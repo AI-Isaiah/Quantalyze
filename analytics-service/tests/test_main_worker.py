@@ -891,13 +891,47 @@ class TestDispatchTickKindAgnostic:
 # ---------------------------------------------------------------------------
 
 
-def _parse_minutes(s: str) -> int:
-    """'10 minutes' -> 10. Tolerant of singular/plural for forward compat."""
+# Unit multipliers for the Postgres-INTERVAL strings that
+# WATCHDOG_PER_KIND_OVERRIDES feeds straight into
+# reset_stalled_compute_jobs(p_per_kind_overrides), where they are cast with
+# `(p_per_kind_overrides ->> kind)::INTERVAL` (migration
+# 20260412094449_compute_jobs_admin_and_defer.sql STEP 6). The override is a
+# free-form interval string, NOT a minutes-only field: '30 seconds', '1 hour',
+# and '15 minutes' are all legitimate Postgres intervals the cast accepts.
+#
+# H-0778: the previous oracle, `_parse_minutes`, hard-asserted the value
+# matched `\d+ minute(s)`. That made it a duck-typed parser with a DIFFERENT
+# unit contract than production: a maintainer who legitimately wrote
+# '90 seconds' (a faster kind) crashed this helper with an AssertionError
+# instead of having the invariant evaluated, and worse, the inverse typo
+# ('60 minutes' meant as '60 seconds') sailed through because the helper only
+# knew minutes. Mirror the production cast's unit handling here so the test
+# oracle measures the SAME thing the watchdog SQL does — total seconds — and
+# the lower/upper-bound invariants below hold across units.
+_INTERVAL_UNIT_SECONDS: dict[str, int] = {
+    "second": 1,
+    "seconds": 1,
+    "minute": 60,
+    "minutes": 60,
+    "hour": 3600,
+    "hours": 3600,
+}
+
+
+def _watchdog_seconds(s: str) -> float:
+    """Convert a single-term Postgres INTERVAL string ('30 seconds',
+    '15 minutes', '1 hour') to total seconds, matching the unit semantics of
+    the `::INTERVAL` cast in reset_stalled_compute_jobs. Unit-agnostic on
+    purpose: the override map's contract is "any interval the SQL cast
+    accepts", not "minutes only"."""
     parts = s.strip().split()
-    assert len(parts) == 2 and parts[1] in ("minute", "minutes"), (
-        f"Unexpected watchdog threshold format: {s!r}"
+    assert len(parts) == 2 and parts[1] in _INTERVAL_UNIT_SECONDS, (
+        f"Unexpected watchdog threshold format {s!r}: expected "
+        f"'<int> <{'/'.join(sorted(_INTERVAL_UNIT_SECONDS))}>'. If a new "
+        "Postgres interval unit is genuinely needed, add it to "
+        "_INTERVAL_UNIT_SECONDS so the invariant can still measure it."
     )
-    return int(parts[0])
+    return int(parts[0]) * _INTERVAL_UNIT_SECONDS[parts[1]]
 
 
 class TestWatchdogInvariant:
@@ -917,11 +951,10 @@ class TestWatchdogInvariant:
             assert handler_seconds is not None, (
                 f"Watchdog override declared for unknown kind {kind!r}"
             )
-            handler_minutes = handler_seconds / 60
-            watchdog_minutes = _parse_minutes(watchdog_str)
-            assert watchdog_minutes > handler_minutes, (
-                f"Watchdog threshold for {kind!r} ({watchdog_minutes}m) is not "
-                f"greater than its handler timeout ({handler_minutes:.1f}m). "
+            watchdog_seconds = _watchdog_seconds(watchdog_str)
+            assert watchdog_seconds > handler_seconds, (
+                f"Watchdog threshold for {kind!r} ({watchdog_seconds}s) is not "
+                f"greater than its handler timeout ({handler_seconds:.0f}s). "
                 "The handler must have a chance to fail-classify itself before "
                 "the watchdog yanks the row — otherwise the job loops forever "
                 "and any caller polling for terminal status hangs."
@@ -942,20 +975,20 @@ class TestWatchdogInvariant:
         # Mirror of main_worker.watchdog_tick `p_stale_threshold` default.
         # Keep in lock-step with that literal — a future change to that
         # default is a breaking contract change for every kind without
-        # an explicit override and must update this constant too.
-        DEFAULT_WATCHDOG_MINUTES = 10
+        # an explicit override and must update this constant too. Stored as
+        # the same interval-string form the worker actually passes the SQL so
+        # it goes through the identical _watchdog_seconds oracle as the
+        # per-kind overrides (no second, divergent unit assumption).
+        DEFAULT_WATCHDOG_INTERVAL = "10 minutes"
 
         for kind, handler_seconds in TIMEOUT_PER_KIND.items():
-            handler_minutes = handler_seconds / 60
             override = WATCHDOG_PER_KIND_OVERRIDES.get(kind)
-            watchdog_minutes = (
-                _parse_minutes(override) if override else DEFAULT_WATCHDOG_MINUTES
-            )
-            assert watchdog_minutes > handler_minutes, (
-                f"Kind {kind!r}: handler timeout {handler_minutes:.1f}m "
-                f"exceeds watchdog threshold {watchdog_minutes}m. "
+            watchdog_seconds = _watchdog_seconds(override or DEFAULT_WATCHDOG_INTERVAL)
+            assert watchdog_seconds > handler_seconds, (
+                f"Kind {kind!r}: handler timeout {handler_seconds:.0f}s "
+                f"exceeds watchdog threshold {watchdog_seconds:.0f}s. "
                 f"Add an entry to WATCHDOG_PER_KIND_OVERRIDES with a "
-                f"value greater than {handler_minutes:.1f} minutes — "
+                f"value greater than {handler_seconds:.0f} seconds — "
                 "otherwise the watchdog reclaims the still-running job "
                 "and any caller polling for terminal status hangs."
             )
@@ -981,18 +1014,73 @@ class TestWatchdogInvariant:
         MAX_RATIO = 4.0
         for kind, watchdog_str in WATCHDOG_PER_KIND_OVERRIDES.items():
             handler_seconds = TIMEOUT_PER_KIND[kind]
-            handler_minutes = handler_seconds / 60
-            watchdog_minutes = _parse_minutes(watchdog_str)
-            ratio = watchdog_minutes / handler_minutes
+            watchdog_seconds = _watchdog_seconds(watchdog_str)
+            ratio = watchdog_seconds / handler_seconds
             assert ratio <= MAX_RATIO, (
-                f"Kind {kind!r}: watchdog threshold {watchdog_minutes}m is "
-                f"{ratio:.1f}x its {handler_minutes:.1f}m handler timeout — "
+                f"Kind {kind!r}: watchdog threshold {watchdog_seconds:.0f}s is "
+                f"{ratio:.1f}x its {handler_seconds:.0f}s handler timeout — "
                 f"above the {MAX_RATIO}x sanity cap. This smells like a "
                 "unit typo (e.g. '60 minutes' where '60 seconds' was meant). "
                 "A genuinely-stuck job would sit unreclaimed far too long. "
                 "If the large window is intentional, raise MAX_RATIO and "
                 "document why."
             )
+
+    def test_no_override_disables_the_watchdog(self) -> None:
+        """H-0778: a per-kind override of '0 minutes' (or '0 seconds') is the
+        moral equivalent of DISABLING the watchdog for that kind, and it is a
+        silent footgun. reset_stalled_compute_jobs validates only the GLOBAL
+        p_stale_threshold (`<= interval '0'` raises) — it does NOT validate
+        per-kind override values
+        (`v_threshold := (p_per_kind_overrides ->> v_kind)::INTERVAL` with no
+        bound check, migration 20260412094449 STEP 6). With a 0 threshold the
+        per-kind UPDATE's `claimed_at < (now() - v_threshold)` is true for
+        EVERY just-claimed running row, so the watchdog reclaims jobs the
+        instant the worker claims them — they bounce pending↔running forever
+        and never run to completion. The lower-bound test above catches 0 only
+        as a side effect of `> handler_seconds`; this test pins the disable
+        semantics directly so the intent ('a watchdog override must impose a
+        real, positive window') survives even if handler timeouts are ever
+        lowered toward zero."""
+        from main_worker import WATCHDOG_PER_KIND_OVERRIDES
+
+        for kind, watchdog_str in WATCHDOG_PER_KIND_OVERRIDES.items():
+            watchdog_seconds = _watchdog_seconds(watchdog_str)
+            assert watchdog_seconds > 0, (
+                f"Kind {kind!r}: watchdog override {watchdog_str!r} resolves to "
+                f"{watchdog_seconds}s. A zero (or negative) watchdog window "
+                "effectively disables the watchdog: reset_stalled_compute_jobs "
+                "reclaims the job the instant it is claimed (claimed_at < "
+                "now() - interval '0'), so it never completes. The SQL does not "
+                "guard per-kind overrides — this test is the only fence against "
+                "an accidental '0 minutes' silently neutering the watchdog."
+            )
+
+    def test_watchdog_seconds_oracle_matches_postgres_interval_units(self) -> None:
+        """H-0778 regression guard for the ORACLE itself. The override values
+        are fed verbatim into Postgres `::INTERVAL`, so the test's parser must
+        agree with Postgres on units — not silently re-interpret everything as
+        minutes (the duck-typed `_parse_minutes` bug this finding flagged). If
+        someone re-narrows the oracle back to minutes-only, the 'seconds' /
+        'hours' cases below break, which is exactly the regression we want a
+        red test for: a minutes-only oracle would crash on a legitimate
+        '90 seconds' override and let a '60 minutes'-meant-as-'60 seconds' typo
+        through (it would read 60, not 1)."""
+        # Equality across units is the whole point: 1 minute == 60 seconds,
+        # 1 hour == 60 minutes. A minutes-only parser cannot express these.
+        assert _watchdog_seconds("90 seconds") == 90
+        assert _watchdog_seconds("1 minute") == _watchdog_seconds("60 seconds")
+        assert _watchdog_seconds("1 hour") == _watchdog_seconds("60 minutes")
+        # The typo the finding describes: '60 minutes' written where
+        # '60 seconds' was meant must read as 3600s, not collapse to 60.
+        assert _watchdog_seconds("60 minutes") == 3600
+        assert _watchdog_seconds("60 seconds") == 60
+        # A garbage / unsupported-unit value must fail loudly (caught format),
+        # never be coerced to a passing number.
+        with pytest.raises(AssertionError):
+            _watchdog_seconds("soon")
+        with pytest.raises(AssertionError):
+            _watchdog_seconds("10 fortnights")
 
 
 # ---------------------------------------------------------------------------

@@ -66,16 +66,21 @@ class TestWorkerLoadDrain:
 
         mock_supabase.rpc.side_effect = _rpc_side_effect
 
-        # M-0756: fresh DispatchResult per call. A single shared
+        # H-0819 / M-0756: fresh DispatchResult per call. A single shared
         # return_value instance leaks state across all 100 awaits — if a
         # refactor gives DispatchResult mutable fields (e.g.
         # `metrics: dict = field(default_factory=dict)`) or the caller
         # mutates the result in place, every call sees the same object and a
         # cross-call corruption bug would pass spuriously. side_effect
         # constructs a new instance per invocation. We also track in-flight
-        # concurrency here (H-0818).
+        # concurrency here (H-0818) and record the per-call result object
+        # identities (H-0819) so that reverting the mock to a shared
+        # `return_value=<one DispatchResult>` is caught structurally below —
+        # not left to rely solely on DispatchResult's frozen=True guard,
+        # which a future un-freeze would silently remove.
         in_flight = 0
         max_in_flight = 0
+        result_identities: list[int] = []
 
         async def _dispatch_side_effect(job: dict) -> DispatchResult:
             nonlocal in_flight, max_in_flight
@@ -88,7 +93,9 @@ class TestWorkerLoadDrain:
                 # sequential `await dispatch(job)` loop, in_flight returns to
                 # 0 before the next job starts.
                 await asyncio.sleep(0)
-                return DispatchResult(outcome=DispatchOutcome.DONE)
+                res = DispatchResult(outcome=DispatchOutcome.DONE)
+                result_identities.append(id(res))
+                return res
             finally:
                 in_flight -= 1
 
@@ -167,8 +174,16 @@ class TestWorkerLoadDrain:
             f"(one job in flight at a time); saw max_in_flight={max_in_flight}"
         )
 
-        # --- H-0818: wall-clock budget — the drain is not silently
-        # serialized into a slow path.
+        # --- H-0816 / H-0818: wall-clock budget — this is what makes the file
+        # an actual *load* test rather than the original correctness-only
+        # smoke test. The drain must not be silently serialized into a slow
+        # path: a synchronous-blocking call landing in the per-job hot loop
+        # turns 100 in-memory async dispatches (well under a second) into a
+        # multi-second/minute grind. 10s is generous slack over the pure async
+        # path while still catching the finding's "100ms → 100s" serialization
+        # attack. The max_in_flight==1 + flag-per-tick assertions above guard
+        # the structural (concurrency / per-tick flag read) regressions that a
+        # loose wall-clock alone would miss.
         assert elapsed < 10.0, (
             f"draining 100 mocked jobs took {elapsed:.2f}s; a regression "
             "has serialized the dispatch loop into a slow/blocking path"
@@ -182,4 +197,23 @@ class TestWorkerLoadDrain:
         assert terminal_ids == {j["id"] for j in all_jobs}, (
             "every claimed job must reach a terminal mark — none left in "
             "an implicit 'running' state"
+        )
+
+        # --- H-0819: every dispatch await must have produced its OWN
+        # DispatchResult instance. The original load test shared a single
+        # `return_value=DispatchResult(...)` across all 100 awaits, so a
+        # cross-call state leak (a mutable field added for instrumentation, or
+        # the caller mutating the result in place before the mark RPC) would
+        # pass spuriously. With a fresh instance per call, the recorded object
+        # ids are all distinct; a regression back to a shared instance
+        # collapses them to a single id and trips this assertion regardless of
+        # whether DispatchResult is still frozen.
+        assert len(result_identities) == total_jobs, (
+            f"expected one result instance recorded per dispatched job; "
+            f"got {len(result_identities)} for {total_jobs} jobs"
+        )
+        assert len(set(result_identities)) == total_jobs, (
+            "each dispatch await must yield a distinct DispatchResult "
+            "instance — a shared return_value would collapse these ids and "
+            "let a cross-call state-leak bug pass undetected"
         )

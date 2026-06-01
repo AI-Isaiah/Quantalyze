@@ -1155,18 +1155,44 @@ def _make_strategy(admin) -> str:
 
 def test_concurrent_claim_disjoint_under_skip_locked(admin):
     """Migration 090 concurrency contract: two concurrent
-    claim_compute_jobs_with_priority calls return DISJOINT row sets via
-    FOR UPDATE SKIP LOCKED, and every claimable row is handed to exactly
-    one worker (the union covers all four seeded rows — no row lost, none
-    double-claimed).
+    claim_compute_jobs_with_priority calls PARTITION the ready pool via
+    `FOR UPDATE SKIP LOCKED` — each worker grabs whatever rows it can lock
+    immediately and SKIPS (does not block on) rows the other worker holds.
+    The defining, non-blocking property: BOTH workers make progress in
+    parallel; neither serializes behind the other.
 
-    Pre-SKIP-LOCKED (or if a refactor drops it): two concurrent batch
-    UPDATEs over the same ready pool either deadlock, block, or BOTH claim
-    the same row — surfacing as an overlapping result set here.
+    --- Why the batch size is HALF the seeded rows (the regression hinge) ---
+
+    We seed FOUR rows but cap EACH worker at `p_batch_size=2`. No single
+    worker can claim more than two, so full coverage of all four seeded
+    rows is achievable ONLY if BOTH workers contributed two each. That
+    makes the degenerate "one worker takes everything, the other takes
+    nothing" outcome — which a plain blocking `FOR UPDATE` produces — fail
+    the coverage assertion instead of passing it vacuously.
+
+    Concretely, drop `SKIP LOCKED` (the exact regression this finding
+    guards) and the two batch UPDATEs serialize: both subqueries select the
+    same two lowest-id candidates under the deterministic
+    `ORDER BY priority, next_attempt_at, id LIMIT 2`; worker A locks them,
+    worker B BLOCKS on the first. When A commits (rows → 'running'), B's
+    EvalPlanQual re-check finds its two locked candidates no longer
+    `status='pending'` and discards them — B returns ZERO seeded rows. The
+    result is `{2 rows} / {}`: union covers only two of the four, so the
+    coverage assertion (and the both-non-empty assertion) FAIL. SKIP LOCKED
+    is what lets B skip A's two locked rows and immediately claim the OTHER
+    two → `{2}/{2}`, union == 4.
+
+    (The previous single assertion pair — disjoint + union==4 at
+    batch_size=4 — was vacuously satisfied by `{4}/{}` because the empty
+    set is disjoint with anything and the union still covered all four;
+    that did not distinguish parallel SKIP-LOCKED partitioning from
+    blocking serialization. This version does.)
     """
     # Four distinct strategies → four distinct dedupe partitions → four
     # independently-claimable rows.
-    strategy_ids = [_make_strategy(admin) for _ in range(4)]
+    n_rows = 4
+    per_worker = n_rows // 2  # 2: neither worker alone can cover all four.
+    strategy_ids = [_make_strategy(admin) for _ in range(n_rows)]
     job_ids: list[str] = []
     try:
         for sid in strategy_ids:
@@ -1174,7 +1200,7 @@ def test_concurrent_claim_disjoint_under_skip_locked(admin):
 
         def _claim_batch(worker: str) -> set[str]:
             res = admin.rpc("claim_compute_jobs_with_priority", {
-                "p_batch_size": 4,
+                "p_batch_size": per_worker,
                 "p_worker_id": worker,
                 "p_unified_backbone_active": False,
             }).execute()
@@ -1197,9 +1223,32 @@ def test_concurrent_claim_disjoint_under_skip_locked(admin):
             f"two workers got overlapping claims for seeded rows: "
             f"{a_ours & b_ours}"
         )
-        # 2. No seeded row lost — every one was handed to exactly one
-        #    worker (never zero). FOR UPDATE SKIP LOCKED partitions the set;
-        #    it must not drop a claimable row on the floor.
+        # 2. Each worker is capped at its batch size — a single worker must
+        #    NOT be able to sweep more than two of the four seeded rows.
+        assert len(a_ours) <= per_worker, (
+            f"worker A claimed {len(a_ours)} seeded rows, exceeding its "
+            f"batch cap of {per_worker}: {a_ours}"
+        )
+        assert len(b_ours) <= per_worker, (
+            f"worker B claimed {len(b_ours)} seeded rows, exceeding its "
+            f"batch cap of {per_worker}: {b_ours}"
+        )
+        # 3. BOTH workers made progress in parallel. This is the SKIP LOCKED
+        #    discriminator: under a blocking `FOR UPDATE`, worker B serializes
+        #    behind A and its EvalPlanQual-invalidated candidates yield an
+        #    EMPTY seeded set — this assertion fires. (With batch_size capped
+        #    at half the pool, both-non-empty is no longer racy: a single
+        #    worker physically cannot claim all four, so genuine parallelism
+        #    must hand at least one seeded row to each side.)
+        assert a_ours and b_ours, (
+            f"a worker claimed ZERO seeded rows (no parallel progress — the "
+            f"blocking-FOR-UPDATE signature SKIP LOCKED must avoid): "
+            f"A={a_ours}, B={b_ours}"
+        )
+        # 4. No seeded row lost — every one was handed to exactly one worker
+        #    (never zero). Coverage of all four is reachable ONLY because two
+        #    workers each contributed their batch of two; a blocking serialize
+        #    that strands B leaves the union short and FAILS here.
         assert (a_ours | b_ours) == ours, (
             f"seeded rows not fully claimed across both workers: missing "
             f"{ours - (a_ours | b_ours)}"

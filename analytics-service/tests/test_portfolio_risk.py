@@ -127,12 +127,52 @@ def test_rolling_correlation_caps_top_pairs():
 
 
 def test_risk_decomposition_zero_volatility():
-    """All-zero weights produce zero portfolio vol; should return zero entries."""
+    """All-zero weights produce zero portfolio vol → the marginal/component
+    decomposition is genuinely undefined (you cannot attribute a share of a
+    portfolio that carries no risk), so marginal_risk_pct and component_var
+    must be 0 for every entry.
+
+    NOTE: this test deliberately does NOT assert standalone_vol == 0. The
+    current production code (portfolio_risk.py:64) returns standalone_vol=0
+    in this branch, but standalone_vol is sqrt(cov[i][i]) — a per-strategy
+    property that is independent of portfolio weights, so the financially
+    correct values are nonzero here. That known-incorrect fallback is pinned
+    (and will be flipped once fixed) by test_risk_decomposition_zero_weights_
+    standalone_vol_is_per_strategy below (H-0803). Asserting == 0 here would
+    cement the bug, so we only pin the two values that are correctly zero.
+    """
     weights = [0.0, 0.0, 0.0]
     cov = np.array([[0.04, 0.01, 0.005], [0.01, 0.03, 0.002], [0.005, 0.002, 0.02]])
     result = compute_risk_decomposition(weights, cov)
     assert all(r["marginal_risk_pct"] == 0 for r in result)
-    assert all(r["standalone_vol"] == 0 for r in result)
+    assert all(r["component_var"] == 0 for r in result)
+
+
+@pytest.mark.skip(
+    reason="TODO(surfaced): H-0803 — portfolio_risk.py:64 returns "
+    "standalone_vol=0 in the zero-portfolio-vol branch. standalone_vol is "
+    "sqrt(cov[i][i]), independent of weights, so the financially correct "
+    "value is nonzero even when all weights are 0. Production fix required "
+    "before un-skipping (move standalone_vol out of the zero-vol early return)."
+)
+def test_risk_decomposition_zero_weights_standalone_vol_is_per_strategy():
+    """H-0803: standalone_vol = sqrt(cov[i][i]) is a per-strategy property
+    and MUST be independent of the portfolio weights. With all-zero weights
+    (portfolio vol == 0) the diagonal variances 0.04, 0.03, 0.02 still imply
+    standalone vols of 0.2000, 0.1732, 0.1414 — they do not collapse to 0.
+
+    This test fails on the current production fallback (which returns
+    standalone_vol=0) and will fail again if a regression re-zeroes
+    standalone_vol in the zero-portfolio-vol branch once the bug is fixed.
+    """
+    weights = [0.0, 0.0, 0.0]
+    cov = np.array([[0.04, 0.01, 0.005], [0.01, 0.03, 0.002], [0.005, 0.002, 0.02]])
+    result = compute_risk_decomposition(weights, cov)
+    expected_standalone = [float(np.sqrt(cov[i][i])) for i in range(len(weights))]
+    assert [r["standalone_vol"] for r in result] == pytest.approx(expected_standalone)
+    # The decomposition itself remains undefined at zero portfolio vol.
+    assert all(r["marginal_risk_pct"] == 0 for r in result)
+    assert all(r["component_var"] == 0 for r in result)
 
 
 def test_risk_decomposition_negative_variance_collapses_to_zeros():

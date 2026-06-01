@@ -65,6 +65,65 @@ export async function createTestUser(
   return data.user.id;
 }
 
+/**
+ * Single live-DB test password convention (H-0038). Every live-DB test that
+ * creates a user + signs in via `signInAsTestUser` shares this one constant
+ * so the password rule is defined in exactly one place. Previously each test
+ * file declared its own divergent constant (e.g. `MandateRpcTest!-9f2c` vs
+ * `MandateAuditTest!-9f2c`), duplicating the convention.
+ */
+export const LIVE_DB_TEST_PASSWORD = "LiveDbTest!-9f2c";
+
+/** Shape returned by {@link signInAsTestUser}. */
+export interface SignedInTestUser {
+  /** Anon-key client authenticated as the freshly created test user. */
+  client: SupabaseClient;
+  /** The new user's id (register for cleanup with `cleanupLiveDbRow`). */
+  userId: string;
+  /** The synthetic email the user was created with. */
+  email: string;
+}
+
+/**
+ * Create a fresh test user, sign them in via the anon key, and return the
+ * authenticated client + ids (H-0038). Centralizes the copy-pasted
+ * "anon-key check → createTestUser → createClient → signInWithPassword" flow
+ * that lived in every mandate/audit live-DB test, and locks the password
+ * convention to {@link LIVE_DB_TEST_PASSWORD} in one place.
+ *
+ * The email is `${prefix}-${Date.now()}@test.local`. The caller is
+ * responsible for cleanup: register the returned `userId` with its existing
+ * `afterEach` → `cleanupLiveDbRow(admin, { userIds: [userId] })`, or pass an
+ * `onCleanup` callback to have it tracked here.
+ *
+ * Only call inside an `it.skipIf(!HAS_LIVE_DB)` block — it throws when the
+ * anon key is absent, by design.
+ */
+export async function signInAsTestUser(
+  admin: SupabaseClient,
+  prefix: string,
+  onCleanup?: (userId: string) => void,
+): Promise<SignedInTestUser> {
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!anonKey) {
+    throw new Error(
+      "NEXT_PUBLIC_SUPABASE_ANON_KEY required for user-scoped live-DB tests",
+    );
+  }
+  const email = `${prefix}-${Date.now()}@test.local`;
+  const userId = await createTestUser(admin, email, LIVE_DB_TEST_PASSWORD);
+  onCleanup?.(userId);
+
+  const client = createClient(LIVE_DB_URL!, anonKey);
+  const { error } = await client.auth.signInWithPassword({
+    email,
+    password: LIVE_DB_TEST_PASSWORD,
+  });
+  if (error) throw error;
+
+  return { client, userId, email };
+}
+
 /** Cleanup tracker — pass IDs of resources to delete at test end. */
 export interface LiveDbCleanupRow {
   strategyIds?: string[];

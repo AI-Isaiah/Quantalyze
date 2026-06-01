@@ -346,6 +346,46 @@ describe("DrawdownChart — scenarioDailyPoints overlay (10-04)", () => {
       expect(anyDiffer).toBe(true);
     });
 
+    // H-0165 — bind the contract directly to the lone defender. The only
+    // thing standing between `computeScenario().equity_curve` (cumulative
+    // RETURN) and a broken overlay is the caller-side `+1` conversion in
+    // src/lib/queries.ts (line ~2132: `value: p.value + 1`). This test
+    // reproduces that conversion in-line and pins the exact invariant:
+    //   deriveSnapshotDrawdowns(returnForm.map(p => p.value + 1))
+    //   === deriveSnapshotDrawdowns(wealthForm)   (valid [-1,0] band)
+    // while the UN-converted return form yields out-of-band garbage.
+    //
+    // REGRESSION CAUGHT: if a future caller drops the `+1` (or the helper
+    // is "hardened" to internally clamp drawdowns to [-1,0], masking the
+    // shape mismatch), the two halves below stop matching / the band
+    // assertion fails — instead of the overlay silently starting at 0%.
+    it("applying the queries.ts `+1` conversion to RETURN form reproduces the valid WEALTH-form drawdowns exactly", () => {
+      // Caller contract: convert cumulative RETURN → cumulative WEALTH.
+      const converted: DailyPoint[] = RETURN_FORM.map((p) => ({
+        date: p.date,
+        value: p.value + 1, // the queries.ts:2132 defender, in-line
+      }));
+      const convertedDd = deriveSnapshotDrawdowns(converted);
+      const wealthDd = deriveSnapshotDrawdowns(WEALTH_FORM);
+
+      // The conversion makes the two paths identical to the canonical
+      // wealth-form result …
+      expect(convertedDd.map((p) => Number(p.value.toFixed(6)))).toEqual(
+        wealthDd.map((p) => Number(p.value.toFixed(6))),
+      );
+      // … and lands every point inside the only physically-valid band.
+      for (const p of convertedDd) {
+        expect(p.value).toBeLessThanOrEqual(0);
+        expect(p.value).toBeGreaterThanOrEqual(-1);
+      }
+
+      // Whereas the UN-converted (return) form leaves the band — proving
+      // the `+1` is load-bearing, not incidental. If this stopped being
+      // true the negative coverage above would be vacuous.
+      const rawDd = deriveSnapshotDrawdowns(RETURN_FORM);
+      expect(Math.min(...rawDd.map((p) => p.value))).toBeLessThan(-1);
+    });
+
     it("the widget renders the scenario Area from the helper output, so a return-form caller paints the broken curve (no detection)", () => {
       // The chart does NOT detect the shape mismatch — it trusts the caller
       // contract. Passing RETURN_FORM still renders an Area (no error/flag),

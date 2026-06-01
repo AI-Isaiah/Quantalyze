@@ -28,6 +28,8 @@ import asyncio
 import dataclasses
 import logging
 import math
+import pathlib
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -106,6 +108,118 @@ def test_metrics_result_dataclass_contract_shape():
         # Subscripting a sibling_kinds-only key must raise, not silently
         # return it — guards the mechanical .sibling_kinds[k] → [k] refactor.
         _ = result["exposure_series"]
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 H-0762 — sibling-kinds RPC privilege posture (source pin)
+# ---------------------------------------------------------------------------
+# The MagicMock-backed runner tests below (test_run_strategy_analytics_*)
+# record that `supabase.rpc("upsert_strategy_analytics_series_batch", ...)`
+# was called with the right shape — but the client is a MagicMock, so they
+# prove NOTHING about WHO is allowed to call that SECURITY DEFINER RPC. A
+# migration flipping it to SECURITY INVOKER, or (the S15g PUBLIC-grant-no-op
+# chain) re-widening EXECUTE to public/anon/authenticated AFTER the canonical
+# REVOKE, would gate-pass every one of those mock tests.
+#
+# The live-DB posture is covered by the pgTAP-style probes in
+# supabase/tests/test_upsert_strategy_analytics_series_batch_privilege.sql and
+# analytics-service/tests/test_upsert_strategy_analytics_series_batch_privilege.py.
+# This static-source pin lives IN the file the finding flagged so the
+# privilege regression is fail-loud even when those companion jobs are
+# skipped, and specifically closes a gap they leave open: the existing static
+# check only asserts the REVOKE line EXISTS. A later
+# `GRANT EXECUTE ... TO public` on the SAME function (a privilege no-op of the
+# REVOKE) would keep that REVOKE line intact and still re-open the surface.
+# Here we scan EVERY grant statement that targets this function and assert
+# none of them grants to a non-service_role principal.
+
+_SERIES_MIGRATION_PATH = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "supabase"
+    / "migrations"
+    / "20260428120919_strategy_analytics_series.sql"
+)
+
+_BATCH_RPC = "upsert_strategy_analytics_series_batch"
+
+
+def test_sibling_batch_rpc_security_definer_and_not_publicly_granted():
+    """H-0762: pin the privilege posture of the sibling-kinds batch RPC at the
+    migration-source layer so the MagicMock runner tests can't mask a
+    privilege regression.
+
+    Catches three concrete regressions:
+      1. SECURITY DEFINER → SECURITY INVOKER on the RPC body.
+      2. Loss of the canonical
+         `REVOKE ALL ... FROM PUBLIC, anon, authenticated`.
+      3. The S15g chain: a NEW `GRANT EXECUTE ... ON FUNCTION
+         upsert_strategy_analytics_series_batch ... TO public/anon/authenticated`
+         that re-widens the surface even though the REVOKE line is still
+         present (a privilege no-op the existing REVOKE-line regex check
+         would NOT catch).
+    """
+    src = _SERIES_MIGRATION_PATH.read_text(encoding="utf-8")
+
+    # The function must exist and declare SECURITY DEFINER + a pinned
+    # search_path. Match the preamble through `AS $$` (non-greedy stops at
+    # LANGUAGE, before SECURITY DEFINER on the next line).
+    block = re.search(
+        r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+" + _BATCH_RPC + r"\b[\s\S]*?AS\s+\$\$",
+        src,
+        re.IGNORECASE,
+    )
+    assert block, (
+        f"{_BATCH_RPC} definition not found in {_SERIES_MIGRATION_PATH.name}; "
+        "the runner tests below mock this RPC and would silently pass if it "
+        "were renamed or dropped."
+    )
+    assert re.search(r"SECURITY\s+DEFINER", block.group(0), re.IGNORECASE), (
+        f"{_BATCH_RPC} must be SECURITY DEFINER. Flipping to SECURITY INVOKER "
+        "would break every legitimate service-role upsert AND, combined with a "
+        "GRANT widening, open a privilege-bypass on a table with no RLS — yet "
+        "the MagicMock runner tests would still pass."
+    )
+
+    # Canonical REVOKE present (defense in depth; the companion privilege test
+    # owns the exhaustive REVOKE assertion).
+    assert re.search(
+        r"REVOKE\s+ALL\s+ON\s+FUNCTION\s+" + _BATCH_RPC
+        + r"[^;]*FROM\s+[^;]*PUBLIC",
+        src,
+        re.IGNORECASE | re.DOTALL,
+    ), f"Canonical REVOKE ALL ... FROM PUBLIC on {_BATCH_RPC} is missing."
+
+    # The S15g no-op chain guard: enumerate EVERY GRANT EXECUTE statement that
+    # targets this function and assert each one grants ONLY to service_role.
+    # A re-widening `GRANT EXECUTE ... TO public` added after the REVOKE would
+    # be a no-op of that REVOKE yet pass any check that only looks for the
+    # REVOKE line.
+    grant_stmts = re.findall(
+        r"GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+" + _BATCH_RPC + r"\b[^;]*?TO\s+([^;]+)",
+        src,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert grant_stmts, (
+        f"Expected at least one GRANT EXECUTE ... TO service_role on {_BATCH_RPC}."
+    )
+    forbidden = {"public", "anon", "authenticated"}
+    for grantees_clause in grant_stmts:
+        grantees = {
+            g.strip().lower()
+            for g in grantees_clause.replace("\n", " ").split(",")
+            if g.strip()
+        }
+        leaked = grantees & forbidden
+        assert not leaked, (
+            f"H-0762 / S15g regression: {_BATCH_RPC} is GRANTed EXECUTE to "
+            f"{sorted(leaked)} — a privilege widening that re-opens the "
+            "no-RLS sibling table to non-service callers and is a no-op of the "
+            "REVOKE above. The MagicMock runner tests cannot see this."
+        )
+        assert "service_role" in grantees, (
+            f"Every GRANT EXECUTE on {_BATCH_RPC} must target service_role only; "
+            f"got grantees {sorted(grantees)}."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2285,6 +2399,47 @@ class TestComputeVolumeMetrics:
         assert result["sell_volume_pct"] == 0.5
         assert result["total_volume_usd"] == 200.0
         assert result["total_fills"] == 2
+
+    def test_asymmetric_split_catches_buy_sell_swap_and_dropped_abs(self) -> None:
+        """H-0760: the golden parity fixture feeds `cost`-less fills to
+        _compute_volume_metrics, so buy/sell percentages bake to 0.0 in
+        golden_252d_expected.json and the cross-runtime parity test trains
+        exclusively on zero-input — it cannot catch a buy/sell-swap or a
+        dropped-abs() formula drift. The pre-existing in-class coverage doesn't
+        close that either: `test_basic_buy_sell_split` uses a SYMMETRIC 50/50
+        split, so swapping the buy/sell branches yields the identical 0.5/0.5
+        and the swap slips through.
+
+        This test exercises the real (non-degenerate) code path with an
+        ASYMMETRIC cost-bearing split and a negative (rebate) cost, and asserts
+        the EXACT percentages so the two named formula-drift regressions fail
+        loud:
+          - buy/sell branch swap: correct buy=0.75 / sell=0.25; a swap gives
+            buy=0.25 / sell=0.75 and diverges here.
+          - dropped abs() on cost: the -100 rebate would subtract instead of
+            adding magnitude, moving total to 200 and shifting both pcts.
+        """
+        from services.analytics_runner import _compute_volume_metrics
+
+        # buy = 300 (200 + a 100-magnitude rebate), sell = 100, total = 400.
+        result = _compute_volume_metrics(
+            [
+                {"side": "buy", "cost": 200.0},
+                {"side": "buy", "cost": -100.0},  # rebate: abs() -> +100 magnitude
+                {"side": "sell", "cost": 100.0},
+            ],
+        )
+        # Exact asymmetric split. A buy<->sell branch swap flips these to
+        # 0.25 / 0.75; a dropped abs() makes buy magnitude 100 (200-100) and
+        # total 200, giving buy=0.5 — both diverge from the pinned values.
+        assert result["buy_volume_pct"] == 0.75, (
+            "H-0760: buy_volume_pct drifted from the 3:1 asymmetric split — a "
+            "buy/sell branch swap or a dropped abs() on a rebate cost."
+        )
+        assert result["sell_volume_pct"] == 0.25
+        # total is the absolute (magnitude) sum: 200 + |−100| + 100 = 400.
+        assert result["total_volume_usd"] == 400.0
+        assert result["total_fills"] == 3
 
     def test_empty_fills_list(self) -> None:
         from services.analytics_runner import _compute_volume_metrics

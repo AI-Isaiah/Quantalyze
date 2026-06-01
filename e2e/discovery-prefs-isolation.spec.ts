@@ -49,37 +49,94 @@ import { createClient } from "@supabase/supabase-js";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 import { cleanupTestAllocator } from "./helpers/cleanup-test-project";
 import { loginAs } from "./helpers/login";
+import { type E2EPage } from "./helpers/discovery-selectors";
 
 const HAS_SEED_ENV =
   !!process.env.TEST_SUPABASE_URL &&
   !!process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
 
-async function signOut(page: import("@playwright/test").Page) {
-  // Try the user-menu sign-out button first (TODOS.md Q3 — there is no
-  // /logout page; logout flows through the user-menu).
+async function signOut(page: E2EPage) {
+  // H-1038 (silent-failure-hunter): the prior helper tried a user-menu
+  // sign-out button via `.isVisible().catch(() => false)` and SILENTLY fell
+  // back to a localStorage/cookie wipe when it wasn't found — masking any
+  // real sign-out-UI regression because we tore the session down ourselves.
+  //
+  // Investigation of the production surface shows there is NO user-menu /
+  // account-button sign-out control rendered on /discovery (SignOutButton.tsx
+  // lives only on /pending-approval and /profile; no aria-label matching
+  // "user menu" or "account" renders anywhere — grep -rn aria-label src
+  // returns only "Account type" on the signup form). So the UI path was
+  // ALWAYS dead and the fallback ALWAYS ran. We keep the fallback as the
+  // real logout mechanism for this spec, but make it (a) explicit about
+  // which path it took via a test annotation, and (b) VERIFY the teardown
+  // actually happened so a no-op wipe fails loud instead of leaving A's
+  // session intact and letting Step 3 read A's own prefs as a false pass.
   const menuBtn = page.locator(
     'button[aria-label*="user menu" i], button[aria-label*="account" i]',
   );
-  if (await menuBtn.first().isVisible().catch(() => false)) {
+  const usedUiPath = await menuBtn
+    .first()
+    .isVisible()
+    .catch(() => false);
+  if (usedUiPath) {
     await menuBtn.first().click();
-    const signOut = page.locator(
+    const signOutBtn = page.locator(
       'button:has-text("Sign out"), button:has-text("Log out"), a:has-text("Sign out")',
     );
-    if (await signOut.first().isVisible().catch(() => false)) {
-      await signOut.first().click();
-      await page.waitForURL(/\/(login|$)/, { timeout: 10000 });
-      return;
-    }
+    await expect(
+      signOutBtn.first(),
+      "user-menu button rendered but no Sign out item — SignOutButton " +
+        "render/wiring regression in the user menu",
+    ).toBeVisible();
+    await signOutBtn.first().click();
+    await page.waitForURL(/\/(login|$)/, { timeout: 10000 });
+    test.info().annotations.push({
+      type: "signout-path",
+      description: "ui (user-menu SignOutButton)",
+    });
+    return;
   }
-  // Fallback: clear sb-* localStorage + cookies. The user-menu path above
-  // already triggers SignOutButton; this fallback runs when the menu isn't
-  // visible (e.g., the seeded test user doesn't render the header).
-  await page.evaluate(() => {
+
+  // Fallback: clear ALL Supabase auth state + cookies. Annotate the path so
+  // a CI report makes the absence of a real sign-out UI visible (rather than
+  // the prior silent swallow). If a real user-menu logout ships later and
+  // then regresses, this annotation flips back from "ui" to "fallback" and
+  // the regression is auditable in the trace.
+  test.info().annotations.push({
+    type: "signout-path",
+    description:
+      "fallback (no user-menu sign-out UI on /discovery — see H-1038)",
+  });
+  const remainingSbKeys = await page.evaluate(() => {
     Object.keys(localStorage)
       .filter((k) => k.startsWith("sb-"))
       .forEach((k) => localStorage.removeItem(k));
+    // Return the count of sb-* keys STILL present after the wipe so the
+    // spec can assert the clear was not a no-op.
+    return Object.keys(localStorage).filter((k) => k.startsWith("sb-")).length;
   });
+  expect(
+    remainingSbKeys,
+    "signOut fallback left sb-* auth keys in localStorage — the wipe " +
+      "was a no-op and user-A's session is NOT torn down (Step 3 would " +
+      "then read A's own prefs and falsely pass the isolation contract)",
+  ).toBe(0);
   await page.context().clearCookies();
+  // Hard proof the session is actually gone: with cookies cleared, an
+  // authenticated GET /api/preferences must NOT succeed as user A. A 401/
+  // redirect/empty-identity here is the contract; a 200 carrying A's
+  // sentinel means logout silently failed and the whole isolation test
+  // downstream is meaningless.
+  const postLogout = await page.request.get("/api/preferences");
+  if (postLogout.ok()) {
+    const body = await postLogout.json().catch(() => ({}));
+    expect(
+      body?.preferences?.excluded_exchanges ?? null,
+      "after signOut the session still returns user-A's " +
+        "excluded_exchanges=['bybit'] — logout did not tear down the " +
+        "session, so the cross-user isolation assertions below are vacuous",
+    ).not.toEqual(["bybit"]);
+  }
 }
 
 test.describe("DISCO-02 allocator preferences isolation", () => {

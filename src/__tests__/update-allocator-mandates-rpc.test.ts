@@ -4,8 +4,8 @@ import {
   HAS_LIVE_DB,
   LIVE_DB_URL,
   createLiveAdminClient,
-  createTestUser,
   cleanupLiveDbRow,
+  signInAsTestUser,
   advertiseLiveDbSkipReason,
 } from "@/lib/test-helpers/live-db";
 
@@ -17,7 +17,9 @@ import {
  * Tests:
  *   1. MANDATE-04: Auth'd user RPC writes max_weight + mandate_edited_at
  *      populated within 5 seconds
- *   2. MANDATE-05: Unauthenticated anon call → SQLSTATE 28000
+ *   2. MANDATE-05: Unauthenticated anon call → GRANT-layer denial
+ *      ("permission denied for function", SQLSTATE 42501); anon REVOKEd in
+ *      migration 061 so the function body never runs
  *   3. MANDATE-05: Out-of-range max_weight → SQLSTATE 22023
  *   4. MANDATE-05: Invalid liquidity_preference enum → SQLSTATE 22023
  *   5. D-11 Reset: p_clear_fields nulls the listed field
@@ -34,7 +36,12 @@ advertiseLiveDbSkipReason("update-allocator-mandates-rpc");
 describe("MANDATE-05 / MANDATE-06: update_allocator_mandates RPC", () => {
   let admin: SupabaseClient;
   let testUserId: string | null = null;
-  const TEST_PASSWORD = "MandateRpcTest!-9f2c";
+  // H-0038: track the created user id for afterEach cleanup. The shared
+  // signInAsTestUser helper creates the user, signs in, and (via this
+  // callback) records the id so cleanup is identical across tests.
+  const trackForCleanup = (userId: string) => {
+    testUserId = userId;
+  };
 
   beforeAll(() => {
     if (HAS_LIVE_DB) admin = createLiveAdminClient();
@@ -47,28 +54,14 @@ describe("MANDATE-05 / MANDATE-06: update_allocator_mandates RPC", () => {
     }
   });
 
-  async function signInAsTestUser(email: string): Promise<SupabaseClient> {
-    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-    if (!anonKey) {
-      throw new Error(
-        "NEXT_PUBLIC_SUPABASE_ANON_KEY required for user-scoped tests",
-      );
-    }
-    const userClient = createClient(LIVE_DB_URL!, anonKey);
-    const { error } = await userClient.auth.signInWithPassword({
-      email,
-      password: TEST_PASSWORD,
-    });
-    if (error) throw error;
-    return userClient;
-  }
-
   it.skipIf(!HAS_LIVE_DB)(
     "MANDATE-04: auth'd user RPC writes max_weight AND mandate_edited_at is populated within 5 seconds",
     async () => {
-      const email = `mandate-rpc-ok-${Date.now()}@test.local`;
-      testUserId = await createTestUser(admin, email, TEST_PASSWORD);
-      const testUserClient = await signInAsTestUser(email);
+      const { client: testUserClient } = await signInAsTestUser(
+        admin,
+        "mandate-rpc-ok",
+        trackForCleanup,
+      );
 
       const beforeCall = Date.now();
       const { error: rpcErr } = await testUserClient.rpc(
@@ -112,28 +105,46 @@ describe("MANDATE-05 / MANDATE-06: update_allocator_mandates RPC", () => {
         p_max_weight: 0.25,
       });
       expect(error).not.toBeNull();
-      // H-0039: the prior assertion accepted THREE different signatures —
-      // 42501 OR 28000 OR a broad /permission|insufficient_privilege|no auth/
-      // message match — so it no longer pinned which enforcement layer fired.
-      // That matters: 42501 (GRANT layer) means the anon role was stopped
-      // BEFORE the function executed; 28000 (the v_auth_uid IS NULL body
-      // guard) means anon got INTO the function. The latter would mean the
-      // REVOKE ALL FROM anon in migration 061 regressed — a real security
-      // hole, not an acceptable alternate path. We pin the GRANT-layer
-      // denial: code 42501 (with a message fallback for PostgREST versions
-      // that strip the code field, but ONLY for the 42501-equivalent
-      // permission-denied text — never the body-guard "no auth" text).
+      // H-0039 (second-pass fix): the GRANT-layer denial and the function's
+      // body auth guard CANNOT be told apart by SQLSTATE — both are 42501.
+      //   • GRANT layer (anon lacks EXECUTE, REVOKEd in mig 061): Postgres
+      //     raises the standard "permission denied for function
+      //     update_allocator_mandates" with SQLSTATE 42501.
+      //   • Body guard (v_auth_uid IS NULL, mandate_columns.sql:128-129):
+      //     RAISE 'update_allocator_mandates: no auth session'
+      //       USING ERRCODE = 'insufficient_privilege'  ← ALSO 42501.
+      //     (The migration's inline comment + COMMENT say "28000", but the
+      //     RAISE actually emits insufficient_privilege = 42501. Unlike
+      //     log_audit_event — switched to 28000 in NEW-C10-04 precisely to
+      //     separate the layers — this RPC's guard was never given that
+      //     treatment, so the codes are identical.)
+      // The prior assertion pinned only the code (42501) and added a vacuous
+      // `not.toBe("28000")` — which can NEVER fail because this RPC emits no
+      // 28000. Under a regression that re-GRANTs anon EXECUTE (REVOKE drift),
+      // anon reaches the body, the guard fires 42501 with the "no auth
+      // session" message — code-only checks would STILL pass GREEN, hiding
+      // the very security hole the test documents. So we distinguish the two
+      // layers by MESSAGE TEXT, the only discriminator available:
+      //   GRANT layer  → "permission denied for function ..." (Postgres std)
+      //   body guard   → "...: no auth session"               (custom RAISE)
+      const msg = error!.message ?? "";
+      // The body-guard message must NOT appear: its presence proves anon
+      // executed the function body, i.e. the REVOKE ALL FROM anon regressed.
+      expect(
+        msg,
+        `Anon reached the function BODY (got the v_auth_uid-IS-NULL guard message), proving REVOKE ALL FROM anon in mig 061 regressed. code=${error!.code} message=${msg}`,
+      ).not.toMatch(/no auth session/i);
+      // And the denial must be the GRANT-layer "permission denied for
+      // function" signature (with SQLSTATE 42501). PostgREST surfaces the
+      // permission-denied error verbatim; we accept a stripped code field
+      // only when the standard permission-denied text is present.
       const isGrantLayerDenial =
-        error!.code === "42501" ||
-        (error!.code == null &&
-          /permission denied|insufficient_privilege/i.test(error!.message));
+        /permission denied for function/i.test(msg) ||
+        (error!.code === "42501" && !/no auth session/i.test(msg));
       expect(
         isGrantLayerDenial,
-        `Expected GRANT-layer 42501 denial (anon REVOKEd in mig 061). Got code=${error!.code} message=${error!.message}. A 28000 here would mean anon reached the function body — REVOKE ALL FROM anon regressed.`,
+        `Expected GRANT-layer "permission denied for function" denial (anon REVOKEd in mig 061). Got code=${error!.code} message=${msg}.`,
       ).toBe(true);
-      // Belt-and-suspenders: assert the body guard's 28000 did NOT fire,
-      // which would prove anon executed the function.
-      expect(error!.code).not.toBe("28000");
     },
     30_000,
   );
@@ -141,9 +152,11 @@ describe("MANDATE-05 / MANDATE-06: update_allocator_mandates RPC", () => {
   it.skipIf(!HAS_LIVE_DB)(
     "out-of-range max_weight: RPC rejects with SQLSTATE 22023",
     async () => {
-      const email = `mandate-rpc-range-${Date.now()}@test.local`;
-      testUserId = await createTestUser(admin, email, TEST_PASSWORD);
-      const testUserClient = await signInAsTestUser(email);
+      const { client: testUserClient } = await signInAsTestUser(
+        admin,
+        "mandate-rpc-range",
+        trackForCleanup,
+      );
 
       const { error } = await testUserClient.rpc(
         "update_allocator_mandates",
@@ -159,9 +172,11 @@ describe("MANDATE-05 / MANDATE-06: update_allocator_mandates RPC", () => {
   it.skipIf(!HAS_LIVE_DB)(
     "invalid liquidity_preference enum: RPC rejects with SQLSTATE 22023",
     async () => {
-      const email = `mandate-rpc-enum-${Date.now()}@test.local`;
-      testUserId = await createTestUser(admin, email, TEST_PASSWORD);
-      const testUserClient = await signInAsTestUser(email);
+      const { client: testUserClient } = await signInAsTestUser(
+        admin,
+        "mandate-rpc-enum",
+        trackForCleanup,
+      );
 
       const { error } = await testUserClient.rpc(
         "update_allocator_mandates",
@@ -179,9 +194,11 @@ describe("MANDATE-05 / MANDATE-06: update_allocator_mandates RPC", () => {
   it.skipIf(!HAS_LIVE_DB)(
     "p_clear_fields: RPC nulls the listed field regardless of named-parameter value",
     async () => {
-      const email = `mandate-rpc-clear-${Date.now()}@test.local`;
-      testUserId = await createTestUser(admin, email, TEST_PASSWORD);
-      const testUserClient = await signInAsTestUser(email);
+      const { client: testUserClient } = await signInAsTestUser(
+        admin,
+        "mandate-rpc-clear",
+        trackForCleanup,
+      );
 
       // Seed a value first.
       const { error: seedErr } = await testUserClient.rpc(
@@ -210,9 +227,11 @@ describe("MANDATE-05 / MANDATE-06: update_allocator_mandates RPC", () => {
   it.skipIf(!HAS_LIVE_DB)(
     "MANDATE-06 (ROADMAP SC4 Option A): authenticated allocator direct UPDATE on mandate columns is blocked — 0 rows affected (allocator_prefs_self_update policy dropped in migration 061)",
     async () => {
-      const email = `mandate-direct-update-${Date.now()}@test.local`;
-      testUserId = await createTestUser(admin, email, TEST_PASSWORD);
-      const testUserClient = await signInAsTestUser(email);
+      const { client: testUserClient } = await signInAsTestUser(
+        admin,
+        "mandate-direct-update",
+        trackForCleanup,
+      );
 
       // Seed via RPC first (the only allowed write path).
       const { error: seedErr } = await testUserClient.rpc(
@@ -261,9 +280,11 @@ describe("MANDATE-05 / MANDATE-06: update_allocator_mandates RPC", () => {
   it.skipIf(!HAS_LIVE_DB)(
     "admin direct UPDATE via service-role client succeeds (allocator_prefs_admin_all policy unchanged)",
     async () => {
-      const email = `mandate-admin-${Date.now()}@test.local`;
-      testUserId = await createTestUser(admin, email, TEST_PASSWORD);
-      const testUserClient = await signInAsTestUser(email);
+      const { client: testUserClient } = await signInAsTestUser(
+        admin,
+        "mandate-admin",
+        trackForCleanup,
+      );
 
       // Seed a mandate row via allocator path so the admin UPDATE has a target.
       await testUserClient.rpc("update_allocator_mandates", {

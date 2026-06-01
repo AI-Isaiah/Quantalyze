@@ -166,15 +166,29 @@ describe("Migration 055 — sanitize_user RPC", () => {
       //      (the per-table DELETE/UPDATE guards are not re-entered in a
       //      way that throws), and the state is byte-identical to after
       //      the first call. A re-fire of the PURGE statements would
-      //      still "succeed" against empty tables, so the load-bearing
-      //      assertion is the FALSE return + no error: proof the guard
-      //      short-circuits BEFORE the per-table mutations on re-run.
+      //      still "succeed" against empty tables, so the FALSE-return is
+      //      NOT a sufficient oracle on its own: a regression that moves
+      //      the `v_already_sanitized` short-circuit to the END of the
+      //      body (RETURN FALSE *after* re-running every UPDATE/DELETE and
+      //      re-emitting the gdpr.sanitize_user audit row) would still
+      //      satisfy `second === false`. The load-bearing oracle for "the
+      //      body did not re-enter" is therefore the audit-row count: the
+      //      migration emits exactly ONE `gdpr.sanitize_user` audit_log row
+      //      per *successful* (TRUE) run, and audit_log is PRESERVE — so a
+      //      no-op second call MUST leave the count at exactly 1. This is
+      //      the re-run audit-attribution probe H-0032 calls out as
+      //      missing.
       const admin = createLiveAdminClient();
       const ts = Date.now();
       const cleanup: {
         userIds: string[];
         strategyIds: string[];
       } = { userIds: [], strategyIds: [] };
+      // audit_log is PRESERVE (migration 049 deny + sanitize never touches
+      // it), so the user-delete cascade does NOT remove the
+      // gdpr.sanitize_user rows this test asserts on. Track + purge them via
+      // the service-role bypass, mirroring the audit-trail test below.
+      const auditIds: string[] = [];
 
       try {
         const userId = await createTestUser(
@@ -259,6 +273,25 @@ describe("Migration 055 — sanitize_user RPC", () => {
           .single();
         expect(profile?.display_name).toBe("[deleted]");
 
+        // RE-RUN AUDIT-ATTRIBUTION PROBE (H-0032). A successful (TRUE)
+        // sanitize emits exactly ONE `gdpr.sanitize_user` audit_log row
+        // attributed to the target. Capture the post-first-call set so we
+        // can both (a) assert the count and (b) clean it up afterwards.
+        const sanitizeAuditRows = async (): Promise<
+          { id: string }[]
+        > => {
+          const { data, error } = await admin
+            .from("audit_log")
+            .select("id")
+            .eq("user_id", userId)
+            .eq("action", "gdpr.sanitize_user");
+          if (error) throw new Error(`audit_log read: ${error.message}`);
+          return data ?? [];
+        };
+        const afterFirstAudit = await sanitizeAuditRows();
+        for (const r of afterFirstAudit) auditIds.push(r.id);
+        expect(afterFirstAudit.length).toBe(1);
+
         // Second call — the re-run guard MUST short-circuit to FALSE with
         // no error. If the guard regressed, the per-table mutations would
         // re-enter; the FALSE return is the proof they did not.
@@ -287,7 +320,26 @@ describe("Migration 055 — sanitize_user RPC", () => {
           .eq("id", userId)
           .single();
         expect(profileAfter2?.display_name).toBe("[deleted]");
+
+        // The decisive H-0032 oracle: the no-op second call must NOT have
+        // re-emitted a gdpr.sanitize_user audit row. Still exactly ONE,
+        // and it is the SAME row captured after the first call. A
+        // regression where the re-run short-circuit no longer guards the
+        // body (the function re-runs every UPDATE/DELETE + re-fires the
+        // audit emission, yet still RETURNs FALSE at the end) goes
+        // undetected by the FALSE-return assertion alone but trips here:
+        // the count becomes 2.
+        const afterSecondAudit = await sanitizeAuditRows();
+        expect(afterSecondAudit.length).toBe(1);
+        expect(afterSecondAudit[0]?.id).toBe(afterFirstAudit[0]?.id);
       } finally {
+        // audit_log is PRESERVE — purge the gdpr.sanitize_user rows this
+        // test created via the service-role bypass (migration 049 denies
+        // UPDATE/DELETE through PostgREST, service-role is bypassed for
+        // cleanup) so they don't leak into the live DB.
+        for (const id of auditIds) {
+          await admin.from("audit_log").delete().eq("id", id);
+        }
         await cleanupLiveDbRow(admin, cleanup);
       }
     },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -190,5 +190,100 @@ describe("vercel.json cron quota (Pro plan, soft bound)", () => {
     }
 
     expect(missing).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// H-1155 — every production cron handler on disk is WIRED in vercel.json.
+//
+// The quota/schedule/allowlist/handler-exists checks above all operate on
+// whatever vercel.json happens to declare. They are silent if an entry is
+// DROPPED: a PR that deletes `sync-funding` (or the whole `crons` key) from
+// vercel.json still leaves the route handler on disk, length stays <= 10, the
+// remaining schedules stay daily-or-allowlisted, and the allowlist-presence
+// check only guards flag-monitor. critical-regressions.test.ts only pins
+// warm-analytics + alert-digest. So six of the eight production crons could
+// vanish from the deployment with NO test failure — production goes dark on
+// funding sync / reconciliation / ack-token cleanup / draft cleanup /
+// founder report / error-rollup with no PR-time signal.
+//
+// The fix derives the EXPECTED set from the filesystem (the route handlers
+// are the source of truth — a handler on disk that no Vercel schedule invokes
+// is dead) and asserts bidirectional parity with vercel.json.crons:
+//   - every disk handler must be scheduled (catches the DROP regression), and
+//   - every scheduled path must resolve to a handler (catches the typo class).
+// Deriving from disk rather than a hand-maintained literal means this test
+// is NOT a single-source tautology against vercel.json: the two sides come
+// from independent inputs and must agree.
+// ---------------------------------------------------------------------------
+describe("vercel.json crons cover every production cron handler (H-1155)", () => {
+  // Cron handlers that do NOT live under src/app/api/cron/ and so must be
+  // enumerated explicitly. Keep this tiny — new crons belong under api/cron/.
+  const NON_CRON_DIR_HANDLERS = ["/api/alert-digest"] as const;
+
+  function expectedCronPathsFromDisk(): string[] {
+    const cronRoot = join(process.cwd(), "src", "app", "api", "cron");
+    const handlerExists = (dir: string) =>
+      ["route.ts", "route.tsx", "route.js"].some((f) =>
+        existsSync(join(cronRoot, dir, f)),
+      );
+
+    const fromCronDir = readdirSync(cronRoot, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && handlerExists(d.name))
+      .map((d) => `/api/cron/${d.name}`);
+
+    return [...fromCronDir, ...NON_CRON_DIR_HANDLERS].sort();
+  }
+
+  it("declares a non-empty crons array (a missing/empty key is a regression)", () => {
+    // Guards the most catastrophic drop: deleting the whole `crons` key.
+    // `loadCrons()` returns [] in that case, which would otherwise pass every
+    // quota/schedule assertion above. There are real cron handlers on disk, so
+    // an empty schedule list can only mean a misconfiguration.
+    expect(loadCrons().length).toBeGreaterThan(0);
+  });
+
+  it("schedules every cron route handler that exists on disk", () => {
+    const scheduled = new Set(loadCrons().map((c) => c.path));
+    const expected = expectedCronPathsFromDisk();
+
+    // A handler on disk that no schedule invokes = a production cron that
+    // silently never runs. This is the exact H-1155 regression: dropping
+    // `sync-funding` / `reconcile-strategies` / `cleanup-ack-tokens` /
+    // `cleanup-wizard-drafts` / `founder-lp-report` / `phase19-error-rollup`
+    // (or flag-monitor) from vercel.json fails HERE.
+    const unscheduled = expected.filter((p) => !scheduled.has(p));
+    expect(unscheduled).toEqual([]);
+  });
+
+  it("does not schedule any path without a handler (catches typos/orphans)", () => {
+    // The inverse direction flagged by pr-test-analyzer#3: a typo like
+    // `/api/cron/sync-fundings` deploys a cron that 404s on every fire. Every
+    // scheduled path must be one we recognise from disk.
+    const expected = new Set(expectedCronPathsFromDisk());
+    const orphans = loadCrons()
+      .map((c) => c.path)
+      .filter((p) => !expected.has(p));
+    expect(orphans).toEqual([]);
+  });
+
+  it("expected set is exactly the eight production crons (pins the inventory)", () => {
+    // Pins the current production cron inventory so adding/removing a handler
+    // is a deliberate, test-visible change. If this list and the disk walk
+    // ever disagree, the walk above is the source of truth and this literal is
+    // stale — but the disagreement itself surfaces the inventory change in CI.
+    expect(expectedCronPathsFromDisk()).toEqual(
+      [
+        "/api/alert-digest",
+        "/api/cron/cleanup-ack-tokens",
+        "/api/cron/cleanup-wizard-drafts",
+        "/api/cron/flag-monitor",
+        "/api/cron/founder-lp-report",
+        "/api/cron/phase19-error-rollup",
+        "/api/cron/reconcile-strategies",
+        "/api/cron/sync-funding",
+        "/api/cron/warm-analytics",
+      ].sort(),
+    );
   });
 });

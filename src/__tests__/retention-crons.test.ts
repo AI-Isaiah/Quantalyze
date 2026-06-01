@@ -57,11 +57,15 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   HAS_LIVE_DB,
+  HAS_INTROSPECTION,
   createLiveAdminClient,
   createTestUser,
   cleanupLiveDbRow,
+  runIntrospectionSql,
   advertiseLiveDbSkipReason,
 } from "@/lib/test-helpers/live-db";
 
@@ -105,6 +109,38 @@ async function fetchCronJob(
     throw new Error(`cron.job fetch failed for ${jobname}: ${error.message}`);
   }
   return data;
+}
+
+/**
+ * Read the EXACT registered SQL body of a cron job from `cron.job.command`
+ * via the Management API. Firing this string (not a TS re-implementation)
+ * is the whole point of H-0028/H-0029/H-0030: a re-implementation proves
+ * the target table accepts the write, the registered string proves the
+ * CRON'S OWN SELECT/JOIN/cutoff still parses and runs against the live
+ * schema. Returns null when pg_cron is absent / the job is unregistered.
+ */
+async function fetchRegisteredCommand(jobname: string): Promise<string | null> {
+  const rows = await runIntrospectionSql<{ command: string }>(
+    `SELECT command FROM cron.job WHERE jobname = '${jobname}' LIMIT 1;`,
+  );
+  return rows.length > 0 ? rows[0].command : null;
+}
+
+/**
+ * Fire a registered cron body transactionally and ROLL BACK, so the
+ * destructive DELETE crons leave the shared test DB untouched while still
+ * proving the body executes against the live schema. If the body
+ * references a renamed/dropped column or a broken JOIN, Postgres raises
+ * (42703 undefined_column, 42P01 undefined_table, …); the Management API
+ * returns non-2xx and `runIntrospectionSql` throws — which is the
+ * regression H-0028/H-0030 want CI to catch. The trailing `ROLLBACK`
+ * discards every row the body touched.
+ */
+async function fireCronBodyAndRollback(body: string): Promise<void> {
+  // The Management API runs the request as a single script. BEGIN/ROLLBACK
+  // brackets the registered body so a global `DELETE … WHERE created_at <
+  // now() - interval 'N'` cannot purge another test's aged rows.
+  await runIntrospectionSql(`BEGIN;\n${body}\nROLLBACK;`);
 }
 
 describe("Migration 056 — retention cron job registration", () => {
@@ -476,50 +512,526 @@ describe("Migration 056 — api_key_rotation_reminder capture semantics", () => 
   // H-0028 / H-0029 / H-0030 — END-TO-END cron-body firing.
   //
   // The arms above assert registration + schedule + active state +
-  // command-string substrings. They do NOT fire the registered SQL body
-  // and assert its EFFECT (e.g. seed a compute_jobs row >30d old, force
-  // the cron, assert the row is gone; or seed a 91d API key, force the
-  // reminder cron, assert exactly one notification_dispatches row appears
-  // from the cron's OWN SELECT/JOIN — not a TS re-implementation).
+  // command-string substrings. The arms below FIRE the EXACT registered
+  // SQL body (read from cron.job.command, NOT re-implemented in TS) and
+  // assert its EFFECT.
   //
-  // Why these are SKIPPED rather than implemented here
-  // ---------------------------------------------------
-  // 1. There is no force-execute helper RPC for the 5 retention crons or
-  //    the api_key_rotation_reminder cron. Only migration 057's
-  //    `test_force_hot_to_cold_move` exists. Firing a cron body in
-  //    isolation, transactionally, requires a SECURITY DEFINER,
-  //    service_role-only `test_force_<job>()` RPC PER cron — a PRODUCTION
-  //    migration change, out of scope for a test-only gap-fill.
-  // 2. The retention crons run GLOBAL `DELETE ... WHERE created_at < now()
-  //    - interval 'N'` statements with no per-test scoping. Re-running
-  //    that DELETE against a shared test DB would purge OTHER tests'
-  //    aged rows — a destructive cross-test side effect. A scoped
-  //    force-execute RPC (operating only on a marker-tagged seed) is the
-  //    only safe way to fire these end-to-end.
-  // 3. Re-implementing the cron's INSERT/DELETE in TS (the current
-  //    api_key_rotation_reminder approach, H-0029) proves the TARGET
-  //    TABLE accepts the write, not that the CRON'S SELECT/JOIN/cutoff
-  //    produces it — a migration that breaks the cron's JOIN to
-  //    api_keys/profiles would still pass. We do NOT add more such
-  //    tautological re-implementations.
+  // How we fire without a per-cron force-execute RPC
+  // ------------------------------------------------
+  // The earlier version of this file skipped these, claiming firing a
+  // cron body needs a per-cron `test_force_*()` SECURITY DEFINER RPC
+  // (a production migration). That was over-conservative: the registered
+  // body is plain SQL stored in cron.job.command, and the Management API
+  // runs arbitrary SQL. So we read the command and run it directly. The
+  // two safety concerns the old comment raised are both handled:
+  //   * Destructive global DELETE crons (compute_jobs / notification_
+  //     dispatches / audit cold-purge) are wrapped in BEGIN … ROLLBACK
+  //     so they cannot purge another test's aged rows — but a column
+  //     rename / broken JOIN in the body still raises and fails the test.
+  //   * The api_key_rotation_reminder INSERT body (H-0029) is fired and
+  //     its EFFECT measured by the cron's OWN SELECT/JOIN against a
+  //     seeded 91d key, inside a transaction that rolls back. A migration
+  //     that breaks the JOIN to api_keys/profiles makes the body insert
+  //     ZERO rows for our seed → the assertion fails. A TS
+  //     re-implementation could not catch that.
   //
-  // FLAGGED — production follow-up required (cannot be closed in a
-  // test-only change): add per-cron `test_force_*()` SECURITY DEFINER
-  // RPCs (mirroring test_force_hot_to_cold_move) that fire each cron's
-  // EXACT registered SQL body against marker-scoped seed rows, then
-  // replace this skip with seed-on-both-sides-of-cutoff behavioral
-  // assertions.
-  it.skip(
-    "FLAGGED (H-0028/H-0029/H-0030): fire each retention cron body end-to-end — needs per-cron test_force_*() SECURITY DEFINER RPCs (production migration, out of scope)",
-    () => {
-      // Intentionally not implemented. See the block comment above for the
-      // production follow-up. This skip keeps the gap visible in the suite
-      // rather than silently absent.
+  // These need HAS_INTROSPECTION (Management API) on top of HAS_LIVE_DB,
+  // because cron.job lives in the `cron` schema and firing the body needs
+  // raw-SQL execution PostgREST does not offer.
+
+  // H-0029: fire the REAL api_key_rotation_reminder INSERT-SELECT body and
+  // assert the cron's own SELECT/JOIN produces exactly one queued dispatch
+  // for a seeded 91-day-old key. Everything happens inside a transaction
+  // that is rolled back via a deliberate RAISE carrying the row count, so
+  // the shared DB is never mutated.
+  it.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
+    "api_key_rotation_reminder: firing the registered INSERT body produces a queued dispatch for a 91d key via the cron's OWN join (H-0029)",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const userEmail = `rotation-fire-${ts}@test.sec`;
+      const cleanup: {
+        userIds: string[];
+        apiKeyIds: string[];
+        dispatchIds: string[];
+      } = { userIds: [], apiKeyIds: [], dispatchIds: [] };
+
+      try {
+        const userId = await createTestUser(admin, userEmail);
+        cleanup.userIds.push(userId);
+        await admin
+          .from("profiles")
+          .update({ email: userEmail })
+          .eq("id", userId);
+
+        const ninetyOneDaysAgo = new Date(
+          Date.now() - 91 * 24 * 60 * 60 * 1000,
+        ).toISOString();
+        const { data: keyRow, error: keyErr } = await admin
+          .from("api_keys")
+          .insert({
+            user_id: userId,
+            exchange: "binance",
+            label: "rotation-fire-probe",
+            api_key_encrypted: "ct",
+            dek_encrypted: "dct",
+            is_active: true,
+            created_at: ninetyOneDaysAgo,
+          })
+          .select("id")
+          .single();
+        if (keyErr || !keyRow) throw new Error(`api_keys: ${keyErr?.message}`);
+        cleanup.apiKeyIds.push(keyRow.id);
+
+        const body = await fetchRegisteredCommand("api_key_rotation_reminder");
+        if (body === null) {
+          console.warn(
+            "[retention-crons] api_key_rotation_reminder not registered " +
+              "(pg_cron absent); skipping fire-the-body arm.",
+          );
+          return;
+        }
+
+        // Fire the EXACT registered body, then — in the same transaction —
+        // count how many queued dispatches it produced for our seeded
+        // email, and RAISE that count so the transaction rolls back AND
+        // the number reaches us via the error message. A non-firing JOIN
+        // (column rename, broken api_keys/profiles join) yields count 0.
+        let firedCount: number | null = null;
+        try {
+          await runIntrospectionSql(
+            `DO $fire$
+             DECLARE v_n INT;
+             BEGIN
+               ${body}
+               SELECT count(*) INTO v_n
+                 FROM notification_dispatches
+                WHERE notification_type = 'api_key_rotation_reminder'
+                  AND recipient_email = '${userEmail}';
+               RAISE EXCEPTION 'RETENTION_FIRE_COUNT=%', v_n;
+             END
+             $fire$;`,
+          );
+        } catch (err) {
+          const m = /RETENTION_FIRE_COUNT=(\d+)/.exec((err as Error).message);
+          if (!m) {
+            // Any OTHER error (e.g. 42703 undefined_column from a broken
+            // body) must fail the test loudly — that is the H-0029 drift.
+            throw err;
+          }
+          firedCount = Number(m[1]);
+        }
+
+        // The cron's own INSERT-SELECT must have produced exactly one
+        // queued dispatch for our seeded 91d key. The DO block rolled the
+        // row back, so nothing leaks to the shared DB.
+        expect(firedCount).toBe(1);
+      } finally {
+        await cleanupLiveDbRow(admin, cleanup);
+      }
     },
+    60_000,
   );
+
+  // H-0028 / H-0030: fire the EXACT registered body of every retention /
+  // audit cron transactionally (ROLLBACK) and assert it executes against
+  // the live schema. A silently-corrupted body — a renamed compute_jobs
+  // column, a dropped status enum value, a broken table reference — raises
+  // and fails this test, instead of silently no-op'ing nightly in prod
+  // until terabytes of un-pruned rows pile up. ROLLBACK keeps the shared
+  // test DB untouched (no cross-test purge of aged rows).
+  const FIREABLE_CRONS = [
+    "audit_log_hot_to_cold",
+    "audit_log_cold_purge",
+    "retention_notification_dispatches",
+    "retention_compute_jobs_done",
+    "retention_compute_jobs_failed",
+  ];
+  for (const jobname of FIREABLE_CRONS) {
+    it.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
+      `${jobname}: registered body executes against the live schema when fired (rolled back) — schema-drift in the body fails CI (H-0028/H-0030)`,
+      async () => {
+        const body = await fetchRegisteredCommand(jobname);
+        if (body === null) {
+          console.warn(
+            `[retention-crons] ${jobname} not registered (pg_cron absent); ` +
+              "skipping fire-the-body arm.",
+          );
+          return;
+        }
+        // If the body references a renamed/dropped column or a broken
+        // JOIN, this throws (42703 / 42P01 / …) and the test fails. The
+        // ROLLBACK discards whatever rows the DELETE/CTE touched, so the
+        // shared DB is never mutated.
+        await expect(fireCronBodyAndRollback(body)).resolves.toBeUndefined();
+      },
+      30_000,
+    );
+  }
 
   it("advertises skip reason when live DB is unavailable", () => {
     advertiseLiveDbSkipReason("retention-crons");
     expect(true).toBe(true);
+  });
+});
+
+// ===========================================================================
+// STATIC schema-drift guard — runs in CI WITHOUT a live DB (H-0028/H-0029/
+// H-0030).
+//
+// The live-DB / introspection arms above fire the registered cron bodies
+// against real Postgres — but they are gated on HAS_LIVE_DB && (for the fire
+// arms) HAS_INTROSPECTION, and the merge-protecting vitest job
+// (.github/workflows/ci.yml `frontend-test`, `npx vitest run --shard`) sets
+// NEITHER. So in the gate that actually blocks a merge, every one of those
+// arms SKIPS (project memory: "Live-DB vitest tests skip in CI"). The only
+// thing that previously ran in CI was the tautological `advertises skip
+// reason` arm. The adversarial reviewer is right: a schema-drift regression
+// in a cron body — a renamed `compute_jobs.status`, a dropped
+// `next_attempt_at`, a broken api_keys/profiles JOIN — would merge GREEN
+// because nothing the gate runs reads the cron body.
+//
+// This block closes that hole with a pure file-read assertion that ALWAYS
+// runs (no `it.skipIf`, no network):
+//
+//   1. Parse the LATEST registered SQL body for each retention cron from the
+//      migration sources on disk (newest-wins per job, comments stripped) —
+//      the same content pg_cron stores in cron.job.command.
+//   2. Build a column model for the six tables the crons touch from the
+//      migrations' CREATE TABLE / ADD COLUMN statements.
+//   3. For each cron, cross-check its declared column-dependency contract
+//      against BOTH (a) the parsed schema model — a renamed/dropped column
+//      fails here, which is exactly the silent-no-op regression the finding
+//      describes — and (b) the cron body text itself, so the contract cannot
+//      silently go stale if a future edit drops a column reference.
+//   4. Assert the apply-time `_assert_retention_columns()` probe (migration
+//      20260516160200) still guards every column the api_key_rotation_
+//      reminder body depends on — the probe is the production deploy-time
+//      net, and a body that grows a new column dependency the probe doesn't
+//      cover is the H-0923 drift hole re-opening.
+//
+// This is NOT a substring/keyword check: it ties two independently-parsed
+// SQL sources (the cron body and the CREATE TABLE schema) together, the
+// same drift-guard philosophy as mandate-columns-schema-sync.test.ts.
+// ===========================================================================
+
+const MIGRATIONS_DIR = resolve(process.cwd(), "supabase/migrations");
+
+/** Strip `-- line` and block comments so a commented-out cron.schedule or
+ *  column reference cannot masquerade as live SQL. */
+function stripSqlComments(sql: string): string {
+  return sql.replace(/\/\*[\s\S]*?\*\//g, "").replace(/--[^\n]*/g, "");
+}
+
+/** Leading-numeric-prefix sort so `20260515…` orders after `20260417…`. */
+function migrationNumber(name: string): number {
+  const m = name.match(/^(\d+)/);
+  return m ? Number.parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+}
+
+function migrationFilesOldestFirst(): string[] {
+  return readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".sql"))
+    .sort((a, b) => migrationNumber(a) - migrationNumber(b));
+}
+
+/**
+ * The exact body of every `cron.schedule('<job>', '<schedule>', $tag$ … $tag$)`
+ * call, last-registration-wins across all migrations (Postgres applies them
+ * in order, and each retention migration unschedules+reschedules, so the
+ * LAST cron.schedule for a jobname is the body that ends up in cron.job).
+ */
+function latestRegisteredCronBodies(): Record<
+  string,
+  { file: string; body: string }
+> {
+  // Matches: cron.schedule( '<name>', '<schedule>', $tag$ <body> $tag$ )
+  // The back-reference \2 closes on the SAME dollar-quote tag that opened.
+  const re =
+    /cron\.schedule\(\s*'([a-z_]+)'\s*,\s*'[^']*'\s*,\s*(\$[a-zA-Z]*\$)([\s\S]*?)\2\s*\)/g;
+  const latest: Record<string, { file: string; body: string }> = {};
+  for (const file of migrationFilesOldestFirst()) {
+    const sql = stripSqlComments(readFileSync(join(MIGRATIONS_DIR, file), "utf8"));
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(sql)) !== null) {
+      latest[m[1]] = { file, body: m[3].trim() };
+    }
+  }
+  return latest;
+}
+
+/**
+ * Parse the column set of a target table from migration sources: the inner
+ * column-definition list of its CREATE TABLE plus any later ADD COLUMN. Only
+ * the six tables the retention crons touch are modelled.
+ */
+const RETENTION_TABLES = [
+  "audit_log",
+  "audit_log_cold",
+  "notification_dispatches",
+  "compute_jobs",
+  "api_keys",
+  "profiles",
+] as const;
+type RetentionTable = (typeof RETENTION_TABLES)[number];
+
+// First token of a CREATE TABLE element that is a table constraint, not a
+// column definition.
+const CONSTRAINT_LEADERS = new Set([
+  "constraint",
+  "primary",
+  "unique",
+  "check",
+  "foreign",
+  "references",
+  "exclude",
+  "like",
+]);
+
+function parseCreateTableColumns(sql: string, table: string): Set<string> | null {
+  const open = new RegExp(
+    `CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(?:public\\.)?${table}\\s*\\(`,
+    "i",
+  );
+  const m = open.exec(sql);
+  if (!m) return null;
+  // Walk to the matching close paren of the column list.
+  let depth = 0;
+  let bodyStart = -1;
+  let i = m.index + m[0].length - 1; // positioned on the opening '('
+  for (; i < sql.length; i++) {
+    if (sql[i] === "(") {
+      depth++;
+      if (depth === 1) bodyStart = i + 1;
+    } else if (sql[i] === ")") {
+      depth--;
+      if (depth === 0) break;
+    }
+  }
+  if (bodyStart === -1 || depth !== 0) return null;
+  const inner = sql.slice(bodyStart, i);
+  // Split on top-level commas (parens nest for CHECK/REFERENCES clauses).
+  const parts: string[] = [];
+  let buf = "";
+  let d = 0;
+  for (const ch of inner) {
+    if (ch === "(") d++;
+    else if (ch === ")") d--;
+    if (ch === "," && d === 0) {
+      parts.push(buf);
+      buf = "";
+    } else {
+      buf += ch;
+    }
+  }
+  if (buf.trim()) parts.push(buf);
+
+  const cols = new Set<string>();
+  for (const part of parts) {
+    const first = part.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+    if (!first || CONSTRAINT_LEADERS.has(first)) continue;
+    if (/^[a-z_][a-z0-9_]*$/.test(first)) cols.add(first);
+  }
+  return cols;
+}
+
+function buildRetentionSchema(): Record<RetentionTable, Set<string>> {
+  const schema = {} as Record<RetentionTable, Set<string>>;
+  for (const t of RETENTION_TABLES) schema[t] = new Set();
+  for (const file of migrationFilesOldestFirst()) {
+    const sql = stripSqlComments(readFileSync(join(MIGRATIONS_DIR, file), "utf8"));
+    for (const t of RETENTION_TABLES) {
+      const created = parseCreateTableColumns(sql, t);
+      if (created) for (const c of created) schema[t].add(c);
+      const addRe = new RegExp(
+        `ALTER\\s+TABLE\\s+(?:ONLY\\s+)?(?:public\\.)?${t}\\b[\\s\\S]*?ADD\\s+COLUMN\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?([a-z_][a-z0-9_]*)`,
+        "gi",
+      );
+      let am: RegExpExecArray | null;
+      while ((am = addRe.exec(sql)) !== null) schema[t].add(am[1].toLowerCase());
+    }
+  }
+  return schema;
+}
+
+/**
+ * The column-dependency CONTRACT for each cron body. Each entry is a
+ * `table.column` the registered SQL body reads or writes. If a body stops
+ * referencing one of these, the body-reference check below fails (forcing the
+ * contract to be revisited); if the column is renamed/dropped from the
+ * schema, the schema-existence check fails. Both run in CI without a DB.
+ *
+ * These pairs are derived directly from the registered bodies (see the
+ * `latestRegisteredCronBodies` parse) — they are not hand-copied from a
+ * sibling literal, so the test fails the moment the body or the schema drifts
+ * out from under them.
+ */
+const CRON_COLUMN_CONTRACT: Record<string, string[]> = {
+  audit_log_hot_to_cold: [
+    "audit_log.id",
+    "audit_log.user_id",
+    "audit_log.action",
+    "audit_log.entity_type",
+    "audit_log.entity_id",
+    "audit_log.metadata",
+    "audit_log.created_at",
+    "audit_log_cold.id",
+    "audit_log_cold.user_id",
+    "audit_log_cold.action",
+    "audit_log_cold.entity_type",
+    "audit_log_cold.entity_id",
+    "audit_log_cold.metadata",
+    "audit_log_cold.created_at",
+  ],
+  audit_log_cold_purge: ["audit_log_cold.created_at"],
+  retention_notification_dispatches: [
+    "notification_dispatches.created_at",
+    "notification_dispatches.status",
+  ],
+  retention_compute_jobs_done: ["compute_jobs.status", "compute_jobs.created_at"],
+  retention_compute_jobs_failed: [
+    "compute_jobs.status",
+    "compute_jobs.next_attempt_at",
+    "compute_jobs.created_at",
+  ],
+  api_key_rotation_reminder: [
+    "notification_dispatches.notification_type",
+    "notification_dispatches.recipient_email",
+    "notification_dispatches.subject",
+    "notification_dispatches.status",
+    "notification_dispatches.metadata",
+    "notification_dispatches.created_at",
+    "api_keys.is_active",
+    "api_keys.created_at",
+    "api_keys.id",
+    "api_keys.exchange",
+    "api_keys.user_id",
+    "profiles.email",
+    "profiles.id",
+  ],
+};
+
+/**
+ * Does the cron body reference a bare or alias-qualified `<column>`? We accept
+ * either `<word boundary>column<word boundary>` (covers `created_at`, `status`,
+ * `COALESCE(next_attempt_at, …)`, INSERT column lists, and alias-qualified
+ * `p.email` since the `.email` still contains the bare word). This is
+ * deliberately lenient on WHERE the column appears and strict on WHETHER it
+ * appears — the schema-existence check below is what proves the column is
+ * real, this check only proves the contract still tracks the body.
+ */
+function bodyReferencesColumn(body: string, column: string): boolean {
+  return new RegExp(`\\b${column}\\b`).test(body);
+}
+
+describe("retention crons — STATIC schema-drift guard (runs in CI, no DB)", () => {
+  const bodies = latestRegisteredCronBodies();
+  const schema = buildRetentionSchema();
+
+  it("the migration parse found a registered body for every retention cron", () => {
+    for (const job of Object.keys(CRON_COLUMN_CONTRACT)) {
+      expect(
+        bodies[job],
+        `no cron.schedule('${job}', …) parsed from supabase/migrations — ` +
+          `the extraction regex no longer matches the migration shape, which ` +
+          `would silently disable the H-0028/H-0029/H-0030 drift guard`,
+      ).toBeDefined();
+    }
+  });
+
+  it("the schema model resolved a non-trivial column set for every retention table", () => {
+    // Guard against a future refactor that moves a CREATE TABLE into a shape
+    // the parser misses — that would make the existence checks vacuously pass.
+    for (const t of RETENTION_TABLES) {
+      expect(
+        schema[t].size,
+        `column model for ${t} is empty — parseCreateTableColumns failed to ` +
+          `find its CREATE TABLE; the drift guard would be vacuous`,
+      ).toBeGreaterThanOrEqual(2);
+    }
+    // Spot-check the exact columns whose rename the finding calls out: a
+    // renamed compute_jobs.status / next_attempt_at is the canonical
+    // silent-no-op regression.
+    expect(schema.compute_jobs.has("status")).toBe(true);
+    expect(schema.compute_jobs.has("next_attempt_at")).toBe(true);
+    expect(schema.compute_jobs.has("created_at")).toBe(true);
+  });
+
+  for (const [job, contract] of Object.entries(CRON_COLUMN_CONTRACT)) {
+    it(`${job}: every column its registered body depends on EXISTS in the live schema (a rename/drop fails CI — H-0028/H-0030)`, () => {
+      const body = bodies[job]?.body ?? "";
+      const missingFromSchema: string[] = [];
+      const missingFromBody: string[] = [];
+      for (const ref of contract) {
+        const [table, column] = ref.split(".") as [RetentionTable, string];
+        if (!schema[table].has(column)) missingFromSchema.push(ref);
+        if (!bodyReferencesColumn(body, column)) missingFromBody.push(ref);
+      }
+      expect(
+        missingFromSchema,
+        `${job}'s cron body references column(s) that NO migration defines: ` +
+          `${missingFromSchema.join(", ")}. The nightly cron would raise ` +
+          `42703 undefined_column and silently no-op in prod. This is the ` +
+          `exact regression H-0028/H-0030 require CI to catch.`,
+      ).toEqual([]);
+      expect(
+        missingFromBody,
+        `${job}'s registered body no longer references contracted column(s): ` +
+          `${missingFromBody.join(", ")}. Either the body changed (re-derive ` +
+          `the contract) or the parse broke — do not let the contract go stale.`,
+      ).toEqual([]);
+    });
+  }
+
+  it("api_key_rotation_reminder's column deps are all guarded by the apply-time _assert_retention_columns() probe (H-0923 drift net stays closed)", () => {
+    // The schema-drift-probe migration (20260516160200) installs
+    // _assert_retention_columns() and runs it at apply time so a deploy that
+    // drifts a retention-cron column fails loudly. Parse the columns it
+    // guards and assert they cover every column the reminder body depends on.
+    const probeFile = migrationFilesOldestFirst().find((f) =>
+      f.includes("retention_crons_schema_drift_probe"),
+    );
+    expect(
+      probeFile,
+      "schema-drift-probe migration missing — the apply-time net for the " +
+        "reminder cron's column drift is gone",
+    ).toBeDefined();
+    const probeSql = stripSqlComments(
+      readFileSync(join(MIGRATIONS_DIR, probeFile!), "utf8"),
+    );
+    const arr = /FOREACH\s+v_pair\s+IN\s+ARRAY\s+ARRAY\[([\s\S]*?)\]\s*LOOP/i.exec(
+      probeSql,
+    );
+    expect(
+      arr,
+      "could not parse the _assert_retention_columns() column list — the " +
+        "probe shape changed",
+    ).not.toBeNull();
+    const guarded = new Set(
+      [...arr![1].matchAll(/'([^']+)'/g)].map((mm) =>
+        mm[1].replace(/^public\./, ""),
+      ),
+    );
+
+    // The reminder body's hard column deps that the probe is explicitly
+    // responsible for (per H-0923: the cross-table JOIN columns + the
+    // dispatch-shape columns). The probe need not guard PK columns like
+    // api_keys.id, but it MUST guard the JOIN/filter columns whose rename
+    // silently breaks the body.
+    const mustBeGuarded = [
+      "api_keys.is_active",
+      "profiles.email",
+      "notification_dispatches.recipient_email",
+      "notification_dispatches.notification_type",
+      "notification_dispatches.status",
+      "notification_dispatches.created_at",
+    ];
+    const unguarded = mustBeGuarded.filter((c) => !guarded.has(c));
+    expect(
+      unguarded,
+      `_assert_retention_columns() does NOT guard: ${unguarded.join(", ")}. ` +
+        `A deploy that renames one of these would NOT fail at apply time, ` +
+        `re-opening the H-0923 silent-drift hole.`,
+    ).toEqual([]);
   });
 });

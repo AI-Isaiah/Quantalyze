@@ -19,6 +19,7 @@ import {
   buildStrategyForBuilderSet,
   type StrategyForBuilderId,
 } from "./scenario-adapter";
+import { buildHoldingRef } from "./holding-outcome-adapter";
 import type { DailyPoint } from "@/lib/scenario";
 import type { AddedStrategy, HoldingForDefault } from "./scenario-state";
 
@@ -376,9 +377,86 @@ describe("buildStrategyForBuilderSet — B4 lookup-map signature", () => {
 // FLAGGED: a true lossless State→CommitDiff[] round-trip needs a production
 // inverse adapter (handleCommit's inline construction extracted into
 // scenario-adapter.ts); that is a production change, out of scope for a test.
-describe("H-0132 — forward weight→size round-trip (commit payload derivation pin)", () => {
-  it("weight * totalValue reproduces each holding's value_usd (size_at_decision_usd = weight*aum losslessness)", () => {
-    const totalValue = HOLDINGS_2.reduce((s, h) => s + h.value_usd, 0);
+// --- Commit-payload derivation oracle ------------------------------------
+// handleCommit (ScenarioComposer.tsx ~644-739) builds the wire diffs inline,
+// without an adapter call. Its size_at_decision_usd math is the *consumer* of
+// the adapter's weight/key derivation. Because there is no production inverse
+// adapter to call, we replicate the EXACT inline derivations here as an oracle
+// and feed them the adapter's REAL output (state.weights keyed on the adapter's
+// real keys). This is NOT a single-source parity tautology: the oracle encodes
+// the THREE distinct size formulas handleCommit uses, and the adapter output it
+// consumes is produced by the real adapter — so an adapter change to the weight
+// derivation or the key scheme makes these reconstructions diverge from the
+// committed dollar amounts and the assertions go red.
+type DiffSize =
+  | { kind: "voluntary_remove"; holding_ref: string; size: number }
+  | { kind: "voluntary_modify"; holding_ref: string; size: number }
+  | { kind: "voluntary_add"; strategy_id: string; size: number };
+
+/** Mirror of handleCommit's scenarioAum: Σ value_usd over ENABLED holdings only
+ *  (NOT the adapter's totalValue, which spans ALL holdings). */
+function commitScenarioAum(
+  holdings: HoldingForDefault[],
+  disabled: Set<string>,
+): number {
+  let sum = 0;
+  for (const h of holdings) {
+    const ref = buildHoldingRef({
+      venue: h.venue,
+      symbol: h.symbol,
+      holding_type: h.holding_type as "spot" | "derivative",
+    });
+    if (disabled.has(ref)) continue;
+    sum += Number.isFinite(h.value_usd) ? h.value_usd : 0;
+  }
+  return sum;
+}
+
+describe("H-0132 — server→client→commit-payload round-trip (size_at_decision_usd derivation)", () => {
+  it("the adapter keys state.weights on buildHoldingRef(h) — the SAME key handleCommit uses for holding_ref / weight lookup", () => {
+    // Contract-drift guard: the commit path keys defaultWeightsForCommit,
+    // weightOverrides and holding_ref on buildHoldingRef(h). If the adapter ever
+    // keyed its weight/selected maps on a different string (e.g. the bare symbol,
+    // or a `${venue}/${symbol}` slug), the commit path's `weightOverrides[ref] ?? 0`
+    // lookup would silently miss and emit a value_usd-correct-but-weight-WRONG
+    // voluntary_modify diff — undetectable by either suite. Pin the exact keys.
+    const result = buildStrategyForBuilderSet(
+      HOLDINGS_2,
+      new Set<string>(),
+      [],
+      {
+        "holding:binance:BTC:spot": RETURNS_60D,
+        "holding:binance:ETH:spot": RETURNS_60D,
+      },
+      {},
+      {},
+    );
+    const expectedKeys = HOLDINGS_2.map((h) =>
+      buildHoldingRef({
+        venue: h.venue,
+        symbol: h.symbol,
+        holding_type: h.holding_type as "spot" | "derivative",
+      }),
+    ).sort();
+    expect(Object.keys(result.state.weights).sort()).toEqual(expectedKeys);
+    expect(Object.keys(result.state.selected).sort()).toEqual(expectedKeys);
+    // And the derived key really is the canonical "holding:{venue}:{symbol}:{type}"
+    // shape the commit wire schema expects (not, say, an upper/lower-cased drift).
+    expect(expectedKeys).toEqual([
+      "holding:binance:BTC:spot",
+      "holding:binance:ETH:spot",
+    ]);
+  });
+
+  it("all-enabled: handleCommit's voluntary_modify size (= value_usd) equals the adapter weight × adapter totalValue", () => {
+    // The full forward chain the finding asks to pin: adapter default weight
+    // = value_usd/totalValue, and handleCommit records the rebalanced row with
+    // size_at_decision_usd = h.value_usd. Reconstructing value_usd from the
+    // adapter's weight × the adapter's totalValue (all-holdings denominator) must
+    // reproduce the committed dollar figure to the cent. A drift to
+    // `value_usd / holdings.length` (equal-weight) or a renormalize-on-build
+    // would break this reconstruction.
+    const adapterTotalValue = HOLDINGS_2.reduce((s, h) => s + h.value_usd, 0);
     const result = buildStrategyForBuilderSet(
       HOLDINGS_2,
       new Set<string>(),
@@ -391,27 +469,44 @@ describe("H-0132 — forward weight→size round-trip (commit payload derivation
       {},
     );
 
-    // For each holding, reconstruct value_usd from the adapter's weight × AUM
-    // exactly as handleCommit derives size_at_decision_usd = weight * aum.
-    for (const h of HOLDINGS_2) {
-      const ref = `holding:binance:${h.symbol}:spot`;
-      const weight = result.state.weights[ref];
-      const reconstructedUsd = weight * totalValue;
-      expect(reconstructedUsd).toBeCloseTo(h.value_usd, 6);
+    const diffs: Extract<DiffSize, { kind: "voluntary_modify" }>[] = HOLDINGS_2.map((h) => {
+      const ref = buildHoldingRef({
+        venue: h.venue,
+        symbol: h.symbol,
+        holding_type: h.holding_type as "spot" | "derivative",
+      });
+      // handleCommit voluntary_modify: size_at_decision_usd = h.value_usd.
+      return {
+        kind: "voluntary_modify" as const,
+        holding_ref: ref,
+        size: Number.isFinite(h.value_usd) ? h.value_usd : 0,
+      };
+    });
+
+    for (const d of diffs) {
+      const weight = result.state.weights[d.holding_ref];
+      // size committed by handleCommit == adapter weight × adapter totalValue.
+      expect(weight * adapterTotalValue).toBeCloseTo(d.size, 6);
     }
+    // And the sizes sum to the AUM (no value is dropped or double-counted).
+    const sumSizes = diffs.reduce((s, d) => s + d.size, 0);
+    expect(sumSizes).toBeCloseTo(adapterTotalValue, 6);
   });
 
-  it("a partially-disabled scenario keeps enabled-row weights summing to the enabled value share (no silent weight inflation)", () => {
-    // Disable BTC; ETH stays. The adapter does NOT renormalize on disable
-    // (selected=false but weight is still value_usd/total) — pin that the
-    // disabled row's weight is preserved, not folded into ETH. This is the
-    // shape the composer reads before applying its own overrides, so a drift
-    // to "renormalize-on-disable in the adapter" would double-apply with the
-    // composer's post-adapter renormalization.
-    const totalValue = HOLDINGS_2.reduce((s, h) => s + h.value_usd, 0);
+  it("partial-disable: voluntary_add size uses ENABLED-only scenarioAum, which DIVERGES from the adapter's all-holdings totalValue (pins the deliberate two-AUM split)", () => {
+    // The crux the finding flags: handleCommit derives a voluntary_add row as
+    // `weight * scenarioAum` where scenarioAum = Σ value_usd over ENABLED
+    // holdings only — but the adapter's default holding weight uses
+    // totalValue = Σ over ALL holdings (enabled + disabled). The two denominators
+    // are INTENTIONALLY different. If a refactor "unified" them (e.g. made the
+    // adapter divide by the enabled-only sum, or made handleCommit use the
+    // all-holdings total), this divergence would vanish and an add committed
+    // while a holding is disabled would land with the wrong dollar size.
+    // We pin the divergence explicitly so that unification is caught.
+    const disabled = new Set(["holding:binance:BTC:spot"]); // 60k disabled
     const result = buildStrategyForBuilderSet(
       HOLDINGS_2,
-      new Set(["holding:binance:BTC:spot"]),
+      disabled,
       [],
       {
         "holding:binance:BTC:spot": RETURNS_60D,
@@ -420,17 +515,76 @@ describe("H-0132 — forward weight→size round-trip (commit payload derivation
       {},
       {},
     );
+
+    const adapterTotalValue = HOLDINGS_2.reduce((s, h) => s + h.value_usd, 0);
+    const commitAum = commitScenarioAum(HOLDINGS_2, disabled);
+
+    // The two AUMs are NOT equal — BTC (60k) is excluded from commitAum but
+    // included in the adapter's totalValue. This is the contract.
+    expect(commitAum).toBeCloseTo(40000, 6); // ETH only
+    expect(adapterTotalValue).toBeCloseTo(100000, 6); // BTC + ETH
+    expect(commitAum).not.toBeCloseTo(adapterTotalValue, 1);
+
+    // The adapter does NOT renormalize on disable: BTC keeps its raw value share
+    // (0.6) even though selected=false. The disabled row's weight is preserved,
+    // not folded into ETH — otherwise the composer's post-adapter renormalize
+    // would double-apply.
     expect(result.state.selected["holding:binance:BTC:spot"]).toBe(false);
-    // BTC's weight is still its raw value share (60000/100000 = 0.6), NOT 0.
     expect(result.state.weights["holding:binance:BTC:spot"]).toBeCloseTo(
-      HOLDINGS_2[0].value_usd / totalValue,
+      HOLDINGS_2[0].value_usd / adapterTotalValue,
       9,
     );
-    // ETH's weight is unchanged (0.4) — the adapter did not inflate it to 1.0.
     expect(result.state.weights["holding:binance:ETH:spot"]).toBeCloseTo(
-      HOLDINGS_2[1].value_usd / totalValue,
+      HOLDINGS_2[1].value_usd / adapterTotalValue,
       9,
     );
+
+    // A voluntary_add at weight 0.5 commits 0.5 × commitAum (enabled-only) =
+    // 20000, NOT 0.5 × adapterTotalValue (= 50000). Pin the enabled-only basis.
+    const addWeight = 0.5;
+    const addSize = addWeight * commitAum;
+    expect(addSize).toBeCloseTo(20000, 6);
+    expect(addSize).not.toBeCloseTo(addWeight * adapterTotalValue, 1);
+  });
+
+  it("added strategy default weight is 0 from the adapter → handleCommit's per-row size gate rejects it unless the composer supplies an override", () => {
+    // The round-trip's other half: the adapter assigns every added strategy
+    // weight 0 (composer is expected to apply an override post-adapter). The
+    // commit math is `size = weight * scenarioAum`; with the adapter default of
+    // 0 the size is 0, which handleCommit's per-row gate REFUSES
+    // (`if (!Number.isFinite(size) || size <= 0)`). Pin that the adapter hands
+    // off weight 0 for adds — a drift to a non-zero default (e.g. 1/(n+1))
+    // would silently let a never-overridden add through the commit gate with a
+    // fabricated dollar size.
+    const added: AddedStrategy[] = [
+      {
+        id: "00000000-0000-0000-0000-000000000001" as StrategyForBuilderId,
+        name: "Strat A",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      },
+    ];
+    const result = buildStrategyForBuilderSet(
+      HOLDINGS_2,
+      new Set<string>(),
+      added,
+      {
+        "holding:binance:BTC:spot": RETURNS_60D,
+        "holding:binance:ETH:spot": RETURNS_60D,
+      },
+      {
+        ["00000000-0000-0000-0000-000000000001" as StrategyForBuilderId]:
+          RETURNS_60D,
+      },
+      {},
+    );
+    const addId = "00000000-0000-0000-0000-000000000001";
+    expect(result.state.weights[addId]).toBe(0);
+    // handleCommit: size = weight(0) * scenarioAum → 0 → gate rejects.
+    const commitAum = commitScenarioAum(HOLDINGS_2, new Set<string>());
+    const gatedSize = result.state.weights[addId] * commitAum;
+    const wouldBeRejected = !Number.isFinite(gatedSize) || gatedSize <= 0;
+    expect(wouldBeRejected).toBe(true);
   });
 });
 

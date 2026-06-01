@@ -13,14 +13,40 @@ def test_twr_no_cash_flows():
 
 
 def test_twr_mid_month_deposit():
-    """$200K deposit on last day should NOT distort +10%."""
+    """H-0801: a $200K deposit on the last day must be SUBTRACTED before the
+    sub-period ratio is formed, so it neither inflates nor over-deflates the
+    return. The result is pinned exactly, not just bounded below.
+
+    The equity curve runs 100,000 → 110,000 over the first 29 observations,
+    then the 30th observation jumps to 316,050 because a 200,000 deposit lands
+    that day. There is a single sub-period (start → end), so:
+        begin_val     = 100,000
+        end_val       = 316,050
+        cf_adjustment = +200,000   (deposit on the closing breakpoint)
+        end_before_cf = 316,050 - 200,000 = 116,050
+        TWR           = 116,050 / 100,000 - 1 = 0.1605
+
+    Why an EXACT assertion and not the old `twr > 0.09`: the loose lower bound
+    silently passed under several over/under-adjustment regressions, each of
+    which an exact pin now catches:
+      - deposit NOT subtracted (end_before_cf = 316,050) → TWR = 2.1605
+      - sign flipped (treated as withdrawal, +200K added) → TWR = 4.1605
+      - over-removal (subtracted twice, -400K) → TWR = -1.8395
+    All three exceed `> 0.09` and would have passed the original test.
+    """
     dates = pd.date_range("2026-01-01", periods=30, freq="D")
     equity_before = np.linspace(100000, 110000, 29)
     equity_after = [316050]
     equity = pd.Series(np.concatenate([equity_before, equity_after]), index=dates)
     events = [{"event_date": dates[29].isoformat(), "event_type": "deposit", "amount": 200000}]
     twr = compute_twr(equity, events)
-    assert twr > 0.09, f"TWR {twr} should be > 9%"
+    assert twr is not None
+    # Lower-bounded (return is genuinely positive) AND upper-bounded: an
+    # un-subtracted or sign-flipped deposit would blow this far past 0.1605.
+    assert abs(twr - 0.1605) < 1e-9, (
+        f"TWR {twr} should be exactly 0.1605 — deposit must be subtracted "
+        f"from the end value once, with the correct sign"
+    )
 
 
 def test_twr_day_zero_deposit():
@@ -216,13 +242,43 @@ def test_modified_dietz_zero_denominator_returns_none():
 
 
 def test_period_returns():
-    """Compute 24h, MTD, YTD returns from a returns series."""
+    """H-0802: compute 24h, MTD, YTD returns and check the NUMERIC values, not
+    just key presence.
+
+    The series is SEEDED (was unseeded random before) so the values are
+    reproducible, and each value is validated against an INDEPENDENT oracle
+    computed by positional slicing — deliberately NOT the date-mask slicing the
+    production code uses, so a window-boundary regression (e.g. MTD computed as
+    `idx <= month_start` instead of `>=`, or YTD failing to reset on Jan 1)
+    produces a different slice and fails this test.
+
+    Calendar: 90 daily points from 2026-01-01, so the last date is 2026-03-31.
+      return_24h = the final daily return
+      return_mtd = compound of March 2026 only      (positions 59..89, 31 days)
+      return_ytd = compound of all of 2026 so far    (positions 0..89, 90 days)
+    The original test asserted only `'return_24h' in result`, so it passed even
+    if every value were None or the windows were inverted.
+    """
+    np.random.seed(42)
     dates = pd.date_range("2026-01-01", periods=90, freq="D")
     returns = pd.Series(np.random.normal(0.001, 0.02, 90), index=dates)
     result = compute_period_returns(returns)
-    assert "return_24h" in result
-    assert "return_mtd" in result
-    assert "return_ytd" in result
+
+    # Sanity-check the calendar assumptions the oracle relies on.
+    assert dates[-1] == pd.Timestamp("2026-03-31")
+    assert dates[59] == pd.Timestamp("2026-03-01")
+
+    # Independent oracle via positional slicing (not date masks).
+    expected_24h = float(returns.iloc[-1])
+    expected_mtd = float(np.prod(1.0 + returns.iloc[59:].to_numpy()) - 1.0)
+    expected_ytd = float(np.prod(1.0 + returns.to_numpy()) - 1.0)
+
+    assert abs(result["return_24h"] - expected_24h) < 1e-12
+    assert abs(result["return_mtd"] - expected_mtd) < 1e-12
+    assert abs(result["return_ytd"] - expected_ytd) < 1e-12
+    # MTD compounds strictly fewer days than YTD here, so they must differ —
+    # guards against MTD silently falling back to the full-series YTD slice.
+    assert abs(result["return_mtd"] - result["return_ytd"]) > 1e-6
 
 
 def test_period_returns_known_values_single_month():

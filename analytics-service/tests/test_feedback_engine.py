@@ -137,6 +137,108 @@ def _make_mock_supabase(
     return mock_sb
 
 
+class _PatchedFeedbackEngine:
+    """Handle returned by the ``patch_feedback_engine`` fixture.
+
+    Carries the configured mock Supabase client and the list of audit
+    payloads captured by the silenced ``log_audit_event`` so a caller can
+    both drive ``compute_adjusted_weights`` and inspect the audit emissions
+    without re-writing the monkeypatch ritual.
+    """
+
+    def __init__(self, mock_sb: MagicMock, audit_calls: list[dict]) -> None:
+        self.mock_sb = mock_sb
+        self.audit_calls = audit_calls
+
+
+def _raise_audit_db_sentinel():
+    """Fail-loud stand-in for ``services.audit.get_supabase``.
+
+    ``feedback_engine.log_audit_event`` is bound at import time
+    (``from services.audit import log_audit_event``), so silencing the audit
+    emit means re-pointing the *feedback_engine* binding. If a test forgets
+    that silence (or a refactor re-binds the real audit fn / switches to
+    ``import services.audit; services.audit.log_audit_event(...)``), the emit
+    falls through to the audit module's own ``get_supabase().rpc(...).execute()``
+    — a real network seam (``services/db.py`` either raises
+    ``RuntimeError: SUPABASE_URL...`` in a credential-less CI run or, with
+    ``live_db=true`` creds present, makes a LIVE audit RPC). Either way the
+    failure is cryptic and far from its cause, or worse, a silent live call.
+
+    Raising here converts that into a deterministic ``AssertionError`` that
+    names the actual problem.
+    """
+    raise AssertionError(
+        "services.audit.get_supabase() was reached during a feedback_engine "
+        "unit test — log_audit_event was not silenced, so compute_adjusted_"
+        "weights attempted a live audit RPC. Silence the audit emit (patch "
+        "services.feedback_engine.log_audit_event, e.g. via the "
+        "patch_feedback_engine fixture) before driving compute_adjusted_weights."
+    )
+
+
+@pytest.fixture(autouse=True)
+def _arm_audit_db_sentinel(monkeypatch):
+    """H-0772 (the load-bearing half) — arm the fail-loud audit-DB sentinel for
+    EVERY test in this module, not just the ones that take ``patch_feedback_engine``.
+
+    The finding's stated goal is that "audit-event silencing isn't accidentally
+    omitted" across the whole surface. The opt-in fixture only guarded the
+    handful of factory call sites; the ~20 tests that still hand-roll the
+    ``monkeypatch.setattr("services.feedback_engine.log_audit_event", ...)``
+    ritual had NO safety net — a test that dropped that one line would reach the
+    real ``services.audit.get_supabase`` (proven: it surfaces as a
+    ``RuntimeError: SUPABASE_URL...`` deep in services/db.py, or a live RPC when
+    creds are present) instead of failing loudly at the real cause.
+
+    Making the sentinel ``autouse`` closes that gap: regardless of whether a
+    test silences the emit by hand or via the factory, an *unsilenced* fall-
+    through to the live audit path is now a deterministic ``AssertionError`` in
+    every test. Tests that DO silence the emit never invoke the sentinel, so it
+    is inert for them.
+    """
+    monkeypatch.setattr("services.audit.get_supabase", _raise_audit_db_sentinel)
+
+
+@pytest.fixture
+def patch_feedback_engine(monkeypatch):
+    """H-0772 — single-source the 3-line monkeypatch preamble that every
+    ``compute_adjusted_weights`` test reconstructs by hand.
+
+    Returns a factory: ``patch_feedback_engine(**make_mock_supabase_kwargs)``
+    builds a mock Supabase via ``_make_mock_supabase``, points
+    ``services.feedback_engine.get_supabase`` at it, and replaces
+    ``services.feedback_engine.log_audit_event`` with a capturing stub.
+
+    The capturing stub (rather than a bare ``lambda **kw: None``) keeps the
+    audit emissions observable on the returned handle's ``audit_calls`` list,
+    so the safety net the finding names — "audit-event silencing isn't
+    accidentally omitted" — is enforced rather than merely hoped for.
+
+    The fail-loud ``services.audit.get_supabase`` sentinel is armed for ALL
+    tests by the autouse ``_arm_audit_db_sentinel`` fixture; this factory only
+    has to silence the feedback_engine binding. If a refactor ever calls the
+    audit module's own ``log_audit_event`` (or restores the unpatched binding),
+    the audit path would reach ``services.audit.get_supabase().rpc(...).
+    execute()`` — a real network call inside a "mocked" unit test — and the
+    sentinel turns that silent flake into a loud, deterministic failure.
+    """
+
+    def _factory(**make_mock_supabase_kwargs) -> _PatchedFeedbackEngine:
+        mock_sb = _make_mock_supabase(**make_mock_supabase_kwargs)
+        audit_calls: list[dict] = []
+        monkeypatch.setattr(
+            "services.feedback_engine.get_supabase", lambda: mock_sb
+        )
+        monkeypatch.setattr(
+            "services.feedback_engine.log_audit_event",
+            lambda **kw: audit_calls.append(kw),
+        )
+        return _PatchedFeedbackEngine(mock_sb, audit_calls)
+
+    return _factory
+
+
 # ---------------------------------------------------------------------------
 # 04-01-01: Public signature
 # ---------------------------------------------------------------------------
@@ -159,7 +261,7 @@ def test_public_signature():
 # ---------------------------------------------------------------------------
 
 
-def test_floor_on_low_rate(monkeypatch):
+def test_floor_on_low_rate(patch_feedback_engine):
     """FEEDBACK-02 / D-13 — 5 rejected+mandate_conflict rows -> W_PREFERENCE_FIT
     success_rate = 0.0 -> {"W_PREFERENCE_FIT": 0.5}."""
     if not IMPORTS_OK:
@@ -173,9 +275,7 @@ def test_floor_on_low_rate(monkeypatch):
         )
         for i in range(5)
     ]
-    mock_sb = _make_mock_supabase(rejected_rows=rejected)
-    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
-    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+    patch_feedback_engine(rejected_rows=rejected)
 
     result = compute_adjusted_weights("alloc-floor")
     assert result == {"W_PREFERENCE_FIT": 0.5}, (
@@ -188,7 +288,7 @@ def test_floor_on_low_rate(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_ceiling_on_high_rate(monkeypatch):
+def test_ceiling_on_high_rate(patch_feedback_engine):
     """FEEDBACK-02 / D-13 — 5 allocated+positive outcomes with portfolio_fit
     dominant in score_breakdown -> {"W_PORTFOLIO_FIT": 1.5}."""
     if not IMPORTS_OK:
@@ -211,11 +311,9 @@ def test_ceiling_on_high_rate(monkeypatch):
         }
         for i in range(5)
     ]
-    mock_sb = _make_mock_supabase(
+    patch_feedback_engine(
         allocated_rows=allocated, breakdown_rows=breakdown_rows,
     )
-    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
-    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
 
     result = compute_adjusted_weights("alloc-ceiling")
     assert result == {"W_PORTFOLIO_FIT": 1.5}, (
@@ -1292,7 +1390,7 @@ def test_migration_063_body_has_enqueue():
 # ---------------------------------------------------------------------------
 
 
-def test_audit_event_emitted(monkeypatch):
+def test_audit_event_emitted(patch_feedback_engine):
     """Audit / T-04-01 — Patch services.feedback_engine.log_audit_event; assert
     called once per successful UPDATE with entity_type='allocator_preference_feedback',
     action='feedback.overrides_updated', user_id=allocator_id."""
@@ -1307,13 +1405,7 @@ def test_audit_event_emitted(monkeypatch):
         )
         for i in range(5)
     ]
-    mock_sb = _make_mock_supabase(rejected_rows=rejected)
-    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
-
-    audit_calls = []
-    def _capture_audit(**kwargs):
-        audit_calls.append(kwargs)
-    monkeypatch.setattr("services.feedback_engine.log_audit_event", _capture_audit)
+    audit_calls = patch_feedback_engine(rejected_rows=rejected).audit_calls
 
     result = compute_adjusted_weights("alloc-audit")
     assert result == {"W_PREFERENCE_FIT": 0.5}
@@ -1334,7 +1426,7 @@ def test_audit_event_emitted(monkeypatch):
     assert md.get("dimensions_updated") == ["W_PREFERENCE_FIT"], md
 
 
-def test_audit_emitted_with_persisted_false_when_row_missing(monkeypatch):
+def test_audit_emitted_with_persisted_false_when_row_missing(patch_feedback_engine):
     """silent-failure / H-0676: when allocator_preferences has NO row
     (update_affected=False) but eligible outcomes exist, the computed overrides
     are STILL returned and applied to live match scoring (routers/match.py),
@@ -1353,13 +1445,9 @@ def test_audit_emitted_with_persisted_false_when_row_missing(monkeypatch):
         for i in range(5)
     ]
     # update_affected=False → the UPDATE matches no row (missing preferences row).
-    mock_sb = _make_mock_supabase(rejected_rows=rejected, update_affected=False)
-    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
-    audit_calls = []
-    monkeypatch.setattr(
-        "services.feedback_engine.log_audit_event",
-        lambda **kw: audit_calls.append(kw),
-    )
+    audit_calls = patch_feedback_engine(
+        rejected_rows=rejected, update_affected=False
+    ).audit_calls
 
     result = compute_adjusted_weights("alloc-no-row")
     # Overrides are still computed + returned (and consumed by scoring upstream).
@@ -1369,6 +1457,137 @@ def test_audit_emitted_with_persisted_false_when_row_missing(monkeypatch):
     md = audit_calls[0].get("metadata", {})
     assert md.get("persisted") is False, f"expected persisted=False, got {md}"
     assert md.get("dimensions_updated") == ["W_PREFERENCE_FIT"], md
+
+
+# ---------------------------------------------------------------------------
+# H-0772: audit-silencing safety net — compute_adjusted_weights must never
+# reach the LIVE audit RPC path during a mocked unit test.
+# ---------------------------------------------------------------------------
+
+
+def test_silenced_audit_never_reaches_live_audit_db(patch_feedback_engine):
+    """H-0772 — the patch_feedback_engine fixture's whole reason to exist is to
+    guarantee log_audit_event is silenced so compute_adjusted_weights cannot
+    fall through to services.audit's real get_supabase().rpc(...).execute() —
+    a network call that would flake/hang a unit test.
+
+    This test pins that contract: with the fixture active, computing overrides
+    that DO emit an audit event (5 mandate_conflict rejections -> floor) must
+    succeed, capture exactly one audit payload, and NEVER trip the fixture's
+    fail-loud services.audit.get_supabase sentinel.
+
+    Regression caught: if the feedback_engine binding is left unpatched (e.g. a
+    refactor switches `from services.audit import log_audit_event` to
+    `import services.audit; services.audit.log_audit_event(...)`, or a test is
+    written that patches get_supabase but forgets the audit silence), the audit
+    emit would reach services.audit.get_supabase — the sentinel raises and this
+    test fails loudly instead of the suite silently making a live RPC.
+    """
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    import services.audit as _audit
+
+    rejected = [
+        _make_outcome(
+            strategy_id=f"r{i}", kind="rejected",
+            rejection_reason="mandate_conflict",
+            delta_180d=None, delta_90d=None, delta_30d=None,
+            percent_allocated=None,
+        )
+        for i in range(5)
+    ]
+    handle = patch_feedback_engine(rejected_rows=rejected)
+
+    result = compute_adjusted_weights("alloc-silenced")
+    assert result == {"W_PREFERENCE_FIT": 0.5}, result
+    # The audit event was emitted (captured), proving the floor path DID hit the
+    # log_audit_event call site — so the silence is load-bearing, not vacuous.
+    assert len(handle.audit_calls) == 1, handle.audit_calls
+
+    # And the live audit path was never reached: calling the sentinel now must
+    # still raise, i.e. it was installed and simply never invoked above.
+    with pytest.raises(AssertionError, match="services.audit.get_supabase"):
+        _audit.get_supabase()
+
+
+def test_unsilenced_audit_falls_through_to_live_audit_db(patch_feedback_engine):
+    """H-0772 (teeth) — demonstrate the failure mode the silence prevents.
+
+    Deliberately RESTORE the real feedback_engine.log_audit_event binding while
+    the fixture's services.audit.get_supabase sentinel stays armed. Now
+    compute_adjusted_weights emits an audit event through the real audit code,
+    which reaches services.audit.get_supabase() — the live network seam. The
+    sentinel makes that fall-through a deterministic AssertionError instead of a
+    silent RPC. If a future change made the audit emit bypass the
+    feedback_engine binding, the silence in every other test would be a no-op
+    and this is the regression that would surface it.
+    """
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    import services.audit as _audit
+    import services.feedback_engine as _fe
+
+    rejected = [
+        _make_outcome(
+            strategy_id=f"r{i}", kind="rejected",
+            rejection_reason="mandate_conflict",
+            delta_180d=None, delta_90d=None, delta_30d=None,
+            percent_allocated=None,
+        )
+        for i in range(5)
+    ]
+    patch_feedback_engine(rejected_rows=rejected)
+    # Undo the audit silence for THIS test only (monkeypatch restores after).
+    _fe.log_audit_event = _audit.log_audit_event
+
+    with pytest.raises(AssertionError, match="services.audit.get_supabase"):
+        compute_adjusted_weights("alloc-unsilenced")
+
+
+def test_handrolled_test_without_audit_silence_fails_loud(monkeypatch):
+    """H-0772 (surface-wide teeth) — the failure mode the reviewer flagged: a
+    test that does NOT take ``patch_feedback_engine`` and hand-rolls the
+    monkeypatch ritual, but FORGETS the ``log_audit_event`` silence line.
+
+    This test takes NO ``patch_feedback_engine`` fixture — it only patches the
+    feedback_engine Supabase client, exactly like the ~20 hand-rolled tests in
+    this file, and deliberately omits the audit-silence line. With the
+    audit-DB sentinel armed ONLY opt-in (the pre-fix design), this fall-through
+    reached ``services.audit.get_supabase`` as a live network seam:
+    ``RuntimeError: SUPABASE_URL...`` in a credential-less CI run, or an actual
+    audit RPC under ``live_db=true``. The bug then surfaced far from its cause
+    (or not at all).
+
+    The autouse ``_arm_audit_db_sentinel`` fixture closes that gap across the
+    whole module: the unsilenced emit now raises a deterministic
+    ``AssertionError`` naming the real problem. This test FAILS (with the
+    cryptic RuntimeError / a live RPC) if the sentinel is downgraded back to
+    opt-in — encoding the finding's stated goal that audit silencing is
+    guaranteed across the surface, not just at the factory call sites.
+    """
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+
+    # 5 mandate_conflict rejections -> floor override -> the main path emits an
+    # audit event (services/feedback_engine.py:412). This is the hand-rolled
+    # ritual MINUS the
+    #   monkeypatch.setattr("services.feedback_engine.log_audit_event", ...)
+    # line — the exact omission the finding warns about.
+    rejected = [
+        _make_outcome(
+            strategy_id=f"r{i}", kind="rejected",
+            rejection_reason="mandate_conflict",
+            delta_180d=None, delta_90d=None, delta_30d=None,
+            percent_allocated=None,
+        )
+        for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(rejected_rows=rejected)
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    # NOTE: intentionally NO log_audit_event silence here.
+
+    with pytest.raises(AssertionError, match="services.audit.get_supabase"):
+        compute_adjusted_weights("alloc-handrolled-unsilenced")
 
 
 # ---------------------------------------------------------------------------
@@ -1429,7 +1648,7 @@ def test_migration_063_enqueues_only_transitioned_allocators():
 # ---------------------------------------------------------------------------
 
 
-def test_fastpath_skip_no_outcomes(monkeypatch):
+def test_fastpath_skip_no_outcomes(patch_feedback_engine):
     """D3 — Seed mocked Supabase so the probe call returns data=[]. Call
     compute_adjusted_weights. Assert returned dict is {}. Count mock_sb.table
     .call_count — must be <= 1 (only the probe was made). Preserves the
@@ -1439,10 +1658,7 @@ def test_fastpath_skip_no_outcomes(monkeypatch):
         pytest.skip("wave 0 placeholder")
 
     # Build a mock supabase where the probe chain returns empty data.
-    mock_sb = _make_mock_supabase(probe_nonempty=False)
-
-    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
-    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+    mock_sb = patch_feedback_engine(probe_nonempty=False).mock_sb
 
     # Pre-call: reset call count so we measure only this invocation's traffic.
     mock_sb.table.reset_mock()

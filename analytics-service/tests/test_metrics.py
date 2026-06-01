@@ -1179,6 +1179,29 @@ def test_qstats_scalars_complete_set(golden_returns, benchmark_returns):
         else:
             assert val is None or isinstance(val, (int, float))
 
+    # H-0781: a POSITIVE-output floor. The any-None-or-number loop above passes
+    # even if `compute_qstats_scalars` returns {k: None for k in keys} — which is
+    # exactly what the per-KPI `try/except Exception: pass` silent-swallow would
+    # produce if quantstats drifts (API rename, numpy/pandas major bump) and
+    # every KPI raises. That regression (flagged in S15b) would slip the
+    # membership-only assertion. On a healthy 500-day golden series WITH a
+    # benchmark, ALL 10 numeric scalars are computable (verified) — assert a
+    # >=8 floor so an all-None swallow regression fails loud here.
+    numeric = {k: v for k, v in result.items() if k != "r_squared_status"}
+    assert len(numeric) == 10
+    non_none = sum(1 for v in numeric.values() if v is not None)
+    assert non_none >= 8, (
+        "METRICS-11 positive-output floor: expected >=8 of 10 qstats scalars to "
+        f"compute on the golden fixture, got {non_none}. A drop toward 0 means "
+        "the per-KPI try/except is silently swallowing a quantstats regression "
+        "(see S15b silent-failure finding #1)."
+    )
+    # And the benchmark-dependent r_squared specifically must compute (it is the
+    # canary for benchmark-path swallows that the no-benchmark sibling test below
+    # cannot see).
+    assert result["r_squared"] is not None
+    assert result["r_squared_status"] == "ok"
+
 
 def test_qstats_scalars_handle_missing_benchmark(golden_returns):
     """METRICS-11: r_squared returns None when benchmark missing (graceful).
@@ -1197,6 +1220,23 @@ def test_qstats_scalars_handle_missing_benchmark(golden_returns):
         "r_squared_status",
     }
     assert set(result.keys()) == expected_keys
+    # H-0781: positive-output floor for the no-benchmark path. r_squared is
+    # intentionally None (no benchmark), so the OTHER 9 numeric scalars must
+    # still compute on the golden series. Without this, an all-swallow
+    # regression returning every benchmark-independent KPI as None passes the
+    # membership-only check. (Verified: 9/10 compute here.)
+    numeric_non_bench = {
+        k: v for k, v in result.items()
+        if k not in {"r_squared", "r_squared_status"}
+    }
+    assert len(numeric_non_bench) == 9
+    non_none = sum(1 for v in numeric_non_bench.values() if v is not None)
+    assert non_none >= 8, (
+        "METRICS-11 positive-output floor (no benchmark): expected >=8 of the 9 "
+        f"benchmark-independent qstats scalars to compute, got {non_none}. A "
+        "drop toward 0 means the per-KPI try/except is silently swallowing a "
+        "quantstats regression."
+    )
 
 
 def test_qstats_scalars_logs_warning_on_qs_failure(golden_returns, caplog, monkeypatch):
