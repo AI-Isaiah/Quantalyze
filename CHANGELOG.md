@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.52] - 2026-06-01
+### Changed — `mypy --strict` type floor: `job_worker.py` → 0 errors (cross-cutting refactor B-mypy, part f-3)
+
+Part f-3 brings `analytics-service/services/job_worker.py` (the compute-queue **dispatch worker** — `sync_trades` / `poll_positions` / `sync_funding` / `reconcile_strategy` / `compute_intro_snapshot` / allocator holdings) to **0 `mypy --strict` errors** (98 → 0). Cardinal rule held: no `cast()`, no `# type: ignore`, no `Any`-laundering, no `or 0.0`; verified by a 4-lens fresh-context adversarial pass (behavior / latent-bugfix / financial / cross-file) that found zero hard-rule violations.
+
+Type-only narrows: `_ExchangeContext.supabase: object → Client` (clears all 22 `.table`/`.rpc`-on-`object` errors at once; `strategy_row → dict | None` — the allocator preflight passes `None`, and no handler reads the field); every `.execute()` result routed through `services.db` `rows()`/`one()` (the part-e router pattern); scalar RPCs use the cron.py-blessed `isinstance(res.data, int)` narrow; the intro-snapshot concentration comprehensions use a walrus value-bind so the `isinstance` filter narrows the same `.get()` it outputs (identical element set + sums); `count=CountMethod.exact`; bare `dict`/`list` parameterized. `postgrest` types imported from their canonical submodules (`base_request_builder` / `types`) — the package root does not re-export `CountMethod` on the CI `postgrest` pin.
+
+Three deliberately-documented latent-bug fixes (`maybe_single().execute()` returns literal `None` on no-row, so the prior `res.data` raised `AttributeError`): `_load_existing_flags` now yields `{}` for a fresh strategy with no `strategy_analytics` row instead of crashing into a `flag_load_failed=True` path that wrote a spurious `phase2_fill_ingestion_failed=False` recovery marker (only reachable when `USE_RAW_TRADE_INGESTION` is on — off by default in prod; new regression test pins it, fails on pre-fix code); `_load_strategy_owner` / `_load_strategy_name` degrade a strategy deleted mid-reconcile to the graceful `None` / `"Strategy"` path the epilogue already handles instead of an `AttributeError` that double-logged or failed+retried the whole reconcile.
+
+Cross-file (required, no-cast): `funding_fetch.upsert_funding_rows`'s `rows` param widened `list[dict] → Sequence[FundingFeeRow | dict[str, Any]]` to match `serialize_funding_row`'s documented producer contract and accept the `fetch_funding_*` `list[FundingFeeRow]` return without a cast (list invariance blocks `list[FundingFeeRow] → list[dict]`); net `funding_fetch` errors 6 → 5 (rest are part-g scope). Full analytics suite 2522 passed (+1 regression test); `routers/` + `equity_reconstruction.py` stay at 0. `analytics_runner` / `position_reconstruction` → 0 follow as f-4.
+
 ## [0.24.15.51] - 2026-06-01
 ### Fixed — compute pipeline never reached `complete`: cron recompute trigger + `failed_retry` claim orphaning (dashboard KPIs frozen)
 
