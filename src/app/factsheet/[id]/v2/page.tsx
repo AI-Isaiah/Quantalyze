@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import { unstable_cache } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { withPublishedOnly } from "@/lib/visibility";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
@@ -30,16 +31,17 @@ import { FactsheetView } from "./FactsheetView";
  */
 async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null> {
   const supabase = createAdminClient();
-  const { data: strategy, error } = await supabase
-    .from("strategies")
-    .select(
-      `id, name, codename, disclosure_tier, status, markets, strategy_types,
+  const { data: strategy, error } = await withPublishedOnly(
+    supabase
+      .from("strategies")
+      .select(
+        `id, name, codename, disclosure_tier, status, markets, strategy_types,
        description, subtypes, supported_exchanges, leverage_range, aum,
        max_capacity, avg_daily_turnover, start_date, benchmark,
        strategy_analytics ( daily_returns, returns_series, computed_at )`,
-    )
-    .eq("id", id)
-    .eq("status", "published")
+      )
+      .eq("id", id),
+  )
     .maybeSingle();
   if (error || !strategy) {
     console.warn("[factsheet] fetchAndBuildPayload — admin probe returned no strategy", {
@@ -172,11 +174,12 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { id } = await params;
   const supabase = await createClient();
-  const { data } = await supabase
-    .from("strategies")
-    .select("id, name, codename, description, disclosure_tier")
-    .eq("id", id)
-    .eq("status", "published")
+  const { data } = await withPublishedOnly(
+    supabase
+      .from("strategies")
+      .select("id, name, codename, description, disclosure_tier")
+      .eq("id", id),
+  )
     .maybeSingle();
   // Factsheet is a full-identity context: prefer the real name in the
   // <title> tag too, not just the H1. displayStrategyName redacts
@@ -243,11 +246,12 @@ export default async function FactsheetV2Page({
     };
   };
   const [signRes, vRes] = await Promise.all([
-    supabase
-      .from("strategies")
-      .select("id, name, codename, disclosure_tier, strategy_analytics ( computed_at )")
-      .eq("id", id)
-      .eq("status", "published")
+    withPublishedOnly(
+      supabase
+        .from("strategies")
+        .select("id, name, codename, disclosure_tier, strategy_analytics ( computed_at )")
+        .eq("id", id),
+    )
       .maybeSingle(),
     supabaseUntyped
       .from("strategy_verifications")

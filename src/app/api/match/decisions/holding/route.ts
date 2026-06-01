@@ -16,6 +16,7 @@ import { z } from "zod";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { withPublishedOnly } from "@/lib/visibility";
 import { logAuditEventAsUser } from "@/lib/audit";
 import { stampOutcomeMarker } from "@/lib/analytics/onboarding-funnel";
 import type { User } from "@supabase/supabase-js";
@@ -89,11 +90,12 @@ export const POST = withAuth(
     }
 
     // Strategy existence gate: only allow published strategies as candidates
-    const { data: candidate } = await supabase
-      .from("strategies")
-      .select("id")
-      .eq("id", top_candidate_strategy_id)
-      .eq("status", "published")
+    const { data: candidate } = await withPublishedOnly(
+      supabase
+        .from("strategies")
+        .select("id")
+        .eq("id", top_candidate_strategy_id),
+    )
       .maybeSingle();
 
     if (!candidate) {

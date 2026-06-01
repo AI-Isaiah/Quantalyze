@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Browser } from "puppeteer-core";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { withPublishedOnly } from "@/lib/visibility";
 import { extractAnalytics } from "@/lib/queries";
 import {
   launchBrowser,
@@ -206,17 +207,18 @@ export async function GET(
 
   // Verify strategy exists and is published
   const admin = createAdminClient();
-  const { data: strategy, error } = await admin
-    .from("strategies")
-    // audit-2026-05-07 red-team HIGH#3 — `computed_at` is required for the
-    // ETag binding (id:computed_at). Pre-fix only `computation_status` was
-    // selected, so analytics.computed_at was always undefined and the ETag
-    // collapsed to `"<id>:"` — useless for revalidation.
-    .select(
-      "id, name, status, strategy_analytics (computation_status, computed_at)",
-    )
-    .eq("id", id)
-    .eq("status", "published")
+  const { data: strategy, error } = await withPublishedOnly(
+    admin
+      .from("strategies")
+      // audit-2026-05-07 red-team HIGH#3 — `computed_at` is required for the
+      // ETag binding (id:computed_at). Pre-fix only `computation_status` was
+      // selected, so analytics.computed_at was always undefined and the ETag
+      // collapsed to `"<id>:"` — useless for revalidation.
+      .select(
+        "id, name, status, strategy_analytics (computation_status, computed_at)",
+      )
+      .eq("id", id),
+  )
     .single();
 
   if (error || !strategy) {

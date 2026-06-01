@@ -37,6 +37,7 @@ import { getOwnPreferences, type AllocatorPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { safeFraction } from "./units";
+import { withPublishedOnly } from "./visibility";
 
 /**
  * Load + redact the manager identity for a strategy.
@@ -112,15 +113,17 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
   const analyticsColumns = "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return";
 
   const query = categorySlug
-    ? supabase
-        .from("strategies")
-        .select(`id, discovery_categories!inner(slug), strategy_analytics (${analyticsColumns})`)
-        .eq("discovery_categories.slug", categorySlug)
-        .eq("status", "published")
-    : supabase
-        .from("strategies")
-        .select(`id, strategy_analytics (${analyticsColumns})`)
-        .eq("status", "published");
+    ? withPublishedOnly(
+        supabase
+          .from("strategies")
+          .select(`id, discovery_categories!inner(slug), strategy_analytics (${analyticsColumns})`)
+          .eq("discovery_categories.slug", categorySlug),
+      )
+    : withPublishedOnly(
+        supabase
+          .from("strategies")
+          .select(`id, strategy_analytics (${analyticsColumns})`),
+      );
 
   const { data: strategies, error } = await query;
   // NEW-C03-05: split error vs genuinely-empty so a transient DB/RLS outage
@@ -206,11 +209,12 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Str
   // admits 'resync' + 'onboard'). Without these modifiers a future second
   // insert would pull the entire history per strategy and force the
   // JS-side .sort()+[0] pick to discard all but one row per response.
-  const { data: strategies, error } = await supabase
-    .from("strategies")
-    .select(`*, discovery_categories!inner(slug), strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)`)
-    .eq("discovery_categories.slug", categorySlug)
-    .eq("status", "published")
+  const { data: strategies, error } = await withPublishedOnly(
+    supabase
+      .from("strategies")
+      .select(`*, discovery_categories!inner(slug), strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)`)
+      .eq("discovery_categories.slug", categorySlug),
+  )
     .order("created_at", {
       referencedTable: "strategy_verifications",
       ascending: false,
@@ -242,10 +246,11 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Str
 export async function getPopulatedCategorySlugs(): Promise<string[]> {
   const supabase = await createClient();
 
-  const { data, error } = await supabase
-    .from("strategies")
-    .select("discovery_categories!inner(slug)")
-    .eq("status", "published");
+  const { data, error } = await withPublishedOnly(
+    supabase
+      .from("strategies")
+      .select("discovery_categories!inner(slug)"),
+  );
 
   // NEW-C03-06: split error vs empty so a transient DB failure is logged
   // rather than silently appearing as "no published strategies anywhere",
@@ -288,13 +293,14 @@ export async function getPublicStrategyDetail(strategyId: string): Promise<{
   // most-recent verification row via PostgREST referencedTable
   // order+limit. Locked decision D-04: trust_tier lives ONLY on
   // strategy_verifications; no strategies.trust_tier column exists.
-  const { data: strategy, error } = await supabase
-    .from("strategies")
-    .select(
-      `*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS}), strategy_verifications (trust_tier, status, created_at)`,
-    )
-    .eq("id", strategyId)
-    .eq("status", "published")
+  const { data: strategy, error } = await withPublishedOnly(
+    supabase
+      .from("strategies")
+      .select(
+        `*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS}), strategy_verifications (trust_tier, status, created_at)`,
+      )
+      .eq("id", strategyId),
+  )
     .order("created_at", {
       referencedTable: "strategy_verifications",
       ascending: false,
@@ -334,13 +340,14 @@ export async function getFactsheetDetail(strategyId: string): Promise<{
 } | null> {
   const supabase = await createClient();
 
-  const { data: strategy, error } = await supabase
-    .from("strategies")
-    .select(
-      `*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS}, monthly_returns, metrics_json), discovery_categories (slug)`,
-    )
-    .eq("id", strategyId)
-    .eq("status", "published")
+  const { data: strategy, error } = await withPublishedOnly(
+    supabase
+      .from("strategies")
+      .select(
+        `*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS}, monthly_returns, metrics_json), discovery_categories (slug)`,
+      )
+      .eq("id", strategyId),
+  )
     .single<Strategy & { discovery_categories: { slug: string } | null; strategy_analytics: { daily_returns?: unknown; computed_at: string | null; computation_status: string | null; monthly_returns?: unknown; metrics_json?: unknown } | null }>();
 
   if (error || !strategy) return null;
@@ -414,11 +421,12 @@ export async function getStrategyDetail(
   // unapproved strategy while /factsheet/[id] correctly 404s — the two
   // surfaces disagree on what is "live". A future RLS widening would also
   // instantly leak every draft's chart suite through this function alone.
-  let query = supabase
-    .from("strategies")
-    .select(baseSelect)
-    .eq("id", strategyId)
-    .eq("status", "published");
+  let query = withPublishedOnly(
+    supabase
+      .from("strategies")
+      .select(baseSelect)
+      .eq("id", strategyId),
+  );
 
   if (expectedCategorySlug) {
     query = query.eq("discovery_categories.slug", expectedCategorySlug);
@@ -629,13 +637,14 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
   strategyId: string,
 ): Promise<StrategyV2Detail | null> {
   const supabase = await createClient();
-  const { data: strategy, error } = await supabase
-    .from("strategies")
-    .select(
-      `${STRATEGY_V2_STRATEGY_COLUMNS}, strategy_analytics (${STRATEGY_V2_ANALYTICS_COLUMNS})`,
-    )
-    .eq("id", strategyId)
-    .eq("status", "published")
+  const { data: strategy, error } = await withPublishedOnly(
+    supabase
+      .from("strategies")
+      .select(
+        `${STRATEGY_V2_STRATEGY_COLUMNS}, strategy_analytics (${STRATEGY_V2_ANALYTICS_COLUMNS})`,
+      )
+      .eq("id", strategyId),
+  )
     .single();
 
   if (error || !strategy) return null;
@@ -2670,17 +2679,18 @@ export const getMyAllocationDashboard = cache(
     // Generated row type widens disclosure_tier to `string` (DB-level CHECK
     // constraint, not a Postgres enum). Re-narrow on the way out via
     // displayStrategyName's accepted shape.
+    // NEW-C03-03 defence-in-depth: withPublishedOnly surfaces only published
+    // strategies. candidateIds come from match_batches JSONB and may reference
+    // strategies that were archived/reverted to draft after the compute job
+    // ran. Without this gate the strategy id (UUID) and codename are returned
+    // to the RSC payload even for non-published rows.
     const candidateStrategiesRes = candidateIds.length > 0
-      ? await supabase
-          .from("strategies")
-          .select("id, name, codename, disclosure_tier")
-          .in("id", candidateIds)
-          // NEW-C03-03 defence-in-depth: only surface published strategies.
-          // candidateIds come from match_batches JSONB and may reference
-          // strategies that were archived/reverted to draft after the compute
-          // job ran. Without this gate the strategy id (UUID) and codename are
-          // returned to the RSC payload even for non-published rows.
-          .eq("status", "published")
+      ? await withPublishedOnly(
+          supabase
+            .from("strategies")
+            .select("id, name, codename, disclosure_tier")
+            .in("id", candidateIds),
+        )
       : {
           data: [] as Array<{
             id: string;

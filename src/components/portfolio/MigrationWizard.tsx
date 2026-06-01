@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
 import { Button } from "@/components/ui/Button";
 import { createClient } from "@/lib/supabase/client";
+import { withPublishedOnly } from "@/lib/visibility";
 
 interface MigrationWizardButtonProps {
   portfolioId: string;
@@ -44,11 +45,12 @@ export function MigrationWizardButton({ portfolioId }: MigrationWizardButtonProp
     }
     let cancelled = false;
     const handle = setTimeout(async () => {
-      const { data } = await supabase
-        .from("strategies")
-        .select("id, name")
-        .ilike("name", `%${query.trim()}%`)
-        .eq("status", "published")
+      const { data } = await withPublishedOnly(
+        supabase
+          .from("strategies")
+          .select("id, name")
+          .ilike("name", `%${query.trim()}%`),
+      )
         .limit(10);
       if (!cancelled) setResults(data ?? []);
     }, 250);

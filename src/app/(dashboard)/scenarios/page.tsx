@@ -1,5 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { withPublishedOnly } from "@/lib/visibility";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { ScenarioBuilder } from "@/components/scenarios/ScenarioBuilder";
@@ -55,13 +56,14 @@ export default async function ScenariosPage() {
   // universe of strategies; the client-side recomputation math depends on
   // the raw daily_returns which RLS doesn't know to restrict.
   const admin = createAdminClient();
-  const { data: strategyRows } = await admin
-    .from("strategies")
-    .select(
-      "id, name, codename, disclosure_tier, strategy_types, markets, start_date",
-    )
-    .eq("is_example", true)
-    .eq("status", "published")
+  const { data: strategyRows } = await withPublishedOnly(
+    admin
+      .from("strategies")
+      .select(
+        "id, name, codename, disclosure_tier, strategy_types, markets, start_date",
+      )
+      .eq("is_example", true),
+  )
     .order("name");
 
   const strategies = (strategyRows ?? []) as Array<{
