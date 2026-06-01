@@ -24,8 +24,8 @@ PYTEST  = $(VENV)/bin/pytest
 help:
 	@echo "Targets:"
 	@echo "  install   — pip install -r requirements.txt + dev deps"
-	@echo "  lint      — mypy --strict on services/ingestion/ (MC-3 fix)"
-	@echo "  typecheck — alias for lint (kept for clarity)"
+	@echo "  lint      — mypy --strict on services/ingestion/ (MC-3 fix; the current CI gate)"
+	@echo "  typecheck — mypy on the full B-mypy floor surface (services/ routers/ models/)"
 	@echo "  test      — pytest with coverage (matches CI ci.yml)"
 	@echo "  ci        — full local CI gauntlet: lint + test"
 
@@ -35,7 +35,12 @@ install:
 lint:
 	$(MYPY) --strict --follow-imports=silent services/ingestion/
 
-typecheck: lint
+# B-mypy: the full type-safety floor. Flags come from pyproject.toml
+# [tool.mypy] (auto-discovered from cwd), so this is byte-for-byte the
+# command the CI gate runs once widened (ci.yml mypy step). Run this to
+# match CI exactly.
+typecheck:
+	$(MYPY) services/ routers/ models/
 
 test:
 	$(PYTEST) --cov=services --cov-report=term-missing --cov-fail-under=80

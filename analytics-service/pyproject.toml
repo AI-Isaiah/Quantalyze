@@ -1,0 +1,31 @@
+[tool.mypy]
+# B-mypy: the analytics-service --strict type-safety floor. mypy auto-discovers
+# this table when invoked with cwd=analytics-service (which CI uses,
+# ci.yml working-directory: analytics-service), so `mypy <paths>` reads the
+# same settings locally and in CI — local == CI by construction. These mirror
+# the flags the CI gate passed on the command line (--strict
+# --follow-imports=silent) so the gate's behaviour is unchanged when it widens
+# from services/ingestion/ to the full surface (see ci.yml mypy step).
+python_version = "3.12"
+strict = true
+follow_imports = "silent"
+
+# Untyped third-party libraries: ccxt/pandas/scipy raise import-untyped (no
+# py.typed, no stubs installed). ignore_missing_imports treats them as Any at
+# their boundary only — it cannot mask a real typing bug in our own code.
+# pandas-stubs is deliberately NOT installed (typing the full pandas math
+# surface across metrics/portfolio/benchmark is gold-plating; the real safety
+# value is typing Supabase rows). If pandas-stubs is ever added this override
+# becomes a no-op and previously-Any pandas calls would start type-checking.
+[[tool.mypy.overrides]]
+module = ["ccxt.*", "pandas.*", "scipy.*"]
+ignore_missing_imports = true
+
+# quantstats ships py.typed but its functions are unannotated, so its callers
+# (metrics.py) get no-untyped-call. disallow_untyped_calls is governed by the
+# CALLER module, so the only lever that clears these is follow_imports=skip on
+# the callee package — which makes quantstats opaque (Any) at the import seam.
+[[tool.mypy.overrides]]
+module = ["quantstats.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
