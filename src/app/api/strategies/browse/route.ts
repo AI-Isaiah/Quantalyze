@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { withPublishedOnly } from "@/lib/visibility";
 import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
@@ -85,10 +86,11 @@ export const GET = withAllocatorAuth(
      // still happens on `name` server-side (alphabetical browse is the
      // drawer contract); the leak prevention is in the projection step
      // below, not in the SELECT/ORDER list.
-    const { data, error } = await supabase
-      .from("strategies")
-      .select("id, name, codename, disclosure_tier, markets, strategy_types")
-      .eq("status", "published")
+    const { data, error } = await withPublishedOnly(
+      supabase
+        .from("strategies")
+        .select("id, name, codename, disclosure_tier, markets, strategy_types"),
+    )
       .order("name", { ascending: true })
       .limit(STRATEGY_BROWSE_LIMIT);
 

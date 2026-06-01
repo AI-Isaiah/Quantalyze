@@ -82,6 +82,11 @@ export async function checkScopeOwnership(
       // Finding #3 locks strategies as the identity table (match_strategies
       // / verified_strategies do not exist), and route tests 10-11 assert
       // the filter is applied via a spy on the mock query chain (V1).
+      //
+      // B10 sanctioned-exception: NOT routed through withPublishedOnly. This
+      // is the strategy arm of the specialised 4-scope checkScopeOwnership
+      // notability gate, not a public-fetcher in the visibility-sweep class;
+      // route tests 10-11 spy on the literal `.eq` call here. Kept inline.
       const { data } = await supabase
         .from("strategies")
         .select("id")

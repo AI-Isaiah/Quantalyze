@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Browser } from "puppeteer-core";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { withPublishedOnly } from "@/lib/visibility";
 import {
   launchBrowser,
   acquirePdfSlot,
@@ -182,11 +183,12 @@ export async function GET(
   }
 
   const admin = createAdminClient();
-  const { data: strategy, error } = await admin
-    .from("strategies")
-    .select("id, name, status, strategy_analytics (computation_status)")
-    .eq("id", id)
-    .eq("status", "published")
+  const { data: strategy, error } = await withPublishedOnly(
+    admin
+      .from("strategies")
+      .select("id, name, status, strategy_analytics (computation_status)")
+      .eq("id", id),
+  )
     .single();
 
   if (error || !strategy) {
