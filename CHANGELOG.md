@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.37] - 2026-06-01
+### Changed — unified exchange pagination driver + `fetch_funding_bybit` adoption (cross-cutting refactor B18, part 1 of 3)
+
+The exchange/funding fetchers each hand-rolled their own pagination loop, so "the loop succeeds but silently under-fetches" was an invisible, recurring bug class (the source of NEW-C13-02 only-SWAP, NEW-C30-01 7-day-window, and the G12 cursor findings). B18 collapses the loop *skeleton* into one driver so a fetcher that under-fetches becomes a review-visible omission.
+
+- **New `services/exchange_pagination.py`** — a `walk_paginated()` driver + a declarative, frozen `ProviderPaginationContract`. The driver owns only the loop skeleton (inst-type fan-out, window walking with the `+1ms` boundary, the page loop, the natural-stop-vs-ceiling decision, inst-type coverage tracking); every provider-specific concern (param building, response-shape validation, row normalisation, cursor extraction, error→skip policy) stays in a `fetch_page` callback the caller supplies.
+- **The stop discipline is bimodal and declared, not hand-rolled.** Venues differ: OKX/Binance are short-page-authoritative (a page shorter than the page size means "done") while every Bybit walk is cursor-authoritative (it stops only on empty items, an empty cursor, or a repeated cursor — a short page with a live cursor still has more rows). `stop_on_short_page` and `stuck_cursor_is_stop` are per-contract switches; a single uniform short-page stop would have silently truncated every Bybit cursor walk after its first non-full page.
+- **`fetch_funding_bybit` migrated onto the driver** (the hardest shape first: 7-day window walk + cursor-authoritative pagination + linear/inverse fan-out with graceful inverse-skip + raise-on-ceiling), behaviour-preserving. `FundingFetchCeilingExceeded` now subclasses the driver's `PaginationCeilingExceeded` so existing `except`/isinstance handlers stay green; a `ceiling_label` contract field keeps funding's operator-facing `MAX_PAGES=…` message wording unchanged.
+- **12 new standalone driver tests** pin the loop semantics independent of any provider (window no-overlap-no-gap, gated-vs-runtime-skipped coverage, cursor- vs short-page-authoritative stop, stuck-cursor, ceiling raise/flag, all-dropped-page advances).
+
+**Verified:** the funding + exchange + harness contract suites stay green (242 passed); `exchange_pagination.py` is `mypy --strict` clean and `funding_fetch.py` carries the same 9 pre-existing pandas/ccxt-stub mypy notes before and after (zero added). Part 2 (remaining funding + daily_pnl) and part 3 (raw_trades + truncation-flag collapse + coverage assertion) follow.
+
 ## [0.24.15.36] - 2026-05-31
 ### Changed — internal IN-list query bounding: one coverage primitive + a DISTINCT-ON RPC (cross-cutting refactor B19)
 

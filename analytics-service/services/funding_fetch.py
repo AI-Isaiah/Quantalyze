@@ -42,6 +42,13 @@ import ccxt.async_support as ccxt
 
 from services.db import db_execute
 from services.exchange import EXCHANGE_CLASSES, create_exchange
+from services.exchange_pagination import (
+    PageRequest,
+    PageResult,
+    PaginationCeilingExceeded,
+    ProviderPaginationContract,
+    walk_paginated,
+)
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger("quantalyze.analytics.funding_fetch")
@@ -75,7 +82,7 @@ BYBIT_FUNDING_DEFAULT_LOOKBACK_DAYS: int = 365
 FUNDING_UPSERT_BATCH_SIZE = 100
 
 
-class FundingFetchCeilingExceeded(RuntimeError):
+class FundingFetchCeilingExceeded(PaginationCeilingExceeded):
     """Raised when a paginator exhausts ``MAX_PAGES`` while the exchange
     still indicates more data is available.
 
@@ -592,271 +599,195 @@ async def fetch_funding_bybit(
     P&L with funding into one number), this endpoint isolates funding only.
 
     NEW-C30-01: Bybit V5 caps a single request's time range to 7 days
-    (startTime → endTime ≤ 7 days). The previous implementation only set
-    ``startTime`` and relied on ``nextPageCursor``; the cursor genuinely
-    exhausts within [startTime, startTime+7d], so any backfill older than
-    7 days silently returned only ~7 days of data as if complete. The same
-    bug was already fixed for /v5/position/closed-pnl in exchange.py
-    (BYBIT_PNL_WINDOW_MS). Fix: walk [start_ms, now_ms] in 7-day windows,
-    passing both ``startTime`` and ``endTime`` for each window. Cursor-
-    based pagination continues within each window. Default since_ms=None
-    to 365 days back (mirrors the default lookback in fetch_daily_pnl).
+    (startTime -> endTime <= 7 days). We walk [start_ms, now_ms] in 7-day
+    windows, passing both startTime and endTime; cursor pagination continues
+    within each window. since_ms=None defaults to 365 days back.
 
-    Uses cursor-based pagination within each 7-day window.
+    M-0921: Bybit perpetuals split into 'linear' (USDT-quoted) and 'inverse'
+    (coin-margined). Each category is a separate call; the inverse call can
+    4xx for keys lacking inverse permission and is gracefully skipped.
+
+    B18: the window walk + category fan-out + page loop + MAX_PAGES ceiling
+    now run through the unified ``walk_paginated`` driver. This function only
+    declares the contract and supplies the provider callback (param building,
+    response-shape validation, row normalisation, cursor extraction). The
+    bimodal stop discipline is declared, not hand-rolled: Bybit is
+    cursor-authoritative (``stop_on_short_page=False``) and funding has no
+    stuck-cursor guard (``stuck_cursor_is_stop=False`` -> a stuck cursor
+    exhausts to the ceiling rather than stopping), preserving the exact
+    pre-B18 behaviour.
     """
-    rows: list[FundingFeeRow] = []
-    dropped = 0
+    dropped = [0]  # boxed for the closure
 
-    # NEW-C30-01: compute window bounds once for the whole call.
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    if since_ms is None:
-        _start_ms = int(
-            (datetime.now(timezone.utc).timestamp()
-             - BYBIT_FUNDING_DEFAULT_LOOKBACK_DAYS * 86400)
-            * 1000
+
+    async def _fetch_page(req: PageRequest) -> PageResult[FundingFeeRow]:
+        params: dict[str, str] = {
+            "category": req.inst_type or "",
+            "type": "SETTLEMENT",
+            "limit": str(BYBIT_PAGE_SIZE),
+            # NEW-C30-01: always pass both startTime and endTime so Bybit
+            # constrains the result to [window_start, window_end] (<= 7 days).
+            "startTime": str(req.window_start),
+            "endTime": str(req.window_end),
+        }
+        if req.cursor:
+            params["cursor"] = req.cursor
+
+        try:
+            result = await exchange.private_get_v5_account_transaction_log(params)
+        except ccxt.BadRequest as exc:
+            # C13-10: the signed endpoint embeds &signature= in error URLs; scrub.
+            if req.inst_type == "inverse":
+                # review/H-03: a PermissionDenied/BadRequest on ANY page of the
+                # inverse category means the key lacks inverse scope -> skip
+                # inverse gracefully (the linear call already succeeded).
+                logger.warning(
+                    "Bybit inverse category returned BadRequest for strategy %s "
+                    "window=[%s,%s] (likely API key lacks inverse permission); "
+                    "skipping inverse: exc_class=%s scrubbed=%s",
+                    strategy_id, req.window_start, req.window_end,
+                    type(exc).__name__, scrub_freeform_string(str(exc)),
+                )
+                return PageResult(rows=[], is_empty=True, skip_inst_type=True)
+            logger.error(
+                "Bybit funding fetch BadRequest category=%s window=[%s,%s] for "
+                "strategy %s: exc_class=%s scrubbed=%s",
+                req.inst_type, req.window_start, req.window_end, strategy_id,
+                type(exc).__name__, scrub_freeform_string(str(exc)),
+            )
+            raise
+        except ccxt.PermissionDenied as exc:
+            if req.inst_type == "inverse":
+                logger.warning(
+                    "Bybit inverse category PermissionDenied for strategy %s "
+                    "window=[%s,%s]; skipping inverse: exc_class=%s scrubbed=%s",
+                    strategy_id, req.window_start, req.window_end,
+                    type(exc).__name__, scrub_freeform_string(str(exc)),
+                )
+                return PageResult(rows=[], is_empty=True, skip_inst_type=True)
+            logger.error(
+                "Bybit funding fetch PermissionDenied category=%s window=[%s,%s] "
+                "for strategy %s: exc_class=%s scrubbed=%s",
+                req.inst_type, req.window_start, req.window_end, strategy_id,
+                type(exc).__name__, scrub_freeform_string(str(exc)),
+            )
+            raise
+        except Exception as exc:
+            # C-0322 / H-1103: re-raise so the worker classifies transient-failed.
+            logger.error(
+                "Bybit funding fetch failed category=%s window=[%s,%s] for "
+                "strategy %s: exc_class=%s scrubbed=%s",
+                req.inst_type, req.window_start, req.window_end, strategy_id,
+                type(exc).__name__, scrub_freeform_string(str(exc)),
+            )
+            raise
+
+        # Phase-4 red-team (M-0928): a non-dict response, non-dict ``result``
+        # field, or non-list ``list`` is the silent-truncation pattern. Fail
+        # loud instead of reporting SUCCESS on zero rows.
+        if not isinstance(result, dict):
+            logger.error(
+                "Bybit transaction-log returned unexpected shape for strategy "
+                "%s category=%s: type=%s",
+                strategy_id, req.inst_type, type(result).__name__,
+            )
+            raise RuntimeError(
+                f"Bybit transaction-log returned non-dict response: "
+                f"{type(result).__name__}"
+            )
+        inner = result.get("result")
+        if not isinstance(inner, dict):
+            logger.error(
+                "Bybit transaction-log 'result' field is non-dict for strategy "
+                "%s category=%s: type=%s retCode=%s",
+                strategy_id, req.inst_type, type(inner).__name__,
+                result.get("retCode"),
+            )
+            raise RuntimeError(
+                f"Bybit transaction-log returned non-dict 'result': "
+                f"{type(inner).__name__}"
+            )
+        items = inner.get("list", [])
+        if not isinstance(items, list):
+            logger.error(
+                "Bybit transaction-log 'result.list' is non-list for strategy "
+                "%s category=%s: type=%s",
+                strategy_id, req.inst_type, type(items).__name__,
+            )
+            raise RuntimeError(
+                f"Bybit transaction-log returned non-list 'result.list': "
+                f"{type(items).__name__}"
+            )
+
+        page_rows: list[FundingFeeRow] = []
+        for item in items:
+            # H-1098 / M-0922: explicit None check distinguishes "field missing"
+            # from "field present but zero" (a legitimate 0 funding is kept).
+            funding_raw: Any = None
+            for key in ("funding", "change", "cashFlow"):
+                val = item.get(key)
+                if val is not None:
+                    funding_raw = val
+                    break
+            if funding_raw is None:
+                logger.warning(
+                    "Bybit transaction-log row has no funding/change/cashFlow "
+                    "field for strategy %s; skipping. symbol=%s id=%s",
+                    strategy_id, item.get("symbol"), item.get("id"),
+                )
+                continue
+            row = _normalize_funding_row(
+                strategy_id=strategy_id,
+                exchange="bybit",
+                symbol=item.get("symbol", "") or "",
+                amount_raw=funding_raw,
+                ts_raw=(item.get("transactionTime") or item.get("created_time")),
+                currency=item.get("currency", "USDT") or "USDT",
+                raw_item=item,
+            )
+            if row is None:
+                dropped[0] += 1
+                continue
+            page_rows.append(row)
+
+        next_cursor = inner.get("nextPageCursor", "") or ""
+        return PageResult(
+            rows=page_rows,
+            next_cursor=next_cursor,
+            is_full_page=len(items) >= BYBIT_PAGE_SIZE,
+            is_empty=(not items),
         )
-    else:
-        _start_ms = since_ms
 
-    # M-0921: Bybit perpetuals split into 'linear' (USDT-quoted) and
-    # 'inverse' (coin-margined like BTCUSD). The v5 API requires a
-    # separate call per category — hard-coding 'linear' silently dropped
-    # all funding for inverse-perp strategies. Iterate both.
-    for category in ("linear", "inverse"):
-        # H-S6-1 (specialist:red-team): the inverse-category call can
-        # 4xx for accounts whose API key lacks 'inverse' permission. The
-        # `linear` call has already succeeded by the time we reach
-        # inverse, so killing the whole job would be a regression vs.
-        # the pre-M-0921 contract (where inverse was never called).
-        # Treat permission/argument errors on the inverse call as
-        # category-not-enabled and continue. Anything else (auth on the
-        # linear call, network errors, RateLimitExceeded) still raises.
-        inverse_skipped = False
+    contract = ProviderPaginationContract(
+        fetcher="fetch_funding_bybit",
+        page_cap=MAX_PAGES,
+        on_ceiling="raise",
+        ceiling_exc=FundingFetchCeilingExceeded,
+        ceiling_label="MAX_PAGES",
+        # Bybit transaction-log is CURSOR-authoritative: a short page with a
+        # live cursor still has more rows, so DO NOT stop on a short page.
+        stop_on_short_page=False,
+        # Funding has no stuck-cursor guard — a repeated cursor exhausts to the
+        # MAX_PAGES ceiling (fail-loud) rather than silently stopping.
+        stuck_cursor_is_stop=False,
+        # M-0921: both perpetual categories; inverse graceful-skips at runtime
+        # (NOT a gate — the key may simply lack inverse permission).
+        inst_types=("linear", "inverse"),
+        gated_inst_types=frozenset(),
+        window_max_days=7,  # NEW-C30-01: Bybit caps each request at 7 days
+        default_lookback_days=BYBIT_FUNDING_DEFAULT_LOOKBACK_DAYS,
+    )
+    walk = await walk_paginated(
+        contract, since_ms=since_ms, now_ms=now_ms, fetch_page=_fetch_page
+    )
+    rows = walk.rows
 
-        # NEW-C30-01: outer window loop — advance in 7-day chunks.
-        window_start = _start_ms
-        while window_start < now_ms:
-            if inverse_skipped:
-                break
-            window_end = min(window_start + BYBIT_FUNDING_WINDOW_MS, now_ms)
-            cursor = ""
-
-            for page_idx in range(MAX_PAGES):
-                params: dict[str, str] = {
-                    "category": category,
-                    "type": "SETTLEMENT",
-                    "limit": str(BYBIT_PAGE_SIZE),
-                    # NEW-C30-01: always pass both startTime and endTime so
-                    # Bybit constrains the result to [window_start, window_end]
-                    # (≤ 7 days).  Without endTime the server silently caps at
-                    # startTime + 7 days and the cursor exhausts inside that
-                    # slice, leaving the rest of [start, now] unwalked.
-                    "startTime": str(window_start),
-                    "endTime": str(window_end),
-                }
-                if cursor:
-                    params["cursor"] = cursor
-
-                try:
-                    result = await exchange.private_get_v5_account_transaction_log(
-                        params
-                    )
-                except ccxt.BadRequest as exc:
-                    # C13-10 scope (funding_fetch): the signed Bybit
-                    # transaction-log endpoint embeds &signature=<HMAC-SHA256>
-                    # in error URLs; scrub before logging.
-                    if category == "inverse":
-                        # review/H-03: remove page_idx==0 guard — a
-                        # PermissionDenied/BadRequest on any page for the
-                        # inverse category means the key lacks inverse scope.
-                        # The old guard only skipped on page 0; a 52-window walk
-                        # could trigger the error on page 1 of window 1 after
-                        # one successful page, causing a hard raise instead of a
-                        # graceful skip.
-                        logger.warning(
-                            "Bybit inverse category returned BadRequest for "
-                            "strategy %s page %d (likely API key lacks inverse "
-                            "permission); skipping inverse: exc_class=%s "
-                            "scrubbed=%s",
-                            strategy_id, page_idx,
-                            type(exc).__name__,
-                            scrub_freeform_string(str(exc)),
-                        )
-                        inverse_skipped = True
-                        break
-                    logger.error(
-                        "Bybit funding fetch BadRequest page %d category=%s "
-                        "window=[%s,%s] for strategy %s: exc_class=%s "
-                        "scrubbed=%s",
-                        page_idx, category, window_start, window_end,
-                        strategy_id,
-                        type(exc).__name__,
-                        scrub_freeform_string(str(exc)),
-                    )
-                    raise
-                except ccxt.PermissionDenied as exc:
-                    if category == "inverse":
-                        # review/H-03: same fix as BadRequest above — remove
-                        # page_idx==0 guard so any page of the inverse category
-                        # that fails with PermissionDenied gracefully skips.
-                        logger.warning(
-                            "Bybit inverse category PermissionDenied for "
-                            "strategy %s page %d; skipping inverse: "
-                            "exc_class=%s scrubbed=%s",
-                            strategy_id, page_idx,
-                            type(exc).__name__,
-                            scrub_freeform_string(str(exc)),
-                        )
-                        inverse_skipped = True
-                        break
-                    logger.error(
-                        "Bybit funding fetch PermissionDenied page %d "
-                        "category=%s window=[%s,%s] for strategy %s: "
-                        "exc_class=%s scrubbed=%s",
-                        page_idx, category, window_start, window_end,
-                        strategy_id,
-                        type(exc).__name__,
-                        scrub_freeform_string(str(exc)),
-                    )
-                    raise
-                except Exception as exc:
-                    # C-0322 / H-1103: was warn+break (partial truncation).
-                    # Re-raise so the worker classifies as transient-failed.
-                    logger.error(
-                        "Bybit funding fetch failed page %d category=%s "
-                        "window=[%s,%s] for strategy %s: exc_class=%s "
-                        "scrubbed=%s",
-                        page_idx, category, window_start, window_end,
-                        strategy_id,
-                        type(exc).__name__,
-                        scrub_freeform_string(str(exc)),
-                    )
-                    raise
-
-                # Phase-4 red-team (audit-2026-05-07, red-team:581 conf=8):
-                # the previous duck-typed chain silently treated any non-dict
-                # response, a non-dict ``result`` field, or a missing/None
-                # ``list`` as "no items, break" — the exact silent-truncation
-                # pattern that Phase-2 explicitly fixed for OKX (M-0928).
-                # Bybit v5 returns ``{retCode: <non-zero>, retMsg: '...',
-                # result: null}`` on auth/scope errors that ccxt does not
-                # translate to a typed exception. Mirror the OKX hardening so
-                # the worker fails loudly instead of reporting SUCCESS on
-                # zero rows.
-                if not isinstance(result, dict):
-                    logger.error(
-                        "Bybit transaction-log returned unexpected shape "
-                        "for strategy %s category=%s: type=%s",
-                        strategy_id, category, type(result).__name__,
-                    )
-                    raise RuntimeError(
-                        f"Bybit transaction-log returned non-dict response: "
-                        f"{type(result).__name__}"
-                    )
-                inner = result.get("result")
-                if not isinstance(inner, dict):
-                    logger.error(
-                        "Bybit transaction-log 'result' field is non-dict "
-                        "for strategy %s category=%s: type=%s retCode=%s",
-                        strategy_id, category, type(inner).__name__,
-                        result.get("retCode"),
-                    )
-                    raise RuntimeError(
-                        f"Bybit transaction-log returned non-dict 'result': "
-                        f"{type(inner).__name__}"
-                    )
-                items = inner.get("list", [])
-                if not isinstance(items, list):
-                    logger.error(
-                        "Bybit transaction-log 'result.list' is non-list for "
-                        "strategy %s category=%s: type=%s",
-                        strategy_id, category, type(items).__name__,
-                    )
-                    raise RuntimeError(
-                        f"Bybit transaction-log returned non-list "
-                        f"'result.list': {type(items).__name__}"
-                    )
-                if not items:
-                    break
-
-                for item in items:
-                    # H-1098 / M-0922: previous chain was
-                    # ``item.get('funding') or item.get('change') or item.get(
-                    # 'cashFlow') or '0'`` which (1) silently inserted a zero
-                    # placeholder when ALL three fields were missing
-                    # (poison-pill vs. the ON CONFLICT match_key dedup) and
-                    # (2) treated a legitimate numeric 0 as "missing" and
-                    # fell through to the next field. Use an explicit None
-                    # check so we distinguish "field missing entirely" from
-                    # "field present but zero".
-                    funding_raw: Any = None
-                    for key in ("funding", "change", "cashFlow"):
-                        val = item.get(key)
-                        if val is not None:
-                            funding_raw = val
-                            break
-                    if funding_raw is None:
-                        # All three amount fields absent → skip rather than
-                        # emit a zero placeholder that would block a future
-                        # corrected row.
-                        logger.warning(
-                            "Bybit transaction-log row has no funding/change/"
-                            "cashFlow field for strategy %s; skipping. "
-                            "symbol=%s id=%s",
-                            strategy_id,
-                            item.get("symbol"),
-                            item.get("id"),
-                        )
-                        continue
-                    row = _normalize_funding_row(
-                        strategy_id=strategy_id,
-                        exchange="bybit",
-                        symbol=item.get("symbol", "") or "",
-                        amount_raw=funding_raw,
-                        ts_raw=(
-                            item.get("transactionTime") or item.get("created_time")
-                        ),
-                        currency=item.get("currency", "USDT") or "USDT",
-                        raw_item=item,
-                    )
-                    if row is None:
-                        dropped += 1
-                        continue
-                    rows.append(row)
-
-                next_cursor = inner.get("nextPageCursor", "") or ""
-                if not next_cursor:
-                    break
-                cursor = next_cursor
-            else:
-                # Phase-4 red-team (audit-2026-05-07, red-team:289 conf=8):
-                # exhausted MAX_PAGES within a single 7-day window while
-                # ``nextPageCursor`` still points at more data.
-                # Bybit is the worst-case exposure (limit=50 × 200 pages =
-                # 10k rows per window) — multi-pair whale strategies with
-                # dense 7-day windows hit this first.
-                # Re-raise instead of silently advancing to the next window
-                # and returning DONE with partial coverage.
-                logger.error(
-                    "Bybit funding_fetch hit MAX_PAGES=%d ceiling for "
-                    "strategy %s category=%s window=[%s,%s] with active "
-                    "cursor (more rows remain)",
-                    MAX_PAGES, strategy_id, category, window_start, window_end,
-                )
-                raise FundingFetchCeilingExceeded(
-                    f"Bybit funding_fetch exhausted MAX_PAGES={MAX_PAGES} "
-                    f"with cursor still active for strategy {strategy_id} "
-                    f"category={category} window=[{window_start},{window_end}]"
-                )
-
-            # Advance to the next 7-day window.
-            window_start = window_end + 1
-
-    if dropped > 0:
+    if dropped[0] > 0:
         logger.warning(
-            "bybit funding_fetch: dropped %d malformed rows for "
-            "strategy %s (kept %d)",
-            dropped, strategy_id, len(rows),
+            "bybit funding_fetch: dropped %d malformed rows for strategy %s "
+            "(kept %d)",
+            dropped[0], strategy_id, len(rows),
         )
     logger.info(
         "bybit funding_fetch: %d rows for strategy %s", len(rows), strategy_id
