@@ -61,6 +61,39 @@ import { after } from "next/server";
  * still grep `[audit]` for forensic review. The contract above is about
  * what rethrow means in the fire-and-forget call path — NOT how to
  * propagate audit failures to the HTTP boundary.
+ *
+ * ── B4c: TWO-TIER EMISSION CONTRACT (H-0278 / M-1157) ──────────────────
+ * Callers choose tier by which function they call — this IS the contract,
+ * and the choice is deliberate per call site, not an accident:
+ *
+ *   1. DROP-TOLERANT (fire-and-forget): `logAuditEvent` /
+ *      `logAuditEventAsUser`. Schedules via `after()` and returns `void`;
+ *      NEVER throws to the caller. On Vercel `after()` holds the function
+ *      alive (`waitUntil`) until the emit settles, so the request-scope
+ *      path does not drop. The only residual drop is the non-request-scope
+ *      `queueMicrotask` fallback (cron / prerender), which is logged with
+ *      the `[audit]` prefix and accepted as best-effort. Use for
+ *      high-volume, non-compliance events (analytics, note edits,
+ *      portfolio updates) where an occasional missed row on a cold-finish
+ *      is acceptable and not gating user latency on the audit round-trip
+ *      is the priority.
+ *   2. BLOCKING (fail-loud): `await emit(...)` / `await emitAsUser(...)`
+ *      directly. These reject on hard failures (`permission_denied`,
+ *      `unknown`, and — on the service path only — an unexpected `28000`),
+ *      so a compliance-critical route can surface a 500 ("mutation succeeded
+ *      but audit failed") and refuse to report success on a dropped audit row.
+ *      The admin RBAC route (`admin/users/[id]/roles`) is the exemplar — it
+ *      imports `emit as logAuditEvent` and `await`s it on the role-mutation
+ *      path (C-0065). Use for role grants, GDPR approve/reject, and other
+ *      forensically load-bearing mutations.
+ *
+ * H-0278 / M-1157 are CLOSED-BY-CONTRACT: the fire-and-forget drop is a
+ * documented property of tier 1, and the blocking escape hatch (tier 2)
+ * exists and is exercised for the compliance-critical paths the findings
+ * named. There is no way to make tier 1 non-dropping without making it
+ * blocking, which the design rejects (it would gate user latency on audit
+ * I/O). Tests pin both: tier-1 never throws to the caller; tier-2 throws on
+ * permission_denied.
  */
 export type AuditEmitErrorKind =
   | "permission_denied"
@@ -447,27 +480,49 @@ export type AuditEntityType =
   | "debug_session";
 
 /**
- * M-0491: Compile-time sentinel mapping every AuditAction to its canonical
- * AuditEntityType (per ADR-0023). The type annotation `Record<AuditAction,
- * AuditEntityType>` means TypeScript will error if:
- *   - A new AuditAction is added without a corresponding entry here.
- *   - An entry maps to a value not in AuditEntityType.
+ * M-0491 / H-0423: the AUTHORITATIVE action→entity_type mapping (per
+ * ADR-0023) AND the single source of truth the {@link AuditEvent}
+ * discriminated union derives from. `as const satisfies Record<AuditAction,
+ * AuditEntityType>` does two jobs at once:
+ *   - `satisfies Record<AuditAction, AuditEntityType>` keeps the
+ *     exhaustiveness + value-validity checks (TS errors if a new
+ *     AuditAction has no entry here, or an entry maps to a value not in
+ *     AuditEntityType).
+ *   - `as const` (NOT a `: Record<...>` annotation — the annotation would
+ *     WIDEN every value to the full AuditEntityType union and defeat the
+ *     derivation) pins each value to its narrow literal entity_type, so
+ *     `(typeof AUDIT_ACTION_ENTITY_TYPE_MAP)[A]` resolves to the single
+ *     canonical entity_type for action `A`.
  *
- * This does NOT prevent a call site from pairing the wrong entity_type —
- * that requires a full discriminated union (H-0423, deferred cross-file).
- * But it makes action↔entity_type drift visible at the definition site
- * rather than only at runtime inside the audit_log JSONB.
+ * H-0423 (audit-2026-05-07, B4c): because {@link AuditEvent} is now derived
+ * from this map (each union arm pins `entity_type` to this table's value
+ * for its `action`), a call site that pairs the WRONG entity_type — e.g.
+ * `{ action: "role.grant", entity_type: "user" }` — is a COMPILE error, not
+ * a silent JSONB drift. This map is the by-construction guarantee; before
+ * B4c it was only a definition-site sentinel that prose-warned but did not
+ * enforce pairing at call sites.
+ *
+ * M-0490 (DEFERRED, Rule 2): per-action metadata SHAPES are intentionally
+ * NOT typed. Metadata is open/append-over-time and governed at runtime by
+ * {@link capAuditMetadata}; the action↔entity_type axis is a closed/stable
+ * 1:1 taxonomy invariant (closed here), metadata-key drift is a different
+ * (runtime-payload) class. ADR-0023's table remains the metadata-key doc.
  *
  * To add a new action: add the literal to AuditAction, add its entity_type
  * to AuditEntityType if needed, then add the entry here. The compiler will
  * catch any of the three steps being omitted.
  */
-export const AUDIT_ACTION_ENTITY_TYPE_MAP: Record<AuditAction, AuditEntityType> = {
+export const AUDIT_ACTION_ENTITY_TYPE_MAP = {
   // 7.1a pilot
   "api_key.decrypt": "api_key",
   "intro.send": "contact_request",
   "intro.resend_noop": "contact_request",
-  "intro.send_failed": "contact_request",
+  // B4c reconciliation: the FAILURE path has no contact_request row yet (the
+  // RPC that would create it failed), so send-intro deliberately anchors the
+  // forensic row to entity_type=strategy / entity_id=strategy_id (a stable
+  // existing id). entity_type pairs with entity_id, so "strategy" — not the
+  // intro.* family's "contact_request" — is the internally-consistent value.
+  "intro.send_failed": "strategy",
   "deletion.request.create": "data_deletion_request",
   // 7.2 RBAC
   "role.grant": "user_app_role",
@@ -504,7 +559,12 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP: Record<AuditAction, AuditEntityType> 
   "strategy.approve": "strategy",
   "strategy.reject": "strategy",
   "api_key.revoke": "api_key",
-  "trades.upload": "trades_upload",
+  // B4c reconciliation: ADR-0023 L149 + the call site both anchor on
+  // strategy (entity_id = strategies.id; "trades.upload is a bulk insert,
+  // strategy is the ownership anchor"). The prior map value "trades_upload"
+  // was definition-site drift — nothing derived from the map at runtime, so
+  // it was never validated against the (correct) emission.
+  "trades.upload": "strategy",
   "admin.partner_import": "partner_import",
   // /review follow-up (T4-C1 + T4-M6)
   "lead.process": "for_quants_lead",
@@ -524,23 +584,58 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP: Record<AuditAction, AuditEntityType> 
   "mandate_preference.admin_update": "allocator_preference_mandate",
   // Sprint 8 Phase 4: Feedback loop
   "feedback.overrides_updated": "allocator_preference_feedback",
-  // Phase 06: allocator API ingestion
-  "allocator.holdings.sync_requested": "allocation",
-  "allocator.holdings.sync_completed": "allocation",
-  "allocator.holdings.sync_failed": "allocation",
+  // Phase 06: allocator API ingestion.
+  // B4c reconciliation: ADR-0023 L192-218 (a dedicated, reasoned section) +
+  // the TS call site both anchor all three on entity_type=api_key /
+  // entity_id=api_keys.id — "the key being polled is the natural entity for
+  // every stage of the sync lifecycle". The prior "allocation" was map drift.
+  // (sync_completed / sync_failed are emitted by the Python worker, which is
+  // out of this TS batch's scope; they have no TS call site, so aligning the
+  // map to the ADR here is purely SSOT hygiene with zero TS runtime effect.)
+  "allocator.holdings.sync_requested": "api_key",
+  "allocator.holdings.sync_completed": "api_key",
+  "allocator.holdings.sync_failed": "api_key",
   // Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint
   "debug_key_flow.invoke": "debug_session",
   // audit-2026-05-07 P700 / admin-auth cluster
   "admin.access.via_env_email_fallback": "user",
   "admin.access.denied": "user",
-} as const;
+} as const satisfies Record<AuditAction, AuditEntityType>;
 
-export interface AuditEvent {
-  action: AuditAction;
-  entity_type: AuditEntityType;
+/**
+ * One discriminated-union arm per action: `entity_type` is pinned to the
+ * single canonical value {@link AUDIT_ACTION_ENTITY_TYPE_MAP} assigns to
+ * `A`. This is what turns a wrong pairing into a tsc error (H-0423).
+ */
+type AuditEventFor<A extends AuditAction> = {
+  action: A;
+  entity_type: (typeof AUDIT_ACTION_ENTITY_TYPE_MAP)[A];
   entity_id: string;
   metadata?: Record<string, unknown>;
-}
+};
+
+/**
+ * The audit event payload. Derived as a DISCRIMINATED UNION over
+ * {@link AuditAction}, so `action` and `entity_type` can no longer drift
+ * apart: each arm fixes `entity_type` to the action's canonical value from
+ * {@link AUDIT_ACTION_ENTITY_TYPE_MAP} (H-0423). A mis-paired literal — e.g.
+ * `{ action: "role.grant", entity_type: "user" }` — fails to compile.
+ *
+ * Call sites build the object inline; tsc verifies the pairing against the
+ * matching arm. This holds for a COMPUTED action too: when `action` is a
+ * ternary (`isGrant ? "role.grant" : "role.revoke"`) or a template literal
+ * (`` `user_note.${scope_kind}.update` ``), TS checks the literal against the
+ * union and accepts it only if `entity_type` is the canonical value for
+ * EVERY branch the action could take — a wrong entity_type at such a site is
+ * still a compile error (verified: a ternary action whose entity_type is
+ * valid for one branch but not the other does NOT compile). So no separate
+ * constructor/escape-hatch is needed — the union alone closes the pairing
+ * class for literal and computed actions alike.
+ *
+ * M-0490 (Rule 2): `metadata` is intentionally left open (see the map
+ * docblock) — per-action metadata shapes are not typed.
+ */
+export type AuditEvent = { [A in AuditAction]: AuditEventFor<A> }[AuditAction];
 
 /**
  * Per-field length cap (in chars) for string values stored in
