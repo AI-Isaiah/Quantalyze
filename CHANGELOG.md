@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.40] - 2026-06-01
+### Added — central typed Supabase-row primitive (`Row` + `rows()`/`one()`) (cross-cutting refactor B-mypy, part 2 of 8)
+
+PostgREST responses are the single biggest `--strict` drift source in the service: `APIResponse.data` is `list[JSON]` and `SingleAPIResponse.data` is `JSON` (a deeply-recursive `bool|str|int|float|Sequence|Mapping|None` union), and `APIResponse` is **not** generic — there's no type parameter to pin at the call site, so every `.data` access splatters the union into the ~508 `union-attr`/`index`/`call-overload`/`arg-type` errors that dominate the remaining count.
+
+- **`Row = dict[str, Any]` + `rows(resp) -> list[Row]` + `one(resp) -> Row | None`** added to `services/db.py` (the `.data`-consumption seam). `rows()` narrows a multi-row response keeping only dict elements; `one()` narrows a single-row response and **returns `None` when the response is `None`** — because `.maybe_single().execute()` returns `None` at runtime when no row matches (the documented `routers/match.py` Sentry contract). The `Row | None` return type is the point: an unguarded `.data["col"]` on a `maybe_single` result is a live AttributeError-on-missing-row bug today, and routing it through `one()` turns that into a **compile error until the caller handles the no-row branch**. Narrowing is by real runtime checks (`isinstance`/`is None`), never a `cast` that hides nullability. `Row` keeps column *values* loose because a PostgREST row genuinely is heterogeneous JSON and the code already fails loud on schema drift at runtime — per-table TypedDicts across 31 tables would be brittle gold-plating; the safety value is narrowing the *container*, not typing each column.
+- The `SingleAPIResponse` import is pinned to `postgrest.base_request_builder` (postgrest does not re-export it from the package root — only `APIResponse`), with a comment so a postgrest bump that relocates it fails loudly.
+
+**This part adds the primitive only — no call site migrates yet**, so it is zero-behaviour-change and **zero error delta** (full surface stays at 954). It establishes the typed seam every later cluster (parts 3–7) routes through. **Verified:** 5 new focused `test_db.py` cases pin the `one(None) -> None` runtime contract + the dict-narrowing; `db.py` is `--strict` clean for the new functions (the lone remaining `db.py` error is the pre-existing untyped `paginated_select(builder, …)`, scheduled for a later cluster); full pytest green (2516 passed, the pre-existing `test_simulator_router` ordering flake deselected). CI gate stays scoped to `services/ingestion/`.
+
 ## [0.24.15.39] - 2026-06-01
 ### Changed — analytics-service mypy `--strict` floor: foundation primitives (config + typed `db_execute`) (cross-cutting refactor B-mypy, part 1 of 8)
 

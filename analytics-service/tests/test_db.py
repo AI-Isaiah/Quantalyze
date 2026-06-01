@@ -404,3 +404,63 @@ def test_chunked_in_query_rejects_nonpositive_page_size() -> None:
     build = _recording_builder(lambda chunk: [], [])
     with pytest.raises(ValueError, match="page_size must be positive"):
         chunked_in_query(build, ["a"], id_field="strategy_id", page_size=0)
+
+
+# ---------------------------------------------------------------------------
+# Supabase row accessors rows()/one() (B-mypy)
+# ---------------------------------------------------------------------------
+#
+# These pin the runtime contract the --strict type narrowing relies on: one()
+# MUST return None for a None response, because .maybe_single().execute()
+# returns None at runtime when no row matches (the documented match.py Sentry
+# contract). If a refactor made one() assume a non-None response, every
+# migrated maybe_single() call site would regain the latent
+# AttributeError-on-missing-row bug the Row|None type exists to prevent.
+
+
+def test_rows_keeps_only_dict_elements() -> None:
+    """rows() narrows APIResponse.data (list[JSON]) to list[Row], dropping any
+    non-dict element — a non-dict is a malformed response, not a row."""
+    from postgrest.base_request_builder import APIResponse
+
+    from services.db import rows
+
+    resp = APIResponse(data=[{"id": "a"}, {"id": "b"}], count=None)
+    assert rows(resp) == [{"id": "a"}, {"id": "b"}]
+
+    # A stray non-dict element is dropped rather than splattering downstream.
+    resp_mixed = APIResponse(data=[{"id": "a"}, "garbage", None], count=None)  # type: ignore[list-item]
+    assert rows(resp_mixed) == [{"id": "a"}]
+
+    assert rows(APIResponse(data=[], count=None)) == []
+
+
+def test_one_returns_none_for_none_response() -> None:
+    """one(None) -> None. This is the load-bearing case:
+    .maybe_single().execute() returns None at runtime on no match, so the
+    Row|None contract forces callers to handle the no-row branch."""
+    from services.db import one
+
+    assert one(None) is None
+
+
+def test_one_returns_row_for_dict_data() -> None:
+    """one() unwraps SingleAPIResponse.data when it is a dict."""
+    from postgrest.base_request_builder import SingleAPIResponse
+
+    from services.db import one
+
+    resp = SingleAPIResponse(data={"id": "x", "value": 1})
+    assert one(resp) == {"id": "x", "value": 1}
+
+
+def test_one_returns_none_for_non_dict_data() -> None:
+    """one() returns None when .data is not a dict (defensive against an
+    unexpected response shape), never a non-indexable value masquerading as a
+    row."""
+    from postgrest.base_request_builder import SingleAPIResponse
+
+    from services.db import one
+
+    assert one(SingleAPIResponse(data=None)) is None
+    assert one(SingleAPIResponse(data=[1, 2, 3])) is None  # type: ignore[arg-type]
