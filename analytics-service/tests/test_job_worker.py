@@ -2043,6 +2043,129 @@ class TestSyncTradesPhase2FailureFlag:
         # Sibling flag survived the clear.
         assert cleared_flags.get("benchmark_unavailable") is True
 
+    @pytest.mark.asyncio
+    async def test_fresh_strategy_missing_analytics_row_skips_spurious_write(self) -> None:
+        """B-mypy f-3 regression: a fresh strategy with NO strategy_analytics
+        row yet (its first sync, before compute_analytics runs) must NOT write
+        a spurious phase2_fill_ingestion_failed=False recovery marker on a clean
+        Phase-2 run.
+
+        Pre-fix, `_load_existing_flags` did `row = res.data or {}`. For a missing
+        row, `.maybe_single().execute()` returns LITERAL None (not a response with
+        data=None), so `res.data` raised AttributeError, caught by the surrounding
+        try/except → flag_load_failed=True → the clean-Phase-2 else-branch hit
+        `elif flag_load_failed:` and stamped a recovery marker for a strategy that
+        never failed. Routing the read through services.db.one() makes the no-row
+        case the intended empty-flags path (no crash, flag_load_failed=False), so
+        the write is correctly skipped. This mocks the read as the REAL literal
+        None — the sibling tests use MagicMock(data=None), which never reproduced
+        the crash — so it FAILS on the pre-fix code (1 spurious upsert) and passes
+        on the one()-routed code (0 upserts).
+        """
+        from services.job_worker import run_sync_trades_job
+
+        sa_upserts: list[dict] = []
+
+        def _table(name: str) -> MagicMock:
+            mock_t = MagicMock()
+            if name == "strategy_analytics":
+                # No analytics row yet → maybe_single().execute() is literal None
+                # (faithful to postgrest; NOT MagicMock(data=None)).
+                mock_select = MagicMock()
+                mock_eq_sel = MagicMock()
+                mock_maybe = MagicMock()
+                mock_maybe.execute.return_value = None
+                mock_eq_sel.maybe_single.return_value = mock_maybe
+                mock_select.eq.return_value = mock_eq_sel
+                mock_t.select.return_value = mock_select
+
+                def _upsert(payload: dict, **_kwargs):
+                    sa_upserts.append(dict(payload))
+                    stub = MagicMock()
+                    stub.execute.return_value = MagicMock(data=[])
+                    return stub
+                mock_t.upsert.side_effect = _upsert
+            elif name == "trades":
+                # Phase 2 trades upsert (success path) + amendment-detection SELECT.
+                mock_t.upsert.return_value = MagicMock(
+                    execute=MagicMock(return_value=MagicMock(data=[]))
+                )
+                mock_select = MagicMock()
+                mock_eq_sel = MagicMock()
+                mock_eq_sel2 = MagicMock()
+                mock_in = MagicMock()
+                mock_in.execute.return_value = MagicMock(data=[])
+                mock_eq_sel2.in_.return_value = mock_in
+                mock_eq_sel.eq.return_value = mock_eq_sel2
+                mock_select.eq.return_value = mock_eq_sel
+                mock_t.select.return_value = mock_select
+            else:
+                # api_keys.update chain
+                mock_update = MagicMock()
+                mock_eq_upd = MagicMock()
+                mock_eq_upd.execute.return_value = MagicMock(data=[])
+                mock_update.eq.return_value = mock_eq_upd
+                mock_t.update.return_value = mock_update
+            return mock_t
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.supabase.table.side_effect = _table
+
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=1)
+            return stub
+        mock_ctx.supabase.rpc.side_effect = _rpc
+
+        mock_ctx.strategy_row = {"id": "strat-fresh", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "binance",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        raw_fills = [
+            {"exchange": "binance", "exchange_fill_id": "f1", "symbol": "BTC-USDT",
+             "side": "buy", "price": "50000", "quantity": "0.1", "is_fill": True,
+             "timestamp": "2026-05-15T12:00:00Z"},
+        ]
+
+        job = {"id": "job-fresh", "kind": "sync_trades", "strategy_id": "strat-fresh"}
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=100.0),
+        ), patch(
+            "services.job_worker.fetch_raw_trades",
+            new=AsyncMock(return_value=raw_fills),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", True,
+        ):
+            result = await run_sync_trades_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+
+        # A strategy that never failed must not get a phase2_fill_ingestion_failed=
+        # False "recovery" marker just because it has no analytics row yet.
+        flag_upserts = [u for u in sa_upserts if "data_quality_flags" in u]
+        assert len(flag_upserts) == 0, (
+            "Fresh strategy (no strategy_analytics row) on a clean Phase-2 run "
+            f"must not write a spurious recovery marker; got {sa_upserts}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # G12.A.5 — RLS denies cross-allocator SELECT on is_fill=true rows
