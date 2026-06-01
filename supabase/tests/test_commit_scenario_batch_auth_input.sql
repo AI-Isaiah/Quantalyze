@@ -43,18 +43,19 @@ BEGIN
   -- Signature must match the function's identity arguments EXACTLY:
   -- has_function_privilege resolves by exact arg types, not by callable
   -- arity. Since the P1956/P1957 idempotency hardening, the function is
-  -- commit_scenario_batch(uuid, jsonb, text DEFAULT NULL, text DEFAULT NULL),
-  -- so the old 2-arg form errors "function ... does not exist". (The PERFORM
-  -- calls below still use 2 args — those resolve fine via the defaults.)
+  -- commit_scenario_batch(uuid, jsonb, text DEFAULT NULL, text DEFAULT NULL,
+  --   text DEFAULT NULL) after the B11 NEW-C18-10 p_portfolio_fingerprint param,
+  -- so the old 2-/4-arg signature strings error "function ... does not exist".
+  -- (The PERFORM calls below still use 2 args — those resolve fine via the defaults.)
   SELECT has_function_privilege('authenticated',
-           'public.commit_scenario_batch(uuid, jsonb, text, text)', 'EXECUTE')
+           'public.commit_scenario_batch(uuid, jsonb, text, text, text)', 'EXECUTE')
     INTO v_auth_can;
   IF v_auth_can IS NOT TRUE THEN
     RAISE EXCEPTION 'Test 1 failed: authenticated lacks EXECUTE on commit_scenario_batch';
   END IF;
 
   SELECT has_function_privilege('anon',
-           'public.commit_scenario_batch(uuid, jsonb, text, text)', 'EXECUTE')
+           'public.commit_scenario_batch(uuid, jsonb, text, text, text)', 'EXECUTE')
     INTO v_anon_can;
   IF v_anon_can IS TRUE THEN
     RAISE EXCEPTION 'Test 1 failed: anon has EXECUTE on commit_scenario_batch — REVOKE regressed';

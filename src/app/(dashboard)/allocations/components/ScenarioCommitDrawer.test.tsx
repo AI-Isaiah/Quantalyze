@@ -295,6 +295,123 @@ describe("T_D10 — fetch fires the right URL/body on pre-flight Submit", () => 
 
     vi.unstubAllGlobals();
   });
+
+  // B11 / NEW-C18-10: the drawer must forward the frozen holdings fingerprint
+  // in the POST body so the RPC can reject a stale-draft commit (409).
+  it("includes init_holdings_fingerprint in the body when the prop is supplied", async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string, _init: { method: string; body: string }) =>
+        new Response(
+          JSON.stringify({ recorded: 1, results: [{ index: 0 }], errors: [] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+        initHoldingsFingerprint="BTC:binance:spot"
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.init_holdings_fingerprint).toBe("BTC:binance:spot");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("OMITS init_holdings_fingerprint from the body when the prop is null (backward compat)", async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string, _init: { method: string; body: string }) =>
+        new Response(
+          JSON.stringify({ recorded: 1, results: [{ index: 0 }], errors: [] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+        // initHoldingsFingerprint omitted -> defaults to null
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect("init_holdings_fingerprint" in body).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
+
+  // B11 / NEW-C18-10: a 409 portfolio_fingerprint_stale response must render the
+  // route's reload guidance (NOT a "malformed response" error), must NOT fire
+  // onSubmitSuccess, and must disable the in-drawer retry (the frozen draft
+  // diverges on every retry — only a reload resolves it).
+  it("renders reload guidance + disables retry on a 409 portfolio_fingerprint_stale response", async () => {
+    const onSubmitSuccess = vi.fn();
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: "Portfolio changed since you started this scenario",
+            detail:
+              "Your holdings were updated after you opened this scenario. Refresh to load the latest holdings, then re-apply your changes.",
+            code: "portfolio_fingerprint_stale",
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={onSubmitSuccess}
+        initHoldingsFingerprint="BTC:binance:spot"
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // Actionable reload copy is shown — NOT the "malformed response" string.
+    const banner = screen.getByTestId("commit-drawer-error");
+    expect(banner).toHaveTextContent(/Refresh to load the latest holdings/i);
+    expect(banner).not.toHaveTextContent(/malformed response/i);
+    // The stale conflict committed nothing → success must not fire.
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+    // Retry is futile for a stale conflict → the Submit button is disabled.
+    expect(screen.getByTestId("commit-drawer-submit")).toBeDisabled();
+
+    vi.unstubAllGlobals();
+  });
 });
 
 // ===========================================================================

@@ -73,6 +73,17 @@ export interface ScenarioCommitDrawerProps {
    * supplies a finite number — see ScenarioComposer.tsx render.
    */
   scenarioAum?: number;
+  /**
+   * B11 / NEW-C18-10: the holdings fingerprint the committed diffs were built
+   * against (the composer freezes scenario.draft.init_holdings_fingerprint at
+   * handleCommit time). Sent in the POST body as `init_holdings_fingerprint`;
+   * commit_scenario_batch recomputes the CURRENT holdings token set and rejects
+   * (409) on divergence — the server-side optimistic-concurrency fence for the
+   * stale-draft lost-update. Optional (null => the route omits it and the RPC
+   * skips the precondition) so legacy tests / parents without the draft fall
+   * back to the prior behaviour; the production composer always supplies it.
+   */
+  initHoldingsFingerprint?: string | null;
 }
 
 interface SubmitResponse {
@@ -95,8 +106,13 @@ interface SubmitResponse {
  *
  * `failureReason` distinguishes user-visible error copy: "partial" means the
  * server returned ok with a partial-recorded count (do NOT retry — some rows
- * landed); "generic" is everything else (network error, top-level error,
- * per-row error list — retry is safe).
+ * landed); "stale_portfolio" (B11 / NEW-C18-10) means the server's optimistic-
+ * concurrency fence rejected the commit because the holdings changed since the
+ * draft was built (HTTP 409 code=portfolio_fingerprint_stale) — retry is
+ * FUTILE (the frozen draft diverges on every retry), only a reload resolves it,
+ * so this state renders the route's reload guidance and disables the in-drawer
+ * retry; "generic" is everything else (network error, top-level error, per-row
+ * error list — retry is safe).
  */
 type SubmitState =
   | { kind: "idle" }
@@ -106,7 +122,7 @@ type SubmitState =
   | {
       kind: "failure";
       response: SubmitResponse | null;
-      failureReason: "partial" | "generic";
+      failureReason: "partial" | "generic" | "stale_portfolio";
     };
 
 function generateIdempotencyKey(): string {
@@ -122,6 +138,7 @@ export function ScenarioCommitDrawer({
   diffs,
   onSubmitSuccess,
   scenarioAum = 0,
+  initHoldingsFingerprint = null,
 }: ScenarioCommitDrawerProps) {
   const [state, setState] = useState<SubmitState>({ kind: "idle" });
   const [perRow, setPerRow] = useState<Record<number, PerRowState>>({});
@@ -434,7 +451,16 @@ export function ScenarioCommitDrawer({
           "content-type": "application/json",
           "Idempotency-Key": idempotencyKey,
         },
-        body: JSON.stringify({ diffs: buildSubmitDiffs() }),
+        // B11 / NEW-C18-10: include the frozen draft fingerprint so the RPC can
+        // reject a stale-draft commit (409). Omit the key when null so the
+        // request shape (and its idempotency request_hash) is unchanged for
+        // callers/tests that don't supply it.
+        body: JSON.stringify({
+          diffs: buildSubmitDiffs(),
+          ...(initHoldingsFingerprint !== null && {
+            init_holdings_fingerprint: initHoldingsFingerprint,
+          }),
+        }),
         signal: controller.signal,
       });
     } catch (err) {
@@ -490,6 +516,43 @@ export function ScenarioCommitDrawer({
       });
       return;
     }
+    // B11 / NEW-C18-10: the server's optimistic-concurrency fence rejected this
+    // commit because the allocator's holdings changed since the draft was built
+    // (position cron refreshed a snapshot, or another tab/device edited). The
+    // 409 body is { error, detail, code:'portfolio_fingerprint_stale' } with NO
+    // `recorded` field, so it MUST be handled before the isValidShape gate (which
+    // would otherwise mislabel it a "malformed response"). It is NOT retry-safe:
+    // the committed diffs + their fingerprint are frozen, so a retry diverges
+    // again every time — only reloading the dashboard (which re-derives the draft
+    // from the new holdings) resolves it. Surface the route's reload guidance and
+    // route to the dedicated stale_portfolio failure state (which disables retry).
+    if (
+      res.status === 409 &&
+      raw !== null &&
+      typeof raw === "object" &&
+      (raw as { code?: unknown }).code === "portfolio_fingerprint_stale"
+    ) {
+      if (controller.signal.aborted) return;
+      const body = raw as { error?: string; detail?: string };
+      setState({
+        kind: "failure",
+        failureReason: "stale_portfolio",
+        response: {
+          recorded: 0,
+          errors: [
+            {
+              index: -1,
+              error:
+                body.detail ??
+                body.error ??
+                "Your holdings changed since you started this scenario. Refresh to load the latest holdings, then re-apply your changes.",
+            },
+          ],
+        },
+      });
+      return;
+    }
+
     const isValidShape =
       raw !== null &&
       typeof raw === "object" &&
@@ -967,6 +1030,12 @@ export function ScenarioCommitDrawer({
                   diffs.length === 0 ||
                   state.kind === "submitting" ||
                   state.kind === "preflight" ||
+                  // B11 / NEW-C18-10: a stale-portfolio conflict can only be
+                  // resolved by reloading (the frozen draft diverges on every
+                  // retry); disable the in-drawer retry so the user is steered to
+                  // the reload guidance instead of an infinite 409 loop.
+                  (state.kind === "failure" &&
+                    state.failureReason === "stale_portfolio") ||
                   !allFilled
                 }
                 className="w-full rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 disabled:opacity-50"

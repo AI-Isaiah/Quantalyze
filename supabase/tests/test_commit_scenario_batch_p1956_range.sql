@@ -79,10 +79,10 @@ DECLARE
 BEGIN
   SELECT prosrc INTO v_prosrc
     FROM pg_proc
-   WHERE oid = 'public.commit_scenario_batch(uuid,jsonb,text,text)'::regprocedure;
+   WHERE oid = 'public.commit_scenario_batch(uuid,jsonb,text,text,text)'::regprocedure;
 
   IF v_prosrc IS NULL THEN
-    RAISE EXCEPTION 'Test 2 failed: commit_scenario_batch(uuid,jsonb,text,text) not installed';
+    RAISE EXCEPTION 'Test 2 failed: commit_scenario_batch(uuid,jsonb,text,text,text) not installed';
   END IF;
   IF v_prosrc LIKE '%new_weight%' THEN
     RAISE EXCEPTION

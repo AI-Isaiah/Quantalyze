@@ -1431,6 +1431,87 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // B11 / NEW-C18-10 — Click Commit freezes the draft's holdings fingerprint
+  //   and passes it to the drawer (so the RPC can reject a stale-draft commit).
+  // -------------------------------------------------------------------------
+  it("B11/NEW-C18-10: Click Commit → drawer receives the frozen holdings fingerprint (current holdings set)", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Produce at least one diff so the commit pipeline opens.
+    fireEvent.click(
+      screen.getByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
+    );
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+
+    const drawerProps = vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0];
+    const fp = drawerProps?.initHoldingsFingerprint;
+    // A fresh draft's fingerprint is computeHoldingsFingerprint over the live
+    // holdings; asserting the SET (order-robust) proves the composer froze the
+    // correct shape rather than null / a stale value.
+    expect(typeof fp).toBe("string");
+    expect(new Set((fp as string).split("|"))).toEqual(
+      new Set([
+        "BTC:binance:spot",
+        "ETH:binance:spot",
+        "SOL:binance:spot",
+      ]),
+    );
+  });
+
+  // B11 / NEW-C18-10 — the fingerprint must be FROZEN at handleCommit, not read
+  // live. If holdings change while the drawer is open (position cron / another
+  // tab), the drawer must keep sending the at-build-time fingerprint so the
+  // server rejects the now-stale commit. A live read would send the CURRENT
+  // (rebased) fingerprint, the server would accept, and the stale diffs would
+  // commit as a lost-update — the exact hole this closes. This test fails if the
+  // drawer prop is sourced from scenario.draft.init_holdings_fingerprint live.
+  it("B11/NEW-C18-10: a holdings change after Commit does NOT update the frozen fingerprint sent to the drawer", () => {
+    const { rerender } = render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
+    );
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    const frozen = vi
+      .mocked(ScenarioCommitDrawer)
+      .mock.calls.at(-1)?.[0]?.initHoldingsFingerprint;
+    expect(new Set((frozen as string).split("|"))).toEqual(
+      new Set(["BTC:binance:spot", "ETH:binance:spot", "SOL:binance:spot"]),
+    );
+
+    // Holdings change mid-dwell: SOL is divested. The LIVE current fingerprint
+    // is now {BTC,ETH}; the FROZEN one must stay {BTC,ETH,SOL}.
+    rerender(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const afterChange = vi
+      .mocked(ScenarioCommitDrawer)
+      .mock.calls.at(-1)?.[0]?.initHoldingsFingerprint;
+    expect(new Set((afterChange as string).split("|"))).toEqual(
+      new Set(["BTC:binance:spot", "ETH:binance:spot", "SOL:binance:spot"]),
+    );
+    // And explicitly NOT the new live set (which is what a live read would send).
+    expect(new Set((afterChange as string).split("|"))).not.toEqual(
+      new Set(["BTC:binance:spot", "ETH:binance:spot"]),
+    );
+  });
+
+  // -------------------------------------------------------------------------
   // NEW-C18-01 — uses useInternalCommitDrawer=false to inspect the diff
   // payload passed to onCommitRequested. Changing a weight produces a
   // voluntary_modify diff alongside any other changes in the batch.
