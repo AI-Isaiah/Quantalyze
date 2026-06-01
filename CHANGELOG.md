@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.47] - 2026-06-01
+### Fixed — cron-sync prod trade ingestion: 4 Sentry errors blocking Bybit persist + OKX fetch
+
+The daily `/api/cron-sync` was reaching exchanges but failing to ingest the data. Four distinct production Sentry issues, all now fixed:
+
+- **QUANTALYZE-N — `APIError 22023 "cannot extract elements from a scalar"` (Bybit persist).** `routers/cron.py` was the last `sync_trades` caller still double-encoding the payload: `json.dumps(trades, default=str)` made PostgREST bind the JSON *string* to the `jsonb` parameter as a scalar string (`'"[…]"'::jsonb`), so `sync_trades`' `jsonb_array_elements(p_trades)` raised 22023 and every fetched Bybit trade was silently dropped (`trades_stored: 0`). Now passes the raw `list[dict]`, matching the two other callers (`routers/exchange.py`, `services/job_worker.py`) that already carry the documenting comments. Regression test asserts `p_trades` reaches the RPC as a list (mutation-verified: a `str` fails it).
+- **QUANTALYZE-M — `AttributeError: 'NoneType' object has no attribute 'encode'`.** A key row with NULL encryption columns (malformed/seed data left `is_active=true`) crashed `decrypt_credentials` on every tick. `_sync_single_key` now detects missing/NULL `dek_encrypted`/`api_key_encrypted` up front and skips the key with a clean `error` status + WARNING (fail-loud, no crash, no Sentry spam).
+- **QUANTALYZE-J/K — OKX `/account/bills` `50011 Too Many Requests` (429) discarded the whole daily-PnL series.** `cron_sync` fans out `BATCH_SIZE` concurrent OKX exchange instances; ccxt's per-instance rate limiter does not coordinate across them, so concurrent keys trip OKX's per-IP bills limit — and the bills loop re-raised on the first 429, throwing away every bill already fetched (`trades_fetched: 0`). The page fetch now retries transient 429s with bounded exponential backoff + jitter (`_okx_bills_fetch_with_backoff`); a 429 that survives all retries is re-raised into `fetch_daily_pnl`'s existing handler (records the `daily_pnl_fetch_error` DQ flag, returns the empty series → no data, never a silently truncated one). This change only adds recovery for the transient-burst case — it does not alter the persistent-failure path.
+
+Verified: `test_cron_router.py` + `test_okx_bills_backoff.py` + `test_exchange*.py` = 196 passed; `routers/cron.py` `mypy --strict` clean; `services/exchange.py` net-zero new mypy errors.
+
 ## [0.24.15.46] - 2026-06-01
 ### Changed — `mypy --strict` type-safety floor: migrate `analytics-service/routers/` onto `rows()`/`one()` (cross-cutting refactor B-mypy, part e)
 
