@@ -302,6 +302,17 @@ export function ScenarioComposer({
   // reinitialize from current live holdings.
   const [commitDrawerOpen, setCommitDrawerOpen] = useState(false);
   const [commitDiffs, setCommitDiffs] = useState<ScenarioCommitDiff[]>([]);
+  // B11 / NEW-C18-10: the holdings fingerprint the committed diffs were built
+  // against, FROZEN at handleCommit time alongside commitDiffs. Sent to the
+  // server so the RPC rejects (409) if the portfolio changed between drawer-
+  // open and submit. Frozen (not read live at submit time): if holdings change
+  // during drawer-dwell the draft rebases to the new shape, so a live read
+  // would send the CURRENT fingerprint and the stale diffs would pass — the
+  // whole hole this closes. The at-build-time shape is what makes the server
+  // reject the stale commit.
+  const [commitFingerprint, setCommitFingerprint] = useState<string | null>(
+    null,
+  );
   // Inline error surfaced for two distinct rejection paths:
   //   (a) the commit pipeline refuses to open — either scenarioAum<=0 with
   //       voluntary_adds present (division-by-zero downstream in the daily
@@ -749,6 +760,13 @@ export function ScenarioComposer({
     // and skip opening the internal drawer.
     setCommitError(null);
     setCommitDiffs(diffs);
+    // B11 / NEW-C18-10: freeze the draft's holdings fingerprint with the diffs.
+    // scenario.draft is the working draft the diffs were derived from; its
+    // init_holdings_fingerprint identifies the holdings shape those diffs
+    // correspond to. Capturing it HERE (not at POST time) is load-bearing — a
+    // holdings refresh during drawer-dwell must not retroactively make the
+    // stale commit look current.
+    setCommitFingerprint(scenario.draft.init_holdings_fingerprint);
     if (useInternalCommitDrawer) {
       setCommitDrawerOpen(true);
     } else {
@@ -1070,10 +1088,14 @@ export function ScenarioComposer({
         onClose={() => setCommitDrawerOpen(false)}
         diffs={commitDiffs}
         scenarioAum={scenarioAum}
+        // B11 / NEW-C18-10: the holdings fingerprint frozen with these diffs.
+        initHoldingsFingerprint={commitFingerprint}
         onSubmitSuccess={() => {
           // NEW-C18-13: clear stale commitDiffs so a subsequent drawer open
           // does not re-submit already-committed rows under a fresh key.
           setCommitDiffs([]);
+          // B11 / NEW-C18-10: clear the frozen fingerprint alongside the diffs.
+          setCommitFingerprint(null);
           scenario.reset();
         }}
       />

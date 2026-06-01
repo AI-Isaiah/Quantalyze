@@ -149,6 +149,17 @@ export const CommitDiffSchema = z.discriminatedUnion("kind", [
 // DoS cap — max 50 diffs per request.
 export const CommitBodySchema = z.object({
   diffs: z.array(CommitDiffSchema).min(1).max(50),
+  // B11 / NEW-C18-10 — optimistic concurrency. The holdings fingerprint the
+  // scenario draft was built against (computeHoldingsFingerprint, scenario-
+  // state.ts): the order-invariant "|"-joined set of "symbol:venue:holding_type"
+  // tokens. Forwarded to commit_scenario_batch as p_portfolio_fingerprint; the
+  // RPC recomputes the CURRENT holdings token set and rejects (-> 409) on
+  // divergence, so a stale draft (holdings changed since the drawer opened, via
+  // the position cron or another tab/device) cannot silently write a lost-update.
+  // Optional for backward compatibility (absent => RPC skips the precondition);
+  // the live client always sends it. .max() bounds a hostile payload — the
+  // longest realistic fingerprint is ~50 holdings * ~30 chars.
+  init_holdings_fingerprint: z.string().max(200_000).optional(),
 });
 
 // Post-normalisation shape of a voluntary_modify diff. After the
@@ -260,10 +271,24 @@ export const IDEM_CODES = {
   SCHEMA_DRIFT: "idempotency_schema_drift",
 } as const;
 
-const IdempotencyErrorCode = z.enum([
+// B11 / NEW-C18-10 optimistic-concurrency conflict code. The RPC returns an
+// ok:false envelope carrying this `code` when the supplied p_portfolio_fingerprint
+// diverges from the current holdings set; the route maps it to 409 (reload).
+// Centralised next to IDEM_CODES so the SQL function
+// (20260601120000_commit_scenario_batch_fingerprint_precondition.sql) and this
+// route cannot drift on a typo — keep the literal in sync with the migration.
+export const CONFLICT_CODES = {
+  PORTFOLIO_FINGERPRINT_STALE: "portfolio_fingerprint_stale",
+} as const;
+
+// All codes the RPC may stamp on an ok:false envelope row. Naming it for the
+// envelope (not "idempotency") keeps it honest now that it carries the
+// optimistic-concurrency conflict code too.
+const RpcEnvelopeErrorCode = z.enum([
   IDEM_CODES.BODY_MISMATCH,
   IDEM_CODES.IN_FLIGHT,
   IDEM_CODES.SCHEMA_DRIFT,
+  CONFLICT_CODES.PORTFOLIO_FINGERPRINT_STALE,
 ]);
 
 const RpcEnvelopeSchema = z.discriminatedUnion("ok", [
@@ -280,7 +305,7 @@ const RpcEnvelopeSchema = z.discriminatedUnion("ok", [
       z.object({
         index: z.number().int(),
         error: z.string(),
-        code: IdempotencyErrorCode.optional(),
+        code: RpcEnvelopeErrorCode.optional(),
       }),
     ),
   }),
@@ -501,6 +526,10 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
       p_diffs: normalisedDiffs,
       p_idempotency_key: idempotencyKeyValid ? idempotencyKey : null,
       p_request_hash: idempotencyKeyValid ? requestHash : null,
+      // B11 / NEW-C18-10: forward the draft's holdings fingerprint so the RPC
+      // can reject a stale-draft commit server-side. null => RPC skips the
+      // precondition (backward-compatible); the live client always supplies it.
+      p_portfolio_fingerprint: parsed.data.init_holdings_fingerprint ?? null,
     },
   );
 
@@ -598,6 +627,27 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
           error: "Idempotency cache has a stale entry; please retry with a fresh key",
         },
         { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    if (firstCode === CONFLICT_CODES.PORTFOLIO_FINGERPRINT_STALE) {
+      // B11 / NEW-C18-10: the allocator's holdings set changed since this
+      // scenario draft was created (position cron refreshed a snapshot, or
+      // another tab/device edited). The RPC recomputed the current holdings
+      // fingerprint, found it diverges from the one the draft was built
+      // against, and committed NOTHING (it rolled back any in-flight
+      // idempotency reservation). 409 Conflict — the client must reload the
+      // dashboard to pick up the new holdings, then re-apply its changes. No
+      // Retry-After: this is not a transient lock, it is a stale-snapshot
+      // conflict that only a reload resolves.
+      return NextResponse.json(
+        {
+          error: "Portfolio changed since you started this scenario",
+          detail:
+            "Your holdings were updated after you opened this scenario. Refresh to load the latest holdings, then re-apply your changes.",
+          code: CONFLICT_CODES.PORTFOLIO_FINGERPRINT_STALE,
+        },
+        { status: 409, headers: NO_STORE_HEADERS },
       );
     }
 

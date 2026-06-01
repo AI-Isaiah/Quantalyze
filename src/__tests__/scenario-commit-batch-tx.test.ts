@@ -350,7 +350,7 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
     "T_RPC_GRANT_AUTHENTICATED: authenticated has EXECUTE",
     async () => {
       const rows = await runIntrospectionSql<{ has_priv: boolean }>(
-        "SELECT has_function_privilege('authenticated', 'public.commit_scenario_batch(uuid, jsonb, text, text)', 'EXECUTE') AS has_priv",
+        "SELECT has_function_privilege('authenticated', 'public.commit_scenario_batch(uuid, jsonb, text, text, text)', 'EXECUTE') AS has_priv",
       );
       expect(rows.length).toBe(1);
       expect(rows[0].has_priv).toBe(true);
@@ -362,7 +362,7 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
     "T_RPC_NO_GRANT_ANON: anon does NOT have EXECUTE",
     async () => {
       const rows = await runIntrospectionSql<{ has_priv: boolean }>(
-        "SELECT has_function_privilege('anon', 'public.commit_scenario_batch(uuid, jsonb, text, text)', 'EXECUTE') AS has_priv",
+        "SELECT has_function_privilege('anon', 'public.commit_scenario_batch(uuid, jsonb, text, text, text)', 'EXECUTE') AS has_priv",
       );
       expect(rows.length).toBe(1);
       expect(rows[0].has_priv).toBe(false);
@@ -374,7 +374,7 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
     "T_RPC_NO_GRANT_PUBLIC: public role does NOT have EXECUTE",
     async () => {
       const rows = await runIntrospectionSql<{ has_priv: boolean }>(
-        "SELECT has_function_privilege('public', 'public.commit_scenario_batch(uuid, jsonb, text, text)', 'EXECUTE') AS has_priv",
+        "SELECT has_function_privilege('public', 'public.commit_scenario_batch(uuid, jsonb, text, text, text)', 'EXECUTE') AS has_priv",
       );
       expect(rows.length).toBe(1);
       expect(rows[0].has_priv).toBe(false);

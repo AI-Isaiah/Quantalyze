@@ -1528,3 +1528,77 @@ describe("NEW-C18-04 — server-side audit recompute of size_at_decision_usd", (
     expect(meta._size_source).toBe("server_holding");
   });
 });
+
+describe("T_R24 — B11 / NEW-C18-10 portfolio-fingerprint precondition", () => {
+  it("forwards init_holdings_fingerprint from the body to the RPC as p_portfolio_fingerprint", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(
+      mkReq({ diffs: [VALID_VR], init_holdings_fingerprint: "BTC:binance:spot" }),
+    );
+    expect(res.status).toBe(200);
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({ p_portfolio_fingerprint: "BTC:binance:spot" }),
+    );
+  });
+
+  it("passes p_portfolio_fingerprint: null when the body omits init_holdings_fingerprint (backward compat)", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReq({ diffs: [VALID_VR] }));
+    expect(res.status).toBe(200);
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({ p_portfolio_fingerprint: null }),
+    );
+  });
+
+  it("RPC ok:false + code=portfolio_fingerprint_stale → 409 (no Retry-After), no audit", async () => {
+    // The holdings changed since the draft was built; the RPC recomputed the
+    // current fingerprint, found divergence, and committed nothing. The route
+    // maps this to 409 Conflict (reload) — and, unlike idempotency_in_flight,
+    // WITHOUT a Retry-After header: a stale-snapshot conflict is resolved by a
+    // reload, not a timed retry.
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: false,
+        errors: [
+          {
+            index: -1,
+            error: "Portfolio holdings changed since this scenario draft was created",
+            code: "portfolio_fingerprint_stale",
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(
+      mkReq({ diffs: [VALID_VR], init_holdings_fingerprint: "BTC:binance:spot" }),
+    );
+    expect(res.status).toBe(409);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(res.headers.get("Retry-After")).toBeNull();
+    const body = await res.json();
+    expect(body.code).toBe("portfolio_fingerprint_stale");
+    expect(body.error).toMatch(/Portfolio changed/i);
+    expect(emit).not.toHaveBeenCalled();
+  });
+});
