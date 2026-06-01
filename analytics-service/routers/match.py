@@ -43,7 +43,14 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from services.db import chunked_in_query, get_supabase
+from services.db import (
+    PaginatedSelectTruncated,
+    Row,
+    chunked_in_query,
+    get_supabase,
+    one,
+    rows,
+)
 from services.equity_reconstruction import reconstruct_symbol_returns
 from services.match_engine import (
     ENGINE_VERSION,
@@ -51,7 +58,6 @@ from services.match_engine import (
     score_candidates,
 )
 from services.match_eval import (
-    PaginatedSelectTruncated,
     compute_hit_rate_metrics,
 )
 
@@ -230,7 +236,7 @@ class RecomputeRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
+def _records_to_series(raw: list[Any] | None, name: str = "") -> pd.Series | None:
     """Convert [{date, value}, ...] JSONB records to a DatetimeIndex pd.Series.
 
     M-0604: ``returns_series`` is JSONB written by the analytics worker. A
@@ -310,9 +316,10 @@ def _engine_is_enabled() -> bool:
         result = supabase.table("system_flags").select("enabled").eq(
             "key", "match_engine_enabled"
         ).maybe_single().execute()
-        if not (result and result.data):
+        row = one(result)
+        if not row:
             return True  # No row / null maybe_single response = default enabled
-        return bool(result.data.get("enabled", True))
+        return bool(row.get("enabled", True))
     except Exception as err:
         logger.error(
             "match_engine: kill switch check FAILED (fail-open, engine "
@@ -386,7 +393,7 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
     if demo_only:
         strategies_query = strategies_query.eq("is_example", True)
     strategies_result = strategies_query.execute()
-    strategies = strategies_result.data or []
+    strategies = rows(strategies_result)
     strategy_ids = [s["id"] for s in strategies]
 
     if not strategy_ids:
@@ -501,7 +508,7 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             # TypeScript parity layer — renaming the JSONB key is a cross-runtime
             # contract change tracked separately. Computing the TRUE manager_aum
             # (SUM over strategies.user_id) is a behaviour change, also deferred.
-            "manager_aum": float(strategy.get("aum")) if strategy.get("aum") else None,
+            "manager_aum": float(_aum) if (_aum := strategy.get("aum")) else None,
             "strategy_type": primary_type,
             "subtype": primary_subtype,  # Phase 3 / SCORING-07
             "exchange": primary_exchange,
@@ -554,15 +561,15 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
         .order("asof", desc=True)
         .execute()
     )
-    holdings_rows = holdings_result.data or []
+    holdings_rows = rows(holdings_result)
 
     # --- Step 2: collapse to latest-asof-per-(venue, symbol, holding_type) ---
     # First row wins because we ordered DESC — mirrors queries.ts:791-795 holdingsMap
-    holdings_map: dict[tuple[str, str, str], dict] = {}
-    for row in holdings_rows:
-        key = (row["venue"], row["symbol"], row["holding_type"])
+    holdings_map: dict[tuple[str, str, str], Row] = {}
+    for holding in holdings_rows:
+        key = (holding["venue"], holding["symbol"], holding["holding_type"])
         if key not in holdings_map:
-            holdings_map[key] = row
+            holdings_map[key] = holding
     collapsed = list(holdings_map.values())
 
     if not collapsed:
@@ -582,12 +589,12 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
         .order("asof", desc=False)
         .execute()
     )
-    snapshots = snapshots_result.data or []
+    snapshots = rows(snapshots_result)
 
     # --- Step 4: reconstruct per-symbol returns + apply 30-day warm-up gate ---
     portfolio_strategies: list[dict[str, Any]] = []
     portfolio_returns: dict[str, pd.Series] = {}
-    holdings_rows_eligible: list[dict] = []
+    holdings_rows_eligible: list[Row] = []
     raw_values: dict[str, float] = {}  # pseudo_id -> value_usd (for weight computation)
     warm_up_dropped = 0  # NEW-C08-05: count excluded holdings for observability
 
@@ -662,7 +669,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     # .data; _score_one_allocator already normalizes None preferences to {}.
     # Pre-fix this raised AttributeError: 'NoneType' object has no attribute
     # 'data' on every prefs-less allocator (Sentry 122529812, cron-recompute).
-    preferences = prefs_result.data if prefs_result else None
+    preferences = one(prefs_result)
 
     # Portfolio strategies + weights. Iterate all portfolios owned by this allocator.
     portfolios_result = supabase.table("portfolios").select("id").eq(
@@ -673,7 +680,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     # ps_rows assembly. Without this, the first-wins loop retains whichever
     # chunk's row is seen first — non-deterministic across pod restarts when
     # the same strategy appears in portfolios spanning different pages.
-    portfolio_ids = sorted(p["id"] for p in (portfolios_result.data or []))
+    portfolio_ids = sorted(p["id"] for p in rows(portfolios_result))
 
     portfolio_strategies: list[dict[str, Any]] = []
     portfolio_weights: dict[str, float] = {}
@@ -736,6 +743,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         # against a partial book, understating existing exposure (audit
         # finding M-0675 angle but query-caused, no log distinguishing "no
         # analytics yet" from "silently truncated").
+        analytics_by_sid: dict[str, Any] = {}
         if strategy_ids:
             # NEW-C08-03 / B19: bound the portfolio analytics IN-list through
             # chunked_in_query. A coverage gap here is the meaningful signal
@@ -764,7 +772,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
                 )
             analytics_by_sid = {row["strategy_id"]: row for row in sa_rows}
         else:
-            analytics_by_sid: dict[str, Any] = {}
+            analytics_by_sid = {}
 
         if strategy_ids:
             for row in ps_rows:
@@ -834,7 +842,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         .eq("decision", "thumbs_down")
         .execute()
     )
-    thumbs_down_ids = {row["strategy_id"] for row in (td_result.data or [])}
+    thumbs_down_ids = {row["strategy_id"] for row in rows(td_result)}
 
     return {
         "preferences": preferences,
@@ -850,13 +858,13 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
 
 def compute_holding_flags(
     *,
-    holdings_rows_eligible: list[dict],
+    holdings_rows_eligible: list[dict[str, Any]],
     portfolio_returns: dict[str, pd.Series],
     portfolio_weights: dict[str, float],
     portfolio_aum: float | None,
-    allocator_preferences: dict,
-    scored_candidates_by_slot: dict[str, list],
-) -> list[dict]:
+    allocator_preferences: dict[str, Any],
+    scored_candidates_by_slot: dict[str, list[Any]],
+) -> list[dict[str, Any]]:
     """Phase 09 / finding f5. Per-holding flag rows persisted into match_batches.holding_flags.
 
     Returns list[dict] — one entry per eligible holding (those present in portfolio_returns).
@@ -882,7 +890,7 @@ def compute_holding_flags(
     corr_ceiling = allocator_preferences.get("correlation_ceiling")
     aum = float(portfolio_aum) if portfolio_aum and float(portfolio_aum) > 0 else None
 
-    flags: list[dict] = []
+    flags: list[dict[str, Any]] = []
 
     for row in holdings_rows_eligible:
         pseudo_id = f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}"
@@ -1062,7 +1070,7 @@ async def _score_one_allocator(
         # candidate list; compute_holding_flags applies the top-real-UUID +
         # FLAG_COMPOSITE_THRESHOLD filter per slot.
         holdings_eligible = ctx.get("_holdings_rows_eligible") or []
-        scored_by_slot: dict[str, list] = {}
+        scored_by_slot: dict[str, list[Any]] = {}
         if holdings_eligible:
             proxies = [
                 _ScoredProxy(c["strategy_id"], float(c.get("score", 0.0)))
@@ -1088,7 +1096,7 @@ async def _score_one_allocator(
         # Persist: one match_batches row, N match_candidates rows.
         supabase = get_supabase()
 
-        batch_row = {
+        batch_row: dict[str, Any] = {
             "allocator_id": allocator_id,
             "mode": result["mode"],
             "filter_relaxed": result["filter_relaxed"],
@@ -1118,9 +1126,10 @@ async def _score_one_allocator(
             _batch_insert = await asyncio.to_thread(
                 lambda: supabase.table("match_batches").insert(batch_row).execute()
             )
-            if not _batch_insert.data:
+            _batch_rows = rows(_batch_insert)
+            if not _batch_rows:
                 raise RuntimeError(f"Failed to insert match_batches for {allocator_id}")
-            _batch_id = _batch_insert.data[0]["id"]
+            _batch_id = str(_batch_rows[0]["id"])
 
             # Build the candidates+excluded rows list.
             # Red-team CRITICAL fix (audit-2026-05-07): `explicitly_excluded` is a
@@ -1136,7 +1145,7 @@ async def _score_one_allocator(
             # uses `excluded_total` so the row-count audit trail stays honest.
             # TODO(audit-2026-05-07 follow-up PR): ship a migration that widens
             # the CHECK to include 'explicitly_excluded', then remove this filter.
-            _rows_to_insert = []
+            _rows_to_insert: list[dict[str, Any]] = []
             for _cand in result["candidates"]:
                 _rows_to_insert.append({
                     "batch_id": _batch_id,
@@ -1343,10 +1352,10 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
         .limit(1)
         .execute()
     )
-    rows = result.data or []
-    if not rows:
+    batch_rows = rows(result)
+    if not batch_rows:
         return False
-    last_row = rows[0]
+    last_row = batch_rows[0]
     # Trigger 2: engine_version mismatch — invalidate v1 batches for the
     # v1→v2 cutover and any future bump. Short-circuits BEFORE the age
     # check so a fresh v1 batch is still recomputed.
@@ -1384,8 +1393,8 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
         .maybe_single()
         .execute()
     )
-    prefs = (prefs_result.data or {}) if prefs_result else {}
-    edited_raw = prefs.get("mandate_edited_at") if isinstance(prefs, dict) else None
+    prefs = one(prefs_result) or {}
+    edited_raw = prefs.get("mandate_edited_at")
     if edited_raw:
         try:
             edited_at = _parse_supabase_ts(edited_raw)
@@ -1451,7 +1460,7 @@ def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
         .range(0, keep - 1)
         .execute()
     )
-    protected_ids = {row["id"] for row in (protected_result.data or [])}
+    protected_ids = {row["id"] for row in rows(protected_result)}
     # Fewer than `keep` total rows → nothing older to sweep.
     if len(protected_ids) < keep:
         return 0
@@ -1475,7 +1484,7 @@ def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
             .range(0, _RETENTION_SELECT_PAGE_SIZE - 1)
             .execute()
         )
-        page_rows = page_result.data or []
+        page_rows = rows(page_result)
         if not page_rows:
             break
         # Exclude the pinned newest `keep` so they are never deleted even when
@@ -1541,7 +1550,8 @@ def _is_admin_profile(user_id: str) -> bool | None:
             .maybe_single()
             .execute()
         )
-        if profile and profile.data and profile.data.get("is_admin"):
+        profile_row = one(profile)
+        if profile_row and profile_row.get("is_admin"):
             return True
         roles = (
             sb.table("user_app_roles")
@@ -1595,9 +1605,10 @@ def _is_allocator_profile(allocator_id: str) -> bool | None:
             allocator_id, exc,
         )
         return None  # sentinel: transient error, not confirmed non-allocator
-    if not (profile and profile.data):
+    profile_row = one(profile)
+    if not profile_row:
         return False
-    return profile.data.get("role") in ("allocator", "both")
+    return profile_row.get("role") in ("allocator", "both")
 
 
 # ---------------------------------------------------------------------------
@@ -1861,7 +1872,7 @@ async def cron_recompute() -> dict[str, Any]:
         .in_("role", ["allocator", "both"])
         .execute()
     )
-    allocators = allocators_result.data or []
+    allocators = rows(allocators_result)
     if not allocators:
         logger.info("match_engine cron: no allocators found")
         return _early_return("no_allocators")
@@ -1962,7 +1973,7 @@ async def cron_recompute() -> dict[str, Any]:
         return_exceptions=True,
     )
     for aid, sweep_result in zip(swept_allocator_ids, sweep_results):
-        if isinstance(sweep_result, Exception):
+        if isinstance(sweep_result, BaseException):
             logger.error(
                 "match_engine cron: retention sweep failed for %s: %s",
                 aid, sweep_result,

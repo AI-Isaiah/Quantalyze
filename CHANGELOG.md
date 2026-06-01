@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.42] - 2026-06-01
+### Changed — migrate `routers/match.py` + `services/feedback_engine.py` onto the `rows()`/`one()` row accessors (cross-cutting refactor B-mypy, part 3 of 8)
+
+First call-site migration of the `--strict` floor. Both files were dominated by the PostgREST `JSON`-union splatter (match.py 198 errors, feedback_engine.py 51) from consuming `.data` directly. Routing every `.data` read through the part-2 `rows()`/`one()` primitives narrows the union once, at the seam, and — critically — makes `one()`'s `Row | None` return type FORCE the no-row handling that these hot, client-facing paths already do at runtime but mypy couldn't see.
+
+- **match.py: 198 → 0 errors.** All `.execute()` multi-row reads route through `rows()`; all five `.maybe_single().execute()` sites (kill-switch, allocator preferences, skip-check prefs, admin-profile gate, allocator-profile gate) route through `one()`. Each `one()` site reproduces its **exact** current runtime contract — e.g. the allocator-preferences site keeps returning `None` (the documented Sentry-122529812 no-mandate signal, normalized to `{}` downstream), and the allocator-profile gate keeps returning `False` on no-row (confirmed-non-allocator → 422) while the transient-error `None` sentinel (→ 503) is untouched. A latent local-variable shadow (`rows = result.data` shadowing the imported `rows()`) was renamed to `batch_rows`.
+- **feedback_engine.py: 51 → 0 errors.** Both eligible-outcome queries + the score-breakdown batch/candidate queries route through `rows()`. The bespoke `BridgeOutcomeRow`/`RejectionReason`/`_BridgeOutcomeOptional` TypedDicts were removed in favour of the central `Row` primitive: they were only ever *annotations* (the producer returned the raw `.data` union, so mypy never validated a row against them), and the campaign's established convention (see `services/db.py`) is one loose `Row` over schema-drift-brittle per-table TypedDicts — the `bridge_outcomes` column contract is preserved as documentation. `count="exact"` → `count=CountMethod.exact` (byte-identical wire request; pure type correctness).
+- A handful of genuine narrows (not unions): a `BaseException` isinstance check on `asyncio.gather(return_exceptions=True)` results (was `Exception`, which under-narrowed); a walrus-bind so a comprehension's None-filtered values type-check; `str()` coercion of the DB batch-id (a UUID) at the typed return boundary; and honest container annotations (`dict[str, Any]`, `list[Any]`). **No `cast()`, no `# type: ignore`, no `Any`-launder** — verified by grep over the diff.
+
+**Net: full surface 954 → 745.** Behaviour-preserving: the match + feedback contract suites stay green (376 passed, identical to baseline) and the full suite is green (2516 passed; the pre-existing `test_simulator_router` ordering flake deselected). The `maybe_single` None-contract was the highest-risk surface — verified at every site that the `one()` migration reproduces today's exact raise/skip/default behaviour. CI gate stays scoped to `services/ingestion/` until the final part.
+
 ## [0.24.15.41] - 2026-06-01
 ### Changed — published-visibility predicate unified into one by-construction helper (cross-cutting refactor B10, TS-only scope)
 
