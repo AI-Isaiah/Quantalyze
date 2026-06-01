@@ -56,9 +56,12 @@ from cryptography.fernet import InvalidToken
 from fastapi import HTTPException
 # APIResponse is the documented return type of a PostgREST builder's
 # `.execute()`; CountMethod is the StrEnum the `.select(count=...)` kwarg expects
-# (a bare "exact" string is rejected under --strict). Both are re-exported at the
-# postgrest package root.
-from postgrest import APIResponse, CountMethod
+# (a bare "exact" string is rejected under --strict). Pin the submodule paths
+# (mirroring services/db.py): the postgrest package root does NOT re-export these
+# on every version (CI's postgrest lacks `CountMethod` at the root), so a root
+# import fails loudly at collection time on a postgrest pin bump.
+from postgrest.base_request_builder import APIResponse
+from postgrest.types import CountMethod
 from supabase import Client
 
 from services.analytics_status import sync_strategy_analytics_status
