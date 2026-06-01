@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, TypeVar
 
+# postgrest does not re-export SingleAPIResponse from its package root (only
+# APIResponse is). Both live in base_request_builder, which is where supabase-py
+# itself imports them from; pin the submodule path so a postgrest bump that
+# relocates them fails loudly at import rather than silently degrading typing.
+from postgrest.base_request_builder import APIResponse, SingleAPIResponse
 from supabase import Client, create_client
 
 logger = logging.getLogger(__name__)
@@ -106,6 +111,61 @@ async def db_execute(fn: Callable[[], _T]) -> _T:
         pass
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_DB_EXECUTOR, fn)
+
+
+# ---------------------------------------------------------------------------
+# Supabase row typing primitive (B-mypy)
+# ---------------------------------------------------------------------------
+#
+# PostgREST responses are the single biggest --strict drift source in the
+# service: ``APIResponse.data`` is ``list[JSON]`` and ``SingleAPIResponse.data``
+# is ``JSON`` (a deeply-recursive ``bool|str|int|float|Sequence[JSON]|
+# Mapping[str,JSON]|None`` union), and ``APIResponse`` is NOT generic — there is
+# no type parameter to pin at the call site, so every ``.data`` access splatters
+# the union across hundreds of ``union-attr``/``index``/``call-overload`` errors.
+#
+# These two accessors are the canonical seam where that union is narrowed ONCE,
+# at the point of consumption, into a typed row shape. ``Row`` keeps the column
+# VALUES loose (``Any``) — a PostgREST row genuinely is heterogeneous JSON and we
+# already fail loud on schema drift at runtime, so per-table TypedDicts would be
+# brittle gold-plating across 31 tables. The value these add is narrowing the
+# *container*: ``one()`` returns ``Row | None``, which means ``row["col"]`` does
+# not type-check until the caller has handled the ``None`` case — so the latent
+# missing-None-check bugs on ``.single()``/``.maybe_single()`` paths (which
+# return ``None`` at runtime) become compile-time-visible instead of a
+# production AttributeError on bad input. This is narrowing by real runtime
+# checks (``isinstance``/``is None``), never a ``cast`` that hides nullability.
+Row = dict[str, Any]
+
+
+def rows(resp: APIResponse) -> list[Row]:
+    """Narrow a multi-row PostgREST response (``.execute()`` / ``.rpc()``) to
+    ``list[Row]``.
+
+    ``resp.data`` is typed ``list[JSON]``; keep only the dict elements (every
+    real table/RPC row is a JSON object). A non-dict element would be a
+    malformed response, not a row — dropping it here mirrors the runtime
+    expectation rather than letting the union splatter downstream.
+    """
+    return [r for r in resp.data if isinstance(r, dict)]
+
+
+def one(resp: SingleAPIResponse | None) -> Row | None:
+    """Narrow a single-row PostgREST response (``.single()`` /
+    ``.maybe_single().execute()``) to ``Row | None``.
+
+    Returns ``None`` when the response itself is ``None`` (``.maybe_single()``
+    returns ``None`` at runtime when no row matches — see the documented
+    Sentry contract at ``routers/match.py``) OR when ``.data`` is not a dict.
+    The ``Row | None`` return type FORCES the caller to handle the no-row case
+    before indexing — that is the whole point: an unguarded ``.data["col"]`` on
+    a ``maybe_single`` result is a live AttributeError-on-missing-row bug today,
+    and routing through ``one()`` turns it into a compile error until guarded.
+    """
+    if resp is None:
+        return None
+    data = resp.data
+    return data if isinstance(data, dict) else None
 
 
 class PaginatedSelectTruncated(RuntimeError):
