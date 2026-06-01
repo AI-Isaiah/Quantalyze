@@ -28,6 +28,7 @@ must keep annotations evaluated at function-definition time.
 """
 
 import asyncio
+import dataclasses
 import os
 import secrets
 import time
@@ -39,12 +40,12 @@ import hashlib
 import structlog
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
 
-from services.db import get_supabase, get_user_scoped_supabase
+from services.db import get_supabase, get_user_scoped_supabase, one, rows
 from services.feature_flags import is_unified_backbone_active
 from services.ingestion import get_adapter
-from services.ingestion.adapter import KeySubmissionRequest
+from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source, Trade
 from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
 from services.rate_limit import limiter
 from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
@@ -103,11 +104,14 @@ def _process_key_rate_limit_key(request: Request) -> str:
 
 
 class _ProcessKeyBody(BaseModel):
-    flow_type: str = Field(
-        ...,
-        pattern=r"^(teaser|onboard|internal_report|csv|resync)$",
-    )
-    source: str = Field(..., pattern=r"^(okx|binance|bybit|csv)$")
+    # FlowType / Source are the canonical Literal aliases shared with
+    # services.ingestion.adapter.KeySubmissionRequest. Reusing them (rather
+    # than a local regex pattern) keeps this body in lockstep with the adapter
+    # contract and lets the values pass straight into KeySubmissionRequest
+    # without a cast. Pydantic validates a Literal field by membership — the
+    # same accept/reject set the prior `Field(pattern=...)` enforced.
+    flow_type: FlowType
+    source: Source
     context: dict[str, Any]
 
     # H-11 — per-flow_type source whitelist. Without this, a malicious caller
@@ -117,7 +121,7 @@ class _ProcessKeyBody(BaseModel):
     # auto-rollback (DoS).
     @field_validator("source")
     @classmethod
-    def _validate_source_per_flow(cls, source: str, info) -> str:
+    def _validate_source_per_flow(cls, source: Source, info: ValidationInfo) -> Source:
         flow_type = info.data.get("flow_type")
         if flow_type is None:
             # If flow_type is absent or already invalid, let its own
@@ -234,7 +238,7 @@ def _envelope_error(
     msg: str | None,
     cid: str,
     vid: str | None,
-) -> dict:
+) -> dict[str, Any]:
     """Phase 17 DESIGN-05 envelope. ok=False renders as wizard error UI."""
     return {
         "ok": False,
@@ -245,6 +249,19 @@ def _envelope_error(
         "recoverable": code
         in {"RATE_LIMITED", "EXCHANGE_UNAVAILABLE", "NETWORK_UNAVAILABLE"},
     }
+
+
+def _trade_to_dict(t: Trade | dict[str, Any]) -> dict[str, Any]:
+    """Normalize a fetch_raw element to a plain dict for trades_to_daily_returns.
+
+    fetch_raw is typed list[Trade] (dataclass instances); ``asdict()`` converts
+    those. An element that is already a dict is passed through unchanged —
+    preserving the inline comprehension's pre-migration defensive shape (never
+    ``asdict()`` a non-dataclass).
+    """
+    if isinstance(t, dict):
+        return t
+    return dataclasses.asdict(t)
 
 
 def _is_long_fetch(body: _ProcessKeyBody) -> bool:
@@ -261,7 +278,7 @@ async def _run_validate_only(
     body: "_ProcessKeyBody",
     correlation_id: str,
     started_at: float,
-) -> dict:
+) -> dict[str, Any]:
     """CR-02 — pre-strategy validation flow.
 
     Runs only `adapter.validate()` (no DB insert, no state-machine
@@ -318,12 +335,12 @@ async def _run_validate_only(
 # ---------------------------------------------------------------------------
 
 
-@router.post("")
+@router.post("", response_model=None)
 @limiter.limit("100/hour", key_func=_process_key_rate_limit_key)
 async def process_key(
     request: Request,
     body: Annotated[_ProcessKeyBody, Body()],
-) -> dict:
+) -> dict[str, Any] | JSONResponse:
     # `Annotated[_ProcessKeyBody, Body()]` — explicit Body marker. Without it,
     # `from __future__ import annotations` (line 18) stringifies the type hint
     # to "_ProcessKeyBody", and FastAPI 0.115.x's body-vs-query auto-detection
@@ -541,7 +558,7 @@ async def process_key(
     # enqueues still dedupe on (strategy_id, kind).
     wizard_session_id = body.context.get("wizard_session_id") or str(uuid.uuid4())
     if wizard_session_id:
-        existing = (
+        existing = one(
             supabase.table("strategy_verifications")
             .select("*")
             .eq("wizard_session_id", wizard_session_id)
@@ -556,10 +573,10 @@ async def process_key(
         # the ENTIRE ingestion for every first-time upload once the
         # unified-backbone flag was flipped on. Guard the None: absent row →
         # not idempotent → fall through to the normal insert path below.
-        if existing is not None and existing.data:
+        if existing:
             log.info(
                 "process_key.idempotent_hit",
-                verification_id=existing.data["id"],
+                verification_id=existing["id"],
             )
             # API-7 — emit WIZARD_DUPLICATE so the wizard renders the
             # idempotent-resume affordance. Pre-fix this path returned a
@@ -569,9 +586,9 @@ async def process_key(
             return {
                 "code": "WIZARD_DUPLICATE",
                 "idempotent": True,
-                "verification_id": existing.data["id"],
-                "status": existing.data["status"],
-                "trust_tier": existing.data.get("trust_tier"),
+                "verification_id": existing["id"],
+                "status": existing["status"],
+                "trust_tier": existing.get("trust_tier"),
                 "correlation_id": correlation_id,
                 "queued": False,
             }
@@ -702,7 +719,7 @@ async def process_key(
             )
             .execute()
         )
-        verification_id = draft_insert.data[0]["id"]
+        verification_id = rows(draft_insert)[0]["id"]
     except Exception as exc:
         # Pitfall 2 — TOCTOU race: SELECT pre-check passed but INSERT loses
         # to a concurrent insert from another wizard tab. Catch SQLSTATE
@@ -714,27 +731,27 @@ async def process_key(
             # TOCTOU delete / RLS hide between the failed insert and this
             # re-select leaves no row, we must surface the ORIGINAL 23505
             # rather than mask it with a cryptic None-deref or PGRST116 500.
-            race_winner = (
+            race_winner = one(
                 supabase.table("strategy_verifications")
                 .select("*")
                 .eq("wizard_session_id", wizard_session_id)
                 .maybe_single()
                 .execute()
             )
-            if race_winner is None or not race_winner.data:
+            if not race_winner:
                 raise
             log.info(
                 "process_key.idempotent_race_resolved",
-                verification_id=race_winner.data["id"],
+                verification_id=race_winner["id"],
             )
             # API-7 — race-resolved idempotent hit emits WIZARD_DUPLICATE
             # for the same reason as the SELECT-pre-check path above.
             return {
                 "code": "WIZARD_DUPLICATE",
                 "idempotent": True,
-                "verification_id": race_winner.data["id"],
-                "status": race_winner.data["status"],
-                "trust_tier": race_winner.data.get("trust_tier"),
+                "verification_id": race_winner["id"],
+                "status": race_winner["status"],
+                "trust_tier": race_winner.get("trust_tier"),
                 "correlation_id": correlation_id,
                 "queued": False,
             }
@@ -864,18 +881,11 @@ async def process_key(
     enriched_metrics_snapshot: dict[str, Any] = _metrics_to_jsonb(metrics)
     matched_strategy_id: str | None = None
     try:
-        import dataclasses
-
         from services.portfolio_metrics import compute_period_returns
         from services.strategy_matching import find_matched_strategy
         from services.transforms import trades_to_daily_returns
 
-        trades_as_dicts = [
-            dataclasses.asdict(t)
-            if dataclasses.is_dataclass(t) and not isinstance(t, type)
-            else t
-            for t in trades
-        ]
+        trades_as_dicts = [_trade_to_dict(t) for t in trades]
         returns = trades_to_daily_returns(
             trades_as_dicts, account_balance=None
         )

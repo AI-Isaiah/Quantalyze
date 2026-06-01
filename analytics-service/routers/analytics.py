@@ -1,4 +1,6 @@
 import logging
+from typing import Any
+
 from fastapi import APIRouter, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -12,7 +14,7 @@ limiter = Limiter(key_func=get_remote_address)
 
 @router.post("/compute-analytics")
 @limiter.limit("10/hour")
-async def compute_analytics(request: Request, req: ComputeRequest):
+async def compute_analytics(request: Request, req: ComputeRequest) -> dict[str, Any]:
     """Compute analytics for a strategy from its trade history.
 
     Thin HTTP wrapper. All work lives in services.analytics_runner.

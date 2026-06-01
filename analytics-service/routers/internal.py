@@ -36,11 +36,11 @@ import os
 import secrets
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from services.db import get_supabase
+from services.db import get_supabase, one
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import create_exchange
 from services.key_permissions import detect_permissions
@@ -136,7 +136,7 @@ async def get_key_permissions(
             "Connect and Submit cannot be masked by the 15-minute TTL."
         ),
     ),
-) -> dict:
+) -> dict[str, Any]:
     """Return live ``{read, trade, withdraw}`` scopes for an api_keys row.
 
     Flow:
@@ -180,10 +180,13 @@ async def get_key_permissions(
     # key_id would fire a stream of FK-failing audit inserts and silently
     # log them (the prior ordering swallowed those by best-effort), making
     # 404 attempts invisible to the audit trail.
-    api_key_row = supabase.table("api_keys").select("*").eq("id", key_id).maybe_single().execute()
+    api_key_row = one(
+        supabase.table("api_keys").select("*").eq("id", key_id).maybe_single().execute()
+    )
     # maybe_single().execute() returns None (not an APIResponse) for an unknown
-    # key_id; guard before .data so the intended 404 fires instead of a 500.
-    if not (api_key_row and api_key_row.data):
+    # key_id; one() collapses both that and a null/non-dict .data to None so the
+    # intended 404 fires instead of a 500.
+    if not api_key_row:
         raise HTTPException(status_code=404, detail="API key not found")
 
     # Audit: best-effort — never let an audit failure break the call.
@@ -197,7 +200,7 @@ async def get_key_permissions(
             "key_permission_audit insert failed for key=%s: %s", key_id, exc
         )
 
-    key_data = api_key_row.data
+    key_data = api_key_row
 
     try:
         kek = get_kek()

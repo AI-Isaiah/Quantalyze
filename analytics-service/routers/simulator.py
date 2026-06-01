@@ -28,6 +28,7 @@ keying mirrors routers/process_key.py:_process_key_rate_limit_key.
 import asyncio
 import logging
 import time
+from typing import Any
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
@@ -35,7 +36,7 @@ from pydantic import BaseModel, Field
 from slowapi.util import get_remote_address
 
 from services.audit import log_audit_event
-from services.db import get_supabase
+from services.db import get_supabase, one, rows
 from services.portfolio_limits import assert_portfolio_within_cap
 from services.rate_limit import limiter
 from services.simulator_scoring import simulate_add_candidate
@@ -163,7 +164,7 @@ class SimulatorRequest(BaseModel):
     user_id: str = Field(min_length=1)
 
 
-def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
+def _records_to_series(raw: list[Any] | None, name: str = "") -> pd.Series | None:
     """Convert [{date, value}, ...] records to a DatetimeIndex pd.Series.
 
     Duplicates `routers.portfolio._records_to_series` — kept local so the
@@ -192,8 +193,8 @@ def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
     if not isinstance(raw, list) or not raw:
         return None
 
-    dates: list = []
-    vals: list = []
+    dates: list[Any] = []
+    vals: list[Any] = []
     skipped = 0
     for r in raw:
         if not isinstance(r, dict):
@@ -229,7 +230,7 @@ def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
 
 @router.post("/simulator")
 @limiter.limit("20/hour", key_func=_simulator_rate_limit_key)
-async def portfolio_simulator(request: Request, req: SimulatorRequest):
+async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[str, Any]:
     """Simulate ADDing a candidate strategy to the user's portfolio.
 
     Returns Sharpe / MaxDD / correlation / concentration deltas plus the
@@ -289,24 +290,27 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
         ),
     )
 
+    portfolio_row = one(portfolio_result)
+    candidate = one(candidate_row)
+
     # Defense-in-depth ownership check. The Next.js layer already validates
     # this, but the Python service uses a service-role client that bypasses
     # RLS — if the service were ever reachable from another path we still
     # want to enforce portfolio ownership here.
-    if not portfolio_result.data:
+    if not portfolio_row:
         raise HTTPException(status_code=404, detail="Portfolio not found")
 
     # Reject candidates that aren't published — same guardrail as the
     # portfolio-optimizer + bridge endpoints.
-    if not candidate_row.data:
+    if not candidate:
         raise HTTPException(
             status_code=404,
             detail="Candidate strategy not found or not published",
         )
-    candidate_name = candidate_row.data.get("name") or req.candidate_strategy_id
+    candidate_name = candidate.get("name") or req.candidate_strategy_id
 
     # Current portfolio composition + weights
-    portfolio_strategies = ps_result.data or []
+    portfolio_strategies = rows(ps_result)
     if not portfolio_strategies:
         raise HTTPException(
             status_code=400,
@@ -357,9 +361,9 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
     # EXISTS but has empty/None returns_series ("Candidate has no returns
     # history"). Folding into the IN query would otherwise collapse those
     # two branches — the existing tests assert both distinctly.
-    rows_by_id: dict[str, dict] = {}
+    rows_by_id: dict[str, dict[str, Any]] = {}
     candidate_row_present = False
-    for row in (sa_result.data or []):
+    for row in rows(sa_result):
         sid = row.get("strategy_id")
         if sid is None:
             continue
@@ -369,10 +373,10 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
 
     portfolio_returns: dict[str, pd.Series] = {}
     for sid in existing_ids:
-        row = rows_by_id.get(sid)
-        if row is None:
+        sa_row = rows_by_id.get(sid)
+        if sa_row is None:
             continue
-        s = _records_to_series(row.get("returns_series"), name=sid)
+        s = _records_to_series(sa_row.get("returns_series"), name=sid)
         if s is not None:
             portfolio_returns[sid] = s
 

@@ -4,11 +4,11 @@ import logging
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 
-from services.db import get_supabase
+from services.db import get_supabase, rows
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions
 
@@ -145,9 +145,9 @@ ALLOWED_STRATEGY_STATUSES = {"draft", "pending_review", "published"}
 
 
 async def _sync_single_key(
-    key_row: dict,
+    key_row: dict[str, Any],
     kek: bytes,
-) -> dict:
+) -> dict[str, Any]:
     """Sync a single API key: decrypt, fetch trades, store, update cursor.
 
     Returns a structured result dict for logging.
@@ -173,6 +173,7 @@ async def _sync_single_key(
             # recent successful validation is still within TTL. Tests use
             # `_validation_cache_hit` directly; the production path treats a
             # hit as "valid, no re-check needed."
+            validation: dict[str, Any]
             if _validation_cache_hit(key_id):
                 validation = {"valid": True, "error": None, "error_code": None}
             else:
@@ -302,7 +303,7 @@ async def _sync_single_key(
             trades_json = json.dumps(trades, default=str)
             for sid in strategy_ids:
                 try:
-                    result = supabase.rpc(
+                    rpc_result = supabase.rpc(
                         "sync_trades",
                         {"p_strategy_id": sid, "p_trades": trades_json},
                     ).execute()
@@ -315,8 +316,8 @@ async def _sync_single_key(
                     per_strategy_stored[sid] = 0
                     strategy_errors[sid] = f"{type(rpc_exc).__name__}: {rpc_exc}"
                     continue
-                if isinstance(result.data, int):
-                    stored = result.data
+                if isinstance(rpc_result.data, int):
+                    stored = rpc_result.data
                 else:
                     # Contract drift: sync_trades is declared to return
                     # the integer row count. A dict / list / None here
@@ -327,14 +328,18 @@ async def _sync_single_key(
                         "for key %s strategy %s: %r — assuming %d stored",
                         key_id,
                         sid,
-                        result.data,
+                        rpc_result.data,
                         len(trades),
                     )
                     stored = len(trades)
                 per_strategy_stored[sid] = stored
             # `trades_stored` reflects the primary strategy for back-compat;
             # `per_strategy_stored` carries the per-strategy breakdown.
-            trades_stored = per_strategy_stored.get(strategy_id, 0)
+            trades_stored = (
+                per_strategy_stored.get(strategy_id, 0)
+                if strategy_id is not None
+                else 0
+            )
 
         # audit-2026-05-07 C-0198 — only advance `last_sync_at` when something
         # was actually stored, OR when there were no trades to store at all
@@ -352,7 +357,7 @@ async def _sync_single_key(
         any_trades_to_store = bool(trades) and bool(strategy_ids)
         should_advance_cursor = (not any_trades_to_store) or synced_count > 0
 
-        update_data: dict = {}
+        update_data: dict[str, Any] = {}
         if should_advance_cursor:
             update_data["last_sync_at"] = datetime.now(timezone.utc).isoformat()
         if account_balance is not None:
@@ -414,7 +419,7 @@ async def _sync_single_key(
             status = "error"
         else:
             status = "ok"
-        result: dict = {
+        result: dict[str, Any] = {
             "key_id": key_id,
             "strategy_id": strategy_id,
             "strategy_ids": strategy_ids,
@@ -454,7 +459,7 @@ async def _sync_single_key(
         }
 
 
-async def _sync_key_with_timeout(key_row: dict, kek: bytes) -> dict:
+async def _sync_key_with_timeout(key_row: dict[str, Any], kek: bytes) -> dict[str, Any]:
     """Wrap _sync_single_key with a per-key timeout."""
     try:
         return await asyncio.wait_for(
@@ -487,7 +492,7 @@ async def _sync_key_with_timeout(key_row: dict, kek: bytes) -> dict:
 
 
 @router.post("/cron-sync")
-async def cron_sync():
+async def cron_sync() -> dict[str, Any]:
     """Daily cron endpoint: sync trades for ALL active API keys.
 
     - Groups keys by exchange for rate-limit awareness
@@ -525,7 +530,7 @@ async def cron_sync():
             status_code=500,
             detail=f"cron_sync: api_keys SELECT failed: {type(exc).__name__}",
         ) from exc
-    raw_keys = keys_result.data or []
+    raw_keys = rows(keys_result)
 
     # Flatten the embed: `strategy_ids` is the full linked set (each
     # downstream `sync_trades` RPC fans out across all of them);
@@ -563,11 +568,11 @@ async def cron_sync():
     logger.info("cron_sync: found %d active API keys", len(keys))
 
     # Group by exchange for rate-limit awareness
-    exchange_groups: dict[str, list[dict]] = defaultdict(list)
+    exchange_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for key in keys:
         exchange_groups[key.get("exchange", "unknown")].append(key)
 
-    all_results: list[dict] = []
+    all_results: list[dict[str, Any]] = []
 
     for exchange_name, group_keys in exchange_groups.items():
         logger.info(
@@ -680,7 +685,7 @@ async def cron_sync():
             # single-caller partial-on-error type. The IN-list is already bounded
             # at _CRON_IN_LIST_PAGE_SIZE here, so the 414 risk is closed; only the
             # uniform coverage flag is forgone.
-            ps_data: list[dict] = []
+            ps_data: list[dict[str, Any]] = []
             for _page_start in range(0, len(synced_strategy_ids), _CRON_IN_LIST_PAGE_SIZE):
                 _chunk = synced_strategy_ids[_page_start:_page_start + _CRON_IN_LIST_PAGE_SIZE]
                 _page = (
@@ -689,7 +694,7 @@ async def cron_sync():
                     .in_("strategy_id", _chunk)
                     .execute()
                 )
-                ps_data.extend(_page.data or [])
+                ps_data.extend(rows(_page))
             candidate_portfolio_ids = list(
                 set(r["portfolio_id"] for r in ps_data)
             )
@@ -702,7 +707,7 @@ async def cron_sync():
             # NEW-C32-01 (continued): also paginate candidate_portfolio_ids.
             portfolio_ids: list[str] = []
             if candidate_portfolio_ids:
-                real_data: list[dict] = []
+                real_data: list[dict[str, Any]] = []
                 for _page_start in range(
                     0, len(candidate_portfolio_ids), _CRON_IN_LIST_PAGE_SIZE
                 ):
@@ -716,7 +721,7 @@ async def cron_sync():
                         .eq("is_test", False)
                         .execute()
                     )
-                    real_data.extend(_page.data or [])
+                    real_data.extend(rows(_page))
                 portfolio_ids = [r["id"] for r in real_data]
         except Exception as exc:
             # A Supabase blip on the recompute lookup must NOT lose the

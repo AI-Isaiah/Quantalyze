@@ -178,6 +178,11 @@ AuditAction = Literal[
     # --- 7.1b Python cross-service (via log_audit_event_service) ------------
     "bridge.score_candidates",
     "simulator.run",
+    # routers/simulator.py failure-path emit. The action column is free-text
+    # TEXT (no DB CHECK/enum), so this row is already written in prod; it was
+    # simply absent from this Literal. Python-only emit — the TS mirror in
+    # src/lib/audit.ts has no matching member because Next.js never raises it.
+    "simulator.run.failed",
     "optimizer.run",
     "reconcile.compare",
     # --- Bridge outcome tracker ---------------------------------------------
