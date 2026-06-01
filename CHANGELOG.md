@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.48] - 2026-06-01
+### Fixed — close the allocator equity/holdings audit-taxonomy gap (Python + TS) — B-mypy part f groundwork
+
+The `mypy --strict` floor (B-mypy) surfaced that `analytics-service` emits **11 audit actions that were absent from the `AuditAction` taxonomy** in both Python and TS — yet were already being written to prod (the `audit_log.action` column is free-text `TEXT`, no CHECK/enum). All 11 route through `job_worker._emit_audit`, which hard-codes `entity_type="api_key"`:
+
+- **10 `allocator.equity.*` actions** emitted by `services/equity_reconstruction.py`: `reconstruct_started`/`reconstruct_complete`/`reconstruct_failed`/`reconstruct_no_data`/`reconstruct_partial_unsupported`/`reconstruct_unexpected_noop`, `refresh_complete`/`refresh_failed`, `sibling_lookup_failed`, `perp_upnl_missing`.
+- **1 `allocator.holdings.persist_failed`** emitted by `services/job_worker.py`.
+
+This is a **behavior-preserving, type-only** backfill (the actions and their `entity_type` are unchanged — they were already written):
+- Added all 11 to the Python `AuditAction` `Literal` (`services/audit.py`) and to the TS `AuditAction` union **plus** the exhaustive `AUDIT_ACTION_ENTITY_TYPE_MAP` (`as const satisfies Record<AuditAction, AuditEntityType>`), all mapped to `"api_key"`.
+- Added an `AllocatorEquityAction` `Literal` alias and widened `job_worker._emit_audit`'s `action` param to `AllocatorHoldingsAction | AllocatorEquityAction` (the drift-detection contract now covers the equity family); added `persist_failed` to `AllocatorHoldingsAction`.
+- Typed the computed `audit_kind` in `equity_reconstruction.py` as `AllocatorEquityAction`.
+- Verified: `test_audit.py::test_action_literal_matches_ts_union` 23/23 (Python `AuditAction` ≡ TS union), `tsc --noEmit` 0, the `_emit_audit`/`log_audit_event` mypy gap scan is empty, and 423 audit/job_worker/equity/allocator tests pass. A fresh-context adversarial pass confirmed the emitted↔taxonomy match is bijective (no dead/typo entries) and the change is strictly type-level.
+
 ## [0.24.15.47] - 2026-06-01
 ### Fixed — cron-sync prod trade ingestion: 4 Sentry errors blocking Bybit persist + OKX fetch
 

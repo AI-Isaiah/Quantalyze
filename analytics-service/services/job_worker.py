@@ -698,22 +698,43 @@ async def _allocator_key_preflight(
     )
 
 
-# M-0670: The internal wrapper exists specifically for the
-# allocator.holdings.sync_* event family — narrow `action` to a Literal so
-# static checkers (and grep) flag any drift the moment a typo enters this
-# call surface. entity_type is hard-coded to 'api_key' (the single
-# discriminator this wrapper supports).
+# M-0670: The internal wrapper exists specifically for the api_key-anchored
+# allocator event families — narrow `action` to a Literal so static checkers
+# (and grep) flag any drift the moment a typo enters this call surface.
+# entity_type is hard-coded to 'api_key' (the single discriminator this wrapper
+# supports), so every action routed through here MUST be one whose canonical
+# AUDIT_ACTION_ENTITY_TYPE_MAP entity is 'api_key'.
 AllocatorHoldingsAction = Literal[
     "allocator.holdings.sync_requested",
     "allocator.holdings.sync_completed",
     "allocator.holdings.sync_failed",
+    "allocator.holdings.persist_failed",
+]
+
+# services.equity_reconstruction routes its equity reconstruct/refresh audit
+# events through this same wrapper (same allocator_id / api_key_id / api_key
+# entity shape). Kept as a sibling Literal so the drift-detection contract above
+# extends to the equity family; all members are also in services.audit.AuditAction
+# and map to entity_type='api_key' (asserted cross-runtime by
+# test_audit.py::test_action_literal_matches_ts_union).
+AllocatorEquityAction = Literal[
+    "allocator.equity.reconstruct_started",
+    "allocator.equity.reconstruct_complete",
+    "allocator.equity.reconstruct_failed",
+    "allocator.equity.reconstruct_no_data",
+    "allocator.equity.reconstruct_partial_unsupported",
+    "allocator.equity.reconstruct_unexpected_noop",
+    "allocator.equity.refresh_complete",
+    "allocator.equity.refresh_failed",
+    "allocator.equity.sibling_lookup_failed",
+    "allocator.equity.perp_upnl_missing",
 ]
 
 
 def _emit_audit(
     allocator_id: str,
     api_key_id: str,
-    action: AllocatorHoldingsAction,
+    action: AllocatorHoldingsAction | AllocatorEquityAction,
     metadata: dict | None = None,
 ) -> None:
     """f7 — Route allocator.holdings.sync_* audit events through
