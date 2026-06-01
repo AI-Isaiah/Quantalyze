@@ -5,12 +5,14 @@ import logging
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from supabase import Client
 
 from models.schemas import (
     BridgeRequest,
@@ -24,7 +26,7 @@ from models.schemas import (
 )
 from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
-from services.db import chunked_in_query, get_supabase
+from services.db import chunked_in_query, get_supabase, one, rows
 from services.exchange import create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions
 from services.metrics import _safe_float, sanitize_metrics
 from services.portfolio_metrics import compute_twr, compute_mwr, compute_period_returns
@@ -90,7 +92,7 @@ def _to_utc_iso(value: datetime | pd.Timestamp) -> str:
             value = value.tz_localize(timezone.utc)
         else:
             value = value.tz_convert(timezone.utc)
-        return value.isoformat()
+        return str(value.isoformat())
     if isinstance(value, datetime):
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
@@ -309,7 +311,7 @@ _VERIFY_STRATEGY_IDEMPOTENCY_TTL_SEC = 24 * 3600
 # PERF-2 — without a cap the dict grows unbounded. Eviction follows the same
 # insertion-order LRU pattern as the email cache.
 _VERIFY_STRATEGY_IDEMPOTENCY_CACHE_MAX = 10_000
-_verify_strategy_idempotency: dict[str, tuple[float, dict]] = {}
+_verify_strategy_idempotency: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _api_key_fingerprint(api_key: str | None) -> str:
@@ -332,7 +334,7 @@ def _verify_strategy_idempotency_key(
 
 def _verify_strategy_idempotency_lookup(
     email: str, exchange: str, api_key: str | None, ik: str,
-) -> dict | None:
+) -> dict[str, Any] | None:
     key = _verify_strategy_idempotency_key(email, exchange, api_key, ik)
     entry = _verify_strategy_idempotency.get(key)
     if not entry:
@@ -351,7 +353,7 @@ def _verify_strategy_idempotency_lookup(
 
 
 def _verify_strategy_idempotency_store(
-    email: str, exchange: str, api_key: str | None, ik: str, response: dict,
+    email: str, exchange: str, api_key: str | None, ik: str, response: dict[str, Any],
 ) -> None:
     key = _verify_strategy_idempotency_key(email, exchange, api_key, ik)
     # Re-insert to preserve insertion-order LRU semantics.
@@ -364,7 +366,7 @@ def _verify_strategy_idempotency_store(
         _verify_strategy_idempotency.pop(oldest, None)
 
 
-def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
+def _records_to_series(raw: list[Any] | None, name: str = "") -> pd.Series | None:
     """Convert [{date, value}, ...] records to a DatetimeIndex pd.Series.
 
     Tolerates malformed records by skipping any entry missing ``date`` or
@@ -376,8 +378,8 @@ def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
     if not isinstance(raw, list) or not raw:
         return None
 
-    dates: list = []
-    vals: list = []
+    dates: list[Any] = []
+    vals: list[Any] = []
     skipped = 0
     for r in raw:
         if not isinstance(r, dict):
@@ -458,7 +460,7 @@ def _build_monthly_returns(
     }
 
 
-def _trim_returns_series(raw_series: list | None, cap: int | None = None) -> list | None:
+def _trim_returns_series(raw_series: list[Any] | None, cap: int | None = None) -> list[Any] | None:
     """Return the trailing `cap` entries of a JSONB returns_series list.
 
     audit-2026-05-07 H-0594 — verify_strategy's per-candidate
@@ -492,7 +494,7 @@ def _trim_returns_series(raw_series: list | None, cap: int | None = None) -> lis
     return list(raw_series)
 
 
-def _unwrap_secret(value) -> str | None:
+def _unwrap_secret(value: object) -> str | None:
     """Return the raw string behind a SecretStr (or a plain str), else None.
 
     Audit H-0535 — VerifyStrategyRequest.api_key/api_secret/passphrase are now
@@ -507,7 +509,8 @@ def _unwrap_secret(value) -> str | None:
         return None
     getter = getattr(value, "get_secret_value", None)
     if callable(getter):
-        return getter()
+        secret = getter()
+        return secret if isinstance(secret, str) else None
     if isinstance(value, str):
         return value
     return None
@@ -543,7 +546,7 @@ def _redact_credentials(message: str, req: "VerifyStrategyRequest") -> str:
 _compute_semaphore = asyncio.Semaphore(3)
 
 
-def _build_normalized_weights(portfolio_strategies: list[dict]) -> dict[str, float]:
+def _build_normalized_weights(portfolio_strategies: list[dict[str, Any]]) -> dict[str, float]:
     """Build a normalized weight map from portfolio_strategies rows.
 
     Replaces three near-identical inline copies across _compute_portfolio_analytics,
@@ -578,7 +581,7 @@ def _build_normalized_weights(portfolio_strategies: list[dict]) -> dict[str, flo
     return {sid: w / total for sid, w in raw.items()}
 
 
-def _series_to_curve(series: pd.Series) -> list[dict]:
+def _series_to_curve(series: pd.Series) -> list[dict[str, Any]]:
     """Serialize a cumprod Series into JSON-shaped equity-curve records.
 
     Replaces two duplicated comprehensions in _compute_portfolio_analytics and
@@ -626,7 +629,7 @@ def _compute_sharpe_and_vol(returns: pd.Series) -> tuple[float | None, float | N
 # Internal computation helper (also callable from the cron module)
 # ---------------------------------------------------------------------------
 
-async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
+async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
     """Compute full portfolio analytics and persist the result.
 
     Inserts a new portfolio_analytics row (immutable history — no upsert).
@@ -647,9 +650,9 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
     if not insert_result.data:
         raise HTTPException(status_code=500, detail="Failed to create analytics row")
 
-    analytics_id = insert_result.data[0]["id"]
+    analytics_id = rows(insert_result)[0]["id"]
 
-    def _fail(error_msg: str):
+    def _fail(error_msg: str) -> None:
         # @audit-skip: compute-job failure state.
         # error_msg is bounded to ~500 chars to keep the column readable.
         supabase.table("portfolio_analytics").update(
@@ -664,7 +667,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             "strategy_id, current_weight, strategies(id, name)"
         ).eq("portfolio_id", portfolio_id).execute()
 
-        portfolio_strategies = ps_result.data or []
+        portfolio_strategies = rows(ps_result)
         if not portfolio_strategies:
             _fail("No strategies found in portfolio.")
             raise HTTPException(status_code=400, detail="No strategies found in portfolio")
@@ -695,7 +698,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             "strategy_id, returns_series, equity_curve, total_aum"
         ).in_("strategy_id", strategy_ids).execute()
 
-        analytics_rows = {row["strategy_id"]: row for row in (sa_result.data or [])}
+        analytics_rows = {row["strategy_id"]: row for row in rows(sa_result)}
 
         strategy_returns: dict[str, pd.Series] = {}
         strategy_equity: dict[str, pd.Series] = {}
@@ -948,7 +951,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         max_drawdown = _safe_float(float(drawdown.min()))
 
         # Narrative — pass enriched payload for monthly breakdown + optimizer sentence
-        analytics_payload: dict = {
+        analytics_payload: dict[str, Any] = {
             "return_mtd": period_returns.get("return_mtd"),
             "avg_pairwise_correlation": avg_pairwise_corr,
             "attribution_breakdown": attribution,
@@ -984,8 +987,9 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             ).eq("portfolio_id", portfolio_id).eq(
                 "computation_status", ComputationStatus.COMPLETE.value
             ).order("computed_at", desc=True).limit(1).execute()
-            if prev_analytics.data and prev_analytics.data[0].get("optimizer_suggestions"):
-                analytics_payload["optimizer_suggestions"] = prev_analytics.data[0]["optimizer_suggestions"]
+            _prev_rows = rows(prev_analytics)
+            if _prev_rows and _prev_rows[0].get("optimizer_suggestions"):
+                analytics_payload["optimizer_suggestions"] = _prev_rows[0]["optimizer_suggestions"]
         except Exception as exc:
             # Optimizer sentence is best-effort, but we MUST surface the failure
             # in logs so transient Supabase issues don't silently drop the
@@ -1147,14 +1151,14 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
 
 
 def _generate_alerts(
-    supabase,
+    supabase: Client,
     portfolio_id: str,
     max_drawdown: float | None,
     avg_pairwise_corr: float | None,
-    rolling_corr: dict | None = None,
-    attribution: list | None = None,
-    risk_decomp: list | None = None,
-    strategy_returns: dict | None = None,
+    rolling_corr: dict[str, Any] | None = None,
+    attribution: list[Any] | None = None,
+    risk_decomp: list[Any] | None = None,
+    strategy_returns: dict[str, Any] | None = None,
 ) -> None:
     """Insert portfolio alerts for threshold breaches.
 
@@ -1303,7 +1307,7 @@ def _generate_alerts(
             ).is_(
                 "acknowledged_at", "null"
             ).execute()
-            existing_types = {row["alert_type"] for row in (existing_resp.data or [])}
+            existing_types = {row["alert_type"] for row in rows(existing_resp)}
         except Exception as exc:
             # If the dedup probe fails we must not silently skip alerts —
             # fall back to per-alert select-then-insert to preserve the
@@ -1343,7 +1347,7 @@ def _generate_alerts(
     _generate_rebalance_drift_alert(supabase, portfolio_id)
 
 
-def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
+def _generate_rebalance_drift_alert(supabase: Client, portfolio_id: str) -> None:
     """Fire a rebalance_drift alert for the strategy with the largest drift > 5%.
 
     Two-layer safety against alert storms:
@@ -1362,12 +1366,12 @@ def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
     """
     try:
         # Portfolio age → honeymoon guard
-        portfolio_row = supabase.table("portfolios").select(
+        portfolio_row = one(supabase.table("portfolios").select(
             "created_at"
-        ).eq("id", portfolio_id).single().execute()
-        if not portfolio_row.data:
+        ).eq("id", portfolio_id).single().execute())
+        if not portfolio_row:
             return
-        created_at_str = portfolio_row.data.get("created_at")
+        created_at_str = portfolio_row.get("created_at")
         if not created_at_str:
             return
         created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
@@ -1386,9 +1390,9 @@ def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
 
         # Keep most recent per strategy. Rows come back ordered DESC.
         seen: set[str] = set()
-        latest: list[dict] = []
-        for row in ws_rows.data:
-            sid = row.get("strategy_id")
+        latest: list[dict[str, Any]] = []
+        for row in rows(ws_rows):
+            sid = row["strategy_id"]
             if sid in seen:
                 continue
             seen.add(sid)
@@ -1421,7 +1425,7 @@ def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
         }
 
         # Find worst-drift strategy with both values present
-        worst: dict | None = None
+        worst: dict[str, Any] | None = None
         for row in latest:
             target = row.get("target_weight")
             actual = row.get("actual_weight")
@@ -1513,7 +1517,7 @@ def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
 
 @router.post("/portfolio-analytics", response_model=PortfolioAnalyticsResponse)
 @limiter.limit("10/hour")
-async def portfolio_analytics(request: Request, req: PortfolioAnalyticsRequest):
+async def portfolio_analytics(request: Request, req: PortfolioAnalyticsRequest) -> dict[str, Any]:
     """Compute full portfolio analytics for a given portfolio."""
     supabase = get_supabase()
 
@@ -1573,7 +1577,7 @@ _OPTIMIZER_PUBLISHED_LIMIT = 200  # max published strategies pulled per optimize
 
 @router.post("/portfolio-optimizer", response_model=PortfolioOptimizerResponse)
 @limiter.limit("10/hour")
-async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
+async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) -> dict[str, Any]:
     """Find diversification candidates for a portfolio.
 
     Audit 2026-05-07 hardening:
@@ -1606,20 +1610,20 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     # re-asserted here for defence-in-depth. portfolio_owner_id is still
     # captured from the row so the audit below can attribute under the
     # portfolio's real owner.
-    portfolio_result = supabase.table("portfolios").select("id, user_id").eq(
+    portfolio_result = one(supabase.table("portfolios").select("id, user_id").eq(
         "id", req.portfolio_id
-    ).eq("user_id", req.user_id).single().execute()
+    ).eq("user_id", req.user_id).single().execute())
 
-    if not portfolio_result.data:
+    if not portfolio_result:
         raise HTTPException(status_code=404, detail="Portfolio not found")
 
-    portfolio_owner_id = portfolio_result.data.get("user_id")
+    portfolio_owner_id = portfolio_result.get("user_id")
 
     ps_result = supabase.table("portfolio_strategies").select(
         "strategy_id, current_weight"
     ).eq("portfolio_id", req.portfolio_id).execute()
 
-    portfolio_strategies = ps_result.data or []
+    portfolio_strategies = rows(ps_result)
     if not portfolio_strategies:
         raise HTTPException(status_code=400, detail="No strategies found in portfolio")
 
@@ -1656,7 +1660,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     portfolio_returns: dict[str, pd.Series] = {}
     optimizer_missing_returns_sids: list[str] = []
     optimizer_fetched_sids: set[str] = set()
-    for row in (sa_in_result.data or []):
+    for row in rows(sa_in_result):
         optimizer_fetched_sids.add(row["strategy_id"])
         s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
         if s is not None:
@@ -1711,7 +1715,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
         "created_at", desc=True
     ).limit(_OPTIMIZER_PUBLISHED_LIMIT).execute()
 
-    candidate_rows = all_published.data or []
+    candidate_rows = rows(all_published)
     candidate_ids = [row["id"] for row in candidate_rows]
     candidate_names = {row["id"]: row.get("name", row["id"]) for row in candidate_rows}
 
@@ -1726,7 +1730,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
             "strategy_id, returns_series"
         ).in_("strategy_id", candidate_ids).execute()
 
-        for row in (sa_cand_result.data or []):
+        for row in rows(sa_cand_result):
             s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
             if s is not None:
                 candidate_returns[row["strategy_id"]] = s
@@ -1749,8 +1753,9 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
         "portfolio_id", req.portfolio_id
     ).eq("computation_status", ComputationStatus.COMPLETE.value).order("computed_at", desc=True).limit(1).execute()
 
+    _latest_rows = rows(latest)
     persisted = False
-    if latest.data:
+    if _latest_rows:
         # @audit-skip: internal cache write (optimizer_suggestions is
         # denormalized onto the most recent portfolio_analytics row for
         # the UI to read in one fetch). User-intent audit emitted below
@@ -1767,11 +1772,11 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
             "portfolio_optimizer: in-place suggestions override on analytics_id=%s "
             "(portfolio=%s, suggestion_count=%d). H-0573 follow-up tracks the "
             "append-only redesign.",
-            latest.data[0]["id"], req.portfolio_id, len(suggestions),
+            _latest_rows[0]["id"], req.portfolio_id, len(suggestions),
         )
         supabase.table("portfolio_analytics").update(
             {"optimizer_suggestions": suggestions}
-        ).eq("id", latest.data[0]["id"]).execute()
+        ).eq("id", _latest_rows[0]["id"]).execute()
         persisted = True
     else:
         # Surface the no-completed-analytics no-op explicitly. The previous
@@ -1832,7 +1837,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
 
 @router.post("/portfolio-bridge", response_model=PortfolioBridgeResponse)
 @limiter.limit("10/hour")
-async def portfolio_bridge(request: Request, req: BridgeRequest):
+async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, Any]:
     """Find replacement candidates for an underperforming strategy (Bridge V1).
 
     Uses REPLACE scoring: removes the incumbent, redistributes its weight,
@@ -1903,7 +1908,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
         "strategy_id, current_weight"
     ).eq("portfolio_id", req.portfolio_id).execute()
 
-    portfolio_strategies = ps_result.data or []
+    portfolio_strategies = rows(ps_result)
     # NEW-C19-07: cap OWN membership before the bridge builds its returns map.
     _assert_portfolio_within_cap(portfolio_strategies)
     strategy_ids = [row["strategy_id"] for row in portfolio_strategies]
@@ -1924,7 +1929,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
 
     portfolio_returns: dict[str, pd.Series] = {}
     bridge_missing_returns_sids: list[str] = []
-    for row in (sa_in_result.data or []):
+    for row in rows(sa_in_result):
         s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
         if s is not None:
             portfolio_returns[row["strategy_id"]] = s
@@ -1944,7 +1949,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
         )
 
     # Also detect strategies that had no analytics row at all.
-    fetched_sids = {row["strategy_id"] for row in (sa_in_result.data or [])}
+    fetched_sids = {row["strategy_id"] for row in rows(sa_in_result)}
     bridge_missing_analytics_sids = [sid for sid in strategy_ids if sid not in fetched_sids]
     if bridge_missing_analytics_sids:
         logger.warning(
@@ -2012,7 +2017,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
         "created_at", desc=True
     ).limit(_OPTIMIZER_PUBLISHED_LIMIT).execute()
 
-    candidate_rows = all_published.data or []
+    candidate_rows = rows(all_published)
     candidate_ids = [row["id"] for row in candidate_rows]
     candidate_names = {row["id"]: row.get("name", row["id"]) for row in candidate_rows}
 
@@ -2022,7 +2027,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
             "strategy_id, returns_series"
         ).in_("strategy_id", candidate_ids).execute()
 
-        for row in (sa_cand_result.data or []):
+        for row in rows(sa_cand_result):
             s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
             if s is not None:
                 candidate_returns[row["strategy_id"]] = s
@@ -2127,7 +2132,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
 
 @router.post("/verify-strategy", response_model=VerifyStrategyResponse)
 @limiter.limit("5/hour")
-async def verify_strategy(request: Request, req: VerifyStrategyRequest):
+async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[str, Any]:
     """Verify a strategy from exchange API keys (landing page flow).
 
     Phase 19 / PR-X2 (pre-BACKBONE-04 step (d)) — this endpoint no longer
@@ -2221,7 +2226,7 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
     verification_id = str(uuid.uuid4())
     supabase = get_supabase()
 
-    def _fail_vr(msg: str):
+    def _fail_vr(msg: str) -> None:
         # Phase 19 / PR-X2 — no-op. The legacy state-machine UPDATE on
         # ``verification_requests`` is gone (migration 107 makes it a
         # read-only VIEW). The TS caller's ``strategy_verifications``
@@ -2286,7 +2291,7 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
             published_result = supabase.table("strategies").select("id").eq(
                 "status", "published"
             ).order("created_at", desc=True).limit(_MATCH_CANDIDATE_LIMIT).execute()
-            published_ids = [row["id"] for row in (published_result.data or [])]
+            published_ids = [row["id"] for row in rows(published_result)]
 
             # Detect the partial-coverage case before the matching loop
             # so we can flip `matching_status` if no match is found in the
@@ -2314,7 +2319,7 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
                 # anyway — older history dilutes the recent-regime
                 # signal verify_strategy is actually looking for.
                 existing: dict[str, pd.Series] = {}
-                for row in (sa_result.data or []):
+                for row in rows(sa_result):
                     raw_series = _trim_returns_series(row.get("returns_series"))
                     s = _records_to_series(raw_series, name=row["strategy_id"])
                     if s is not None:
