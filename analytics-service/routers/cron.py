@@ -403,35 +403,58 @@ async def _sync_single_key(
                 len(trades),
             )
 
-        # audit-2026-05-07 C-0197 — mark strategy_analytics rows stale for
-        # strategies that actually received new trades. The downstream
-        # analytics cron will pick up `computation_status='stale'` rows and
-        # recompute; pre-fix the cron synced trades but never told the
-        # analytics layer that its inputs had changed, so KPI rows stayed
-        # stale until a user-triggered recompute (or the daily portfolio
-        # recompute cascade) happened to touch them.
-        stale_strategy_ids = [
+        # audit-2026-05-07 C-0197 / 2026-06-01 root-cause fix — trigger an
+        # analytics recompute for strategies that received new trades.
+        #
+        # The pre-fix code wrote `computation_status='stale'` to
+        # strategy_analytics, but that was broken two ways:
+        #   (a) 'stale' is NOT in the strategy_analytics_computation_status_check
+        #       CHECK constraint (only 'pending'/'computing'/'complete'/'failed'),
+        #       so every write on a cron-synced strategy raised SQLSTATE 23514
+        #       (Sentry QUANTALYZE-P), and
+        #   (b) nothing ever READ 'stale' — the imagined "downstream analytics
+        #       cron picks up stale rows and recomputes" did not exist, so
+        #       cron-synced (e.g. bybit) strategies were never recomputed and
+        #       their dashboard KPIs froze until a user-triggered recompute.
+        #
+        # The real recompute trigger is the compute_jobs queue: enqueue one
+        # `compute_analytics` job per strategy that got new trades — mirroring
+        # the Phase-18 sync_trades follow-on at
+        # services/job_worker.py::run_sync_trades_job. enqueue_compute_job is
+        # dedup-safe (the partial unique index
+        # compute_jobs_one_inflight_per_kind_strategy caps one in-flight
+        # compute_analytics per strategy) and runs here as the service role,
+        # so _assert_owner inside the RPC bypasses cleanly (auth.uid() IS NULL).
+        # Best-effort PER STRATEGY: a transient enqueue failure for one
+        # strategy must not abort the others or fail the sync — trades are
+        # already persisted. Failures are logged to Sentry AND surfaced in
+        # the result envelope below (`recompute_enqueue_errors`) so the
+        # cron_sync summary alarm sees them rather than the failure living
+        # only in Sentry. NOTE: a failed enqueue is NOT re-driven by the next
+        # sync tick — `last_sync_at` has already advanced, so the next tick
+        # fetches no new trades for this strategy and recomputes nothing.
+        # Recovery then relies on the daily/portfolio recompute cascade or a
+        # user-triggered recompute.
+        recompute_strategy_ids = [
             sid for sid, stored in per_strategy_stored.items() if stored > 0
         ]
-        if stale_strategy_ids:
+        recompute_enqueue_errors: dict[str, str] = {}
+        for sid in recompute_strategy_ids:
             try:
-                # B19 deferred: this is an UPDATE ... WHERE IN (...), not a
-                # SELECT-IN. services.db.chunked_in_query returns SELECT-row
-                # coverage, which is meaningless for an UPDATE — out of scope
-                # (same exclusion as the retention DELETE-IN at match.py:1442).
-                supabase.table("strategy_analytics").update(
-                    {"computation_status": "stale"}
-                ).in_("strategy_id", stale_strategy_ids).execute()
-            except Exception:
-                # Non-fatal: the next analytics cron tick will still pick
-                # the rows up if they were already stale; if they weren't,
-                # the user-facing KPIs are stale by one cron cycle until a
-                # downstream recompute touches them. logger.exception so
-                # the traceback reaches Sentry.
+                supabase.rpc(
+                    "enqueue_compute_job",
+                    {"p_strategy_id": sid, "p_kind": "compute_analytics"},
+                ).execute()
+            except Exception as enq_exc:
+                # logger.exception (active traceback) so the full stack reaches
+                # Sentry; non-fatal — continue so one strategy's failure does
+                # not starve the rest, and record it for the result envelope.
+                recompute_enqueue_errors[sid] = f"{type(enq_exc).__name__}: {enq_exc}"
                 logger.exception(
-                    "cron_sync: failed to mark strategy_analytics stale for %d "
-                    "strategy id(s) on key %s — analytics may lag one cycle",
-                    len(stale_strategy_ids),
+                    "cron_sync: failed to enqueue compute_analytics for "
+                    "strategy %s on key %s — analytics will lag until the daily "
+                    "recompute cascade or a user-triggered recompute",
+                    sid,
                     key_id,
                 )
 
@@ -468,6 +491,14 @@ async def _sync_single_key(
             if status == "error":
                 first_sid = next(iter(strategy_errors))
                 result["error"] = strategy_errors[first_sid]
+        # Surface recompute-trigger failures so the cron_sync summary sees a
+        # tick where trades stored fine but the analytics recompute enqueue
+        # failed (otherwise it would be indistinguishable from a healthy
+        # tick — the failure would live only in Sentry). Does NOT change the
+        # ok/partial/error status, which reflects trade *persistence*: the
+        # trades did land; only the fire-and-forget recompute trigger failed.
+        if recompute_enqueue_errors:
+            result["recompute_enqueue_errors"] = recompute_enqueue_errors
         return result
 
     except Exception as e:

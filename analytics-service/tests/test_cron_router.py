@@ -447,13 +447,26 @@ class TestMultiStrategyFanOut:
             result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
 
         assert result["status"] == "ok"
-        # ONE RPC per linked strategy
-        assert mock_supabase.rpc.call_count == 3
+        # ONE sync_trades RPC per linked strategy (each followed by an
+        # enqueue_compute_job recompute trigger, asserted separately below).
+        sync_trades_calls = [
+            c for c in mock_supabase.rpc.call_args_list if c.args[0] == "sync_trades"
+        ]
+        assert len(sync_trades_calls) == 3
         invoked_strategies = sorted(
-            call.args[1]["p_strategy_id"]
-            for call in mock_supabase.rpc.call_args_list
+            c.args[1]["p_strategy_id"] for c in sync_trades_calls
         )
         assert invoked_strategies == ["strat-A", "strat-B", "strat-C"]
+        # And one compute_analytics recompute enqueued per stored strategy
+        # (the trigger that replaced the broken 'stale' marker).
+        enqueue_calls = [
+            c for c in mock_supabase.rpc.call_args_list
+            if c.args[0] == "enqueue_compute_job"
+        ]
+        assert sorted(c.args[1]["p_strategy_id"] for c in enqueue_calls) == [
+            "strat-A", "strat-B", "strat-C",
+        ]
+        assert all(c.args[1]["p_kind"] == "compute_analytics" for c in enqueue_calls)
         # Result reports per-strategy breakdown
         assert result["per_strategy_stored"] == {
             "strat-A": 3,
@@ -931,12 +944,11 @@ class TestPartialStatusOnRpcFailure:
         # CRITICAL: last_sync_at UPDATE MUST still have fired — else the
         # next tick refetches `strat-A` / `strat-C`'s already-landed
         # trades and re-runs the (still-broken) `strat-B` RPC needlessly.
-        # Post-C-0197, the cron also issues a separate
-        # `.table("strategy_analytics").update({"computation_status":
-        # "stale"})` so the analytics layer recomputes; both updates
-        # land on `mock_supabase.table.return_value.update` because the
-        # generic mock doesn't dispatch by table name. Walk the call
-        # list and require the last_sync_at payload to appear in it.
+        # Post-2026-06-01 the recompute trigger is an
+        # `enqueue_compute_job(..., 'compute_analytics')` RPC per stored
+        # strategy (NOT a strategy_analytics UPDATE), so the only
+        # `.table(...).update(...)` here is the api_keys last_sync_at write.
+        # Walk the call list and require the last_sync_at payload to appear.
         update_payloads = [
             call.args[0]
             for call in mock_supabase.table.return_value.update.call_args_list
@@ -1086,9 +1098,14 @@ class TestSyncTradesPayloadIsJsonbArrayNotScalar:
         assert result["status"] == "ok"
         assert result["per_strategy_stored"]["strat-A"] == 2
 
-        # Exactly one sync_trades RPC for the one linked strategy.
-        assert mock_supabase.rpc.call_count == 1
-        call = mock_supabase.rpc.call_args
+        # Exactly one sync_trades RPC for the one linked strategy (a
+        # follow-on enqueue_compute_job recompute trigger also fires; filter
+        # to the sync_trades call for the payload-shape assertion).
+        sync_trades_calls = [
+            c for c in mock_supabase.rpc.call_args_list if c.args[0] == "sync_trades"
+        ]
+        assert len(sync_trades_calls) == 1
+        call = sync_trades_calls[0]
         assert call.args[0] == "sync_trades"
         params = call.args[1]
         p_trades = params["p_trades"]
@@ -2138,31 +2155,45 @@ class TestC0195AllocatorProtectedKeyNotDeactivated:
         )
 
 
-class TestC0197StrategyAnalyticsMarkedStale:
-    """C-0197: after a successful `sync_trades` RPC the cron must signal
-    the analytics layer that its inputs changed by writing
-    `computation_status='stale'` to the affected `strategy_analytics`
-    rows. Pre-fix the cron synced trades but never told analytics — KPI
-    rows stayed stale until a user-triggered recompute happened to touch
-    them. Tests assert the UPDATE was issued with the right payload and
-    filter set.
+class TestC0197CronTriggersAnalyticsRecompute:
+    """C-0197 / 2026-06-01 root-cause fix: after a successful `sync_trades`
+    the cron must trigger an analytics recompute for each strategy that
+    received new trades, by enqueueing a `compute_analytics` compute_job.
+
+    The original implementation instead wrote
+    `computation_status='stale'` to strategy_analytics, which was broken
+    two ways: (a) 'stale' is not a valid computation_status (the
+    strategy_analytics_computation_status_check CHECK allows only
+    pending/computing/complete/failed), so every write raised SQLSTATE
+    23514 (Sentry QUANTALYZE-P); and (b) nothing ever read 'stale', so
+    cron-synced (e.g. bybit) strategies were never recomputed and their
+    dashboard KPIs froze. These tests assert the enqueue happens per
+    stored strategy and the illegal 'stale' UPDATE is gone.
     """
 
     @pytest.mark.asyncio
-    async def test_C0197_successful_sync_marks_strategy_analytics_stale(self):
+    async def test_successful_sync_enqueues_compute_analytics_per_strategy(self):
         mock_supabase = MagicMock()
-        rpc_chain = MagicMock()
-        rpc_chain.execute.return_value = MagicMock(data=4)
-        mock_supabase.rpc.return_value = rpc_chain
 
-        # Track update payloads by the *table* they were issued against.
-        # The generic `mock_supabase.table.return_value.update` collapses
-        # api_keys + strategy_analytics into the same MagicMock; we need
-        # to dispatch by table name so the C-0197 assertion can isolate
-        # the strategy_analytics mutation.
+        # Record every rpc(name, args) so we can isolate the recompute
+        # enqueues from the sync_trades persistence calls.
+        rpc_calls: list[tuple[str, dict]] = []
+
+        def _rpc(name: str, args: dict):
+            rpc_calls.append((name, args))
+            chain = MagicMock()
+            if name == "sync_trades":
+                # int row count > 0 → this strategy "stored" → must recompute
+                chain.execute.return_value = MagicMock(data=4)
+            else:
+                chain.execute.return_value = MagicMock(data=None)
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc
+
+        # Track table().update() payloads by table so we can assert the
+        # illegal strategy_analytics 'stale' write is GONE.
         updates_by_table: dict[str, list[dict]] = defaultdict_factory()
-        in_filters: dict[str, list[tuple[str, list[str]]]] = defaultdict_factory()
-        api_keys_eq_calls: list[tuple[str, str]] = []
 
         def _make_chain(table_name: str):
             chain = MagicMock()
@@ -2170,22 +2201,10 @@ class TestC0197StrategyAnalyticsMarkedStale:
             def _update(payload: dict):
                 updates_by_table[table_name].append(payload)
                 upd = MagicMock()
-
-                def _eq(col, val):
-                    if table_name == "api_keys":
-                        api_keys_eq_calls.append((col, val))
-                    eq_chain = MagicMock()
-                    eq_chain.execute.return_value = MagicMock(data=[{"id": val}])
-                    return eq_chain
-
-                def _in(col, vals):
-                    in_filters[table_name].append((col, list(vals)))
-                    in_chain = MagicMock()
-                    in_chain.execute.return_value = MagicMock(data=[])
-                    return in_chain
-
-                upd.eq.side_effect = _eq
-                upd.in_.side_effect = _in
+                upd.eq.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "x"}]
+                )
+                upd.in_.return_value.execute.return_value = MagicMock(data=[])
                 return upd
 
             chain.update.side_effect = _update
@@ -2221,31 +2240,41 @@ class TestC0197StrategyAnalyticsMarkedStale:
             result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
 
         assert result["status"] == "ok"
-        # strategy_analytics MUST have one UPDATE with the stale marker
-        # scoped to the synced strategy_ids only.
+
+        # Exactly one enqueue_compute_job(compute_analytics) per stored
+        # strategy — this is the recompute trigger that replaced the
+        # broken 'stale' marker. Without the fix this list is empty.
+        enqueue_args = [
+            args for (name, args) in rpc_calls if name == "enqueue_compute_job"
+        ]
+        assert sorted(a["p_strategy_id"] for a in enqueue_args) == ["strat-A", "strat-B"], (
+            f"Expected one enqueue_compute_job per stored strategy; got {enqueue_args!r}"
+        )
+        assert all(a["p_kind"] == "compute_analytics" for a in enqueue_args), (
+            f"Every recompute enqueue must be kind=compute_analytics; got {enqueue_args!r}"
+        )
+
+        # The illegal `computation_status='stale'` write must be GONE — it
+        # violated the CHECK constraint (23514) and nothing ever read it.
         sa_updates = updates_by_table.get("strategy_analytics", [])
-        assert sa_updates == [{"computation_status": "stale"}], (
-            f"Expected exactly one strategy_analytics stale UPDATE; got {sa_updates!r}"
+        assert sa_updates == [], (
+            f"strategy_analytics must NOT be UPDATEd with a 'stale' marker "
+            f"(removed — CHECK-violating + dead); got {sa_updates!r}"
         )
-        sa_filters = in_filters.get("strategy_analytics", [])
-        assert len(sa_filters) == 1, (
-            f"Expected exactly one .in_(...) filter on the stale UPDATE; got {sa_filters!r}"
-        )
-        column, ids = sa_filters[0]
-        assert column == "strategy_id"
-        assert sorted(ids) == ["strat-A", "strat-B"]
 
     @pytest.mark.asyncio
-    async def test_C0197_no_stale_update_when_nothing_stored(self):
+    async def test_no_recompute_enqueue_when_nothing_stored(self):
         """If sync_trades stored zero trades across the board (e.g. all
-        per-strategy RPCs failed), DO NOT mark analytics stale —
-        nothing changed, and bouncing the rows would force a useless
-        recompute.
+        per-strategy RPCs failed), DO NOT enqueue a recompute — nothing
+        changed, and a useless compute_analytics job would just churn.
         """
         mock_supabase = MagicMock()
+        rpc_calls: list[tuple[str, dict]] = []
 
-        # Every sync_trades RPC raises.
+        # Every rpc raises — sync_trades fails for all strategies, so
+        # per_strategy_stored stays 0 and no recompute should be attempted.
         def _rpc(name: str, args: dict):
+            rpc_calls.append((name, args))
             chain = MagicMock()
             chain.execute.side_effect = RuntimeError("postgres dead")
             return chain
@@ -2297,12 +2326,75 @@ class TestC0197StrategyAnalyticsMarkedStale:
             key_row = _make_key_row(strategy_ids=["strat-A"])
             result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
 
-        # All RPCs failed → status=error (covered by red-team test),
-        # AND no strategy_analytics UPDATE was issued.
+        # All RPCs failed → status=error, AND no recompute enqueue fired.
         assert result["status"] == "error"
+        enqueue_args = [
+            args for (name, args) in rpc_calls if name == "enqueue_compute_job"
+        ]
+        assert enqueue_args == [], (
+            f"Expected zero compute_analytics enqueues when nothing stored; "
+            f"got {enqueue_args!r}"
+        )
         assert sa_update_calls == [], (
-            f"Expected zero strategy_analytics stale UPDATEs when nothing "
-            f"was stored; got {sa_update_calls!r}"
+            f"Expected zero strategy_analytics UPDATEs when nothing stored; "
+            f"got {sa_update_calls!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_clean_zero_count_stored_does_not_enqueue_recompute(self):
+        """A clean `sync_trades` success that stored ZERO new trades
+        (`data=0`, NOT an exception) must also skip the recompute enqueue.
+        This pins the `stored > 0` guard specifically — distinct from the
+        exception path above — so a regression loosening it to `>= 0`
+        (unconditional enqueue) is caught.
+        """
+        mock_supabase = MagicMock()
+        rpc_calls: list[tuple[str, dict]] = []
+
+        def _rpc(name: str, args: dict):
+            rpc_calls.append((name, args))
+            chain = MagicMock()
+            # sync_trades succeeds but stored nothing new (0 rows).
+            chain.execute.return_value = MagicMock(data=0)
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc
+        mock_supabase.table.return_value.update.return_value.eq.return_value.\
+            execute.return_value = MagicMock(data=[{"id": "x"}])
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(strategy_ids=["strat-A"])
+            result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        assert result["status"] == "ok"
+        assert result["per_strategy_stored"]["strat-A"] == 0
+        enqueue_args = [
+            args for (name, args) in rpc_calls if name == "enqueue_compute_job"
+        ]
+        assert enqueue_args == [], (
+            f"A clean zero-stored sync must NOT enqueue a recompute (the "
+            f"`stored > 0` guard); got {enqueue_args!r}"
         )
 
 
