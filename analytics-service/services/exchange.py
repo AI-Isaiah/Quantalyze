@@ -2,6 +2,7 @@ import asyncio
 import ccxt.async_support as ccxt
 import logging
 import os
+import random
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, TypedDict
@@ -825,6 +826,59 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     return result
 
 
+# OKX rate-limits /account/bills per-IP (error 50011). cron_sync fans out
+# BATCH_SIZE exchange instances concurrently and ccxt's per-instance rate
+# limiter does NOT coordinate across them, so concurrent keys trip 429 even
+# though each instance is individually polite (QUANTALYZE-J/K). A 429 here is
+# transient — back off and retry the SAME page instead of discarding the whole
+# (already partially fetched) bills series.
+OKX_BILLS_MAX_RETRIES = 4
+OKX_BILLS_BACKOFF_BASE_S = 0.5
+
+
+async def _okx_bills_fetch_with_backoff(
+    exchange: ccxt.Exchange,
+    method_name: str,
+    params: dict[str, str],
+    *,
+    label: str,
+    page: int,
+) -> dict[str, Any]:
+    """Fetch one OKX bills page, retrying transient 429s with backoff+jitter.
+
+    Only ``RateLimitExceeded``/``DDoSProtection`` are retried; every other
+    exception (and a 429 that survives all retries) is re-raised. It then hits
+    ``fetch_daily_pnl``'s outer ``except`` (which records the
+    ``daily_pnl_fetch_error`` DQ flag and returns the as-yet-unaggregated —
+    i.e. empty — series), so a persistent 429 yields NO data, never a silently
+    truncated one. This helper does NOT change that downstream behaviour; it
+    only adds recovery for the *transient* burst case so the common 429 stops
+    zeroing out the whole fetch. Jitter spreads the concurrent keys' retries so
+    they don't thunder back in lockstep.
+    """
+    method = getattr(exchange, method_name)
+    for attempt in range(OKX_BILLS_MAX_RETRIES):
+        try:
+            result: dict[str, Any] = await method(params)
+            return result
+        except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as exc:
+            if attempt == OKX_BILLS_MAX_RETRIES - 1:
+                raise
+            delay = OKX_BILLS_BACKOFF_BASE_S * (2 ** attempt) + random.uniform(0, 0.5)
+            logger.warning(
+                "OKX bills %s page %d: %s (attempt %d/%d) — backing off %.2fs, retrying",
+                label,
+                page,
+                type(exc).__name__,
+                attempt + 1,
+                OKX_BILLS_MAX_RETRIES,
+                delay,
+            )
+            await asyncio.sleep(delay)
+    # Loop always returns or raises; this satisfies the type checker.
+    raise RuntimeError("unreachable: _okx_bills_fetch_with_backoff")
+
+
 async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) -> list[dict[str, Any]]:
     """Fetch daily PnL from the exchange account bills/ledger.
 
@@ -866,7 +920,13 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         params["after"] = after_id
 
                     try:
-                        bills = await exchange.private_get_account_bills(params)
+                        bills = await _okx_bills_fetch_with_backoff(
+                            exchange,
+                            "private_get_account_bills",
+                            params,
+                            label=inst_type,
+                            page=page,
+                        )
                         data = bills.get("data", [])
                         if not data:
                             break
@@ -921,7 +981,13 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         if after_id:
                             params["after"] = after_id
                         try:
-                            bills = await exchange.private_get_account_bills_archive(params)
+                            bills = await _okx_bills_fetch_with_backoff(
+                                exchange,
+                                "private_get_account_bills_archive",
+                                params,
+                                label=f"archive {inst_type}",
+                                page=page,
+                            )
                             data = bills.get("data", [])
                             if not data:
                                 break

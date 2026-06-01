@@ -424,6 +424,21 @@ export type AuditAction =
   | "allocator.holdings.sync_requested"
   | "allocator.holdings.sync_completed"
   | "allocator.holdings.sync_failed"
+  | "allocator.holdings.persist_failed"
+  // --- Allocator equity reconstruction / refresh (Python-only, emitted by
+  // analytics-service services.equity_reconstruction via job_worker._emit_audit
+  // no TS call site). Carried here so the Python and TS AuditAction taxonomies
+  // stay in sync, enforced by test_audit.py test_action_literal_matches_ts_union.
+  | "allocator.equity.reconstruct_started"
+  | "allocator.equity.reconstruct_complete"
+  | "allocator.equity.reconstruct_failed"
+  | "allocator.equity.reconstruct_no_data"
+  | "allocator.equity.reconstruct_partial_unsupported"
+  | "allocator.equity.reconstruct_unexpected_noop"
+  | "allocator.equity.refresh_complete"
+  | "allocator.equity.refresh_failed"
+  | "allocator.equity.sibling_lookup_failed"
+  | "allocator.equity.perp_upnl_missing"
   // --- Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint ---
   | "debug_key_flow.invoke"
   // --- audit-2026-05-07 P700: break-glass ADMIN_EMAIL fallback grant ---
@@ -602,6 +617,19 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP = {
   "allocator.holdings.sync_requested": "api_key",
   "allocator.holdings.sync_completed": "api_key",
   "allocator.holdings.sync_failed": "api_key",
+  "allocator.holdings.persist_failed": "api_key",
+  // Allocator equity reconstruction / refresh — Python-only, all routed through
+  // job_worker._emit_audit which hard-codes entity_type='api_key'.
+  "allocator.equity.reconstruct_started": "api_key",
+  "allocator.equity.reconstruct_complete": "api_key",
+  "allocator.equity.reconstruct_failed": "api_key",
+  "allocator.equity.reconstruct_no_data": "api_key",
+  "allocator.equity.reconstruct_partial_unsupported": "api_key",
+  "allocator.equity.reconstruct_unexpected_noop": "api_key",
+  "allocator.equity.refresh_complete": "api_key",
+  "allocator.equity.refresh_failed": "api_key",
+  "allocator.equity.sibling_lookup_failed": "api_key",
+  "allocator.equity.perp_upnl_missing": "api_key",
   // Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint
   "debug_key_flow.invoke": "debug_session",
   // audit-2026-05-07 P700 / admin-auth cluster

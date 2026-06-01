@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.24.15.50] - 2026-06-01
+### Changed — `mypy --strict` type floor: `equity_reconstruction.py` → 0 errors (cross-cutting refactor B-mypy, part f-2)
+
+Part f-2 brings `analytics-service/services/equity_reconstruction.py` (allocator historical equity / holdings reconstruction — financial code) to **0 `mypy --strict` errors** (53 → 0). Cardinal rule held: no `cast()`, no `# type: ignore`, no `Any`-laundering, no `or 0.0` fabrication; 100% behavior-preserving (verified by a fresh-context adversarial pass that traced the money path input-by-input).
+
+- **Money path (px/src)**: the spot + perp marking loops changed `px, src = _price_on(...)` (which returns `tuple[float | None, str | None]`) to a `maybe_px` temp with the existing `is None` guard, then `px = maybe_px` once narrowed — so a missing OHLCV price still skips the symbol (and records it in `skipped_symbols`) **exactly** as before; a `None` can never reach `qty * px` or `pos.mark(px)`. `src` retains its exact value (including `None`). Pure type-narrowing, no value change.
+- **`ccxt.NotSupported` subclass-Any**: `DeribitNotSupportedError` now uses a `TYPE_CHECKING` base alias (`Exception` for the type-checker, `ccxt.NotSupported` at runtime — ccxt ships no `py.typed`, so subclassing it tripped `disallow_subclassing_any`). Verified `issubclass(DeribitNotSupportedError, ccxt.NotSupported)` is still `True` at runtime, so the `except ccxt.NotSupported` feature-detection handlers still catch it. (Reusable pattern — `allocator_positions.py` has the same shape, to be fixed in a later part.)
+- **Shared `_ExchangeContext.exchange`** (`job_worker.py`): retyped `object → ccxt.Exchange` (the field always holds a ccxt exchange). Type-only (ccxt resolves to `Any`), no runtime change — and it incidentally cleared 5 pre-existing job_worker strict errors (the `ctx.exchange.close()`/`fetch_*` calls), 103 → 98, ahead of f-3.
+- The rest is honest annotation backfill: CoinGecko httpx `params: dict[str, str | int]`, the nested db-helper closures `-> Any` (their `supabase` arg is `Any`, so the builder chain genuinely is), `_parse_dt(value: object) -> datetime | None`, and bare `dict`/`list` → loosest-parameterized forms.
+- Verified: `mypy services/equity_reconstruction.py --strict` 0; 332 equity/reconstruction/position tests pass; full analytics suite 2520 passed (the one `test_simulator_router` full-suite failure is the pre-existing ordering flake, confirmed passing in isolation and untouched by this diff).
+
+## [0.24.15.49] - 2026-06-01
+### Fixed — `compute_analytics` mixed-precision timestamp crash (dashboard KPIs never refreshed)
+
+`compute_analytics` was failing terminally for ~63% of strategies (45/71 jobs `failed_final`), freezing their dashboard KPIs even when fresh trades were present. Root cause: `analytics-service/services/transforms.py` parsed the trade-`timestamp` column with a bare `pd.to_datetime(df["timestamp"])`. Pandas ≥2.0 infers the datetime format from the first element and then applies it strictly to the rest — so a series that mixes microsecond-precision raw fills (`...T12:34:56.123456+00:00`) with whole-second daily-PnL summary rows (`...T00:00:00+00:00`) raises `time data "..." doesn't match format "%Y-%m-%dT%H:%M:%S.%f%z" at position N` and aborts the whole computation. Real accumulated trade history routinely mixes both precisions (and the v0.24.15.47 `sync_trades` fix now persists *more* whole-second daily-PnL rows), so the failure was widespread.
+
+Fix: parse each value independently with `pd.to_datetime(df["timestamp"], format="ISO8601", utc=True)` (pandas ≥2.0 handles variable ISO precision; `utc=True` normalizes the already-`+00:00` inputs to a tz-aware UTC column — no shift). Covers every caller (`trades_to_daily_returns` delegates to `trades_to_daily_returns_with_status`). Regression test `test_mixed_precision_timestamps_do_not_raise` reproduces the exact prod error (mutation-verified: reverting the fix re-raises). 21/21 transforms tests pass; `services/transforms.py` net-zero new mypy errors.
+
+Follow-ups (tracked, not in this PR): (1) cron.py writes an illegal `computation_status='stale'` and never enqueues `compute_analytics` — replace with `enqueue_compute_job(..., 'compute_analytics')` (closes QUANTALYZE-P + wires the cron-sync recompute trigger); (2) `claim_compute_jobs_with_priority` drops `failed_retry` jobs (orphans them) — migration to add `failed_retry` + the C39 in-flight guard.
+
+## [0.24.15.48] - 2026-06-01
+### Fixed — close the allocator equity/holdings audit-taxonomy gap (Python + TS) — B-mypy part f groundwork
+
+The `mypy --strict` floor (B-mypy) surfaced that `analytics-service` emits **11 audit actions that were absent from the `AuditAction` taxonomy** in both Python and TS — yet were already being written to prod (the `audit_log.action` column is free-text `TEXT`, no CHECK/enum). All 11 route through `job_worker._emit_audit`, which hard-codes `entity_type="api_key"`:
+
+- **10 `allocator.equity.*` actions** emitted by `services/equity_reconstruction.py`: `reconstruct_started`/`reconstruct_complete`/`reconstruct_failed`/`reconstruct_no_data`/`reconstruct_partial_unsupported`/`reconstruct_unexpected_noop`, `refresh_complete`/`refresh_failed`, `sibling_lookup_failed`, `perp_upnl_missing`.
+- **1 `allocator.holdings.persist_failed`** emitted by `services/job_worker.py`.
+
+This is a **behavior-preserving, type-only** backfill (the actions and their `entity_type` are unchanged — they were already written):
+- Added all 11 to the Python `AuditAction` `Literal` (`services/audit.py`) and to the TS `AuditAction` union **plus** the exhaustive `AUDIT_ACTION_ENTITY_TYPE_MAP` (`as const satisfies Record<AuditAction, AuditEntityType>`), all mapped to `"api_key"`.
+- Added an `AllocatorEquityAction` `Literal` alias and widened `job_worker._emit_audit`'s `action` param to `AllocatorHoldingsAction | AllocatorEquityAction` (the drift-detection contract now covers the equity family); added `persist_failed` to `AllocatorHoldingsAction`.
+- Typed the computed `audit_kind` in `equity_reconstruction.py` as `AllocatorEquityAction`.
+- Verified: `test_audit.py::test_action_literal_matches_ts_union` 23/23 (Python `AuditAction` ≡ TS union), `tsc --noEmit` 0, the `_emit_audit`/`log_audit_event` mypy gap scan is empty, and 423 audit/job_worker/equity/allocator tests pass. A fresh-context adversarial pass confirmed the emitted↔taxonomy match is bijective (no dead/typo entries) and the change is strictly type-level.
+
+## [0.24.15.47] - 2026-06-01
+### Fixed — cron-sync prod trade ingestion: 4 Sentry errors blocking Bybit persist + OKX fetch
+
+The daily `/api/cron-sync` was reaching exchanges but failing to ingest the data. Four distinct production Sentry issues, all now fixed:
+
+- **QUANTALYZE-N — `APIError 22023 "cannot extract elements from a scalar"` (Bybit persist).** `routers/cron.py` was the last `sync_trades` caller still double-encoding the payload: `json.dumps(trades, default=str)` made PostgREST bind the JSON *string* to the `jsonb` parameter as a scalar string (`'"[…]"'::jsonb`), so `sync_trades`' `jsonb_array_elements(p_trades)` raised 22023 and every fetched Bybit trade was silently dropped (`trades_stored: 0`). Now passes the raw `list[dict]`, matching the two other callers (`routers/exchange.py`, `services/job_worker.py`) that already carry the documenting comments. Regression test asserts `p_trades` reaches the RPC as a list (mutation-verified: a `str` fails it).
+- **QUANTALYZE-M — `AttributeError: 'NoneType' object has no attribute 'encode'`.** A key row with NULL encryption columns (malformed/seed data left `is_active=true`) crashed `decrypt_credentials` on every tick. `_sync_single_key` now detects missing/NULL `dek_encrypted`/`api_key_encrypted` up front and skips the key with a clean `error` status + WARNING (fail-loud, no crash, no Sentry spam).
+- **QUANTALYZE-J/K — OKX `/account/bills` `50011 Too Many Requests` (429) discarded the whole daily-PnL series.** `cron_sync` fans out `BATCH_SIZE` concurrent OKX exchange instances; ccxt's per-instance rate limiter does not coordinate across them, so concurrent keys trip OKX's per-IP bills limit — and the bills loop re-raised on the first 429, throwing away every bill already fetched (`trades_fetched: 0`). The page fetch now retries transient 429s with bounded exponential backoff + jitter (`_okx_bills_fetch_with_backoff`); a 429 that survives all retries is re-raised into `fetch_daily_pnl`'s existing handler (records the `daily_pnl_fetch_error` DQ flag, returns the empty series → no data, never a silently truncated one). This change only adds recovery for the transient-burst case — it does not alter the persistent-failure path.
+
+Verified: `test_cron_router.py` + `test_okx_bills_backoff.py` + `test_exchange*.py` = 196 passed; `routers/cron.py` `mypy --strict` clean; `services/exchange.py` net-zero new mypy errors.
+
 ## [0.24.15.46] - 2026-06-01
 ### Changed — `mypy --strict` type-safety floor: migrate `analytics-service/routers/` onto `rows()`/`one()` (cross-cutting refactor B-mypy, part e)
 

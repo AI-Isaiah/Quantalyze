@@ -98,6 +98,12 @@ def _make_key_row(
         "id": key_id,
         "exchange": exchange,
         "last_sync_at": None,
+        # Real api_keys rows always carry these encryption columns; the
+        # null-credential guard in _sync_single_key only trips when they are
+        # missing/NULL (malformed seed data). Decrypt is mocked in tests, so
+        # the dummy values are never actually decrypted.
+        "dek_encrypted": "dummy-dek",
+        "api_key_encrypted": "dummy-blob",
         "strategy_ids": strategy_ids or [],
         "strategy_id": (strategy_ids or [None])[0],
     }
@@ -207,6 +213,14 @@ def _make_mock_supabase_for_cron_sync(
         pa_data = []
     if update_data is None:
         update_data = [{"id": r.get("id", "key-1")} for r in keys_data]
+
+    # Real api_keys rows carry encryption columns; _sync_single_key's
+    # null-credential guard (QUANTALYZE-M) skips rows missing them. Default-fill
+    # so credential-agnostic integration tests still reach the (mocked) decrypt
+    # path rather than being short-circuited as malformed.
+    for _row in keys_data:
+        _row.setdefault("dek_encrypted", "dummy-dek")
+        _row.setdefault("api_key_encrypted", "dummy-blob")
 
     mock_supabase = MagicMock()
 
@@ -676,6 +690,8 @@ class TestPortfolioRecomputeErrorIsolation:
                         "id": "key-1",
                         "exchange": "binance",
                         "last_sync_at": None,
+                        "dek_encrypted": "dummy-dek",
+                        "api_key_encrypted": "dummy-blob",
                         "strategies": [{"id": "strat-A", "status": "published"}],
                     }
                 ]
@@ -988,6 +1004,137 @@ class TestSyncTradesShapeFallbackLogged:
         ), (
             "Expected ERROR log re: 'unexpected shape' for strat-A; got "
             + repr([r.message for r in caplog.records])
+        )
+
+
+class TestSyncTradesPayloadIsJsonbArrayNotScalar:
+    """REGRESSION (Postgres 22023): cron's inline persist must hand the
+    sync_trades RPC a JSON *array* (list[dict]) for `p_trades`, NOT a
+    pre-serialized JSON string.
+
+    WHY this matters (not just WHAT): pre-fix, cron did
+    `json.dumps(trades, default=str)` and passed the *string*. PostgREST then
+    bound that string to the JSONB parameter as a scalar string
+    (`'"[…]"'::jsonb`), so `sync_trades`' `jsonb_array_elements(p_trades)`
+    raised 22023 "cannot extract elements from a scalar" — silently dropping
+    every fetched trade for any strategy-linked key (the live blocker for
+    Bybit once its geo-block was lifted). A string does NOT fail at the Python
+    layer; it round-trips through PostgREST and only blows up inside the DB
+    function, so the type of this argument IS the contract and must be guarded
+    at the call site. The other two callers (routers/exchange.py,
+    services/job_worker.py) already pass the raw list; this locks the third
+    (inline cron) path so it can't regress to a string.
+    """
+
+    @pytest.mark.asyncio
+    async def test_p_trades_passed_as_list_not_serialized_string(self):
+        mock_supabase = MagicMock()
+        rpc_chain = MagicMock()
+        rpc_chain.execute.return_value = MagicMock(data=2)  # int row count
+        mock_supabase.rpc.return_value = rpc_chain
+        update_chain = MagicMock()
+        update_chain.eq.return_value.execute.return_value = MagicMock(
+            data=[{"id": "key-1"}]
+        )
+        mock_supabase.table.return_value.update.return_value = update_chain
+
+        # Trade dicts shaped like fetch_daily_pnl output (all JSON-native).
+        trades_fixture = [
+            {
+                "exchange": "bybit",
+                "symbol": "BTC/USDT:USDT",
+                "side": "buy",
+                "price": 42000.5,
+                "quantity": 0.1,
+                "timestamp": "2026-06-01T00:00:00+00:00",
+            },
+            {
+                "exchange": "bybit",
+                "symbol": "ETH/USDT:USDT",
+                "side": "sell",
+                "price": 2500.0,
+                "quantity": 1.0,
+                "timestamp": "2026-06-01T01:00:00+00:00",
+            },
+        ]
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=trades_fixture),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(exchange="bybit", strategy_ids=["strat-A"])
+            result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        assert result["status"] == "ok"
+        assert result["per_strategy_stored"]["strat-A"] == 2
+
+        # Exactly one sync_trades RPC for the one linked strategy.
+        assert mock_supabase.rpc.call_count == 1
+        call = mock_supabase.rpc.call_args
+        assert call.args[0] == "sync_trades"
+        params = call.args[1]
+        p_trades = params["p_trades"]
+
+        # THE regression assertion: a JSON array, not a double-encoded string.
+        assert isinstance(p_trades, list), (
+            "p_trades must be a list[dict] so PostgREST binds it as a JSONB "
+            "array; a str makes it a JSONB scalar string and sync_trades' "
+            "jsonb_array_elements() raises Postgres 22023. Got "
+            f"{type(p_trades).__name__}: {p_trades!r}"
+        )
+        assert not isinstance(p_trades, str)
+        assert p_trades == trades_fixture
+        assert params["p_strategy_id"] == "strat-A"
+
+
+class TestNullCredentialKeyIsSkippedNotCrashed:
+    """REGRESSION (QUANTALYZE-M): a key row with NULL encryption columns
+    (malformed/seed data left is_active=true) must be skipped with a clean
+    `error` status, NOT crash decrypt_credentials with `'NoneType' object has
+    no attribute 'encode'` — which spammed Sentry with an unactionable
+    AttributeError on every cron tick. Fail loud (status=error + WARNING) but
+    never raise, and never reach the decrypt path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_null_dek_encrypted_skips_without_reaching_decrypt(self, caplog):
+        key_row = _make_key_row(exchange="okx", strategy_ids=["strat-A"])
+        key_row["dek_encrypted"] = None  # malformed credential row
+
+        def _boom(*_a, **_k):
+            raise AssertionError("decrypt_credentials reached for null-cred key")
+
+        with patch.object(cron_mod, "decrypt_credentials", _boom):
+            with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+                result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        assert result["status"] == "error"
+        assert result["error"] == "missing_credentials"
+        assert result["trades_fetched"] == 0
+        assert any(
+            "missing/NULL encryption columns" in r.message
+            for r in caplog.records
+            if r.levelname == "WARNING"
+        ), "expected a WARNING about missing encryption columns; got " + repr(
+            [r.message for r in caplog.records]
         )
 
 

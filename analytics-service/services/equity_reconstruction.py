@@ -41,6 +41,7 @@ from services.closed_sets import (
 from services.dateday import epoch_ms_to_iso_day, sort_events_stable
 from services.db import db_execute, get_supabase
 from services.job_worker import (
+    AllocatorEquityAction,
     DispatchOutcome,
     DispatchResult,
     _allocator_key_preflight,
@@ -426,7 +427,18 @@ def _map_exception_to_sync_status(exc: Exception) -> str:
     return "error"
 
 
-class DeribitNotSupportedError(ccxt.NotSupported):
+if TYPE_CHECKING:
+    # ccxt.async_support ships no py.typed, so ``ccxt.NotSupported`` is ``Any`` and
+    # subclassing it trips ``disallow_subclassing_any`` under ``--strict``. At
+    # RUNTIME this class MUST inherit ``ccxt.NotSupported`` so the
+    # ``except ccxt.NotSupported`` feature-detection handlers below still catch it;
+    # for the type-checker we expose the concrete ``Exception`` base it derives from.
+    _DeribitNotSupportedBase = Exception
+else:
+    _DeribitNotSupportedBase = ccxt.NotSupported
+
+
+class DeribitNotSupportedError(_DeribitNotSupportedBase):
     """Reconstruction does not support Deribit (spot-less derivative-only venue).
 
     Mirrors allocator_positions.DeribitNotSupportedError — raised BEFORE any
@@ -462,7 +474,7 @@ _BREAKDOWN_TOP_N: int = 20
 _BREAKDOWN_PROTECTED_KEYS: tuple[str, ...] = ("STARTING_BALANCE", "__truncated__")
 
 
-def _cap_breakdown(breakdown: dict) -> dict:
+def _cap_breakdown(breakdown: dict[str, Any]) -> dict[str, Any]:
     # Audit 2026-05-07 L-0065: short-circuit on cardinality BEFORE serialising.
     # The truncation branch keeps only the top _BREAKDOWN_TOP_N symbols, so a
     # breakdown already at/below that count can never be truncated to anything
@@ -535,7 +547,7 @@ async def _fetch_trades_with_pagination(
     since_ms: int,
     now_ms: int,
     limit_per_call: int = 500,
-) -> tuple[list[dict], bool]:
+) -> tuple[list[dict[str, Any]], bool]:
     """Paginate fetch_my_trades via since. Returns (trades, hit_okx_terminus).
 
     For OKX, fans out across every instrument type (SPOT/MARGIN/SWAP/
@@ -574,7 +586,7 @@ async def _fetch_trades_with_pagination(
     # → exchangeType map → final 'SPOT'/'SWAP'/etc. Pre-fix, no `type`
     # was passed, so the call defaulted to SPOT and dropped every other
     # instrument's fills.
-    all_trades: list[dict] = []
+    all_trades: list[dict[str, Any]] = []
     for inst_type in OKX_INSTRUMENT_TYPES:
         type_trades = await _fetch_trades_paginated_one_pass(
             exchange,
@@ -590,13 +602,13 @@ async def _fetch_trades_paginated_one_pass(
     exchange: Any,
     since_ms: int,
     limit_per_call: int,
-    params: dict | None,
-) -> list[dict]:
+    params: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
     """Inner pagination loop — one cursor walk against fetch_my_trades with
     a fixed params payload. Caller picks `params` (None for non-OKX, an
     instType selector for OKX). Returns the flat list of trade dicts.
     """
-    all_trades: list[dict] = []
+    all_trades: list[dict[str, Any]] = []
     cursor_ms = since_ms
 
     # 500 iterations × 500 trades/page = 250k trade ceiling per pass —
@@ -626,7 +638,7 @@ async def _fetch_trades_paginated_one_pass(
 
 async def _fetch_transfers(
     exchange: Any, kind: str, since_ms: int, now_ms: int
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Paginate fetch_deposits or fetch_withdrawals via 90-day windows.
 
     Binance/OKX both cap per-call windows at 90 days (RESEARCH.md §1A/§1B).
@@ -639,7 +651,7 @@ async def _fetch_transfers(
 
     window_ms = 90 * 24 * 60 * 60 * 1000
     page_limit = 500
-    all_rows: list[dict] = []
+    all_rows: list[dict[str, Any]] = []
     window_start = since_ms
     while window_start < now_ms:
         window_end = min(window_start + window_ms, now_ms)
@@ -679,7 +691,7 @@ async def _fetch_transfers(
 
 async def _fetch_ohlcv_daily(
     exchange: Any, symbol: str, start_ms: int, end_ms: int,
-) -> list[list]:
+) -> list[list[Any]]:
     """Daily close OHLCV in [start_ms, end_ms]. Paginate until we reach
     end_ms or the venue stops returning new data.
 
@@ -698,7 +710,7 @@ async def _fetch_ohlcv_daily(
     Raises ccxt.BadSymbol for symbols the venue does not list — caller
     uses this as the CoinGecko-fallback trigger.
     """
-    all_rows: list[list] = []
+    all_rows: list[list[Any]] = []
     cursor_ms = start_ms
     day_ms = 24 * 60 * 60 * 1000
     # Safety ceiling: 10 pages × 1000 bars = 10000 candles, more than
@@ -745,7 +757,7 @@ async def _fetch_coingecko_daily_closes(
     """
     cg_id = _coingecko_id_for(symbol)
     url = f"{COINGECKO_BASE}/coins/{cg_id}/market_chart/range"
-    params = {
+    params: dict[str, str | int] = {
         "vs_currency": "usd",
         "from": start_ts_secs,
         "to": end_ts_secs,
@@ -812,7 +824,7 @@ async def _cache_coingecko_prices(
         for iso, price in prices
     ]
 
-    def _upsert():
+    def _upsert() -> Any:
         return supabase.table("token_price_history").upsert(
             rows,
             on_conflict="symbol,asof",
@@ -829,7 +841,7 @@ async def _read_cached_prices(
     supabase: Any, symbol: str, start_iso: str, end_iso: str
 ) -> dict[str, float]:
     """SELECT from token_price_history; return {asof_iso: price_usd}."""
-    def _sel():
+    def _sel() -> Any:
         return (
             supabase.table("token_price_history")
             .select("asof, price_usd")
@@ -853,9 +865,9 @@ async def _read_cached_prices(
 # ---------------------------------------------------------------------------
 
 def _compute_daily_equity(
-    trades: list[dict],
-    deposits: list[dict],
-    withdrawals: list[dict],
+    trades: list[dict[str, Any]],
+    deposits: list[dict[str, Any]],
+    withdrawals: list[dict[str, Any]],
     ohlcv_by_symbol: dict[str, list[tuple[str, float]]],
     coingecko_by_symbol: dict[str, dict[str, float]],
     start_date: date,
@@ -864,8 +876,8 @@ def _compute_daily_equity(
     skipped_symbols: set[str] | None = None,
     unknown_perp_symbols: set[str] | None = None,
     inverse_perp_symbols: set[str] | None = None,
-    ctval_drift_warnings: list[dict] | None = None,
-) -> list[dict]:
+    ctval_drift_warnings: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Replay trades + transfers forward; mark each day by close × quantity.
 
     Returns rows with { asof, value_usd, breakdown, source }. `source` is
@@ -901,7 +913,7 @@ def _compute_daily_equity(
         PnL feeds directly into that day's total_usd.
     """
     # Build event timeline keyed by date
-    events_by_date: dict[str, list[dict]] = {}
+    events_by_date: dict[str, list[dict[str, Any]]] = {}
 
     def _event_date(ts_ms: Any) -> str | None:
         if ts_ms is None:
@@ -978,7 +990,7 @@ def _compute_daily_equity(
                 return cg_series[cg_sorted[idx]], "coingecko_fallback"
         return None, None
 
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     cur = start_date
     while cur <= end_date:
         iso = cur.isoformat()
@@ -1205,10 +1217,10 @@ def _compute_daily_equity(
                 continue
             if sym in STABLECOINS:
                 px = 1.0
-                src = "exchange_primary"
+                src: str | None = "exchange_primary"
             else:
-                px, src = _price_on(sym, iso)
-                if px is None:
+                maybe_px, src = _price_on(sym, iso)
+                if maybe_px is None:
                     # C-0330: skipping a symbol because of an OHLCV gap is
                     # NOT the same as the symbol having no position. Surface
                     # the skip via the caller-supplied set so the audit log
@@ -1218,6 +1230,7 @@ def _compute_daily_equity(
                     if skipped_symbols is not None:
                         skipped_symbols.add(sym)
                     continue
+                px = maybe_px
             usd = qty * px
             breakdown[sym] = round(usd, 2)
             total += usd
@@ -1240,12 +1253,13 @@ def _compute_daily_equity(
                 continue
             base = perp_sym.split("/")[0].upper()
             quote_sym = perp_quote(perp_sym)
-            px, src = _price_on(base, iso)
-            if px is None:
+            maybe_px, src = _price_on(base, iso)
+            if maybe_px is None:
                 # C-0330: same symbol-skip surfacing applies to perp marks.
                 if skipped_symbols is not None:
                     skipped_symbols.add(base)
                 continue
+            px = maybe_px
             unrealized = pos.mark(px)
             if unrealized == 0.0:
                 continue
@@ -1316,7 +1330,7 @@ def _result_row_count(res: Any) -> int:
 
 async def persist_equity_snapshots(
     supabase: Any,
-    rows: list[dict],
+    rows: list[dict[str, Any]],
     allocator_id: str,
     history_depth_months: int | None,
 ) -> int:
@@ -1365,7 +1379,7 @@ async def persist_equity_snapshots(
     # mid-run failure (network blip, SIGKILL) leaves row count above zero
     # with the history truncated, and retries short-circuit permanently.
     # 730 rows × ~150B is ≈110KB — well within PostgREST payload limits.
-    def _upsert():
+    def _upsert() -> Any:
         return supabase.table("allocator_equity_snapshots").upsert(
             stamped,
             on_conflict="allocator_id,asof",
@@ -1464,7 +1478,7 @@ async def _allocator_has_other_api_keys(
     multi-key data on a transient read error). ``.lookup_failed`` is
     True in the second case so the caller can audit the latch.
     """
-    def _sel():
+    def _sel() -> Any:
         return (
             supabase.table("api_keys")
             .select("id", count="exact", head=True)
@@ -1523,7 +1537,7 @@ async def _purge_allocator_equity_snapshots(
     actually wiped, hiding the wipe in the audit trail. ``minimal`` also
     avoids materialising every deleted JSONB row back to the worker.
     """
-    def _del():
+    def _del() -> Any:
         return (
             supabase.table("allocator_equity_snapshots")
             .delete(count="exact", returning="minimal")
@@ -1537,7 +1551,7 @@ async def _purge_allocator_equity_snapshots(
 
 async def replace_equity_snapshots(
     supabase: Any,
-    rows: list[dict],
+    rows: list[dict[str, Any]],
     allocator_id: str,
     history_depth_months: int | None,
 ) -> int:
@@ -1562,7 +1576,7 @@ async def replace_equity_snapshots(
         # so call the RPC with an empty array — the function purges then
         # inserts zero rows in one transaction (still atomic, no wipe-then-
         # crash window because there is nothing to insert afterwards).
-        payload: list[dict] = []
+        payload: list[dict[str, Any]] = []
     else:
         # Project ONLY the columns the RPC's jsonb_to_recordset reads. value_usd
         # is already rounded to 2dp upstream; breakdown is the capped dict.
@@ -1582,7 +1596,7 @@ async def replace_equity_snapshots(
             for r in rows
         ]
 
-    def _rpc():
+    def _rpc() -> Any:
         return supabase.rpc(
             "replace_allocator_equity_snapshots",
             {
@@ -1624,7 +1638,7 @@ async def _api_key_already_reconstructed(supabase: Any, api_key_id: str) -> bool
     job's own row is `running`/`pending`, never `done`, so excluding it
     is automatic.
     """
-    def _sel():
+    def _sel() -> Any:
         return (
             supabase.table("compute_jobs")
             .select("id", count="exact", head=True)
@@ -1651,8 +1665,8 @@ async def _api_key_already_reconstructed(supabase: Any, api_key_id: str) -> bool
 
 async def _fetch_today_holdings(
     supabase: Any, allocator_id: str, today_iso: str
-) -> list[dict]:
-    def _sel():
+) -> list[dict[str, Any]]:
+    def _sel() -> Any:
         return (
             supabase.table("allocator_holdings")
             .select(
@@ -1682,7 +1696,7 @@ async def _fetch_and_price_window(
     supabase: Any,
     start_date: date,
     end_date: date,
-) -> tuple[list[dict], bool, dict]:
+) -> tuple[list[dict[str, Any]], bool, dict[str, Any]]:
     """Fetch trades + transfers + OHLCV in [start_date, end_date] and build
     the per-day equity rows. Returns ``(rows, hit_okx_terminus, telemetry)``.
 
@@ -1696,7 +1710,7 @@ async def _fetch_and_price_window(
       covered by the defensive ctVal table (silent-inflation risk).
     - ``inverse_perp_symbols``: list[str] — inverse perps that landed
       under an unsupported cost shape.
-    - ``ctval_drift_warnings``: list[dict] — soft drift signals where
+    - ``ctval_drift_warnings``: list[dict[str, Any]] — soft drift signals where
       cost/price disagrees with the table by 1-5%.
     """
     start_ms = int(
@@ -1789,7 +1803,7 @@ async def _fetch_and_price_window(
     skipped_symbols: set[str] = set()
     unknown_perp_symbols: set[str] = set()
     inverse_perp_symbols: set[str] = set()
-    ctval_drift_warnings: list[dict] = []
+    ctval_drift_warnings: list[dict[str, Any]] = []
     rows = _compute_daily_equity(
         trades, deposits, withdrawals,
         ohlcv_by_symbol, coingecko_by_symbol,
@@ -2098,7 +2112,7 @@ async def _fetch_current_equity(
 # Entrypoints
 # ---------------------------------------------------------------------------
 
-async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
+async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> DispatchResult:
     """Full backfill on first key connect. One-time per (allocator, api_key).
 
     KEY-SCOPED per VOICES-ACCEPTED f1 — reads job['api_key_id'], derives
@@ -2342,6 +2356,7 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
             round(float((r.get("value_usd") or 0.0)), 2) == 0.0 for r in rows
         )
     )
+    audit_kind: AllocatorEquityAction
     if count == 0 and rows and not sibling_check.has_siblings:
         audit_kind = "allocator.equity.reconstruct_unexpected_noop"
     elif count == 0 and not rows:
@@ -2394,7 +2409,7 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
-async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
+async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> DispatchResult:
     """Incremental one-day delta. KEY-SCOPED per VOICES-ACCEPTED f1.
 
     Reads job['api_key_id'] via _allocator_key_preflight; derives allocator_id
@@ -2610,7 +2625,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
 
 
 def reconstruct_symbol_returns(
-    snapshots: list[dict],
+    snapshots: list[dict[str, Any]],
     symbol: str,
 ) -> "pd.Series | None":
     """Phase 09 / D-01 + D-02. Reconstruct a per-symbol daily-return Series
@@ -2724,7 +2739,7 @@ class EquityCurveBuilder:
 
     def __init__(
         self,
-        trades: list,  # list[Trade] — annotation kept loose to avoid circular import
+        trades: list[Any],  # list[Trade] — annotation kept loose to avoid circular import
         mark_prices: dict[str, float] | None = None,
         starting_nav: float | None = None,
     ) -> None:
@@ -2738,7 +2753,7 @@ class EquityCurveBuilder:
         # CR-perf-2 — cache reconstruct_positions output. to_metrics_snapshot
         # and to_equity_curve_daily both call reconstruct_positions; pre-fix
         # this fired _match_positions_fifo twice for every snapshot read.
-        self._positions_cache: list | None = None
+        self._positions_cache: list[Any] | None = None
 
     # ------------------------------------------------------------------
     # Position reconstruction (in-memory, not persisted)
@@ -2758,7 +2773,7 @@ class EquityCurveBuilder:
         from services.ingestion.adapter import Position
         from services.position_reconstruction import _match_positions_fifo
 
-        positions_by_symbol: dict[str, list[dict]] = defaultdict(list)
+        positions_by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for trade in self.trades:
             ts = trade.timestamp
             if isinstance(ts, datetime):
@@ -2775,7 +2790,7 @@ class EquityCurveBuilder:
                 }
             )
 
-        all_positions: list[dict] = []
+        all_positions: list[dict[str, Any]] = []
         for symbol, fills in positions_by_symbol.items():
             # Explicit decision (review): a corrupt zero/non-finite-entry
             # position dropped by _match_positions_fifo IS surfaced — it emits
@@ -2828,7 +2843,7 @@ class EquityCurveBuilder:
     # Funding-rate accumulation
     # ------------------------------------------------------------------
 
-    def attach_funding(self, funding_rows: list[dict]) -> None:
+    def attach_funding(self, funding_rows: list[dict[str, Any]]) -> None:
         """Sum signed funding payments into self._funding_pnl_by_day.
 
         Each ``funding_row`` shape: ``{timestamp, symbol, payment, ...}``.
@@ -3097,7 +3112,7 @@ class EquityCurveBuilder:
         )
 
 
-def _position_dict_to_position_kwargs(p: dict) -> dict:
+def _position_dict_to_position_kwargs(p: dict[str, Any]) -> dict[str, Any]:
     """Map ``_match_positions_fifo`` output dict → ``Position`` dataclass kwargs.
 
     ``_match_positions_fifo`` keys (verified):
@@ -3111,7 +3126,7 @@ def _position_dict_to_position_kwargs(p: dict) -> dict:
       entry_price, exit_price, quantity, pnl, funding_pnl, status, roi,
       duration_days
     """
-    def _parse_dt(value):
+    def _parse_dt(value: object) -> datetime | None:
         if value is None:
             return None
         if isinstance(value, datetime):

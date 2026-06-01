@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import time
 from collections import defaultdict
@@ -164,6 +163,29 @@ async def _sync_single_key(
     start = time.monotonic()
 
     try:
+        # A key row with NULL encryption columns (malformed/seed data that
+        # slipped into api_keys with is_active=true) makes decrypt_credentials
+        # call `.encode()` on None → AttributeError, which surfaces to Sentry
+        # as an unactionable crash every tick (QUANTALYZE-M). Detect it up
+        # front and skip the key with a clean `error` status instead of letting
+        # the decrypt blow up. Fail loud (status=error, logged) but don't crash.
+        if not key_row.get("dek_encrypted") or not key_row.get("api_key_encrypted"):
+            logger.warning(
+                "cron_sync: key %s has missing/NULL encryption columns — "
+                "skipping (malformed credential row, not syncing)",
+                key_id,
+            )
+            return {
+                "key_id": key_id,
+                "strategy_id": strategy_id,
+                "strategy_ids": strategy_ids,
+                "exchange": exchange_name,
+                "trades_fetched": 0,
+                "duration_s": round(time.monotonic() - start, 2),
+                "status": "error",
+                "error": "missing_credentials",
+            }
+
         # Decrypt credentials
         api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
         exchange = create_exchange(exchange_name, api_key, api_secret, passphrase)
@@ -300,12 +322,20 @@ async def _sync_single_key(
         strategy_errors: dict[str, str] = {}
 
         if trades and strategy_ids:
-            trades_json = json.dumps(trades, default=str)
             for sid in strategy_ids:
                 try:
+                    # Pass `trades` (list[dict]) directly. Pre-serializing via
+                    # json.dumps makes PostgREST cast the JSON *string* into a
+                    # JSONB scalar string instead of a JSONB array, which trips
+                    # sync_trades' `jsonb_array_elements(p_trades)` with 22023
+                    # "cannot extract elements from a scalar". The supabase
+                    # Python client serializes the request body exactly once.
+                    # (Same fix already applied in routers/exchange.py and
+                    # services/job_worker.py — this inline cron path was the
+                    # last caller still double-encoding.)
                     rpc_result = supabase.rpc(
                         "sync_trades",
-                        {"p_strategy_id": sid, "p_trades": trades_json},
+                        {"p_strategy_id": sid, "p_trades": trades},
                     ).execute()
                 except Exception as rpc_exc:
                     logger.exception(
