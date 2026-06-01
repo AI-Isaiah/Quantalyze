@@ -93,6 +93,12 @@ const discoveryCodec: StorageCodec<DiscoveryViewPreferences> = {
 /**
  * SSR-safe one-shot read of the persisted prefs (server returns DEFAULTS).
  * Retained for back-compat; the hook reads via the cross-tab primitive.
+ *
+ * B7 sanctioned-exception: the hot path is the `useCrossTabStorage`-backed hook
+ * below; this bare one-shot read is the retained non-React back-compat accessor
+ * (it reuses `discoveryCodec`, so it shares the same parse/version/poison-strip
+ * logic — only the storage mechanics are bare). Exempts the file from the B25
+ * `no-raw-localstorage` rule.
  */
 export function safeRead(uid: string, slug: string): DiscoveryViewPreferences {
   if (typeof window === "undefined") return DEFAULTS;

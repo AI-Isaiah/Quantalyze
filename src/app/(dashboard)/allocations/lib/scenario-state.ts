@@ -583,6 +583,13 @@ export function scenarioDraftCodec(
 // fail-loud recovery). These bare helpers remain for any non-React caller and
 // for the SSR-safe one-shot read contract their tests pin; they are NOT the
 // hook's hot path.
+//
+// B7 sanctioned-exception: the three helpers below use bare `localStorage`
+// deliberately — it is the test-mock surface (`vi.stubGlobal("localStorage",
+// mock)` only intercepts the unqualified global, see the read helper's note)
+// and these are the documented back-compat path, NOT new persistent state. New
+// state MUST route through useCrossTabStorage. This marker exempts the file
+// from the B25 `no-raw-localstorage` rule (the hot path is already migrated).
 // ---------------------------------------------------------------------------
 
 /** SSR-safe localStorage read. Returns null on SSR, missing key, schema-version

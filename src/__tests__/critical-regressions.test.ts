@@ -1040,6 +1040,7 @@ describe("Critical regression guards", () => {
       it("classifies exactly the known PR/push-triggered workflows", () => {
         expect([...mergePathWorkflows].sort()).toEqual([
           `${WORKFLOW_DIR}/ci.yml`,
+          `${WORKFLOW_DIR}/contracts.yml`,
           `${WORKFLOW_DIR}/migration-drift-check.yml`,
           `${WORKFLOW_DIR}/migration-policy-self-test.yml`,
           `${WORKFLOW_DIR}/migration-policy.yml`,
