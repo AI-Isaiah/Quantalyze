@@ -35,78 +35,38 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Literal, Optional, TypedDict
+from typing import Any, Optional
+
+from postgrest.types import CountMethod
 
 from services.audit import log_audit_event
-from services.db import get_supabase
+from services.db import Row, get_supabase, rows
 
 logger = logging.getLogger("quantalyze.feedback_engine")
 
 
 # ---------------------------------------------------------------------------
-# Row contract — TypedDict mirrors the bridge_outcomes columns this pipeline
-# reads (H-0680). TypedDict (not Pydantic) keeps zero runtime cost — the
-# Supabase fetch returns plain dicts and we keep consuming them as dicts —
-# while giving mypy/IDE static checks at every read site (`outcome["kind"]`,
-# `outcome.get("delta_180d")`, etc.) so a future column rename (e.g.
-# delta_180d → delta_180_days) or a kind/reason typo surfaces as a type error
-# instead of a silent None / raw KeyError at runtime. Mirrors the
-# FundingFeeRow (M-0929) / ScoredCandidate (H-0698) convention.
-#
-# Field shapes track information_schema for bridge_outcomes:
-#   kind             TEXT NOT NULL  → Literal['rejected','allocated']
-#   rejection_reason TEXT NULL
-#   strategy_id      UUID NULL      (holding-based outcomes carry NULL; dropped
-#                                    in _fetch_eligible_outcomes)
-#   delta_30/90/180d NUMERIC NULL   → PostgREST serializes numeric as a JSON
-#                                    number OR a string depending on magnitude,
-#                                    so the read sites coerce via float(); the
-#                                    annotation reflects both wire shapes.
+# Row shape — bridge_outcomes rows are consumed as the central `Row`
+# (dict[str, Any]) primitive from services.db (B-mypy). A bespoke per-table
+# TypedDict was removed in favour of the one shared contract: it was only ever
+# an *annotation* (the producer returned the raw PostgREST `.data` union, so
+# mypy never actually validated a row against it), and the campaign's
+# established convention (see services/db.py) is a single loose `Row` rather
+# than schema-drift-brittle per-table TypedDicts across 31 tables. The column
+# contract this pipeline relies on is preserved here as documentation:
+#   kind              TEXT NOT NULL   ('rejected' | 'allocated')
+#   rejection_reason  TEXT NULL       (the five D-06 reasons; NULL on allocated)
+#   strategy_id       UUID NULL       (holding-based outcomes carry NULL and are
+#                                      dropped in _fetch_eligible_outcomes, so
+#                                      every row reaching a consumer has it)
+#   delta_30/90/180d  NUMERIC NULL    (PostgREST serializes numeric as a JSON
+#                                      number OR string by magnitude; read sites
+#                                      coerce via float())
 #   percent_allocated NUMERIC NULL
-# total=False because every fetch projects an explicit column subset and any
-# field may be absent/None on a given row.
-RejectionReason = Literal[
-    "mandate_conflict",
-    "underperforming_peers",
-    "timing_wrong",
-    "already_owned",
-    "other",
-]
-
-
-# LOW9 (2026-05-27): required/optional split mirroring the
-# `_ClaimedJobOptional` / `ClaimedJob` pattern in main_worker.py. Pre-fix
-# `BridgeOutcomeRow` was a single `total=False` TypedDict, yet `kind` and
-# `strategy_id` are dereferenced as REQUIRED (`outcome["kind"]` in
-# `_success_value`/`_attribute_dimension`; `o["strategy_id"]` /
-# `outcome["strategy_id"]` in `compute_adjusted_weights`). `_fetch_eligible_
-# outcomes` guarantees both: every fetch projects `strategy_id, kind, ...`
-# explicitly, and the producer drops rows with `strategy_id is None` before
-# returning, so the required fields are non-absent at every consumer.
-class _BridgeOutcomeOptional(TypedDict, total=False):
-    # MED8 (2026-05-27): typed as the `RejectionReason` Literal (was bare
-    # `Optional[str]`). The enumerated values mirror the bridge_outcomes
-    # producer's CHECK domain (the five D-06 reasons; NULL on allocated rows).
-    # `_attribute_dimension` already routes the unmapped tail (`other`, and the
-    # SQL-filtered `already_owned`) through the score-dominant fallback, so the
-    # closed Literal is the honest contract — a typo'd/renamed reason now
-    # surfaces as a type error at the read site instead of silently mapping to
-    # nothing.
-    rejection_reason: Optional[RejectionReason]
-    delta_30d: Optional[float | str]
-    delta_90d: Optional[float | str]
-    delta_180d: Optional[float | str]
-    percent_allocated: Optional[float | str]
-
-
-class BridgeOutcomeRow(_BridgeOutcomeOptional):
-    # Required keys: always projected by `_fetch_eligible_outcomes` and never
-    # absent at a consumer. `strategy_id` is non-None after the producer's
-    # `o.get("strategy_id") is not None` filter (holding-based outcomes carry
-    # NULL strategy_id and are dropped before this contract is read), so it is
-    # required AND non-Optional here.
-    strategy_id: str
-    kind: Literal["rejected", "allocated"]
+# A typo'd column or reason no longer surfaces at type-check time, but the read
+# sites already fail loud / log on unexpected shapes at runtime (e.g. the
+# non-numeric-delta guard in _success_value), and the producer drops malformed
+# rows — so the runtime contract is unchanged.
 
 # D-06 direct-mapping subset. See module docstring for the two intentional
 # omissions (already_owned and other) — both covered by tests
@@ -155,15 +115,15 @@ def _has_any_bridge_outcomes(allocator_id: str) -> bool:
     supabase = get_supabase()
     resp = (
         supabase.table("bridge_outcomes")
-        .select("id", count="exact")
+        .select("id", count=CountMethod.exact)
         .eq("allocator_id", allocator_id)
         .limit(1)
         .execute()
     )
-    return bool(resp.data)
+    return bool(rows(resp))
 
 
-def _fetch_eligible_outcomes(allocator_id: str) -> list[BridgeOutcomeRow]:
+def _fetch_eligible_outcomes(allocator_id: str) -> list[Row]:
     """Query bridge_outcomes for this allocator, apply D-08 noise filters + D-03 pending drop.
 
     Two sequential queries (not one OR chain — Pitfall 5). D-08 drop order:
@@ -172,7 +132,7 @@ def _fetch_eligible_outcomes(allocator_id: str) -> list[BridgeOutcomeRow]:
       3. kind='allocated' AND all delta_Xd IS NULL (pending) — filtered in Python (D-03).
     """
     supabase = get_supabase()
-    rejected = (
+    rejected = rows(
         supabase.table("bridge_outcomes")
         .select("strategy_id, kind, rejection_reason, "
                 "delta_30d, delta_90d, delta_180d, percent_allocated")
@@ -180,9 +140,9 @@ def _fetch_eligible_outcomes(allocator_id: str) -> list[BridgeOutcomeRow]:
         .eq("kind", "rejected")
         .neq("rejection_reason", "already_owned")
         .execute()
-    ).data or []
+    )
 
-    allocated = (
+    allocated = rows(
         supabase.table("bridge_outcomes")
         .select("strategy_id, kind, rejection_reason, "
                 "delta_30d, delta_90d, delta_180d, percent_allocated")
@@ -190,7 +150,7 @@ def _fetch_eligible_outcomes(allocator_id: str) -> list[BridgeOutcomeRow]:
         .eq("kind", "allocated")
         .gte("percent_allocated", 1.0)
         .execute()
-    ).data or []
+    )
 
     mature_allocated = [
         o for o in allocated
@@ -229,7 +189,7 @@ def _fetch_score_breakdowns(
         .order("computed_at", desc=True)
         .execute()
     )
-    batch_ids = [b["id"] for b in (batches_result.data or [])]
+    batch_ids = [b["id"] for b in rows(batches_result)]
     if not batch_ids:
         return {}
     cand_result = (
@@ -253,7 +213,7 @@ def _fetch_score_breakdowns(
     # test_determinism contract independent of Supabase's return order.
     by_batch: dict[str, dict[str, dict[str, Any]]] = {}
     sorted_rows = sorted(
-        (r for r in (cand_result.data or []) if r.get("score_breakdown")),
+        (r for r in rows(cand_result) if r.get("score_breakdown")),
         key=lambda r: (
             r["batch_id"],
             r["strategy_id"],
@@ -272,7 +232,7 @@ def _fetch_score_breakdowns(
     return out
 
 
-def _success_value(outcome: BridgeOutcomeRow) -> int:
+def _success_value(outcome: Row) -> int:
     """D-01 + D-02: success = 1 iff most-mature non-NULL delta > 0; else 0.
     Rejected outcomes count as FAILURE (D-04). Precondition: outcome passed D-03/D-08 filters.
     """
@@ -302,7 +262,7 @@ def _success_value(outcome: BridgeOutcomeRow) -> int:
 
 
 def _attribute_dimension(
-    outcome: BridgeOutcomeRow,
+    outcome: Row,
     score_breakdown: Optional[dict[str, Any]],
 ) -> tuple[str, ...]:
     """D-05 hybrid attribution. Returns a tuple of dimension names:
@@ -320,9 +280,9 @@ def _attribute_dimension(
         return ALL_DIMENSIONS  # D-07 uniform fallback
 
     candidates = {
-        dim: score_breakdown.get(_DIM_TO_BREAKDOWN_KEY[dim])
+        dim: v
         for dim in ALL_DIMENSIONS
-        if score_breakdown.get(_DIM_TO_BREAKDOWN_KEY[dim]) is not None
+        if (v := score_breakdown.get(_DIM_TO_BREAKDOWN_KEY[dim])) is not None
     }
     if not candidates:
         return ALL_DIMENSIONS
