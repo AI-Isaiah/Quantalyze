@@ -50,6 +50,36 @@ class TestTradesToDailyReturns:
         # The return with fees should be less
         assert float(r_fee.iloc[0]) < float(r_no_fee.iloc[0])
 
+    def test_mixed_precision_timestamps_do_not_raise(self):
+        """REGRESSION: compute_analytics ~63% terminal-failure (2026-06-01).
+
+        Trade rows mix timestamp precision — raw fills carry microseconds
+        (`...T12:34:56.123456+00:00`) while daily-PnL summary rows are
+        whole-second (`...T00:00:00+00:00`). A bare ``pd.to_datetime``
+        (pandas >=2.0) infers the format from element 0 and then raises
+        ``time data "...T00:00:00+00:00" doesn't match format
+        "%Y-%m-%dT%H:%M:%S.%f%z" at position N`` on the first row of differing
+        precision — which crashed ``compute_analytics`` for every strategy
+        whose trades contained a whole-second timestamp, freezing its dashboard
+        KPIs. ``format="ISO8601"`` parses each value independently.
+
+        WHY (Rule 9): the bug is invisible to single-precision fixtures — it
+        only bites when a series MIXES precisions, which is exactly what real
+        accumulated trade history does. Reverting the fix re-raises here.
+        """
+        trades = [
+            {"timestamp": "2026-05-30T12:34:56.123456+00:00", "symbol": "BTCUSDT", "side": "buy", "price": "100", "quantity": "1", "fee": "0", "order_type": "market"},
+            {"timestamp": "2026-05-30T18:00:00+00:00", "symbol": "BTCUSDT", "side": "sell", "price": "110", "quantity": "1", "fee": "0", "order_type": "market"},
+            {"timestamp": "2026-05-31T00:00:00+00:00", "symbol": "BTCUSDT", "side": "buy", "price": "120", "quantity": "1", "fee": "0", "order_type": "market"},
+        ]
+        # Pre-fix this raises ValueError in pd.to_datetime. Both public entry
+        # points route through the same parse (the simple form delegates to
+        # *_with_status), so assert both return cleanly.
+        returns = trades_to_daily_returns(trades)
+        assert isinstance(returns, pd.Series)
+        series, _meta = trades_to_daily_returns_with_status(trades)
+        assert isinstance(series, pd.Series)
+
 
 class TestDownsampleSeries:
     def test_already_small(self):

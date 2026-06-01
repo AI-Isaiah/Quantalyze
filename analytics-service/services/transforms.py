@@ -102,7 +102,16 @@ def trades_to_daily_returns_with_status(
         )
 
     df = pd.DataFrame(trades)
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    # Trade timestamps mix precision: raw fills carry microseconds
+    # (`...T12:34:56.123456+00:00`) while daily-PnL summary rows are
+    # whole-second (`...T00:00:00+00:00`). A bare `pd.to_datetime` (pandas
+    # >=2.0) infers the format from element 0 and then fails strictly on the
+    # first row of differing precision ("time data ... doesn't match format
+    # ... at position N") — the dominant `compute_analytics` failure. Parse
+    # each value independently with `format="ISO8601"`; `utc=True` yields a
+    # tz-aware UTC column (inputs are already +00:00, so this normalizes, it
+    # does not shift).
+    df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601", utc=True)
     df["date"] = df["timestamp"].dt.date
 
     # Check if this is daily PnL data (from exchange bills API or CSV upload)
