@@ -5,11 +5,16 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any
+from typing import Any, TypeVar
 
 from supabase import Client, create_client
 
 logger = logging.getLogger(__name__)
+
+# Return type of the synchronous callable db_execute runs in its thread pool;
+# preserved end-to-end so callers get the real .execute()/APIResponse type back
+# instead of Any (B-mypy).
+_T = TypeVar("_T")
 
 # NEW-C12-08: asyncio.to_thread posts work to Python's default ThreadPoolExecutor
 # (min(32, cpu+4) workers) which can silently saturate when many handler timeouts
@@ -74,7 +79,7 @@ def get_user_scoped_supabase(user_access_token: str) -> Client:
     return client
 
 
-async def db_execute(fn):
+async def db_execute(fn: Callable[[], _T]) -> _T:
     """Run a synchronous Supabase call without blocking the async event loop.
 
     NEW-C12-08: uses the module-level bounded ThreadPoolExecutor (_DB_EXECUTOR)
@@ -89,7 +94,7 @@ async def db_execute(fn):
     # before full blockage. _work_queue is a private attribute of ThreadPoolExecutor;
     # fall back silently if the CPython implementation changes.
     try:
-        qsize = _DB_EXECUTOR._work_queue.qsize()  # type: ignore[attr-defined]
+        qsize = _DB_EXECUTOR._work_queue.qsize()
         if qsize > _DB_POOL_SIZE * 0.8:
             logger.warning(
                 "db_execute: thread pool near saturation "

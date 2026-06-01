@@ -186,7 +186,7 @@ class CsvAdapter:
         if fmt != "trades":
             return []
 
-        import pandas as pd  # type: ignore[import-untyped]
+        import pandas as pd
 
         # CR-03: same canonical-key resolution as validate().
         raw_bytes = _resolve_raw_bytes(creds_or_file)

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.39] - 2026-06-01
+### Changed — analytics-service mypy `--strict` floor: foundation primitives (config + typed `db_execute`) (cross-cutting refactor B-mypy, part 1 of 8)
+
+The analytics-service had **no mypy config at all** and 1050 `--strict` errors, but they cluster into a handful of shared root causes rather than a long tail — so they're fixable by construction, B18-style, not with 1050 per-site bandaids. This first PR lands the two zero-behaviour-risk foundation primitives and leaves the CI gate untouched.
+
+- **New `analytics-service/pyproject.toml` `[tool.mypy]` table** — `strict = true`, `follow_imports = "silent"`, `python_version = "3.12"`, mirroring the flags the CI gate passed on the command line so the gate's behaviour is unchanged when it later widens. mypy auto-discovers this from `cwd = analytics-service` (which CI uses), so **local == CI by construction**. Two `[[tool.mypy.overrides]]` for the genuinely-untyped third-party libs only: `ccxt`/`pandas`/`scipy` (`ignore_missing_imports`) and `quantstats` (`+ follow_imports = "skip"`, the only lever that clears its unannotated-function calls). `pandas-stubs` is deliberately **not** added (typing the full pandas math surface is gold-plating; the real safety value is typing Supabase rows, in later parts). No first-party `ignore_errors` overrides — every analytics module is held to the full bar.
+- **`db_execute` typed as a generic `Callable[[], _T] -> _T`** (`services/db.py`) — the body is byte-identical (`return await loop.run_in_executor(_DB_EXECUTOR, fn)`); typeshed types `run_in_executor` so `await` yields `_T`, propagating each caller's real `.execute()`/`APIResponse` return type instead of `Any`. This alone resolves ~80 `no-untyped-call` errors at the worker-path call sites by construction — no `cast`, no `Any`.
+- Removed two now-stale `# type: ignore` comments that `warn_unused_ignores` would re-fail under the config — including the `import pandas` ignore in `services/ingestion/csv_adapter.py`, which the new `pandas.*` override makes redundant and which would otherwise turn the **currently-green** `services/ingestion/` gate red. Pinned `mypy==2.0.0` in `requirements-dev.txt` and repointed the Makefile `typecheck` target at the full floor surface.
+
+**Net: 1050 → 954 errors** (config + `db_execute`), zero logic touched. **Verified:** the existing `mypy --strict --follow-imports=silent services/ingestion/` gate still reports `Success: no issues found in 10 source files`; the `db.py` diff is import + signature + comment only; full pytest green except the pre-existing `test_simulator_router` full-suite ordering flake (proven to fail identically on the clean base — `1 failed, 2407 passed` both with and without this change). The CI gate stays scoped to `services/ingestion/` until the final part widens it. Parts 2–7 introduce a central typed Supabase-row primitive + migrate the call sites (forcing real None/shape handling — the latent-bug prize); part 8 promotes the gate to the full surface.
+
 ## [0.24.15.38] - 2026-06-01
 ### Changed — audit-event taxonomy enforced by construction: `AuditEvent` discriminated union + map reconciliation (cross-cutting refactor B4c)
 
