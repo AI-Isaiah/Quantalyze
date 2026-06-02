@@ -198,6 +198,9 @@ function buildCompositionRows(
         amount: ps.allocated_amount,
         twr: attr?.contribution ?? a?.cagr ?? null,
         sharpe: a?.sharpe ?? null,
+        // B14: carry the constituent's freshness so CompositionDonut can flag a
+        // stale slice (extractAnalytics defaults computed_at to "" → no badge).
+        computedAt: a?.computed_at || null,
       };
     })
     .filter((row): row is NonNullable<typeof row> => row !== null);

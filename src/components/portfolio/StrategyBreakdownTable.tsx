@@ -3,6 +3,7 @@
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import { formatPercent, formatNumber, metricColor, extractAnalytics } from "@/lib/utils";
+import { SyncBadge } from "@/components/strategy/SyncBadge";
 import type { StrategyAnalytics, AttributionRow } from "@/lib/types";
 
 type SortKey = "name" | "weight" | "twr" | "sharpe" | "max_dd" | "contribution";
@@ -16,6 +17,12 @@ interface StrategyRow {
   sharpe: number | null;
   max_dd: number | null;
   contribution: number | null;
+  /**
+   * The constituent's own analytics computed_at — drives the per-row freshness
+   * badge so a mixed-freshness portfolio cannot present stale per-strategy
+   * metrics as current (B14). `null` when the join carried no analytics.
+   */
+  computedAt: string | null;
 }
 
 const COLUMNS: { key: SortKey; label: string; align?: "right" }[] = [
@@ -91,6 +98,9 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
         sharpe: analytics?.sharpe ?? null,
         max_dd: analytics?.max_drawdown ?? null,
         contribution: attr?.contribution ?? null,
+        // extractAnalytics defaults computed_at to "" when absent; SyncBadge
+        // treats "" / null as "no freshness to claim" and renders nothing.
+        computedAt: analytics?.computed_at || null,
       };
     });
   }, [strategies, attribution]);
@@ -139,12 +149,18 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
               className="border-b border-border last:border-0 hover:bg-page/50 transition-colors"
             >
               <td className="px-4 py-3">
-                <Link
-                  href={`/portfolios/${portfolioId}/strategies/${row.strategy_id}`}
-                  className="font-medium text-text-primary hover:text-accent transition-colors"
-                >
-                  {row.name}
-                </Link>
+                <div className="flex flex-col gap-0.5">
+                  <Link
+                    href={`/portfolios/${portfolioId}/strategies/${row.strategy_id}`}
+                    className="font-medium text-text-primary hover:text-accent transition-colors"
+                  >
+                    {row.name}
+                  </Link>
+                  {/* B14: per-constituent freshness so a stale strategy's
+                      Sharpe/MaxDD isn't read as current. Renders nothing when
+                      the row carries no computed_at. */}
+                  <SyncBadge computedAt={row.computedAt} />
+                </div>
               </td>
               <td className="px-4 py-3 text-right font-metric text-text-secondary">
                 {row.weight != null ? formatPercent(row.weight) : "\u2014"}

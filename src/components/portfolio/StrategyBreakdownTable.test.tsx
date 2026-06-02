@@ -32,7 +32,12 @@ function strat(
   id: string,
   name: string,
   weight: number | null,
-  analytics: { cagr?: number | null; sharpe?: number | null; max_drawdown?: number | null } | null,
+  analytics: {
+    cagr?: number | null;
+    sharpe?: number | null;
+    max_drawdown?: number | null;
+    computed_at?: string | null;
+  } | null,
 ): StrategyInput {
   return {
     strategy_id: id,
@@ -149,5 +154,73 @@ describe("<StrategyBreakdownTable> — H-0393", () => {
     );
 
     expect(screen.getByRole("link", { name: "Unknown" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * B14 — Freshness / Liveness Signaling Contract.
+ *
+ * The breakdown table renders each constituent's Sharpe / MaxDD / TWR sourced
+ * from that strategy's own `strategy_analytics`. Before B14 every row rendered
+ * those metrics uniformly with NO indication of how stale each constituent's
+ * data was — so a portfolio mixing a strategy recomputed 2h ago with one whose
+ * analytics are 4 days old presented BOTH numbers as equally current. That is
+ * the canonical B14 bug ("stale Sharpe/MaxDD shown as current").
+ *
+ * The fix surfaces per-row freshness via the shared SyncBadge primitive, which
+ * routes through `computeFreshness` (the single staleness SoT, 12h/48h
+ * thresholds). These specs encode WHY: each constituent must carry its own
+ * liveness signal, and a row with no computed_at must NOT fabricate one.
+ */
+function hoursAgoIso(hours: number): string {
+  return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+}
+
+describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
+  it("renders a per-row freshness badge keyed on each constituent's computed_at", () => {
+    const strategies: StrategyInput[] = [
+      strat("a", "Alpha", 0.6, { sharpe: 1.5, computed_at: hoursAgoIso(2) }),
+      strat("b", "Beta", 0.4, { sharpe: 1.0, computed_at: hoursAgoIso(100) }),
+    ];
+
+    render(
+      <StrategyBreakdownTable strategies={strategies} attribution={null} portfolioId="p-1" />,
+    );
+
+    // One "Synced … ago" badge per constituent that has a computed_at.
+    expect(screen.getAllByText(/Synced/i)).toHaveLength(2);
+  });
+
+  it("distinguishes a fresh constituent (positive dot) from a stale one (negative dot)", () => {
+    const strategies: StrategyInput[] = [
+      // 2h ago → fresh (< 12h) → positive token.
+      strat("a", "Fresh", 0.6, { sharpe: 1.5, computed_at: hoursAgoIso(2) }),
+      // 100h ago → stale (≥ 48h) → negative token.
+      strat("b", "Stale", 0.4, { sharpe: 1.0, computed_at: hoursAgoIso(100) }),
+    ];
+
+    const { container } = render(
+      <StrategyBreakdownTable strategies={strategies} attribution={null} portfolioId="p-1" />,
+    );
+
+    // The fresh/stale split must be visible: exactly one positive and one
+    // negative freshness dot (sourced from FRESHNESS_COLORS via SyncBadge).
+    expect(container.querySelectorAll(".bg-positive")).toHaveLength(1);
+    expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
+  });
+
+  it("renders NO freshness badge for a constituent missing computed_at (never fabricates liveness)", () => {
+    const strategies: StrategyInput[] = [
+      strat("a", "Alpha", 0.6, { sharpe: 1.5, computed_at: null }),
+      strat("b", "Beta", 0.4, { sharpe: 1.0 }), // computed_at absent entirely
+    ];
+
+    render(
+      <StrategyBreakdownTable strategies={strategies} attribution={null} portfolioId="p-1" />,
+    );
+
+    // Rows still render, but with no "Synced … ago" liveness claim.
+    expect(screen.getAllByRole("row").slice(1)).toHaveLength(2);
+    expect(screen.queryByText(/Synced/i)).toBeNull();
   });
 });
