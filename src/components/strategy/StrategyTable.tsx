@@ -159,6 +159,16 @@ export function StrategyTable({
   // `prefsHydrated` only (not `prefs`) prevents a post-Save re-render from
   // clobbering user-driven column-sort or view-toggle changes that haven't
   // been persisted yet.
+  //
+  // F9 M-0475/M-0476 — "once on hydration" is per-MOUNT, not per-session. On a
+  // client-side category navigation (/discovery/crypto-sma → /discovery/equity-sma)
+  // useDiscoveryPrefs returns the new slug's prefs, but `prefsHydrated` stays
+  // true across the key flip, so this effect would NOT re-fire and the legacy
+  // view/sort/showExamples state would stay pinned to the previous category.
+  // The fix lives at the call sites: both /discovery/[slug] and /browse/[slug]
+  // now pass `key={(user,)slug}` so a scope change REMOUNTS this component and
+  // this effect re-runs cleanly for the new scope. Do not relax that key
+  // without re-introducing a slug-aware re-mirror here.
   useEffect(() => {
     if (!prefsHydrated) return;
     setViewMode(prefs.view);

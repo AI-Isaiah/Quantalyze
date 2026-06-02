@@ -47,7 +47,13 @@ export default async function PublicCategoryPage({
         <InfoBanner className="mb-6">{meta.description}</InfoBanner>
       )}
 
+      {/* F9 M-0475/M-0476 — key by slug so a client-side category change
+          remounts StrategyTable. Without it, navigating /browse/crypto-sma →
+          /browse/equity-sma reuses the same instance; its prefs-mirror effect
+          (gated on prefsHydrated, which never re-toggles on a key flip) would
+          leave view/sort/showExamples pointing at the previous category. */}
       <StrategyTable
+        key={`browse:${slug}`}
         strategies={strategies}
         categorySlug={slug}
         basePath="/browse"
