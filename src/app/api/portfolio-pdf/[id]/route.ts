@@ -7,7 +7,7 @@ import {
   acquirePdfSlot,
   PDF_QUEUE_TIMEOUT_MESSAGE,
 } from "@/lib/puppeteer";
-import { publicIpLimiter, checkLimit, getClientIp, rateLimitDenyText } from "@/lib/ratelimit";
+import { publicIpLimiter, checkLimit, getClientIp, rateLimitDenyJson } from "@/lib/ratelimit";
 import { signPdfRenderToken } from "@/lib/pdf-render-token";
 import { sanitizeFilename } from "@/lib/sanitize-filename";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -31,11 +31,13 @@ export async function GET(
   // a user opening factsheet → tearsheet → portfolio PDF from the same IP
   // burned a single 10/min budget. Now each PDF surface has its own bucket.
   const rl = await checkLimit(publicIpLimiter, `portfolio-pdf:${ip}`);
-  // audit-2026-05-07 PR-2 silent-failure-hunter A: rateLimitDenyText
+  // audit-2026-05-07 PR-2 silent-failure-hunter A: rateLimitDenyJson
   // distinguishes misconfig 503 from organic 429 so an Upstash outage
   // surfaces on SRE health dashboards instead of looking like throttled
-  // organic traffic.
-  if (!rl.success) return rateLimitDenyText(rl);
+  // organic traffic. F5b (L-0018): JSON envelope (was the plain-text
+  // rateLimitDenyText twin) so the 429/503 path matches this route's own
+  // JSON 401/404/500 responses — clients can parse one shape unconditionally.
+  if (!rl.success) return rateLimitDenyJson(rl);
 
   const { id } = await params;
 
@@ -92,10 +94,10 @@ export async function GET(
     });
   } catch (err) {
     if (err instanceof Error && err.message === PDF_QUEUE_TIMEOUT_MESSAGE) {
-      return new NextResponse("PDF generation queue full, retry in 10 seconds", {
-        status: 503,
-        headers: { "Retry-After": "10" },
-      });
+      return NextResponse.json(
+        { error: "PDF generation queue full, retry in 10 seconds" },
+        { status: 503, headers: { "Retry-After": "10" } },
+      );
     }
     // PR-2 silent-failure-hunter F6 (2026-05-28): PDF generation covers
     // puppeteer crashes, OOM, navigation timeouts, Chromium SIGSEGV, font-
