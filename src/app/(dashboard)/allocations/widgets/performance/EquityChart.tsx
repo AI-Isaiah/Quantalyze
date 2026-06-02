@@ -473,6 +473,36 @@ function firstDate(points: DailyPoint[]): Date {
 // because it must never be mutated (the chart only reads/maps overlays).
 const EMPTY_OVERLAYS: readonly OverlaySeries[] = Object.freeze([]);
 
+// B14 / NEW-C09-04 (H-1226): single source for the sync-freshness footer copy,
+// shared by the inner EquityChart header stamp and the EquityChartWidgetInner
+// wrapper. Both consumers MUST route through here so the never-synced state can
+// never render the "sync just now" lie again.
+//   - `lastSyncAt === null` → no successful sync is on record. The producer
+//     (getMyAllocationDashboard) always plumbs this field, so a null is genuine
+//     "never synced" (e.g. an allocator who has not connected an exchange yet),
+//     NOT an unplumbed call site. Claiming "sync just now" here is the staleness
+//     lie B14 exists to kill; surface honest onboarding copy instead.
+//   - `nowMs === null` is the wrapper's first-render placeholder (SSR/CSR parity,
+//     before the minute-tick resolves relative time). The inner stamp passes
+//     `Date.now()`, so it never reaches this branch.
+//   - `stale` is the upstream `allKeysStale` flag (>24h cutoff), independent of
+//     the syncing axis (see src/lib/sync-freshness/types.ts) — a plain boolean
+//     here, never folded into a precedence enum.
+export function syncStampLabel(
+  lastSyncAt: string | null,
+  stale: boolean,
+  nowMs: number | null,
+): string {
+  if (!lastSyncAt) {
+    return stale ? "data stale" : "no sync yet";
+  }
+  if (nowMs === null) {
+    return stale ? "data stale" : "sync just now";
+  }
+  const rel = formatRelativeTime(lastSyncAt, nowMs);
+  return stale ? `stale · last sync ${rel}` : `last sync ${rel}`;
+}
+
 export function EquityChart({
   equityDailyPoints,
   benchmark,
@@ -1362,9 +1392,14 @@ export function EquityChart({
                 : undefined
             }
           >
-            {lastSyncAt
-              ? `last sync ${formatRelativeTime(lastSyncAt, Date.now())}`
-              : "sync just now"}
+            {/* B14 / NEW-C09-04 (H-1226): route through the shared
+                `syncStampLabel` so this inner stamp is stale-aware and never
+                renders the "sync just now" lie. `Date.now()` (not the wrapper's
+                minute-tick `now`) is passed because this inner stamp keeps no
+                SSR-parity placeholder state of its own. This header is visible
+                wherever the inner <EquityChart> renders without `hideHeader`
+                (e.g. the Scenario tab — ScenarioComposer). */}
+            {syncStampLabel(lastSyncAt, stale, Date.now())}
           </div>
         </div>
       </div>
@@ -1952,13 +1987,10 @@ function EquityChartWidgetInner({
       clearInterval(interval);
     };
   }, [lastSyncAt]);
-  const syncStampCopy = (() => {
-    if (!lastSyncAt || now === null) {
-      return stale ? "data stale" : "sync just now";
-    }
-    const rel = formatRelativeTime(lastSyncAt, now);
-    return stale ? `stale · last sync ${rel}` : `last sync ${rel}`;
-  })();
+  // B14 / NEW-C09-04 (H-1226): pass the minute-tick `now` (null on first
+  // render) so the resolved relative-time copy updates live; the shared
+  // `syncStampLabel` owns the never-synced / stale / fresh copy rules.
+  const syncStampCopy = syncStampLabel(lastSyncAt, stale, now);
 
   const [period, setPeriod] = useState<Period>(DEFAULT_PERIOD);
   const [customRange, setCustomRange] = useState<CustomRange | null>(null);

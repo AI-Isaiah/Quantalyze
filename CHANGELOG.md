@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.24.15.72] - 2026-06-02
+### Fixed — Equity widget no longer claims "sync just now" for never-synced allocators (B14, H-1226 / NEW-C09-04)
+
+An allocator who had never completed a sync (e.g. one who has not connected an exchange yet) saw the literal copy **"sync just now"** in the equity-curve footer — a freshness lie, since no sync ever happened. This was the last live instance of the NEW-C09-04 class on the equity surface; the .66 / .70 B14 slices closed the producer and portfolio axes but never reached this widget's display copy.
+
+- The never-synced state (`lastSyncAt` null, not stale) now renders the honest **"no sync yet"** at both stamp sites — the `EquityChartWidget` card-header stamp and the inner `EquityChart` component's own header. The producer (`getMyAllocationDashboard`) always plumbs `lastSyncAt`, so a null genuinely means "never synced," not an unplumbed call site.
+- Single-sourced the footer copy in one exported `syncStampLabel(lastSyncAt, stale, nowMs)` helper that both stamp sites now call, so the lie cannot reappear at one site while the other is correct. The stale-with-timestamp copy (`stale · last sync …`) — previously untested and duplicated — is now pinned by a 6-case unit test.
+
+### Changed — Scenario tab equity chart now reflects real sync state
+- The Scenario tab renders the inner `EquityChart` header but passed no sync state, so its stamp showed "sync just now" (now "no sync yet") regardless of the allocator's real sync. `ScenarioComposer` now plumbs the live `allKeysStale` / `lastSyncAt`, so the Scenario-tab stamp is honest. This also applies the existing stale-dimmer overlay to the Scenario chart when the live baseline is stale — matching the Overview chart and the KpiStrip convention that a stale baseline suppresses the projection.
+- Surfaced by 6 fresh-context review specialists + a red-team pass on the final diff (the ScenarioComposer reachability was a specialist + red-team finding; the discriminated-union fix the audit proposed was declined as it would reintroduce the syncing/stale precedence coupling .70 deliberately removed). tsc 0 / eslint 0 / full vitest 5937 passed.
+
+## [0.24.15.71] - 2026-06-02
+### Tested — Holdings tab strategy-rows render coverage (F4b follow-up)
+
+Closes the render-coverage gap left by v0.24.15.69 (F4b). The new `StrategyRowsTable` branch of `HoldingsTable` — the production Holdings-tab path (`HoldingsTabPanel` → `toStrategyRows` → `<HoldingsTable strategyRows>`) — had **zero render coverage**: every other allocations test mocks `HoldingsTable` (e.g. `HoldingsTabPanel.test.tsx`) or exercises the legacy/design branch, the adapter's 16 tests are data-only, and the e2e suite never clicks the Holdings tab. A render-time crash in that branch (bad cell formatter, broken factsheet `<Link>`, sort handler) would slip past tsc, lint, the adapter tests, and CI e2e alike.
+
+- New `HoldingsTable.strategy-rows.test.tsx` (10 tests) renders the **real** `HoldingsTable` fed by the **real** adapter output: the eight column headers, one `data-strategy-row` per strategy, per-row factsheet `href`, disclosure-tier Manager redaction (org → codename → em-dash), sorting interaction, and the empty state.
+- Locks the H-0062/H-0063/H-0064 closure: the "all six metric columns render real values, not '—'" assertion encodes exactly the pre-F4b all-dashes failure mode, so the regression cannot silently return.
+- Verification-only: no source change. tsc 0 / eslint 0 / the 10 new tests green. (A full authenticated in-browser /qa is not feasible here — the dashboard reads via the service-role admin client, and the local dev env targets a different Supabase project than the test credentials — so this render test is the durable substitute for the browser-render dimension.)
+
+## [0.24.15.70] - 2026-06-02
+### Refactored — Allocation-dashboard sync-staleness single-sourced + lint-backstopped (B14, sync-liveness slice)
+
+Complements v0.24.15.66's B14 portfolio-badge slice (per-strategy `computed_at` via `computeFreshness`). This closes a **different axis** of the same NEW-C09-04 finding: the allocation dashboard's per-account **api-key sync liveness** (`allKeysStale` / `lastSyncAt` / `hasSyncing`), which #348 surfaced as a `StalenessBanner` but derived inline in `getMyAllocationDashboard` (`last_sync_at < cutoff`) — the primitive the B14 plan deferred.
+
+- New `src/lib/sync-freshness/` (`deriveSyncFreshness`): the single place the api-key sync-staleness decision is made (24h cutoff + the independent all-keys-stale and any-key-syncing predicates + max `lastSyncAt`). `getMyAllocationDashboard` now derives its three payload fields off it; **behaviour-preserving** — the `{allKeysStale, lastSyncAt, hasSyncing}` read contract is unchanged, so KpiStrip / EmptyState / ScenarioComposer / EquityChart are untouched.
+- New `quantalyze/no-raw-staleness-derivation` ESLint rule bans raw `last_sync_at`-vs-cutoff comparisons outside the SoT (mirrors the `no-raw-*` family). Unlike .66's overloaded `fresh/warm/stale` axis, the raw-comparison shape on this axis IS soundly expressible, so a rule is warranted; registered in the B25 plugin + contract registry.
+- Named `sync-freshness` / `SyncFreshness` (not `freshness` / `Freshness`) to coexist cleanly with the pre-existing `computeFreshness` computed_at module — two distinct axes, documented in the module header.
+- Reviewed by the 6 fresh-context specialists (code / silent-failure / type-design / comment / test / simplify): a MEDIUM module-name collision and a contradictory "precedence" comment were fixed; an independence regression guard was added (allStale ⊥ syncing — a stale-and-syncing key must report both, else KpiStrip would un-null stale KPIs during a sync).
+- Tests: the 4 fold states + cutoff boundary + independence, the lint rule's valid/invalid fixtures, and a query-layer guard (TC p7-06). tsc 0 / eslint 0 / full vitest green (the B25 contract registry caught the new rule needing registration).
+
 ## [0.24.15.69] - 2026-06-02
 ### Changed — Allocator Holdings tab: strategy-rows + honest Exchange Positions (F4b, H-0062/H-0063/H-0064)
 

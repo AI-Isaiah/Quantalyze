@@ -415,6 +415,29 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // B14 / NEW-C09-04 (H-1226) — the Scenario-tab EquityChart renders the inner
+  // header (no hideHeader), so the composer MUST plumb the live sync state.
+  // Before the fix it passed neither prop, so the header stamp showed
+  // "sync just now" / "no sync yet" to a synced allocator — a lie. This pins
+  // the wiring so a future refactor can't silently drop it and regress.
+  // -------------------------------------------------------------------------
+  it("EquityChart receives stale + lastSyncAt so the Scenario-tab sync stamp is honest (B14/H-1226)", () => {
+    const lastSync = "2026-02-01T00:00:00.000Z";
+    const payload = makePayload({ allKeysStale: true, lastSyncAt: lastSync });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(EquityChart).toHaveBeenCalled();
+    const props = vi.mocked(EquityChart).mock.calls[0][0];
+    expect(props.stale).toBe(true);
+    expect(props.lastSyncAt).toBe(lastSync);
+  });
+
+  // -------------------------------------------------------------------------
   // T_C5 — DrawdownChart receives scenarioDailyPoints
   // -------------------------------------------------------------------------
   it("T_C5 DrawdownChart receives scenarioDailyPoints", () => {

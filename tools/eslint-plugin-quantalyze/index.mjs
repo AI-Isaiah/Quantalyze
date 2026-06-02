@@ -8,7 +8,7 @@
  * AST-rule delta (rules a grep test can't do well, whose runtime SoT is
  * already shipped). Future batches add their rules here:
  *   - B9  no-passthrough-on-ipc           (LANDED — bans Zod .passthrough()/.catchall())
- *   - B14 freshness-signal-consumption    (after B14 ships its lint half)
+ *   - B14 no-raw-staleness-derivation     (LANDED — bans raw last_sync_at vs cutoff; route via deriveSyncFreshness)
  *   - B17 labeled-metric-consumption      (after B17 ships its runtime half)
  *
  * See .planning/audit-2026-05-07/B25-PLAN.md for the honesty-gate inventory
@@ -18,6 +18,7 @@ import noRawLocalstorage from "./rules/no-raw-localstorage.mjs";
 import noRawPublishedPredicate from "./rules/no-raw-published-predicate.mjs";
 import noRawRetryAfterParse from "./rules/no-raw-retry-after-parse.mjs";
 import noPassthroughOnIpc from "./rules/no-passthrough-on-ipc.mjs";
+import noRawStalenessDerivation from "./rules/no-raw-staleness-derivation.mjs";
 
 const plugin = {
   meta: { name: "eslint-plugin-quantalyze", version: "0.1.0" },
@@ -26,6 +27,7 @@ const plugin = {
     "no-raw-published-predicate": noRawPublishedPredicate,
     "no-raw-retry-after-parse": noRawRetryAfterParse,
     "no-passthrough-on-ipc": noPassthroughOnIpc,
+    "no-raw-staleness-derivation": noRawStalenessDerivation,
   },
 };
 
