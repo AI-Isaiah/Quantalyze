@@ -2,6 +2,7 @@
 
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { formatCurrency, formatNumber, formatPercent, STRATEGY_PALETTE } from "@/lib/utils";
+import { SyncBadge } from "@/components/strategy/SyncBadge";
 
 interface CompositionDonutProps {
   strategies: {
@@ -11,6 +12,12 @@ interface CompositionDonutProps {
     amount: number | null;
     twr: number | null;
     sharpe: number | null;
+    /**
+     * Constituent analytics computed_at — drives the per-row freshness badge so
+     * a stale slice's TWR/Sharpe is not read as current (B14). `null` when the
+     * constituent carried no analytics.
+     */
+    computedAt?: string | null;
   }[];
 }
 
@@ -73,9 +80,13 @@ export function CompositionDonut({ strategies }: CompositionDonutProps) {
           <tbody>
             {strategies.map((s, i) => (
               <tr key={s.id} className="border-b border-border/50 hover:bg-page/50 transition-colors">
-                <td className="py-2 pr-4 flex items-center gap-2">
-                  <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: STRATEGY_PALETTE[i % STRATEGY_PALETTE.length] }} />
-                  <span className="text-text-primary">{s.name}</span>
+                <td className="py-2 pr-4">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: STRATEGY_PALETTE[i % STRATEGY_PALETTE.length] }} />
+                    <span className="text-text-primary">{s.name}</span>
+                    {/* B14: per-slice freshness — renders nothing without a computed_at. */}
+                    <SyncBadge computedAt={s.computedAt ?? null} />
+                  </div>
                 </td>
                 <td className="py-2 pr-4 text-right font-metric">{formatCurrency(s.amount)}</td>
                 <td className="py-2 pr-4 text-right font-metric">{formatPercent(s.weight)}</td>

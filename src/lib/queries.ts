@@ -33,7 +33,7 @@ import type {
 } from "./types";
 import { SUPPORTED_EXCHANGES, type SupportedExchange } from "./utils";
 import { holdingScopeKey } from "./keys";
-import { getOwnPreferences, type AllocatorPreferences } from "./preferences";
+import { getOwnPreferences, type AllocatorOwnPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { safeFraction } from "./units";
@@ -1678,8 +1678,12 @@ export interface MyAllocationDashboardPayload {
    * `lib/mandate-gates.ts` `deriveMandateGates`. The mandate widget renders
    * an empty state when this is null. Editing surface lives at
    * /profile?tab=mandate (`MandateForm`); this projection is read-only.
+   *
+   * Typed `AllocatorOwnPreferences` (NOT the full `AllocatorPreferences`): the
+   * admin-only `founder_notes` / `edited_by_user_id` columns are structurally
+   * absent so this client-serialized payload can never carry founder PII.
    */
-  mandate: AllocatorPreferences | null;
+  mandate: AllocatorOwnPreferences | null;
   // ─────────────────────────────────────────────────────────────────────
   // Phase 10 / Plan 10-03 (scenario builder + what-if)
   // ─────────────────────────────────────────────────────────────────────
@@ -1776,7 +1780,7 @@ export interface MyAllocationDashboardPayload {
  * persisted value; only `null` means "unset").
  */
 export function deriveMandateIsSet(
-  mandate: AllocatorPreferences | null,
+  mandate: AllocatorOwnPreferences | null,
 ): boolean {
   if (mandate === null) return false;
   if (mandate.max_weight !== null && mandate.max_weight !== undefined) return true;

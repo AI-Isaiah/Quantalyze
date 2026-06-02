@@ -32,7 +32,7 @@
  */
 
 import type { PortfolioAnalytics } from "@/lib/types";
-import type { AllocatorPreferences } from "@/lib/preferences";
+import type { AllocatorOwnPreferences } from "@/lib/preferences";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { formatPercent, formatNumber, formatCurrency } from "@/lib/utils";
 
@@ -89,7 +89,7 @@ type DashboardHolding = MyAllocationDashboardPayload["holdingsSummary"][number];
  * when the source value is null, `ok: null` when either side is unknown).
  */
 export function deriveMandateGates(
-  mandate: AllocatorPreferences | null,
+  mandate: AllocatorOwnPreferences | null,
   analytics: PortfolioAnalytics | null,
   holdingsSummary: DashboardHolding[],
   strategies: DashboardStrategy[],
@@ -122,7 +122,7 @@ export function countPassingGates(gates: GateRow[]): {
 // ---------------------------------------------------------------------------
 
 function maxSingleAllocationGate(
-  mandate: AllocatorPreferences | null,
+  mandate: AllocatorOwnPreferences | null,
   strategies: DashboardStrategy[],
 ): GateRow {
   const cap = mandate?.max_weight ?? null;
@@ -138,7 +138,7 @@ function maxSingleAllocationGate(
 }
 
 function minSharpeGate(
-  mandate: AllocatorPreferences | null,
+  mandate: AllocatorOwnPreferences | null,
   analytics: PortfolioAnalytics | null,
 ): GateRow {
   const floor = mandate?.min_sharpe ?? null;
@@ -153,7 +153,7 @@ function minSharpeGate(
 }
 
 function maxDdFloorGate(
-  mandate: AllocatorPreferences | null,
+  mandate: AllocatorOwnPreferences | null,
   analytics: PortfolioAnalytics | null,
 ): GateRow {
   // mandate.max_drawdown_tolerance is stored as a positive magnitude
@@ -178,7 +178,7 @@ function maxDdFloorGate(
 }
 
 function minAumGate(
-  mandate: AllocatorPreferences | null,
+  mandate: AllocatorOwnPreferences | null,
   holdingsSummary: DashboardHolding[],
 ): GateRow {
   const tier = mandate?.liquidity_preference ?? null;
@@ -203,7 +203,7 @@ function minAumGate(
 }
 
 function styleConcentrationGate(
-  mandate: AllocatorPreferences | null,
+  mandate: AllocatorOwnPreferences | null,
   strategies: DashboardStrategy[],
 ): GateRow {
   const cap = mandate?.max_aum_concentration ?? null;

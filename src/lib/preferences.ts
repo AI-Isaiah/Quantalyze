@@ -52,6 +52,25 @@ export interface AllocatorPreferences {
   scoring_weight_overrides: Record<string, number> | null;
 }
 
+/**
+ * Allocator-facing projection of {@link AllocatorPreferences}.
+ *
+ * `founder_notes` (free-text founder commentary ABOUT the allocator) and
+ * `edited_by_user_id` (the internal admin UUID of whoever last edited the
+ * row) are **admin-only** — the allocator must never receive them. They are
+ * intentionally `Omit`-ted here so the type itself is the chokepoint: any
+ * allocator-facing surface that types its mandate as `AllocatorOwnPreferences`
+ * (the dashboard payload, `/api/preferences`, the profile mandate form) is
+ * structurally incapable of carrying the two admin-only fields, so a future
+ * payload widen can't silently re-leak them. `getOwnPreferences` returns this
+ * narrowed shape; admin surfaces (which legitimately read `founder_notes`)
+ * source their data from admin routes typed as the full `AllocatorPreferences`.
+ */
+export type AllocatorOwnPreferences = Omit<
+  AllocatorPreferences,
+  "founder_notes" | "edited_by_user_id"
+>;
+
 /** Default fallbacks used by the match engine when an allocator has no preferences row. */
 export const DEFAULT_PREFERENCES: Partial<AllocatorPreferences> = {
   max_drawdown_tolerance: 0.30,
@@ -229,7 +248,7 @@ export function validateAdminEditableInput(input: Partial<AllocatorPreferences>)
 export async function getOwnPreferences(
   supabase: SupabaseClient,
   userId: string,
-): Promise<AllocatorPreferences | null> {
+): Promise<AllocatorOwnPreferences | null> {
   const { data, error } = await supabase
     .from("allocator_preferences")
     .select("*")
@@ -262,5 +281,18 @@ export async function getOwnPreferences(
     }
     throw error;
   }
-  return data as AllocatorPreferences | null;
+  if (data === null) return null;
+  // Strip the two admin-only fields server-side BEFORE the row can reach any
+  // allocator-facing surface (dashboard RSC payload, /api/preferences JSON,
+  // profile mandate form props). `founder_notes` is founder commentary about
+  // the allocator and `edited_by_user_id` is an internal admin UUID — neither
+  // is ever shown to the allocator, so the self-read must not carry them.
+  // Destructure-and-drop (vs. an explicit column allowlist) keeps the SELECT *
+  // drift-safe: a new mandate column flows through automatically.
+  const {
+    founder_notes: _founderNotes,
+    edited_by_user_id: _editedByUserId,
+    ...ownPreferences
+  } = data as AllocatorPreferences;
+  return ownPreferences;
 }
