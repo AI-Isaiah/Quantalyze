@@ -403,4 +403,42 @@ describe("POST /api/simulator", () => {
     const body = await res.json();
     expect(body.error).toBe("Portfolio not found");
   });
+
+  it("TC11 — every response carries Cache-Control: private, no-store (M-0957)", async () => {
+    // audit-2026-05-07 Block D / P1947: allocator-scoped simulation payloads
+    // (Sharpe / MaxDD / equity curves) must never be retained by a shared
+    // cache. Pin no-store on the 200 success body AND representative error
+    // paths, including coexistence with Retry-After on the 429 throttle.
+    const { POST } = await import("./route");
+
+    const okRes = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        candidate_strategy_id: CANDIDATE_ID,
+      }),
+    );
+    expect(okRes.status).toBe(200);
+    expect(okRes.headers.get("Cache-Control")).toBe("private, no-store");
+
+    STATE.checkLimitResult = { success: false, retryAfter: 42 };
+    const throttled = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        candidate_strategy_id: CANDIDATE_ID,
+      }),
+    );
+    expect(throttled.status).toBe(429);
+    expect(throttled.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(throttled.headers.get("Retry-After")).toBe("42");
+
+    STATE.authUser = null;
+    const unauth = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        candidate_strategy_id: CANDIDATE_ID,
+      }),
+    );
+    expect(unauth.status).toBe(401);
+    expect(unauth.headers.get("Cache-Control")).toBe("private, no-store");
+  });
 });
