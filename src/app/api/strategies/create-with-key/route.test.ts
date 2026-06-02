@@ -113,6 +113,7 @@ describe("POST /api/strategies/create-with-key — envelope-encryption shape", (
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual({
+      ok: true,
       strategy_id: STRATEGY_ID,
       api_key_id: API_KEY_ID,
     });
@@ -255,6 +256,7 @@ describe("POST /api/strategies/create-with-key — P467 scope-rejection paths", 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual({
+      ok: true,
       strategy_id: STRATEGY_ID,
       api_key_id: API_KEY_ID,
     });

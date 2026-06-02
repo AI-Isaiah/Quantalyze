@@ -455,6 +455,9 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(200);
     const body = await res.json();
+    // H-0309: stable `ok: true` success discriminator, uniform with the sibling
+    // create-with-key / keys-sync endpoints.
+    expect(body.ok).toBe(true);
     expect(body.strategy_id).toBe(STRATEGY_ID);
     expect(body.status).toBe("pending_review");
     expect(
@@ -722,6 +725,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toBe("Draft not found");
+    expect(body.code).toBe("GATE_DRAFT_GONE"); // SubmitStep maps off this code
     // The raw Postgres message must not leak (P445-style hardening).
     expect(JSON.stringify(body)).not.toContain("strategy abc-uuid not found");
 
@@ -742,6 +746,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toBe("Draft not found");
+    expect(body.code).toBe("GATE_DRAFT_GONE"); // SubmitStep maps off this code
     expect(JSON.stringify(body)).not.toContain("no data returned");
 
     fetchSpy.mockRestore();
@@ -765,6 +770,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     expect(res.status).toBe(403);
     const body = await res.json();
     expect(body.error).toBe("This draft cannot be finalized");
+    expect(body.code).toBe("GUARD_BLOCKED"); // SubmitStep maps off this code
     // The raw owner/user UUIDs MUST NOT leak (P445-style hardening).
     expect(JSON.stringify(body)).not.toContain("xyz-uuid");
     expect(JSON.stringify(body)).not.toContain("uid-1234");
@@ -1011,6 +1017,9 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(200);
     const body = await res.json();
+    // H-0309: pin the ok:true discriminator on the LIVE (unified) path, not
+    // just the legacy handler.
+    expect(body.ok).toBe(true);
     expect(body.strategy_id).toBe(STRATEGY_ID);
     expect(body.status).toBe("pending_review");
     expect(body.queued).toBe(true);
@@ -1039,6 +1048,7 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(200);
     const body = await res.json();
+    expect(body.ok).toBe(true); // H-0309: discriminator pinned on the unified dedup path
     expect(body.queued).toBe(false);
     expect(body.code).toBe("WIZARD_DUPLICATE");
     expect(body.idempotent).toBe(true);

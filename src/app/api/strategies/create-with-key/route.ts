@@ -247,7 +247,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       );
     }
 
+    // H-0309 / M-0346: stable `ok: true` success discriminator so the wizard
+    // client (and any future caller) can branch on `data.ok` uniformly across
+    // create-with-key / finalize-wizard / keys-sync, matching the csv-finalize
+    // envelope already on the wire. Error bodies keep their `{ code, error }`
+    // shape and are discriminated by the absence of `ok` (res.ok / HTTP status).
     return NextResponse.json({
+      ok: true,
       strategy_id: row.strategy_id,
       api_key_id: row.api_key_id,
     });

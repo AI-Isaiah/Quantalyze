@@ -32,4 +32,15 @@ describe("buildEnvelope (Phase 16 / OBSERV-06)", () => {
     const env = buildEnvelope("GATE_INSUFFICIENT_DAYS", "corr-2");
     expect(env.recoverable).toBe(true);
   });
+
+  // RED-TEAM R1 regression guard (H-0192 follow-up): GUARD_BLOCKED is the 403
+  // refresh-nudge, so it MUST be recoverable — its envelope renders the Retry
+  // control the old UNKNOWN mapping provided. GATE_DRAFT_GONE (draft truly
+  // gone) is correctly NOT recoverable — retrying can't bring it back; the user
+  // starts fresh. A revert that dropped clear_and_retry from GUARD_BLOCKED (and
+  // silently removed the Retry button) fails here.
+  it("GUARD_BLOCKED is recoverable; GATE_DRAFT_GONE is not", () => {
+    expect(buildEnvelope("GUARD_BLOCKED", "corr-3").recoverable).toBe(true);
+    expect(buildEnvelope("GATE_DRAFT_GONE", "corr-4").recoverable).toBe(false);
+  });
 });

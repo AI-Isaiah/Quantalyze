@@ -19,6 +19,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { mandateAutoSaveLimiter, checkLimit } from "@/lib/ratelimit";
+import { isUuid } from "@/lib/utils";
 
 export async function PUT(
   req: NextRequest,
@@ -47,6 +48,16 @@ export async function PUT(
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
   }
 
+  // H-0341 / L-0089: reject a malformed strategyId as 400 BEFORE the rate-limit
+  // check and the DB call. An unvalidated id reached Supabase as a 22P02
+  // invalid-uuid cast that surfaced as a generic 500 — indistinguishable from a
+  // real infra failure — so a stale slug-as-id (e.g. a UI regression) burned a
+  // rate-limit token on every retry. Validating here gives the client a clean
+  // non-retryable 400 and never consumes a token on structurally bad input.
+  if (!isUuid(strategyId)) {
+    return NextResponse.json({ error: "Invalid strategy id" }, { status: 400 });
+  }
+
   // 30/min per user. Toggle bursts can legitimately exceed the global
   // userActionLimiter's 5/min cap.
   const rl = await checkLimit(mandateAutoSaveLimiter, `watchlist:${user.id}`);
@@ -68,7 +79,30 @@ export async function PUT(
         { onConflict: "user_id,strategy_id", ignoreDuplicates: true },
       );
     if (error) {
-      console.error("[api/watchlist] add failed:", error.message ?? error);
+      // H-0341: log the full PostgrestError so the SQLSTATE (22P02 / 23503 /
+      // 42501) is available for alert routing, not just the opaque .message.
+      console.error("[api/watchlist] add failed:", {
+        code: error.code,
+        message: error.message,
+        details: error.details,
+        hint: error.hint,
+      });
+      // L-0088: a 23503 foreign_key_violation means strategy_id does not
+      // reference an existing strategies row. Return 404 (not 500) so a
+      // nonexistent id reads as "not found" rather than an infra failure, and
+      // gives the client a non-retryable signal. NOTE: this removes the
+      // 200-vs-500 infra-signal asymmetry but does NOT fully close the
+      // existence oracle — the FK check ignores RLS, so any real strategy id
+      // (incl. another user's unpublished one) still yields 200 while a
+      // nonexistent id yields 404. That residual is not exploitable: strategy
+      // ids are unguessable random UUIDs, and a published strategy's id is
+      // already public via its factsheet.
+      if (error.code === "23503") {
+        return NextResponse.json(
+          { error: "Strategy not found" },
+          { status: 404 },
+        );
+      }
       return NextResponse.json({ error: "Failed to add" }, { status: 500 });
     }
   } else {
@@ -81,7 +115,12 @@ export async function PUT(
       .eq("user_id", user.id)
       .eq("strategy_id", strategyId);
     if (error) {
-      console.error("[api/watchlist] remove failed:", error.message ?? error);
+      console.error("[api/watchlist] remove failed:", {
+        code: error.code,
+        message: error.message,
+        details: error.details,
+        hint: error.hint,
+      });
       return NextResponse.json({ error: "Failed to remove" }, { status: 500 });
     }
   }

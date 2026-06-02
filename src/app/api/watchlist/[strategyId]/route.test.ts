@@ -320,4 +320,36 @@ describe("PUT /api/watchlist/[strategyId]", () => {
     const res = await PUT(makeReq({ action: "remove" }), makeCtx());
     expect(res.status).toBe(500);
   });
+
+  // H-0341 / L-0089 (audit-2026-05-07): a malformed strategyId must be
+  // rejected as 400 at the boundary, BEFORE any rate-limit token is consumed
+  // or the DB is touched. Pre-fix the raw id reached Supabase as a 22P02
+  // invalid-uuid cast → generic 500, indistinguishable from infra failure, so
+  // a stale slug-as-id burned a token on every StarToggle retry.
+  it("returns 400 on a malformed strategyId without consuming a rate-limit token or hitting the DB", async () => {
+    const ctxRaw = { params: Promise.resolve({ strategyId: "not-a-uuid" }) };
+    const res = await PUT(makeReq({ action: "add" }), ctxRaw);
+    expect(res.status).toBe(400); // WITHOUT fix: mock upsert resolves → 200
+    expect(recorders.rateLimitCalls).toHaveLength(0); // token NOT burned
+    expect(recorders.upsertCalls).toHaveLength(0); // DB NOT touched
+  });
+
+  // L-0088 (audit-2026-05-07): an "add" that hits a 23503 foreign_key_violation
+  // (strategy_id references no existing row) must return 404, not 500 — so a
+  // nonexistent id reads as "not found" instead of an infra failure, collapsing
+  // the 200-vs-500 existence oracle a UUID-probing caller could exploit.
+  it("returns 404 (not 500) when add hits a 23503 FK violation", async () => {
+    recorders.upsertResponse = {
+      error: new PostgrestError({
+        message: 'insert violates foreign key constraint "user_favorites_strategy_id_fkey"',
+        details: "",
+        hint: "",
+        code: "23503",
+      }),
+    };
+    const res = await PUT(makeReq({ action: "add" }), makeCtx());
+    expect(res.status).toBe(404); // WITHOUT fix: 500
+    const body = await res.json();
+    expect(body.error).toBe("Strategy not found");
+  });
 });

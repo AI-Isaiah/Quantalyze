@@ -200,6 +200,7 @@ describe("POST /api/keys/sync", () => {
     expect(res.status).toBe(202);
     const body = await res.json();
     expect(body).toEqual({
+      ok: true,
       accepted: true,
       strategy_id: TEST_STRATEGY_ID,
       status: "syncing",
@@ -229,6 +230,7 @@ describe("POST /api/keys/sync", () => {
     expect(res.status).toBe(202);
     const body = await res.json();
     expect(body).toEqual({
+      ok: true,
       accepted: true,
       strategy_id: TEST_STRATEGY_ID,
       status: "syncing",

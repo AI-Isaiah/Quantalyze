@@ -154,4 +154,63 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     expect(onSubmitted).toHaveBeenCalledWith("strat-final");
     expect(findWizardError()).toBeUndefined();
   });
+
+  // H-0192: the finalize route now tags its actionable failures with a
+  // WizardErrorCode (404 -> GATE_DRAFT_GONE, 403 RLS -> GUARD_BLOCKED) and
+  // SubmitStep maps off that code, NOT raw HTTP status. Pre-fix these collapsed
+  // to UNKNOWN, blinding the founder (and the wizard_error funnel) to which
+  // finalize gate fired.
+  it("maps the route's GATE_DRAFT_GONE code (404 draft gone) through", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ error: "Draft not found", code: "GATE_DRAFT_GONE" }, 404),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("GATE_DRAFT_GONE"); // pre-fix: UNKNOWN
+  });
+
+  it("maps the route's GUARD_BLOCKED code (403 cannot finalize) through", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { error: "This draft cannot be finalized", code: "GUARD_BLOCKED" },
+        403,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("GUARD_BLOCKED"); // pre-fix: UNKNOWN
+  });
+
+  // RED-TEAM R2 regression guard: a pre-handler 403 (CSRF / approval-gate) has
+  // NO finalize code. The OLD status-based mapping mislabeled it as
+  // GUARD_BLOCKED ("draft cannot be finalized"); it must map to UNKNOWN so the
+  // wizard_error funnel doesn't conflate approval/CSRF denials with draft-state
+  // failures. (UNKNOWN is recoverable, so the Retry control still renders.)
+  it("maps a code-less 403 (pre-handler CSRF/approval denial) to UNKNOWN, not GUARD_BLOCKED", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ error: "Forbidden" }, 403),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("UNKNOWN");
+  });
+
+  // A 409 stale-state ('draft_state_invalid' — not a WizardErrorCode) maps to
+  // UNKNOWN, which is recoverable, so the legitimately-retryable refresh path
+  // keeps its Retry button (RED-TEAM R1 regression guard).
+  it("maps a 409 unknown code (draft_state_invalid) to UNKNOWN (recoverable)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { error: "Refresh and try again.", code: "draft_state_invalid" },
+        409,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("UNKNOWN");
+  });
 });
