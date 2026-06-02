@@ -394,4 +394,25 @@ describe("deriveOutcomeStatusPill", () => {
     expect(result.state).toBe("allocated-win");
     expect(result.tone).toBe("positive");
   });
+
+  // F2 H-0463/H-0464 — the pill shares the NaN-safe mostMatureDelta with the KPI
+  // strip. A non-finite delta (corrupt worker write) must resolve to "pending",
+  // NOT silently fall through to "loss" (NaN === null is false, so the old inline
+  // ternary classified it as a loss). Mirrors the KPI strip's pending treatment.
+  it("F2 H-0464: a NaN most-mature delta yields 'pending', not 'loss'", () => {
+    const result = deriveOutcomeStatusPill(
+      makeBridgeOutcome({ percent_allocated: 10, delta_180d: NaN }),
+    );
+    expect(result.state).toBe("allocated-pending");
+    expect(result.tone).toBe("neutral");
+  });
+
+  it("F2 H-0464: a NaN high delta falls through to a valid lower delta", () => {
+    // delta_180d=NaN must not pre-empt the genuine delta_90d win.
+    const result = deriveOutcomeStatusPill(
+      makeBridgeOutcome({ percent_allocated: 10, delta_180d: NaN, delta_90d: 0.05 }),
+    );
+    expect(result.state).toBe("allocated-win");
+    expect(result.tone).toBe("positive");
+  });
 });

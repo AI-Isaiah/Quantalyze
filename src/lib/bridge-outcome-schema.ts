@@ -38,6 +38,32 @@ export type BridgeOutcome = {
   created_at: string;
 };
 
+/**
+ * Single source of truth for the "most-mature realized delta" ladder
+ * (delta_180d → delta_90d → delta_30d), matching Phase 4
+ * feedback_engine._success_value (lines 156-166).
+ *
+ * F2 H-0463: this used to exist twice — a named helper in outcomes-kpi.ts AND an
+ * inline nested ternary in bridge-outcome-label.ts — so the KPI strip and the
+ * status pill could silently disagree. Both now call this.
+ *
+ * F2 H-0464 / M-0532: NaN-safe. A buggy analytics-worker write can land a NaN or
+ * Infinity in a delta_* column (Postgres double precision accepts 'NaN'::float8;
+ * a divide-by-zero in the returns calc produces ±Inf). A plain `!== null` check
+ * lets NaN through (`NaN !== null` is true), where it would (a) short-circuit the
+ * ladder ahead of a VALID lower delta, (b) count as a LOSS in the win-rate
+ * denominator (`NaN > 0` is false), and (c) poison avgRealizedDelta to NaN; and
+ * Infinity would count as a spurious WIN. Treat any non-finite delta as ABSENT
+ * (fall through the ladder); return null when no finite delta exists so the row
+ * is classified pending, not a fabricated win/loss.
+ */
+export function mostMatureDelta(o: BridgeOutcome): number | null {
+  if (o.delta_180d !== null && Number.isFinite(o.delta_180d)) return o.delta_180d;
+  if (o.delta_90d !== null && Number.isFinite(o.delta_90d)) return o.delta_90d;
+  if (o.delta_30d !== null && Number.isFinite(o.delta_30d)) return o.delta_30d;
+  return null;
+}
+
 export const ALLOCATED_FIELDS = z
   .object({
     percent_allocated: z.number().min(0.1).max(50),

@@ -9,7 +9,7 @@
 // feedback_engine._success_value lines 156-166. Fixture avgRealizedDelta
 // = 0.00333 on the 7-row parity fixture.
 
-import type { BridgeOutcome } from "./bridge-outcome-schema";
+import { mostMatureDelta, type BridgeOutcome } from "./bridge-outcome-schema";
 
 export type OutcomeKPIs = {
   /** D-13: simple count of all rows (allocated + rejected + pending). */
@@ -35,13 +35,9 @@ export type OutcomeKPIs = {
   winRateDenominator: number;
 };
 
-function mostMatureDelta(o: BridgeOutcome): number | null {
-  // D-12 revised: prefer delta_180d > delta_90d > delta_30d, matching
-  // Phase 4 feedback_engine._success_value lines 156-166.
-  if (o.delta_180d !== null) return o.delta_180d;
-  if (o.delta_90d !== null) return o.delta_90d;
-  return o.delta_30d;
-}
+// F2 H-0463/H-0464 — mostMatureDelta now lives in bridge-outcome-schema as the
+// single, NaN-safe source of truth shared with deriveOutcomeStatusPill (the KPI
+// strip and the status pill can no longer drift or disagree on a corrupt delta).
 
 /**
  * Pairwise (divide-and-conquer) summation. Gives cross-runtime IEEE-754 parity
@@ -68,26 +64,42 @@ export function computeOutcomeKPIs(outcomes: BridgeOutcome[]): OutcomeKPIs {
     (o) => o.kind === "allocated" && (o.percent_allocated ?? 0) >= 1.0,
   );
 
-  // Step 3: partition by matured (any non-NULL delta) vs pending (all NULL).
-  const mature = allocatedSized.filter(
-    (o) => o.delta_30d !== null || o.delta_90d !== null || o.delta_180d !== null,
-  );
-  const pendingCount = allocatedSized.length - mature.length;
+  // Step 3 (F2 H-0464/M-0532): partition by a FINITE most-mature delta.
+  // mostMatureDelta is NaN-safe — it treats NaN/Infinity from a buggy
+  // analytics-worker write as ABSENT (NaN passes a plain `!== null` check, then
+  // counts as a loss because `NaN > 0` is false, and poisons the average to NaN;
+  // Infinity counts as a spurious win). A row whose only deltas are non-finite
+  // therefore resolves to null and is counted PENDING (not a fabricated loss),
+  // and mature/pending/deltas stay mutually consistent (winRateDenominator ==
+  // deltas.length). A row with a non-finite high delta but a valid lower one uses
+  // the valid lower delta rather than the corrupt value.
+  const deltas: number[] = [];
+  let nonFiniteDropped = 0;
+  for (const o of allocatedSized) {
+    const d = mostMatureDelta(o);
+    if (d !== null) {
+      deltas.push(d);
+    } else if (
+      o.delta_30d !== null ||
+      o.delta_90d !== null ||
+      o.delta_180d !== null
+    ) {
+      // Had delta value(s), but every one was non-finite — a data corruption
+      // worth surfacing rather than silently folding into "pending".
+      nonFiniteDropped++;
+    }
+  }
+  const pendingCount = allocatedSized.length - deltas.length;
 
-  if (mature.length === 0) {
-    return { totalOutcomes, winRate: null, avgRealizedDelta: null, pendingCount, winRateDenominator: 0 };
+  // Rule 12 (fail loud): a corrupt non-finite delta is a real data bug
+  // (analytics-worker divide-by-zero / malformed series). Surface it instead of
+  // letting it vanish into the pending bucket. Fires only when such a row exists.
+  if (nonFiniteDropped > 0) {
+    console.error(
+      `[computeOutcomeKPIs] excluded ${nonFiniteDropped} allocated row(s) with non-finite delta_* values (NaN/Infinity) from the win-rate — likely a corrupt analytics-worker write.`,
+    );
   }
 
-  const deltas = mature
-    .map(mostMatureDelta)
-    .filter((d): d is number => d !== null);
-
-  // F-10: guard against a future change to the `mature` filter or
-  // `mostMatureDelta` that produces a non-empty `mature` but an empty `deltas`.
-  // Today this is unreachable (see winRateDenominator docstring), but the guard
-  // is cheap and makes the null-return invariant explicit — without it, a
-  // hypothetical `deltas.length === 0` would produce `winRate: NaN` and
-  // `avgRealizedDelta: NaN` instead of the correct `null` return.
   if (deltas.length === 0) {
     return { totalOutcomes, winRate: null, avgRealizedDelta: null, pendingCount, winRateDenominator: 0 };
   }
