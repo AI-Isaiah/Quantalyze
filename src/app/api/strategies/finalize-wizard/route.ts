@@ -739,7 +739,10 @@ async function runLegacyFinalize(args: {
     }
   });
 
+  // H-0309: uniform `ok: true` success discriminator across the wizard
+  // endpoints (create-with-key / keys-sync / finalize-wizard).
   return NextResponse.json({
+    ok: true,
     strategy_id: resolvedId,
     status: "pending_review",
   });
@@ -814,6 +817,7 @@ async function unifiedFinalizeWizardHandler(args: {
   if (isProcessKeyOnboardResponse(upstream)) {
     if (upstream.queued) {
       return NextResponse.json({
+        ok: true,
         strategy_id: args.strategy_id,
         status: "pending_review",
         verification_id: upstream.verification_id,
@@ -822,6 +826,7 @@ async function unifiedFinalizeWizardHandler(args: {
     }
     // queued=false discriminant — duplicate / dedup-hit envelope.
     return NextResponse.json({
+      ok: true,
       strategy_id: args.strategy_id,
       status: "pending_review",
       verification_id: upstream.verification_id ?? null,

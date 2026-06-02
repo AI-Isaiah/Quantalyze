@@ -455,6 +455,9 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(200);
     const body = await res.json();
+    // H-0309: stable `ok: true` success discriminator, uniform with the sibling
+    // create-with-key / keys-sync endpoints.
+    expect(body.ok).toBe(true);
     expect(body.strategy_id).toBe(STRATEGY_ID);
     expect(body.status).toBe("pending_review");
     expect(

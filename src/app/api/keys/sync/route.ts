@@ -162,6 +162,9 @@ async function unifiedKeysSyncHandler(args: {
     if (upstream.queued === false && upstream.code === "WIZARD_DUPLICATE") {
       return NextResponse.json(
         {
+          // H-0309: uniform `ok: true` success discriminator (alongside the
+          // legacy `accepted`) so all wizard endpoints share one shape.
+          ok: true,
           accepted: true,
           strategy_id: args.strategy_id,
           status: typeof upstream.status === "string" ? upstream.status : "syncing",
@@ -175,6 +178,7 @@ async function unifiedKeysSyncHandler(args: {
     }
     return NextResponse.json(
       {
+        ok: true,
         accepted: true,
         strategy_id: args.strategy_id,
         status: "syncing",
@@ -240,7 +244,7 @@ async function legacyKeysSyncHandler(args: {
     });
 
     return NextResponse.json(
-      { accepted: true, strategy_id, status: "syncing" },
+      { ok: true, accepted: true, strategy_id, status: "syncing" },
       { status: 202 },
     );
   }
@@ -317,7 +321,7 @@ async function legacyKeysSyncHandler(args: {
   });
 
   return NextResponse.json(
-    { accepted: true, strategy_id, status: "syncing" },
+    { ok: true, accepted: true, strategy_id, status: "syncing" },
     { status: 202 },
   );
 }
