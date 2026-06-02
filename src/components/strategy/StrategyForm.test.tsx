@@ -39,6 +39,10 @@ vi.mock("next/navigation", () => ({
 let strategiesUpdateResult: { error: { code?: string; message?: string } | null } = {
   error: null,
 };
+// Controls what `.from("api_keys").insert(...)` resolves to.
+let apiKeysInsertResult: { error: { code?: string; message?: string } | null } = {
+  error: null,
+};
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -60,6 +64,9 @@ vi.mock("@/lib/supabase/client", () => ({
             eq: () => Promise.resolve(strategiesUpdateResult),
           }),
         };
+      }
+      if (table === "api_keys") {
+        return { insert: () => Promise.resolve(apiKeysInsertResult) };
       }
       throw new Error(`unexpected from(${table})`);
     },
@@ -85,6 +92,7 @@ beforeEach(() => {
   routerPushMock.mockClear();
   routerRefreshMock.mockClear();
   strategiesUpdateResult = { error: null };
+  apiKeysInsertResult = { error: null };
   // jsdom lacks HTMLDialogElement methods the <Modal> uses on mount.
   if (!HTMLDialogElement.prototype.showModal) {
     HTMLDialogElement.prototype.showModal = function showModal() {
@@ -152,5 +160,43 @@ describe("StrategyForm — H-0405 error redaction", () => {
     expect(
       screen.queryByText("Couldn't save your strategy. Please try again."),
     ).not.toBeInTheDocument();
+  });
+
+  // H-0405 same-class (specialist review): the api_keys insert in the SAME
+  // component must also redact its raw Postgres error from the connect-key
+  // banner — an RLS denial / unique-constraint violation embeds SQLSTATE +
+  // constraint names. Connect-key flow: open modal -> fill key/secret ->
+  // validate-and-encrypt (mocked 200) -> api_keys insert (mocked error).
+  it("redacts a raw api_keys insert error from the connect-key banner", async () => {
+    apiKeysInsertResult = {
+      error: {
+        code: "42501",
+        message:
+          'new row violates row-level security policy for table "api_keys"',
+      },
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ valid: true, read_only: true, ciphertext: "x" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    render(<StrategyForm mode="create" />);
+    fireEvent.click(screen.getByRole("button", { name: /connect api key/i }));
+    fireEvent.change(screen.getByPlaceholderText(/your read-only api key/i), {
+      target: { value: "kkkkkkkk" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/your api secret/i), {
+      target: { value: "ssssssss" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Connect Key" }));
+
+    expect(
+      await screen.findByText("Couldn't connect this API key. Please try again."),
+    ).toBeInTheDocument();
+    // The raw RLS/SQLSTATE detail must not reach the banner.
+    expect(screen.queryByText(/row-level security/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/42501/)).not.toBeInTheDocument();
   });
 });

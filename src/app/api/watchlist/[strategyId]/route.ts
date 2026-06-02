@@ -89,9 +89,14 @@ export async function PUT(
       });
       // L-0088: a 23503 foreign_key_violation means strategy_id does not
       // reference an existing strategies row. Return 404 (not 500) so a
-      // nonexistent id reads as "not found" rather than an infra failure —
-      // collapsing the 200-vs-500 existence oracle a UUID-probing caller
-      // could otherwise use, and giving the client a non-retryable signal.
+      // nonexistent id reads as "not found" rather than an infra failure, and
+      // gives the client a non-retryable signal. NOTE: this removes the
+      // 200-vs-500 infra-signal asymmetry but does NOT fully close the
+      // existence oracle — the FK check ignores RLS, so any real strategy id
+      // (incl. another user's unpublished one) still yields 200 while a
+      // nonexistent id yields 404. That residual is not exploitable: strategy
+      // ids are unguessable random UUIDs, and a published strategy's id is
+      // already public via its factsheet.
       if (error.code === "23503") {
         return NextResponse.json(
           { error: "Strategy not found" },

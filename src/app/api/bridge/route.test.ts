@@ -113,10 +113,13 @@ vi.mock("@/lib/analytics-client", async () => {
   };
 });
 
-// Sentry capture is fire-and-forget; stub it so the 500-path test doesn't
-// attempt a real @sentry/nextjs import.
+// Sentry capture is fire-and-forget; spy on it so the 500-path tests can pin
+// the server-side-preservation half of the H-1062 fix (now that err.message is
+// no longer echoed to the client, captureToSentry is the structured channel)
+// without attempting a real @sentry/nextjs import.
+const captureSpy = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/sentry-capture", () => ({
-  captureToSentry: () => {},
+  captureToSentry: captureSpy,
 }));
 
 // Valid v4 UUIDs — real portfolio/strategy ids are gen_random_uuid() (v4).
@@ -145,6 +148,7 @@ beforeEach(() => {
   STATE.csrfShouldReject = false;
   STATE.portfolioFound = true;
   STATE.findReplacementImpl = async () => ({ candidates: [] });
+  captureSpy.mockClear();
 });
 
 afterEach(() => {
@@ -318,6 +322,14 @@ describe("POST /api/bridge", () => {
     // The internal Python detail must never appear in the response envelope.
     expect(body.error).not.toContain("simulator_scoring.py");
     expect(body.error).not.toContain("Zod");
+    // ...but it MUST still reach Sentry — the static client message means
+    // captureToSentry is now the structured observability channel for 5xx.
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { route: "api/bridge", op: "findReplacementCandidates" },
+      }),
+    );
   });
 
   it("TC9 — upstream 4xx forwarded with its status (H-1061/H-1063)", async () => {
@@ -336,6 +348,8 @@ describe("POST /api/bridge", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toBe("Portfolio not found");
+    // A forwarded 4xx is an expected user error, NOT an operator alert.
+    expect(captureSpy).not.toHaveBeenCalled();
   });
 
   it("TC9b — upstream 5xx stays 500 with static message (no leak)", async () => {
@@ -354,6 +368,12 @@ describe("POST /api/bridge", () => {
     const body = await res.json();
     expect(body.error).toBe("Bridge scoring failed. Please try again.");
     expect(body.error).not.toContain("traceback");
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { route: "api/bridge", op: "findReplacementCandidates" },
+      }),
+    );
   });
 
   it("TC10 — upstream timeout → 504 (H-1061)", async () => {

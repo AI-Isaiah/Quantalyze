@@ -128,7 +128,18 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
         label: `${apiExchange} key`,
         ...dbFields,
       });
-      if (insertError) throw new Error(insertError.message);
+      if (insertError) {
+        // H-0405 (same leak class, same file as the strategies insert/update
+        // redaction): never surface the raw Postgres error — an api_keys RLS
+        // denial (42501) or unique/CHECK violation embeds SQLSTATE + constraint
+        // names. Log the detail, show a static banner.
+        console.error(
+          "[StrategyForm] api_keys insert failed:",
+          insertError.code,
+          insertError.message,
+        );
+        throw new Error("Couldn't connect this API key. Please try again.");
+      }
 
       setApiConnected(true);
       setDataSource("api");

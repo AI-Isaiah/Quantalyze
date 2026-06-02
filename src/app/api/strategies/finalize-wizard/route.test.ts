@@ -1014,6 +1014,9 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(200);
     const body = await res.json();
+    // H-0309: pin the ok:true discriminator on the LIVE (unified) path, not
+    // just the legacy handler.
+    expect(body.ok).toBe(true);
     expect(body.strategy_id).toBe(STRATEGY_ID);
     expect(body.status).toBe("pending_review");
     expect(body.queued).toBe(true);
@@ -1042,6 +1045,7 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(200);
     const body = await res.json();
+    expect(body.ok).toBe(true); // H-0309: discriminator pinned on the unified dedup path
     expect(body.queued).toBe(false);
     expect(body.code).toBe("WIZARD_DUPLICATE");
     expect(body.idempotent).toBe(true);
