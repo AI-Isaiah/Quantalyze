@@ -264,4 +264,25 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
     expect(res.status).toBe(200);
     expect(STATE.refundCalls).toHaveLength(0);
   });
+
+  it("F5b: every response carries Cache-Control: private, no-store", async () => {
+    // audit-2026-05-07 Block D / P1947: the 200 body is the allocator's
+    // optimizer suggestions — a shared cache must never retain it. Pin
+    // no-store on the 200 success body and representative error paths,
+    // including coexistence with Retry-After on the 429 throttle.
+    const okRes = await POST(buildRequest({ portfolio_id: "x" }));
+    expect(okRes.status).toBe(200);
+    expect(okRes.headers.get("Cache-Control")).toBe("private, no-store");
+
+    STATE.checkLimitResult = { success: false, retryAfter: 42 };
+    const throttled = await POST(buildRequest({ portfolio_id: "x" }));
+    expect(throttled.status).toBe(429);
+    expect(throttled.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(throttled.headers.get("retry-after")).toBe("42");
+
+    STATE.authUser = null;
+    const unauth = await POST(buildRequest({ portfolio_id: "x" }));
+    expect(unauth.status).toBe(401);
+    expect(unauth.headers.get("Cache-Control")).toBe("private, no-store");
+  });
 });

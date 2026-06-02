@@ -8,6 +8,7 @@ import {
   AnalyticsTimeoutError,
 } from "@/lib/analytics-client";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /** Optimizer can take 3-8s on large portfolios; 15s is generous. */
 const OPTIMIZER_TIMEOUT_MS = 15_000;
@@ -21,7 +22,10 @@ export async function POST(req: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401, headers: NO_STORE_HEADERS },
+    );
   }
 
   // Approval gate (PR #266 follow-up): block pending-approval users from
@@ -35,14 +39,17 @@ export async function POST(req: NextRequest) {
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Invalid JSON body" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   const portfolioId = body.portfolio_id;
   if (!portfolioId) {
     return NextResponse.json(
       { error: "portfolio_id is required" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -61,7 +68,10 @@ export async function POST(req: NextRequest) {
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      {
+        status: 429,
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+      },
     );
   }
 
@@ -93,7 +103,10 @@ export async function POST(req: NextRequest) {
   // portfolio. The IDOR concern is mitigated; rate-limit above closes the
   // CSRF-amplification-via-CSRF chain.
   if (!(await assertPortfolioOwnership(portfolioId, user.id))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json(
+      { error: "Forbidden" },
+      { status: 403, headers: NO_STORE_HEADERS },
+    );
   }
 
   try {
@@ -110,10 +123,13 @@ export async function POST(req: NextRequest) {
       OPTIMIZER_TIMEOUT_MS,
     );
 
-    return NextResponse.json({
-      status: "complete",
-      suggestions: data.suggestions ?? [],
-    });
+    return NextResponse.json(
+      {
+        status: "complete",
+        suggestions: data.suggestions ?? [],
+      },
+      { headers: NO_STORE_HEADERS },
+    );
   } catch (err) {
     if (err instanceof AnalyticsTimeoutError) {
       // Audit-2026-05-07 red-team R-0002: refund the 5/min token on
@@ -121,7 +137,7 @@ export async function POST(req: NextRequest) {
       await refundRateLimitToken("analytics_timeout");
       return NextResponse.json(
         { status: "failed", suggestions: null, error: "Optimizer timed out" },
-        { status: 504 },
+        { status: 504, headers: NO_STORE_HEADERS },
       );
     }
     // Audit-2026-05-07 M-0333 (api-contract c8): do NOT surface
@@ -139,7 +155,7 @@ export async function POST(req: NextRequest) {
         suggestions: null,
         error: "Analytics service unreachable",
       },
-      { status: 503 },
+      { status: 503, headers: NO_STORE_HEADERS },
     );
   }
 }
