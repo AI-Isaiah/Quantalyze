@@ -80,3 +80,13 @@ class TestIsGeoBlocked:
             ) from cause
         except ccxt.ExchangeNotAvailable as e:
             assert is_geo_blocked(e) is False
+
+    def test_451_with_eligibility_tell_but_no_phrase_marker_is_geo_blocked(self) -> None:
+        # Positive case for the HTTP-451 heuristic branch: a 451 carrying the
+        # specific "eligibility" tell but NOT the "restricted location" phrase
+        # marker still classifies as a geo-block (word-boundary 451 + eligibility).
+        exc = ccxt.ExchangeError(
+            "binance GET /fapi/v1/account 451 "
+            '{"code":0,"msg":"Service unavailable per b. Eligibility in your region"}'
+        )
+        assert is_geo_blocked(exc) is True

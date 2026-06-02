@@ -2990,7 +2990,9 @@ class TestCircuitBreakerSingleDbClock:
             "not table().update() with datetime.now() (C12-10)"
         )
 
-        await _stamp_429(supabase, {"id": "key-9"})
+        # Non-geo-block exc so the stamp path runs (a geo-block early-returns
+        # without stamping — see TestStamp429GeoBlockSkip).
+        await _stamp_429(supabase, {"id": "key-9"}, ccxt.RateLimitExceeded("429 too many"))
 
         assert rpc_calls == [("stamp_api_key_429", {"p_api_key_id": "key-9"})], (
             "stamp must go through the DB-clock RPC so the stamp and the "
