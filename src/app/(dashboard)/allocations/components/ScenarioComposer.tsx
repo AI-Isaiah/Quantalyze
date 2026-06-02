@@ -60,6 +60,7 @@ import {
   type DailyPoint,
   type StrategyForBuilder,
 } from "@/lib/scenario";
+import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
 import { useScenarioState } from "../hooks/useScenarioState";
 import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 import {
@@ -461,10 +462,30 @@ export function ScenarioComposer({
     ],
   );
 
+  // H-0487/H-0493 — map each holding scopeRef to its bare symbol so aliased
+  // multi-venue/instrument holdings (identical symbol-keyed series) can be
+  // collapsed before computeScenario, keeping avg_pairwise_correlation honest.
+  const symbolByHoldingId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const h of holdingsSummary as Array<{
+      venue: string;
+      symbol: string;
+      holding_type: "spot" | "derivative";
+    }>) {
+      map.set(buildHoldingRef(h), h.symbol);
+    }
+    return map;
+  }, [holdingsSummary]);
+
   const scenarioMetrics = useMemo(() => {
-    const cache = buildDateMapCache(adapterOutput.strategies);
-    return computeScenario(adapterOutput.strategies, adapterOutput.state, cache);
-  }, [adapterOutput]);
+    const deAliased = collapseAliasedHoldingStrategies(
+      adapterOutput.strategies,
+      adapterOutput.state,
+      symbolByHoldingId,
+    );
+    const cache = buildDateMapCache(deAliased.strategies);
+    return computeScenario(deAliased.strategies, deAliased.state, cache);
+  }, [adapterOutput, symbolByHoldingId]);
 
   // -------------------------------------------------------------------------
   // M4 — live baseline from payload (NOT recomputed here).
