@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse, after } from "next/server";
+import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
@@ -62,10 +63,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const { id, status, admin_note } = body;
-  if (!id || !VALID_STATUSES.includes(status as (typeof VALID_STATUSES)[number])) {
+  // B9 boundary-validation parity (M-1143 sibling): validate with a Zod schema.
+  // The defect this closes: `admin_note` was written into
+  // contact_requests.admin_note (unbounded TEXT, L84-91 below) with NO length
+  // cap. `.max(2000)` rejects an oversized note at the boundary (fail-loud 400)
+  // before the DB write. id/status semantics preserved (non-empty id + the
+  // existing VALID_STATUSES enum). Parse stays BEFORE the rate limiter (B15b).
+  const parsed = z
+    .object({
+      id: z.string().min(1),
+      status: z.enum(VALID_STATUSES),
+      admin_note: z.string().max(2000).optional(),
+    })
+    .safeParse(body);
+  if (!parsed.success) {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
+  const { id, status, admin_note } = parsed.data;
 
   // B15b (audit-2026-05-07): rate-limit AFTER input validation so a
   // malformed/invalid body (rejected 400 above) never consumes one of the

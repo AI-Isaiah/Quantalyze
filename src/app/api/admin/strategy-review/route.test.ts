@@ -457,3 +457,45 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
     expect(body.error).not.toContain("ANALYTICS_FAILED");
   });
 });
+
+/**
+ * B9 boundary-validation parity (M-1143) — the reject path wrote the raw
+ * request-body `review_note` into strategies.review_note (unbounded TEXT) with
+ * no length cap; only the audit-metadata copy was bounded. The route now Zod-
+ * validates the body with `review_note: z.string().max(2000)`, rejecting an
+ * oversized note at the boundary BEFORE the DB write.
+ *
+ * Fail-without-fix: pre-fix the route only checked `!id` + the action enum, so
+ * id='strat-1'/action='reject' with a 2001-char note passed straight through to
+ * the strategies UPDATE and returned 200 — the assertion below would see 200.
+ */
+describe("POST /api/admin/strategy-review — B9 M-1143 review_note length cap", () => {
+  const url = "http://localhost:3000/api/admin/strategy-review";
+
+  beforeEach(() => {
+    supabaseState.callCount = 0;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    // Allow the limiter through so a 400 can only come from body validation,
+    // not from the shared suite's deny-everything ratelimit doMock.
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("rejects a review_note exceeding 2000 chars with 400 before any DB write", async () => {
+    const mod = await import("./route");
+    const req = new NextRequest(url, {
+      method: "POST",
+      headers: { origin: "http://localhost:3000" },
+      body: JSON.stringify({
+        id: "strat-1",
+        action: "reject",
+        review_note: "x".repeat(2001),
+      }),
+    });
+    const res = await (mod.POST as (req: NextRequest) => Promise<Response>)(req);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/invalid request/i);
+  });
+});
