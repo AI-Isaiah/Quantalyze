@@ -52,6 +52,10 @@ const eslintConfig = defineConfig([
       // stronger lock than a file allowlist that could go stale when a new
       // boundary module is added.
       "quantalyze/no-passthrough-on-ipc": "error",
+      // B14 — ban re-deriving sync staleness from a raw `last_sync_at` vs cutoff
+      // comparison; route through deriveSyncFreshness() (@/lib/sync-freshness) so
+      // the 24h cutoff lives in one place (two-sync-time max/sort is still fine).
+      "quantalyze/no-raw-staleness-derivation": "error",
     },
   },
   // Directory exemptions: the canonical helpers' own homes legitimately contain
@@ -63,6 +67,10 @@ const eslintConfig = defineConfig([
   {
     files: ["src/lib/retry/**"],
     rules: { "quantalyze/no-raw-retry-after-parse": "off" },
+  },
+  {
+    files: ["src/lib/sync-freshness/**"],
+    rules: { "quantalyze/no-raw-staleness-derivation": "off" },
   },
   // Test/spec files are exempt: they deliberately exercise the raw patterns to
   // set up fixtures and assert behaviour (e.g. SignOutButton.test.tsx seeds raw
@@ -77,6 +85,7 @@ const eslintConfig = defineConfig([
       "quantalyze/no-raw-published-predicate": "off",
       "quantalyze/no-raw-retry-after-parse": "off",
       "quantalyze/no-passthrough-on-ipc": "off",
+      "quantalyze/no-raw-staleness-derivation": "off",
     },
   },
 ]);
