@@ -722,11 +722,14 @@ jobs:
       # gated packages.
       #
       # B-mypy program: the strict floor started at services/ingestion/ (Phase
-      # 19 / BACKBONE-02 / MC-3) and now covers ALL of services/ (B-mypy part g,
-      # v0.24.15.60) plus routers/ — both verified 0 against the CI-pinned deps
-      # (supabase 2.15.1 / postgrest 1.0.2). models/ + scripts/ are the
-      # remaining incremental tail; tests/ stays untyped by design.
-      - run: mypy --strict --follow-imports=silent services/ routers/
+      # 19 / BACKBONE-02 / MC-3) and now covers ALL running-service code —
+      # services/ (B-mypy part g, v0.24.15.60), routers/ (part h, v0.24.15.61),
+      # and models/ (part i) — all verified 0 against the CI-pinned deps
+      # (supabase 2.15.1 / postgrest 1.0.2). scripts/ stays ungated: they are
+      # one-off operational tooling (backfills, cassette recording), not the
+      # running service, and gating them would add a types-PyYAML dev-dep plus
+      # friction for throwaway scripts. tests/ stays untyped by design.
+      - run: mypy --strict --follow-imports=silent services/ routers/ models/
       # PR #149 v0.22.25.3 follow-up: wire the test Supabase project into
       # the python job so the P97 fence regression tests in
       # tests/test_compute_jobs_fencing.py execute against a real DB. The
