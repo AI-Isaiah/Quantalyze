@@ -11,6 +11,21 @@ Removes `src/app/api/activity/portfolio/route.ts` and its test — a confirmed d
 - Also removes the now-orphaned `DailyPnlRow` interface from `src/lib/types.ts` — it was imported only by the deleted route, so it became dead the moment the route went.
 - Gates: `tsc` clean, lint 0 errors, full vitest 5851 passed / 0 failed. Self-contained test removal — no shared fixture touched.
 
+## [0.24.15.57] - 2026-06-02
+### Changed — B-mypy g1: 11 analytics services → `mypy --strict` 0 (mechanical + trivial narrows)
+
+Continues the B-mypy `--strict` type-safety floor for `analytics-service` (part g, the leaf-tail; sub-PR g1 of 2). Brings 11 `services/` modules to 0 strict errors, verified against a **CI-equivalent venv** (Python 3.12 + `requirements.txt`: supabase==2.15.1 / postgrest 1.0.2, where `APIResponse` is generic) — the shared local dev `.venv` has drifted to supabase 2.28.3 (non-generic) and masked two CI-only errors.
+
+- Pure type-arg parameterization (`dict`/`list` → parameterized) across `positions`, `encryption`, `transforms`, `portfolio_risk`, `portfolio_limits`, `simulator_scoring`, `funding_fetch`.
+- `positions` / `allocator_positions`: `supabase_client` typed `Client`; `_upsert` closures annotated `-> None` with the discarded `.execute()` return dropped (mirrors `funding_fetch._upsert`), avoiding a bare `-> APIResponse` that is an `Any`-launder on the CI-pinned generic postgrest.
+- `portfolio_risk`: `np.ndarray` → `np.ndarray[Any, Any]` (pre-existing bare-generic latent on CI's numpy).
+- `allocator_positions`: `DeribitNotSupportedError` now uses the `TYPE_CHECKING` `_DeribitNotSupportedBase` shim (mirrors the landed `equity_reconstruction.py` fix) — still subclasses `ccxt.NotSupported` at runtime.
+- `reconciliation`: explicit `key`-None guard for `matched_db_ids.add` (control flow identical) + `_TupleKey` alias.
+- `strategy_matching`: `return str(best)` (no-op coercion of the strategy_id column label).
+- `logging_config`: removed a pre-existing `# type: ignore[no-untyped-def]` on `dispatch` and typed it (starlette `RequestResponseEndpoint`); structlog-typed processor; `Callable[..., logging.LogRecord]` factory.
+
+Cardinal rule held: no `cast()`, no `# type: ignore` (one removed), no `Any`-laundering, no fabricated-data dodges; 100% behavior-preserving. Verified: `mypy --strict services/` 0 on the 11 files on both CI and local venvs; full pytest 2531 passed on both; 4-lens adversarial red-team (its sole confirmed finding drove the CI-venv verification).
+
 ## [0.24.15.56] - 2026-06-02
 ### Added — B9 Boundary Validation Parity: lint rule + CHECK↔Zod matrix + latent-23514 fix
 

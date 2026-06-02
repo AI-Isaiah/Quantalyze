@@ -19,14 +19,17 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Callable
 from contextvars import ContextVar
+from typing import Any
 from uuid import uuid4
 
 import sentry_sdk
 import structlog
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
+from structlog.typing import EventDict, WrappedLogger
 
 # Phase 18 / FIX-04 — canonical PII scrub. Inserted into the structlog
 # processor pipeline below so every event_dict walks through scrub_pii
@@ -42,7 +45,9 @@ correlation_id_var: ContextVar[str | None] = ContextVar(
 )
 
 
-def _redact_processor(_logger, _method_name, event_dict):
+def _redact_processor(
+    _logger: WrappedLogger, _method_name: str, event_dict: EventDict
+) -> EventDict:
     """structlog processor — walks every event_dict through scrub_pii so
     denylisted key shapes never leak into the JSON log line.
 
@@ -80,7 +85,7 @@ def _redact_processor(_logger, _method_name, event_dict):
         return event_dict
 
 
-def _scrub_tree_freeform(node, depth: int):
+def _scrub_tree_freeform(node: object, depth: int) -> object:
     """Recursively scrub every str leaf in a (dict|list|tuple) tree through
     scrub_freeform_string. Bounded at depth 8 to defend against pathological
     self-referential / very-deep traceback trees. Fail-open per caller's
@@ -190,11 +195,11 @@ def _scrub_record_in_place(record: logging.LogRecord) -> None:
 # NEW-C13-10 — module-private slot for the original LogRecord factory so
 # configure_logging() is idempotent. On a second call we re-wrap the already-
 # wrapped factory only if it's NOT already our wrapper.
-_ORIGINAL_LOG_RECORD_FACTORY: "logging._LogRecordFactory | None" = None
+_ORIGINAL_LOG_RECORD_FACTORY: "Callable[..., logging.LogRecord] | None" = None
 _REDACT_FACTORY_INSTALLED = False
 
 
-def _redact_log_record_factory(*args, **kwargs) -> logging.LogRecord:
+def _redact_log_record_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
     """Wrapped LogRecord factory that scrubs msg/args at record creation.
 
     Bridges the structlog _redact_processor protection to ALL stdlib log
@@ -258,7 +263,9 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
 
     HEADER_NAME = "x-correlation-id"
 
-    async def dispatch(self, request: Request, call_next):  # type: ignore[no-untyped-def]
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
         cid = request.headers.get(self.HEADER_NAME) or str(uuid4())
 
         # Capture the Token so we can surgically reset (FIX 11).

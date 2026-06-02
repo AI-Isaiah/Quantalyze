@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from typing import Optional
+from typing import Any, Optional
 from services.metrics import _safe_float
 
 # Rolling correlation is O(n²) in strategy count; skip beyond this threshold.
@@ -9,7 +9,7 @@ MAX_STRATEGIES_FOR_ROLLING = 20
 MAX_ROLLING_PAIRS = 10
 
 
-def compute_correlation_matrix(strategy_returns: dict[str, pd.Series]) -> dict:
+def compute_correlation_matrix(strategy_returns: dict[str, pd.Series]) -> dict[str, Any]:
     ids = list(strategy_returns.keys())
     if len(ids) < 2:
         return {ids[0]: {ids[0]: 1.0}} if ids else {}
@@ -20,7 +20,7 @@ def compute_correlation_matrix(strategy_returns: dict[str, pd.Series]) -> dict:
     return {k1: {k2: _safe_float(v) for k2, v in row.items()} for k1, row in corr.items()}
 
 
-def compute_rolling_correlation(strategy_returns: dict[str, pd.Series], window: int = 30) -> dict:
+def compute_rolling_correlation(strategy_returns: dict[str, pd.Series], window: int = 30) -> dict[str, Any]:
     ids = list(strategy_returns.keys())
     if len(ids) < 2 or len(ids) > MAX_STRATEGIES_FOR_ROLLING:
         return {}
@@ -40,7 +40,7 @@ def compute_rolling_correlation(strategy_returns: dict[str, pd.Series], window: 
     return result
 
 
-def compute_avg_pairwise_correlation(corr_matrix: dict) -> Optional[float]:
+def compute_avg_pairwise_correlation(corr_matrix: dict[str, Any]) -> Optional[float]:
     ids = list(corr_matrix.keys())
     n = len(ids)
     if n < 2:
@@ -56,7 +56,7 @@ def compute_avg_pairwise_correlation(corr_matrix: dict) -> Optional[float]:
     return _safe_float(total / count) if count > 0 else None
 
 
-def compute_risk_decomposition(weights: list[float], covariance_matrix: np.ndarray) -> list[dict]:
+def compute_risk_decomposition(weights: list[float], covariance_matrix: np.ndarray[Any, Any]) -> list[dict[str, Any]]:
     w = np.array(weights)
     port_var = w @ covariance_matrix @ w
     port_vol = np.sqrt(port_var) if port_var > 0 else 0
@@ -74,7 +74,7 @@ def compute_risk_decomposition(weights: list[float], covariance_matrix: np.ndarr
     ]
 
 
-def compute_attribution(weights: list[float], strategy_twrs: list[float], portfolio_twr: float) -> list[dict]:
+def compute_attribution(weights: list[float], strategy_twrs: list[float], portfolio_twr: float) -> list[dict[str, Any]]:
     n = len(weights)
     equal_weight = 1.0 / n if n > 0 else 0
     result = []

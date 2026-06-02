@@ -17,6 +17,8 @@ OWN-membership path should import this rather than re-deriving a cap.
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import HTTPException
 
 # ~16x the current prod max (6 strategies in the largest portfolio), so the cap
@@ -24,7 +26,7 @@ from fastapi import HTTPException
 MAX_PORTFOLIO_STRATEGIES = 100
 
 
-def assert_portfolio_within_cap(portfolio_strategies: list[dict]) -> None:
+def assert_portfolio_within_cap(portfolio_strategies: list[dict[str, Any]]) -> None:
     """Reject an oversized OWN portfolio at the boundary, BEFORE any O(N^2)
     cov/correlation matmul + N×N JSONB persist runs (and before a compute permit
     is consumed). Raises HTTPException 413 when membership exceeds
