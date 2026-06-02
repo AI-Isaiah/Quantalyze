@@ -353,7 +353,17 @@ describe("PUT /api/preferences", () => {
       p_entity_type: "allocator_preference_mandate",
       p_entity_id: STATE.authUser!.id,
     });
-    expect((failAudit!.args.p_metadata as { error_code: string | null }).error_code).toBe("22023");
+    // Pin the FULL failure-row forensic contract, not just error_code: the
+    // whitelisted field names a self-editor touched (never admin-only keys —
+    // same anti-smuggle guard as the success emit) and the self_edit flag that
+    // lets ops attribute a bounds-probe to a self-edit attempt.
+    expect(
+      failAudit!.args.p_metadata as {
+        fields: string[];
+        self_edit: boolean;
+        error_code: string | null;
+      },
+    ).toMatchObject({ fields: ["max_weight"], self_edit: true, error_code: "22023" });
     // The happy-path success action must NOT appear on an error branch.
     expect(
       STATE.rpcCalls.some(

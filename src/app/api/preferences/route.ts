@@ -129,10 +129,16 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   // metadata.fields=[], so a script posting `{}` 30×/min produced ~60
   // zero-information background writes/min and flooded audit_log with rows
   // that say nothing (the exact noise the F8 failure-audit work is careful
-  // NOT to add). Short-circuit BEFORE the limiter/RPC/audit: nothing changed,
-  // so consume no write budget and leave no forensic noise. The 200
-  // {fields:[]} keeps useMandateAutoSave's optimistic reconciliation happy
-  // (an idempotent no-op, not an error).
+  // NOT to add). And update_allocator_mandates is not even a literal no-op on
+  // empty input: its UPSERT bumps mandate_edited_at (and INSERTs an all-NULL
+  // row for a first-visit user), and step 5 unconditionally enqueues a
+  // rescore_allocator compute job ("fires on every mandate write; no change
+  // detector"). Short-circuiting a zero-field PUT BEFORE the limiter/RPC/audit
+  // therefore also (correctly) elides a phantom rescore + a misleading
+  // edit-timestamp; a real edit (any present self-editable key) still falls
+  // through to the RPC and enqueues the rescore. The 200 {fields:[]} keeps
+  // useMandateAutoSave's optimistic reconciliation happy (idempotent no-op,
+  // not an error).
   if (Object.keys(fields).length === 0) {
     return NextResponse.json({ success: true, fields: [] }, { headers: NO_STORE_HEADERS });
   }
