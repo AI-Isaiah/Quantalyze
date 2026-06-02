@@ -424,6 +424,31 @@ describe("POST /api/for-quants-lead", () => {
       });
     });
 
+    /**
+     * H-0266 (B9 boundary parity) — wizard_session_id is written verbatim into
+     * for_quants_leads.wizard_context (JSONB). Pre-fix the bare min(8).max(64)
+     * accepted ANY characters, so an injected `"><script>…` token (28 chars,
+     * within the length bounds) was persisted as stored-XSS fuel. The route now
+     * constrains it to the alphanumeric/`-`/`_` charset every real producer
+     * emits (UUID, "desktop-gate", the `cid-…` fallback — see the G9.B.4 test's
+     * "sess-1234" which still passes). Fail-without-fix: pre-regex this returned
+     * 200 and the script token landed in the JSONB column.
+     */
+    it("H-0266: rejects a wizard_session_id with non-alphanumeric chars (XSS token) with 400", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeRequest({
+          ...VALID_PAYLOAD,
+          wizard_context: {
+            draft_strategy_id: null,
+            step: "metadata",
+            wizard_session_id: '"><script>alert(1)</script>x',
+          },
+        }),
+      );
+      expect(res.status).toBe(400);
+    });
+
     it("returns 400 for malformed JSON body", async () => {
       const { POST } = await import("./route");
       const req = new NextRequest(
