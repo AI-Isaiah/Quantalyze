@@ -58,6 +58,7 @@ const CONTRACT_GUARDS: Guard[] = [
   { path: "src/__tests__/metrics-parity-helper.test.ts", batch: "B9", invariant: "TS-side trade-mix bucket-mode parity" },
   { path: "src/app/api/allocator/scenario/commit/percent-allocated-parity.test.ts", batch: "B9", invariant: "percent_allocated parity: Zod ↔ DB CHECK ↔ RPC validator" },
   { path: "src/__tests__/strategy-sources-migration-parity.test.ts", batch: "B9", invariant: "STRATEGY_SOURCES TS registry ↔ SQL CHECK constraint parity" },
+  { path: "src/__tests__/contracts/check-zod-db-check-parity.test.ts", batch: "B9", invariant: "14-column CHECK↔Zod parity matrix (incl. computation_status #399 'stale' rejection)" },
   { path: "src/__tests__/strategies-source-csv-constraint.test.ts", batch: "B9", invariant: "strategies.source CHECK admits 'csv'" },
   { path: "src/__tests__/critical-regressions.test.ts", batch: "B24", invariant: "VERSION/package.json sync + dynamic workflow-security policy" },
   { path: "src/__tests__/audit-coverage.test.ts", batch: "Audit", invariant: "every Supabase mutation emits an audit event (grep)" },
