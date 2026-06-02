@@ -111,11 +111,23 @@ export function SubmitStep({
         const KNOWN_FINALIZE_CODES: ReadonlySet<WizardErrorCode> = new Set<WizardErrorCode>(
           ["KEY_SCOPE_BROADENED", "KEY_NETWORK_TIMEOUT"],
         );
-        const surfaced: WizardErrorCode =
-          data.code &&
-          KNOWN_FINALIZE_CODES.has(data.code as WizardErrorCode)
-            ? (data.code as WizardErrorCode)
-            : "UNKNOWN";
+        // H-0192: trust an explicit, known finalize code first (the live
+        // key-scope/timeout probe paths). Otherwise map by HTTP status so the
+        // route's 404 ("Draft not found") and 403 ("This draft cannot be
+        // finalized") — which carry no `code` — surface actionable copy
+        // instead of collapsing every failure to UNKNOWN (and to UNKNOWN in
+        // the PostHog wizard_error funnel, blinding the founder to which
+        // finalize gate fired).
+        let surfaced: WizardErrorCode;
+        if (data.code && KNOWN_FINALIZE_CODES.has(data.code as WizardErrorCode)) {
+          surfaced = data.code as WizardErrorCode;
+        } else if (res.status === 404) {
+          surfaced = "GATE_DRAFT_GONE";
+        } else if (res.status === 403 || res.status === 409) {
+          surfaced = "GUARD_BLOCKED";
+        } else {
+          surfaced = "UNKNOWN";
+        }
         setErrorCode(surfaced);
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,

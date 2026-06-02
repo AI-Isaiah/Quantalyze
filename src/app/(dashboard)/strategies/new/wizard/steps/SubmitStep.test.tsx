@@ -154,4 +154,43 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     expect(onSubmitted).toHaveBeenCalledWith("strat-final");
     expect(findWizardError()).toBeUndefined();
   });
+
+  // H-0192: finalize-wizard's 404/403/409 carry no `code`, so they used to
+  // collapse to UNKNOWN — the founder couldn't tell from the PostHog funnel
+  // whether the draft was gone, the guard fired, or the RPC 500'd. Status now
+  // maps to actionable codes when no trusted code is present.
+  it("maps a 404 (Draft not found, no code) to GATE_DRAFT_GONE", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ error: "Draft not found" }, 404),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("GATE_DRAFT_GONE"); // pre-fix: UNKNOWN
+  });
+
+  it("maps a 403 (cannot be finalized, no code) to GUARD_BLOCKED", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ error: "This draft cannot be finalized" }, 403),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("GUARD_BLOCKED"); // pre-fix: UNKNOWN
+  });
+
+  it("maps a 409 draft_state_invalid (non-union code) to GUARD_BLOCKED", async () => {
+    // The route sends a lowercase code not in the WizardErrorCode union, so the
+    // known-code guard rejects it and the 409 status drives the mapping.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { error: "Refresh and try again.", code: "draft_state_invalid" },
+        409,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("GUARD_BLOCKED"); // pre-fix: UNKNOWN
+  });
 });

@@ -28,6 +28,10 @@ export type WizardErrorCode =
   // Wizard lifecycle
   | "SESSION_EXPIRED"
   | "SUBMIT_NOTIFY_FAILED"
+  // H-0192: finalize-wizard 404 (draft deleted/expired) and 403/409
+  // (not in a finalizable state) used to collapse to UNKNOWN at SubmitStep.
+  | "GATE_DRAFT_GONE"
+  | "GUARD_BLOCKED"
   // Phase 17 NEW — CSV branch absorption (DESIGN-05).
   | "CSV_PARSE_FAILED"
   | "CSV_SCHEMA_VIOLATION"
@@ -298,6 +302,30 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#sync-timing",
     actions: ["request_call"],
+  },
+
+  GATE_DRAFT_GONE: {
+    title: "This draft is no longer available.",
+    cause:
+      "We couldn't find this wizard draft. It may have already been submitted, or it expired before you finished.",
+    fix: [
+      "Start a new strategy from the strategies page.",
+      "If you believe this is a mistake, use Request a Call below.",
+    ],
+    docsHref: "/security#draft-resume",
+    actions: ["start_fresh", "request_call"],
+  },
+
+  GUARD_BLOCKED: {
+    title: "This draft can't be finalized right now.",
+    cause:
+      "The server rejected the submission — this draft isn't in a finalizable state for your account, or the page is out of date.",
+    fix: [
+      "Refresh the page and try again.",
+      "If it keeps failing, start a new strategy or use Request a Call below.",
+    ],
+    docsHref: "/security#draft-resume",
+    actions: ["start_fresh", "request_call"],
   },
 
   // ============================================================
