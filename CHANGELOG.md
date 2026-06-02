@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.64] - 2026-06-02
+### Fixed — Analytics worker: classify exchange edge geo-block as permanent (no futile retry, no phantom 429 cooldown)
+
+The Railway analytics worker egresses from a US region; Bybit (AWS CloudFront `403` "block access from your country", which ccxt mis-maps to `RateLimitExceeded`) and Binance (`451` "restricted location") geo-block it at the edge. These were classified `transient` → retried forever while stamping a phantom 429 cooldown that parked every sibling job on the key for ~10 min.
+
+- New `services/geo_block.py` `is_geo_blocked()` (signature-based: specific phrase markers + a word-boundary-`451` + `eligibility` heuristic). `classify_exception` returns `permanent` for a geo-block *before* the ccxt `NetworkError` branch, so the job fails terminal (no retry) with an operator-actionable message.
+- `_stamp_429` now skips the `last_429_at` stamp for a geo-block (it is not a rate limit) — a single geo-blocked key no longer parks its sibling jobs behind the circuit breaker; the allocator poll no longer persists a misleading `sync_status='rate_limited'`.
+- Reviewed by a fresh-context 3-lens red-team + adversarial verification (2 real findings fixed + mutation-verified): dropped an over-broad bare-`"restricted"` / bare-`"451"`-substring false-positive that would have mis-flagged a *retryable* OKX "Operation restricted" (or a 451-bearing price) as `permanent` → `failed_final` on the first attempt; centralized the stamp-skip in `_stamp_429` so it covers all 7 `RateLimitExceeded` call sites (incl. `equity_reconstruction.py`).
+- **Operator note:** this makes the worker *classify* the geo-block correctly and stop the futile retry/cooldown — the actual market-data remediation still requires moving the worker off US egress (Railway region).
+
 ## [0.24.15.63] - 2026-06-02
 ### Fixed — Public /demo/founder-view 500 (seed demo allocator unprovisioned)
 
