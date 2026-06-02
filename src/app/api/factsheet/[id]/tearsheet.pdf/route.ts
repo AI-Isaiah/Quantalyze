@@ -8,7 +8,7 @@ import {
   PDF_QUEUE_TIMEOUT_MESSAGE,
 } from "@/lib/puppeteer";
 import { extractAnalytics } from "@/lib/queries";
-import { publicIpLimiter, checkLimit, getClientIp, isRateLimitMisconfigured } from "@/lib/ratelimit";
+import { publicIpLimiter, checkLimit, getClientIp, rateLimitDenyJson } from "@/lib/ratelimit";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { sanitizeFilename } from "@/lib/sanitize-filename";
 import { isUuid } from "@/lib/utils";
@@ -142,16 +142,10 @@ export async function GET(
   // DB/puppeteer work). See limiter-ordering.test.ts PUBLIC_IP_EXCEPTION.
   const rl = await checkLimit(publicIpLimiter, `tearsheet-pdf:${ip}`);
   if (!rl.success) {
-    if (isRateLimitMisconfigured(rl)) {
-      return new NextResponse("Service temporarily unavailable", {
-        status: 503,
-        headers: { "Retry-After": String(rl.retryAfter) },
-      });
-    }
-    return new NextResponse("Rate limit exceeded", {
-      status: 429,
-      headers: { "Retry-After": String(rl.retryAfter) },
-    });
+    // F5b (L-0018): JSON envelope (was plain-text) so the rate-limit path
+    // matches this route's JSON 4xx/5xx responses; rateLimitDenyJson keeps
+    // the misconfig-503 vs throttle-429 split and the Retry-After header.
+    return rateLimitDenyJson(rl);
   }
 
   const { id } = await params;
@@ -273,10 +267,10 @@ export async function GET(
     });
   } catch (err) {
     if (err instanceof Error && err.message === PDF_QUEUE_TIMEOUT_MESSAGE) {
-      return new NextResponse("PDF generation queue full, retry in 10 seconds", {
-        status: 503,
-        headers: { "Retry-After": "10" },
-      });
+      return NextResponse.json(
+        { error: "PDF generation queue full, retry in 10 seconds" },
+        { status: 503, headers: { "Retry-After": "10" } },
+      );
     }
     // PR-2 silent-failure-hunter F6 (2026-05-28): promote PDF render
     // failures to Sentry. Pre-fix invisible.

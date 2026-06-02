@@ -8,7 +8,7 @@ import {
   launchBrowser,
   PDF_QUEUE_TIMEOUT_MESSAGE,
 } from "@/lib/puppeteer";
-import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
+import { publicIpLimiter, checkLimit, getClientIp, rateLimitDenyJson } from "@/lib/ratelimit";
 import { signPdfRenderToken } from "@/lib/pdf-render-token";
 import { sanitizeFilename } from "@/lib/sanitize-filename";
 
@@ -41,11 +41,11 @@ export async function GET(
   // before any work). See limiter-ordering.test.ts PUBLIC_IP_EXCEPTION.
   const ip = getClientIp(req.headers);
   const rl = await checkLimit(publicIpLimiter, `demo-pdf:${ip}`);
+  // F5b (L-0018): JSON envelope (was plain-text) so the rate-limit path
+  // matches this route's JSON 401/404/500 responses; rateLimitDenyJson also
+  // surfaces a limiter misconfiguration as 503 instead of a misleading 429.
   if (!rl.success) {
-    return new NextResponse("Rate limit exceeded", {
-      status: 429,
-      headers: { "Retry-After": String(rl.retryAfter) },
-    });
+    return rateLimitDenyJson(rl);
   }
 
   const { id } = await params;
@@ -117,10 +117,10 @@ export async function GET(
     });
   } catch (err) {
     if (err instanceof Error && err.message === PDF_QUEUE_TIMEOUT_MESSAGE) {
-      return new NextResponse("PDF generation queue full, retry in 10 seconds", {
-        status: 503,
-        headers: { "Retry-After": "10" },
-      });
+      return NextResponse.json(
+        { error: "PDF generation queue full, retry in 10 seconds" },
+        { status: 503, headers: { "Retry-After": "10" } },
+      );
     }
     console.error("[demo-portfolio-pdf] Generation failed:", err);
     return NextResponse.json(

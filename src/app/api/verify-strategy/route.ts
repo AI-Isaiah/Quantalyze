@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
-import { verifyStrategy } from "@/lib/analytics-client";
+import {
+  verifyStrategy,
+  AnalyticsUpstreamError,
+  AnalyticsTimeoutError,
+} from "@/lib/analytics-client";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { SUPPORTED_EXCHANGES } from "@/lib/utils";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
@@ -343,9 +348,29 @@ async function legacyVerifyStrategyHandler(args: {
       ...(passphrase ? { passphrase } : {}),
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Verification service error";
-    console.error("[verify-strategy] Analytics service error:", message);
-    return NextResponse.json({ error: message }, { status: 502 });
+    // F5b (R8): forward the CURATED 4xx detail from the Python verifier
+    // (actionable user copy, e.g. "No trades found for this key") but never
+    // echo a raw 5xx traceback or contract-violation string. Mirrors the
+    // bridge / simulator 4xx-forward / 5xx-redact pattern F5a established.
+    if (
+      err instanceof AnalyticsUpstreamError &&
+      err.status >= 400 &&
+      err.status < 500
+    ) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
+    if (err instanceof AnalyticsTimeoutError) {
+      return NextResponse.json(
+        { error: "Verification timed out. Please try again." },
+        { status: 504 },
+      );
+    }
+    console.error("[verify-strategy] Analytics service error:", err);
+    captureToSentry(err, { tags: { route: "api/verify-strategy" } });
+    return NextResponse.json(
+      { error: "Verification service unavailable. Please try again." },
+      { status: 502 },
+    );
   }
 
   const verificationId = analyticsResult.verification_id;

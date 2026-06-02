@@ -8,6 +8,7 @@ import type {
 } from "@/lib/types";
 import { DELTA_UNITS } from "@/lib/api/simulatorSchema";
 import type { SimulatorResponseOk } from "@/lib/api/simulatorSchema";
+import { ErrorResponseSchema } from "@/lib/api/errorSchema";
 import { dateMapStrict } from "@/lib/keys";
 import { parseRetryAfterSeconds } from "@/lib/retry";
 
@@ -53,9 +54,17 @@ export function PortfolioImpactPanel({
       });
 
       if (!res.ok) {
-        const body = await res
+        // F5 (M-0967/L-0060): validate the error body against the shared
+        // ErrorResponseSchema so `body` is typed (not `any`). A non-string
+        // `error` (e.g. `{ error: { nested } }`) fails the parse and yields an
+        // empty body → the cascade below falls back to static copy instead of
+        // coercing an object to "[object Object]". H-1127's multi-key read and
+        // B20's retryAfter precedence are preserved unchanged.
+        const raw = await res
           .json()
           .catch(() => ({ error: "Simulation failed" }));
+        const parsedError = ErrorResponseSchema.safeParse(raw);
+        const body = parsedError.success ? parsedError.data : {};
         // H-1127: error bodies do not always use `{ error }`. The Python
         // service raises HTTPException with `detail`; other layers forward
         // `message`. Read all three common keys so the real, actionable backend

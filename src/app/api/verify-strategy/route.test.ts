@@ -38,9 +38,34 @@ vi.mock("@/lib/ratelimit", () => ({
   getClientIp: () => "127.0.0.1",
 }));
 
-vi.mock("@/lib/analytics-client", () => ({
-  verifyStrategy: verifyStrategyMock,
-}));
+vi.mock("@/lib/analytics-client", () => {
+  // Real-shape error classes so the route's `err instanceof AnalyticsUpstreamError`
+  // narrowing resolves against the same constructor identity (F5b R8).
+  class AnalyticsUpstreamError extends Error {
+    readonly status: number;
+    constructor(message: string, status: number) {
+      super(message);
+      this.name = "AnalyticsUpstreamError";
+      this.status = status;
+    }
+  }
+  class AnalyticsTimeoutError extends Error {
+    constructor(path: string, timeoutMs: number) {
+      super(`Analytics request to ${path} timed out after ${timeoutMs}ms`);
+      this.name = "AnalyticsTimeoutError";
+    }
+  }
+  return {
+    verifyStrategy: verifyStrategyMock,
+    AnalyticsUpstreamError,
+    AnalyticsTimeoutError,
+  };
+});
+
+// F5b (R8): spy on captureToSentry so the 5xx-redaction test can pin that the
+// internal detail still reaches Sentry now that err.message is no longer echoed.
+const captureSpy = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureSpy }));
 
 vi.mock("@/lib/feature-flags", () => ({
   isUnifiedBackboneActive: vi.fn().mockResolvedValue(false),
@@ -162,6 +187,56 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
     const res = await POST(postReq(VALID_BODY));
     expect(res.status).toBe(200);
     expect(verifyStrategyMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("F5b (R8) — a 5xx/generic delegate error returns 502 STATIC (no leak) + Sentry", async () => {
+    // The thrown message mimics the raw Python traceback / contract-violation
+    // string the analytics client surfaces on a 5xx — exactly what must NOT
+    // reach the (semi-public) verification caller.
+    verificationCount = 0;
+    verifyStrategyMock.mockRejectedValue(
+      new Error("Traceback: simulator_scoring.py:188 KeyError 'sharpe'"),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toBe("Verification service unavailable. Please try again.");
+    expect(body.error).not.toContain("Traceback");
+    expect(body.error).not.toContain("simulator_scoring");
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { route: "api/verify-strategy" } }),
+    );
+  });
+
+  it("F5b (R8) — a curated 4xx delegate error is forwarded with its status", async () => {
+    verificationCount = 0;
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    verifyStrategyMock.mockRejectedValue(
+      new AnalyticsUpstreamError("No trades found for this key in the last 90 days", 404),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    // Curated 4xx detail is user-actionable — it MUST still reach the caller.
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe("No trades found for this key in the last 90 days");
+    expect(captureSpy).not.toHaveBeenCalled();
+  });
+
+  it("F5b (R8) — a delegate timeout returns 504 STATIC, no Sentry (timeout is upstream-expected)", async () => {
+    verificationCount = 0;
+    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    verifyStrategyMock.mockRejectedValue(
+      new AnalyticsTimeoutError("/api/verify-strategy", 30000),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    expect(res.status).toBe(504);
+    const body = await res.json();
+    expect(body.error).toBe("Verification timed out. Please try again.");
+    expect(captureSpy).not.toHaveBeenCalled();
   });
 });
 

@@ -66,6 +66,14 @@ const rateLimitState = vi.hoisted(
   }),
 );
 
+// F5b (R8): spy on captureToSentry so the insert-error test can pin that the
+// redacted DB error still reaches the structured observability channel after
+// the raw error.message stopped being forwarded to the client.
+const captureSpy = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: captureSpy,
+}));
+
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: {
@@ -161,6 +169,7 @@ describe("POST /api/trades/upload — cross-user write protection", () => {
     supabaseState.insertErrorOnBatch = -1;
     supabaseState.auditRpcThrows = false;
     rateLimitState.result = { success: true, retryAfter: 0 };
+    captureSpy.mockClear();
   });
 
   it("rejects requests without auth (CSRF check fires first)", async () => {
@@ -323,7 +332,15 @@ describe("POST /api/trades/upload — cross-user write protection", () => {
     const body = await res.json();
     // First batch (500) committed before the second errored.
     expect(body.inserted).toBe(500);
-    expect(body.error).toMatch(/Insert failed at row 500/);
+    // F5b (R8): the raw Postgres error.message must NOT leak — the body is a
+    // static envelope; the detail goes to Sentry. The partial `inserted`
+    // count is still surfaced so the client knows how far it got.
+    expect(body.error).toBe("Failed to upload trades");
+    expect(body.error).not.toMatch(/Insert failed/);
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ tags: { route: "api/trades/upload" } }),
+    );
     // No rollup audit on a failed upload (the emit is below the loop).
     expect(
       supabaseState.rpcCalls.filter((c) => c.name === "log_audit_event_service"),
@@ -369,6 +386,35 @@ describe("POST /api/trades/upload — cross-user write protection", () => {
     // Rate-limit short-circuits before any insert.
     expect(supabaseState.insertedBatches).toHaveLength(0);
   });
+
+  it("F5b (R9) — every response carries Cache-Control: private, no-store", async () => {
+    // audit-2026-05-07 Block D / P1947: stamp no-store on the success body AND
+    // the error paths. Mirrors simulator TC11 / bridge TC11 / browse T11b.
+    const { POST } = await import("./route");
+    const oneRow = [
+      { timestamp: "2024-01-01T00:00:00Z", symbol: "BTC", side: "buy", price: 100, quantity: 1 },
+    ];
+
+    const okRes = await POST(
+      makeRequest({ strategy_id: ownedStrategyId, trades: oneRow }),
+    );
+    expect(okRes.status).toBe(200);
+    expect(okRes.headers.get("Cache-Control")).toBe("private, no-store");
+
+    const forbidden = await POST(
+      makeRequest({ strategy_id: otherStrategyId, trades: oneRow }),
+    );
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.headers.get("Cache-Control")).toBe("private, no-store");
+
+    rateLimitState.result = { success: false, retryAfter: 30 };
+    const throttled = await POST(
+      makeRequest({ strategy_id: ownedStrategyId, trades: oneRow }),
+    );
+    expect(throttled.status).toBe(429);
+    expect(throttled.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(throttled.headers.get("Retry-After")).toBe("30");
+  });
 });
 
 // ─── C-0121: trades.upload rollup audit emission ───────────────────────
@@ -388,6 +434,7 @@ describe("POST /api/trades/upload — C-0121 rollup audit emission", () => {
     supabaseState.insertErrorOnBatch = -1;
     supabaseState.auditRpcThrows = false;
     rateLimitState.result = { success: true, retryAfter: 0 };
+    captureSpy.mockClear();
   });
 
   it("emits exactly ONE trades.upload audit row regardless of batch count", async () => {

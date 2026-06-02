@@ -27,7 +27,7 @@
  */
 /** @vitest-environment node */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 vi.mock("server-only", () => ({}));
 
@@ -47,6 +47,22 @@ vi.mock("@/lib/ratelimit", () => ({
   getClientIp: vi.fn().mockReturnValue("127.0.0.1"),
   isRateLimitMisconfigured: (rl: { success: boolean; reason?: string }) =>
     rl.success === false && rl.reason === "ratelimit_misconfigured",
+  // F5b (L-0018): route now JSON-normalizes rate-limit denials via
+  // rateLimitDenyJson (was inline plain-text) — mirror the real helper so
+  // the 429/503 path stays parseable as { error } like the route's 4xx/5xx.
+  rateLimitDenyJson: (rl: { retryAfter: number; reason?: string }) =>
+    NextResponse.json(
+      {
+        error:
+          rl.reason === "ratelimit_misconfigured"
+            ? "Rate limiter unavailable"
+            : "Too many requests",
+      },
+      {
+        status: rl.reason === "ratelimit_misconfigured" ? 503 : 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
+    ),
 }));
 import { checkLimit } from "@/lib/ratelimit";
 
@@ -748,6 +764,11 @@ describe("GET /api/factsheet/[id]/pdf — self-recursion fence (audit-2026-05-07
     );
     const res = await GET(req, mkParams());
     expect(res.status).toBe(508);
+    // F5b (L-0018): the 508 body is now a JSON { error } envelope (was
+    // plain-text), so a client parsing responses uniformly as JSON never
+    // throws on this path. Pre-fix, res.json() on "Loop Detected" rejected.
+    const loopBody = (await res.json()) as { error: string };
+    expect(loopBody.error).toBe("Loop Detected");
     // Critical anti-assertions: the fence MUST short-circuit BEFORE
     // touching the rate limiter, Supabase, or puppeteer. Otherwise a
     // recursion would still burn the semaphore on every entry.
