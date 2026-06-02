@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.76] - 2026-06-02
+### Fixed — B9 boundary-validation parity, remainder (audit-2026-05-07)
+
+Completes **B9 (Boundary Validation Parity)**. PR #406 (v0.24.15.54) landed the structural class — the repo-wide `no-passthrough-on-ipc` ESLint rule + the CHECK↔Zod parity matrix — but 73 individual `OWNED-BY-B9` findings remained in the tracker. A per-finding verification pass against live post-#406 code classified them: **5 already closed**, **62 type-design suggestions with no runtime defect** (declined per the campaign's standing precedent — gold-plating over an already-closed class, each verified at the real trust boundary), and **6 genuine boundary-validation gaps**, fixed here (each with a fail-without-fix regression test):
+
+- **M-1143 — unbounded admin notes.** `admin/strategy-review` (`review_note`) and `admin/intro-request` (`admin_note`) wrote the raw request-body string into an unbounded `TEXT` column with no length cap — only the audit-metadata copy was bounded. Both routes now Zod-validate the body with `…_note: z.string().max(2000)`, rejecting an oversized note with a 400 before the DB write (id kept as `min(1)` + the existing action/status enum — behavior-preserving).
+- **L-0076 — preferences PUT crash.** A non-object JSON body (`null` / scalar / array) reached `pickSelfEditableFields` → `key in input`, where the `in` operator throws an uncaught `TypeError` → unstructured 500. Added the sibling-route body-shape guard → structured 400 + `NO_STORE_HEADERS`.
+- **M-0395 — unbounded benchmark correlation.** `isCorrelationPointArray` validated finiteness but not the `[-1, 1]` domain, so a producer regression rendered an absurd correlation point. Out-of-range now routes to the existing graceful "malformed → unavailable" branch.
+- **M-0982 — simulator drawdown sign.** `SimulatorMetricsSchema.max_drawdown` gains `.max(0)` (negative-by-convention; a positive value is a producer sign-flip). The hard `[-1,1]`/`[0,1]` bounds on correlation/concentration are deliberately omitted (numpy correlation float-overshoot + a throw-on-failure parser would 500 a legitimate edge); Zod v4's `z.number()` already rejects NaN/Infinity, so no `.finite()` is needed.
+- **H-0266 — wizard_session_id charset.** A free-text 8–64-char token written verbatim into `for_quants_leads.wizard_context` (JSONB) accepted any characters (stored-XSS fuel). Constrained to `[A-Za-z0-9_-]` — the charset every real producer (UUID, `"desktop-gate"`, the `cid-…` fallback) already emits, so a hostile token is rejected 400 at the boundary while legitimate flows are unaffected.
+- **H-1122 — funding_fees.exchange CHECK.** The lone exchange column with no CHECK constraint (siblings all pin `binance|okx|bybit`, and the TS `FundingFee.exchange` narrows to the three literals). A forward migration adds the CHECK mirroring the siblings (pre-flight fail-loud guard listing any out-of-range value + a self-verifying DO-block) and registers `funding_fees.exchange` in the CHECK↔Zod parity matrix (TS = `SUPPORTED_EXCHANGES`) so a future divergence fails CI before it becomes a 23514.
+
+Reviewed by an 8-lens specialist suite + an independent fresh-context red team (each fix independently verified fail-without-fix by reverting, zero false-positive rejections of legitimate producer input, migration prod-safe). The single threshold finding — `.finite()` being a Zod-v4 no-op and its test tautological — was applied (dropped the inert calls + the tautological test; kept the load-bearing `.max(0)`). tsc 0 / eslint 0 errors / full vitest green.
+
 ## [0.24.15.75] - 2026-06-02
 ### Fixed — No-store class-closure: cross-tenant cache-leak across 32 authenticated tenant-data routes (audit-2026-05-07 Block D / P1947)
 
