@@ -725,6 +725,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toBe("Draft not found");
+    expect(body.code).toBe("GATE_DRAFT_GONE"); // SubmitStep maps off this code
     // The raw Postgres message must not leak (P445-style hardening).
     expect(JSON.stringify(body)).not.toContain("strategy abc-uuid not found");
 
@@ -745,6 +746,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toBe("Draft not found");
+    expect(body.code).toBe("GATE_DRAFT_GONE"); // SubmitStep maps off this code
     expect(JSON.stringify(body)).not.toContain("no data returned");
 
     fetchSpy.mockRestore();
@@ -768,6 +770,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     expect(res.status).toBe(403);
     const body = await res.json();
     expect(body.error).toBe("This draft cannot be finalized");
+    expect(body.code).toBe("GUARD_BLOCKED"); // SubmitStep maps off this code
     // The raw owner/user UUIDs MUST NOT leak (P445-style hardening).
     expect(JSON.stringify(body)).not.toContain("xyz-uuid");
     expect(JSON.stringify(body)).not.toContain("uid-1234");

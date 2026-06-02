@@ -325,7 +325,10 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "If it keeps failing, start a new strategy or use Request a Call below.",
     ],
     docsHref: "/security#draft-resume",
-    actions: ["start_fresh", "request_call"],
+    // `clear_and_retry` keeps the envelope recoverable so the Retry control
+    // renders — the route's 403 is a refresh-nudge (stale page), not a hard
+    // permission wall, and retrying after a refresh is the intended path.
+    actions: ["clear_and_retry", "start_fresh", "request_call"],
   },
 
   // ============================================================

@@ -429,7 +429,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
   if (!strategyRow) {
-    return NextResponse.json({ error: "Draft not found" }, { status: 404 });
+    return NextResponse.json({ error: "Draft not found", code: "GATE_DRAFT_GONE" }, { status: 404 });
   }
 
   const apiKeyId =
@@ -557,7 +557,7 @@ async function runLegacyFinalize(args: {
       error.code,
     );
     if (error.code === "P0002" || error.code === "02000") {
-      return NextResponse.json({ error: "Draft not found" }, { status: 404 });
+      return NextResponse.json({ error: "Draft not found", code: "GATE_DRAFT_GONE" }, { status: 404 });
     }
     // audit-2026-05-07 H-0321: split the two SQLSTATEs so HTTP semantics
     // match the actual failure mode.
@@ -569,8 +569,12 @@ async function runLegacyFinalize(args: {
     //     missing fields, stale snapshot). 409 lets the client show a
     //     refresh nudge rather than a "permission denied" sign-out prompt.
     if (error.code === "42501") {
+      // H-0192 (red-team follow-up): tag with the route's own discriminator so
+      // SubmitStep maps off `code`, not raw HTTP status. Keying off status
+      // mislabeled pre-handler 403s (CSRF, approval-gate) as draft-finalize
+      // failures and conflated them in the wizard_error funnel.
       return NextResponse.json(
-        { error: "This draft cannot be finalized" },
+        { error: "This draft cannot be finalized", code: "GUARD_BLOCKED" },
         { status: 403 },
       );
     }
