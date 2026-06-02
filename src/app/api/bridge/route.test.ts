@@ -406,4 +406,43 @@ describe("POST /api/bridge", () => {
     const body = await res.json();
     expect(body.error).toMatch(/required/i);
   });
+
+  it("TC11 — every response carries Cache-Control: private, no-store (M-0889)", async () => {
+    // audit-2026-05-07 Block D / P1947: the 200 body is allocator-scoped
+    // BridgeCandidate[] (strategy_id / sharpe_delta tied to the caller's
+    // underperformer) — a shared cache must never retain it. Pin no-store on
+    // the 200 success body and on representative error paths, including
+    // coexistence with Retry-After on the 429 throttle and the withAuth 401.
+    const { POST } = await import("./route");
+
+    const okRes = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+    expect(okRes.status).toBe(200);
+    expect(okRes.headers.get("Cache-Control")).toBe("private, no-store");
+
+    STATE.checkLimitResult = { success: false, retryAfter: 30 };
+    const throttled = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+    expect(throttled.status).toBe(429);
+    expect(throttled.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(throttled.headers.get("Retry-After")).toBe("30");
+
+    STATE.authUser = null;
+    const unauth = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+    expect(unauth.status).toBe(401);
+    expect(unauth.headers.get("Cache-Control")).toBe("private, no-store");
+  });
 });
