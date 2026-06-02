@@ -7,6 +7,8 @@ import {
   type StrategyForBuilder,
 } from "@/lib/scenario";
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
+import { buildStrategyForBuilderSet } from "@/app/(dashboard)/allocations/lib/scenario-adapter";
+import { buildHoldingRef } from "@/app/(dashboard)/allocations/lib/holding-outcome-adapter";
 
 // computeScenario requires n >= 10 common dates or it returns null KPIs.
 const DATES = [
@@ -259,5 +261,68 @@ describe("avg_pairwise_correlation honesty end-to-end (H-0487/H-0493)", () => {
     expect(fixed.twr).toBe(buggy.twr);
     expect(fixed.sharpe).toBe(buggy.sharpe);
     expect(fixed.max_drawdown).toBe(buggy.max_drawdown);
+  });
+});
+
+describe("production adapter id ↔ symbol-map key alignment (H-0487/H-0493)", () => {
+  // The collapse only fixes avgRho if the symbol-map keys (built with
+  // buildHoldingRef in ScenarioComposer / holdingScopeKey in the SSR path)
+  // byte-match the strategy .id the adapter assigns. If those derivations
+  // ever drift, symbolByHoldingId.get(s.id) returns undefined, the collapse
+  // silently no-ops, and avgRho is poisoned again — the EXACT failure mode
+  // that got the prior sentinel attempt reverted as inert. This drives the
+  // REAL adapter + the production key derivation so any such drift fails here
+  // instead of silently re-inerting the fix.
+  it("real adapter ids collapse — guards the silent re-inert regression", () => {
+    const holdings = [
+      { venue: "binance", symbol: "BTC", holding_type: "spot" as const, value_usd: 30000 },
+      { venue: "okx", symbol: "BTC", holding_type: "spot" as const, value_usd: 20000 },
+      { venue: "binance", symbol: "ETH", holding_type: "spot" as const, value_usd: 50000 },
+    ];
+    const returnsByScopeRef: Record<string, DailyPoint[]> = {
+      [buildHoldingRef(holdings[0])]: series(BTC),
+      [buildHoldingRef(holdings[1])]: series(BTC), // identical series (symbol-keyed alias)
+      [buildHoldingRef(holdings[2])]: series(ETH),
+    };
+
+    // Drive the REAL adapter — it sets each holding strategy's id to
+    // buildHoldingRef(h). minReturnDays=2 (our fixture has 12 days).
+    const { strategies, state } = buildStrategyForBuilderSet(
+      holdings,
+      new Set<string>(),
+      [],
+      returnsByScopeRef,
+      {},
+      {},
+      2,
+    );
+    expect(strategies).toHaveLength(3);
+
+    // Production builds the symbol map the SAME way (buildHoldingRef).
+    const symbolMap = new Map(holdings.map((h) => [buildHoldingRef(h), h.symbol]));
+    // Alignment invariant: every adapter holding-strategy id IS a symbol-map key.
+    for (const s of strategies) {
+      expect(symbolMap.has(s.id)).toBe(true);
+    }
+
+    const cacheBuggy = buildDateMapCache(strategies);
+    const buggy = computeScenario(strategies, state, cacheBuggy);
+    const deAliased = collapseAliasedHoldingStrategies(strategies, state, symbolMap);
+    const fixed = computeScenario(
+      deAliased.strategies,
+      deAliased.state,
+      buildDateMapCache(deAliased.strategies),
+    );
+
+    // Without collapse: the two BTC venues fabricate a 1.0. With collapse:
+    // BTC merges to one slot, ETH kept, and avgRho is no longer the 1.0-inflated value.
+    expect(
+      buggy.correlation_matrix?.[buildHoldingRef(holdings[0])]?.[
+        buildHoldingRef(holdings[1])
+      ],
+    ).toBe(1);
+    expect(deAliased.strategies).toHaveLength(2);
+    expect(fixed.avg_pairwise_correlation).not.toBe(buggy.avg_pairwise_correlation);
+    expect(fixed.avg_pairwise_correlation).not.toBe(1);
   });
 });

@@ -63,6 +63,13 @@ export function collapseAliasedHoldingStrategies(
   symbolByHoldingId: ReadonlyMap<string, string>,
 ): { strategies: StrategyForBuilder[]; state: ScenarioState } {
   const passthrough: StrategyForBuilder[] = [];
+  // COUPLING: grouping by bare symbol is correct ONLY while
+  // reconstructHoldingReturnsByScopeRef (queries.ts) keys the reconstructed
+  // series by symbol alone — that is what makes same-symbol members share a
+  // byte-identical series, which is what makes the summed-weight merge
+  // weight-equivalent. If the breakdown is ever made venue-aware (distinct
+  // series per venue), THIS collapse must be revisited (or removed) in the
+  // same change, or it would silently merge genuinely-distinct exposures.
   const bySymbol = new Map<string, StrategyForBuilder[]>();
   for (const s of strategies) {
     const symbol = symbolByHoldingId.get(s.id);

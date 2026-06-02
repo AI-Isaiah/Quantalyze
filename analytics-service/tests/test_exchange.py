@@ -122,6 +122,57 @@ class TestMonetaryPrecisionH0669:
         assert '"0.123456789012345678"' in encoded
         assert Decimal(out["quantity"]) == precise_qty
 
+    def test_finite_decimal_rejects_pathological_magnitude_and_length(self) -> None:
+        """Security-review hardening: a huge-but-finite magnitude or an
+        unbounded digit string must be dropped at validation, matching the
+        pre-fix float path (which rejected them as inf). Pre-hardening these
+        passed ``is_finite()`` and later raised an uncaught ``decimal.Overflow``
+        in the cost multiply, aborting the whole sync."""
+        from services.exchange import _finite_decimal, _finite_positive_decimal
+
+        assert _finite_positive_decimal("1E1000000000", label="x") is None
+        assert _finite_decimal("1E1000000000", label="x") is None
+        # Unbounded-length digit string rejected BEFORE building a huge Decimal.
+        assert _finite_decimal("1" * 100, label="x") is None
+        # Legitimate values still parse exactly.
+        assert _finite_positive_decimal("60000.5", label="x") == Decimal("60000.5")
+        assert _finite_decimal("-0.4", label="x") == Decimal("-0.4")
+        assert _finite_decimal("0", label="x") == Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_okx_poison_magnitude_fill_dropped_not_job_abort(self) -> None:
+        """End-to-end poison-pill regression guard: a malformed huge-but-finite
+        fillPx must drop the single fill (like the pre-fix float path), NOT
+        raise decimal.Overflow in the cost multiply and abort the whole sync.
+        """
+        from services.exchange import _fetch_raw_trades_okx_inst_type
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+
+        async def _history(params: dict) -> dict:
+            if params.get("instType") != "SPOT":
+                return {"data": []}
+            return {"data": [
+                {
+                    "instId": "BTC-USDT",
+                    "side": "buy",
+                    "fillPx": "1E1000000000",  # finite Decimal, astronomical
+                    "fillSz": "0.5",
+                    "fee": "0",
+                    "feeCcy": "USDT",
+                    "ts": "1700000000000",
+                    "ordId": "ord-poison",
+                    "tradeId": "trade-poison",
+                    "execType": "T",
+                }
+            ]}
+
+        mock_exchange.private_get_trade_fills_history = _history
+        # Returns (poison fill dropped) rather than raising.
+        fills, _ = await _fetch_raw_trades_okx_inst_type(mock_exchange, None, "SPOT")
+        assert fills == []
+
 
 def _okx_swap_only(swap_data: list[dict]) -> "AsyncMock":
     """Return an AsyncMock for ``private_get_trade_fills_history`` that

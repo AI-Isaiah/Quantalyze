@@ -370,6 +370,23 @@ def _finite_positive_float(value: Any, *, label: str) -> float | None:
     return out
 
 
+# H-0669 hardening (security review) — bound monetary-string parsing so a
+# malformed/malicious exchange field cannot (a) build a multi-megabyte Decimal
+# from an unbounded digit string, or (b) admit a huge-but-finite magnitude
+# (e.g. "1E1000000000") that the pre-fix float path rejected as inf but which
+# now passes ``is_finite()`` and later raises an UNCAUGHT ``decimal.Overflow``
+# in the exact ``cost = price * quantity`` multiply — aborting the whole sync
+# (a poison-pill, since the bad fill re-triggers every retry). A real price /
+# quantity / fee numeric string is short and well within a sane magnitude;
+# bounding here drops the single bad fill (matching the pre-fix graceful drop)
+# instead of failing the job.
+_MONETARY_STR_MAXLEN = 48
+# |value| <= ~1e30: generous for any real price/qty/fee, and keeps cost
+# (whose adjusted exponent is the sum of the operands') far below the default
+# Decimal context Emax (999999), so the multiply can never overflow.
+_MONETARY_MAX_ADJUSTED = 30
+
+
 def _finite_decimal(value: Any, *, label: str) -> Decimal | None:
     """Audit-2026-05-07 H-0669 — exact-precision variant of ``_finite_float``
     for the monetary fill fields persisted into ``trades``' DECIMAL columns.
@@ -390,14 +407,25 @@ def _finite_decimal(value: Any, *, label: str) -> Decimal | None:
     a float input (CCXT already parsed it upstream) ``Decimal(str(f))`` keeps
     the float's shortest-repr value — it prevents FURTHER loss but cannot
     recover precision ccxt already dropped.
+
+    Hardened against unbounded length and pathological magnitude (see the
+    ``_MONETARY_*`` constants above) so the new Decimal path keeps the float
+    path's graceful-drop behavior at the untrusted-exchange-string boundary.
     """
     if isinstance(value, bool):
         logger.warning("_finite_decimal: bool rejected for %s=%r", label, value)
         return None
     if value is None:
         return None
+    text = str(value)
+    if len(text) > _MONETARY_STR_MAXLEN:
+        logger.warning(
+            "_finite_decimal: rejected %s (string length %d exceeds cap %d)",
+            label, len(text), _MONETARY_STR_MAXLEN,
+        )
+        return None
     try:
-        out = Decimal(str(value))
+        out = Decimal(text)
     except (InvalidOperation, ValueError, TypeError):
         logger.warning(
             "_finite_decimal: rejected %s=%r (non-numeric)", label, value,
@@ -406,6 +434,15 @@ def _finite_decimal(value: Any, *, label: str) -> Decimal | None:
     if not out.is_finite():
         logger.warning(
             "_finite_decimal: rejected %s=%r (NaN/inf)", label, value,
+        )
+        return None
+    if out != 0 and abs(out.adjusted()) > _MONETARY_MAX_ADJUSTED:
+        # Huge-but-finite magnitude the pre-fix float path rejected as inf;
+        # admitting it would overflow the exact cost multiply and abort the job.
+        logger.warning(
+            "_finite_decimal: rejected %s=%r (magnitude outside sane monetary "
+            "range, |adjusted exponent| %d > %d)",
+            label, value, abs(out.adjusted()), _MONETARY_MAX_ADJUSTED,
         )
         return None
     return out
@@ -565,9 +602,21 @@ def normalize_symbol(exchange_id: str, raw: str) -> str:
     and an identical OKX copy in ``funding_fetch.py``). Funding attribution
     joins ``funding_fees.symbol`` to ``positions.symbol`` by exact string
     equality, so the two OKX copies MUST stay byte-identical or OKX funding
-    silently zero-matches. Routing every producer through this one helper
-    removes that hand-sync trap (the helper the funding_fetch.py note asked
-    for).
+    silently zero-matches. Routing the trades + funding producers through this
+    one helper removes that hand-sync trap (the helper the funding_fetch.py
+    note asked for).
+
+    SCOPE BOUNDARY — this helper owns the *exchange-native* normalization on
+    the trades/funding axis, where the input is each venue's raw form (OKX
+    instId, Bybit V5 symbol, CCXT-unified for ``_normalize_fill``). It is NOT
+    the right helper for the *CCXT-unified position* axis — the live-position
+    strip in ``positions.py::_normalize_ccxt_position`` and the Binance
+    per-symbol reverse-map below both receive the CCXT-UNIFIED symbol for
+    EVERY venue (OKX positions arrive as ``"BTC/USDT:USDT"``, NOT the raw
+    instId). Those sites must keep the unconditional CCXT strip: routing them
+    through ``normalize_symbol("okx", ...)`` would wrongly dash-strip a
+    slash-form string. They are a deliberately separate, exchange-agnostic
+    normalization, not a copy this refactor failed to migrate.
 
     Output strings are PRESERVED per exchange — this is a single-source
     refactor, NOT a re-canonicalization. Changing the stored form would
