@@ -244,7 +244,15 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
     expect(container.textContent).not.toContain("sync just now");
   });
 
-  it("shows 'sync just now' by default (fresh, no lastSyncAt)", () => {
+  it("shows 'no sync yet' (NOT the 'sync just now' lie) when fresh with no lastSyncAt — B14 / NEW-C09-04 (H-1226)", () => {
+    // A null/absent lastSyncAt with allKeysStale falsy is the genuine
+    // never-synced state (e.g. a brand-new allocator who has not connected an
+    // exchange). The producer (getMyAllocationDashboard) always plumbs
+    // lastSyncAt, so this is NOT an unplumbed legacy call site. Rendering
+    // "sync just now" here would claim a sync just completed when none ever
+    // has — the exact staleness lie B14 exists to eliminate. The stamp must
+    // surface the honest onboarding copy instead. This assertion FAILS against
+    // the pre-fix `: "sync just now"` branch.
     seedTweaks({});
     const { container } = render(
       <TweaksProvider>
@@ -257,7 +265,8 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
         />
       </TweaksProvider>,
     );
-    expect(container.textContent).toContain("sync just now");
+    expect(container.textContent).toContain("no sync yet");
+    expect(container.textContent).not.toContain("sync just now");
     expect(container.textContent).not.toContain("data stale");
   });
 

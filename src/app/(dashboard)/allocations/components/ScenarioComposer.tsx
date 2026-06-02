@@ -281,6 +281,7 @@ export function ScenarioComposer({
     holdingReturnsByScopeRef,
     snapshotCount,
     allKeysStale,
+    lastSyncAt,
     minHistoryDepthMonths,
     activeVenues,
   } = payload as MyAllocationDashboardPayload & {
@@ -917,9 +918,16 @@ export function ScenarioComposer({
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {/* B14 / NEW-C09-04 (H-1226): the Scenario-tab chart renders the inner
+            header (no `hideHeader`), so plumb the real sync state. Without it
+            the header stamp showed "sync just now" / "no sync yet" to a synced
+            allocator — a lie. `stale`/`lastSyncAt` come from the live baseline
+            the scenario projects from. */}
         <EquityChart
           equityDailyPoints={equityDailyPoints}
           scenarioSeries={scenarioWealthSeries}
+          stale={allKeysStale}
+          lastSyncAt={lastSyncAt}
         />
         <div className="h-[300px] relative">
           {/* DrawdownChart extends WidgetProps (data + timeframe + width + height
