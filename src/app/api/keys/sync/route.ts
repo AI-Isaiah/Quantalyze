@@ -188,6 +188,12 @@ async function unifiedKeysSyncHandler(args: {
       { status: 202 },
     );
   }
+  // Drift fallback: a 2xx upstream whose body lacks `queued` is an unrecognized
+  // shape (every well-formed resync carries it). Deliberately NOT stamped with
+  // ok:true — the structured success branches above own the discriminator, and
+  // marking an unrecognized shape ok:true would falsely signal success. The
+  // correct hardening (fail-loud-on-drift like finalize-wizard's unified
+  // handler) is the B9 no-passthrough-on-ipc rule's domain, not F5's.
   return NextResponse.json(upstream);
 }
 
