@@ -52,10 +52,35 @@ vi.mock("@/lib/ratelimit", () => ({
   checkLimit: async () => rateLimitResult,
 }));
 
-vi.mock("@/lib/analytics-client", () => ({
-  validateKey: mockValidateKey,
-  encryptKey: mockEncryptKey,
-}));
+vi.mock("@/lib/analytics-client", () => {
+  // Real-shape error classes so the route's `err instanceof AnalyticsUpstreamError`
+  // narrowing resolves against the same constructor identity (F5b R8).
+  class AnalyticsUpstreamError extends Error {
+    readonly status: number;
+    constructor(message: string, status: number) {
+      super(message);
+      this.name = "AnalyticsUpstreamError";
+      this.status = status;
+    }
+  }
+  class AnalyticsTimeoutError extends Error {
+    constructor(path: string, timeoutMs: number) {
+      super(`Analytics request to ${path} timed out after ${timeoutMs}ms`);
+      this.name = "AnalyticsTimeoutError";
+    }
+  }
+  return {
+    validateKey: mockValidateKey,
+    encryptKey: mockEncryptKey,
+    AnalyticsUpstreamError,
+    AnalyticsTimeoutError,
+  };
+});
+
+// F5b (R8): spy on captureToSentry so the 5xx-redaction test can pin that the
+// internal detail still reaches Sentry now that err.message is no longer echoed.
+const captureSpy = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureSpy }));
 
 vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: () => null,
@@ -149,16 +174,48 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     expect(mockEncryptKey).not.toHaveBeenCalled();
   });
 
-  // ── (4) validateKey throws → 400, message propagated ───────────────
-  it("returns 400 with the propagated error.message when validateKey throws", async () => {
-    mockValidateKey.mockRejectedValue(new Error("Invalid API signature"));
+  // ── (4) validateKey throws a generic/5xx error → 500 STATIC, no leak ──
+  it("returns 500 with a STATIC message (not the raw error) when validateKey throws a non-upstream error", async () => {
+    // F5b (R8): a generic Error (crypto failure, contract drift, unreachable
+    // service) must NOT have its message echoed — that leaked Python
+    // tracebacks / crypto internals to the allocator. Redact + capture.
+    mockValidateKey.mockRejectedValue(
+      new Error("crypto: internal nonce derivation failed at kek.ts:42"),
+    );
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe("Key validation failed. Please try again.");
+    expect(body.error).not.toContain("crypto");
+    expect(body.error).not.toContain("kek.ts");
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { route: "api/keys/validate-and-encrypt" },
+      }),
+    );
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+  });
+
+  // ── (4b) validateKey throws a curated 4xx → forwarded with its status ──
+  it("forwards a curated 4xx AnalyticsUpstreamError so actionable key errors still reach the user", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("Invalid API credentials for this exchange", 400),
+    );
 
     const { POST } = await import("./route");
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error).toBe("Invalid API signature");
+    // The curated 4xx detail is user-actionable — it MUST still reach the
+    // client so the user can fix their key (not redacted like a 5xx).
+    expect(body.error).toBe("Invalid API credentials for this exchange");
+    expect(captureSpy).not.toHaveBeenCalled();
     expect(mockEncryptKey).not.toHaveBeenCalled();
   });
 
