@@ -98,8 +98,11 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
         sharpe: analytics?.sharpe ?? null,
         max_dd: analytics?.max_drawdown ?? null,
         contribution: attr?.contribution ?? null,
-        // extractAnalytics defaults computed_at to "" when absent; SyncBadge
-        // treats "" / null as "no freshness to claim" and renders nothing.
+        // extractAnalytics casts the row without validating, so computed_at may
+        // be absent/empty (or analytics itself null). `|| null` collapses all of
+        // those to null so SyncBadge (which renders nothing for a falsy
+        // computedAt) makes no freshness claim. The `|| null` is load-bearing —
+        // do not drop it on the assumption computed_at is always present.
         computedAt: analytics?.computed_at || null,
       };
     });

@@ -4,7 +4,7 @@ import { formatCurrency, formatPercent, formatNumber } from "@/lib/utils";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
 import { verifyPdfRenderToken } from "@/lib/pdf-render-token";
-import { computeFreshness, freshnessLabel } from "@/lib/freshness";
+import { formatDataVintage } from "./vintage";
 import type { Portfolio, StrategyAnalytics } from "@/lib/types";
 import type { Metadata } from "next";
 
@@ -137,21 +137,15 @@ export default async function PortfolioPdfPage({
 
   // B14: the render date ("Generated …") is NOT the data vintage. Surface the
   // analytics `computed_at` so a report rendered today off week-old analytics
-  // doesn't read as current. Routed through the computeFreshness SoT.
-  const analyticsComputedAt =
-    (analyticsRes.data as { computed_at?: string | null } | null)?.computed_at ?? null;
-  const dataAsOf = analyticsComputedAt
-    ? new Date(analyticsComputedAt).toLocaleDateString("en-US", {
-        year: "numeric",
-        month: "long",
-        day: "numeric",
-      })
-    : null;
-  // Append the staleness word only when the data is not fresh, so a current
-  // report stays uncluttered while a stale one is flagged in print.
-  const dataFreshnessLabel = analyticsComputedAt
-    ? freshnessLabel(computeFreshness(analyticsComputedAt))
-    : null;
+  // doesn't read as current (formatDataVintage routes through the freshness SoT).
+  //
+  // Read from the adapted `analytics` (line 97), NOT the raw row: this file
+  // mandates every portfolio_analytics read go through adaptPortfolioAnalytics
+  // (see comment above), so the vintage line stays consistent with the KPI
+  // body — when the adapter rejects a malformed/unknown-status row both go
+  // null together (vintage falls to "Data freshness unavailable"), never a
+  // confident "Data as of …" header over an em-dash body.
+  const dataVintage = formatDataVintage(analytics?.computed_at ?? null);
 
   const kpis = [
     { label: "AUM", value: formatCurrency(analytics?.total_aum) },
@@ -186,11 +180,7 @@ export default async function PortfolioPdfPage({
             Portfolio Report
           </p>
           <p className="text-[10px] text-text-muted">Generated {generatedAt}</p>
-          <p className="text-[10px] text-text-muted">
-            {dataAsOf
-              ? `Data as of ${dataAsOf}${dataFreshnessLabel && dataFreshnessLabel !== "Fresh" ? ` (${dataFreshnessLabel})` : ""}`
-              : "Data freshness unavailable"}
-          </p>
+          <p className="text-[10px] text-text-muted">{dataVintage}</p>
         </div>
       </div>
 

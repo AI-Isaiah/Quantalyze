@@ -199,7 +199,9 @@ function buildCompositionRows(
         twr: attr?.contribution ?? a?.cagr ?? null,
         sharpe: a?.sharpe ?? null,
         // B14: carry the constituent's freshness so CompositionDonut can flag a
-        // stale slice (extractAnalytics defaults computed_at to "" → no badge).
+        // stale slice. extractAnalytics returns null (or an unvalidated row) when
+        // analytics are absent; `|| null` collapses absent/empty computed_at to
+        // null so SyncBadge renders no badge.
         computedAt: a?.computed_at || null,
       };
     })
