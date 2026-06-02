@@ -108,6 +108,23 @@ export function BridgeDrawer({
 }: BridgeDrawerProps) {
   const [state, setState] = useState<DrawerState>(INITIAL_STATE);
   const drawerRef = useRef<HTMLDivElement>(null);
+  // F9 H-0084 — holds the in-flight Send-intro AbortController so the close
+  // paths (Esc / backdrop / ×) can cancel the POST before the drawer dismisses.
+  const abortRef = useRef<AbortController | null>(null);
+
+  // F9 H-0084 — every dismissal path runs through this so a dismiss DURING an
+  // in-flight send aborts the request (client) — and, via the forwarded signal,
+  // server-side too — instead of letting a `match_decision` the allocator thinks
+  // they canceled persist. The in-component "Back to candidates" button already
+  // disables itself while submitting; Esc/backdrop/× did not, so they were the
+  // gap this closes.
+  const closeWithAbort = () => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    onClose();
+  };
 
   // 09.1-REVIEW IN-04: split the previous combined effect into two so
   // the eslint-disable scope only wraps the reset path, not the unrelated
@@ -130,10 +147,20 @@ export function BridgeDrawer({
   }, [isOpen]);
 
   // Esc-to-close handler — only attached while the drawer is open.
+  // F9 M-0061: skip a pre-handled Esc (a nested popover marked it via
+  // preventDefault) and claim the ones we act on, so one keypress doesn't
+  // collapse stacked layers. F9 H-0084: aborts any in-flight send on dismiss.
   useEffect(() => {
     if (!isOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      if (e.defaultPrevented) return;
+      e.preventDefault();
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
+      }
+      onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -166,12 +193,20 @@ export function BridgeDrawer({
     // refactor of `candidates` can't silently regress into POSTing a
     // blank candidate id.
     if (!selected.top_candidate_strategy_id) return;
+    // F9 H-0084 — own an AbortController so a drawer dismiss mid-flight cancels
+    // the POST. Stored in abortRef for the close paths (Esc/backdrop/×).
+    const controller = new AbortController();
+    abortRef.current = controller;
     setState({ ...state, submitting: true, error: null });
     try {
       const result = await sendBridgeIntro({
         holdingRef: buildHoldingRef(selected),
         topCandidateStrategyId: selected.top_candidate_strategy_id,
+        signal: controller.signal,
       });
+      // Aborted = the user dismissed mid-flight; the drawer is already closing
+      // and its state has been reset. Nothing to surface.
+      if (controller.signal.aborted || (!result.ok && result.aborted)) return;
       if (!result.ok) {
         setState((prev) =>
           prev.stage === "confirm"
@@ -182,6 +217,13 @@ export function BridgeDrawer({
       }
       onClose();
     } catch (e) {
+      // A deliberate abort surfaces here too — ignore it (drawer dismissing).
+      if (
+        controller.signal.aborted ||
+        (e instanceof DOMException && e.name === "AbortError")
+      ) {
+        return;
+      }
       // A rejected helper (network failure, thrown error) must surface like
       // the resolved {ok:false} path: re-enable the button and show an error
       // so the allocator can retry. Without this, the await rejection escapes
@@ -192,6 +234,10 @@ export function BridgeDrawer({
           ? { ...prev, submitting: false, error: message }
           : prev,
       );
+    } finally {
+      // Clear only if this is still the active controller (a later send hasn't
+      // replaced it).
+      if (abortRef.current === controller) abortRef.current = null;
     }
   }
 
@@ -238,9 +284,9 @@ export function BridgeDrawer({
 
   return (
     <>
-      {/* Backdrop — click dismisses */}
+      {/* Backdrop — click dismisses (F9 H-0084: aborts an in-flight send). */}
       <div
-        onClick={onClose}
+        onClick={closeWithAbort}
         aria-hidden="true"
         data-testid="bridge-drawer-backdrop"
         style={{
@@ -278,7 +324,7 @@ export function BridgeDrawer({
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={closeWithAbort}
             aria-label="Close drawer"
             className="text-text-muted hover:text-text-primary"
           >

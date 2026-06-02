@@ -2,6 +2,19 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 
+// F9 M-0189 — OutcomesWidget retry now calls useRouter().refresh() (soft
+// re-fetch) instead of window.location.reload(). Provide a router stub.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    refresh: vi.fn(),
+    push: vi.fn(),
+    replace: vi.fn(),
+    prefetch: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+  }),
+}));
+
 /**
  * Phase 11 / UI-BLOCK-01 — Regression test asserting that
  * OutcomesWidget routes its render through the shared <WidgetState>

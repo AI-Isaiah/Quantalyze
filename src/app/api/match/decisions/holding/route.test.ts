@@ -242,3 +242,42 @@ describe("POST /api/match/decisions/holding — happy path", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// F9 H-0084 — server-side cancellation honoring
+// ---------------------------------------------------------------------------
+
+describe("POST /api/match/decisions/holding — abort honoring (F9 H-0084)", () => {
+  it("returns 499 and does NOT insert/audit when the request is already aborted", async () => {
+    // Ownership + strategy gates pass so we actually reach the pre-write guard.
+    mockHoldingSelectSingle.mockResolvedValueOnce({
+      data: { id: "holding-row-id" },
+      error: null,
+    });
+    mockStrategySelectSingle.mockResolvedValueOnce({
+      data: { id: "11111111-2222-4333-8444-555555555555" },
+      error: null,
+    });
+
+    const abortedReq = new NextRequest(
+      new URL("http://localhost/api/match/decisions/holding"),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          holding_ref: "holding:binance:BTC:spot",
+          top_candidate_strategy_id: "11111111-2222-4333-8444-555555555555",
+        }),
+        signal: AbortSignal.abort(),
+      },
+    );
+
+    const res = await POST(abortedReq);
+
+    expect(res.status).toBe(499);
+    // The whole point: no match_decisions row, no audit event for the action the
+    // allocator canceled.
+    expect(mockDecisionInsertSingle).not.toHaveBeenCalled();
+    expect(logAuditEventAsUser).not.toHaveBeenCalled();
+  });
+});

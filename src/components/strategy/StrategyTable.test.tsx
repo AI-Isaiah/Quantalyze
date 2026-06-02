@@ -476,3 +476,113 @@ describe("StrategyTable — DISCO-04 sparkline color rule (returns column only)"
     );
   });
 });
+
+// --- F9 M-0475/M-0476: prefs mirror is per-scope -----------------------------
+//
+// The mirror-into-legacy-state effect (StrategyTable.tsx) is gated on
+// `prefsHydrated` only, which never re-toggles when useDiscoveryPrefs's key
+// flips on a client-side category change — so a REUSED instance keeps the
+// previous category's view/sort. The call sites (/discovery/[slug],
+// /browse/[slug]) pass `key={(user,)slug}` to force a remount. These tests pin
+// the per-mount contract AND the bug-without-remount.
+//
+// Uses a self-contained in-memory localStorage: the file's shared jsdom storage
+// lacks a working setItem in this env (see the try/catch around clear() above).
+describe("StrategyTable — prefs mirror per scope (F9 M-0475/M-0476)", () => {
+  function makeLocalStorage(): Storage {
+    const store = new Map<string, string>();
+    return {
+      get length() {
+        return store.size;
+      },
+      clear: () => store.clear(),
+      getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+      key: (i: number) => Array.from(store.keys())[i] ?? null,
+      removeItem: (k: string) => {
+        store.delete(k);
+      },
+      setItem: (k: string, v: string) => {
+        store.set(k, String(v));
+      },
+    } as unknown as Storage;
+  }
+
+  const PREFS_KEY = "discovery_view_preferences:u-1:equity-sma";
+  // Unversioned blob → adopted as v1 by the discovery codec's per-field merge.
+  const GRID_PREFS = JSON.stringify({
+    view: "grid",
+    sort: { key: "sharpe", dir: "desc" },
+    hide_examples: true,
+  });
+
+  beforeEach(() => {
+    Object.defineProperty(window, "localStorage", {
+      value: makeLocalStorage(),
+      configurable: true,
+    });
+  });
+
+  it("a fresh mount mirrors ITS scope's persisted prefs (grid)", async () => {
+    window.localStorage.setItem(PREFS_KEY, GRID_PREFS);
+    render(
+      <StrategyTable
+        key="u-1:equity-sma"
+        strategies={STRATEGIES}
+        categorySlug="equity-sma"
+        userId="u-1"
+        initialWatchedSet={new Set()}
+      />,
+    );
+    // After hydration the grid view applies for this scope → no <table>.
+    await waitFor(() => {
+      expect(document.querySelector("table")).toBeNull();
+    });
+  });
+
+  it("stale on same-instance slug change; a keyed remount adopts the new scope", async () => {
+    window.localStorage.setItem(PREFS_KEY, GRID_PREFS);
+
+    const { rerender } = render(
+      <StrategyTable
+        key="u-1:crypto-sma"
+        strategies={STRATEGIES}
+        categorySlug="crypto-sma"
+        userId="u-1"
+        initialWatchedSet={new Set()}
+      />,
+    );
+    await waitFor(() => {
+      expect(document.querySelector("table")).not.toBeNull();
+    });
+
+    // Navigate to equity-sma WITHOUT remounting (same key) — the bug scenario.
+    // useDiscoveryPrefs re-hydrates to grid, but the prefs-mirror effect does
+    // NOT re-run, so the legacy view stays table (stale).
+    rerender(
+      <StrategyTable
+        key="u-1:crypto-sma"
+        strategies={STRATEGIES}
+        categorySlug="equity-sma"
+        userId="u-1"
+        initialWatchedSet={new Set()}
+      />,
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(document.querySelector("table")).not.toBeNull();
+
+    // Remount via the slug-keyed key (the fix) — the mirror re-runs for the new
+    // scope and adopts its grid prefs.
+    rerender(
+      <StrategyTable
+        key="u-1:equity-sma"
+        strategies={STRATEGIES}
+        categorySlug="equity-sma"
+        userId="u-1"
+        initialWatchedSet={new Set()}
+      />,
+    );
+    await waitFor(() => {
+      expect(document.querySelector("table")).toBeNull();
+    });
+  });
+});

@@ -27,6 +27,7 @@
  */
 
 import { useState } from "react";
+import Link from "next/link";
 import { BridgeDrawer } from "./BridgeDrawer";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
 import type { OutcomeRow } from "@/lib/queries";
@@ -224,12 +225,18 @@ export function BridgeWidget({
               No reviews recorded yet.
             </span>
           )}
-          <a
+          {/* F9 H-0087/H-1211/M-0067 — next/Link, not a raw <a>. A raw anchor to
+              the same-route `/allocations?tab=outcomes` triggered a full-document
+              reload that wiped in-flight Bridge drawer state, the TweaksProvider
+              panel state, scroll position, and any ScenarioComposer draft. The
+              sibling InsightStrip already uses <Link>; this matches the SPA-native
+              tab navigation idiom (AllocationsTabs changeTab + router.replace). */}
+          <Link
             href="/allocations?tab=outcomes"
             className="ml-auto text-sm font-medium text-accent hover:underline"
           >
             {hasOutcomes ? "View outcomes" : "Show last recommendation"} →
-          </a>
+          </Link>
         </div>
       </div>
     );

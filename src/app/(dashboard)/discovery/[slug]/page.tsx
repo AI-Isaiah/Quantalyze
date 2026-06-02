@@ -60,7 +60,15 @@ export default async function DiscoveryPage({
           appear. Refresh to retry.
         </div>
       )}
+      {/* F9 M-0475/M-0476 — key by (user, slug) so a client-side category
+          change remounts StrategyTable. Without it, navigating between
+          /discovery/[slug] pages reuses the instance; its prefs-mirror effect
+          (gated on prefsHydrated, which never re-toggles on the useDiscoveryPrefs
+          key flip) would leave view/sort/showExamples on the prior category's
+          saved prefs until a full reload. A remount re-runs the mirror cleanly
+          for the new scope. */}
       <StrategyTable
+        key={`${user.id}:${slug}`}
         strategies={strategies}
         categorySlug={slug}
         portfolioId={portfolio?.id ?? null}
