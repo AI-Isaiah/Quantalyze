@@ -41,6 +41,19 @@ export const ALLOCATOR_PREFERENCES_COLUMNS =
   // Phase 3 (migration 062)
   "scoring_weight_overrides";
 
+// The strategy_analytics columns the match queue enriches each candidate with.
+// Every name here MUST exist on the strategy_analytics table — PostgREST 400s
+// the whole projection if one does not, and (because the admin client does not
+// throwOnError) that 42703 is silently swallowed, blanking the ENTIRE analytics
+// panel for every candidate on both the admin Match-queue and the public demo.
+// `total_aum` was wrongly listed here through 0.24.15.x: it lives on
+// portfolio_analytics, never strategy_analytics (per-strategy AUM comes from
+// strategies.aum on the candidate join, masked separately for exploratory tiers).
+// strategy-analytics-match-columns-schema-sync.test.ts is the backstop.
+export const STRATEGY_ANALYTICS_MATCH_COLUMNS =
+  "strategy_id, sharpe, sortino, max_drawdown, cagr, volatility, " +
+  "six_month_return, cumulative_return, sparkline_returns";
+
 // --- Return type -----------------------------------------------------------
 // Kept deliberately loose (Record<string, unknown> for the batch JSONB fields
 // and nested relationships) so the consuming React components — which own
@@ -186,15 +199,16 @@ export async function getAllocatorMatchPayload(
     .filter(Boolean);
   let analyticsByStrategyId: Record<string, Record<string, unknown>> = {};
   if (strategyIds.length > 0) {
-    const { data: analyticsRows } = await admin
+    const { data: analyticsRows, error: analyticsErr } = await admin
       .from("strategy_analytics")
-      .select(
-        "strategy_id, sharpe, sortino, max_drawdown, cagr, volatility, " +
-          "six_month_return, cumulative_return, total_aum, sparkline_returns",
-      )
+      .select(STRATEGY_ANALYTICS_MATCH_COLUMNS)
       .in("strategy_id", strategyIds);
-    const analyticsArr =
-      (analyticsRows as Array<Record<string, unknown>> | null) ?? [];
+    // Fail loud, matching the fan-out error convention above (lines ~133-137).
+    // The pre-fix code swallowed this error: a bad projection (e.g. the old
+    // non-existent `total_aum`) silently blanked every candidate's analytics
+    // instead of surfacing the schema drift.
+    if (analyticsErr) throw analyticsErr;
+    const analyticsArr = castRows<Record<string, unknown>>(analyticsRows);
     analyticsByStrategyId = Object.fromEntries(
       analyticsArr.map((row) => [row.strategy_id as string, row]),
     );

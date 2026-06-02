@@ -66,7 +66,6 @@ export interface CandidateRow {
     volatility: number | null;
     six_month_return: number | null;
     cumulative_return: number | null;
-    total_aum: number | null;
     sparkline_returns: unknown;
   } | null;
 }
