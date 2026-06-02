@@ -61,7 +61,21 @@ def compute_risk_decomposition(weights: list[float], covariance_matrix: np.ndarr
     port_var = w @ covariance_matrix @ w
     port_vol = np.sqrt(port_var) if port_var > 0 else 0
     if port_vol == 0:
-        return [{"marginal_risk_pct": 0, "standalone_vol": 0, "component_var": 0} for _ in weights]
+        # H-0803: marginal/component attribution is genuinely undefined when the
+        # portfolio carries no risk (all-zero weights, or a non-PSD cov whose
+        # port_var<0 collapsed to 0) — you cannot apportion a share of a zero
+        # risk — so those stay 0. But standalone_vol = sqrt(cov[i][i]) is a
+        # PER-STRATEGY property independent of the weights; it must report the
+        # real per-strategy vol here, not collapse to 0. Mirrors the non-zero
+        # branch's standalone_vol expression below.
+        return [
+            {
+                "marginal_risk_pct": 0,
+                "standalone_vol": _safe_float(float(np.sqrt(covariance_matrix[i][i]))),
+                "component_var": 0,
+            }
+            for i in range(len(weights))
+        ]
     marginal_contrib = (covariance_matrix @ w) / port_vol
     component_risk = w * marginal_contrib
     return [

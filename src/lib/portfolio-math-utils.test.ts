@@ -141,4 +141,26 @@ describe("mean / stdDev / compound", () => {
     // (1.1 * 0.9) - 1 = -0.01
     expect(compound([0.1, -0.1])).toBeCloseTo(-0.01, 6);
   });
+
+  it("H-0469: never returns a non-finite value (JSON.stringify would coerce it to null)", () => {
+    // The hazard: a non-finite compound() result JSON-serializes to null
+    // (RFC 8259 §6), so computeMonthlyReturns/computeAnnualReturns would ship
+    // value:null to the client from a number-typed field. compound() must
+    // always return a finite, JSON-round-trippable number.
+    for (const series of [
+      [1e308, 1e308], // finite inputs overflow the product to +Infinity
+      [0.1, Infinity, -0.1], // corrupt +Infinity in the series
+      [0.1, NaN, -0.1], // corrupt NaN in the series
+    ]) {
+      const r = compound(series);
+      expect(Number.isFinite(r)).toBe(true);
+      expect(JSON.parse(JSON.stringify(r))).toBe(r);
+    }
+  });
+
+  it("H-0469: clamps overflow to the signed extreme, neutralizes NaN to 0", () => {
+    expect(compound([1e308, 1e308])).toBe(Number.MAX_VALUE); // +overflow
+    expect(compound([-1.5, 1e308, 1e308])).toBe(-Number.MAX_VALUE); // sign preserved via the (1-1.5) negative factor
+    expect(compound([0.1, NaN, -0.1])).toBe(0); // NaN → neutral no-growth
+  });
 });

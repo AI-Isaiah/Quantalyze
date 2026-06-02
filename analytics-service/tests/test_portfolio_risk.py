@@ -132,14 +132,13 @@ def test_risk_decomposition_zero_volatility():
     portfolio that carries no risk), so marginal_risk_pct and component_var
     must be 0 for every entry.
 
-    NOTE: this test deliberately does NOT assert standalone_vol == 0. The
-    current production code (portfolio_risk.py:64) returns standalone_vol=0
-    in this branch, but standalone_vol is sqrt(cov[i][i]) — a per-strategy
-    property that is independent of portfolio weights, so the financially
-    correct values are nonzero here. That known-incorrect fallback is pinned
-    (and will be flipped once fixed) by test_risk_decomposition_zero_weights_
-    standalone_vol_is_per_strategy below (H-0803). Asserting == 0 here would
-    cement the bug, so we only pin the two values that are correctly zero.
+    NOTE: this test deliberately does NOT assert standalone_vol == 0.
+    standalone_vol is sqrt(cov[i][i]) — a per-strategy property independent of
+    the portfolio weights, so its financially correct values are nonzero even
+    here (H-0803 fixed the zero-vol branch to return them). The per-strategy
+    invariant is pinned by test_risk_decomposition_zero_weights_standalone_vol_
+    is_per_strategy below; this test only pins the two values that are correctly
+    zero, so it stays valid regardless of the standalone_vol value.
     """
     weights = [0.0, 0.0, 0.0]
     cov = np.array([[0.04, 0.01, 0.005], [0.01, 0.03, 0.002], [0.005, 0.002, 0.02]])
@@ -148,22 +147,15 @@ def test_risk_decomposition_zero_volatility():
     assert all(r["component_var"] == 0 for r in result)
 
 
-@pytest.mark.skip(
-    reason="TODO(surfaced): H-0803 — portfolio_risk.py:64 returns "
-    "standalone_vol=0 in the zero-portfolio-vol branch. standalone_vol is "
-    "sqrt(cov[i][i]), independent of weights, so the financially correct "
-    "value is nonzero even when all weights are 0. Production fix required "
-    "before un-skipping (move standalone_vol out of the zero-vol early return)."
-)
 def test_risk_decomposition_zero_weights_standalone_vol_is_per_strategy():
     """H-0803: standalone_vol = sqrt(cov[i][i]) is a per-strategy property
     and MUST be independent of the portfolio weights. With all-zero weights
     (portfolio vol == 0) the diagonal variances 0.04, 0.03, 0.02 still imply
     standalone vols of 0.2000, 0.1732, 0.1414 — they do not collapse to 0.
 
-    This test fails on the current production fallback (which returns
-    standalone_vol=0) and will fail again if a regression re-zeroes
-    standalone_vol in the zero-portfolio-vol branch once the bug is fixed.
+    Pre-H-0803 the zero-portfolio-vol branch returned standalone_vol=0; the fix
+    returns sqrt(cov[i][i]). This test pins the per-strategy invariant and fails
+    if a regression re-zeroes standalone_vol in that branch.
     """
     weights = [0.0, 0.0, 0.0]
     cov = np.array([[0.04, 0.01, 0.005], [0.01, 0.03, 0.002], [0.005, 0.002, 0.02]])
@@ -180,10 +172,11 @@ def test_risk_decomposition_negative_variance_collapses_to_zeros():
     port_var > 0 else 0`. A non-PSD covariance matrix (numerical
     instability / a near-singular cov produced by float arithmetic) can
     yield port_var < 0. The `if port_var > 0 else 0` guard must collapse
-    port_vol to 0 so the function returns flat zero entries rather than
-    taking sqrt of a negative (→ NaN). Tests only ever fed positive-definite
-    cov + the all-zero-weight case before; the negative-variance branch
-    was unexercised.
+    port_vol to 0 so the marginal/component ATTRIBUTION is zero (undefined at
+    zero portfolio vol) rather than taking sqrt of a negative port_var (→ NaN).
+    standalone_vol = sqrt(cov[i][i]) is per-strategy and stays nonzero (H-0803).
+    Tests only ever fed positive-definite cov + the all-zero-weight case before;
+    the negative-variance branch was unexercised.
     """
     # Non-PSD matrix: eigenvalues 3 and -1. With w=[0.5, -0.5],
     # w @ cov @ w = -0.5 < 0.
@@ -191,12 +184,15 @@ def test_risk_decomposition_negative_variance_collapses_to_zeros():
     weights = [0.5, -0.5]
     assert (np.array(weights) @ cov_non_psd @ np.array(weights)) < 0
     result = compute_risk_decomposition(weights, cov_non_psd)
-    # Negative port_var → port_vol == 0 → the zero-vol branch returns flat
-    # zero entries (no NaN from sqrt of a negative number).
+    # Negative port_var → port_vol == 0 → the zero-vol branch zeroes the
+    # ATTRIBUTION (marginal/component) with no NaN from sqrt of a negative...
     assert len(result) == 2
     assert all(r["marginal_risk_pct"] == 0 for r in result)
-    assert all(r["standalone_vol"] == 0 for r in result)
     assert all(r["component_var"] == 0 for r in result)
+    # ...but standalone_vol = sqrt(cov[i][i]) is a per-strategy property,
+    # independent of weights/port_vol — here sqrt(1.0) = 1.0, NOT 0 (H-0803).
+    expected_standalone = [float(np.sqrt(cov_non_psd[i][i])) for i in range(len(weights))]
+    assert [r["standalone_vol"] for r in result] == pytest.approx(expected_standalone)
 
 
 def test_attribution_empty_weights_returns_empty_list():

@@ -89,5 +89,23 @@ export function compound(returns: number[]): number {
   if (returns.length === 0) return 0;
   let product = 1;
   for (const r of returns) product *= 1 + r;
-  return product - 1;
+  const result = product - 1;
+  // H-0469: never return a non-finite value. JSON.stringify(±Infinity|NaN) ===
+  // 'null' (RFC 8259 §6), so callers that ship compound() output to the client
+  // (computeMonthlyReturns/computeAnnualReturns → {date, value}) would silently
+  // emit value:null — a number-typed field that lies over the wire. Two ways to
+  // go non-finite: (1) even all-finite inputs can overflow the running product
+  // to ±Infinity (e.g. compound([1e308, 1e308])) → clamp to the signed
+  // representable extreme; (2) a corrupt non-finite return (NaN/Infinity in the
+  // series) poisons the product to NaN → return 0, this lib's neutral "no
+  // growth" default (as for empty input). The NaN arm is silent (no warn) — and
+  // unreachable today: compound()'s only live caller (AlphaBetaDecomposition)
+  // feeds it values already finite-filtered by normalizeDailyReturns, and the
+  // computeMonthlyReturns/computeAnnualReturns paths that pass raw values have
+  // no production caller. So this is a forward-looking JSON-safety guard, not a
+  // mask over a live corruption path; if a future caller wires raw daily values
+  // straight into compound() without a finite-filter, add a warn breadcrumb here.
+  if (Number.isNaN(result)) return 0;
+  if (!Number.isFinite(result)) return result > 0 ? Number.MAX_VALUE : -Number.MAX_VALUE;
+  return result;
 }

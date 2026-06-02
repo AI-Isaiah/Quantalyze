@@ -232,17 +232,26 @@ describe("computeWinRate", () => {
     const wins = values.filter((v) => v > 0).reduce((s, v) => s + v, 0);
     const losses = values.filter((v) => v < 0).reduce((s, v) => s + v, 0);
     if (losses === 0) {
-      expect(profitFactor).toBe(Infinity);
+      // M-0543: wins-but-no-losses → profitFactor is `null` (undefined ratio),
+      // NOT Infinity. A non-finite number would JSON-serialize to null silently;
+      // returning null makes the "no downside" case explicit + round-trippable.
+      expect(profitFactor).toBeNull();
     } else {
       expect(profitFactor).toBeCloseTo(wins / Math.abs(losses), 10);
     }
   });
 
-  it("all-positive series has winRate 1 and profitFactor Infinity", () => {
+  it("all-positive series has winRate 1 and profitFactor null (no losses → undefined ratio, M-0543)", () => {
     const values = CONSTANT_RETURNS.map((d) => d.value);
     const { winRate, profitFactor } = computeWinRate(values);
     expect(winRate).toBe(1);
-    expect(profitFactor).toBe(Infinity);
+    expect(profitFactor).toBeNull();
+    // The whole result must JSON-round-trip losslessly — the bug was that a
+    // number-typed Infinity became null over the wire, lying about the type.
+    expect(JSON.parse(JSON.stringify({ winRate, profitFactor }))).toEqual({
+      winRate: 1,
+      profitFactor: null,
+    });
   });
 });
 
@@ -404,6 +413,21 @@ describe("computeHerfindahlIndex", () => {
     const expected = 0.25 + 0.09 + 0.04;
     expect(computeHerfindahlIndex(weights)).toBeCloseTo(expected, 10);
   });
+
+  it("M-0544: long-short book with negative weights stays in [1/n, 1]", () => {
+    // [1.5, -0.5] (150% long / 50% short) — the raw Σwᵢ² returned 2.5, out of
+    // the documented [1/n, 1] range → "Concentration: 2.5" gibberish. With
+    // gross-exposure normalization Σ|wᵢ|=2: w'=[0.75, 0.25] → 0.625, in range.
+    const hhi = computeHerfindahlIndex([1.5, -0.5]);
+    expect(hhi).toBeCloseTo(0.625, 10);
+    expect(hhi).toBeGreaterThanOrEqual(0.5); // 1/n for n=2
+    expect(hhi).toBeLessThanOrEqual(1);
+  });
+
+  it("M-0544: empty or all-zero book returns the inert 0 (no exposure)", () => {
+    expect(computeHerfindahlIndex([])).toBe(0);
+    expect(computeHerfindahlIndex([0, 0, 0])).toBe(0);
+  });
 });
 
 // ── 13. detectRegimeChanges ─────────────────────────────────────────
@@ -532,6 +556,14 @@ describe("non-finite input robustness (audit batch1)", () => {
 
   it("computeReturnDistribution returns [] when no finite returns remain", () => {
     expect(computeReturnDistribution([NaN, Infinity, -Infinity], 10)).toEqual([]);
+  });
+
+  it("M-0542: all-identical returns collapse to a single bin, not N noise bins", () => {
+    // range === 0: the generic path emitted 10 bins all with min===max===0.02,
+    // bin 0 holding all 4 counts and bins 1..9 being zero-count noise. Now a
+    // single meaningful bin.
+    const dist = computeReturnDistribution([0.02, 0.02, 0.02, 0.02], 10);
+    expect(dist).toEqual([{ min: 0.02, max: 0.02, count: 4 }]);
   });
 
   // H-0472: findMinMax left the -Infinity/+Infinity sentinels in place when
