@@ -52,6 +52,25 @@ export interface BrowseStrategyRow {
   strategy_types: string[];
 }
 
+/**
+ * Wire contract for GET /api/strategies/browse (F5b review #1/#6/#8). Exporting
+ * + annotating the response payload means `has_more` / `limit` cannot be
+ * renamed or dropped without a compile error, and a consumer that wants to
+ * honor truncation can import this rather than re-declaring the shape inline.
+ *
+ * `limit` is the hard alphabetical cap (NOT a `page_size` — there is no
+ * offset/cursor; `has_more: true` signals "refine your filter", not "load the
+ * next page"). This intentionally differs from portfolio-alerts' cursored
+ * `{ page_size, offset, has_more }` paginator. The drawer does not yet surface
+ * `has_more` (the catalog is well under the cap today); wiring a truncation
+ * notice is a deferred UX follow-up, not a wire change.
+ */
+export interface BrowseResponse {
+  strategies: BrowseStrategyRow[];
+  has_more: boolean;
+  limit: number;
+}
+
 // M10 — Pin LIMIT 200. Verified strategy count is in the low tens today;
 // the v0.16 strategy-onboarding push is expected to multiply this. The
 // drawer contract is "browse first 200 alphabetical" with no pagination
@@ -92,7 +111,11 @@ export const GET = withAllocatorAuth(
         .select("id, name, codename, disclosure_tier, markets, strategy_types"),
     )
       .order("name", { ascending: true })
-      .limit(STRATEGY_BROWSE_LIMIT);
+      // M-0343 (audit-2026-05-07 F5b): fetch one row past the cap so the
+      // response can honestly signal truncation. Without a has_more flag a
+      // client silently sees only the first STRATEGY_BROWSE_LIMIT rows once
+      // the verified catalog grows past it, with no contract-level signal.
+      .limit(STRATEGY_BROWSE_LIMIT + 1);
 
     if (error) {
       console.error("[api/strategies/browse] select error:", error);
@@ -117,7 +140,16 @@ export const GET = withAllocatorAuth(
     // `name || codename` lets an attacker who knows a real strategy
     // name look it up and read its codename — defeating the
     // pseudonymity contract for the entire verified catalog.
-    const strategies: BrowseStrategyRow[] = (data ?? []).map((row) => {
+    // M-0343: the +1 probe row tells us the catalog exceeds the cap. Drop it
+    // from the payload and surface `has_more` so a consumer CAN warn instead of
+    // silently truncating (the drawer does not yet — deferred UX follow-up,
+    // see BrowseResponse). `limit` is echoed so the contract is self-describing
+    // and a future cursor/total field is an additive (non-breaking) change.
+    const rows = data ?? [];
+    const hasMore = rows.length > STRATEGY_BROWSE_LIMIT;
+    const pageRows = hasMore ? rows.slice(0, STRATEGY_BROWSE_LIMIT) : rows;
+
+    const strategies: BrowseStrategyRow[] = pageRows.map((row) => {
       const r = row as {
         id: string;
         name: string;
@@ -144,9 +176,11 @@ export const GET = withAllocatorAuth(
       };
     });
 
-    return NextResponse.json(
-      { strategies },
-      { status: 200, headers: NO_STORE_HEADERS },
-    );
+    const body: BrowseResponse = {
+      strategies,
+      has_more: hasMore,
+      limit: STRATEGY_BROWSE_LIMIT,
+    };
+    return NextResponse.json(body, { status: 200, headers: NO_STORE_HEADERS });
   },
 );

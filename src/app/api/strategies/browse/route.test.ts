@@ -324,7 +324,7 @@ describe("GET /api/strategies/browse", () => {
     expect(STATE.observedFilters.orderColumn).toBe("name");
   });
 
-  it("T8 (M10) — LIMIT 200 cap: 250 published strategies → response has 200", async () => {
+  it("T8 (M10 + M-0343) — 250 published strategies → 200 rows, has_more:true, probe LIMIT+1", async () => {
     STATE.strategyRows = Array.from({ length: 250 }, (_, i) => ({
       id: `11111111-1111-4111-8111-${String(i).padStart(12, "0")}`,
       name: `Strategy ${String(i).padStart(3, "0")}`,
@@ -335,9 +335,31 @@ describe("GET /api/strategies/browse", () => {
     const { GET } = await import("./route");
     const res = await GET(makeRequest());
     expect(res.status).toBe(200);
-    expect(STATE.observedFilters.limit).toBe(200);
+    // M-0343: fetch one past the cap (the probe row) to detect truncation.
+    expect(STATE.observedFilters.limit).toBe(201);
     const body = await res.json();
+    // Page is sliced back to the cap; the probe row is never returned.
     expect(body.strategies).toHaveLength(200);
+    // The truncation signal + self-describing cap the client can act on.
+    expect(body.has_more).toBe(true);
+    expect(body.limit).toBe(200);
+  });
+
+  it("T8b (M-0343) — under the cap: 50 strategies → has_more:false, full page", async () => {
+    STATE.strategyRows = Array.from({ length: 50 }, (_, i) => ({
+      id: `22222222-2222-4222-8222-${String(i).padStart(12, "0")}`,
+      name: `Strategy ${String(i).padStart(3, "0")}`,
+      codename: null,
+      markets: ["crypto"],
+      strategy_types: ["systematic"],
+    }));
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategies).toHaveLength(50);
+    expect(body.has_more).toBe(false);
+    expect(body.limit).toBe(200);
   });
 
   // ============================================================

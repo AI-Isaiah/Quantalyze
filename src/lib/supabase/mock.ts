@@ -150,6 +150,16 @@ export function createMockSupabaseClient(store: MockStore): SupabaseClient {
         single() {
           return Promise.resolve(runSelect(true));
         },
+        // maybeSingle(): resolves to { data: row | null }. NOTE the mock
+        // COLLAPSES single() and maybeSingle() to the same lenient behavior —
+        // runSelect(true) returns `limited[0] ?? null` with no error on 0 rows,
+        // so neither reproduces real PostgREST single()'s PGRST116 error-on-
+        // empty (the opposite half of the real distinction). Adequate only for
+        // callers (like leadExists) that branch on `data === null`; a test that
+        // needs single()-errors-on-empty would be mismodeled here.
+        maybeSingle() {
+          return Promise.resolve(runSelect(true));
+        },
         // Thenable returns an actual Promise so `.catch()` chains work
         // and the object is safe to await multiple times in tests.
         then<TResult = unknown>(

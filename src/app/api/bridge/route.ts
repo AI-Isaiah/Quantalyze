@@ -1,7 +1,7 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { assertSameOrigin } from "@/lib/csrf";
-import { assertProfileApproved } from "@/lib/api/approval-gate";
+import { withAuth } from "@/lib/api/withAuth";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import {
   findReplacementCandidates,
   AnalyticsUpstreamError,
@@ -15,29 +15,37 @@ import {
   isRateLimitMisconfigured,
 } from "@/lib/ratelimit";
 
-export async function POST(req: NextRequest) {
-  const csrfError = assertSameOrigin(req);
-  if (csrfError) return csrfError;
-
+// M-0888 (audit-2026-05-07 F5b): use the `withAuth` wrapper instead of
+// hand-rolling assertSameOrigin + supabase.auth.getUser + assertProfileApproved.
+// withAuth applies the same CSRF + auth + approval gate AND stamps the 401
+// envelope with NO_STORE_HEADERS, and any future wrapper hardening (double-
+// submit CSRF, body-size cap, Vary) reaches this route for free.
+//
+// Note: the sibling bridge/outcome + bridge/outcome/dismiss routes use the
+// heavier `withAuthLimited` (which folds rate-limit + body-schema INTO the
+// wrapper). Bridge deliberately stays on plain `withAuth` + an INLINE limiter:
+// converging onto withAuthLimited's default `rateLimitDenyJson` would drop this
+// route's bespoke 429/503 copy AND regress the NO_STORE_HEADERS added below
+// (rateLimitDenyJson does not stamp it). The inline limiter already enforces the
+// B15 validate-before-limit ordering, so the convergence value is marginal.
+//
+// M-0889 (audit-2026-05-07 round-2 Block D / P1947): every authenticated
+// response — error AND success — must carry `Cache-Control: private, no-store`.
+// The 200 body is user-specific BridgeCandidate[] (the allocator's
+// underperformer scoring), exactly the cross-tenant-leak surface the policy
+// targets. The 401 picks NO_STORE_HEADERS up from withAuth; every handler
+// return below stamps it explicitly.
+export const POST = withAuth(async (req, user) => {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  // Approval gate (PR #266 follow-up): bridge fires a Python round-trip
-  // to find replacement candidates; expensive enough to deny to
-  // pending-approval users.
-  const denied = await assertProfileApproved(supabase, user.id);
-  if (denied) return denied;
 
   let rawBody: unknown;
   try {
     rawBody = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Invalid JSON" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   // M-0884: UUID-validate the body (mirrors /api/simulator) so a non-UUID id
@@ -49,7 +57,7 @@ export async function POST(req: NextRequest) {
         error:
           "portfolio_id and underperformer_strategy_id are required and must be valid UUIDs",
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   const { portfolio_id, underperformer_strategy_id } = parsed.data;
@@ -66,7 +74,7 @@ export async function POST(req: NextRequest) {
         { error: "Rate limiter unavailable" },
         {
           status: 503,
-          headers: { "Retry-After": String(rl.retryAfter) },
+          headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
         },
       );
     }
@@ -81,7 +89,7 @@ export async function POST(req: NextRequest) {
       },
       {
         status: 429,
-        headers: { "Retry-After": String(rl.retryAfter) },
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
       },
     );
   }
@@ -95,7 +103,10 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (!portfolio) {
-    return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
+    return NextResponse.json(
+      { error: "Portfolio not found" },
+      { status: 404, headers: NO_STORE_HEADERS },
+    );
   }
 
   try {
@@ -104,7 +115,7 @@ export async function POST(req: NextRequest) {
       underperformer_strategy_id,
       user.id,
     );
-    return NextResponse.json(result);
+    return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (err) {
     // H-1061 / H-1063: forward upstream 4xx semantics (400 "no returns data",
     // 404 "portfolio not found", 422) instead of flattening every failure to
@@ -116,13 +127,16 @@ export async function POST(req: NextRequest) {
       err.status >= 400 &&
       err.status < 500
     ) {
-      return NextResponse.json({ error: err.message }, { status: err.status });
+      return NextResponse.json(
+        { error: err.message },
+        { status: err.status, headers: NO_STORE_HEADERS },
+      );
     }
     // A timed-out Python round-trip is a gateway timeout, not a client error.
     if (err instanceof AnalyticsTimeoutError) {
       return NextResponse.json(
         { error: "Bridge scoring timed out. Please try again." },
-        { status: 504 },
+        { status: 504, headers: NO_STORE_HEADERS },
       );
     }
     // H-1062: genuine 5xx / unexpected exceptions return a STATIC message.
@@ -135,7 +149,7 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json(
       { error: "Bridge scoring failed. Please try again." },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
-}
+});

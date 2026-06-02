@@ -8,6 +8,7 @@ import {
   listForQuantsLeads,
   markLeadProcessed,
   unmarkLeadProcessed,
+  leadExists,
   FOR_QUANTS_LEADS_FULL_VIEW_CAP,
 } from "./for-quants-leads-admin";
 import {
@@ -262,5 +263,54 @@ describe("unmarkLeadProcessed", () => {
     );
 
     expect(result).toEqual({ ok: false, reason: "not_found" });
+  });
+});
+
+describe("leadExists (M-0269)", () => {
+  let store: ReturnType<typeof createMockStore>;
+
+  beforeEach(() => {
+    store = createMockStore();
+  });
+
+  it("returns true when the row exists (regardless of processed state)", async () => {
+    // The disambiguation must NOT filter on processed_at — a row already in
+    // the target state still exists and should resolve to an idempotent 200.
+    seedTable(store, "for_quants_leads", [
+      makeLead({
+        id: "11111111-0000-0000-0000-000000000001",
+        processed_at: "2026-04-10T09:00:00Z",
+      }),
+    ]);
+    const client = createMockSupabaseClient(store);
+
+    expect(
+      await leadExists("11111111-0000-0000-0000-000000000001", client),
+    ).toBe(true);
+  });
+
+  it("returns false when the row does not exist", async () => {
+    const client = createMockSupabaseClient(store);
+
+    expect(
+      await leadExists("99999999-0000-0000-0000-000000000099", client),
+    ).toBe(false);
+  });
+
+  it("fails closed (returns false + logs) when the existence probe errors", async () => {
+    // A failed probe must NOT report the row as present — that would let the
+    // route answer an idempotent-success 200 for a row it cannot confirm.
+    seedTable(store, "for_quants_leads", [
+      makeLead({ id: "11111111-0000-0000-0000-000000000001" }),
+    ]);
+    setTableErrorOnce(store, "for_quants_leads", { message: "boom" });
+    const client = createMockSupabaseClient(store);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(
+      await leadExists("11111111-0000-0000-0000-000000000001", client),
+    ).toBe(false);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });
