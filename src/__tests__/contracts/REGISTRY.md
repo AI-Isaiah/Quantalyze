@@ -26,7 +26,6 @@ which is strictly stronger than a bypassable lint rule — so they get NO rule:
 | B8 | closed-sets | `SUPPORTED_EXCHANGES` + `satisfies` + `closed-sets.test.ts` | type-enforced — no rule |
 | B4c | audit action↔entity_type | `AUDIT_ACTION_ENTITY_TYPE_MAP` union + `@ts-expect-error` test | type-enforced — no rule |
 | B19 | chunked IN-query | `analytics-service/services/db.py` (Python) | out of ESLint scope |
-| B9 | no-passthrough-on-ipc | (runtime half not shipped) | **deferred → lands after B25** |
 | B14 | freshness-signal-consumption | `freshness.ts` shipped; lint half not | **deferred → lands after B25** |
 | B17 | labeled-metric-consumption | (runtime half not shipped) | **deferred → lands after B25** |
 
@@ -37,6 +36,7 @@ which is strictly stronger than a bypassable lint rule — so they get NO rule:
 | `no-raw-localstorage` | B7 | `localStorage` / `window.localStorage` member access | `useCrossTabStorage` (`@/lib/storage`) | `src/lib/storage/**`; files with `B7 sanctioned-exception:`; test files |
 | `no-raw-published-predicate` | B10 | `.eq("status","published")` | `withPublishedOnly` (`@/lib/visibility`) | files with `B10 sanctioned-exception:` / `B10 visibility:`; test files |
 | `no-raw-retry-after-parse` | B20 | `Number()/parseInt()` of a Retry-After header | `parseRetryAfterSeconds` (`@/lib/retry`) | `src/lib/retry/**`; files with `B20 sanctioned-exception:`; test files |
+| `no-passthrough-on-ipc` | B9 | Zod `.passthrough()` / `.catchall()` on a boundary parser (NEW-C40-01 leak class) | `.strict()` (fail loud) or default `.strip()` | per-site inline `// eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception:` (~13 forward-compat HTTP envelopes); test files. **Enforced repo-wide, not file-scoped** — a file allowlist could go stale when a new boundary module is added. |
 
 Rules are `"error"` (not `"warn"`): the recon proved a clean baseline, so they fail
 CI by construction on a future raw offender — the literal goal of the capstone.

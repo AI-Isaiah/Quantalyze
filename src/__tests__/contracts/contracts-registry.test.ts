@@ -33,6 +33,11 @@ const EXPECTED_RULES = [
   "no-raw-localstorage",
   "no-raw-published-predicate",
   "no-raw-retry-after-parse",
+  // B9 — bans Zod .passthrough()/.catchall() at boundary parsers. Wired
+  // repo-wide at "error" in the broad src/** block, so the "resolves every
+  // rule to error" probe below (which targets src/lib/visibility.ts) covers
+  // it with no rule→file split needed.
+  "no-passthrough-on-ipc",
 ] as const;
 
 interface Guard {
