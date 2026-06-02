@@ -899,6 +899,185 @@ class TestSyncTradesFeatureFlag:
         mock_fetch_raw.assert_awaited_once()
 
 
+class TestAdvanceSyncCursorFence:
+    """NEW-C12-05 (CL12): the sync_trades epilogue cursor/balance write goes
+    through the advance_sync_cursor SECDEF RPC, which fences on claim_token so
+    a watchdog-reclaimed (orphaned) worker's write is dropped.
+
+    These mock tests pin the WORKER-SIDE contract (always run in CI): the token
+    is threaded when WORKER_FENCE_V2 is on, NULL when off, and a FALSE return
+    (orphan-blocked) logs the loud `worker_orphan_write_blocked` signal without
+    failing the job. The SQL fence semantics themselves are pinned by the
+    live-DB test in tests/test_compute_jobs_fencing.py.
+    """
+
+    def _build_ctx(self) -> MagicMock:
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-1", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "binance",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+        return mock_ctx
+
+    def _find_advance_call(self, mock_ctx: MagicMock) -> dict:
+        """Return the params dict of the advance_sync_cursor rpc call (the
+        worker also rpc's enqueue_compute_job, so filter by name)."""
+        for call in mock_ctx.supabase.rpc.call_args_list:
+            if call.args and call.args[0] == "advance_sync_cursor":
+                return call.args[1]
+        raise AssertionError(
+            "advance_sync_cursor was never called — epilogue did not route "
+            f"through the fenced RPC. rpc calls: {mock_ctx.supabase.rpc.call_args_list}"
+        )
+
+    async def _run(self, mock_ctx: MagicMock, job: dict) -> "DispatchResult":
+        from services.job_worker import run_sync_trades_job
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
+        ):
+            return await run_sync_trades_job(job)
+
+    @pytest.mark.asyncio
+    async def test_threads_claim_token_when_fence_on(self, caplog) -> None:
+        """WORKER_FENCE_V2 on → the job's claim_token is forwarded as
+        p_claim_token so the RPC's ownership fence is live. And on the owned
+        (data=True) happy path the orphan-blocked warning must NOT fire —
+        otherwise a future bug inverting `if not _owned` would pollute the
+        greppable signal on every healthy sync, making it unactionable."""
+        import logging
+
+        mock_ctx = self._build_ctx()
+        mock_rpc = MagicMock()
+        mock_rpc.execute.return_value = MagicMock(data=True)  # owned
+        mock_ctx.supabase.rpc.return_value = mock_rpc
+
+        job = {
+            "id": "job-fence-on", "kind": "sync_trades",
+            "strategy_id": "strat-1", "claim_token": "tok-abc-123",
+        }
+        with patch("services.job_worker.WORKER_FENCE_V2", True), \
+                caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+            result = await self._run(mock_ctx, job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        params = self._find_advance_call(mock_ctx)
+        assert params["p_claim_token"] == "tok-abc-123", (
+            "fence on must thread the job's claim_token so an orphaned worker's "
+            f"write is dropped — got {params.get('p_claim_token')!r}"
+        )
+        assert params["p_api_key_id"] == "key-1"
+        assert params["p_job_id"] == "job-fence-on"
+        # Phase-1 succeeded + balance fetched → both cursors + balance written.
+        assert params["p_last_sync_at"] is not None
+        assert params["p_last_fetched_ts"] is not None
+        assert params["p_account_balance"] == 10000.0
+        # Owned write → no orphan signal.
+        assert not any(
+            "worker_orphan_write_blocked" in rec.message for rec in caplog.records
+        ), "owned (data=True) write must NOT emit the orphan-blocked warning"
+
+    @pytest.mark.asyncio
+    async def test_passes_null_token_when_fence_off(self) -> None:
+        """WORKER_FENCE_V2 off (kill-switch) → p_claim_token is NULL so the
+        RPC's back-compat arm writes unconditionally (pre-fence behaviour)."""
+        mock_ctx = self._build_ctx()
+        mock_rpc = MagicMock()
+        mock_rpc.execute.return_value = MagicMock(data=True)
+        mock_ctx.supabase.rpc.return_value = mock_rpc
+
+        job = {
+            "id": "job-fence-off", "kind": "sync_trades",
+            "strategy_id": "strat-1", "claim_token": "tok-abc-123",
+        }
+        with patch("services.job_worker.WORKER_FENCE_V2", False):
+            result = await self._run(mock_ctx, job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        params = self._find_advance_call(mock_ctx)
+        assert params["p_claim_token"] is None, (
+            "kill-switch off must pass a NULL token so the migration's "
+            "back-compat arm preserves the unconditional legacy write"
+        )
+
+    @pytest.mark.asyncio
+    async def test_orphan_blocked_logs_warning_without_failing_job(
+        self, caplog
+    ) -> None:
+        """A FALSE return (the fence dropped the write because the watchdog
+        reclaimed the job) logs the loud worker_orphan_write_blocked signal but
+        does NOT fail the job — the trades are already persisted and the
+        re-claiming worker owns the cursor now."""
+        import logging
+
+        mock_ctx = self._build_ctx()
+
+        def _rpc_side_effect(name: str, params: dict):
+            res = MagicMock()
+            # advance_sync_cursor reports orphan-blocked; other rpc's (e.g.
+            # enqueue_compute_job) succeed normally.
+            res.execute.return_value = MagicMock(
+                data=False if name == "advance_sync_cursor" else 1
+            )
+            return res
+
+        mock_ctx.supabase.rpc.side_effect = _rpc_side_effect
+
+        job = {
+            "id": "job-orphan", "kind": "sync_trades",
+            "strategy_id": "strat-1", "claim_token": "tok-stale",
+        }
+        with patch("services.job_worker.WORKER_FENCE_V2", True), \
+                caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+            result = await self._run(mock_ctx, job)
+
+        assert result.outcome == DispatchOutcome.DONE, (
+            "an orphan-blocked epilogue write must NOT fail the job"
+        )
+        assert any(
+            "worker_orphan_write_blocked" in rec.message for rec in caplog.records
+        ), (
+            "the dropped-write must surface a loud greppable signal so the "
+            f"fence firing is observable. records: {[r.message for r in caplog.records]}"
+        )
+
+    def test_worker_fence_v2_ships_on_by_default(self) -> None:
+        """The epilogue fence must ship ON by default — only
+        WORKER_FENCE_V2=false disables it. The module is imported with the env
+        var unset in CI/local, so the live constant reflects the shipped
+        default; a future edit that flips the env default (e.g. default to
+        "false") would make this assertion fail. NB: deliberately does NOT
+        importlib.reload — reloading services.job_worker mutates the module
+        singleton and leaks across test files (it broke
+        test_job_worker_sync_funding), so we assert the already-imported
+        constant instead."""
+        import os
+        import services.job_worker as jw
+
+        if os.environ.get("WORKER_FENCE_V2", "").lower() == "false":
+            pytest.skip("WORKER_FENCE_V2=false in this env — cannot assert the shipped default")
+        assert jw.WORKER_FENCE_V2 is True, (
+            "the epilogue fence must default ON; only WORKER_FENCE_V2=false disables it"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Phase 18 root-cause fix: sync_trades enqueues compute_analytics
 # ---------------------------------------------------------------------------
@@ -1725,17 +1904,24 @@ class TestSyncTradesPhase2PartialBatchFailure:
             "last_sync_at": None, "user_id": "user-1",
         }
 
-        # rpc passes through.
+        # rpc passes through; record advance_sync_cursor calls. NEW-C12-05:
+        # the epilogue cursor write now routes through this fenced RPC instead
+        # of table('api_keys').update(), so the G12.A.7 invariant is asserted
+        # on the RPC's p_last_fetched_ts param below.
+        advance_calls: list[dict] = []
+
         def _rpc(name: str, payload: dict) -> MagicMock:
+            if name == "advance_sync_cursor":
+                advance_calls.append(dict(payload))
             stub = MagicMock()
-            stub.execute.return_value = MagicMock(data=2)
+            # advance_sync_cursor returns owned/written (True); the orphan path
+            # is exercised in TestAdvanceSyncCursorFence.
+            stub.execute.return_value = MagicMock(
+                data=True if name == "advance_sync_cursor" else 2
+            )
             return stub
 
         mock_ctx.supabase.rpc.side_effect = _rpc
-
-        # Track every supabase.table('api_keys').update(payload).eq(...)
-        # call so we can assert the granular cursor was NOT advanced.
-        api_key_updates: list[dict] = []
 
         # The upsert mock fails on the 2nd batch. We need a fresh mock_t
         # per .table() call so the chained verbs don't share state.
@@ -1767,12 +1953,11 @@ class TestSyncTradesPhase2PartialBatchFailure:
 
             mock_t.upsert.side_effect = _upsert
 
-            # UPDATE chain — record api_keys updates so we can assert the
-            # granular cursor (last_fetched_trade_timestamp) was NOT
-            # written when the partial batch failed.
+            # UPDATE chain — generic no-op. The granular-cursor-held assertion
+            # now inspects the advance_sync_cursor RPC params (advance_calls),
+            # not table().update() payloads; this stub just keeps any residual
+            # api_keys.update() path from blowing up.
             def _update(payload: dict):
-                if name == "api_keys":
-                    api_key_updates.append(dict(payload))
                 mock_eq_upd = MagicMock()
                 mock_eq_upd.execute.return_value = MagicMock(data=[])
                 inner = MagicMock()
@@ -1816,28 +2001,28 @@ class TestSyncTradesPhase2PartialBatchFailure:
         # invariant under test.
         assert result.outcome == DispatchOutcome.DONE
 
-        # The granular cursor advance (last_fetched_trade_timestamp)
-        # MUST NOT appear in any api_keys update payload — Phase 2
-        # didn't fully complete, so the next run must re-fetch the
-        # failed window.
-        granular_cursor_writes = [
-            u for u in api_key_updates
-            if "last_fetched_trade_timestamp" in u
-        ]
-        assert granular_cursor_writes == [], (
-            f"Phase 2 partial batch failure must NOT advance "
-            f"last_fetched_trade_timestamp; otherwise the next run "
-            f"won't re-fetch the lost fills. "
-            f"Got api_keys updates with the granular cursor: {granular_cursor_writes}. "
-            f"All api_keys updates: {api_key_updates}."
+        # NEW-C12-05: the epilogue cursor write routes through one fenced
+        # advance_sync_cursor RPC. G12.A.7 invariant preserved — Phase 2
+        # partial failure must NOT advance the granular cursor (the param is
+        # NULL → "leave the column untouched") so the next run re-fetches the
+        # failed window; ignore_duplicates on the upsert keeps it idempotent.
+        assert len(advance_calls) == 1, (
+            f"expected exactly one advance_sync_cursor call, got {advance_calls}"
+        )
+        params = advance_calls[0]
+        assert params["p_last_fetched_ts"] is None, (
+            f"Phase 2 partial batch failure must NOT advance the granular cursor "
+            f"(last_fetched_trade_timestamp); otherwise the next run won't "
+            f"re-fetch the lost fills. Got p_last_fetched_ts={params['p_last_fetched_ts']!r}."
         )
 
-        # Sanity: the legacy `last_sync_at` cursor still advances (it's
-        # a separate semantic — the daily-PnL Phase 1 ran fine).
-        last_sync_writes = [
-            u for u in api_key_updates if "last_sync_at" in u
-        ]
-        assert len(last_sync_writes) >= 1
+        # Sanity: the legacy `last_sync_at` cursor still advances (it's a
+        # separate semantic — the daily-PnL Phase 1 ran fine), so its param
+        # is populated rather than NULL.
+        assert params["p_last_sync_at"] is not None, (
+            "last_sync_at still advances when Phase 1 ran fine — it is a "
+            "distinct cursor from the granular fetched checkpoint."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2678,118 +2863,22 @@ class TestRedTeamReconcileUntypedExceptionDrainsBuffer:
 # ---------------------------------------------------------------------------
 
 
-class TestMonotonicCursorAdvance:
-    """NEW-C12-05 — cursor updates must carry a PostgREST .or_() condition
-    so a slow/preempted worker (W1) arriving after a faster worker (W2) has
-    already advanced the cursor cannot regress it.
-
-    These unit tests verify the PostgREST builder chain directly: they mock
-    the Supabase table builder and assert that:
-    1. `.or_("last_fetched_trade_timestamp.is.null,...")` is called when
-       advancing the fetched-cursor.
-    2. `.or_("last_sync_at.is.null,...")` is called when advancing last_sync_at.
-    3. The `.or_()` is NOT appended when only account_balance_usdt is updated
-       (no ordering semantics for balance).
-    """
-
-    def _make_builder_chain(self) -> tuple[MagicMock, list]:
-        """Return a chainable PostgREST mock that records every call and
-        stores the `.or_()` arguments in `or_calls`."""
-        or_calls: list[str] = []
-        execute_mock = MagicMock(return_value=MagicMock(data=[]))
-        builder = MagicMock()
-        builder.update.return_value = builder
-        builder.eq.return_value = builder
-
-        def _or(condition: str) -> MagicMock:
-            or_calls.append(condition)
-            return builder
-
-        builder.or_.side_effect = _or
-        builder.execute = execute_mock
-
-        supabase_mock = MagicMock()
-        supabase_mock.table.return_value = builder
-        return supabase_mock, or_calls
-
-    def test_fetched_cursor_update_carries_or_condition(self) -> None:
-        """_update_fetched_cursor must append .or_(...last_fetched_trade_timestamp...)
-        so the update is a no-op if a concurrent worker already advanced past it.
-
-        Tests the PostgREST chain contract directly by replicating the exact
-        builder sequence that _update_fetched_cursor constructs.
-        """
-        # We test the closure contract inline by replicating the exact
-        # PostgREST chain that _update_fetched_cursor builds.
-        from datetime import datetime, timezone
-
-        supabase_mock, or_calls = self._make_builder_chain()
-        new_ts = datetime.now(timezone.utc).isoformat()
-        key_id = "key-abc"
-
-        # Replicate the _update_fetched_cursor closure body:
-        supabase_mock.table("api_keys").update(
-            {"last_fetched_trade_timestamp": new_ts}
-        ).eq("id", key_id).or_(
-            f"last_fetched_trade_timestamp.is.null,"
-            f"last_fetched_trade_timestamp.lt.{new_ts}"
-        ).execute()
-
-        assert len(or_calls) == 1, "Expected exactly one .or_() call"
-        assert "last_fetched_trade_timestamp.is.null" in or_calls[0], (
-            f"Monotonic guard missing null-check: {or_calls[0]!r}"
-        )
-        assert f"last_fetched_trade_timestamp.lt.{new_ts}" in or_calls[0], (
-            f"Monotonic guard missing lt-check: {or_calls[0]!r}"
-        )
-
-    def test_sync_cursor_update_carries_or_condition_for_last_sync_at(self) -> None:
-        """_update_cursor must append .or_(...last_sync_at...) when last_sync_at
-        is in the update payload so a slow W1 cannot regress the cursor.
-        """
-        from datetime import datetime, timezone
-
-        supabase_mock, or_calls = self._make_builder_chain()
-        new_ts = datetime.now(timezone.utc).isoformat()
-        key_id = "key-abc"
-        update_data = {"last_sync_at": new_ts}
-
-        builder = supabase_mock.table("api_keys").update(update_data).eq("id", key_id)
-        if "last_sync_at" in update_data:
-            builder = builder.or_(
-                f"last_sync_at.is.null,last_sync_at.lt.{new_ts}"
-            )
-        builder.execute()
-
-        assert len(or_calls) == 1, "Expected exactly one .or_() call for last_sync_at"
-        assert "last_sync_at.is.null" in or_calls[0], (
-            f"Monotonic guard missing null-check: {or_calls[0]!r}"
-        )
-        assert f"last_sync_at.lt.{new_ts}" in or_calls[0], (
-            f"Monotonic guard missing lt-check: {or_calls[0]!r}"
-        )
-
-    def test_balance_only_update_has_no_or_condition(self) -> None:
-        """When only account_balance_usdt is updated (no last_sync_at),
-        the .or_() monotonic guard must NOT be appended.
-        account_balance_usdt has no temporal ordering semantics.
-        """
-        from datetime import datetime, timezone
-
-        supabase_mock, or_calls = self._make_builder_chain()
-        key_id = "key-abc"
-        update_data = {"account_balance_usdt": 12345.67}
-
-        builder = supabase_mock.table("api_keys").update(update_data).eq("id", key_id)
-        # No last_sync_at → no .or_() should be appended.
-        if "last_sync_at" in update_data:  # False
-            builder = builder.or_("last_sync_at.is.null,last_sync_at.lt.XXX")
-        builder.execute()
-
-        assert len(or_calls) == 0, (
-            "Balance-only update must not carry a .or_() monotonic guard; "
-            f"unexpected .or_() calls: {or_calls}"
-        )
+# NEW-C12-05 monotonic cursor guard — RELOCATED to SQL (2026-06-02).
+#
+# The sync_trades epilogue no longer builds a PostgREST `.or_()` monotonic
+# guard on a `table('api_keys').update(...)` chain. Migration 20260602173710
+# moved the whole epilogue write behind the claim-token-fenced
+# `advance_sync_cursor` SECDEF RPC, and the monotonic guard now lives there as
+# a SQL `CASE` (last_* advances only when strictly newer; balance has no
+# ordering so it is overwritten via COALESCE). The previous unit tests here
+# replicated the old `.or_()` builder chain INLINE and asserted on the
+# replica, so they could not observe the real guard and would pass regardless
+# of production behaviour. The guard is now verified where it actually runs:
+#   • SQL CASE / fence semantics → tests/test_compute_jobs_fencing.py::
+#     test_advance_sync_cursor_fence_owned_orphan_backcompat (+ the no-regress
+#     monotonic assertion in the same file) against the live test project.
+#   • Worker-side param threading → TestAdvanceSyncCursorFence above
+#     (p_last_fetched_ts / p_last_sync_at / p_account_balance + claim_token).
 
 
 class TestCircuitBreakerSingleDbClock:

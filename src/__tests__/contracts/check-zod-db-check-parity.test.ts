@@ -223,16 +223,16 @@ const SPECS: Spec[] = [
   },
   {
     // B9 H-1122: funding_fees was the lone exchange column with no CHECK. The
-    // 20260602140000 migration adds it, mirroring the sibling exchange columns.
+    // 20260602180000 migration adds it, mirroring the sibling exchange columns.
     column: "funding_fees.exchange",
     ts: SUPPORTED_EXCHANGES,
     tsNote:
-      "SUPPORTED_EXCHANGES (closed-sets.ts); FundingFee.exchange discriminated union (types.ts) narrows to the 3. CHECK added by 20260602140000_funding_fees_exchange_check.sql.",
+      "SUPPORTED_EXCHANGES (closed-sets.ts); FundingFee.exchange discriminated union (types.ts) narrows to the 3. CHECK added by 20260602180000_funding_fees_exchange_check.sql.",
     sql: () =>
       resolveColumnCheck(
         "funding_fees",
         "exchange",
-        "20260602140000_funding_fees_exchange_check.sql",
+        "20260602180000_funding_fees_exchange_check.sql",
       ),
   },
   {
