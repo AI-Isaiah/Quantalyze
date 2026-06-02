@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.24.15.85] - 2026-06-03
+### Fixed — F12: banned-package CI scanner robustness + security hardening
+
+Hardens `scripts/check-banned-packages.mjs` — the hard CI supply-chain gate that fails the build if a banned/compromised package (axios, react-native-international-phone-number, react-native-country-select, @openclaw-ai/openclawai) appears in `package.json` or any lockfile. Closes the F12 batch (H-1018 / H-1134 / M-0842 / M-0992 / L-0063) **plus three real false-negative classes and several fail-loud gaps surfaced by a 5-lens specialist + 4-angle red-team review**.
+
+- **H-1018 — single-lockfile blindness + 3-place list drift.** Previously scanned only `package-lock.json`, so a pnpm/yarn lockfile (a common workspace/PM-switch refactor) would silently bypass the gate; the BANNED list was hand-duplicated across the script, the test, and (per a now-corrected docstring "in sync" claim) user-private CLAUDE.md. Now scans `package-lock.json` + `pnpm-lock.yaml` + `yarn.lock`, with the exported `BANNED` const as the single CI-checkable source of truth (the test imports it — no third copy).
+- **ALIAS BYPASS (review, HIGH) — `npm:` aliasing.** `innocent@npm:axios@1.14.1` keyed the manifest on `innocent` and the lockfile on `node_modules/innocent` while resolving to axios; the scan matched only the dependency key/path, never the resolved name, so the compromised package shipped green. Now `scanPackageJson` parses the dependency VALUE for the `npm:` alias target, and `scanLockfile` matches the entry's real name (path key + `entry.name` + the alias parsed from a v1 `entry.version`).
+- **LEGACY PNPM + YARN-ALIAS KEYS (review, HIGH).** The text matcher required `name@version`, missing pnpm v5/v6 slash-version keys (`/axios/1.14.1`, `/@scope/n/1.0.0`) and yarn-classic alias keys (`"my-alias@npm:axios@..."`). Reworked into a two-pattern matcher (name + `@`-or-`/` separator with an optional boundary-anchored leading slash, covering pnpm v5/v6/v9 + yarn; plus an explicit `npm:<banned>@` alias pattern). The boundary rework also fixes a pre-existing false POSITIVE — a legitimate scoped `@scope/axios` no longer matches unscoped `axios`.
+- **H-1134 — scoped-name coverage.** Added scoped-banned-name tests across v1 / v2-transitive / pnpm v5-v6; the finding's "v1 walker broken for scoped" premise was itself false (npm v1 keys scoped pkgs by full `@scope/name`) and is now test-pinned.
+- **M-0992 — typed lockfile + fail-loud.** Replaced a `@ts-expect-error` over raw lockfile access with typed `entryVersion`/`entryNames` helpers; the "fail-loud on unknown shape" intent is now genuinely **fail-CLOSED** (exit 1, not warn-and-pass).
+- **FAIL CLOSED (review, MED/LOW).** The gate now blocks (exit 1) instead of passing green whenever it cannot actually scan: an unrecognized `package-lock.json` shape, a malformed/unparseable lockfile (clean diagnostic, not a raw stack trace), or no lockfile at all (`ALLOW_NO_LOCKFILE=1` opts out). A blind security gate must block (CLAUDE.md Rule 12).
+- **EXEC GUARD (review, MED).** `invokedDirectly()` now compares `realpathSync(argv[1])` to the module url, so a symlinked invocation path no longer diverges and silently skips the gate (fail-open).
+- **L-0063 — docstring drift.** Corrected: CLAUDE.md is a user-private human MIRROR, not an auto-synced source; the in-repo `BANNED` const is the CI-enforced gate. Declined the version-pinning suggestion (banning ALL versions is the stronger posture — a downgrade to a pre-compromise version is exactly the dodge to block).
+
+Reviewed by a 5-lens specialist suite (security-bypass / code-review / silent-failure / test-wiring / cross-runtime) + a 4-angle fresh-context Claude red team (residual-bypass / false-positive / fail-closed-regression / exec-guard). 11 new regression tests (alias ×3 surfaces, pnpm v5/v6, yarn-classic alias, scoped-tail non-false-positive, unrecognized/malformed/no-lockfile fail-closed, symlinked exec-guard), each proven to fail against the pre-hardening scanner (Rule 9). tsc 0 / eslint 0 / 23 vitest green.
+
 ## [0.24.15.84] - 2026-06-03
 ### Fixed — F11: server-side PostHog telemetry hardening (event-drop + prod-masquerade)
 
