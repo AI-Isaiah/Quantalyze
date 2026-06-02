@@ -150,6 +150,20 @@ _RAW_TRADE_INGESTION_ENABLED: Final[bool] = (
     os.environ.get("USE_RAW_TRADE_INGESTION", "false").lower() == "true"
 )
 
+# NEW-C12-05 (CL12): claim-token fence on the sync_trades epilogue cursor
+# write (advance_sync_cursor RPC, migration 20260602173710). Defaults ON —
+# the migration's back-compat NULL-token arm + the per-column monotonic
+# guards make the fence safe to ship live, and an orphan write only drops
+# when the watchdog genuinely reclaimed the job mid-epilogue. Set
+# WORKER_FENCE_V2=false in the Railway worker env as an instant kill-switch:
+# the worker then threads p_claim_token=NULL, the RPC's back-compat arm
+# writes unconditionally, and behaviour is identical to pre-fence. Read once
+# at import (same M-0673 rollout-window rationale as the flag above);
+# tests flip it via monkeypatch on this module attribute.
+WORKER_FENCE_V2: Final[bool] = (
+    os.environ.get("WORKER_FENCE_V2", "true").lower() != "false"
+)
+
 logger = logging.getLogger("quantalyze.analytics.job_worker")
 
 
@@ -1347,68 +1361,88 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # on the next run. Phase-2 dedup (exchange_fill_id unique index) absorbs
     # the re-fetch cost.
     advance_fetched_cursor = (not raw_fills) or (phase2_complete and not phase1_failed)
-    if advance_fetched_cursor:
-        _new_fetched_ts = datetime.now(timezone.utc).isoformat()
 
-        def _update_fetched_cursor() -> None:
-            # NEW-C12-05: monotonic advance — only update if the existing
-            # last_fetched_trade_timestamp is older than the new value.
-            # A preempted/slow W1 arriving after W2 has already advanced
-            # the cursor cannot regress it (split-brain half-open guard).
-            ctx.supabase.table("api_keys").update(
-                {"last_fetched_trade_timestamp": _new_fetched_ts}
-            ).eq("id", ctx.key_row["id"]).or_(
-                f"last_fetched_trade_timestamp.is.null,"
-                f"last_fetched_trade_timestamp.lt.{_new_fetched_ts}"
+    # NEW-C12-05 (CL12): fenced epilogue write. The two cursor checkpoints
+    # (last_fetched_trade_timestamp, last_sync_at) and the balance snapshot are
+    # written through the advance_sync_cursor SECDEF RPC (migration
+    # 20260602173710) in ONE atomic, claim-token-fenced UPDATE — replacing the
+    # prior two separate api_keys.update() calls. The fence drops the write
+    # entirely if the watchdog reclaimed this job mid-epilogue and another
+    # worker re-claimed it, closing the split-brain the per-column monotonic
+    # guards only partially covered (account_balance_usdt has no ordering, so a
+    # stale W1 could clobber W2's fresher snapshot). Those monotonic guards are
+    # preserved INSIDE the RPC (CASE per timestamp) as defence-in-depth that
+    # survives even when the fence is inert (WORKER_FENCE_V2 off / NULL token).
+    #
+    # Gating is unchanged from the pre-RPC two-write form; a NULL param means
+    # "leave this column untouched", mirroring the old conditional builds:
+    #   • last_fetched_trade_timestamp advances only when advance_fetched_cursor
+    #     (G12.A.7 / red-team C-1: held back when Phase-1 failed so the next run
+    #     re-fetches the unpersisted PnL window — parse_since_ms prefers it).
+    #   • last_sync_at advances only when Phase-1 persisted rows (NEW-C12-02:
+    #     advancing past an unpersisted window loses the daily-PnL permanently).
+    #   • account_balance_usdt is written whenever present (no ordering).
+    #
+    # Error policy: this consolidates two writes (the old fetched-cursor write
+    # was best-effort warn-and-continue; the old _update_cursor propagated) into
+    # one best-effort write. Both checkpoints are idempotent — a missed stamp
+    # just re-fetches one window next run (Phase-2 dedup absorbs it) — so
+    # swallow-with-warning is safe and avoids a retry storm on a persistent
+    # api_keys write fault. Not silent: the warning is surfaced loudly.
+    _now_iso = datetime.now(timezone.utc).isoformat()
+    _p_last_fetched = _now_iso if advance_fetched_cursor else None
+    _p_last_sync = _now_iso if not phase1_failed else None
+
+    if _p_last_fetched is None and _p_last_sync is None and account_balance is None:
+        # silent-failure/F-04: nothing to write (fetched cursor held, Phase-1
+        # failed, no balance). Log the deliberate skip so operators can
+        # distinguish it from a write-path regression that drops the update.
+        logger.info(
+            "sync_trades: advance_sync_cursor skipped — no columns to write "
+            "(advance_fetched_cursor=%s phase1_failed=%s account_balance=%s; "
+            "last_sync_at intentionally held for retry)",
+            advance_fetched_cursor, phase1_failed, account_balance,
+        )
+    else:
+        def _advance_cursor() -> bool:
+            res = ctx.supabase.rpc(
+                "advance_sync_cursor",
+                {
+                    "p_api_key_id": ctx.key_row["id"],
+                    "p_job_id": job["id"],
+                    # WORKER_FENCE_V2 kill-switch: off → NULL token → the RPC's
+                    # back-compat arm writes unconditionally (today's behaviour);
+                    # on → thread the claim token so an orphaned (watchdog-
+                    # reclaimed) worker's epilogue write is dropped.
+                    "p_claim_token": (
+                        job.get("claim_token") if WORKER_FENCE_V2 else None
+                    ),
+                    "p_last_fetched_ts": _p_last_fetched,
+                    "p_last_sync_at": _p_last_sync,
+                    "p_account_balance": account_balance,
+                },
             ).execute()
+            # Scalar BOOLEAN: True = owned/written, False = orphan-blocked.
+            return bool(res.data)
 
         try:
-            await db_execute(_update_fetched_cursor)
+            _owned = await db_execute(_advance_cursor)
+            if not _owned:
+                # NEW-C12-05: the fence dropped this write — the watchdog
+                # reclaimed the job mid-epilogue and another worker owns the
+                # cursor now. Loud, greppable signal so operators can confirm
+                # the fence fires as intended rather than masking a bug.
+                logger.warning(
+                    "worker_orphan_write_blocked: advance_sync_cursor dropped "
+                    "the epilogue cursor write for api_key %s (job %s) — "
+                    "watchdog reclaim race; the re-claiming worker owns it now.",
+                    ctx.key_row.get("id"), job.get("id"),
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Failed to stamp last_fetched_trade_timestamp for api_key %s: %s",
-                ctx.key_row.get("id"), exc,
+                "Failed to advance sync cursor for api_key %s (job %s): %s",
+                ctx.key_row.get("id"), job.get("id"), exc,
             )
-
-    # Advance sync cursor (skip last_sync_at when Phase-1 persisted nothing
-    # so the next run re-fetches the failed daily-PnL window — NEW-C12-02).
-    def _update_cursor() -> None:
-        update_data: dict[str, Any] = {}
-        _new_sync_ts = datetime.now(timezone.utc).isoformat()
-        if not phase1_failed:
-            # NEW-C12-02: only advance last_sync_at when Phase-1 actually
-            # persisted rows; advancing past an unpersisted window loses the
-            # daily-PnL data permanently (the next run's since_ms skips it).
-            update_data["last_sync_at"] = _new_sync_ts
-        if account_balance is not None:
-            update_data["account_balance_usdt"] = account_balance
-        if update_data:
-            # NEW-C12-05: monotonic advance — add last_sync_at<new_value
-            # condition so a slow W1 finishing after W2 cannot regress the
-            # cursor. account_balance_usdt has no ordering semantics so it's
-            # always updated when present.
-            builder = ctx.supabase.table("api_keys").update(update_data).eq(
-                "id", ctx.key_row["id"]
-            )
-            if "last_sync_at" in update_data:
-                builder = builder.or_(
-                    f"last_sync_at.is.null,"
-                    f"last_sync_at.lt.{_new_sync_ts}"
-                )
-            builder.execute()
-        else:
-            # silent-failure/F-04: log when we deliberately skip the DB write
-            # so operators can verify last_sync_at is intentionally held and
-            # can distinguish from a write path regression that accidentally
-            # clears update_data.
-            logger.info(
-                "sync_trades: _update_cursor skipping DB write — "
-                "phase1_failed=%s account_balance=%s "
-                "(last_sync_at intentionally held for retry)",
-                phase1_failed, account_balance,
-            )
-
-    await db_execute(_update_cursor)
 
     # Phase 18 root-cause fix: enqueue the follow-on compute_analytics
     # job for THIS strategy. Without it, sync_trades completes, the
