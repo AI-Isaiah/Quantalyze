@@ -1,5 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+
+// F9 M-0189 — OutcomesWidget retry now calls useRouter().refresh() (soft
+// re-fetch) instead of window.location.reload(). Provide a router stub with a
+// stable refresh spy so the retry-behavior test can assert on it.
+const { refreshMock } = vi.hoisted(() => ({ refreshMock: vi.fn() }));
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    refresh: refreshMock,
+    push: vi.fn(),
+    replace: vi.fn(),
+    prefetch: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+  }),
+}));
+
 import OutcomesWidget from "./OutcomesWidget";
 
 // ---------------------------------------------------------------------------
@@ -186,6 +202,25 @@ describe("OutcomesWidget", () => {
     expect(
       screen.getByRole("button", { name: /Try again/i }),
     ).toBeInTheDocument();
+  });
+
+  it("F9 M-0189: 'Try again' soft-refreshes via router.refresh() (no hard reload)", () => {
+    refreshMock.mockClear();
+    const reloadSpy = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      writable: true,
+      value: { ...window.location, reload: reloadSpy },
+    });
+    const errorData = { outcomes: undefined, __error: true } as unknown;
+    render(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      <OutcomesWidget data={errorData as any} {...WIDGET_PROPS_BASE} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Try again/i }));
+    expect(refreshMock).toHaveBeenCalledTimes(1);
+    // The hard reload that wiped sibling-widget state must NOT be used.
+    expect(reloadSpy).not.toHaveBeenCalled();
   });
 
   // Rendering 200 outcome rows can exceed the 5s default under concurrent

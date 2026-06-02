@@ -1,5 +1,19 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+
+// F9 M-0189 — OutcomesWidget retry now calls useRouter().refresh() (soft
+// re-fetch) instead of window.location.reload(). Provide a router stub.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    refresh: vi.fn(),
+    push: vi.fn(),
+    replace: vi.fn(),
+    prefetch: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+  }),
+}));
+
 import OutcomesWidget from "./OutcomesWidget";
 import type { TimeframeKey } from "../../lib/types";
 

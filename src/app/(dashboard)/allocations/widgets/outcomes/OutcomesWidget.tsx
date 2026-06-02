@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Line, LineChart, ResponsiveContainer } from "recharts";
 import type { OutcomeRow } from "@/lib/queries";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
@@ -817,6 +818,15 @@ function OutcomesWidgetInner({
   data,
 }: { data: OutcomesWidgetData } & BaseWidgetProps) {
   const view = resolveOutcomesView(data);
+  const router = useRouter();
+  // F9 M-0189 — retry must soft-refresh (re-fetch server data only), not
+  // window.location.reload(). A hard reload discards every OTHER dashboard
+  // widget's in-memory state (open Bridge drawer, Tweaks panel, scroll). This
+  // widget is fed by props from a Server Component, so router.refresh() re-runs
+  // the server fetch and streams fresh props in without remounting the page.
+  const onRetry = useCallback(() => {
+    router.refresh();
+  }, [router]);
   // `outcomes` for the hooks below: the populated rows, or [] for the
   // loading/empty/error states (hooks must run unconditionally, before the
   // `switch` returns). computeOutcomeKPIs([]) is a no-op zero-KPI result.
@@ -849,10 +859,11 @@ function OutcomesWidgetInner({
   // OutcomesWidget has 4 real branches (error / loading / empty /
   // populated). Per the UI-BLOCK-01 contract we wire as many of those
   // as the primitive can faithfully express:
-  //   - error    → <WidgetState mode="error" onRetry=window.location.reload>
-  //                Reuses the existing 'Could not load outcomes' copy and
-  //                preserves the reload-on-retry behavior of the legacy
-  //                'Try again' button.
+  //   - error    → <WidgetState mode="error" onRetry={router.refresh}>
+  //                Reuses the existing 'Could not load outcomes' copy. F9 M-0189:
+  //                retry is a soft router.refresh() (re-fetch server data only),
+  //                NOT window.location.reload() — a hard reload wiped sibling
+  //                widgets' in-memory state (Bridge drawer, Tweaks, scroll).
   //   - success  → <WidgetState mode="success">{populated card}</WidgetState>
   //                Bare children, no chrome — visual passthrough.
   //   - loading  → SKIPPED. The existing 3-cell + 5-row LoadingState skeleton
@@ -875,9 +886,7 @@ function OutcomesWidgetInner({
           mode="error"
           error={{
             message: "Could not load outcomes",
-            onRetry: () => {
-              if (typeof window !== "undefined") window.location.reload();
-            },
+            onRetry,
           }}
         />
       );
@@ -899,9 +908,7 @@ function OutcomesWidgetInner({
         </p>
         <button
           type="button"
-          onClick={() => {
-            if (typeof window !== "undefined") window.location.reload();
-          }}
+          onClick={onRetry}
           className="inline-block rounded-md border border-[var(--color-border)] px-4 py-2 text-sm font-medium"
           style={{ color: "var(--color-text-primary)", backgroundColor: "var(--color-surface)" }}
         >
