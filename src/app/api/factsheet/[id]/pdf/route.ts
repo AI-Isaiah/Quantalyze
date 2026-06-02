@@ -8,7 +8,7 @@ import {
   acquirePdfSlot,
   PDF_QUEUE_TIMEOUT_MESSAGE,
 } from "@/lib/puppeteer";
-import { publicIpLimiter, checkLimit, getClientIp, isRateLimitMisconfigured } from "@/lib/ratelimit";
+import { publicIpLimiter, checkLimit, getClientIp, rateLimitDenyJson } from "@/lib/ratelimit";
 import { sanitizeFilename } from "@/lib/sanitize-filename";
 import { safeCompare } from "@/lib/timing-safe-compare";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -146,7 +146,9 @@ export async function GET(
     console.error(
       "[pdf] Refused self-recursive call: User-Agent matches PDF renderer fingerprint",
     );
-    return new NextResponse("Loop Detected", { status: 508 });
+    // F5b (L-0018): JSON envelope (was plain-text) so this route's error
+    // bodies are uniformly parseable as { error } across every status code.
+    return NextResponse.json({ error: "Loop Detected" }, { status: 508 });
   }
 
   // Adversarial revision 2026-05-06 (Phase 18 Plan 03 / B4) — internal cron
@@ -190,16 +192,10 @@ export async function GET(
     // prefix. Was `pdf:${ip}`, shared with portfolio-pdf + tearsheet.
     const rl = await checkLimit(publicIpLimiter, `factsheet-pdf:${ip}`);
     if (!rl.success) {
-      if (isRateLimitMisconfigured(rl)) {
-        return new NextResponse("Service temporarily unavailable", {
-          status: 503,
-          headers: { "Retry-After": String(rl.retryAfter) },
-        });
-      }
-      return new NextResponse("Rate limit exceeded", {
-        status: 429,
-        headers: { "Retry-After": String(rl.retryAfter) },
-      });
+      // F5b (L-0018): JSON envelope (was plain-text) so the rate-limit path
+      // matches this route's JSON 4xx/5xx responses; rateLimitDenyJson keeps
+      // the misconfig-503 vs throttle-429 split and the Retry-After header.
+      return rateLimitDenyJson(rl);
     }
   }
 
@@ -350,10 +346,10 @@ export async function GET(
     });
   } catch (err) {
     if (err instanceof Error && err.message === PDF_QUEUE_TIMEOUT_MESSAGE) {
-      return new NextResponse("PDF generation queue full, retry in 10 seconds", {
-        status: 503,
-        headers: { "Retry-After": "10" },
-      });
+      return NextResponse.json(
+        { error: "PDF generation queue full, retry in 10 seconds" },
+        { status: 503, headers: { "Retry-After": "10" } },
+      );
     }
     // PR-2 silent-failure-hunter F6 (2026-05-28): promote PDF render
     // failures (puppeteer crashes, OOM, navigation timeouts, etc.) to

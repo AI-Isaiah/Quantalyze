@@ -8,7 +8,7 @@
  */
 /** @vitest-environment node */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 vi.mock("server-only", () => ({}));
 
@@ -21,6 +21,21 @@ vi.mock("@/lib/ratelimit", () => ({
   publicIpLimiter: {},
   checkLimit: vi.fn(),
   getClientIp: vi.fn().mockReturnValue("127.0.0.1"),
+  // F5b (L-0018): route now JSON-normalizes rate-limit denials via
+  // rateLimitDenyJson (was inline plain-text) — mirror the real helper.
+  rateLimitDenyJson: (rl: { retryAfter: number; reason?: string }) =>
+    NextResponse.json(
+      {
+        error:
+          rl.reason === "ratelimit_misconfigured"
+            ? "Rate limiter unavailable"
+            : "Too many requests",
+      },
+      {
+        status: rl.reason === "ratelimit_misconfigured" ? 503 : 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
+    ),
 }));
 import { checkLimit } from "@/lib/ratelimit";
 
