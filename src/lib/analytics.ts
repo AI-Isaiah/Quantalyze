@@ -142,7 +142,18 @@ export async function trackForQuantsEventServer(
   if (!client) return;
 
   try {
-    client.capture({
+    // H-0416 / M-0486: use captureImmediate, NOT capture()+flush(). posthog-node
+    // 5.29.2's capture() defers the enqueue behind an async prepareEventMessage
+    // (a microtask hop) and returns void, so a same-tick `await capture()` is a
+    // no-op and a following `await flush()` finds an empty queue and short-
+    // circuits (`if (!queue.length) return` in posthog-core-stateless) — the
+    // event ships only later via the background timer, which Vercel Fluid Compute
+    // can suspend before. captureImmediate() builds the batch and awaits the HTTP
+    // POST in the single promise it returns, so awaiting it guarantees the event
+    // is on the wire before the instance can suspend. (Verified against the
+    // installed SDK: capture has no `return`; captureImmediate returns the
+    // pending send promise.)
+    await client.captureImmediate({
       distinctId,
       event,
       properties: {
@@ -156,14 +167,6 @@ export async function trackForQuantsEventServer(
         source_layer: "server",
       },
     });
-    // H-0416 / M-0486: posthog-node's capture() only SYNCHRONOUSLY enqueues into
-    // an internal batch — flushAt:1 sets the batch threshold but does NOT await
-    // the HTTP POST. The surrounding `await trackForQuantsEventServer(...)` (in
-    // the caller's after()) therefore resolves the instant capture() returns,
-    // and on Vercel Fluid Compute the instance can suspend before the flush hits
-    // the wire, silently dropping the event. await an explicit flush so the
-    // promise resolves only once the event is actually on the wire.
-    await client.flush();
   } catch (err) {
     console.warn(
       "[analytics] server capture failed (non-blocking):",

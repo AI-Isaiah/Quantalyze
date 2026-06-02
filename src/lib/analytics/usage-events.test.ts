@@ -25,17 +25,21 @@ vi.mock("server-only", () => ({}));
  */
 
 const POSTHOG_MOCK = vi.hoisted(() => {
-  const captureSpy = vi.fn();
+  const captureImmediateSpy = vi.fn();
   const flushSpy = vi.fn(async () => undefined);
   const ctorSpy = vi.fn();
   const MockPostHog = class {
-    capture = captureSpy;
+    // The wrapper uses captureImmediate (H-0416/M-0486): capture()+flush() is
+    // inert in posthog-node 5.29.2. No `capture` method here — a regression to
+    // capture() would call undefined → throw → caught → the captureImmediateSpy
+    // assertions fail.
+    captureImmediate = captureImmediateSpy;
     flush = flushSpy;
     constructor(key: string, opts: Record<string, unknown>) {
       ctorSpy(key, opts);
     }
   };
-  return { captureSpy, flushSpy, ctorSpy, MockPostHog };
+  return { captureImmediateSpy, flushSpy, ctorSpy, MockPostHog };
 });
 
 vi.mock("posthog-node", () => ({
@@ -47,7 +51,7 @@ describe("src/lib/analytics/usage-events.ts — server-side wrapper", () => {
   const originalEnv = { ...process.env };
 
   beforeEach(async () => {
-    POSTHOG_MOCK.captureSpy.mockClear();
+    POSTHOG_MOCK.captureImmediateSpy.mockClear();
     POSTHOG_MOCK.flushSpy.mockClear();
     POSTHOG_MOCK.ctorSpy.mockClear();
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -73,7 +77,7 @@ describe("src/lib/analytics/usage-events.ts — server-side wrapper", () => {
     }
 
     expect(POSTHOG_MOCK.ctorSpy).not.toHaveBeenCalled();
-    expect(POSTHOG_MOCK.captureSpy).not.toHaveBeenCalled();
+    expect(POSTHOG_MOCK.captureImmediateSpy).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0][0]).toContain(
       "NEXT_PUBLIC_POSTHOG_KEY not set",
@@ -100,8 +104,8 @@ describe("src/lib/analytics/usage-events.ts — server-side wrapper", () => {
       flushInterval: 0,
     });
 
-    expect(POSTHOG_MOCK.captureSpy).toHaveBeenCalledTimes(1);
-    expect(POSTHOG_MOCK.captureSpy.mock.calls[0][0]).toMatchObject({
+    expect(POSTHOG_MOCK.captureImmediateSpy).toHaveBeenCalledTimes(1);
+    expect(POSTHOG_MOCK.captureImmediateSpy.mock.calls[0][0]).toMatchObject({
       distinctId: "user-abc",
       event: "intro_submitted",
       properties: expect.objectContaining({
@@ -125,12 +129,12 @@ describe("src/lib/analytics/usage-events.ts — server-side wrapper", () => {
     });
 
     expect(POSTHOG_MOCK.ctorSpy).toHaveBeenCalledTimes(1);
-    expect(POSTHOG_MOCK.captureSpy).toHaveBeenCalledTimes(3);
+    expect(POSTHOG_MOCK.captureImmediateSpy).toHaveBeenCalledTimes(3);
   });
 
   it("swallows capture errors so callers never observe a throw", async () => {
     process.env.NEXT_PUBLIC_POSTHOG_KEY = "phc_usage_test";
-    POSTHOG_MOCK.captureSpy.mockImplementationOnce(() => {
+    POSTHOG_MOCK.captureImmediateSpy.mockImplementationOnce(() => {
       throw new Error("simulated capture failure");
     });
     const { trackUsageEventServer, __resetUsageAnalyticsForTest } =
@@ -143,5 +147,58 @@ describe("src/lib/analytics/usage-events.ts — server-side wrapper", () => {
       }),
     ).resolves.toBeUndefined();
     expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it("swallows a captureImmediate REJECTION so a live caller's after() never sees an unhandled rejection", async () => {
+    // Unlike the for-quants wrapper, this one has LIVE callers (usage/session-
+    // start, intro, alerts/[id]/acknowledge, alerts/ack). captureImmediate awaits
+    // the HTTP POST and can reject (network/5xx); the in-try await must swallow it.
+    process.env.NEXT_PUBLIC_POSTHOG_KEY = "phc_usage_test";
+    POSTHOG_MOCK.captureImmediateSpy.mockRejectedValueOnce(
+      new Error("simulated immediate-send 5xx"),
+    );
+    const { trackUsageEventServer, __resetUsageAnalyticsForTest } =
+      await import("./usage-events");
+    __resetUsageAnalyticsForTest();
+
+    await expect(
+      trackUsageEventServer("session_start", "user-rejects", { session_count: 1 }),
+    ).resolves.toBeUndefined();
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it("M-0487: $host falls back to a non-prod sentinel, never the literal quantalyze.com", async () => {
+    process.env.NEXT_PUBLIC_POSTHOG_KEY = "phc_usage_test";
+    delete process.env.NEXT_PUBLIC_SITE_URL;
+    const { trackUsageEventServer, __resetUsageAnalyticsForTest } =
+      await import("./usage-events");
+    __resetUsageAnalyticsForTest();
+
+    await trackUsageEventServer("session_start", "u-host", { session_count: 1 });
+
+    const props = POSTHOG_MOCK.captureImmediateSpy.mock.calls[0][0].properties as Record<
+      string,
+      unknown
+    >;
+    // These are LIVE events (session/intro/alert), so the masquerade-as-prod bug
+    // was real on any deploy with NEXT_PUBLIC_SITE_URL unset.
+    expect(props.$host).toBe("unknown.local");
+    expect(props.$host).not.toBe("quantalyze.com");
+  });
+
+  it("M-0487: $host uses NEXT_PUBLIC_SITE_URL when it is set", async () => {
+    process.env.NEXT_PUBLIC_POSTHOG_KEY = "phc_usage_test";
+    process.env.NEXT_PUBLIC_SITE_URL = "https://quantalyze-rho.vercel.app";
+    const { trackUsageEventServer, __resetUsageAnalyticsForTest } =
+      await import("./usage-events");
+    __resetUsageAnalyticsForTest();
+
+    await trackUsageEventServer("session_start", "u-host2", { session_count: 1 });
+
+    const props = POSTHOG_MOCK.captureImmediateSpy.mock.calls[0][0].properties as Record<
+      string,
+      unknown
+    >;
+    expect(props.$host).toBe("https://quantalyze-rho.vercel.app");
   });
 });
