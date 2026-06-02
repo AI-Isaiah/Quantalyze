@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { validateKey, encryptKey } from "@/lib/analytics-client";
+import {
+  validateKey,
+  encryptKey,
+  AnalyticsUpstreamError,
+  AnalyticsTimeoutError,
+} from "@/lib/analytics-client";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import type { User } from "@supabase/supabase-js";
@@ -127,7 +133,29 @@ async function legacyValidateAndEncryptHandler(args: {
     const encrypted = await encryptKey(exchange, api_key, api_secret, passphrase);
     return NextResponse.json({ ...encrypted, valid: true, read_only: true });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Validation failed";
-    return NextResponse.json({ error: message }, { status: 400 });
+    // F5b (R8): forward the CURATED 4xx detail from the Python validator
+    // (e.g. "Invalid API credentials", "Key has IP restrictions") so the
+    // user can fix their key — but never echo a raw 5xx traceback, crypto
+    // internal, or contract-violation string. Mirrors the bridge / simulator
+    // 4xx-forward / 5xx-redact pattern F5a established.
+    if (
+      err instanceof AnalyticsUpstreamError &&
+      err.status >= 400 &&
+      err.status < 500
+    ) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
+    if (err instanceof AnalyticsTimeoutError) {
+      return NextResponse.json(
+        { error: "Key validation timed out. Please try again." },
+        { status: 504 },
+      );
+    }
+    console.error("[keys/validate-and-encrypt] validation failed:", err);
+    captureToSentry(err, { tags: { route: "api/keys/validate-and-encrypt" } });
+    return NextResponse.json(
+      { error: "Key validation failed. Please try again." },
+      { status: 500 },
+    );
   }
 }
