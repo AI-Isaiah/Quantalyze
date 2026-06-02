@@ -8,9 +8,21 @@
  * regression-pinned).
  *
  * The adapter is the pure projection layer. The composer (Plan 06) calls
- * `computeScenario(strategies, state, dateMapCache)` with this output. Weight
- * overrides — when present — are applied by the composer AFTER the adapter
- * returns; the adapter's job is shape projection only.
+ * `computeScenario(strategies, state, dateMapCache)` with this output verbatim.
+ *
+ * F9 H-0133 — be precise about where `weightOverrides` actually flow: the
+ * composer applies them to the COMMIT diffs (handleCommit reads
+ * `draft.weightOverrides[id] ?? 0`), NOT to the live projection. The projection
+ * uses the default weights computed here (holdings value-proportional, added
+ * strategies 0). The weight-0 default for added strategies is therefore a
+ * DELIBERATE, test-pinned invariant (scenario-adapter.test.ts "added strategy
+ * default weight is 0 …"): a non-zero default would let a never-weighted add
+ * slip a fabricated dollar size past handleCommit's per-row gate. The
+ * consequence — an added strategy contributes nothing to the projected curve
+ * until weighted, and the slider does not yet move the projection — is a known
+ * limitation tracked by H-0133's remaining root cause (wire weightOverrides
+ * into the projection state at the composer), NOT something the adapter should
+ * paper over by synthesizing a weight.
  *
  * B4-pinned signature: positional args, NOT a single inputs object. The
  * `addedStrategies` arg is `AddedStrategy[]` (lightweight; minted by
@@ -133,7 +145,9 @@ export function buildStrategyForBuilderSet(
 
   const allStrategies = [...holdingStrategies, ...addedAsBuilder];
 
-  // Σ value_usd for default holding weights (composer applies overrides post-adapter).
+  // Σ value_usd for default holding weights. NOTE (F9 H-0133): "overrides
+  // applied post-adapter" is true only for the COMMIT path — the live
+  // projection consumes these defaults verbatim.
   const totalValue = holdings.reduce(
     (s, h) => s + (Number.isFinite(h.value_usd) ? h.value_usd : 0),
     0,
@@ -154,8 +168,18 @@ export function buildStrategyForBuilderSet(
       const h = holdingByRef.get(s.id)!;
       weights[s.id] = totalValue > 0 ? h.value_usd / totalValue : 0;
     } else {
+      // F9 H-0133 — DELIBERATE weight-0 default for added strategies (pinned by
+      // scenario-adapter.test.ts). See the file header: a non-zero default would
+      // let a never-weighted add past handleCommit's per-row size gate.
       weights[s.id] = 0;
     }
+    // F9 H-0133 — the "2022-01-01" fallback is inert in practice: holdings are
+    // warm-up-gated above (start_date always non-null), and an added strategy
+    // has a null start_date ONLY when its return series is empty
+    // (`start_date: returns[0]?.date ?? null`) — i.e. it contributes nothing to
+    // the curve regardless of date. The fallback also mirrors the frozen
+    // scenario.ts engine's own `?? "2022-01-01"` (SCENARIO-05), so it never
+    // back-extrapolates a real series onto a fabricated inception.
     startDates[s.id] = s.start_date ?? "2022-01-01";
   }
 
