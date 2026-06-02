@@ -108,12 +108,26 @@ export function SubmitStep({
         // since Connect, or KEY_NETWORK_TIMEOUT when that probe itself
         // fails). Trust the code only if it's a known wizard code so a
         // garbled response can't poison the envelope copy.
+        // H-0192: the finalize route tags each actionable failure with its
+        // own WizardErrorCode — the 404 "Draft not found" -> GATE_DRAFT_GONE,
+        // the 403 RLS/ownership denial -> GUARD_BLOCKED, and the live
+        // key-scope / network-probe paths -> KEY_SCOPE_BROADENED /
+        // KEY_NETWORK_TIMEOUT. Map off that code only, NOT raw HTTP status:
+        // status-based mapping mislabeled pre-handler 403s (CSRF, approval-gate)
+        // as draft-finalize failures and conflated them in the wizard_error
+        // funnel. Anything without a known code (a 409 stale-state, a 500, a
+        // pre-handler error) -> UNKNOWN, whose copy is recoverable so the retry
+        // affordance the old mapping provided is preserved.
         const KNOWN_FINALIZE_CODES: ReadonlySet<WizardErrorCode> = new Set<WizardErrorCode>(
-          ["KEY_SCOPE_BROADENED", "KEY_NETWORK_TIMEOUT"],
+          [
+            "KEY_SCOPE_BROADENED",
+            "KEY_NETWORK_TIMEOUT",
+            "GATE_DRAFT_GONE",
+            "GUARD_BLOCKED",
+          ],
         );
         const surfaced: WizardErrorCode =
-          data.code &&
-          KNOWN_FINALIZE_CODES.has(data.code as WizardErrorCode)
+          data.code && KNOWN_FINALIZE_CODES.has(data.code as WizardErrorCode)
             ? (data.code as WizardErrorCode)
             : "UNKNOWN";
         setErrorCode(surfaced);

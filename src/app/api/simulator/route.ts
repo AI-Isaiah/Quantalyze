@@ -4,7 +4,9 @@ import { assertSameOrigin } from "@/lib/csrf";
 import {
   simulateAddCandidate,
   AnalyticsUpstreamError,
+  AnalyticsTimeoutError,
 } from "@/lib/analytics-client";
+import { captureToSentry } from "@/lib/sentry-capture";
 import {
   simulatorLimiter,
   checkLimit,
@@ -112,15 +114,32 @@ export async function POST(req: NextRequest) {
     );
     return NextResponse.json(result);
   } catch (err) {
-    console.error("[simulator] Simulation failed:", err);
     // Forward 4xx semantics from the Python service (e.g. 400 "already in
     // portfolio", 404 "portfolio not found") instead of flattening every
-    // upstream error to 500. 5xx upstream stays 5xx downstream.
+    // upstream error to 500. AnalyticsUpstreamError.message carries the Python
+    // `detail` (operator-curated copy) — safe to forward on the 4xx path.
     if (err instanceof AnalyticsUpstreamError && err.status >= 400 && err.status < 500) {
       return NextResponse.json({ error: err.message }, { status: err.status });
     }
-    const message =
-      err instanceof Error ? err.message : "Portfolio impact simulation failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    // M-0959/M-0963/L-0055: a timed-out Python round-trip is a gateway timeout.
+    if (err instanceof AnalyticsTimeoutError) {
+      return NextResponse.json(
+        { error: "The simulator is taking longer than expected. Please try again." },
+        { status: 504 },
+      );
+    }
+    // M-0959/M-0963/L-0055: genuine 5xx / unexpected exceptions return a STATIC
+    // message. Echoing err.message here leaked the parseResponse() contract-
+    // violation string (Python schema field names) and FastAPI 5xx detail to
+    // authenticated allocators — the byte-identical defect F5 closed in the
+    // sister /api/bridge route. Keep the detail server-side only.
+    console.error("[simulator] Simulation failed:", err);
+    captureToSentry(err, {
+      tags: { route: "api/simulator", op: "simulateAddCandidate" },
+    });
+    return NextResponse.json(
+      { error: "Portfolio impact simulation failed." },
+      { status: 500 },
+    );
   }
 }
