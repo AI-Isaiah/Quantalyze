@@ -7,6 +7,8 @@ from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, TypedDict
 
+from supabase import Client
+
 from services.closed_sets import is_trade_side
 from services.ingestion._timestamps import coerce_to_aware_utc
 from services.metrics import _safe_float
@@ -124,7 +126,7 @@ def _record_dq_flag(key: str, value: Any) -> None:
             # too so the invariant "lists in _LAST_DQ_FLAGS are ≤ cap and
             # unique" holds globally, not just on the merge path.
             if isinstance(value, list):
-                dedup: list = []
+                dedup: list[Any] = []
                 for item in value:
                     if len(dedup) >= _DQ_LIST_MERGE_CAP:
                         break
@@ -433,7 +435,7 @@ class FillRow(TypedDict):
     is_fill: bool
     is_maker: bool
     cost: float
-    raw_data: dict | None
+    raw_data: dict[str, Any] | None
 
 
 # Audit-2026-05-07 G12.B.4 — whitelist for OKX's posSide field. Anything
@@ -469,7 +471,7 @@ _RAW_DATA_KEEP_KEYS: frozenset[str] = frozenset({
 })
 
 
-def _trim_raw_data(raw_data: dict | None) -> dict | None:
+def _trim_raw_data(raw_data: dict[str, Any] | None) -> dict[str, Any] | None:
     """Audit-2026-05-07 M-0665 — when ``EXCHANGE_STORE_RAW_DATA`` is off,
     keep only the whitelisted keys from the exchange response. Returns
     ``None`` if the trimmed dict would be empty so the JSONB column
@@ -498,7 +500,7 @@ def _make_fill_dict(
     exchange_order_id: str,
     exchange_fill_id: str,
     is_maker: bool,
-    raw_data: dict | None,
+    raw_data: dict[str, Any] | None,
     position_direction: Literal["long", "short"] | None = None,
     order_type: str = "fill",
 ) -> FillRow:
@@ -904,7 +906,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
         if exchange.id == "okx":
             # OKX: fetch account bills (P&L history) across all instrument
             # types, paginated for full history.
-            all_bills: list[dict] = []
+            all_bills: list[dict[str, Any]] = []
 
             OKX_BILLS_PAGE_CAP = 100
             for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
@@ -964,7 +966,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
 
             # Fetch bills-archive for older history (>3 months)
             # Only fetch archive if we need data older than 90 days
-            archive_bills: list[dict] = []
+            archive_bills: list[dict[str, Any]] = []
             three_months_ago_ms = int((datetime.now(timezone.utc) - timedelta(days=90)).timestamp() * 1000)
             should_fetch_archive = since_ms is None or since_ms < three_months_ago_ms
             if not should_fetch_archive:
@@ -975,7 +977,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     after_id = ""
                     type_count = 0
                     for page in range(100):
-                        params: dict[str, str] = {"instType": inst_type, "limit": "100"}
+                        params = {"instType": inst_type, "limit": "100"}
                         if since_ms:
                             params["begin"] = str(since_ms)
                         if after_id:
@@ -1011,7 +1013,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
             # Merge recent + archive and deduplicate by billId
             merged_bills = all_bills + archive_bills
             seen_ids: set[str] = set()
-            unique_bills: list[dict] = []
+            unique_bills: list[dict[str, Any]] = []
             for bill in merged_bills:
                 bid = bill.get("billId", "")
                 if bid and bid not in seen_ids:
@@ -1099,10 +1101,10 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
         elif exchange.id == "binance":
             # Binance: fetch income history (futures P&L)
             try:
-                params = {"limit": 1000}
+                binance_params: dict[str, int] = {"limit": 1000}
                 if since_ms:
-                    params["startTime"] = since_ms
-                income = await exchange.fapiPrivate_get_income(params)
+                    binance_params["startTime"] = since_ms
+                income = await exchange.fapiPrivate_get_income(binance_params)
                 for item in income:
                     # Sprint 5.6 cutover: FUNDING_FEE no longer routes into
                     # daily_pnl. Funding is ingested separately via
@@ -1275,15 +1277,15 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     window_end = min(window_start + BYBIT_PNL_WINDOW_MS, now_ms)
                     cursor = ""
                     for _page in range(BYBIT_PNL_PAGE_CAP):
-                        params: dict[str, Any] = {
+                        bybit_params: dict[str, Any] = {
                             "category": "linear",
                             "limit": 200,
                             "startTime": str(window_start),
                             "endTime": str(window_end),
                         }
                         if cursor:
-                            params["cursor"] = cursor
-                        page_result = await exchange.private_get_v5_position_closed_pnl(params)
+                            bybit_params["cursor"] = cursor
+                        page_result = await exchange.private_get_v5_position_closed_pnl(bybit_params)
                         page_items = (
                             page_result.get("result", {}).get("list", [])
                         )
@@ -1478,7 +1480,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
 async def fetch_raw_trades(
     exchange: ccxt.Exchange,
     strategy_id: str,
-    supabase,
+    supabase: Client,
     since_ms: int | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch raw fill-level trades from the exchange.
@@ -1533,7 +1535,7 @@ async def fetch_raw_trades(
 async def _fetch_raw_trades_binance(
     exchange: ccxt.Exchange,
     strategy_id: str,
-    supabase,
+    supabase: Client,
     since_ms: int | None,
 ) -> list[dict[str, Any]]:
     """Binance: per-symbol iteration using fetch_my_trades."""
@@ -1544,7 +1546,7 @@ async def _fetch_raw_trades_binance(
     # this, a strategy with >1000 fill or snapshot rows silently drops
     # symbols from discovery and per-symbol pagination then skips real
     # history (defeating the H-0662 fix below).
-    def _get_symbols():
+    def _get_symbols() -> list[str]:
         trade_rows = paginated_select(
             supabase.table("trades")
             .select("symbol")
@@ -1631,7 +1633,7 @@ async def _fetch_raw_trades_binance(
             )
             ccxt_symbol_by_normalized[normalized] = mkt_symbol
 
-    async def _fetch_one(symbol: str):
+    async def _fetch_one(symbol: str) -> tuple[str, list[dict[str, Any]]]:
         # Normalize symbol for CCXT: BTCUSDT -> BTC/USDT:USDT
         ccxt_symbol = symbol
         if "/" not in ccxt_symbol:
@@ -1642,7 +1644,7 @@ async def _fetch_raw_trades_binance(
         # until a short page returns or we hit the cap (20 × 1000 =
         # 20K fills/symbol). Mirrors the OKX/Bybit page-cap contract.
         BINANCE_PAGE_CAP = 20
-        all_trades: list[dict] = []
+        all_trades: list[dict[str, Any]] = []
         current_since = since_ms
         for _page in range(BINANCE_PAGE_CAP):
             # Hold the semaphore only across the network call so one
@@ -1742,7 +1744,10 @@ async def _fetch_raw_trades_binance(
         for t in trades:
             normalized = _normalize_fill(t, exchange.id)
             if normalized is not None:
-                fills.append(normalized)
+                # FillRow (TypedDict) -> plain dict for the list[dict[str, Any]]
+                # public contract (fetch_raw_trades returns list[dict]); dict()
+                # is a real conversion, not a cast.
+                fills.append(dict(normalized))
 
     if failed_symbols:
         # Partial-failure summary so the bad-symbol rate is visible in logs
@@ -1872,7 +1877,9 @@ async def _fetch_raw_trades_okx_inst_type(
                 elif pos_side_raw not in (None, ""):
                     logger.warning("invalid posSide value=%s, using None", pos_side_raw)
 
-                fills.append(_make_fill_dict(
+                # dict(...) widens the FillRow (TypedDict) factory output to the
+                # plain dict the list[dict[str, Any]] accumulator holds.
+                fills.append(dict(_make_fill_dict(
                     exchange="okx",
                     symbol=symbol,
                     side=side,
@@ -1886,7 +1893,7 @@ async def _fetch_raw_trades_okx_inst_type(
                     is_maker=is_maker,
                     raw_data=raw_data,
                     position_direction=position_direction,
-                ))
+                )))
 
             new_cursor = data[-1].get("tradeId", "")
 
@@ -2065,7 +2072,9 @@ async def _fetch_raw_trades_bybit(
                     and _raw_is_maker.lower() == "true"
                 )
 
-                fills.append(_make_fill_dict(
+                # dict(...) widens the FillRow (TypedDict) factory output to the
+                # plain dict the list[dict[str, Any]] accumulator holds.
+                fills.append(dict(_make_fill_dict(
                     exchange="bybit",
                     symbol=symbol,
                     side=side,
@@ -2083,7 +2092,7 @@ async def _fetch_raw_trades_bybit(
                     # not in this batch's scope. Leave None; downstream
                     # consumers fall back to side-based inference.
                     position_direction=None,
-                ))
+                )))
 
             next_cursor = result.get("result", {}).get("nextPageCursor", "")
             # Audit-2026-05-07 G12.B.6 — stuck-cursor guard. If Bybit
@@ -2126,7 +2135,7 @@ async def _fetch_raw_trades_bybit(
     return fills
 
 
-def _normalize_fill(trade: dict, exchange_id: str) -> FillRow | None:
+def _normalize_fill(trade: dict[str, Any], exchange_id: str) -> FillRow | None:
     """Normalize a CCXT unified trade to our fill dict shape.
 
     Delegates to ``_make_fill_dict`` so OKX, Bybit, and CCXT branches
@@ -2391,7 +2400,7 @@ async def fetch_mark_prices(
         # single-shot list of mark prices, so we still fan out one request
         # per symbol — but in parallel. return_exceptions=True keeps a
         # single failed symbol from torpedoing the whole batch.
-        async def _fetch_one(sym: str):
+        async def _fetch_one(sym: str) -> tuple[str, float | None]:
             try:
                 resp = await exchange.public_get_public_mark_price(
                     {"instId": sym}

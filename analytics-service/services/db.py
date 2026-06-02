@@ -11,6 +11,7 @@ from typing import Any, TypeVar
 # APIResponse is). Both live in base_request_builder, which is where supabase-py
 # itself imports them from; pin the submodule path so a postgrest bump that
 # relocates them fails loudly at import rather than silently degrading typing.
+from postgrest._sync.request_builder import SyncSelectRequestBuilder
 from postgrest.base_request_builder import APIResponse, SingleAPIResponse
 from supabase import Client, create_client
 
@@ -138,7 +139,15 @@ async def db_execute(fn: Callable[[], _T]) -> _T:
 Row = dict[str, Any]
 
 
-def rows(resp: APIResponse) -> list[Row]:
+# ``APIResponse``/``SingleAPIResponse`` are ``Generic[_ReturnT]`` on the
+# postgrest pinned by ``requirements.txt`` (supabase==2.15.1 -> postgrest 1.0.x),
+# which is what CI and prod install — so ``--strict`` (disallow_any_generics)
+# requires the explicit parameter. ``[Any]`` is the honest argument: we do not
+# model per-table row shapes (``Row`` keeps VALUES ``Any``; see the seam comment
+# above), so the row payload genuinely is ``Any``. (A drifted local venv on
+# postgrest 2.28.x, where these are non-generic, will flag the subscript — that
+# is a venv-drift symptom, not a typing bug; verify against the pinned deps.)
+def rows(resp: APIResponse[Any]) -> list[Row]:
     """Narrow a multi-row PostgREST response (``.execute()`` / ``.rpc()``) to
     ``list[Row]``.
 
@@ -150,7 +159,7 @@ def rows(resp: APIResponse) -> list[Row]:
     return [r for r in resp.data if isinstance(r, dict)]
 
 
-def one(resp: SingleAPIResponse | None) -> Row | None:
+def one(resp: SingleAPIResponse[Any] | None) -> Row | None:
     """Narrow a single-row PostgREST response (``.single()`` /
     ``.maybe_single().execute()``) to ``Row | None``.
 
@@ -201,7 +210,7 @@ class PaginatedSelectTruncated(RuntimeError):
 
 
 def paginated_select(
-    builder,
+    builder: SyncSelectRequestBuilder[Any],
     order_by: tuple[tuple[str, bool], ...],
     page_size: int = 1000,
     hard_cap_pages: int = 1000,

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.60] - 2026-06-02
+### Refactored — B-mypy part g: all analytics `services/` to `mypy --strict` 0
+
+Completes the B-mypy leaf-tail: every module under `analytics-service/services/` now passes `mypy --strict --follow-imports=silent` with **0 errors** on the CI-pinned deps (supabase 2.15.1 / postgrest 1.0.2), unblocking **part h** (widening the CI mypy gate from `services/ingestion/` to `services/`). Type-only / behavior-preserving — no `cast()`, no `# type: ignore`, no `Any`-launder, no fabricated-data dodges.
+
+- **exchange.py** (21): `list`/`dict` type-args; split the reused `params` variable into precise per-exchange locals (`binance_params: dict[str, int]`, `bybit_params: dict[str, Any]`; okx keeps `dict[str, str]`); `supabase: Client` params; `_get_symbols`/`_fetch_one` return types; `FillRow`→`dict()` widen at the 3 `list[dict]` append boundaries (`fetch_raw_trades`' documented public contract).
+- **position_reconstruction.py** (10) + **job_worker.py** (10): the `APIResponse` closures — consumed-return closures use the documented `resp: APIResponse[Any] = …; return resp` stub-gap bridge (supabase 2.15.1 types `Client.table()`/`.rpc()` as `Any`); discarded-return closures drop to `-> None` (the g1 pattern).
+- **metrics.py** (6): `collections.abc` views on the dict-proxy methods; `result: dict[str, Any]`; a `_QstatsScalarKey` `Literal` so the dispatch-table loop writes into the `QstatsScalarsResult` TypedDict (now fails type-check on key drift).
+- **match_engine.py** (3): `scored: list[ScoredCandidate]` + `_serialize_excluded -> list[ExcludedCandidate]` — preserves the purpose-built TypedDict contracts (widening would have orphaned them and regressed their read-site checks).
+- **match_eval.py** (2): `supabase: Client`; isinstance-narrow the `Any` rank scalar back to `int` (None for SQL-drift, matching the existing `int | None` "not in batch" contract).
+- **feature_flags.py** (2): a `_FlagCacheEntry` TypedDict so the cache-hit `return cached["value"]` paths stay `bool`.
+- **db.py / portfolio_optimizer.py / bridge_scoring.py** (10): the central `db.py` primitives (`rows`/`one`/`paginated_select`) parameterized `[Any]` against the generic CI postgrest (`SyncSelectRequestBuilder` imported from its defining module to satisfy strict re-export); the two optimizer modules type their `results` accumulator `list[dict[str, Any]]` so the `sorted(key=lambda x: x["score"/"composite_score"])` reads type cleanly (pre-existing None-in-sort latent left intact).
+- Verified on the CI-equivalent venv (`uv` + py3.12 + `requirements*.txt`): `mypy --strict` 0 (51 files); full pytest **2531 passed** (sole failure is the pre-existing simulator-router ordering flake, passes in isolation); cardinal-rule grep clean; multi-lens Claude red-team — **0 confirmed findings**.
+
 ## [0.24.15.59] - 2026-06-02
 ### Fixed — Match-queue analytics blank (strategy_analytics.total_aum schema-mismatch)
 

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from datetime import date as _date
-from typing import Optional
+from typing import Any, Optional
 from services.metrics import _safe_float
 
 
@@ -11,7 +11,7 @@ def find_improvement_candidates(
     weights: dict[str, float],
     w1: float = 0.4, w2: float = 0.3, w3: float = 0.3,
     add_weight: float = 0.10,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     port_df = pd.DataFrame(portfolio_returns).dropna()
     if port_df.empty:
         return []
@@ -22,7 +22,7 @@ def find_improvement_candidates(
     current_sharpe = _compute_sharpe(port_returns)
     current_avg_corr = _avg_corr(port_df)
     current_max_dd = _max_drawdown(port_returns)
-    results = []
+    results: list[dict[str, Any]] = []
     for cid, c_returns in candidate_returns.items():
         aligned = pd.concat([port_df, c_returns.rename(cid)], axis=1).dropna()
         if len(aligned) < 30:
@@ -53,7 +53,7 @@ def find_improvement_candidates(
     return sorted(results, key=lambda x: x["score"], reverse=True)[:5]
 
 
-def generate_narrative(analytics: dict) -> str:
+def generate_narrative(analytics: dict[str, Any]) -> str:
     """Build a deterministic portfolio narrative.
 
     Structure:

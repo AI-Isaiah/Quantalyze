@@ -466,11 +466,17 @@ async def _check_circuit_breaker(
     exchange_name = key_row.get("exchange", "")
     cooldown = EXCHANGE_COOLDOWNS.get(exchange_name, 120)
 
-    def _cooldown_remaining() -> APIResponse:
-        return supabase.rpc("api_key_cooldown_remaining", {
+    def _cooldown_remaining() -> APIResponse[Any]:
+        # Boundary re-assertion: supabase 2.15.1 types Client.rpc() as Any, so
+        # `.execute()` statically yields Any. Re-assert the genuine runtime
+        # APIResponse[Any] here (the same stub-gap bridge services/db.py applies
+        # in rows()/one()) so the consumed `res.data` read stays typed — no
+        # cast, no ignore.
+        resp: APIResponse[Any] = supabase.rpc("api_key_cooldown_remaining", {
             "p_api_key_id": key_row["id"],
             "p_cooldown_seconds": cooldown,
         }).execute()
+        return resp
 
     try:
         res = await db_execute(_cooldown_remaining)
@@ -1697,13 +1703,13 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             error_kind, msg = classify_exception(exc)
             sanitized = msg[:500]
 
-            def _update_rate_limited() -> APIResponse:
-                return (
-                    ctx.supabase.table("api_keys")
-                    .update({"sync_status": "rate_limited", "sync_error": sanitized})
-                    .eq("id", api_key_id)
-                    .execute()
-                )
+            def _update_rate_limited() -> None:
+                # Return value discarded by the caller; drop it (matches
+                # _update_persist_err below) so we never annotate the Any-typed
+                # `.execute()` as APIResponse.
+                ctx.supabase.table("api_keys").update(
+                    {"sync_status": "rate_limited", "sync_error": sanitized}
+                ).eq("id", api_key_id).execute()
 
             try:
                 await db_execute(_update_rate_limited)
@@ -1727,13 +1733,12 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             sanitized = msg[:500]
             status_target = _map_exception_to_sync_status(exc)
 
-            def _update_err() -> APIResponse:
-                return (
-                    ctx.supabase.table("api_keys")
-                    .update({"sync_status": status_target, "sync_error": sanitized})
-                    .eq("id", api_key_id)
-                    .execute()
-                )
+            def _update_err() -> None:
+                # Return value discarded by the caller; drop it (see
+                # _update_rate_limited / _update_persist_err).
+                ctx.supabase.table("api_keys").update(
+                    {"sync_status": status_target, "sync_error": sanitized}
+                ).eq("id", api_key_id).execute()
 
             try:
                 await db_execute(_update_err)
@@ -1774,17 +1779,14 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
 
         final_status = "complete_with_warnings" if warning else "complete"
 
-        def _update_ok() -> APIResponse:
-            return (
-                ctx.supabase.table("api_keys")
-                .update({
-                    "sync_status": final_status,
-                    "sync_error": warning,
-                    "last_sync_at": datetime.now(timezone.utc).isoformat(),
-                })
-                .eq("id", api_key_id)
-                .execute()
-            )
+        def _update_ok() -> None:
+            # Return value discarded by the caller; drop it (see
+            # _update_rate_limited / _update_persist_err).
+            ctx.supabase.table("api_keys").update({
+                "sync_status": final_status,
+                "sync_error": warning,
+                "last_sync_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", api_key_id).execute()
 
         # NEW-C12-03: treat _update_ok failure as a hard error (not a swallowed
         # warning) — a missed sync_status write leaves the UI spinner stuck on
@@ -1839,13 +1841,13 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
     # Non-blocking: a stamp failure must not affect the compute job. The
     # RPC failure path is logged via logger.warning per the analytics-service
     # convention (services/audit.py error handling).
-    def _stamp_first_sync() -> APIResponse:
-        return (
-            ctx.supabase.rpc(
-                "stamp_first_sync_success",
-                {"p_user_id": allocator_id},
-            ).execute()
-        )
+    def _stamp_first_sync() -> None:
+        # Return value discarded by the caller; drop it (see
+        # _update_rate_limited / _update_persist_err).
+        ctx.supabase.rpc(
+            "stamp_first_sync_success",
+            {"p_user_id": allocator_id},
+        ).execute()
 
     try:
         await db_execute(_stamp_first_sync)

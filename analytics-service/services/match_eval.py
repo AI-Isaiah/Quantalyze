@@ -18,6 +18,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from supabase import Client
+
 from services.db import PaginatedSelectTruncated, paginated_select
 
 logger = logging.getLogger(__name__)
@@ -377,7 +379,7 @@ def compute_hit_rate_metrics(
 
 
 def _find_strategy_rank_in_latest_batch_before(
-    supabase,
+    supabase: Client,
     allocator_id: str,
     strategy_id: str,
     before_timestamp: str,
@@ -411,7 +413,12 @@ def _find_strategy_rank_in_latest_batch_before(
     )
     if not cand_result.data:
         return None
-    return cand_result.data.get("rank")
+    # `rank` is a NOT NULL int column on match_candidates; isinstance-narrow the
+    # Any-typed PostgREST scalar (supabase 2.15.1 leaves .data Any) back to int.
+    # A non-int would mean SQL contract drift — fall through to None, the same
+    # "not in batch" outcome the guard above produces.
+    rank = cand_result.data.get("rank")
+    return rank if isinstance(rank, int) else None
 
 
 def _week_start_iso(timestamp_str: str) -> str:

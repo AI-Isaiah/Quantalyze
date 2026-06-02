@@ -364,8 +364,13 @@ async def _reconstruct_positions_inner(
     dashboard with empty positions and contradictory trade_metrics.
     """
     # Query fills ordered by timestamp
-    def _fetch_fills() -> APIResponse:
-        return (
+    def _fetch_fills() -> APIResponse[Any]:
+        # Boundary re-assertion: supabase 2.15.1 types Client.table() as Any so
+        # `.execute()` statically yields Any. Re-assert the genuine runtime
+        # APIResponse[Any] here (the same stub-gap bridge services/db.py applies
+        # in rows()/one()) so the consumed rows(result) read stays typed — no
+        # cast, no ignore.
+        resp: APIResponse[Any] = (
             supabase.table("trades")
             .select("*")
             .eq("strategy_id", strategy_id)
@@ -373,6 +378,7 @@ async def _reconstruct_positions_inner(
             .order("timestamp")
             .execute()
         )
+        return resp
 
     result = await db_execute(_fetch_fills)
     fills = rows(result)
@@ -825,8 +831,10 @@ async def _attribute_funding(
             start = page * _PAGE_SIZE
             end = start + _PAGE_SIZE - 1
 
-            def _fetch_funding(s: int = start, e: int = end) -> APIResponse:
-                return (
+            def _fetch_funding(s: int = start, e: int = end) -> APIResponse[Any]:
+                # Boundary re-assertion (see _fetch_fills): supabase types
+                # `.execute()` as Any; re-assert APIResponse[Any] for rows().
+                resp: APIResponse[Any] = (
                     supabase.table("funding_fees")
                     # NEW-C30-02: include currency so we can skip
                     # base-coin-denominated (inverse-perp) rows before
@@ -853,6 +861,7 @@ async def _attribute_funding(
                     .range(s, e)
                     .execute()
                 )
+                return resp
 
             result = await db_execute(_fetch_funding)
             chunk = rows(result)
@@ -1718,14 +1727,17 @@ async def compute_exposure_metrics(
     # lookup failed (unknown) — stay discriminable to security reviewers.
     api_key_lookup_failed = False
     try:
-        def _fetch_self() -> APIResponse:
-            return (
+        def _fetch_self() -> APIResponse[Any]:
+            # Boundary re-assertion (see _fetch_fills): supabase types
+            # `.execute()` as Any; re-assert APIResponse[Any] for rows().
+            resp: APIResponse[Any] = (
                 supabase.table("strategies")
                 .select("api_key_id")
                 .eq("id", strategy_id)
                 .limit(1)
                 .execute()
             )
+            return resp
 
         self_result = await db_execute(_fetch_self)
         self_rows = rows(self_result)
@@ -1740,13 +1752,16 @@ async def compute_exposure_metrics(
 
     if api_key_id:
         try:
-            def _fetch_siblings() -> APIResponse:
-                return (
+            def _fetch_siblings() -> APIResponse[Any]:
+                # Boundary re-assertion (see _fetch_fills): supabase types
+                # `.execute()` as Any; re-assert APIResponse[Any] for rows().
+                resp: APIResponse[Any] = (
                     supabase.table("strategies")
                     .select("id")
                     .eq("api_key_id", api_key_id)
                     .execute()
                 )
+                return resp
 
             sib_result = await db_execute(_fetch_siblings)
             sib_rows = rows(sib_result)
@@ -1778,14 +1793,17 @@ async def compute_exposure_metrics(
                 strategy_id, exc,
             )
 
-    def _fetch_snapshots() -> APIResponse:
-        return (
+    def _fetch_snapshots() -> APIResponse[Any]:
+        # Boundary re-assertion (see _fetch_fills): supabase types `.execute()`
+        # as Any; re-assert APIResponse[Any] for rows().
+        resp: APIResponse[Any] = (
             supabase.table("position_snapshots")
             .select("snapshot_date, side, size_usd")
             .eq("strategy_id", strategy_id)
             .order("snapshot_date")
             .execute()
         )
+        return resp
 
     result = await db_execute(_fetch_snapshots)
     snapshots = rows(result)
