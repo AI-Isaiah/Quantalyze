@@ -37,6 +37,9 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+// Single source of truth (M-0842/H-1018b): the test imports the SAME BANNED
+// list the scanner uses, instead of hand-duplicating package names here.
+import { BANNED } from "../../scripts/check-banned-packages.mjs";
 
 const REPO_ROOT = process.cwd();
 const HOOK_SCRIPT = join(REPO_ROOT, "scripts", "check-banned-packages.mjs");
@@ -135,19 +138,14 @@ describe("scripts/check-banned-packages.mjs", () => {
     expect(result.stderr).toContain("package-lock.json:");
   }, 30_000);
 
-  it("exits 1 for every other banned name in the CLAUDE.md table", () => {
-    // The four banned packages per ~/.claude/CLAUDE.md:
-    //   axios (tested above), react-native-international-phone-number,
-    //   react-native-country-select, @openclaw-ai/openclawai.
-    // We exercise the other three here to prove the matcher isn't
-    // axios-only.
-    const otherBanned = [
-      "react-native-international-phone-number",
-      "react-native-country-select",
-      "@openclaw-ai/openclawai",
-    ];
+  it("exits 1 for EVERY banned name in the single-source BANNED list (not axios-only)", () => {
+    // Drive the matrix from the SAME exported BANNED list the scanner uses, so
+    // adding a new compromise to the script automatically extends this test —
+    // no third hand-maintained copy of the name list (M-0842).
+    const allBanned = BANNED.map((b) => b.name);
+    expect(allBanned).toContain("@openclaw-ai/openclawai"); // scoped name present
 
-    for (const name of otherBanned) {
+    for (const name of allBanned) {
       const scratch = prepareScratch();
       const pkg = JSON.parse(
         readFileSync(join(scratch, "package.json"), "utf8"),
@@ -371,4 +369,85 @@ describe("scripts/check-banned-packages.mjs", () => {
       expect(result.stderr).toContain("package-lock.json:");
     }
   }, 60_000);
+
+  // H-1018: a banned package landing in a pnpm or yarn lockfile (a common
+  // outcome of adding a workspace / switching package managers) must trip the
+  // gate — scanning only package-lock.json would silently bypass it.
+  function scratchWith(files: Record<string, string>): string {
+    const scratch = mkdtempSync(join(tmpdir(), "banned-pkg-pm-"));
+    mkdirSync(join(scratch, "scripts"), { recursive: true });
+    cpSync(HOOK_SCRIPT, join(scratch, "scripts", "check-banned-packages.mjs"));
+    for (const [rel, content] of Object.entries(files)) {
+      writeFileSync(join(scratch, rel), content, "utf8");
+    }
+    return scratch;
+  }
+
+  it("H-1018: detects a banned package in pnpm-lock.yaml (no package-lock.json)", () => {
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({ name: "probe", version: "1.0.0" }),
+      // pnpm v9 packages-map key shape.
+      "pnpm-lock.yaml":
+        'lockfileVersion: "9.0"\npackages:\n  axios@1.14.1:\n' +
+        "    resolution: {integrity: sha512-fake}\n",
+    });
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("pnpm-lock.yaml");
+    expect(result.stderr).toContain("axios");
+  }, 30_000);
+
+  it("H-1018: detects a scoped banned package in yarn.lock", () => {
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({ name: "probe", version: "1.0.0" }),
+      // yarn classic entry-key shape (quoted because of the scope + range).
+      "yarn.lock":
+        '# yarn lockfile v1\n\n"@openclaw-ai/openclawai@^1.0.0":\n' +
+        '  version "1.0.0"\n  resolved "https://registry.npmjs.org/x"\n',
+    });
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("yarn.lock");
+    expect(result.stderr).toContain("@openclaw-ai/openclawai");
+  }, 30_000);
+
+  it("H-1018: a name-substring in yarn.lock does NOT false-positive (boundary match)", () => {
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({ name: "probe", version: "1.0.0" }),
+      // `my-axios-wrapper` is NOT axios — the `@`-boundary match must skip it.
+      "yarn.lock":
+        '# yarn lockfile v1\n\n"my-axios-wrapper@^1.0.0":\n  version "1.0.0"\n',
+    });
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(0);
+  }, 30_000);
+
+  it("H-1134: detects a scoped banned package in a v1 lockfile `dependencies` tree", () => {
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({ name: "probe", version: "1.0.0" }),
+      // npm v1 keys a scoped package by its full `@scope/name`.
+      "package-lock.json": JSON.stringify({
+        name: "probe",
+        lockfileVersion: 1,
+        dependencies: {
+          "@openclaw-ai/openclawai": { version: "1.0.0" },
+        },
+      }),
+    });
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("@openclaw-ai/openclawai");
+  }, 30_000);
 });

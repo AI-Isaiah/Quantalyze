@@ -2,10 +2,21 @@
 /**
  * scripts/check-banned-packages.mjs
  *
- * Fails CI if any package in ~/.claude/CLAUDE.md's "Banned Packages"
- * table appears in either package.json (direct dependency) OR
- * package-lock.json (transitive). Supply-chain attacks typically land
- * through the lockfile, so we must block both.
+ * Fails CI if any banned package (see the `BANNED` const below — the
+ * in-repo, CI-checkable source of truth) appears in package.json (direct
+ * dependency) OR in ANY lockfile in the repo (transitive): package-lock.json
+ * (npm), pnpm-lock.yaml (pnpm), or yarn.lock (yarn). Supply-chain attacks
+ * typically land through the lockfile's transitive graph, so we block every
+ * install path — H-1018: scanning only package-lock.json would silently
+ * disable the gate the moment a refactor introduces a pnpm/yarn lockfile.
+ *
+ * Source of truth: the `BANNED` array IS the authority and is exported so the
+ * regression test imports the same list (no hand-duplication). The "Banned
+ * Packages" table in ~/.claude/CLAUDE.md is a USER-PRIVATE, human-readable
+ * MIRROR — it is not in the repo and CI cannot read it, so it can drift; when
+ * a new compromise is documented there it MUST also be added here. (Older
+ * docs claimed this file is "kept in sync with" CLAUDE.md, which was a lie:
+ * there is no automatic sync — this array is the real, CI-enforced gate.)
  *
  * Pure Node, zero runtime dependencies. Run from the repo root:
  *
@@ -20,10 +31,16 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 
-// Keep in sync with the "Banned Packages" table in ~/.claude/CLAUDE.md.
-// Every entry must include a safe alternative — contributors need to
-// know what to use instead, not just that their PR failed.
-const BANNED = [
+// THE in-repo source of truth for banned packages (exported for the
+// regression test). Every entry must include a safe alternative — contributors
+// need to know what to use instead, not just that their PR failed.
+//
+// `name` matches ANY version by design: a banned package is one this project
+// must never ship at all (the listed alternative replaces it), so we do not
+// narrow to the specific compromised version — a pre-compromise version of a
+// compromised package is still a package we have a safe alternative for, and a
+// "downgrade to dodge the gate" is exactly the move we want to block.
+export const BANNED = [
   {
     name: "axios",
     reason:
@@ -94,15 +111,52 @@ function scanPackageJson() {
 }
 
 /**
+ * @typedef {{ version?: unknown, dependencies?: unknown }} LockfileEntry
+ * The npm lockfile entry shape we read from. Modelled loosely on purpose:
+ * the only field we consume is `version` (a string), and `dependencies`
+ * (a nested tree) for the v1 walker. Everything is `unknown` so a future
+ * npm reshuffle of the `version` field surfaces in `entryVersion` (-> the
+ * literal "unknown") rather than crashing or silently coercing.
+ */
+
+/** Read a lockfile entry's version without trusting its shape (M-0992 —
+ * replaces a `@ts-expect-error` over a raw `any` access).
+ * @param {unknown} entry @returns {string} */
+function entryVersion(entry) {
+  if (entry && typeof entry === "object" && "version" in entry) {
+    const v = /** @type {{ version?: unknown }} */ (entry).version;
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return "unknown";
+}
+
+/**
  * Check package-lock.json for any banned package in the resolved tree,
  * catching transitive deps. Supports both lockfile v1 (dependencies
  * tree) and lockfile v2/v3 (packages map keyed by node_modules path).
+ * Scoped banned names (e.g. `@openclaw-ai/openclawai`) are handled by both
+ * arms: the v2/v3 key `node_modules/@scope/pkg` slices to the full `@scope/pkg`,
+ * and the v1 `dependencies` tree keys scoped packages by their full
+ * `@scope/pkg` name (H-1134).
  * @returns {Hit[]}
  */
 function scanLockfile() {
   const path = resolve(REPO_ROOT, "package-lock.json");
   if (!existsSync(path)) return [];
+  /** @type {{ packages?: Record<string, unknown>, dependencies?: Record<string, unknown> }} */
   const lock = JSON.parse(readFileSync(path, "utf8"));
+  // Fail-loud on an unrecognized lockfile shape (M-0992): neither a v2/v3
+  // `packages` map nor a v1 `dependencies` tree means npm changed the format
+  // and this scanner is silently blind. Surface it instead of passing green.
+  const hasV2 = lock.packages && typeof lock.packages === "object";
+  const hasV1 = lock.dependencies && typeof lock.dependencies === "object";
+  if (!hasV2 && !hasV1) {
+    console.error(
+      "check-banned-packages: WARNING — package-lock.json has neither a " +
+        "`packages` map (v2/v3) nor a `dependencies` tree (v1); the lockfile " +
+        "scan is BLIND to its shape. Update this scanner for the new format.",
+    );
+  }
   /** @type {Hit[]} */
   const hits = [];
   const seen = new Set();
@@ -128,8 +182,7 @@ function scanLockfile() {
         if (name === banned.name) {
           push(hitFor({
             name: banned.name,
-            // @ts-expect-error — dynamic lockfile shape
-            version: String(entry.version ?? "unknown"),
+            version: entryVersion(entry),
             source: `package-lock.json:${key}`,
           }));
         }
@@ -137,9 +190,11 @@ function scanLockfile() {
     }
   }
 
-  // Lockfile v1: dependencies tree. Walk recursively.
+  // Lockfile v1: dependencies tree. Walk recursively. npm v1 keys a scoped
+  // package by its FULL `@scope/name` (not a nested scope object), so the
+  // `name === banned.name` check matches scoped banned names directly (H-1134).
   if (lock.dependencies && typeof lock.dependencies === "object") {
-    /** @param {Record<string, any>} tree @param {string} parentPath */
+    /** @param {Record<string, unknown>} tree @param {string} parentPath */
     function walk(tree, parentPath) {
       for (const [name, entry] of Object.entries(tree)) {
         if (!entry || typeof entry !== "object") continue;
@@ -147,13 +202,14 @@ function scanLockfile() {
           if (name === banned.name) {
             push(hitFor({
               name: banned.name,
-              version: String(entry.version ?? "unknown"),
+              version: entryVersion(entry),
               source: `package-lock.json:${parentPath}${name}`,
             }));
           }
         }
-        if (entry.dependencies && typeof entry.dependencies === "object") {
-          walk(entry.dependencies, `${parentPath}${name}/`);
+        const nested = /** @type {LockfileEntry} */ (entry).dependencies;
+        if (nested && typeof nested === "object") {
+          walk(/** @type {Record<string, unknown>} */ (nested), `${parentPath}${name}/`);
         }
       }
     }
@@ -163,8 +219,62 @@ function scanLockfile() {
   return hits;
 }
 
+/**
+ * Scan a non-npm lockfile (pnpm-lock.yaml / yarn.lock) for banned package
+ * names. H-1018: a refactor that introduces a pnpm or yarn lockfile would
+ * otherwise silently bypass the gate. We avoid a YAML/yarn-lock parser (this
+ * script is zero-dependency) and instead match each banned name at a lockfile
+ * ENTRY boundary — the name immediately followed by `@<version>` and preceded
+ * by start-of-line / whitespace / quote / slash. That key shape is common to
+ * both formats (yarn `"name@range":`, pnpm `/name@version:` or `name@version:`)
+ * and the trailing `@` prevents substring false-positives (`my-axios@` etc.).
+ * @param {string} relPath @param {string} label @returns {Hit[]}
+ */
+function scanTextLockfile(relPath, label) {
+  const path = resolve(REPO_ROOT, relPath);
+  if (!existsSync(path)) return [];
+  const text = readFileSync(path, "utf8");
+  /** @type {Hit[]} */
+  const hits = [];
+  const seen = new Set();
+  for (const banned of BANNED) {
+    const escaped = banned.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(?:^|[\\s"'/])${escaped}@([^\\s:,"']+)`, "m");
+    const m = re.exec(text);
+    if (m && !seen.has(banned.name)) {
+      seen.add(banned.name);
+      hits.push(hitFor({
+        name: banned.name,
+        version: m[1] || "unknown",
+        source: `${label}`,
+      }));
+    }
+  }
+  return hits;
+}
+
 function main() {
-  const hits = [...scanPackageJson(), ...scanLockfile()];
+  // H-1018: scan EVERY lockfile format present, not just package-lock.json.
+  const lockfiles = [
+    { rel: "package-lock.json", label: "package-lock.json" },
+    { rel: "pnpm-lock.yaml", label: "pnpm-lock.yaml" },
+    { rel: "yarn.lock", label: "yarn.lock" },
+  ];
+  const present = lockfiles.filter((l) => existsSync(resolve(REPO_ROOT, l.rel)));
+  if (present.length === 0) {
+    console.error(
+      "check-banned-packages: WARNING — no lockfile (package-lock.json / " +
+        "pnpm-lock.yaml / yarn.lock) found; the transitive-dependency scan is " +
+        "INACTIVE and only direct package.json deps are checked.",
+    );
+  }
+
+  const hits = [
+    ...scanPackageJson(),
+    ...scanLockfile(),
+    ...scanTextLockfile("pnpm-lock.yaml", "pnpm-lock.yaml"),
+    ...scanTextLockfile("yarn.lock", "yarn.lock"),
+  ];
   if (hits.length === 0) {
     console.log("check-banned-packages: clean (0 banned packages found)");
     return 0;
@@ -188,4 +298,9 @@ function main() {
   return 1;
 }
 
-process.exit(main());
+// Run only when invoked directly (`node scripts/check-banned-packages.mjs`),
+// NOT when imported — the regression test imports `BANNED` from this module as
+// the single source of truth, and importing must not trigger the exit.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exit(main());
+}
