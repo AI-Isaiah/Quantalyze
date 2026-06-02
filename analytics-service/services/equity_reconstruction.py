@@ -2177,7 +2177,7 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 ctx.exchange, venue, ctx.supabase, start_date, end_date,
             )
         except ccxt.RateLimitExceeded as exc:
-            await _stamp_429(ctx.supabase, ctx.key_row)
+            await _stamp_429(ctx.supabase, ctx.key_row, exc)
             error_kind, msg = classify_exception(exc)
             sanitized = msg[:500]
             _emit_audit(
@@ -2579,7 +2579,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
     except ccxt.RateLimitExceeded as exc:
-        await _stamp_429(ctx.supabase, ctx.key_row)
+        await _stamp_429(ctx.supabase, ctx.key_row, exc)
         error_kind, msg = classify_exception(exc)
         sanitized = msg[:500]
         _emit_audit(
