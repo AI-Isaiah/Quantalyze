@@ -22,8 +22,11 @@ from decimal import Decimal
 from typing import Any, Literal, TypedDict
 from uuid import UUID
 
+from postgrest.base_request_builder import APIResponse
+from supabase import Client
+
 from services.closed_sets import PositionSide, TRADE_SIDES
-from services.db import db_execute
+from services.db import db_execute, rows
 from services.equity.fallback import merge_dq_flags
 
 # Audit-2026-05-07 M-0935: Sentry capture is best-effort. The sentry_sdk
@@ -314,7 +317,7 @@ def _lock_for(strategy_id: str) -> asyncio.Lock:
 
 
 async def reconstruct_positions(
-    strategy_id: str | UUID, supabase
+    strategy_id: str | UUID, supabase: Client
 ) -> PositionTradeMetrics:
     """Public entry point — serializes per-strategy via in-memory
     asyncio.Lock so concurrent same-worker callers do not both fire the
@@ -344,7 +347,7 @@ async def reconstruct_positions(
 
 
 async def _reconstruct_positions_inner(
-    strategy_id: str, supabase
+    strategy_id: str, supabase: Client
 ) -> PositionTradeMetrics:
     """Reconstruct position lifecycles from raw fills using FIFO matching.
 
@@ -361,7 +364,7 @@ async def _reconstruct_positions_inner(
     dashboard with empty positions and contradictory trade_metrics.
     """
     # Query fills ordered by timestamp
-    def _fetch_fills():
+    def _fetch_fills() -> APIResponse:
         return (
             supabase.table("trades")
             .select("*")
@@ -372,7 +375,7 @@ async def _reconstruct_positions_inner(
         )
 
     result = await db_execute(_fetch_fills)
-    fills = result.data or []
+    fills = rows(result)
 
     if not fills:
         logger.info("No fills found for strategy %s", strategy_id)
@@ -383,7 +386,7 @@ async def _reconstruct_positions_inner(
     # 'UNKNOWN') so heterogeneous instruments can no longer FIFO-match
     # under a fictitious shared lifecycle (a buy of BTC and a sell of ETH
     # would otherwise "close" a position).
-    fills_by_key: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    fills_by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     fills_dropped_no_symbol = 0
     for fill in fills:
         sym = fill.get("symbol")
@@ -397,7 +400,7 @@ async def _reconstruct_positions_inner(
         exch = (fill.get("exchange") or "unknown")
         fills_by_key[(sym, exch)].append(fill)
 
-    all_positions: list[dict] = []
+    all_positions: list[dict[str, Any]] = []
     aggregated_data_quality_flags: dict[str, Any] = {}
     # Audit H-0812: counters for positions DROPPED inside FIFO (corrupt input,
     # e.g. zero_entry_price_dropped). Accumulated across symbols, then merged
@@ -453,7 +456,7 @@ async def _reconstruct_positions_inner(
     # `data_quality_flags` which the positions table does not have).
     payload = [_strip_non_db_keys(p) for p in all_positions]
 
-    def _atomic_rebuild():
+    def _atomic_rebuild() -> None:
         supabase.rpc(
             "reconstruct_positions_atomic",
             {"p_strategy_id": strategy_id, "p_positions": payload},
@@ -499,8 +502,8 @@ async def _reconstruct_positions_inner(
     # total_positions, open_positions, closed_positions, long_count,
     # short_count) remain ROI-based by contract — only the dollar
     # bucketing changes.
-    winners: list[dict] = []
-    losers: list[dict] = []
+    winners: list[dict[str, Any]] = []
+    losers: list[dict[str, Any]] = []
     breakevens = 0
     missing_pnl = 0
     for p in closed:
@@ -664,7 +667,7 @@ async def _reconstruct_positions_inner(
 _NON_DB_KEYS = frozenset({"data_quality_flags", "exchange"})
 
 
-def _strip_non_db_keys(pos: dict) -> dict:
+def _strip_non_db_keys(pos: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of the position dict with transient (non-column) keys
     removed. Caller-side defense for the atomic-rebuild RPC payload."""
     return {k: v for k, v in pos.items() if k not in _NON_DB_KEYS}
@@ -672,8 +675,8 @@ def _strip_non_db_keys(pos: dict) -> dict:
 
 async def _attribute_funding(
     strategy_id: str,
-    positions: list[dict],
-    supabase,
+    positions: list[dict[str, Any]],
+    supabase: Client,
     flags: dict[str, Any] | None = None,
 ) -> None:
     """Sum funding_fees into each position's funding_pnl column.
@@ -815,14 +818,14 @@ async def _attribute_funding(
     # correct.
     _PAGE_SIZE = 1000
 
-    funding_rows: list[dict] = []
+    funding_rows: list[dict[str, Any]] = []
     page = 0
     try:
         while True:
             start = page * _PAGE_SIZE
             end = start + _PAGE_SIZE - 1
 
-            def _fetch_funding(s=start, e=end):
+            def _fetch_funding(s: int = start, e: int = end) -> APIResponse:
                 return (
                     supabase.table("funding_fees")
                     # NEW-C30-02: include currency so we can skip
@@ -852,7 +855,7 @@ async def _attribute_funding(
                 )
 
             result = await db_execute(_fetch_funding)
-            chunk = (result.data if result else None) or []
+            chunk = rows(result)
             funding_rows.extend(chunk)
             if len(chunk) < _PAGE_SIZE:
                 break
@@ -989,7 +992,7 @@ async def _attribute_funding(
     # `now` (sampled before the fetch) is the open/corrupt-close upper bound —
     # sampling a second `now` here would let a row in the micro-gap between the
     # two be inside a window yet outside the (earlier) fetch bound, dropping it.
-    parsed_positions: list[tuple[datetime, datetime, dict]] = []
+    parsed_positions: list[tuple[datetime, datetime, dict[str, Any]]] = []
     for pos in positions:
         # Default funding_pnl=0 for every position; only positions whose window
         # parses and claims rows below get a non-zero value.
@@ -1039,15 +1042,15 @@ async def _attribute_funding(
     # positions with OVERLAPPING windows on the same key — bisect bounds the
     # scan window, the set picks the winner inside it.
     key_timestamps: dict[tuple[str, str], list[datetime]] = {
-        key: [row[0] for row in rows] for key, rows in by_key.items()
+        key: [row[0] for row in key_rows] for key, key_rows in by_key.items()
     }
     # Per-(symbol, exchange) set of funding-row indices already owned by a
     # position, so a row is summed into at most one position.
     consumed: dict[tuple[str, str], set[int]] = defaultdict(set)
     for opened_dt, closed_dt, pos in parsed_positions:
         key = (pos.get("symbol", ""), pos.get("exchange") or "unknown")
-        rows = by_key.get(key, [])
-        if not rows:
+        key_rows = by_key.get(key, [])
+        if not key_rows:
             continue
         timestamps = key_timestamps[key]
         # Half-open window: [opened, closed). bisect_left on opened_dt finds
@@ -1063,7 +1066,7 @@ async def _attribute_funding(
         for idx in range(lo, hi):
             if idx in owned:
                 continue
-            total += rows[idx][1]
+            total += key_rows[idx][1]
             owned.add(idx)
 
         # Round to 8 decimals (funding amounts are typically ≤ 6 places
@@ -1149,10 +1152,10 @@ def _round_float(value: Decimal, places: int) -> float:
 # cleanup may rename without underscore once the equity-curve seam is stable.
 def _match_positions_fifo(
     symbol: str,
-    fills: list[dict],
+    fills: list[dict[str, Any]],
     strategy_id: str,
     dropped_flags: dict[str, Any] | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """FIFO position matching for a single symbol.
 
     Tracks net position: buy increases (long), sell decreases (long).
@@ -1173,9 +1176,9 @@ def _match_positions_fifo(
     # the running sums exact and makes the close-detection `net_qty == 0`
     # exact rather than dependent on a float epsilon. Serialized to float
     # only when building the output position dict.
-    positions: list[dict] = []
+    positions: list[dict[str, Any]] = []
     net_qty = Decimal(0)
-    entry_fills: list[dict] = []  # fills that opened the current position
+    entry_fills: list[dict[str, Any]] = []  # fills that opened the current position
     # Audit-2026-05-27 P2 (LOW9): count EVERY fill that touches the current
     # position (open + adds + partial reductions + final close), not just the
     # opening/adding fills. `entry_fills` only ever held opening/adding fills,
@@ -1683,7 +1686,7 @@ def _match_positions_fifo(
 
 
 async def compute_exposure_metrics(
-    strategy_id: str, supabase
+    strategy_id: str, supabase: Client
 ) -> ExposureMetrics:
     """Compute exposure metrics from position_snapshots.
 
@@ -1715,7 +1718,7 @@ async def compute_exposure_metrics(
     # lookup failed (unknown) — stay discriminable to security reviewers.
     api_key_lookup_failed = False
     try:
-        def _fetch_self():
+        def _fetch_self() -> APIResponse:
             return (
                 supabase.table("strategies")
                 .select("api_key_id")
@@ -1725,7 +1728,7 @@ async def compute_exposure_metrics(
             )
 
         self_result = await db_execute(_fetch_self)
-        self_rows = (self_result.data if self_result else []) or []
+        self_rows = rows(self_result)
         api_key_id = self_rows[0].get("api_key_id") if self_rows else None
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -1737,7 +1740,7 @@ async def compute_exposure_metrics(
 
     if api_key_id:
         try:
-            def _fetch_siblings():
+            def _fetch_siblings() -> APIResponse:
                 return (
                     supabase.table("strategies")
                     .select("id")
@@ -1746,7 +1749,7 @@ async def compute_exposure_metrics(
                 )
 
             sib_result = await db_execute(_fetch_siblings)
-            sib_rows = (sib_result.data if sib_result else []) or []
+            sib_rows = rows(sib_result)
             if len(sib_rows) > 1:
                 logger.warning(
                     "compute_exposure_metrics: api_key_id %s is shared by %d "
@@ -1775,7 +1778,7 @@ async def compute_exposure_metrics(
                 strategy_id, exc,
             )
 
-    def _fetch_snapshots():
+    def _fetch_snapshots() -> APIResponse:
         return (
             supabase.table("position_snapshots")
             .select("snapshot_date, side, size_usd")
@@ -1785,7 +1788,7 @@ async def compute_exposure_metrics(
         )
 
     result = await db_execute(_fetch_snapshots)
-    snapshots = result.data or []
+    snapshots = rows(result)
 
     # Audit H-0738: collect data-quality markers in one place. The
     # apikey-lookup-failed marker is shared across the no-snapshots
@@ -1806,7 +1809,7 @@ async def compute_exposure_metrics(
         return {"data_quality_flags": dq_flags}
 
     # Group by snapshot_date to compute per-date exposure
-    by_date: dict[str, list[dict]] = defaultdict(list)
+    by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for snap in snapshots:
         by_date[snap.get("snapshot_date", "")].append(snap)
 

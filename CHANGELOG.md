@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.24.15.54] - 2026-06-02
+## [0.24.15.55] - 2026-06-02
 ### Added — B9 Boundary Validation Parity: lint rule + CHECK↔Zod matrix + latent-23514 fix
 
 Closes the **NEW-C40-01 boundary-leak class** (a Zod schema diverging from its DB CHECK; an "accept unknown keys" mode on a service/IPC boundary) *by construction*:
@@ -10,6 +10,16 @@ Closes the **NEW-C40-01 boundary-leak class** (a Zod schema diverging from its D
 - **Latent prod bug fixed**: the analytics worker writes `computation_status='complete_with_warnings'` on the heuristic-capital fallback path (`analytics_runner.py`), but the `strategy_analytics.computation_status` CHECK rejected it (verified live in prod) — so every warnings-producing strategy's *entire* metrics upsert would 23514. Widened the CHECK to the intended 5-value set (safe — every existing row is in the subset; `'stale'` stays rejected). Established `STRATEGY_ANALYTICS_COMPUTATION_STATUSES` as the TS single-source-of-truth, with `StrategyAnalytics.computation_status` derived from it so the hand-typed union cannot re-drift.
 - Reviewed by 5 specialists + a 3-lens fresh-context red-team. Fixed: the Zod-v4 `.loose()` blind spot (the form a v4 dev reaches for first), an audit-integrity defect (a false escape rationale on `VerifyStrategyResponseSchema` — its `results` field *is* spread into a JSONB write; now modeled explicitly + stripped, escape removed), and several parity-extractor robustness gaps. Folds FIX-LIST M-0907 / L-0043 (BridgeResponseSchema passthrough vs its docblock).
 - **Deferred (tracked):** the cross-runtime Python enum snapshot (Part C — collides with the in-flight b-mypy refactor) and end-to-end `complete_with_warnings` surfacing (the queue-path `sync_strategy_analytics_status` RPC clobbers it to `complete`, and 2 consumer gates still exact-match `complete` — a B3-completion follow-up). No `analytics-service/**` edit; parallel-safe with b-mypy. The migration auto-applies to prod on merge.
+
+## [0.24.15.54] - 2026-06-02
+### Changed — `mypy --strict` type floor: `analytics_runner.py` + `position_reconstruction.py` → 0 errors (cross-cutting refactor B-mypy, part f-4)
+
+Migrated the two analytics "runner" modules to `mypy --strict` clean (49 + 23 → 0 errors), continuing the B-mypy floor. All narrows are real and cast-free — no `cast()`, no `# type: ignore`, no `Any`-laundering, no fabricated-data dodges — and behavior is preserved (full pytest suite: 2531 passed; a fresh-context 4-lens adversarial red-team confirmed 0 real findings).
+
+- **`position_reconstruction.py`**: typed `reconstruct_positions` / `_reconstruct_positions_inner` / `_attribute_funding` / `compute_exposure_metrics` with `supabase: Client`; annotated the DB-fetch closures `-> APIResponse` and routed every `.data` read through `services.db.rows()`; parameterized 13 bare `dict`/`list[dict]` annotations.
+- **Latent prod bug fixed (documented)**: a local variable `rows` in `_attribute_funding` shadowed the new `rows()` import, which would have raised `UnboundLocalError` (swallowed by the broad funding-fetch `except`) and silently zeroed **all** `funding_pnl`. Renamed the local to `key_rows`.
+- **`analytics_runner.py`**: read-only TypedDict consumers (`_merge_into_top_level_flags`, `_compute_derived_trade_metrics`) widened to `Mapping[str, Any]` so they accept `PositionTradeMetrics` etc. without a cast; `_compute_trade_mix` reconstructs the declared `TradeMix4Bucket`/`TradeMix2Bucket` per branch (was returning a wider `dict[str, TradeMixBucket]`); the `DataQualityFlags` typo-guard (M-0657) is kept across the typed direct-writes and widened to an open `dict[str, Any]` only at the dynamic-merge boundary; `.single()` reads routed through `one()`, multi-row reads through `rows()`; upsert payloads hoisted to `dict[str, Any]` locals.
+- Verified: `mypy --strict` 0 on both files; cardinal-rule grep clean; full analytics pytest 2531 passed (1 pre-existing simulator-router ordering flake, passes in isolation).
 
 ## [0.24.15.53] - 2026-06-01
 ### Changed — Test-gap hardening: closed 57 audit HIGH findings by strengthening weak/tautological tests
