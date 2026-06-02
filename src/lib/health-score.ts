@@ -139,6 +139,22 @@ export function computePortfolioHealthScore(
 ): PortfolioHealthScore | null {
   if (!analytics) return null;
 
+  // F2 H-1076 — health requires real data. portfolio_sharpe / portfolio_max_drawdown /
+  // avg_pairwise_correlation are deliberately `number | null` (null = pending/empty
+  // portfolio, nothing computed). Coercing null→0 via `?? 0` made 0 the BEST possible
+  // value on the INVERTED drawdown + correlation axes (0 DD → 25/25, 0 corr → 25/25),
+  // so an all-null portfolio scored 0 + 25 + 25 + 20 = 70 = "Healthy" — a green badge
+  // over a portfolio with no data. Treat any missing scored axis as "not computed" and
+  // return null (the return type + every consumer already handle null, same as the
+  // `!analytics` case) rather than fabricating a healthy score from absent data.
+  if (
+    analytics.portfolio_sharpe == null ||
+    analytics.portfolio_max_drawdown == null ||
+    analytics.avg_pairwise_correlation == null
+  ) {
+    return null;
+  }
+
   // Sharpe: 0 pts at <= 0, 25 pts at >= 2.0
   const sharpe = scaleComponent(analytics.portfolio_sharpe ?? 0, 0, 2.0);
 

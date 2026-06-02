@@ -340,8 +340,36 @@ describe("PUT /api/preferences", () => {
     expect(body.error).not.toMatch(/update_allocator_mandates/);
 
     await drainAuditMicrotasks();
-    // C-2: audit now uses log_audit_event_service; neither path should fire on error.
-    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event" || c.name === "log_audit_event_service")).toHaveLength(0);
+    // F8 (H-0295/H-0298): the RPC-error path now emits a FAILURE audit so a
+    // bounds-probing storm at the 30/min rate-limit boundary is forensically
+    // visible. The legacy user-scoped path (log_audit_event) must still never
+    // fire — the failure row goes through the service-role path.
+    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event")).toHaveLength(0);
+    const failAudit = STATE.rpcCalls.find((c) => c.name === "log_audit_event_service");
+    expect(failAudit).toBeDefined();
+    expect(failAudit!.args).toMatchObject({
+      p_user_id: STATE.authUser!.id,
+      p_action: "mandate_preference.update.failed",
+      p_entity_type: "allocator_preference_mandate",
+      p_entity_id: STATE.authUser!.id,
+    });
+    // Pin the FULL failure-row forensic contract, not just error_code: the
+    // whitelisted field names a self-editor touched (never admin-only keys —
+    // same anti-smuggle guard as the success emit) and the self_edit flag that
+    // lets ops attribute a bounds-probe to a self-edit attempt.
+    expect(
+      failAudit!.args.p_metadata as {
+        fields: string[];
+        self_edit: boolean;
+        error_code: string | null;
+      },
+    ).toMatchObject({ fields: ["max_weight"], self_edit: true, error_code: "22023" });
+    // The happy-path success action must NOT appear on an error branch.
+    expect(
+      STATE.rpcCalls.some(
+        (c) => c.name === "log_audit_event_service" && c.args.p_action === "mandate_preference.update",
+      ),
+    ).toBe(false);
   });
 
   it("TC7 — NEW-C07-02: RPC SQLSTATE 28000 after successful getUser returns 500 (infra fault, not unauthenticated)", async () => {
@@ -371,11 +399,27 @@ describe("PUT /api/preferences", () => {
     expect(body.error).toBe("Internal server error");
 
     await drainAuditMicrotasks();
-    // C-2: audit now uses log_audit_event_service; neither path should fire on error.
-    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event" || c.name === "log_audit_event_service")).toHaveLength(0);
+    // F8 (H-0295/H-0298): a 28000 infra-fault still returns 500 + Sentry, but
+    // now ALSO emits a failure audit (error_code 28000) so the fault leaves a
+    // forensic row, not only a console.error. Legacy user-scoped path silent.
+    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event")).toHaveLength(0);
+    const failAudit = STATE.rpcCalls.find((c) => c.name === "log_audit_event_service");
+    expect(failAudit).toBeDefined();
+    expect(failAudit!.args).toMatchObject({
+      p_user_id: STATE.authUser!.id,
+      p_action: "mandate_preference.update.failed",
+      p_entity_type: "allocator_preference_mandate",
+      p_entity_id: STATE.authUser!.id,
+    });
+    expect((failAudit!.args.p_metadata as { error_code: string | null }).error_code).toBe("28000");
+    expect(
+      STATE.rpcCalls.some(
+        (c) => c.name === "log_audit_event_service" && c.args.p_action === "mandate_preference.update",
+      ),
+    ).toBe(false);
   });
 
-  it("TC8 — 500 unknown RPC error: generic message, no audit", async () => {
+  it("TC8 — 500 unknown RPC error: generic message + failure audit (F8)", async () => {
     STATE.rpcState.update_allocator_mandates = {
       data: null,
       error: { code: "XX000", message: "some db err" },
@@ -390,8 +434,50 @@ describe("PUT /api/preferences", () => {
     expect(body.error).toBe("Failed to save mandate");
 
     await drainAuditMicrotasks();
-    // C-2: audit now uses log_audit_event_service; neither path should fire on error.
-    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event" || c.name === "log_audit_event_service")).toHaveLength(0);
+    // F8 (H-0295/H-0298): even the generic save-failure branch now emits a
+    // failure audit carrying the raw error_code, so the forensic trail is
+    // complete across all three RPC-error branches. Legacy path silent.
+    expect(STATE.rpcCalls.filter((c) => c.name === "log_audit_event")).toHaveLength(0);
+    const failAudit = STATE.rpcCalls.find((c) => c.name === "log_audit_event_service");
+    expect(failAudit).toBeDefined();
+    expect(failAudit!.args).toMatchObject({
+      p_user_id: STATE.authUser!.id,
+      p_action: "mandate_preference.update.failed",
+      p_entity_type: "allocator_preference_mandate",
+      p_entity_id: STATE.authUser!.id,
+    });
+    expect((failAudit!.args.p_metadata as { error_code: string | null }).error_code).toBe("XX000");
+    expect(
+      STATE.rpcCalls.some(
+        (c) => c.name === "log_audit_event_service" && c.args.p_action === "mandate_preference.update",
+      ),
+    ).toBe(false);
+  });
+
+  it("TC8b — L-0078: empty self-editable field set short-circuits before RPC + audit (no zero-information writes)", async () => {
+    // A PUT whose body has no self-editable fields — `{}`, or a body carrying
+    // only admin-only keys that pickSelfEditableFields drops — is a semantic
+    // no-op. Pre-fix it still ran a no-op COALESCE RPC AND wrote an audit row
+    // with metadata.fields=[], so a `{}`-spam loop flooded audit_log with
+    // zero-information rows. Post-fix: instant 200 {success:true, fields:[]},
+    // NO RPC and NO audit of either kind.
+    const { PUT } = await import("./route");
+
+    // Case 1: a literally empty body.
+    const resEmpty = await PUT(makeRequest({}));
+    expect(resEmpty.status).toBe(200);
+    expect(await resEmpty.json()).toEqual({ success: true, fields: [] });
+
+    // Case 2: a body carrying ONLY admin-only fields (all stripped → empty).
+    const resAdminOnly = await PUT(
+      makeRequest({ founder_notes: "x", min_sharpe: 0.9 }),
+    );
+    expect(resAdminOnly.status).toBe(200);
+    expect(await resAdminOnly.json()).toEqual({ success: true, fields: [] });
+
+    await drainAuditMicrotasks();
+    // No mandate RPC, no audit row of EITHER kind — the no-op reaches neither.
+    expect(STATE.rpcCalls).toHaveLength(0);
   });
 
   it("TC9 — CSRF short-circuits before auth/rpc/audit", async () => {

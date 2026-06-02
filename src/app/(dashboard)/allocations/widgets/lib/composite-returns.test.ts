@@ -45,6 +45,43 @@ describe("buildCompositeReturns", () => {
     expect(buildCompositeReturns([])).toEqual([]);
   });
 
+  it("H-0158: renormalizes per-date when coverage is partial (no global-weight under-weighting)", () => {
+    // Strategy A (weight 0.6) has data on both days; strategy B (weight 0.4)
+    // only on day 2. On day 1 only A contributes, so the composite must be A's
+    // return (0.02), NOT 0.02*0.6/1.0 = 0.012 (the old global-totalWeight bug
+    // would have under-weighted it to 0.6× its true value).
+    const strategies = [
+      {
+        strategy: {
+          strategy_analytics: {
+            daily_returns: [
+              { date: "2024-01-01", value: 0.02 },
+              { date: "2024-01-02", value: 0.04 },
+            ],
+          },
+        },
+        weight: 0.6,
+      },
+      {
+        strategy: {
+          strategy_analytics: {
+            daily_returns: [{ date: "2024-01-02", value: -0.02 }],
+          },
+        },
+        weight: 0.4,
+      },
+    ];
+
+    const result = buildCompositeReturns(strategies);
+    expect(result).toHaveLength(2);
+    // Day 1: only A present → 0.02*0.6 / 0.6 = 0.02 (NOT 0.012).
+    expect(result[0].date).toBe("2024-01-01");
+    expect(result[0].value).toBeCloseTo(0.02, 6);
+    // Day 2: both present → (0.04*0.6 + -0.02*0.4) / 1.0 = 0.016.
+    expect(result[1].date).toBe("2024-01-02");
+    expect(result[1].value).toBeCloseTo(0.016, 6);
+  });
+
   it("excludes strategies with zero weight", () => {
     const strategies = [
       {

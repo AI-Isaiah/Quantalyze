@@ -5,6 +5,7 @@
 import { formatPercent } from "./utils";
 import {
   REJECTION_REASON_LABELS,
+  mostMatureDelta,
   type BridgeOutcome,
 } from "./bridge-outcome-schema";
 
@@ -134,12 +135,10 @@ export function deriveOutcomeStatusPill(
   const pct = outcome.percent_allocated ?? 0;
   const prefix = `Allocated ${pct}%`;
 
-  const mostMature =
-    outcome.delta_180d !== null
-      ? outcome.delta_180d
-      : outcome.delta_90d !== null
-        ? outcome.delta_90d
-        : outcome.delta_30d;
+  // F2 H-0463/H-0464: shared NaN-safe ladder (was an inline ternary that
+  // duplicated outcomes-kpi.ts AND let a NaN delta fall through to "loss" — a
+  // non-finite delta now resolves to null → "pending", matching the KPI strip).
+  const mostMature = mostMatureDelta(outcome);
 
   if (mostMature === null) {
     return {

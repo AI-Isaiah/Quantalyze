@@ -54,17 +54,18 @@ interface Recorders {
   ltCalls: Array<{ col: string; val: unknown }>;
   inCalls: Array<{ col: string; vals: unknown[] }>;
   deleteCalls: Array<{ table: string; options: Record<string, unknown> | undefined }>;
-  // The cron makes three distinct shapes of supabase calls. Each test seeds
-  // the response sequence; the mock pulls from the right queue based on the
-  // chain shape (select+lt → SELECT_DRAFTS, delete+in → DELETE_DRAFTS,
-  // select head:true + eq → COUNT_REFS, delete+eq on api_keys → DELETE_KEY).
+  // The cron makes two strategies chain shapes plus one RPC. Each test seeds
+  // the response sequence; the mock dispatches by chain shape (select+lt →
+  // SELECT_DRAFTS, delete+in → DELETE_DRAFTS) and the rpc() stub returns a
+  // per-key result for the delete_api_key_if_unreferenced orphan sweep.
   selectDraftsResponse: { data: DraftRow[] | null; error: { message: string } | null };
   deleteDraftsResponse: { count: number | null; error: { message: string } | null };
-  // refCountByKey is consulted by the per-key COUNT_REFS chain. Tests seed
-  // a map keyed by api_key_id so different keys can return different counts
-  // (the orphan-skip test seeds `refCount > 0` for the shared key only).
-  refCountByKey: Record<string, { count: number | null; error: { message: string } | null }>;
-  deleteKeyByKey: Record<string, { error: { message: string } | null }>;
+  // M-0347: captured delete_api_key_if_unreferenced RPC invocations + a
+  // per-key seeded result. `data` is the rows the RPC reports deleted
+  // (1 = orphan revoked, 0 = still referenced → kept); `error` injects a
+  // failure so the loud-surfacing (500 + errors[]) path can be exercised.
+  rpcCalls: Array<{ fn: string; args: Record<string, unknown> }>;
+  rpcResultByKey: Record<string, { data: number | null; error: { message: string } | null }>;
 }
 
 function makeRecorders(): Recorders {
@@ -77,8 +78,8 @@ function makeRecorders(): Recorders {
     deleteCalls: [],
     selectDraftsResponse: { data: [], error: null },
     deleteDraftsResponse: { count: 0, error: null },
-    refCountByKey: {},
-    deleteKeyByKey: {},
+    rpcCalls: [],
+    rpcResultByKey: {},
   };
 }
 
@@ -94,22 +95,34 @@ function makeReq(headers: Record<string, string> = {}): NextRequest {
  * Builds a chainable Supabase mock that records every call into `recorders`
  * and dispatches the awaited result based on which chain shape was used.
  *
- * Three distinct chain shapes the route under test invokes:
+ * Two strategies chain shapes + one RPC the route under test invokes:
  *   A. SELECT_DRAFTS  : .from("strategies").select("id, api_key_id")
  *                       .eq("source","wizard").eq("status","draft")
  *                       .lt("created_at", cutoff)
  *   B. DELETE_DRAFTS  : .from("strategies").delete({count:"exact"})
  *                       .in("id", draftIds)
  *                       .eq("source","wizard").eq("status","draft")
- *   C. COUNT_REFS     : .from("strategies").select("id",{count:"exact",head:true})
- *                       .eq("api_key_id", keyId)
- *   D. DELETE_KEY     : .from("api_keys").delete().eq("id", keyId)
+ *   R. ORPHAN_REVOKE  : .rpc("delete_api_key_if_unreferenced",{p_api_key_id})
+ *                       — atomic check+delete; returns rows deleted.
  *
  * Each chain method records and returns the chain itself (a thenable). The
- * thenable resolves based on the shape captured during the chain build.
+ * thenable resolves based on the shape captured during the chain build; rpc()
+ * resolves to the per-key seeded result.
  */
 function createSupabaseMock(recorders: Recorders) {
   return {
+    // Shape R: ORPHAN_REVOKE — the atomic delete_api_key_if_unreferenced RPC.
+    // Returns { data: <rows deleted>, error } seeded per api_key_id.
+    rpc(fn: string, args: Record<string, unknown>) {
+      recorders.rpcCalls.push({ fn, args });
+      const keyId = String(args.p_api_key_id ?? "");
+      const seeded = recorders.rpcResultByKey[keyId];
+      // Default: orphan revoked (1 row). Tests that need "still referenced"
+      // (0) or an error seed rpcResultByKey explicitly.
+      return Promise.resolve(
+        seeded ?? { data: 1, error: null },
+      );
+    },
     from(table: string) {
       recorders.fromCalls.push(table);
 
@@ -142,29 +155,10 @@ function createSupabaseMock(recorders: Recorders) {
         error: { message: string } | null;
         count?: number | null;
       } => {
-        // Shape C: head:true count query on strategies (refCount check).
-        if (
-          state.table === "strategies" &&
-          state.verb === "select" &&
-          state.selectOptions?.head === true &&
-          state.selectOptions?.count === "exact"
-        ) {
-          const keyEq = state.eqs.find(([c]) => c === "api_key_id");
-          const keyId = keyEq ? String(keyEq[1]) : "";
-          const seeded = recorders.refCountByKey[keyId];
-          if (!seeded) {
-            // Default to 0 references — happy path treats every key as
-            // orphaned. Tests that need refCount > 0 seed explicitly.
-            return { data: null, count: 0, error: null };
-          }
-          return { data: null, count: seeded.count, error: seeded.error };
-        }
-
         // Shape A: SELECT_DRAFTS — strategies.select(... id, api_key_id ...)
         if (
           state.table === "strategies" &&
-          state.verb === "select" &&
-          !state.selectOptions?.head
+          state.verb === "select"
         ) {
           return {
             data: recorders.selectDraftsResponse.data,
@@ -178,17 +172,6 @@ function createSupabaseMock(recorders: Recorders) {
             data: null,
             count: recorders.deleteDraftsResponse.count,
             error: recorders.deleteDraftsResponse.error,
-          };
-        }
-
-        // Shape D: DELETE_KEY — api_keys.delete().eq("id", keyId)
-        if (state.table === "api_keys" && state.verb === "delete") {
-          const idEq = state.eqs.find(([c]) => c === "id");
-          const keyId = idEq ? String(idEq[1]) : "";
-          const seeded = recorders.deleteKeyByKey[keyId];
-          return {
-            data: null,
-            error: seeded?.error ?? null,
           };
         }
 
@@ -440,17 +423,12 @@ describe.each([
     ];
     recorders.selectDraftsResponse = { data: drafts, error: null };
     recorders.deleteDraftsResponse = { count: 3, error: null };
-    // All three keys are orphaned (refCount=0 default applies; explicit
-    // for clarity in this scenario).
-    recorders.refCountByKey = {
-      "key-a": { count: 0, error: null },
-      "key-b": { count: 0, error: null },
-      "key-c": { count: 0, error: null },
-    };
-    recorders.deleteKeyByKey = {
-      "key-a": { error: null },
-      "key-b": { error: null },
-      "key-c": { error: null },
+    // All three keys are orphaned — the atomic RPC reports 1 deleted row each
+    // (default rpc result also returns 1; explicit here for clarity).
+    recorders.rpcResultByKey = {
+      "key-a": { data: 1, error: null },
+      "key-b": { data: 1, error: null },
+      "key-c": { data: 1, error: null },
     };
 
     const handler = await getHandler();
@@ -466,18 +444,15 @@ describe.each([
       key_sweep_errors: 0,
     });
 
-    // SELECT, DELETE, then 3 × (COUNT_REFS, DELETE_KEY)
-    expect(recorders.fromCalls).toEqual([
-      "strategies", // SELECT_DRAFTS
-      "strategies", // DELETE_DRAFTS
-      "strategies", // COUNT_REFS key-a
-      "api_keys", // DELETE_KEY key-a
-      "strategies", // COUNT_REFS key-b
-      "api_keys", // DELETE_KEY key-b
-      "strategies", // COUNT_REFS key-c
-      "api_keys", // DELETE_KEY key-c
+    // Only two from() calls (SELECT then DELETE on strategies); the orphan
+    // revokes go through the atomic RPC, which does not call from().
+    expect(recorders.fromCalls).toEqual(["strategies", "strategies"]);
+    // Three atomic orphan-revoke RPCs, one per distinct key, in order.
+    expect(recorders.rpcCalls).toEqual([
+      { fn: "delete_api_key_if_unreferenced", args: { p_api_key_id: "key-a" } },
+      { fn: "delete_api_key_if_unreferenced", args: { p_api_key_id: "key-b" } },
+      { fn: "delete_api_key_if_unreferenced", args: { p_api_key_id: "key-c" } },
     ]);
-    expect(recorders.deleteCalls.filter((c) => c.table === "api_keys")).toHaveLength(3);
     // The DELETE_DRAFTS call requested an exact count.
     const deleteDraft = recorders.deleteCalls.find((c) => c.table === "strategies");
     expect(deleteDraft?.options).toEqual({ count: "exact" });
@@ -514,29 +489,30 @@ describe.each([
         { stage: "strategies:delete", col: "status", val: "draft" },
       ]),
     );
-    // null api_key_id → no orphan-key sweep at all.
+    // null api_key_id → no orphan-key sweep at all (no RPC, two from() calls).
     expect(recorders.fromCalls).toEqual(["strategies", "strategies"]);
+    expect(recorders.rpcCalls).toHaveLength(0);
   });
 
   // --- Orphan-key revoke logic (the dangerous path) -----------------------
 
-  it("does NOT revoke an api_key when refCount > 0 (key still referenced by a live strategy)", async () => {
-    // The shared key-shared has refCount=1 — a non-wizard strategy still
-    // references it. The route MUST NOT delete it. The orphan key-orphan
-    // has refCount=0 and SHOULD be deleted.
+  it("does NOT count a still-referenced key as revoked (atomic RPC returns 0 deletions)", async () => {
+    // key-shared is still referenced by a live strategy: the atomic RPC's
+    // NOT EXISTS guard deletes 0 rows for it (the key survives). key-orphan
+    // has no references → 1 row deleted. The cron consults BOTH via the RPC
+    // but only counts the actual deletion. A regression that counted a
+    // 0-deletion RPC as a revoke (or skipped the still-referenced key's RPC)
+    // would fail here.
     const drafts: DraftRow[] = [
       { id: "draft-shared", api_key_id: "key-shared" },
       { id: "draft-orphan", api_key_id: "key-orphan" },
     ];
     recorders.selectDraftsResponse = { data: drafts, error: null };
     recorders.deleteDraftsResponse = { count: 2, error: null };
-    recorders.refCountByKey = {
-      // Live strategy still uses this key. DO NOT REVOKE.
-      "key-shared": { count: 1, error: null },
-      "key-orphan": { count: 0, error: null },
-    };
-    recorders.deleteKeyByKey = {
-      "key-orphan": { error: null },
+    recorders.rpcResultByKey = {
+      // Live strategy still uses this key → RPC deletes nothing.
+      "key-shared": { data: 0, error: null },
+      "key-orphan": { data: 1, error: null },
     };
 
     const handler = await getHandler();
@@ -546,33 +522,26 @@ describe.each([
 
     expect(res.status).toBe(200);
     const body = await res.json();
-    // Only the orphan was revoked — the shared key was correctly skipped.
-    // A key kept because still-referenced is NOT an error: zero sweep errors.
+    // Only the orphan counted as revoked — the shared key's 0-deletion RPC is
+    // NOT an error: zero sweep errors.
     expect(body).toEqual({
       deleted: 2,
       orphaned_keys_revoked: 1,
       key_sweep_errors: 0,
     });
 
-    // Critical: api_keys.delete must have been called EXACTLY ONCE (for
-    // key-orphan), never for key-shared.
-    const apiKeyDeletes = recorders.deleteCalls.filter(
-      (c) => c.table === "api_keys",
-    );
-    expect(apiKeyDeletes).toHaveLength(1);
-    // The .eq("id", ...) on api_keys must target key-orphan, never
-    // key-shared. (eqCalls captures the stage as "api_keys:delete".)
-    const apiKeyEqs = recorders.eqCalls.filter(
-      (c) => c.stage === "api_keys:delete",
-    );
-    expect(apiKeyEqs).toEqual([
-      { stage: "api_keys:delete", col: "id", val: "key-orphan" },
+    // Both keys went through the atomic RPC (the still-referenced one is kept
+    // by the NOT EXISTS guard inside the single statement, not by a skip).
+    expect(recorders.rpcCalls).toEqual([
+      {
+        fn: "delete_api_key_if_unreferenced",
+        args: { p_api_key_id: "key-shared" },
+      },
+      {
+        fn: "delete_api_key_if_unreferenced",
+        args: { p_api_key_id: "key-orphan" },
+      },
     ]);
-    // Defense in depth: assert the shared key's id never appears as the
-    // value of any api_keys-stage filter.
-    for (const call of apiKeyEqs) {
-      expect(call.val).not.toBe("key-shared");
-    }
   });
 
   it("dedupes api_key_id and skips drafts with null api_key_id", async () => {
@@ -585,8 +554,7 @@ describe.each([
     ];
     recorders.selectDraftsResponse = { data: drafts, error: null };
     recorders.deleteDraftsResponse = { count: 3, error: null };
-    recorders.refCountByKey = { "key-dup": { count: 0, error: null } };
-    recorders.deleteKeyByKey = { "key-dup": { error: null } };
+    recorders.rpcResultByKey = { "key-dup": { data: 1, error: null } };
 
     const handler = await getHandler();
     const res = await handler(
@@ -601,16 +569,11 @@ describe.each([
       key_sweep_errors: 0,
     });
 
-    // Exactly one COUNT_REFS pass (key-dup). Null was filtered out before
+    // Exactly one orphan-revoke RPC (key-dup). Null was filtered out before
     // the loop; the duplicate was deduped via the Set in the route.
-    const countQueries = recorders.selectCalls.filter(
-      (c) => c.options?.head === true && c.options?.count === "exact",
-    );
-    expect(countQueries).toHaveLength(1);
-    const apiKeyDeletes = recorders.deleteCalls.filter(
-      (c) => c.table === "api_keys",
-    );
-    expect(apiKeyDeletes).toHaveLength(1);
+    expect(recorders.rpcCalls).toEqual([
+      { fn: "delete_api_key_if_unreferenced", args: { p_api_key_id: "key-dup" } },
+    ]);
   });
 
   // --- Error paths --------------------------------------------------------
@@ -687,15 +650,17 @@ describe.each([
     expect(loggedRaw).toBe(true);
   });
 
-  it("M-1145/H-1251: count-check error skips the key but surfaces it loudly (500 + errors)", async () => {
-    // The route skips the key when the COUNT_REFS query errors (safe
-    // direction — don't revoke when uncertain), but the skip MUST be
-    // observable: a transient count error means an orphan may have been
-    // left behind, NOT that the run was clean. The run is therefore
-    // degraded → 500 (Vercel Cron alerts on non-2xx; a 207 would still be
-    // keyed as success), the failing key is named in errors[], and
-    // key_sweep_errors counts it. A regression that swallowed the error
-    // back to a clean 200 would fail this test.
+  it("M-1144/M-1145/H-1251: an RPC revoke error is non-fatal to the loop but surfaced loudly (500 + errors)", async () => {
+    // The atomic delete_api_key_if_unreferenced RPC collapses the prior two
+    // failure modes (errored ref-count AND errored delete) into one: any RPC
+    // error means an orphan may have been left pointing at a strategy we just
+    // deleted — real integrity drift. The orphan-sweep loop must NOT abort
+    // (key-good still gets swept), but the failure must NOT masquerade as a
+    // clean run: the run is degraded → 500 (Vercel Cron alerts on non-2xx; a
+    // 207 would still be keyed as success), the failing key is named in
+    // errors[], and key_sweep_errors counts it. A regression that swallowed
+    // the error back to a clean 200, aborted the loop, or dropped the
+    // errors[]/count would fail this test.
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const drafts: DraftRow[] = [
       { id: "d1", api_key_id: "key-bad" },
@@ -703,11 +668,10 @@ describe.each([
     ];
     recorders.selectDraftsResponse = { data: drafts, error: null };
     recorders.deleteDraftsResponse = { count: 2, error: null };
-    recorders.refCountByKey = {
-      "key-bad": { count: null, error: { message: "transient" } },
-      "key-good": { count: 0, error: null },
+    recorders.rpcResultByKey = {
+      "key-bad": { data: null, error: { message: "fk violation" } },
+      "key-good": { data: 1, error: null },
     };
-    recorders.deleteKeyByKey = { "key-good": { error: null } };
 
     const handler = await getHandler();
     const res = await handler(
@@ -718,72 +682,24 @@ describe.each([
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.deleted).toBe(2);
+    // key-good still swept despite key-bad's error — the loop did not abort.
     expect(body.orphaned_keys_revoked).toBe(1);
     expect(body.key_sweep_errors).toBe(1);
     expect(body.errors).toHaveLength(1);
     expect(body.errors[0]).toContain("key-bad");
+    expect(body.errors[0]).toContain("revoke failed");
+
+    // Both keys were attempted via the RPC — the loop continued after the
+    // first failure.
+    expect(recorders.rpcCalls).toEqual([
+      { fn: "delete_api_key_if_unreferenced", args: { p_api_key_id: "key-bad" } },
+      { fn: "delete_api_key_if_unreferenced", args: { p_api_key_id: "key-good" } },
+    ]);
+
     // Surfaced via console.error (red in Vercel logs), not console.warn.
     const loggedError = errorSpy.mock.calls.some((call) =>
       call.some(
         (arg) => typeof arg === "string" && arg.includes("key=key-bad"),
-      ),
-    );
-    expect(loggedError).toBe(true);
-  });
-
-  it("M-1144/H-1251: api_keys DELETE error is non-fatal to the loop but surfaced loudly (500 + errors)", async () => {
-    // route.ts orphan-sweep loop — `if (keyErr) { console.error(...); push;
-    // continue; }`. A confirmed orphan (refCount===0) that fails to delete
-    // leaves an api_keys row pointing at a strategy we just deleted: real
-    // integrity drift. The loop must NOT abort (key-b still gets swept), but
-    // the failure must NOT masquerade as a clean run. A regression that
-    // dropped key_sweep_errors / the errors[] list / the 500 (reverting to a
-    // bare `{deleted, orphaned_keys_revoked}` 200) would fail this test —
-    // an operator could no longer distinguish "kept because referenced" from
-    // "failed to revoke, orphan left behind".
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const drafts: DraftRow[] = [
-      { id: "draft-a", api_key_id: "key-a" },
-      { id: "draft-b", api_key_id: "key-b" },
-    ];
-    recorders.selectDraftsResponse = { data: drafts, error: null };
-    recorders.deleteDraftsResponse = { count: 2, error: null };
-    recorders.refCountByKey = {
-      "key-a": { count: 0, error: null },
-      "key-b": { count: 0, error: null },
-    };
-    recorders.deleteKeyByKey = {
-      "key-a": { error: { message: "fk violation" } },
-      "key-b": { error: null },
-    };
-
-    const handler = await getHandler();
-    const res = await handler(
-      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
-    );
-
-    // Degraded run — surfaced as 500 so cron monitoring goes red, NOT a
-    // clean 200 that buries the orphan that was left behind.
-    expect(res.status).toBe(500);
-    const body = await res.json();
-    expect(body.deleted).toBe(2);
-    expect(body.orphaned_keys_revoked).toBe(1);
-    expect(body.key_sweep_errors).toBe(1);
-    expect(body.errors).toHaveLength(1);
-    expect(body.errors[0]).toContain("key-a");
-    expect(body.errors[0]).toContain("revoke failed");
-
-    // Both keys were attempted (key-a errored, key-b succeeded) — the loop
-    // did not abort after the first failure.
-    const apiKeyDeletes = recorders.deleteCalls.filter(
-      (c) => c.table === "api_keys",
-    );
-    expect(apiKeyDeletes).toHaveLength(2);
-
-    // Surfaced via console.error (error filters), not console.warn.
-    const loggedError = errorSpy.mock.calls.some((call) =>
-      call.some(
-        (arg) => typeof arg === "string" && arg.includes("key=key-a"),
       ),
     );
     expect(loggedError).toBe(true);
