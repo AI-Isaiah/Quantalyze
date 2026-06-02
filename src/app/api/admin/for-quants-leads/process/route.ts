@@ -34,10 +34,10 @@ export const POST = withAdminAuth(
       : await markLeadProcessed(id);
 
     if (!result.ok && result.reason === "not_found") {
-      return NextResponse.json(
-        { error: "Lead not found or already in the requested state" },
-        { status: 404 },
-      );
+      // M-0269: this is now a GENUINELY missing row — the "already in the
+      // requested state" no-op path returns 200 below, so a network-retried
+      // POST that already succeeded no longer surfaces as a 404 hard-error.
+      return NextResponse.json({ error: "Lead not found" }, { status: 404 });
     }
     if (!result.ok) {
       return NextResponse.json({ error: "Update failed" }, { status: 500 });
@@ -54,13 +54,23 @@ export const POST = withAdminAuth(
     // (createAdminClient) client, so the audit emits via the service path with
     // the explicit acting-admin id (log_audit_event_service) — JWT-immune, not
     // a user-JWT auth.uid() emit that drops in the post-response after() window.
-    logAuditEventAsUser(admin, user.id, {
-      action: unprocess ? "lead.unprocess" : "lead.process",
-      entity_type: "for_quants_lead",
-      entity_id: id,
-    });
+    // M-0269: only audit a REAL state change. A no-op (row already in the
+    // target state — typically a network retry of a call that already
+    // succeeded) returns 200 but must NOT emit a second audit row implying a
+    // fresh toggle; the original successful call already logged it.
+    if (!result.noop) {
+      logAuditEventAsUser(admin, user.id, {
+        action: unprocess ? "lead.unprocess" : "lead.process",
+        entity_type: "for_quants_lead",
+        entity_id: id,
+      });
+    }
 
-    return NextResponse.json({ ok: true, unprocessed: unprocess === true });
+    return NextResponse.json({
+      ok: true,
+      noop: result.noop === true,
+      unprocessed: unprocess === true,
+    });
   },
   {
     schema: BODY_SCHEMA,

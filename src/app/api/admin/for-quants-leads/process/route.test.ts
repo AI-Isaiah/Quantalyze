@@ -30,8 +30,8 @@ const STATE = vi.hoisted(() => ({
     | { id: string }
     | null,
   isAdminResult: true,
-  markResult: { ok: true } as { ok: true } | { ok: false; reason: "not_found" } | { ok: false; reason: "unknown" },
-  unmarkResult: { ok: true } as { ok: true } | { ok: false; reason: "not_found" } | { ok: false; reason: "unknown" },
+  markResult: { ok: true } as { ok: true; noop?: true } | { ok: false; reason: "not_found" } | { ok: false; reason: "unknown" },
+  unmarkResult: { ok: true } as { ok: true; noop?: true } | { ok: false; reason: "not_found" } | { ok: false; reason: "unknown" },
   markCalls: [] as string[],
   unmarkCalls: [] as string[],
 }));
@@ -195,7 +195,7 @@ describe("POST /api/admin/for-quants-leads/process — C-0037", () => {
     const res = await POST(makeReq({ id: VALID_UUID }));
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ ok: true, unprocessed: false });
+    expect(body).toEqual({ ok: true, noop: false, unprocessed: false });
 
     // Helper-indirection blind-spot anchor (see route comment T4-C1):
     // the audit grep-coverage test cannot see this emission because the
@@ -215,5 +215,30 @@ describe("POST /api/admin/for-quants-leads/process — C-0037", () => {
 
     expect(STATE.markCalls).toEqual([VALID_UUID]);
     expect(STATE.unmarkCalls).toHaveLength(0);
+  });
+
+  it("M-0269 — a no-op (already in target state) returns 200 + noop:true and emits NO audit", async () => {
+    // A network-retried POST whose original call already succeeded: the helper
+    // reports ok:true,noop:true. The route must return 200 — NOT the old 404
+    // the admin table rendered as "Could not mark as processed" — AND must NOT
+    // emit a second lead.process audit row for a non-change.
+    STATE.markResult = { ok: true, noop: true };
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ id: VALID_UUID }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ ok: true, noop: true, unprocessed: false });
+    expect(auditEmissions).toHaveLength(0);
+    expect(STATE.markCalls).toEqual([VALID_UUID]);
+  });
+
+  it("M-0269 — a genuinely missing lead still returns 404 (not a no-op)", async () => {
+    STATE.markResult = { ok: false, reason: "not_found" };
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ id: VALID_UUID }));
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe("Lead not found");
+    expect(auditEmissions).toHaveLength(0);
   });
 });

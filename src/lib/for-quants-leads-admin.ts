@@ -114,7 +114,7 @@ export async function listForQuantsLeads({
 }
 
 export type SetLeadProcessedResult =
-  | { ok: true }
+  | { ok: true; noop?: true }
   | { ok: false; reason: "not_found" | "db_error" };
 
 // Filters on the opposite state so double-clicks are idempotent and
@@ -141,7 +141,7 @@ export async function markLeadProcessed(
     .eq("id", id)
     .is("processed_at", null)
     .select("id");
-  return toResult(data, error);
+  return toResult(admin, id, data, error);
 }
 
 export async function unmarkLeadProcessed(
@@ -155,19 +155,43 @@ export async function unmarkLeadProcessed(
     .eq("id", id)
     .not("processed_at", "is", null)
     .select("id");
-  return toResult(data, error);
+  return toResult(admin, id, data, error);
 }
 
-function toResult(
+async function toResult(
+  admin: SupabaseClient,
+  id: string,
   data: { id: string }[] | null,
   error: { message: string } | null,
-): SetLeadProcessedResult {
+): Promise<SetLeadProcessedResult> {
   if (error) {
     console.error("[for-quants-leads-admin] update failed:", error);
     return { ok: false, reason: "db_error" };
   }
-  if (!data || data.length === 0) {
+  if (data && data.length > 0) {
+    // The conditional UPDATE flipped a real row — a genuine toggle.
+    return { ok: true };
+  }
+  // M-0269: 0 rows updated means EITHER the row is already in the target state
+  // (a no-op — e.g. a network-retried POST that already succeeded) OR the row
+  // genuinely does not exist. The conditional UPDATE can't tell them apart, so
+  // probe by id. Conflating them as 404 made a retried success look like a hard
+  // error in the admin table (ForQuantsLeadsTable shows "Could not mark as
+  // processed. Try again." on any non-2xx).
+  const { data: existing, error: probeError } = await admin
+    .from("for_quants_leads")
+    .select("id")
+    .eq("id", id);
+  if (probeError) {
+    console.error(
+      "[for-quants-leads-admin] existence probe failed:",
+      probeError,
+    );
+    return { ok: false, reason: "db_error" };
+  }
+  if (!existing || existing.length === 0) {
     return { ok: false, reason: "not_found" };
   }
-  return { ok: true };
+  // Row exists but was already in the target state — idempotent success.
+  return { ok: true, noop: true };
 }

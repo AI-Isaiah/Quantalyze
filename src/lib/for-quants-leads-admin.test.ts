@@ -147,7 +147,11 @@ describe("markLeadProcessed", () => {
     expect(typeof row?.processed_at).toBe("string");
   });
 
-  it("returns not_found when the row is already processed (idempotent)", async () => {
+  it("returns noop:true when the row is already processed (idempotent — M-0269)", async () => {
+    // The conditional UPDATE matches 0 rows (processed_at already set), but the
+    // row EXISTS — so this is an idempotent no-op (e.g. a network-retried POST
+    // that already succeeded), NOT a missing row. It must resolve to
+    // ok:true,noop:true so the route returns 200, not a misleading 404.
     seedTable(store, "for_quants_leads", [
       makeLead({
         id: "11111111-0000-0000-0000-000000000001",
@@ -161,7 +165,7 @@ describe("markLeadProcessed", () => {
       client,
     );
 
-    expect(result).toEqual({ ok: false, reason: "not_found" });
+    expect(result).toEqual({ ok: true, noop: true });
   });
 
   it("returns not_found when the row does not exist", async () => {
@@ -212,7 +216,10 @@ describe("mock `.not(col, \"is\", null)` semantics (used by unmarkLeadProcessed)
       "11111111-0000-0000-0000-000000000001",
       client,
     );
-    expect(result).toEqual({ ok: false, reason: "not_found" });
+    // M-0269: the unprocessed row IS excluded by .not("processed_at","is",null)
+    // (0 rows updated), but it EXISTS — so this is an idempotent no-op, not a
+    // missing row. noop:true proves the .not filter correctly excluded it.
+    expect(result).toEqual({ ok: true, noop: true });
 
     const result2 = await unmarkLeadProcessed(
       "22222222-0000-0000-0000-000000000002",
@@ -250,7 +257,7 @@ describe("unmarkLeadProcessed", () => {
     expect(row?.processed_at).toBeNull();
   });
 
-  it("returns not_found when the row is already unprocessed (symmetric)", async () => {
+  it("returns noop:true when the row is already unprocessed (symmetric — M-0269)", async () => {
     seedTable(store, "for_quants_leads", [
       makeLead({ id: "11111111-0000-0000-0000-000000000001", processed_at: null }),
     ]);
@@ -261,6 +268,8 @@ describe("unmarkLeadProcessed", () => {
       client,
     );
 
-    expect(result).toEqual({ ok: false, reason: "not_found" });
+    // Already in the target (unprocessed) state + row exists → idempotent
+    // no-op, not a missing row.
+    expect(result).toEqual({ ok: true, noop: true });
   });
 });
