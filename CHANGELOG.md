@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.15.61] - 2026-06-02
+### Changed — B-mypy part h: widen the CI `mypy --strict` gate to `services/` + `routers/`
+
+The CI mypy gate (`.github/workflows/ci.yml`) was scoped to `services/ingestion/` only. With **part g** (v0.24.15.60) bringing all of `analytics-service/services/` to `mypy --strict` 0 — and `routers/` already clean — this widens the gate to `services/ routers/`, so the strict type floor is now **enforced on every PR** across the full services + routers surface (62 source files, verified 0 against the CI-pinned deps supabase 2.15.1 / postgrest 1.0.2). Catches signature/`.data`/`APIResponse` drift at type-check time before it reaches prod.
+
+- CI-only change (workflow `run:` line + comment); no source or runtime behavior change.
+- Remaining incremental tail: `models/` (1 error) + `scripts/` (9) — a small follow-up batch; `tests/` stays untyped by design.
+
 ## [0.24.15.60] - 2026-06-02
 ### Refactored — B-mypy part g: all analytics `services/` to `mypy --strict` 0
 
