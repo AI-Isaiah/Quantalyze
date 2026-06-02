@@ -98,10 +98,13 @@ export function compound(returns: number[]): number {
   // to ±Infinity (e.g. compound([1e308, 1e308])) → clamp to the signed
   // representable extreme; (2) a corrupt non-finite return (NaN/Infinity in the
   // series) poisons the product to NaN → return 0, this lib's neutral "no
-  // growth" default (as for empty input). Such upstream corruption is already
-  // surfaced loudly by the sibling stats that consume the same returns
-  // (computeReturnDistribution / findMinMax warnDroppedNonFinite), so a silent
-  // neutralization here does not hide it at the system level.
+  // growth" default (as for empty input). The NaN arm is silent (no warn) — and
+  // unreachable today: compound()'s only live caller (AlphaBetaDecomposition)
+  // feeds it values already finite-filtered by normalizeDailyReturns, and the
+  // computeMonthlyReturns/computeAnnualReturns paths that pass raw values have
+  // no production caller. So this is a forward-looking JSON-safety guard, not a
+  // mask over a live corruption path; if a future caller wires raw daily values
+  // straight into compound() without a finite-filter, add a warn breadcrumb here.
   if (Number.isNaN(result)) return 0;
   if (!Number.isFinite(result)) return result > 0 ? Number.MAX_VALUE : -Number.MAX_VALUE;
   return result;

@@ -132,14 +132,13 @@ def test_risk_decomposition_zero_volatility():
     portfolio that carries no risk), so marginal_risk_pct and component_var
     must be 0 for every entry.
 
-    NOTE: this test deliberately does NOT assert standalone_vol == 0. The
-    current production code (portfolio_risk.py:64) returns standalone_vol=0
-    in this branch, but standalone_vol is sqrt(cov[i][i]) — a per-strategy
-    property that is independent of portfolio weights, so the financially
-    correct values are nonzero here. That known-incorrect fallback is pinned
-    (and will be flipped once fixed) by test_risk_decomposition_zero_weights_
-    standalone_vol_is_per_strategy below (H-0803). Asserting == 0 here would
-    cement the bug, so we only pin the two values that are correctly zero.
+    NOTE: this test deliberately does NOT assert standalone_vol == 0.
+    standalone_vol is sqrt(cov[i][i]) — a per-strategy property independent of
+    the portfolio weights, so its financially correct values are nonzero even
+    here (H-0803 fixed the zero-vol branch to return them). The per-strategy
+    invariant is pinned by test_risk_decomposition_zero_weights_standalone_vol_
+    is_per_strategy below; this test only pins the two values that are correctly
+    zero, so it stays valid regardless of the standalone_vol value.
     """
     weights = [0.0, 0.0, 0.0]
     cov = np.array([[0.04, 0.01, 0.005], [0.01, 0.03, 0.002], [0.005, 0.002, 0.02]])
@@ -154,9 +153,9 @@ def test_risk_decomposition_zero_weights_standalone_vol_is_per_strategy():
     (portfolio vol == 0) the diagonal variances 0.04, 0.03, 0.02 still imply
     standalone vols of 0.2000, 0.1732, 0.1414 — they do not collapse to 0.
 
-    This test fails on the current production fallback (which returns
-    standalone_vol=0) and will fail again if a regression re-zeroes
-    standalone_vol in the zero-portfolio-vol branch once the bug is fixed.
+    Pre-H-0803 the zero-portfolio-vol branch returned standalone_vol=0; the fix
+    returns sqrt(cov[i][i]). This test pins the per-strategy invariant and fails
+    if a regression re-zeroes standalone_vol in that branch.
     """
     weights = [0.0, 0.0, 0.0]
     cov = np.array([[0.04, 0.01, 0.005], [0.01, 0.03, 0.002], [0.005, 0.002, 0.02]])
