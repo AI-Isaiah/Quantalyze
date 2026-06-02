@@ -5,6 +5,7 @@ import os
 import random
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, TypedDict
 
 from supabase import Client
@@ -369,6 +370,66 @@ def _finite_positive_float(value: Any, *, label: str) -> float | None:
     return out
 
 
+def _finite_decimal(value: Any, *, label: str) -> Decimal | None:
+    """Audit-2026-05-07 H-0669 — exact-precision variant of ``_finite_float``
+    for the monetary fill fields persisted into ``trades``' DECIMAL columns.
+
+    OKX/Bybit report price/quantity/fee as decimal STRINGS. Parsing them
+    straight to ``Decimal(str(value))`` avoids the IEEE-754 binary rounding
+    ``float()`` bakes in BEFORE the value reaches the base-10 DECIMAL column
+    (``float('0.1') * 3 == 0.30000000000000004``; ``Decimal('0.1') *
+    Decimal('3') == Decimal('0.3')`` exactly). The persist seam serializes
+    these back to numeric STRINGS (json.dumps cannot encode a raw Decimal),
+    and the read side already re-parses ``trades`` NUMERIC columns via
+    ``Decimal(str(value))`` (position_reconstruction), so the string carrier
+    is lossless end-to-end.
+
+    Mirrors ``_finite_float``'s guards: reject bool (an int subclass ``str``
+    would render as ``"True"``) and reject NaN / ±Inf / non-numeric. For a
+    string input ``Decimal(str(s))`` keeps every digit the exchange sent; for
+    a float input (CCXT already parsed it upstream) ``Decimal(str(f))`` keeps
+    the float's shortest-repr value — it prevents FURTHER loss but cannot
+    recover precision ccxt already dropped.
+    """
+    if isinstance(value, bool):
+        logger.warning("_finite_decimal: bool rejected for %s=%r", label, value)
+        return None
+    if value is None:
+        return None
+    try:
+        out = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        logger.warning(
+            "_finite_decimal: rejected %s=%r (non-numeric)", label, value,
+        )
+        return None
+    if not out.is_finite():
+        logger.warning(
+            "_finite_decimal: rejected %s=%r (NaN/inf)", label, value,
+        )
+        return None
+    return out
+
+
+def _finite_positive_decimal(value: Any, *, label: str) -> Decimal | None:
+    """Decimal counterpart of ``_finite_positive_float`` (NEW-C13-11): like
+    ``_finite_decimal`` but also rejects zero/negative, for price and quantity
+    fields where a non-positive value indicates a corrupt/adversarial fill.
+
+    Fee fields must NOT use this — maker rebates are legitimately negative.
+    """
+    out = _finite_decimal(value, label=label)
+    if out is None:
+        return None
+    if out <= 0:
+        logger.warning(
+            "_finite_positive_decimal: rejected %s=%r (≤0 — must be positive)",
+            label, value,
+        )
+        return None
+    return out
+
+
 # Audit-2026-05-07 G12.B.5 — overlap window for late-arriving exchange fills.
 # Hardcoded to 1 hour (3_600_000 ms) because:
 #   * CCXT timestamps are normalized to UTC, but exchange-side propagation lag
@@ -424,9 +485,15 @@ class FillRow(TypedDict):
     exchange: str
     symbol: str
     side: str
-    price: float
-    quantity: float
-    fee: float
+    # H-0669 — monetary fields are persisted as exact numeric STRINGS (the
+    # serializable carrier for a Decimal: json.dumps cannot encode a raw
+    # Decimal, and a float would re-introduce the IEEE-754 drift these columns
+    # are DECIMAL precisely to avoid). PostgreSQL casts the JSON string
+    # losslessly into the DECIMAL column; the read side already re-parses via
+    # Decimal(str(value)).
+    price: str
+    quantity: str
+    fee: str
     fee_currency: str
     timestamp: str
     order_type: str
@@ -434,7 +501,7 @@ class FillRow(TypedDict):
     exchange_fill_id: str
     is_fill: bool
     is_maker: bool
-    cost: float
+    cost: str
     raw_data: dict[str, Any] | None
 
 
@@ -531,9 +598,9 @@ def _make_fill_dict(
     exchange: str,
     symbol: str,
     side: str,
-    price: float,
-    quantity: float,
-    fee: float,
+    price: Decimal | float,
+    quantity: Decimal | float,
+    fee: Decimal | float,
     fee_currency: str,
     timestamp: str,
     exchange_order_id: str,
@@ -550,6 +617,15 @@ def _make_fill_dict(
     by G12.B.4/G12.B.7 (three near-identical builders). ``cost`` is
     computed from ``price * quantity`` so callers cannot accidentally
     pass an inconsistent value.
+
+    H-0669 — this is the single serialization chokepoint for monetary
+    precision: ``price`` / ``quantity`` / ``fee`` arrive as ``Decimal``
+    (OKX/Bybit string-parsed) or ``float`` (CCXT, already float upstream),
+    are coerced to ``Decimal`` via ``Decimal(str(...))``, ``cost`` is
+    computed as an EXACT ``Decimal`` multiply (not the float ``price *
+    quantity`` that compounded IEEE-754 drift), and all four are emitted as
+    numeric STRINGS — the only carrier that crosses the json/httpx persist
+    seam losslessly into the DECIMAL columns.
 
     ``position_direction`` is the typed long/short discriminator. The
     ``trades`` table does not yet have a dedicated column for it
@@ -617,13 +693,22 @@ def _make_fill_dict(
     # AFTER position_direction is written so the canonical discriminator
     # always survives the trim.
     raw_data = _trim_raw_data(raw_data)
+    # H-0669 — coerce to exact Decimal (str() keeps a string input's full
+    # precision and a float input's shortest repr), compute cost as an exact
+    # Decimal multiply, and serialize all monetary fields as numeric strings.
+    price_d = price if isinstance(price, Decimal) else Decimal(str(price))
+    quantity_d = (
+        quantity if isinstance(quantity, Decimal) else Decimal(str(quantity))
+    )
+    fee_d = fee if isinstance(fee, Decimal) else Decimal(str(fee))
+    cost_d = price_d * quantity_d
     return {
         "exchange": exchange,
         "symbol": symbol,
         "side": side,
-        "price": price,
-        "quantity": quantity,
-        "fee": fee,
+        "price": str(price_d),
+        "quantity": str(quantity_d),
+        "fee": str(fee_d),
         "fee_currency": fee_currency,
         "timestamp": timestamp,
         "order_type": order_type,
@@ -631,7 +716,7 @@ def _make_fill_dict(
         "exchange_fill_id": exchange_fill_id,
         "is_fill": True,
         "is_maker": is_maker,
-        "cost": price * quantity,
+        "cost": str(cost_d),
         "raw_data": raw_data,
     }
 
@@ -1866,8 +1951,11 @@ async def _fetch_raw_trades_okx_inst_type(
                 raw_inst_id = fill.get("instId", "")
                 symbol = normalize_symbol("okx", raw_inst_id)
                 side = fill.get("side", "").lower()
-                price_chk = _finite_positive_float(fill.get("fillPx", 0), label="OKX fillPx")
-                amount_chk = _finite_positive_float(fill.get("fillSz", 0), label="OKX fillSz")
+                # H-0669 — parse the exchange's decimal STRINGS straight to
+                # Decimal (not via float) so price/quantity reach the DECIMAL
+                # columns with no IEEE-754 drift.
+                price_chk = _finite_positive_decimal(fill.get("fillPx", 0), label="OKX fillPx")
+                amount_chk = _finite_positive_decimal(fill.get("fillSz", 0), label="OKX fillSz")
                 if price_chk is None or amount_chk is None:
                     logger.error(
                         "OKX fill dropped: non-finite price=%r or amount=%r "
@@ -1888,7 +1976,10 @@ async def _fetch_raw_trades_okx_inst_type(
                     _settle = _inst_parts[1].upper() if len(_inst_parts) >= 2 else ""
                     if _settle in ("USDT", "USDC", "BUSD", "USDE", "PYUSD", "USDB"):
                         _ct = _okx_contract_size_for_inst_id(raw_inst_id, exchange)
-                        amount = fill_sz_contracts * _ct
+                        # H-0669 — keep the contract-size rescale exact (Decimal
+                        # contracts × Decimal ctVal); a Decimal × float multiply
+                        # would both raise TypeError and re-introduce drift.
+                        amount = fill_sz_contracts * Decimal(str(_ct))
                         if _ct != 1.0:
                             fill.setdefault("_ingest_ctval", _ct)
                     else:
@@ -1896,8 +1987,8 @@ async def _fetch_raw_trades_okx_inst_type(
                 else:
                     amount = fill_sz_contracts  # SPOT/MARGIN: already base units
 
-                fee_chk = _finite_float(fill.get("fee", 0), label="OKX fee")
-                fee = fee_chk if fee_chk is not None else 0.0
+                fee_chk = _finite_decimal(fill.get("fee", 0), label="OKX fee")
+                fee = fee_chk if fee_chk is not None else Decimal("0")
                 fee_currency = fill.get("feeCcy", "USDT")
                 _check_fee_currency_mismatch(
                     exchange="okx", symbol=raw_inst_id, fee_currency=fee_currency,
@@ -2072,10 +2163,11 @@ async def _fetch_raw_trades_bybit(
                 # NEW-C13-11: also reject zero/negative price and amount —
                 # both are physically impossible for a fill and indicate
                 # corrupt data; _finite_positive_float rejects ≤0 values.
-                price_chk = _finite_positive_float(
+                # H-0669 — parse Bybit's decimal STRINGS straight to Decimal.
+                price_chk = _finite_positive_decimal(
                     fill.get("execPrice", 0), label="Bybit execPrice"
                 )
-                amount_chk = _finite_positive_float(
+                amount_chk = _finite_positive_decimal(
                     fill.get("execQty", 0), label="Bybit execQty"
                 )
                 if price_chk is None or amount_chk is None:
@@ -2090,10 +2182,10 @@ async def _fetch_raw_trades_bybit(
                 amount = amount_chk
                 # Preserve signed fee so maker rebates remain negative
                 # (H-0671) — same rationale as the OKX branch.
-                fee_chk = _finite_float(
+                fee_chk = _finite_decimal(
                     fill.get("execFee", 0), label="Bybit execFee"
                 )
-                fee = fee_chk if fee_chk is not None else 0.0
+                fee = fee_chk if fee_chk is not None else Decimal("0")
                 fee_currency = fill.get("feeCurrency", "USDT")
                 # Audit-2026-05-07 H-0670 — fee-currency mismatch flag.
                 _check_fee_currency_mismatch(

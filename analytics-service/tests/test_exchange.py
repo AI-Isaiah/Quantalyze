@@ -1,5 +1,6 @@
 import pytest
 from datetime import datetime, timezone
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import ccxt.async_support as ccxt_async
@@ -55,6 +56,71 @@ class TestNormalizeSymbol:
         # test) — together those pin both ends to this single source.
         inst_id = "BTC-USDT-SWAP"
         assert normalize_symbol("okx", inst_id) == "BTCUSDTSWAP"
+
+
+class TestMonetaryPrecisionH0669:
+    """H-0669 — monetary fill fields keep exact decimal precision.
+
+    Pre-fix, price/quantity/fee/cost were Python floats inserted into the
+    DECIMAL ``trades`` columns; ``float('0.1') * 3 == 0.30000000000000004``
+    silently corrupted ``cost`` and high-precision quantities lost digits
+    beyond float's ~15-17 sig figs. The fix parses exchange decimal STRINGS to
+    Decimal at ingest, computes ``cost`` as an exact Decimal multiply, and
+    serializes each monetary field as a numeric STRING.
+    """
+
+    def test_make_fill_dict_cost_is_exact_decimal_not_float_drifted(self) -> None:
+        from services.exchange import _make_fill_dict
+
+        # Float inputs (the pre-fix shape): float 0.1 * 3.0 drifts to
+        # 0.30000000000000004. The exact-Decimal multiply yields 0.3.
+        out = _make_fill_dict(
+            exchange="okx",
+            symbol="BTCUSDT",
+            side="buy",
+            price=0.1,
+            quantity=3.0,
+            fee=0.0,
+            fee_currency="USDT",
+            timestamp="2024-01-01T00:00:00+00:00",
+            exchange_order_id="ord-1",
+            exchange_fill_id="fill-1",
+            is_maker=False,
+            raw_data=None,
+        )
+        assert isinstance(out["cost"], str)
+        assert Decimal(out["cost"]) == Decimal("0.3")
+        # Guard against the exact float-drift value the bug produced.
+        assert Decimal(out["cost"]) != Decimal(0.1 * 3.0)
+        for key in ("price", "quantity", "fee", "cost"):
+            assert isinstance(out[key], str)
+
+    def test_make_fill_dict_serializable_string_preserves_full_precision(self) -> None:
+        """The persist seam json.dumps()-es the row. A raw Decimal would raise
+        TypeError; the numeric-string carrier crosses losslessly and keeps the
+        full 18-digit precision a float would have truncated."""
+        import json
+
+        from services.exchange import _make_fill_dict
+
+        precise_qty = Decimal("0.123456789012345678")  # 18 digits — beyond float
+        out = _make_fill_dict(
+            exchange="bybit",
+            symbol="BTCUSDT",
+            side="sell",
+            price=Decimal("60000.5"),
+            quantity=precise_qty,
+            fee=Decimal("-0.4"),
+            fee_currency="USDT",
+            timestamp="2024-01-01T00:00:00+00:00",
+            exchange_order_id="ord-1",
+            exchange_fill_id="fill-2",
+            is_maker=True,
+            raw_data=None,
+        )
+        encoded = json.dumps(out)  # must NOT raise (no raw Decimal in the dict)
+        assert '"0.123456789012345678"' in encoded
+        assert Decimal(out["quantity"]) == precise_qty
 
 
 def _okx_swap_only(swap_data: list[dict]) -> "AsyncMock":
@@ -612,15 +678,17 @@ class TestFetchRawTrades:
         assert result[0]["exchange"] == "okx"
         assert result[0]["symbol"] == "BTCUSDTSWAP"
         assert result[0]["side"] == "buy"
-        assert result[0]["price"] == 60000.0
+        # H-0669 — monetary fields are now exact numeric strings; compare via
+        # Decimal (which ignores trailing-zero formatting and is exact).
+        assert Decimal(result[0]["price"]) == Decimal("60000")
         # NEW-C13-01: fillSz=0.1 contracts × BTC-USDT ctVal=0.01 = 0.001 base units.
-        assert result[0]["quantity"] == pytest.approx(0.001)
+        assert Decimal(result[0]["quantity"]) == Decimal("0.001")
         # Audit-2026-05-07 H-0671 — fee is the signed value from the
         # exchange. The fixture uses fee="-0.6" (a maker rebate) and the
         # post-fix branch persists it unchanged so downstream
         # ``realized_pnl = ... - total_fees`` reduces by the rebate
         # instead of inflating the apparent fee via abs().
-        assert result[0]["fee"] == -0.6
+        assert Decimal(result[0]["fee"]) == Decimal("-0.6")
         assert result[0]["is_fill"] is True
         assert result[0]["exchange_order_id"] == "ord-1"
         assert result[0]["exchange_fill_id"] == "trade-1"
@@ -1437,8 +1505,8 @@ class TestG12BFillRowFactory:
             "is_maker", "cost", "raw_data",
         }
         assert required.issubset(set(out.keys()))
-        # cost must derive from price * quantity.
-        assert out["cost"] == 60000.0 * 0.1
+        # cost must derive from price * quantity (exact Decimal; H-0669).
+        assert Decimal(out["cost"]) == Decimal("6000")
         assert out["is_fill"] is True
         # position_direction stashed into raw_data, not a top-level key.
         assert out["raw_data"]["position_direction"] == "long"
@@ -2284,7 +2352,7 @@ class TestG12BMakerRebatePreservesSign:
         )
         assert len(result) == 1
         # Sign must be preserved — this is the contract H-0671 fixes.
-        assert result[0]["fee"] == -0.4
+        assert Decimal(result[0]["fee"]) == Decimal("-0.4")
 
     @pytest.mark.asyncio
     async def test_bybit_maker_rebate_stays_negative(self) -> None:
@@ -2321,7 +2389,7 @@ class TestG12BMakerRebatePreservesSign:
             mock_exchange, "strat-1", mock_supabase
         )
         assert len(result) == 1
-        assert result[0]["fee"] == -0.4
+        assert Decimal(result[0]["fee"]) == Decimal("-0.4")
 
     def test_normalize_fill_ccxt_maker_rebate_stays_negative(self) -> None:
         """CCXT unified shape — _normalize_fill must also preserve sign.
@@ -2344,7 +2412,7 @@ class TestG12BMakerRebatePreservesSign:
             },
             "binance",
         )
-        assert out["fee"] == -0.4
+        assert Decimal(out["fee"]) == Decimal("-0.4")
 
 
 # ─── audit-2026-05-07 H-0662 — Binance fetch_my_trades paginates ────
@@ -3016,7 +3084,7 @@ class TestG12BOkxFundingRowContract:
         assert len(result) == 1
         normal = [r for r in result if r["exchange_fill_id"] == "trade-fill"][0]
         # NEW-C13-01: fillSz=0.1 contracts × BTC-USDT ctVal=0.01 = 0.001 base units.
-        assert normal["quantity"] == pytest.approx(0.001)
+        assert Decimal(normal["quantity"]) == Decimal("0.001")
         # Confirm the funding-shaped row was dropped (not in result)
         funding_rows = [
             r for r in result if r.get("exchange_fill_id") == "trade-funding"
@@ -5046,7 +5114,7 @@ class TestClusterIC1301OkxContractNormalization:
 
         result = await _fetch_raw_trades_okx(mock_exchange, None)
         assert len(result) == 1
-        assert result[0]["quantity"] == pytest.approx(0.1), (
+        assert Decimal(result[0]["quantity"]) == Decimal("0.1"), (
             f"Expected 10 contracts × 0.01 ctVal = 0.1 BTC, got {result[0]['quantity']}. "
             "NEW-C13-01: fillSz must be normalized from contracts to base units."
         )
@@ -5080,7 +5148,7 @@ class TestClusterIC1301OkxContractNormalization:
         mock_exchange.private_get_trade_fills_history = _history
         fills, cap_hit = await _fetch_raw_trades_okx_inst_type(mock_exchange, None, "FUTURES")
         assert len(fills) == 1
-        assert fills[0]["quantity"] == pytest.approx(0.05), (
+        assert Decimal(fills[0]["quantity"]) == Decimal("0.05"), (
             f"Expected 5 contracts × 0.01 ctVal = 0.05 BTC, got {fills[0]['quantity']}. "
             "NEW-C13-01: FUTURES fills need same normalization as SWAP."
         )
@@ -5117,7 +5185,7 @@ class TestClusterIC1301OkxContractNormalization:
         fills, _ = await _fetch_raw_trades_okx_inst_type(mock_exchange, None, "SPOT")
         assert len(fills) == 1
         # SPOT: no normalization → quantity == fillSz exactly.
-        assert fills[0]["quantity"] == pytest.approx(0.5), (
+        assert Decimal(fills[0]["quantity"]) == Decimal("0.5"), (
             f"SPOT fill must not be contract-normalized. Got {fills[0]['quantity']}."
         )
 
