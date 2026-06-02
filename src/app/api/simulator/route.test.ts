@@ -103,8 +103,15 @@ vi.mock("@/lib/analytics-client", async () => {
       this.status = status;
     }
   }
+  class AnalyticsTimeoutError extends Error {
+    constructor(path: string, timeoutMs: number) {
+      super(`Analytics request to ${path} timed out after ${timeoutMs}ms`);
+      this.name = "AnalyticsTimeoutError";
+    }
+  }
   return {
     AnalyticsUpstreamError,
+    AnalyticsTimeoutError,
     simulateAddCandidate: (
       portfolioId: string,
       candidateStrategyId: string,
@@ -112,6 +119,13 @@ vi.mock("@/lib/analytics-client", async () => {
     ) => STATE.simulateImpl(portfolioId, candidateStrategyId, userId),
   };
 });
+
+// Sentry capture is fire-and-forget; spy so the 5xx tests can pin that the
+// detail still reaches Sentry now that err.message is no longer echoed.
+const captureSpy = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: captureSpy,
+}));
 
 // PR-3+4 H-1143 (audit-2026-05-07): SimulatorRequestSchema tightened
 // portfolio_id from `.min(1)` to `.uuid()`. The pre-fix fixture
@@ -148,6 +162,7 @@ beforeEach(() => {
     candidate_name: "Test",
     portfolio_id: PORTFOLIO_ID,
   });
+  captureSpy.mockClear();
 });
 
 afterEach(() => {
@@ -309,13 +324,13 @@ describe("POST /api/simulator", () => {
     expect(body.error).toBe("Portfolio not found");
   });
 
-  it("TC8 — 5xx AnalyticsUpstreamError NOT specially forwarded → 500", async () => {
+  it("TC8 — 5xx AnalyticsUpstreamError → 500 with STATIC message (M-0959/M-0963: no leak)", async () => {
     // Route only special-cases 4xx upstream; 5xx falls through to the generic
-    // 500 "message" path. This pins the existing contract; if we ever choose
-    // to forward 5xx verbatim, this test will fail loudly.
+    // 500 path, which now returns a STATIC message (the byte-identical defect
+    // F5 closed in /api/bridge — err.message echoed the upstream 5xx detail).
     const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
     STATE.simulateImpl = async () => {
-      throw new AnalyticsUpstreamError("upstream blew up", 502);
+      throw new AnalyticsUpstreamError("upstream traceback frame 42", 502);
     };
     const { POST } = await import("./route");
     const res = await POST(
@@ -326,15 +341,23 @@ describe("POST /api/simulator", () => {
     );
     expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.error).toBe("upstream blew up");
+    expect(body.error).toBe("Portfolio impact simulation failed.");
+    expect(body.error).not.toContain("traceback");
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { route: "api/simulator", op: "simulateAddCandidate" },
+      }),
+    );
   });
 
-  it("TC9 — analytics-client throws unreachable → 500 with message", async () => {
-    // The route catches generic Errors and emits 500 with err.message.
-    // This covers the "ANALYTICS_SERVICE_URL not configured / not reachable"
-    // path (the wrapper throws "Analytics service is not reachable.").
+  it("TC9 — generic Error (e.g. contract drift) → 500 STATIC, no leak (L-0055)", async () => {
+    // parseResponse() throws a plain Error whose message embeds Python schema
+    // field names on contract drift; that must NOT reach the allocator.
     STATE.simulateImpl = async () => {
-      throw new Error("Analytics service is not reachable. Please ensure it is running.");
+      throw new Error(
+        "Analytics response contract violation on /api/simulator: deltas.sharpe_delta: Expected number, received null",
+      );
     };
     const { POST } = await import("./route");
     const res = await POST(
@@ -345,7 +368,26 @@ describe("POST /api/simulator", () => {
     );
     expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.error).toMatch(/not reachable/i);
+    expect(body.error).toBe("Portfolio impact simulation failed.");
+    expect(body.error).not.toContain("sharpe_delta");
+    expect(body.error).not.toContain("contract violation");
+  });
+
+  it("TC9b — AnalyticsTimeoutError → 504 (M-0959)", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      throw new AnalyticsTimeoutError("/api/simulator", 15000);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        candidate_strategy_id: CANDIDATE_ID,
+      }),
+    );
+    expect(res.status).toBe(504);
+    const body = await res.json();
+    expect(body.error).toMatch(/taking longer/i);
   });
 
   it("TC10 — 404 when portfolio ownership check fails", async () => {
