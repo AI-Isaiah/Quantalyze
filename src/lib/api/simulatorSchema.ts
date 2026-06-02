@@ -37,25 +37,24 @@ export const SimulatorRequestSchema = z.object({
 
 export type SimulatorRequest = z.infer<typeof SimulatorRequestSchema>;
 
-// M-0982 (B9 boundary parity): enforce the metric wire domains at the trust
-// boundary, independent of producer trust. The Python producer already nullifies
-// NaN/Inf via `_safe_float`, so `.finite()` is defense-in-depth — it fails loud
-// if a future producer bypasses that path. `max_drawdown` is a NEGATIVE quantity
-// by the producer convention (simulator_scoring.py: "MaxDD is a negative
-// number"), so `.max(0)` catches a sign-flip regression.
+// M-0982 (B9 boundary parity): `max_drawdown` is a NEGATIVE quantity by the
+// producer convention (simulator_scoring.py: "MaxDD is a negative number"), so
+// `.max(0)` rejects a producer sign-flip at the wire — a positive value would
+// otherwise render as a confident "less risk" signal. This is the one genuine
+// new invariant the bare schema lacked.
 //
-// The hard [-1,1] / [0,1] bounds on avg_correlation / concentration are
-// DELIBERATELY NOT enforced here: numpy-style correlation can float-overshoot
-// 1.0 for a perfectly-correlated candidate, weight normalisation for the HHI is
-// producer-side and unverified, and SimulatorResponseSchema is parsed with a
-// THROW-on-failure parser (analytics-client.parseResponse) — so a hard bound
-// would 500 a legitimate edge case. NaN/Inf (the only absurd value reachable
-// past `_safe_float`) is already caught by `.finite()`.
+// No `.finite()` is needed: this repo runs Zod v4, where `z.number()` already
+// rejects NaN/Infinity by default (unlike v3). And the hard [-1,1] / [0,1]
+// bounds on avg_correlation / concentration are DELIBERATELY omitted: numpy-style
+// correlation can float-overshoot 1.0 for a perfectly-correlated candidate,
+// weight normalisation for the HHI is producer-side and unverified, and
+// SimulatorResponseSchema is parsed with a THROW-on-failure parser
+// (analytics-client.parseResponse) — so a hard bound would 500 a legitimate edge.
 export const SimulatorMetricsSchema = z.object({
-  sharpe: z.number().finite().nullable(),
-  max_drawdown: z.number().max(0).finite().nullable(),
-  avg_correlation: z.number().finite().nullable(),
-  concentration: z.number().finite().nullable(),
+  sharpe: z.number().nullable(),
+  max_drawdown: z.number().max(0).nullable(),
+  avg_correlation: z.number().nullable(),
+  concentration: z.number().nullable(),
 });
 
 // NEW-C11-01: deltas are nullable — a null means the operand metric was not
