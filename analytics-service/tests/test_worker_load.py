@@ -79,7 +79,12 @@ class TestWorkerLoadDrain:
         # which a future un-freeze would silently remove.
         in_flight = 0
         max_in_flight = 0
-        result_identities: list[int] = []
+        # Hold the actual DispatchResult OBJECTS (not their id()s). CPython
+        # reuses an id() once the object is GC'd, so recording bare ids and
+        # checking distinctness later flakes under memory pressure (a CI box
+        # collected ~11 of 100 before the assertion). Keeping the objects alive
+        # pins their ids, making the distinctness check deterministic.
+        dispatched_results: list[DispatchResult] = []
 
         async def _dispatch_side_effect(job: dict) -> DispatchResult:
             nonlocal in_flight, max_in_flight
@@ -93,7 +98,7 @@ class TestWorkerLoadDrain:
                 # 0 before the next job starts.
                 await asyncio.sleep(0)
                 res = DispatchResult(outcome=DispatchOutcome.DONE)
-                result_identities.append(id(res))
+                dispatched_results.append(res)
                 return res
             finally:
                 in_flight -= 1
@@ -193,12 +198,13 @@ class TestWorkerLoadDrain:
         # pass spuriously. With a fresh instance per call, the recorded object
         # ids are all distinct; a regression back to a shared instance
         # collapses them to a single id and trips this assertion regardless of
-        # whether DispatchResult is still frozen.
-        assert len(result_identities) == total_jobs, (
+        # whether DispatchResult is still frozen. (Objects are held alive in
+        # dispatched_results so their ids cannot be reused — see above.)
+        assert len(dispatched_results) == total_jobs, (
             f"expected one result instance recorded per dispatched job; "
-            f"got {len(result_identities)} for {total_jobs} jobs"
+            f"got {len(dispatched_results)} for {total_jobs} jobs"
         )
-        assert len(set(result_identities)) == total_jobs, (
+        assert len({id(r) for r in dispatched_results}) == total_jobs, (
             "each dispatch await must yield a distinct DispatchResult "
             "instance — a shared return_value would collapse these ids and "
             "let a cross-call state-leak bug pass undetected"
