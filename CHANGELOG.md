@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.74] - 2026-06-02
+### Fixed — API error-envelope hygiene, F5b delta (audit-2026-05-07)
+
+Closes the F5b findings that v0.24.15.73 (#423, a parallel agent's same-scope slice) left open. #423 covered no-store/withAuth on bridge+simulator, browse pagination, and the for-quants idempotent toggle; this delta closes the rest of the error-envelope class on the surrounding surface:
+
+- **PDF error-envelope JSON normalization** (L-0018): `/api/portfolio-pdf`, `/api/demo/portfolio-pdf`, `/api/factsheet/[id]/pdf`, and `/api/factsheet/[id]/tearsheet.pdf` now return a JSON `{ error }` envelope on every error path (was plain-text on 429/503/queue-full/508), so a client can parse one shape unconditionally. `Retry-After` is preserved; the success PDF binary is unchanged. The sole `rateLimitDenyText` caller (portfolio-pdf) moved to `rateLimitDenyJson`.
+- **Raw-error redaction** (R8, continuation of the F5a leak class): `/api/keys/validate-and-encrypt`, `/api/verify-strategy`, `/api/trades/upload`, and the 500 branch of `/api/strategies/browse` no longer forward raw Postgres / Python / crypto `error.message` to the client. The two analytics routes adopt the bridge pattern — **forward the curated 4xx detail** (actionable key-validation / verification copy still reaches the user), map timeouts to 504, and redact 5xx to a static message + `captureToSentry`.
+- **No-store cache hygiene** completing the compute-proxy trio: `/api/portfolio-optimizer` (and `/api/trades/upload`) now stamp `Cache-Control: private, no-store` on every response (bridge + simulator were done in #423).
+- **Client error-schema** (M-0967 / L-0060): `PortfolioImpactPanel` validates the simulator error body against a new shared `ErrorResponseSchema` (Zod) instead of dereferencing `any` — a non-string `error` can no longer coerce to `"[object Object]"`.
+
+Each fix is pinned by a fail-without-fix regression test. Reviewed by a 6-specialist suite (2 LOW test-gaps found + closed: the 504-timeout arm + trades/upload no-store assertions) and a 4-lens fresh-context red team (0 regressions confirmed). Deferred: M-0353 (finalize-wizard `fieldErrors` — client renders only error codes) and the user-settings + admin no-store sweep. tsc 0 / eslint 0 errors / full vitest green.
+
 ## [0.24.15.73] - 2026-06-02
 ### Fixed — API error-envelope hygiene round 2: no-store headers, withAuth, pagination contract, idempotency (F5b)
 
