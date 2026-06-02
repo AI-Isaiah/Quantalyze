@@ -85,6 +85,7 @@ function buildStrategy(
     current_weight: null,
     allocated_amount: null,
     alias: null,
+    added_at: "2026-01-01T00:00:00Z",
     eligible_for_outcome: false,
     existing_outcome: null,
     strategy: {
@@ -95,6 +96,7 @@ function buildStrategy(
       strategy_types: ["market_neutral"],
       markets: [],
       start_date: null,
+      organization_name: null,
       strategy_analytics: null,
       ...strategyOverrides,
     },

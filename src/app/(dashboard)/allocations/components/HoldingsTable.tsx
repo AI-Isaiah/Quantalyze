@@ -34,6 +34,7 @@
 
 import { Fragment, useMemo, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import {
   HoldingNoteIconButton,
   HoldingNoteRow,
@@ -41,6 +42,7 @@ import {
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
 import { formatNumber, formatPercent } from "@/lib/utils";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
+import type { StrategyRow } from "../lib/strategies-row-adapter";
 import { BridgeOutcomeBanner } from "./BridgeOutcomeBanner";
 import { HoldingDetail } from "./HoldingDetail";
 
@@ -125,6 +127,13 @@ export type SortKey =
   | "age";
 
 export interface HoldingsTableProps {
+  /**
+   * F4b strategy-row mode — one row per onboarded portfolio strategy. When
+   * present this takes precedence over `rows`/`holdings`; the table renders
+   * the strategy columns (Strategy / Manager / Weight / Allocation / MTD /
+   * Sharpe / Max DD / Age) with each row linking to the strategy factsheet.
+   */
+  strategyRows?: StrategyRow[];
   // ── Legacy props (Phase 08) — required when `rows` is absent.
   holdings?: HoldingRow[];
   showRevoked?: boolean;
@@ -148,6 +157,9 @@ export interface HoldingsTableProps {
 }
 
 export function HoldingsTable(props: HoldingsTableProps) {
+  if (props.strategyRows) {
+    return <StrategyRowsTable rows={props.strategyRows} />;
+  }
   if (props.rows) {
     return (
       <DesignHoldingsTable
@@ -166,6 +178,170 @@ export function HoldingsTable(props: HoldingsTableProps) {
       onShowRevokedChange={props.onShowRevokedChange ?? (() => {})}
       notesByHoldingScopeRef={props.notesByHoldingScopeRef ?? {}}
     />
+  );
+}
+
+// ──────────────────────────────────────────────────────── STRATEGY-ROW MODE
+// F4b — one row per onboarded portfolio strategy. No status-dot, no
+// per-holding bridge-outcome banner / sub-row (those are holding-centric and
+// live on the secondary Exchange-Positions section). Each row's Strategy cell
+// links to the strategy factsheet; the displayed name is already tier-redacted
+// by the adapter (alias → codename → synthetic id), and the factsheet route
+// applies its own disclosure-tier handling.
+
+type StrategySortKey =
+  | "strategy"
+  | "manager"
+  | "weight"
+  | "allocation"
+  | "mtd"
+  | "sharpe"
+  | "maxDd"
+  | "age";
+
+function compareStrategyRows(
+  a: StrategyRow,
+  b: StrategyRow,
+  key: StrategySortKey,
+  dir: SortDir,
+): number {
+  const dirMul = dir === "asc" ? 1 : -1;
+  const av = a[key];
+  const bv = b[key];
+  if (av == null && bv == null) return 0;
+  if (av == null) return 1; // nulls sort to end regardless of dir
+  if (bv == null) return -1;
+  if (typeof av === "string" && typeof bv === "string") {
+    return av.localeCompare(bv) * dirMul;
+  }
+  if (typeof av === "number" && typeof bv === "number") {
+    return (av - bv) * dirMul;
+  }
+  return 0;
+}
+
+function StrategyRowsTable({ rows }: { rows: StrategyRow[] }) {
+  const [sort, setSort] = useState<{ key: StrategySortKey; dir: SortDir }>({
+    key: "allocation",
+    dir: "desc",
+  });
+
+  const sortedRows = useMemo(
+    () =>
+      [...rows].sort(
+        (a, b) =>
+          compareStrategyRows(a, b, sort.key, sort.dir) ||
+          a.id.localeCompare(b.id),
+      ),
+    [rows, sort],
+  );
+
+  function toggleSort(key: StrategySortKey) {
+    setSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: "desc" },
+    );
+  }
+
+  return (
+    <section className="rounded-sm border border-border bg-surface">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
+          Strategies
+        </h3>
+      </div>
+
+      {sortedRows.length === 0 ? (
+        <p className="px-4 py-6 text-sm text-text-muted">
+          No strategies onboarded yet.
+        </p>
+      ) : (
+        <table className="w-full text-sm" data-table="strategies">
+          <thead>
+            <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-muted">
+              <StrategySortableHeader label="Strategy" sortKey="strategy" sort={sort} onSort={toggleSort} />
+              <StrategySortableHeader label="Manager" sortKey="manager" sort={sort} onSort={toggleSort} />
+              <StrategySortableHeader label="Weight" sortKey="weight" sort={sort} onSort={toggleSort} align="right" />
+              <StrategySortableHeader label="Allocation" sortKey="allocation" sort={sort} onSort={toggleSort} align="right" />
+              <StrategySortableHeader label="MTD" sortKey="mtd" sort={sort} onSort={toggleSort} align="right" />
+              <StrategySortableHeader label="Sharpe" sortKey="sharpe" sort={sort} onSort={toggleSort} align="right" />
+              <StrategySortableHeader label="Max DD" sortKey="maxDd" sort={sort} onSort={toggleSort} align="right" />
+              <StrategySortableHeader label="Age" sortKey="age" sort={sort} onSort={toggleSort} align="right" />
+            </tr>
+          </thead>
+          <tbody>
+            {sortedRows.map((row) => (
+              <tr
+                key={row.id}
+                className="border-b border-border/50 last:border-0"
+                data-strategy-row={row.id}
+              >
+                <td className="px-4 py-2 font-medium text-text-primary">
+                  <Link
+                    href={`/factsheet/${row.id}`}
+                    className="text-accent hover:underline"
+                  >
+                    {row.strategy}
+                  </Link>
+                </td>
+                <td className="px-4 py-2 text-text-secondary">
+                  {row.manager ?? "—"}
+                </td>
+                <td className="px-4 py-2 text-right tabular-nums">
+                  {row.weight == null ? "—" : formatPercent(row.weight)}
+                </td>
+                <td className="px-4 py-2 text-right tabular-nums">
+                  {formatUsd(row.allocation)}
+                </td>
+                <td className="px-4 py-2 text-right tabular-nums">
+                  {row.mtd == null ? "—" : formatPercent(row.mtd)}
+                </td>
+                <td className="px-4 py-2 text-right tabular-nums">
+                  {row.sharpe == null ? "—" : formatNumber(row.sharpe)}
+                </td>
+                <td className="px-4 py-2 text-right tabular-nums">
+                  {row.maxDd == null ? "—" : formatPercent(row.maxDd)}
+                </td>
+                <td className="px-4 py-2 text-right tabular-nums">
+                  {formatDays(row.age)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
+function StrategySortableHeader({
+  label,
+  sortKey,
+  sort,
+  onSort,
+  align,
+}: {
+  label: string;
+  sortKey: StrategySortKey;
+  sort: { key: StrategySortKey; dir: SortDir };
+  onSort: (key: StrategySortKey) => void;
+  align?: "right";
+}) {
+  const isActive = sort.key === sortKey;
+  return (
+    <th
+      className={`px-4 py-2 font-semibold ${align === "right" ? "text-right" : ""}`}
+    >
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 uppercase tracking-wider hover:text-text-primary"
+        onClick={() => onSort(sortKey)}
+      >
+        {label}
+        {isActive ? <span aria-hidden>{sort.dir === "asc" ? "▲" : "▼"}</span> : null}
+      </button>
+    </th>
   );
 }
 

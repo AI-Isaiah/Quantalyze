@@ -1484,6 +1484,12 @@ export interface MyAllocationDashboardPayload {
     allocated_amount: number | null;
     alias: string | null;
     /**
+     * F4b — when the strategy was onboarded into this portfolio
+     * (`portfolio_strategies.added_at`, non-nullable). Drives the "Age"
+     * column on the Holdings-tab strategy table.
+     */
+    added_at: string;
+    /**
      * True when:
      *   - the allocator has a match_decisions row with decision='sent_as_intro' for this strategy, AND
      *   - no bridge_outcomes row exists for (allocator, strategy), AND
@@ -1514,6 +1520,14 @@ export interface MyAllocationDashboardPayload {
       strategy_types: string[];
       markets: string[];
       start_date: string | null;
+      /**
+       * F4b — the managing organization's display name, REDACTED to `null`
+       * server-side for non-`institutional` rows (same trust boundary as
+       * `name` above: surfacing the org identity on exploratory tiers would
+       * defeat the disclosure-tier redaction). Drives the "Manager" column;
+       * the client falls through to `codename` when this is null.
+       */
+      organization_name: string | null;
       strategy_analytics: Pick<
         StrategyAnalytics,
         "daily_returns" | "cagr" | "sharpe" | "volatility" | "max_drawdown"
@@ -2856,6 +2870,7 @@ export const getMyAllocationDashboard = cache(
           current_weight,
           allocated_amount,
           alias,
+          added_at,
           strategy:strategies!inner (
             id,
             name,
@@ -2864,6 +2879,7 @@ export const getMyAllocationDashboard = cache(
             strategy_types,
             markets,
             start_date,
+            organization:organizations(name),
             strategy_analytics (
               daily_returns,
               cagr,
@@ -2994,6 +3010,32 @@ export const getMyAllocationDashboard = cache(
       const redactedName =
         strategy.disclosure_tier === "institutional" ? strategy.name : null;
 
+      // F4b — same trust boundary as `redactedName` (P35): the managing
+      // organization's name is manager-identifying, so it must NOT reach the
+      // RSC payload for non-institutional rows. Extract the raw embed
+      // (Supabase returns an embedded to-one as object OR array depending on
+      // join inference), redact by tier, and strip the raw `organization`
+      // field below so only the redacted `organization_name` is serialized.
+      const rawOrgEmbed = castRow<{ organization: unknown }>(
+        strategy,
+        "organization-join",
+      ).organization;
+      const rawOrgObj = Array.isArray(rawOrgEmbed) ? rawOrgEmbed[0] : rawOrgEmbed;
+      const orgName =
+        rawOrgObj != null &&
+        typeof rawOrgObj === "object" &&
+        typeof (rawOrgObj as { name?: unknown }).name === "string"
+          ? ((rawOrgObj as { name: string }).name)
+          : null;
+      const redactedOrgName =
+        strategy.disclosure_tier === "institutional" ? orgName : null;
+
+      // Drop the raw `organization` embed so `...strategyRest` below cannot
+      // spread the unredacted org name into the payload (only the redacted
+      // `organization_name` is emitted).
+      const { organization: _rawOrganization, ...strategyRest } =
+        strategy as StrategyPayload & { organization?: unknown };
+
       // NEW-C09-08 (B1, audit-2026-05-07) — CLOSED. Gate `current_weight`
       // through the `safeFraction` boundary so a producer-side bug
       // (paused-strategy negative weight, percent-vs-fraction confusion
@@ -3017,11 +3059,13 @@ export const getMyAllocationDashboard = cache(
           current_weight: safeFraction(row.current_weight),
           allocated_amount: row.allocated_amount,
           alias: castRow<{ alias: string | null }>(row, "alias").alias ?? null,
+          added_at: castRow<{ added_at: string }>(row, "added_at").added_at,
           eligible_for_outcome,
           existing_outcome,
           strategy: {
-            ...strategy,
+            ...strategyRest,
             name: redactedName,
+            organization_name: redactedOrgName,
             strategy_analytics: (analytics ?? null) as
               | MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"],
           },

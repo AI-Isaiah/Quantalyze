@@ -369,12 +369,13 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P count badges (H-1189 / 
 
   it("renders count badges on Holdings (8) and Outcomes (4) tabs when arrays are populated", () => {
     setSearchParams("");
-    const holdings = Array.from({ length: 8 }).map((_, i) => ({ id: `h-${i}` }));
+    // F4b: the Holdings badge counts onboarded strategies, not raw positions.
+    const strategies = Array.from({ length: 8 }).map((_, i) => ({ strategy_id: `s-${i}` }));
     const outcomes = Array.from({ length: 4 }).map((_, i) => ({ id: `o-${i}` }));
     render(
       <AllocationsTabs
         {...STUB_PROPS}
-        holdingsSummary={holdings as unknown as MyAllocationDashboardPayload["holdingsSummary"]}
+        strategies={strategies as unknown as MyAllocationDashboardPayload["strategies"]}
         outcomes={outcomes as unknown as MyAllocationDashboardPayload["outcomes"]}
       />,
     );
@@ -400,7 +401,7 @@ describe("AllocationsTabs — audit-2026-05-07 cluster P count badges (H-1189 / 
     render(
       <AllocationsTabs
         {...STUB_PROPS}
-        holdingsSummary={[{ id: "h-only" }] as unknown as MyAllocationDashboardPayload["holdingsSummary"]}
+        strategies={[{ strategy_id: "s-only" }] as unknown as MyAllocationDashboardPayload["strategies"]}
       />,
     );
     const holdingsTab = screen.getByRole("tab", { name: /Holdings/ });
