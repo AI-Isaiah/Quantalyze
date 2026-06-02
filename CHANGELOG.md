@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.69] - 2026-06-02
+### Changed — Allocator Holdings tab: strategy-rows + honest Exchange Positions (F4b, H-0062/H-0063/H-0064)
+
+The Holdings tab previously rendered raw exchange positions through a 9-column table whose Strategy / Manager / MTD / Sharpe / Max DD / Age columns were **structurally empty on every row** — `allocator_holdings` has no strategy link or `allocated_at`, and the adapter (correctly) refuses to invent one, so a fresh allocator saw a mostly-dashed table. This reworks the tab around the data that actually exists.
+
+- **Primary "Strategies" section** — one row per onboarded strategy (`portfolio_strategies`), with real data: Strategy (alias → tier-redacted `displayStrategyName`), Manager (the managing org, **redacted to codename on non-institutional tiers** server-side — same trust boundary as the strategy name), Weight, Allocation, **MTD** (derived from `strategy_analytics.daily_returns`, compounding the last observed month — mirrors the Python `compute_period_returns`), Sharpe, Max DD, and Age (days since `portfolio_strategies.added_at`). Each row links to the strategy factsheet.
+- **Secondary "Exchange Positions" section** (always shown) — the allocator's raw synced positions with position-appropriate columns: spot balances (legacy holding table, with revoked-key handling) + open derivative positions (`OpenPositionsTable`). A flagged-holding "Record outcome" surface (`ScenarioFlaggedHoldingsList`) renders above them when any holding is flagged for a bridge/replacement, preserving that CTA.
+- **Server** (`getMyAllocationDashboard`): the `portfolio_strategies` projection now also selects `added_at` and the managing `organizations(name)` embed; `organization_name` is redacted to `null` for non-institutional rows and the raw `organization` embed is stripped before serialization (so manager identity can't leak on exploratory tiers — same class as the F4a fix). `MyAllocationDashboardPayload.strategies[]` gains `added_at` + `strategy.organization_name`.
+- **New** `strategies-row-adapter.ts` (pure, injectable `now`) + 16 unit tests (MTD derivation incl. cross-month + null cases, age clamping, manager tier-redaction, bijection). The Holdings tab badge now counts onboarded strategies. The legacy/design `HoldingsTable` modes are untouched.
+
 ## [0.24.15.68] - 2026-06-02
 ### Fixed — API error-envelope hygiene: leak redaction, actionable errors, uniform success discriminator (F5a)
 

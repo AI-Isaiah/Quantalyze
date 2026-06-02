@@ -1206,6 +1206,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
           current_weight: null,
           allocated_amount: null,
           alias: "Added Strategy A",
+          added_at: "2025-06-01T00:00:00Z",
           eligible_for_outcome: false,
           existing_outcome: null,
           strategy: {
@@ -1216,6 +1217,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
             strategy_types: ["momentum"],
             markets: ["binance"],
             start_date: "2025-01-01",
+            organization_name: null,
             strategy_analytics: {
               // The runtime payload from queries.ts surfaces daily_returns as a
               // DailyPoint[] for the scenario sandbox path even though the
@@ -1286,6 +1288,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
           current_weight: null,
           allocated_amount: null,
           alias: "Meta Strategy",
+          added_at: "2025-06-01T00:00:00Z",
           eligible_for_outcome: false,
           existing_outcome: null,
           strategy: {
@@ -1296,6 +1299,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
             strategy_types: ["momentum"],
             markets: ["binance"],
             start_date: "2025-01-01",
+            organization_name: null,
             strategy_analytics: {
               daily_returns: {} as Record<string, Record<string, number>>,
               cagr: 0.22,
