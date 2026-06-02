@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.15.62] - 2026-06-02
+### Changed — B-mypy part i: extend the CI `mypy --strict` gate to `models/` (running-service floor complete)
+
+With **part h** (v0.24.15.61) gating `services/ routers/`, the only remaining running-service code outside the strict floor was `models/`. This brings it in: the gate is now `services/ routers/ models/` (64 source files, verified 0 against the CI-pinned deps supabase 2.15.1 / postgrest 1.0.2). **B-mypy now covers all running-service code.**
+
+- **models/schemas.py** (1 error): `PortfolioOptimizerRequest._validate_weights` param/return `Optional[dict]` → `Optional[dict[str, float]]`, matching the field declaration (`weights: Optional[dict[str, float]]`). Type-only / behavior-preserving — it is an after-mode `field_validator`, so the value is already field-coerced; the H-0589 NaN/Inf/negative guards run unchanged (43 schemas/optimizer tests pass). `--follow-imports=silent` means `models/` errors were invisible through the `services/` gate, so the explicit gate entry is what actually checks it.
+- **scripts/ deliberately left ungated**: the 6 CI-venv errors there are in one-off operational tooling (backfills, cassette recording), not the running service. Gating would add a `types-PyYAML` dev-dep plus friction for throwaway scripts, low payoff. `tests/` stays untyped by design.
+- CI-only gate widening + a 1-line annotation; no runtime behavior change.
+
 ## [0.24.15.61] - 2026-06-02
 ### Changed — B-mypy part h: widen the CI `mypy --strict` gate to `services/` + `routers/`
 

@@ -145,7 +145,7 @@ class PortfolioOptimizerRequest(BaseModel):
 
     @field_validator("weights")
     @classmethod
-    def _validate_weights(cls, v: Optional[dict]) -> Optional[dict]:
+    def _validate_weights(cls, v: Optional[dict[str, float]]) -> Optional[dict[str, float]]:
         if v is None:
             return None
         if not isinstance(v, dict):
