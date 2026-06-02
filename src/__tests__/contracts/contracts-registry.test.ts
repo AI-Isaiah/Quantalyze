@@ -38,6 +38,11 @@ const EXPECTED_RULES = [
   // rule to error" probe below (which targets src/lib/visibility.ts) covers
   // it with no rule→file split needed.
   "no-passthrough-on-ipc",
+  // B14 — bans raw `last_sync_at`-vs-cutoff staleness comparisons outside the
+  // deriveSyncFreshness SoT. Wired at "error" in the broad src/** block; its
+  // own module (src/lib/sync-freshness/**) and test files are the only
+  // exemptions, so the "resolves to error for visibility.ts" probe covers it.
+  "no-raw-staleness-derivation",
 ] as const;
 
 interface Guard {

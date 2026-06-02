@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.67] - 2026-06-02
+### Refactored — Allocation-dashboard sync-staleness single-sourced + lint-backstopped (B14, sync-liveness slice)
+
+Complements v0.24.15.66's B14 portfolio-badge slice (per-strategy `computed_at` via `computeFreshness`). This closes a **different axis** of the same NEW-C09-04 finding: the allocation dashboard's per-account **api-key sync liveness** (`allKeysStale` / `lastSyncAt` / `hasSyncing`), which #348 surfaced as a `StalenessBanner` but derived inline in `getMyAllocationDashboard` (`last_sync_at < cutoff`) — the primitive the B14 plan deferred.
+
+- New `src/lib/sync-freshness/` (`deriveSyncFreshness`): the single place the api-key sync-staleness decision is made (24h cutoff + the independent all-keys-stale and any-key-syncing predicates + max `lastSyncAt`). `getMyAllocationDashboard` now derives its three payload fields off it; **behaviour-preserving** — the `{allKeysStale, lastSyncAt, hasSyncing}` read contract is unchanged, so KpiStrip / EmptyState / ScenarioComposer / EquityChart are untouched.
+- New `quantalyze/no-raw-staleness-derivation` ESLint rule bans raw `last_sync_at`-vs-cutoff comparisons outside the SoT (mirrors the `no-raw-*` family). Unlike .66's overloaded `fresh/warm/stale` axis, the raw-comparison shape on this axis IS soundly expressible, so a rule is warranted; registered in the B25 plugin + contract registry.
+- Named `sync-freshness` / `SyncFreshness` (not `freshness` / `Freshness`) to coexist cleanly with the pre-existing `computeFreshness` computed_at module — two distinct axes, documented in the module header.
+- Reviewed by the 6 fresh-context specialists (code / silent-failure / type-design / comment / test / simplify): a MEDIUM module-name collision and a contradictory "precedence" comment were fixed; an independence regression guard was added (allStale ⊥ syncing — a stale-and-syncing key must report both, else KpiStrip would un-null stale KPIs during a sync).
+- Tests: the 4 fold states + cutoff boundary + independence, the lint rule's valid/invalid fixtures, and a query-layer guard (TC p7-06). tsc 0 / eslint 0 / full vitest green (the B25 contract registry caught the new rule needing registration).
+
 ## [0.24.15.66] - 2026-06-02
 ### Fixed — Portfolio surfaces showed stale per-constituent metrics as current (B14)
 

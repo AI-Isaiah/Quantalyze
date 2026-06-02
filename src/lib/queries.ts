@@ -36,6 +36,7 @@ import { holdingScopeKey } from "./keys";
 import { getOwnPreferences, type AllocatorOwnPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { deriveSyncFreshness } from "@/lib/sync-freshness/types";
 import { safeFraction } from "./units";
 import { withPublishedOnly } from "./visibility";
 
@@ -2205,16 +2206,15 @@ function derivePhase07Fields(
   | "activeVenues"
   | "equityBaselineUnknown"
 > {
-  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const activeKeys = apiKeys.filter((k) => k.is_active);
-  const allKeysStale =
-    activeKeys.length > 0 &&
-    activeKeys.every((k) => !k.last_sync_at || k.last_sync_at < cutoff);
-  const lastSyncAt = activeKeys.reduce<string | null>((max, k) => {
-    if (!k.last_sync_at) return max;
-    return !max || k.last_sync_at > max ? k.last_sync_at : max;
-  }, null);
-  const hasSyncing = activeKeys.some((k) => k.sync_status === "syncing");
+  // B14: single-source the sync-staleness decision in deriveSyncFreshness so the
+  // 24h cutoff + the two independent stale/syncing predicates cannot drift per
+  // surface (NEW-C09-04). The three fields below stay the payload read-contract
+  // for the dashboard's KpiStrip / EmptyState / ScenarioComposer / EquityChart.
+  const freshness = deriveSyncFreshness(apiKeys);
+  const allKeysStale = freshness.allStale;
+  const lastSyncAt = freshness.lastSyncAt;
+  const hasSyncing = freshness.syncing;
 
   // f7 adapter: DailyPoint[] for EquityCurve/DrawdownChart parallel-prop.
   const equityDailyPoints = equitySnapshotsToDailyPoints(

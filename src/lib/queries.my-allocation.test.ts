@@ -1090,7 +1090,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     expect(result.allKeysStale).toBe(false);
   });
 
-  it("TC p7-06: any active key sync_status='syncing' → hasSyncing=true", async () => {
+  it("TC p7-06: any active key sync_status='syncing' → hasSyncing=true; a stale+syncing key still reports allKeysStale=true (B14 — allStale and syncing are independent axes, NEW-C09-04)", async () => {
     state.portfolios = [P7_PORTFOLIO];
     state.apiKeys = [
       {
@@ -1108,6 +1108,12 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
     expect(result.hasSyncing).toBe(true);
+    // The key has never synced (last_sync_at=null) AND is mid-sync — these are
+    // independent: allKeysStale must NOT be suppressed by syncing, else the
+    // dashboard renders stale-sourced KPIs with full confidence during a sync
+    // (NEW-C09-04). The banner gate (allKeysStale && !hasSyncing) handles the
+    // double-message suppression at the consumer, not here.
+    expect(result.allKeysStale).toBe(true);
   });
 
   it("TC p7-07 (f7): equitySnapshots of 5 daily rows → equityDailyPoints length 5, values preserved in order", async () => {
