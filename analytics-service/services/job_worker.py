@@ -66,6 +66,7 @@ from supabase import Client
 
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
+from services.geo_block import is_geo_blocked
 from services.closed_sets import (  # B8b: single-sourced closed sets, re-exported
     PositionDirection as PositionDirection,
     Side as Side,
@@ -344,6 +345,23 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
             case _:
                 pass  # 5xx → falls through to 'unknown' below
 
+    # Egress-region geo-block (CloudFront 403 "blocked from your country" /
+    # Binance 451 "restricted location"). MUST be checked BEFORE the ccxt
+    # hierarchy below: Bybit's CloudFront 403 is non-JSON, so ccxt mis-maps it
+    # to RateLimitExceeded — which the NetworkError check would classify
+    # "transient" and retry forever (re-hammering a host that will never answer
+    # from this region) while stamping a phantom 429 cooldown. It is PERMANENT
+    # from the current worker egress; surface an operator-actionable message so
+    # the fix (move the worker region / proxy) is obvious, not a phantom rate
+    # limit. Reuses the "permanent" kind (no compute_jobs.error_kind CHECK
+    # migration needed).
+    if is_geo_blocked(exc):
+        return (
+            "permanent",
+            f"Exchange geo-blocked from worker egress region "
+            f"(CloudFront/451 — move region or proxy): {str(exc)[:400]}",
+        )
+
     # CCXT hierarchy checks: RequestTimeout and RateLimitExceeded both
     # inherit from NetworkError, so `isinstance(..., NetworkError)` covers
     # all three. Kept explicit for readability + future drift safety.
@@ -547,11 +565,20 @@ async def _check_circuit_breaker(
     return DispatchResult(outcome=DispatchOutcome.DEFERRED)
 
 
-async def _stamp_429(supabase: Client, key_row: dict[str, Any]) -> None:
+async def _stamp_429(
+    supabase: Client, key_row: dict[str, Any], exc: BaseException
+) -> None:
     """Stamp api_keys.last_429_at on a 429 response.
 
     Called before classify_exception returns, so subsequent jobs for the
     same API key will be deferred by the circuit breaker.
+
+    Skips entirely for an exchange edge GEO-BLOCK (``is_geo_blocked``): Bybit's
+    CloudFront 403 is mis-mapped by ccxt to ``RateLimitExceeded`` but is NOT a
+    rate limit — stamping it would park every sibling job on this api_key behind
+    the circuit breaker for the exchange cooldown (~10 min) even though the job
+    is (correctly) classified 'permanent'. Skipping keeps the geo-block fix's
+    no-phantom-cooldown promise instead of re-introducing it here.
 
     NEW-C12-10: stamp via the stamp_api_key_429 RPC so last_429_at is set
     from the DB clock (now()), not the stamping replica's Python wall clock.
@@ -561,6 +588,15 @@ async def _stamp_429(supabase: Client, key_row: dict[str, Any]) -> None:
     drift apart. A direct table().update() with datetime.now() would
     re-introduce the cross-container skew this RPC exists to remove.
     """
+    if is_geo_blocked(exc):
+        logger.info(
+            "api_key %s: exchange geo-block (not a rate limit) — skipping "
+            "last_429_at stamp so sibling jobs are not parked behind the "
+            "circuit breaker",
+            key_row.get("id"),
+        )
+        return
+
     def _stamp() -> None:
         supabase.rpc("stamp_api_key_429", {
             "p_api_key_id": key_row["id"],
@@ -926,8 +962,8 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 )
                 phase2_failed = True
                 phase2_error_message = str(e)[:200]
-    except ccxt.RateLimitExceeded:
-        await _stamp_429(ctx.supabase, ctx.key_row)
+    except ccxt.RateLimitExceeded as exc:
+        await _stamp_429(ctx.supabase, ctx.key_row, exc)
         # Audit-2026-05-07 red-team HIGH conf=8 — RateLimitExceeded can
         # bubble out of ``fetch_all_trades`` / ``fetch_usdt_balance`` /
         # ``fetch_raw_trades`` AFTER the daily-PnL branch or fetch_raw
@@ -1577,8 +1613,8 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
                 error_message=f"sync_funding: exchange {exchange_name} not supported",
                 error_kind="permanent",
             )
-    except ccxt.RateLimitExceeded:
-        await _stamp_429(ctx.supabase, ctx.key_row)
+    except ccxt.RateLimitExceeded as exc:
+        await _stamp_429(ctx.supabase, ctx.key_row, exc)
         raise
     finally:
         try:
@@ -1639,8 +1675,8 @@ async def run_poll_positions_job(job: dict[str, Any]) -> DispatchResult:
 
     try:
         snapshots = await fetch_positions(ctx.key_row["exchange"], ctx.exchange)
-    except ccxt.RateLimitExceeded:
-        await _stamp_429(ctx.supabase, ctx.key_row)
+    except ccxt.RateLimitExceeded as exc:
+        await _stamp_429(ctx.supabase, ctx.key_row, exc)
         raise
     finally:
         try:
@@ -1699,25 +1735,30 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
         try:
             rows, warning = await fetch_allocator_holdings(venue, ctx.exchange)
         except ccxt.RateLimitExceeded as exc:
-            await _stamp_429(ctx.supabase, ctx.key_row)
+            await _stamp_429(ctx.supabase, ctx.key_row, exc)
             error_kind, msg = classify_exception(exc)
             sanitized = msg[:500]
+            # A geo-block is mis-mapped to RateLimitExceeded but is NOT a rate
+            # limit (classify_exception returns 'permanent'): don't persist a
+            # misleading sync_status='rate_limited' for a key that is
+            # permanently geo-blocked from this region — surface 'error'.
+            sync_status = "error" if is_geo_blocked(exc) else "rate_limited"
 
             def _update_rate_limited() -> None:
                 # Return value discarded by the caller; drop it (matches
                 # _update_persist_err below) so we never annotate the Any-typed
                 # `.execute()` as APIResponse.
                 ctx.supabase.table("api_keys").update(
-                    {"sync_status": "rate_limited", "sync_error": sanitized}
+                    {"sync_status": sync_status, "sync_error": sanitized}
                 ).eq("id", api_key_id).execute()
 
             try:
                 await db_execute(_update_rate_limited)
             except Exception as upd_exc:  # noqa: BLE001
                 logger.warning(
-                    "poll_allocator_positions: failed to stamp sync_status='rate_limited' "
+                    "poll_allocator_positions: failed to persist sync_status=%r "
                     "for api_key %s: %s",
-                    api_key_id, upd_exc,
+                    sync_status, api_key_id, upd_exc,
                 )
             _emit_audit(
                 allocator_id, api_key_id, "allocator.holdings.sync_failed",
@@ -1919,8 +1960,8 @@ async def run_reconcile_strategy_job(job: dict[str, Any]) -> DispatchResult:
         # populated for the NEXT call on this asyncio task (worker pools
         # reuse tasks).
         get_and_clear_last_dq_flags()
-    except ccxt.RateLimitExceeded:
-        await _stamp_429(ctx.supabase, ctx.key_row)
+    except ccxt.RateLimitExceeded as exc:
+        await _stamp_429(ctx.supabase, ctx.key_row, exc)
         # Drain so a rate-limit-truncated partial accumulation does not
         # leak forward on this asyncio task.
         get_and_clear_last_dq_flags()

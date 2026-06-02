@@ -33,6 +33,7 @@ from fastapi import HTTPException
 from services.job_worker import (
     DispatchOutcome,
     DispatchResult,
+    _stamp_429,
     classify_exception,
     dispatch,
 )
@@ -69,6 +70,37 @@ class TestClassifyException:
         kind, msg = classify_exception(exc)
         assert kind == "transient"
         assert "429" in msg or "too many" in msg.lower()
+
+    def test_bybit_cloudfront_geoblock_is_permanent_not_rate_limit(self) -> None:
+        """Bybit's CloudFront country-block returns a non-JSON 403 that ccxt
+        mis-maps to RateLimitExceeded. It MUST classify permanent (no retry,
+        no phantom 429 cooldown) with an operator-actionable message — NOT
+        transient, which would re-hammer a host that will never answer from
+        this region. Mutation guard: drop the is_geo_blocked check in
+        classify_exception and this flips to ('transient', ...)."""
+        exc = ccxt.RateLimitExceeded(
+            "bybit GET https://api.bybit.com/v5/account/transaction-log 403 "
+            "Forbidden {error:The Amazon CloudFront distribution is configured "
+            "to block access from your country}"
+        )
+        kind, msg = classify_exception(exc)
+        assert kind == "permanent"
+        assert "geo-blocked" in msg.lower()
+
+    def test_binance_451_restricted_location_is_permanent(self) -> None:
+        """Binance returns 451 'Service unavailable from a restricted location'
+        for blocked regions. Even though ccxt may wrap it in a type that would
+        otherwise fall through to 'unknown', the geo-block signature classifies
+        it permanent so it isn't retried on the (unchangeable-from-here)
+        region."""
+        exc = ccxt.ExchangeError(
+            "binance GET https://fapi.binance.com/fapi/v1/time 451 "
+            "{\"code\":0,\"msg\":\"Service unavailable from a restricted "
+            "location according to 'b. Eligibility'\"}"
+        )
+        kind, msg = classify_exception(exc)
+        assert kind == "permanent"
+        assert "geo-blocked" in msg.lower()
 
     def test_authentication_error_is_permanent(self) -> None:
         exc = ccxt.AuthenticationError("invalid api key")
@@ -333,6 +365,42 @@ class TestClassifyException:
 # ---------------------------------------------------------------------------
 # dispatch routing
 # ---------------------------------------------------------------------------
+
+class TestStamp429GeoBlockSkip:
+    """_stamp_429 must NOT stamp last_429_at for an exchange edge geo-block.
+
+    Bybit's CloudFront 403 is mis-mapped by ccxt to RateLimitExceeded, but it is
+    NOT a rate limit: stamping it would park every sibling job on the same
+    api_key behind the circuit breaker (~10 min) even though the job is
+    classified 'permanent'. This is the no-phantom-cooldown half of the
+    geo-block fix that classify_exception alone does NOT deliver — the
+    per-handler `except ccxt.RateLimitExceeded` arms call _stamp_429 BEFORE the
+    exception ever reaches classify_exception (red-team 2026-06-02). Mutation
+    guard: delete the is_geo_blocked early-return in _stamp_429 and
+    test_geo_block_skips_stamp fails (the RPC fires).
+    """
+
+    @pytest.mark.asyncio
+    async def test_geo_block_skips_stamp(self) -> None:
+        supabase = MagicMock()
+        geo_exc = ccxt.RateLimitExceeded(
+            "bybit 403 Forbidden {error:The Amazon CloudFront distribution is "
+            "configured to block access from your country}"
+        )
+        await _stamp_429(supabase, {"id": "key-abc"}, geo_exc)
+        supabase.rpc.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_genuine_rate_limit_still_stamps(self) -> None:
+        # Control: the skip is geo-block-specific — a real 429 still stamps via
+        # the stamp_api_key_429 RPC.
+        supabase = MagicMock()
+        await _stamp_429(
+            supabase, {"id": "key-abc"}, ccxt.RateLimitExceeded("429 too many")
+        )
+        supabase.rpc.assert_called_once()
+        assert supabase.rpc.call_args[0][0] == "stamp_api_key_429"
+
 
 class TestDispatchRouting:
     """dispatch reads job['kind'] and routes to the matching run_* handler.
@@ -2922,7 +2990,9 @@ class TestCircuitBreakerSingleDbClock:
             "not table().update() with datetime.now() (C12-10)"
         )
 
-        await _stamp_429(supabase, {"id": "key-9"})
+        # Non-geo-block exc so the stamp path runs (a geo-block early-returns
+        # without stamping — see TestStamp429GeoBlockSkip).
+        await _stamp_429(supabase, {"id": "key-9"}, ccxt.RateLimitExceeded("429 too many"))
 
         assert rpc_calls == [("stamp_api_key_429", {"p_api_key_id": "key-9"})], (
             "stamp must go through the DB-clock RPC so the stamp and the "

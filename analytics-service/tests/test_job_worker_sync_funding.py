@@ -90,7 +90,8 @@ class TestRunSyncFundingJob:
         next cron tick from re-enqueuing immediately."""
         ctx = _build_mock_ctx(exchange_name="binance")
         mock_stamp_429 = AsyncMock()
-        mock_fetch = AsyncMock(side_effect=ccxt.RateLimitExceeded("429"))
+        rate_limit_exc = ccxt.RateLimitExceeded("429")
+        mock_fetch = AsyncMock(side_effect=rate_limit_exc)
 
         job = {"id": "job-funding-429", "kind": "sync_funding", "strategy_id": "strat-1"}
 
@@ -107,8 +108,9 @@ class TestRunSyncFundingJob:
             with pytest.raises(ccxt.RateLimitExceeded):
                 await run_sync_funding_job(job)
 
-        # _stamp_429 must run before the re-raise.
-        mock_stamp_429.assert_awaited_once_with(ctx.supabase, ctx.key_row)
+        # _stamp_429 must run before the re-raise, and the raising exception
+        # must be threaded through (it drives the geo-block skip in _stamp_429).
+        mock_stamp_429.assert_awaited_once_with(ctx.supabase, ctx.key_row, rate_limit_exc)
         ctx.exchange.close.assert_awaited()  # (f) finally still closes
 
     @pytest.mark.asyncio
