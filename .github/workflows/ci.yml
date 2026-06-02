@@ -715,14 +715,18 @@ jobs:
             echo "pip install attempt $n failed (transient?); retrying in $((n*5))s"
             sleep $((n*5))
           done
-      # Phase 19 / BACKBONE-02 / MC-3 fix: @runtime_checkable Protocol only
-      # verifies method *presence* at runtime, not signature shape. mypy
-      # --strict scoped to services/ingestion/ catches signature drift
-      # (e.g. `validate(req)` vs `validate(request)`) at type-check time
-      # before the test pipeline. --follow-imports=silent keeps strictness
-      # local to the new package; the legacy untyped surface migrates
-      # incrementally.
-      - run: mypy --strict --follow-imports=silent services/ingestion/
+      # @runtime_checkable Protocol only verifies method *presence* at runtime,
+      # not signature shape; mypy --strict catches signature drift (e.g.
+      # `validate(req)` vs `validate(request)`) at type-check time before the
+      # test pipeline. --follow-imports=silent keeps strictness local to the
+      # gated packages.
+      #
+      # B-mypy program: the strict floor started at services/ingestion/ (Phase
+      # 19 / BACKBONE-02 / MC-3) and now covers ALL of services/ (B-mypy part g,
+      # v0.24.15.60) plus routers/ — both verified 0 against the CI-pinned deps
+      # (supabase 2.15.1 / postgrest 1.0.2). models/ + scripts/ are the
+      # remaining incremental tail; tests/ stays untyped by design.
+      - run: mypy --strict --follow-imports=silent services/ routers/
       # PR #149 v0.22.25.3 follow-up: wire the test Supabase project into
       # the python job so the P97 fence regression tests in
       # tests/test_compute_jobs_fencing.py execute against a real DB. The
