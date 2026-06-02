@@ -251,6 +251,37 @@ describe("GET /api/demo/match/[allocator_id] — audit-2026-05-07 cluster A", ()
     expect(res.status).toBe(500);
   });
 
+  it("degrades to an empty 200 queue when the seed demo allocator is unprovisioned (PGRST116)", async () => {
+    // getAllocatorMatchPayload's profiles `.single()` raises PGRST116 ("0 rows")
+    // when the seed demo allocator isn't seeded in this environment (the seed is
+    // a manual script not run in prod). The PUBLIC demo must degrade to an empty
+    // queue (200) — a 500 on /demo/founder-view is a trust-collapse signal —
+    // while a GENUINE error (the test above) still 500s.
+    STATE.throwFromHelper = Object.assign(
+      new Error("JSON object requested, multiple (or no) rows returned"),
+      { code: "PGRST116" },
+    );
+    const res = await callRoute(SEED_UUID);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      profile: unknown;
+      batch: unknown;
+      candidates: unknown[];
+      excluded: unknown[];
+      decisions: unknown[];
+      existing_contact_requests: unknown[];
+    };
+    expect(body.profile).toBeNull();
+    expect(body.batch).toBeNull();
+    expect(body.candidates).toEqual([]);
+    expect(body.excluded).toEqual([]);
+    expect(body.decisions).toEqual([]);
+    expect(body.existing_contact_requests).toEqual([]);
+    // Still edge-cached identically to the normal path (10s fresh + 60s SWR)
+    // so it revalidates to real data shortly after the seed is provisioned.
+    expect(res.headers.get("cache-control")).toContain("s-maxage=10");
+  });
+
   it("red-team R6: exploratory candidate analytics.total_aum is masked", async () => {
     STATE.payload.candidates = [
       {

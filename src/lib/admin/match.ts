@@ -121,6 +121,12 @@ export async function getAllocatorMatchPayload(
         "id, display_name, company, email, role, allocator_status, preferences_updated_at",
       )
       .eq("id", allocatorId)
+      // This is the ONLY `.single()` in this fan-out. The public demo route
+      // (/api/demo/match) depends on that: it maps a PGRST116 from here to
+      // "seed demo allocator not provisioned" and degrades to an empty queue
+      // instead of 500. If you add another `.single()` below, update that
+      // route to an explicit profile-existence pre-check (PGRST116 would no
+      // longer uniquely mean "profile absent").
       .single(),
     admin
       .from("match_decisions")

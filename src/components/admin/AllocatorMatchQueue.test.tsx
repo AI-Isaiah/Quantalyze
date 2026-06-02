@@ -205,6 +205,42 @@ describe("<AllocatorMatchQueue> — C-0126 demo read-only", () => {
     }
   });
 
+  it("renders an empty, non-crashing queue when the demo seed is unprovisioned (profile: null)", async () => {
+    // /api/demo/match degrades to a 200 empty payload (profile null) when the
+    // seed demo allocator isn't provisioned in this environment. The component
+    // must render the empty state — NOT crash dereferencing profile.display_name
+    // (which it did before the null-guard, throwing on the public /demo page).
+    const emptyPayload = {
+      profile: null,
+      preferences: null,
+      batch: null,
+      candidates: [],
+      excluded: [],
+      decisions: [],
+      existing_contact_requests: [],
+    };
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(emptyPayload), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    render(
+      <AllocatorMatchQueue
+        allocatorId={ALLOCATOR_ID}
+        forceReadOnly={true}
+        sourceApiPath="/api/demo/match"
+      />,
+    );
+
+    // The empty-state copy renders → the component got past the header without
+    // dereferencing the null profile.
+    expect(await screen.findByText(/No candidates yet/i)).toBeInTheDocument();
+    // The read-only banner still shows on the public demo.
+    expect(screen.getByText(/Read-only preview/i)).toBeInTheDocument();
+  });
+
   it("still allows the read-only GET to /api/demo/match (queue loads)", async () => {
     const payload = buildPayload();
     const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(
