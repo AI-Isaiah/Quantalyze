@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.73] - 2026-06-02
+### Fixed — API error-envelope hygiene, part 2 (F5b; audit-2026-05-07)
+
+Second pass on the compute-proxy + supporting API surface, closing the remaining OWNED-BY-F5 findings plus the complete-surface siblings the recon surfaced — three whole classes and three contracts:
+
+- **No-store cache hygiene** (M-0889 / M-0957): every response on the compute-proxy trio — `/api/bridge`, `/api/simulator`, `/api/portfolio-optimizer` — now stamps `Cache-Control: private, no-store`. These serve allocator-scoped payloads (replacement candidates, portfolio-impact metrics, optimizer suggestions) a shared cache must never retain (Block D / P1947). `/api/bridge` also **converged onto the `withAuth` wrapper** (M-0888), dropping its hand-rolled CSRF + auth + approval-gate — behavior-preserving since it already gated approval inline.
+- **Raw-error redaction** (continuation of the F5a leak class): `/api/strategies/browse`, `/api/trades/upload`, `/api/keys/validate-and-encrypt`, and `/api/verify-strategy` no longer forward raw Postgres / Python / crypto `error.message` to the client. The two analytics routes adopt the bridge pattern — **forward the curated 4xx detail** (actionable key-validation / verification copy still reaches the user), map timeouts to 504, and redact 5xx to a static message + `captureToSentry`.
+- **PDF error-envelope normalization** (L-0018): `/api/portfolio-pdf`, `/api/demo/portfolio-pdf`, `/api/factsheet/[id]/pdf`, and `/api/factsheet/[id]/tearsheet.pdf` now return a JSON `{ error }` envelope on every error path (was plain-text on 429/503/queue-full/508), so a client can parse one shape unconditionally. `Retry-After` is preserved; the success PDF binary is unchanged.
+- **Client error-schema** (M-0967 / L-0060): `PortfolioImpactPanel` validates the simulator error body against a new shared `ErrorResponseSchema` (Zod) instead of dereferencing `any` — a non-string `error` can no longer coerce to `"[object Object]"`.
+- **Pagination contract** (M-0343): `/api/strategies/browse` fetches `LIMIT+1` and returns an additive `has_more` flag, so a catalog exceeding 200 gives a contract-level signal instead of a silent truncation. Existing `{ strategies }` consumers are unaffected.
+- **Idempotent toggle** (M-0269): the `for-quants-leads` process toggle now distinguishes "already in the requested state" (idempotent no-op → 200, no duplicate audit) from a genuinely missing row (404), so a network-retried POST no longer surfaces as a false failure in the admin table.
+
+Reviewed by a 6-specialist suite (2 LOW test-gaps found + closed) and a 4-lens fresh-context red team (0 regressions confirmed — the bridge `withAuth` conversion was independently verified behavior-preserving). Deferred with rationale: M-0353 (finalize-wizard `fieldErrors`) — the client renders only error codes, so the contract would be unrendered; and the user-settings + admin no-store sweep (preferences / notes / alias / intro / admin-match) — a dedicated exhaustive follow-up. tsc 0 / eslint 0 errors / full vitest 5914 passed.
+
 ## [0.24.15.72] - 2026-06-02
 ### Fixed — Equity widget no longer claims "sync just now" for never-synced allocators (B14, H-1226 / NEW-C09-04)
 
