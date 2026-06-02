@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.15.71] - 2026-06-02
+### Tested — Holdings tab strategy-rows render coverage (F4b follow-up)
+
+Closes the render-coverage gap left by v0.24.15.69 (F4b). The new `StrategyRowsTable` branch of `HoldingsTable` — the production Holdings-tab path (`HoldingsTabPanel` → `toStrategyRows` → `<HoldingsTable strategyRows>`) — had **zero render coverage**: every other allocations test mocks `HoldingsTable` (e.g. `HoldingsTabPanel.test.tsx`) or exercises the legacy/design branch, the adapter's 16 tests are data-only, and the e2e suite never clicks the Holdings tab. A render-time crash in that branch (bad cell formatter, broken factsheet `<Link>`, sort handler) would slip past tsc, lint, the adapter tests, and CI e2e alike.
+
+- New `HoldingsTable.strategy-rows.test.tsx` (10 tests) renders the **real** `HoldingsTable` fed by the **real** adapter output: the eight column headers, one `data-strategy-row` per strategy, per-row factsheet `href`, disclosure-tier Manager redaction (org → codename → em-dash), sorting interaction, and the empty state.
+- Locks the H-0062/H-0063/H-0064 closure: the "all six metric columns render real values, not '—'" assertion encodes exactly the pre-F4b all-dashes failure mode, so the regression cannot silently return.
+- Verification-only: no source change. tsc 0 / eslint 0 / the 10 new tests green. (A full authenticated in-browser /qa is not feasible here — the dashboard reads via the service-role admin client, and the local dev env targets a different Supabase project than the test credentials — so this render test is the durable substitute for the browser-render dimension.)
+
 ## [0.24.15.70] - 2026-06-02
 ### Refactored — Allocation-dashboard sync-staleness single-sourced + lint-backstopped (B14, sync-liveness slice)
 
