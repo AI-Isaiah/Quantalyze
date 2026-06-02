@@ -198,6 +198,45 @@ describe("resolveBenchmarkCorrelation", () => {
     expect(message).toContain("btc_rolling_correlation_90d malformed");
   });
 
+  it("M-0395: treats an out-of-[-1,1]-range correlation value as malformed -> unavailable", () => {
+    // A rolling correlation is mathematically bounded to [-1, 1]. A producer
+    // regression emitting 1.5 (or -2.0) is finite, so pre-fix it passed the
+    // typeof+isFinite guard and rendered as a confident 1.5 correlation point.
+    // It must now route through the malformed -> unavailable branch.
+    const resolved = resolveBenchmarkCorrelation(
+      buildAnalytics({
+        returns_series: [{ date: "2024-01-01", value: 1.0 }],
+        metrics_json: {
+          btc_rolling_correlation_90d: [
+            { date: "2024-04-01", value: 0.3 },
+            { date: "2024-04-02", value: 1.5 }, // out of range
+            { date: "2024-04-03", value: -2.0 }, // out of range
+          ],
+        },
+      }),
+    );
+    expect(resolved.kind).toBe("unavailable");
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+    expect(consoleErrorSpy.mock.calls[0]?.[0] as string).toContain(
+      "btc_rolling_correlation_90d malformed",
+    );
+  });
+
+  it("accepts boundary correlation values of exactly -1 and 1 (inclusive)", () => {
+    const resolved = resolveBenchmarkCorrelation(
+      buildAnalytics({
+        returns_series: [{ date: "2024-01-01", value: 1.0 }],
+        metrics_json: {
+          btc_rolling_correlation_90d: [
+            { date: "2024-04-01", value: -1 },
+            { date: "2024-04-02", value: 1 },
+          ],
+        },
+      }),
+    );
+    expect(resolved.kind).toBe("ok");
+  });
+
   it("logs and returns kind:'unavailable' when precomputed is a non-array primitive", () => {
     const resolved = resolveBenchmarkCorrelation(
       buildAnalytics({

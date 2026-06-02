@@ -158,7 +158,20 @@ const WIZARD_CONTEXT_SCHEMA = z
   .object({
     draft_strategy_id: z.string().uuid().nullable().optional(),
     step: z.enum(WIZARD_STEP_KEYS).optional(),
-    wizard_session_id: z.string().min(8).max(64).optional(),
+    // H-0266 (B9 boundary parity): wizard_session_id is a free-text correlation
+    // token written verbatim into for_quants_leads.wizard_context (JSONB). The
+    // bare min(8).max(64) accepted ANY characters (e.g. an injected
+    // `"><script>…` payload), making it stored-XSS fuel if the founder CRM ever
+    // renders wizard_context as HTML. Constrain it to the charset every real
+    // producer already emits — UUIDs (crypto.randomUUID), the literal
+    // "desktop-gate", and the `cid-<base36>-<base36>` non-secure-context
+    // fallback all match — so a hostile token is rejected (400) at the boundary.
+    wizard_session_id: z
+      .string()
+      .min(8)
+      .max(64)
+      .regex(/^[A-Za-z0-9_-]+$/, "wizard_session_id must be an alphanumeric token")
+      .optional(),
   })
   .nullable()
   .optional();

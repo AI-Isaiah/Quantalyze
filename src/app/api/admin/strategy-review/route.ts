@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { revalidateTag } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -43,10 +44,27 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const { id, action, review_note } = body;
-  if (!id || !["approve", "reject"].includes(action as string)) {
+  // B9 boundary-validation parity (M-1143): validate the admin POST body with a
+  // Zod schema rather than ad-hoc truthy checks. The defect this closes:
+  // `review_note` was written into strategies.review_note (unbounded TEXT) on
+  // the reject path with NO length cap — only the audit-metadata COPY (L220-227
+  // below) was bounded, so an admin (or hijacked admin session) could bloat the
+  // row with a multi-megabyte note. `.max(2000)` rejects it at the boundary
+  // (fail-loud 400) before the DB write. `id`/`action` semantics are preserved
+  // (non-empty id + approve|reject enum), so existing callers are unaffected.
+  // Parse stays BEFORE the rate limiter (B15b ordering) so a malformed body
+  // never burns an admin token.
+  const parsed = z
+    .object({
+      id: z.string().min(1),
+      action: z.enum(["approve", "reject"]),
+      review_note: z.string().max(2000).optional(),
+    })
+    .safeParse(body);
+  if (!parsed.success) {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
+  const { id, action, review_note } = parsed.data;
 
   // B15b (audit-2026-05-07): rate-limit AFTER input validation so a
   // malformed/invalid body (rejected 400 above) never consumes one of the

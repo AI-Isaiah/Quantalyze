@@ -222,6 +222,20 @@ const SPECS: Spec[] = [
     sql: () => resolveColumnCheck("compute_jobs", "exchange", "20260411144407_compute_jobs_queue.sql"),
   },
   {
+    // B9 H-1122: funding_fees was the lone exchange column with no CHECK. The
+    // 20260602180000 migration adds it, mirroring the sibling exchange columns.
+    column: "funding_fees.exchange",
+    ts: SUPPORTED_EXCHANGES,
+    tsNote:
+      "SUPPORTED_EXCHANGES (closed-sets.ts); FundingFee.exchange discriminated union (types.ts) narrows to the 3. CHECK added by 20260602180000_funding_fees_exchange_check.sql.",
+    sql: () =>
+      resolveColumnCheck(
+        "funding_fees",
+        "exchange",
+        "20260602180000_funding_fees_exchange_check.sql",
+      ),
+  },
+  {
     column: "profiles.role",
     ts: SIGNUP_ROLES,
     sql: () => resolveColumnCheck("profiles", "role", "20260405061911_initial_schema.sql"),
@@ -306,6 +320,7 @@ describe("[B9] CHECK ↔ Zod parity matrix", () => {
       "compute_jobs.status",
       "compute_jobs.error_kind",
       "compute_jobs.exchange",
+      "funding_fees.exchange",
       "profiles.role",
       "user_app_roles.role",
       "user_notes.scope_kind",

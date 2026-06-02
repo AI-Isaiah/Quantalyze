@@ -57,7 +57,15 @@ function isCorrelationPointArray(value: unknown): value is CorrelationPoint[] {
     return (
       typeof e.date === "string" &&
       typeof e.value === "number" &&
-      Number.isFinite(e.value)
+      Number.isFinite(e.value) &&
+      // M-0395 (B9 boundary parity): a rolling correlation is mathematically
+      // bounded to [-1, 1]. An out-of-range value (a producer regression) makes
+      // the guard return false, routing the whole series through the existing
+      // "malformed -> unavailable" branch (which logs the greppable
+      // `[CorrelationWithBenchmark] … malformed` line) rather than rendering an
+      // absurd >1 correlation point on the chart.
+      e.value >= -1 &&
+      e.value <= 1
     );
   });
 }

@@ -152,6 +152,28 @@ describe("SimulatorResponseSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  // M-0982 (B9 boundary parity): max_drawdown is negative-by-convention
+  // (simulator_scoring.py: "MaxDD is a negative number"), so .max(0) rejects a
+  // producer sign-flip at the wire — the one genuine invariant the bare schema
+  // lacked. (Zod v4's z.number() already rejects NaN/Infinity, so no .finite()
+  // is needed; a tautological "rejects Infinity" test was removed in review.)
+  it("M-0982: rejects a positive proposed.max_drawdown (sign-flip)", () => {
+    const result = SimulatorResponseSchema.safeParse({
+      ...validResponse,
+      proposed: { ...validResponse.proposed, max_drawdown: 0.5 },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("M-0982: accepts max_drawdown of exactly 0 (no-drawdown portfolio, inclusive bound)", () => {
+    const result = SimulatorResponseSchema.safeParse({
+      ...validResponse,
+      current: { ...validResponse.current, max_drawdown: 0 },
+      proposed: { ...validResponse.proposed, max_drawdown: 0 },
+    });
+    expect(result.success).toBe(true);
+  });
+
   // Non-ok branches stay `.passthrough()` because Python's _empty_result
   // (analytics-service/services/simulator_scoring.py) emits the full ok
   // shape — proposed/deltas/equity_curve_* — with nulls on every non-ok
