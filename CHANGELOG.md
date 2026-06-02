@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.79] - 2026-06-02
+### Fixed — F2a: numeric-integrity in the allocator display layer (audit-2026-05-07 HIGH-tackle batch F2, part a)
+
+The "a null/NaN value renders as a real number" class on allocator-facing metrics.
+
+- **H-0463 / H-0464 / M-0532 — corrupt deltas poisoned win-rate + status pill.** The most-mature-delta ladder (delta_180d→90d→30d) existed twice — a helper in `outcomes-kpi.ts` and an inline ternary in `bridge-outcome-label.ts` — both using a plain `!== null` check that lets NaN/Infinity through (a buggy analytics-worker write lands `'NaN'::float8` / ±Inf). NaN short-circuited ahead of a valid lower delta, counted as a **loss** (`NaN > 0` is false), and poisoned `avgRealizedDelta` to NaN; Infinity counted as a spurious **win** — corrupting both the KPI strip and the status pill, divergently. One NaN-safe `mostMatureDelta` now lives in `bridge-outcome-schema` (shared by both): a non-finite delta is treated as absent (falls through the ladder); no finite delta → null → the row is **pending**, not a fabricated win/loss. `computeOutcomeKPIs` repartitions on the finite delta (mature/pending/deltas stay consistent) and fail-loud `console.error`s when a fully-unusable row is excluded. The Python `_success_value` parity is the **ladder order only** — the non-finite handling deliberately diverges (the dashboard treats corrupt deltas as pending; the learning signal scores them) and the comments now say so, to stop a maintainer "reconciling" the two and reintroducing the bug.
+- **H-1076 — false "Healthy" over empty data.** `computePortfolioHealthScore` coerced null scored axes to 0 via `?? 0`, and the inverted drawdown/correlation math made 0 the BEST value, so an all-null (pending/empty) portfolio scored 70 = "Healthy". It now returns null when any scored axis is missing (the return type + every caller already handle null). *Scope note: this fn currently has no production caller — it's a latent-bug + test-honesty fix (a test had pinned the 70="Healthy" bug as intended).*
+- **H-0158 — composite returns under-weighted partial-coverage dates.** `buildCompositeReturns` divided every date's weighted sum by the GLOBAL `totalWeight`, so a date where only a 0.6-weight strategy reported was divided by 1.0, understating its return to 0.6× the true value. It now tracks a per-date contributing weight and renormalizes each date by the weight present that day (full-coverage dates unchanged).
+- **M-0541 — computeVaR returned undefined at confidence=0.** Only the lower index bound was clamped; `confidence=0` gave `idx = floor(1·n) = n` → `sorted[n]` undefined, poisoning `computeExpectedShortfall`. Clamp the upper bound too.
+
+Deferred (documented, kept open): **F2b** — the JSON-Infinity-on-the-wire sub-class (`compound`/`computeWinRate.profitFactor` emit Infinity → `JSON.stringify` → `null` → "null%"; H-0469 distribution part + M-0542 crash were already fixed by a prior pass) + the Python `portfolio_risk.py` `standalone_vol`-zeroing (H-0803) — needs contract-test changes + pytest. **H-1119** re-routed to **B9** (it's a PortfolioAnalytics discriminated-union type-design finding, not numeric integrity).
+
+Reviewed by a 5-lens specialist suite + an independent fresh-context red team; applied the red-team's parity-claim scoping + JSDoc/comment corrections (all doc-only). Test-quality lens verified the new tests fail on fix-revert. tsc 0 / eslint 0 errors / full vitest 5993 (+17 F2 tests).
+
 ## [0.24.15.78] - 2026-06-02
 ### Fixed — B9 boundary-validation parity, remainder (audit-2026-05-07)
 

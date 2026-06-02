@@ -142,8 +142,15 @@ export function computeRollingMetric(
 export function computeVaR(returns: number[], confidence: number): number {
   if (returns.length === 0) return 0;
   const sorted = [...returns].sort((a, b) => a - b);
-  const idx = Math.floor((1 - confidence) * sorted.length);
-  return sorted[Math.max(0, idx)];
+  // F2 M-0541: clamp BOTH bounds. confidence=0 gives idx = floor(1 * n) = n →
+  // sorted[n] is `undefined`, which then poisons computeExpectedShortfall
+  // (`filter(r => r <= undefined)` → []) and propagates NaN to any consumer.
+  // The lower clamp already existed; the upper bound was missing.
+  const idx = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.floor((1 - confidence) * sorted.length)),
+  );
+  return sorted[idx];
 }
 
 // ── 5. computeExpectedShortfall ─────────────────────────────────────

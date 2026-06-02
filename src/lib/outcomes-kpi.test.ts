@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { computeOutcomeKPIs } from "./outcomes-kpi";
 import type { BridgeOutcome } from "./bridge-outcome-schema";
 import fixture from "../../tests/fixtures/outcomes-kpi-parity.json";
@@ -197,5 +197,52 @@ describe("computeOutcomeKPIs", () => {
     expect(empty.winRate).toBeNull();
     expect(empty.avgRealizedDelta).toBeNull();
     expect(empty.winRateDenominator).toBe(0);
+  });
+
+  // F2 H-0464 / M-0532 — NaN/Infinity from a corrupt analytics-worker write must
+  // not corrupt the win rate or the average. Postgres double precision accepts
+  // 'NaN'::float8; a divide-by-zero in the returns calc yields ±Infinity.
+  describe("non-finite delta safety (H-0464 / M-0532)", () => {
+    it("uses the valid lower delta when the most-mature delta is NaN (no short-circuit)", () => {
+      // delta_180d=NaN must NOT short-circuit ahead of the valid delta_90d.
+      const r = computeOutcomeKPIs([
+        makeOutcome({ delta_180d: NaN, delta_90d: 0.05, delta_30d: 0.01 }),
+      ]);
+      expect(r.winRateDenominator).toBe(1);
+      expect(r.winRate).toBe(1); // 0.05 > 0 → win
+      expect(r.avgRealizedDelta).toBeCloseTo(0.05, 9);
+      expect(Number.isFinite(r.avgRealizedDelta!)).toBe(true);
+    });
+
+    it("counts an all-non-finite row as pending, not a loss; keeps the average finite", () => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const r = computeOutcomeKPIs([
+        makeOutcome({ delta_180d: NaN, delta_90d: null, delta_30d: null }),
+        makeOutcome({ delta_180d: 0.04, delta_90d: null, delta_30d: null }), // a real win
+      ]);
+      // The NaN-only row is excluded from the win-rate denominator (NOT counted
+      // as a loss) and surfaced as pending; only the real row contributes.
+      expect(r.winRateDenominator).toBe(1);
+      expect(r.winRate).toBe(1);
+      expect(r.pendingCount).toBe(1);
+      expect(Number.isFinite(r.avgRealizedDelta!)).toBe(true);
+      expect(errSpy).toHaveBeenCalledTimes(1); // fail-loud on the corrupt row
+      errSpy.mockRestore();
+    });
+
+    it("does NOT count an Infinity delta as a spurious win", () => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const r = computeOutcomeKPIs([
+        makeOutcome({ delta_180d: Infinity, delta_90d: null, delta_30d: null }),
+        makeOutcome({ delta_180d: -0.02, delta_90d: null, delta_30d: null }), // a real loss
+      ]);
+      // Infinity would have been `> 0` → a fake win. It's excluded instead; only
+      // the genuine loss counts.
+      expect(r.winRateDenominator).toBe(1);
+      expect(r.winRate).toBe(0);
+      expect(r.pendingCount).toBe(1);
+      expect(Number.isFinite(r.avgRealizedDelta!)).toBe(true);
+      errSpy.mockRestore();
+    });
   });
 });

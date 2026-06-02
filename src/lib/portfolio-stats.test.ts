@@ -170,6 +170,18 @@ describe("computeExpectedShortfall", () => {
     const es95 = computeExpectedShortfall(values, 0.95);
     expect(es95).toBeCloseTo(expectedES, 10);
   });
+
+  it("M-0541: confidence=0 clamps to the last index (no undefined / NaN poisoning)", () => {
+    const values = [-0.05, -0.02, 0.01, 0.03, 0.08];
+    // idx = floor((1-0)*5) = 5 → was sorted[5] === undefined (out of bounds).
+    // Now clamped to the last (worst-upper) element; must be a real finite number.
+    const var0 = computeVaR(values, 0);
+    expect(Number.isFinite(var0)).toBe(true);
+    expect(var0).toBe(0.08); // sorted ascending, last element
+    // And the undefined must not propagate NaN into Expected Shortfall.
+    const es0 = computeExpectedShortfall(values, 0);
+    expect(Number.isFinite(es0)).toBe(true);
+  });
 });
 
 // ── 6. computeReturnDistribution ────────────────────────────────────
