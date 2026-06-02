@@ -126,6 +126,41 @@ describe("src/lib/analytics.ts — server-side wrapper", () => {
     // it stays green both before and after the H-0416 await-flush fix.
   });
 
+  it("M-0487: $host falls back to a non-prod sentinel, never the literal quantalyze.com", async () => {
+    process.env.NEXT_PUBLIC_POSTHOG_KEY = "phc_test_key";
+    delete process.env.NEXT_PUBLIC_SITE_URL;
+    const { trackForQuantsEventServer, __resetForQuantsAnalyticsForTest } =
+      await import("./analytics");
+    __resetForQuantsAnalyticsForTest();
+
+    await trackForQuantsEventServer("for_quants_view", "v-host");
+
+    const props = POSTHOG_MOCK.captureSpy.mock.calls[0][0].properties as Record<
+      string,
+      unknown
+    >;
+    // quantalyze.com is an unrelated WP site; the prod URL is
+    // quantalyze-rho.vercel.app. A missing-env event must NOT masquerade as prod.
+    expect(props.$host).toBe("unknown.local");
+    expect(props.$host).not.toBe("quantalyze.com");
+  });
+
+  it("M-0487: $host uses NEXT_PUBLIC_SITE_URL when it is set", async () => {
+    process.env.NEXT_PUBLIC_POSTHOG_KEY = "phc_test_key";
+    process.env.NEXT_PUBLIC_SITE_URL = "https://quantalyze-rho.vercel.app";
+    const { trackForQuantsEventServer, __resetForQuantsAnalyticsForTest } =
+      await import("./analytics");
+    __resetForQuantsAnalyticsForTest();
+
+    await trackForQuantsEventServer("for_quants_view", "v-host2");
+
+    const props = POSTHOG_MOCK.captureSpy.mock.calls[0][0].properties as Record<
+      string,
+      unknown
+    >;
+    expect(props.$host).toBe("https://quantalyze-rho.vercel.app");
+  });
+
   // SEC-005-class regression guard (see FIX-LIST H-0415 / H-0416).
   //
   // posthog-node's capture() is a *synchronous enqueue* into an internal
@@ -136,12 +171,10 @@ describe("src/lib/analytics.ts — server-side wrapper", () => {
   // trackForQuantsEventServer to `await client.flush()` after capture()
   // so the awaited promise resolves only once the event is on the wire.
   //
-  // This test asserts that contract. It is .skip'd because the production
-  // code in src/lib/analytics.ts:147 still fires capture() without an
-  // explicit flush — un-skipping it today goes RED, surfacing the real
-  // bug. Once H-0416 lands `await client.flush()`, remove the `.skip`.
-  it.skip("flushes after every capture so serverless suspension can't drop the event", async () => {
-    // TODO(surfaced): H-0415 — un-skip once H-0416 adds `await client.flush()`
+  // This test asserts that contract. H-0416/M-0486 landed `await client.flush()`
+  // in trackForQuantsEventServer, so this is now an active regression guard
+  // (it goes RED again if the explicit per-capture flush is ever removed).
+  it("flushes after every capture so serverless suspension can't drop the event", async () => {
     process.env.NEXT_PUBLIC_POSTHOG_KEY = "phc_test_key";
     const { trackForQuantsEventServer, __resetForQuantsAnalyticsForTest } =
       await import("./analytics");

@@ -142,17 +142,28 @@ export async function trackForQuantsEventServer(
   if (!client) return;
 
   try {
-    // `flushAt: 1` on the constructor means capture() synchronously
-    // enqueues a flush in the background. No explicit await needed.
     client.capture({
       distinctId,
       event,
       properties: {
         ...props,
-        $host: process.env.NEXT_PUBLIC_SITE_URL ?? "quantalyze.com",
+        // M-0487: do NOT fall back to a real domain. PostHog uses $host as the
+        // canonical referrer for funnel attribution; hard-coding "quantalyze.com"
+        // (an unrelated WP site — prod is quantalyze-rho.vercel.app) made
+        // preview/missing-env events masquerade as prod traffic. A neutral
+        // sentinel keeps them in a clearly-non-prod bucket PostHog can filter.
+        $host: process.env.NEXT_PUBLIC_SITE_URL ?? "unknown.local",
         source_layer: "server",
       },
     });
+    // H-0416 / M-0486: posthog-node's capture() only SYNCHRONOUSLY enqueues into
+    // an internal batch — flushAt:1 sets the batch threshold but does NOT await
+    // the HTTP POST. The surrounding `await trackForQuantsEventServer(...)` (in
+    // the caller's after()) therefore resolves the instant capture() returns,
+    // and on Vercel Fluid Compute the instance can suspend before the flush hits
+    // the wire, silently dropping the event. await an explicit flush so the
+    // promise resolves only once the event is actually on the wire.
+    await client.flush();
   } catch (err) {
     console.warn(
       "[analytics] server capture failed (non-blocking):",
