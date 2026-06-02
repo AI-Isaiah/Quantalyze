@@ -199,6 +199,14 @@ export function computeReturnDistribution(
   warnDroppedNonFinite("computeReturnDistribution", returns.length - finiteCount);
   if (finiteCount === 0) return [];
   const range = maxVal - minVal;
+  // M-0542: when every finite return is identical (range === 0) the generic
+  // path emits `bins` bins all sharing min === max === minVal — bin 0 holds
+  // every count while bins 1..n-1 are zero-count noise bins with identical
+  // boundaries, a misleading histogram for a constant-return strategy.
+  // Collapse to the single meaningful bin.
+  if (range === 0) {
+    return [{ min: minVal, max: minVal, count: finiteCount }];
+  }
   const binWidth = range / bins;
 
   const result: DistributionBin[] = Array.from({ length: bins }, (_, i) => ({
@@ -221,12 +229,22 @@ export function computeReturnDistribution(
 // ── 7. computeWinRate ───────────────────────────────────────────────
 export interface WinRateResult {
   winRate: number;
-  profitFactor: number;
+  /**
+   * Sum(wins) / |sum(losses)|. `null` when there are wins but no losses — the
+   * ratio is mathematically infinite, and M-0543: a non-finite `number` is
+   * silently coerced to `null` by JSON.stringify (RFC 8259 §6) on its way to
+   * the client anyway, so a `number`-typed field would lie over the wire.
+   * `null` makes "undefined ratio (no downside)" explicit and JSON-round-
+   * trippable. `0` stays reserved for the genuinely-zero cases (no trades, or
+   * no wins) — distinct from "infinitely good".
+   */
+  profitFactor: number | null;
 }
 
 /**
  * Win rate = positive returns / total.
- * Profit factor = sum(positive returns) / |sum(negative returns)|.
+ * Profit factor = sum(positive returns) / |sum(negative returns)|, or `null`
+ * when there are wins but no losses (see {@link WinRateResult.profitFactor}).
  */
 export function computeWinRate(returns: number[]): WinRateResult {
   if (returns.length === 0) return { winRate: 0, profitFactor: 0 };
@@ -235,8 +253,8 @@ export function computeWinRate(returns: number[]): WinRateResult {
   const winRate = wins.length / returns.length;
   const sumWins = wins.reduce((s, v) => s + v, 0);
   const sumLosses = losses.reduce((s, v) => s + v, 0);
-  const profitFactor =
-    sumLosses === 0 ? (sumWins > 0 ? Infinity : 0) : sumWins / Math.abs(sumLosses);
+  const profitFactor: number | null =
+    sumLosses === 0 ? (sumWins > 0 ? null : 0) : sumWins / Math.abs(sumLosses);
   return { winRate, profitFactor };
 }
 
@@ -475,11 +493,29 @@ export function computeRiskDecomposition(
 
 // ── 12. computeHerfindahlIndex ──────────────────────────────────────
 /**
- * Herfindahl-Hirschman Index: sum of squared weights.
- * Ranges from 1/n (perfectly diversified) to 1 (single asset).
+ * Herfindahl-Hirschman Index of portfolio concentration, computed on
+ * gross-exposure weights (each weight divided by the total absolute exposure
+ * Σ|wᵢ|). Ranges from 1/n (perfectly diversified) to 1 (single concentrated
+ * position) for ANY book — including long-short books with negative weights.
+ *
+ * M-0544: the prior `Σwᵢ²` silently returned out-of-range values for shorts
+ * (e.g. [1.5, -0.5] → 2.5, violating the documented [1/n, 1] range and
+ * rendering "Concentration: 2.5" gibberish). Normalizing by gross exposure
+ * keeps the result in range and preserves the concentration interpretation.
+ * For an all-non-negative book that already sums to 1, Σ|wᵢ| = 1 so this
+ * reduces to the textbook Σwᵢ² (backward compatible).
+ *
+ * Returns 0 for an empty or all-zero book — no exposure means concentration
+ * is undefined, and 0 is the inert sentinel (distinct from the [1/n, 1] live
+ * range, so a caller can tell "no book" from "fully diversified").
  */
 export function computeHerfindahlIndex(weights: number[]): number {
-  return weights.reduce((s, w) => s + w * w, 0);
+  const gross = weights.reduce((s, w) => s + Math.abs(w), 0);
+  if (gross === 0) return 0;
+  return weights.reduce((s, w) => {
+    const norm = Math.abs(w) / gross;
+    return s + norm * norm;
+  }, 0);
 }
 
 // ── 13. detectRegimeChanges ─────────────────────────────────────────
