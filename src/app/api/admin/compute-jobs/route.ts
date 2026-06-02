@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import type { ComputeJobAdminRow } from "@/lib/types";
 
 export async function GET(request: NextRequest) {
@@ -17,10 +18,10 @@ export async function GET(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403, headers: NO_STORE_HEADERS });
   }
 
   const url = request.nextUrl;
@@ -43,9 +44,9 @@ export async function GET(request: NextRequest) {
     console.error("get_admin_compute_jobs RPC failed:", error);
     return NextResponse.json(
       { error: "Failed to fetch compute jobs" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
-  return NextResponse.json((data ?? []) as ComputeJobAdminRow[]);
+  return NextResponse.json((data ?? []) as ComputeJobAdminRow[], { headers: NO_STORE_HEADERS });
 }

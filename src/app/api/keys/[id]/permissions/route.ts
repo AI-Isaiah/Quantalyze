@@ -4,6 +4,7 @@ import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -102,7 +103,7 @@ export const GET = withAuth(
     const segments = new URL(req.url).pathname.split("/");
     const keyId = segments[segments.indexOf("keys") + 1];
     if (!keyId) {
-      return NextResponse.json({ error: "Missing key id" }, { status: 400 });
+      return NextResponse.json({ error: "Missing key id" }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
     // Per-user rate limit on this route as well — defense in depth on top
@@ -112,7 +113,7 @@ export const GET = withAuth(
     if (!rl.success) {
       return NextResponse.json(
         { error: "Too many requests" },
-        { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+        { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
       );
     }
 
@@ -125,13 +126,13 @@ export const GET = withAuth(
       .maybeSingle();
 
     if (keyErr) {
-      return NextResponse.json({ error: "Lookup failed" }, { status: 500 });
+      return NextResponse.json({ error: "Lookup failed" }, { status: 500, headers: NO_STORE_HEADERS });
     }
     if (!keyRow) {
-      return NextResponse.json({ error: "Key not found" }, { status: 404 });
+      return NextResponse.json({ error: "Key not found" }, { status: 404, headers: NO_STORE_HEADERS });
     }
     if (keyRow.user_id !== user.id) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      return NextResponse.json({ error: "Forbidden" }, { status: 403, headers: NO_STORE_HEADERS });
     }
 
     try {
@@ -151,7 +152,7 @@ export const GET = withAuth(
         },
       });
 
-      return NextResponse.json(payload);
+      return NextResponse.json(payload, { headers: NO_STORE_HEADERS });
     } catch (err) {
       // The raw Error.message used to bubble straight into the response
       // body (e.g. "INTERNAL_API_TOKEN is not configured on the Next
@@ -181,7 +182,7 @@ export const GET = withAuth(
         : "Could not check key scopes. Try again.";
 
       console.error(`[keys/permissions] proxy failed for ${keyId}:`, err);
-      return NextResponse.json({ error: userMessage, code }, { status: 502 });
+      return NextResponse.json({ error: userMessage, code }, { status: 502, headers: NO_STORE_HEADERS });
     }
   },
 );

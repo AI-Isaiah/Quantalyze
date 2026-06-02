@@ -2,6 +2,7 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { STRATEGY_NAMES, canonicalizeExchangeList } from "@/lib/constants";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
@@ -160,7 +161,7 @@ function validatePayload(
       ok: false,
       response: NextResponse.json(
         { error: "Invalid request body" },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
   }
@@ -184,7 +185,7 @@ function validatePayload(
       ok: false,
       response: NextResponse.json(
         { error: "strategy_id must be a valid UUID" },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
   }
@@ -193,7 +194,7 @@ function validatePayload(
       ok: false,
       response: NextResponse.json(
         { error: "name must be one of the allowed codenames" },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
   }
@@ -206,7 +207,7 @@ function validatePayload(
       ok: false,
       response: NextResponse.json(
         { error: "description must be 10-5000 characters" },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
   }
@@ -215,7 +216,7 @@ function validatePayload(
       ok: false,
       response: NextResponse.json(
         { error: "category_id must be a valid UUID" },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
   }
@@ -241,7 +242,7 @@ function validatePayload(
         {
           error: `aum must be a finite non-negative number under ${MAX_DOLLAR_VALUE}`,
         },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
   }
@@ -252,7 +253,7 @@ function validatePayload(
         {
           error: `max_capacity must be a finite non-negative number under ${MAX_DOLLAR_VALUE}`,
         },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
   }
@@ -314,7 +315,7 @@ async function runScopeBroadeningProbe(
       ok: false,
       response: NextResponse.json(
         { error: "Could not verify key scopes", code: "KEY_NETWORK_TIMEOUT" },
-        { status: 502 },
+        { status: 502, headers: NO_STORE_HEADERS },
       ),
     };
   }
@@ -326,7 +327,7 @@ async function runScopeBroadeningProbe(
           error: "Exchange permission probe failed",
           code: "KEY_NETWORK_TIMEOUT",
         },
-        { status: 502 },
+        { status: 502, headers: NO_STORE_HEADERS },
       ),
     };
   }
@@ -338,7 +339,7 @@ async function runScopeBroadeningProbe(
           error: "Key has been broadened beyond read-only on the exchange.",
           code: "KEY_SCOPE_BROADENED",
         },
-        { status: 403 },
+        { status: 403, headers: NO_STORE_HEADERS },
       ),
     };
   }
@@ -380,12 +381,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     if (isRateLimitMisconfigured(rl)) {
       return NextResponse.json(
         { error: "Rate limiter unavailable" },
-        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+        { status: 503, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
       );
     }
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
 
@@ -425,11 +426,11 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
     return NextResponse.json(
       { error: "Could not load draft" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
   if (!strategyRow) {
-    return NextResponse.json({ error: "Draft not found", code: "GATE_DRAFT_GONE" }, { status: 404 });
+    return NextResponse.json({ error: "Draft not found", code: "GATE_DRAFT_GONE" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
   const apiKeyId =
@@ -557,7 +558,7 @@ async function runLegacyFinalize(args: {
       error.code,
     );
     if (error.code === "P0002" || error.code === "02000") {
-      return NextResponse.json({ error: "Draft not found", code: "GATE_DRAFT_GONE" }, { status: 404 });
+      return NextResponse.json({ error: "Draft not found", code: "GATE_DRAFT_GONE" }, { status: 404, headers: NO_STORE_HEADERS });
     }
     // audit-2026-05-07 H-0321: split the two SQLSTATEs so HTTP semantics
     // match the actual failure mode.
@@ -575,7 +576,7 @@ async function runLegacyFinalize(args: {
       // failures and conflated them in the wizard_error funnel.
       return NextResponse.json(
         { error: "This draft cannot be finalized", code: "GUARD_BLOCKED" },
-        { status: 403 },
+        { status: 403, headers: NO_STORE_HEADERS },
       );
     }
     if (error.code === "22023") {
@@ -585,12 +586,12 @@ async function runLegacyFinalize(args: {
             "This draft is not in a finalizable state. Refresh and try again.",
           code: "draft_state_invalid",
         },
-        { status: 409 },
+        { status: 409, headers: NO_STORE_HEADERS },
       );
     }
     return NextResponse.json(
       { error: "Could not finalize wizard draft" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -745,11 +746,14 @@ async function runLegacyFinalize(args: {
 
   // H-0309: uniform `ok: true` success discriminator across the wizard
   // endpoints (create-with-key / keys-sync / finalize-wizard).
-  return NextResponse.json({
-    ok: true,
-    strategy_id: resolvedId,
-    status: "pending_review",
-  });
+  return NextResponse.json(
+    {
+      ok: true,
+      strategy_id: resolvedId,
+      status: "pending_review",
+    },
+    { headers: NO_STORE_HEADERS },
+  );
 }
 
 /**
@@ -820,24 +824,30 @@ async function unifiedFinalizeWizardHandler(args: {
   const upstream = result.body;
   if (isProcessKeyOnboardResponse(upstream)) {
     if (upstream.queued) {
-      return NextResponse.json({
+      return NextResponse.json(
+        {
+          ok: true,
+          strategy_id: args.strategy_id,
+          status: "pending_review",
+          verification_id: upstream.verification_id,
+          queued: true,
+        },
+        { headers: NO_STORE_HEADERS },
+      );
+    }
+    // queued=false discriminant — duplicate / dedup-hit envelope.
+    return NextResponse.json(
+      {
         ok: true,
         strategy_id: args.strategy_id,
         status: "pending_review",
-        verification_id: upstream.verification_id,
-        queued: true,
-      });
-    }
-    // queued=false discriminant — duplicate / dedup-hit envelope.
-    return NextResponse.json({
-      ok: true,
-      strategy_id: args.strategy_id,
-      status: "pending_review",
-      verification_id: upstream.verification_id ?? null,
-      queued: false,
-      code: upstream.code,
-      ...(upstream.idempotent === true ? { idempotent: true } : {}),
-    });
+        verification_id: upstream.verification_id ?? null,
+        queued: false,
+        code: upstream.code,
+        ...(upstream.idempotent === true ? { idempotent: true } : {}),
+      },
+      { headers: NO_STORE_HEADERS },
+    );
   }
   // Phase B simplify — H-0327 follow-up. The guard miss means the upstream
   // /process-key returned a 2xx body whose shape doesn't match the onboard
@@ -870,7 +880,7 @@ async function unifiedFinalizeWizardHandler(args: {
   });
   return NextResponse.json(
     { error: "Upstream service returned unexpected response" },
-    { status: 502 },
+    { status: 502, headers: NO_STORE_HEADERS },
   );
 }
 

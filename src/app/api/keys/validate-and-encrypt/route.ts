@@ -7,6 +7,7 @@ import {
 } from "@/lib/analytics-client";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { withAuth } from "@/lib/api/withAuth";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import type { User } from "@supabase/supabase-js";
 
@@ -25,14 +26,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const { exchange, api_key, api_secret, passphrase } = body;
 
   if (!exchange || !api_key || !api_secret) {
-    return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+    return NextResponse.json({ error: "Missing required fields" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   const rl = await checkLimit(userActionLimiter, `keys-validate-encrypt:${user.id}`);
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
 
@@ -71,7 +72,7 @@ async function unifiedValidateAndEncryptHandler(args: {
   const internalToken = process.env.INTERNAL_API_TOKEN;
   if (!internalToken) {
     console.error("[keys/validate-and-encrypt] INTERNAL_API_TOKEN not configured");
-    return NextResponse.json({ error: "Service unavailable" }, { status: 503 });
+    return NextResponse.json({ error: "Service unavailable" }, { status: 503, headers: NO_STORE_HEADERS });
   }
 
   const correlationId = await getCorrelationId();
@@ -99,9 +100,9 @@ async function unifiedValidateAndEncryptHandler(args: {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    return NextResponse.json(err, { status: res.status });
+    return NextResponse.json(err, { status: res.status, headers: NO_STORE_HEADERS });
   }
-  return NextResponse.json(await res.json());
+  return NextResponse.json(await res.json(), { headers: NO_STORE_HEADERS });
 }
 
 /**
@@ -127,11 +128,11 @@ async function legacyValidateAndEncryptHandler(args: {
     if (!validation.read_only) {
       return NextResponse.json({
         error: "This key has trading or withdrawal permissions. Only read-only keys are accepted.",
-      }, { status: 400 });
+      }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
     const encrypted = await encryptKey(exchange, api_key, api_secret, passphrase);
-    return NextResponse.json({ ...encrypted, valid: true, read_only: true });
+    return NextResponse.json({ ...encrypted, valid: true, read_only: true }, { headers: NO_STORE_HEADERS });
   } catch (err) {
     // F5b (R8): forward the CURATED 4xx detail from the Python validator
     // (e.g. "Invalid API credentials", "Key has IP restrictions") so the
@@ -143,19 +144,19 @@ async function legacyValidateAndEncryptHandler(args: {
       err.status >= 400 &&
       err.status < 500
     ) {
-      return NextResponse.json({ error: err.message }, { status: err.status });
+      return NextResponse.json({ error: err.message }, { status: err.status, headers: NO_STORE_HEADERS });
     }
     if (err instanceof AnalyticsTimeoutError) {
       return NextResponse.json(
         { error: "Key validation timed out. Please try again." },
-        { status: 504 },
+        { status: 504, headers: NO_STORE_HEADERS },
       );
     }
     console.error("[keys/validate-and-encrypt] validation failed:", err);
     captureToSentry(err, { tags: { route: "api/keys/validate-and-encrypt" } });
     return NextResponse.json(
       { error: "Key validation failed. Please try again." },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 }

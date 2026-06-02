@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withAuth } from "@/lib/api/withAuth";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { createClient } from "@/lib/supabase/server";
 import { assertPortfolioOwnership } from "@/lib/queries";
 import { logAuditEvent } from "@/lib/audit";
@@ -9,11 +10,11 @@ import type { User } from "@supabase/supabase-js";
 export const GET = withAuth(async (req: NextRequest, user: User) => {
   const portfolioId = new URL(req.url).searchParams.get("portfolio_id");
   if (!portfolioId) {
-    return NextResponse.json({ error: "Missing portfolio_id" }, { status: 400 });
+    return NextResponse.json({ error: "Missing portfolio_id" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   if (!(await assertPortfolioOwnership(portfolioId, user.id))) {
-    return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
+    return NextResponse.json({ error: "Portfolio not found" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
   const supabase = await createClient();
@@ -24,9 +25,9 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
     .order("created_at", { ascending: false });
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: 500, headers: NO_STORE_HEADERS });
   }
-  return NextResponse.json({ documents: data ?? [] });
+  return NextResponse.json({ documents: data ?? [] }, { headers: NO_STORE_HEADERS });
 });
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
@@ -42,18 +43,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   if (!portfolio_id || !title || !doc_type || !file_path) {
     return NextResponse.json(
       { error: "Missing required fields: portfolio_id, title, doc_type, file_path" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   if (!DOC_TYPES.includes(doc_type as (typeof DOC_TYPES)[number])) {
     return NextResponse.json(
       { error: `Invalid doc_type. Must be one of: ${DOC_TYPES.join(", ")}` },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   if (!(await assertPortfolioOwnership(portfolio_id, user.id))) {
-    return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
+    return NextResponse.json({ error: "Portfolio not found" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
   const supabase = await createClient();
@@ -77,7 +78,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     .single();
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: 500, headers: NO_STORE_HEADERS });
   }
 
   // Sprint 6 Task 7.1b — audit the document upload. Forensic trail for
@@ -95,5 +96,5 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     });
   }
 
-  return NextResponse.json({ document: data });
+  return NextResponse.json({ document: data }, { headers: NO_STORE_HEADERS });
 });

@@ -5,6 +5,7 @@ import {
   type AuditLogRow,
 } from "@/lib/audit-log-csv";
 import { auditLogExportLimiter, checkLimit } from "@/lib/ratelimit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * GET /api/me/audit-log/export — Phase 11 / D-05 self-serve audit-log CSV.
@@ -57,7 +58,10 @@ export async function GET(_req: NextRequest): Promise<NextResponse> {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401, headers: NO_STORE_HEADERS },
+    );
   }
 
   // Phase 11 review fix IN-03: per-user rate limit on the CSV export.
@@ -70,7 +74,10 @@ export async function GET(_req: NextRequest): Promise<NextResponse> {
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      {
+        status: 429,
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+      },
     );
   }
 
@@ -93,7 +100,7 @@ export async function GET(_req: NextRequest): Promise<NextResponse> {
     console.error("[api/me/audit-log/export] query failed:", error);
     return NextResponse.json(
       { error: "Failed to read audit log" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -107,7 +114,7 @@ export async function GET(_req: NextRequest): Promise<NextResponse> {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": `attachment; filename="${filename}"`,
-      "Cache-Control": "no-store",
+      ...NO_STORE_HEADERS,
     },
   });
 }

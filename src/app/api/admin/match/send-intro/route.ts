@@ -16,6 +16,7 @@ import {
 import { loadManagerIdentity } from "@/lib/manager-identity";
 import type { ManagerIdentity } from "@/lib/types";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 // POST /api/admin/match/send-intro
 // Calls send_intro_with_decision(...) — a single Postgres transaction that upserts
@@ -59,16 +60,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     console.error("[api/admin/match/send-intro] getUser failed:", getUserErr);
     return NextResponse.json(
       { error: "Authentication service unavailable", code: "auth_getuser_failed" },
-      { status: 503 },
+      { status: 503, headers: NO_STORE_HEADERS },
     );
   }
 
   // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403, headers: NO_STORE_HEADERS });
   }
 
   // audit-2026-05-07 fix-loop H-0234 — kill-switch gate.
@@ -106,7 +107,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           error:
             "Match engine status could not be verified. Please retry.",
         },
-        { status: 503 },
+        { status: 503, headers: NO_STORE_HEADERS },
       );
     }
     if (flagRow && flagRow.enabled === false) {
@@ -116,7 +117,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             "Match engine is disabled. Re-enable it from the queue index before sending intros.",
           disabled: true,
         },
-        { status: 503 },
+        { status: 503, headers: NO_STORE_HEADERS },
       );
     }
   }
@@ -139,7 +140,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (contentLength > MAX_JSON_BODY_BYTES) {
     return NextResponse.json(
       { error: "Request body too large" },
-      { status: 413 },
+      { status: 413, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -147,12 +148,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     bodyText = await req.text();
   } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400, headers: NO_STORE_HEADERS });
   }
   if (Buffer.byteLength(bodyText, "utf8") > MAX_JSON_BODY_BYTES) {
     return NextResponse.json(
       { error: "Request body too large" },
-      { status: 413 },
+      { status: 413, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -160,13 +161,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     raw = bodyText.length === 0 ? null : JSON.parse(bodyText);
   } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return NextResponse.json(
       { error: "Request body must be a JSON object" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   const rawBody = raw as Record<string, unknown>;
@@ -180,7 +181,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   ) {
     return NextResponse.json(
       { error: "allocator_id is required" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   if (
@@ -189,7 +190,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   ) {
     return NextResponse.json(
       { error: "strategy_id is required" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   // Phase 5 D-20b — original_strategy_id captured at intro-send time.
@@ -199,7 +200,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   ) {
     return NextResponse.json(
       { error: "original_strategy_id is required" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   if (
@@ -208,7 +209,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   ) {
     return NextResponse.json(
       { error: "admin_note is required" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   // audit-2026-05-07 fix-loop H-0231 — admin_note length cap. Bounds both
@@ -220,7 +221,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       {
         error: `admin_note exceeds maximum length of ${ADMIN_NOTE_MAX} characters`,
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   if (
@@ -230,7 +231,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   ) {
     return NextResponse.json(
       { error: "candidate_id must be a string or null" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -243,7 +244,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         error:
           "original_strategy_id must differ from strategy_id (cannot replace a strategy with itself)",
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -284,7 +285,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { error: "Service temporarily unavailable" },
         {
           status: 503,
-          headers: { "Retry-After": String(rl.retryAfter) },
+          headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
         },
       );
     }
@@ -292,7 +293,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { error: "Too many requests" },
       {
         status: 429,
-        headers: { "Retry-After": String(rl.retryAfter) },
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
       },
     );
   }
@@ -315,13 +316,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
     return NextResponse.json(
       { error: "Failed to verify allocator portfolio" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
   if (!portfolioRow) {
     return NextResponse.json(
       { error: "Allocator has no portfolio; cannot record an intro" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   const { data: holdingRow, error: holdingErr } = await admin
@@ -337,7 +338,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
     return NextResponse.json(
       { error: "Failed to verify allocator holdings" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
   if (!holdingRow) {
@@ -346,7 +347,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         error:
           "original_strategy_id is not one of this allocator's current holdings",
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -372,7 +373,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
       return NextResponse.json(
         { error: "Failed to verify candidate" },
-        { status: 500 },
+        { status: 500, headers: NO_STORE_HEADERS },
       );
     }
     if (!candidateRow || candidateRow.allocator_id !== body.allocator_id) {
@@ -381,7 +382,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           error:
             "candidate_id does not belong to the specified allocator",
         },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
   }
@@ -424,7 +425,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
       return NextResponse.json(
         { error: "Failed to verify strategy", code: "strategy_lookup_failed" },
-        { status: 500 },
+        { status: 500, headers: NO_STORE_HEADERS },
       );
     }
     if (!strategyRow) {
@@ -433,7 +434,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           error: "strategy_id does not exist",
           code: "strategy_not_found",
         },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
     if (strategyRow.status !== "published") {
@@ -442,7 +443,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           error: `Cannot send intro for a strategy with status '${strategyRow.status}' — strategy must be published`,
           code: "strategy_not_published",
         },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
     if (!strategyRow.user_id) {
@@ -451,7 +452,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           error: "strategy_id has no associated manager — cannot send intro",
           code: "strategy_no_manager",
         },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
   }
@@ -495,7 +496,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     return NextResponse.json(
       { error: "Failed to send intro" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -564,7 +565,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     return NextResponse.json(
       { error: "Intro service returned an unexpected response. No email was sent.", code: "rpc_shape_drift" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -625,7 +626,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           note_applied: !wasAlreadySent,
           audit_warning: "Intro committed but the audit record could not be written. Contact support.",
         },
-        { status: 207 },
+        { status: 207, headers: NO_STORE_HEADERS },
       );
     }
   }
@@ -657,20 +658,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  return NextResponse.json({
-    // audit-2026-05-07 fix-loop M-0280 — include `success: true` for parity
-    // with sibling admin PUTs (preferences, kill-switch). Shared client
-    // interceptors that branch on body.success can now see a positive signal
-    // without sniffing the 2xx status.
-    success: true,
-    contact_request_id: row?.contact_request_id,
-    match_decision_id: row?.match_decision_id,
-    was_already_sent: wasAlreadySent,
-    // NEW-C34-03: surface note_applied so the UI can warn when a re-send
-    // did not apply the new note (was_already_sent=true → RPC returned the
-    // old row unchanged, note was silently dropped).
-    note_applied: !wasAlreadySent,
-  });
+  return NextResponse.json(
+    {
+      // audit-2026-05-07 fix-loop M-0280 — include `success: true` for parity
+      // with sibling admin PUTs (preferences, kill-switch). Shared client
+      // interceptors that branch on body.success can now see a positive signal
+      // without sniffing the 2xx status.
+      success: true,
+      contact_request_id: row?.contact_request_id,
+      match_decision_id: row?.match_decision_id,
+      was_already_sent: wasAlreadySent,
+      // NEW-C34-03: surface note_applied so the UI can warn when a re-send
+      // did not apply the new note (was_already_sent=true → RPC returned the
+      // old row unchanged, note was silently dropped).
+      note_applied: !wasAlreadySent,
+    },
+    { headers: NO_STORE_HEADERS },
+  );
 }
 
 /** Lightweight email format guard — defense in depth before we hand off to Resend. */

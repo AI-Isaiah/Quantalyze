@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
 import { evalMatch } from "@/lib/analytics-client";
 import { assertSameOrigin } from "@/lib/csrf";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 // Audit-2026-05-07 C-0041: same-origin guard runs before auth so a
 // cross-origin probe with a replayed session cookie hits the CSRF wall
@@ -16,10 +17,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const { data: { user } } = await supabase.auth.getUser();
   // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403, headers: NO_STORE_HEADERS });
   }
 
   const url = new URL(req.url);
@@ -31,12 +32,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       lookback_days: lookback,
       partner_tag: partnerTag,
     });
-    return NextResponse.json(data);
+    return NextResponse.json(data, { headers: NO_STORE_HEADERS });
   } catch (err) {
     console.error("[api/admin/match/eval] upstream error:", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Unknown error" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 }

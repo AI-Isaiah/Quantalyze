@@ -8,6 +8,7 @@ import { parseCsv, parseCsvWithSchema } from "@/lib/csv";
 import { ensureAuthUser } from "@/lib/supabase/admin-users";
 import { adminActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { capAuditMetadata, emitAsUser } from "@/lib/audit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import {
   validateDisplayName,
   ProfileValidationError,
@@ -378,14 +379,14 @@ export async function POST(request: Request): Promise<NextResponse> {
   const { data: { user }, error: getUserErr } = await supabase.auth.getUser();
   if (getUserErr) {
     console.error("[api/admin/partner-import] auth.getUser failed:", getUserErr);
-    return NextResponse.json({ error: "Authentication check failed" }, { status: 500 });
+    return NextResponse.json({ error: "Authentication check failed" }, { status: 500, headers: NO_STORE_HEADERS });
   }
   // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403, headers: NO_STORE_HEADERS });
   }
 
   // Contract v2 (C-0052): resolve the with_header flag from the URL
@@ -417,7 +418,7 @@ export async function POST(request: Request): Promise<NextResponse> {
           error:
             "with_header must be 'true' or 'false' (audit-2026-05-07 C-0052: explicit contract v2)",
         },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
   }
@@ -429,16 +430,16 @@ export async function POST(request: Request): Promise<NextResponse> {
   // the hard cap. Mirrors send-intro's M-0284 guard.
   const contentLength = Number(request.headers.get("content-length") ?? "");
   if (contentLength > MAX_JSON_BODY_BYTES) {
-    return NextResponse.json({ error: "Request body too large" }, { status: 413 });
+    return NextResponse.json({ error: "Request body too large" }, { status: 413, headers: NO_STORE_HEADERS });
   }
   let bodyText: string;
   try {
     bodyText = await request.text();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400, headers: NO_STORE_HEADERS });
   }
   if (Buffer.byteLength(bodyText, "utf8") > MAX_JSON_BODY_BYTES) {
-    return NextResponse.json({ error: "Request body too large" }, { status: 413 });
+    return NextResponse.json({ error: "Request body too large" }, { status: 413, headers: NO_STORE_HEADERS });
   }
   let body: {
     partner_tag?: unknown;
@@ -448,7 +449,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   try {
     body = bodyText.length === 0 ? {} : JSON.parse(bodyText);
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   const partner_tag = typeof body.partner_tag === "string" ? body.partner_tag : "";
@@ -458,7 +459,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   if (!isValidPartnerTag(partner_tag)) {
     return NextResponse.json(
       { error: "partner_tag must match ^[a-z0-9-]+$" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -475,12 +476,12 @@ export async function POST(request: Request): Promise<NextResponse> {
     if (isRateLimitMisconfigured(rl)) {
       return NextResponse.json(
         { error: "Rate limiter unavailable", code: "ratelimit_misconfigured" },
-        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+        { status: 503, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
       );
     }
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
 
@@ -498,14 +499,14 @@ export async function POST(request: Request): Promise<NextResponse> {
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Invalid CSV" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   if (managers.length === 0 && allocators.length === 0) {
     return NextResponse.json(
       { error: "Both CSVs are empty — nothing to import" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -525,7 +526,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         allocators_rows: allocators.length,
         max_rows: MAX_IMPORT_ROWS,
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -566,7 +567,7 @@ export async function POST(request: Request): Promise<NextResponse> {
           conflicts: tierConflicts,
           code: "strategy_tier_conflict",
         },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
   }
@@ -921,7 +922,7 @@ export async function POST(request: Request): Promise<NextResponse> {
           // we include the flag uniformly for client parity.
           partial_completion: observedPartialCompletion,
         },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -943,7 +944,7 @@ export async function POST(request: Request): Promise<NextResponse> {
           allocators_rows_skipped: allocatorsRowsSkipped,
           partial_completion: observedPartialCompletion,
         },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
     // Audit-2026-05-07 C-0053 (red-team c8): the operator-facing 500
@@ -963,7 +964,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         allocators_rows_skipped: allocatorsRowsSkipped,
         partial_completion: observedPartialCompletion,
       },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -1034,7 +1035,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       allocators_rows_skipped: allocatorsRowsSkipped,
       partial_completion: false,
       audit_warning: "Import succeeded but the audit record could not be written. Contact support. Do NOT re-run the import.",
-    }, { status: 500 });
+    }, { status: 500, headers: NO_STORE_HEADERS });
   }
 
   return NextResponse.json({
@@ -1053,5 +1054,5 @@ export async function POST(request: Request): Promise<NextResponse> {
     // the throw. Clients can switch on this flag uniformly instead of
     // inferring partial state from a 500 status code.
     partial_completion: false,
-  });
+  }, { headers: NO_STORE_HEADERS });
 }

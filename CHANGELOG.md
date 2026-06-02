@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.75] - 2026-06-02
+### Fixed — No-store class-closure: cross-tenant cache-leak across 32 authenticated tenant-data routes (audit-2026-05-07 Block D / P1947)
+
+Closes the no-store sweep that #423 (v0.24.15.73) and #425 (v0.24.15.74) explicitly deferred ("an eslint rule to close the no-store class across the ~24 other authenticated routes" / "the user-settings + admin no-store sweep"). Policy (Block D / P1947): every authenticated route whose response **body carries tenant-specific data** must send `Cache-Control: private, no-store` (the shared `NO_STORE_HEADERS` const) so a shared/CDN cache cannot absorb one tenant's payload and serve it to another. The `withAuth`-family wrappers stamp it only on their own 401/approval-403 paths; a handler's own success + error responses do not inherit it.
+
+- **31 routes stamped** (307 response sites): `keys/validate-and-encrypt` (the 200 carries the caller's **encrypted credential ciphertext** — the highest-value leak), `keys/sync`, `keys/[id]/permissions`, `notes` (private free-text note body), `preferences` (allocator mandate prefs), `portfolio-documents`, `portfolio-alerts`, `alerts/critical`, `bridge/outcome` + `/dismiss` + `/[id]/curves`, `match/decisions/holding`, `attestation`, `account/deletion-request`, `portfolio-strategies/alias`, `allocator/holdings/sync`, `usage/session-start`, all six `strategies/*` write/draft routes, the five `admin/match/*` read routes (allocator PII + match payloads), `admin/partner-import` (conflict bodies enumerate real existing-user emails), `admin/compute-jobs`, and `admin/users/[id]/roles`. Every locally-constructed `NextResponse.json` / `new NextResponse` site now carries `NO_STORE_HEADERS`, merging with any pre-existing `Retry-After` via `{ ...NO_STORE_HEADERS, "Retry-After": … }`.
+- **`me/audit-log/export`** normalized from a bare `Cache-Control: no-store` to the canonical `private, no-store` const on the CSV success path (+ its error paths).
+- **`csvErrorEnvelope`** (local helper in `strategies/csv-validate`) stamps `NO_STORE_HEADERS` as the merge base for every CSV error path — caller headers (the 429's `Retry-After`) merge on top without clobbering Cache-Control.
+- **Regression lock**: a new `src/__tests__/no-store-coverage.test.ts` ratchet asserts all 34 audited tenant-data routes import + stamp the const (a total-removal tripwire that requires a real `headers:`/spread usage, not a bare occurrence count). Behavioral `Cache-Control: private, no-store` success-path assertions added on the six highest-sensitivity routes (encrypted credentials, per-key scope, private notes, mandate prefs, allocator PII, relationship documents).
+
+Deliberate scope boundaries (no tenant data on the wire, so out of policy): `withRole`/`withAuth` wrapper-owned 401/403/503 paths, the `rateLimitDenyJson`/`rateLimitDenyText` generic-deny helpers, and `postProcessKey(...).response` forwarded upstream bodies (mitigated by all callers being POST). `portfolio-optimizer` + `trades/upload` were already covered by #425 and are locked by the new ratchet.
+
+Reviewed by a 5-lens specialist suite + an independent fresh-context red team. Three lenses clean (residual-leak completeness, the six-largest-file deep read, header-merge of the inline sites); applied the two threshold findings — a `csvErrorEnvelope` spread-order fix (the 429 was dropping no-store) and the ratchet/behavioral-assertion hardening. tsc 0 / eslint 0 errors / full vitest 5963 passed.
+
 ## [0.24.15.74] - 2026-06-02
 ### Fixed — API error-envelope hygiene, F5b delta (audit-2026-05-07)
 

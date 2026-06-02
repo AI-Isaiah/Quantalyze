@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 // GET /api/admin/match/allocators
 //
@@ -25,10 +26,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const { data: { user } } = await supabase.auth.getUser();
   // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403, headers: NO_STORE_HEADERS });
   }
 
   const admin = createAdminClient();
@@ -54,7 +55,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           ? "Match engine schema not found. Apply migration 011 to your Supabase project."
           : "Failed to load allocators",
       },
-      { status: isSchemaError ? 503 : 500 },
+      { status: isSchemaError ? 503 : 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -62,7 +63,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const allocatorIds = allocators.map((a) => a.id);
 
   if (allocatorIds.length === 0) {
-    return NextResponse.json({ allocators: [] });
+    return NextResponse.json({ allocators: [] }, { headers: NO_STORE_HEADERS });
   }
 
   // Latest batch per allocator
@@ -83,7 +84,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           ? "Match engine schema not found. Apply migration 011 to your Supabase project."
           : "Failed to load match data",
       },
-      { status: isSchemaError ? 503 : 500 },
+      { status: isSchemaError ? 503 : 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -189,5 +190,5 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return bRecent.localeCompare(aRecent);
   });
 
-  return NextResponse.json({ allocators: enriched });
+  return NextResponse.json({ allocators: enriched }, { headers: NO_STORE_HEADERS });
 }

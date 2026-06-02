@@ -3,6 +3,7 @@ import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
 import { assertPortfolioOwnership } from "@/lib/queries";
 import { logAuditEvent } from "@/lib/audit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -49,7 +50,7 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
 
   if (portfolioId) {
     if (!(await assertPortfolioOwnership(portfolioId, user.id))) {
-      return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
+      return NextResponse.json({ error: "Portfolio not found" }, { status: 404, headers: NO_STORE_HEADERS });
     }
     query = query.eq("portfolio_id", portfolioId);
   } else {
@@ -64,14 +65,14 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
         page_size: limit,
         offset,
         has_more: false,
-      });
+      }, { headers: NO_STORE_HEADERS });
     }
     query = query.in("portfolio_id", portfolioIds);
   }
 
   const { data, error } = await query;
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: 500, headers: NO_STORE_HEADERS });
   }
   const rows = data ?? [];
   // We asked for `limit + 1` rows via `.range(offset, offset + limit)`
@@ -84,7 +85,7 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
     page_size: limit,
     offset,
     has_more: hasMore,
-  });
+  }, { headers: NO_STORE_HEADERS });
 });
 
 export const PATCH = withAuth(async (req: NextRequest, user: User) => {
@@ -92,7 +93,7 @@ export const PATCH = withAuth(async (req: NextRequest, user: User) => {
   const { alert_id } = body as { alert_id?: string };
 
   if (!alert_id) {
-    return NextResponse.json({ error: "Missing alert_id" }, { status: 400 });
+    return NextResponse.json({ error: "Missing alert_id" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   // Single UPDATE with subquery for ownership check (no TOCTOU window)
@@ -104,7 +105,7 @@ export const PATCH = withAuth(async (req: NextRequest, user: User) => {
   const portfolioIds = (portfolios ?? []).map((p) => p.id);
 
   if (portfolioIds.length === 0) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403, headers: NO_STORE_HEADERS });
   }
 
   const { data, error } = await supabase
@@ -115,10 +116,10 @@ export const PATCH = withAuth(async (req: NextRequest, user: User) => {
     .select("id");
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: 500, headers: NO_STORE_HEADERS });
   }
   if (!data || data.length === 0) {
-    return NextResponse.json({ error: "Alert not found or forbidden" }, { status: 404 });
+    return NextResponse.json({ error: "Alert not found or forbidden" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
   // Sprint 6 Task 7.1b — audit the in-app ack. The email-ack path in
@@ -131,5 +132,5 @@ export const PATCH = withAuth(async (req: NextRequest, user: User) => {
     metadata: { source: "in_app_list" },
   });
 
-  return NextResponse.json({ success: true });
+  return NextResponse.json({ success: true }, { headers: NO_STORE_HEADERS });
 });

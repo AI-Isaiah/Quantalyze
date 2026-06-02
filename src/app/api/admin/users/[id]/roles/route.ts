@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { withRole, APP_ROLES, type AppRole } from "@/lib/auth";
 import { captureToSentry } from "@/lib/sentry-capture";
 import {
@@ -120,12 +121,12 @@ export const GET = withRole<{ id: string }>("admin")(
       if (isRateLimitMisconfigured(rl)) {
         return NextResponse.json(
           { error: "Rate limiter unavailable", code: "ratelimit_misconfigured" },
-          { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+          { status: 503, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
         );
       }
       return NextResponse.json(
         { error: "Too many requests" },
-        { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+        { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
       );
     }
 
@@ -133,7 +134,7 @@ export const GET = withRole<{ id: string }>("admin")(
     if (!targetUserId) {
       return NextResponse.json(
         { error: "Missing target user id in path" },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -153,13 +154,13 @@ export const GET = withRole<{ id: string }>("admin")(
       });
       return NextResponse.json(
         { error: "Failed to fetch user roles", code: "profile_read_failed" },
-        { status: 500 },
+        { status: 500, headers: NO_STORE_HEADERS },
       );
     }
     if (!profile) {
       return NextResponse.json(
         { error: "User not found", code: "user_not_found" },
-        { status: 404 },
+        { status: 404, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -172,10 +173,13 @@ export const GET = withRole<{ id: string }>("admin")(
       });
       return NextResponse.json(
         { error: "Failed to fetch user roles", code: "roles_read_failed" },
-        { status: 500 },
+        { status: 500, headers: NO_STORE_HEADERS },
       );
     }
-    return NextResponse.json({ user_id: targetUserId, roles: result.roles });
+    return NextResponse.json(
+      { user_id: targetUserId, roles: result.roles },
+      { headers: NO_STORE_HEADERS },
+    );
   },
 );
 
@@ -185,7 +189,7 @@ export const POST = withRole<{ id: string }>("admin")(
     if (!rawTargetUserId) {
       return NextResponse.json(
         { error: "Missing target user id in path" },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
     // Normalize to lowercase so the actor/target comparison and the audit
@@ -199,7 +203,7 @@ export const POST = withRole<{ id: string }>("admin")(
     if (!parsed.success) {
       return NextResponse.json(
         { error: "Invalid request body", issues: parsed.error.issues },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
     const { action, role } = parsed.data;
@@ -219,12 +223,12 @@ export const POST = withRole<{ id: string }>("admin")(
       if (isRateLimitMisconfigured(rl)) {
         return NextResponse.json(
           { error: "Rate limiter unavailable", code: "ratelimit_misconfigured" },
-          { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+          { status: 503, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
         );
       }
       return NextResponse.json(
         { error: "Too many requests" },
-        { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+        { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
       );
     }
 
@@ -251,10 +255,10 @@ export const POST = withRole<{ id: string }>("admin")(
               error:
                 "Admins cannot revoke their own admin role — another admin must act.",
             },
-            { status: 403 },
+            { status: 403, headers: NO_STORE_HEADERS },
           );
         }
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+        return NextResponse.json({ error: "Forbidden" }, { status: 403, headers: NO_STORE_HEADERS });
       }
       // 23514 check_violation → 409 last-admin lockout (NEW-C17-02 / H-02).
       if (code === "23514") {
@@ -264,21 +268,21 @@ export const POST = withRole<{ id: string }>("admin")(
               "Cannot revoke: this is the last admin account. Grant admin to another user first.",
             code: "would_orphan_last_admin",
           },
-          { status: 409 },
+          { status: 409, headers: NO_STORE_HEADERS },
         );
       }
       // P0002 no_data_found → 404 user_not_found (mirrors GET).
       if (code === "P0002") {
         return NextResponse.json(
           { error: "User not found", code: "user_not_found" },
-          { status: 404 },
+          { status: 404, headers: NO_STORE_HEADERS },
         );
       }
       // 22023 invalid_parameter_value → 400 (defensive; body is Zod-validated).
       if (code === "22023") {
         return NextResponse.json(
           { error: "Invalid role mutation request", code: "invalid_role_mutation" },
-          { status: 400 },
+          { status: 400, headers: NO_STORE_HEADERS },
         );
       }
       console.error("[admin/users/roles] admin_role_mutate failed:", {
@@ -290,7 +294,7 @@ export const POST = withRole<{ id: string }>("admin")(
       });
       return NextResponse.json(
         { error: "Role mutation failed", code: "admin_role_mutate_failed" },
-        { status: 500 },
+        { status: 500, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -307,7 +311,7 @@ export const POST = withRole<{ id: string }>("admin")(
       );
       return NextResponse.json(
         { error: "Role mutation failed", code: "admin_role_mutate_failed" },
-        { status: 500 },
+        { status: 500, headers: NO_STORE_HEADERS },
       );
     }
     const result = data as AdminRoleMutateResult;
@@ -337,7 +341,7 @@ export const POST = withRole<{ id: string }>("admin")(
       }
       return NextResponse.json(
         { error: `User does not hold role '${role}' — nothing to revoke.`, code: "role_not_held" },
-        { status: 404 },
+        { status: 404, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -380,7 +384,7 @@ export const POST = withRole<{ id: string }>("admin")(
           error: `${isGrant ? "Grant" : "Revoke"} committed but audit emission failed. Refresh to verify state.`,
           code: "mutation_succeeded_but_audit_failed",
         },
-        { status: 500 },
+        { status: 500, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -449,10 +453,13 @@ export const POST = withRole<{ id: string }>("admin")(
                 "Revoke committed but the role is still observed as held (possible concurrent re-grant). Refresh and retry if needed.",
               code: "revoke_did_not_take",
             },
-        { status: 409 },
+        { status: 409, headers: NO_STORE_HEADERS },
       );
     }
 
-    return NextResponse.json({ user_id: targetUserId, roles: result.roles });
+    return NextResponse.json(
+      { user_id: targetUserId, roles: result.roles },
+      { headers: NO_STORE_HEADERS },
+    );
   },
 );

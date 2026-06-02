@@ -244,6 +244,10 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(200);
+    // Block D / P1947: the success body carries the caller's ENCRYPTED
+    // credential ciphertext (dek_encrypted/nonce/api_*_encrypted). It must
+    // never be absorbed by a shared cache and served to another tenant.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = await res.json();
     expect(body).toEqual({
       api_key_encrypted: "ct-blob",

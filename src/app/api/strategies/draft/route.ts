@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -34,12 +35,12 @@ export const GET = withAuth(async (_req: NextRequest, user: User) => {
     if (isRateLimitMisconfigured(rl)) {
       return NextResponse.json(
         { draft: null, error: "Rate limiter unavailable" },
-        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+        { status: 503, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
       );
     }
     return NextResponse.json(
       { draft: null, error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
 
@@ -71,9 +72,9 @@ export const GET = withAuth(async (_req: NextRequest, user: User) => {
     });
     return NextResponse.json(
       { draft: null, error: "draft_lookup_failed" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
-  return NextResponse.json({ draft: data ?? null });
+  return NextResponse.json({ draft: data ?? null }, { headers: NO_STORE_HEADERS });
 });

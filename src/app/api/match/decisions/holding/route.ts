@@ -14,6 +14,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { withAuth } from "@/lib/api/withAuth";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withPublishedOnly } from "@/lib/visibility";
@@ -51,14 +52,17 @@ export const POST = withAuth(
     try {
       rawBody = await req.json();
     } catch {
-      return NextResponse.json({ error: "invalid json" }, { status: 400 });
+      return NextResponse.json(
+        { error: "invalid json" },
+        { status: 400, headers: NO_STORE_HEADERS },
+      );
     }
 
     const parsed = BodySchema.safeParse(rawBody);
     if (!parsed.success) {
       return NextResponse.json(
         { error: "invalid payload", issues: parsed.error.issues },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
     const { holding_ref, top_candidate_strategy_id } = parsed.data;
@@ -68,7 +72,7 @@ export const POST = withAuth(
     if (!scope) {
       return NextResponse.json(
         { error: "invalid holding_ref" },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -86,7 +90,10 @@ export const POST = withAuth(
     if (!ownedHolding) {
       // Return 403 for both "holding not found" and "belongs to another allocator"
       // — no existence leak per T-09-03.b spec.
-      return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+      return NextResponse.json(
+        { error: "Unauthorized" },
+        { status: 403, headers: NO_STORE_HEADERS },
+      );
     }
 
     // Strategy existence gate: only allow published strategies as candidates
@@ -101,7 +108,7 @@ export const POST = withAuth(
     if (!candidate) {
       return NextResponse.json(
         { error: "strategy not found" },
-        { status: 404 },
+        { status: 404, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -137,7 +144,7 @@ export const POST = withAuth(
     if (insertErr || !inserted) {
       return NextResponse.json(
         { error: "failed to record decision" },
-        { status: 500 },
+        { status: 500, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -174,7 +181,7 @@ export const POST = withAuth(
 
     return NextResponse.json(
       { match_decision_id: inserted.id },
-      { status: 201 },
+      { status: 201, headers: NO_STORE_HEADERS },
     );
   },
 );

@@ -7,6 +7,7 @@ import { withAuthLimited } from "@/lib/api/withAuthLimited";
 import { userActionLimiter } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { REJECTION_REASONS } from "@/lib/bridge-outcome-schema";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * Records or updates a bridge outcome (allocated / rejected) for a
@@ -131,7 +132,7 @@ export const POST = withAuthLimited(
         error: "NOT_ELIGIBLE",
         reason: "No sent_as_intro for this strategy",
       },
-      { status: 403 },
+      { status: 403, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -160,7 +161,7 @@ export const POST = withAuthLimited(
     console.error("[api/bridge/outcome] upsert error:", error);
     return NextResponse.json(
       { error: "Failed to record outcome" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -187,5 +188,8 @@ export const POST = withAuthLimited(
     },
   });
 
-  return NextResponse.json({ success: true, outcome: inserted });
+  return NextResponse.json(
+    { success: true, outcome: inserted },
+    { headers: NO_STORE_HEADERS },
+  );
 });

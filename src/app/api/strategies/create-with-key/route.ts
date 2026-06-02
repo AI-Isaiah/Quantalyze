@@ -6,6 +6,7 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
 import { isUuid } from "@/lib/utils";
 import { isSupportedExchange } from "@/lib/closed-sets";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -29,7 +30,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   if (!body || typeof body !== "object") {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "Invalid request body" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -45,21 +46,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   if (typeof exchange !== "string" || !isSupportedExchange(exchange)) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "Unsupported exchange" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   if (typeof api_key !== "string" || api_key.length < 8) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "api_key is required" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   if (typeof api_secret !== "string" || api_secret.length < 8) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "api_secret is required" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -69,33 +70,33 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   ) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "OKX requires a passphrase" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   if (!isUuid(wizard_session_id)) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "wizard_session_id required" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   if (api_key.length > 512 || api_secret.length > 512) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "Key or secret too long" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   if (typeof passphrase === "string" && passphrase.length > 512) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "Passphrase too long" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   if (typeof label === "string" && label.length > 100) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "Label too long" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -109,7 +110,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   if (!rl.success) {
     return NextResponse.json(
       { code: "KEY_RATE_LIMIT", error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      {
+        status: 429,
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+      },
     );
   }
 
@@ -139,7 +143,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         // H-0305 consistency: ConnectKeyStep reads `code` only (maps it to copy
         // client-side), so omit `error` — all failure bodies are uniform { code }.
         { code },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -179,7 +183,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       return NextResponse.json(
         // H-0305 consistency: uniform { code } body; detail is in the server log above.
         { code: "UNKNOWN" },
-        { status: 502 },
+        { status: 502, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -221,7 +225,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             error:
               "A wizard session with this key is already in progress.",
           },
-          { status: 409 },
+          { status: 409, headers: NO_STORE_HEADERS },
         );
       }
       if (error.code === "42501") {
@@ -230,12 +234,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             code: "UNKNOWN",
             error: "Permission denied. Please sign out and back in.",
           },
-          { status: 403 },
+          { status: 403, headers: NO_STORE_HEADERS },
         );
       }
       return NextResponse.json(
         { code: "UNKNOWN", error: "Could not create draft strategy" },
-        { status: 500 },
+        { status: 500, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -243,7 +247,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     if (!row?.strategy_id || !row?.api_key_id) {
       return NextResponse.json(
         { code: "UNKNOWN", error: "RPC returned no rows" },
-        { status: 500 },
+        { status: 500, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -252,11 +256,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // create-with-key / finalize-wizard / keys-sync, matching the csv-finalize
     // envelope already on the wire. Error bodies keep their `{ code, error }`
     // shape and are discriminated by the absence of `ok` (res.ok / HTTP status).
-    return NextResponse.json({
-      ok: true,
-      strategy_id: row.strategy_id,
-      api_key_id: row.api_key_id,
-    });
+    return NextResponse.json(
+      {
+        ok: true,
+        strategy_id: row.strategy_id,
+        api_key_id: row.api_key_id,
+      },
+      { headers: NO_STORE_HEADERS },
+    );
   } catch (err) {
     // Log the raw message server-side only — never forward it to the client.
     // Raw Railway/exchange strings can contain partial secrets or internal
@@ -293,6 +300,6 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       status = 400;
     }
 
-    return NextResponse.json({ code }, { status });
+    return NextResponse.json({ code }, { status, headers: NO_STORE_HEADERS });
   }
 });

@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { mandateAutoSaveLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * PATCH /api/portfolio-strategies/alias
@@ -43,7 +44,10 @@ export async function PATCH(req: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      { error: "unauthorized" },
+      { status: 401, headers: NO_STORE_HEADERS },
+    );
   }
 
   let body: AliasBody;
@@ -59,7 +63,10 @@ export async function PATCH(req: NextRequest) {
       message: err instanceof Error ? err.message : String(err),
       userId: user.id,
     });
-    return NextResponse.json({ error: "invalid json" }, { status: 400 });
+    return NextResponse.json(
+      { error: "invalid json" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   const portfolioId =
@@ -69,7 +76,7 @@ export async function PATCH(req: NextRequest) {
   if (!portfolioId || !strategyId) {
     return NextResponse.json(
       { error: "portfolio_id and strategy_id are required" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -85,7 +92,7 @@ export async function PATCH(req: NextRequest) {
   } else {
     return NextResponse.json(
       { error: "alias must be a string or null" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -99,7 +106,10 @@ export async function PATCH(req: NextRequest) {
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      {
+        status: 429,
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+      },
     );
   }
 
@@ -114,10 +124,16 @@ export async function PATCH(req: NextRequest) {
     .maybeSingle();
   if (pfErr) {
     console.error("[api/portfolio-strategies/alias] portfolio lookup failed:", pfErr.message);
-    return NextResponse.json({ error: "internal error" }, { status: 500 });
+    return NextResponse.json(
+      { error: "internal error" },
+      { status: 500, headers: NO_STORE_HEADERS },
+    );
   }
   if (!portfolio) {
-    return NextResponse.json({ error: "portfolio not found" }, { status: 404 });
+    return NextResponse.json(
+      { error: "portfolio not found" },
+      { status: 404, headers: NO_STORE_HEADERS },
+    );
   }
 
   // audit-2026-05-07 G8.B.6 / FIX-LIST P267 — count-check the UPDATE.
@@ -137,12 +153,15 @@ export async function PATCH(req: NextRequest) {
 
   if (updateErr) {
     console.error("[api/portfolio-strategies/alias] update failed:", updateErr.message);
-    return NextResponse.json({ error: "internal error" }, { status: 500 });
+    return NextResponse.json(
+      { error: "internal error" },
+      { status: 500, headers: NO_STORE_HEADERS },
+    );
   }
   if (!updatedRows || updatedRows.length === 0) {
     return NextResponse.json(
       { error: "investment row not found" },
-      { status: 404 },
+      { status: 404, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -156,5 +175,5 @@ export async function PATCH(req: NextRequest) {
     metadata: { strategy_id: strategyId, alias },
   });
 
-  return NextResponse.json({ ok: true, alias });
+  return NextResponse.json({ ok: true, alias }, { headers: NO_STORE_HEADERS });
 }

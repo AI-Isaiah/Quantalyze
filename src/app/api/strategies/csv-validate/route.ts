@@ -6,6 +6,7 @@ import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * POST /api/strategies/csv-validate — Phase 15 / CSV-01..CSV-02.
@@ -53,7 +54,18 @@ function csvErrorEnvelope(
       debug_context,
       correlation_id: null,
     },
-    { status, ...init },
+    // NO_STORE_HEADERS is the base so every error envelope is private,no-store;
+    // caller headers (e.g. the 429's Retry-After) merge ON TOP without
+    // clobbering Cache-Control. Spread order matters: a flat `...init` last
+    // would replace the whole `headers` key and drop no-store on the 429.
+    {
+      status,
+      ...init,
+      headers: {
+        ...NO_STORE_HEADERS,
+        ...(init.headers as Record<string, string> | undefined),
+      },
+    },
   );
 }
 
@@ -152,7 +164,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   try {
     const result = await validateCsv(formData);
-    return NextResponse.json(result);
+    return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (err) {
     const message = err instanceof Error ? err.message : "CSV validation failed";
     console.error("[strategies/csv-validate] threw:", message);
@@ -203,7 +215,7 @@ async function unifiedCsvValidateHandler(args: {
       userId: args.userId,
     });
     if (!result.ok) return result.response;
-    return NextResponse.json(result.body);
+    return NextResponse.json(result.body, { headers: NO_STORE_HEADERS });
   } catch (err) {
     const message = err instanceof Error ? err.message : "CSV validation failed";
     console.error("[strategies/csv-validate] unified path threw:", message);

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
 import { createClient } from "@/lib/supabase/server";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { assertSameOrigin } from "@/lib/csrf";
 import { logAuditEvent } from "@/lib/audit";
 import {
@@ -64,7 +65,10 @@ export async function GET(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401, headers: NO_STORE_HEADERS },
+    );
   }
 
   const scope_kind = request.nextUrl.searchParams.get("scope_kind");
@@ -76,7 +80,7 @@ export async function GET(request: NextRequest) {
   ) {
     return NextResponse.json(
       { error: "Missing or invalid scope_kind/scope_ref" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -91,16 +95,25 @@ export async function GET(request: NextRequest) {
   if (error && error.code !== "PGRST116") {
     // PGRST116 = 0 rows via .single() — legitimate not-found, not a DB error.
     console.error("[notes] DB error:", error.message);
-    return NextResponse.json({ error: "Database error" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Database error" },
+      { status: 500, headers: NO_STORE_HEADERS },
+    );
   }
   if (!data) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json(
+      { error: "Not found" },
+      { status: 404, headers: NO_STORE_HEADERS },
+    );
   }
 
-  return NextResponse.json({
-    content: data.content,
-    updated_at: data.updated_at,
-  });
+  return NextResponse.json(
+    {
+      content: data.content,
+      updated_at: data.updated_at,
+    },
+    { headers: NO_STORE_HEADERS },
+  );
 }
 
 export async function PATCH(request: NextRequest) {
@@ -114,26 +127,35 @@ export async function PATCH(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401, headers: NO_STORE_HEADERS },
+    );
   }
 
   let rawBody: unknown;
   try {
     rawBody = await request.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Invalid JSON" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   const parsed = BodySchema.safeParse(rawBody);
   if (!parsed.success) {
-    return NextResponse.json({ error: "Invalid body" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Invalid body" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
   const { scope_kind, scope_ref, content } = parsed.data;
 
   if (new TextEncoder().encode(content).length > MAX_CONTENT_BYTES) {
     return NextResponse.json(
       { error: "Content exceeds 100 KB limit" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -145,7 +167,10 @@ export async function PATCH(request: NextRequest) {
   );
   if (!own.ok) {
     // Generic 403 per D-09 — do not leak the ownership reason to the client.
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json(
+      { error: "Forbidden" },
+      { status: 403, headers: NO_STORE_HEADERS },
+    );
   }
 
   const { data, error } = await supabase
@@ -167,7 +192,7 @@ export async function PATCH(request: NextRequest) {
     console.error("user_notes upsert failed:", error);
     return NextResponse.json(
       { error: "Failed to save note" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -184,5 +209,8 @@ export async function PATCH(request: NextRequest) {
     },
   });
 
-  return NextResponse.json({ updated_at: data?.updated_at });
+  return NextResponse.json(
+    { updated_at: data?.updated_at },
+    { headers: NO_STORE_HEADERS },
+  );
 }
