@@ -162,6 +162,9 @@ async function unifiedKeysSyncHandler(args: {
     if (upstream.queued === false && upstream.code === "WIZARD_DUPLICATE") {
       return NextResponse.json(
         {
+          // H-0309: uniform `ok: true` success discriminator (alongside the
+          // legacy `accepted`) so all wizard endpoints share one shape.
+          ok: true,
           accepted: true,
           strategy_id: args.strategy_id,
           status: typeof upstream.status === "string" ? upstream.status : "syncing",
@@ -175,6 +178,7 @@ async function unifiedKeysSyncHandler(args: {
     }
     return NextResponse.json(
       {
+        ok: true,
         accepted: true,
         strategy_id: args.strategy_id,
         status: "syncing",
@@ -184,6 +188,12 @@ async function unifiedKeysSyncHandler(args: {
       { status: 202 },
     );
   }
+  // Drift fallback: a 2xx upstream whose body lacks `queued` is an unrecognized
+  // shape (every well-formed resync carries it). Deliberately NOT stamped with
+  // ok:true — the structured success branches above own the discriminator, and
+  // marking an unrecognized shape ok:true would falsely signal success. The
+  // correct hardening (fail-loud-on-drift like finalize-wizard's unified
+  // handler) is the B9 no-passthrough-on-ipc rule's domain, not F5's.
   return NextResponse.json(upstream);
 }
 
@@ -240,7 +250,7 @@ async function legacyKeysSyncHandler(args: {
     });
 
     return NextResponse.json(
-      { accepted: true, strategy_id, status: "syncing" },
+      { ok: true, accepted: true, strategy_id, status: "syncing" },
       { status: 202 },
     );
   }
@@ -317,7 +327,7 @@ async function legacyKeysSyncHandler(args: {
   });
 
   return NextResponse.json(
-    { accepted: true, strategy_id, status: "syncing" },
+    { ok: true, accepted: true, strategy_id, status: "syncing" },
     { status: 202 },
   );
 }

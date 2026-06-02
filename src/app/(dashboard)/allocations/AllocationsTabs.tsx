@@ -463,7 +463,10 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   // matching the truth screenshot ("Holdings 8", "Outcomes 4"). Counts
   // come straight from the payload arrays already on `props`; no new
   // queries needed.
-  const holdingsCount = props.holdingsSummary?.length ?? 0;
+  // F4b — the Holdings tab's primary surface is now one row per onboarded
+  // strategy, so the badge counts strategies (raw exchange positions render
+  // in the secondary "Exchange Positions" section, not as the headline count).
+  const holdingsCount = props.strategies?.length ?? 0;
   const outcomesCount = props.outcomes?.length ?? 0;
   const tabCount: Partial<Record<TabKey, number>> = {
     holdings: holdingsCount,

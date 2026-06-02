@@ -2,13 +2,16 @@ import { describe, it, expect, vi } from "vitest";
 import { render } from "@testing-library/react";
 
 /**
- * v0.15.7.0 — HoldingsTabPanel revoked-status join (regression coverage
+ * v0.15.7.0 / F4b — HoldingsTabPanel revoked-status join (regression coverage
  * for the deleted T12b that lived in AllocationDashboard.revoked-holdings.test.tsx).
  *
- * Contract under test: HoldingsTabPanel builds `revokedStatusByHoldingId`
- * by joining `props.apiKeys` (api_key.id → sync_status) onto
- * `props.holdingsSummary` (api_key_id) and keying the result by
- * `buildHoldingRef(h)`. The join must:
+ * Contract under test: HoldingsTabPanel joins `props.apiKeys`
+ * (api_key.id → sync_status) onto `props.holdingsSummary` (api_key_id) so each
+ * spot position carries the correct `source_key_sync_status`. F4b moved spot
+ * positions to the secondary "Exchange Positions" section, rendered via the
+ * legacy `HoldingsTable` mode (the `holdings` prop), so the resolved status now
+ * lives on `HoldingRow.source_key_sync_status` rather than the design-mode
+ * `revokedStatusByHoldingId` map. The join must:
  *
  *   1. Resolve `revoked` for a holding whose api_key_id points to a
  *      revoked apiKey row.
@@ -17,18 +20,25 @@ import { render } from "@testing-library/react";
  *   3. Default to `unknown` when api_key_id is null OR the FK doesn't
  *      resolve (defensive — RESTRICT FK should prevent the latter).
  *
- * The test stubs HoldingsTable to a marker that exposes the
- * `revokedStatusByHoldingId` prop verbatim, so the assertion is
- * end-to-end: real adapter + real useMemo, only the visual layer mocked.
+ * The panel now renders `HoldingsTable` twice — once in strategy-row mode
+ * (Section 1, `strategyRows`) and once in legacy mode (Section 2, `holdings`).
+ * The stub serializes whichever prop is present so the test can pick the
+ * legacy (`holdings`) render and assert the per-holding sync status.
  */
 
 vi.mock("./components/HoldingsTable", () => ({
-  HoldingsTable: (props: { revokedStatusByHoldingId?: Record<string, string> }) => (
-    <div
-      data-testid="holdings-table-stub"
-      data-revoked-map={JSON.stringify(props.revokedStatusByHoldingId ?? {})}
-    />
-  ),
+  HoldingsTable: (props: {
+    strategyRows?: unknown[];
+    holdings?: { id: string; source_key_sync_status: string }[];
+  }) =>
+    props.holdings ? (
+      <div
+        data-testid="holdings-table-legacy"
+        data-holdings={JSON.stringify(props.holdings)}
+      />
+    ) : (
+      <div data-testid="holdings-table-strategies" />
+    ),
 }));
 
 import { HoldingsTabPanel } from "./HoldingsTabPanel";
@@ -100,20 +110,27 @@ const STUB_PAYLOAD = {
 function renderPanel() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { container } = render(<HoldingsTabPanel {...(STUB_PAYLOAD as any)} />);
-  const stub = container.querySelector("[data-testid='holdings-table-stub']");
+  const stub = container.querySelector("[data-testid='holdings-table-legacy']");
   expect(stub).not.toBeNull();
-  const raw = stub!.getAttribute("data-revoked-map");
-  return JSON.parse(raw ?? "{}") as Record<string, string>;
+  const raw = stub!.getAttribute("data-holdings");
+  const rows = JSON.parse(raw ?? "[]") as {
+    id: string;
+    source_key_sync_status: string;
+  }[];
+  // Build ref → source_key_sync_status for the assertions.
+  const map: Record<string, string> = {};
+  for (const r of rows) map[r.id] = r.source_key_sync_status;
+  return map;
 }
 
-describe("HoldingsTabPanel — revokedStatusByHoldingId join (T12b regression)", () => {
-  it("revoked apiKey → 'revoked' in revokedStatusByHoldingId", () => {
+describe("HoldingsTabPanel — source_key_sync_status join (T12b regression)", () => {
+  it("revoked apiKey → 'revoked' on the spot holding row", () => {
     const map = renderPanel();
     const ref = buildHoldingRef(REVOKED_HOLDING);
     expect(map[ref]).toBe("revoked");
   });
 
-  it("complete apiKey → 'complete' in revokedStatusByHoldingId", () => {
+  it("complete apiKey → 'complete' on the spot holding row", () => {
     const map = renderPanel();
     const ref = buildHoldingRef(ACTIVE_HOLDING);
     expect(map[ref]).toBe("complete");

@@ -1,42 +1,39 @@
 "use client";
 
 /**
- * Phase 09.1 D-06 + D-11 + D-18 — Holdings tab body.
+ * Phase 09.1 D-06 + D-11 + D-18 / F4b — Holdings tab body.
  *
- * Plan 02 stubbed this panel; Plan 08 fills it with the real adapter-driven
- * HoldingsTable + 3-tab row-expand surface.
+ * Two sections:
+ *   1. **Strategies** — one row per onboarded portfolio strategy
+ *      (`props.strategies` → `toStrategyRows` → `HoldingsTable strategyRows`).
+ *      This is the primary surface: Strategy / Manager / Weight / Allocation /
+ *      MTD / Sharpe / Max DD / Age, each row linking to the strategy factsheet.
+ *      Strategy↔analytics data is real (server-projected); there is NO
+ *      holding→strategy join, so raw exchange positions live in section 2.
+ *   2. **Exchange Positions** — the allocator's raw synced positions, always
+ *      shown with position-appropriate columns (no empty strategy columns):
+ *        - a flagged-holding "Record outcome" surface
+ *          (`ScenarioFlaggedHoldingsList`) when any holdings are flagged for a
+ *          bridge/replacement — preserves the per-holding outcome CTA;
+ *        - spot balances via the legacy `HoldingsTable` (holding columns +
+ *          revoked-key handling);
+ *        - open derivative positions via `OpenPositionsTable`.
  *
- * Wiring:
- *   1. `toDesignHoldings` (Plan 04 adapter) joins holdingsSummary + flagged
- *      + matchDecisions + strategies into the designer row shape. The
- *      adapter's R1 contract requires the caller to supply the
- *      holding→strategy correspondence. There is no such correspondence
- *      surfaced on this payload today, so we pass an empty
- *      `holdingToStrategyId` map and the adapter falls through to
- *      strategy=null for every row.
- *   2. `revokedStatusByHoldingId` is built from props.holdingsSummary ×
- *      props.apiKeys here. Key format: `buildHoldingRef(h)` — same
- *      format the adapter emits as `DesignHoldingRow.id`.
- *   3. `flaggedHoldingsByRef` is keyed by the same buildHoldingRef so the
- *      OutcomeForm in the row-expand "Record outcome" tab gets the right
- *      `top_candidate_strategy_id`.
- *   4. The flagged-holding adapter shape uses `composite_score` (per
- *      Plan 04 R1 narrow boundary), so we map
- *      `top_candidate_composite → composite_score` here.
+ * Spot vs derivative are partitioned because their `value_usd` semantics
+ * differ (spot = marked equity value; derivative = notional exposure, with
+ * `unrealized_pnl_usd` the equity contribution).
  */
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
-import {
-  toDesignHoldings,
-  type HoldingsAdapterInputs,
-} from "./lib/holdings-adapter";
 import { buildHoldingRef } from "./lib/holding-outcome-adapter";
-import { HoldingsTable } from "./components/HoldingsTable";
+import { toStrategyRows } from "./lib/strategies-row-adapter";
+import { HoldingsTable, type HoldingRow } from "./components/HoldingsTable";
 import {
   OpenPositionsTable,
   type OpenPositionRow,
 } from "./components/OpenPositionsTable";
+import { ScenarioFlaggedHoldingsList } from "./ScenarioFlaggedHoldingsList";
 
 export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
   const holdingsSummary = props.holdingsSummary ?? [];
@@ -45,15 +42,15 @@ export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
   const apiKeys = props.apiKeys ?? [];
   const strategies = props.strategies ?? [];
 
-  // Bug-fix (2026-05-20): spot rows and derivative rows must NOT share the
-  // Holdings table. Their `value_usd` semantics are different — for spot
-  // it's the marked value (equity contribution), for derivatives it's the
-  // CCXT notional `size_usd` (exposure, NOT equity contribution; the
-  // equity contribution is `unrealized_pnl_usd`). Sharing the same table
-  // would inflate weight denominators and make a leveraged perp appear as
-  // a multi-million-dollar "holding" alongside spot cash. Partition here
-  // so the Holdings tile renders ONLY spot rows; Open Positions renders
-  // derivatives with notional + unrealized P&L surfaced explicitly.
+  const [showRevoked, setShowRevoked] = useState(true);
+
+  // ── Section 1: one row per onboarded strategy. Real strategy data; no
+  //    holding involvement (raw positions render in section 2 below).
+  const strategyRows = useMemo(
+    () => toStrategyRows({ strategies }),
+    [strategies],
+  );
+
   const spotHoldings = useMemo(
     () => holdingsSummary.filter((h) => h.holding_type === "spot"),
     [holdingsSummary],
@@ -73,119 +70,33 @@ export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
     return m;
   }, [apiKeys]);
 
-  // ── revokedStatusByHoldingId — key by buildHoldingRef so the new
-  //    HoldingsTable can look it up against DesignHoldingRow.id. Covers
-  //    BOTH spot and derivative rows so OpenPositionsTable can join the
-  //    same sync_status map (its rows use buildHoldingRef as id too).
-  const revokedStatusByHoldingId = useMemo<Record<string, string>>(() => {
-    const out: Record<string, string> = {};
-    for (const h of holdingsSummary) {
-      const ref = buildHoldingRef({
-        venue: h.venue,
-        symbol: h.symbol,
-        holding_type: h.holding_type,
-      });
-      const status = h.api_key_id
-        ? keyStatusById.get(h.api_key_id) ?? "unknown"
-        : "unknown";
-      out[ref] = status;
-    }
-    return out;
-  }, [holdingsSummary, keyStatusById]);
-
-  // ── holdingToStrategyId — empty map per Plan 04 SUMMARY: the legacy
-  //    body has no holding→strategy correspondence. Strategy resolves to
-  //    null for every row, matching current UI behavior. Future work can
-  //    populate this map from server-side analytics widening.
-  const holdingToStrategyId = useMemo<Record<string, string>>(() => ({}), []);
-
-  // ── flaggedHoldingsByRef — keyed by buildHoldingRef. Drives OutcomeForm
-  //    strategyId in the row-expand "Record outcome" tab.
-  const flaggedHoldingsByRef = useMemo<
-    Record<string, { top_candidate_strategy_id: string | null }>
-  >(() => {
-    const out: Record<string, { top_candidate_strategy_id: string | null }> =
-      {};
-    for (const f of flaggedHoldings) {
-      const ref = buildHoldingRef({
-        venue: f.venue,
-        symbol: f.symbol,
-        holding_type: f.holding_type,
-      });
-      out[ref] = {
-        top_candidate_strategy_id: f.top_candidate_strategy_id ?? null,
-      };
-    }
-    return out;
-  }, [flaggedHoldings]);
-
-  // ── adapter input — flagged shape needs composite_score (Plan 04 R1
-  //    narrow boundary). The live FlaggedHolding type exposes
-  //    top_candidate_composite; map verbatim here.
-  const adapterStrategies = useMemo<HoldingsAdapterInputs["strategies"]>(
+  // ── spot rows for the legacy holding-column table (Exchange Positions).
+  //    source_key_sync_status drives the revoked-key chip.
+  const spotHoldingRows = useMemo<HoldingRow[]>(
     () =>
-      strategies.map((s) => ({
-        id: s.strategy.id,
-        // audit-2026-05-07 G8.A.10 (P43) — adapter routes through
-        // `displayStrategyName`, which requires `disclosure_tier` to
-        // surface institutional `name` (without it, even institutional
-        // rows fall through to the synthetic id). Pass tier explicitly.
-        name: s.strategy.name,
-        alias: s.alias,
-        codename: s.strategy.codename,
-        disclosure_tier: s.strategy.disclosure_tier,
-        strategy_types: s.strategy.strategy_types,
-        strategy_analytics: s.strategy.strategy_analytics
-          ? {
-              sharpe: s.strategy.strategy_analytics.sharpe ?? null,
-              max_drawdown: s.strategy.strategy_analytics.max_drawdown ?? null,
-              mtd: null,
-            }
-          : null,
-      })),
-    [strategies],
-  );
-
-  const adapterFlagged = useMemo<HoldingsAdapterInputs["flaggedHoldings"]>(
-    () =>
-      flaggedHoldings.map((f) => ({
-        venue: f.venue,
-        symbol: f.symbol,
-        holding_type: f.holding_type,
-        composite_score: f.top_candidate_composite,
-        top_candidate_strategy_id: f.top_candidate_strategy_id,
-      })),
-    [flaggedHoldings],
-  );
-
-  const rows = useMemo(
-    () =>
-      toDesignHoldings({
-        // Spot-only — derivative rows render in OpenPositionsTable below.
-        // See the partition comment at the top of the component.
-        holdingsSummary: spotHoldings.map((h) => ({
+      spotHoldings.map((h) => {
+        const ref = buildHoldingRef({
           venue: h.venue,
           symbol: h.symbol,
           holding_type: h.holding_type,
+        });
+        const status = h.api_key_id
+          ? keyStatusById.get(h.api_key_id) ?? "unknown"
+          : "unknown";
+        return {
+          id: ref,
+          venue: h.venue,
+          symbol: h.symbol,
+          holding_type: "spot",
           quantity: h.quantity,
           value_usd: h.value_usd,
+          entry_price: h.entry_price ?? null,
+          unrealized_pnl_usd: h.unrealized_pnl_usd ?? null,
           api_key_id: h.api_key_id,
-          // Phase 06 projection does not surface per-holding allocated_at
-          // yet; pass null so age renders as em-dash.
-          allocated_at: null,
-        })),
-        flaggedHoldings: adapterFlagged,
-        matchDecisionsByHoldingRef,
-        strategies: adapterStrategies,
-        holdingToStrategyId,
+          source_key_sync_status: status,
+        };
       }),
-    [
-      spotHoldings,
-      adapterFlagged,
-      matchDecisionsByHoldingRef,
-      adapterStrategies,
-      holdingToStrategyId,
-    ],
+    [spotHoldings, keyStatusById],
   );
 
   const openPositionRows = useMemo<OpenPositionRow[]>(
@@ -196,6 +107,9 @@ export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
           symbol: h.symbol,
           holding_type: h.holding_type,
         });
+        const status = h.api_key_id
+          ? keyStatusById.get(h.api_key_id) ?? "unknown"
+          : "unknown";
         return {
           id: ref,
           venue: h.venue,
@@ -207,20 +121,44 @@ export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
           mark_price: h.mark_price_usd,
           unrealized_pnl_usd: h.unrealized_pnl_usd ?? null,
           api_key_id: h.api_key_id,
-          source_key_sync_status: revokedStatusByHoldingId[ref] ?? "unknown",
+          source_key_sync_status: status,
         };
       }),
-    [derivativeHoldings, revokedStatusByHoldingId],
+    [derivativeHoldings, keyStatusById],
   );
 
+  const allocatorPreferences = props.mandate
+    ? { max_weight: props.mandate.max_weight }
+    : null;
+
   return (
-    <div data-tab-panel="holdings">
-      <HoldingsTable
-        rows={rows}
-        revokedStatusByHoldingId={revokedStatusByHoldingId}
-        flaggedHoldingsByRef={flaggedHoldingsByRef}
-      />
-      <OpenPositionsTable rows={openPositionRows} />
+    <div data-tab-panel="holdings" className="grid gap-8">
+      {/* Section 1 — onboarded strategies (renders its own "Strategies" header). */}
+      <HoldingsTable strategyRows={strategyRows} />
+
+      {/* Section 2 — raw exchange positions (always shown). */}
+      <section className="grid gap-4">
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
+          Exchange Positions
+        </h3>
+        {flaggedHoldings.length > 0 ? (
+          <ScenarioFlaggedHoldingsList
+            flaggedHoldings={flaggedHoldings}
+            matchDecisionsByHoldingRef={matchDecisionsByHoldingRef}
+            // Matches the Scenario-tab wiring (ScenarioStub): existing outcomes
+            // are not pre-loaded here; the banner's server-side eligibility
+            // check gates double-recording.
+            existingOutcomesByHoldingRef={{}}
+            allocatorPreferences={allocatorPreferences}
+          />
+        ) : null}
+        <HoldingsTable
+          holdings={spotHoldingRows}
+          showRevoked={showRevoked}
+          onShowRevokedChange={setShowRevoked}
+        />
+        <OpenPositionsTable rows={openPositionRows} />
+      </section>
     </div>
   );
 }

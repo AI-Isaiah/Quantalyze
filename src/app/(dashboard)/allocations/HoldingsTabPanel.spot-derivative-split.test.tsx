@@ -19,21 +19,33 @@ import { render } from "@testing-library/react";
  *
  * Fix: partition holdingsSummary into spot (→ HoldingsTable) and
  * derivative (→ OpenPositionsTable) at the panel boundary. This test
- * encodes the invariant: a derivative row MUST NOT reach HoldingsTable's
- * `rows` prop, and its `unrealized_pnl_usd` MUST be the one surfaced as
+ * encodes the invariant: a derivative row MUST NOT reach the spot
+ * HoldingsTable, and its `unrealized_pnl_usd` MUST be the one surfaced as
  * the equity contribution on OpenPositionsTable.
+ *
+ * F4b: spot positions now render via the legacy `HoldingsTable` mode (the
+ * `holdings` prop, `HoldingRow` shape with `value_usd`) in the secondary
+ * "Exchange Positions" section. The panel renders `HoldingsTable` twice —
+ * strategy-row mode (Section 1) + legacy spot mode (Section 2) — so the stub
+ * picks the `holdings` render.
  */
 
 // Both child components stubbed so we can inspect the props each receives
 // without depending on their internal rendering. Props are serialized to
 // JSON on a data attribute and read back in the assertions.
 vi.mock("./components/HoldingsTable", () => ({
-  HoldingsTable: (props: { rows?: Array<{ symbol: string; alloc: number }> }) => (
-    <div
-      data-testid="holdings-table-stub"
-      data-rows={JSON.stringify(props.rows ?? [])}
-    />
-  ),
+  HoldingsTable: (props: {
+    strategyRows?: unknown[];
+    holdings?: Array<{ symbol: string; value_usd: number }>;
+  }) =>
+    props.holdings ? (
+      <div
+        data-testid="holdings-table-legacy"
+        data-holdings={JSON.stringify(props.holdings)}
+      />
+    ) : (
+      <div data-testid="holdings-table-strategies" />
+    ),
 }));
 
 vi.mock("./components/OpenPositionsTable", () => ({
@@ -107,7 +119,7 @@ function renderAndReadProps() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { container } = render(<HoldingsTabPanel {...(PAYLOAD as any)} />);
   const holdingsStub = container.querySelector(
-    "[data-testid='holdings-table-stub']",
+    "[data-testid='holdings-table-legacy']",
   );
   const positionsStub = container.querySelector(
     "[data-testid='open-positions-table-stub']",
@@ -115,8 +127,8 @@ function renderAndReadProps() {
   expect(holdingsStub).not.toBeNull();
   expect(positionsStub).not.toBeNull();
   const holdingsRows = JSON.parse(
-    holdingsStub!.getAttribute("data-rows") ?? "[]",
-  ) as Array<{ symbol: string; alloc: number }>;
+    holdingsStub!.getAttribute("data-holdings") ?? "[]",
+  ) as Array<{ symbol: string; value_usd: number }>;
   const positionRows = JSON.parse(
     positionsStub!.getAttribute("data-rows") ?? "[]",
   ) as Array<{
@@ -136,9 +148,9 @@ describe("HoldingsTabPanel — spot vs derivative split (2026-05-20 regression)"
 
   it("derivative's notional (500k) MUST NOT appear in the Holdings table", () => {
     const { holdingsRows } = renderAndReadProps();
-    // Pre-fix: a row with alloc=500_000 would be present here, swamping
+    // Pre-fix: a row with value_usd=500_000 would be present here, swamping
     // the spot row's weight. Post-fix: derivatives are partitioned out.
-    expect(holdingsRows.find((r) => r.alloc === 500_000)).toBeUndefined();
+    expect(holdingsRows.find((r) => r.value_usd === 500_000)).toBeUndefined();
     expect(holdingsRows.find((r) => r.symbol === "ETHUSDT")).toBeUndefined();
   });
 
