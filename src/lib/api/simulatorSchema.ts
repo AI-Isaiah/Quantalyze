@@ -163,21 +163,21 @@ const SimulatorInsufficientDataBranch = z
     status: z.literal("insufficient_data"),
     ...SimulatorCommonShape,
   })
-  .passthrough();
+  .passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: Python _empty_result emits the full ok shape on every non-ok branch; the discriminated union reads none of these fields and tightening would 5xx every non-ok response
 
 const SimulatorAlreadyInPortfolioBranch = z
   .object({
     status: z.literal("already_in_portfolio"),
     ...SimulatorCommonShape,
   })
-  .passthrough();
+  .passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: Python _empty_result emits the full ok shape on every non-ok branch; the discriminated union reads none of these fields and tightening would 5xx every non-ok response
 
 const SimulatorEmptyPortfolioBranch = z
   .object({
     status: z.literal("empty_portfolio"),
     ...SimulatorCommonShape,
   })
-  .passthrough();
+  .passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: Python _empty_result emits the full ok shape on every non-ok branch; the discriminated union reads none of these fields and tightening would 5xx every non-ok response
 
 export const SimulatorResponseSchema = z
   .discriminatedUnion("status", [

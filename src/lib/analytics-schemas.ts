@@ -33,7 +33,7 @@ export const ValidateKeyResponseSchema = z.object({
   read_only: z.boolean(),
   exchange: z.string().optional(),
   permissions: z.array(z.string()).optional(),
-}).passthrough();
+}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; /api/validate-key result is read for UI display only, never spread into a write
 
 // --- /api/encrypt-key ---
 // The analytics service uses envelope encryption: every credential (key,
@@ -69,19 +69,19 @@ export const EncryptKeyResponseSchema = z.object({
 export const FetchTradesResponseSchema = z.object({
   trades_fetched: z.number(),
   strategy_id: z.string().optional(),
-}).passthrough();
+}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; only trades_fetched is read, never spread into a write
 
 // --- /api/compute-analytics ---
 export const ComputeAnalyticsResponseSchema = z.object({
   status: z.string(),
   strategy_id: z.string().optional(),
-}).passthrough();
+}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat status envelope; never spread into a write
 
 // --- /api/portfolio-analytics ---
 export const PortfolioAnalyticsResponseSchema = z.object({
   status: z.string(),
   portfolio_id: z.string().optional(),
-}).passthrough();
+}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat status envelope; never spread into a write
 
 // --- /api/portfolio-optimizer ---
 // Audit-2026-05-07 M-0332 (type-design-analyzer c8): model `suggestions`
@@ -96,12 +96,22 @@ export const PortfolioOptimizerResponseSchema = z.object({
   portfolio_id: z.string().optional(),
   suggestions: z.array(z.record(z.string(), z.unknown())).optional(),
   persisted: z.boolean().optional(),
-}).passthrough();
+}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; suggestions are open-shaped by design (Python fans out per-candidate), wrapper pinned, never spread into a write
 
 // --- /api/verify-strategy ---
+// `results` + `matched_strategy_id` are CONSUMED by verify-strategy/route.ts:396
+// (`results` is spread into the strategy_verifications.metrics_snapshot JSONB
+// column; matched_strategy_id is folded in). Model them explicitly so the
+// write-fed shape is typed and the schema default-STRIPS the unconsumed
+// top-level twr/sharpe/return_* forward-compat fields instead of passing them
+// through — closing the boundary honestly (B9; corrects a prior `.passthrough()`
+// whose escape rationale wrongly claimed "never spread into a write": `results`
+// IS spread into a write, but into a JSONB sink so there was no PGRST204 break).
 export const VerifyStrategyResponseSchema = z.object({
   verification_id: z.string(),
-}).passthrough();
+  results: z.record(z.string(), z.unknown()).nullable().optional(),
+  matched_strategy_id: z.string().nullable().optional(),
+});
 
 // --- /api/match/recompute ---
 // Every branch carries a `status` discriminator so callers can switch on a
@@ -110,7 +120,7 @@ export const VerifyStrategyResponseSchema = z.object({
 export const RecomputeMatchResponseSchema = z.object({
   status: z.enum(["disabled", "skipped", "ok"]),
   allocator_id: z.string().optional(),
-}).passthrough();
+}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat per-branch extras; discriminated on status, never spread into a write
 
 // ─────────────────────────────────────────────────────────────────────
 // Strict primitive responses (Sprint 2 Task 2.9 and later)
@@ -254,8 +264,14 @@ export type TickJobsResponse = z.infer<typeof TickJobsResponseSchema>;
 // ─────────────────────────────────────────────────────────────────────
 // Bridge response (Sprint 4 Phase 3)
 //
-// Strict schema for /api/portfolio-bridge. Each candidate must match
-// the BridgeCandidate shape in types.ts. Parse failures throw.
+// /api/portfolio-bridge response. Each candidate matches the strict
+// BridgeCandidate shape in types.ts; parse failures on a known field throw.
+// B9 (folds M-0907 / L-0043): the WRAPPER is intentionally `.passthrough()`
+// (forward-compat, read-only — never spread into a write; the harmful WRITE-path
+// mirror NEW-C40-01 on EncryptKeyResponseSchema was converted to strip). So this
+// is NOT the "strict schema" the original docblock claimed — the passthrough
+// carries an inline B9 sanctioned-exception and the candidates are fully typed
+// by BridgeCandidateSchema.
 // ─────────────────────────────────────────────────────────────────────
 
 // audit-2026-05-07 M-0908: single source of truth for the bridge fit
@@ -283,7 +299,7 @@ const BridgeCandidateSchema = z.object({
 
 export const BridgeResponseSchema = z.object({
   candidates: z.array(BridgeCandidateSchema),
-}).passthrough();
+}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat wrapper; candidates are strictly typed (BridgeCandidateSchema), wrapper never spread into a write
 
 export type BridgeResponse = z.infer<typeof BridgeResponseSchema>;
 
@@ -317,7 +333,7 @@ export const CsvValidateResponseSchema = z.object({
     }),
   ),
   correlation_id: z.string().nullable(),
-}).passthrough();
+}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; Phase 16 envelope expansion (correlation_id), rendered only, never spread into a write
 
 export type CsvValidateResponse = z.infer<typeof CsvValidateResponseSchema>;
 
@@ -331,6 +347,6 @@ export type CsvValidateResponse = z.infer<typeof CsvValidateResponseSchema>;
 export const CsvFinalizeResponseSchema = z.object({
   strategy_id: z.string(),
   status: z.string(),
-}).passthrough();
+}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; only strategy_id/status are read, never spread into a write
 
 export type CsvFinalizeResponse = z.infer<typeof CsvFinalizeResponseSchema>;

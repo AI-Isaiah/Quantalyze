@@ -45,6 +45,13 @@ const eslintConfig = defineConfig([
       "quantalyze/no-raw-localstorage": "error",
       "quantalyze/no-raw-published-predicate": "error",
       "quantalyze/no-raw-retry-after-parse": "error",
+      // B9 — ban Zod .passthrough()/.catchall() at boundary parsers. Enforced
+      // repo-wide (not file-scoped) because passthrough only ever appears at a
+      // boundary in this codebase, so a global ban with a greppable per-site
+      // `// eslint-disable-line ... -- B9 sanctioned-exception:` escape is a
+      // stronger lock than a file allowlist that could go stale when a new
+      // boundary module is added.
+      "quantalyze/no-passthrough-on-ipc": "error",
     },
   },
   // Directory exemptions: the canonical helpers' own homes legitimately contain
@@ -69,6 +76,7 @@ const eslintConfig = defineConfig([
       "quantalyze/no-raw-localstorage": "off",
       "quantalyze/no-raw-published-predicate": "off",
       "quantalyze/no-raw-retry-after-parse": "off",
+      "quantalyze/no-passthrough-on-ipc": "off",
     },
   },
 ]);

@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { AlertSeverity, DocType, SupportedExchange } from "./utils";
-import { SIGNUP_ROLES, exchangeEnum } from "./closed-sets";
+import {
+  SIGNUP_ROLES,
+  exchangeEnum,
+  type StrategyAnalyticsComputationStatus,
+} from "./closed-sets";
 
 // ---------------------------------------------------------------------------
 // audit-2026-05-07 H-0517 — branded identifier vocabulary
@@ -267,7 +271,9 @@ export interface StrategyAnalytics {
   id: string;
   strategy_id: string;
   computed_at: string;
-  computation_status: "pending" | "computing" | "complete" | "complete_with_warnings" | "failed";
+  // B9: single source of truth is STRATEGY_ANALYTICS_COMPUTATION_STATUSES in
+  // closed-sets.ts, pinned against the DB CHECK by check-zod-db-check-parity.test.ts.
+  computation_status: StrategyAnalyticsComputationStatus;
   computation_error: string | null;
   benchmark: string | null;
   cumulative_return: number | null;
