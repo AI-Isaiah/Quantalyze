@@ -196,59 +196,42 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
     metadata: { source: "wizard", status_before_delete: "draft" },
   });
 
-  // Hard-delete the linked api_keys row ONLY if no other strategy
-  // still references it. Otherwise the FK's ON DELETE SET NULL would
-  // silently break another strategy that happened to share the same
-  // key. Check first, then delete; the check is best-effort.
+  // Hard-delete the linked api_keys row ONLY if no other strategy still
+  // references it. Otherwise the FK's ON DELETE SET NULL would silently break
+  // another strategy that happened to share the same key.
   if (draft.api_key_id) {
-    const { count: refCount, error: refCountErr } = await supabase
-      .from("strategies")
-      .select("id", { count: "exact", head: true })
-      .eq("api_key_id", draft.api_key_id);
-    // H-0314: a dropped error here is dangerous. On a transient query
-    // failure `count` is null, `(null ?? 0) === 0` is true, and we would
-    // delete the api_keys row even when sibling strategies still
-    // reference it — the FK's ON DELETE SET NULL would then silently
-    // break those siblings' sync. Treat a failed ref-count as "cannot
-    // prove the key is orphaned" and skip the delete (the conservative
-    // direction — never revoke a possibly-shared key on an unproven count).
-    // NOTE: the draft strategy row is already deleted above, and
-    // cron/cleanup-wizard-drafts only discovers keys via STILL-EXISTING draft
-    // rows — so on this rare transient-failure path the key is NOT reclaimed by
-    // that cron and may linger orphaned until a dedicated orphan-key sweep.
-    // Mirrors that cron's own countErr → skip guard.
-    if (refCountErr) {
+    const keyToRevoke = draft.api_key_id;
+    // M-0347: the check + delete is ONE atomic statement inside the
+    // delete_api_key_if_unreferenced RPC:
+    //   DELETE FROM api_keys WHERE id=$1 AND user_id=auth.uid()
+    //     AND NOT EXISTS (SELECT 1 FROM strategies WHERE api_key_id=$1)
+    // The prior two-statement "SELECT count(*) ... then conditional DELETE"
+    // had a TOCTOU window: a concurrent wizard session re-attaching this key
+    // between the count and the delete got its fresh strategy's key revoked.
+    // The RPC returns the number of rows it deleted (0 = still referenced or
+    // not owned; 1 = revoked).
+    const { data: revoked, error: revokeErr } = await supabase.rpc(
+      "delete_api_key_if_unreferenced",
+      { p_api_key_id: keyToRevoke },
+    );
+    // H-0314: never treat an RPC failure as "orphaned → safe to ignore". The
+    // strategy row is already deleted above; a dangling api_key is swept later
+    // by cron/cleanup-wizard-drafts. Skip + log, never risk breaking a sibling.
+    if (revokeErr) {
       console.warn(
-        "[strategies/draft DELETE] api_keys ref-count check failed (skip cleanup):",
-        refCountErr,
+        "[strategies/draft DELETE] api_keys atomic revoke failed (skip cleanup):",
+        revokeErr,
       );
-    } else if ((refCount ?? 0) === 0) {
-      // Capture the api_key_id in a const so TS narrows it inside the
-      // audit emission below (the if-guard already established it's
-      // non-null, but the closure below loses that narrowing).
-      const keyToRevoke = draft.api_key_id;
-      const { error: delKeyErr } = await supabase
-        .from("api_keys")
-        .delete()
-        .eq("id", keyToRevoke);
-      if (delKeyErr) {
-        // Non-fatal: the strategy row is gone, the dangling api_key is
-        // a cosmetic issue the Sprint 2 cleanup cron will sweep.
-        console.warn(
-          "[strategies/draft DELETE] api_keys cleanup failed (non-fatal):",
-          delKeyErr,
-        );
-      } else {
-        // Audit the key revoke alongside the strategy delete so the
-        // forensic record shows "wizard-draft delete cascaded into
-        // api_key revoke".
-        logAuditEvent(supabase, {
-          action: "api_key.revoke",
-          entity_type: "api_key",
-          entity_id: keyToRevoke,
-          metadata: { reason: "wizard_draft_cleanup", strategy_id: id },
-        });
-      }
+    } else if ((revoked ?? 0) > 0) {
+      // Audit only when a key was ACTUALLY revoked (zero referencing strategies
+      // inside the same atomic statement). A 0 return means the key is still
+      // referenced by another strategy — correctly preserved, nothing to audit.
+      logAuditEvent(supabase, {
+        action: "api_key.revoke",
+        entity_type: "api_key",
+        entity_id: keyToRevoke,
+        metadata: { reason: "wizard_draft_cleanup", strategy_id: id },
+      });
     }
   }
 

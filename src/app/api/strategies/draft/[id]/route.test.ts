@@ -38,19 +38,17 @@ const STATE = vi.hoisted(() => ({
     | null,
   // Captured DELETE filter chain (so we can confirm user_id scoping).
   strategiesDeleteCalls: [] as Array<{ column: string; value: unknown }>,
-  // api_keys reference count returned by the head/select for cleanup.
-  apiKeyRefCount: 1 as number,
-  // H-0314: inject an error on the api_keys ref-count head/select. When
-  // set, the mock resolves { count: null, error } — exactly what
-  // PostgREST returns on a failed count query. The route must treat this
-  // as "cannot prove the key is orphaned" and SKIP the api_keys delete,
-  // not coalesce null→0 and yank a key sibling strategies still share.
-  apiKeyRefCountError: null as { message: string } | null,
-  // Captured api_keys deletes (cleanup branch).
-  apiKeysDeleteCalls: [] as Array<{ column: string; value: unknown }>,
-  // H-0312: inject a failure on the api_keys delete to exercise the
-  // non-fatal cleanup branch (the route warns + still returns 200).
-  apiKeysDeleteError: null as { message: string } | null,
+  // M-0347: captured delete_api_key_if_unreferenced RPC invocations. The
+  // route's api_keys cleanup is now ONE atomic RPC (single-statement
+  // check+delete) instead of a count-then-delete TOCTOU.
+  rpcCalls: [] as Array<{ fn: string; args: Record<string, unknown> }>,
+  // Rows the RPC reports deleted: 1 = orphan key revoked, 0 = still
+  // referenced (kept). The route audits a revoke ONLY when this is > 0.
+  apiKeyRevokeResult: 1 as number,
+  // H-0314 (fail-safe): inject an RPC error. The route must treat any RPC
+  // failure as "cannot prove the key is orphaned" → skip + warn + still 200,
+  // never emit a revoke audit on an unproven delete.
+  apiKeyRevokeError: null as { message: string } | null,
   // Captured audit emissions.
   auditCalls: [] as Array<{ action: string; entity_id: unknown }>,
 }));
@@ -63,36 +61,24 @@ vi.mock("@/lib/supabase/server", () => ({
         error: null,
       }),
     },
+    // M-0347: the api_keys cleanup now goes through a single atomic RPC.
+    // The route must NOT touch from("api_keys") any more — the throw on an
+    // unexpected table below doubles as a guard proving that.
+    rpc: (fn: string, args: Record<string, unknown>) => {
+      STATE.rpcCalls.push({ fn, args });
+      return Promise.resolve({
+        data: STATE.apiKeyRevokeError ? null : STATE.apiKeyRevokeResult,
+        error: STATE.apiKeyRevokeError,
+      });
+    },
     from: (table: string) => {
       if (table === "strategies") {
         // The route uses two chains:
-        //   .select(...).eq().eq().maybeSingle()                  (GET, DELETE preflight)
-        //   .select("id", {count:'exact', head:true}).eq(...)     (api_keys ref count)
-        //   .delete().eq().eq().eq().eq()                          (DELETE)
+        //   .select(...).eq().eq().maybeSingle()   (GET, DELETE preflight)
+        //   .delete().eq().eq().eq().eq()           (DELETE)
         const buildSelectChain = () => ({
           eq: (_column: string, _value: unknown) => buildSelectChain(),
           maybeSingle: async () => ({ data: STATE.draftRow, error: null }),
-          // Terminal for the ref-count head:true select.
-          then: undefined,
-        });
-        const buildRefCountChain = () => ({
-          eq: (_column: string, _value: unknown) => ({
-            // The route awaits the .eq() chain directly — model that by
-            // exposing a thenable that resolves to { count, error }. On a
-            // PostgREST count failure `count` comes back null alongside the
-            // error, so when an error is injected we force count→null to
-            // faithfully reproduce the null-coalesce hazard the route guards.
-            then: (
-              resolve: (v: {
-                count: number | null;
-                error: { message: string } | null;
-              }) => void,
-            ) =>
-              resolve({
-                count: STATE.apiKeyRefCountError ? null : STATE.apiKeyRefCount,
-                error: STATE.apiKeyRefCountError,
-              }),
-          }),
         });
         const buildDeleteChain = () => ({
           eq: (column: string, value: unknown) => {
@@ -107,26 +93,8 @@ vi.mock("@/lib/supabase/server", () => ({
           },
         });
         return {
-          select: (_cols: string, opts?: { count?: string; head?: boolean }) => {
-            if (opts?.head) return buildRefCountChain();
-            return buildSelectChain();
-          },
+          select: () => buildSelectChain(),
           delete: () => buildDeleteChain(),
-        };
-      }
-      if (table === "api_keys") {
-        const buildApiKeyDeleteChain = () => ({
-          eq: (column: string, value: unknown) => {
-            STATE.apiKeysDeleteCalls.push({ column, value });
-            return {
-              then: (
-                resolve: (v: { error: { message: string } | null }) => void,
-              ) => resolve({ error: STATE.apiKeysDeleteError }),
-            };
-          },
-        });
-        return {
-          delete: () => buildApiKeyDeleteChain(),
         };
       }
       throw new Error(`unexpected from(${table})`);
@@ -177,10 +145,9 @@ beforeEach(() => {
   STATE.user = null;
   STATE.draftRow = null;
   STATE.strategiesDeleteCalls = [];
-  STATE.apiKeyRefCount = 1;
-  STATE.apiKeyRefCountError = null;
-  STATE.apiKeysDeleteCalls = [];
-  STATE.apiKeysDeleteError = null;
+  STATE.rpcCalls = [];
+  STATE.apiKeyRevokeResult = 1;
+  STATE.apiKeyRevokeError = null;
   STATE.auditCalls = [];
 });
 
@@ -338,19 +305,21 @@ describe("/api/strategies/draft/[id] — 200 happy path for the owner (C-0115)",
 });
 
 // ============================================================
-// H-0312 — DELETE api_keys conditional cleanup (refCount fence) +
-//          non-fatal cleanup-failure branch.
+// H-0312 / M-0347 — DELETE api_keys conditional cleanup via the atomic
+// delete_api_key_if_unreferenced RPC.
 //
-// The DELETE handler hard-deletes the linked api_keys row ONLY when no
-// other strategy still references it (refCount === 0). Otherwise the FK's
-// ON DELETE SET NULL would silently break another strategy sharing the
-// same key. A regression that dropped the refCount guard would orphan
-// a sibling strategy's credentials; one that treated the api_keys delete
-// failure as fatal would 500 a delete whose primary effect already
-// succeeded. These tests pin both contracts.
+// The DELETE handler revokes the linked api_keys row ONLY when no other
+// strategy references it. This is now ONE atomic statement inside the RPC
+// (DELETE ... WHERE id=$1 AND user_id=auth.uid() AND NOT EXISTS(strategies
+// referencing it)) — closing the prior count-then-delete TOCTOU where a
+// concurrent wizard re-attaching the key between the count and the delete
+// got its fresh strategy's key revoked. The route reads the RPC's deleted-
+// row count: >0 ⇒ revoked (audit it); 0 ⇒ still referenced (keep, no audit).
+// A regression that audited a non-revoke, kept a referenced-key path racy,
+// or 500'd on an RPC error would each break a contract these tests pin.
 // ============================================================
-describe("DELETE /api/strategies/draft/[id] — api_keys cleanup (H-0312)", () => {
-  it("hard-deletes the linked api_keys row when refCount === 0", async () => {
+describe("DELETE /api/strategies/draft/[id] — api_keys cleanup via atomic RPC (H-0312 / M-0347)", () => {
+  it("calls delete_api_key_if_unreferenced and audits the revoke when the RPC reports a deletion", async () => {
     STATE.user = { id: OWNER_ID };
     STATE.draftRow = {
       id: DRAFT_ID,
@@ -359,7 +328,7 @@ describe("DELETE /api/strategies/draft/[id] — api_keys cleanup (H-0312)", () =
       status: "draft",
       api_key_id: API_KEY_ID,
     };
-    STATE.apiKeyRefCount = 0; // no other strategy references the key
+    STATE.apiKeyRevokeResult = 1; // RPC: orphan key revoked
 
     const { DELETE } = await import("./route");
     const res = await DELETE(makeDeleteReq(), makeCtx());
@@ -367,12 +336,12 @@ describe("DELETE /api/strategies/draft/[id] — api_keys cleanup (H-0312)", () =
     expect(res.status).toBe(200);
     expect((await res.json()).deleted).toBe(true);
 
-    // The api_keys delete fired, scoped to the linked key id.
-    expect(STATE.apiKeysDeleteCalls).toContainEqual({
-      column: "id",
-      value: API_KEY_ID,
+    // The atomic RPC fired with the linked key id — NOT a count-then-delete.
+    expect(STATE.rpcCalls).toContainEqual({
+      fn: "delete_api_key_if_unreferenced",
+      args: { p_api_key_id: API_KEY_ID },
     });
-    // The forensic record shows the cascade revoke.
+    // The forensic record shows the cascade revoke (RPC returned > 0).
     const revokeAudit = STATE.auditCalls.find(
       (c) => c.action === "api_key.revoke",
     );
@@ -380,7 +349,7 @@ describe("DELETE /api/strategies/draft/[id] — api_keys cleanup (H-0312)", () =
     expect(revokeAudit!.entity_id).toBe(API_KEY_ID);
   });
 
-  it("does NOT delete the api_keys row when another strategy still references it (refCount > 0)", async () => {
+  it("does NOT audit a revoke when the RPC reports 0 deletions (key still referenced)", async () => {
     STATE.user = { id: OWNER_ID };
     STATE.draftRow = {
       id: DRAFT_ID,
@@ -389,7 +358,7 @@ describe("DELETE /api/strategies/draft/[id] — api_keys cleanup (H-0312)", () =
       status: "draft",
       api_key_id: API_KEY_ID,
     };
-    STATE.apiKeyRefCount = 2; // a sibling strategy shares the key
+    STATE.apiKeyRevokeResult = 0; // RPC: a sibling strategy references the key
 
     const { DELETE } = await import("./route");
     const res = await DELETE(makeDeleteReq(), makeCtx());
@@ -397,24 +366,25 @@ describe("DELETE /api/strategies/draft/[id] — api_keys cleanup (H-0312)", () =
     expect(res.status).toBe(200);
     expect((await res.json()).deleted).toBe(true);
 
-    // Critical: the shared key must survive — deleting it would NULL out
-    // the sibling strategy's credentials via ON DELETE SET NULL.
-    expect(STATE.apiKeysDeleteCalls.length).toBe(0);
+    // The RPC was still consulted (atomic check), but it deleted nothing —
+    // the shared key survives (the NOT EXISTS guard) and no revoke is audited.
+    expect(STATE.rpcCalls).toContainEqual({
+      fn: "delete_api_key_if_unreferenced",
+      args: { p_api_key_id: API_KEY_ID },
+    });
     const revokeAudit = STATE.auditCalls.find(
       (c) => c.action === "api_key.revoke",
     );
     expect(revokeAudit).toBeUndefined();
   });
 
-  it("does NOT delete the api_keys row when the ref-count query itself errors (H-0314)", async () => {
-    // The ref-count query is the ONLY signal that decides whether the
-    // linked key is orphaned. If it errors, `count` is null. A naive
-    // `(count ?? 0) === 0` would coalesce that to 0 and DELETE the key —
-    // even if sibling strategies still reference it — silently NULLing
-    // their api_key_id via ON DELETE SET NULL and breaking their sync.
-    // The route must treat a failed ref-count as "cannot prove orphaned"
-    // and skip the delete entirely. Without the fix this test fails:
-    // the delete fires and the revoke audit is emitted off a null count.
+  it("treats an RPC failure as non-fatal — 200, no revoke audit (H-0314 fail-safe)", async () => {
+    // The atomic RPC unifies what used to be two failure modes (an errored
+    // ref-count AND an errored delete) into one: any RPC error means "cannot
+    // prove the key is orphaned". The route must skip + warn + still 200 (the
+    // strategy row is already gone), and must NEVER emit a revoke audit on an
+    // unproven delete — revoking a possibly-shared key would NULL a sibling's
+    // credentials via ON DELETE SET NULL. Without the fail-safe this fails.
     STATE.user = { id: OWNER_ID };
     STATE.draftRow = {
       id: DRAFT_ID,
@@ -423,7 +393,7 @@ describe("DELETE /api/strategies/draft/[id] — api_keys cleanup (H-0312)", () =
       status: "draft",
       api_key_id: API_KEY_ID,
     };
-    STATE.apiKeyRefCountError = { message: "ref-count query blew up" };
+    STATE.apiKeyRevokeError = { message: "rpc blew up" };
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const { DELETE } = await import("./route");
@@ -432,44 +402,12 @@ describe("DELETE /api/strategies/draft/[id] — api_keys cleanup (H-0312)", () =
     // The strategy row is already gone — the request still succeeds.
     expect(res.status).toBe(200);
     expect((await res.json()).deleted).toBe(true);
-
-    // CRITICAL: the api_keys delete must NOT have fired. A possibly-shared
-    // key cannot be revoked on the strength of an errored (null) count.
-    expect(STATE.apiKeysDeleteCalls.length).toBe(0);
-    // And no revoke audit — nothing was revoked.
-    const revokeAudit = STATE.auditCalls.find(
-      (c) => c.action === "api_key.revoke",
-    );
-    expect(revokeAudit).toBeUndefined();
-    warnSpy.mockRestore();
-  });
-
-  it("treats an api_keys delete failure as non-fatal — still returns 200", async () => {
-    STATE.user = { id: OWNER_ID };
-    STATE.draftRow = {
-      id: DRAFT_ID,
-      user_id: OWNER_ID,
-      source: "wizard",
-      status: "draft",
-      api_key_id: API_KEY_ID,
-    };
-    STATE.apiKeyRefCount = 0;
-    STATE.apiKeysDeleteError = { message: "api_keys delete blew up" };
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    const { DELETE } = await import("./route");
-    const res = await DELETE(makeDeleteReq(), makeCtx());
-
-    // The strategy row is already gone; a dangling api_key is a cosmetic
-    // cleanup issue, NOT a request failure.
-    expect(res.status).toBe(200);
-    expect((await res.json()).deleted).toBe(true);
-    // The delete was attempted...
-    expect(STATE.apiKeysDeleteCalls).toContainEqual({
-      column: "id",
-      value: API_KEY_ID,
+    // The RPC was attempted...
+    expect(STATE.rpcCalls).toContainEqual({
+      fn: "delete_api_key_if_unreferenced",
+      args: { p_api_key_id: API_KEY_ID },
     });
-    // ...but failed, so the revoke audit must NOT have been emitted.
+    // ...but failed, so NO revoke audit — nothing was provably revoked.
     const revokeAudit = STATE.auditCalls.find(
       (c) => c.action === "api_key.revoke",
     );

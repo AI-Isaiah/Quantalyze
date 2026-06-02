@@ -3103,6 +3103,10 @@ export type Database = {
         Args: { p_api_key_id: string; p_cascade_holdings?: boolean }
         Returns: number
       }
+      delete_api_key_if_unreferenced: {
+        Args: { p_api_key_id: string }
+        Returns: number
+      }
       disconnect_allocator_api_key: {
         Args: { p_api_key_id: string }
         Returns: boolean
