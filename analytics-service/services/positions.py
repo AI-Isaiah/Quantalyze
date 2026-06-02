@@ -20,6 +20,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from supabase import Client
+
 from services.db import db_execute
 
 logger = logging.getLogger("quantalyze.analytics.positions")
@@ -29,7 +31,7 @@ logger = logging.getLogger("quantalyze.analytics.positions")
 # Bybit V5 raw response parser
 # ---------------------------------------------------------------------------
 
-def _parse_bybit_v5_positions(raw_response: dict) -> list[dict]:
+def _parse_bybit_v5_positions(raw_response: dict[str, Any]) -> list[dict[str, Any]]:
     """Parse raw Bybit V5 position list response into normalized dicts.
 
     Expected response structure (from private_get_v5_position_list):
@@ -54,7 +56,7 @@ def _parse_bybit_v5_positions(raw_response: dict) -> list[dict]:
     Filters out zero-size positions.
     """
     items = raw_response.get("result", {}).get("list", [])
-    positions: list[dict] = []
+    positions: list[dict[str, Any]] = []
 
     for item in items:
         size_raw = item.get("size", "0")
@@ -88,7 +90,7 @@ def _parse_bybit_v5_positions(raw_response: dict) -> list[dict]:
 # Unified position normalizer from CCXT schema
 # ---------------------------------------------------------------------------
 
-def _normalize_ccxt_position(pos: dict, exchange_name: str) -> dict | None:
+def _normalize_ccxt_position(pos: dict[str, Any], exchange_name: str) -> dict[str, Any] | None:
     """Normalize a single CCXT unified position dict to our schema.
 
     Returns None if position has zero size (filtered out by caller).
@@ -125,7 +127,7 @@ def _normalize_ccxt_position(pos: dict, exchange_name: str) -> dict | None:
     }
 
 
-def _bybit_ccxt_has_critical_fields(positions: list[dict]) -> bool:
+def _bybit_ccxt_has_critical_fields(positions: list[dict[str, Any]]) -> bool:
     """Check if Bybit CCXT positions have all critical fields populated.
 
     If any position is missing markPrice, entryPrice, or unrealizedPnl,
@@ -143,7 +145,7 @@ def _bybit_ccxt_has_critical_fields(positions: list[dict]) -> bool:
 # Internal: batch normalize CCXT positions
 # ---------------------------------------------------------------------------
 
-def _normalize_ccxt_positions(raw: list[dict], exchange_name: str) -> list[dict]:
+def _normalize_ccxt_positions(raw: list[dict[str, Any]], exchange_name: str) -> list[dict[str, Any]]:
     """Normalize a list of CCXT unified positions, filtering out zero-size."""
     return [
         n for pos in raw
@@ -155,7 +157,7 @@ def _normalize_ccxt_positions(raw: list[dict], exchange_name: str) -> list[dict]
 # Public: fetch_positions
 # ---------------------------------------------------------------------------
 
-async def fetch_positions(exchange_name: str, exchange: Any) -> list[dict]:
+async def fetch_positions(exchange_name: str, exchange: Any) -> list[dict[str, Any]]:
     """Fetch current positions from exchange via async CCXT.
 
     The exchange must already be constructed (via create_exchange) with
@@ -179,7 +181,7 @@ async def fetch_positions(exchange_name: str, exchange: Any) -> list[dict]:
     return _normalize_ccxt_positions(raw_positions, exchange_name)
 
 
-async def _fetch_positions_bybit(exchange: Any) -> list[dict]:
+async def _fetch_positions_bybit(exchange: Any) -> list[dict[str, Any]]:
     """Bybit-specific: try CCXT unified first, fall back to raw V5."""
     raw_positions = await exchange.fetch_positions()
 
@@ -200,8 +202,8 @@ async def _fetch_positions_bybit(exchange: Any) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 async def persist_position_snapshots(
-    supabase_client: Any,
-    snapshots: list[dict],
+    supabase_client: Client,
+    snapshots: list[dict[str, Any]],
     strategy_id: str,
     snapshot_date: str,
 ) -> int:
@@ -218,11 +220,11 @@ async def persist_position_snapshots(
         for snap in snapshots
     ]
 
-    def _upsert():
-        return supabase_client.table("position_snapshots").upsert(
+    def _upsert() -> None:
+        supabase_client.table("position_snapshots").upsert(
             rows,
             on_conflict="strategy_id,snapshot_date,symbol,side",
         ).execute()
 
-    result = await db_execute(_upsert)
+    await db_execute(_upsert)
     return len(rows)

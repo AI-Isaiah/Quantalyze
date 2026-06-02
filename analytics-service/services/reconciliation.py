@@ -68,6 +68,11 @@ PRICE_TOLERANCE_BP = 0.0001  # 1bp = 0.01%
 # so we compare with a tiny epsilon to absorb float-vs-Decimal round-trip.
 QTY_EPSILON = 1e-8
 
+# Deterministic secondary-stage match key produced by ``_tuple_key``:
+# (exchange, symbol, side, ts_bucket, rounded_qty). All five components are
+# non-None by construction at the point ``_tuple_key`` returns a tuple.
+_TupleKey = tuple[str, str, str, int, float]
+
 
 # ---------------------------------------------------------------------------
 # Report shape
@@ -127,7 +132,7 @@ def _bucket(ts_ms: int | None) -> int | None:
     return ts_ms // (TS_BUCKET_SECONDS * 1000)
 
 
-def _f(row: dict, *keys: str) -> Any:
+def _f(row: dict[str, Any], *keys: str) -> Any:
     """Tolerant getter — returns the first present key's value."""
     for k in keys:
         if k in row and row[k] is not None:
@@ -144,7 +149,7 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
-def _tuple_key(row: dict) -> tuple | None:
+def _tuple_key(row: dict[str, Any]) -> _TupleKey | None:
     """Deterministic tuple identity for secondary-stage matching.
 
     Price is excluded from the hash key and compared with ±1bp tolerance
@@ -178,7 +183,7 @@ def _qty_matches(a: float | None, b: float | None) -> bool:
     return abs(a - b) <= QTY_EPSILON
 
 
-def _tuple_matches(exchange_row: dict, db_row: dict) -> bool:
+def _tuple_matches(exchange_row: dict[str, Any], db_row: dict[str, Any]) -> bool:
     """Confirm a tuple-key pair really agrees on the non-key fields.
 
     The tuple key already pinned exchange/symbol/side/bucket/qty; here we
@@ -191,7 +196,7 @@ def _tuple_matches(exchange_row: dict, db_row: dict) -> bool:
     return _price_matches(ex_price, db_price)
 
 
-def _summarize(row: dict) -> dict[str, Any]:
+def _summarize(row: dict[str, Any]) -> dict[str, Any]:
     """Project a trade row down to the fields we echo in the discrepancy payload."""
     return {
         "exchange": _f(row, "exchange"),
@@ -211,8 +216,8 @@ def _summarize(row: dict) -> dict[str, Any]:
 def diff_strategy_fills(
     strategy_id: str,
     date_range: tuple[datetime, datetime],
-    exchange_fills: list[dict],
-    db_fills: list[dict],
+    exchange_fills: list[dict[str, Any]],
+    db_fills: list[dict[str, Any]],
 ) -> ReconciliationReport:
     """Compute a reconciliation report for one strategy over a date window.
 
@@ -248,8 +253,8 @@ def diff_strategy_fills(
     # that finds a match here is removed from both working sets. ID
     # mismatches in price/qty are caught here and surfaced as
     # mismatch_* (a rewrite, not a drift).
-    db_by_id: dict[tuple[str, str], dict] = {}
-    db_ladder: list[dict] = []  # DB rows with no fill_id (unlikely post-039 but defensive)
+    db_by_id: dict[tuple[str, str], dict[str, Any]] = {}
+    db_ladder: list[dict[str, Any]] = []  # DB rows with no fill_id (unlikely post-039 but defensive)
     for row in db_fills:
         ex = _f(row, "exchange")
         fid = _f(row, "exchange_fill_id", "id")
@@ -258,7 +263,7 @@ def diff_strategy_fills(
         else:
             db_ladder.append(row)
 
-    exchange_residue: list[dict] = []
+    exchange_residue: list[dict[str, Any]] = []
     matched_db_ids: set[tuple[str, str]] = set()
 
     for ex_row in exchange_fills:
@@ -266,7 +271,10 @@ def diff_strategy_fills(
         fid = _f(ex_row, "exchange_fill_id", "id")
         key = (str(ex), str(fid)) if ex is not None and fid else None
         db_row = db_by_id.get(key) if key else None
-        if db_row is None:
+        # ``key is None`` already implies ``db_row is None`` (the guard above),
+        # so this preserves the original control flow while narrowing ``key``
+        # to ``tuple[str, str]`` for the ``matched_db_ids.add`` below.
+        if key is None or db_row is None:
             exchange_residue.append(ex_row)
             continue
 
@@ -312,13 +320,13 @@ def diff_strategy_fills(
     # matching pairs) or `needs_manual_review` (N:M ambiguity).
     db_residue = [r for (k, r) in db_by_id.items() if k not in matched_db_ids] + db_ladder
 
-    ex_by_tuple: dict[tuple, list[dict]] = defaultdict(list)
+    ex_by_tuple: dict[_TupleKey, list[dict[str, Any]]] = defaultdict(list)
     for row in exchange_residue:
         tk = _tuple_key(row)
         if tk is not None:
             ex_by_tuple[tk].append(row)
 
-    db_by_tuple: dict[tuple, list[dict]] = defaultdict(list)
+    db_by_tuple: dict[_TupleKey, list[dict[str, Any]]] = defaultdict(list)
     for row in db_residue:
         tk = _tuple_key(row)
         if tk is not None:
