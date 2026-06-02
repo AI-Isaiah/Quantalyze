@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.73] - 2026-06-02
+### Fixed — API error-envelope hygiene round 2: no-store headers, withAuth, pagination contract, idempotency (F5b)
+
+Closes the deferred OWNED-BY-F5 remainder (5 fixed, 2 reverify-closed, 2 deferred-with-rationale). Each finding was re-verified against current `main` first — F5a (#419) had already redacted the leak-bearing *messages* on bridge/simulator; this batch closes the *header/contract* axis those routes still missed.
+
+- **bridge** (M-0888/M-0889): migrated `POST /api/bridge` to the `withAuth` wrapper (drops hand-rolled CSRF + getUser + approval-gate) and stamps `NO_STORE_HEADERS` on every response path. The 200 body is the allocator's `BridgeCandidate[]` — a cross-tenant cache-leak surface (audit Block D / P1947). Kept on plain `withAuth` + inline limiter deliberately (converging onto `withAuthLimited`'s default deny would drop the bespoke 429/503 copy and regress the new no-store).
+- **simulator** (M-0957): `NO_STORE_HEADERS` on all 9 paths (200 body = user-specific portfolio metrics). Review follow-up: also added the approval gate it was missing, matching its compute-heavy siblings (bridge, portfolio-optimizer) so pending-approval users can't consume the expensive Python round-trip.
+- **browse** (M-0343): additive, typed `BrowseResponse` envelope — fetch `LIMIT+1` probe, return `{ strategies, has_more, limit }` so a client can detect truncation instead of silently seeing only the first 200. `has_more`/`limit` are now compiler-checked at the boundary.
+- **process** (M-0269): the conditional UPDATE returns 0 rows == not_found for BOTH a missing row and one already in the target state; disambiguate via a new `leadExists()` in the `for_quants_leads` service-role chokepoint so a retried/double-submitted admin POST gets an idempotent 200, not a spurious 404.
+- Reverify-closed (no code; closed by #191): M-0967 / L-0060 (PortfolioImpactPanel error-body coercion). Deferred-with-rationale: M-0353 (finalize-wizard fieldErrors — needs coordinated route+client refactor) and L-0018 (portfolio-pdf text 429/503 is the deliberate `rateLimitDenyText` convention).
+- Reviewed by 6 fresh-context specialists + an adversarial red-team (all 8 specialist findings confirmed + 1 new; none CRITICAL/HIGH). Applied: corrected a misleading bridge comment, the simulator approval gate, the typed `BrowseResponse`, a mock-comment fix, and no-store regression guards on the leak-bearing error paths (404 / upstream-4xx-forward / 504 / 500). Deferred to a dedicated batch: a construction-level eslint rule to close the no-store class across the ~24 other authenticated routes. tsc 0 / eslint 0 / full vitest 5942 green.
+
 ## [0.24.15.72] - 2026-06-02
 ### Fixed — Equity widget no longer claims "sync just now" for never-synced allocators (B14, H-1226 / NEW-C09-04)
 
