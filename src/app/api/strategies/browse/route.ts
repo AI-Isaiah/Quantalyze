@@ -52,6 +52,25 @@ export interface BrowseStrategyRow {
   strategy_types: string[];
 }
 
+/**
+ * Wire contract for GET /api/strategies/browse (F5b review #1/#6/#8). Exporting
+ * + annotating the response payload means `has_more` / `limit` cannot be
+ * renamed or dropped without a compile error, and a consumer that wants to
+ * honor truncation can import this rather than re-declaring the shape inline.
+ *
+ * `limit` is the hard alphabetical cap (NOT a `page_size` — there is no
+ * offset/cursor; `has_more: true` signals "refine your filter", not "load the
+ * next page"). This intentionally differs from portfolio-alerts' cursored
+ * `{ page_size, offset, has_more }` paginator. The drawer does not yet surface
+ * `has_more` (the catalog is well under the cap today); wiring a truncation
+ * notice is a deferred UX follow-up, not a wire change.
+ */
+export interface BrowseResponse {
+  strategies: BrowseStrategyRow[];
+  has_more: boolean;
+  limit: number;
+}
+
 // M10 — Pin LIMIT 200. Verified strategy count is in the low tens today;
 // the v0.16 strategy-onboarding push is expected to multiply this. The
 // drawer contract is "browse first 200 alphabetical" with no pagination
@@ -122,10 +141,10 @@ export const GET = withAllocatorAuth(
     // name look it up and read its codename — defeating the
     // pseudonymity contract for the entire verified catalog.
     // M-0343: the +1 probe row tells us the catalog exceeds the cap. Drop it
-    // from the payload and surface `has_more` so the drawer can warn instead
-    // of silently truncating. `limit` is echoed so the contract is
-    // self-describing and a future cursor/total field is an additive
-    // (non-breaking) change.
+    // from the payload and surface `has_more` so a consumer CAN warn instead of
+    // silently truncating (the drawer does not yet — deferred UX follow-up,
+    // see BrowseResponse). `limit` is echoed so the contract is self-describing
+    // and a future cursor/total field is an additive (non-breaking) change.
     const rows = data ?? [];
     const hasMore = rows.length > STRATEGY_BROWSE_LIMIT;
     const pageRows = hasMore ? rows.slice(0, STRATEGY_BROWSE_LIMIT) : rows;
@@ -157,9 +176,11 @@ export const GET = withAllocatorAuth(
       };
     });
 
-    return NextResponse.json(
-      { strategies, has_more: hasMore, limit: STRATEGY_BROWSE_LIMIT },
-      { status: 200, headers: NO_STORE_HEADERS },
-    );
+    const body: BrowseResponse = {
+      strategies,
+      has_more: hasMore,
+      limit: STRATEGY_BROWSE_LIMIT,
+    };
+    return NextResponse.json(body, { status: 200, headers: NO_STORE_HEADERS });
   },
 );

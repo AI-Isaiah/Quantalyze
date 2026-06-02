@@ -18,10 +18,16 @@ import {
 // M-0888 (audit-2026-05-07 F5b): use the `withAuth` wrapper instead of
 // hand-rolling assertSameOrigin + supabase.auth.getUser + assertProfileApproved.
 // withAuth applies the same CSRF + auth + approval gate AND stamps the 401
-// envelope with NO_STORE_HEADERS, so this route stops drifting from the
-// convention every other 2026-vintage bridge route already follows
-// (bridge/outcome, bridge/outcome/dismiss). Any future wrapper hardening
-// (double-submit CSRF, body-size cap, Vary) now reaches this route for free.
+// envelope with NO_STORE_HEADERS, and any future wrapper hardening (double-
+// submit CSRF, body-size cap, Vary) reaches this route for free.
+//
+// Note: the sibling bridge/outcome + bridge/outcome/dismiss routes use the
+// heavier `withAuthLimited` (which folds rate-limit + body-schema INTO the
+// wrapper). Bridge deliberately stays on plain `withAuth` + an INLINE limiter:
+// converging onto withAuthLimited's default `rateLimitDenyJson` would drop this
+// route's bespoke 429/503 copy AND regress the NO_STORE_HEADERS added below
+// (rateLimitDenyJson does not stamp it). The inline limiter already enforces the
+// B15 validate-before-limit ordering, so the convergence value is marginal.
 //
 // M-0889 (audit-2026-05-07 round-2 Block D / P1947): every authenticated
 // response — error AND success — must carry `Cache-Control: private, no-store`.

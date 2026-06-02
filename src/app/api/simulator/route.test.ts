@@ -208,6 +208,68 @@ describe("POST /api/simulator", () => {
     expect(unauth.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
+  it("M-0957 — error paths (404, upstream-4xx-forward, 504, 500) all carry no-store", async () => {
+    // F5b review #3: pin the leak-bearing error branches, not just 200+401.
+    const { POST } = await import("./route");
+    const req = () =>
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        candidate_strategy_id: CANDIDATE_ID,
+      });
+
+    STATE.portfolioFound = false; // 404 portfolio-not-found
+    let res = await POST(req());
+    expect(res.status).toBe(404);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    STATE.portfolioFound = true;
+
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("already in portfolio", 400); // 4xx fwd
+    };
+    res = await POST(req());
+    expect(res.status).toBe(400);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+
+    STATE.simulateImpl = async () => {
+      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      throw new AnalyticsTimeoutError("/api/portfolio-simulate", 15000); // 504
+    };
+    res = await POST(req());
+    expect(res.status).toBe(504);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("traceback", 502); // 500 generic
+    };
+    res = await POST(req());
+    expect(res.status).toBe(500);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("F5b — pending-approval user is denied 403 (gate parity with bridge / portfolio-optimizer)", async () => {
+    // The compute-heavy simulateAddCandidate round-trip must be gated like its
+    // siblings. assertProfileApproved is globally mocked to null (approved) in
+    // test-setup; override it once to return a denial NextResponse.
+    const { assertProfileApproved } = await import("@/lib/api/approval-gate");
+    vi.mocked(assertProfileApproved).mockResolvedValueOnce(
+      NextResponse.json(
+        { error: "Account pending approval" },
+        { status: 403, headers: { "Cache-Control": "private, no-store" } },
+      ),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        candidate_strategy_id: CANDIDATE_ID,
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
   it("TC2 — 403 CSRF when origin allowlist fails", async () => {
     STATE.csrfShouldReject = true;
     const { POST } = await import("./route");

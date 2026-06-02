@@ -237,6 +237,14 @@ describe("POST /api/admin/for-quants-leads/process — C-0037", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ ok: true, noop: true });
+    // The 200-noop returns BEFORE logAuditEventAsUser, so a retried/double-
+    // submitted no-op must NOT write an audit row (idempotency must not forge
+    // a "lead.process" event for an operation that already took effect).
+    expect(
+      auditEmissions.filter(
+        (e) => e.action === "lead.process" || e.action === "lead.unprocess",
+      ),
+    ).toHaveLength(0);
   });
 
   it("M-0269 — helper not_found + row missing (genuinely absent) → 404", async () => {
@@ -247,5 +255,18 @@ describe("POST /api/admin/for-quants-leads/process — C-0037", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toBe("Lead not found");
+  });
+
+  it("M-0269 — unmark (unprocess:true) path applies the same disambiguation → 200 noop", async () => {
+    // The unmark branch shares the leadExists() disambiguation; pin it so the
+    // symmetric already-in-state case is covered, not just the mark branch.
+    STATE.unmarkResult = { ok: false, reason: "not_found" };
+    STATE.leadExists = true;
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ id: VALID_UUID, unprocess: true }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ ok: true, noop: true });
+    expect(STATE.unmarkCalls).toEqual([VALID_UUID]);
   });
 });

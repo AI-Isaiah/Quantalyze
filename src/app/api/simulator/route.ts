@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
+import { assertProfileApproved } from "@/lib/api/approval-gate";
 import {
   simulateAddCandidate,
   AnalyticsUpstreamError,
@@ -31,9 +32,14 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  * body is user-specific portfolio metrics (Sharpe / MaxDD / correlation /
  * equity curves); allocator-scoped payloads served from any shared cache
  * (intermediate proxy, browser bfcache, service-worker) would leak
- * cross-tenant. (Auth stays hand-rolled here — unlike /api/bridge this route
- * has no approval gate, so it is intentionally NOT migrated to `withAuth`,
- * which would silently add one.)
+ * cross-tenant.
+ *
+ * Auth stays hand-rolled (this route's bespoke limiter/envelope shape predates
+ * `withAuth`), but the approval gate IS enforced below — F5b review found the
+ * two sibling compute-heavy analytics routes both gate it (/api/bridge via
+ * withAuth, /api/portfolio-optimizer via explicit assertProfileApproved), and
+ * the expensive simulateAddCandidate Python round-trip is exactly what the
+ * universal-approval gate exists to deny to pending-approval users.
  */
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
@@ -50,6 +56,13 @@ export async function POST(req: NextRequest) {
       { status: 401, headers: NO_STORE_HEADERS },
     );
   }
+
+  // F5b review (security lens + red-team): match the approval-gate posture of
+  // the sibling compute-heavy routes (bridge via withAuth, portfolio-optimizer
+  // explicit) so pending-approval users cannot consume the expensive analytics
+  // round-trip. The 403 carries NO_STORE_HEADERS via approval-gate.ts.
+  const denied = await assertProfileApproved(supabase, user.id);
+  if (denied) return denied;
 
   let rawBody: unknown;
   try {

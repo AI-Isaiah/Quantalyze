@@ -195,6 +195,48 @@ describe("POST /api/bridge", () => {
     expect(unauth.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
+  it("M-0889 — error paths (404, upstream-4xx-forward, 504, 500) all carry no-store", async () => {
+    // F5b review #3: the leak-bearing error branches must be pinned, not just
+    // 200+401. The 4xx-forward path echoes the upstream err.message (operator
+    // copy that can be tenant-distinguishing) — the highest-value path to guard.
+    const { POST } = await import("./route");
+    const req = () =>
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      });
+
+    STATE.portfolioFound = false; // 404 portfolio-not-found
+    let res = await POST(req());
+    expect(res.status).toBe(404);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    STATE.portfolioFound = true;
+
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("no returns data", 400); // 4xx forward
+    };
+    res = await POST(req());
+    expect(res.status).toBe(400);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      throw new AnalyticsTimeoutError("/api/portfolio-bridge", 15000); // 504
+    };
+    res = await POST(req());
+    expect(res.status).toBe(504);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("traceback", 502); // 500 generic
+    };
+    res = await POST(req());
+    expect(res.status).toBe(500);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
   it("TC2 — 403 CSRF when origin allowlist fails", async () => {
     STATE.csrfShouldReject = true;
     const { POST } = await import("./route");
