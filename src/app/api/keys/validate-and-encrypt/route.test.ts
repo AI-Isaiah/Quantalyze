@@ -219,6 +219,25 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     expect(mockEncryptKey).not.toHaveBeenCalled();
   });
 
+  // ── (4c) validateKey times out → 504 STATIC, no Sentry ─────────────
+  it("returns 504 with static copy when validateKey times out (timeout is upstream-expected, not a 5xx alert)", async () => {
+    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsTimeoutError("/api/validate-key", 30000),
+    );
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(504);
+    const body = await res.json();
+    expect(body.error).toBe("Key validation timed out. Please try again.");
+    // A timeout is an expected upstream condition — NOT captured to Sentry
+    // (mirrors the 4xx-forward no-Sentry anti-assertion above).
+    expect(captureSpy).not.toHaveBeenCalled();
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+  });
+
   // ── (5) Happy path → 200 with encryptKey payload + valid/read_only ──
   it("returns the encryptKey payload spread with valid:true, read_only:true on success", async () => {
     const { POST } = await import("./route");

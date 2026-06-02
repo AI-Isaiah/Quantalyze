@@ -224,6 +224,20 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
     expect(body.error).toBe("No trades found for this key in the last 90 days");
     expect(captureSpy).not.toHaveBeenCalled();
   });
+
+  it("F5b (R8) — a delegate timeout returns 504 STATIC, no Sentry (timeout is upstream-expected)", async () => {
+    verificationCount = 0;
+    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    verifyStrategyMock.mockRejectedValue(
+      new AnalyticsTimeoutError("/api/verify-strategy", 30000),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    expect(res.status).toBe(504);
+    const body = await res.json();
+    expect(body.error).toBe("Verification timed out. Please try again.");
+    expect(captureSpy).not.toHaveBeenCalled();
+  });
 });
 
 /**
