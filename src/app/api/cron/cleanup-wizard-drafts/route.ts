@@ -53,12 +53,21 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
   if (selectError) {
     console.error("[cron/cleanup-wizard-drafts] select failed:", selectError);
-    return NextResponse.json({ error: selectError.message }, { status: 500 });
+    // Generic envelope — keep the raw PostgREST message in the log, not the
+    // response body (it can carry SQL state / table / constraint names).
+    return NextResponse.json({ error: "Cron select failed" }, { status: 500 });
   }
 
   const draftRows = drafts ?? [];
   if (draftRows.length === 0) {
-    return NextResponse.json({ deleted: 0, orphaned_keys_revoked: 0 });
+    // Keep the success shape consistent across every clean run so a monitor
+    // can read key_sweep_errors uniformly (a clean drafts-present run also
+    // returns key_sweep_errors:0).
+    return NextResponse.json({
+      deleted: 0,
+      orphaned_keys_revoked: 0,
+      key_sweep_errors: 0,
+    });
   }
 
   const draftIds = draftRows.map((d) => d.id);
@@ -80,13 +89,19 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
   if (delError) {
     console.error("[cron/cleanup-wizard-drafts] delete failed:", delError);
-    return NextResponse.json({ error: delError.message }, { status: 500 });
+    return NextResponse.json({ error: "Cron delete failed" }, { status: 500 });
   }
 
   // Best-effort revoke orphaned api_keys — only when no strategy still
   // references the key. Mirrors the user-driven DELETE handler so a
   // shared key isn't accidentally yanked from a different live strategy.
   let orphanedKeysRevoked = 0;
+  // Track per-key sweep failures so a partially-failed run can't masquerade
+  // as a clean one. Without this, a 200 `{orphaned_keys_revoked: N}` is
+  // indistinguishable from "M other keys were kept because still-referenced"
+  // vs. "M keys FAILED to revoke and orphan rows now point at deleted
+  // strategies" (H-1251). Mirrors the sibling cron `errors[]` convention.
+  const sweepErrors: string[] = [];
   const apiKeyIds = Array.from(
     new Set(
       draftRows
@@ -101,10 +116,14 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       .select("id", { count: "exact", head: true })
       .eq("api_key_id", keyId);
     if (countErr) {
-      console.warn(
-        "[cron/cleanup-wizard-drafts] count check failed (skip):",
+      // Safe direction for THIS key (skip revoke when uncertain), but the
+      // skip must be observable — a transient count error means an orphan
+      // may have been left behind, not that the run was clean (M-1145).
+      console.error(
+        `[cron/cleanup-wizard-drafts] count check failed for key=${keyId} (skip revoke):`,
         countErr,
       );
+      sweepErrors.push(`${keyId}: count check failed: ${countErr.message}`);
       continue;
     }
     if ((refCount ?? 0) > 0) continue;
@@ -117,19 +136,35 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       .delete()
       .eq("id", keyId);
     if (keyErr) {
-      console.warn(
-        "[cron/cleanup-wizard-drafts] api_key delete failed (non-fatal):",
+      // Confirmed orphan (refCount===0) that failed to delete: the api_keys
+      // table now holds a row pointing at strategies we just deleted. This
+      // is a real integrity drift, not a no-op — surface it loudly (M-1144).
+      console.error(
+        `[cron/cleanup-wizard-drafts] api_key delete failed for key=${keyId} (orphan NOT revoked):`,
         keyErr,
       );
+      sweepErrors.push(`${keyId}: revoke failed: ${keyErr.message}`);
       continue;
     }
     orphanedKeysRevoked += 1;
   }
 
-  return NextResponse.json({
-    deleted: deletedCount ?? draftIds.length,
-    orphaned_keys_revoked: orphanedKeysRevoked,
-  });
+  // H-1251: when any orphan-sweep step errored, the run is degraded — orphan
+  // api_keys rows may have been left pointing at deleted strategies. Return a
+  // non-2xx (500) so Vercel Cron treats the run as FAILED and alerts: a 207
+  // Multi-Status is still in the 2xx family, so Vercel would key it as success
+  // and bury the partial failure. (The per-key console.error above also names
+  // each failing key.) A retried run early-returns once the drafts are gone, so
+  // this is alert-only, not auto-heal — surfacing the orphan is the point.
+  return NextResponse.json(
+    {
+      deleted: deletedCount ?? draftIds.length,
+      orphaned_keys_revoked: orphanedKeysRevoked,
+      key_sweep_errors: sweepErrors.length,
+      ...(sweepErrors.length > 0 ? { errors: sweepErrors.slice(0, 5) } : {}),
+    },
+    { status: sweepErrors.length > 0 ? 500 : 200 },
+  );
 }
 
 export const GET = handle;

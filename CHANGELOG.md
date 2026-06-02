@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.55] - 2026-06-02
+### Fixed — Loud-fail discipline across the allocator client surface (audit-2026-05-07 fix-batch F1)
+
+Closed a whole class of bug where a failed fetch/DB call was silently shown as "empty / no data / all clear" — so the user was misled, and in one case **lost data**. 31 findings fixed across 14 frontend files (16 HIGH + 15 MEDIUM/LOW), each with a regression test that fails without the fix. Implemented and adversarially reviewed per-file by independent passes (14 PASS, 2 reconciled).
+
+- **Data-loss fixed (headline):** the **Holding Notes** tab treated *every* non-OK `/api/notes` response (500/403/429, network error) as "no note yet" — dropping the user into an empty editor over their existing note, which blur-autosave then PUT-overwrote. Now a non-404 failure renders a distinct "Couldn't load your note — your saved note is safe" error with Retry, and the autosave is **gated on a clean load** so a failed fetch can no longer destroy the stored note (`HoldingDetail.tsx`, `useNoteAutoSave.ts`; H-0092/H-0093/H-1216/M-0075/M-1160).
+- **No more false "all clear":** Bridge status, portfolio Insight Strip, Portfolio Impact Panel, and Replacement cards now distinguish "couldn't load" from "genuinely empty" — a load failure shows an error state, not a reassuring empty/"within mandate" view (`BridgeWidget`, `InsightStrip`, `PortfolioImpactPanel`, `ReplacementCard`, `ReplacementPanel`, `StrategyBrowseDrawer`, `HoldingsTable`, `ForQuantsLeadsTable`, `SendIntroPanel`, `ApiKeyManager`, `MetadataStep`).
+- **Cron failures now alert:** `cleanup-wizard-drafts` returns a non-2xx (500, not a 2xx 207) when an orphan-`api_keys` sweep step fails, so Vercel Cron monitoring actually goes red instead of burying a partial failure; `sync-funding` counts a `{data:null,error:null}` enqueue result as a failure (accounting identity `enqueued+failed===total_candidates`) rather than a silent drop (H-1251/H-1091 + per-key/per-job error arrays). Both routes `console.error` every swallowed branch.
+- **Discipline:** every previously-swallowed catch/error branch now logs `console.error`, and failures render a distinct, recoverable error state instead of a misleading empty one — the B2 Result-envelope ethos applied to the allocator client surface.
+
 ## [0.24.15.54] - 2026-06-02
 ### Changed — `mypy --strict` type floor: `analytics_runner.py` + `position_reconstruction.py` → 0 errors (cross-cutting refactor B-mypy, part f-4)
 

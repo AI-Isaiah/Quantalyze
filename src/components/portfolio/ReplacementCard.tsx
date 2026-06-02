@@ -34,6 +34,19 @@ interface ReplacementCardProps {
   replacementFor: string;
 }
 
+// H-1067: distinct, actionable message per failure mode. The /api/intro route
+// returns 401 (unauthorized), 403 (not an allocator / not approved), 429 (rate
+// limit), 400 (bad body) and 500 (insert/select failure); the network/parse
+// path (no status) and programming errors (e.g. a thrown TypeError) land here
+// too. Collapsing all of these into a bare "Retry Intro" hid which were
+// retryable and which were permanent — and masked client bugs as network blips.
+function humanizeIntroError(status: number | null): string {
+  if (status === 429) return "Too many requests — try again in a minute.";
+  if (status === 401 || status === 403) return "You don't have permission to request this intro.";
+  if (status === 400) return "Couldn't request intro — please reload and retry.";
+  return "Couldn't reach the server — retry shortly.";
+}
+
 /**
  * A single replacement candidate card inside the ReplacementPanel.
  * Shows strategy name, fit label badge, metric deltas (Sharpe, MaxDD, Corr),
@@ -41,9 +54,11 @@ interface ReplacementCardProps {
  */
 export function ReplacementCard({ candidate, replacementFor }: ReplacementCardProps) {
   const [introState, setIntroState] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [introError, setIntroError] = useState<string | null>(null);
 
   const handleIntro = useCallback(async () => {
     setIntroState("loading");
+    setIntroError(null);
     try {
       const res = await fetch("/api/intro", {
         method: "POST",
@@ -61,10 +76,25 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
         return;
       }
       if (!res.ok) {
-        throw new Error(`${res.status}`);
+        // H-1067: surface WHICH failure happened instead of one opaque retry.
+        console.error("[bridge.intro] request failed:", res.status, {
+          strategy_id: candidate.strategy_id,
+          replacement_for: replacementFor,
+        });
+        setIntroError(humanizeIntroError(res.status));
+        setIntroState("error");
+        return;
       }
       setIntroState("done");
-    } catch {
+    } catch (err) {
+      // H-1067: never swallow — a network/parse failure or a programming error
+      // (e.g. composite_score not a number) must be observable, not disguised
+      // as a generic retry.
+      console.error("[bridge.intro] request threw:", err, {
+        strategy_id: candidate.strategy_id,
+        replacement_for: replacementFor,
+      });
+      setIntroError(humanizeIntroError(null));
       setIntroState("error");
     }
   }, [candidate, replacementFor]);
@@ -115,19 +145,27 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
       {introState === "done" ? (
         <p className="text-xs text-text-muted">Intro Requested</p>
       ) : (
-        <button
-          type="button"
-          onClick={handleIntro}
-          disabled={introState === "loading"}
-          className={cn(
-            "rounded-md border border-accent bg-accent px-3 py-1 text-xs font-medium text-white transition-colors duration-150",
-            introState === "loading"
-              ? "cursor-wait opacity-60"
-              : "hover:bg-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent",
+        <>
+          {/* H-1067: distinct, actionable error — not a silent generic retry. */}
+          {introState === "error" && introError && (
+            <p className="mb-2 text-xs text-negative" role="alert">
+              {introError}
+            </p>
           )}
-        >
-          {introState === "loading" ? "Requesting..." : introState === "error" ? "Retry Intro" : "Request Intro"}
-        </button>
+          <button
+            type="button"
+            onClick={handleIntro}
+            disabled={introState === "loading"}
+            className={cn(
+              "rounded-md border border-accent bg-accent px-3 py-1 text-xs font-medium text-white transition-colors duration-150",
+              introState === "loading"
+                ? "cursor-wait opacity-60"
+                : "hover:bg-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent",
+            )}
+          >
+            {introState === "loading" ? "Requesting..." : introState === "error" ? "Retry Intro" : "Request Intro"}
+          </button>
+        </>
       )}
     </div>
   );

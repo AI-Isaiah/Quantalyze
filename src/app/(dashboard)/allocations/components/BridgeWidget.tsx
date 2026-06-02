@@ -34,7 +34,17 @@ import type { OutcomeRow } from "@/lib/queries";
 export type BridgeWidgetVariant = "full" | "card" | "subtle";
 
 export interface BridgeWidgetProps {
-  flaggedHoldings: FlaggedHolding[];
+  /**
+   * H-1210 (F1 loud-fail) — discriminate "we couldn't load the breach data"
+   * from "genuinely zero breaches". An array (incl. `[]`) is a KNOWN result:
+   * `[]` → the real "All clear" empty state. `null` is the UNKNOWN signal —
+   * the upstream dashboard payload failed to resolve flaggedHoldings (network
+   * blip / query threw). For a SAFETY-RELEVANT widget we must NEVER collapse
+   * "unknown" into the reassuring "All clear" UI; `null` renders a distinct
+   * "Bridge status unavailable" state with a retry affordance. Callers that
+   * coalesce a failed payload field MUST pass `null`, not `[]`.
+   */
+  flaggedHoldings: FlaggedHolding[] | null;
   matchDecisionsByHoldingRef: Record<string, { id: string } | null>;
   /** Driven by the Tweaks panel (Plan 11); default "full" per D-15. */
   variant?: BridgeWidgetVariant;
@@ -47,6 +57,14 @@ export interface BridgeWidgetProps {
    * state degrades to the "no reviews recorded yet" copy.
    */
   outcomes?: ReadonlyArray<OutcomeRow>;
+  /**
+   * H-1210 (F1 loud-fail) — optional retry handler for the "Bridge status
+   * unavailable" error state (rendered when `flaggedHoldings` is `null`).
+   * When provided, the error card shows a Retry button that invokes it so
+   * the caller can re-fetch. When omitted the error state still renders
+   * (just without the button) — the load failure is never silently hidden.
+   */
+  onRetry?: () => void;
 }
 
 /**
@@ -82,8 +100,61 @@ export function BridgeWidget({
   matchDecisionsByHoldingRef,
   variant = "full",
   outcomes = [],
+  onRetry,
 }: BridgeWidgetProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // H-1210 (F1 loud-fail) — `null` is the UNKNOWN signal: the upstream
+  // dashboard payload failed to resolve flaggedHoldings. Render a distinct
+  // error state instead of the reassuring "All clear" empty state, and log
+  // the swallowed failure so it stays observable. An allocator must never
+  // decide not to rebalance because a *failed* Bridge load looked "All clear".
+  if (flaggedHoldings === null) {
+    console.error(
+      "[BridgeWidget] flaggedHoldings unavailable — rendering error state (load failed upstream)",
+    );
+    return (
+      <div
+        role="region"
+        aria-label="Bridge status unavailable"
+        data-testid="bridge-error-state"
+        className="rounded-lg border px-4 py-3"
+        style={{
+          borderColor: "var(--color-bridge-border-100)",
+          background: "var(--color-bridge-bg-50)",
+        }}
+      >
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span
+            className="text-[10px] font-mono uppercase tracking-[0.14em]"
+            style={{ color: "var(--color-warning)" }}
+          >
+            Bridge
+          </span>
+          <span
+            className="text-base font-semibold text-text-primary"
+            style={{ fontFamily: "var(--font-serif, Fraunces, Georgia, serif)" }}
+          >
+            Status unavailable
+          </span>
+          <span className="text-sm text-text-secondary">
+            Couldn&rsquo;t load your Bridge status.
+          </span>
+          {onRetry ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              data-testid="bridge-error-retry"
+              className="ml-auto text-sm font-medium text-accent hover:underline"
+            >
+              Retry
+            </button>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   const hasBreaches = flaggedHoldings.length > 0;
 
   if (!hasBreaches) {

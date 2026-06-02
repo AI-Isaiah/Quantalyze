@@ -56,6 +56,14 @@ const STATE = vi.hoisted(() => ({
   // M-0307: when set, the strategy_analytics .in() query resolves with
   // this error so the route's 500 "Failed to load curves" branch is hit.
   analyticsError: null as { code?: string; message: string } | null,
+  // H-0258: when set, the user-scoped bridge_outcomes SELECT resolves with
+  // this error so the route's "real DB error -> 500, not a masked 404"
+  // branch is exercised.
+  outcomeError: null as { code?: string; message: string } | null,
+  // H-0256 / M-0305: when set, the admin match_decisions SELECT resolves
+  // with this error so the loud-fail (console.error, no silent swallow)
+  // branch is exercised.
+  decisionError: null as { code?: string; message: string } | null,
 }));
 
 // user-scoped supabase client: returns auth + outcomeRow from bridge_outcomes
@@ -73,8 +81,9 @@ vi.mock("@/lib/supabase/server", () => ({
           select: () => ({
             eq: () => ({
               maybeSingle: async () => ({
-                data: STATE.outcomeRow,
-                error: null,
+                // H-0258: error injection for the real-DB-error branch.
+                data: STATE.outcomeError ? null : STATE.outcomeRow,
+                error: STATE.outcomeError,
               }),
             }),
           }),
@@ -98,8 +107,9 @@ vi.mock("@/lib/supabase/admin", () => ({
             select: () => ({
               eq: () => ({
                 maybeSingle: async () => ({
-                  data: STATE.decisionRow,
-                  error: null,
+                  // H-0256 / M-0305: error injection for the loud-fail branch.
+                  data: STATE.decisionError ? null : STATE.decisionRow,
+                  error: STATE.decisionError,
                 }),
               }),
             }),
@@ -187,6 +197,8 @@ beforeEach(() => {
   STATE.lastLimiterKey = null;
   STATE.adminClientCreated = 0;
   STATE.analyticsError = null;
+  STATE.outcomeError = null;
+  STATE.decisionError = null;
 });
 
 afterEach(() => {
@@ -430,5 +442,97 @@ describe("GET /api/bridge/outcome/[id]/curves", () => {
     // Must NOT degrade to an empty-curve 200.
     expect(body).not.toHaveProperty("original");
     expect(body).not.toHaveProperty("replacement");
+  });
+
+  it("H-0258 — bridge_outcomes lookup ERROR returns 500 (logged), NOT a masked 404", async () => {
+    // Loud-fail discipline: `if (outcomeErr || !outcome) return 404` used to
+    // collapse a real DB/RLS error into a 404 with no log — an operator could
+    // not tell "row not owned" from "the ownership SELECT itself blew up".
+    // A non-null outcomeErr must surface as a 500 AND be logged. Reverting the
+    // discrimination (folding the error back into the 404 branch) flips this
+    // to a silent 404 and fails the test.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.outcomeError = { code: "PGRST301", message: "rls/network blip" };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(OUTCOME_ID));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body).toEqual({ error: "Failed to load curves" });
+    // The lookup failure must be observable (logged), not swallowed.
+    expect(errSpy).toHaveBeenCalledWith(
+      "[api/bridge/outcome/curves] outcome lookup error:",
+      STATE.outcomeError,
+    );
+    errSpy.mockRestore();
+  });
+
+  it("H-0258b — genuine 'not owned' (no error, null row) still returns the opaque 404", async () => {
+    // Happy-path / empty-state intact: the discrimination must NOT turn a
+    // legitimate not-found into a 500. With outcomeError=null and a null row,
+    // the route returns the same opaque 404 it always did, and does NOT log
+    // an outcome lookup error.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.outcomeRow = null;
+    STATE.outcomeError = null;
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(OUTCOME_ID));
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body).toEqual({ error: "Not found" });
+    expect(errSpy).not.toHaveBeenCalledWith(
+      "[api/bridge/outcome/curves] outcome lookup error:",
+      expect.anything(),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("H-0256 / M-0305 — match_decisions lookup ERROR is logged, NOT silently swallowed as 'no original strategy'", async () => {
+    // Loud-fail discipline: `if (!decisionErr && decision)` used to discard a
+    // non-null decisionErr, leaving originalStrategyId=null and returning an
+    // empty original series — indistinguishable from the legitimate
+    // match_decision_id=NULL case. The resolution FAILED and must be observable.
+    // We keep the response 200 (replacement curve is still valid) but a
+    // console.error MUST fire. Reverting to the silent-swallow gate drops the
+    // log and fails the assertion below.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.decisionError = { code: "PGRST301", message: "admin client transient" };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(OUTCOME_ID));
+    // Response stays 200 — replacement series is independently valid.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // Original resolution failed → empty original (the same shape as before)…
+    expect(body.original).toEqual([]);
+    expect(body.replacement.length).toBeGreaterThan(0);
+    // …BUT the failure is now loud: it was logged, not swallowed.
+    expect(errSpy).toHaveBeenCalledWith(
+      "[api/bridge/outcome/curves] match_decisions lookup error:",
+      STATE.decisionError,
+    );
+    errSpy.mockRestore();
+  });
+
+  it("H-0256b — legitimate match_decision_id=NULL stays SILENT (no spurious error log)", async () => {
+    // The empty-state UX for the genuine NULL case (migration 059 ON DELETE
+    // SET NULL) must NOT log a match_decisions lookup error — only a real
+    // decisionErr does. This guards against the loud-fail fix over-firing.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.outcomeRow = {
+      id: OUTCOME_ID,
+      allocator_id: "00000000-0000-0000-0000-000000000001",
+      strategy_id: STRAT_ID,
+      match_decision_id: null,
+      allocated_at: ALLOCATED_AT,
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(OUTCOME_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.original).toEqual([]);
+    expect(errSpy).not.toHaveBeenCalledWith(
+      "[api/bridge/outcome/curves] match_decisions lookup error:",
+      expect.anything(),
+    );
+    errSpy.mockRestore();
   });
 });

@@ -366,6 +366,84 @@ describe("InsightStrip — H-1080/H-1082 compute called unconditionally + memoiz
 });
 
 // ---------------------------------------------------------------------------
+// F1 — H-1081 / M-0896 loud-fail discipline
+// ---------------------------------------------------------------------------
+//
+// The strip renders nothing when no insights fire (PR3 dashboard-parity:
+// presence is the signal). That early `return null` silently masks two
+// DISTINCT upstream failures, conflating them with a genuine "no portfolio /
+// nothing to say yet" empty state:
+//
+//   H-1081: analytics === null WHILE a portfolioId is present. A loaded
+//     portfolio implies its analytics row was computed; null means the
+//     upstream fetch/computation failed. computeAllInsights(null, …) returns
+//     [] for every analytics-keyed rule, so the strip vanishes with no signal.
+//   M-0896: analytics present but portfolioId null — analytics implies a
+//     portfolio, so this is an orphaned-analytics bug, and the BridgeTrigger
+//     "Find Replacement" affordance is silently dropped.
+//
+// These pin that the failure is now OBSERVABLE (console.error → Sentry
+// breadcrumb) WITHOUT changing the render contract. A revert of the loud-fail
+// effect (or a regression that re-conflates failure with empty) fails these.
+
+describe("InsightStrip — F1 H-1081/M-0896 loud-fail on suppressed insights", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("H-1081: logs an error when analytics is null for a loaded portfolio (failure ≠ no-insights)", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // null analytics + a real portfolioId = the upstream-failure case. The
+    // strip still renders nothing (layout contract preserved) but must now
+    // emit an observable error so the silent disappearance shows up.
+    const { container } = render(
+      <InsightStrip analytics={null} portfolioId="p-1" />,
+    );
+    expect(container.firstChild).toBeNull();
+    expect(spy).toHaveBeenCalledWith(
+      expect.stringContaining("[InsightStrip] analytics is null"),
+      expect.objectContaining({ portfolioId: "p-1" }),
+    );
+  });
+
+  it("H-1081: does NOT log for a genuine empty state (no portfolio yet → no portfolioId, null analytics)", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // No portfolioId means there is genuinely no portfolio loaded yet — the
+    // legitimate "nothing to say" empty state. The happy/empty path must stay
+    // quiet so we don't cry wolf on first-load.
+    render(<InsightStrip analytics={null} />);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("H-1081: does NOT log when analytics loaded fine and simply no rules fired", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // A successfully-fetched analytics row with no firing rules is the true
+    // all-clear: render nothing, stay silent.
+    render(<InsightStrip analytics={buildAnalytics()} portfolioId="p-1" />);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("M-0896: logs an error for orphaned analytics (analytics present but portfolioId null)", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // analytics implies a portfolio, so a null portfolioId here is a bug that
+    // also silently drops the bridge affordance. It must be observable.
+    render(<InsightStrip analytics={buildAnalytics()} portfolioId={null} />);
+    expect(spy).toHaveBeenCalledWith(
+      expect.stringContaining("[InsightStrip] orphaned analytics"),
+      expect.objectContaining({ hasAnalytics: true }),
+    );
+  });
+
+  it("M-0896: does NOT log when both analytics and portfolioId are present (happy path)", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <InsightStrip analytics={buildAnalytics()} portfolioId="p-1" flaggedCount={1} />,
+    );
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // M-0441 / L-0026 — dead `{false ? ... : ...}` branch removed
 // ---------------------------------------------------------------------------
 //

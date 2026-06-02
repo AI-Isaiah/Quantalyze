@@ -145,10 +145,17 @@ export function StrategyBrowseDrawer({
         setLoading(false);
       })
       .catch((e: unknown) => {
+        // H-0117 (loud-fail) — `cancelled` is the ONLY signal that the abort
+        // was our own cleanup (close/unmount). When cancelled is true the
+        // controller.abort() above intentionally tore down the request, so
+        // dropping silently is correct. But a flaky-proxy / mid-flight
+        // AbortError arrives with cancelled === false: previously the
+        // `e.name === "AbortError"` early-return swallowed it WITHOUT clearing
+        // `loading` or setting `error`, wedging the drawer in "Loading…"
+        // forever. Past this guard, every error — AbortError included — is a
+        // genuine load failure and must surface the distinct error state.
         if (cancelled) return;
-        // AbortError surfaces here when controller.abort() ran before the
-        // network response — silently drop, the drawer is already closed.
-        if (e instanceof DOMException && e.name === "AbortError") return;
+        console.error("[StrategyBrowseDrawer] strategy load failed", e);
         setError(
           e instanceof Error ? e.message : "Couldn't load strategies",
         );

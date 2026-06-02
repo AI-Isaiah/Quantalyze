@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
@@ -49,6 +50,7 @@ export interface MetadataStepProps {
 }
 
 export function MetadataStep({
+  wizardSessionId,
   initial,
   detectedMarkets,
   detectedExchange,
@@ -95,6 +97,18 @@ export function MetadataStep({
           .order("sort_order");
         if (cancelled) return;
         if (error) {
+          // Loud-fail (F1, M-0248): an RLS regression or transient
+          // Supabase outage makes discovery_categories unreadable. The
+          // user is blocked at this step, so the founder/ops team must
+          // get a signal — surface telemetry + console.error, not just
+          // the inline copy. An empty (but readable) result is the
+          // genuine "no categories yet" path and stays silent above.
+          console.error("[wizard:MetadataStep] category select error:", error);
+          trackForQuantsEventClient("wizard_error", {
+            wizard_session_id: wizardSessionId,
+            step: "metadata",
+            code: "METADATA_CATEGORY_LOAD_FAILED",
+          });
           setCategoryLoadError("Could not load strategy categories.");
           return;
         }
@@ -104,8 +118,13 @@ export function MetadataStep({
         }
       } catch (err) {
         if (!cancelled) {
-          setCategoryLoadError("Could not load strategy categories.");
           console.error("[wizard:MetadataStep] category fetch:", err);
+          trackForQuantsEventClient("wizard_error", {
+            wizard_session_id: wizardSessionId,
+            step: "metadata",
+            code: "METADATA_CATEGORY_LOAD_FAILED",
+          });
+          setCategoryLoadError("Could not load strategy categories.");
         }
       }
     })();
