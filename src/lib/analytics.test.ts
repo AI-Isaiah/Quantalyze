@@ -112,6 +112,10 @@ describe("src/lib/analytics.ts — server-side wrapper", () => {
       host: "https://example.posthog.com",
       flushAt: 1,
       flushInterval: 0,
+      // Bounded retry budget so an inline-awaited captureImmediate can't hang a
+      // request for ~9-20s on a PostHog incident (default 3×3s → 1×500ms).
+      fetchRetryCount: 1,
+      fetchRetryDelay: 500,
     });
 
     expect(POSTHOG_MOCK.captureImmediateSpy).toHaveBeenCalledTimes(1);

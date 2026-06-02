@@ -45,9 +45,16 @@ function getServerClient(): PostHog | null {
 
   _serverClient = new PostHog(key, {
     host: process.env.NEXT_PUBLIC_POSTHOG_HOST ?? "https://us.i.posthog.com",
-    // flushAt:1 so events ship even on Vercel function cold-finish.
     flushAt: 1,
     flushInterval: 0,
+    // The wrapper uses captureImmediate (awaits the HTTP POST). Several LIVE
+    // callers await it INLINE in a request/render path (usage/session-start,
+    // onboarding-funnel → /allocations), so bound the retry budget (default
+    // 3 × 3s ≈ up to ~9-20s on a PostHog incident) to 1 × 500ms — worst-case
+    // ~1s added latency while still surviving a single transient blip.
+    // Telemetry must never hang a request.
+    fetchRetryCount: 1,
+    fetchRetryDelay: 500,
   });
   return _serverClient;
 }
