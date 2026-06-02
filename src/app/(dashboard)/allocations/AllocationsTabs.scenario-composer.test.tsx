@@ -176,8 +176,6 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
     max_aum_concentration: null,
     preferred_strategy_types: null,
     preferred_markets: ["binance"],
-    founder_notes: null,
-    edited_by_user_id: null,
     updated_at: "2026-01-01T00:00:00Z",
     max_weight: null,
     correlation_ceiling: null,

@@ -12,7 +12,7 @@ import {
 } from "@/components/exchanges/ExchangesTabContent";
 import { AuditLogSubsection } from "@/app/(dashboard)/profile/components/AuditLogSubsection";
 import type { Profile } from "@/lib/types";
-import type { AllocatorPreferences } from "@/lib/preferences";
+import type { AllocatorOwnPreferences } from "@/lib/preferences";
 
 const ALL_TABS = [
   { key: "personal", label: "Personal Info" },
@@ -45,7 +45,7 @@ function parseTabParam(raw: string | null, isAllocator: boolean): TabKey {
 
 interface Props {
   profile: Profile;
-  initialPreferences?: AllocatorPreferences | null;
+  initialPreferences?: AllocatorOwnPreferences | null;
   isAllocator?: boolean;
   exchanges?: ExchangesTabContentProps | null;
 }

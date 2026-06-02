@@ -141,18 +141,14 @@ function MandateSnapshotCard({
 }
 
 export function MandateTabPanel(props: MyAllocationDashboardPayload) {
-  // The dashboard payload does not currently project mandate columns
-  // (see `MyAllocationDashboardPayload` in src/lib/queries.ts). Read
-  // defensively from likely future field names so a payload-widening
-  // PR can light this snapshot up without touching the tab body.
-  const propsRecord = props as unknown as Record<string, unknown>;
-  const mandate =
-    (propsRecord.mandate as MandateSnapshot | null | undefined) ??
-    (propsRecord.allocatorPreferences as
-      | MandateSnapshot
-      | null
-      | undefined) ??
-    null;
+  // `props.mandate` is the canonical `AllocatorOwnPreferences` projection
+  // (src/lib/queries.ts) — the admin-only `founder_notes` / `edited_by_user_id`
+  // columns are `Omit`-ted at the type level, so reading it directly cannot
+  // surface founder PII. (Previously this read through an
+  // `as unknown as Record<string, unknown>` cast that bypassed all type
+  // checking; M-0046 / H-0065.) `MandateSnapshot` is a structural subset of
+  // the mandate shape, so the assignment below is type-checked end-to-end.
+  const mandate: MandateSnapshot | null = props.mandate ?? null;
 
   return (
     <div data-tab-panel="mandate" className="grid gap-4">

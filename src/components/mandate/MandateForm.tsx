@@ -5,7 +5,7 @@ import { Card } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
 import { STRATEGY_TYPES, SUBTYPES, EXCHANGES } from "@/lib/constants";
-import type { AllocatorPreferences } from "@/lib/preferences";
+import type { AllocatorOwnPreferences } from "@/lib/preferences";
 import { useMandateAutoSave } from "./useMandateAutoSave";
 import { MandateSaveStatus } from "./MandateSaveStatus";
 import { MandateSlider } from "./MandateSlider";
@@ -14,7 +14,7 @@ import { MandateSegmentedRadio } from "./MandateSegmentedRadio";
 import { MandateAdvancedSection } from "./MandateAdvancedSection";
 
 interface Props {
-  initial: AllocatorPreferences | null;
+  initial: AllocatorOwnPreferences | null;
 }
 
 function toggleIn<T extends string>(list: T[], value: T): T[] {

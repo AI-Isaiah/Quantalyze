@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.65] - 2026-06-02
+### Fixed — Allocator dashboard leaked admin-only founder PII to the allocator (F4a / H-0065, M-0046)
+
+`getOwnPreferences` (`src/lib/preferences.ts`) did `select("*")` on `allocator_preferences` and returned the **full** row — including the two admin-only columns **`founder_notes`** (free-text founder commentary *about* the allocator) and **`edited_by_user_id`** (an internal admin UUID). That row was then serialized to the allocator's browser through three live surfaces: the dashboard RSC payload (`getMyAllocationDashboard` → `page.tsx` spreads the payload into the `"use client"` `AllocationsTabs`), the `/api/preferences` GET JSON, and the profile mandate form props. Any allocator could read founder notes written about them plus an admin user id (enumeration vector) straight from the network response — regardless of what the UI rendered.
+
+- **Root-cause, whole-surface fix:** `getOwnPreferences` now strips `founder_notes` + `edited_by_user_id` server-side and returns a new `AllocatorOwnPreferences = Omit<AllocatorPreferences, "founder_notes" | "edited_by_user_id">`. Destructure-and-drop keeps the `select("*")` drift-safe (new mandate columns still flow through). This closes all three allocator-facing vectors at the source.
+- **Type-level chokepoint (M-0046):** `MyAllocationDashboardPayload.mandate`, `deriveMandateIsSet`, the `mandate-gates` helpers, `ProfileTabs`, and `MandateForm` are all retyped to `AllocatorOwnPreferences`, so the two admin-only fields are *structurally absent* — a future payload widen cannot silently re-introduce the leak. `MandateTabPanel` drops its `as unknown as Record<string, unknown>` cast (which previously bypassed all type-checking) and reads `props.mandate` directly.
+- **Admin surfaces untouched:** `admin/PreferencesPanel` and `admin/AllocatorMatchQueue` legitimately read `founder_notes` and source their data from admin routes typed as the full `AllocatorPreferences` — unchanged.
+- **Regression test:** `getOwnPreferences` is asserted to drop both admin-only fields while preserving every non-PII mandate field the dashboard + gates consume (fails without the strip).
+- Type-only narrowing + a server-side strip; no UI/behavior change for the allocator (the dashboard never rendered the two fields).
+
 ## [0.24.15.64] - 2026-06-02
 ### Fixed — Analytics worker: classify exchange edge geo-block as permanent (no futile retry, no phantom 429 cooldown)
 
