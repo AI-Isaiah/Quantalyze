@@ -152,6 +152,36 @@ describe("SimulatorResponseSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  // M-0982 (B9 boundary parity): the metric wire domains are enforced at the
+  // boundary. max_drawdown is negative-by-convention so a positive value is a
+  // producer sign-flip (rejected by .max(0)); a non-finite value bypassing
+  // _safe_float is rejected by .finite(). Pre-fix both were bare
+  // z.number().nullable() and rode straight through.
+  it("M-0982: rejects a positive proposed.max_drawdown (sign-flip)", () => {
+    const result = SimulatorResponseSchema.safeParse({
+      ...validResponse,
+      proposed: { ...validResponse.proposed, max_drawdown: 0.5 },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("M-0982: rejects a non-finite proposed.sharpe (Infinity bypassing _safe_float)", () => {
+    const result = SimulatorResponseSchema.safeParse({
+      ...validResponse,
+      proposed: { ...validResponse.proposed, sharpe: Number.POSITIVE_INFINITY },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("M-0982: accepts max_drawdown of exactly 0 (no-drawdown portfolio, inclusive bound)", () => {
+    const result = SimulatorResponseSchema.safeParse({
+      ...validResponse,
+      current: { ...validResponse.current, max_drawdown: 0 },
+      proposed: { ...validResponse.proposed, max_drawdown: 0 },
+    });
+    expect(result.success).toBe(true);
+  });
+
   // Non-ok branches stay `.passthrough()` because Python's _empty_result
   // (analytics-service/services/simulator_scoring.py) emits the full ok
   // shape — proposed/deltas/equity_curve_* — with nulls on every non-ok
