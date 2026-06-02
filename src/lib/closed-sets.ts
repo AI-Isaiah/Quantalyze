@@ -91,6 +91,29 @@ export const ADMIN_ONLY_PREFERENCE_FIELDS = [
 // --- Liquidity preference enum ---------------------------------------------
 export const LIQUIDITY_PREFERENCES = ["high", "medium", "low"] as const;
 
+// --- strategy_analytics.computation_status closed set ----------------------
+// SoT for the strategy_analytics.computation_status column. The analytics
+// worker writes 'complete_with_warnings' when a computation SUCCEEDS but used a
+// consumer-specific fallback (used_heuristic_capital / balance_error —
+// analytics_runner.py:1765); the frontend read-gates (B3) admit it; and the DB
+// CHECK permits exactly this set (supabase/migrations/
+// 20260602120000_strategy_analytics_computation_status_add_complete_with_warnings.sql).
+// 'stale' is deliberately ABSENT — it was never a valid status (the #399 cron
+// bug). Pinned against the DB CHECK by check-zod-db-check-parity.test.ts.
+//
+// DISTINCT from portfolio_analytics.computation_status (a DIFFERENT table whose
+// 4-value CHECK has no 'complete_with_warnings' — see portfolio-analytics-
+// adapter.ts COMPUTATION_STATUSES). Do not conflate the two.
+export const STRATEGY_ANALYTICS_COMPUTATION_STATUSES = [
+  "pending",
+  "computing",
+  "complete",
+  "complete_with_warnings",
+  "failed",
+] as const;
+export type StrategyAnalyticsComputationStatus =
+  (typeof STRATEGY_ANALYTICS_COMPUTATION_STATUSES)[number];
+
 // --- Signup roles (SECURITY BOUNDARY) --------------------------------------
 // SECURITY BOUNDARY (NEW-C15-05): the AUTHORITATIVE allowlist for the role a
 // new user receives is the SQL trigger handle_new_user
