@@ -33,6 +33,7 @@ import type {
 } from "./types";
 import { SUPPORTED_EXCHANGES, type SupportedExchange } from "./utils";
 import { holdingScopeKey } from "./keys";
+import { collapseAliasedHoldingStrategies } from "./scenario-dealias";
 import { getOwnPreferences, type AllocatorOwnPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -2076,7 +2077,13 @@ export function holdingEquityContribution(h: MyAllocationDashboardPayload["holdi
   return Number.isFinite(h.value_usd) ? h.value_usd : 0;
 }
 
-function liveBaselineMetricsFromHoldings(
+/**
+ * @internal Exported for unit testing only (H-0487/H-0493 de-alias wiring
+ * regression). Guards that this SSR call site actually invokes
+ * collapseAliasedHoldingStrategies — reverting the collapse here must fail a
+ * test rather than silently re-poisoning the live-baseline avgRho.
+ */
+export function liveBaselineMetricsFromHoldings(
   holdingsSummary: MyAllocationDashboardPayload["holdingsSummary"],
   holdingReturnsByScopeRef: Record<string, DailyPoint[]>,
 ): MyAllocationDashboardPayload["liveBaselineMetrics"] {
@@ -2138,8 +2145,22 @@ function liveBaselineMetricsFromHoldings(
     weights[scopeRef] = Math.max(0, holdingEquityContribution(h));
   }
   const state: ScenarioState = { selected, weights, startDates };
-  const cache = buildDateMapCache(strategies);
-  const liveCM = computeScenario(strategies, state, cache);
+  // H-0487/H-0493 — collapse multi-venue/instrument aliases of one symbol
+  // (identical reconstructed series, because breakdown JSONB is symbol-keyed)
+  // into a single representative before computeScenario, so the engine does
+  // not fold a fabricated rho=1.0 into avg_pairwise_correlation (avgRho). The
+  // summed-weight merge is weight-equivalent for the equity curve / Sharpe /
+  // TWR / max-DD; only the spurious self-correlation pair is removed.
+  const symbolByHoldingId = new Map<string, string>(
+    holdingsSummary.map((h) => [holdingScopeKey(h), h.symbol]),
+  );
+  const deAliased = collapseAliasedHoldingStrategies(
+    strategies,
+    state,
+    symbolByHoldingId,
+  );
+  const cache = buildDateMapCache(deAliased.strategies);
+  const liveCM = computeScenario(deAliased.strategies, deAliased.state, cache);
 
   if (liveCM.n === 0 || liveCM.equity_curve.length === 0) return emptyDefault;
 

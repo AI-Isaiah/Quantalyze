@@ -23,13 +23,14 @@ Shared upsert helpers (serialize_funding_row, upsert_funding_rows) live
 here so both job_worker.py and scripts/backfill_funding.py use identical
 serialization and conflict-resolution logic.
 
-Symbol normalization note (M-0923 / M-0924, audit-2026-05-07): OKX
-`instId` like ``BTC-USDT-SWAP`` is normalized to ``BTCUSDTSWAP`` here
-and the trades pipeline (analytics-service/services/exchange.py) does
-the same. Both producers MUST stay in sync — funding attribution joins
-positions and funding rows by exact ``symbol`` string equality. A future
-canonical ``normalize_symbol(exchange, raw)`` helper would deduplicate
-this contract; tracked as a defense-in-depth backlog item.
+Symbol normalization note (H-0668 / M-0923 / M-0924, audit-2026-05-07):
+OKX ``instId`` like ``BTC-USDT-SWAP`` is normalized to ``BTCUSDTSWAP`` for
+storage, and the trades pipeline must produce the same string — funding
+attribution joins positions and funding rows by exact ``symbol`` string
+equality, so any drift silently zero-matches OKX funding. Both producers
+now route through the single ``normalize_symbol(exchange, raw)`` helper in
+``services.exchange`` (the helper this note previously asked for), so the
+hand-sync trap is closed by construction rather than by convention.
 """
 from __future__ import annotations
 
@@ -43,7 +44,7 @@ import ccxt.async_support as ccxt
 from supabase import Client
 
 from services.db import db_execute
-from services.exchange import EXCHANGE_CLASSES, create_exchange
+from services.exchange import EXCHANGE_CLASSES, create_exchange, normalize_symbol
 from services.exchange_pagination import (
     PageRequest,
     PageResult,
@@ -525,7 +526,7 @@ async def fetch_funding_okx(
 
             for item in data:
                 inst_id = item.get("instId", "") or ""
-                symbol = inst_id.replace("-", "")
+                symbol = normalize_symbol("okx", inst_id)
                 row = _normalize_funding_row(
                     strategy_id=strategy_id,
                     exchange="okx",

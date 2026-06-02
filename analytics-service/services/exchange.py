@@ -5,6 +5,7 @@ import os
 import random
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, TypedDict
 
 from supabase import Client
@@ -369,6 +370,108 @@ def _finite_positive_float(value: Any, *, label: str) -> float | None:
     return out
 
 
+# H-0669 hardening (security review) — bound monetary-string parsing so a
+# malformed/malicious exchange field cannot (a) build a multi-megabyte Decimal
+# from an unbounded digit string, or (b) admit a huge-but-finite magnitude
+# (e.g. "1E1000000000") that the pre-fix float path rejected as inf but which
+# now passes ``is_finite()`` and later raises an UNCAUGHT ``decimal.Overflow``
+# in the exact ``cost = price * quantity`` multiply — aborting the whole sync
+# (a poison-pill, since the bad fill re-triggers every retry). A real price /
+# quantity / fee numeric string is short and well within a sane magnitude;
+# bounding here drops the single bad fill (matching the pre-fix graceful drop)
+# instead of failing the job.
+_MONETARY_STR_MAXLEN = 48
+# Bound is on |adjusted exponent|, so it is TWO-SIDED: it rejects both
+# astronomically large (~>1e30, the overflow poison-pill) and astronomically
+# tiny (~<1e-30) magnitudes. 1e30 is generous for any real price/qty/fee (the
+# largest realistic shapes — 1e12 meme-coin quantities, 1e-8 satoshi fees —
+# pass with wide margin), and keeping the operands <= ~1e30 keeps cost (whose
+# adjusted exponent is the sum of the operands') far below the default Decimal
+# context Emax (999999) so the multiply can never overflow. The small side is
+# pure defense-in-depth — a sub-1e-30 value never occurs and cannot overflow.
+_MONETARY_MAX_ADJUSTED = 30
+
+
+def _finite_decimal(value: Any, *, label: str) -> Decimal | None:
+    """Audit-2026-05-07 H-0669 — exact-precision variant of ``_finite_float``
+    for the monetary fill fields persisted into ``trades``' DECIMAL columns.
+
+    OKX/Bybit report price/quantity/fee as decimal STRINGS. Parsing them
+    straight to ``Decimal(str(value))`` avoids the IEEE-754 binary rounding
+    ``float()`` bakes in BEFORE the value reaches the base-10 DECIMAL column
+    (``float('0.1') * 3 == 0.30000000000000004``; ``Decimal('0.1') *
+    Decimal('3') == Decimal('0.3')`` exactly). The persist seam serializes
+    these back to numeric STRINGS (json.dumps cannot encode a raw Decimal),
+    and the read side already re-parses ``trades`` NUMERIC columns via
+    ``Decimal(str(value))`` (position_reconstruction), so the string carrier
+    is lossless end-to-end.
+
+    Mirrors ``_finite_float``'s guards: reject bool (an int subclass ``str``
+    would render as ``"True"``) and reject NaN / ±Inf / non-numeric. For a
+    string input ``Decimal(str(s))`` keeps every digit the exchange sent; for
+    a float input (CCXT already parsed it upstream) ``Decimal(str(f))`` keeps
+    the float's shortest-repr value — it prevents FURTHER loss but cannot
+    recover precision ccxt already dropped.
+
+    Hardened against unbounded length and pathological magnitude (see the
+    ``_MONETARY_*`` constants above) so the new Decimal path keeps the float
+    path's graceful-drop behavior at the untrusted-exchange-string boundary.
+    """
+    if isinstance(value, bool):
+        logger.warning("_finite_decimal: bool rejected for %s=%r", label, value)
+        return None
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) > _MONETARY_STR_MAXLEN:
+        logger.warning(
+            "_finite_decimal: rejected %s (string length %d exceeds cap %d)",
+            label, len(text), _MONETARY_STR_MAXLEN,
+        )
+        return None
+    try:
+        out = Decimal(text)
+    except (InvalidOperation, ValueError, TypeError):
+        logger.warning(
+            "_finite_decimal: rejected %s=%r (non-numeric)", label, value,
+        )
+        return None
+    if not out.is_finite():
+        logger.warning(
+            "_finite_decimal: rejected %s=%r (NaN/inf)", label, value,
+        )
+        return None
+    if out != 0 and abs(out.adjusted()) > _MONETARY_MAX_ADJUSTED:
+        # Huge-but-finite magnitude the pre-fix float path rejected as inf;
+        # admitting it would overflow the exact cost multiply and abort the job.
+        logger.warning(
+            "_finite_decimal: rejected %s=%r (magnitude outside sane monetary "
+            "range, |adjusted exponent| %d > %d)",
+            label, value, abs(out.adjusted()), _MONETARY_MAX_ADJUSTED,
+        )
+        return None
+    return out
+
+
+def _finite_positive_decimal(value: Any, *, label: str) -> Decimal | None:
+    """Decimal counterpart of ``_finite_positive_float`` (NEW-C13-11): like
+    ``_finite_decimal`` but also rejects zero/negative, for price and quantity
+    fields where a non-positive value indicates a corrupt/adversarial fill.
+
+    Fee fields must NOT use this — maker rebates are legitimately negative.
+    """
+    out = _finite_decimal(value, label=label)
+    if out is None:
+        return None
+    if out <= 0:
+        logger.warning(
+            "_finite_positive_decimal: rejected %s=%r (≤0 — must be positive)",
+            label, value,
+        )
+        return None
+    return out
+
+
 # Audit-2026-05-07 G12.B.5 — overlap window for late-arriving exchange fills.
 # Hardcoded to 1 hour (3_600_000 ms) because:
 #   * CCXT timestamps are normalized to UTC, but exchange-side propagation lag
@@ -424,9 +527,15 @@ class FillRow(TypedDict):
     exchange: str
     symbol: str
     side: str
-    price: float
-    quantity: float
-    fee: float
+    # H-0669 — monetary fields are persisted as exact numeric STRINGS (the
+    # serializable carrier for a Decimal: json.dumps cannot encode a raw
+    # Decimal, and a float would re-introduce the IEEE-754 drift these columns
+    # are DECIMAL precisely to avoid). PostgreSQL casts the JSON string
+    # losslessly into the DECIMAL column; the read side already re-parses via
+    # Decimal(str(value)).
+    price: str
+    quantity: str
+    fee: str
     fee_currency: str
     timestamp: str
     order_type: str
@@ -434,7 +543,7 @@ class FillRow(TypedDict):
     exchange_fill_id: str
     is_fill: bool
     is_maker: bool
-    cost: float
+    cost: str
     raw_data: dict[str, Any] | None
 
 
@@ -487,14 +596,65 @@ def _trim_raw_data(raw_data: dict[str, Any] | None) -> dict[str, Any] | None:
     return trimmed if trimmed else None
 
 
+def normalize_symbol(exchange_id: str, raw: str) -> str:
+    """Single source of truth for the stored ``trades.symbol`` /
+    ``funding_fees.symbol`` canonical form, per exchange.
+
+    Audit-2026-05-07 H-0668 / M-0923 / M-0924 — the OKX/Bybit/CCXT trades
+    branches and the OKX funding fetcher each previously hand-rolled this
+    normalization inline (OKX ``instId.replace('-','')``, the CCXT
+    ``_normalize_fill`` slash/quote-suffix strip, the Bybit V5 passthrough,
+    and an identical OKX copy in ``funding_fetch.py``). Funding attribution
+    joins ``funding_fees.symbol`` to ``positions.symbol`` by exact string
+    equality, so the two OKX copies MUST stay byte-identical or OKX funding
+    silently zero-matches. Routing the trades + funding producers through this
+    one helper removes that hand-sync trap (the helper the funding_fetch.py
+    note asked for).
+
+    SCOPE BOUNDARY — this helper owns the *exchange-native* normalization on
+    the trades/funding axis, where the input is each venue's raw form (OKX
+    instId, Bybit V5 symbol, CCXT-unified for ``_normalize_fill``). It is NOT
+    the right helper for the *CCXT-unified position* axis — the live-position
+    strip in ``positions.py::_normalize_ccxt_position`` and the Binance
+    per-symbol reverse-map below both receive the CCXT-UNIFIED symbol for
+    EVERY venue (OKX positions arrive as ``"BTC/USDT:USDT"``, NOT the raw
+    instId). Those sites must keep the unconditional CCXT strip: routing them
+    through ``normalize_symbol("okx", ...)`` would wrongly dash-strip a
+    slash-form string. They are a deliberately separate, exchange-agnostic
+    normalization, not a copy this refactor failed to migrate.
+
+    Output strings are PRESERVED per exchange — this is a single-source
+    refactor, NOT a re-canonicalization. Changing the stored form would
+    force a multi-table backfill of historical ``trades`` / ``funding_fees``
+    / ``position_snapshots`` rows for zero functional gain: every consumer
+    keys by the ``(symbol, exchange)`` tuple and a strategy is bound to a
+    single exchange, so OKX's ``BTCUSDTSWAP`` form is internally
+    self-consistent and never collides with another venue's ``BTCUSDT``.
+
+      - ``okx``   : raw OKX instId   ``"BTC-USDT-SWAP"`` → ``"BTCUSDTSWAP"``
+      - ``bybit`` : raw Bybit V5 sym ``"BTCUSDT"``       → ``"BTCUSDT"`` (passthrough)
+      - else (CCXT-unified, e.g. ``binance``): ``"BTC/USDT:USDT"`` → ``"BTCUSDT"``
+
+    The ``else`` branch reproduces the prior unconditional ``_normalize_fill``
+    behavior for every CCXT-unified venue (``_normalize_fill`` is the
+    CCXT-only path; OKX and Bybit use their own dedicated branches).
+    """
+    exch = exchange_id.lower()
+    if exch == "okx":
+        return raw.replace("-", "")
+    if exch == "bybit":
+        return raw
+    return raw.replace("/", "").replace(":USDT", "").replace(":USD", "")
+
+
 def _make_fill_dict(
     *,
     exchange: str,
     symbol: str,
     side: str,
-    price: float,
-    quantity: float,
-    fee: float,
+    price: Decimal | float,
+    quantity: Decimal | float,
+    fee: Decimal | float,
     fee_currency: str,
     timestamp: str,
     exchange_order_id: str,
@@ -511,6 +671,20 @@ def _make_fill_dict(
     by G12.B.4/G12.B.7 (three near-identical builders). ``cost`` is
     computed from ``price * quantity`` so callers cannot accidentally
     pass an inconsistent value.
+
+    H-0669 — this is the single serialization chokepoint for monetary
+    precision: ``price`` / ``quantity`` / ``fee`` arrive as ``Decimal``
+    (OKX/Bybit string-parsed) or ``float`` (CCXT, already float upstream),
+    are coerced to ``Decimal`` via ``Decimal(str(...))``, ``cost`` is
+    computed as an IEEE-754-drift-free ``Decimal`` multiply — gone is the
+    float ``price * quantity`` that turned ``0.1 * 3`` into
+    ``0.30000000000000004``. (The multiply runs in the default Decimal
+    context, prec=28: a product needing >28 significant digits is
+    context-rounded, but that is far beyond any real fill's precision and the
+    DECIMAL column scale, so "drift-free" — not "arbitrary-precision exact" —
+    is the precise claim.) All four monetary fields are emitted as numeric
+    STRINGS — the only carrier that crosses the json/httpx persist seam
+    losslessly into the DECIMAL columns.
 
     ``position_direction`` is the typed long/short discriminator. The
     ``trades`` table does not yet have a dedicated column for it
@@ -578,13 +752,23 @@ def _make_fill_dict(
     # AFTER position_direction is written so the canonical discriminator
     # always survives the trim.
     raw_data = _trim_raw_data(raw_data)
+    # H-0669 — coerce to exact Decimal (str() keeps a string input's full
+    # precision and a float input's shortest repr), compute cost as a
+    # drift-free Decimal multiply, and serialize all monetary fields as
+    # numeric strings.
+    price_d = price if isinstance(price, Decimal) else Decimal(str(price))
+    quantity_d = (
+        quantity if isinstance(quantity, Decimal) else Decimal(str(quantity))
+    )
+    fee_d = fee if isinstance(fee, Decimal) else Decimal(str(fee))
+    cost_d = price_d * quantity_d
     return {
         "exchange": exchange,
         "symbol": symbol,
         "side": side,
-        "price": price,
-        "quantity": quantity,
-        "fee": fee,
+        "price": str(price_d),
+        "quantity": str(quantity_d),
+        "fee": str(fee_d),
         "fee_currency": fee_currency,
         "timestamp": timestamp,
         "order_type": order_type,
@@ -592,7 +776,7 @@ def _make_fill_dict(
         "exchange_fill_id": exchange_fill_id,
         "is_fill": True,
         "is_maker": is_maker,
-        "cost": price * quantity,
+        "cost": str(cost_d),
         "raw_data": raw_data,
     }
 
@@ -1825,10 +2009,13 @@ async def _fetch_raw_trades_okx_inst_type(
                     continue
 
                 raw_inst_id = fill.get("instId", "")
-                symbol = raw_inst_id.replace("-", "")
+                symbol = normalize_symbol("okx", raw_inst_id)
                 side = fill.get("side", "").lower()
-                price_chk = _finite_positive_float(fill.get("fillPx", 0), label="OKX fillPx")
-                amount_chk = _finite_positive_float(fill.get("fillSz", 0), label="OKX fillSz")
+                # H-0669 — parse the exchange's decimal STRINGS straight to
+                # Decimal (not via float) so price/quantity reach the DECIMAL
+                # columns with no IEEE-754 drift.
+                price_chk = _finite_positive_decimal(fill.get("fillPx", 0), label="OKX fillPx")
+                amount_chk = _finite_positive_decimal(fill.get("fillSz", 0), label="OKX fillSz")
                 if price_chk is None or amount_chk is None:
                     logger.error(
                         "OKX fill dropped: non-finite price=%r or amount=%r "
@@ -1849,7 +2036,10 @@ async def _fetch_raw_trades_okx_inst_type(
                     _settle = _inst_parts[1].upper() if len(_inst_parts) >= 2 else ""
                     if _settle in ("USDT", "USDC", "BUSD", "USDE", "PYUSD", "USDB"):
                         _ct = _okx_contract_size_for_inst_id(raw_inst_id, exchange)
-                        amount = fill_sz_contracts * _ct
+                        # H-0669 — keep the contract-size rescale exact (Decimal
+                        # contracts × Decimal ctVal); a Decimal × float multiply
+                        # would both raise TypeError and re-introduce drift.
+                        amount = fill_sz_contracts * Decimal(str(_ct))
                         if _ct != 1.0:
                             fill.setdefault("_ingest_ctval", _ct)
                     else:
@@ -1857,8 +2047,30 @@ async def _fetch_raw_trades_okx_inst_type(
                 else:
                     amount = fill_sz_contracts  # SPOT/MARGIN: already base units
 
-                fee_chk = _finite_float(fill.get("fee", 0), label="OKX fee")
-                fee = fee_chk if fee_chk is not None else 0.0
+                # H-0669 (red-team bypass-hunter) — the ctVal rescale above
+                # introduces a NEW Decimal that never passed _finite_decimal:
+                # _okx_contract_size_for_inst_id falls back to
+                # ``exchange.markets[...]['contractSize']`` for instIds outside
+                # the hardcoded table, and a malformed value there yields
+                # ``float('inf')`` → ``Decimal('Infinity')`` → an unguarded
+                # ``Infinity`` quantity/cost (which, now that the carrier is a
+                # string, json.dumps no longer rejects and PG casts as a corrupt
+                # non-finite NUMERIC). Re-validate the post-rescale amount so a
+                # single bad fill is DROPPED gracefully, matching the fillSz guard.
+                amount_chk = _finite_positive_decimal(
+                    str(amount), label="OKX amount (post-ctVal rescale)"
+                )
+                if amount_chk is None:
+                    logger.error(
+                        "OKX fill dropped: non-finite/oversized amount after "
+                        "contract-size rescale (instId=%s, tradeId=%s)",
+                        fill.get("instId"), fill.get("tradeId"),
+                    )
+                    continue
+                amount = amount_chk
+
+                fee_chk = _finite_decimal(fill.get("fee", 0), label="OKX fee")
+                fee = fee_chk if fee_chk is not None else Decimal("0")
                 fee_currency = fill.get("feeCcy", "USDT")
                 _check_fee_currency_mismatch(
                     exchange="okx", symbol=raw_inst_id, fee_currency=fee_currency,
@@ -2026,17 +2238,18 @@ async def _fetch_raw_trades_bybit(
                     )
                     continue
 
-                symbol = fill.get("symbol", "")
+                symbol = normalize_symbol("bybit", fill.get("symbol", ""))
                 side = fill.get("side", "").lower()
                 # Audit-2026-05-07 H-0661 — finite-value validation; same
                 # rationale as the OKX branch.
                 # NEW-C13-11: also reject zero/negative price and amount —
                 # both are physically impossible for a fill and indicate
                 # corrupt data; _finite_positive_float rejects ≤0 values.
-                price_chk = _finite_positive_float(
+                # H-0669 — parse Bybit's decimal STRINGS straight to Decimal.
+                price_chk = _finite_positive_decimal(
                     fill.get("execPrice", 0), label="Bybit execPrice"
                 )
-                amount_chk = _finite_positive_float(
+                amount_chk = _finite_positive_decimal(
                     fill.get("execQty", 0), label="Bybit execQty"
                 )
                 if price_chk is None or amount_chk is None:
@@ -2051,10 +2264,10 @@ async def _fetch_raw_trades_bybit(
                 amount = amount_chk
                 # Preserve signed fee so maker rebates remain negative
                 # (H-0671) — same rationale as the OKX branch.
-                fee_chk = _finite_float(
+                fee_chk = _finite_decimal(
                     fill.get("execFee", 0), label="Bybit execFee"
                 )
-                fee = fee_chk if fee_chk is not None else 0.0
+                fee = fee_chk if fee_chk is not None else Decimal("0")
                 fee_currency = fill.get("feeCurrency", "USDT")
                 # Audit-2026-05-07 H-0670 — fee-currency mismatch flag.
                 _check_fee_currency_mismatch(
@@ -2201,10 +2414,7 @@ def _normalize_fill(trade: dict[str, Any], exchange_id: str) -> FillRow | None:
         )
         return None
 
-    normalized_symbol = (
-        trade.get("symbol", "")
-        .replace("/", "").replace(":USDT", "").replace(":USD", "")
-    )
+    normalized_symbol = normalize_symbol(exchange_id, trade.get("symbol", ""))
     # Audit-2026-05-07 H-0670 — fee-currency mismatch flag. Use the
     # CCXT-unified ``symbol`` (pre-normalization, with the "BTC/USDT:USDT"
     # form) so ``_infer_quote_currency`` can use the explicit ":USDT"

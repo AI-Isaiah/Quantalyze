@@ -398,6 +398,70 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // H-0487/H-0493 — guards the CLIENT call site of collapseAliasedHoldingStrategies.
+  // Two same-symbol multi-venue BTC holdings (identical symbol-keyed series)
+  // must be merged into ONE exposure BEFORE the (real) computeScenario, so it
+  // sees 2 distinct strategies (correlation_matrix has 2 keys, not 3) and avgRho
+  // is the genuine BTC↔ETH value, not a fabricated 1.0. Reverting the composer's
+  // collapse wiring leaves 3 strategies → this fails (the silent re-inert mode).
+  // -------------------------------------------------------------------------
+  it("H-0487 multi-venue BTC collapses before computeScenario (scenario avgRho not fabricated 1.0)", () => {
+    const dates = Array.from({ length: 12 }, (_, i) =>
+      `2026-01-${String(i + 1).padStart(2, "0")}`,
+    );
+    const btcSeries = dates.map((date, i) => ({
+      date,
+      value: [0.02, -0.01, 0.03, -0.02, 0.01][i % 5],
+    }));
+    const ethSeries = dates.map((date, i) => ({
+      date,
+      value: [-0.01, 0.02, -0.015][i % 3],
+    }));
+    const mkStrat = (id: string, returns: typeof btcSeries) => ({
+      id,
+      name: id,
+      codename: null,
+      disclosure_tier: "public",
+      strategy_types: [] as string[],
+      markets: [] as string[],
+      start_date: dates[0],
+      daily_returns: returns,
+      cagr: null,
+      sharpe: null,
+      volatility: null,
+      max_drawdown: null,
+    });
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkStrat(REF_BTC, btcSeries),
+        mkStrat(REF_BTC_OKX, btcSeries), // identical series (symbol-keyed alias)
+        mkStrat(REF_ETH, ethSeries),
+      ],
+      state: {
+        selected: { [REF_BTC]: true, [REF_BTC_OKX]: true, [REF_ETH]: true },
+        weights: { [REF_BTC]: 0.4, [REF_BTC_OKX]: 0.3, [REF_ETH]: 0.3 },
+        startDates: {},
+      },
+    });
+
+    const payload = makePayload({
+      holdingsSummary: [HOLDING_BTC, HOLDING_BTC_OKX, HOLDING_ETH],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const props = vi.mocked(KpiStrip).mock.calls[0][0];
+    const sm = props.scenarioMetrics;
+    expect(Object.keys(sm?.correlation_matrix ?? {})).toHaveLength(2);
+    expect(sm?.avg_pairwise_correlation).not.toBeNull();
+    expect(sm?.avg_pairwise_correlation).not.toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
   // T_C4 — EquityChart receives scenarioSeries
   // -------------------------------------------------------------------------
   it("T_C4 EquityChart receives scenarioSeries (DailyPoint[])", () => {

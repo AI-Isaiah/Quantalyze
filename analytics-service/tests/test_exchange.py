@@ -1,10 +1,215 @@
 import pytest
 from datetime import datetime, timezone
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import ccxt.async_support as ccxt_async
 
-from services.exchange import create_exchange, validate_key_permissions
+from services.exchange import (
+    create_exchange,
+    normalize_symbol,
+    validate_key_permissions,
+)
+
+
+class TestNormalizeSymbol:
+    """H-0668 — single-source ``normalize_symbol`` helper.
+
+    This is a single-source-enforcement / drift-guard test, NOT a
+    fail-without-fix bug repro: the OKX trades branch and the OKX funding
+    fetcher were already byte-identical by hand, so there is no live
+    mismatch to reproduce. The hazard the refactor closes is *future drift*
+    — funding attribution joins ``funding_fees.symbol`` to
+    ``positions.symbol`` by exact string equality, so if one of the two
+    OKX copies were edited and the other not, OKX funding would silently
+    zero-match. Both now route through this one helper; these assertions
+    pin the canonical (output-preserving) forms it must keep producing.
+
+    Deliberately NOT asserted: ``normalize_symbol("okx", ...) ==
+    normalize_symbol("binance", ...)`` for the same asset. OKX's
+    ``BTCUSDTSWAP`` vs Binance's ``BTCUSDT`` divergence is intentional
+    (every consumer keys by the ``(symbol, exchange)`` tuple), so asserting
+    cross-venue equality would encode a wrong intent.
+    """
+
+    def test_okx_instid_dash_strip(self) -> None:
+        assert normalize_symbol("okx", "BTC-USDT-SWAP") == "BTCUSDTSWAP"
+        assert normalize_symbol("okx", "BTC-USD-SWAP") == "BTCUSDSWAP"
+        assert normalize_symbol("okx", "BTC-USDT-231229") == "BTCUSDT231229"
+
+    def test_bybit_v5_passthrough(self) -> None:
+        assert normalize_symbol("bybit", "BTCUSDT") == "BTCUSDT"
+        assert normalize_symbol("bybit", "ETHUSDT") == "ETHUSDT"
+
+    def test_ccxt_unified_slash_and_quote_suffix_strip(self) -> None:
+        assert normalize_symbol("binance", "BTC/USDT:USDT") == "BTCUSDT"
+        assert normalize_symbol("binance", "ETH/USD:USD") == "ETHUSD"
+        # Unknown CCXT venue falls through the same (else) branch as binance.
+        assert normalize_symbol("kraken", "BTC/USDT:USDT") == "BTCUSDT"
+
+    def test_okx_trades_and_funding_share_one_normalizer(self) -> None:
+        # The trades pipeline (exchange.py OKX branch) and the funding
+        # fetcher (funding_fetch.py OKX branch) both call this exact helper
+        # for the same instId, so they cannot drift. Pinned to the form the
+        # live-path tests assert (test_exchange.py BTCUSDTSWAP @ the OKX
+        # fetch test; test_funding_fetch.py BTCUSDTSWAP @ the OKX funding
+        # test) — together those pin both ends to this single source.
+        inst_id = "BTC-USDT-SWAP"
+        assert normalize_symbol("okx", inst_id) == "BTCUSDTSWAP"
+
+
+class TestMonetaryPrecisionH0669:
+    """H-0669 — monetary fill fields keep exact decimal precision.
+
+    Pre-fix, price/quantity/fee/cost were Python floats inserted into the
+    DECIMAL ``trades`` columns; ``float('0.1') * 3 == 0.30000000000000004``
+    silently corrupted ``cost`` and high-precision quantities lost digits
+    beyond float's ~15-17 sig figs. The fix parses exchange decimal STRINGS to
+    Decimal at ingest, computes ``cost`` as an exact Decimal multiply, and
+    serializes each monetary field as a numeric STRING.
+    """
+
+    def test_make_fill_dict_cost_is_exact_decimal_not_float_drifted(self) -> None:
+        from services.exchange import _make_fill_dict
+
+        # Float inputs (the pre-fix shape): float 0.1 * 3.0 drifts to
+        # 0.30000000000000004. The exact-Decimal multiply yields 0.3.
+        out = _make_fill_dict(
+            exchange="okx",
+            symbol="BTCUSDT",
+            side="buy",
+            price=0.1,
+            quantity=3.0,
+            fee=0.0,
+            fee_currency="USDT",
+            timestamp="2024-01-01T00:00:00+00:00",
+            exchange_order_id="ord-1",
+            exchange_fill_id="fill-1",
+            is_maker=False,
+            raw_data=None,
+        )
+        assert isinstance(out["cost"], str)
+        assert Decimal(out["cost"]) == Decimal("0.3")
+        # Guard against the exact float-drift value the bug produced.
+        assert Decimal(out["cost"]) != Decimal(0.1 * 3.0)
+        for key in ("price", "quantity", "fee", "cost"):
+            assert isinstance(out[key], str)
+
+    def test_make_fill_dict_serializable_string_preserves_full_precision(self) -> None:
+        """The persist seam json.dumps()-es the row. A raw Decimal would raise
+        TypeError; the numeric-string carrier crosses losslessly and keeps the
+        full 18-digit precision a float would have truncated."""
+        import json
+
+        from services.exchange import _make_fill_dict
+
+        precise_qty = Decimal("0.123456789012345678")  # 18 digits — beyond float
+        out = _make_fill_dict(
+            exchange="bybit",
+            symbol="BTCUSDT",
+            side="sell",
+            price=Decimal("60000.5"),
+            quantity=precise_qty,
+            fee=Decimal("-0.4"),
+            fee_currency="USDT",
+            timestamp="2024-01-01T00:00:00+00:00",
+            exchange_order_id="ord-1",
+            exchange_fill_id="fill-2",
+            is_maker=True,
+            raw_data=None,
+        )
+        encoded = json.dumps(out)  # must NOT raise (no raw Decimal in the dict)
+        assert '"0.123456789012345678"' in encoded
+        assert Decimal(out["quantity"]) == precise_qty
+
+    def test_finite_decimal_rejects_pathological_magnitude_and_length(self) -> None:
+        """Security-review hardening: a huge-but-finite magnitude or an
+        unbounded digit string must be dropped at validation, matching the
+        pre-fix float path (which rejected them as inf). Pre-hardening these
+        passed ``is_finite()`` and later raised an uncaught ``decimal.Overflow``
+        in the cost multiply, aborting the whole sync."""
+        from services.exchange import _finite_decimal, _finite_positive_decimal
+
+        assert _finite_positive_decimal("1E1000000000", label="x") is None
+        assert _finite_decimal("1E1000000000", label="x") is None
+        # Unbounded-length digit string rejected BEFORE building a huge Decimal.
+        assert _finite_decimal("1" * 100, label="x") is None
+        # Legitimate values still parse exactly.
+        assert _finite_positive_decimal("60000.5", label="x") == Decimal("60000.5")
+        assert _finite_decimal("-0.4", label="x") == Decimal("-0.4")
+        assert _finite_decimal("0", label="x") == Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_okx_poison_magnitude_fill_dropped_not_job_abort(self) -> None:
+        """End-to-end poison-pill regression guard: a malformed huge-but-finite
+        fillPx must drop the single fill (like the pre-fix float path), NOT
+        raise decimal.Overflow in the cost multiply and abort the whole sync.
+        """
+        from services.exchange import _fetch_raw_trades_okx_inst_type
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+
+        async def _history(params: dict) -> dict:
+            if params.get("instType") != "SPOT":
+                return {"data": []}
+            return {"data": [
+                {
+                    "instId": "BTC-USDT",
+                    "side": "buy",
+                    "fillPx": "1E1000000000",  # finite Decimal, astronomical
+                    "fillSz": "0.5",
+                    "fee": "0",
+                    "feeCcy": "USDT",
+                    "ts": "1700000000000",
+                    "ordId": "ord-poison",
+                    "tradeId": "trade-poison",
+                    "execType": "T",
+                }
+            ]}
+
+        mock_exchange.private_get_trade_fills_history = _history
+        # Returns (poison fill dropped) rather than raising.
+        fills, _ = await _fetch_raw_trades_okx_inst_type(mock_exchange, None, "SPOT")
+        assert fills == []
+
+    @pytest.mark.asyncio
+    async def test_okx_malformed_ctval_fill_dropped_not_persisted_infinity(self) -> None:
+        """Red-team bypass guard: a malformed ``exchange.markets[...]
+        ['contractSize']`` for an instId outside the hardcoded ctVal table
+        yields ``float('inf')``; the SWAP ctVal rescale then produced an
+        unvalidated ``Decimal('Infinity')`` quantity/cost that skipped
+        ``_finite_decimal`` and (now that the carrier is a string) persisted as
+        a corrupt ``'Infinity'`` NUMERIC. The post-rescale re-validation must
+        DROP the fill instead."""
+        from services.exchange import _fetch_raw_trades_okx_inst_type
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        # Non-hardcoded instId → ctVal falls back to markets['contractSize'].
+        mock_exchange.markets = {"ZZZ/USDT:USDT": {"contractSize": "1e400"}}
+
+        async def _history(params: dict) -> dict:
+            if params.get("instType") != "SWAP":
+                return {"data": []}
+            return {"data": [
+                {
+                    "instId": "ZZZ-USDT-SWAP",
+                    "side": "buy",
+                    "fillPx": "1.5",
+                    "fillSz": "3",
+                    "fee": "0",
+                    "feeCcy": "USDT",
+                    "ts": "1700000000000",
+                    "ordId": "ord-z",
+                    "tradeId": "trade-z",
+                    "execType": "T",
+                }
+            ]}
+
+        mock_exchange.private_get_trade_fills_history = _history
+        fills, _ = await _fetch_raw_trades_okx_inst_type(mock_exchange, None, "SWAP")
+        assert fills == []
 
 
 def _okx_swap_only(swap_data: list[dict]) -> "AsyncMock":
@@ -562,15 +767,17 @@ class TestFetchRawTrades:
         assert result[0]["exchange"] == "okx"
         assert result[0]["symbol"] == "BTCUSDTSWAP"
         assert result[0]["side"] == "buy"
-        assert result[0]["price"] == 60000.0
+        # H-0669 — monetary fields are now exact numeric strings; compare via
+        # Decimal (which ignores trailing-zero formatting and is exact).
+        assert Decimal(result[0]["price"]) == Decimal("60000")
         # NEW-C13-01: fillSz=0.1 contracts × BTC-USDT ctVal=0.01 = 0.001 base units.
-        assert result[0]["quantity"] == pytest.approx(0.001)
+        assert Decimal(result[0]["quantity"]) == Decimal("0.001")
         # Audit-2026-05-07 H-0671 — fee is the signed value from the
         # exchange. The fixture uses fee="-0.6" (a maker rebate) and the
         # post-fix branch persists it unchanged so downstream
         # ``realized_pnl = ... - total_fees`` reduces by the rebate
         # instead of inflating the apparent fee via abs().
-        assert result[0]["fee"] == -0.6
+        assert Decimal(result[0]["fee"]) == Decimal("-0.6")
         assert result[0]["is_fill"] is True
         assert result[0]["exchange_order_id"] == "ord-1"
         assert result[0]["exchange_fill_id"] == "trade-1"
@@ -1387,8 +1594,8 @@ class TestG12BFillRowFactory:
             "is_maker", "cost", "raw_data",
         }
         assert required.issubset(set(out.keys()))
-        # cost must derive from price * quantity.
-        assert out["cost"] == 60000.0 * 0.1
+        # cost must derive from price * quantity (exact Decimal; H-0669).
+        assert Decimal(out["cost"]) == Decimal("6000")
         assert out["is_fill"] is True
         # position_direction stashed into raw_data, not a top-level key.
         assert out["raw_data"]["position_direction"] == "long"
@@ -2234,7 +2441,7 @@ class TestG12BMakerRebatePreservesSign:
         )
         assert len(result) == 1
         # Sign must be preserved — this is the contract H-0671 fixes.
-        assert result[0]["fee"] == -0.4
+        assert Decimal(result[0]["fee"]) == Decimal("-0.4")
 
     @pytest.mark.asyncio
     async def test_bybit_maker_rebate_stays_negative(self) -> None:
@@ -2271,7 +2478,7 @@ class TestG12BMakerRebatePreservesSign:
             mock_exchange, "strat-1", mock_supabase
         )
         assert len(result) == 1
-        assert result[0]["fee"] == -0.4
+        assert Decimal(result[0]["fee"]) == Decimal("-0.4")
 
     def test_normalize_fill_ccxt_maker_rebate_stays_negative(self) -> None:
         """CCXT unified shape — _normalize_fill must also preserve sign.
@@ -2294,7 +2501,7 @@ class TestG12BMakerRebatePreservesSign:
             },
             "binance",
         )
-        assert out["fee"] == -0.4
+        assert Decimal(out["fee"]) == Decimal("-0.4")
 
 
 # ─── audit-2026-05-07 H-0662 — Binance fetch_my_trades paginates ────
@@ -2966,7 +3173,7 @@ class TestG12BOkxFundingRowContract:
         assert len(result) == 1
         normal = [r for r in result if r["exchange_fill_id"] == "trade-fill"][0]
         # NEW-C13-01: fillSz=0.1 contracts × BTC-USDT ctVal=0.01 = 0.001 base units.
-        assert normal["quantity"] == pytest.approx(0.001)
+        assert Decimal(normal["quantity"]) == Decimal("0.001")
         # Confirm the funding-shaped row was dropped (not in result)
         funding_rows = [
             r for r in result if r.get("exchange_fill_id") == "trade-funding"
@@ -4996,7 +5203,7 @@ class TestClusterIC1301OkxContractNormalization:
 
         result = await _fetch_raw_trades_okx(mock_exchange, None)
         assert len(result) == 1
-        assert result[0]["quantity"] == pytest.approx(0.1), (
+        assert Decimal(result[0]["quantity"]) == Decimal("0.1"), (
             f"Expected 10 contracts × 0.01 ctVal = 0.1 BTC, got {result[0]['quantity']}. "
             "NEW-C13-01: fillSz must be normalized from contracts to base units."
         )
@@ -5030,7 +5237,7 @@ class TestClusterIC1301OkxContractNormalization:
         mock_exchange.private_get_trade_fills_history = _history
         fills, cap_hit = await _fetch_raw_trades_okx_inst_type(mock_exchange, None, "FUTURES")
         assert len(fills) == 1
-        assert fills[0]["quantity"] == pytest.approx(0.05), (
+        assert Decimal(fills[0]["quantity"]) == Decimal("0.05"), (
             f"Expected 5 contracts × 0.01 ctVal = 0.05 BTC, got {fills[0]['quantity']}. "
             "NEW-C13-01: FUTURES fills need same normalization as SWAP."
         )
@@ -5067,7 +5274,7 @@ class TestClusterIC1301OkxContractNormalization:
         fills, _ = await _fetch_raw_trades_okx_inst_type(mock_exchange, None, "SPOT")
         assert len(fills) == 1
         # SPOT: no normalization → quantity == fillSz exactly.
-        assert fills[0]["quantity"] == pytest.approx(0.5), (
+        assert Decimal(fills[0]["quantity"]) == Decimal("0.5"), (
             f"SPOT fill must not be contract-normalized. Got {fills[0]['quantity']}."
         )
 
