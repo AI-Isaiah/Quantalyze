@@ -292,7 +292,55 @@ export async function GET(
     res.headers.set("Vary", "Cookie");
     return res;
   } catch (err) {
+    // The demo route is hard-locked to the seed ALLOCATOR_ACTIVE_ID, whose
+    // profile is provisioned by scripts/seed-full-app-demo.ts — a MANUAL seed
+    // not run in every environment (notably prod). When that seed profile is
+    // absent, getAllocatorMatchPayload's only `.single()` (the profiles fetch)
+    // raises PostgREST PGRST116 ("0 rows"). For the AUTH'd admin route a missing
+    // allocator IS a real error (it 500s by design). But for this PUBLIC demo a
+    // 500 on an unprovisioned fixture is a trust-collapse signal for a known,
+    // expected condition — degrade to a clean, empty queue (200) that
+    // AllocatorMatchQueue renders as "No candidates yet". Any genuine error
+    // (schema drift, network, any non-PGRST116) still 500s below.
+    //
+    // Coupling: this relies on `profiles` being the ONLY `.single()` in
+    // getAllocatorMatchPayload (a matching note lives there). If a second
+    // `.single()` is added, PGRST116 stops uniquely meaning "demo profile
+    // absent" and this must become an explicit profile-existence pre-check.
+    if (isUnprovisionedSeedProfile(err)) {
+      const empty: AllocatorMatchPayload = {
+        profile: null,
+        preferences: null,
+        batch: null,
+        candidates: [],
+        excluded: [],
+        decisions: [],
+        existing_contact_requests: [],
+      };
+      const res = NextResponse.json(empty);
+      res.headers.set(
+        "Cache-Control",
+        "public, s-maxage=10, stale-while-revalidate=60",
+      );
+      res.headers.set("Vary", "Cookie");
+      return res;
+    }
     console.error("[api/demo/match/[allocator_id]] error:", err);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
+}
+
+/**
+ * PostgREST raises `PGRST116` when a `.single()` matches zero rows. The only
+ * `.single()` in getAllocatorMatchPayload is the seed allocator's `profiles`
+ * fetch, so this uniquely signals "the demo fixture isn't provisioned in this
+ * environment" — distinct from a genuine query/network error.
+ */
+function isUnprovisionedSeedProfile(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code?: unknown }).code === "PGRST116"
+  );
 }
