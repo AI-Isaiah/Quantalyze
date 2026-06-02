@@ -24,6 +24,9 @@ import pytest
 from services.match_engine import (
     ENGINE_VERSION,
     WEIGHTS_VERSION,
+    W_SCREENING_PREFERENCE_FIT,
+    W_SCREENING_TRACK_RECORD,
+    W_SCREENING_CAPACITY_FIT,
     score_candidates,
     to_canonical_json,
     _normalize_min_max,
@@ -1370,6 +1373,74 @@ def test_v2_golden_fixture_passes_sanity_invariants():
     assert sorted(seen_ranks) == list(range(1, len(candidates) + 1)), (
         f"ranks {seen_ranks} are not a dense 1..N sequence"
     )
+
+
+# --- H-0756: ULP-scale composition anchor on the committed golden ------------
+def test_v2_golden_composite_score_matches_independent_recomposition():
+    """H-0756: the range/structural sanity guard above closes the catastrophic
+    drift class (NaN/inf/out-of-range/broken-rank) but is BLIND to the specific
+    hazard this finding names: a composition-order refactor (hoisting the
+    renormalization out of the candidate loop, or swapping `0.6*p + 0.4*m` for
+    an fma) shifts each per-row score by ~1 ULP — e.g. 74.14999999999999 -> 74.15.
+    Every sanity invariant still passes (74.15 is in [0,100], sub-scores
+    unchanged, rank order intact), so a naive `REGENERATE_GOLDEN=1` (which has
+    NO sanity check at all) would silently re-baseline the drifted math and the
+    TOP_N intro boundary could move WITHOUT anyone noticing.
+
+    This test is the independent ULP anchor the byte-exact snapshot lacks: it
+    recomposes the screening-mode composite score FROM the committed sub-scores
+    (preference_fit / mandate_fit_score / track_record / capacity_fit) using the
+    documented D-02 + screening-weight spec formula — NOT by re-running
+    score_candidates. The recomposition is asserted EXACTLY equal to the stored
+    `score` (today the gap is bit-for-bit 0.0). A 1-ULP composition drift makes
+    the regenerated `score` diverge from this spec-anchored value by ~1.4e-14
+    and fails HERE, forcing whoever regenerates to consciously confirm the math
+    move instead of rubber-stamping it.
+
+    Note the weights are imported from the engine (not hard-coded): if the
+    weight CONSTANTS themselves are retuned that is a deliberate, separately
+    WEIGHTS_VERSION-gated change and this anchor moves with them. What it pins
+    is the COMPOSITION (the operation that combines sub-scores into the score),
+    which is exactly the surface H-0756 says a refactor silently perturbs.
+    """
+    import json
+
+    data = json.loads((FIXTURES_DIR / "match_engine_v2_golden.json").read_text())
+    assert data["mode"] == "screening", (
+        "this anchor assumes the golden's screening-mode composition "
+        "(no portfolio_fit term); regen changed the fixture's mode"
+    )
+
+    for c in data["candidates"]:
+        bd = c["score_breakdown"]
+        # The golden is screening mode: there is no portfolio_fit term, so the
+        # composite reduces to the three screening weights over the composed
+        # effective_preference_fit + track_record + capacity_fit.
+        assert "portfolio_fit" not in bd, (
+            f"{c['strategy_id']}: screening-mode golden unexpectedly carries a "
+            "portfolio_fit sub-score — composition formula below would be wrong"
+        )
+        # D-02 composition: effective_preference_fit = 0.6*preference + 0.4*mandate
+        effective_preference_fit = (
+            0.6 * bd["preference_fit"] + 0.4 * bd["mandate_fit_score"]
+        )
+        recomposed = 100 * (
+            W_SCREENING_PREFERENCE_FIT * effective_preference_fit
+            + W_SCREENING_TRACK_RECORD * bd["track_record"]
+            + W_SCREENING_CAPACITY_FIT * bd["capacity_fit"]
+        )
+        # EXACT equality: catches a 1-ULP composition drift the [0,100] sanity
+        # band cannot. The float-stable golden was produced by this exact op
+        # order, so the gap is 0.0 today; any reassociation/fma/renorm-hoist
+        # that perturbs the LSB of the stored score breaks this assertion.
+        assert recomposed == c["score"], (
+            f"H-0756: {c['strategy_id']} stored score {c['score']!r} != "
+            f"independent spec recomposition {recomposed!r} "
+            f"(delta {abs(recomposed - c['score']):.3e}). A composition-order "
+            "refactor shifted the per-row score; do NOT blindly "
+            "REGENERATE_GOLDEN — confirm the math move is intended and that the "
+            "TOP_N intro boundary did not silently shift."
+        )
 
 
 # ---------------------------------------------------------------------------

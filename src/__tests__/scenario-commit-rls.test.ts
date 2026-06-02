@@ -35,7 +35,7 @@
  * BASE_URL absent (CI without live DB).
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from "vitest";
 import { createClient } from "@supabase/supabase-js";
 import {
   HAS_LIVE_DB,
@@ -44,6 +44,114 @@ import {
   LIVE_DB_URL,
 } from "@/lib/test-helpers/live-db";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { NextRequest } from "next/server";
+
+// ---------------------------------------------------------------------------
+// H-0037 — CI-RUNNABLE audit-emission regression (the half the live-DB T_RLS8
+// below cannot prove in the vitest lane).
+//
+// The T_RLS8 case in this file hard-asserts the real audit contract
+// (action="match.decision_record", metadata.source="scenario_commit",
+// metadata.kind=row.kind, exactly one row per match_decision), but it is gated
+// on HAS_FULL_LIVE (needs SCENARIO_COMMIT_BASE_URL → a live dev server) which
+// CI never sets — so per Rule-9 it is SILENTLY SKIPPED and a regression that
+// dropped `emit(...)` from the success branch (or emitted the wrong
+// action/entity_id/metadata) still ships green.
+//
+// To close that gap WITHOUT a live server we invoke the production route
+// handler IN-PROCESS with the Supabase RPC + audit `emit` mocked (the same
+// proven harness as src/app/api/allocator/scenario/commit/route.test.ts). The
+// route's audit-event construction is REAL code — only the I/O boundaries are
+// stubbed — so the assertions below FAIL if the success branch stops emitting,
+// emits the wrong action/entity_id/metadata, or emits on a rolled-back batch.
+// These cases run unconditionally in CI (no env gating).
+//
+// `vi.mock` is hoisted above all imports; it does NOT affect the live-DB block
+// in this file because that block imports the real `createClient` from
+// `@supabase/supabase-js` (NOT mocked here) and the un-mocked live-db helper,
+// and is itself skipped in CI.
+// ---------------------------------------------------------------------------
+
+// `import "server-only"` (transitive via the route's analytics imports) throws
+// in jsdom — stub it so the in-process route import resolves under test.
+vi.mock("server-only", () => ({}));
+
+// Onboarding marker stamp is non-blocking analytics fired inside after();
+// no-op it so the route import doesn't depend on Supabase auth.admin.
+vi.mock("@/lib/analytics/onboarding-funnel", () => ({
+  stampOutcomeMarker: vi.fn(async () => undefined),
+}));
+
+// The route only touches the admin client lazily inside after() for
+// stampOutcomeMarker (mocked above). It must NEVER reach admin.from() — fail
+// loud if a regression re-introduces route-layer plumbing.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    auth: { admin: { getUserById: vi.fn(), updateUserById: vi.fn() } },
+    from: () => {
+      throw new Error(
+        "[test] route should not touch admin.from() — idempotency lives in commit_scenario_batch since migration 131",
+      );
+    },
+  }),
+}));
+
+// withAllocatorAuth — pass-through that injects a fixed allocator. The real
+// auth/CSRF gate needs Supabase and is covered by withAllocatorAuth.test.ts.
+const INPROC_USER = { id: "alloc-A" } as unknown as import("@supabase/supabase-js").User;
+vi.mock("@/lib/api/withAllocatorAuth", () => ({
+  withAllocatorAuth:
+    (h: (req: NextRequest, user: typeof INPROC_USER) => unknown) =>
+    (req: NextRequest) =>
+      h(req, INPROC_USER),
+}));
+
+// User-scoped supabase: rpc('commit_scenario_batch') is the H4 hook; from()
+// returns the allocator_holdings audit-recompute chain (empty by default).
+const inprocRpc = vi.fn();
+const buildHoldingsChain = () => {
+  const chain: { data: unknown[]; error: { message: string } | null } & {
+    select: () => typeof chain;
+    eq: () => typeof chain;
+    in: () => typeof chain;
+    order: () => typeof chain;
+  } = {
+    data: [],
+    error: null,
+    select: () => chain,
+    eq: () => chain,
+    in: () => chain,
+    order: () => chain,
+  };
+  return chain;
+};
+vi.mock("@/lib/supabase/server", () => ({
+  createClient: async () => ({
+    from: vi.fn(() => buildHoldingsChain()),
+    rpc: inprocRpc,
+  }),
+}));
+
+// Rate limiter — always allow on this path.
+vi.mock("@/lib/ratelimit", () => ({
+  userActionLimiter: {},
+  checkLimit: vi.fn(async () => ({ success: true })),
+  isRateLimitMisconfigured: vi.fn(() => false),
+}));
+
+// Audit — default async no-op so the route's `emit(...).then(ok, fail)`
+// per-promise guard resolves. The spy lets us assert the emitted events.
+vi.mock("@/lib/audit", () => ({
+  emit: vi.fn(async () => {}),
+}));
+
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: vi.fn(),
+}));
+
+// Imports after mocks (vitest hoists vi.mock above these regardless of order).
+import { POST as COMMIT_POST } from "@/app/api/allocator/scenario/commit/route";
+import { emit as inprocEmit } from "@/lib/audit";
 
 // jsdom sets `process.env.BASE_URL = "/"` (its default document URL prefix),
 // so this test reads from a different env var (`SCENARIO_COMMIT_BASE_URL`)
@@ -861,5 +969,141 @@ describe("scenario-commit RLS — coverage-gate visibility (M-0019)", () => {
     // (e.g. inverts HAS_BASE_URL) is caught.
     expect(typeof HAS_FULL_LIVE).toBe("boolean");
     expect(HAS_FULL_LIVE).toBe(HAS_LIVE_DB && HAS_BASE_URL && HAS_ANON_KEY);
+  });
+});
+
+// ===========================================================================
+// H-0037 — in-process audit-emission regression (runs in CI, no live server)
+//
+// The live T_RLS8 case above is the source-of-truth integration test, but it
+// is gated on HAS_FULL_LIVE and is SKIPPED in CI. The reviewer's verdict was
+// "weak" precisely because of that: per Rule-9 a CI-skipped test cannot fail
+// when the audit-emission business logic regresses. This block closes the gap
+// by driving the REAL route handler in-process with mocked I/O, so a dropped
+// `emit()`, a wrong action / entity_id / metadata, or an emission on a
+// rolled-back batch FAILS the suite in the standard vitest lane.
+//
+// These cases pin the SAME contract T_RLS8 asserts against a live server:
+//   - full-success batch → exactly one match.decision_record audit event per
+//     recorded row, with source="scenario_commit", entity_id=match_decision_id,
+//     metadata.kind=row.kind, entity_type="match_decision"
+//   - rolled-back batch → ZERO audit events
+// — verified against the production contract in
+// src/app/api/allocator/scenario/commit/route.ts:873-909.
+// ===========================================================================
+
+function mkCommitReq(body: unknown) {
+  return new NextRequest(
+    new URL("http://localhost/api/allocator/scenario/commit"),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+const VR_DIFF = {
+  kind: "voluntary_remove" as const,
+  holding_ref: "holding:binance:BTC:spot",
+  size_at_decision_usd: 1000,
+  rejection_reason: "underperforming_peers" as const,
+};
+const VA_DIFF = {
+  kind: "voluntary_add" as const,
+  strategy_id: "11111111-2222-4333-8444-555555555555",
+  percent_allocated: 5,
+  size_at_decision_usd: 5000,
+};
+
+type EmitCall = [unknown, {
+  action: string;
+  entity_type: string;
+  entity_id: string;
+  metadata: { kind?: string; source?: string };
+}];
+
+describe("H-0037 — scenario-commit audit emission (in-process route, CI-runnable)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    inprocRpc.mockReset();
+  });
+
+  it("full-success voluntary_add → emits exactly one match.decision_record with source=scenario_commit + kind, entity_id=match_decision_id", async () => {
+    inprocRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          {
+            index: 0,
+            match_decision_id: "md-va-1",
+            bridge_outcome_id: "bo-va-1",
+            kind: "voluntary_add",
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await COMMIT_POST(mkCommitReq({ diffs: [VA_DIFF] }));
+    expect(res.status).toBe(200);
+
+    // The success branch MUST emit. A regression that drops emit() from the
+    // success path makes this fail (where the live T_RLS8 would silently skip).
+    expect(inprocEmit).toHaveBeenCalledTimes(1);
+    const [, event] = (inprocEmit as unknown as { mock: { calls: EmitCall[] } })
+      .mock.calls[0];
+    // Pin the exact production contract (route.ts:873-909) — not a tautology.
+    expect(event.action).toBe("match.decision_record");
+    expect(event.entity_type).toBe("match_decision");
+    expect(event.entity_id).toBe("md-va-1");
+    expect(event.metadata.source).toBe("scenario_commit");
+    expect(event.metadata.kind).toBe("voluntary_add");
+  });
+
+  it("full-success multi-row batch → one audit event per recorded row, each carrying source + its own kind/entity_id", async () => {
+    inprocRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+          { index: 1, match_decision_id: "md-2", bridge_outcome_id: "bo-2", kind: "voluntary_add" },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await COMMIT_POST(mkCommitReq({ diffs: [VR_DIFF, VA_DIFF] }));
+    expect(res.status).toBe(200);
+
+    expect(inprocEmit).toHaveBeenCalledTimes(2);
+    const calls = (inprocEmit as unknown as { mock: { calls: EmitCall[] } }).mock.calls;
+    expect(calls[0][1].action).toBe("match.decision_record");
+    expect(calls[0][1].entity_id).toBe("md-1");
+    expect(calls[0][1].metadata.source).toBe("scenario_commit");
+    expect(calls[0][1].metadata.kind).toBe("voluntary_remove");
+    expect(calls[1][1].entity_id).toBe("md-2");
+    expect(calls[1][1].metadata.source).toBe("scenario_commit");
+    expect(calls[1][1].metadata.kind).toBe("voluntary_add");
+  });
+
+  it("rolled-back batch (RPC ok=false, recorded:0) → emits NO audit events", async () => {
+    // The T_RLS8 'full-failure batch creates NONE' half. The route emits one
+    // audit event per RECORDED row; a rolled-back tx records nothing, so audit
+    // emission must be zero. A regression that emitted audit before checking
+    // the rollback envelope would fail here.
+    inprocRpc.mockResolvedValueOnce({
+      data: {
+        ok: false,
+        recorded: [],
+        errors: [{ index: 0, error: "Holding not owned by user" }],
+      },
+      error: null,
+    });
+
+    const res = await COMMIT_POST(mkCommitReq({ diffs: [VR_DIFF] }));
+    // Rolled-back batches respond 422 (recorded:0 envelope), never 200.
+    expect(res.status).toBe(422);
+    expect(inprocEmit).not.toHaveBeenCalled();
   });
 });

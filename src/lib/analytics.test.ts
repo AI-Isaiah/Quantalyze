@@ -118,8 +118,48 @@ describe("src/lib/analytics.ts — server-side wrapper", () => {
       }),
     });
 
-    // No explicit flush — the constructor's flushAt: 1 handles it.
-    expect(POSTHOG_MOCK.flushSpy).not.toHaveBeenCalled();
+    // NOTE: deliberately does NOT assert anything about flush() here.
+    // Whether the wrapper relies on flushAt:1 or calls an explicit
+    // `await client.flush()` is the subject of the dedicated test below
+    // ("flushes after every capture for serverless safety"). This test
+    // only proves the capture is *forwarded* with the right payload, so
+    // it stays green both before and after the H-0416 await-flush fix.
+  });
+
+  // SEC-005-class regression guard (see FIX-LIST H-0415 / H-0416).
+  //
+  // posthog-node's capture() is a *synchronous enqueue* into an internal
+  // batch; the HTTP POST to PostHog happens asynchronously afterwards.
+  // flushAt:1 schedules that flush but does NOT block, so on Vercel Fluid
+  // Compute the lambda can suspend after `after()` resolves and drop the
+  // in-flight event. The only serverless-safe contract is for
+  // trackForQuantsEventServer to `await client.flush()` after capture()
+  // so the awaited promise resolves only once the event is on the wire.
+  //
+  // This test asserts that contract. It is .skip'd because the production
+  // code in src/lib/analytics.ts:147 still fires capture() without an
+  // explicit flush — un-skipping it today goes RED, surfacing the real
+  // bug. Once H-0416 lands `await client.flush()`, remove the `.skip`.
+  it.skip("flushes after every capture so serverless suspension can't drop the event", async () => {
+    // TODO(surfaced): H-0415 — un-skip once H-0416 adds `await client.flush()`
+    process.env.NEXT_PUBLIC_POSTHOG_KEY = "phc_test_key";
+    const { trackForQuantsEventServer, __resetForQuantsAnalyticsForTest } =
+      await import("./analytics");
+    __resetForQuantsAnalyticsForTest();
+
+    await trackForQuantsEventServer("for_quants_view", "v-flush-1");
+
+    // Each capture must be paired with exactly one flush…
+    expect(POSTHOG_MOCK.captureSpy).toHaveBeenCalledTimes(1);
+    expect(POSTHOG_MOCK.flushSpy).toHaveBeenCalledTimes(1);
+
+    await trackForQuantsEventServer("for_quants_cta_click", "v-flush-2");
+
+    // …and a second capture must produce a second flush, proving the
+    // flush is per-event (the serverless-safety contract) rather than a
+    // one-time constructor side effect.
+    expect(POSTHOG_MOCK.captureSpy).toHaveBeenCalledTimes(2);
+    expect(POSTHOG_MOCK.flushSpy).toHaveBeenCalledTimes(2);
   });
 
   it("reuses the singleton PostHog client across multiple captures", async () => {

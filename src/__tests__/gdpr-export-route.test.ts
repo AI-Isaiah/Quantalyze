@@ -773,18 +773,20 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
     expect(rlCall).toBeDefined();
   });
 
-  // H-0015 (SURFACED): abuse-pattern signals (429 storms) should be
-  // audited so SecOps can detect credential-export probing. The route
-  // currently returns 429 WITHOUT emitting any audit event — a security
-  // observability gap. This assertion encodes the desired behavior (a
-  // dedicated `account.export_rate_limited` audit event on the 429
-  // path) and FAILS today because the route short-circuits before any
-  // logAuditEvent call. Promote to `it(...)` once the route emits a
-  // rate-limit audit event. Production fix required in
-  // src/app/api/account/export/route.ts (the 429 branch) — flagged, not
-  // applied here (test files only).
+  // H-0015 (CLOSED 2026-05-25 in src/app/api/account/export/route.ts):
+  // abuse-pattern signals (429 storms) must be audited so SecOps can
+  // detect credential-export probing. The test above proves a
+  // `account.export_rate_limited` event IS emitted on the 429 path; this
+  // test goes one level deeper and pins the FORENSIC PAYLOAD of that
+  // event. The whole point of the rate-limit audit is reconstructing a
+  // probe — an audit row with no fingerprint (ip / user_agent) and no
+  // retry_after window is useless to an investigator, so a regression
+  // that emits the event but drops or empties its metadata would silently
+  // re-open the observability gap the finding describes. Asserting the
+  // metadata shape (not just that the event fired) is what makes this a
+  // genuine guard rather than a key-name tautology.
   it(
-    "H-0015: emits an audit event on the 429 rate-limit path (SURFACED — route does not audit 429s)",
+    "H-0015: the 429 rate-limit audit carries the forensic fingerprint (retry_after + ip + user_agent)",
     async () => {
       checkLimitMock.mockResolvedValueOnce({
         success: false,
@@ -795,13 +797,15 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       const res = await POST(makeRequest());
       expect(res.status).toBe(429);
 
-      // Drain the deferred-emit microtask queue.
+      // Drain the deferred-emit microtask queue (after()/queueMicrotask).
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
 
-      // A rate-limit refusal must leave a forensic trail so a probing
-      // storm is detectable. Expect a dedicated rate-limit audit action.
+      // The dedicated rate-limit audit action fired via the user-scoped
+      // `log_audit_event` RPC (NOT the service-role `log_audit_event_service`
+      // path the post-mutation export audits use — a regression that routed
+      // this through the wrong RPC would also be caught here).
       const rlCall = logAuditRpcMock.mock.calls.find(
         (c) =>
           (c as unknown as [string, { p_action?: string }])[0] ===
@@ -810,8 +814,73 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
             "account.export_rate_limited",
       );
       expect(rlCall).toBeDefined();
+
+      // The audit row MUST carry enough to reconstruct the probe:
+      //   - entity binds to the throttled user (so SecOps can group a storm
+      //     against a single account),
+      //   - retry_after records the window the limiter reported (proves the
+      //     event is the throttle, not some unrelated emit),
+      //   - ip / user_agent are the request fingerprint (here null because
+      //     the ratelimit mock stubs getClientIp -> "unknown" and the test
+      //     request sets no UA — but the KEYS must be present so a real
+      //     probe with a real IP/UA is captured, not dropped on the floor).
+      const args = (rlCall as unknown as [string, Record<string, unknown>])[1];
+      expect(args.p_entity_type).toBe("user");
+      expect(args.p_entity_id).toBe("user-429");
+      const md = args.p_metadata as Record<string, unknown>;
+      expect(md.retry_after).toBe(86_400);
+      // Keys MUST exist (forensic contract) even when the value is null in
+      // this header-less test request.
+      expect("ip" in md).toBe(true);
+      expect("user_agent" in md).toBe(true);
+      expect(md.ip).toBeNull();
+      expect(md.user_agent).toBeNull();
     },
   );
+
+  it("H-0015: a header-carrying 429 probe records its IP + User-Agent on the audit row", async () => {
+    // The null-fingerprint case above proves the KEYS are present; this
+    // case proves the route actually THREADS a real fingerprint through to
+    // the audit metadata. A regression that hard-coded null (or read the
+    // wrong header) would pass the test above but fail here — closing the
+    // "event fired but the forensic value is always empty" loophole.
+    checkLimitMock.mockResolvedValueOnce({ success: false, retryAfter: 3_600 });
+
+    const reqWithFingerprint = new NextRequest(
+      "http://localhost:3000/api/account/export",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "http://localhost:3000",
+          "user-agent": "probe-agent/9.9",
+        },
+        body: "{}",
+      },
+    );
+
+    const { POST } = await loadRoute();
+    const res = await POST(reqWithFingerprint);
+    expect(res.status).toBe(429);
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const rlCall = logAuditRpcMock.mock.calls.find(
+      (c) =>
+        (c as unknown as [string, { p_action?: string }])[0] ===
+          "log_audit_event" &&
+        (c as unknown as [string, { p_action?: string }])[1]?.p_action ===
+          "account.export_rate_limited",
+    );
+    expect(rlCall).toBeDefined();
+    const md = (rlCall as unknown as [string, Record<string, unknown>])[1]
+      .p_metadata as Record<string, unknown>;
+    expect(md.retry_after).toBe(3_600);
+    // The route reads the UA off the request and lands it on the audit row.
+    expect(md.user_agent).toBe("probe-agent/9.9");
+  });
 
   it("429 short-circuits before collectUserExportBundle or upload (wasted-compute guard)", async () => {
     checkLimitMock.mockResolvedValueOnce({

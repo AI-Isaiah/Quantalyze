@@ -31,7 +31,7 @@
  *    distinguishable from a state-not-persisted failure.
  */
 
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import { createClient } from "@supabase/supabase-js";
 import {
   seedBridgeCandidate,
@@ -42,23 +42,24 @@ import {
   cleanupTestAllocator,
   cleanupTestStrategy,
 } from "./helpers/cleanup-test-project";
+import { SELECTORS, type E2EPage } from "./helpers/discovery-selectors";
 
 const HAS_SEED_ENV =
   !!process.env.TEST_SUPABASE_URL &&
   !!process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
 
 async function loginViaForm(
-  page: Page,
+  page: E2EPage,
   email: string,
   password: string,
 ): Promise<void> {
+  // H-1040: selectors centralized in helpers/discovery-selectors.ts so a
+  // login-form rename rots one place (and fails the AuthForms unit test)
+  // rather than four copy-pasted spec literals.
   await page.goto("/login");
-  await page.fill(
-    'input[name="email"], input[placeholder*="email" i]',
-    email,
-  );
-  await page.fill('input[type="password"]', password);
-  await page.click('button:has-text("Sign in")');
+  await page.fill(SELECTORS.loginEmail, email);
+  await page.fill(SELECTORS.loginPassword, password);
+  await page.click(SELECTORS.loginSubmit);
   await page.waitForURL(/\/(discovery|strategies|dashboard)/, {
     timeout: 15000,
   });
@@ -165,7 +166,7 @@ test.describe("DISCO-01 watchlist", () => {
     // e2e/discovery-watchlist.spec.ts:110 — the previous test.skip on
     // tableRowCount === 0 silently masked the entire happy-path
     // assertion on every clean test DB.
-    await page.waitForSelector("table tbody tr", { timeout: 15000 });
+    await page.waitForSelector(SELECTORS.tableRows, { timeout: 15000 });
     // audit-2026-05-21 PR #236 anchor-element pattern — select the
     // specific row that contains the seeded strategy's factsheet
     // anchor (`/factsheet/${strategyId}`) rather than `.first()`.
@@ -178,7 +179,7 @@ test.describe("DISCO-01 watchlist", () => {
     // or silently star a row from a prior run.
     const strategyId = seededStrategy!.strategyId;
     const seededRow = page
-      .locator("table tbody tr")
+      .locator(SELECTORS.tableRows)
       .filter({
         has: page.locator(`a[href="/factsheet/${strategyId}"]`),
       });
@@ -192,9 +193,7 @@ test.describe("DISCO-01 watchlist", () => {
     // exist on the targeted row. If the row rendered but StarToggle
     // failed to hydrate, this surfaces the structural failure with the
     // strategyId in the diagnostic.
-    const starButton = seededRow
-      .locator('button[aria-label*="to watchlist"]')
-      .first();
+    const starButton = seededRow.locator(SELECTORS.starAddButton).first();
     await expect(
       starButton,
       `seeded row (strategyId=${strategyId}) has no watchlist star button — ` +
@@ -222,14 +221,14 @@ test.describe("DISCO-01 watchlist", () => {
     // the row by factsheet href (PR #236 pattern) so an unrelated
     // first row from prior runs cannot mask the assertion.
     await page.reload();
-    await page.waitForSelector("table tbody tr", { timeout: 15000 });
+    await page.waitForSelector(SELECTORS.tableRows, { timeout: 15000 });
     const seededRowAfterReload = page
-      .locator("table tbody tr")
+      .locator(SELECTORS.tableRows)
       .filter({
         has: page.locator(`a[href="/factsheet/${strategyId}"]`),
       });
     await expect(
-      seededRowAfterReload.locator('button[aria-label*="from watchlist"]'),
+      seededRowAfterReload.locator(SELECTORS.starRemoveButton),
       "StarToggle did not persist 'starred' state across reload",
     ).toBeVisible({ timeout: 5000 });
 
@@ -257,7 +256,7 @@ test.describe("DISCO-01 watchlist", () => {
       "My Watchlist tab did not filter to the seeded row — server-side " +
         "user_favorites scope regression or hydration race",
     ).toBeVisible({ timeout: 5000 });
-    await expect(page.locator("table tbody tr")).toHaveCount(1);
+    await expect(page.locator(SELECTORS.tableRows)).toHaveCount(1);
   });
 
   test("unauthenticated PUT to /api/watchlist returns 401 (public-path RLS guard)", async ({
@@ -409,7 +408,7 @@ test.describe("DISCO-01 watchlist", () => {
 
     // Wait for the table or empty state.
     await Promise.race([
-      page.waitForSelector("table tbody tr", { timeout: 15000 }),
+      page.waitForSelector(SELECTORS.tableRows, { timeout: 15000 }),
       page.waitForSelector("text=/no strategies/i", { timeout: 15000 }),
     ]);
 
@@ -450,7 +449,7 @@ test.describe("DISCO-01 watchlist", () => {
     // has leaked. The expected state is the "no strategies" empty
     // state OR an empty tbody.
     const watchlistRowCount = await page
-      .locator("table tbody tr")
+      .locator(SELECTORS.tableRows)
       .count();
     expect(
       watchlistRowCount,
@@ -465,5 +464,80 @@ test.describe("DISCO-01 watchlist", () => {
       .delete()
       .eq("user_id", userAId!)
       .eq("strategy_id", strategyId);
+  });
+});
+
+/**
+ * H-1058 (pr-test-analyzer): the four discovery specs all sign in as a single
+ * allocator. Per feedback_e2e_all_user_groups the public/anon path must also
+ * be covered — specifically that the PUBLIC /browse surface HIDES the
+ * allocator-only watchlist controls (star column, Customize cog, My Watchlist
+ * tab). StrategyTable.tsx gates all of these on `userId !== undefined`
+ * (showStarColumn = userId !== undefined at :327; the Customize/My-Watchlist
+ * chrome at :552 is `userId !== undefined && (...)`). The public /browse/[slug]
+ * route (src/app/browse/[slug]/page.tsx) renders <StrategyTable> with NO userId
+ * prop, so an anon visitor must see none of these. Previously this branch was
+ * only covered by a unit test (StrategyTable.test.tsx Case 2) and never live in
+ * the browser, so a regression that passed a userId (or dropped the
+ * `userId !== undefined` guard) on the public path would ship undetected.
+ *
+ * This block is deliberately NOT gated on TEST_SUPABASE_* seed env — /browse is
+ * a PUBLIC_ROUTES entry (src/proxy.ts:7), needs no login and no seeded role,
+ * only the dev server.
+ */
+test.describe("DISCO-01 watchlist — public/anon path (no allocator chrome)", () => {
+  test("anonymous /browse/[slug] hides star toggles, Customize cog, and My Watchlist tab", async ({
+    page,
+  }) => {
+    // Visit the public category page as an unauthenticated user. proxy.ts
+    // keeps /browse public, so there is NO redirect to /login here — a
+    // redirect would itself be a public-path regression.
+    const resp = await page.goto("/browse/crypto-sma");
+    expect(
+      resp?.status() ?? 0,
+      "/browse/crypto-sma did not return a non-error status for an anon " +
+        "user — public route regression (proxy PUBLIC_ROUTES dropped /browse)",
+    ).toBeLessThan(400);
+    await expect(
+      page,
+      "anon visit to /browse/crypto-sma redirected to /login — the public " +
+        "browse path must stay reachable without auth",
+    ).not.toHaveURL(/\/login/);
+
+    // The page may legitimately have zero published rows on a clean DB. The
+    // assertions below are about the ABSENCE of allocator-only chrome, which
+    // holds whether or not rows exist — so we do NOT require a seeded row.
+
+    // 1. No star/watchlist toggle anywhere on the public page. The star
+    //    column is rendered ONLY when userId !== undefined (StrategyTable
+    //    :327). If a regression passes a userId on the public path, or drops
+    //    the guard, these buttons appear and this assertion fails.
+    await expect(
+      page.locator(SELECTORS.starAddButton),
+      "anon /browse shows an 'add to watchlist' star button — StrategyTable " +
+        "rendered the userId-gated star column for a logged-out user " +
+        "(showStarColumn = userId !== undefined regression)",
+    ).toHaveCount(0);
+    await expect(
+      page.locator(SELECTORS.starRemoveButton),
+      "anon /browse shows a 'remove from watchlist' star button — userId-gated " +
+        "star column leaked onto the public path",
+    ).toHaveCount(0);
+
+    // 2. No Customize cog (StrategyTable :552 renders it only for userId).
+    await expect(
+      page.locator(SELECTORS.customizeCog),
+      "anon /browse shows the Customize cog — allocator-only discovery " +
+        "controls leaked onto the public path",
+    ).toHaveCount(0);
+
+    // 3. No "My Watchlist" tab (WatchlistTabs is part of the userId-gated
+    //    chrome). A logged-out browser must never see a personal-watchlist
+    //    surface.
+    await expect(
+      page.getByRole("tab", { name: /My Watchlist/ }),
+      "anon /browse shows a 'My Watchlist' tab — personal watchlist surface " +
+        "leaked to a logged-out user",
+    ).toHaveCount(0);
   });
 });

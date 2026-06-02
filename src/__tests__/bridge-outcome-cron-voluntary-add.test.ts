@@ -379,7 +379,7 @@ describe("migration 080 — voluntary_add cron branch (live-DB / H2)", () => {
 
       const { data: row } = await admin
         .from("bridge_outcomes")
-        .select("delta_30d, delta_90d, delta_180d")
+        .select("delta_30d, delta_90d, delta_180d, needs_recompute, deltas_computed_at")
         .eq("id", bo!.id)
         .single();
       // anchor present, anchor+30/90/180 absent → extract_delta returns NULL
@@ -388,6 +388,19 @@ describe("migration 080 — voluntary_add cron branch (live-DB / H2)", () => {
       expect(row?.delta_30d).toBeNull();
       expect(row?.delta_90d).toBeNull();
       expect(row?.delta_180d).toBeNull();
+      // CRITICAL: prove the row was actually PROCESSED by the voluntary_add
+      // branch (its first guard — series HAS a value at allocated_at — passed),
+      // not silently skipped by the candidate WHERE clause. The
+      // voluntary_add_updated UPDATE sets needs_recompute=FALSE +
+      // deltas_computed_at for every candidate it touches, even when every
+      // extract_delta resolves to NULL. Without these assertions the NULL deltas
+      // above are indistinguishable from "row never entered the branch", making
+      // the test pass vacuously if voluntary_add_candidates ever stops matching
+      // this row. With them, the NULLs specifically encode "branch ran, found
+      // the anchor, but the +30/90/180d endpoints are absent so it wrote no
+      // spurious fill" — the exact partial-window behaviour H-0011 guards.
+      expect(row?.needs_recompute).toBe(false);
+      expect(row?.deltas_computed_at).not.toBeNull();
 
       await admin
         .from("strategy_analytics")

@@ -21,11 +21,60 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { NextRequest } from "next/server";
+// NextResponse is imported STATICALLY (like every sibling route.test.ts and
+// like route.ts under test) rather than via a dynamic `await import` inside a
+// test body. A dynamic import under vi.mock isolation can resolve to a
+// DIFFERENT NextResponse module instance than the handler's, so the handler's
+// early-return `if (csrfError) return csrfError;` would forward a foreign
+// object whose `.status` the test reads by luck. Sharing the one static
+// instance keeps the fixture and the production code on the same contract.
+import { NextRequest, NextResponse } from "next/server";
+// PostgrestError is imported as a VALUE (it is a class extending Error) so the
+// fixtures can construct real instances; AuthUser is type-only.
+import { PostgrestError } from "@supabase/supabase-js";
+import type { AuthUser } from "@supabase/supabase-js";
+
+// The supabase delete builder the handler exercises is EXACTLY
+// `.delete().eq("user_id", …).eq("strategy_id", …)` then awaited. We model
+// that contract explicitly instead of a `chain as unknown as {…}` double-cast:
+// each `.eq()` returns either the same builder (more filters to chain) or the
+// awaited `{ error }` result. If a future supabase-js upgrade changed the
+// filter method (e.g. renamed `.eq` → `.match`, or the handler grew a third
+// `.eq()`), this interface would no longer describe what `route.ts` calls and
+// the mock would stop type-checking — surfacing the drift in the test build.
+interface MockSupabaseDeleteResult {
+  error: PostgrestError | null;
+}
+interface MockSupabaseDeleteChain {
+  eq(
+    col: string,
+    val: string,
+  ): MockSupabaseDeleteChain | Promise<MockSupabaseDeleteResult>;
+}
+
+/**
+ * Construct a real PostgrestError so error fixtures match the production
+ * `PostgrestError | null` contract supabase-js returns — not a bare
+ * `{ message }` object the handler's `error.message ?? error` only happens to
+ * tolerate. Seeding a wrong-shape error (a string, a number) now fails to
+ * compile rather than running green against a fiction.
+ */
+function makePgError(message: string): PostgrestError {
+  return new PostgrestError({
+    message,
+    details: "",
+    hint: "",
+    code: "P0001",
+  });
+}
 
 // vi.hoisted lets the mock factories below reach the recorder.
 const recorders = vi.hoisted(() => ({
-  user: null as { id: string } | null,
+  // Typed as the real supabase `User | null`. The handler reads `user.id`;
+  // pinning the full `User` shape means a future handler that reads
+  // `user.email` / `user.app_metadata.role` sees the fixture's real value
+  // instead of a silent `undefined` from a `{ id }`-only stub.
+  user: null as AuthUser | null,
   upsertCalls: [] as Array<{
     table: string;
     row: Record<string, unknown>;
@@ -35,11 +84,13 @@ const recorders = vi.hoisted(() => ({
     table: string;
     eqs: Array<[string, string]>;
   }>,
-  upsertResponse: { error: null as unknown },
-  deleteResponse: { error: null as unknown },
+  // Strict `PostgrestError | null` — supabase-js never returns a string/number
+  // here, and the test must not be allowed to pretend it does.
+  upsertResponse: { error: null as PostgrestError | null },
+  deleteResponse: { error: null as PostgrestError | null },
   rateLimitResponse: { success: true as boolean, retryAfter: 0 as number },
   rateLimitCalls: [] as string[],
-  csrfReturn: null as unknown,
+  csrfReturn: null as NextResponse | null,
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -52,12 +103,13 @@ vi.mock("@/lib/supabase/server", () => ({
         recorders.upsertCalls.push({ table, row, options });
         return Promise.resolve({ error: recorders.upsertResponse.error });
       },
-      delete: () => {
+      delete: (): MockSupabaseDeleteChain => {
         const eqs: Array<[string, string]> = [];
-        const chain: { eq: (col: string, val: string) => typeof chain | Promise<{ error: unknown }> } = {
+        const chain: MockSupabaseDeleteChain = {
           eq(col: string, val: string) {
             eqs.push([col, val]);
-            // After 2 .eq() calls (user_id + strategy_id) await resolves.
+            // After 2 .eq() calls (user_id + strategy_id) await resolves —
+            // mirrors supabase-js, where `.eq().eq()` yields a thenable.
             if (eqs.length >= 2) {
               recorders.deleteCalls.push({ table, eqs: [...eqs] });
               return Promise.resolve({ error: recorders.deleteResponse.error });
@@ -65,9 +117,7 @@ vi.mock("@/lib/supabase/server", () => ({
             return chain;
           },
         };
-        // Some chains resolve as a thenable — emulate the supabase-js behavior
-        // where .eq().eq() returns a Promise on the final eq.
-        return chain as unknown as { eq: (col: string, val: string) => unknown };
+        return chain;
       },
     }),
   }),
@@ -88,7 +138,20 @@ vi.mock("@/lib/ratelimit", () => ({
 
 import { PUT } from "./route";
 
-const VALID_USER = { id: "00000000-0000-0000-0000-000000000aaa" };
+// A complete supabase `User`, not a `{ id }` stub. Typing the recorder slot as
+// the real `AuthUser` forces this fixture to carry every field the production
+// auth contract guarantees (id, app_metadata, user_metadata, aud, created_at),
+// so a handler that later reads e.g. `user.app_metadata.role` exercises a real
+// value here instead of silently reading `undefined` off a partial mock.
+const VALID_USER: AuthUser = {
+  id: "00000000-0000-0000-0000-000000000aaa",
+  app_metadata: { provider: "email" },
+  user_metadata: {},
+  aud: "authenticated",
+  created_at: "2026-01-01T00:00:00.000Z",
+  email: "allocator@quantalyze.test",
+  role: "authenticated",
+};
 const STRATEGY_ID = "cccccccc-0001-4000-8000-000000000001";
 
 function makeReq(body: unknown): NextRequest {
@@ -122,15 +185,31 @@ describe("PUT /api/watchlist/[strategyId]", () => {
     recorders.user = null;
     const res = await PUT(makeReq({ action: "add" }), makeCtx());
     expect(res.status).toBe(401);
+    // The handler constructs this response with its OWN `NextResponse.json`.
+    // Asserting `instanceof NextResponse` against the test's statically-imported
+    // class proves the handler and the test resolve the SAME next/server module
+    // instance. A reintroduced dynamic `await import("next/server")` (or any
+    // vi.mock isolation that forks the module) would make this fail — catching
+    // the cross-instance divergence the contract-drift finding warns about,
+    // which a `res.status` check alone (works on any Response-like) would miss.
+    expect(res).toBeInstanceOf(NextResponse);
   });
 
   it("returns 403 when assertSameOrigin returns a NextResponse (CSRF mismatch)", async () => {
-    recorders.csrfReturn = new (await import("next/server")).NextResponse(
-      JSON.stringify({ error: "Origin not allowed" }),
+    // Uses the statically-imported NextResponse — the SAME module instance the
+    // handler imports — so the handler's `if (csrfError) return csrfError;`
+    // forwards exactly this object. The route is expected to short-circuit
+    // BEFORE auth/body/rate-limit, so we also pin that the supabase mock was
+    // never touched (no upsert/delete recorded).
+    recorders.csrfReturn = NextResponse.json(
+      { error: "Origin not allowed" },
       { status: 403 },
     );
     const res = await PUT(makeReq({ action: "add" }), makeCtx());
     expect(res.status).toBe(403);
+    expect(res).toBe(recorders.csrfReturn);
+    expect(recorders.upsertCalls).toHaveLength(0);
+    expect(recorders.deleteCalls).toHaveLength(0);
   });
 
   it("returns 400 when body action is invalid", async () => {
@@ -227,13 +306,17 @@ describe("PUT /api/watchlist/[strategyId]", () => {
   });
 
   it("returns 500 when supabase upsert reports an error", async () => {
-    recorders.upsertResponse = { error: { message: "db down" } };
+    // A real PostgrestError, the only error shape supabase-js returns. The
+    // handler logs `error.message ?? error`, so the fixture MUST carry a
+    // `.message` — seeding a bare `{ message }` (or worse, a string) would no
+    // longer type-check against the `PostgrestError | null` recorder slot.
+    recorders.upsertResponse = { error: makePgError("db down") };
     const res = await PUT(makeReq({ action: "add" }), makeCtx());
     expect(res.status).toBe(500);
   });
 
   it("returns 500 when supabase delete reports an error", async () => {
-    recorders.deleteResponse = { error: { message: "db down" } };
+    recorders.deleteResponse = { error: makePgError("db down") };
     const res = await PUT(makeReq({ action: "remove" }), makeCtx());
     expect(res.status).toBe(500);
   });

@@ -1,11 +1,10 @@
 import { describe, it, expect, beforeAll, afterEach } from "vitest";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { type SupabaseClient } from "@supabase/supabase-js";
 import {
   HAS_LIVE_DB,
-  LIVE_DB_URL,
   createLiveAdminClient,
-  createTestUser,
   cleanupLiveDbRow,
+  signInAsTestUser,
   advertiseLiveDbSkipReason,
 } from "@/lib/test-helpers/live-db";
 
@@ -26,7 +25,11 @@ advertiseLiveDbSkipReason("mandate-audit");
 describe("MANDATE-08: mandate_preference.update audit coverage", () => {
   let admin: SupabaseClient;
   let testUserId: string | null = null;
-  const TEST_PASSWORD = "MandateAuditTest!-9f2c";
+  // H-0038: record the created user id for afterEach cleanup. The shared
+  // signInAsTestUser helper creates + signs in + (via this callback) tracks.
+  const trackForCleanup = (userId: string) => {
+    testUserId = userId;
+  };
 
   beforeAll(() => {
     if (HAS_LIVE_DB) admin = createLiveAdminClient();
@@ -42,26 +45,18 @@ describe("MANDATE-08: mandate_preference.update audit coverage", () => {
   it.skipIf(!HAS_LIVE_DB)(
     "log_audit_event RPC called by authenticated client with mandate_preference.update writes an audit_log row",
     async () => {
-      const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-      if (!anonKey) {
-        throw new Error("NEXT_PUBLIC_SUPABASE_ANON_KEY required");
-      }
-      const email = `mandate-audit-${Date.now()}@test.local`;
-      testUserId = await createTestUser(admin, email, TEST_PASSWORD);
-
-      const userClient = createClient(LIVE_DB_URL!, anonKey);
-      const { error: authErr } = await userClient.auth.signInWithPassword({
-        email,
-        password: TEST_PASSWORD,
-      });
-      expect(authErr).toBeNull();
+      const { client: userClient, userId } = await signInAsTestUser(
+        admin,
+        "mandate-audit",
+        trackForCleanup,
+      );
 
       // Directly invoke the RPC that logAuditEvent() wraps — this is the
       // contract the route handler depends on.
       const { error: auditErr } = await userClient.rpc("log_audit_event", {
         p_action: "mandate_preference.update",
         p_entity_type: "allocator_preference_mandate",
-        p_entity_id: testUserId,
+        p_entity_id: userId,
         p_metadata: { fields: ["max_weight"], self_edit: true },
       });
       expect(auditErr).toBeNull();
@@ -73,7 +68,7 @@ describe("MANDATE-08: mandate_preference.update audit coverage", () => {
       const { data, error: selErr } = await admin
         .from("audit_log")
         .select("action, entity_type, entity_id, user_id, metadata")
-        .eq("entity_id", testUserId!)
+        .eq("entity_id", userId)
         .eq("action", "mandate_preference.update")
         .order("created_at", { ascending: false })
         .limit(1);
@@ -85,7 +80,7 @@ describe("MANDATE-08: mandate_preference.update audit coverage", () => {
       // keyed on auth.uid()), NOT taken from the client payload — the test
       // never passes p_user_id, so a row whose user_id matches the
       // authenticated caller proves the function stamps auth.uid() itself.
-      expect(data![0].user_id).toBe(testUserId);
+      expect(data![0].user_id).toBe(userId);
       // M-0013: the audited PAYLOAD (metadata column) is the load-bearing
       // content — it's what forensic review reads. A regression that drops
       // {fields, self_edit} from the SECURITY DEFINER body would leave the

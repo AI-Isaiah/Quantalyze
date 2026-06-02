@@ -1,29 +1,47 @@
 import { test, expect } from "@playwright/test";
+import { SELECTORS, type E2EPage } from "./helpers/discovery-selectors";
 
 // Match Queue E2E tests (Phase 4 Task 14 from the perfect-match plan).
 //
 // These tests follow the existing E2E pattern in this repo: hit the real dev
-// server, log in as the test account, and gracefully degrade when the expected
-// data isn't seeded yet. They verify UI structure, admin-gate behavior, and
-// the main founder workflow (open queue → view candidates → send intro).
+// server, log in as the admin test account, and verify the admin-gate
+// behavior + the founder workflow (open queue → view candidates → send intro).
 //
 // Assumptions:
 // - Dev server is running at http://localhost:3000
 // - Migration 011 has been applied
-// - The test account (matratzentester24@gmail.com) either IS the admin or a
-//   regular allocator — the test adapts to either case.
+//
+// H-1050 (red-team CHAIN) test-side remediation:
+//   The prior version hardcoded `matratzentester24@gmail.com / Test12` in
+//   source. A committed plaintext credential is a security finding in its own
+//   right (it lives in git history forever); the CONVENTION for this repo is
+//   to source test creds from the environment (the macOS-Keychain-backed
+//   E2E_* envs, see reference_test_credentials), NOT to commit them. The
+//   credential already in git history and the `authenticated`-grant on the
+//   send_intro RPC are production/infra concerns out of this file's scope; the
+//   testable defect closed here is the SILENT-NO-OP half of the chain:
+//   admin-path tests that bailed out (wrapped `if (hasDashboard)`, early
+//   `return`) silently flipped from real coverage to vacuous green when the
+//   account lacked admin — so a credential rotation that dropped the admin
+//   role was invisible (CI stayed green). We now:
+//     1. read creds from E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD (no committed
+//        secret) and EXPLICITLY skip when they are absent (a reported skip,
+//        not a green vacuous pass);
+//     2. when creds ARE present, assert the account actually reaches the
+//        admin surface — a dropped admin role then FAILS LOUD instead of
+//        no-op-passing.
+const ADMIN_EMAIL = process.env.E2E_ADMIN_EMAIL;
+const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD;
+const HAS_ADMIN_CREDS = !!ADMIN_EMAIL && !!ADMIN_PASSWORD;
 
-const TEST_EMAIL = "matratzentester24@gmail.com";
-const TEST_PASSWORD = "Test12";
-
-async function login(page: import("@playwright/test").Page) {
+async function login(page: E2EPage) {
+  // Selectors centralized in helpers/discovery-selectors.ts (H-1040) so a
+  // login-form rename rots one place and fails the AuthForms unit test
+  // instead of silently 0-matching here.
   await page.goto("/login");
-  await page.fill(
-    'input[name="email"], input[placeholder*="email" i]',
-    TEST_EMAIL,
-  );
-  await page.fill('input[type="password"]', TEST_PASSWORD);
-  await page.click('button:has-text("Sign in")');
+  await page.fill(SELECTORS.loginEmail, ADMIN_EMAIL!);
+  await page.fill(SELECTORS.loginPassword, ADMIN_PASSWORD!);
+  await page.click(SELECTORS.loginSubmit);
   await page.waitForURL(/\/(discovery|strategies)/, { timeout: 10000 });
 }
 
@@ -43,28 +61,30 @@ test.describe("Match Queue — admin gate", () => {
     await expect(page).toHaveURL(/\/(login|discovery)/, { timeout: 10000 });
   });
 
-  test("/admin/match/eval is admin-only", async ({ page }) => {
+  test("/admin/match/eval is reachable by the admin account", async ({
+    page,
+  }) => {
+    test.skip(
+      !HAS_ADMIN_CREDS,
+      "E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD not wired — admin-path coverage " +
+        "is REPORTED-SKIPPED (not silently green). See H-1050.",
+    );
     await login(page);
     await page.goto("/admin/match/eval");
-    // The contract: either you ARE admin (and the page renders) or you are
-    // NOT admin (and you cannot reach the URL). The previous version of
-    // this test asserted (isAdmin || urlIncludes('/discovery' OR '/login'))
-    // which was always true because login lands at /discovery/crypto-sma.
-    // The new assertion is XOR: exactly one of (admin sees page) and
-    // (non-admin bounced) must be true, and we verify by URL not by a
-    // permissive substring match.
-    const isAdmin = await page
-      .locator("text=Match engine eval")
-      .isVisible()
-      .catch(() => false);
-    const url = page.url();
-    if (isAdmin) {
-      // Admin path: must actually be on the eval URL
-      expect(url).toContain("/admin/match/eval");
-    } else {
-      // Non-admin path: must NOT be on the eval URL (proxy or DAL bounced)
-      expect(url).not.toContain("/admin/match/eval");
-    }
+    // H-1050: the prior version branched `if (isAdmin) {...} else {...}` so
+    // it passed whether or not the account was admin — meaning a credential
+    // rotation that DROPPED the admin role left CI green while the admin
+    // path was never exercised. Now that creds are env-gated to the admin
+    // account, we assert the admin path POSITIVELY: the eval surface MUST
+    // render and the URL MUST be the eval route. A demoted admin (bounced
+    // to /discovery) now FAILS this test loudly.
+    await expect(
+      page.locator("text=Match engine eval"),
+      "admin account did NOT reach the match-engine eval dashboard — the " +
+        "test admin role was dropped (credential rotation) OR the admin gate " +
+        "regressed. This used to pass silently via the non-admin branch.",
+    ).toBeVisible({ timeout: 10000 });
+    expect(page.url()).toContain("/admin/match/eval");
   });
 });
 
@@ -130,56 +150,55 @@ test.describe("Match Queue — API admin gate", () => {
   });
 });
 
-test.describe("Match Queue — admin UI (graceful degradation)", () => {
+test.describe("Match Queue — admin UI", () => {
+  // H-1050: env-gate the whole admin-UI block. When creds are absent the
+  // tests are REPORTED-SKIPPED (visible in the CI summary) rather than
+  // running against a hardcoded committed account and silently no-op-passing
+  // when that account lacks admin.
+  test.skip(
+    !HAS_ADMIN_CREDS,
+    "E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD not wired — admin-UI coverage is " +
+      "REPORTED-SKIPPED (not silently green). See H-1050.",
+  );
+
   test.beforeEach(async ({ page }) => {
     await login(page);
   });
 
-  test("admin opens match queue, non-admin gets bounced to discovery", async ({
+  test("admin opens match queue and sees the filter chip row", async ({
     page,
   }) => {
-    // Branches by URL after navigation, NOT by a permissive disjunction.
-    // Old version asserted (hasQueue || isRedirected) where one or the
-    // other is always true after login — vacuous. New version distinguishes
-    // the two paths and asserts something concrete in each.
+    // H-1050: the prior version branched `if (url.endsWith("/admin/match"))
+    // {...} else {...}` so the NON-admin redirect branch made the test pass
+    // even when the account had lost admin. With creds env-gated to the
+    // admin account, we assert the admin path POSITIVELY: navigation MUST
+    // land on /admin/match and the filter chip row MUST render. A demoted
+    // admin (bounced to /discovery) now fails loudly.
     await page.goto("/admin/match");
-    const url = page.url();
-
-    if (url.endsWith("/admin/match")) {
-      // Admin path: page must render with a real anchor that does NOT
-      // exist in the error or empty state — the filter chip row.
-      await expect(
-        page.locator('button:has-text("Needs attention")'),
-      ).toBeVisible();
-    } else {
-      // Non-admin path: must land on the discovery page exactly, not just
-      // somewhere containing the substring "/discovery".
-      expect(url).toContain("/discovery/crypto-sma");
-      expect(url).not.toContain("/admin/match");
-    }
+    await expect(
+      page,
+      "admin account was bounced from /admin/match — admin role dropped " +
+        "(credential rotation) or admin gate regressed. Used to pass " +
+        "silently via the non-admin redirect branch.",
+    ).toHaveURL(/\/admin\/match$/, { timeout: 10000 });
+    await expect(
+      page.locator('button:has-text("Needs attention")'),
+    ).toBeVisible();
   });
 
-  test("match queue index renders filter chips, search, and engine pill (admin only)", async ({
+  test("match queue index renders filter chips, search, and engine pill", async ({
     page,
   }) => {
-    // The previous version gated on `text=Match queue` (the page header,
-    // which renders even in error mode after migration 011 fix in 3aadcd5).
-    // That meant: if the test user IS admin AND migration 011 isn't applied,
-    // hasQueue=true triggers the inner assertions, but the filter chips
-    // aren't in the DOM, and the test times out. Two failure modes hidden
-    // in one assertion.
-    //
-    // The fix: gate on a more specific anchor (the Needs attention chip
-    // itself) and ALSO assert that the migration-error card is NOT visible.
-    // This makes the test loud about the actual deployment state instead
-    // of silently passing or silently failing.
+    // H-1050: the prior version did `if (!url.endsWith("/admin/match"))
+    // return;` — an early return that silently SKIPPED every assertion when
+    // the account wasn't admin. With admin creds env-gated, the account MUST
+    // reach /admin/match; a bounce is a loud failure, not a vacuous pass.
     await page.goto("/admin/match");
-    const url = page.url();
-    if (!url.endsWith("/admin/match")) {
-      // Non-admin: this test is admin-only, skip the body. The other tests
-      // in this describe cover the non-admin redirect path.
-      return;
-    }
+    await expect(
+      page,
+      "admin account did not reach /admin/match — admin role dropped or gate " +
+        "regressed. Prior version silently `return`ed here and passed.",
+    ).toHaveURL(/\/admin\/match$/, { timeout: 10000 });
 
     // Loud failure if the migration isn't applied — the page would show
     // the error card from MatchQueueIndex.tsx instead of the filter chips.
@@ -203,28 +222,45 @@ test.describe("Match Queue — admin UI (graceful degradation)", () => {
     await expect(page.locator("text=/Engine:/")).toBeVisible();
   });
 
-  test("eval dashboard renders 4 KPIs if visible", async ({ page }) => {
+  test("eval dashboard renders 4 KPIs and the window selector", async ({
+    page,
+  }) => {
+    // H-1050: the prior version wrapped the entire body in
+    // `if (hasDashboard) {...}` — a regression that demoted the admin (so
+    // the dashboard never rendered) made the test pass with ZERO assertions
+    // firing. With admin creds env-gated, the dashboard MUST render; its
+    // absence is now a loud failure.
     await page.goto("/admin/match/eval");
-    const hasDashboard = await page
-      .locator("text=Match engine eval")
-      .isVisible()
-      .catch(() => false);
+    await expect(
+      page.locator("text=Match engine eval"),
+      "admin account did not reach the eval dashboard — admin role dropped " +
+        "or gate regressed. Prior `if (hasDashboard)` wrapper passed with " +
+        "no assertions when the dashboard was absent.",
+    ).toBeVisible({ timeout: 10000 });
 
-    if (hasDashboard) {
-      // Four KPI labels
-      await expect(page.locator("text=Intros shipped")).toBeVisible();
-      await expect(page.locator("text=Hit rate top-3")).toBeVisible();
-      await expect(page.locator("text=Hit rate top-10")).toBeVisible();
-      await expect(page.locator("text=Graduation gate")).toBeVisible();
-      // Window selector
-      await expect(page.locator('button:has-text("7d")')).toBeVisible();
-      await expect(page.locator('button:has-text("28d")')).toBeVisible();
-      await expect(page.locator('button:has-text("90d")')).toBeVisible();
-    }
+    // Four KPI labels
+    await expect(page.locator("text=Intros shipped")).toBeVisible();
+    await expect(page.locator("text=Hit rate top-3")).toBeVisible();
+    await expect(page.locator("text=Hit rate top-10")).toBeVisible();
+    await expect(page.locator("text=Graduation gate")).toBeVisible();
+    // Window selector
+    await expect(page.locator('button:has-text("7d")')).toBeVisible();
+    await expect(page.locator('button:has-text("28d")')).toBeVisible();
+    await expect(page.locator('button:has-text("90d")')).toBeVisible();
   });
 });
 
 test.describe("Preferences page", () => {
+  // H-1050: this block logs in via the shared `login()` helper, which now
+  // sources creds from E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD. Skip (reported,
+  // not silently green) when they are absent so the login helper never
+  // dereferences undefined creds.
+  test.skip(
+    !HAS_ADMIN_CREDS,
+    "E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD not wired — preferences-page " +
+      "coverage is REPORTED-SKIPPED. See H-1050.",
+  );
+
   test.beforeEach(async ({ page }) => {
     await login(page);
   });

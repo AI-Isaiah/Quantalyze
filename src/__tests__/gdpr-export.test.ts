@@ -20,6 +20,8 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // gdpr-export.ts imports "server-only" which throws under vitest+jsdom.
 // Matches the audit.test.ts and rbac-matrix.test.ts mock pattern.
@@ -2091,16 +2093,28 @@ describe("GDPR export — live DB integration", () => {
         // H-0016: the pre-this seed only covered api_keys + portfolios +
         // auto-created profiles (3 of 15+ manifest tables). A migration
         // that DROPS or RENAMES one of the other ~12 manifest entries'
-        // backing table (or its user_column) would not be caught at the
-        // live layer — only at the unit mock layer, which fabricates the
-        // data shape and so cannot detect real-schema drift. Seed more
-        // manifest tables against the REAL schema so a column/table
-        // rename surfaces as an insert error here AND a missing-rows
-        // assertion below. We seed across both `direct` (strategies,
-        // user_notes) and `indirect` (user_favorites via strategies)
-        // manifest kinds. All chosen tables ON DELETE CASCADE from
-        // auth.users / profiles, so the existing userIds cleanup (plus
-        // strategyIds) tears them down with no extra cleanup wiring.
+        // backing table (or its user_column / via_column / parent_user_column)
+        // would not be caught at the live layer — only at the unit mock
+        // layer, which fabricates the data shape and so cannot detect
+        // real-schema drift. Seed more manifest tables against the REAL
+        // schema so a column/table rename surfaces as an insert error here
+        // AND a missing-rows assertion below. We deliberately cover BOTH
+        // manifest kinds:
+        //   - `direct`   — strategies, user_notes, user_favorites
+        //                  (filtered by their own `user_id` column).
+        //   - `indirect` — trades (the two-hop path: probe
+        //                  strategies.user_id for parent ids, then fetch
+        //                  children via `trades.strategy_id` IN (...)).
+        // The indirect seed is the load-bearing addition: pre-this, ZERO
+        // genuinely-indirect manifest tables were exercised against the
+        // real schema, so a rename of `trades.strategy_id` (the
+        // `via_column`) or `strategies.user_id` (the `parent_user_column`)
+        // — the exact two-hop join the unit mock fabricates — would have
+        // slipped past every test. Seeding trades and asserting its
+        // row_count below closes that hole. All chosen tables ON DELETE
+        // CASCADE from auth.users / profiles / strategies, so the existing
+        // userIds + strategyIds cleanup tears them down with no extra
+        // cleanup wiring (trades cascade-delete with their strategy).
         const { data: strategyRow, error: sErr } = await admin
           .from("strategies")
           .insert({ user_id: userId, name: "Export test strategy" })
@@ -2120,6 +2134,26 @@ describe("GDPR export — live DB integration", () => {
           .from("user_favorites")
           .insert({ user_id: userId, strategy_id: strategyRow.id });
         if (favErr) throw new Error(`user_favorites seed: ${favErr.message}`);
+
+        // H-0016 indirect-path seed: trades is `kind: "indirect"` —
+        // collectUserExportBundle reaches it by first probing
+        // strategies.user_id for the subject's parent ids, then fetching
+        // `trades` WHERE strategy_id IN (those ids). The columns set here
+        // are the trades NOT-NULL set (migration 20260405061911 +
+        // 20260510181440 side CHECK); `is_fill` defaults to false.
+        const { error: tradeErr } = await admin.from("trades").insert({
+          strategy_id: strategyRow.id,
+          exchange: "binance",
+          symbol: "BTC/USDT",
+          side: "buy",
+          price: 42000,
+          quantity: 0.1,
+          fee: 0,
+          fee_currency: "USDT",
+          timestamp: "2026-01-01T00:00:00Z",
+          order_type: "market",
+        } as never);
+        if (tradeErr) throw new Error(`trades seed: ${tradeErr.message}`);
 
         // Call the assembler directly (not through the HTTP route,
         // which would hit storage + rate-limiter).
@@ -2161,6 +2195,19 @@ describe("GDPR export — live DB integration", () => {
         expect(userFavoritesTableRow).toBeDefined();
         expect(userFavoritesTableRow?.row_count).toBe(1);
 
+        // H-0016 indirect-path assertion: the seeded trade must round-trip
+        // through the REAL two-hop indirect query. A row_count of 0 (or a
+        // missing entry, or a non-null fetch_error) means the
+        // strategies->trades join broke against the live schema — i.e. the
+        // manifest's `via_column` (trades.strategy_id) or
+        // `parent_user_column` (strategies.user_id) no longer matches the
+        // database. This is the precise drift the unit-mock layer cannot
+        // detect (it fabricates the parent-probe + child `.in()` shapes).
+        const tradesTableRow = bundle.tables.find((t) => t.table === "trades");
+        expect(tradesTableRow).toBeDefined();
+        expect(tradesTableRow?.fetch_error).toBeNull();
+        expect(tradesTableRow?.row_count).toBe(1);
+
         // Truncation flag should be FALSE for a minimal seed
         expect(bundle.truncated_at_size_cap).toBe(false);
         // A complete seed must not flag the bundle partial — proves none
@@ -2180,4 +2227,158 @@ describe("GDPR export — live DB integration", () => {
       expect(true).toBe(true);
     },
   );
+});
+
+/**
+ * H-0016 — manifest ↔ real-schema drift guard (CI-EXECUTING).
+ *
+ * Why this block exists (second-pass fix)
+ * ---------------------------------------
+ * The original H-0016 fix hardened the live-DB integration test above
+ * (it.skipIf(!HAS_LIVE_DB)) to seed direct + indirect tables against the
+ * real schema. That test is correct but DORMANT: the only full-suite
+ * vitest run in CI (ci.yml `frontend-test`) has NO Supabase env, so
+ * HAS_LIVE_DB is false and the seeded assertions SKIP — they provide
+ * zero automated protection (codebase invariant "Live-DB vitest tests
+ * skip in CI"). A migration that drops a manifest table or renames a
+ * manifest FILTER/JOIN column (`user_column`, `via_column`,
+ * `parent_user_column`, `parent_id_column`) would ship green, then 500
+ * the Art. 15/20 export in production (`fetch_error` -> `partial:true`).
+ *
+ * This block closes the gap STRUCTURALLY and runs in EVERY CI pass with
+ * NO live DB. It parses `src/lib/database.types.ts` — the generated,
+ * checked-in mirror of the live schema (regenerated whenever a migration
+ * changes the schema; the same single source of truth the existing
+ * `gdpr-export-schema.test.ts` uses for the ORDER-column drift guard) —
+ * and asserts that, for EVERY manifest spec, the columns the SELECT
+ * actually FILTERS / JOINS on exist on the tables they reference.
+ *
+ * The existing `gdpr-export-schema.test.ts` only validates the ORDER
+ * column. It does NOT cover the load-bearing filter/join columns that
+ * H-0016 is about — a rename of `trades.strategy_id` (via_column) or
+ * `strategies.user_id` (parent_user_column) is invisible to an
+ * order-column check. This block covers exactly those columns:
+ *   - direct    -> spec.table exists; spec.user_column on spec.table
+ *   - projected -> spec.source_table exists; spec.user_column on it
+ *   - indirect  -> spec.table exists; spec.via_column on spec.table;
+ *                  spec.parent_table exists; spec.parent_user_column on
+ *                  parent; (spec.parent_id_column ?? "id") on parent
+ *
+ * Non-tautological: if a future regeneration drops/renames any of these
+ * columns while the manifest still references the old name, the matching
+ * assertion fails here BEFORE the export 500s prod. The anchor-guard test
+ * proves the parser is actually finding columns (so the assertions can't
+ * vacuously pass on a format change).
+ */
+const TYPES_FILE_H0016 = join(
+  process.cwd(),
+  "src",
+  "lib",
+  "database.types.ts",
+);
+
+/**
+ * Parse `database.types.ts` into table -> set-of-Row-column-names.
+ * Mirrors the proven parser in `gdpr-export-schema.test.ts`: the
+ * generated file emits `      <table>: {` then `        Row: {` then
+ * each column as `          <col>: <type>`.
+ */
+function parseRowColumnsH0016(src: string): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  const tableRe =
+    /^ {6}([a-z0-9_]+): \{\n {8}Row: \{\n([\s\S]*?)\n {8}\}/gm;
+  const colRe = /^ {10}([a-z0-9_]+):/gm;
+  for (const tableMatch of src.matchAll(tableRe)) {
+    const table = tableMatch[1];
+    const body = tableMatch[2];
+    const cols = new Set<string>();
+    for (const colMatch of body.matchAll(colRe)) {
+      cols.add(colMatch[1]);
+    }
+    out.set(table, cols);
+  }
+  return out;
+}
+
+describe("H-0016 — manifest filter/join columns exist on the real schema (no skip)", () => {
+  const src = readFileSync(TYPES_FILE_H0016, "utf8");
+  const rowColumns = parseRowColumnsH0016(src);
+
+  it("parser found anchor tables + columns (guards against a vacuous pass)", () => {
+    // If the generated-file format ever changes and the parser silently
+    // returns empty sets, EVERY assertion below would pass vacuously.
+    // Pin a known direct owner column, a known indirect via/parent
+    // column, and a projected source owner column so a parser break is
+    // loud, not silent.
+    expect(rowColumns.size).toBeGreaterThan(20);
+    expect(rowColumns.get("strategies")?.has("user_id")).toBe(true); // parent_user_column
+    expect(rowColumns.get("trades")?.has("strategy_id")).toBe(true); // indirect via_column
+    expect(rowColumns.get("audit_log")?.has("user_id")).toBe(true); // projected user_column
+    expect(rowColumns.get("profiles")?.has("id")).toBe(true); // direct user_column = "id"
+  });
+
+  it("every DIRECT spec's table + user_column exist on the real schema", () => {
+    for (const spec of USER_EXPORT_TABLES) {
+      if (spec.kind !== "direct") continue;
+      const cols = rowColumns.get(spec.table);
+      expect(
+        cols,
+        `manifest DIRECT table "${spec.table}" not found in database.types.ts — a migration dropped/renamed it but the manifest still SELECTs it (.from("${spec.table}") -> 42P01, export 500s)`,
+      ).toBeDefined();
+      expect(
+        cols!.has(spec.user_column),
+        `DIRECT spec for "${spec.table}" filters by .eq("${spec.user_column}", userId) but that column does not exist on ${spec.table} — a rename raises Postgres 42703 -> fetch_error -> partial:true -> the Art. 15 export 500s for every user (H-0016)`,
+      ).toBe(true);
+    }
+  });
+
+  it("every PROJECTED spec's source_table + user_column exist on the real schema", () => {
+    for (const spec of USER_EXPORT_TABLES) {
+      if (spec.kind !== "projected") continue;
+      const cols = rowColumns.get(spec.source_table);
+      expect(
+        cols,
+        `manifest PROJECTED source_table "${spec.source_table}" (bundle "${spec.table}") not found in database.types.ts — the SELECT .from("${spec.source_table}") would 42P01 and 500 the export`,
+      ).toBeDefined();
+      expect(
+        cols!.has(spec.user_column),
+        `PROJECTED spec for source "${spec.source_table}" declares user_column "${spec.user_column}" but that column does not exist on ${spec.source_table} — the .eq()/or_filter owner predicate would 42703 (or silently return zero rows), dropping the subject's data from the bundle (H-0016)`,
+      ).toBe(true);
+    }
+  });
+
+  it("every INDIRECT spec's via/parent/parent_id columns exist on the real schema (two-hop join)", () => {
+    for (const spec of USER_EXPORT_TABLES) {
+      if (spec.kind !== "indirect") continue;
+
+      // Child table + via_column (the `.in(via_column, parentIds)` leg).
+      const childCols = rowColumns.get(spec.table);
+      expect(
+        childCols,
+        `manifest INDIRECT child table "${spec.table}" not found in database.types.ts — .from("${spec.table}") would 42P01 and 500 the export`,
+      ).toBeDefined();
+      expect(
+        childCols!.has(spec.via_column),
+        `INDIRECT spec for "${spec.table}" joins on .in("${spec.via_column}", parentIds) but ${spec.via_column} does not exist on ${spec.table} — a via_column rename raises 42703 -> fetch_error -> partial:true -> export 500 (this is the exact two-hop column the unit mock fabricates; only this real-schema check catches the drift) (H-0016)`,
+      ).toBe(true);
+
+      // Parent table + parent_user_column (the `.eq(parent_user_column, userId)` probe).
+      const parentCols = rowColumns.get(spec.parent_table);
+      expect(
+        parentCols,
+        `manifest INDIRECT parent_table "${spec.parent_table}" (via "${spec.table}") not found in database.types.ts — the parent-id probe would 42P01 and 500 the export`,
+      ).toBeDefined();
+      expect(
+        parentCols!.has(spec.parent_user_column),
+        `INDIRECT spec for "${spec.table}" probes parent ${spec.parent_table} by .eq("${spec.parent_user_column}", userId) but that column does not exist on ${spec.parent_table} — a parent_user_column rename raises 42703 on the parent probe -> fetch_error -> partial:true -> export 500 (H-0016)`,
+      ).toBe(true);
+
+      // parent_id_column (defaults to "id" at the call site in fetchRowsForSpec).
+      const parentIdColumn = spec.parent_id_column ?? "id";
+      expect(
+        parentCols!.has(parentIdColumn),
+        `INDIRECT spec for "${spec.table}" reads parent ids from ${spec.parent_table}.${parentIdColumn} (parent_id_column ${spec.parent_id_column ? `="${spec.parent_id_column}"` : 'defaulted to "id"'}) but that column does not exist on ${spec.parent_table} — .select("${parentIdColumn}")/.order("${parentIdColumn}") raises 42703 -> the indirect child returns zero rows / 500s (H-0016)`,
+      ).toBe(true);
+    }
+  });
 });

@@ -487,7 +487,16 @@ def test_bridge_returns_result_when_audit_emit_raises(
     audit-path failure does not 500 every successful run. A RuntimeError
     (Branch 3, unknown) raised by the emit must NOT escape the handler. Covers
     BOTH the empty-candidates fast-path and the full-scoring path. Guards
-    against dropping the try/except wrap."""
+    against dropping the try/except wrap.
+
+    H-0815 gap (a) — "emission skipped at runtime": the stub RECORDS every
+    invocation, and we assert the emit fired exactly once with the right
+    attribution shape (action / entity_type / entity_id / user_id). A
+    never-raising stub would pass the availability check trivially, and — worse —
+    a regression that DELETES the emit call from the exercised branch would also
+    silently pass (the stub that is never called never raises). Recording +
+    asserting `len(recorded) == 1` closes that hole: the emit must actually
+    happen on the happy path, not merely be swallowable when it does."""
     from routers import portfolio as portfolio_router
     from models.schemas import BridgeRequest
 
@@ -500,8 +509,13 @@ def test_bridge_returns_result_when_audit_emit_raises(
 
     # The audit emit raises an UNEXPECTED error (not transient / not 42501) —
     # the class the emitter re-raises after Sentry-capturing it. The router's
-    # wrap must swallow it so the successful compute still returns.
-    def _raising_emit(**_kwargs):
+    # wrap must swallow it so the successful compute still returns. We also
+    # RECORD the kwargs so the test fails if the emit is silently dropped
+    # (gap a) or called with the wrong attribution shape.
+    recorded: list[dict[str, object]] = []
+
+    def _raising_emit(**kwargs):
+        recorded.append(kwargs)
         raise RuntimeError("unexpected audit RPC failure")
 
     monkeypatch.setattr(portfolio_router, "log_audit_event", _raising_emit)
@@ -531,3 +545,21 @@ def test_bridge_returns_result_when_audit_emit_raises(
     assert result["ok"] is True
     assert result["status"] == "complete"
     assert result["portfolio_id"] == portfolio_id
+
+    # gap (a): the emit MUST have actually fired on the exercised happy-path
+    # branch — exactly once, with the Task-7.1b attribution shape. If a
+    # refactor drops the log_audit_event call from this branch, `recorded`
+    # stays empty and this assertion fails (the AST test would not catch a
+    # drop in only one of the three branches; this does).
+    assert len(recorded) == 1, (
+        "portfolio_bridge must emit exactly one bridge.score_candidates audit "
+        f"event on the happy path; emit fired {len(recorded)} time(s) "
+        "(0 ⇒ the emission was silently skipped at runtime)"
+    )
+    emitted = recorded[0]
+    assert emitted["action"] == "bridge.score_candidates"
+    assert emitted["entity_type"] == "bridge_run"
+    # entity_id is the portfolio the bridge ran against; user_id carries the
+    # caller's attribution — swapping these breaks the spoof-proof invariant.
+    assert emitted["entity_id"] == portfolio_id
+    assert emitted["user_id"] == "44444444-4444-4444-4444-444444444444"
