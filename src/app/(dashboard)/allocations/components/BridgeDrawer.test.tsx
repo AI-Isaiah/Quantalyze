@@ -173,7 +173,65 @@ describe("BridgeDrawer — Phase 09.1 Plan 09 / D-15 / D-16", () => {
     expect(mockSendBridgeIntro).toHaveBeenCalledWith({
       holdingRef: "holding:binance:BTC/USDT:spot",
       topCandidateStrategyId: "strat-a",
+      // F9 H-0084 — the drawer now forwards an AbortSignal so a mid-flight
+      // dismiss can cancel the POST.
+      signal: expect.any(AbortSignal),
     });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("F9 H-0084: dismissing (Esc) mid-flight aborts the in-flight send signal", () => {
+    const onClose = vi.fn();
+    // A send that stays pending — the test cancels it by dismissing the drawer.
+    let capturedSignal: AbortSignal | undefined;
+    mockSendBridgeIntro.mockImplementation((args: { signal?: AbortSignal }) => {
+      capturedSignal = args.signal;
+      return new Promise(() => {});
+    });
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={onClose}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Send intro/ }));
+    // The POST is in flight (button reads "Sending…") and not yet aborted.
+    expect(screen.getByRole("button", { name: /Sending/ })).toBeInTheDocument();
+    expect(capturedSignal?.aborted).toBe(false);
+    // Esc while the send is pending must abort it (no phantom match_decision for
+    // an action the allocator believes they canceled).
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("F9 H-0084: dismissing (backdrop) mid-flight aborts the in-flight send signal", () => {
+    const onClose = vi.fn();
+    let capturedSignal: AbortSignal | undefined;
+    mockSendBridgeIntro.mockImplementation((args: { signal?: AbortSignal }) => {
+      capturedSignal = args.signal;
+      return new Promise(() => {});
+    });
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={onClose}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Send intro/ }));
+    expect(capturedSignal?.aborted).toBe(false);
+    fireEvent.click(screen.getByTestId("bridge-drawer-backdrop"));
+    expect(capturedSignal?.aborted).toBe(true);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -567,6 +625,9 @@ describe("BridgeDrawer — Phase 10 Plan 05 / Task 3 'Add to scenario' CTA", () 
     expect(mockSendBridgeIntro).toHaveBeenCalledWith({
       holdingRef: "holding:binance:BTC/USDT:spot",
       topCandidateStrategyId: "strat-a",
+      // F9 H-0084 — the drawer now forwards an AbortSignal so a mid-flight
+      // dismiss can cancel the POST.
+      signal: expect.any(AbortSignal),
     });
     expect(onClose).toHaveBeenCalledTimes(1);
   });

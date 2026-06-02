@@ -46,14 +46,28 @@ export function CustomizeDrawer({
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const [entered, setEntered] = useState(false);
 
-  // ESC closes
+  // ESC closes.
+  //
+  // F9 H-1253: this listener lives on `document` — the SAME boundary as the Tab
+  // trap below. The prior split (ESC on `window`, Tab on `document`) was the
+  // worst of both worlds: in plain React DOM both fire, but a portal/dialog that
+  // installs a stopPropagation at the document boundary would let ESC and the
+  // Tab trap disagree about which events they see.
+  //
+  // F9 M-0061: cooperate with any nested modal/popover's own ESC handler. A
+  // handler that already acted marks the event (`preventDefault`); we skip a
+  // pre-handled ESC and claim the ones we act on so a single Escape doesn't
+  // collapse multiple stacked layers at once.
   useEffect(() => {
     if (!open) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      if (e.defaultPrevented) return;
+      e.preventDefault();
+      onClose();
     };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
   }, [open, onClose]);
 
   // Body scroll-lock while open

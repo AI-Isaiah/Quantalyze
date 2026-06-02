@@ -112,6 +112,19 @@ export const POST = withAuth(
       );
     }
 
+    // F9 H-0084 — best-effort cancellation honoring. The BridgeDrawer aborts
+    // this request's fetch when the allocator dismisses the drawer mid-flight.
+    // If that abort propagated before we reach the write, skip the insert/audit
+    // entirely so we don't record a `match_decision` for an action the user
+    // canceled. Racy by nature (the abort may land after this check), but it
+    // closes the common case where the cancel arrives during the gate awaits.
+    if (req.signal.aborted) {
+      return NextResponse.json(
+        { error: "request aborted" },
+        { status: 499, headers: NO_STORE_HEADERS },
+      );
+    }
+
     // Insert match_decisions row (XOR satisfied: original_strategy_id=NULL, original_holding_ref set)
     // Per migration 011:138 CHECK constraint, decision='sent_as_intro' is the correct value.
     // Uses admin client because migration 011 only grants service-role INSERT on

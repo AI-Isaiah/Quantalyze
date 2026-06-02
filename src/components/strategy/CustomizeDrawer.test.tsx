@@ -70,8 +70,24 @@ describe("CustomizeDrawer", () => {
   it("ESC key calls onClose", () => {
     const onClose = vi.fn();
     renderDrawer({ onClose });
-    fireEvent.keyDown(window, { key: "Escape" });
+    // F9 H-1253: ESC + Tab now share the `document` listener boundary.
+    fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("F9 M-0061: a pre-handled ESC (defaultPrevented) does not double-close", () => {
+    const onClose = vi.fn();
+    renderDrawer({ onClose });
+    // A nested popover that already consumed Escape marks the event. The
+    // drawer must skip it so one keypress doesn't collapse two layers.
+    const evt = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    evt.preventDefault();
+    document.dispatchEvent(evt);
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it("clicking the backdrop calls onClose (selects via data-testid, not aria-hidden)", () => {
