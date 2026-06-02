@@ -266,6 +266,9 @@ describe("POST /api/portfolio-documents — C-0105 validation + ownership + happ
     );
 
     expect(res.status).toBe(200);
+    // Block D / P1947: the success body is the caller's created relationship
+    // document row — private, no-store so a shared cache can't leak it.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = (await res.json()) as { document: { id: string } };
     expect(body.document).toBeDefined();
     expect(body.document.id).toBe(DOCUMENT_ID);

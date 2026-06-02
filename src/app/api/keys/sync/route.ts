@@ -8,6 +8,7 @@ import { logAuditEventAsUser } from "@/lib/audit";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -55,14 +56,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const { strategy_id } = body;
 
   if (!strategy_id || typeof strategy_id !== "string") {
-    return NextResponse.json({ error: "Missing strategy_id" }, { status: 400 });
+    return NextResponse.json({ error: "Missing strategy_id" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   const rl = await checkLimit(userActionLimiter, `keys-sync:${user.id}`);
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
 
@@ -85,7 +86,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // random uuid both see the same response shape.
     return NextResponse.json(
       { error: "Strategy not found" },
-      { status: 404 },
+      { status: 404, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -173,7 +174,7 @@ async function unifiedKeysSyncHandler(args: {
           code: "WIZARD_DUPLICATE",
           idempotent: true,
         },
-        { status: 200 },
+        { status: 200, headers: NO_STORE_HEADERS },
       );
     }
     return NextResponse.json(
@@ -185,7 +186,7 @@ async function unifiedKeysSyncHandler(args: {
         verification_id: upstream.verification_id ?? null,
         queued: upstream.queued ?? true,
       },
-      { status: 202 },
+      { status: 202, headers: NO_STORE_HEADERS },
     );
   }
   // Drift fallback: a 2xx upstream whose body lacks `queued` is an unrecognized
@@ -194,7 +195,7 @@ async function unifiedKeysSyncHandler(args: {
   // marking an unrecognized shape ok:true would falsely signal success. The
   // correct hardening (fail-loud-on-drift like finalize-wizard's unified
   // handler) is the B9 no-passthrough-on-ipc rule's domain, not F5's.
-  return NextResponse.json(upstream);
+  return NextResponse.json(upstream, { headers: NO_STORE_HEADERS });
 }
 
 /**
@@ -234,7 +235,7 @@ async function legacyKeysSyncHandler(args: {
       );
       return NextResponse.json(
         { error: "Could not start sync. Try again in a moment." },
-        { status: 503 },
+        { status: 503, headers: NO_STORE_HEADERS },
       );
     }
 
@@ -251,7 +252,7 @@ async function legacyKeysSyncHandler(args: {
 
     return NextResponse.json(
       { ok: true, accepted: true, strategy_id, status: "syncing" },
-      { status: 202 },
+      { status: 202, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -279,7 +280,7 @@ async function legacyKeysSyncHandler(args: {
     );
     return NextResponse.json(
       { error: "Could not start sync. Try again in a moment." },
-      { status: 503 },
+      { status: 503, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -328,6 +329,6 @@ async function legacyKeysSyncHandler(args: {
 
   return NextResponse.json(
     { ok: true, accepted: true, strategy_id, status: "syncing" },
-    { status: 202 },
+    { status: 202, headers: NO_STORE_HEADERS },
   );
 }

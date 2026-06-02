@@ -16,6 +16,7 @@ import {
 } from "@/lib/ratelimit";
 import { logAuditEventAsUser } from "@/lib/audit";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * RPC parameter bag for `update_allocator_mandates`. Each non-null
@@ -37,7 +38,7 @@ export async function GET(_req: NextRequest): Promise<NextResponse> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   // Approval gate (PR #266 follow-up): allocator mandate preferences are
   // an allocator-only surface; a pending-approval user has no business
@@ -57,25 +58,25 @@ export async function GET(_req: NextRequest): Promise<NextResponse> {
     if (isRateLimitMisconfigured(rlRead)) {
       return NextResponse.json(
         { error: "Service temporarily unavailable" },
-        { status: 503, headers: { "Retry-After": String(rlRead.retryAfter) } },
+        { status: 503, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rlRead.retryAfter) } },
       );
     }
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rlRead.retryAfter) } },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rlRead.retryAfter) } },
     );
   }
 
   try {
     const prefs = await getOwnPreferences(supabase, user.id);
-    return NextResponse.json({ preferences: prefs });
+    return NextResponse.json({ preferences: prefs }, { headers: NO_STORE_HEADERS });
   } catch (err) {
     // F-04 (specialist-review 2026-05-26): log error code explicitly so ops can
     // distinguish PGRST205 (schema drift), 42501 (RLS denial), 28000 (JWT
     // propagation failure), and network errors without parsing raw error objects.
     const code = (err as { code?: string | null })?.code ?? null;
     console.error("[api/preferences] GET error:", { code, message: (err as Error)?.message ?? String(err) });
-    return NextResponse.json({ error: "Failed to load preferences" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to load preferences" }, { status: 500, headers: NO_STORE_HEADERS });
   }
 }
 
@@ -86,7 +87,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   // Approval gate — see GET handler above for rationale.
   const deniedPut = await assertProfileApproved(supabase, user.id);
@@ -96,14 +97,14 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   // Whitelist + validate (TS-layer mirror of RPC bounds per D-18).
   const fields = pickSelfEditableFields(body);
   const validationError = validateSelfEditableInput(fields);
   if (validationError) {
-    return NextResponse.json({ error: validationError }, { status: 400 });
+    return NextResponse.json({ error: validationError }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   // NEW-C07-04 (audit-2026-05-26 code-review): rate-limit token consumed
@@ -121,12 +122,12 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     if (isRateLimitMisconfigured(rl)) {
       return NextResponse.json(
         { error: "Service temporarily unavailable" },
-        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+        { status: 503, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
       );
     }
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
 
@@ -194,7 +195,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
       }).catch(() => {});
       return NextResponse.json(
         { error: "Internal server error" },
-        { status: 500 },
+        { status: 500, headers: NO_STORE_HEADERS },
       );
     }
     if (error.code === "22023") {
@@ -210,10 +211,10 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
       // for ops.
       return NextResponse.json(
         { error: "Invalid mandate value" },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
-    return NextResponse.json({ error: "Failed to save mandate" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to save mandate" }, { status: 500, headers: NO_STORE_HEADERS });
   }
 
   // Audit emission — fire-and-forget; grepped by audit-coverage.test.ts.
@@ -232,5 +233,5 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     metadata: { fields: Object.keys(fields), self_edit: true },
   });
 
-  return NextResponse.json({ success: true });
+  return NextResponse.json({ success: true }, { headers: NO_STORE_HEADERS });
 }

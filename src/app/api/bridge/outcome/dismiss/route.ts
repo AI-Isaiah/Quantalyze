@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import { withAuthLimited } from "@/lib/api/withAuthLimited";
 import { userActionLimiter } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 const BODY_SCHEMA = z.object({
   strategy_id: z.string().uuid(),
@@ -51,7 +52,10 @@ export const POST = withAuthLimited(
 
     if (error || !inserted) {
       console.error("[api/bridge/outcome/dismiss] upsert error:", error);
-      return NextResponse.json({ error: "Failed to dismiss" }, { status: 500 });
+      return NextResponse.json(
+        { error: "Failed to dismiss" },
+        { status: 500, headers: NO_STORE_HEADERS },
+      );
     }
 
     logAuditEvent(supabase, {
@@ -64,6 +68,9 @@ export const POST = withAuthLimited(
       },
     });
 
-    return NextResponse.json({ success: true, dismissal: inserted });
+    return NextResponse.json(
+      { success: true, dismissal: inserted },
+      { headers: NO_STORE_HEADERS },
+    );
   },
 );

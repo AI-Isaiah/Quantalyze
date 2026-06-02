@@ -5,6 +5,7 @@ import { escapeHtml, notifyFounderGeneric } from "@/lib/email";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { assertSameOrigin } from "@/lib/csrf";
 import { logAuditEventAsUser } from "@/lib/audit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
 
@@ -49,7 +50,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   } = await supabase.auth.getUser();
 
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401, headers: NO_STORE_HEADERS },
+    );
   }
 
   // Cross-lambda rate limit so a runaway client cannot spam the founder's
@@ -60,7 +64,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { error: "Rate limit exceeded" },
       {
         status: 429,
-        headers: { "Retry-After": String(rl.retryAfter) },
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
       },
     );
   }
@@ -93,7 +97,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         idempotent: true,
         message: "Deletion request already pending",
       },
-      { status: 200 },
+      { status: 200, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -107,7 +111,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     console.error("[api/account/deletion-request] Insert failed:", error);
     return NextResponse.json(
       { error: "Failed to record deletion request" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -121,7 +125,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
     return NextResponse.json(
       { error: "Failed to record deletion request" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -159,10 +163,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
      <p style="color:#666;font-size:12px;">Complete deletion within 30 days per GDPR Art. 17. Update the completed_at column when done.</p>`,
   );
 
-  return NextResponse.json({
-    ok: true,
-    request_id: inserted?.id,
-    requested_at: inserted?.requested_at,
-    idempotent: false,
-  });
+  return NextResponse.json(
+    {
+      ok: true,
+      request_id: inserted?.id,
+      requested_at: inserted?.requested_at,
+      idempotent: false,
+    },
+    { headers: NO_STORE_HEADERS },
+  );
 }

@@ -10,6 +10,7 @@ import { postProcessKey } from "@/lib/process-key-client";
 import { canonicalizeExchangeList } from "@/lib/constants";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * POST /api/strategies/csv-finalize — Phase 15 / CSV-01.
@@ -482,7 +483,7 @@ async function persistDailyReturnsOrErrorResponse(
         debug_context: { strategy_id: strategyId },
         correlation_id: opts.correlationId,
       },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
   return null;
@@ -709,7 +710,7 @@ async function applyCsvMetadataUpdate(
         debug_context: { field: parsed.field },
         correlation_id: opts.correlationId,
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   const updatePayload = buildMetadataUpdatePayload(parsed.payload);
@@ -761,7 +762,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         debug_context: {},
         correlation_id,
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -781,7 +782,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         debug_context: {},
         correlation_id,
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -796,7 +797,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         },
         correlation_id,
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -816,7 +817,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         debug_context: parsedSeries.debug_context ?? {},
         correlation_id,
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   const dailyReturnsSeries = parsedSeries.rows;
@@ -833,7 +834,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         debug_context: {},
         correlation_id,
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   const trimmedName = strategy_name.trim();
@@ -846,7 +847,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         debug_context: {},
         correlation_id,
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   // NEW-C14-12: check trimmedName.length (not the raw strategy_name.length).
@@ -862,7 +863,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         debug_context: { length: trimmedName.length },
         correlation_id,
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -900,7 +901,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         debug_context: { fmt, row_count: 0 },
         correlation_id,
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -919,7 +920,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         debug_context: { field: preCreateMetadataParsed.field },
         correlation_id,
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -943,7 +944,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         debug_context: {},
         correlation_id,
       },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
 
@@ -1002,7 +1003,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           debug_context: {},
           correlation_id,
         },
-        { status: 401 },
+        { status: 401, headers: NO_STORE_HEADERS },
       );
     }
     if (error.code === "22023") {
@@ -1014,7 +1015,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           debug_context: { sqlstate: error.code },
           correlation_id,
         },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
     // NEW-C14-01: migration 104 adds a UNIQUE INDEX on wizard_session_id
@@ -1072,7 +1073,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
               idempotent: true,
               correlation_id,
             },
-            { status: 409 },
+            { status: 409, headers: NO_STORE_HEADERS },
           );
         }
       } catch (lookupErr) {
@@ -1091,7 +1092,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           debug_context: {},
           correlation_id,
         },
-        { status: 409 },
+        { status: 409, headers: NO_STORE_HEADERS },
       );
     }
     return NextResponse.json(
@@ -1103,7 +1104,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         debug_context: {},
         correlation_id,
       },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -1202,12 +1203,15 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // `ok: false`; this closes the asymmetry. API W-1: correlation_id is
   // the UUID generated at request entry (see top of POST), now threaded
   // through every envelope on this route.
-  return NextResponse.json({
-    ok: true,
-    strategy_id: newStrategyId,
-    status: "pending_review",
-    correlation_id,
-  });
+  return NextResponse.json(
+    {
+      ok: true,
+      strategy_id: newStrategyId,
+      status: "pending_review",
+      correlation_id,
+    },
+    { headers: NO_STORE_HEADERS },
+  );
 });
 
 /**
@@ -1248,7 +1252,7 @@ async function unifiedCsvFinalizeHandler(args: {
         debug_context: {},
         correlation_id: args.correlationId,
       },
-      { status: 503 },
+      { status: 503, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -1276,7 +1280,7 @@ async function unifiedCsvFinalizeHandler(args: {
         debug_context: {},
         correlation_id: args.correlationId,
       },
-      { status: 401 },
+      { status: 401, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -1335,7 +1339,7 @@ async function unifiedCsvFinalizeHandler(args: {
         },
         correlation_id: args.correlationId,
       },
-      { status: 502 },
+      { status: 502, headers: NO_STORE_HEADERS },
     );
   }
   const newStrategyId: string = unifiedBody.strategy_id;
@@ -1390,6 +1394,6 @@ async function unifiedCsvFinalizeHandler(args: {
       ok: true,
       correlation_id: args.correlationId,
     },
-    { status: result.status },
+    { status: result.status, headers: NO_STORE_HEADERS },
   );
 }

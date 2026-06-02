@@ -4,6 +4,7 @@ import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { recomputeMatch } from "@/lib/analytics-client";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const csrfError = assertSameOrigin(req);
@@ -14,21 +15,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403, headers: NO_STORE_HEADERS });
   }
 
   let body: { allocator_id?: string; force?: boolean };
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   if (!body.allocator_id || typeof body.allocator_id !== "string") {
-    return NextResponse.json({ error: "allocator_id is required" }, { status: 400 });
+    return NextResponse.json({ error: "allocator_id is required" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   // B15b (audit-2026-05-07): rate-limit AFTER validating allocator_id so an
@@ -37,7 +38,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
 
@@ -51,10 +52,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       body.force ?? false,
       user.id,
     );
-    return NextResponse.json(result);
+    return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error("[api/admin/match/recompute] error:", err);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: 500, headers: NO_STORE_HEADERS });
   }
 }

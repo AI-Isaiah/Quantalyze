@@ -83,6 +83,10 @@ describe("GET /api/admin/match/allocators — C-0041 same-origin guard", () => {
     // After the CSRF gate passes, the handler runs auth + DB. The mocked
     // admin returns an empty profile set → 200 with `allocators: []`.
     expect(res.status).toBe(200);
+    // Block D / P1947: the success body carries allocator PII (display_name,
+    // email, company) + per-allocator triage metadata — must be private,
+    // no-store so a shared cache cannot leak it cross-admin/cross-tenant.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = await res.json();
     expect(body).toEqual({ allocators: [] });
   });

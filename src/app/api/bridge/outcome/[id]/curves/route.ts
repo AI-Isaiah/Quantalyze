@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { assertProfileApproved } from "@/lib/api/approval-gate";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { bridgeOutcomeCurvesLimiter, checkLimit } from "@/lib/ratelimit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * GET /api/bridge/outcome/[id]/curves
@@ -41,7 +42,7 @@ async function getAuthedUserIdOrError(
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   // Approval gate (PR #266 follow-up): bridge-outcome curves are
   // allocator-dashboard data; pending-approval users have no business
@@ -92,7 +93,7 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
 
   const { id } = await ctx.params;
   if (!id || typeof id !== "string") {
-    return NextResponse.json({ error: "id required" }, { status: 400 });
+    return NextResponse.json({ error: "id required" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   // Voice-D10: dedicated limiter; does not share budget with userActionLimiter.
@@ -105,7 +106,7 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
 
@@ -128,10 +129,10 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
       "[api/bridge/outcome/curves] outcome lookup error:",
       outcomeErr,
     );
-    return NextResponse.json({ error: "Failed to load curves" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to load curves" }, { status: 500, headers: NO_STORE_HEADERS });
   }
   if (!outcome) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json({ error: "Not found" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
   // C-0080 (audit-2026-05-07): defense-in-depth cross-tenant guard. RLS
@@ -143,7 +144,7 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
   // Return 404 (not 403) so the response cannot distinguish "exists but not
   // yours" from "doesn't exist".
   if ((outcome as { allocator_id: string }).allocator_id !== userId) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json({ error: "Not found" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
   const allocatedAt = (outcome as { allocated_at: string | null }).allocated_at;
@@ -153,7 +154,7 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
       original: [],
       replacement: [],
       allocated_at: null,
-    });
+    }, { headers: NO_STORE_HEADERS });
   }
 
   const strategyId = (outcome as { strategy_id: string }).strategy_id;
@@ -196,7 +197,7 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
 
   if (analyticsErr) {
     console.error("[api/bridge/outcome/curves] analytics fetch error:", analyticsErr);
-    return NextResponse.json({ error: "Failed to load curves" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to load curves" }, { status: 500, headers: NO_STORE_HEADERS });
   }
 
   const rowsByStrategy = new Map<string, ReturnsPoint[]>();
@@ -218,5 +219,5 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
     original: rebaseAndWindow(originalStrategyId),
     replacement: rebaseAndWindow(strategyId),
     allocated_at: allocatedAt,
-  });
+  }, { headers: NO_STORE_HEADERS });
 }

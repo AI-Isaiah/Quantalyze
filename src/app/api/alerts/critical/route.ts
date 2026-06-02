@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
 import { assertPortfolioOwnership } from "@/lib/queries";
@@ -35,7 +36,7 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
 
   if (portfolioId) {
     if (!(await assertPortfolioOwnership(portfolioId, user.id))) {
-      return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
+      return NextResponse.json({ error: "Portfolio not found" }, { status: 404, headers: NO_STORE_HEADERS });
     }
     query = query.eq("portfolio_id", portfolioId);
   } else {
@@ -46,14 +47,14 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
       .limit(50);
     const portfolioIds = (portfolios ?? []).map((p) => p.id);
     if (portfolioIds.length === 0) {
-      return NextResponse.json({ alerts: [] });
+      return NextResponse.json({ alerts: [] }, { headers: NO_STORE_HEADERS });
     }
     query = query.in("portfolio_id", portfolioIds);
   }
 
   const { data, error } = await query;
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: 500, headers: NO_STORE_HEADERS });
   }
-  return NextResponse.json({ alerts: data ?? [] });
+  return NextResponse.json({ alerts: data ?? [] }, { headers: NO_STORE_HEADERS });
 });

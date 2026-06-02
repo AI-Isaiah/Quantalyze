@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { getAllocatorMatchPayload } from "@/lib/admin/match";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 // GET /api/admin/match/[allocator_id]
 //
@@ -34,20 +35,20 @@ export async function GET(
 
   // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403, headers: NO_STORE_HEADERS });
   }
 
   const admin = createAdminClient();
 
   try {
     const payload = await getAllocatorMatchPayload(admin, allocator_id);
-    return NextResponse.json(payload);
+    return NextResponse.json(payload, { headers: NO_STORE_HEADERS });
   } catch (err) {
     console.error("[api/admin/match/[allocator_id]] error:", err);
     // Don't leak Postgres constraint/column names to the client.
-    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+    return NextResponse.json({ error: "Internal error" }, { status: 500, headers: NO_STORE_HEADERS });
   }
 }

@@ -5,6 +5,7 @@ import { assertProfileApproved } from "@/lib/api/approval-gate";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { logAuditEvent } from "@/lib/audit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * GET  /api/strategies/draft/[id] — fetch a specific wizard draft for
@@ -36,7 +37,7 @@ async function getAuthedUserIdOrError(
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   // Approval gate (PR #266 follow-up): wizard drafts belong to the
   // post-approval flow; pre-approval users cannot create or mutate one.
@@ -52,7 +53,7 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
 
   const { id } = await ctx.params;
   if (!id || typeof id !== "string") {
-    return NextResponse.json({ error: "id required" }, { status: 400 });
+    return NextResponse.json({ error: "id required" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   // audit-2026-05-07 H-0253 follow-up (PR-2 2026-05-28): per-surface key.
@@ -65,12 +66,12 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
     if (isRateLimitMisconfigured(rl)) {
       return NextResponse.json(
         { error: "Rate limiter unavailable" },
-        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+        { status: 503, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
       );
     }
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
 
@@ -99,18 +100,18 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
     });
     return NextResponse.json(
       { error: "draft_lookup_failed" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
   if (!data) {
-    return NextResponse.json({ error: "Draft not found" }, { status: 404 });
+    return NextResponse.json({ error: "Draft not found" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
   if (data.source !== "wizard" || data.status !== "draft") {
-    return NextResponse.json({ error: "Not a wizard draft" }, { status: 404 });
+    return NextResponse.json({ error: "Not a wizard draft" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
-  return NextResponse.json({ draft: data });
+  return NextResponse.json({ draft: data }, { headers: NO_STORE_HEADERS });
 }
 
 export async function DELETE(req: NextRequest, ctx: RouteContext) {
@@ -120,7 +121,7 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
 
   const { id } = await ctx.params;
   if (!id || typeof id !== "string") {
-    return NextResponse.json({ error: "id required" }, { status: 400 });
+    return NextResponse.json({ error: "id required" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   // B15 (2026-05-30): consume the limiter AFTER input validation so a
@@ -133,12 +134,12 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
     if (isRateLimitMisconfigured(rl)) {
       return NextResponse.json(
         { error: "Rate limiter unavailable" },
-        { status: 503, headers: { "Retry-After": String(rl.retryAfter) } },
+        { status: 503, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
       );
     }
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
 
@@ -157,7 +158,7 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
     .maybeSingle();
 
   if (!draft) {
-    return NextResponse.json({ error: "Draft not found" }, { status: 404 });
+    return NextResponse.json({ error: "Draft not found" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
   // Delete the strategies row. Re-apply the source + status filter so a
@@ -181,7 +182,7 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
     );
     return NextResponse.json(
       { error: "Failed to delete draft" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -251,5 +252,5 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
     }
   }
 
-  return NextResponse.json({ deleted: true });
+  return NextResponse.json({ deleted: true }, { headers: NO_STORE_HEADERS });
 }

@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { trackUsageEventServer } from "@/lib/analytics/usage-events";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * POST /api/usage/session-start — increment server-side session_count.
@@ -37,7 +38,10 @@ export async function POST(req: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401, headers: NO_STORE_HEADERS },
+    );
   }
 
   const admin = createAdminClient();
@@ -60,7 +64,7 @@ export async function POST(req: NextRequest) {
     );
     return NextResponse.json(
       { error: "Failed to update session metadata" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -74,7 +78,7 @@ export async function POST(req: NextRequest) {
   if (!result || typeof result.session_count !== "number") {
     return NextResponse.json(
       { error: "Failed to update session metadata" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -86,8 +90,11 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  return NextResponse.json({
-    session_count: result.session_count,
-    debounced: result.debounced,
-  });
+  return NextResponse.json(
+    {
+      session_count: result.session_count,
+      debounced: result.debounced,
+    },
+    { headers: NO_STORE_HEADERS },
+  );
 }

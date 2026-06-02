@@ -210,6 +210,10 @@ describe("GET /api/keys/[id]/permissions — probe_error pass-through", () => {
     const { GET } = await import("./route");
     const res = await GET(makeRequest(KEY_ID));
     expect(res.status).toBe(200);
+    // Block D / P1947: the GET success body is the caller's live per-key
+    // permission scope (read/trade/withdraw) — must be private, no-store so a
+    // shared cache cannot serve one key's scope to another tenant.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = await res.json();
     expect(body.probe_error).toBe(false);
   });

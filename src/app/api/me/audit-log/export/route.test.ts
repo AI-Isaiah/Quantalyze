@@ -203,11 +203,13 @@ describe("GET /api/me/audit-log/export", () => {
     expect(body.error).toBe("Failed to read audit log");
   });
 
-  it("Test 6 — sets Cache-Control: no-store on the success response", async () => {
+  it("Test 6 — sets Cache-Control: private, no-store on the success response", async () => {
     const { GET } = await import("./route");
     const res = await GET(makeRequest());
 
-    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    // Normalized to the canonical NO_STORE_HEADERS const (Block D / P1947):
+    // the tenant CSV download must never sit in a shared OR private cache.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
   it("Test 7 — chains .gte('created_at', <90 days ago ISO>) on the SELECT", async () => {

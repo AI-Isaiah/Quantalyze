@@ -4,6 +4,7 @@ import type { User } from "@supabase/supabase-js";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
 import { logAuditEvent } from "@/lib/audit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * POST /api/allocator/holdings/sync — Phase 06 / D-14 / INGEST-06.
@@ -48,7 +49,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   if (!parsed.success) {
     return NextResponse.json(
       { error: "Invalid body: api_key_id must be a UUID" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   const { api_key_id } = parsed.data;
@@ -72,7 +73,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     if (error.code === "42501") {
       return NextResponse.json(
         { error: "API key not found or not owned by you" },
-        { status: 403 },
+        { status: 403, headers: NO_STORE_HEADERS },
       );
     }
     console.error(
@@ -81,7 +82,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
     return NextResponse.json(
       { error: "Could not start sync. Try again in a moment." },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -102,5 +103,5 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // render the "Queued — retry in {N}s" helper during rate-limit
   // contagion windows. Do NOT rebuild the object here — any field-level
   // reconstruction would strip `next_attempt_at`.
-  return NextResponse.json(data, { status: 200 });
+  return NextResponse.json(data, { status: 200, headers: NO_STORE_HEADERS });
 });

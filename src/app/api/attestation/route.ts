@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { userActionLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { assertSameOrigin } from "@/lib/csrf";
 import { logAuditEvent } from "@/lib/audit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 // ATTESTATION_VERSION is the schema/semantic version stamped on every
 // attestation row in metadata.version. Audit consumers correlate
@@ -42,20 +43,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   } = await supabase.auth.getUser();
 
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
   }
 
   let body: { accepted?: boolean };
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   if (body.accepted !== true) {
     return NextResponse.json(
       { error: "Attestation must be explicitly accepted" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -69,7 +70,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { error: "Rate limit exceeded" },
       {
         status: 429,
-        headers: { "Retry-After": String(rl.retryAfter) },
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
       },
     );
   }
@@ -107,7 +108,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     console.error("[api/attestation] Insert failed:", error);
     return NextResponse.json(
       { error: "Failed to record attestation" },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -121,5 +122,5 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     metadata: { version: ATTESTATION_VERSION, has_ip: ipAddress !== null },
   });
 
-  return NextResponse.json({ ok: true, attestation });
+  return NextResponse.json({ ok: true, attestation }, { headers: NO_STORE_HEADERS });
 }
