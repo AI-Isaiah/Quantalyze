@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.66] - 2026-06-02
+### Fixed — Portfolio surfaces showed stale per-constituent metrics as current (B14)
+
+Portfolio metric surfaces rendered each constituent's Sharpe / MaxDD / TWR uniformly with no liveness signal, so a portfolio mixing a strategy recomputed 2h ago with one 4 days stale presented both numbers as equally current — the canonical B14 ("Freshness / Liveness Signaling") bug: "stale Sharpe/MaxDD shown as current."
+
+- **StrategyBreakdownTable** + **CompositionDonut** now render a per-row / per-slice `SyncBadge` keyed on each constituent's own `computed_at` (already present on the dashboard payload — **no query change**). Every freshness classification routes through the existing `computeFreshness` SoT (12h/48h thresholds) and reuses the same per-row badge already used by the discovery/browse strategy lists; **no new primitive**.
+- **portfolio-pdf** now distinguishes the *render* date ("Generated …") from the *data vintage* ("Data as of …"), sourced from the **adapted** portfolio analytics `computed_at` (routed through `adaptPortfolioAnalytics` like every other read in that file) so a report rendered today off week-old analytics no longer reads as current. An unparseable/absent vintage falls through to "Data freshness unavailable" — never "Invalid Date". Extracted into a pure `formatDataVintage()` helper with a spec pinning the suppress-when-fresh contract.
+- Reviewed by a 6-dimension fresh-context Claude fan-out, each finding adversarially skeptic-verified → 3 confirmed (PDF vintage bypassing the adapter; missing PDF-line test; two inaccurate comments) all fixed + mutation-verified.
+- **Scope (Rule 2/7):** closes the freshness-signal class on the *portfolio* surface. The single-strategy public surfaces (`/browse`, `/strategy/[id]`, the v2 shell) are deferred — they need a query-layer `computed_at` projection and overlap a parallel agent's active strategy-rows work. **No ESLint rule:** `"fresh"/"warm"/"stale"` are overloaded across unrelated status enums (`DashboardState`, `CardShellStatus`, `computation_status`), so a precise consumption rule isn't soundly expressible; enforcement stays the `computeFreshness` runtime SoT.
+- Tests: per-constituent fresh-vs-stale badges + "never fabricate liveness without `computed_at`" + the PDF vintage helper's 3 branches. tsc 0 / lint 0 / full vitest 5868.
+
 ## [0.24.15.65] - 2026-06-02
 ### Fixed — Allocator dashboard leaked admin-only founder PII to the allocator (F4a / H-0065, M-0046)
 
