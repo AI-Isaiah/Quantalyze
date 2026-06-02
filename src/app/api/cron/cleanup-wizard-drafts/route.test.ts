@@ -383,7 +383,11 @@ describe.each([
 
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ deleted: 0, orphaned_keys_revoked: 0 });
+    expect(body).toEqual({
+      deleted: 0,
+      orphaned_keys_revoked: 0,
+      key_sweep_errors: 0,
+    });
     // Only the SELECT_DRAFTS call should have run; no DELETE, no count,
     // no api_keys touch.
     expect(recorders.fromCalls).toEqual(["strategies"]);
@@ -456,7 +460,11 @@ describe.each([
 
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ deleted: 3, orphaned_keys_revoked: 3 });
+    expect(body).toEqual({
+      deleted: 3,
+      orphaned_keys_revoked: 3,
+      key_sweep_errors: 0,
+    });
 
     // SELECT, DELETE, then 3 × (COUNT_REFS, DELETE_KEY)
     expect(recorders.fromCalls).toEqual([
@@ -539,7 +547,12 @@ describe.each([
     expect(res.status).toBe(200);
     const body = await res.json();
     // Only the orphan was revoked — the shared key was correctly skipped.
-    expect(body).toEqual({ deleted: 2, orphaned_keys_revoked: 1 });
+    // A key kept because still-referenced is NOT an error: zero sweep errors.
+    expect(body).toEqual({
+      deleted: 2,
+      orphaned_keys_revoked: 1,
+      key_sweep_errors: 0,
+    });
 
     // Critical: api_keys.delete must have been called EXACTLY ONCE (for
     // key-orphan), never for key-shared.
@@ -582,7 +595,11 @@ describe.each([
 
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ deleted: 3, orphaned_keys_revoked: 1 });
+    expect(body).toEqual({
+      deleted: 3,
+      orphaned_keys_revoked: 1,
+      key_sweep_errors: 0,
+    });
 
     // Exactly one COUNT_REFS pass (key-dup). Null was filtered out before
     // the loop; the duplicate was deduped via the Set in the route.
@@ -598,10 +615,16 @@ describe.each([
 
   // --- Error paths --------------------------------------------------------
 
-  it("returns 500 when the SELECT errors", async () => {
+  it("returns 500 with a GENERIC body (no raw PostgREST message) when the SELECT errors", async () => {
+    // M-1146: the response body must NOT echo the raw PostgREST message
+    // (it can carry SQL state / table / constraint names). The detail
+    // belongs in the server log, not the wire — even to a CRON_SECRET holder.
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     recorders.selectDraftsResponse = {
       data: null,
-      error: { message: "DB connection failed" },
+      error: { message: "DB connection failed: relation auth.foo missing" },
     };
 
     const handler = await getHandler();
@@ -611,17 +634,35 @@ describe.each([
 
     expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.error).toContain("DB connection failed");
+    expect(body.error).toBe("Cron select failed");
+    // The raw message must NOT leak to the caller…
+    expect(JSON.stringify(body)).not.toContain("DB connection failed");
+    expect(JSON.stringify(body)).not.toContain("auth.foo");
+    // …but it MUST still be logged for ops visibility.
+    const loggedRaw = errorSpy.mock.calls.some((call) =>
+      call.some(
+        (arg) =>
+          (typeof arg === "object" &&
+            arg !== null &&
+            JSON.stringify(arg).includes("DB connection failed")) ||
+          (typeof arg === "string" && arg.includes("DB connection failed")),
+      ),
+    );
+    expect(loggedRaw).toBe(true);
   });
 
-  it("returns 500 when the DELETE errors", async () => {
+  it("returns 500 with a GENERIC body (no raw PostgREST message) when the DELETE errors", async () => {
+    // M-1146: same generic-envelope contract on the delete error path.
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     recorders.selectDraftsResponse = {
       data: [{ id: "draft-a", api_key_id: null }],
       error: null,
     };
     recorders.deleteDraftsResponse = {
       count: null,
-      error: { message: "FK violation" },
+      error: { message: "FK violation on constraint strategies_api_key_id_fkey" },
     };
 
     const handler = await getHandler();
@@ -631,12 +672,31 @@ describe.each([
 
     expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.error).toContain("FK violation");
+    expect(body.error).toBe("Cron delete failed");
+    expect(JSON.stringify(body)).not.toContain("FK violation");
+    expect(JSON.stringify(body)).not.toContain("strategies_api_key_id_fkey");
+    const loggedRaw = errorSpy.mock.calls.some((call) =>
+      call.some(
+        (arg) =>
+          (typeof arg === "object" &&
+            arg !== null &&
+            JSON.stringify(arg).includes("FK violation")) ||
+          (typeof arg === "string" && arg.includes("FK violation")),
+      ),
+    );
+    expect(loggedRaw).toBe(true);
   });
 
-  it("treats a count-check error as non-fatal (skip key, continue)", async () => {
-    // The route logs and `continue`s when the COUNT_REFS query errors —
-    // best-effort orphan sweep should not fail the whole cron.
+  it("M-1145/H-1251: count-check error skips the key but surfaces it loudly (500 + errors)", async () => {
+    // The route skips the key when the COUNT_REFS query errors (safe
+    // direction — don't revoke when uncertain), but the skip MUST be
+    // observable: a transient count error means an orphan may have been
+    // left behind, NOT that the run was clean. The run is therefore
+    // degraded → 500 (Vercel Cron alerts on non-2xx; a 207 would still be
+    // keyed as success), the failing key is named in errors[], and
+    // key_sweep_errors counts it. A regression that swallowed the error
+    // back to a clean 200 would fail this test.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const drafts: DraftRow[] = [
       { id: "d1", api_key_id: "key-bad" },
       { id: "d2", api_key_id: "key-good" },
@@ -654,19 +714,34 @@ describe.each([
       makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
     );
 
-    expect(res.status).toBe(200);
+    // Degraded run — NOT a clean 200; 500 so Vercel Cron alerts.
+    expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body).toEqual({ deleted: 2, orphaned_keys_revoked: 1 });
+    expect(body.deleted).toBe(2);
+    expect(body.orphaned_keys_revoked).toBe(1);
+    expect(body.key_sweep_errors).toBe(1);
+    expect(body.errors).toHaveLength(1);
+    expect(body.errors[0]).toContain("key-bad");
+    // Surfaced via console.error (red in Vercel logs), not console.warn.
+    const loggedError = errorSpy.mock.calls.some((call) =>
+      call.some(
+        (arg) => typeof arg === "string" && arg.includes("key=key-bad"),
+      ),
+    );
+    expect(loggedError).toBe(true);
   });
 
-  it("H-1250: treats an api_keys DELETE error as non-fatal (swallow, continue)", async () => {
-    // route.ts:119-125 — `if (keyErr) { console.warn(...); continue; }`. The
-    // symmetric count-check error branch IS tested ("treats a count-check
-    // error as non-fatal") but the DELETE-error branch was not. A regression
-    // converting the `continue` to `return 500` (or flipping the polarity to
-    // `if (!keyErr) continue`) would silently break the whole cron with no
-    // test failure. Best-effort orphan sweep MUST NOT fail the whole cron:
-    // key-a's delete error is swallowed, key-b succeeds → revoked count = 1.
+  it("M-1144/H-1251: api_keys DELETE error is non-fatal to the loop but surfaced loudly (500 + errors)", async () => {
+    // route.ts orphan-sweep loop — `if (keyErr) { console.error(...); push;
+    // continue; }`. A confirmed orphan (refCount===0) that fails to delete
+    // leaves an api_keys row pointing at a strategy we just deleted: real
+    // integrity drift. The loop must NOT abort (key-b still gets swept), but
+    // the failure must NOT masquerade as a clean run. A regression that
+    // dropped key_sweep_errors / the errors[] list / the 500 (reverting to a
+    // bare `{deleted, orphaned_keys_revoked}` 200) would fail this test —
+    // an operator could no longer distinguish "kept because referenced" from
+    // "failed to revoke, orphan left behind".
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const drafts: DraftRow[] = [
       { id: "draft-a", api_key_id: "key-a" },
       { id: "draft-b", api_key_id: "key-b" },
@@ -687,11 +762,16 @@ describe.each([
       makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
     );
 
-    // The whole cron stays 200 (no fail-the-batch on a single orphan-key
-    // delete error) and only the succeeding key counts toward the total.
-    expect(res.status).toBe(200);
+    // Degraded run — surfaced as 500 so cron monitoring goes red, NOT a
+    // clean 200 that buries the orphan that was left behind.
+    expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body).toEqual({ deleted: 2, orphaned_keys_revoked: 1 });
+    expect(body.deleted).toBe(2);
+    expect(body.orphaned_keys_revoked).toBe(1);
+    expect(body.key_sweep_errors).toBe(1);
+    expect(body.errors).toHaveLength(1);
+    expect(body.errors[0]).toContain("key-a");
+    expect(body.errors[0]).toContain("revoke failed");
 
     // Both keys were attempted (key-a errored, key-b succeeded) — the loop
     // did not abort after the first failure.
@@ -699,6 +779,14 @@ describe.each([
       (c) => c.table === "api_keys",
     );
     expect(apiKeyDeletes).toHaveLength(2);
+
+    // Surfaced via console.error (error filters), not console.warn.
+    const loggedError = errorSpy.mock.calls.some((call) =>
+      call.some(
+        (arg) => typeof arg === "string" && arg.includes("key=key-a"),
+      ),
+    );
+    expect(loggedError).toBe(true);
   });
 
   it("falls back to draftIds.length when DELETE returns count=null", async () => {
@@ -719,6 +807,10 @@ describe.each([
 
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ deleted: 2, orphaned_keys_revoked: 0 });
+    expect(body).toEqual({
+      deleted: 2,
+      orphaned_keys_revoked: 0,
+      key_sweep_errors: 0,
+    });
   });
 });

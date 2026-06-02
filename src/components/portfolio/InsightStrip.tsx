@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import type { PortfolioAnalytics } from "@/lib/types";
@@ -100,6 +100,40 @@ export function InsightStrip({
       ),
     [analytics, portfolioStrategies, portfolioAgeDays, max],
   );
+
+  // F1 (loud-fail discipline) — H-1081 / M-0896. The strip renders nothing
+  // when no insights fire, which silently masks two distinct upstream
+  // failures from a genuine "no portfolio / nothing to say yet" empty state:
+  //
+  //   H-1081: `analytics === null` WHILE a portfolioId is present. A loaded
+  //     portfolio implies its analytics row was (or should have been)
+  //     computed; null here means the upstream fetch/computation failed, not
+  //     that there were simply no insights. computeAllInsights(null, …)
+  //     returns [] for every analytics-keyed rule, so the strip vanishes with
+  //     zero signal. Surface it so it shows up in the console/Sentry breadcrumb
+  //     trail instead of disappearing.
+  //   M-0896: analytics is present but portfolioId is null — analytics implies
+  //     a portfolio, so this is an orphaned-analytics bug. It also silently
+  //     drops the BridgeTrigger "Find Replacement" affordance (isBridgeable
+  //     requires portfolioId) from underperformance insights.
+  //
+  // Logged from an effect (not render) so the render stays a pure function of
+  // props. We do NOT change the render output: the layout contract (presence
+  // is the signal, no empty-state copy) is unchanged — we only make the
+  // failure observable.
+  useEffect(() => {
+    if (analytics === null && portfolioId) {
+      console.error(
+        "[InsightStrip] analytics is null for a loaded portfolio — insights silently suppressed (likely upstream analytics fetch/computation failure)",
+        { portfolioId },
+      );
+    } else if (analytics !== null && !portfolioId) {
+      console.error(
+        "[InsightStrip] orphaned analytics — analytics computed but portfolioId is null; bridge 'Find Replacement' affordance silently dropped",
+        { hasAnalytics: true },
+      );
+    }
+  }, [analytics, portfolioId]);
 
   // PR3 (dashboard parity) — when zero insights fire AND no flagged
   // holdings, render nothing. The truth screenshot doesn't show the

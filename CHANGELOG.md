@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.24.15.55] - 2026-06-02
+## [0.24.15.56] - 2026-06-02
 ### Added — B9 Boundary Validation Parity: lint rule + CHECK↔Zod matrix + latent-23514 fix
 
 Closes the **NEW-C40-01 boundary-leak class** (a Zod schema diverging from its DB CHECK; an "accept unknown keys" mode on a service/IPC boundary) *by construction*:
@@ -10,6 +10,16 @@ Closes the **NEW-C40-01 boundary-leak class** (a Zod schema diverging from its D
 - **Latent prod bug fixed**: the analytics worker writes `computation_status='complete_with_warnings'` on the heuristic-capital fallback path (`analytics_runner.py`), but the `strategy_analytics.computation_status` CHECK rejected it (verified live in prod) — so every warnings-producing strategy's *entire* metrics upsert would 23514. Widened the CHECK to the intended 5-value set (safe — every existing row is in the subset; `'stale'` stays rejected). Established `STRATEGY_ANALYTICS_COMPUTATION_STATUSES` as the TS single-source-of-truth, with `StrategyAnalytics.computation_status` derived from it so the hand-typed union cannot re-drift.
 - Reviewed by 5 specialists + a 3-lens fresh-context red-team. Fixed: the Zod-v4 `.loose()` blind spot (the form a v4 dev reaches for first), an audit-integrity defect (a false escape rationale on `VerifyStrategyResponseSchema` — its `results` field *is* spread into a JSONB write; now modeled explicitly + stripped, escape removed), and several parity-extractor robustness gaps. Folds FIX-LIST M-0907 / L-0043 (BridgeResponseSchema passthrough vs its docblock).
 - **Deferred (tracked):** the cross-runtime Python enum snapshot (Part C — collides with the in-flight b-mypy refactor) and end-to-end `complete_with_warnings` surfacing (the queue-path `sync_strategy_analytics_status` RPC clobbers it to `complete`, and 2 consumer gates still exact-match `complete` — a B3-completion follow-up). No `analytics-service/**` edit; parallel-safe with b-mypy. The migration auto-applies to prod on merge.
+
+## [0.24.15.55] - 2026-06-02
+### Fixed — Loud-fail discipline across the allocator client surface (audit-2026-05-07 fix-batch F1)
+
+Closed a whole class of bug where a failed fetch/DB call was silently shown as "empty / no data / all clear" — so the user was misled, and in one case **lost data**. 31 findings fixed across 14 frontend files (16 HIGH + 15 MEDIUM/LOW), each with a regression test that fails without the fix. Implemented and adversarially reviewed per-file by independent passes (14 PASS, 2 reconciled).
+
+- **Data-loss fixed (headline):** the **Holding Notes** tab treated *every* non-OK `/api/notes` response (500/403/429, network error) as "no note yet" — dropping the user into an empty editor over their existing note, which blur-autosave then PUT-overwrote. Now a non-404 failure renders a distinct "Couldn't load your note — your saved note is safe" error with Retry, and the autosave is **gated on a clean load** so a failed fetch can no longer destroy the stored note (`HoldingDetail.tsx`, `useNoteAutoSave.ts`; H-0092/H-0093/H-1216/M-0075/M-1160).
+- **No more false "all clear":** Bridge status, portfolio Insight Strip, Portfolio Impact Panel, and Replacement cards now distinguish "couldn't load" from "genuinely empty" — a load failure shows an error state, not a reassuring empty/"within mandate" view (`BridgeWidget`, `InsightStrip`, `PortfolioImpactPanel`, `ReplacementCard`, `ReplacementPanel`, `StrategyBrowseDrawer`, `HoldingsTable`, `ForQuantsLeadsTable`, `SendIntroPanel`, `ApiKeyManager`, `MetadataStep`).
+- **Cron failures now alert:** `cleanup-wizard-drafts` returns a non-2xx (500, not a 2xx 207) when an orphan-`api_keys` sweep step fails, so Vercel Cron monitoring actually goes red instead of burying a partial failure; `sync-funding` counts a `{data:null,error:null}` enqueue result as a failure (accounting identity `enqueued+failed===total_candidates`) rather than a silent drop (H-1251/H-1091 + per-key/per-job error arrays). Both routes `console.error` every swallowed branch.
+- **Discipline:** every previously-swallowed catch/error branch now logs `console.error`, and failures render a distinct, recoverable error state instead of a misleading empty one — the B2 Result-envelope ethos applied to the allocator client surface.
 
 ## [0.24.15.54] - 2026-06-02
 ### Changed — `mypy --strict` type floor: `analytics_runner.py` + `position_reconstruction.py` → 0 errors (cross-cutting refactor B-mypy, part f-4)

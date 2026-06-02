@@ -218,6 +218,68 @@ describe("<ReplacementCard> — H-1077", () => {
     );
   });
 
+  // H-1067 (loud-fail discipline) — a failed intro must NOT collapse into a
+  // single opaque "Retry Intro": the user needs a distinct, actionable message
+  // AND the failure must be observable in the console (no empty swallow). These
+  // assertions fail on the pre-fix `catch {}`/bare-throw code, which logged
+  // nothing and rendered no message.
+  describe("H-1067 — distinct, observable intro failures", () => {
+    it("renders a 'too many requests' message and logs on a 429", async () => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockFetch(async () =>
+        new Response(JSON.stringify({ error: "Too many requests" }), { status: 429 }),
+      );
+
+      render(<ReplacementCard candidate={buildCandidate()} replacementFor="old-1" />);
+      fireEvent.click(screen.getByRole("button", { name: "Request Intro" }));
+
+      await waitFor(() =>
+        expect(screen.getByRole("alert")).toHaveTextContent(/try again in a minute/i),
+      );
+      // Still retryable from the same affordance.
+      expect(screen.getByRole("button", { name: "Retry Intro" })).toBeInTheDocument();
+      // The swallowed branch must be observable.
+      expect(errSpy).toHaveBeenCalled();
+      expect(errSpy.mock.calls[0]?.[0]).toContain("[bridge.intro]");
+    });
+
+    it("renders a distinct 'permission' message on a 403 (not a generic network error)", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      mockFetch(async () =>
+        new Response(JSON.stringify({ error: "Only allocators can request introductions" }), {
+          status: 403,
+        }),
+      );
+
+      render(<ReplacementCard candidate={buildCandidate()} replacementFor="old-1" />);
+      fireEvent.click(screen.getByRole("button", { name: "Request Intro" }));
+
+      await waitFor(() =>
+        expect(screen.getByRole("alert")).toHaveTextContent(/don't have permission/i),
+      );
+      // A 403 must NOT read like a transient server outage.
+      expect(screen.queryByText(/couldn't reach the server/i)).toBeNull();
+    });
+
+    it("renders a server-unreachable message and logs the thrown error on a network failure", async () => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const thrown = new Error("network down");
+      mockFetch(async () => {
+        throw thrown;
+      });
+
+      render(<ReplacementCard candidate={buildCandidate()} replacementFor="old-1" />);
+      fireEvent.click(screen.getByRole("button", { name: "Request Intro" }));
+
+      await waitFor(() =>
+        expect(screen.getByRole("alert")).toHaveTextContent(/couldn't reach the server/i),
+      );
+      // The thrown error itself must be logged, not silently dropped.
+      expect(errSpy).toHaveBeenCalled();
+      expect(errSpy.mock.calls.flat()).toContain(thrown);
+    });
+  });
+
   it("disables the button and shows 'Requesting...' while the intro request is in flight", async () => {
     // A fetch that never resolves keeps the card in the loading state.
     mockFetch(() => new Promise<Response>(() => {}));

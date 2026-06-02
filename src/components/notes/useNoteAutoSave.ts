@@ -87,7 +87,17 @@ export function useNoteAutoSave(
           return;
         }
 
-        if (generationRef.current !== gen) return; // stale response — drop
+        if (generationRef.current !== gen) {
+          // M-1160: a newer save() superseded this one — drop the stale
+          // response, but log so the discarded save isn't invisible.
+          console.debug(
+            "[useNoteAutoSave] stale save response dropped",
+            scope_kind,
+            scope_ref,
+            { gen, current: generationRef.current },
+          );
+          return;
+        }
 
         if (res.ok) {
           setLastSavedAt(new Date());

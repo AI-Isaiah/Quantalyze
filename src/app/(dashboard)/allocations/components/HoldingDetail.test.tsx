@@ -25,11 +25,14 @@ vi.mock("@/components/notes/NoteRender", () => ({
 vi.mock("@/components/notes/NoteSaveStatus", () => ({
   NoteSaveStatus: () => <div data-testid="note-save-status" />,
 }));
+// `save` is a module-level spy so the loud-fail tests can assert that a
+// failed/errored note load NEVER triggers a destructive PUT on blur.
+const saveSpy = vi.fn();
 vi.mock("@/components/notes/useNoteAutoSave", () => ({
   useNoteAutoSave: () => ({
     saveState: "idle",
     lastSavedAt: null,
-    save: vi.fn(),
+    save: saveSpy,
   }),
 }));
 vi.mock("./OutcomeForm", () => ({
@@ -63,9 +66,11 @@ function makeRow(overrides: Partial<DesignHoldingRow> = {}): DesignHoldingRow {
 
 describe("HoldingDetail — H-0091", () => {
   beforeEach(() => {
+    saveSpy.mockClear();
     global.fetch = vi.fn(() =>
       Promise.resolve({
         ok: true,
+        status: 200,
         json: () =>
           Promise.resolve({
             content: "Seeded note body",
@@ -158,5 +163,109 @@ describe("HoldingDetail — H-0091", () => {
       expect(screen.getByTestId("note-render")).toBeInTheDocument(),
     );
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // F1 loud-fail discipline — H-0092 / H-0093 / H-1216 / M-0075.
+  //
+  // A non-OK /api/notes GET (401/403/429/5xx) or a thrown network error must
+  // NOT be conflated with a genuine 404 "no note yet". The pre-fix code routed
+  // EVERY non-OK into edit mode with an empty draft, and onNoteBlur then PUT
+  // that empty draft over the unread server note — silent data loss. These
+  // tests pin: (1) a 404 still opens the empty editor (happy empty-state),
+  // (2) a 500 / network error renders a distinct error+retry state, NOT the
+  // editor, and (3) the destructive save() is never invoked on the error path.
+  // -------------------------------------------------------------------------
+
+  function mockNotesGet(opts: { ok: boolean; status: number }) {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: opts.ok,
+        status: opts.status,
+        json: () => Promise.resolve({}),
+      }),
+    ) as unknown as typeof fetch;
+  }
+
+  it("404 → genuine empty: opens the editor (no note yet), not the error state", async () => {
+    mockNotesGet({ ok: false, status: 404 });
+    render(<HoldingDetail row={makeRow()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Notes" }));
+
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+    // Editor (textarea) is shown for the legitimately-empty case.
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText(/No note yet/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("500 → distinct error+retry state; never the empty editor", async () => {
+    mockNotesGet({ ok: false, status: 500 });
+    render(<HoldingDetail row={makeRow()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Notes" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/Couldn't load your note/i);
+    expect(
+      within(alert).getByRole("button", { name: /Retry/i }),
+    ).toBeInTheDocument();
+    // The misleading empty editor must NOT render on a transport failure.
+    expect(
+      screen.queryByPlaceholderText(/No note yet/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("403 → error state, and a blur on the error path NEVER calls save() (data-loss fence)", async () => {
+    mockNotesGet({ ok: false, status: 403 });
+    render(<HoldingDetail row={makeRow()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Notes" }));
+
+    await screen.findByRole("alert");
+    // No editor → no blur path is reachable, and save() was never wired to run.
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(
+      screen.queryByPlaceholderText(/No note yet/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("network error (thrown fetch) → error state, save() not called", async () => {
+    global.fetch = vi.fn(() =>
+      Promise.reject(new Error("network down")),
+    ) as unknown as typeof fetch;
+    render(<HoldingDetail row={makeRow()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Notes" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/Couldn't load your note/i);
+    expect(saveSpy).not.toHaveBeenCalled();
+  });
+
+  it("Retry after an error refetches and recovers to the loaded note", async () => {
+    mockNotesGet({ ok: false, status: 500 });
+    render(<HoldingDetail row={makeRow()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Notes" }));
+    await screen.findByRole("alert");
+
+    // Repoint fetch at a successful response, then hit Retry.
+    global.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            content: "Recovered note",
+            updated_at: "2026-04-01T00:00:00Z",
+          }),
+      }),
+    ) as unknown as typeof fetch;
+    fireEvent.click(screen.getByRole("button", { name: /Retry/i }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("note-render")).toHaveTextContent(
+        "Recovered note",
+      ),
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

@@ -59,6 +59,15 @@ export function ReplacementPanel({
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
         if (!controller.signal.aborted) {
+          // Loud-fail (M-0905): the inline error UI alone gives operators zero
+          // log signal, so a bridge-scoring regression manifests as silent
+          // in-app error toasts. Emit a tagged breadcrumb with the request
+          // context so failure rate is observable/aggregatable.
+          console.error("[bridge.fetch] candidate load failed", {
+            portfolioId,
+            strategyId,
+            err,
+          });
           setError(err instanceof Error ? err.message : "Failed to load candidates");
         }
       }

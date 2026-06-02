@@ -77,8 +77,22 @@ export function ForQuantsLeadsTable({
         return;
       }
       router.refresh();
-    } catch {
-      setError("Network error. Try again.");
+    } catch (err) {
+      // Loud-fail (audit-2026-05-07 H-0355 / M-0380): a bare `catch {}`
+      // collapsed JSON-parse errors, aborts, timeouts, CSP violations and
+      // genuine network failures into one opaque "Network error" message
+      // with no diagnostic trail. Capture the binding, log it (a swallowed
+      // failure must stay observable), and surface the real reason.
+      console.error("[ForQuantsLeadsTable] toggleProcessed failed", {
+        leadId: id,
+        unprocess: currentlyProcessed,
+        error: err,
+      });
+      setError(
+        `Could not save change: ${
+          err instanceof Error ? err.message : "unknown error"
+        }.`,
+      );
     } finally {
       setLoadingId(null);
     }

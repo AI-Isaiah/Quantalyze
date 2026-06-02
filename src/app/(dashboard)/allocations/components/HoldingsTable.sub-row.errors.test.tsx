@@ -144,7 +144,7 @@ describe("HoldingsTable sub-row error paths — H-0094", () => {
     expect(screen.getByTestId("outcome-form")).toBeInTheDocument();
   });
 
-  it("(b) /api/notes 5xx → Notes tab degrades to the empty-note edit textarea, not stuck on Loading…", async () => {
+  it("(b) /api/notes 5xx → Notes tab shows a load-error (not the empty-note textarea), so blur-save can't overwrite the unread note (H-0092/H-0093/H-1216)", async () => {
     global.fetch = vi.fn(() =>
       Promise.resolve({
         ok: false,
@@ -157,14 +157,23 @@ describe("HoldingsTable sub-row error paths — H-0094", () => {
     fireEvent.click(screen.getByText("Test Strategy"));
     fireEvent.click(screen.getByRole("tab", { name: "Notes" }));
 
-    // After the failed GET resolves, the component sets noteLoaded=true and
-    // noteEditing=true → the placeholder textarea is shown for input.
+    // After a non-404 failed GET, the component MUST distinguish "couldn't
+    // load" from "no note yet": it renders a load-error alert + Retry, NOT the
+    // empty editor. Showing the placeholder textarea here was the data-loss
+    // bug (blur then PUTs an empty draft over the unread server note).
     await waitFor(() =>
-      expect(
-        screen.getByPlaceholderText("No note yet. Start typing to add one."),
-      ).toBeInTheDocument(),
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        /Couldn't load your note/i,
+      ),
     );
-    // "Loading…" must no longer be present.
+    expect(
+      screen.getByRole("button", { name: /Retry/i }),
+    ).toBeInTheDocument();
+    // The empty-note editor must NOT be presented on a load failure.
+    expect(
+      screen.queryByPlaceholderText("No note yet. Start typing to add one."),
+    ).not.toBeInTheDocument();
+    // And it must not be stuck on "Loading…".
     expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
   });
 

@@ -1080,4 +1080,181 @@ describe("<PortfolioImpactPanel>", () => {
     const status = screen.getByRole("status");
     expect(status.textContent).toMatch(/Correlation not computable/);
   });
+
+  // -------------------------------------------------------------------------
+  // H-1127 — non-OK error bodies whose schema is not `{ error }` (loud-fail)
+  // -------------------------------------------------------------------------
+
+  it("H-1127: surfaces a `{ detail }` error body (FastAPI HTTPException), not 'HTTP 400'", async () => {
+    // The Python service raises HTTPException, which serializes to `{ detail }`.
+    // Pre-fix the panel only read `body.error`, so the real, actionable message
+    // was discarded and the user saw the opaque "HTTP 400".
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify({ detail: "No returns data available for the candidate" }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Detail-shaped error"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("No returns data available for the candidate"),
+      ).toBeInTheDocument(),
+    );
+    // The pre-fix opaque fallback must NOT be shown.
+    expect(screen.queryByText("HTTP 400")).toBeNull();
+  });
+
+  it("H-1127: surfaces a `{ message }` error body, not 'HTTP 500'", async () => {
+    mockFetch(async () =>
+      new Response(JSON.stringify({ message: "Candidate is already in this portfolio" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Message-shaped error"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("Candidate is already in this portfolio"),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("HTTP 500")).toBeNull();
+  });
+
+  it("H-1127: logs the unrecognized body shape (contract drift is observable)", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // A body that parses but matches none of error/detail/message — the panel
+    // must fall back to "HTTP 500" AND log so contract drift is not silent.
+    mockFetch(async () =>
+      new Response(JSON.stringify({ errors: ["nested", "array"] }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Unrecognized error shape"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("HTTP 500")).toBeInTheDocument(),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[PortfolioImpactPanel] unrecognized error body shape",
+      expect.objectContaining({ status: 500 }),
+    );
+  });
+
+  it("H-1127: coerces a non-string `{ error }` value rather than rendering '[object Object]'", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // A nested object under `error` must NOT coerce to "[object Object]" copy.
+    mockFetch(async () =>
+      new Response(JSON.stringify({ error: { nested: "object" } }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Object error value"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("HTTP 500")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // M-0969 — catch block: friendly copy + console.error for swallowed failures
+  // -------------------------------------------------------------------------
+
+  it("M-0969: a network failure shows friendly copy (not a raw 'Failed to fetch') and is logged", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // `fetch` rejects with a TypeError on a genuine network failure.
+    mockFetch(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Offline"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText(/Network error — check your connection/i)).toBeInTheDocument(),
+    );
+    // The raw browser string must never reach the user.
+    expect(screen.queryByText(/Failed to fetch/)).toBeNull();
+    // The operator must be able to see the underlying error in logs.
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[PortfolioImpactPanel] simulate impact failed",
+      expect.any(TypeError),
+    );
+  });
+
+  it("M-0969: a malformed success body (JSON parse error) shows friendly copy, not a SyntaxError string", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // A 200 response with a non-JSON body (e.g. an HTML error page) makes
+    // res.json() throw a SyntaxError. Pre-fix the user saw "Unexpected token …".
+    mockFetch(async () =>
+      new Response("<!DOCTYPE html><html>502 Bad Gateway</html>", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Malformed body"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/server returned an unexpected response/i),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/Unexpected token/i)).toBeNull();
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[PortfolioImpactPanel] simulate impact failed",
+      expect.any(SyntaxError),
+    );
+  });
 });

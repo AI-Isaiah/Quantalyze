@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { BridgeWidget } from "./BridgeWidget";
 import type { OutcomeRow } from "@/lib/queries";
 
@@ -280,6 +280,69 @@ describe("BridgeWidget — empty state (no breaches, no outcomes)", () => {
     );
     expect(screen.getByText("All clear")).toBeTruthy();
     expect(screen.getByText("No reviews recorded yet.")).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// H-1210 (F1 loud-fail) — unknown ("couldn't load") MUST NOT read as "All
+// clear". `flaggedHoldings === null` is the UNKNOWN signal (upstream payload
+// failed to resolve the breach data); `[]` is the genuinely-empty result.
+// For a safety-relevant widget these two MUST render distinct UI, and the
+// swallowed failure must be logged. These tests fail if the discrimination
+// regresses (e.g. someone coalesces `null` back to `[]` or drops the error
+// branch), per CLAUDE.md Rule 9.
+// ---------------------------------------------------------------------------
+describe("BridgeWidget — load-failure (unknown) state, H-1210", () => {
+  it('renders a distinct "Status unavailable" error state for null flaggedHoldings — NOT "All clear"', () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <BridgeWidget
+        flaggedHoldings={null}
+        matchDecisionsByHoldingRef={{}}
+        outcomes={[]}
+      />,
+    );
+    // Distinct error region + copy.
+    expect(
+      screen.getByRole("region", { name: /bridge status unavailable/i }),
+    ).toBeTruthy();
+    expect(screen.getByTestId("bridge-error-state")).toBeTruthy();
+    expect(screen.getByText("Status unavailable")).toBeTruthy();
+    // The reassuring empty state must NOT appear — this is the headline bug:
+    // a failed load that looks "All clear" silently misinforms the allocator.
+    expect(screen.queryByText("All clear")).toBeNull();
+    expect(screen.queryByTestId("bridge-empty-state")).toBeNull();
+    // The swallowed failure is observable.
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[BridgeWidget]"),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("invokes onRetry from the error-state Retry button when provided", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const onRetry = vi.fn();
+    render(
+      <BridgeWidget
+        flaggedHoldings={null}
+        matchDecisionsByHoldingRef={{}}
+        onRetry={onRetry}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("bridge-error-retry"));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("an empty array still renders the real 'All clear' state (failure ≠ empty)", () => {
+    render(
+      <BridgeWidget
+        flaggedHoldings={[]}
+        matchDecisionsByHoldingRef={{}}
+        outcomes={[]}
+      />,
+    );
+    expect(screen.getByText("All clear")).toBeTruthy();
+    expect(screen.queryByTestId("bridge-error-state")).toBeNull();
   });
 });
 
