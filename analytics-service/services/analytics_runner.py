@@ -38,17 +38,21 @@ import logging
 import math
 import os
 from collections import defaultdict
+from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 from fastapi import HTTPException
+from supabase import Client
 
 from services.benchmark import get_benchmark_returns
 from services.db import (
     PaginatedSelectTruncated,
     db_execute,
     get_supabase,
+    one,
     paginated_select,
+    rows,
 )
 from services.metrics import _safe_float, compute_all_metrics
 from services.equity.fallback import merge_dq_flags
@@ -219,9 +223,9 @@ class DataQualityFlags(TypedDict, total=False):
 
 
 def _merge_into_top_level_flags(
-    target: dict | None,
-    source: dict | None,
-) -> dict | None:
+    target: dict[str, Any] | None,
+    source: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
     """Audit-2026-05-07 round-2 / P1994+P1995 follow-up: lift inner
     `data_quality_flags` keys (from `reconstruct_positions` and the
     turnover series) into the top-level `strategy_analytics.data_quality_flags`
@@ -265,7 +269,7 @@ def _merge_into_top_level_flags(
 
 async def _load_position_time_series(
     strategy_id: str,
-    supabase,
+    supabase: Client,
 ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]], dict[str, float]]:
     """H-A1: derive (positions_by_date, prices_by_date, nav_by_date) from
     `position_snapshots`.
@@ -464,7 +468,7 @@ async def _load_position_time_series(
     return positions_by_date, prices_by_date, nav_by_date
 
 
-def _compute_volume_metrics(fills: list[dict]) -> dict:
+def _compute_volume_metrics(fills: list[dict[str, Any]]) -> dict[str, Any]:
     """Compute fill-level volume metrics.
 
     fills: list of dicts with 'side' and 'cost' keys.
@@ -535,8 +539,8 @@ def _compute_volume_metrics(fills: list[dict]) -> dict:
 
 
 def _compute_position_side_volume_pcts(
-    fills: list[dict], positions: list[dict]
-) -> dict:
+    fills: list[dict[str, Any]], positions: list[dict[str, Any]]
+) -> dict[str, Any]:
     """Attribute fill volume to positions by timestamp window.
 
     A fill belongs to position P if its timestamp falls within
@@ -639,9 +643,9 @@ def _compute_position_side_volume_pcts(
 
 
 def _compute_derived_trade_metrics(
-    volume_metrics: dict,
-    trade_metrics_from_positions: dict,
-) -> dict:
+    volume_metrics: Mapping[str, Any],
+    trade_metrics_from_positions: Mapping[str, Any],
+) -> dict[str, Any]:
     """B-01 path (b): compute the 6 derived trade metrics from BOTH the
     volume-side dict (`_compute_volume_metrics(fills)` output) AND the
     position-side dict (`reconstruct_positions(strategy_id, supabase)` output).
@@ -723,7 +727,7 @@ def _compute_derived_trade_metrics(
     losers_count = int(trade_metrics_from_positions.get("losers_count") or 0)
     per_trade = trade_metrics_from_positions.get("realized_pnl_per_trade") or []
 
-    out: dict = {
+    out: dict[str, Any] = {
         "expectancy": None,
         "risk_reward_ratio": None,
         "weighted_risk_reward_ratio": None,
@@ -736,7 +740,7 @@ def _compute_derived_trade_metrics(
     # divide-by-zero in `reconstruct_positions`) must be dropped at the
     # boundary — it silently corrupts SQN / profit-factor / weighted-R:R
     # math (NaN evades both `p > 0` and `p < 0` filters).
-    def _finite_pnl(t: dict) -> float | None:
+    def _finite_pnl(t: dict[str, Any]) -> float | None:
         return _safe_float(t.get("realized_pnl"))
 
     # Expectancy: only meaningful when at least one of avg_win / avg_loss is
@@ -832,7 +836,7 @@ def _compute_derived_trade_metrics(
     return out
 
 
-def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
+def _compute_volume_aggregator(fills: list[dict[str, Any]]) -> dict[str, float]:
     """METRICS-09: aggregate volume metrics over fills (raw_fills WHERE is_fill=true).
 
     Returns:
@@ -983,7 +987,7 @@ TradeMixResult = TradeMix4Bucket | TradeMix2Bucket
 
 
 def _compute_trade_mix(
-    fills: list[dict], has_maker_taker: bool
+    fills: list[dict[str, Any]], has_maker_taker: bool
 ) -> TradeMixResult:
     """Trade Mix breakdown by side × maker/taker.
 
@@ -1075,7 +1079,19 @@ def _compute_trade_mix(
             notional_parse_failed,
         )
 
-    return buckets
+    # M-0656: narrow the str-keyed accumulator to the mode TypedDict the
+    # declared return type promises. Reconstructing from the known keys (the
+    # exact keys initialized above, never mutated to add new ones) is
+    # behaviour-identical to returning `buckets` — same keys, same bucket
+    # objects — while satisfying the union return type without a cast.
+    if has_maker_taker:
+        return TradeMix4Bucket(
+            long_maker=buckets["long_maker"],
+            long_taker=buckets["long_taker"],
+            short_maker=buckets["short_maker"],
+            short_taker=buckets["short_taker"],
+        )
+    return TradeMix2Bucket(long=buckets["long"], short=buckets["short"])
 
 
 # KPI-17: per-strategy gate threshold for switching to 4-bucket Trade Mix.
@@ -1083,7 +1099,7 @@ def _compute_trade_mix(
 _MAKER_TAKER_COVERAGE_THRESHOLD = 0.99
 
 
-def _has_maker_taker_coverage(fills: list[dict]) -> bool:
+def _has_maker_taker_coverage(fills: list[dict[str, Any]]) -> bool:
     """Return True when ≥99% of this strategy's fills carry is_maker.
 
     Per-strategy data-driven gate: a venue that populates is_maker
@@ -1097,7 +1113,7 @@ def _has_maker_taker_coverage(fills: list[dict]) -> bool:
     return populated / len(fills) >= _MAKER_TAKER_COVERAGE_THRESHOLD
 
 
-def _is_trade_mix_approximate(positions: list[dict]) -> bool:
+def _is_trade_mix_approximate(positions: list[dict[str, Any]]) -> bool:
     """Trade Mix panel buckets fills by side (buy→long, sell→short).
 
     A *closed* short has a buy-to-close fill that gets mis-bucketed as
@@ -1116,7 +1132,7 @@ def _is_trade_mix_approximate(positions: list[dict]) -> bool:
     )
 
 
-async def run_strategy_analytics(strategy_id: str) -> dict:
+async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
     """Run the full analytics pipeline for a single strategy.
 
     See module docstring for contract and side effects.
@@ -1132,7 +1148,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         .execute()
     )
 
-    if not strategy_result.data:
+    strategy_row = one(strategy_result)
+    if not strategy_row:
         raise HTTPException(status_code=404, detail="Strategy not found")
 
     # Update status to computing. The worker-side bridge (038 RPC) may
@@ -1156,7 +1173,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             .execute()
         )
 
-        trades = result.data
+        trades = rows(result)
         if not trades or len(trades) < 2:
             await db_execute(
                 lambda: supabase.table("strategy_analytics").upsert(
@@ -1203,16 +1220,12 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # the flag split was meant to eliminate.
         api_key_id: str | None = None
         try:
-            api_key_id = (
-                strategy_result.data.get("api_key_id")
-                if strategy_result.data
-                else None
-            )
+            api_key_id = strategy_row.get("api_key_id")
             if api_key_id:
                 key_result = await db_execute(
-                    lambda kid=api_key_id: supabase.table("api_keys")
+                    lambda: supabase.table("api_keys")
                     .select("account_balance_usdt")
-                    .eq("id", kid)
+                    .eq("id", api_key_id)
                     .single()
                     .execute()
                 )
@@ -1221,10 +1234,9 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                 # NULL. A truthy check would conflate "real zero" with
                 # "no balance configured" and silently mark the strategy
                 # as degraded forever.
+                key_row = one(key_result)
                 balance_raw = (
-                    key_result.data.get("account_balance_usdt")
-                    if key_result.data
-                    else None
+                    key_row.get("account_balance_usdt") if key_row else None
                 )
                 if balance_raw is not None:
                     # Audit-2026-05-27 A1 (MED8): narrow the cast so a corrupt
@@ -1400,7 +1412,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # 039 was never landed). Project `cost` -> `notional_usd` and
         # `timestamp` -> `filled_at` so downstream helpers see the keys
         # they expect; missing keys still fall through `.get(..., default)`.
-        fills_data: list[dict] = []
+        fills_data: list[dict[str, Any]] = []
         fills_fetch_failed = False
         fills_fetch_error: str | None = None
         try:
@@ -1458,7 +1470,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # in `public.positions`; fetch each position's side + window so the
         # helper can attribute fills by timestamp instead of pretending
         # buy_volume_pct equals long_volume_pct.
-        position_side_pcts: dict = {}
+        position_side_pcts: dict[str, Any] = {}
         position_side_volume_failed = False
         position_side_volume_error: str | None = None
         trade_mix_approximate = False
@@ -1470,7 +1482,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                     .eq("strategy_id", strategy_id)
                     .execute()
                 )
-                positions_list = (pos_result.data if pos_result else []) or []
+                positions_list = rows(pos_result)
                 position_side_pcts = _compute_position_side_volume_pcts(
                     fills_data, positions_list
                 )
@@ -1718,13 +1730,22 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             if isinstance(trade_metrics_from_positions, dict)
             else None
         )
+        # `data_quality_flags` carried the DataQualityFlags contract through the
+        # typed direct writes above (M-0657 typo-guard). The producer-flag merge
+        # below introduces dynamically-keyed flags (see the DataQualityFlags
+        # docstring), so widen to the open `dict[str, Any]` the canonical reducer
+        # operates on. `{**...}` preserves the None-vs-empty distinction the
+        # upsert relies on (null vs {} for a zero-flag strategy).
+        top_level_flags: dict[str, Any] | None = (
+            {**data_quality_flags} if data_quality_flags is not None else None
+        )
         if inner_position_flags:
-            data_quality_flags = _merge_into_top_level_flags(
-                data_quality_flags, inner_position_flags
+            top_level_flags = _merge_into_top_level_flags(
+                top_level_flags, inner_position_flags
             )
         if turnover_flags:
-            data_quality_flags = _merge_into_top_level_flags(
-                data_quality_flags, turnover_flags
+            top_level_flags = _merge_into_top_level_flags(
+                top_level_flags, turnover_flags
             )
 
         # Upgrade computation_status to 'complete_with_warnings' ONLY when
@@ -1752,8 +1773,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # alongside PR-7c). Until then, stay narrow: only the audit-#9
         # producer/consumer pair upgrades status.
         consumer_specific_flags = (
-            (data_quality_flags or {}).get("used_heuristic_capital")
-            or (data_quality_flags or {}).get("balance_error")
+            (top_level_flags or {}).get("used_heuristic_capital")
+            or (top_level_flags or {}).get("balance_error")
         )
         # When the consumer flag is suppressed (because the upstream
         # account_balance_unavailable / no_linked_api_key already
@@ -1769,18 +1790,19 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # B-01: single strategy_analytics upsert spreads metrics_result.metrics_json
         # AND attaches the merged trade_metrics + volume_aggregator + exposure
         # aggregates (without exposure_series, which moved to sibling_kinds).
+        upsert_payload: dict[str, Any] = {
+            "strategy_id": strategy_id,
+            "computation_status": computation_status_value,
+            "computation_error": None,
+            "data_quality_flags": top_level_flags,
+            **metrics_result.metrics_json,
+            "trade_metrics": merged_trade_metrics,
+            "volume_metrics": volume_aggregator,
+            "exposure_metrics": exposure_metrics,
+        }
         await db_execute(
             lambda: supabase.table("strategy_analytics").upsert(
-                {
-                    "strategy_id": strategy_id,
-                    "computation_status": computation_status_value,
-                    "computation_error": None,
-                    "data_quality_flags": data_quality_flags,
-                    **metrics_result.metrics_json,
-                    "trade_metrics": merged_trade_metrics,
-                    "volume_metrics": volume_aggregator,
-                    "exposure_metrics": exposure_metrics,
-                },
+                upsert_payload,
                 on_conflict="strategy_id",
             ).execute()
         )
@@ -1811,17 +1833,18 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                     str(exc),
                 )
                 try:
-                    existing = data_quality_flags or {}
+                    existing = top_level_flags or {}
                     existing["sibling_kinds_failed"] = True
                     # Audit 2026-05-07 G12.G.10: stable enum code, not raw exc.
                     existing["sibling_kinds_error"] = "SIBLING_BATCH_UPSERT_FAILED"
+                    flag_payload: dict[str, Any] = {
+                        "strategy_id": strategy_id,
+                        "data_quality_flags": existing,
+                    }
                     await db_execute(
                         lambda: supabase.table("strategy_analytics")
                         .upsert(
-                            {
-                                "strategy_id": strategy_id,
-                                "data_quality_flags": existing,
-                            },
+                            flag_payload,
                             on_conflict="strategy_id",
                         )
                         .execute()
@@ -1887,7 +1910,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         raise HTTPException(status_code=500, detail="Analytics computation failed")
 
 
-async def run_csv_strategy_analytics(strategy_id: str) -> dict:
+async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
     """Phase 19.1 / CSV → analytics pipeline Plan 02 Task 2.
 
     Analytics pipeline for source='csv' strategies. Loads
@@ -1954,7 +1977,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
         # (date asc) matches the (strategy_id, date) UNIQUE index from
         # the same migration so paginated rows cannot duplicate or
         # skip at page boundaries.
-        def _load_series():
+        def _load_series() -> list[dict[str, Any]]:
             return paginated_select(
                 supabase.table("csv_daily_returns")
                 .select("date, daily_return")
@@ -1970,7 +1993,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
             # history" instead of falling through to generic "missing
             # data" copy. Downstream consumers gate the chip on
             # data_quality_flags?.csv_source (src/lib/types.ts:335).
-            def _mark_failed():
+            def _mark_failed() -> None:
                 supabase.table("strategy_analytics").upsert(
                     {
                         "strategy_id": strategy_id,
@@ -2008,8 +2031,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
             data_quality_flags["benchmark_unavailable"] = True
             data_quality_flags["benchmark_note"] = "Benchmark data unavailable."
 
-        def _mark_complete():
-            payload = {
+        def _mark_complete() -> None:
+            payload: dict[str, Any] = {
                 "strategy_id": strategy_id,
                 "computation_status": "complete",
                 "computation_error": None,
@@ -2031,7 +2054,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
             # scalars. Now: sibling failure sets sibling_kinds_failed=True and
             # still returns 'complete' (scalars are intact).
             try:
-                def _upsert_siblings():
+                def _upsert_siblings() -> None:
                     supabase.rpc(
                         "upsert_strategy_analytics_series_batch",
                         {
@@ -2050,13 +2073,14 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
                     existing = data_quality_flags or {}
                     existing["sibling_kinds_failed"] = True
                     existing["sibling_kinds_error"] = "SIBLING_BATCH_UPSERT_FAILED"
+                    csv_flag_payload: dict[str, Any] = {
+                        "strategy_id": strategy_id,
+                        "data_quality_flags": existing,
+                    }
                     await db_execute(
                         lambda: supabase.table("strategy_analytics")
                         .upsert(
-                            {
-                                "strategy_id": strategy_id,
-                                "data_quality_flags": existing,
-                            },
+                            csv_flag_payload,
                             on_conflict="strategy_id",
                         )
                         .execute()
@@ -2087,7 +2111,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
             strategy_id, trunc.page_count, trunc.page_size, trunc.hint or "n/a",
         )
 
-        def _mark_truncated():
+        def _mark_truncated() -> None:
             supabase.table("strategy_analytics").upsert(
                 {
                     "strategy_id": strategy_id,
@@ -2121,7 +2145,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict:
         # pill survives the unrecoverable failure. Without it the
         # owner-side UI sees null data_quality_flags and falls back to
         # generic "missing data" copy instead of "CSV upload failed".
-        def _mark_unrecoverable():
+        def _mark_unrecoverable() -> None:
             supabase.table("strategy_analytics").upsert(
                 {
                     "strategy_id": strategy_id,
