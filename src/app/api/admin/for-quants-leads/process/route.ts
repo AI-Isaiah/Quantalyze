@@ -4,6 +4,7 @@ import { withAdminAuth } from "@/lib/api/withAdminAuth";
 import {
   markLeadProcessed,
   unmarkLeadProcessed,
+  leadExists,
   type SetLeadProcessedResult,
 } from "@/lib/for-quants-leads-admin";
 import { logAuditEventAsUser } from "@/lib/audit";
@@ -34,10 +35,19 @@ export const POST = withAdminAuth(
       : await markLeadProcessed(id);
 
     if (!result.ok && result.reason === "not_found") {
-      return NextResponse.json(
-        { error: "Lead not found or already in the requested state" },
-        { status: 404 },
-      );
+      // M-0269 (audit-2026-05-07 F5b): the conditional UPDATE in
+      // mark/unmarkLeadProcessed filters on `processed_at`, so a row ALREADY
+      // in the requested state matches 0 rows == "not_found",
+      // indistinguishable from a row that genuinely does not exist. A retried
+      // / double-submitted POST that lands after the first succeeded must not
+      // surface a hard error for an operation that already took effect.
+      // Disambiguate via the for_quants_leads service-role chokepoint:
+      //   row exists  -> already in target state -> 200 idempotent no-op
+      //   row missing -> genuinely not found     -> 404
+      if (await leadExists(id)) {
+        return NextResponse.json({ ok: true, noop: true });
+      }
+      return NextResponse.json({ error: "Lead not found" }, { status: 404 });
     }
     if (!result.ok) {
       return NextResponse.json({ error: "Update failed" }, { status: 500 });

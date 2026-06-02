@@ -34,6 +34,10 @@ const STATE = vi.hoisted(() => ({
   unmarkResult: { ok: true } as { ok: true } | { ok: false; reason: "not_found" } | { ok: false; reason: "unknown" },
   markCalls: [] as string[],
   unmarkCalls: [] as string[],
+  // M-0269: controls the route's existence-disambiguation SELECT in the
+  // helper-not_found branch — true ⇒ row exists (already in target state),
+  // false ⇒ row genuinely missing.
+  leadExists: true,
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -77,6 +81,9 @@ vi.mock("@/lib/for-quants-leads-admin", () => ({
     STATE.unmarkCalls.push(id);
     return STATE.unmarkResult;
   },
+  // M-0269: the route disambiguates a helper not_found via this existence
+  // check (kept in the for_quants_leads service-role chokepoint).
+  leadExists: async () => STATE.leadExists,
 }));
 
 const auditEmissions: Array<{
@@ -150,6 +157,7 @@ beforeEach(() => {
   STATE.unmarkResult = { ok: true };
   STATE.markCalls = [];
   STATE.unmarkCalls = [];
+  STATE.leadExists = true;
   auditEmissions.length = 0;
   auditServiceActors.length = 0;
 });
@@ -215,5 +223,29 @@ describe("POST /api/admin/for-quants-leads/process — C-0037", () => {
 
     expect(STATE.markCalls).toEqual([VALID_UUID]);
     expect(STATE.unmarkCalls).toHaveLength(0);
+  });
+
+  // M-0269: the conditional UPDATE returns 0 rows == "not_found" for BOTH a
+  // missing row and a row already in the target state. The route disambiguates
+  // with an existence SELECT so a retried/double-submitted POST that already
+  // succeeded gets an idempotent 200, not a spurious admin-facing error.
+  it("M-0269 — helper not_found + row exists (already in target state) → 200 idempotent no-op", async () => {
+    STATE.markResult = { ok: false, reason: "not_found" };
+    STATE.leadExists = true;
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ id: VALID_UUID }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ ok: true, noop: true });
+  });
+
+  it("M-0269 — helper not_found + row missing (genuinely absent) → 404", async () => {
+    STATE.markResult = { ok: false, reason: "not_found" };
+    STATE.leadExists = false;
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ id: VALID_UUID }));
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe("Lead not found");
   });
 });

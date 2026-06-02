@@ -158,6 +158,35 @@ export async function unmarkLeadProcessed(
   return toResult(data, error);
 }
 
+/**
+ * M-0269: distinguishes "row already in the requested state" from "row
+ * genuinely missing". The conditional UPDATE in mark/unmarkLeadProcessed
+ * filters on `processed_at`, so a no-op toggle matches 0 rows == not_found,
+ * indistinguishable from a missing row. The process route uses this to return
+ * an idempotent 200 for the already-in-state case instead of a spurious 404
+ * to a retried/double-submitted POST. Access stays in this service-role
+ * chokepoint so the Migration 030 discipline (every for_quants_leads call site
+ * goes through createAdminClient) holds — the route never touches the table.
+ */
+export async function leadExists(
+  id: string,
+  client?: SupabaseClient,
+): Promise<boolean> {
+  const admin = client ?? createAdminClient();
+  const { data, error } = await admin
+    .from("for_quants_leads")
+    .select("id")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) {
+    console.error("[for-quants-leads-admin] existence check failed:", error);
+    // Fail closed: treat an errored existence probe as "missing" so the route
+    // returns 404 rather than a misleading idempotent-success 200.
+    return false;
+  }
+  return data !== null;
+}
+
 function toResult(
   data: { id: string }[] | null,
   error: { message: string } | null,

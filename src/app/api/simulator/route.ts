@@ -13,6 +13,7 @@ import {
   isRateLimitMisconfigured,
 } from "@/lib/ratelimit";
 import { SimulatorRequestSchema } from "@/lib/api/simulatorSchema";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * Sprint 6 Task 6.4 — POST /api/simulator
@@ -24,6 +25,15 @@ import { SimulatorRequestSchema } from "@/lib/api/simulatorSchema";
  * The analytics-service endpoint does compute-heavy portfolio math on
  * every call, so rate limiting here is a protection against both
  * accidental loops (React re-render leaks) and adversarial scraping.
+ *
+ * M-0957 (audit-2026-05-07 round-2 Block D / P1947, F5b): every response —
+ * error AND success — carries `Cache-Control: private, no-store`. The 200
+ * body is user-specific portfolio metrics (Sharpe / MaxDD / correlation /
+ * equity curves); allocator-scoped payloads served from any shared cache
+ * (intermediate proxy, browser bfcache, service-worker) would leak
+ * cross-tenant. (Auth stays hand-rolled here — unlike /api/bridge this route
+ * has no approval gate, so it is intentionally NOT migrated to `withAuth`,
+ * which would silently add one.)
  */
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
@@ -35,14 +45,20 @@ export async function POST(req: NextRequest) {
   } = await supabase.auth.getUser();
 
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401, headers: NO_STORE_HEADERS },
+    );
   }
 
   let rawBody: unknown;
   try {
     rawBody = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Invalid JSON" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   const parsed = SimulatorRequestSchema.safeParse(rawBody);
@@ -52,7 +68,7 @@ export async function POST(req: NextRequest) {
         error:
           "portfolio_id and candidate_strategy_id are required and must be valid UUIDs",
       },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -69,7 +85,7 @@ export async function POST(req: NextRequest) {
         { error: "Rate limiter unavailable" },
         {
           status: 503,
-          headers: { "Retry-After": String(rl.retryAfter) },
+          headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
         },
       );
     }
@@ -84,7 +100,7 @@ export async function POST(req: NextRequest) {
       },
       {
         status: 429,
-        headers: { "Retry-After": String(rl.retryAfter) },
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
       },
     );
   }
@@ -103,7 +119,10 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (!portfolio) {
-    return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
+    return NextResponse.json(
+      { error: "Portfolio not found" },
+      { status: 404, headers: NO_STORE_HEADERS },
+    );
   }
 
   try {
@@ -112,20 +131,23 @@ export async function POST(req: NextRequest) {
       candidate_strategy_id,
       user.id,
     );
-    return NextResponse.json(result);
+    return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (err) {
     // Forward 4xx semantics from the Python service (e.g. 400 "already in
     // portfolio", 404 "portfolio not found") instead of flattening every
     // upstream error to 500. AnalyticsUpstreamError.message carries the Python
     // `detail` (operator-curated copy) — safe to forward on the 4xx path.
     if (err instanceof AnalyticsUpstreamError && err.status >= 400 && err.status < 500) {
-      return NextResponse.json({ error: err.message }, { status: err.status });
+      return NextResponse.json(
+        { error: err.message },
+        { status: err.status, headers: NO_STORE_HEADERS },
+      );
     }
     // M-0959/M-0963/L-0055: a timed-out Python round-trip is a gateway timeout.
     if (err instanceof AnalyticsTimeoutError) {
       return NextResponse.json(
         { error: "The simulator is taking longer than expected. Please try again." },
-        { status: 504 },
+        { status: 504, headers: NO_STORE_HEADERS },
       );
     }
     // M-0959/M-0963/L-0055: genuine 5xx / unexpected exceptions return a STATIC
@@ -139,7 +161,7 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json(
       { error: "Portfolio impact simulation failed." },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 }

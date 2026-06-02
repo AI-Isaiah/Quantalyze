@@ -92,7 +92,11 @@ export const GET = withAllocatorAuth(
         .select("id, name, codename, disclosure_tier, markets, strategy_types"),
     )
       .order("name", { ascending: true })
-      .limit(STRATEGY_BROWSE_LIMIT);
+      // M-0343 (audit-2026-05-07 F5b): fetch one row past the cap so the
+      // response can honestly signal truncation. Without a has_more flag a
+      // client silently sees only the first STRATEGY_BROWSE_LIMIT rows once
+      // the verified catalog grows past it, with no contract-level signal.
+      .limit(STRATEGY_BROWSE_LIMIT + 1);
 
     if (error) {
       console.error("[api/strategies/browse] select error:", error);
@@ -117,7 +121,16 @@ export const GET = withAllocatorAuth(
     // `name || codename` lets an attacker who knows a real strategy
     // name look it up and read its codename — defeating the
     // pseudonymity contract for the entire verified catalog.
-    const strategies: BrowseStrategyRow[] = (data ?? []).map((row) => {
+    // M-0343: the +1 probe row tells us the catalog exceeds the cap. Drop it
+    // from the payload and surface `has_more` so the drawer can warn instead
+    // of silently truncating. `limit` is echoed so the contract is
+    // self-describing and a future cursor/total field is an additive
+    // (non-breaking) change.
+    const rows = data ?? [];
+    const hasMore = rows.length > STRATEGY_BROWSE_LIMIT;
+    const pageRows = hasMore ? rows.slice(0, STRATEGY_BROWSE_LIMIT) : rows;
+
+    const strategies: BrowseStrategyRow[] = pageRows.map((row) => {
       const r = row as {
         id: string;
         name: string;
@@ -145,7 +158,7 @@ export const GET = withAllocatorAuth(
     });
 
     return NextResponse.json(
-      { strategies },
+      { strategies, has_more: hasMore, limit: STRATEGY_BROWSE_LIMIT },
       { status: 200, headers: NO_STORE_HEADERS },
     );
   },

@@ -184,6 +184,30 @@ describe("POST /api/simulator", () => {
     expect(body.error).toBe("Unauthorized");
   });
 
+  it("M-0957 — success AND 401 carry Cache-Control: private, no-store", async () => {
+    const { POST } = await import("./route");
+    // 200 success — user-specific portfolio metrics must never be shared-cached.
+    const ok = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        candidate_strategy_id: CANDIDATE_ID,
+      }),
+    );
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("Cache-Control")).toBe("private, no-store");
+
+    // 401 — the hand-rolled auth path stamps NO_STORE_HEADERS too.
+    STATE.authUser = null;
+    const unauth = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        candidate_strategy_id: CANDIDATE_ID,
+      }),
+    );
+    expect(unauth.status).toBe(401);
+    expect(unauth.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
   it("TC2 — 403 CSRF when origin allowlist fails", async () => {
     STATE.csrfShouldReject = true;
     const { POST } = await import("./route");

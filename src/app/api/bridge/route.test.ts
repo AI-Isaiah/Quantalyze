@@ -170,6 +170,31 @@ describe("POST /api/bridge", () => {
     expect(body.error).toBe("Unauthorized");
   });
 
+  it("M-0888/M-0889 — success AND 401 carry Cache-Control: private, no-store", async () => {
+    const { POST } = await import("./route");
+    // 200 success — user-specific BridgeCandidate[] must never be shared-cached.
+    STATE.findReplacementImpl = async () => ({ candidates: [] });
+    const ok = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("Cache-Control")).toBe("private, no-store");
+
+    // 401 — supplied by the withAuth wrapper this route now uses (M-0888).
+    STATE.authUser = null;
+    const unauth = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+    expect(unauth.status).toBe(401);
+    expect(unauth.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
   it("TC2 — 403 CSRF when origin allowlist fails", async () => {
     STATE.csrfShouldReject = true;
     const { POST } = await import("./route");

@@ -150,6 +150,13 @@ export function createMockSupabaseClient(store: MockStore): SupabaseClient {
         single() {
           return Promise.resolve(runSelect(true));
         },
+        // maybeSingle(): like single() but 0 rows resolves to data:null with no
+        // error (the real PostgREST distinction). runSelect(true) already
+        // returns `limited[0] ?? null`, so the mock's single/maybeSingle share
+        // semantics — adequate for callers that branch on data === null.
+        maybeSingle() {
+          return Promise.resolve(runSelect(true));
+        },
         // Thenable returns an actual Promise so `.catch()` chains work
         // and the object is safe to await multiple times in tests.
         then<TResult = unknown>(
