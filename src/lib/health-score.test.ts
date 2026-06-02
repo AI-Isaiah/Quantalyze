@@ -59,6 +59,33 @@ describe("computePortfolioHealthScore", () => {
     expect(computePortfolioHealthScore(null)).toBeNull();
   });
 
+  // F2 H-1076 — a portfolio with no computed data (any scored axis null) must
+  // NOT score as "Healthy". Before the fix, null coerced to 0 and the inverted
+  // drawdown/correlation math made 0 the BEST value: all-null → 0+25+25+20 = 70
+  // = "Healthy", a green badge over a portfolio with nothing computed.
+  it("H-1076: returns null when a scored axis is null (no false 'Healthy' over empty data)", () => {
+    // The exact empty/analytics-pending shape that previously scored 70.
+    expect(
+      computePortfolioHealthScore(
+        makeAnalytics({
+          portfolio_sharpe: null,
+          portfolio_max_drawdown: null,
+          avg_pairwise_correlation: null,
+        }),
+      ),
+    ).toBeNull();
+    // Any single missing scored axis is enough — health needs all three.
+    expect(
+      computePortfolioHealthScore(makeAnalytics({ portfolio_max_drawdown: null })),
+    ).toBeNull();
+    expect(
+      computePortfolioHealthScore(makeAnalytics({ avg_pairwise_correlation: null })),
+    ).toBeNull();
+    expect(
+      computePortfolioHealthScore(makeAnalytics({ portfolio_sharpe: null })),
+    ).toBeNull();
+  });
+
   it("awards full 25 pts per scored component for perfect inputs", () => {
     // sharpe=2.0 → 25, dd=0 → 25, corr=0.1 → 25, capacity placeholder=20.
     const result = computePortfolioHealthScore(
@@ -163,27 +190,26 @@ describe("computePortfolioHealthScore", () => {
     expect(result.color).toBe("warning");
   });
 
-  it("treats missing sharpe/drawdown/correlation as 0 via ?? fallback (no crash)", () => {
-    const result = computePortfolioHealthScore(
-      makeAnalytics({
-        portfolio_sharpe: null,
-        portfolio_max_drawdown: null,
-        avg_pairwise_correlation: null,
-      }),
-    )!;
-    // sharpe ?? 0 → 0 pts; dd ?? 0 → 25 pts (0% DD is best); corr ?? 0 → 25
-    // pts (0 corr is best); capacity 20 → total 70 → Healthy boundary.
-    expect(result.components.sharpe).toBe(0);
-    expect(result.components.drawdown).toBe(25);
-    expect(result.components.correlation).toBe(25);
-    expect(result.components.capacity).toBe(20);
-    expect(result.total).toBe(70);
-    expect(result.label).toBe("Healthy");
+  it("H-1076: all-null scored axes return null, NOT a fabricated 70 'Healthy'", () => {
+    // REGRESSION (was the bug): this exact input previously coerced each null
+    // to 0 via `?? 0`, and the inverted drawdown/correlation math made 0 the
+    // BEST value (0 DD → 25, 0 corr → 25), so all-null scored 0+25+25+20 = 70 =
+    // "Healthy" — a green badge over a portfolio with nothing computed. The fix
+    // returns null when any scored axis is missing.
+    expect(
+      computePortfolioHealthScore(
+        makeAnalytics({
+          portfolio_sharpe: null,
+          portfolio_max_drawdown: null,
+          avg_pairwise_correlation: null,
+        }),
+      ),
+    ).toBeNull();
   });
 
   it("treats the HEALTHY threshold as inclusive (total === 70 is Healthy)", () => {
     // Locks the `>=` boundary so a future `>` tweak that shifts the band
-    // would fail. The null-fallback case above produces exactly 70.
+    // would fail. Uses explicit non-null zeros to land exactly on 70.
     const result = computePortfolioHealthScore(
       makeAnalytics({
         portfolio_sharpe: 0,
