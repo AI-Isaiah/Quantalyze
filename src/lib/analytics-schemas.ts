@@ -99,9 +99,19 @@ export const PortfolioOptimizerResponseSchema = z.object({
 }).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; suggestions are open-shaped by design (Python fans out per-candidate), wrapper pinned, never spread into a write
 
 // --- /api/verify-strategy ---
+// `results` + `matched_strategy_id` are CONSUMED by verify-strategy/route.ts:396
+// (`results` is spread into the strategy_verifications.metrics_snapshot JSONB
+// column; matched_strategy_id is folded in). Model them explicitly so the
+// write-fed shape is typed and the schema default-STRIPS the unconsumed
+// top-level twr/sharpe/return_* forward-compat fields instead of passing them
+// through — closing the boundary honestly (B9; corrects a prior `.passthrough()`
+// whose escape rationale wrongly claimed "never spread into a write": `results`
+// IS spread into a write, but into a JSONB sink so there was no PGRST204 break).
 export const VerifyStrategyResponseSchema = z.object({
   verification_id: z.string(),
-}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; only verification_id is read, never spread into a write
+  results: z.record(z.string(), z.unknown()).nullable().optional(),
+  matched_strategy_id: z.string().nullable().optional(),
+});
 
 // --- /api/match/recompute ---
 // Every branch carries a `status` discriminator so callers can switch on a

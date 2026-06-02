@@ -126,6 +126,12 @@ function inlineCheckSet(fileName: string, column: string): string[] {
  * migration that re-adds/narrows an inline-checked column via a named
  * ADD CONSTRAINT (the DROP-then-ADD idiom B9 itself uses for strategy_analytics)
  * is then detected, not silently compared against the stale CREATE-time set.
+ *
+ * Assumption: a value-set CHECK on a pinned column follows the canonical
+ * `<table>_<column>_check` name. A future narrowing under a NON-canonical
+ * constraint name would fall back to the inline CREATE set (no current instance —
+ * the only non-canonically-named CHECKs in the corpus are XOR/coherence
+ * constraints, not value-set CHECKs on a pinned column).
  */
 function resolveColumnCheck(table: string, column: string, createFile: string): string[] {
   return latestNamedCheckSet(`${table}_${column}_check`) ?? inlineCheckSet(createFile, column);
@@ -290,11 +296,32 @@ const SPECS: Spec[] = [
 ];
 
 describe("[B9] CHECK ↔ Zod parity matrix", () => {
-  it("pins a non-trivial set of column pairs (fail-loud on accidental truncation)", () => {
+  it("pins exactly the expected column set (identity, not just count — a drop-one/add-one swap fails)", () => {
+    // Identity, not a >=N floor: a count-only guard lets a malicious/accidental
+    // drop-one-add-one swap net green. Pin the exact set so dropping any pinned
+    // column fails even if another is added. Add coverage by editing this list
+    // deliberately.
+    const EXPECTED_COLUMNS = [
+      "strategy_analytics.computation_status",
+      "compute_jobs.status",
+      "compute_jobs.error_kind",
+      "compute_jobs.exchange",
+      "profiles.role",
+      "user_app_roles.role",
+      "user_notes.scope_kind",
+      "contact_requests.status",
+      "contact_requests.source",
+      "bridge_outcomes.rejection_reason",
+      "allocator_preferences.liquidity_preference",
+      "match_decisions.kind",
+      "match_decisions.decision",
+      "portfolio_alerts.severity",
+    ];
     expect(
-      SPECS.length,
-      "B9 parity SPECS shrank unexpectedly — did a pinned pair get dropped?",
-    ).toBeGreaterThanOrEqual(14);
+      SPECS.map((s) => s.column).sort(),
+      "B9 parity column set drifted — a pinned pair was dropped/renamed (a drop-one/add-one " +
+        "swap would slip past a count-only guard). Update EXPECTED_COLUMNS deliberately if adding coverage.",
+    ).toEqual([...EXPECTED_COLUMNS].sort());
   });
 
   it.each(SPECS)("$column — TS set == latest SQL CHECK", (spec) => {

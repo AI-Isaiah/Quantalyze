@@ -104,6 +104,16 @@ export const LIQUIDITY_PREFERENCES = ["high", "medium", "low"] as const;
 // DISTINCT from portfolio_analytics.computation_status (a DIFFERENT table whose
 // 4-value CHECK has no 'complete_with_warnings' — see portfolio-analytics-
 // adapter.ts COMPUTATION_STATUSES). Do not conflate the two.
+//
+// SURFACING CAVEAT (red-team 2026-06-02): the CHECK widening prevents the latent
+// 23514 that would reject the worker's whole metrics upsert on the warnings path
+// (its proven value). It does NOT by itself make 'complete_with_warnings' surface
+// end-to-end: on the compute-jobs QUEUE path the 038 RPC
+// sync_strategy_analytics_status clobbers it back to 'complete' when all jobs
+// finish, and two consumer gates still exact-match 'complete' (queries.ts:667
+// getStrategyV2Panels; admin/strategy-review/route.ts:148). Completing that
+// surfacing (RPC-preserve + a shared isComputedAnalytics() gate) is a tracked
+// B3-completion follow-up, OUT of B9's boundary-parity scope.
 export const STRATEGY_ANALYTICS_COMPUTATION_STATUSES = [
   "pending",
   "computing",
