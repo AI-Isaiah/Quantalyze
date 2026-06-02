@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.58] - 2026-06-02
+### Removed — F3: delete the dead `/api/activity/portfolio` endpoint (audit-2026-05-07)
+
+Removes `src/app/api/activity/portfolio/route.ts` and its test — a confirmed dead, broken endpoint. Closes audit findings **H-0205 / H-0206 / H-0209 / M-0258 / M-0259** by removal rather than by patching code no caller reaches.
+
+- **Dead:** its only two consumers — the `TradeVolume` and `TradingActivityLog` dashboard widgets — were deleted in #368 (`b7b-2`, v0.24.15.20, "prune orphaned widget-grid renderers"). A whole-repo + git-history sweep (and an independent fresh-context adversarial verifier) found zero live references: no fetch, no dynamic URL builder, no catch-all/proxy route, no e2e/Python/cron/middleware/`vercel.json`/docs consumer.
+- **Broken:** the route `.select(...realized_pnl...)` from `trades`, but `realized_pnl` has never existed on that table (it lives only on `positions`); both the original `CREATE TABLE trades` and the `trades_raw_fills` migration confirm the column set. A direct authenticated hit would 500/PGRST-42703, not serve data — no data leak, no data loss, but also nothing usable. Its `route.test.ts` mock fabricated the non-existent `realized_pnl` column, pinning fiction.
+- **Why delete vs. patch:** the endpoint is unconsumed, and any future widget rebuild would have to rewrite the query against real columns (`cost` for volume, a `positions` join for realized P&L) regardless — so patching it now would be speculative code for no caller. Matches the campaign's existing "delete dead route" disposition (F12 H-0317).
+- Also removes the now-orphaned `DailyPnlRow` interface from `src/lib/types.ts` — it was imported only by the deleted route, so it became dead the moment the route went.
+- Gates: `tsc` clean, lint 0 errors, full vitest 5851 passed / 0 failed. Self-contained test removal — no shared fixture touched.
+
 ## [0.24.15.57] - 2026-06-02
 ### Changed — B-mypy g1: 11 analytics services → `mypy --strict` 0 (mechanical + trivial narrows)
 

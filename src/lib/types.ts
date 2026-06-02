@@ -1683,15 +1683,6 @@ export interface WeightSnapshot {
   created_at: string;
 }
 
-export interface DailyPnlRow {
-  date: string;
-  strategy_id: string;
-  strategy_name: string;
-  symbol: string;
-  pnl_usd: number;
-  exchange: string;
-}
-
 export interface UserNote {
   id: string;
   user_id: string;
