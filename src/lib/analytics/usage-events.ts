@@ -45,9 +45,16 @@ function getServerClient(): PostHog | null {
 
   _serverClient = new PostHog(key, {
     host: process.env.NEXT_PUBLIC_POSTHOG_HOST ?? "https://us.i.posthog.com",
-    // flushAt:1 so events ship even on Vercel function cold-finish.
     flushAt: 1,
     flushInterval: 0,
+    // The wrapper uses captureImmediate (awaits the HTTP POST). Several LIVE
+    // callers await it INLINE in a request/render path (usage/session-start,
+    // onboarding-funnel → /allocations), so bound the retry budget (default
+    // 3 × 3s ≈ up to ~9-20s on a PostHog incident) to 1 × 500ms — worst-case
+    // ~1s added latency while still surviving a single transient blip.
+    // Telemetry must never hang a request.
+    fetchRetryCount: 1,
+    fetchRetryDelay: 500,
   });
   return _serverClient;
 }
@@ -70,12 +77,24 @@ export async function trackUsageEventServer(
   if (!client) return;
 
   try {
-    client.capture({
+    // H-0416/M-0486 (sibling): use captureImmediate, NOT capture(). posthog-node
+    // 5.29.2's capture() defers the enqueue behind an async prepareEventMessage
+    // and returns void, so the event is NOT on the wire when this function's
+    // awaited promise resolves — on Vercel Fluid Compute the instance can suspend
+    // first and drop it. Unlike the (dead) for-quants wrapper, this one has LIVE
+    // callers (usage/session-start, intro, alerts/[id]/acknowledge, alerts/ack)
+    // that fire it inside after(), so the drop was real. captureImmediate() builds
+    // the batch and awaits the HTTP POST in one returned promise.
+    await client.captureImmediate({
       distinctId,
       event,
       properties: {
         ...(properties ?? {}),
-        $host: process.env.NEXT_PUBLIC_SITE_URL ?? "quantalyze.com",
+        // M-0487 (sibling): never fall back to "quantalyze.com" (an unrelated WP
+        // site; prod is quantalyze-rho.vercel.app) — that made preview/missing-env
+        // session/intro/alert events masquerade as prod traffic in PostHog funnel
+        // attribution. Neutral, filterable, clearly-non-prod sentinel instead.
+        $host: process.env.NEXT_PUBLIC_SITE_URL ?? "unknown.local",
         source_layer: "server",
       },
     });
