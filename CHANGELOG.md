@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.59] - 2026-06-02
+### Fixed — Match-queue analytics blank (strategy_analytics.total_aum schema-mismatch)
+
+`getAllocatorMatchPayload` (`src/lib/admin/match.ts`) enriched every match candidate with a `strategy_analytics` projection that listed **`total_aum`** — a column that lives on `portfolio_analytics`, never `strategy_analytics`. PostgREST 42703'd the whole projection; because the admin client has no `throwOnError` and the call site didn't capture `error`, the failure was **silently swallowed** → `analyticsRows = null` → every candidate's `analytics` went null. Net effect: the analytics panel (sharpe / sortino / max_drawdown / sparkline / …) rendered **blank for every candidate on both the admin Match-queue and the public demo** — a latent bug that never worked in production.
+
+- **Fix:** removed `total_aum` (per-strategy AUM already comes from `strategies.aum` on the candidate join, masked separately for exploratory tiers). Extracted the projection to an exported `STRATEGY_ANALYTICS_MATCH_COLUMNS` constant.
+- **Fail loud:** the analytics query now captures and throws on its error, matching the file's own fan-out convention (the 5 sibling queries already `throw` on error) instead of silently degrading.
+- **Regression guard:** `strategy-analytics-match-columns-schema-sync.test.ts` parses `strategy_analytics`'s real columns from the migrations (CREATE TABLE + ALTER ADD COLUMN) and asserts the projection is a subset, plus a live-DB projection check. Proven to fail with `total_aum` reintroduced.
+- Cleaned the now-vestigial `total_aum` refs the bad column left behind: removed the false `total_aum: number | null` field from `AllocatorMatchQueue`'s analytics type and the dead `analytics?.total_aum ??` branch in `CandidateDetail` (the "Manager AUM" metric already fell through to `strategy.aum`, its real source).
+- Found by a schema-mismatch sweep generalizing the F3 root cause (236 `.select()` sites checked vs the real schema; this was the only confirmed bug, 0 false positives). Same dead-column class as F3; the swallow is an F1 loud-fail violation.
+- Gates: tsc clean, lint 0 errors, full vitest 5853 passed / 0 failed. No demo-masking change — the exploratory exfil controls (`EXPLORATORY_MASKED_STRATEGY_FIELDS` incl. `aum`) are untouched; performance ratios were always intended to be visible per the route's own contract.
+
 ## [0.24.15.58] - 2026-06-02
 ### Removed — F3: delete the dead `/api/activity/portfolio` endpoint (audit-2026-05-07)
 

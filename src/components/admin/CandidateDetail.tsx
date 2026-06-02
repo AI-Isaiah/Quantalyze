@@ -77,7 +77,7 @@ export function CandidateDetail({
         <Metric label="Total return" value={fmtPct(analytics?.cumulative_return)} />
         <Metric
           label="Manager AUM"
-          value={fmtUsd(analytics?.total_aum ?? strategy?.aum)}
+          value={fmtUsd(strategy?.aum)}
         />
         <Metric
           label="Track record"
