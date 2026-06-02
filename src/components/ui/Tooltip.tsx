@@ -1,6 +1,13 @@
 "use client";
 
-import { useState, useId, useRef, useCallback, type ReactNode } from "react";
+import {
+  useState,
+  useId,
+  useRef,
+  useCallback,
+  useEffect,
+  type ReactNode,
+} from "react";
 
 /**
  * Lightweight accessible tooltip — no external dependency.
@@ -27,6 +34,11 @@ export function Tooltip({ content, children, className }: TooltipProps) {
   const id = useId();
 
   const show = useCallback(() => {
+    // F9 M-0898: clear any still-pending enter timer before queuing a new one.
+    // Without this a rapid focus-then-hover (or a synthetic re-fire) orphans the
+    // first timeout — it keeps running and fires an extra setOpen(true) on an
+    // already-open tooltip.
+    if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => setOpen(true), 150);
   }, []);
 
@@ -34,6 +46,18 @@ export function Tooltip({ content, children, className }: TooltipProps) {
     if (timerRef.current) clearTimeout(timerRef.current);
     setOpen(false);
   }, []);
+
+  // F9 M-0899 / L-0044: cancel a pending enter timer on unmount so the delayed
+  // setOpen never fires after the component is gone. `hide` only clears on
+  // blur/mouseleave; a parent that unmounts mid-hover (KPI strip re-render,
+  // panel close, route change during the 150ms delay) would otherwise leak the
+  // timer + trigger a post-unmount state update.
+  useEffect(
+    () => () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    },
+    [],
+  );
 
   return (
     <span
