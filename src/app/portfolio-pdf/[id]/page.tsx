@@ -4,6 +4,7 @@ import { formatCurrency, formatPercent, formatNumber } from "@/lib/utils";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
 import { verifyPdfRenderToken } from "@/lib/pdf-render-token";
+import { formatDataVintage } from "./vintage";
 import type { Portfolio, StrategyAnalytics } from "@/lib/types";
 import type { Metadata } from "next";
 
@@ -134,6 +135,18 @@ export default async function PortfolioPdfPage({
     day: "numeric",
   });
 
+  // B14: the render date ("Generated …") is NOT the data vintage. Surface the
+  // analytics `computed_at` so a report rendered today off week-old analytics
+  // doesn't read as current (formatDataVintage routes through the freshness SoT).
+  //
+  // Read from the adapted `analytics` (line 97), NOT the raw row: this file
+  // mandates every portfolio_analytics read go through adaptPortfolioAnalytics
+  // (see comment above), so the vintage line stays consistent with the KPI
+  // body — when the adapter rejects a malformed/unknown-status row both go
+  // null together (vintage falls to "Data freshness unavailable"), never a
+  // confident "Data as of …" header over an em-dash body.
+  const dataVintage = formatDataVintage(analytics?.computed_at ?? null);
+
   const kpis = [
     { label: "AUM", value: formatCurrency(analytics?.total_aum) },
     { label: "TWR (total)", value: formatPercent(analytics?.total_return_twr) },
@@ -167,6 +180,7 @@ export default async function PortfolioPdfPage({
             Portfolio Report
           </p>
           <p className="text-[10px] text-text-muted">Generated {generatedAt}</p>
+          <p className="text-[10px] text-text-muted">{dataVintage}</p>
         </div>
       </div>
 
