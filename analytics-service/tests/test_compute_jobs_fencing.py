@@ -2460,3 +2460,148 @@ def test_low_priority_throttled_when_normal_backlog_present(admin):
                 admin.table("strategies").delete().eq("id", sid).execute()
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# NEW-C12-05 (CL12): advance_sync_cursor epilogue claim-token fence
+# ---------------------------------------------------------------------------
+# Migration 20260602173710 fences the sync_trades epilogue cursor write on the
+# same claim_token contract as the terminal mark (mig 117) and defer
+# (20260529170000): a worker whose job the watchdog reclaimed and another
+# worker re-claimed must NOT advance the cursor. The worker side (token
+# threading + orphan-block logging) is pinned by
+# tests/test_job_worker.py::TestAdvanceSyncCursorFence; this proves the SQL
+# fence semantics against the live test project.
+
+
+def test_advance_sync_cursor_fence_owned_orphan_backcompat(admin, strategy_id):
+    """Owned token → TRUE; reclaimed (token rotated OR status flipped) → FALSE;
+    NULL token (back-compat arm) → TRUE regardless of ownership."""
+    job = admin.table("compute_jobs").insert({
+        "strategy_id": strategy_id,
+        "kind": "sync_trades",
+        "status": "pending",
+        "priority": "normal",
+        "exchange": "okx",
+    }).execute().data[0]
+    job_id = job["id"]
+    # A random api_key id suffices: the fence returns BEFORE the api_keys
+    # UPDATE when not owned, and the UPDATE harmlessly affects 0 rows when
+    # owned — so the ownership branch is exercised without seeding a real key
+    # (which would need NOT-NULL encrypted-credential columns).
+    fake_key = str(uuid.uuid4())
+    _ts = "2026-06-02T00:00:00+00:00"
+
+    def _advance(token):
+        return _rpc_retry_timeout(lambda: admin.rpc("advance_sync_cursor", {
+            "p_api_key_id": fake_key,
+            "p_job_id": job_id,
+            "p_claim_token": token,
+            "p_last_fetched_ts": _ts,
+            "p_last_sync_at": _ts,
+            "p_account_balance": 100,
+        }).execute())
+
+    try:
+        claimed = _claim_one(admin, "advance-fence-test")
+        assert claimed is not None and claimed["id"] == job_id
+        token = claimed["claim_token"]
+        assert token is not None
+
+        # (1) Owned: matching token on a still-running row → TRUE.
+        assert _advance(token).data is True, "owned job must return TRUE"
+
+        # (2) Reclaim by token rotation (W2 re-claims under a fresh token):
+        # W1's stale token no longer matches → FALSE, write dropped.
+        new_token = str(uuid.uuid4())
+        admin.table("compute_jobs").update(
+            {"claim_token": new_token}
+        ).eq("id", job_id).execute()
+        assert _advance(token).data is False, (
+            "reclaimed job (rotated token) must return FALSE so the orphan's "
+            "epilogue write is dropped"
+        )
+
+        # (3) Reclaim by status flip (watchdog reset to pending before
+        # re-claim): even the current token must not write a non-running row.
+        admin.table("compute_jobs").update(
+            {"status": "pending"}
+        ).eq("id", job_id).execute()
+        assert _advance(new_token).data is False, (
+            "non-running job must return FALSE (fence requires status=running)"
+        )
+
+        # (4) Back-compat: NULL token bypasses the fence (deploy-window /
+        # WORKER_FENCE_V2 off) and writes unconditionally → TRUE.
+        assert _advance(None).data is True, (
+            "NULL token (back-compat arm) must return TRUE regardless of ownership"
+        )
+    finally:
+        admin.table("compute_jobs").delete().eq("id", job_id).execute()
+
+
+def test_advance_sync_cursor_monotonic_guard_no_regress(admin):
+    """The RPC's SQL CASE guard must advance each timestamp cursor only when
+    strictly newer (a slow/preempted worker cannot regress it) while the
+    balance, which has no ordering semantics, is overwritten unconditionally.
+
+    Uses the back-compat NULL-token write path against a real seeded api_key
+    so the UPDATE actually lands and the persisted columns are observable.
+    """
+    user_id = _seed_user_id(admin)
+    key = admin.table("api_keys").insert({
+        "user_id": user_id,
+        "exchange": "okx",
+        "label": f"advance-monotonic-{uuid.uuid4().hex[:8]}",
+        "api_key_encrypted": "test-placeholder",
+    }).execute().data[0]
+    key_id = key["id"]
+
+    high = "2026-06-02T12:00:00+00:00"
+    low = "2026-06-01T00:00:00+00:00"
+    higher = "2026-06-03T00:00:00+00:00"
+
+    def _advance(ts, bal):
+        return _rpc_retry_timeout(lambda: admin.rpc("advance_sync_cursor", {
+            "p_api_key_id": key_id,
+            "p_job_id": None,
+            "p_claim_token": None,  # back-compat: unconditional write
+            "p_last_fetched_ts": ts,
+            "p_last_sync_at": ts,
+            "p_account_balance": bal,
+        }).execute())
+
+    def _read():
+        return admin.table("api_keys").select(
+            "last_sync_at,last_fetched_trade_timestamp,account_balance_usdt"
+        ).eq("id", key_id).single().execute().data
+
+    try:
+        # Establish a HIGH watermark.
+        _advance(high, 100)
+        row = _read()
+        assert row["last_sync_at"][:19] == high[:19], row["last_sync_at"]
+        assert float(row["account_balance_usdt"]) == 100.0
+
+        # Stale write (older ts, newer balance): timestamps must NOT regress,
+        # but the balance overwrites (no ordering).
+        _advance(low, 55)
+        row = _read()
+        assert row["last_sync_at"][:19] == high[:19], (
+            f"last_sync_at regressed to a stale value: {row['last_sync_at']}"
+        )
+        assert row["last_fetched_trade_timestamp"][:19] == high[:19], (
+            f"last_fetched_trade_timestamp regressed: {row['last_fetched_trade_timestamp']}"
+        )
+        assert float(row["account_balance_usdt"]) == 55.0, (
+            "balance has no ordering — a later write must overwrite it"
+        )
+
+        # Genuinely newer write advances the cursor.
+        _advance(higher, 70)
+        row = _read()
+        assert row["last_sync_at"][:19] == higher[:19], (
+            f"last_sync_at must advance to a strictly newer value: {row['last_sync_at']}"
+        )
+    finally:
+        admin.table("api_keys").delete().eq("id", key_id).execute()
