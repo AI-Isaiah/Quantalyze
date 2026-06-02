@@ -583,7 +583,24 @@ function DesignHoldingsTable({
                             // unmounts. Without this the banner re-renders
                             // from the memoized prop and the user sees no
                             // feedback until full page reload.
-                            router.refresh();
+                            //
+                            // H-1220 (loud-fail): the server decision is
+                            // already committed by the time onDismiss fires.
+                            // If router.refresh() throws (auth blip, network
+                            // failure), the banner never unmounts and the user
+                            // is left staring at a "dismissed" strip with no
+                            // feedback that the view is stale. Swallowing that
+                            // silently is the exact failure-vs-success conflation
+                            // F1 closes — surface it so the dropped refresh is
+                            // observable rather than invisible.
+                            try {
+                              router.refresh();
+                            } catch (err) {
+                              console.error(
+                                "[HoldingsTable] router.refresh after banner dismiss failed",
+                                err,
+                              );
+                            }
                           }}
                         />
                       </td>

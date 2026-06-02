@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { SendIntroPanel } from "./SendIntroPanel";
 import type { CandidateRow } from "@/components/admin/AllocatorMatchQueue";
@@ -24,8 +24,6 @@ import type { CandidateRow } from "@/components/admin/AllocatorMatchQueue";
 
 const ALLOCATOR_ID = "11111111-1111-4111-8111-111111111111";
 const CANDIDATE_STRATEGY_ID = "22222222-2222-4222-8222-222222222222";
-const HOLDINGS_URL = `/api/admin/allocators/${ALLOCATOR_ID}/holdings`;
-const SEND_INTRO_URL = "/api/admin/match/send-intro";
 
 const CANDIDATE: CandidateRow = {
   id: "cand-1",
@@ -175,6 +173,31 @@ describe("SendIntroPanel — holdings fetch/state (M-0389)", () => {
     // is false but originalStrategyId stays empty).
     const sendBtn = screen.getByRole("button", { name: /send intro/i });
     expect((sendBtn as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("does NOT claim 'no holdings' when the fetch fails (H-0359 — failure ≠ empty)", async () => {
+    // A transient backend error (500) must surface as a load FAILURE, never as
+    // the definitive business fact "this allocator has no current holdings".
+    // Before the fix the catch block called setHoldings([]), which flipped
+    // holdingsEmpty true and rendered the loud red "Cannot send intro" banner —
+    // misleading the admin into thinking the portfolio was genuinely empty.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    installRoutedFetch({ holdingsFail: true });
+    renderPanel();
+    // The inline load-failure message is shown…
+    await screen.findByText(/Failed to load holdings/i);
+    // …but the empty-portfolio banner and its body copy must NOT appear: we
+    // could not reach the server, so we cannot assert the allocator is empty.
+    expect(screen.queryByText("Cannot send intro")).toBeNull();
+    expect(
+      screen.queryByText(/Allocator has no current holdings/i),
+    ).toBeNull();
+    // The swallowed failure must be observable in logs (loud-fail discipline).
+    expect(errSpy).toHaveBeenCalledWith(
+      "[SendIntroPanel] holdings load failed",
+      expect.anything(),
+    );
+    errSpy.mockRestore();
   });
 
   it("filters out the candidate strategy itself — only holding == candidate yields the empty block", async () => {

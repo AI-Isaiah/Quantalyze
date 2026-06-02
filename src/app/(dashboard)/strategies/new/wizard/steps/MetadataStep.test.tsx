@@ -29,6 +29,14 @@ vi.mock("@/lib/supabase/client", () => ({
   }),
 }));
 
+// M-0248 (F1 loud-fail): an unreadable discovery_categories table must
+// fire wizard_error telemetry so the founder/ops team gets a signal —
+// not just show inline copy. We assert the analytics payload directly.
+const trackMock = vi.fn();
+vi.mock("@/lib/for-quants-analytics", () => ({
+  trackForQuantsEventClient: (...args: unknown[]) => trackMock(...args),
+}));
+
 const CATS = [
   { id: "cat-aaa", name: "Market Neutral" },
   { id: "cat-bbb", name: "Directional" },
@@ -49,6 +57,7 @@ describe("[H-0191] MetadataStep", () => {
     orderResult = { data: CATS, error: null };
     baseProps.onComplete = vi.fn();
     baseProps.onBack = vi.fn();
+    trackMock.mockClear();
   });
 
   it("auto-selects categories[0] when categoryId is null and data is non-empty", async () => {
@@ -63,6 +72,43 @@ describe("[H-0191] MetadataStep", () => {
     expect(
       await screen.findByText(/Could not load strategy categories\./i),
     ).toBeInTheDocument();
+  });
+
+  it("[M-0248] fires wizard_error telemetry when the category select errors", async () => {
+    // Loud-fail: an RLS regression / Supabase outage that makes
+    // discovery_categories unreadable must emit observable telemetry so
+    // the founder/ops team sees the user is blocked — the inline copy
+    // alone is invisible to them. Asserting the exact code so an
+    // "UNKNOWN" or missing event cannot satisfy the test.
+    orderResult = { data: null, error: { message: "rls denied" } };
+    render(<MetadataStep {...baseProps} />);
+
+    await waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const call = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    ) as unknown[] | undefined;
+    expect(call).toBeDefined();
+    const payload = call![1] as {
+      code: string;
+      step: string;
+      wizard_session_id: string;
+    };
+    expect(payload.code).toBe("METADATA_CATEGORY_LOAD_FAILED");
+    expect(payload.step).toBe("metadata");
+    expect(payload.wizard_session_id).toBe("session-1");
+  });
+
+  it("[M-0248] does NOT fire wizard_error on a genuine empty (readable) result", async () => {
+    // Discriminate failure from empty: zero categories that read cleanly
+    // is a legitimate (if degenerate) state, not an error — no telemetry.
+    orderResult = { data: [], error: null };
+    render(<MetadataStep {...baseProps} />);
+    // Let the effect settle.
+    await screen.findByLabelText("Category");
+    const errored = trackMock.mock.calls.some(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    );
+    expect(errored).toBe(false);
   });
 
   it("pre-selects the canonical exchange chip from detectedExchange (lowercase → canonical)", () => {

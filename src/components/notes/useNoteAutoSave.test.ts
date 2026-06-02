@@ -184,6 +184,47 @@ describe("useNoteAutoSave", () => {
     expect(result.current.lastSavedAt).toBe(lastSavedAfterSecond);
   });
 
+  it("M-1160: a stale (superseded) save response is logged via console.debug so the dropped save is traceable", async () => {
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+    let resolveFirst!: (r: Response) => void;
+    const firstPromise = new Promise<Response>((r) => {
+      resolveFirst = r;
+    });
+    let resolveSecond!: (r: Response) => void;
+    const secondPromise = new Promise<Response>((r) => {
+      resolveSecond = r;
+    });
+
+    fetchSpy
+      .mockReturnValueOnce(firstPromise)
+      .mockReturnValueOnce(secondPromise);
+
+    const { result } = renderHook(() => useNoteAutoSave("portfolio", "abc"));
+
+    let firstDone: Promise<void> | null = null;
+    let secondDone: Promise<void> | null = null;
+    await act(async () => {
+      firstDone = result.current.save("a");
+      secondDone = result.current.save("b");
+    });
+
+    // Second (current generation) settles first.
+    await act(async () => {
+      resolveSecond(makeResponse(200, { updated_at: "second" }));
+      await secondDone;
+    });
+    expect(debugSpy).not.toHaveBeenCalled();
+
+    // First settles late — its response is stale and must be logged on drop.
+    await act(async () => {
+      resolveFirst(makeResponse(200, { updated_at: "first" }));
+      await firstDone;
+    });
+    expect(debugSpy).toHaveBeenCalledTimes(1);
+    expect(debugSpy.mock.calls[0][0]).toContain("stale save response dropped");
+  });
+
   it("does NOT flush on unmount — fire-and-forget exit contract (S2)", async () => {
     // Mount hook, do NOT call save(), unmount. Expect zero fetch calls.
     const { unmount } = renderHook(() =>

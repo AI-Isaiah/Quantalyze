@@ -151,6 +151,74 @@ describe("<ReplacementPanel> — H-1077", () => {
     );
   });
 
+  // M-0905 (F1 loud-fail discipline): the inline error UI alone leaves
+  // operators with zero log signal, so a bridge-scoring regression in the
+  // Python service would show up only as silent in-app toasts. The swallowed
+  // catch branch MUST emit a tagged `[bridge.fetch]` breadcrumb carrying the
+  // request context so the failure rate is observable/aggregatable. These
+  // tests fail if the console.error is dropped (regression) OR if it fires on
+  // a genuine success/empty load (over-firing).
+  it("logs the bridge failure via console.error with a stable prefix when the fetch returns non-OK", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockFetch(async () =>
+      new Response(JSON.stringify({ error: "Bridge service unavailable" }), {
+        status: 500,
+      }),
+    );
+
+    renderPanel();
+
+    await waitFor(() =>
+      expect(screen.getByText("Bridge service unavailable")).toBeInTheDocument(),
+    );
+
+    const tagged = errorSpy.mock.calls.find(
+      (call) => typeof call[0] === "string" && call[0].includes("[bridge.fetch]"),
+    );
+    expect(tagged).toBeDefined();
+    // Breadcrumb must carry the request context operators need to aggregate.
+    expect(tagged?.[1]).toMatchObject({ portfolioId: "p-1", strategyId: "under-1" });
+  });
+
+  it("logs the bridge failure via console.error with a stable prefix when the fetch rejects", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockFetch(async () => {
+      throw new Error("network down");
+    });
+
+    renderPanel();
+
+    await waitFor(() =>
+      expect(screen.getByText("network down")).toBeInTheDocument(),
+    );
+
+    const tagged = errorSpy.mock.calls.find(
+      (call) => typeof call[0] === "string" && call[0].includes("[bridge.fetch]"),
+    );
+    expect(tagged).toBeDefined();
+    expect(tagged?.[1]).toMatchObject({ portfolioId: "p-1", strategyId: "under-1" });
+  });
+
+  it("does NOT log a bridge failure on a successful empty load (no false telemetry)", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockFetch(async () =>
+      new Response(JSON.stringify({ candidates: [] }), { status: 200 }),
+    );
+
+    renderPanel();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/No replacement candidates found/i),
+      ).toBeInTheDocument(),
+    );
+
+    const tagged = errorSpy.mock.calls.find(
+      (call) => typeof call[0] === "string" && call[0].includes("[bridge.fetch]"),
+    );
+    expect(tagged).toBeUndefined();
+  });
+
   it("calls onClose when Escape is pressed", async () => {
     mockFetch(() => new Promise<Response>(() => {}));
     const onClose = vi.fn();

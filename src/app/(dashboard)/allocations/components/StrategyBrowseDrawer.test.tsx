@@ -392,6 +392,50 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
     vi.unstubAllGlobals();
   });
 
+  it("H-0117 — a non-user AbortError mid-flight surfaces the error state (no eternal spinner)", async () => {
+    // Loud-fail discipline: the effect's `cancelled` flag is the ONLY signal
+    // that an abort was our own close/unmount cleanup. A flaky-proxy /
+    // mid-flight AbortError arrives while the drawer is still OPEN
+    // (cancelled === false). The pre-fix code early-returned on
+    // `e.name === "AbortError"` WITHOUT clearing `loading` or setting `error`,
+    // wedging the drawer in "Loading…" forever. This test drives the default
+    // fetch path (the only path that can produce a real AbortError) and
+    // rejects mid-flight without ever closing the drawer.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const abortErr = new DOMException("aborted", "AbortError");
+    const fetchSpy = vi.fn(async () => {
+      throw abortErr;
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <StrategyBrowseDrawer
+        isOpen
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        allocatorMandate={MANDATE_BINANCE_OKX}
+        // Default fetch path — exercises the AbortController/AbortError branch.
+      />,
+    );
+    await flush();
+
+    // The distinct error state must render — NOT the loading spinner and NOT
+    // the misleading "No verified strategies are live yet." empty state.
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("No verified strategies are live yet."),
+    ).not.toBeInTheDocument();
+    // The swallowed failure is now observable.
+    expect(consoleErr).toHaveBeenCalledWith(
+      "[StrategyBrowseDrawer] strategy load failed",
+      abortErr,
+    );
+
+    vi.unstubAllGlobals();
+    consoleErr.mockRestore();
+  });
+
   it("T15 — backdrop click during loading state still calls onClose", async () => {
     // Slow fetcher that never resolves while we click backdrop.
     let resolveFetch: ((rows: StrategyBrowseRow[]) => void) | null = null;

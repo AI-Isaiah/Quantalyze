@@ -82,6 +82,7 @@ describe.each([
   });
 
   it("returns 500 when the strategy fetch errors", async () => {
+    const rawDbMessage = 'permission denied for table strategies';
     vi.doMock("@/lib/supabase/admin", () => ({
       createAdminClient: () => ({
         from: () => ({
@@ -90,7 +91,7 @@ describe.each([
               in: () =>
                 Promise.resolve({
                   data: null,
-                  error: { message: "DB connection failed" },
+                  error: { message: rawDbMessage },
                 }),
             }),
           }),
@@ -105,9 +106,14 @@ describe.each([
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.error).toBeTruthy();
+    // M-0916: the raw PostgREST message (schema/column/constraint names) must
+    // NOT leak into the response body — only a stable code. Reverting the fix
+    // (returning fetchError.message) fails this.
+    expect(body.error).toBe("strategy_fetch_failed");
+    expect(JSON.stringify(body)).not.toContain(rawDbMessage);
   });
 
-  it("returns {enqueued:0} when there are no strategies", async () => {
+  it("returns the unified envelope (enqueued/failed/total_candidates, no skipped) when there are no strategies", async () => {
     vi.doMock("@/lib/supabase/admin", () => ({
       createAdminClient: () => ({
         from: () => ({
@@ -126,7 +132,14 @@ describe.each([
     );
     expect(res.status).toBe(200);
     const body = await res.json();
+    // M-0913/M-0915: empty path must carry the SAME flat shape as the
+    // populated path, not the legacy `{enqueued:0, skipped:0}`. Reverting the
+    // fix (the orphan `skipped` field / missing failed+total_candidates) fails
+    // these assertions.
     expect(body.enqueued).toBe(0);
+    expect(body.failed).toBe(0);
+    expect(body.total_candidates).toBe(0);
+    expect(body).not.toHaveProperty("skipped");
   });
 
   it("enqueues one job per strategy on the happy path", async () => {
@@ -230,6 +243,93 @@ describe.each([
     expect(body.failed).toBe(1);
     expect(Array.isArray(body.errors)).toBe(true);
     expect(body.errors[0]).toContain("strat-a");
+    // M-0916: the raw RPC error ("FK violation") must NOT leak into the
+    // per-row errors array — only the strategy id + a stable code. Reverting
+    // the fix (pushing result.value.error.message) fails this.
+    expect(body.errors[0]).not.toContain("FK violation");
+    expect(body.errors[0]).toContain("enqueue_failed");
+  });
+
+  // --- H-1091: RPC resolves {data:null, error:null} — must NOT vanish -------
+  //
+  // route.ts:96 increments `enqueued` only when result.value.data is truthy.
+  // If enqueue_compute_job is replaced by a void/null-returning shim, the row
+  // resolves with neither data nor error. The original code had no else, so
+  // such a row was counted as NEITHER enqueued NOR failed — total_candidates
+  // !== enqueued + failed was the only signal and nothing logged it. The fix
+  // adds an explicit else that counts it failed + logs. This test asserts the
+  // accounting identity holds and 500 fires on an all-null batch.
+  it("H-1091: counts {data:null, error:null} as a failure, not a silent drop", async () => {
+    const strategies = [{ id: "strat-a" }, { id: "strat-b" }];
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from: () => ({
+          select: () => ({
+            eq: () => ({
+              in: () => Promise.resolve({ data: strategies, error: null }),
+            }),
+          }),
+        }),
+        // void-returning shim: resolves with neither data nor error.
+        rpc: vi.fn().mockImplementation(() =>
+          Promise.resolve({ data: null, error: null }),
+        ),
+      }),
+    }));
+    const handler = await getHandler(_verb);
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    const body = await res.json();
+    // Accounting identity must hold — no row may vanish.
+    expect(body.enqueued + body.failed).toBe(body.total_candidates);
+    expect(body.enqueued).toBe(0);
+    expect(body.failed).toBe(2);
+    // The load-bearing assertions for the H-1091 fix are `failed===2` and the
+    // accounting identity above: WITHOUT the else branch a {data:null,error:null}
+    // row is counted as neither enqueued nor failed, so failed would be 0 and
+    // enqueued+failed (0) !== total_candidates (2). The 500 below is NOT the
+    // distinguishing signal — allFailed (rows>0 && enqueued===0) already fires it
+    // at enqueued=0 even pre-fix — but it's asserted as a behavioral guard.
+    expect(res.status).toBe(500);
+    expect(Array.isArray(body.errors)).toBe(true);
+    expect(body.errors[0]).toContain("strat-a");
+  });
+
+  // --- L-0050: errors[] is truncated to 5 — errors_total flags it ----------
+  //
+  // route.ts caps `errors` at 5 entries. With > 5 failures a consumer sees
+  // errors.length===5 / failed===N and can't tell how many are missing. The
+  // fix adds `errors_total` so truncation is detectable from the envelope.
+  it("L-0050: exposes errors_total when the errors array is truncated", async () => {
+    const strategies = Array.from({ length: 7 }, (_, i) => ({
+      id: `strat-${i}`,
+    }));
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from: () => ({
+          select: () => ({
+            eq: () => ({
+              in: () => Promise.resolve({ data: strategies, error: null }),
+            }),
+          }),
+        }),
+        rpc: vi.fn().mockImplementation(() =>
+          Promise.resolve({ data: null, error: { message: "queue down" } }),
+        ),
+      }),
+    }));
+    const handler = await getHandler(_verb);
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    const body = await res.json();
+    expect(body.failed).toBe(7);
+    // Array is capped at 5...
+    expect(body.errors).toHaveLength(5);
+    // ...but errors_total reveals the true count so truncation is visible.
+    expect(body.errors_total).toBe(7);
+    expect(body.errors_total).toBeGreaterThan(body.errors.length);
   });
 
   // --- H-1090: Promise.allSettled rejected branch (thrown RPC promise) -----

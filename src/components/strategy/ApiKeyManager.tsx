@@ -36,6 +36,13 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // H-0395: distinct load-failure state. Without it, a failed api_keys SELECT
+  // (RLS regression after a GRANT migration, expired session, network error)
+  // left `keys` at [] and the render showed the misleading "No API keys
+  // connected" empty state — a user with keys would think they vanished and
+  // could re-add a duplicate. We now discriminate failure from genuine-empty
+  // and surface a retryable error banner instead of the all-clear empty state.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [syncingKeyId, setSyncingKeyId] = useState<string | null>(null);
   // `lastAttemptedKeyId` survives the catch block that clears
   // `syncingKeyId` so the SyncProgress retry button has a stable
@@ -64,7 +71,15 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       .order("created_at", { ascending: false });
     if (keysErr) {
       console.error("[ApiKeyManager] api_keys fetch failed:", keysErr.message);
+      // H-0395: a non-empty error (network/RLS/session) is NOT "no keys".
+      // Surface a distinct, retryable error state and keep whatever keys we
+      // had — never let the failure collapse into the empty "no keys" UI.
+      setLoadError(keysErr.message);
+      return;
     }
+    // Reached only on a clean response: clear any prior load error so a
+    // successful retry restores the normal list / genuine-empty state.
+    setLoadError(null);
     if (data) {
       setKeys(data);
       // NEW-C37-04: derive lastSyncAt from the key that was actually synced
@@ -293,7 +308,24 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         />
       )}
 
-      {keys.length === 0 && !showForm && (
+      {/* H-0395: distinct load-failure state. Shown instead of the
+          "No API keys connected" empty state when the api_keys SELECT
+          failed, so a load error is never disguised as "you have no keys". */}
+      {loadError && !showForm && (
+        <Card>
+          <div className="flex flex-col items-center gap-3 py-4 text-center">
+            <p className="text-sm text-negative">
+              Couldn&apos;t load your API keys. Your existing keys are safe — this is a
+              connection problem, not a deletion.
+            </p>
+            <Button size="sm" variant="secondary" onClick={() => loadKeys()}>
+              Retry
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {keys.length === 0 && !loadError && !showForm && (
         <Card>
           <p className="text-sm text-text-muted text-center py-4">
             No API keys connected. Add a read-only exchange key to import your trading data.

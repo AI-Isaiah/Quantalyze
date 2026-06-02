@@ -74,6 +74,12 @@ export function HoldingDetail({
   const [noteDraft, setNoteDraft] = useState<string>("");
   const [noteEditing, setNoteEditing] = useState(false);
   const [noteLoaded, setNoteLoaded] = useState(false);
+  // Loud-fail (F1 / H-0092 / H-0093 / H-1216 / M-0075): a fetch failure must be
+  // a DISTINCT state from "no note yet" — only a genuine 404 means empty. Any
+  // other non-OK (401/403/429/5xx) or a thrown network/parse error sets
+  // noteLoadError so we render an error+retry affordance instead of dropping the
+  // user into an empty editor that onNoteBlur would PUT over their unread note.
+  const [noteLoadError, setNoteLoadError] = useState(false);
   const [initialSavedAt, setInitialSavedAt] = useState<Date | null>(null);
 
   useEffect(() => {
@@ -98,12 +104,25 @@ export function HoldingDetail({
           setNoteDraft(c);
           setInitialSavedAt(ts ? new Date(ts) : null);
           setNoteEditing(!c);
-        } else if (!cancelled) {
-          // 404 or any non-OK → start in edit mode so placeholder guides input.
+        } else if (!cancelled && res.status === 404) {
+          // Genuine "no note yet" → start in edit mode so placeholder guides input.
           setNoteEditing(true);
+        } else if (!cancelled) {
+          // 401/403/429/5xx → load failed. Do NOT enter edit mode (an empty
+          // draft would overwrite the unread server note on blur).
+          console.error(
+            "[HoldingDetail] notes load failed",
+            res.status,
+            scope_ref,
+          );
+          setNoteLoadError(true);
         }
-      } catch {
-        if (!cancelled) setNoteEditing(true);
+      } catch (err) {
+        // Network drop / JSON parse error → same loud-fail path as a 5xx.
+        if (!cancelled) {
+          console.error("[HoldingDetail] notes load failed", err, scope_ref);
+          setNoteLoadError(true);
+        }
       } finally {
         if (!cancelled) setNoteLoaded(true);
       }
@@ -113,6 +132,11 @@ export function HoldingDetail({
     };
   }, [tab, scope_ref, noteLoaded]);
 
+  function retryNoteLoad() {
+    setNoteLoadError(false);
+    setNoteLoaded(false);
+  }
+
   const { saveState, lastSavedAt, save } = useNoteAutoSave(
     "holding",
     scope_ref,
@@ -120,6 +144,9 @@ export function HoldingDetail({
   );
 
   function onNoteBlur() {
+    // Never persist a draft when the initial load failed — we don't know the
+    // server-side content, so a save here would clobber it (data-loss fence).
+    if (noteLoadError) return;
     const payload = noteDraft;
     setNoteContent(payload);
     void save(payload);
@@ -200,6 +227,17 @@ export function HoldingDetail({
         <div role="tabpanel" aria-label="Notes">
           {!noteLoaded ? (
             <p className="text-xs text-text-muted">Loading…</p>
+          ) : noteLoadError ? (
+            <div role="alert" className="text-xs text-text-muted">
+              <p>Couldn&apos;t load your note. Your saved note is safe.</p>
+              <button
+                type="button"
+                onClick={retryNoteLoad}
+                className="mt-2 text-xs text-accent underline hover:text-accent-hover"
+              >
+                Retry
+              </button>
+            </div>
           ) : (
             <div>
               {noteEditing ? (

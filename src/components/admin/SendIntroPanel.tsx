@@ -64,10 +64,17 @@ export function SendIntroPanel({
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
         if (!aborted) {
+          // H-0359 — a fetch failure must NOT be conflated with "allocator has
+          // no holdings". Surface the error but keep `holdings` null so
+          // `holdingsEmpty` stays false: we never claim the portfolio is empty
+          // when the truth is we couldn't reach the server.
+          console.error(
+            "[SendIntroPanel] holdings load failed",
+            err,
+          );
           setHoldingsError(
             err instanceof Error ? err.message : "Failed to load holdings",
           );
-          setHoldings([]);
         }
       }
     }

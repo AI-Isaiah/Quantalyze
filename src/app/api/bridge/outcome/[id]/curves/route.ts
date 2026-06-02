@@ -117,7 +117,20 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
     .eq("id", id)
     .maybeSingle();
 
-  if (outcomeErr || !outcome) {
+  // H-0258: discriminate a real DB/RLS error from a legitimate "not owned /
+  // does not exist" miss. A non-null outcomeErr means the ownership SELECT
+  // itself blew up (network blip, RLS regression, schema drift) — that must
+  // surface as a 500 with a log, NOT a 404. 404 is reserved for "row not
+  // visible to caller" so an operator seeing a wave of 404s knows the lookup
+  // succeeded; a 500 tells them the lookup failed.
+  if (outcomeErr) {
+    console.error(
+      "[api/bridge/outcome/curves] outcome lookup error:",
+      outcomeErr,
+    );
+    return NextResponse.json({ error: "Failed to load curves" }, { status: 500 });
+  }
+  if (!outcome) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
@@ -156,7 +169,20 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
       .select("original_strategy_id")
       .eq("id", matchDecisionId)
       .maybeSingle();
-    if (!decisionErr && decision) {
+    if (decisionErr) {
+      // H-0256 / M-0305: a non-null decisionErr (admin-client transient, RLS
+      // misconfig, schema drift) was previously swallowed by the success-gate
+      // condition, leaving originalStrategyId=null and returning an empty
+      // original series — indistinguishable from the legitimate
+      // match_decision_id=NULL case (migration 059 ON DELETE SET NULL). The
+      // resolution FAILED; that must be observable. We keep the response 200
+      // (replacement curve is still valid and useful) but log to stderr so
+      // canary/log-aggregation surfaces a metric instead of a silent gap.
+      console.error(
+        "[api/bridge/outcome/curves] match_decisions lookup error:",
+        decisionErr,
+      );
+    } else if (decision) {
       originalStrategyId = (decision as { original_strategy_id: string | null }).original_strategy_id;
     }
   }

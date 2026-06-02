@@ -56,6 +56,27 @@ export function PortfolioImpactPanel({
         const body = await res
           .json()
           .catch(() => ({ error: "Simulation failed" }));
+        // H-1127: error bodies do not always use `{ error }`. The Python
+        // service raises HTTPException with `detail`; other layers forward
+        // `message`. Read all three common keys so the real, actionable backend
+        // explanation reaches the user instead of an opaque "HTTP 500". Coerce
+        // to string so a nested/object value can't render as "[object Object]".
+        const serverMessage =
+          typeof body.error === "string"
+            ? body.error
+            : typeof body.detail === "string"
+              ? body.detail
+              : typeof body.message === "string"
+                ? body.message
+                : undefined;
+        if (serverMessage === undefined) {
+          // Surface contract drift: the body parsed but matched none of the
+          // expected error-message keys, so we're falling back to "HTTP <code>".
+          console.error(
+            "[PortfolioImpactPanel] unrecognized error body shape",
+            { status: res.status, body },
+          );
+        }
         if (res.status === 429) {
           // B20: the route's own body.retryAfter takes precedence; otherwise parse
           // the Retry-After header through the shared primitive. This adds HTTP-date
@@ -71,13 +92,13 @@ export function PortfolioImpactPanel({
           if (!controller.signal.aborted) {
             setState({
               kind: "error",
-              message: body.error ?? "Too many simulations. Try again later.",
+              message: serverMessage ?? "Too many simulations. Try again later.",
               retryAfter,
             });
           }
           return;
         }
-        throw new Error(body.error ?? `HTTP ${res.status}`);
+        throw new Error(serverMessage ?? `HTTP ${res.status}`);
       }
 
       const data = (await res.json()) as SimulatorCandidate;
@@ -86,12 +107,27 @@ export function PortfolioImpactPanel({
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
+      // M-0969: every caught error must be observable to operators — the user
+      // sees the (friendly) state, but without this log the operator only ever
+      // gets a screenshot. Log first, then translate to user copy.
+      console.error("[PortfolioImpactPanel] simulate impact failed", err);
       if (!controller.signal.aborted) {
-        setState({
-          kind: "error",
-          message:
-            err instanceof Error ? err.message : "Failed to simulate impact",
-        });
+        // M-0969: don't surface raw, browser-specific failure strings as user
+        // copy. `fetch` network failures throw a TypeError ("Failed to fetch" /
+        // "Load failed" / "NetworkError…"); a malformed success body throws a
+        // SyntaxError from res.json() ("Unexpected token < in JSON…"). Map both
+        // to actionable copy. Errors we threw deliberately above (the non-OK
+        // branch's `new Error(serverMessage)`) are plain Errors and keep their
+        // already-curated, server-provided message.
+        const message =
+          err instanceof TypeError
+            ? "Network error — check your connection and retry."
+            : err instanceof SyntaxError
+              ? "The server returned an unexpected response. Please retry."
+              : err instanceof Error
+                ? err.message
+                : "Failed to simulate impact.";
+        setState({ kind: "error", message });
       }
     }
   }, [portfolioId, candidateStrategyId]);
