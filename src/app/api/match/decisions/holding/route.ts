@@ -154,7 +154,56 @@ export const POST = withAuth(
       .select("id")
       .single();
 
-    if (insertErr || !inserted) {
+    if (insertErr) {
+      // Log every insert failure with its Postgres code so both the genuine-
+      // failure 500 and the idempotent-replay path are traceable (a bare 500
+      // otherwise hides e.g. a 23502 NOT-NULL drift like the H-0960 `kind` case).
+      console.error(
+        "[match-decisions/holding] match_decisions insert failed:",
+        insertErr.message,
+        insertErr.code,
+      );
+      // F6 (H-0436): the partial-unique uniq_match_dec_sent_per_pair
+      // (allocator_id, strategy_id) WHERE decision='sent_as_intro' already
+      // prevents a duplicate row — so a retry after a *perceived* failure (the
+      // client received a 2xx but the body parse failed, or a double-click)
+      // raises 23505 here instead of inserting a second decision. Treat that as
+      // an idempotent replay: return the existing decision id rather than a
+      // confusing 500 that drives the allocator to retry yet again. The
+      // original insert already emitted the audit event + first_outcome stamp,
+      // so they are intentionally NOT re-run on the replay path.
+      if (insertErr.code === "23505") {
+        const { data: existing, error: existingLookupErr } = await admin
+          .from("match_decisions")
+          .select("id")
+          .eq("allocator_id", user.id)
+          .eq("strategy_id", top_candidate_strategy_id)
+          .eq("decision", "sent_as_intro")
+          .maybeSingle();
+        if (existingLookupErr) {
+          // The 23505 proves the row exists; a null `existing` here means the
+          // lookup faulted, not that the row is missing. Log so the resulting
+          // 500 is traceable rather than looking like a phantom insert failure.
+          console.error(
+            "[match-decisions/holding] post-23505 idempotent-replay lookup failed:",
+            existingLookupErr.message,
+            existingLookupErr.code,
+          );
+        }
+        if (existing?.id) {
+          return NextResponse.json(
+            { match_decision_id: existing.id },
+            { status: 200, headers: NO_STORE_HEADERS },
+          );
+        }
+      }
+      return NextResponse.json(
+        { error: "failed to record decision" },
+        { status: 500, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    if (!inserted) {
       return NextResponse.json(
         { error: "failed to record decision" },
         { status: 500, headers: NO_STORE_HEADERS },

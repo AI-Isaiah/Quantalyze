@@ -94,6 +94,14 @@ function makeLimiter(
 // 5/minute per authenticated user — sensitive POSTs (attestation, deletion requests).
 export const userActionLimiter = makeLimiter(5, "60 s");
 
+// 30/minute per authenticated user — AGGREGATE ceiling for /api/keys/sync, which
+// is bucketed per-(user, strategy) at userActionLimiter for fairness (one
+// allocator's concurrent strategy resyncs must not starve each other). This
+// per-user ceiling re-caps total endpoint volume so an authenticated caller
+// can't bypass the limit by varying strategy_id across unbounded UUIDs (F6
+// red-team). 30/min comfortably covers a multi-strategy allocator's real syncs.
+export const keysSyncUserLimiter = makeLimiter(30, "60 s");
+
 // 10/minute per IP — public GETs (PDF routes) exposed to crawlers and scrapers.
 export const publicIpLimiter = makeLimiter(10, "60 s");
 

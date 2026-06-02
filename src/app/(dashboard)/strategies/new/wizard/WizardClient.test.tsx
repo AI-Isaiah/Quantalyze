@@ -42,13 +42,16 @@ vi.mock("@/lib/for-quants-analytics", () => ({
 // drive a SIGNED_OUT event. ---
 let authCallback: ((event: string) => void) | null = null;
 const unsubscribeMock = vi.fn();
+// H-0187/M-0238: count subscribes so a regression that re-adds `step` to the
+// auth-effect deps (resubscribing on every step transition) fails loudly.
+const onAuthStateChangeMock = vi.fn((cb: (event: string) => void) => {
+  authCallback = cb;
+  return { data: { subscription: { unsubscribe: unsubscribeMock } } };
+});
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
     auth: {
-      onAuthStateChange: (cb: (event: string) => void) => {
-        authCallback = cb;
-        return { data: { subscription: { unsubscribe: unsubscribeMock } } };
-      },
+      onAuthStateChange: (cb: (event: string) => void) => onAuthStateChangeMock(cb),
     },
   }),
 }));
@@ -96,6 +99,8 @@ beforeEach(async () => {
   pushMock.mockClear();
   clearWizardStateMock.mockClear();
   saveWizardStateMock.mockClear();
+  onAuthStateChangeMock.mockClear();
+  unsubscribeMock.mockClear();
   ({ WizardClient } = await import("./WizardClient"));
 });
 
@@ -152,6 +157,35 @@ describe("[H-0182] WizardClient — resume banner on LS pointer mismatch", () =>
       expect(call).toBeDefined();
     });
     expect(screen.queryByTestId("wizard-resume")).toBeNull();
+  });
+
+  it("does NOT resubscribe the auth listener on a step transition (H-0187/M-0238)", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    render(<WizardClient initialDraft={DRAFT} />);
+    await waitFor(() => expect(authCallback).not.toBeNull());
+    // The listener mounts exactly once.
+    expect(onAuthStateChangeMock).toHaveBeenCalledTimes(1);
+
+    // Resume → handleResume → setStep("sync_preview"): a real step transition.
+    fireEvent.click(await screen.findByTestId("wizard-resume"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("wizard-resume")).toBeNull(),
+    );
+
+    // The pre-fix deps `[wizardSessionId, step]` tore down + re-subscribed the
+    // supabase-js auth channel on this transition, leaving a window where a
+    // token-refresh SIGNED_OUT fired unheard. With `step` read via a ref and
+    // `[wizardSessionId]` deps, the subscription must survive the step change.
+    expect(onAuthStateChangeMock).toHaveBeenCalledTimes(1);
+    expect(unsubscribeMock).not.toHaveBeenCalled();
+
+    // And the listener still reports the LIVE step via the ref, not a stale one.
+    act(() => authCallback!("SIGNED_OUT"));
+    const errCall = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    ) as unknown[] | undefined;
+    expect(errCall).toBeDefined();
+    expect((errCall![1] as { step: string }).step).toBe("sync_preview");
   });
 
   it("does NOT show the Resume banner when no override is set", async () => {

@@ -54,9 +54,22 @@ vi.mock("@/lib/analytics-client", () => ({
 }));
 
 const rpcMock = vi.fn();
+// F6 pre-Railway idempotency fence: the route calls
+// from("strategies").select(...).eq().eq().maybeSingle() BEFORE validate/encrypt.
+// These audit tests exercise the catch-block / encrypt paths, so default the
+// fence to "no existing draft" — the full flow then proceeds as before.
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     rpc: (...args: unknown[]) => rpcMock(...args),
+    from: () => ({
+      select: () => ({
+        eq: () => ({
+          eq: () => ({
+            maybeSingle: async () => ({ data: null, error: null }),
+          }),
+        }),
+      }),
+    }),
   }),
 }));
 
