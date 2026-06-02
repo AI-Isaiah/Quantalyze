@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.54] - 2026-06-02
+### Added — B9 Boundary Validation Parity: lint rule + CHECK↔Zod matrix + latent-23514 fix
+
+Closes the **NEW-C40-01 boundary-leak class** (a Zod schema diverging from its DB CHECK; an "accept unknown keys" mode on a service/IPC boundary) *by construction*:
+
+- **`no-passthrough-on-ipc` ESLint rule** (`eslint-plugin-quantalyze`) bans all four Zod-v4 "keep unknown keys" forms — `.passthrough()` / `.catchall()` / `.loose()` / `z.looseObject()` — repo-wide at `"error"`. The 21 deliberate read-only forward-compat sites (analytics HTTP envelopes + widget render contracts) carry greppable `B9 sanctioned-exception:` inline escapes, so the rule stays live for any new boundary mode rather than blind-skipping the files that carry passthroughs.
+- **14-column CHECK↔Zod parity matrix** (`check-zod-db-check-parity.test.ts`) — a CI-failing test that freezes each TS closed-set against the latest SQL CHECK/enum (named-constraint-first with inline-CREATE fallback; PG-enum + `ALTER TYPE ADD VALUE` handling; dollar-quote stripping), so a future divergence fails CI *before* it can become a runtime 23514 at insert. Pins the exact column identity set (not just a count floor).
+- **Latent prod bug fixed**: the analytics worker writes `computation_status='complete_with_warnings'` on the heuristic-capital fallback path (`analytics_runner.py`), but the `strategy_analytics.computation_status` CHECK rejected it (verified live in prod) — so every warnings-producing strategy's *entire* metrics upsert would 23514. Widened the CHECK to the intended 5-value set (safe — every existing row is in the subset; `'stale'` stays rejected). Established `STRATEGY_ANALYTICS_COMPUTATION_STATUSES` as the TS single-source-of-truth, with `StrategyAnalytics.computation_status` derived from it so the hand-typed union cannot re-drift.
+- Reviewed by 5 specialists + a 3-lens fresh-context red-team. Fixed: the Zod-v4 `.loose()` blind spot (the form a v4 dev reaches for first), an audit-integrity defect (a false escape rationale on `VerifyStrategyResponseSchema` — its `results` field *is* spread into a JSONB write; now modeled explicitly + stripped, escape removed), and several parity-extractor robustness gaps. Folds FIX-LIST M-0907 / L-0043 (BridgeResponseSchema passthrough vs its docblock).
+- **Deferred (tracked):** the cross-runtime Python enum snapshot (Part C — collides with the in-flight b-mypy refactor) and end-to-end `complete_with_warnings` surfacing (the queue-path `sync_strategy_analytics_status` RPC clobbers it to `complete`, and 2 consumer gates still exact-match `complete` — a B3-completion follow-up). No `analytics-service/**` edit; parallel-safe with b-mypy. The migration auto-applies to prod on merge.
+
 ## [0.24.15.53] - 2026-06-01
 ### Changed — Test-gap hardening: closed 57 audit HIGH findings by strengthening weak/tautological tests
 
