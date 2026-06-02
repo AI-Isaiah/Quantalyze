@@ -122,6 +122,21 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: validationError }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
+  // L-0078 (audit-2026-05-07, api-contract c9): a PUT whose self-editable
+  // field set is empty — body `{}`, or a body carrying only admin-only keys
+  // that pickSelfEditableFields drops — is a semantic no-op. Pre-fix it still
+  // dispatched a no-op COALESCE RPC AND wrote an audit row with
+  // metadata.fields=[], so a script posting `{}` 30×/min produced ~60
+  // zero-information background writes/min and flooded audit_log with rows
+  // that say nothing (the exact noise the F8 failure-audit work is careful
+  // NOT to add). Short-circuit BEFORE the limiter/RPC/audit: nothing changed,
+  // so consume no write budget and leave no forensic noise. The 200
+  // {fields:[]} keeps useMandateAutoSave's optimistic reconciliation happy
+  // (an idempotent no-op, not an error).
+  if (Object.keys(fields).length === 0) {
+    return NextResponse.json({ success: true, fields: [] }, { headers: NO_STORE_HEADERS });
+  }
+
   // NEW-C07-04 (audit-2026-05-26 code-review): rate-limit token consumed
   // AFTER body parse + validate. Pre-fix: checkLimit ran before JSON parse,
   // so a client retrying on a 400 (one out-of-range field) burned the full
@@ -183,6 +198,30 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
 
   if (error) {
     console.error("[api/preferences] update_allocator_mandates RPC error:", error);
+    // F8 (H-0295 code-reviewer c9 + H-0298 red-team c7): emit a failure audit
+    // on EVERY RPC error branch (28000 infra-fault, 22023 out-of-bounds,
+    // generic) BEFORE dispatching the branch-specific response. Pre-fix only
+    // the happy 200 branch audited, so an allocator — or a CSRF'd victim —
+    // probing the mandate bounds at the 30/min rate-limit boundary (e.g.
+    // max_weight=0.51 over and over to learn the bound, or to detect a role
+    // transition) left ZERO audit_log trail; only the ops-only console.error
+    // above recorded it. Mandate fields drive match scoring, so a silent
+    // edit-attempt storm is also a silent matching-corruption probe. Same
+    // fire-and-forget service-role path as the success emit
+    // (logAuditEventAsUser → JWT-immune, Sentry-reported on hard failure,
+    // never gates the response — see route.test TC13). entity_id = user.id
+    // mirrors the happy path. error.code is captured in metadata so a single
+    // emit distinguishes the three branches forensically.
+    logAuditEventAsUser(createAdminClient(), user.id, {
+      action: "mandate_preference.update.failed",
+      entity_type: "allocator_preference_mandate",
+      entity_id: user.id,
+      metadata: {
+        fields: Object.keys(fields),
+        self_edit: true,
+        error_code: error.code ?? null,
+      },
+    });
     if (error.code === "28000") {
       // NEW-C07-02 (audit-2026-05-26 silent-failure): we already verified the
       // user is authenticated via auth.getUser() above. If the RPC then raises
