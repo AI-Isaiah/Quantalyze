@@ -4,7 +4,57 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import ccxt.async_support as ccxt_async
 
-from services.exchange import create_exchange, validate_key_permissions
+from services.exchange import (
+    create_exchange,
+    normalize_symbol,
+    validate_key_permissions,
+)
+
+
+class TestNormalizeSymbol:
+    """H-0668 — single-source ``normalize_symbol`` helper.
+
+    This is a single-source-enforcement / drift-guard test, NOT a
+    fail-without-fix bug repro: the OKX trades branch and the OKX funding
+    fetcher were already byte-identical by hand, so there is no live
+    mismatch to reproduce. The hazard the refactor closes is *future drift*
+    — funding attribution joins ``funding_fees.symbol`` to
+    ``positions.symbol`` by exact string equality, so if one of the two
+    OKX copies were edited and the other not, OKX funding would silently
+    zero-match. Both now route through this one helper; these assertions
+    pin the canonical (output-preserving) forms it must keep producing.
+
+    Deliberately NOT asserted: ``normalize_symbol("okx", ...) ==
+    normalize_symbol("binance", ...)`` for the same asset. OKX's
+    ``BTCUSDTSWAP`` vs Binance's ``BTCUSDT`` divergence is intentional
+    (every consumer keys by the ``(symbol, exchange)`` tuple), so asserting
+    cross-venue equality would encode a wrong intent.
+    """
+
+    def test_okx_instid_dash_strip(self) -> None:
+        assert normalize_symbol("okx", "BTC-USDT-SWAP") == "BTCUSDTSWAP"
+        assert normalize_symbol("okx", "BTC-USD-SWAP") == "BTCUSDSWAP"
+        assert normalize_symbol("okx", "BTC-USDT-231229") == "BTCUSDT231229"
+
+    def test_bybit_v5_passthrough(self) -> None:
+        assert normalize_symbol("bybit", "BTCUSDT") == "BTCUSDT"
+        assert normalize_symbol("bybit", "ETHUSDT") == "ETHUSDT"
+
+    def test_ccxt_unified_slash_and_quote_suffix_strip(self) -> None:
+        assert normalize_symbol("binance", "BTC/USDT:USDT") == "BTCUSDT"
+        assert normalize_symbol("binance", "ETH/USD:USD") == "ETHUSD"
+        # Unknown CCXT venue falls through the same (else) branch as binance.
+        assert normalize_symbol("kraken", "BTC/USDT:USDT") == "BTCUSDT"
+
+    def test_okx_trades_and_funding_share_one_normalizer(self) -> None:
+        # The trades pipeline (exchange.py OKX branch) and the funding
+        # fetcher (funding_fetch.py OKX branch) both call this exact helper
+        # for the same instId, so they cannot drift. Pinned to the form the
+        # live-path tests assert (test_exchange.py BTCUSDTSWAP @ the OKX
+        # fetch test; test_funding_fetch.py BTCUSDTSWAP @ the OKX funding
+        # test) — together those pin both ends to this single source.
+        inst_id = "BTC-USDT-SWAP"
+        assert normalize_symbol("okx", inst_id) == "BTCUSDTSWAP"
 
 
 def _okx_swap_only(swap_data: list[dict]) -> "AsyncMock":

@@ -487,6 +487,45 @@ def _trim_raw_data(raw_data: dict[str, Any] | None) -> dict[str, Any] | None:
     return trimmed if trimmed else None
 
 
+def normalize_symbol(exchange_id: str, raw: str) -> str:
+    """Single source of truth for the stored ``trades.symbol`` /
+    ``funding_fees.symbol`` canonical form, per exchange.
+
+    Audit-2026-05-07 H-0668 / M-0923 / M-0924 — the OKX/Bybit/CCXT trades
+    branches and the OKX funding fetcher each previously hand-rolled this
+    normalization inline (OKX ``instId.replace('-','')``, the CCXT
+    ``_normalize_fill`` slash/quote-suffix strip, the Bybit V5 passthrough,
+    and an identical OKX copy in ``funding_fetch.py``). Funding attribution
+    joins ``funding_fees.symbol`` to ``positions.symbol`` by exact string
+    equality, so the two OKX copies MUST stay byte-identical or OKX funding
+    silently zero-matches. Routing every producer through this one helper
+    removes that hand-sync trap (the helper the funding_fetch.py note asked
+    for).
+
+    Output strings are PRESERVED per exchange — this is a single-source
+    refactor, NOT a re-canonicalization. Changing the stored form would
+    force a multi-table backfill of historical ``trades`` / ``funding_fees``
+    / ``position_snapshots`` rows for zero functional gain: every consumer
+    keys by the ``(symbol, exchange)`` tuple and a strategy is bound to a
+    single exchange, so OKX's ``BTCUSDTSWAP`` form is internally
+    self-consistent and never collides with another venue's ``BTCUSDT``.
+
+      - ``okx``   : raw OKX instId   ``"BTC-USDT-SWAP"`` → ``"BTCUSDTSWAP"``
+      - ``bybit`` : raw Bybit V5 sym ``"BTCUSDT"``       → ``"BTCUSDT"`` (passthrough)
+      - else (CCXT-unified, e.g. ``binance``): ``"BTC/USDT:USDT"`` → ``"BTCUSDT"``
+
+    The ``else`` branch reproduces the prior unconditional ``_normalize_fill``
+    behavior for every CCXT-unified venue (``_normalize_fill`` is the
+    CCXT-only path; OKX and Bybit use their own dedicated branches).
+    """
+    exch = exchange_id.lower()
+    if exch == "okx":
+        return raw.replace("-", "")
+    if exch == "bybit":
+        return raw
+    return raw.replace("/", "").replace(":USDT", "").replace(":USD", "")
+
+
 def _make_fill_dict(
     *,
     exchange: str,
@@ -1825,7 +1864,7 @@ async def _fetch_raw_trades_okx_inst_type(
                     continue
 
                 raw_inst_id = fill.get("instId", "")
-                symbol = raw_inst_id.replace("-", "")
+                symbol = normalize_symbol("okx", raw_inst_id)
                 side = fill.get("side", "").lower()
                 price_chk = _finite_positive_float(fill.get("fillPx", 0), label="OKX fillPx")
                 amount_chk = _finite_positive_float(fill.get("fillSz", 0), label="OKX fillSz")
@@ -2026,7 +2065,7 @@ async def _fetch_raw_trades_bybit(
                     )
                     continue
 
-                symbol = fill.get("symbol", "")
+                symbol = normalize_symbol("bybit", fill.get("symbol", ""))
                 side = fill.get("side", "").lower()
                 # Audit-2026-05-07 H-0661 — finite-value validation; same
                 # rationale as the OKX branch.
@@ -2201,10 +2240,7 @@ def _normalize_fill(trade: dict[str, Any], exchange_id: str) -> FillRow | None:
         )
         return None
 
-    normalized_symbol = (
-        trade.get("symbol", "")
-        .replace("/", "").replace(":USDT", "").replace(":USD", "")
-    )
+    normalized_symbol = normalize_symbol(exchange_id, trade.get("symbol", ""))
     # Audit-2026-05-07 H-0670 — fee-currency mismatch flag. Use the
     # CCXT-unified ``symbol`` (pre-normalization, with the "BTC/USDT:USDT"
     # form) so ``_infer_quote_currency`` can use the explicit ":USDT"
