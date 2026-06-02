@@ -3,6 +3,8 @@ import { withAuth } from "@/lib/api/withAuth";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEventAsUser } from "@/lib/audit";
+import { captureToSentry } from "@/lib/sentry-capture";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -59,11 +61,17 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const { strategy_id, trades } = body;
 
   if (!strategy_id || !Array.isArray(trades) || trades.length === 0) {
-    return NextResponse.json({ error: "Missing strategy_id or trades" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Missing strategy_id or trades" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   if (trades.length > 5000) {
-    return NextResponse.json({ error: "Maximum 5,000 trades per upload" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Maximum 5,000 trades per upload" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   // Verify user owns this strategy
@@ -76,7 +84,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     .single();
 
   if (!strategy) {
-    return NextResponse.json({ error: "Strategy not found or not owned by you" }, { status: 403 });
+    return NextResponse.json(
+      { error: "Strategy not found or not owned by you" },
+      { status: 403, headers: NO_STORE_HEADERS },
+    );
   }
 
   // Sanitize every row: whitelist columns, force strategy_id + user_id
@@ -86,7 +97,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     if (!clean) {
       return NextResponse.json(
         { error: `Invalid trade at index ${i}: must be an object with at least a timestamp, and strategy_id must match` },
-        { status: 400 },
+        { status: 400, headers: NO_STORE_HEADERS },
       );
     }
     sanitized.push(clean);
@@ -100,7 +111,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      {
+        status: 429,
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+      },
     );
   }
 
@@ -115,10 +129,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // batches succeed — one event per upload, not per 500-row batch.
     const { error } = await supabase.from("trades").insert(batch);
     if (error) {
-      return NextResponse.json({
-        error: `Insert failed at row ${i}: ${error.message}`,
-        inserted,
-      }, { status: 500 });
+      // F5b (R8): the raw Postgres error.message can carry constraint /
+      // column / schema detail — log + capture server-side and return a
+      // static envelope. `inserted` is preserved so the client knows how
+      // many rows landed before the failure.
+      console.error(`[trades/upload] batch insert failed at row ${i}:`, error);
+      captureToSentry(error, {
+        tags: { route: "api/trades/upload" },
+        extra: { batchStartRow: i, inserted },
+      });
+      return NextResponse.json(
+        { error: "Failed to upload trades", inserted },
+        { status: 500, headers: NO_STORE_HEADERS },
+      );
     }
     inserted += batch.length;
   }
@@ -137,5 +160,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     metadata: { inserted, batches: Math.ceil(inserted / batchSize) },
   });
 
-  return NextResponse.json({ inserted, strategy_id });
+  return NextResponse.json(
+    { inserted, strategy_id },
+    { headers: NO_STORE_HEADERS },
+  );
 });
