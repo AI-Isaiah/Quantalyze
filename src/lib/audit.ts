@@ -417,6 +417,18 @@ export type AuditAction =
   | "bridge_outcome.dismiss"
   // --- Sprint 8 Phase 2: Mandate profile builder ----------------------
   | "mandate_preference.update"
+  // F8 (audit-2026-05-07 H-0295/H-0298, code-reviewer c9 + red-team c7):
+  // failure-path companion to `mandate_preference.update`. Emitted by PUT
+  // /api/preferences on the RPC error branches (SQLSTATE 28000 infra-fault,
+  // 22023 out-of-bounds, and the generic save failure) so a hostile self-edit
+  // probing the mandate bounds at the rate-limit boundary leaves a forensic
+  // trail instead of only a console.error. Mirrors the `intro.send_failed` /
+  // `simulator.run.failed` failure-action pattern, anchoring on the same
+  // allocator_preference_mandate entity as the happy path. (Keep comments in
+  // this union free of the semicolon character — the Python parity test's TS
+  // union parser captures only up to the union's first one. See
+  // tests/test_audit.py _parse_ts_union.)
+  | "mandate_preference.update.failed"
   | "mandate_preference.admin_update"
   // --- Sprint 8 Phase 4: Feedback loop ------------------------------------
   | "feedback.overrides_updated"
@@ -603,6 +615,10 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP = {
   "bridge_outcome.dismiss": "bridge_outcome_dismissal",
   // Sprint 8 Phase 2: Mandate profile builder
   "mandate_preference.update": "allocator_preference_mandate",
+  // F8: failure-path action anchors on the same entity as the happy path —
+  // the mandate row the caller tried (and failed) to edit. entity_id is the
+  // acting allocator's id (mirrors the success emit, which uses user.id).
+  "mandate_preference.update.failed": "allocator_preference_mandate",
   "mandate_preference.admin_update": "allocator_preference_mandate",
   // Sprint 8 Phase 4: Feedback loop
   "feedback.overrides_updated": "allocator_preference_feedback",

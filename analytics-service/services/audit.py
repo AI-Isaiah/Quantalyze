@@ -191,6 +191,9 @@ AuditAction = Literal[
     "bridge_outcome.dismiss",
     # --- Sprint 8 Phase 2: Mandate profile builder -------------------------
     "mandate_preference.update",
+    # F8: failure-path companion (TS-only emit; carried here so the bidirectional
+    # AuditAction parity test test_action_literal_matches_ts_union stays green).
+    "mandate_preference.update.failed",
     "mandate_preference.admin_update",
     # --- Sprint 8 Phase 4: Feedback loop ------------------------------------
     "feedback.overrides_updated",
