@@ -1070,7 +1070,7 @@ def score_candidates(
         )
 
     # Final scoring
-    scored: list[dict[str, Any]] = []
+    scored: list[ScoredCandidate] = []
     for i, rc in enumerate(raw_components):
         cand = rc["candidate"]
         sid = cand["strategy_id"]
@@ -1258,7 +1258,7 @@ def _top_excluded(
     return excluded_sorted[:TOP_N_EXCLUDED]
 
 
-def _serialize_excluded(excluded: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _serialize_excluded(excluded: list[dict[str, Any]]) -> list[ExcludedCandidate]:
     """Drop the raw `candidate` dict from excluded entries before returning."""
     return [
         {

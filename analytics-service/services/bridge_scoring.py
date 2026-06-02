@@ -12,7 +12,7 @@ WITH the candidate replacing the incumbent.
 
 import numpy as np
 import pandas as pd
-from typing import Optional
+from typing import Any, Optional
 from services.metrics import _safe_float
 from services.portfolio_optimizer import _compute_sharpe, _avg_corr, _max_drawdown
 
@@ -33,7 +33,7 @@ def find_replacement_candidates(
     w1: float = 0.4,
     w2: float = 0.3,
     w3: float = 0.3,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Score candidates as replacements for a specific underperforming strategy.
 
     Returns top 5 candidates sorted by composite_score, each with:
@@ -76,7 +76,7 @@ def find_replacement_candidates(
     # Pre-compute remaining weights (shared across all candidates)
     base_weights = {sid: weights.get(sid, 0) for sid in remaining_sids}
 
-    results = []
+    results: list[dict[str, Any]] = []
     for cid, c_returns in candidate_returns.items():
         if cid in portfolio_sids:
             continue

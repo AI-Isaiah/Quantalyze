@@ -3,6 +3,7 @@ import quantstats as qs
 import pandas as pd
 import numpy as np
 import math
+from collections.abc import ItemsView, KeysView, ValuesView
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
@@ -112,7 +113,21 @@ _LOG_RETURN_FLOOR: float = -1.0 + 1e-9
 # H-0710 / H-0713 / H-0723 dispatch table: (result_key, qs.stats attribute name).
 # `r_squared` (needs benchmark) and `time_in_market` (not a qs call) are handled
 # inline since their shapes differ from the single-arg pattern below.
-_QSTATS_SINGLE_ARG_SCALARS: tuple[tuple[str, str], ...] = (
+_QstatsScalarKey = Literal[
+    "recovery_factor",
+    "ulcer_index",
+    "upi",
+    "kelly_criterion",
+    "probabilistic_sharpe_ratio",
+    "common_sense_ratio",
+    "cpc_index",
+    "serenity_index",
+]
+# Typing the key as the literal union of QstatsScalarsResult's float|None fields
+# lets the `result[result_key] = ...` loop below write into the TypedDict
+# (which requires literal keys) AND fails type-check if a dispatch-table key is
+# ever typo'd or drifts from the result shape — no cast, no ignore.
+_QSTATS_SINGLE_ARG_SCALARS: tuple[tuple[_QstatsScalarKey, str], ...] = (
     ("recovery_factor", "recovery_factor"),
     ("ulcer_index", "ulcer_index"),
     ("upi", "ulcer_performance_index"),
@@ -238,13 +253,13 @@ class MetricsResult:
     def get(self, key: str, default: Any = None) -> Any:
         return self.metrics_json.get(key, default)
 
-    def items(self):
+    def items(self) -> ItemsView[str, Any]:
         return self.metrics_json.items()
 
-    def keys(self):
+    def keys(self) -> KeysView[str]:
         return self.metrics_json.keys()
 
-    def values(self):
+    def values(self) -> ValuesView[Any]:
         return self.metrics_json.values()
 
 
@@ -297,7 +312,7 @@ def _safe_float(value: Any) -> float | None:
 
 def sanitize_metrics(data: dict[str, Any]) -> dict[str, Any]:
     """Replace NaN/Inf with None in all numeric values before Supabase upsert."""
-    result = {}
+    result: dict[str, Any] = {}
     for key, value in data.items():
         if isinstance(value, float):
             result[key] = _safe_float(value)

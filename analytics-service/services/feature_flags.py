@@ -30,7 +30,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any
+from typing import TypedDict
 
 # Imported eagerly so test code can monkey-patch
 # `services.feature_flags.get_supabase` (the most ergonomic patch target).
@@ -63,7 +63,17 @@ def _resolve_cache_ttl_s() -> float:
 
 
 _CACHE_TTL_S: float = _resolve_cache_ttl_s()
-_cache: dict[str, dict[str, Any]] = {}
+
+
+class _FlagCacheEntry(TypedDict):
+    # The cached value is always a bool (`env_value and not kill_switch_off`)
+    # and expires_at a monotonic float. Typing the entry precisely lets the
+    # cache-hit `return cached["value"]` paths stay bool without an Any-launder.
+    value: bool
+    expires_at: float
+
+
+_cache: dict[str, _FlagCacheEntry] = {}
 
 # CR-perf-3 — single-flight guard. Without this, N concurrent expired-cache
 # misses each fire their own Supabase RPC; under burst load that's a
