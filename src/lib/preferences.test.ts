@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   DEFAULT_PREFERENCES,
   SELF_EDITABLE_PREFERENCE_FIELDS,
@@ -7,6 +8,7 @@ import {
   pickAdminEditableFields,
   validateSelfEditableInput,
   validateAdminEditableInput,
+  getOwnPreferences,
 } from "./preferences";
 
 describe("preferences helpers", () => {
@@ -444,5 +446,71 @@ describe("preferences helpers", () => {
         }),
       ).toBeNull();
     });
+  });
+});
+
+describe("getOwnPreferences — admin-PII stripping (F4a / H-0065)", () => {
+  // Build a minimal SupabaseClient whose
+  // `.from(...).select(...).eq(...).maybeSingle()` chain resolves to `row`.
+  function mockSupabase(row: Record<string, unknown> | null): SupabaseClient {
+    const chain = {
+      select: () => chain,
+      eq: () => chain,
+      maybeSingle: () => Promise.resolve({ data: row, error: null }),
+    };
+    return { from: () => chain } as unknown as SupabaseClient;
+  }
+
+  // A full allocator_preferences row INCLUDING the two admin-only columns.
+  const fullRow = {
+    user_id: "u-1",
+    mandate_archetype: "diversified",
+    target_ticket_size_usd: 50_000,
+    excluded_exchanges: null,
+    max_drawdown_tolerance: 0.2,
+    min_track_record_days: 180,
+    min_sharpe: 0.8,
+    max_aum_concentration: 0.3,
+    preferred_strategy_types: ["delta_neutral"],
+    preferred_markets: ["binance"],
+    // Admin-only — must NOT survive into the allocator-facing projection:
+    founder_notes: "INTERNAL: high-touch LP, founder to call quarterly",
+    edited_by_user_id: "admin-uuid-9999",
+    updated_at: "2026-01-01T00:00:00Z",
+    max_weight: 0.25,
+    correlation_ceiling: 0.6,
+    liquidity_preference: "high",
+    style_exclusions: null,
+    mandate_edited_at: null,
+    scoring_weight_overrides: null,
+  };
+
+  it("strips founder_notes and edited_by_user_id from the returned row", async () => {
+    const prefs = await getOwnPreferences(mockSupabase(fullRow), "u-1");
+    expect(prefs).not.toBeNull();
+    // The whole point of F4a: these admin-only fields are the live PII leak
+    // that reached the allocator's RSC payload / /api/preferences JSON before
+    // this fix. They must be absent (not merely null) on the self-read.
+    expect(prefs).not.toHaveProperty("founder_notes");
+    expect(prefs).not.toHaveProperty("edited_by_user_id");
+  });
+
+  it("preserves every non-PII mandate field the dashboard + gates consume", async () => {
+    const prefs = await getOwnPreferences(mockSupabase(fullRow), "u-1");
+    // mandate-gates.ts + MandateSnapshotCard + deriveMandateIsSet read these.
+    expect(prefs).toMatchObject({
+      max_weight: 0.25,
+      min_sharpe: 0.8,
+      max_drawdown_tolerance: 0.2,
+      max_aum_concentration: 0.3,
+      liquidity_preference: "high",
+      correlation_ceiling: 0.6,
+      preferred_strategy_types: ["delta_neutral"],
+      mandate_archetype: "diversified",
+    });
+  });
+
+  it("returns null when the allocator has no preferences row", async () => {
+    expect(await getOwnPreferences(mockSupabase(null), "u-1")).toBeNull();
   });
 });
