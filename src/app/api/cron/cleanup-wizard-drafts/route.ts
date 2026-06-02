@@ -111,42 +111,31 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   );
 
   for (const keyId of apiKeyIds) {
-    const { count: refCount, error: countErr } = await admin
-      .from("strategies")
-      .select("id", { count: "exact", head: true })
-      .eq("api_key_id", keyId);
-    if (countErr) {
-      // Safe direction for THIS key (skip revoke when uncertain), but the
-      // skip must be observable — a transient count error means an orphan
-      // may have been left behind, not that the run was clean (M-1145).
-      console.error(
-        `[cron/cleanup-wizard-drafts] count check failed for key=${keyId} (skip revoke):`,
-        countErr,
-      );
-      sweepErrors.push(`${keyId}: count check failed: ${countErr.message}`);
-      continue;
-    }
-    if ((refCount ?? 0) > 0) continue;
-
-    // @audit-skip: cron garbage collection, no user attribution. Deletes
-    // api_keys rows whose only references were wizard drafts that just
-    // got auto-cleaned by this same sweep — the keys are now orphaned.
-    const { error: keyErr } = await admin
-      .from("api_keys")
-      .delete()
-      .eq("id", keyId);
+    // M-0347: atomic check+delete via the shared delete_api_key_if_unreferenced
+    // RPC. As service_role the auth.uid()-IS-NULL arm lets the cron revoke ANY
+    // unreferenced key, and the NOT EXISTS makes the reference check + delete a
+    // single statement — closing the prior two-step "count then delete" TOCTOU
+    // where a wizard re-attaching the key mid-sweep got its strategy yanked.
+    // The RPC returns rows deleted (0 = still referenced, kept; 1 = revoked).
+    // @audit-skip: cron garbage collection, no user attribution.
+    const { data: revoked, error: keyErr } = await admin.rpc(
+      "delete_api_key_if_unreferenced",
+      { p_api_key_id: keyId },
+    );
     if (keyErr) {
-      // Confirmed orphan (refCount===0) that failed to delete: the api_keys
-      // table now holds a row pointing at strategies we just deleted. This
-      // is a real integrity drift, not a no-op — surface it loudly (M-1144).
+      // A failed revoke means an orphan may have been left pointing at the
+      // strategies we just deleted — real integrity drift, not a no-op. Surface
+      // it loudly so the run reports degraded (M-1144/M-1145/H-1251).
       console.error(
-        `[cron/cleanup-wizard-drafts] api_key delete failed for key=${keyId} (orphan NOT revoked):`,
+        `[cron/cleanup-wizard-drafts] atomic key revoke failed for key=${keyId} (orphan NOT revoked):`,
         keyErr,
       );
       sweepErrors.push(`${keyId}: revoke failed: ${keyErr.message}`);
       continue;
     }
-    orphanedKeysRevoked += 1;
+    // revoked === 0 → key is still referenced by a live strategy, correctly
+    // kept (no error, no increment); revoked > 0 → orphan successfully swept.
+    if ((revoked ?? 0) > 0) orphanedKeysRevoked += 1;
   }
 
   // H-1251: when any orphan-sweep step errored, the run is degraded — orphan
