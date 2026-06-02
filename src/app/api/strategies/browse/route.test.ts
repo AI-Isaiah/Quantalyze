@@ -141,6 +141,13 @@ vi.mock("@/lib/ratelimit", () => ({
   },
 }));
 
+// F5b (R8): the route now captures the redacted DB error to Sentry instead of
+// forwarding error.message. Spy so the 500-path test can pin the channel.
+const captureSpy = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: captureSpy,
+}));
+
 function makeRequest(): NextRequest {
   return new NextRequest("http://localhost:3000/api/strategies/browse", {
     method: "GET",
@@ -434,6 +441,15 @@ describe("GET /api/strategies/browse", () => {
     const res = await GET(makeRequest());
     expect(res.status).toBe(500);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    // F5b (R8): the raw Postgres error.message ("boom") must NOT leak — the
+    // body is a static envelope and the detail goes to Sentry.
+    const body = await res.json();
+    expect(body.error).toBe("Failed to load strategies");
+    expect(body.error).not.toBe("boom");
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "PGRST500" }),
+      expect.objectContaining({ tags: { route: "api/strategies/browse" } }),
+    );
     consoleSpy.mockRestore();
   });
 

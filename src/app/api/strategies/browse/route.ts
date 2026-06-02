@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { withPublishedOnly } from "@/lib/visibility";
 import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
@@ -118,9 +119,13 @@ export const GET = withAllocatorAuth(
       .limit(STRATEGY_BROWSE_LIMIT + 1);
 
     if (error) {
+      // F5b (R8): do not forward the raw Postgres error.message (column names /
+      // SQLSTATE / schema detail) to the allocator. Log + capture server-side;
+      // return a static envelope — mirrors the F5a redaction in bridge/simulator.
       console.error("[api/strategies/browse] select error:", error);
+      captureToSentry(error, { tags: { route: "api/strategies/browse" } });
       return NextResponse.json(
-        { error: error.message },
+        { error: "Failed to load strategies" },
         { status: 500, headers: NO_STORE_HEADERS },
       );
     }
