@@ -173,6 +173,44 @@ class TestMonetaryPrecisionH0669:
         fills, _ = await _fetch_raw_trades_okx_inst_type(mock_exchange, None, "SPOT")
         assert fills == []
 
+    @pytest.mark.asyncio
+    async def test_okx_malformed_ctval_fill_dropped_not_persisted_infinity(self) -> None:
+        """Red-team bypass guard: a malformed ``exchange.markets[...]
+        ['contractSize']`` for an instId outside the hardcoded ctVal table
+        yields ``float('inf')``; the SWAP ctVal rescale then produced an
+        unvalidated ``Decimal('Infinity')`` quantity/cost that skipped
+        ``_finite_decimal`` and (now that the carrier is a string) persisted as
+        a corrupt ``'Infinity'`` NUMERIC. The post-rescale re-validation must
+        DROP the fill instead."""
+        from services.exchange import _fetch_raw_trades_okx_inst_type
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        # Non-hardcoded instId → ctVal falls back to markets['contractSize'].
+        mock_exchange.markets = {"ZZZ/USDT:USDT": {"contractSize": "1e400"}}
+
+        async def _history(params: dict) -> dict:
+            if params.get("instType") != "SWAP":
+                return {"data": []}
+            return {"data": [
+                {
+                    "instId": "ZZZ-USDT-SWAP",
+                    "side": "buy",
+                    "fillPx": "1.5",
+                    "fillSz": "3",
+                    "fee": "0",
+                    "feeCcy": "USDT",
+                    "ts": "1700000000000",
+                    "ordId": "ord-z",
+                    "tradeId": "trade-z",
+                    "execType": "T",
+                }
+            ]}
+
+        mock_exchange.private_get_trade_fills_history = _history
+        fills, _ = await _fetch_raw_trades_okx_inst_type(mock_exchange, None, "SWAP")
+        assert fills == []
+
 
 def _okx_swap_only(swap_data: list[dict]) -> "AsyncMock":
     """Return an AsyncMock for ``private_get_trade_fills_history`` that

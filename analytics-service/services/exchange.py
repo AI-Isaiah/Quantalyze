@@ -381,9 +381,14 @@ def _finite_positive_float(value: Any, *, label: str) -> float | None:
 # bounding here drops the single bad fill (matching the pre-fix graceful drop)
 # instead of failing the job.
 _MONETARY_STR_MAXLEN = 48
-# |value| <= ~1e30: generous for any real price/qty/fee, and keeps cost
-# (whose adjusted exponent is the sum of the operands') far below the default
-# Decimal context Emax (999999), so the multiply can never overflow.
+# Bound is on |adjusted exponent|, so it is TWO-SIDED: it rejects both
+# astronomically large (~>1e30, the overflow poison-pill) and astronomically
+# tiny (~<1e-30) magnitudes. 1e30 is generous for any real price/qty/fee (the
+# largest realistic shapes — 1e12 meme-coin quantities, 1e-8 satoshi fees —
+# pass with wide margin), and keeping the operands <= ~1e30 keeps cost (whose
+# adjusted exponent is the sum of the operands') far below the default Decimal
+# context Emax (999999) so the multiply can never overflow. The small side is
+# pure defense-in-depth — a sub-1e-30 value never occurs and cannot overflow.
 _MONETARY_MAX_ADJUSTED = 30
 
 
@@ -671,10 +676,15 @@ def _make_fill_dict(
     precision: ``price`` / ``quantity`` / ``fee`` arrive as ``Decimal``
     (OKX/Bybit string-parsed) or ``float`` (CCXT, already float upstream),
     are coerced to ``Decimal`` via ``Decimal(str(...))``, ``cost`` is
-    computed as an EXACT ``Decimal`` multiply (not the float ``price *
-    quantity`` that compounded IEEE-754 drift), and all four are emitted as
-    numeric STRINGS — the only carrier that crosses the json/httpx persist
-    seam losslessly into the DECIMAL columns.
+    computed as an IEEE-754-drift-free ``Decimal`` multiply — gone is the
+    float ``price * quantity`` that turned ``0.1 * 3`` into
+    ``0.30000000000000004``. (The multiply runs in the default Decimal
+    context, prec=28: a product needing >28 significant digits is
+    context-rounded, but that is far beyond any real fill's precision and the
+    DECIMAL column scale, so "drift-free" — not "arbitrary-precision exact" —
+    is the precise claim.) All four monetary fields are emitted as numeric
+    STRINGS — the only carrier that crosses the json/httpx persist seam
+    losslessly into the DECIMAL columns.
 
     ``position_direction`` is the typed long/short discriminator. The
     ``trades`` table does not yet have a dedicated column for it
@@ -743,8 +753,9 @@ def _make_fill_dict(
     # always survives the trim.
     raw_data = _trim_raw_data(raw_data)
     # H-0669 — coerce to exact Decimal (str() keeps a string input's full
-    # precision and a float input's shortest repr), compute cost as an exact
-    # Decimal multiply, and serialize all monetary fields as numeric strings.
+    # precision and a float input's shortest repr), compute cost as a
+    # drift-free Decimal multiply, and serialize all monetary fields as
+    # numeric strings.
     price_d = price if isinstance(price, Decimal) else Decimal(str(price))
     quantity_d = (
         quantity if isinstance(quantity, Decimal) else Decimal(str(quantity))
@@ -2035,6 +2046,28 @@ async def _fetch_raw_trades_okx_inst_type(
                         amount = fill_sz_contracts  # inverse — skip normalization
                 else:
                     amount = fill_sz_contracts  # SPOT/MARGIN: already base units
+
+                # H-0669 (red-team bypass-hunter) — the ctVal rescale above
+                # introduces a NEW Decimal that never passed _finite_decimal:
+                # _okx_contract_size_for_inst_id falls back to
+                # ``exchange.markets[...]['contractSize']`` for instIds outside
+                # the hardcoded table, and a malformed value there yields
+                # ``float('inf')`` → ``Decimal('Infinity')`` → an unguarded
+                # ``Infinity`` quantity/cost (which, now that the carrier is a
+                # string, json.dumps no longer rejects and PG casts as a corrupt
+                # non-finite NUMERIC). Re-validate the post-rescale amount so a
+                # single bad fill is DROPPED gracefully, matching the fillSz guard.
+                amount_chk = _finite_positive_decimal(
+                    str(amount), label="OKX amount (post-ctVal rescale)"
+                )
+                if amount_chk is None:
+                    logger.error(
+                        "OKX fill dropped: non-finite/oversized amount after "
+                        "contract-size rescale (instId=%s, tradeId=%s)",
+                        fill.get("instId"), fill.get("tradeId"),
+                    )
+                    continue
+                amount = amount_chk
 
                 fee_chk = _finite_decimal(fill.get("fee", 0), label="OKX fee")
                 fee = fee_chk if fee_chk is not None else Decimal("0")

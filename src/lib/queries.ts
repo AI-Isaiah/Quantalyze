@@ -2077,7 +2077,13 @@ export function holdingEquityContribution(h: MyAllocationDashboardPayload["holdi
   return Number.isFinite(h.value_usd) ? h.value_usd : 0;
 }
 
-function liveBaselineMetricsFromHoldings(
+/**
+ * @internal Exported for unit testing only (H-0487/H-0493 de-alias wiring
+ * regression). Guards that this SSR call site actually invokes
+ * collapseAliasedHoldingStrategies — reverting the collapse here must fail a
+ * test rather than silently re-poisoning the live-baseline avgRho.
+ */
+export function liveBaselineMetricsFromHoldings(
   holdingsSummary: MyAllocationDashboardPayload["holdingsSummary"],
   holdingReturnsByScopeRef: Record<string, DailyPoint[]>,
 ): MyAllocationDashboardPayload["liveBaselineMetrics"] {

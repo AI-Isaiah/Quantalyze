@@ -1439,3 +1439,68 @@ describe("NEW-C09-08 — current_weight clamped through safeFraction", () => {
 
 // Silence unused-var for DAY_MS helper (kept for future TC authors).
 void DAY_MS;
+
+describe("liveBaselineMetricsFromHoldings — multi-venue de-alias wiring (H-0487/H-0493)", () => {
+  // Guards the SSR call site of collapseAliasedHoldingStrategies: reverting the
+  // collapse inside liveBaselineMetricsFromHoldings must FAIL this test rather
+  // than silently re-folding a fabricated rho=1.0 into the live-baseline avgRho.
+  function mkHolding(venue: string, symbol: string, value_usd: number) {
+    return {
+      symbol,
+      venue,
+      holding_type: "spot" as const,
+      value_usd,
+      quantity: 1,
+      mark_price_usd: null,
+      api_key_id: "k",
+      side: "flat" as const,
+      entry_price: null,
+      unrealized_pnl_usd: null,
+    };
+  }
+  const DATES = Array.from({ length: 12 }, (_, i) =>
+    `2026-01-${String(i + 2).padStart(2, "0")}`,
+  );
+  const BTC = [
+    0.02, -0.01, 0.03, -0.02, 0.01, 0.0, 0.015, -0.005, 0.02, -0.01, 0.005, 0.01,
+  ];
+  const ETH = [
+    -0.01, 0.02, -0.015, 0.025, -0.005, 0.01, -0.02, 0.015, -0.01, 0.02, -0.008,
+    0.012,
+  ];
+  const series = (vals: number[]) =>
+    vals.map((value, i) => ({ date: DATES[i], value }));
+
+  it("collapses BTC@binance + BTC@okx so the live-baseline avgRho is not the fabricated 1.0", async () => {
+    const { liveBaselineMetricsFromHoldings } = await import("./queries");
+
+    // Honest reference: one BTC exposure (50k) + ETH (50k), no aliased duplicate.
+    const reference = liveBaselineMetricsFromHoldings(
+      [mkHolding("binance", "BTC", 50_000), mkHolding("binance", "ETH", 50_000)],
+      {
+        "holding:binance:BTC:spot": series(BTC),
+        "holding:binance:ETH:spot": series(ETH),
+      },
+    );
+    expect(reference.avgRho).not.toBeNull();
+    expect(reference.avgRho).not.toBe(1);
+
+    // Multi-venue: BTC split 30k/20k across two venues (identical symbol-keyed
+    // series) + ETH 50k. The collapse makes this exactly equivalent to the
+    // reference (BTC merged to 50k), so avgRho must match. Without the collapse
+    // wiring, the aliased BTC pair folds a fabricated 1.0 into avgRho → mismatch.
+    const live = liveBaselineMetricsFromHoldings(
+      [
+        mkHolding("binance", "BTC", 30_000),
+        mkHolding("okx", "BTC", 20_000),
+        mkHolding("binance", "ETH", 50_000),
+      ],
+      {
+        "holding:binance:BTC:spot": series(BTC),
+        "holding:okx:BTC:spot": series(BTC),
+        "holding:binance:ETH:spot": series(ETH),
+      },
+    );
+    expect(live.avgRho).toBe(reference.avgRho);
+  });
+});

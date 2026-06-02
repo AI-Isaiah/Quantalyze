@@ -120,8 +120,23 @@ export function collapseAliasedHoldingStrategies(
     }
     selected[rep.id] = anySelected;
     weights[rep.id] = summedSelectedWeight;
-    if (state.startDates[rep.id] !== undefined) {
-      startDates[rep.id] = state.startDates[rep.id];
+    // Carry the EARLIEST include-from across the aliased group, not blindly the
+    // representative's. The weight-equivalence guarantee relies on aliased
+    // members sharing a start date — which they do today, since they share a
+    // byte-identical symbol-keyed series (so dailyReturns[0].date is equal) and
+    // the SSR path passes no startDates at all. This is therefore a no-op now;
+    // it keeps the merge correct-by-construction (never LATER than any member)
+    // if a per-holding include-from control is ever added. ISO dates compare
+    // lexicographically = chronologically.
+    let earliestStart: string | undefined;
+    for (const member of group) {
+      const sd = state.startDates[member.id];
+      if (sd !== undefined && (earliestStart === undefined || sd < earliestStart)) {
+        earliestStart = sd;
+      }
+    }
+    if (earliestStart !== undefined) {
+      startDates[rep.id] = earliestStart;
     }
   }
 
