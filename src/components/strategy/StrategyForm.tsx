@@ -14,6 +14,26 @@ import type { Strategy } from "@/lib/types";
 
 const EXCHANGE_OPTIONS = EXCHANGES.map((e) => ({ value: e.toLowerCase(), label: e }));
 
+/**
+ * H-0405 (audit-2026-05-07): map a raw Postgres/PostgREST error to a safe,
+ * user-facing string. Piping `error.message` straight into the banner leaked
+ * internal detail — SQLSTATE 42501 (RLS / SECURITY DEFINER trigger RAISE, such
+ * as the cross-tenant api_key_id guard from migration 028/029 which embeds two
+ * UUIDs + the migration name), constraint text, and column names. Keep all of
+ * that server-side; show the user one of two intent-specific messages.
+ */
+function toUserFacingStrategyError(error: {
+  code?: string;
+  message?: string;
+}): string {
+  const code = error.code ?? "";
+  const message = error.message ?? "";
+  if (code === "42501" || message.includes("cross-tenant linkage blocked")) {
+    return "You can only link API keys you own.";
+  }
+  return "Couldn't save your strategy. Please try again.";
+}
+
 interface StrategyFormProps {
   strategy?: Strategy;
   mode: "create" | "edit";
@@ -155,10 +175,10 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
 
     if (mode === "create") {
       const { error } = await supabase.from("strategies").insert(payload);
-      if (error) { setError(error.message); setLoading(false); return; }
+      if (error) { setError(toUserFacingStrategyError(error)); setLoading(false); return; }
     } else if (strategy) {
       const { error } = await supabase.from("strategies").update(payload).eq("id", strategy.id);
-      if (error) { setError(error.message); setLoading(false); return; }
+      if (error) { setError(toUserFacingStrategyError(error)); setLoading(false); return; }
     }
 
     router.push("/strategies");
