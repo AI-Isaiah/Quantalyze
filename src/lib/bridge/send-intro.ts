@@ -55,6 +55,15 @@ export async function sendBridgeIntro(
       signal: args.signal,
     });
     if (!res.ok) {
+      // F9 H-0084: the route returns 499 when it honored a client cancellation
+      // (req.signal.aborted) — the fetch RESOLVES rather than throwing, so this
+      // is the server-side twin of the AbortError catch below. Map it to the
+      // same quiet aborted result so `result.aborted` is a reliable
+      // "was cancelled" discriminator regardless of which side won the race
+      // (no raw "request aborted" string ever reaches the toast).
+      if (res.status === 499) {
+        return { ok: false, error: "Cancelled.", aborted: true };
+      }
       const body = await res.json().catch((err) => {
         // H-0435: a real backend that begins emitting HTML 502s (CDN truncation,
         // proxy timeout) reaches here. Log the parse failure so the fallback copy

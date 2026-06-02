@@ -346,4 +346,28 @@ describe("sendBridgeIntro", () => {
     });
     expect(errSpy).not.toHaveBeenCalled();
   });
+
+  // F9 H-0084: the server-side twin — the route returns 499 when it honored the
+  // cancellation before writing. The fetch RESOLVES (no throw), so this is the
+  // !res.ok path; it must map to the SAME quiet aborted result (and never leak
+  // the raw "request aborted" body string to the toast).
+  it("maps a 499 response to a quiet aborted result (server-honored cancel)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: "request aborted" }), {
+        status: 499,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    installFetch(fetchMock);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await sendBridgeIntro(ARGS);
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Cancelled.",
+      aborted: true,
+    });
+    expect(errSpy).not.toHaveBeenCalled();
+  });
 });
