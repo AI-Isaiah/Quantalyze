@@ -113,7 +113,10 @@ interface Decision {
 }
 
 interface QueueData {
-  profile: Profile;
+  // Nullable: the public /api/demo/match route returns `profile: null` when the
+  // seed demo allocator isn't provisioned in this environment (an empty queue
+  // instead of a 500). The header/breadcrumb below null-guard on it.
+  profile: Profile | null;
   preferences: AllocatorPreferences | null;
   batch: MatchBatch | null;
   candidates: CandidateRow[];
@@ -368,7 +371,7 @@ export function AllocatorMatchQueue({
       )}
 
       {/* Breadcrumb */}
-      {!forceReadOnly && (
+      {!forceReadOnly && profile && (
         <nav className="flex items-center gap-2 text-sm text-text-muted">
           <Link href="/admin/match" className="hover:text-text-primary">
             Match queue
@@ -391,7 +394,9 @@ export function AllocatorMatchQueue({
         </div>
       )}
 
-      {/* Header strip */}
+      {/* Header strip — skipped when the (demo) allocator profile is
+          unprovisioned; a null profile renders just the empty-state below. */}
+      {profile && (
       <Card>
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
@@ -454,6 +459,7 @@ export function AllocatorMatchQueue({
           )}
         </div>
       </Card>
+      )}
 
       {/* Filter-relaxed callout */}
       {batch?.filter_relaxed && (

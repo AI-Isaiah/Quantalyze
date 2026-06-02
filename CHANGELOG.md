@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.63] - 2026-06-02
+### Fixed — Public /demo/founder-view 500 (seed demo allocator unprovisioned)
+
+The public, read-only `/demo/founder-view` page mounts the real `AllocatorMatchQueue` against `GET /api/demo/match/<seed>`, which **500'd in production** — the demo founder-view match queue has never worked in prod. Root cause: the route is hard-locked to the seed `ALLOCATOR_ACTIVE_ID`, whose `profiles` row is provisioned only by `scripts/seed-full-app-demo.ts` (a manual script never run against prod; only `seed-demo-data.ts` runs in CI vs staging). With the profile absent, `getAllocatorMatchPayload`'s sole `.single()` (the profiles fetch) raises PostgREST `PGRST116` → throw → 500 (the route's deliberate F1 loud-fail). Found while prod-verifying PR #410; **pre-existing, not a #410 regression.**
+
+- **Demo route only** (`src/app/api/demo/match/[allocator_id]/route.ts`): catch `PGRST116` and degrade to a clean, empty **200** queue (`profile: null`, no candidates) that `AllocatorMatchQueue` renders as "No candidates yet" — instead of a 500 trust-collapse on a public marketing page. Any genuine error (schema drift, network, any non-`PGRST116`) still 500s. The shared `getAllocatorMatchPayload` is unchanged, so the AUTH'd admin route keeps full loud-fail (a missing *real* allocator IS an error there).
+- **No invented data:** returns `profile: null`, not a fabricated allocator identity. `AllocatorMatchQueue` null-guards its header/breadcrumb so an unprovisioned demo renders just the read-only banner + empty state.
+- **Coupling documented** at both sites: the `PGRST116`→graceful mapping relies on `profiles` being the only `.single()` in the fan-out (true given the PK on `profiles.id` + `allocator_preferences.user_id` and `.limit(1)` on `match_batches`).
+- Regression tests (both proven to fail without the fix): route `PGRST116 → 200 empty` (and a genuine error still `→ 500`); component renders the empty state without crashing on `profile: null`. tsc 0, eslint 0, full vitest 5855 passed.
+
 ## [0.24.15.61] - 2026-06-02
 ### Changed — B-mypy part h: widen the CI `mypy --strict` gate to `services/` + `routers/`
 
