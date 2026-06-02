@@ -6,6 +6,7 @@ import {
   EquityChart,
   anchorFromFirstPositive,
   localDateFromISO,
+  syncStampLabel,
   type OverlaySeries,
   type Period,
 } from "./EquityChart";
@@ -311,10 +312,15 @@ describe("EquityChart", () => {
     // Both chrome elements now render: the sync stamp (truth-screenshot
     // parity) AND the return summary (`aria-label="Return over {period}"`
     // — the same naming convention used before PR3 removed it).
-    const { getByText, getByLabelText } = render(
+    const { getByText, queryByText, getByLabelText } = render(
       <EquityChart equityDailyPoints={makeSeries(60)} initialPeriod="ALL" />,
     );
-    expect(getByText("sync just now")).toBeTruthy();
+    // B14 / NEW-C09-04 (H-1226): with no `lastSyncAt` the stamp renders the
+    // honest "no sync yet" copy, not the "sync just now" lie. EQ-5's point is
+    // that the stamp AND the return summary both render — verify the stamp is
+    // present via its honest copy.
+    expect(getByText("no sync yet")).toBeTruthy();
+    expect(queryByText("sync just now")).toBeNull();
     const summary = getByLabelText("Return over ALL");
     expect(summary).toBeTruthy();
     // Summary text matches "+x.xx%" / "-x.xx%" pattern.
@@ -957,6 +963,57 @@ describe("EquityChart — NEW-C04-08 narrow range annotation", () => {
       <EquityChart equityDailyPoints={pts} initialPeriod="ALL" />,
     );
     expect(container.querySelector('[data-testid="equity-chart-narrow-range"]')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B14 / NEW-C09-04 (H-1226) — syncStampLabel is the single source for the
+// sync-freshness footer copy shared by the inner EquityChart header stamp and
+// the EquityChartWidgetInner wrapper. These cases lock the full
+// (lastSyncAt × stale × nowMs) matrix so the never-synced "sync just now" lie
+// cannot return at EITHER stamp site, and so the previously-untested
+// stale-with-timestamp copy is pinned.
+// ---------------------------------------------------------------------------
+describe("syncStampLabel — honest sync-freshness footer copy", () => {
+  const NOW = Date.UTC(2026, 0, 1, 12, 0, 0);
+  const FIVE_MIN_AGO = new Date(NOW - 5 * 60 * 1000).toISOString();
+
+  it("never-synced + fresh → 'no sync yet' (NOT the 'sync just now' lie), regardless of nowMs", () => {
+    // The producer always plumbs lastSyncAt, so null = genuinely never synced.
+    // This is the exact state the fix exists to make honest.
+    expect(syncStampLabel(null, false, null)).toBe("no sync yet");
+    expect(syncStampLabel(null, false, NOW)).toBe("no sync yet");
+  });
+
+  it("never-synced + stale → 'data stale' (active keys, none ever synced)", () => {
+    expect(syncStampLabel(null, true, null)).toBe("data stale");
+    expect(syncStampLabel(null, true, NOW)).toBe("data stale");
+  });
+
+  it("empty-string lastSyncAt is treated as never-synced, never formatted as an epoch", () => {
+    // "" is falsy → the never-synced branch, so formatRelativeTime("") (which
+    // would render a 1970-epoch "56 years ago") is never reached.
+    expect(syncStampLabel("", false, NOW)).toBe("no sync yet");
+    expect(syncStampLabel("", true, NOW)).toBe("data stale");
+  });
+
+  it("real timestamp + nowMs===null → first-render placeholder (SSR/CSR parity)", () => {
+    // The wrapper renders this for one frame before the minute-tick resolves
+    // relative time; the timestamp is real and recent so the placeholder holds.
+    expect(syncStampLabel(FIVE_MIN_AGO, false, null)).toBe("sync just now");
+    expect(syncStampLabel(FIVE_MIN_AGO, true, null)).toBe("data stale");
+  });
+
+  it("real timestamp + resolved nowMs → relative-time copy", () => {
+    expect(syncStampLabel(FIVE_MIN_AGO, false, NOW)).toBe("last sync 5m ago");
+  });
+
+  it("real timestamp + stale + resolved nowMs → 'stale · last sync …' (the realistic stale-but-previously-synced state)", () => {
+    // This compound copy had no coverage before; it is the most common
+    // production staleness state (synced once, now >24h old).
+    expect(syncStampLabel(FIVE_MIN_AGO, true, NOW)).toBe(
+      "stale · last sync 5m ago",
+    );
   });
 });
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.72] - 2026-06-02
+### Fixed — Equity widget no longer claims "sync just now" for never-synced allocators (B14, H-1226 / NEW-C09-04)
+
+An allocator who had never completed a sync (e.g. one who has not connected an exchange yet) saw the literal copy **"sync just now"** in the equity-curve footer — a freshness lie, since no sync ever happened. This was the last live instance of the NEW-C09-04 class on the equity surface; the .66 / .70 B14 slices closed the producer and portfolio axes but never reached this widget's display copy.
+
+- The never-synced state (`lastSyncAt` null, not stale) now renders the honest **"no sync yet"** at both stamp sites — the `EquityChartWidget` card-header stamp and the inner `EquityChart` component's own header. The producer (`getMyAllocationDashboard`) always plumbs `lastSyncAt`, so a null genuinely means "never synced," not an unplumbed call site.
+- Single-sourced the footer copy in one exported `syncStampLabel(lastSyncAt, stale, nowMs)` helper that both stamp sites now call, so the lie cannot reappear at one site while the other is correct. The stale-with-timestamp copy (`stale · last sync …`) — previously untested and duplicated — is now pinned by a 6-case unit test.
+
+### Changed — Scenario tab equity chart now reflects real sync state
+- The Scenario tab renders the inner `EquityChart` header but passed no sync state, so its stamp showed "sync just now" (now "no sync yet") regardless of the allocator's real sync. `ScenarioComposer` now plumbs the live `allKeysStale` / `lastSyncAt`, so the Scenario-tab stamp is honest. This also applies the existing stale-dimmer overlay to the Scenario chart when the live baseline is stale — matching the Overview chart and the KpiStrip convention that a stale baseline suppresses the projection.
+- Surfaced by 6 fresh-context review specialists + a red-team pass on the final diff (the ScenarioComposer reachability was a specialist + red-team finding; the discriminated-union fix the audit proposed was declined as it would reintroduce the syncing/stale precedence coupling .70 deliberately removed). tsc 0 / eslint 0 / full vitest 5937 passed.
+
 ## [0.24.15.71] - 2026-06-02
 ### Tested — Holdings tab strategy-rows render coverage (F4b follow-up)
 
