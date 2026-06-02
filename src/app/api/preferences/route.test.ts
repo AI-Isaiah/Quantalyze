@@ -424,6 +424,24 @@ describe("PUT /api/preferences", () => {
     expect(STATE.rpcCalls).toHaveLength(0);
   });
 
+  it("TC10b — L-0076: non-object JSON body (null) is rejected 400 without crashing", async () => {
+    // req.json() accepts a literal `null` (also 42, "foo", []). Pre-fix that
+    // flowed into pickSelfEditableFields -> `key in null`, where the `in`
+    // operator throws an uncaught TypeError -> unstructured 500. The route must
+    // instead return the structured 400 + no-store, before any rpc/audit.
+    const { PUT } = await import("./route");
+
+    const res = await PUT(makeRequest("null"));
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("Request body must be a JSON object");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+
+    await drainAuditMicrotasks();
+    expect(STATE.rpcCalls).toHaveLength(0);
+  });
+
   it("TC11 — WR-02 burst tolerance: PUT uses 30/min mandateAutoSaveLimiter, not 5/min userActionLimiter", async () => {
     // MandateForm fans a single edit out into 8+ field-level PUTs (3 strategy
     // chips + 2 exchange chips + max_weight slide + ticket-size blur +

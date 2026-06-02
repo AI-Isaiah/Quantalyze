@@ -95,7 +95,22 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
 
   let body: Record<string, unknown>;
   try {
-    body = await req.json();
+    const parsed = await req.json();
+    // L-0076 (B9 boundary parity): req.json() accepts any valid JSON, including
+    // the scalars `null` / `42` / `"foo"` and arrays. Those flow into
+    // pickSelfEditableFields -> `key in input`, and the `in` operator throws a
+    // TypeError on a non-object operand (null/number/string) — an UNCAUGHT crash
+    // that escaped this try as an unstructured Next.js 500 (no {error} envelope,
+    // no no-store header, no structured log). Reject a non-object body with the
+    // same structured 400 the sibling admin routes use, before
+    // pickSelfEditableFields is reached.
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return NextResponse.json(
+        { error: "Request body must be a JSON object" },
+        { status: 400, headers: NO_STORE_HEADERS },
+      );
+    }
+    body = parsed as Record<string, unknown>;
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400, headers: NO_STORE_HEADERS });
   }
