@@ -36,9 +36,10 @@ Key design decisions (from plan 06-02 + VOICES-ACCEPTED.md):
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import ccxt.async_support as ccxt
+from supabase import Client
 
 from services.closed_sets import STABLECOINS
 from services.db import db_execute
@@ -54,7 +55,7 @@ from services.positions import fetch_positions
 RAW_PAYLOAD_CAP_BYTES: int = 4096  # D-02 / ~4KB JSONB cap
 
 
-def _extract_bybit_unified_walletbalances(info: dict) -> dict[str, float]:
+def _extract_bybit_unified_walletbalances(info: dict[str, Any]) -> dict[str, float]:
     """Extract per-coin `walletBalance` from a Bybit V5 unified-account
     `info` payload.
 
@@ -105,7 +106,18 @@ def _extract_bybit_unified_walletbalances(info: dict) -> dict[str, float]:
         return {}
 
 
-class DeribitNotSupportedError(ccxt.NotSupported):
+if TYPE_CHECKING:
+    # ccxt.async_support ships no py.typed, so ``ccxt.NotSupported`` is ``Any`` and
+    # subclassing it trips ``disallow_subclassing_any`` under ``--strict``. At
+    # RUNTIME this class MUST inherit ``ccxt.NotSupported`` so the
+    # ``except ccxt.NotSupported`` feature-detection handlers still catch it;
+    # for the type-checker we expose the concrete ``Exception`` base it derives from.
+    _DeribitNotSupportedBase = Exception
+else:
+    _DeribitNotSupportedBase = ccxt.NotSupported
+
+
+class DeribitNotSupportedError(_DeribitNotSupportedBase):
     """f3 Path B: raised when the allocator worker is asked to fetch spot from Deribit.
 
     Subclasses ccxt.NotSupported so any catch-all `except ccxt.NotSupported`
@@ -115,7 +127,7 @@ class DeribitNotSupportedError(ccxt.NotSupported):
     """
 
 
-def _cap_raw_payload(payload: dict) -> dict:
+def _cap_raw_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Truncate a raw_payload JSON dict to fit the ~4KB JSONB cap.
 
     If the serialized payload exceeds RAW_PAYLOAD_CAP_BYTES, return a
@@ -148,7 +160,7 @@ def _map_exception_to_sync_status(exc: Exception) -> str:
     return "error"
 
 
-async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict]:
+async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict[str, Any]]:
     """Build spot allocator_holdings rows from fetch_balance() + bulk fetch_tickers().
 
     f3 Path B: if exchange.id == 'deribit', raise DeribitNotSupportedError
@@ -203,7 +215,7 @@ async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict]:
         f"{asset}/USDT" for asset in non_zero
         if asset.upper() not in STABLECOINS
     ]
-    tickers: dict[str, dict] = {}
+    tickers: dict[str, dict[str, Any]] = {}
     if need_tickers:
         try:
             tickers = await exchange.fetch_tickers(need_tickers) or {}
@@ -218,7 +230,7 @@ async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict]:
                 except Exception:
                     tickers[sym] = {"last": 0.0}
 
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     for asset, qty in non_zero.items():
         asset_upper = asset.upper()
         if asset_upper in STABLECOINS:
@@ -246,7 +258,7 @@ async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict]:
     return rows
 
 
-async def _fetch_derivative_rows(exchange_name: str, exchange: Any) -> list[dict]:
+async def _fetch_derivative_rows(exchange_name: str, exchange: Any) -> list[dict[str, Any]]:
     """Build derivative allocator_holdings rows by reusing positions.fetch_positions.
 
     Remaps the strategy-side snapshot shape to the allocator_holdings
@@ -254,7 +266,7 @@ async def _fetch_derivative_rows(exchange_name: str, exchange: Any) -> list[dict
     f3 Path B only defers the spot side.
     """
     snapshots = await fetch_positions(exchange_name, exchange)
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     for s in snapshots:
         qty = float(s.get("size_base") or 0)
         entry_raw = s.get("entry_price")
@@ -280,7 +292,7 @@ async def _fetch_derivative_rows(exchange_name: str, exchange: Any) -> list[dict
 
 async def fetch_allocator_holdings(
     exchange_name: str, exchange: Any
-) -> tuple[list[dict], str | None]:
+) -> tuple[list[dict[str, Any]], str | None]:
     """D-01: fetch BOTH spot and derivatives in a single sync.
 
     Returns ``(rows, warning)`` where ``warning`` is None on full success
@@ -294,8 +306,8 @@ async def fetch_allocator_holdings(
     path: the whole sync is marked 'error' so the allocator sees the
     deferral message (f3 Path B).
     """
-    spot_rows: list[dict] = []
-    deriv_rows: list[dict] = []
+    spot_rows: list[dict[str, Any]] = []
+    deriv_rows: list[dict[str, Any]] = []
     warning: str | None = None
 
     # Spot side — any failure (including Deribit Path B) re-raises to
@@ -319,8 +331,8 @@ async def fetch_allocator_holdings(
 
 
 async def persist_allocator_holdings(
-    supabase_client: Any,
-    holdings: list[dict],
+    supabase_client: Client,
+    holdings: list[dict[str, Any]],
     allocator_id: str,
     api_key_id: str,
     asof_date: str,
@@ -346,8 +358,8 @@ async def persist_allocator_holdings(
         for h in holdings
     ]
 
-    def _upsert():
-        return supabase_client.table("allocator_holdings").upsert(
+    def _upsert() -> None:
+        supabase_client.table("allocator_holdings").upsert(
             rows,
             on_conflict="allocator_id,venue,symbol,asof",
         ).execute()

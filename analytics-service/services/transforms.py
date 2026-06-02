@@ -259,7 +259,7 @@ def _build_meta(
     }
 
 
-def downsample_series(series: list[dict], target_points: int = 90) -> list[float]:
+def downsample_series(series: list[dict[str, Any]], target_points: int = 90) -> list[float]:
     """Downsample a time series to target_points for sparklines."""
     if len(series) <= target_points:
         return [p["value"] for p in series]
@@ -268,7 +268,7 @@ def downsample_series(series: list[dict], target_points: int = 90) -> list[float
     return [series[int(i * step)]["value"] for i in range(target_points)]
 
 
-def cap_data_points(data: list, max_points: int = 5000) -> list:
+def cap_data_points(data: list[Any], max_points: int = 5000) -> list[Any]:
     """Truncate data to max_points, keeping the most recent."""
     if len(data) <= max_points:
         return data

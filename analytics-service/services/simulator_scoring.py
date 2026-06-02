@@ -23,7 +23,7 @@ specific candidate, unlike the REPLACE bridge that ranks multiple
 alternatives.
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -49,7 +49,7 @@ def simulate_add_candidate(
     candidate_returns: pd.Series,
     weights: dict[str, float],
     add_weight: float = 0.10,
-) -> dict:
+) -> dict[str, Any]:
     """Run the ADD scenario for a single candidate against a portfolio.
 
     Args:
@@ -261,7 +261,7 @@ def _metrics_dict(
     max_dd: Optional[float],
     avg_corr: Optional[float],
     concentration: Optional[float],
-) -> dict:
+) -> dict[str, Any]:
     return {
         "sharpe": _safe_float(sharpe),
         "max_drawdown": _safe_float(max_dd),
@@ -270,7 +270,7 @@ def _metrics_dict(
     }
 
 
-def _zero_deltas() -> dict:
+def _zero_deltas() -> dict[str, Any]:
     return {
         "sharpe_delta": 0.0,
         "dd_delta": 0.0,
@@ -279,13 +279,13 @@ def _zero_deltas() -> dict:
     }
 
 
-def _cumulative_curve(returns: pd.Series) -> list[dict]:
+def _cumulative_curve(returns: pd.Series) -> list[dict[str, Any]]:
     """Convert a returns series into a list of {date, value} points where
     value is the cumulative growth factor (starts at ~1 + first return)."""
     if returns.empty:
         return []
     cumulative = (1 + returns).cumprod()
-    points: list[dict] = []
+    points: list[dict[str, Any]] = []
     for idx, val in cumulative.items():
         date_str = idx.isoformat() if hasattr(idx, "isoformat") else str(idx)
         # Strip time when the index is a pd.Timestamp at midnight (most
@@ -296,7 +296,7 @@ def _cumulative_curve(returns: pd.Series) -> list[dict]:
     return points
 
 
-def _empty_result(candidate_id: str, status: str) -> dict:
+def _empty_result(candidate_id: str, status: str) -> dict[str, Any]:
     """Return a well-formed no-op result when preconditions fail but we
     still want to respond without an HTTP error."""
     return {

@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+from typing import Any
+
 from cryptography.fernet import Fernet, InvalidToken
 
 logger = logging.getLogger("quantalyze.analytics")
@@ -57,7 +59,7 @@ def encrypt_credentials(
     api_secret: str,
     passphrase: str | None,
     kek: bytes,
-) -> dict:
+) -> dict[str, Any]:
     """Encrypt exchange credentials using envelope encryption.
 
     1. Generate a unique DEK for this key pair
@@ -88,7 +90,7 @@ def encrypt_credentials(
 
 
 def decrypt_credentials(
-    encrypted_row: dict,
+    encrypted_row: dict[str, Any],
     kek: bytes,
 ) -> tuple[str, str, str | None]:
     """Decrypt exchange credentials.
@@ -108,11 +110,11 @@ def decrypt_credentials(
 
 
 def rotate_kek(
-    encrypted_row: dict,
+    encrypted_row: dict[str, Any],
     old_kek: bytes,
     new_kek: bytes,
     new_version: int,
-) -> dict:
+) -> dict[str, Any]:
     """Re-encrypt the DEK with a new KEK. Data stays untouched."""
     old_cipher = Fernet(old_kek)
     dek = old_cipher.decrypt(encrypted_row["dek_encrypted"].encode())

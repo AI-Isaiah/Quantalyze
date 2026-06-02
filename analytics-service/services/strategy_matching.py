@@ -45,7 +45,7 @@ _MIN_OVERLAP_DAYS = 30
 _PUBLISHED_STRATEGIES_LIMIT = 100
 
 
-def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
+def _records_to_series(raw: list[dict[str, Any]] | None, name: str = "") -> pd.Series | None:
     """Convert ``[{date, value}, ...]`` records to a DatetimeIndex Series.
 
     Mirrors the helper at ``analytics-service/routers/portfolio.py:35``.
@@ -122,7 +122,11 @@ def find_matched_strategy(
         )
         best = corrs.idxmax()
         if corrs[best] > _MATCH_CORRELATION_THRESHOLD:
-            return best
+            # ``best`` is a DataFrame column label sourced from
+            # ``row["strategy_id"]`` (see ``existing`` above), i.e. a strategy_id
+            # string; ``str()`` is a no-op coercion that makes the Any-typed
+            # pandas ``idxmax()`` result honestly ``str``.
+            return str(best)
         return None
 
     except Exception as exc:  # noqa: BLE001

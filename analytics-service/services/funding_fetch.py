@@ -40,6 +40,7 @@ from decimal import Decimal
 from typing import Any, TypedDict
 
 import ccxt.async_support as ccxt
+from supabase import Client
 
 from services.db import db_execute
 from services.exchange import EXCHANGE_CLASSES, create_exchange
@@ -167,7 +168,7 @@ def _sanitize_raw(value: Any) -> Any:
     return str(value)
 
 
-def _extract_raw_data(raw_item: dict) -> dict[str, Any]:
+def _extract_raw_data(raw_item: dict[str, Any]) -> dict[str, Any]:
     """Project ``raw_item`` onto the whitelist + sanitize each value.
 
     Keys not in ``_RAW_DATA_WHITELIST`` are dropped; values are passed
@@ -259,7 +260,7 @@ def _normalize_funding_row(
     amount_raw: Any,
     ts_raw: Any,
     currency: str,
-    raw_item: dict,
+    raw_item: dict[str, Any],
 ) -> "FundingFeeRow | None":
     """Build a uniform funding_fees row from raw exchange fields.
 
@@ -863,10 +864,10 @@ def serialize_funding_row(row: "FundingFeeRow | dict[str, Any]") -> dict[str, An
 
 
 async def upsert_funding_rows(
-    supabase,
+    supabase: Client,
     rows: Sequence[FundingFeeRow | dict[str, Any]],
     batch_size: int = FUNDING_UPSERT_BATCH_SIZE,
-) -> dict:
+) -> dict[str, Any]:
     """Upsert funding rows into funding_fees in batches.
 
     Uses on_conflict='match_key' + ignore_duplicates=True so repeated
@@ -890,7 +891,7 @@ async def upsert_funding_rows(
         batch = rows[i : i + batch_size]
         payload = [serialize_funding_row(r) for r in batch]
 
-        def _upsert(rows_to_insert=payload):
+        def _upsert(rows_to_insert: list[dict[str, Any]] = payload) -> None:
             supabase.table("funding_fees").upsert(
                 rows_to_insert,
                 on_conflict="match_key",
