@@ -8,6 +8,14 @@
 // order is delta_180d -> delta_90d -> delta_30d, matching Phase 4
 // feedback_engine._success_value lines 156-166. Fixture avgRealizedDelta
 // = 0.00333 on the 7-row parity fixture.
+//
+// F2 H-0464 parity scope: the LADDER ORDER + the strict-`> 0`-is-win rule match
+// Python; the NON-FINITE handling DELIBERATELY DIVERGES (see mostMatureDelta in
+// bridge-outcome-schema). The dashboard treats a NaN/Infinity delta as absent
+// (pending, excluded from the denominator); Python's _success_value scores a
+// real NaN as a loss and Infinity as a win and keeps both in its denominator.
+// The byte-parity fixture contains no non-finite rows, so this is not a fixture
+// regression — but do NOT "reconcile" the two sides on non-finite inputs.
 
 import { mostMatureDelta, type BridgeOutcome } from "./bridge-outcome-schema";
 
@@ -18,19 +26,22 @@ export type OutcomeKPIs = {
   winRate: number | null;
   /** D-12 revised: arithmetic mean of most-mature non-NULL delta per surviving allocated row; null when denominator=0. */
   avgRealizedDelta: number | null;
-  /** D-14 sub-label source: count of allocated rows with percent>=1 but all three deltas NULL. */
+  /**
+   * D-14 sub-label source: count of allocated rows (percent>=1) with NO usable
+   * (finite) most-mature delta. F2 H-0464: this is now `allocatedSized.length -
+   * deltas.length`, which includes both all-NULL-delta rows AND rows whose only
+   * deltas are non-finite (NaN/Infinity from a corrupt worker write) — the
+   * latter are surfaced via a console.error rather than silently scored.
+   */
   pendingCount: number;
   /**
-   * NEW-C27-02: denominator of winRate — count of mature allocated rows
-   * (percent>=1, at least one non-null delta) that contributed a numeric delta
-   * to the win-rate calculation (= `deltas.length` after the `mostMatureDelta`
-   * filter). In practice equals `mature.length` because `mostMatureDelta` can
-   * only return null when all three delta fields are null, but the `mature`
-   * filter already guarantees at least one is non-null. Returned explicitly so
-   * consumers can show a consistent "N settled" sub-label using the SAME
-   * population as the rate itself rather than a different slice (e.g. rows with
-   * delta_90d != null). Do NOT substitute `mature.length` — if the `mature`
-   * filter or `mostMatureDelta` logic ever changes the two could diverge.
+   * NEW-C27-02: denominator of winRate — the count of allocated rows
+   * (percent>=1) that contributed a FINITE most-mature delta to the win-rate
+   * calculation (= `deltas.length`). F2 H-0464: `mostMatureDelta` returns null
+   * not only when all three delta fields are NULL but ALSO when every present
+   * delta is non-finite, so a row with a non-null-but-NaN delta is excluded here
+   * and counted in pendingCount. Returned explicitly so consumers can show a
+   * consistent "N settled" sub-label over the SAME population as the rate itself.
    */
   winRateDenominator: number;
 };
@@ -72,7 +83,10 @@ export function computeOutcomeKPIs(outcomes: BridgeOutcome[]): OutcomeKPIs {
   // therefore resolves to null and is counted PENDING (not a fabricated loss),
   // and mature/pending/deltas stay mutually consistent (winRateDenominator ==
   // deltas.length). A row with a non-finite high delta but a valid lower one uses
-  // the valid lower delta rather than the corrupt value.
+  // the valid lower delta rather than the corrupt value — and is INTENTIONALLY
+  // NOT counted as corruption below: the row still settled on a usable number, so
+  // fail-loud is deliberately scoped to FULLY-unusable rows (every delta
+  // non-finite) to avoid logging on routine partial maturity.
   const deltas: number[] = [];
   let nonFiniteDropped = 0;
   for (const o of allocatedSized) {

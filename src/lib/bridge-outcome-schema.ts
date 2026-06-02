@@ -39,8 +39,8 @@ export type BridgeOutcome = {
 };
 
 /**
- * Single source of truth for the "most-mature realized delta" ladder
- * (delta_180d → delta_90d → delta_30d), matching Phase 4
+ * Single source of truth for the "most-mature realized delta" LADDER ORDER
+ * (delta_180d → delta_90d → delta_30d). The ladder order matches Phase 4
  * feedback_engine._success_value (lines 156-166).
  *
  * F2 H-0463: this used to exist twice — a named helper in outcomes-kpi.ts AND an
@@ -56,6 +56,16 @@ export type BridgeOutcome = {
  * Infinity would count as a spurious WIN. Treat any non-finite delta as ABSENT
  * (fall through the ladder); return null when no finite delta exists so the row
  * is classified pending, not a fabricated win/loss.
+ *
+ * ⚠️ DELIBERATE DIVERGENCE from Python (do NOT "reconcile" the two — it would
+ * reintroduce the NaN-as-loss / Inf-as-win bug). The PARITY with
+ * feedback_engine._success_value is the LADDER ORDER only, NOT the non-finite
+ * handling. Python's `_success_value` falls through only when `float(v)` RAISES
+ * (a non-numeric string); a real IEEE NaN does NOT raise, so Python scores a
+ * sole-NaN delta as a LOSS (0) that COUNTS in its denominator, and `inf > 0` as
+ * a WIN. That is the learning-signal computation; this is the dashboard, where
+ * treating a corrupt delta as absent (pending) is the correct UX. The two are
+ * intentionally different on non-finite inputs.
  */
 export function mostMatureDelta(o: BridgeOutcome): number | null {
   if (o.delta_180d !== null && Number.isFinite(o.delta_180d)) return o.delta_180d;
