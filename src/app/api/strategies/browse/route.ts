@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { withPublishedOnly } from "@/lib/visibility";
 import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
@@ -54,8 +55,13 @@ export interface BrowseStrategyRow {
 
 // M10 — Pin LIMIT 200. Verified strategy count is in the low tens today;
 // the v0.16 strategy-onboarding push is expected to multiply this. The
-// drawer contract is "browse first 200 alphabetical" with no pagination
-// in v0.15. Documented cap; raise (and add pagination) when v0.16 lands.
+// drawer contract is "browse first 200 alphabetical".
+//
+// M-0343 (F5b): the route fetches LIMIT+1 and returns a `has_more` flag so
+// the client gets a contract-level signal once the catalog exceeds the cap,
+// instead of silently rendering a truncated first page with no indication.
+// The field is additive — existing `{ strategies }` consumers are unaffected
+// — so a future cursor/offset rollout is not a breaking change.
 const STRATEGY_BROWSE_LIMIT = 200;
 
 export const GET = withAllocatorAuth(
@@ -92,12 +98,19 @@ export const GET = withAllocatorAuth(
         .select("id, name, codename, disclosure_tier, markets, strategy_types"),
     )
       .order("name", { ascending: true })
-      .limit(STRATEGY_BROWSE_LIMIT);
+      // M-0343 (F5b): fetch one extra row to detect a truncated page without
+      // a separate COUNT round-trip. The probe row is sliced off below.
+      .limit(STRATEGY_BROWSE_LIMIT + 1);
 
     if (error) {
+      // F5b (R8): do not forward the raw Postgres error.message (column
+      // names / SQLSTATE / schema detail) to the allocator. Log + capture
+      // server-side; return a static envelope — mirrors the F5a redaction
+      // applied to the bridge / simulator routes.
       console.error("[api/strategies/browse] select error:", error);
+      captureToSentry(error, { tags: { route: "api/strategies/browse" } });
       return NextResponse.json(
-        { error: error.message },
+        { error: "Failed to load strategies" },
         { status: 500, headers: NO_STORE_HEADERS },
       );
     }
@@ -117,7 +130,14 @@ export const GET = withAllocatorAuth(
     // `name || codename` lets an attacker who knows a real strategy
     // name look it up and read its codename — defeating the
     // pseudonymity contract for the entire verified catalog.
-    const strategies: BrowseStrategyRow[] = (data ?? []).map((row) => {
+    // M-0343 (F5b): we fetched LIMIT+1; `has_more` signals the catalog
+    // exceeds the cap. Slice back to the cap so the returned array length
+    // stays bounded at STRATEGY_BROWSE_LIMIT (the probe row is never emitted).
+    const rows = data ?? [];
+    const hasMore = rows.length > STRATEGY_BROWSE_LIMIT;
+    const visibleRows = hasMore ? rows.slice(0, STRATEGY_BROWSE_LIMIT) : rows;
+
+    const strategies: BrowseStrategyRow[] = visibleRows.map((row) => {
       const r = row as {
         id: string;
         name: string;
@@ -145,7 +165,7 @@ export const GET = withAllocatorAuth(
     });
 
     return NextResponse.json(
-      { strategies },
+      { strategies, has_more: hasMore },
       { status: 200, headers: NO_STORE_HEADERS },
     );
   },

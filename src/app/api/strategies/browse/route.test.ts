@@ -141,6 +141,14 @@ vi.mock("@/lib/ratelimit", () => ({
   },
 }));
 
+// F5b (R8): the route now captures the redacted DB error to Sentry instead
+// of forwarding error.message. Spy so the 500-path test can pin that the
+// detail still reaches the structured observability channel.
+const captureSpy = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: captureSpy,
+}));
+
 function makeRequest(): NextRequest {
   return new NextRequest("http://localhost:3000/api/strategies/browse", {
     method: "GET",
@@ -335,9 +343,29 @@ describe("GET /api/strategies/browse", () => {
     const { GET } = await import("./route");
     const res = await GET(makeRequest());
     expect(res.status).toBe(200);
-    expect(STATE.observedFilters.limit).toBe(200);
+    // M-0343 (F5b): route fetches LIMIT+1 (201) to detect a truncated page.
+    expect(STATE.observedFilters.limit).toBe(201);
     const body = await res.json();
+    // The probe row is sliced off — the emitted array stays capped at 200.
     expect(body.strategies).toHaveLength(200);
+    // 250 published > 200 cap → the client gets the truncation signal.
+    expect(body.has_more).toBe(true);
+  });
+
+  it("T8b (M-0343) — has_more is false when the catalog fits under the cap", async () => {
+    STATE.strategyRows = Array.from({ length: 5 }, (_, i) => ({
+      id: `11111111-1111-4111-8111-${String(i).padStart(12, "0")}`,
+      name: `Strategy ${String(i).padStart(3, "0")}`,
+      codename: null,
+      markets: ["crypto"],
+      strategy_types: ["systematic"],
+    }));
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategies).toHaveLength(5);
+    expect(body.has_more).toBe(false);
   });
 
   // ============================================================
@@ -412,6 +440,15 @@ describe("GET /api/strategies/browse", () => {
     const res = await GET(makeRequest());
     expect(res.status).toBe(500);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    // F5b (R8): the raw Postgres error.message ("boom") must NOT leak to the
+    // allocator — the body is a static envelope and the detail goes to Sentry.
+    const body = await res.json();
+    expect(body.error).toBe("Failed to load strategies");
+    expect(body.error).not.toBe("boom");
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "PGRST500" }),
+      expect.objectContaining({ tags: { route: "api/strategies/browse" } }),
+    );
     consoleSpy.mockRestore();
   });
 
