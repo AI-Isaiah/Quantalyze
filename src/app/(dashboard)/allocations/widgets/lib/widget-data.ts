@@ -19,7 +19,10 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
  * safe without `any`.
  *
  * `.loose()` (zod v4 passthrough) keeps any payload field a widget reads that
- * isn't enumerated here, so restoring the type can't silently drop a read.
+ * isn't enumerated here, so restoring the type can't silently drop a read. Each
+ * `.loose()` carries a B9 sanctioned-exception: these are read-only RENDER
+ * contracts (the widget displays the payload, never writes it back), so keeping
+ * unknown fields is safe forward-compat, not the NEW-C40-01 write-leak class.
  */
 
 const dailyPointSchema = z.object({ date: z.string(), value: z.number() });
@@ -46,14 +49,14 @@ const riskStrategyRowSchema = z
         codename: z.string().nullable().optional(),
         strategy_analytics: z
           .object({ daily_returns: z.unknown() })
-          .loose()
+          .loose() // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: read-only widget render contract (withWidgetBoundary display), never spread into a write
           .nullable()
           .optional(),
       })
-      .loose()
+      .loose() // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: read-only widget render contract (withWidgetBoundary display), never spread into a write
       .optional(),
   })
-  .loose();
+  .loose(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: read-only widget render contract (withWidgetBoundary display), never spread into a write
 
 /**
  * Shared contract for the seven `{strategies, analytics?, compositeReturns?}`
@@ -67,12 +70,12 @@ export const riskWidgetDataSchema = z
     strategies: z.array(riskStrategyRowSchema),
     analytics: z
       .object({ correlation_matrix: z.unknown().optional() })
-      .loose()
+      .loose() // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: read-only widget render contract (withWidgetBoundary display), never spread into a write
       .nullable()
       .optional(),
     compositeReturns: z.array(dailyPointSchema).optional(),
   })
-  .loose();
+  .loose(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: read-only widget render contract (withWidgetBoundary display), never spread into a write
 
 export type RiskWidgetData = z.infer<typeof riskWidgetDataSchema>;
 
@@ -88,7 +91,7 @@ const overlaySeriesSchema = z
     color: z.string(),
     points: z.array(dailyPointSchema),
   })
-  .loose();
+  .loose(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: read-only widget render contract (withWidgetBoundary display), never spread into a write
 
 /**
  * Contract for the direct-mount `EquityChartWidget` (factsheet Overview /
@@ -116,7 +119,7 @@ export const equityChartWidgetDataSchema = z
     allKeysStale: z.boolean().optional(),
     lastSyncAt: z.string().nullable().optional(),
   })
-  .loose();
+  .loose(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: read-only widget render contract (withWidgetBoundary display), never spread into a write
 
 export type EquityChartWidgetData = z.infer<typeof equityChartWidgetDataSchema>;
 
@@ -144,7 +147,7 @@ const outcomeRowSchema = z
       .object({ original_strategy: z.object({ id: z.string(), name: z.string() }) })
       .nullable(),
   })
-  .loose();
+  .loose(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: read-only widget render contract (withWidgetBoundary display), never spread into a write
 
 /**
  * Contract for the direct-mount `OutcomesWidget` (OutcomesTabPanel). The mount
@@ -161,7 +164,7 @@ export const outcomesWidgetDataSchema = z
     outcomes: z.array(outcomeRowSchema).optional(),
     __error: z.unknown().optional(),
   })
-  .loose();
+  .loose(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: read-only widget render contract (withWidgetBoundary display), never spread into a write
 
 export type OutcomesWidgetData = z.infer<typeof outcomesWidgetDataSchema>;
 

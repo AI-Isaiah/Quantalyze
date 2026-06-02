@@ -10,24 +10,26 @@
  *
  * Method (pure file-read; vitest has no DB):
  *   - SQL side: scan every supabase/migrations/*.sql, comment-stripped, ordered by
- *     leading numeric prefix (Postgres last-wins). For each column take the LATEST
- *     value-set, resolved in this precedence:
+ *     leading numeric prefix (Postgres last-wins). EVERY CHECK column resolves via
+ *     resolveColumnCheck with this precedence (so a future re-add/narrow is caught
+ *     even on columns whose baseline is an inline check):
  *       1. a named `ADD CONSTRAINT <table>_<col>_check CHECK (...)` (newest file, last match), else
- *       2. the inline `CHECK (<col> [IS NULL OR <col>] IN (...))` in the table's CREATE migration, else
- *       3. a `CREATE TYPE <enum> AS ENUM (...)` for enum-typed columns.
- *     The named-search runs FIRST so a future migration that re-adds/narrows a
- *     constraint is detected even on columns whose baseline is an inline check.
+ *       2. the inline `CHECK (<col> [IS NULL OR <col>] IN (...))` in the table's CREATE migration.
+ *     Enum-typed columns resolve via latestEnumTypeValues (schema-qualified
+ *     `CREATE TYPE` + cumulative `ALTER TYPE ... ADD VALUE`).
  *   - TS side: import the runtime single-source-of-truth where one exists (so TS
  *     drift is caught too); pin the documented write-path set inline (with a cite)
  *     for the columns whose TS authority is a route-local const / split write paths.
- *   - Relation: 'equal' (in-parity) OR 'ts-subset' (TS deliberately stricter — a
- *     per-endpoint business rule; SAFE: every TS value is SQL-accepted).
+ *   - Assertion: TS value-set == latest SQL value-set (set equality). A value
+ *     'onlyInTs' is the dangerous direction (TS admits what the DB rejects → 23514).
  *
  * Honesty caveat (same as the sibling parity tests): the Zod/TS side is pinned
  * here; the DB side is pinned by each migration's own verification DO-block plus a
  * post-apply MCP probe. vitest cannot reach Postgres, so a constraint hand-edited
  * directly in prod (not via a migration file) would not be caught here — that is
- * what the migration DO-blocks guard.
+ * what the migration DO-blocks guard. For Python-written columns (computation_status,
+ * portfolio_alerts.severity) only the TS-union↔CHECK relation is pinned, NOT the
+ * Python-producer↔CHECK relation.
  */
 import { describe, it, expect, vi } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
@@ -60,6 +62,15 @@ function stripSqlComments(sql: string): string {
   return sql.replace(/\/\*[\s\S]*?\*\//g, "").replace(/--[^\n]*/g, "");
 }
 
+/** Strip dollar-quoted string/DO-block bodies (`$tag$ … $tag$`, incl. `$$ … $$`).
+ *  Used only for the ALTER TYPE ADD VALUE scan: real ADD VALUE is top-level DDL
+ *  (it cannot run inside a tx/DO block), so removing dollar-quoted bodies drops
+ *  RAISE-message text that merely QUOTES an `ALTER TYPE … ADD VALUE '…'` example
+ *  (e.g. the remediation string in 20260516160300) without dropping real DDL. */
+function stripDollarQuotes(sql: string): string {
+  return sql.replace(/\$([A-Za-z_]*)\$[\s\S]*?\$\1\$/g, "");
+}
+
 function migrationsSortedAsc(): { name: string; num: number; path: string }[] {
   return readdirSync(MIGRATIONS_DIR)
     .filter((f) => f.endsWith(".sql"))
@@ -86,33 +97,70 @@ function latestNamedCheckSet(constraintName: string): string[] | null {
   return null;
 }
 
-/** Inline `CHECK (<col> [IS NULL OR <col>] IN (...))` in a specific CREATE migration. */
+/** Inline `CHECK (<col> [IS NULL OR <col>] IN (...))` in a specific CREATE migration.
+ *  The IN-list capture is `[^()]*` (no parens) so a compound/nested future CHECK
+ *  fails loud (empty/partial capture → assertion mismatch) rather than silently
+ *  mis-binding to the wrong paren group. The exactly-1-match guard catches a
+ *  column-name collision or a migrated-to-named constraint. */
 function inlineCheckSet(fileName: string, column: string): string[] {
   const f = migrationsSortedAsc().find((x) => x.name === fileName);
   if (!f) throw new Error(`migration file not found: ${fileName}`);
   const sql = stripSqlComments(readFileSync(f.path, "utf8"));
-  const re = new RegExp(`CHECK\\s*\\([^)]*?\\b${column}\\s+IN\\s*\\(([^)]*)\\)`, "gi");
+  const re = new RegExp(`CHECK\\s*\\([^)]*?\\b${column}\\s+IN\\s*\\(([^()]*)\\)`, "gi");
   const matches = [...sql.matchAll(re)];
   if (matches.length !== 1) {
     throw new Error(
       `expected exactly 1 inline CHECK for column '${column}' in ${fileName}, found ${matches.length} — ` +
-        `the column may have gained a named ADD CONSTRAINT (update the spec to use latestNamedCheckSet) ` +
+        `the column may have gained a named ADD CONSTRAINT (resolveColumnCheck should pick it up) ` +
         `or another column collides; resolve explicitly rather than guessing.`,
     );
   }
   return quotedLiterals(matches[0][1]);
 }
 
-/** Latest `CREATE TYPE <name> AS ENUM (...)` value-set (column governed by a PG enum). */
+/**
+ * Resolve a column's LATEST value-set CHECK with named-constraint precedence:
+ * a `<table>_<column>_check` named ADD CONSTRAINT (newest wins) if one exists
+ * anywhere, else the inline CHECK in the table's CREATE migration. This makes
+ * the precedence the docstring promises real for EVERY column — a future
+ * migration that re-adds/narrows an inline-checked column via a named
+ * ADD CONSTRAINT (the DROP-then-ADD idiom B9 itself uses for strategy_analytics)
+ * is then detected, not silently compared against the stale CREATE-time set.
+ */
+function resolveColumnCheck(table: string, column: string, createFile: string): string[] {
+  return latestNamedCheckSet(`${table}_${column}_check`) ?? inlineCheckSet(createFile, column);
+}
+
+/**
+ * Latest cumulative value-set for a column governed by a Postgres ENUM type.
+ * Reads `CREATE TYPE [schema.]<name> AS ENUM (...)` (newest wins; schema prefix
+ * tolerated) and UNIONs in every `ALTER TYPE [schema.]<name> ADD VALUE
+ * [IF NOT EXISTS] '<v>'` across all migrations — the idiomatic way a PG enum
+ * grows — so the resolved set reflects the cumulative live enum, not just the
+ * original CREATE.
+ */
 function latestEnumTypeValues(typeName: string): string[] {
   const files = migrationsSortedAsc();
-  const re = new RegExp(`CREATE\\s+TYPE\\s+${typeName}\\s+AS\\s+ENUM\\s*\\(([\\s\\S]*?)\\)`, "gi");
+  const createRe = new RegExp(
+    `CREATE\\s+TYPE\\s+(?:public\\.)?${typeName}\\s+AS\\s+ENUM\\s*\\(([\\s\\S]*?)\\)`,
+    "gi",
+  );
+  const addValueRe = new RegExp(
+    `ALTER\\s+TYPE\\s+(?:public\\.)?${typeName}\\s+ADD\\s+VALUE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?'([^']+)'`,
+    "gi",
+  );
+  let base: string[] | null = null;
+  const added = new Set<string>();
   for (let i = files.length - 1; i >= 0; i--) {
     const sql = stripSqlComments(readFileSync(files[i].path, "utf8"));
-    const matches = [...sql.matchAll(re)];
-    if (matches.length > 0) return quotedLiterals(matches[matches.length - 1][1]);
+    if (base === null) {
+      const creates = [...sql.matchAll(createRe)];
+      if (creates.length > 0) base = quotedLiterals(creates[creates.length - 1][1]);
+    }
+    for (const m of stripDollarQuotes(sql).matchAll(addValueRe)) added.add(m[1]);
   }
-  throw new Error(`CREATE TYPE ${typeName} AS ENUM (...) not found`);
+  if (base === null) throw new Error(`CREATE TYPE ${typeName} AS ENUM (...) not found`);
+  return [...new Set([...base, ...added])];
 }
 
 // --- compute_jobs Zod enums, read from the canonical read-side row schema -----
@@ -122,147 +170,122 @@ const computeJobsErrorKind = [
   ...GetUserComputeJobsRowSchema.shape.error_kind.unwrap().options,
 ];
 
-type Relation = "equal" | "ts-subset";
-
 interface Spec {
   column: string;
   /** The TS write-side closed set (canonical SoT or documented write-path set). */
   ts: readonly string[];
-  /** How the SQL CHECK set is resolved from migrations. */
+  /** Latest SQL CHECK / ENUM value-set, resolved from migrations (named-first). */
   sql: () => string[];
-  relation: Relation;
   /** Values that MUST NOT appear in the SQL set (e.g. the #399 'stale'). */
   rejects?: readonly string[];
   /** Where the TS set comes from when it's not an imported symbol. */
   tsNote?: string;
 }
 
+// Deliberately-deferred columns (a TS closed set AND a column CHECK both exist,
+// but parity is pinned elsewhere or there is no TS SoT yet — tracked, not
+// silently omitted, so the matrix's coverage is auditable):
+//   - strategies.source        → strategy-sources-migration-parity.test.ts (+ strategies-source-csv-constraint.test.ts)
+//   - trades/positions.side     → no TS SoT yet (B8b Python-mirror TRADE_SIDES deferred)
+//   - doc_type / access_level / disclosure_tier / priority → follow-up coverage (their TS unions
+//     are display-only types today; promoting each to a runtime SoT const + a SPEC is tracked B9.1)
 const SPECS: Spec[] = [
   {
-    // THE #399 / complete_with_warnings exhibit. After
-    // 20260602120000_..._add_complete_with_warnings.sql the named CHECK is the
-    // 5-value set; 'stale' must stay rejected.
+    // THE #399 / complete_with_warnings exhibit. After the B9 widening migration
+    // the named CHECK is the 5-value set; 'stale' must stay rejected.
     column: "strategy_analytics.computation_status",
     ts: STRATEGY_ANALYTICS_COMPUTATION_STATUSES,
-    sql: () => {
-      const s = latestNamedCheckSet("strategy_analytics_computation_status_check");
-      if (!s) throw new Error("no named strategy_analytics_computation_status_check found");
-      return s;
-    },
-    relation: "equal",
+    tsNote: "STRATEGY_ANALYTICS_COMPUTATION_STATUSES (closed-sets.ts); 5-value after the B9 widening migration",
+    sql: () =>
+      resolveColumnCheck("strategy_analytics", "computation_status", "20260405061911_initial_schema.sql"),
     rejects: ["stale", "complete_with_errors"],
   },
   {
     column: "compute_jobs.status",
     ts: computeJobsStatus,
-    sql: () => inlineCheckSet("20260411144407_compute_jobs_queue.sql", "status"),
-    relation: "equal",
+    sql: () => resolveColumnCheck("compute_jobs", "status", "20260411144407_compute_jobs_queue.sql"),
   },
   {
     column: "compute_jobs.error_kind",
     ts: computeJobsErrorKind,
-    sql: () => inlineCheckSet("20260411144407_compute_jobs_queue.sql", "error_kind"),
-    relation: "equal",
+    sql: () => resolveColumnCheck("compute_jobs", "error_kind", "20260411144407_compute_jobs_queue.sql"),
   },
   {
     column: "compute_jobs.exchange",
     ts: SUPPORTED_EXCHANGES,
-    sql: () => inlineCheckSet("20260411144407_compute_jobs_queue.sql", "exchange"),
-    relation: "equal",
+    sql: () => resolveColumnCheck("compute_jobs", "exchange", "20260411144407_compute_jobs_queue.sql"),
   },
   {
     column: "profiles.role",
     ts: SIGNUP_ROLES,
-    sql: () => inlineCheckSet("20260405061911_initial_schema.sql", "role"),
-    relation: "equal",
+    sql: () => resolveColumnCheck("profiles", "role", "20260405061911_initial_schema.sql"),
     rejects: ["admin"], // privilege class lives in user_app_roles, never signup
   },
   {
     column: "user_app_roles.role",
     ts: APP_ROLES,
-    sql: () => inlineCheckSet("20260417031851_user_app_roles.sql", "role"),
-    relation: "equal",
+    sql: () => resolveColumnCheck("user_app_roles", "role", "20260417031851_user_app_roles.sql"),
   },
   {
     column: "user_notes.scope_kind",
-    // src/app/api/notes/route.ts:35 ALLOWED_KINDS + src/lib/notes/ownership.ts:30 ScopeKind
     ts: ["portfolio", "holding", "bridge_outcome", "strategy"],
     tsNote: "notes/route.ts:35 ALLOWED_KINDS (route-local) / ownership.ts:30 ScopeKind",
-    sql: () => {
-      const s = latestNamedCheckSet("user_notes_scope_kind_check");
-      if (!s) throw new Error("no named user_notes_scope_kind_check found");
-      return s;
-    },
-    relation: "equal",
+    sql: () => resolveColumnCheck("user_notes", "scope_kind", "20260421060316_user_notes_multiscope.sql"),
   },
   {
     column: "contact_requests.status",
-    // intro-request/route.ts:11 VALID_STATUSES + types.ts:1017 ContactRequestStatus
     ts: ["pending", "intro_made", "completed", "declined"],
-    tsNote: "intro-request/route.ts:11 VALID_STATUSES (route-local) / types.ts:1017",
-    sql: () => {
-      const s = latestNamedCheckSet("contact_requests_status_check");
-      if (!s) throw new Error("no named contact_requests_status_check found");
-      return s;
-    },
-    relation: "equal",
+    tsNote: "intro-request/route.ts:11 VALID_STATUSES (route-local) / types.ts:1017 ContactRequestStatus",
+    sql: () => resolveColumnCheck("contact_requests", "status", "20260405061911_initial_schema.sql"),
     rejects: ["accepted"], // migrated away in mig 008
   },
   {
     column: "contact_requests.source",
     ts: ["direct", "bridge"], // intro/route.ts:45 INTRO_SCHEMA.source z.enum
     tsNote: "intro/route.ts:45 INTRO_SCHEMA.source (route-local z.enum)",
-    sql: () => {
-      const s = latestNamedCheckSet("contact_requests_source_check");
-      if (!s) throw new Error("no named contact_requests_source_check found");
-      return s;
-    },
-    relation: "equal",
+    sql: () =>
+      resolveColumnCheck("contact_requests", "source", "20260416125430_contact_request_metadata.sql"),
   },
   {
     column: "bridge_outcomes.rejection_reason",
     ts: REJECTION_REASONS,
-    sql: () => inlineCheckSet("20260418060747_bridge_outcomes.sql", "rejection_reason"),
-    relation: "equal",
+    sql: () =>
+      resolveColumnCheck("bridge_outcomes", "rejection_reason", "20260418060747_bridge_outcomes.sql"),
   },
   {
     column: "allocator_preferences.liquidity_preference",
     ts: LIQUIDITY_PREFERENCES,
-    sql: () => {
-      const s = latestNamedCheckSet("allocator_preferences_liquidity_preference_check");
-      if (!s) throw new Error("no named allocator_preferences_liquidity_preference_check found");
-      return s;
-    },
-    relation: "equal",
+    sql: () =>
+      resolveColumnCheck(
+        "allocator_preferences",
+        "liquidity_preference",
+        "20260418150632_mandate_columns.sql",
+      ),
   },
   {
     column: "match_decisions.kind",
     // database.types Constants.public.Enums.match_decision_kind + scenario-commit
     // discriminated union; SQL side is a PG ENUM TYPE, not a CHECK.
     ts: ["bridge_recommended", "voluntary_remove", "voluntary_add", "voluntary_modify"],
-    tsNote: "database.types match_decision_kind + scenario/commit/route.ts discriminated union",
+    tsNote: "database.types match_decision_kind + scenario/commit/route.ts discriminated union (SQL = PG ENUM type)",
     sql: () => latestEnumTypeValues("match_decision_kind"),
-    relation: "equal",
   },
   {
     column: "match_decisions.decision",
-    // Full intended set; admin route emits a 3-value subset, holding route emits
-    // the 4th ('sent_as_intro') — no single TS symbol enumerates all four.
+    // Union of the split write paths: admin route emits a 3-value subset,
+    // holding route emits the 4th ('sent_as_intro') — no single TS symbol has all four.
     ts: ["thumbs_up", "thumbs_down", "sent_as_intro", "snoozed"],
-    tsNote: "admin/match/decisions/route.ts:10 VALID (subset) + match/decisions/holding/route.ts:130 literal",
-    sql: () => inlineCheckSet("20260407164606_perfect_match.sql", "decision"),
-    relation: "equal",
+    tsNote:
+      "admin/match/decisions/route.ts:10 VALID (3-value subset) + match/decisions/holding/route.ts:130 'sent_as_intro' literal — union of the split write paths",
+    sql: () => resolveColumnCheck("match_decisions", "decision", "20260407164606_perfect_match.sql"),
   },
   {
     column: "portfolio_alerts.severity",
-    ts: ["critical", "high", "medium", "low"], // utils.ts:126 AlertSeverity (Python writes the column)
-    tsNote: "utils.ts:126 AlertSeverity (type union; portfolio_alerts is written by analytics-service)",
-    sql: () => {
-      const s = latestNamedCheckSet("portfolio_alerts_severity_check");
-      if (!s) throw new Error("no named portfolio_alerts_severity_check found");
-      return s;
-    },
-    relation: "equal",
+    ts: ["critical", "high", "medium", "low"],
+    tsNote:
+      "utils.ts:126 AlertSeverity (TS display/email union — the pinned authority). Column is WRITTEN by analytics-service (reconciliation.py emits 'critical'; portfolio.py emits high/medium/low), so Python-producer↔CHECK drift is NOT covered here — only TS-union↔CHECK.",
+    sql: () =>
+      resolveColumnCheck("portfolio_alerts", "severity", "20260407075303_portfolio_intelligence.sql"),
   },
 ];
 
@@ -274,30 +297,21 @@ describe("[B9] CHECK ↔ Zod parity matrix", () => {
     ).toBeGreaterThanOrEqual(14);
   });
 
-  it.each(SPECS)("$column — TS $relation SQL CHECK", (spec) => {
+  it.each(SPECS)("$column — TS set == latest SQL CHECK", (spec) => {
     const sqlSet = new Set(spec.sql());
     const tsSet = new Set(spec.ts);
 
     expect(sqlSet.size, `${spec.column}: extracted an empty SQL CHECK set`).toBeGreaterThan(0);
 
-    if (spec.relation === "equal") {
-      const onlyInSql = [...sqlSet].filter((v) => !tsSet.has(v));
-      const onlyInTs = [...tsSet].filter((v) => !sqlSet.has(v));
-      expect(
-        { onlyInSql, onlyInTs },
-        `${spec.column}: TS closed set drifted from the latest SQL CHECK. ` +
-          `A value 'onlyInTs' is the dangerous direction (TS admits what the DB rejects → 23514 at insert). ` +
-          `Reconcile: add the value to the other side, or write a migration that aligns the CHECK. ` +
-          `(TS source: ${spec.tsNote ?? "imported canonical const"})`,
-      ).toEqual({ onlyInSql: [], onlyInTs: [] });
-    } else {
-      // ts-subset: every TS value must be SQL-accepted (no 23514). SQL may have extras.
-      const tsNotInSql = [...tsSet].filter((v) => !sqlSet.has(v));
-      expect(
-        tsNotInSql,
-        `${spec.column}: TS admits value(s) the SQL CHECK rejects → 23514-at-insert risk.`,
-      ).toEqual([]);
-    }
+    const onlyInSql = [...sqlSet].filter((v) => !tsSet.has(v));
+    const onlyInTs = [...tsSet].filter((v) => !sqlSet.has(v));
+    expect(
+      { onlyInSql, onlyInTs },
+      `${spec.column}: TS closed set drifted from the latest SQL CHECK. ` +
+        `A value 'onlyInTs' is the dangerous direction (TS admits what the DB rejects → 23514 at insert). ` +
+        `Reconcile: add the value to the other side, or write a migration that aligns the CHECK. ` +
+        `(TS source: ${spec.tsNote ?? "imported canonical const"})`,
+    ).toEqual({ onlyInSql: [], onlyInTs: [] });
 
     for (const bad of spec.rejects ?? []) {
       expect(

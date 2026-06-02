@@ -254,8 +254,14 @@ export type TickJobsResponse = z.infer<typeof TickJobsResponseSchema>;
 // ─────────────────────────────────────────────────────────────────────
 // Bridge response (Sprint 4 Phase 3)
 //
-// Strict schema for /api/portfolio-bridge. Each candidate must match
-// the BridgeCandidate shape in types.ts. Parse failures throw.
+// /api/portfolio-bridge response. Each candidate matches the strict
+// BridgeCandidate shape in types.ts; parse failures on a known field throw.
+// B9 (folds M-0907 / L-0043): the WRAPPER is intentionally `.passthrough()`
+// (forward-compat, read-only — never spread into a write; the harmful WRITE-path
+// mirror NEW-C40-01 on EncryptKeyResponseSchema was converted to strip). So this
+// is NOT the "strict schema" the original docblock claimed — the passthrough
+// carries an inline B9 sanctioned-exception and the candidates are fully typed
+// by BridgeCandidateSchema.
 // ─────────────────────────────────────────────────────────────────────
 
 // audit-2026-05-07 M-0908: single source of truth for the bridge fit
