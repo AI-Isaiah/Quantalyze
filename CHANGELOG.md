@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.84] - 2026-06-03
+### Fixed — F11: server-side PostHog telemetry hardening (event-drop + prod-masquerade)
+
+Closes the server-side PostHog telemetry class across BOTH server wrappers (`src/lib/analytics.ts` `trackForQuantsEventServer` and `src/lib/analytics/usage-events.ts` `trackUsageEventServer`).
+
+- **H-0416 / M-0486 — serverless event drop.** The wrappers called posthog-node `capture()` (a synchronous enqueue that defers the actual batch-build behind an async `prepareEventMessage` and returns `void`), relying on `flushAt:1` to ship. In posthog-node 5.29.2 that is **inert for the serverless case**: the awaited wrapper resolves before the HTTP POST, and on Vercel Fluid Compute the instance can suspend and drop the event. (The naive `capture()` + `await flush()` "fix" is equally inert — a same-tick `flush()` finds an empty queue and short-circuits.) Switched both wrappers to `await client.captureImmediate({...})`, the SDK's documented serverless primitive, which builds the batch and awaits the POST in the promise it returns. Also bounded the client retry budget (`fetchRetryCount:1 / fetchRetryDelay:500`, vs the 3×3s default) so an inline-awaited send can never hang a request/render path for ~9-20s on a PostHog incident.
+- **M-0487 — preview/missing-env events masqueraded as prod.** `$host` fell back to the literal `"quantalyze.com"` (an unrelated WordPress site; the prod URL is `quantalyze-rho.vercel.app`), so on any deploy with `NEXT_PUBLIC_SITE_URL` unset, events were attributed to the wrong domain in PostHog funnel analysis. Now falls back to a neutral, filterable `"unknown.local"` sentinel.
+
+Scope note: the original batch targeted only `trackForQuantsEventServer`, but that wrapper is **dead** (its for-quants server capture was removed in G9.B.1); the adversarial review found the structurally-identical **live** sibling `trackUsageEventServer` (4 prod callers: `usage/session-start`, `intro`, `alerts/[id]/acknowledge`, `alerts/ack`, plus the onboarding funnel) carried both bugs — so the real fix landed there. `H-0414` (tick per-job failure array) deferred: dormant queue; a real fix needs a coordinated Python-worker emit + the `.strict()` `TickJobsResponseSchema` field + a Vercel-cron consumer (a real-time-alerting feature), inert if schema-only.
+
+Coverage: both test files migrated to a `captureImmediate` mock (no `capture` method, so a regression to the inert primitive goes RED), added per-event captureImmediate + `$host` sentinel + awaited-rejection-swallow tests, and pinned the bounded retry budget. 9 new/changed tests verified load-bearing (fail on source-revert across both wrappers). Reviewed by a 3-lens specialist suite + two fresh-context Claude red-team passes — the first proved the original `capture()+flush()` inert (driving the captureImmediate rework + the live-sibling expansion), the second verified the rework SHIP and surfaced the inline-await latency bound (applied). tsc 0 / lint 0 / 47 wrapper+caller tests.
+
 ## [0.24.15.83] - 2026-06-02
 ### Fixed — F2b: numeric-library hardening (non-finite / out-of-range outputs)
 

@@ -113,9 +113,15 @@ function getServerClient(): PostHog | null {
 
   _serverClient = new PostHog(key, {
     host: process.env.NEXT_PUBLIC_POSTHOG_HOST ?? "https://us.i.posthog.com",
-    // Flush aggressively so Vercel function suspension doesn't drop events.
     flushAt: 1,
     flushInterval: 0,
+    // The wrapper uses captureImmediate (awaits the HTTP POST), so a caller that
+    // awaits it INLINE in a request/render path blocks on that POST. Bound the
+    // retry budget (default is 3 × 3s = up to ~9-20s on a PostHog incident) to
+    // 1 × 500ms so the worst-case added latency is ~1s, while still surviving a
+    // single transient blip. Telemetry must never hang a request.
+    fetchRetryCount: 1,
+    fetchRetryDelay: 500,
   });
   return _serverClient;
 }
@@ -142,14 +148,28 @@ export async function trackForQuantsEventServer(
   if (!client) return;
 
   try {
-    // `flushAt: 1` on the constructor means capture() synchronously
-    // enqueues a flush in the background. No explicit await needed.
-    client.capture({
+    // H-0416 / M-0486: use captureImmediate, NOT capture()+flush(). posthog-node
+    // 5.29.2's capture() defers the enqueue behind an async prepareEventMessage
+    // (a microtask hop) and returns void, so a same-tick `await capture()` is a
+    // no-op and a following `await flush()` finds an empty queue and short-
+    // circuits (`if (!queue.length) return` in posthog-core-stateless) — the
+    // event ships only later via the background timer, which Vercel Fluid Compute
+    // can suspend before. captureImmediate() builds the batch and awaits the HTTP
+    // POST in the single promise it returns, so awaiting it guarantees the event
+    // is on the wire before the instance can suspend. (Verified against the
+    // installed SDK: capture has no `return`; captureImmediate returns the
+    // pending send promise.)
+    await client.captureImmediate({
       distinctId,
       event,
       properties: {
         ...props,
-        $host: process.env.NEXT_PUBLIC_SITE_URL ?? "quantalyze.com",
+        // M-0487: do NOT fall back to a real domain. PostHog uses $host as the
+        // canonical referrer for funnel attribution; hard-coding "quantalyze.com"
+        // (an unrelated WP site — prod is quantalyze-rho.vercel.app) made
+        // preview/missing-env events masquerade as prod traffic. A neutral
+        // sentinel keeps them in a clearly-non-prod bucket PostHog can filter.
+        $host: process.env.NEXT_PUBLIC_SITE_URL ?? "unknown.local",
         source_layer: "server",
       },
     });
