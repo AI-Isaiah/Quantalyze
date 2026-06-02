@@ -306,4 +306,44 @@ describe("sendBridgeIntro", () => {
       expect.objectContaining({ message: "Unexpected token < in JSON" }),
     );
   });
+
+  // F9 H-0084: the optional abort signal must reach fetch so the caller
+  // (BridgeDrawer) can cancel an in-flight send when the drawer is dismissed.
+  it("forwards the abort signal to fetch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ match_decision_id: "md-1" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    installFetch(fetchMock);
+    const controller = new AbortController();
+
+    await sendBridgeIntro({ ...ARGS, signal: controller.signal });
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.signal).toBe(controller.signal);
+  });
+
+  // F9 H-0084: a deliberate abort is NOT a failure — return a quiet
+  // { aborted: true } result and do NOT log it as a connectivity error (a real
+  // network failure still logs, pinned by the tests above).
+  it("returns a quiet aborted result (no console.error) when the signal aborts", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(
+        new DOMException("The operation was aborted.", "AbortError"),
+      );
+    installFetch(fetchMock);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await sendBridgeIntro(ARGS);
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Cancelled.",
+      aborted: true,
+    });
+    expect(errSpy).not.toHaveBeenCalled();
+  });
 });

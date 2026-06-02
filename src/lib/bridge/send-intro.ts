@@ -26,11 +26,20 @@ export type SendBridgeIntroArgs = {
   holdingRef: string;
   /** Strategy id of the Bridge top candidate to record intent against. */
   topCandidateStrategyId: string;
+  /**
+   * F9 H-0084 — optional abort signal. When the caller (BridgeDrawer) dismisses
+   * the drawer while a send is in flight, it aborts this signal so the POST is
+   * cancelled rather than silently completing a `match_decision` the allocator
+   * believes they canceled. The route handler also honors the cancellation
+   * server-side via `req.signal`.
+   */
+  signal?: AbortSignal;
 };
 
 export type SendBridgeIntroResult =
   | { ok: true; matchDecisionId: string }
-  | { ok: false; error: string };
+  /** `aborted: true` marks a deliberate caller cancellation (not a failure). */
+  | { ok: false; error: string; aborted?: boolean };
 
 export async function sendBridgeIntro(
   args: SendBridgeIntroArgs,
@@ -43,6 +52,7 @@ export async function sendBridgeIntro(
         holding_ref: args.holdingRef,
         top_candidate_strategy_id: args.topCandidateStrategyId,
       }),
+      signal: args.signal,
     });
     if (!res.ok) {
       const body = await res.json().catch((err) => {
@@ -89,9 +99,15 @@ export async function sendBridgeIntro(
     }
     return { ok: true, matchDecisionId: typedBody.match_decision_id };
   } catch (err) {
+    // F9 H-0084: a deliberate caller abort (drawer dismissed mid-flight) throws
+    // AbortError here. That's expected — return a quiet aborted result WITHOUT
+    // logging it as a failure (the caller discards it; the drawer is closing).
+    if (err instanceof DOMException && err.name === "AbortError") {
+      return { ok: false, error: "Cancelled.", aborted: true };
+    }
     // H-0435: bind the error and emit telemetry so a real connectivity
-    // regression (TypeError CORS/offline/DNS, AbortError) produces a
-    // diagnostic signal instead of an opaque user-facing string.
+    // regression (TypeError CORS/offline/DNS) produces a diagnostic signal
+    // instead of an opaque user-facing string.
     console.error("[sendBridgeIntro] failed:", err);
     return { ok: false, error: "Network error. Please retry." };
   }
