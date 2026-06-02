@@ -34,6 +34,7 @@ import {
   mkdtempSync,
   cpSync,
   mkdirSync,
+  symlinkSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -449,5 +450,214 @@ describe("scripts/check-banned-packages.mjs", () => {
     });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("@openclaw-ai/openclawai");
+  }, 30_000);
+
+  // ---- F12 review hardening: alias bypass, legacy pnpm keys, fail-closed ----
+  // Each test below fails against the pre-hardening scanner, per Rule 9.
+
+  it("A: an npm:<banned> alias in package.json (key != resolved name) is caught", () => {
+    // `npm install innocent@npm:axios@1.14.1` keys the manifest on `innocent`
+    // but installs axios — keying only on the dependency NAME misses it. A
+    // clean lockfile is supplied so the gate runs (fail-closed otherwise).
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({
+        name: "probe",
+        version: "1.0.0",
+        dependencies: { innocent: "npm:axios@1.14.1" },
+      }),
+      "package-lock.json": JSON.stringify({
+        name: "probe",
+        lockfileVersion: 3,
+        packages: { "": { name: "probe" } },
+      }),
+    });
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("axios");
+    expect(result.stderr.toLowerCase()).toMatch(/fetch|undici/);
+  }, 30_000);
+
+  it("A: an npm: alias in a v2/v3 lockfile (entry.name resolves to banned) is caught", () => {
+    // npm writes `name: "axios"` on the aliased entry; the KEY is `innocent`.
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({ name: "probe", version: "1.0.0", dependencies: {} }),
+      "package-lock.json": JSON.stringify({
+        name: "probe",
+        lockfileVersion: 3,
+        packages: {
+          "": { name: "probe" },
+          "node_modules/innocent": { name: "axios", version: "1.14.1" },
+        },
+      }),
+    });
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("axios");
+  }, 30_000);
+
+  it("A: an npm: alias in a v1 lockfile (version='npm:axios@…') is caught", () => {
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({ name: "probe", version: "1.0.0", dependencies: {} }),
+      "package-lock.json": JSON.stringify({
+        name: "probe",
+        lockfileVersion: 1,
+        dependencies: { innocent: { version: "npm:axios@1.14.1" } },
+      }),
+    });
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("axios");
+  }, 30_000);
+
+  it("B: a pnpm v5 slash-version key (/axios/1.14.1) is caught", () => {
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({ name: "probe", version: "1.0.0" }),
+      "pnpm-lock.yaml":
+        "lockfileVersion: '5.4'\npackages:\n  /axios/1.14.1:\n" +
+        "    resolution: {integrity: sha512-fake}\n" +
+        "  /@openclaw-ai/openclawai/1.0.0:\n" +
+        "    resolution: {integrity: sha512-fake}\n",
+    });
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("axios");
+    expect(result.stderr).toContain("@openclaw-ai/openclawai");
+  }, 30_000);
+
+  it("B: a pnpm v6 leading-slash key (/axios@1.14.1) is caught", () => {
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({ name: "probe", version: "1.0.0" }),
+      "pnpm-lock.yaml":
+        "lockfileVersion: '6.0'\npackages:\n  /axios@1.14.1:\n" +
+        "    resolution: {integrity: sha512-fake}\n",
+    });
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("axios");
+  }, 30_000);
+
+  it("C: a yarn-classic npm: alias key (\"my-alias@npm:axios@…\") is caught", () => {
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({ name: "probe", version: "1.0.0" }),
+      "yarn.lock":
+        '# yarn lockfile v1\n\n"my-alias@npm:axios@^1.0.0":\n' +
+        '  version "1.14.1"\n  resolved "https://registry.npmjs.org/axios/-/axios-1.14.1.tgz"\n',
+    });
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("axios");
+  }, 30_000);
+
+  it("boundary: a legit scoped @scope/axios is NOT a false positive for unscoped axios", () => {
+    // `@blah/axios` is a DIFFERENT package than the banned unscoped `axios`.
+    // The leading-boundary rule must not let the `/axios@` inside `@blah/axios@`
+    // trip the gate (the pre-hardening regex's `[\s"'/]` boundary did).
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({ name: "probe", version: "1.0.0" }),
+      "yarn.lock": '# yarn lockfile v1\n\n"@blah/axios@^1.0.0":\n  version "1.0.0"\n',
+    });
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(0);
+  }, 30_000);
+
+  it("D: an unrecognized package-lock.json shape FAILS CLOSED (exit 1, not green)", () => {
+    // Neither a v2/v3 `packages` map nor a v1 `dependencies` tree — the scan is
+    // blind. A security gate must block, not warn-and-pass.
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({ name: "probe", version: "1.0.0" }),
+      "package-lock.json": JSON.stringify({
+        lockfileVersion: 99,
+        someNewFormat: { "node_modules/axios": { version: "1.14.1" } },
+      }),
+    });
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/BLIND|unscannable|FAILING CLOSED/i);
+  }, 30_000);
+
+  it("D: a malformed (non-JSON) package-lock.json FAILS CLOSED with a clean message, not a raw stack trace", () => {
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({ name: "probe", version: "1.0.0" }),
+      "package-lock.json": "{ truncated lockfile",
+    });
+    const result = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/could not be parsed|FAILING CLOSED/i);
+    // Must be the deliberate fail-closed diagnostic, NOT an uncaught V8 trace.
+    expect(result.stderr).not.toContain("at JSON.parse");
+  }, 30_000);
+
+  it("I: no lockfile FAILS CLOSED, and ALLOW_NO_LOCKFILE=1 opts out", () => {
+    const scratch = scratchWith({
+      "package.json": JSON.stringify({ name: "probe", version: "1.0.0", dependencies: {} }),
+    });
+    const failed = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+    });
+    expect(failed.status).toBe(1);
+    expect(failed.stderr).toMatch(/no lockfile|FAILING CLOSED/i);
+
+    const opted = spawnSync("node", ["scripts/check-banned-packages.mjs"], {
+      encoding: "utf8",
+      cwd: scratch,
+      env: { ...process.env, ALLOW_NO_LOCKFILE: "1" },
+    });
+    expect(opted.status).toBe(0);
+    expect(opted.stdout).toContain("clean");
+  }, 30_000);
+
+  it("E: the exec guard still runs the gate via an absolute path through a symlink", () => {
+    // resolve(argv[1]) does not resolve symlinks while import.meta.url does, so
+    // comparing realpaths keeps the gate from silently no-op'ing (fail-open).
+    const target = mkdtempSync(join(tmpdir(), "banned-pkg-symtarget-"));
+    mkdirSync(join(target, "scripts"), { recursive: true });
+    cpSync(HOOK_SCRIPT, join(target, "scripts", "check-banned-packages.mjs"));
+    writeFileSync(
+      join(target, "package.json"),
+      JSON.stringify({ name: "probe", version: "1.0.0", dependencies: { axios: "1.14.1" } }),
+      "utf8",
+    );
+    writeFileSync(
+      join(target, "package-lock.json"),
+      JSON.stringify({ name: "probe", lockfileVersion: 3, packages: { "": { name: "probe" } } }),
+      "utf8",
+    );
+    const link = join(mkdtempSync(join(tmpdir(), "banned-pkg-symlink-")), "repo");
+    symlinkSync(target, link);
+    const result = spawnSync(
+      "node",
+      [join(link, "scripts", "check-banned-packages.mjs")],
+      { encoding: "utf8", cwd: link },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("axios");
   }, 30_000);
 });
