@@ -17,11 +17,10 @@ import {
 } from "@/lib/min-history";
 import {
   CHART_ACCENT,
-  CHART_AXIS_TICK,
   CHART_BORDER,
-  CHART_FONT_MONO,
   CHART_REFERENCE_DASH,
   CHART_TEXT_MUTED,
+  CHART_TICK_STYLE,
 } from "./chart-tokens";
 
 type CorrelationPoint = { date: string; value: number };
@@ -208,7 +207,7 @@ export function CorrelationWithBenchmark({
       <LineChart accessibilityLayer={false} data={resolved.series} margin={{ top: 5, right: 30, bottom: 5, left: 5 }}>
         <XAxis
           dataKey="date"
-          tick={{ fontSize: 11, fill: CHART_AXIS_TICK, fontFamily: CHART_FONT_MONO }}
+          tick={CHART_TICK_STYLE}
           tickLine={false}
           axisLine={{ stroke: CHART_BORDER }}
           tickFormatter={(d: string) => d.slice(5)}
@@ -217,7 +216,7 @@ export function CorrelationWithBenchmark({
         <YAxis
           domain={[-1, 1]}
           ticks={[-1, -0.5, 0, 0.5, 1]}
-          tick={{ fontSize: 11, fill: CHART_AXIS_TICK, fontFamily: CHART_FONT_MONO }}
+          tick={CHART_TICK_STYLE}
           tickLine={false}
           axisLine={false}
           tickFormatter={(v: number) => v.toFixed(1)}

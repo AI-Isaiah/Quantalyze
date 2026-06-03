@@ -93,7 +93,9 @@ const HEADER_CELL =
   "text-[10px] uppercase tracking-wider text-text-muted font-medium py-2 px-4 border-b border-border";
 const CELL_BASE = "py-2 px-4 align-middle";
 const CELL_DATE = `${CELL_BASE} text-xs text-text-secondary font-metric tabular-nums`;
-const CELL_ONGOING = `${CELL_BASE} text-xs text-warning italic`;
+// M-0404: keep font-metric so the "ongoing" cell aligns in the mono column
+// with the sibling date cells (matches CELL_DATE's family).
+const CELL_ONGOING = `${CELL_BASE} text-xs text-warning italic font-metric`;
 const CELL_DEPTH = `${CELL_BASE} text-sm font-metric tabular-nums text-right text-negative`;
 const CELL_DAYS = `${CELL_BASE} text-xs font-metric tabular-nums text-text-muted text-right`;
 
@@ -140,7 +142,10 @@ export function WorstDrawdowns({ analytics }: { analytics: StrategyAnalytics }) 
         <tbody>
           {episodes.map((ep, i) => (
             <tr
-              key={`${ep.peakDate}-${ep.troughDate}-${i}`}
+              // M-0406: (peakDate, troughDate) uniquely identifies an episode,
+              // so the index suffix only pinned keys to list position — drop it
+              // for stable reconciliation. `i` is still used by the aria-label.
+              key={`${ep.peakDate}-${ep.troughDate}`}
               aria-label={buildAriaLabel(ep, i)}
               className="border-b border-border hover:bg-page transition-colors duration-150"
             >
