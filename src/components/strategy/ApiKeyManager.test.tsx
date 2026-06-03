@@ -178,3 +178,77 @@ describe("ApiKeyManager — H-0395 loud-fail on api_keys load failure", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+/**
+ * M-0456 (audit-2026-05-07) — ApiKeyManager swapped its api_keys read from a
+ * broad projection to the `API_KEY_USER_COLUMNS` allowlist. The static
+ * sec-005-api-keys-projection regex test catches a `.select("*")` regression,
+ * but the RENDER side was untested: the only prior row-column assertion is the
+ * label ("My Binance" in the H-0395 retry test above).
+ *
+ * This pins the RENDER CONTRACT — given a row, ApiKeyManager reads `key.exchange`
+ * (capitalized exchange name) and `key.last_sync_at` (the "· Last synced …"
+ * line) and surfaces BOTH. (The supabase mock here ignores the projection
+ * argument, so this guards the render path, not the literal projection string;
+ * the static sec-005 test owns the projection-string axis.) Together they cover
+ * the degraded-card risk: if the manager stops reading a column — or that column
+ * arrives null/absent from a runtime allowlist drop — the card degrades ("?"
+ * icon, missing name, no "Last synced" line) and this test fails.
+ *
+ * NB the finding's `sync_status` / `is_active` worry is a MISREAD for THIS
+ * component: ApiKeyManager derives SyncProgress.syncStatus from component state,
+ * not from `key.sync_status`, and never reads `key.is_active`. Those columns are
+ * consumed + already discriminatingly tested by the sibling
+ * AllocatorExchangeManager (pill text / Disconnected section). So for
+ * ApiKeyManager the genuine residual is exactly exchange + last_sync_at.
+ */
+describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", () => {
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("renders the exchange-derived name and the last-synced line from a full row", async () => {
+    // A full api_keys row (every API_KEY_USER_COLUMNS field present).
+    selectResultMock.mockReturnValue({
+      data: [
+        {
+          id: "key-1",
+          user_id: "user-a",
+          exchange: "binance",
+          label: "My Binance",
+          is_active: true,
+          sync_status: "complete",
+          last_sync_at: "2026-04-19T11:58:00Z",
+          account_balance_usdt: 1000,
+          created_at: "2026-01-01T00:00:00Z",
+          sync_error: null,
+          last_429_at: null,
+          disconnected_at: null,
+        },
+      ],
+      error: null,
+    });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    // Label column.
+    await waitFor(() => {
+      expect(screen.getByText("My Binance")).toBeInTheDocument();
+    });
+    // exchange (→ "Binance") AND last_sync_at (→ "· Last synced …") render in a
+    // single <p>; anchoring on `^Binance` disambiguates from the "My Binance"
+    // label node. If the manager stops reading `exchange`/`last_sync_at`, or
+    // either arrives null/absent on the row, this assertion fails — the
+    // render-contract guard for the degraded-card regression.
+    expect(
+      screen.getByText(/^Binance\s*·\s*Last synced/),
+    ).toBeInTheDocument();
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, act } from "@testing-library/react";
 import { MandateForm } from "./MandateForm";
 import { MandateSlider } from "./MandateSlider";
 import type { AllocatorPreferences } from "@/lib/preferences";
@@ -182,38 +182,79 @@ describe("MandateForm", () => {
   // save overwrote the previous. Fix uses ref-backed latest-value pattern
   // in MandateForm.tsx. Found by /qa on 2026-04-19.
   // Report: .planning/phases/02-mandate-profile-builder/02-UAT.md (Gap G-01)
-  it("rapid successive preferred_strategy_types clicks send cumulative values (not overwrite)", () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers(),
-      json: async () => ({ success: true }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
+  // M-0419 — the three chip families (preferred_strategy_types,
+  // excluded_exchanges, style_exclusions) had three byte-identical test bodies
+  // differing only by chip names + the field key (and style_exclusions needing
+  // the Advanced accordion expanded first). Collapsed into one it.each so the
+  // families are exercised IDENTICALLY and cannot drift apart — the guarantee
+  // the finding cites. The load-bearing neuter is the same G-01 stale-closure
+  // one documented above: a toggle handler that reads React state instead of
+  // the latest-value ref makes bodies[1] drop chipA for every row.
+  it.each([
+    {
+      field: "preferred_strategy_types",
+      chipA: "Long-Only",
+      chipB: "Market Neutral",
+      expand: false,
+    },
+    {
+      field: "excluded_exchanges",
+      chipA: "Binance",
+      chipB: "OKX",
+      expand: false,
+    },
+    {
+      field: "style_exclusions",
+      chipA: "Trend Following",
+      chipB: "Momentum",
+      expand: true,
+    },
+  ])(
+    "rapid successive $field clicks send cumulative values (not overwrite)",
+    ({ field, chipA, chipB, expand }) => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => ({ success: true }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
 
-    render(<MandateForm initial={BLANK_PREFS} />);
-    const longOnly = screen.getByRole("checkbox", { name: "Long-Only" });
-    const marketNeutral = screen.getByRole("checkbox", { name: "Market Neutral" });
+      render(<MandateForm initial={BLANK_PREFS} />);
+      // style_exclusions chips live inside the collapsed-by-default Advanced
+      // accordion; the other two families are always-visible Basics chips.
+      if (expand) {
+        fireEvent.click(
+          screen.getByRole("button", { name: "Advanced constraints" }),
+        );
+      }
+      const chipAEl = screen.getByRole("checkbox", { name: chipA });
+      const chipBEl = screen.getByRole("checkbox", { name: chipB });
 
-    // Fire synchronously — simulates two clicks within a single React batch
-    // (before any re-render commits). With the stale-closure bug, the second
-    // click would read `preferredTypes = []` and send `["Market Neutral"]`
-    // alone, overwriting the first save.
-    fireEvent.click(longOnly);
-    fireEvent.click(marketNeutral);
+      // Both clicks inside ONE act() so React defers the commit until act exits
+      // — a genuine single-batch double-toggle (before any re-render). This is
+      // what makes the test DISCRIMINATING for G-01: with the stale-closure bug
+      // (handler reads React state) the second click sees the render-time []
+      // snapshot and sends only [chipB], overwriting the first save; the
+      // ref-backed latest-value pattern mutates the ref synchronously so the
+      // second save is cumulative. (Bare fireEvent flushes a re-render between
+      // clicks, which masks the bug — so the act() wrapper is load-bearing.)
+      act(() => {
+        fireEvent.click(chipAEl);
+        fireEvent.click(chipBEl);
+      });
 
-    // Both saves must be POSTed — and the second must carry both values.
-    const bodies = fetchMock.mock.calls
-      .filter((c) => c[0] === "/api/preferences")
-      .map((c) => JSON.parse(c[1].body as string));
-    expect(bodies).toHaveLength(2);
-    expect(bodies[0]).toEqual({ preferred_strategy_types: ["Long-Only"] });
-    expect(bodies[1]).toEqual({
-      preferred_strategy_types: ["Long-Only", "Market Neutral"],
-    });
-    expect(longOnly).toHaveAttribute("aria-checked", "true");
-    expect(marketNeutral).toHaveAttribute("aria-checked", "true");
-  });
+      // Both saves POST — and the second must carry BOTH values (cumulative).
+      const bodies = fetchMock.mock.calls
+        .filter((c) => c[0] === "/api/preferences")
+        .map((c) => JSON.parse(c[1].body as string));
+      expect(bodies).toHaveLength(2);
+      expect(bodies[0]).toEqual({ [field]: [chipA] });
+      expect(bodies[1]).toEqual({ [field]: [chipA, chipB] });
+      expect(chipAEl).toHaveAttribute("aria-checked", "true");
+      expect(chipBEl).toHaveAttribute("aria-checked", "true");
+    },
+  );
 
   it("H-0377: filters unknown/legacy enum values from initial so they are not re-sent on save", () => {
     // A leftover/obsolete DB value (a strategy type later dropped from
@@ -315,56 +356,6 @@ describe("MandateForm", () => {
     );
     expect(body.excluded_exchanges).toContain("binance");
     expect(body.excluded_exchanges).toContain("OKX");
-  });
-
-  it("rapid successive excluded_exchanges clicks send cumulative values (not overwrite)", () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers(),
-      json: async () => ({ success: true }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(<MandateForm initial={BLANK_PREFS} />);
-    const binance = screen.getByRole("checkbox", { name: "Binance" });
-    const okx = screen.getByRole("checkbox", { name: "OKX" });
-
-    fireEvent.click(binance);
-    fireEvent.click(okx);
-
-    const bodies = fetchMock.mock.calls
-      .filter((c) => c[0] === "/api/preferences")
-      .map((c) => JSON.parse(c[1].body as string));
-    expect(bodies).toHaveLength(2);
-    expect(bodies[0]).toEqual({ excluded_exchanges: ["Binance"] });
-    expect(bodies[1]).toEqual({ excluded_exchanges: ["Binance", "OKX"] });
-  });
-
-  it("rapid successive style_exclusions clicks send cumulative values (not overwrite)", () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers(),
-      json: async () => ({ success: true }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(<MandateForm initial={BLANK_PREFS} />);
-    // Expand Advanced to reach style_exclusions chips.
-    fireEvent.click(screen.getByRole("button", { name: "Advanced constraints" }));
-    const trend = screen.getByRole("checkbox", { name: "Trend Following" });
-    const momentum = screen.getByRole("checkbox", { name: "Momentum" });
-
-    fireEvent.click(trend);
-    fireEvent.click(momentum);
-
-    const bodies = fetchMock.mock.calls
-      .filter((c) => c[0] === "/api/preferences")
-      .map((c) => JSON.parse(c[1].body as string));
-    expect(bodies).toHaveLength(2);
-    expect(bodies[0].style_exclusions).toEqual(["Trend Following"]);
-    expect(bodies[1].style_exclusions).toEqual(["Trend Following", "Momentum"]);
   });
 
   // M-0420 (audit-2026-05-07) — document the NO-DEBOUNCE contract for chip
