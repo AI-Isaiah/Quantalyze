@@ -1,6 +1,14 @@
+import logging
+
 import pandas as pd
 import numpy as np
-from services.portfolio_metrics import compute_twr, compute_mwr, compute_modified_dietz, compute_period_returns
+import pytest
+from services.portfolio_metrics import (
+    compute_twr, compute_mwr, compute_modified_dietz, compute_period_returns,
+    _parse_date,
+)
+
+_METRICS_LOGGER = "quantalyze.analytics.portfolio_metrics"
 
 
 def test_twr_no_cash_flows():
@@ -115,7 +123,18 @@ def test_twr_day_zero_dropped_but_mid_period_handled():
 
 
 def test_mwr_known_sequence():
-    """MWR/IRR for a known cash flow should converge."""
+    """M-0748: pin the IRR to its hand-computed value instead of the loose
+    `0 < mwr < 0.5` band, which spanned 50 percentage points and would pass a
+    buggy implementation returning anything in (0, 0.5).
+
+    Cash flows: -100,000 @ 2026-01-01, -50,000 @ 2026-06-01, +170,000 @
+    2026-12-31. net_cf = +20,000 >= 0, so the terminal-value guard does NOT
+    append final_value (the +170,000 IS the terminal inflow). Year fractions
+    from t0 (365.25-day basis): t = [0, 151/365.25, 364/365.25]. Solving
+        -100000 - 50000/(1+r)^0.413415 + 170000/(1+r)^0.996578 = 0
+    gives r ~ 0.156367 (15.64%). Matches the file's H-0732 exact-pin convention
+    (test_mwr_single_outflow_one_year_exact_irr etc.).
+    """
     cash_flows = [
         {"amount": -100000, "date": "2026-01-01"},
         {"amount": -50000, "date": "2026-06-01"},
@@ -123,7 +142,7 @@ def test_mwr_known_sequence():
     ]
     mwr = compute_mwr(cash_flows, final_value=170000)
     assert mwr is not None
-    assert 0 < mwr < 0.5
+    assert abs(mwr - 0.15636675) < 1e-6
 
 
 def test_mwr_single_outflow_one_year_exact_irr():
@@ -343,3 +362,157 @@ def test_period_returns_empty_and_none_all_none():
 
     none_result = compute_period_returns(None)
     assert none_result == {"return_24h": None, "return_mtd": None, "return_ytd": None}
+
+
+# ---------------------------------------------------------------------------
+# M-0695 — Modified Dietz clamps out-of-range day indices
+# ---------------------------------------------------------------------------
+
+def test_modified_dietz_clamps_day_beyond_period():
+    """M-0695: a day index beyond the period must clamp to period_days (weight
+    0), NOT produce a negative weight that inverts the cash flow's denominator
+    contribution and flips the return's sign.
+
+    Pre-fix, day=35 over a 30-day period gives weight = (30-35)/30 = -0.1667, so
+    a +50,000 deposit contributes -8,333 to the denominator (100,000 - 8,333 =
+    91,667) and the return becomes 10,000/91,667 = 0.1091 instead of the
+    clamped-day-30 value 10,000/100,000 = 0.10. The two must now be equal.
+    """
+    over = compute_modified_dietz(100000, 160000, [{"amount": 50000, "day": 35}], 30)
+    at_end = compute_modified_dietz(100000, 160000, [{"amount": 50000, "day": 30}], 30)
+    assert over is not None and at_end is not None
+    assert abs(over - at_end) < 1e-12, (
+        "an out-of-range day (35 > period 30) must clamp to period_days, "
+        "matching a day-30 cash flow (weight 0)"
+    )
+
+
+def test_modified_dietz_clamps_negative_day():
+    """M-0695: a negative day index must clamp to 0 (weight 1.0), matching a
+    day-0 deposit, rather than producing a weight > 1 that over-weights the
+    cash flow."""
+    neg = compute_modified_dietz(100000, 160000, [{"amount": 50000, "day": -5}], 30)
+    at_start = compute_modified_dietz(100000, 160000, [{"amount": 50000, "day": 0}], 30)
+    assert neg is not None and at_start is not None
+    assert abs(neg - at_start) < 1e-12
+
+
+# ---------------------------------------------------------------------------
+# M-0696 — _parse_date fails loud on numeric epochs, no silent truncation
+# ---------------------------------------------------------------------------
+
+def test_parse_date_rejects_numeric_epoch_loudly():
+    """M-0696: a numeric epoch must raise, not silently truncate to a 1970-era
+    date. The old `str(value)[:10]` turned 1700000000000 into '1700000000',
+    which mis-parsed with no error; numeric input now raises TypeError so the
+    units bug surfaces at the boundary."""
+    with pytest.raises(TypeError):
+        _parse_date(1700000000000)
+    with pytest.raises(TypeError):
+        _parse_date(1700000000.0)
+
+
+def test_parse_date_parses_iso_without_truncation():
+    """M-0696: an ISO datetime string parses to its tz-naive calendar day,
+    preserving the historical date-only contract (no [:10] truncation), so
+    happy-path inputs are byte-compatible with the previous behaviour."""
+    assert _parse_date("2026-01-03T12:30:00Z") == pd.Timestamp("2026-01-03")
+    assert _parse_date("2026-01-03") == pd.Timestamp("2026-01-03")
+    assert _parse_date("2026-01-03").tz is None
+
+
+def test_parse_date_offset_keeps_local_calendar_day():
+    """M-0696: a non-UTC offset must keep the LOCAL wall-clock calendar day
+    (tz_localize(None)), matching the old str(value)[:10] prefix — NOT convert
+    to UTC. Both inputs CROSS the UTC date line, so a tz_convert('UTC')
+    regression would shift them to an ADJACENT day and fail here (a non-crossing
+    offset like +14:00 at 23:30 would pass under both impls and is a hollow
+    guard):
+      01:00+05:00 -> UTC 2026-01-02 20:00 (UTC day Jan 2); local day stays Jan 3.
+      23:00-05:00 -> UTC 2026-01-04 04:00 (UTC day Jan 4); local day stays Jan 3.
+    """
+    assert _parse_date("2026-01-03T01:00:00+05:00") == pd.Timestamp("2026-01-03")
+    assert _parse_date("2026-01-03T23:00:00-05:00") == pd.Timestamp("2026-01-03")
+
+
+def test_parse_date_rejects_unparseable_string_loudly():
+    """M-0696: an empty/whitespace string parses to NaT, which has no
+    .normalize() — the old code returned that NaT and let the caller crash with
+    a cryptic AttributeError. Now it fails loud with a clear ValueError."""
+    with pytest.raises(ValueError):
+        _parse_date("")
+    with pytest.raises(ValueError):
+        _parse_date("   ")
+
+
+# ---------------------------------------------------------------------------
+# M-0697 — compute_mwr logs convergence failures (None-from-no-data is silent)
+# ---------------------------------------------------------------------------
+
+def test_mwr_logs_warning_on_nonconvergence(caplog):
+    """M-0697: when both solvers fail to find an IRR, compute_mwr must log a
+    warning so a None from non-convergence is distinguishable in the logs from
+    a None from no-data. All-positive cash flows have no IRR (NPV > 0 for every
+    rate > -1) so both Newton and brentq fail."""
+    with caplog.at_level(logging.WARNING, logger=_METRICS_LOGGER):
+        result = compute_mwr(
+            [
+                {"amount": 100, "date": "2025-01-01"},
+                {"amount": 200, "date": "2026-01-01"},
+            ],
+            final_value=0,
+        )
+    assert result is None
+    assert any(
+        "converge" in r.message.lower() or "brentq" in r.message
+        for r in caplog.records
+    ), "non-convergence must emit a WARNING so it is distinguishable from no-data"
+
+
+def test_mwr_no_data_path_stays_silent(caplog):
+    """M-0697: the no-cash-flows None must NOT log a convergence warning — that
+    path is genuinely 'no data', not a solver failure. This pins the
+    distinction the warning exists to create."""
+    with caplog.at_level(logging.WARNING, logger=_METRICS_LOGGER):
+        assert compute_mwr([], final_value=100000) is None
+    assert not caplog.records
+
+
+# ---------------------------------------------------------------------------
+# M-0698 — compute_twr warns when a meaningful sub-period is silently dropped
+# ---------------------------------------------------------------------------
+
+def test_twr_warns_on_zero_begin_value(caplog):
+    """M-0698: a sub-period whose begin value is 0 (the portfolio passed through
+    zero — a meaningful blow-up event) is skipped, but must WARN so the
+    resulting TWR being computed from a strict subset of sub-periods is visible.
+    A series starting at 0 then recovering triggers the begin_val==0 skip."""
+    dates = pd.date_range("2026-01-01", periods=3, freq="D")
+    equity = pd.Series([0.0, 100.0, 110.0], index=dates)
+    with caplog.at_level(logging.WARNING, logger=_METRICS_LOGGER):
+        result = compute_twr(equity, [])
+    assert result is None  # the only sub-period was dropped
+    assert any("begin_val=0" in r.message for r in caplog.records), (
+        "a zero begin-value sub-period must warn, not silently continue"
+    )
+
+
+def test_twr_debug_logs_too_short_segment(caplog):
+    """M-0698: a sub-period with only one observation in range is dropped and
+    must emit a DEBUG trace. A cash-flow breakpoint that falls between two
+    equity observations (no equity point on that date) splits the series into
+    two single-observation sub-periods, both of which are dropped."""
+    # Equity on Jan 1 and Jan 3 (no Jan 2 point); a deposit event on Jan 2
+    # inserts a breakpoint, so [Jan1, Jan2] and [Jan2, Jan3] each hold one
+    # equity observation -> both hit the len(segment) < 2 debug skip.
+    equity = pd.Series(
+        [100.0, 110.0],
+        index=pd.to_datetime(["2026-01-01", "2026-01-03"]),
+    )
+    events = [{"event_date": "2026-01-02", "event_type": "deposit", "amount": 5}]
+    with caplog.at_level(logging.DEBUG, logger=_METRICS_LOGGER):
+        result = compute_twr(equity, events)
+    assert result is None  # every sub-period was too short
+    assert any("dropping sub-period" in r.message for r in caplog.records), (
+        "a single-observation sub-period must leave a DEBUG trace, not vanish"
+    )
