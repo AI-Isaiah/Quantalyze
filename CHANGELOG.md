@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.93] - 2026-06-03
+### Fixed — H4 Lane-2 for-quants-lead endpoint hardening (H-0270 + M-0317 + M-0320)
+
+Closes the whole `src/app/api/for-quants-lead/route.ts` finding surface (a public, unauthenticated founder-inbox endpoint) as one Lane-2 batch. Each runtime fix was proven to fail when reverted (Rule 9); tsc + eslint clean; 91 tests across 7 files green (8 new). A 4-lens specialist suite (code-reviewer, silent-failure-hunter, type-design-analyzer, security) + a fresh-context Claude red-team ran on the staged diff — verdict **SHIP**; the red-team empirically re-neutered every fix and concretely refuted all three deliberate non-changes. The one in-spirit specialist finding (forensic logging) was folded in.
+
+- **H-0270** (`route.ts`, `app/for-quants/RequestCallModal.tsx`) — add a hidden `website` honeypot. The modal renders it off-screen (`aria-hidden`, `tabIndex={-1}`, `autoComplete="off"`) and transmits its value; the route, after Zod parse and before the insert, drops a populated honeypot with a **success-shaped 200** (no DB row, no founder email) so a bot believes it succeeded and never escalates, while OPS still gets a forensic `console.warn` (email + IP + UA — not the value, which could carry a payload) so a rare false-positive is recoverable. A 400 would teach the bot which field to skip. The rotation-proof control (Turnstile/hCaptcha) is intentionally deferred — Cloudflare account + env wiring.
+- **M-0317** (`route.ts`) — `WIZARD_CONTEXT_SCHEMA` now `.refine()`s that a present `step` requires `wizard_session_id`, enforcing the funnel cross-correlation invariant the schema previously left as two independently-optional fields. Both in-app producers (RequestCallModal's typed context, the wizard DesktopGate's `"desktop-gate"`) already satisfy it; `null`/missing contexts short-circuit, so no legitimate traffic is over-rejected.
+- **M-0320** (`route.ts`) — top-level (empty-path) Zod issues (e.g. a JSON-array body) are bucketed under a synthetic `_form` key instead of being silently dropped, so the client receives an actionable message instead of `fieldErrors: {}`.
+- **M-0373** (`RequestCallModal.test.tsx`, folded as a touched-file finding) — add the four behavioral tests the audit flagged as missing on the modal's submit state machine: the synchronous `inFlight` double-click gate (fired on the `<form>` to isolate it from the async `disabled={submitting}` gate — neuter-verified it bails the 2nd of two submits), the success view echoing the email, inline API `fieldErrors` rendering, and the network-reject error path.
+
+Deliberate non-changes, each pressure-tested and refuted by the red-team as leaving no exploitable defect: **M-0318** (`wizard_context` stays `.nullable().optional()` — `null` and missing are handled identically at the insert site; requiring the key would 400 minimal/external callers of a public endpoint); **M-0316** (`draft_strategy_id` ownership is unverifiable on an unauthenticated endpoint — it is UUID-constrained advisory CRM metadata; an existence check would add an enumeration oracle); **M-0324** (idempotency/dedup needs a `UNIQUE(lower(email), day)` migration — Lane 1, out of this route's lane — and the route already documents the deferral).
+
 ## [0.24.15.92] - 2026-06-03
 ### Fixed — compute_jobs SECDEF-RPC corrections (M-1137/M-1138 + G23-187-mig-01/03)
 
