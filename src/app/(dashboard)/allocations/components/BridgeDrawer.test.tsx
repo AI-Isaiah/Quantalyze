@@ -632,7 +632,7 @@ describe("BridgeDrawer — Phase 10 Plan 05 / Task 3 'Add to scenario' CTA", () 
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("T_AS7 — both buttons have type='button' and accent styling classes", () => {
+  it("T_AS7 — both confirm-stage CTAs are non-submitting buttons (type='button')", () => {
     render(
       <BridgeDrawer
         isOpen
@@ -648,10 +648,18 @@ describe("BridgeDrawer — Phase 10 Plan 05 / Task 3 'Add to scenario' CTA", () 
     const sendBtn = screen.getByRole("button", { name: /Send intro/ });
     const addBtn = screen.getByTestId("bridge-add-to-scenario");
 
+    // The load-bearing contract: a bare <button> defaults to type="submit", so
+    // an action CTA must set type="button" explicitly — a defensive convention
+    // that stays correct even if these buttons are ever nested in a <form>
+    // (BridgeDrawer renders them in plain divs today; the explicit type future-
+    // proofs against an accidental submit/reload).
     expect(sendBtn).toHaveAttribute("type", "button");
     expect(addBtn).toHaveAttribute("type", "button");
-    expect(sendBtn.className).toMatch(/bg-accent/);
-    expect(addBtn.className).toMatch(/bg-accent/);
+    // M-0056: the previous `.className.toMatch(/bg-accent/)` pins are dropped.
+    // They asserted a literal Tailwind utility, so a DESIGN.md tokenization /
+    // CSS-var refactor (zero behavior change) would break them — the
+    // "test implementation, not behavior" antipattern (Rule 9). Visual fidelity
+    // is owned by design-review (DESIGN.md), not a brittle class regex here.
   });
 
   // ---------------------------------------------------------------------------
