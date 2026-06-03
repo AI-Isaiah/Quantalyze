@@ -775,6 +775,42 @@ describe("Critical regression guards", () => {
       });
     });
 
+    // L-0062: the docs-link-check job link-checks docs/runbooks INTERNAL
+    // links only — external runbook URLs reference third-party provider
+    // docs whose URLs we do not own, so they must NOT fail CI. That
+    // internal-only contract is enforced by exactly one flag (`--offline`)
+    // on the lychee invocation with nothing pinning it. Drop the flag and
+    // lychee silently starts resolving external URLs over the network,
+    // failing CI on third-party doc churn outside our control.
+    describe("docs-link-check: internal-only contract (L-0062)", () => {
+      it("ci.yml docs-link-check lychee step runs --offline (external URLs intentionally NOT checked)", () => {
+        const src = readText(".github/workflows/ci.yml");
+        // Scope to the docs-link-check job's run block, NOT a global grep —
+        // `npm ci --prefer-offline` appears 7x elsewhere and would vacuously pass.
+        const stepRe =
+          /-\s*name:\s*Link-check docs[^\n]*\n\s*run:\s*\|\n([\s\S]*?)(?=\n\s{4,6}\S|\n\S|$)/;
+        const m = src.match(stepRe);
+        expect(
+          m,
+          "ci.yml: docs-link-check 'Link-check docs' run block not found — job shape drifted",
+        ).not.toBeNull();
+        const runBlock = m![1];
+        expectMatch(runBlock, /\blychee\b/, "ci.yml docs-link-check step no longer invokes lychee");
+        // The load-bearing flag: internal-only enforcement.
+        expectMatch(
+          runBlock,
+          /lychee[^\n]*\s--offline\b/,
+          "ci.yml docs-link-check dropped --offline — lychee would now resolve external runbook URLs over the network and fail CI on third-party doc URL changes the team does not own (L-0062 contract broken)",
+        );
+        // Scope sanity: it targets the runbooks tree, not an unbounded glob.
+        expectMatch(
+          runBlock,
+          /docs\/runbooks/,
+          "ci.yml docs-link-check no longer scopes to docs/runbooks",
+        );
+      });
+    });
+
     // H-1024 (pr-test-analyzer): the non-seeded ("placeholder-env") e2e
     // lane MUST carry at least one assertion that an
     // allocator/strategy-manager-protected route redirects an

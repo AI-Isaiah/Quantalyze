@@ -100,7 +100,16 @@ const FORBIDDEN_WILDCARD = /\.from\s*\(\s*["'`]api_keys["'`]\s*\)\s*\.select\s*\
 // (e.g., `supabase.from("strategies").select("*, api_keys(*)")`). Must
 // also be banned because PostgREST applies the column grants to the
 // embedded resource just like a direct projection.
-const FORBIDDEN_EMBED = /\.select\s*\(\s*["'`][^"'`]*api_keys\s*\(\s*\*\s*\)[^"'`]*["'`]/g;
+//
+// The optional `(?:![a-zA-Z0-9_]+)?` group also catches PostgREST
+// *hint*-join syntax — `api_keys!inner(*)`, `api_keys!left(*)`, and
+// constraint-name hints like `api_keys!fk_strategies_api_key_id(*)` — all
+// of which embed the full `*` projection just like the plain `api_keys(*)`
+// form. Without the hint group this guard is blind to a whole syntax
+// family that two live call sites already use (with explicit columns), so
+// a future `api_keys!inner(*)` regression would slip past the scan.
+const FORBIDDEN_EMBED =
+  /\.select\s*\(\s*["'`][^"'`]*api_keys(?:![a-zA-Z0-9_]+)?\s*\(\s*\*\s*\)[^"'`]*["'`]/g;
 
 describe("SEC-005: api_keys column projection", () => {
   it("API_KEY_USER_COLUMNS constant is defined and excludes encrypted columns", () => {
@@ -164,5 +173,35 @@ describe("SEC-005: api_keys column projection", () => {
     }
 
     expect(offenders.length).toBe(0);
+  });
+
+  it("FORBIDDEN_EMBED matches PostgREST hint-join syntax (api_keys!inner(*)) and plain embed, but not explicit-column hint joins", () => {
+    // The embed guard must catch every `api_keys(*)` projection form,
+    // including PostgREST hint joins (`!inner`, `!left`, constraint-name
+    // hints), because each one returns the full encrypted-column set.
+    const mustMatch = [
+      `.select("*, api_keys(*)")`,
+      `.select("id, api_keys!inner(*)")`,
+      `.select("api_keys!left(*)")`,
+      `.select("api_keys!fk_strategies_api_key_id(*)")`,
+    ];
+    for (const s of mustMatch) {
+      FORBIDDEN_EMBED.lastIndex = 0;
+      expect(FORBIDDEN_EMBED.test(s)).toBe(true);
+    }
+
+    // The two live, safe call sites project explicit columns through the
+    // same hint-join syntax. They must NOT trip the guard — otherwise the
+    // file-scan above would false-positive on real production lines.
+    // (src/app/api/cron/sync-funding/route.ts and
+    //  src/app/api/cron/reconcile-strategies/route.ts respectively.)
+    const mustNotMatch = [
+      `api_keys!inner(exchange, is_active)`,
+      `api_keys!inner(exchange, is_active, last_sync_at)`,
+    ];
+    for (const s of mustNotMatch) {
+      FORBIDDEN_EMBED.lastIndex = 0;
+      expect(FORBIDDEN_EMBED.test(s)).toBe(false);
+    }
   });
 });

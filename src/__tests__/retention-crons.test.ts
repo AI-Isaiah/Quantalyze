@@ -633,6 +633,111 @@ describe("Migration 056 — api_key_rotation_reminder capture semantics", () => 
     60_000,
   );
 
+  // H-0029 (dedup arm): fire the EXACT registered INSERT body when a reminder
+  // <60d old ALREADY exists for the seeded user, and assert the body inserts
+  // ZERO new rows. The existing dedup arm (line ~411) only re-implements the
+  // recent-reminder probe as a hand-written supabase-js SELECT — it proves
+  // OUR probe finds the seeded dispatch, NOT that the cron's OWN `NOT EXISTS`
+  // clause suppresses the insert. This arm fires the registered body so a
+  // regression that widens/breaks the dedup window — e.g. flipping
+  // `nd.created_at > now() - interval '60 days'` to `'0 days'`, or dropping
+  // the `AND NOT EXISTS (…)` block entirely — makes the body insert a
+  // duplicate, firedNew flips to 1, and THIS test fails. The hand-written
+  // probe arm stays green under that same neuter, which is exactly why it is
+  // insufficient on its own.
+  it.skipIf(!HAS_LIVE_DB || !HAS_INTROSPECTION)(
+    "api_key_rotation_reminder: firing the registered INSERT body inserts ZERO new rows when a reminder <60d old already exists (NOT EXISTS dedup — H-0029 dedup arm)",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const userEmail = `rotation-dedup-fire-${ts}@test.sec`;
+      const cleanup = {
+        userIds: [] as string[],
+        apiKeyIds: [] as string[],
+        dispatchIds: [] as string[],
+      };
+      try {
+        const userId = await createTestUser(admin, userEmail);
+        cleanup.userIds.push(userId);
+        await admin.from("profiles").update({ email: userEmail }).eq("id", userId);
+
+        const ninetyOneDaysAgo = new Date(
+          Date.now() - 91 * 24 * 60 * 60 * 1000,
+        ).toISOString();
+        const { data: keyRow, error: keyErr } = await admin
+          .from("api_keys")
+          .insert({
+            user_id: userId,
+            exchange: "binance",
+            label: "rotation-dedup-fire-probe",
+            api_key_encrypted: "ct",
+            dek_encrypted: "dct",
+            is_active: true,
+            created_at: ninetyOneDaysAgo,
+          })
+          .select("id")
+          .single();
+        if (keyErr || !keyRow) throw new Error(`api_keys: ${keyErr?.message}`);
+        cleanup.apiKeyIds.push(keyRow.id);
+
+        // Seed ONE reminder 5 days ago — inside the 60d dedup window.
+        const fiveDaysAgo = new Date(
+          Date.now() - 5 * 24 * 60 * 60 * 1000,
+        ).toISOString();
+        const { data: disp, error: dispErr } = await admin
+          .from("notification_dispatches")
+          .insert({
+            notification_type: "api_key_rotation_reminder",
+            recipient_email: userEmail,
+            subject: "Rotate your exchange API key",
+            status: "queued",
+            metadata: { user_id: userId },
+            created_at: fiveDaysAgo,
+          })
+          .select("id")
+          .single();
+        if (dispErr || !disp) throw new Error(`dispatches seed: ${dispErr?.message}`);
+        cleanup.dispatchIds.push(disp.id);
+
+        const body = await fetchRegisteredCommand("api_key_rotation_reminder");
+        if (body === null) {
+          console.warn(
+            "[retention-crons] reminder cron unregistered; skipping dedup-fire arm.",
+          );
+          return;
+        }
+
+        // Fire the EXACT body inside a DO block, count rows the BODY adds
+        // (created_at = now() inside the txn, so > our 5d seed), RAISE+rollback.
+        let firedNew: number | null = null;
+        try {
+          await runIntrospectionSql(
+            `DO $fire$
+             DECLARE v_n INT;
+             BEGIN
+               ${body}
+               SELECT count(*) INTO v_n FROM notification_dispatches
+                WHERE notification_type = 'api_key_rotation_reminder'
+                  AND recipient_email = '${userEmail}'
+                  AND created_at > now() - interval '1 minute';
+               RAISE EXCEPTION 'RETENTION_DEDUP_NEW=%', v_n;
+             END $fire$;`,
+          );
+        } catch (err) {
+          const m = /RETENTION_DEDUP_NEW=(\d+)/.exec((err as Error).message);
+          if (!m) throw err;
+          firedNew = Number(m[1]);
+        }
+        // The NOT EXISTS clause must suppress the insert: the body adds ZERO
+        // new rows because a reminder <60d old already exists for this user.
+        expect(firedNew).toBe(0);
+      } finally {
+        await cleanupLiveDbRow(admin, cleanup);
+      }
+    },
+    60_000,
+  );
+
   // H-0028 / H-0030: fire the EXACT registered body of every retention /
   // audit cron transactionally (ROLLBACK) and assert it executes against
   // the live schema. A silently-corrupted body — a renamed compute_jobs
