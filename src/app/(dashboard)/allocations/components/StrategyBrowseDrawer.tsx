@@ -26,7 +26,7 @@
  * The composer (Plan 06) wires this callback to the scenario-state hook.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   computeMandateFitApprox,
   type AllocatorMandateForFit,
@@ -87,6 +87,34 @@ const TIER_BG: Record<MandateFitTier, string> = {
   yellow: "rgba(217,119,6,0.10)",
   red: "rgba(220,38,38,0.10)",
 };
+
+// M-0107 — memoized filter pill. With a stable `onToggle` (useCallback in the
+// parent) it re-renders only when its own `pressed` flips, so a search
+// keystroke no longer re-renders the entire market/type pill grid.
+const FilterPill = memo(function FilterPill({
+  label,
+  pressed,
+  onToggle,
+}: {
+  label: string;
+  pressed: boolean;
+  onToggle: (label: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={pressed}
+      onClick={() => onToggle(label)}
+      className={`rounded-md border px-2 py-1 text-xs ${
+        pressed
+          ? "border-accent text-accent"
+          : "border-border text-text-secondary"
+      }`}
+    >
+      {label}
+    </button>
+  );
+});
 
 export function StrategyBrowseDrawer({
   isOpen,
@@ -179,6 +207,16 @@ export function StrategyBrowseDrawer({
       setActiveTypes(new Set());
       setRecentlyAdded(new Set());
       setPermanentlyDimmed(new Set());
+      // H-0082(b) — also reset the fetch-result trio. The drawer stays mounted
+      // while closed (renders null), so WITHOUT this a reopen's first render
+      // flashes the PREVIOUS session's stale `strategies`/`error` for one frame
+      // before the fetch effect re-runs and flips to Loading. Resetting to the
+      // initial state makes a reopen behave identically to a first open: the
+      // documented "close and reopen" recovery path now actually clears a
+      // prior error instead of showing it stale.
+      setStrategies([]);
+      setError(null);
+      setLoading(false);
       /* eslint-enable react-hooks/set-state-in-effect */
       // Drain pending dim timers so they don't fire post-close.
       for (const id of dimTimerIdsRef.current) clearTimeout(id);
@@ -204,38 +242,77 @@ export function StrategyBrowseDrawer({
     };
   }, []);
 
-  if (!isOpen) return null;
-
-  // Derive unique markets + strategy_types for filter pills (sorted).
-  const allMarkets = Array.from(
-    new Set(strategies.flatMap((s) => s.markets)),
-  ).sort();
-  const allTypes = Array.from(
-    new Set(strategies.flatMap((s) => s.strategy_types)),
-  ).sort();
-
-  // Apply search + filters client-side.
+  // M-0106 — derive the filter-pill lists + the filtered+tier rows in memos so
+  // a search keystroke (or any unrelated re-render — e.g. the recentlyAdded /
+  // permanentlyDimmed dim-timers) doesn't rebuild two Sets + two sorts + a full
+  // filter pass + a per-row computeMandateFitApprox (which itself builds a
+  // `new Set(prefs)`). Hooks must run unconditionally → above the `!isOpen`
+  // early return.
+  const allMarkets = useMemo(
+    () => Array.from(new Set(strategies.flatMap((s) => s.markets))).sort(),
+    [strategies],
+  );
+  const allTypes = useMemo(
+    () =>
+      Array.from(new Set(strategies.flatMap((s) => s.strategy_types))).sort(),
+    [strategies],
+  );
   const q = search.trim().toLowerCase();
-  const filtered = strategies.filter((s) => {
-    if (q) {
-      const nameMatch = s.name.toLowerCase().includes(q);
-      const codenameMatch = (s.codename ?? "").toLowerCase().includes(q);
-      if (!nameMatch && !codenameMatch) return false;
-    }
-    if (
-      activeMarkets.size > 0 &&
-      !s.markets.some((m) => activeMarkets.has(m))
-    ) {
-      return false;
-    }
-    if (
-      activeTypes.size > 0 &&
-      !s.strategy_types.some((t) => activeTypes.has(t))
-    ) {
-      return false;
-    }
-    return true;
-  });
+  // Filtered rows carry their precomputed mandate-fit `tier` so it isn't
+  // recomputed per-row in JSX on every render (only when the filter inputs or
+  // the mandate change).
+  const filtered = useMemo(
+    () =>
+      strategies
+        .filter((s) => {
+          if (q) {
+            const nameMatch = s.name.toLowerCase().includes(q);
+            const codenameMatch = (s.codename ?? "").toLowerCase().includes(q);
+            if (!nameMatch && !codenameMatch) return false;
+          }
+          if (
+            activeMarkets.size > 0 &&
+            !s.markets.some((m) => activeMarkets.has(m))
+          ) {
+            return false;
+          }
+          if (
+            activeTypes.size > 0 &&
+            !s.strategy_types.some((t) => activeTypes.has(t))
+          ) {
+            return false;
+          }
+          return true;
+        })
+        .map((s) => ({ s, tier: computeMandateFitApprox(s, allocatorMandate) })),
+    [strategies, q, activeMarkets, activeTypes, allocatorMandate],
+  );
+
+  // M-0107 — stable per-kind toggle handlers (functional setState, no Set dep)
+  // so the memoized FilterPill children re-render only when their own `pressed`
+  // flips, not on every keystroke.
+  const toggleMarket = useCallback(
+    (m: string) =>
+      setActiveMarkets((prev) => {
+        const next = new Set(prev);
+        if (next.has(m)) next.delete(m);
+        else next.add(m);
+        return next;
+      }),
+    [],
+  );
+  const toggleType = useCallback(
+    (t: string) =>
+      setActiveTypes((prev) => {
+        const next = new Set(prev);
+        if (next.has(t)) next.delete(t);
+        else next.add(t);
+        return next;
+      }),
+    [],
+  );
+
+  if (!isOpen) return null;
 
   function handleAdd(s: StrategyBrowseRow) {
     onAdd({
@@ -266,17 +343,6 @@ export function StrategyBrowseDrawer({
       });
     }, 2000);
     dimTimerIdsRef.current.add(timerId);
-  }
-
-  function toggleSet(
-    set: Set<string>,
-    key: string,
-    setter: (s: Set<string>) => void,
-  ) {
-    const next = new Set(set);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    setter(next);
   }
 
   function clearAllFilters() {
@@ -347,47 +413,27 @@ export function StrategyBrowseDrawer({
           className="mt-3 flex flex-wrap gap-2"
           aria-label="Markets filter"
         >
-          {allMarkets.map((m) => {
-            const pressed = activeMarkets.has(m);
-            return (
-              <button
-                key={m}
-                type="button"
-                aria-pressed={pressed}
-                onClick={() => toggleSet(activeMarkets, m, setActiveMarkets)}
-                className={`rounded-md border px-2 py-1 text-xs ${
-                  pressed
-                    ? "border-accent text-accent"
-                    : "border-border text-text-secondary"
-                }`}
-              >
-                {m}
-              </button>
-            );
-          })}
+          {allMarkets.map((m) => (
+            <FilterPill
+              key={m}
+              label={m}
+              pressed={activeMarkets.has(m)}
+              onToggle={toggleMarket}
+            />
+          ))}
         </div>
         <div
           className="mt-2 flex flex-wrap gap-2"
           aria-label="Strategy types filter"
         >
-          {allTypes.map((t) => {
-            const pressed = activeTypes.has(t);
-            return (
-              <button
-                key={t}
-                type="button"
-                aria-pressed={pressed}
-                onClick={() => toggleSet(activeTypes, t, setActiveTypes)}
-                className={`rounded-md border px-2 py-1 text-xs ${
-                  pressed
-                    ? "border-accent text-accent"
-                    : "border-border text-text-secondary"
-                }`}
-              >
-                {t}
-              </button>
-            );
-          })}
+          {allTypes.map((t) => (
+            <FilterPill
+              key={t}
+              label={t}
+              pressed={activeTypes.has(t)}
+              onToggle={toggleType}
+            />
+          ))}
         </div>
 
         <div className="mt-6">
@@ -425,8 +471,7 @@ export function StrategyBrowseDrawer({
               </div>
             )}
           <ul className="grid gap-2">
-            {filtered.map((s) => {
-              const tier = computeMandateFitApprox(s, allocatorMandate);
+            {filtered.map(({ s, tier }) => {
               const dimmed = permanentlyDimmed.has(s.id);
               const justAdded = recentlyAdded.has(s.id);
               return (
