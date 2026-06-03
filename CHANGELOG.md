@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.89] - 2026-06-03
+### Fixed — H2 (Lane 2): type-safety hardening — DiscoveryGroup, upstream-status invariant, mandate enum-cast filter
+
+Three surgical HIGH type-safety fixes from the 2026-06-03 reverify+triage sweep (Lane 2 frontend). Specialist + red-team review confirmed all three sound; the only follow-ups were test-coverage pins for the subtle contracts.
+
+- **H-0437 — `src/lib/constants.ts`: `DISCOVERY_CATEGORIES.group` was a bare inferred union.** A future typo (e.g. `"TradFI"`) would silently widen the inferred type and create a rogue Discovery sidebar sub-group at runtime. Added an exported `DiscoveryGroup = "Digital Assets" | "TradFi"` and `] as const satisfies readonly { …; group: DiscoveryGroup; … }[]` so a typo is now a compile error. `as const satisfies` preserves the literal narrowing existing consumers rely on (verified: no consumer breakage).
+- **H-1144 — `src/lib/analytics-client.ts`: `AnalyticsUpstreamError` accepted any `number` as `status`.** The class's documented contract is to preserve the upstream status so route handlers can forward it as the HTTP response code — but a malformed status (NaN / non-integer / out of `[100,599]`) could surface downstream as an invalid `NextResponse` status. The constructor now throws `RangeError` on an invalid status. All current callers pass `res.status` inside `if (!res.ok)`, so this is a fail-loud fence that never fires in practice.
+- **H-0377 — `src/components/mandate/MandateForm.tsx`: unvalidated `string[]` cast straight to enum unions.** `preferred_strategy_types` / `style_exclusions` are typed `string[] | null` but were cast to the enum unions with `as`; the server validates membership against the **same** `STRATEGY_TYPES` / `SUBTYPES` constants, so a stale DB value would ride along and be **rejected** on the next save (the field silently fails to persist). New `filterToKnown(values, allowed)` type-guard helper drops unknowns at intake (real narrowing, no `as` lie). `excluded_exchanges` is **deliberately not** filtered — the server validates it case-insensitively (`isSupportedExchange` lowercases) while `EXCHANGES` is display-case, so an exact-case filter could wrongly drop a server-valid lowercase value; that decision is now pinned by a test.
+
+Review: 6-lens specialist suite + 2-angle fresh-context Claude red team (0 code defects; 3 test-coverage follow-ups applied). Regression tests, each verified to fail when its fix/decision is neutered: H-0377 intake-drop + Reset-clears + lowercase-exchange-survives; H-1144 invalid-status-throws / 100·599-boundaries-construct. H-0437 is tsc-guarded by the `satisfies` clause. tsc 0 / eslint 0 / 59 touched-file tests pass.
+
 ## [0.24.15.88] - 2026-06-03
 ### Fixed — H1 (Lane 2): dispatch-audit freeze-survival + scope-tag truncation + panel code-split
 

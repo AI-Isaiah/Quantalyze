@@ -248,6 +248,21 @@ describe("AnalyticsUpstreamError", () => {
     expect(err).toBeInstanceOf(Error);
   });
 
+  it("H-1144: constructor fails loud on an out-of-range / non-integer HTTP status", async () => {
+    const mod = await import("./analytics-client");
+    // Valid HTTP statuses incl. the 100/599 boundaries construct fine.
+    expect(new mod.AnalyticsUpstreamError("ok", 100).status).toBe(100);
+    expect(new mod.AnalyticsUpstreamError("ok", 599).status).toBe(599);
+    // Invalid statuses throw at construction — the documented contract is that
+    // `status` is forwarded as the HTTP response code, so a NaN / non-integer /
+    // out-of-range value must never silently become an invalid response status.
+    for (const bad of [0, 99, 600, 404.5, NaN]) {
+      expect(() => new mod.AnalyticsUpstreamError("x", bad)).toThrow(
+        /invalid HTTP status/i,
+      );
+    }
+  });
+
   it("forwards 4xx JSON body as AnalyticsUpstreamError(status=400)", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ detail: "already in portfolio" }), {

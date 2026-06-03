@@ -205,10 +205,19 @@ export const CHART_COLORS = {
 // Assets and TradFi — so allocators can scan crypto and traditional-
 // finance strategy surfaces separately. Order within each group follows
 // the array; groups render in the order they first appear.
+// H-0437: `group` is constrained to DiscoveryGroup via `satisfies` below, so a
+// typo (e.g. `"TradFI"`) is a compile error instead of silently widening the
+// inferred type and creating a rogue sidebar sub-group at runtime.
+export type DiscoveryGroup = "Digital Assets" | "TradFi";
 export const DISCOVERY_CATEGORIES = [
   { slug: "crypto-sma", name: "Crypto SMA", group: "Digital Assets", description: "Separately Managed Accounts for crypto quantitative strategies. Verified performance from exchange APIs." },
   { slug: "cfd", name: "CFD", group: "Digital Assets", description: "Contract-for-difference strategies across major crypto pairs." },
   { slug: "emerging-crypto", name: "Emerging Crypto", group: "Digital Assets", description: "Early-stage strategies on newer tokens and protocols." },
   { slug: "crypto-decks", name: "Crypto Decks", group: "Digital Assets", description: "Curated bundles of crypto strategies for diversified allocation." },
   { slug: "tradfi-decks", name: "TradFi Decks", group: "TradFi", description: "Traditional finance strategy bundles bridging TradFi and crypto." },
-] as const;
+] as const satisfies readonly {
+  slug: string;
+  name: string;
+  group: DiscoveryGroup;
+  description: string;
+}[];
