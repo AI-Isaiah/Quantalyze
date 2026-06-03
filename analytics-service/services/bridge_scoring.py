@@ -44,16 +44,23 @@ def find_replacement_candidates(
     (portfolio.py) hydrates it from the strategies table before returning
     to the client. The Zod BridgeResponseSchema requires it.
     """
+    # Dedupe duplicate timestamps last-write-wins (the G15-006 idiom in
+    # routers/simulator.py + _build_monthly_returns) BEFORE the frame is built:
+    # find_replacement_candidates is inherently multi-strategy (an incumbent
+    # among several), so a returns_series carrying a repeated date makes the
+    # `pd.DataFrame(...)` constructor RAISE ("cannot reindex on an axis with
+    # duplicate labels") when two strategies dup different dates — and the
+    # per-candidate baseline reslice below cartesian-amplify against a repeated
+    # date. routers/portfolio.py documents that `_records_to_series` does NOT
+    # dedupe its JSONB input. A no-op on the unique-date series the analytics
+    # pipeline normally produces.
+    portfolio_returns = {
+        sid: s[~s.index.duplicated(keep="last")]
+        for sid, s in portfolio_returns.items()
+    }
     port_df = pd.DataFrame(portfolio_returns).dropna()
     if port_df.empty or incumbent_strategy_id not in port_df.columns:
         return []
-    # Dedupe duplicate timestamps last-write-wins (the G15-006 idiom in
-    # routers/simulator.py + _build_monthly_returns) so the per-candidate
-    # baseline reslice below cannot cartesian-amplify against a returns_series
-    # carrying a repeated date — routers/portfolio.py documents that
-    # `_records_to_series` does NOT dedupe its JSONB input. A no-op on the
-    # unique-date series the analytics pipeline normally produces.
-    port_df = port_df[~port_df.index.duplicated(keep="last")]
 
     # Current-portfolio weights (with incumbent). The baseline metrics
     # (sharpe / corr / dd) are NOT computed here over the full port_df window —
@@ -89,6 +96,10 @@ def find_replacement_candidates(
         if cid in portfolio_sids:
             continue
 
+        # Dedupe the candidate's own dup-date JSONB shape before the alignment
+        # join (parity with the portfolio-side dedupe above + the ADD-semantics
+        # sibling find_improvement_candidates), so concat cannot raise/amplify.
+        c_returns = c_returns[~c_returns.index.duplicated(keep="last")]
         all_returns = pd.concat(
             [remaining_df, c_returns.rename(cid)], axis=1
         ).dropna()

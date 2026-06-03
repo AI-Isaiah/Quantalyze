@@ -15,18 +15,37 @@ def find_improvement_candidates(
     w1: float = 0.4, w2: float = 0.3, w3: float = 0.3,
     add_weight: float = 0.10,
 ) -> list[dict[str, Any]]:
+    # Duplicate-timestamp guard (sibling of bridge_scoring M-0893 / simulator
+    # G15-006): the optimizer's series come from `_records_to_series`, which does
+    # NOT dedupe — duplicate-date JSONB is a documented shape (routers/portfolio
+    # _records_to_series). A non-unique index makes BOTH the multi-strategy
+    # `pd.DataFrame(...)` constructor below RAISE ("cannot reindex on an axis with
+    # duplicate labels") AND the per-candidate `pd.concat([port_df, c], axis=1)`
+    # alignment raise/amplify on the join. Collapse each series to one row per
+    # date (last-write-wins) BEFORE the frame is built, so neither can trip.
+    portfolio_returns = {
+        sid: s[~s.index.duplicated(keep="last")]
+        for sid, s in portfolio_returns.items()
+    }
     port_df = pd.DataFrame(portfolio_returns).dropna()
     if port_df.empty:
         return []
     w_arr = np.array([weights.get(sid, 0) for sid in port_df.columns])
     if w_arr.sum() > 0:
         w_arr = w_arr / w_arr.sum()
-    port_returns = (port_df * w_arr).sum(axis=1)
-    current_sharpe = _compute_sharpe(port_returns)
-    current_avg_corr = _avg_corr(port_df)
-    current_max_dd = _max_drawdown(port_returns)
+    port_cols = list(port_df.columns)
+    # Window-alignment correctness (sibling of bridge_scoring.find_replacement_
+    # candidates M-0893): the incumbent baseline (sharpe / avg_corr / max_dd) MUST
+    # be measured over the SAME window as each candidate's blended metric.
+    # `_compute_sharpe` annualizes ×√252 regardless of sample length, so a baseline
+    # computed once over the FULL port_df window and compared against a candidate
+    # scored over its shorter `aligned` overlap window mixes regimes/sample sizes
+    # and ranks short-history candidates spuriously. The baseline is therefore
+    # RESLICED to each candidate's window inside the loop (see port_baseline),
+    # never precomputed here.
     results: list[dict[str, Any]] = []
     for cid, c_returns in candidate_returns.items():
+        c_returns = c_returns[~c_returns.index.duplicated(keep="last")]
         aligned = pd.concat([port_df, c_returns.rename(cid)], axis=1).dropna()
         if len(aligned) < 30:
             continue
@@ -59,9 +78,19 @@ def find_improvement_candidates(
                 "(zero-variance returns or unscoreable blend)", cid,
             )
             continue
-        # Use already-aligned frame to compute correlation with portfolio returns
-        port_aligned = (aligned[list(port_df.columns)] * w_arr).sum(axis=1)
-        corr_with_portfolio = float(port_aligned.corr(aligned[cid])) if len(aligned) > 10 else 0
+        # Resliced incumbent baseline over THIS candidate's aligned window (the
+        # window-alignment fix; see the header note). The port_cols-only slice of
+        # the aligned frame is the existing portfolio measured on the exact
+        # overlap window the candidate is scored on — the single source for both
+        # the correlation term and the three deltas below. For a full-window
+        # candidate (aligned spans port_df's dates) this equals the old
+        # full-window baseline exactly, so it is a no-op there.
+        port_cols_aligned = aligned[port_cols]
+        port_baseline = (port_cols_aligned * w_arr).sum(axis=1)
+        current_sharpe = _compute_sharpe(port_baseline)
+        current_avg_corr = _avg_corr(port_cols_aligned)
+        current_max_dd = _max_drawdown(port_baseline)
+        corr_with_portfolio = float(port_baseline.corr(aligned[cid])) if len(aligned) > 10 else 0
         # A None metric on EITHER side of a delta means that axis has no
         # comparable baseline (uniform across candidates), so it contributes 0.
         sharpe_lift = (new_sharpe - current_sharpe) if current_sharpe is not None else 0

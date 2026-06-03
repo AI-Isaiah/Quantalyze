@@ -341,3 +341,47 @@ class TestBaselineWindowAlignment:
         # into an amplified baseline window.
         assert dirty[0]["composite_score"] == pytest.approx(clean[0]["composite_score"])
         assert dirty[0]["sharpe_delta"] == pytest.approx(clean[0]["sharpe_delta"])
+
+    def test_multi_strategy_duplicate_dates_on_different_days_does_not_raise(self):
+        # Red-team gap (sibling of the find_improvement_candidates fix):
+        # find_replacement_candidates is inherently multi-strategy (an incumbent
+        # among several), so a portfolio whose strategies carry duplicate dates on
+        # DIFFERENT days makes `pd.DataFrame(portfolio_returns)` raise "cannot
+        # reindex on an axis with duplicate labels" — 500'ing the whole bridge
+        # request — BEFORE any post-construct row dedupe could run. The dedupe was
+        # moved to per-series, BEFORE the frame is built, so a dup-date portfolio
+        # scores identically to its clean twin. The prior test covers only the
+        # same-date-across-strategies case (which the constructor tolerates).
+        #
+        # Rule-9: deduping AFTER the constructor (or not at all) raises here.
+        base = pd.date_range("2025-01-01", periods=60, freq="B")
+        inc_vals = np.linspace(0.001, 0.004, 60)
+        r1_vals = np.linspace(0.002, 0.001, 60)
+        cand = _make_returns(10, n=60, mu=0.003)
+
+        def _score(inc: pd.Series, r1: pd.Series):
+            return find_replacement_candidates(
+                portfolio_returns={"inc": inc, "r1": r1},
+                candidate_returns={"cand": pd.Series(cand.to_numpy(), index=base)},
+                weights={"inc": 0.5, "r1": 0.5},
+                incumbent_strategy_id="inc",
+            )
+
+        clean = _score(pd.Series(inc_vals, index=base), pd.Series(r1_vals, index=base))
+        # inc dups date[10]; r1 dups a DIFFERENT date[20]. Same value →
+        # last-write-wins collapses each back to its clean twin.
+        inc_dup = pd.Series(
+            np.append(inc_vals, inc_vals[10]),
+            index=base.append(pd.DatetimeIndex([base[10]])),
+        )
+        r1_dup = pd.Series(
+            np.append(r1_vals, r1_vals[20]),
+            index=base.append(pd.DatetimeIndex([base[20]])),
+        )
+        dirty = _score(inc_dup, r1_dup)
+
+        assert len(clean) == len(dirty) == 1
+        assert dirty[0]["composite_score"] == pytest.approx(clean[0]["composite_score"]), (
+            "a multi-strategy portfolio with dup dates on different days must "
+            "dedupe to its clean twin, not 500 in the DataFrame constructor"
+        )
