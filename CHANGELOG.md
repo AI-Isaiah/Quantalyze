@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.92] - 2026-06-03
+### Fixed — compute_jobs SECDEF-RPC corrections (M-1137/M-1138 + G23-187-mig-01/03)
+
+Two forward `CREATE OR REPLACE` corrections to `compute_jobs` queue RPCs in `supabase/migrations/20260603120000_compute_jobs_rpc_clear_error_and_gin_fanin.sql`, each re-based byte-for-byte (sed-extracted) on the latest live function body so no dedupe / C39 / throttle / strict-token invariant could be dropped, with only the surgical change per finding. A `STEP 3` self-verifying DO block pins **both** fixes **and** the pre-existing invariants of each rewritten body, so a future full-body rewrite fails loud rather than silently reverting them (which is exactly how G23-187 below regressed).
+
+- **M-1137 / M-1138** — `claim_compute_jobs` and `claim_compute_jobs_with_priority` now clear `last_error = NULL, error_kind = NULL` on a `failed_retry → running` re-claim. Previously a re-claimed (now `running`) row carried the **prior** attempt's error string, which `get_admin_compute_jobs` surfaces un-redacted — an admin-observability lie plus a needlessly extended exposure window for any sensitive substring in `last_error`. Safe and self-healing: `mark_compute_job_failed` unconditionally re-writes both columns on the next failure, and no code reads a running row's `last_error` to drive behavior.
+- **G23-187-mig-01 / mig-03** — `mark_compute_job_done`'s fan-in advance is restored to the GIN-supported, set-based `parent_job_ids @> ARRAY[p_job_id]::uuid[]` UPDATE (semantically identical to the prior per-child `check_fan_in_ready` loop: `count(parents WHERE status <> 'done') = 0`). The B5 strict-token rewrite (`20260528183100`) had copied a pre-`20260516131500` body and silently reverted it to a per-child `= ANY(parent_job_ids)` FOR-loop the planner cannot push to the `compute_jobs_parent_lookup` GIN index, re-introducing the seq-scan + N+1 overhead H-0864 had closed. The set-based form was live in prod 2026-05-16 → 2026-05-28; the B5 strict-token gate is preserved verbatim.
+
+Recon: a 5-agent adversarial reverify against the latest deployed definitions caught the G23-187 fan-in regression (a finding my first pass had marked closed) and confirmed 15 sibling findings as reverify-closed by-design / superseded / one-time-resolved, plus re-affirmed 2 perf/observability defers (H-1237, M-1127). Reviewed by a 5-specialist suite (migration-reviewer, rls-policy-auditor, code-reviewer, silent-failure-hunter, security/perf) + a fresh-context Claude red team — zero must-fix findings; the rls-auditor positively confirmed no ACL widening and that the user/admin `last_error` redaction posture is preserved. A behavioral sql-test (structural + functional `last_error`-clearing) is staged pending a test-project catch-up.
+
 ## [0.24.15.91] - 2026-06-03
 ### Fixed — H3 Lane-2 component react/type/perf batch (H-0353/H-0358/H-0380/H-1252/H-1227)
 
