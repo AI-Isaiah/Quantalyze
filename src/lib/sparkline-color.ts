@@ -23,9 +23,8 @@ export const SPARKLINE_TONE_COLOR: Record<SparklineTone, string> = {
 };
 
 export function sparklineTone(data: number[]): SparklineTone {
-  // `data` is a non-nullable `number[]` under strict mode and both call sites
-  // pre-mask null via `?? []` (StrategyTable/StrategyGrid), so the prior
-  // `!data ||` disjunct was statically dead (M-0571). Keep only the real
+  // `data` is a non-nullable `number[]` under strict mode, so the prior
+  // `!data ||` disjunct was statically dead (M-0571) — keep only the real
   // empty-array guard.
   if (data.length === 0) return "neutral";
   const final = data[data.length - 1];
