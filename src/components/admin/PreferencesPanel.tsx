@@ -343,9 +343,13 @@ export function PreferencesPanel({
                     onClick={() =>
                       toggle(styleExclusions, subtype, setStyleExclusions)
                     }
+                    // H-0358: exclusion chips use negative (red) styling to
+                    // match "Excluded exchanges" below — an active excluded
+                    // style is a removal, not a preference (accent/green is
+                    // reserved for the "Preferred …" inclusion groups).
                     className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
                       active
-                        ? "border-accent bg-accent/10 text-accent"
+                        ? "border-negative bg-negative/10 text-negative"
                         : "border-border bg-surface text-text-secondary hover:border-border-focus"
                     }`}
                   >
