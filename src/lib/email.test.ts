@@ -191,6 +191,39 @@ describe("email.ts — notification_dispatches audit trail", () => {
     expect(state.sendCalls[0].to).toBe("manager@example.com");
   });
 
+  it("H-0445: schedules the 'sent' dispatch write via after() so a Vercel freeze can't strand it at 'queued'", async () => {
+    // In a real request scope `after()` (Next 16 ≈ Vercel waitUntil) defers the
+    // audit write past the response flush AND keeps the function instance alive
+    // until it lands. Pre-fix the happy path was a bare `void markDispatch(...)`
+    // fire-and-forget promise that Fluid Compute could reap on suspension,
+    // leaving an already-sent email's row stuck at 'queued'. Mock next/server's
+    // `after` to prove the write is now scheduled through it. This test FAILS on
+    // the pre-fix code (after() is never touched → afterCallbacks stays empty).
+    const afterCallbacks: Array<() => void | Promise<void>> = [];
+    vi.doMock("next/server", () => ({
+      after: (cb: () => void | Promise<void>) => {
+        afterCallbacks.push(cb);
+        return cb();
+      },
+    }));
+    vi.resetModules();
+    const { notifyManagerIntroRequest } = await import("./email");
+
+    await notifyManagerIntroRequest(
+      "manager@example.com",
+      "Acme Capital",
+      "Long Vol Macro",
+    );
+
+    // after() carried the dispatch write (the 'sent' update on the happy path).
+    expect(afterCallbacks.length).toBeGreaterThanOrEqual(1);
+    // …and the scheduled write actually ran: the row reached 'sent'.
+    expect(state.rows[0]?.status).toBe("sent");
+    expect(state.rows[0]?.sent_at).toBeTruthy();
+
+    vi.doUnmock("next/server");
+  });
+
   it("writes cc into metadata when the helper passes a cc address", async () => {
     const { notifyAllocatorOfAdminIntro } = await import("./email");
 
