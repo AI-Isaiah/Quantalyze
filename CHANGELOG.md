@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.24.15.90] - 2026-06-03
+### Fixed — analytics numeric/silent-failure correctness batch (M-0695/0696/0697/0698/0748/0701/0903/0904/0704/0707)
+
+Ten audit findings (all MEDIUM, confidence 8–9) across the `analytics-service` portfolio metrics/optimizer/risk surface, closed as one batch. Each fix is surgical and additive; every new test was proven to fail when the fix is reverted (Rule 9); `mypy --strict` clean; coverage 88.6%.
+
+**`services/portfolio_metrics.py`**
+- **M-0695** — `compute_modified_dietz` clamps the cash-flow `day` index into `[0, period_days]`. An out-of-range day produced a weight outside `[0,1]` that inverted (`day>period`) or over-weighted (`day<0`) the denominator contribution, silently flipping the return's sign.
+- **M-0696** — `_parse_date` rejects numeric epochs with `TypeError` and stops truncating `str(value)[:10]` (which turned a stringified epoch into a 1970-era date with no error). It parses the whole string then reduces to a tz-naive calendar day (`tz_localize(None)` keeps the local wall-clock day, byte-identical to the old prefix on every realistic ISO input). Empty/garbage now fails loud with a clear `ValueError` instead of a cryptic `NaT.normalize()` `AttributeError`.
+- **M-0697** — `compute_mwr` logs a WARNING when both IRR solvers fail to converge (Newton fallback is debug-level so a recovered IRR doesn't cry wolf), so a `None` from non-convergence is distinguishable in logs from the silent no-data `None`.
+- **M-0698** — `compute_twr` warns on a `begin_val==0` sub-period skip (portfolio passed through zero) and debug-logs a too-short-segment skip, so a TWR computed from a strict subset of sub-periods is visible.
+- **M-0748** — `test_mwr_known_sequence` pins the IRR to its hand-computed value (`0.15636675`) instead of the loose `0<mwr<0.5` band.
+
+**`services/portfolio_optimizer.py`**
+- **M-0701** — `find_improvement_candidates` drops a degenerate candidate whose own aligned returns have zero variance (e.g. a paused/all-zero strategy), rather than ranking it on a partial `0`-collapsed score. The gate keys on the candidate column only — **not** `_avg_corr` over the whole blended frame, which a single flat *existing* strategy would poison to `None` for every candidate, silently dropping all suggestions (caught by the red team).
+- **M-0903** — the per-month narrative noun follows the sign of the month's return (`"decline"` when negative), instead of unconditionally saying `"gain"` for a losing month.
+- **M-0904** — `generate_narrative` warns when an optimizer recommendation is warranted but a prerequisite (`portfolio_sharpe`/`risk_decomposition`) is missing, instead of the sentence silently vanishing.
+
+**`services/portfolio_risk.py`**
+- **M-0704** — `compute_rolling_correlation` caps on **pair** count (`len(pairs)`), not strategy count (`len(ids)`); 6 strategies form 15 pairs yet slipped the `len(ids)>10` gate, leaking all 15 pair-series despite the 10-pair promise.
+
+**`routers/portfolio.py`**
+- **M-0707** — adds `data_quality['correlation_history_sufficient']` (mirrors `cov_history_sufficient`, reusing the already-computed `overlap_df`) so the dashboard can distinguish an all-`None` correlation matrix (insufficient overlap) from RLS-stripped data or a compute failure.
+
+Reviewed by a 6-specialist suite (code-reviewer / silent-failure-hunter / type-design / pr-test-analyzer / security / performance) then a 3-angle fresh-context Claude red team executing counterexamples on a CI-pinned venv. The red team caught the M-0701 frame-wide `avg_corr` regression (one paused strategy nuking all optimizer suggestions) and a hollow tz-offset test — both fixed and pinned by regression tests. **M-0708** was reverify-closed (already fixed by H-0803/F2b); **M-0703** deferred (the audit's prescribed pre-concat fix is mathematically unsound — per-candidate `dropna` yields distinct windows; only a marginal micro-opt remains on a bounded 200-candidate loop). 18 new/updated tests.
+
 ## [0.24.15.89] - 2026-06-03
 ### Fixed — H2 (Lane 2): type-safety hardening — DiscoveryGroup, upstream-status invariant, mandate enum-cast filter
 
