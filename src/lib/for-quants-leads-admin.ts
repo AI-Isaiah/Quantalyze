@@ -86,7 +86,12 @@ export async function listForQuantsLeads({
     .order("created_at", { ascending: false });
 
   if (showAll) {
-    query = query.limit(FOR_QUANTS_LEADS_FULL_VIEW_CAP);
+    // M-0519: over-fetch by one. With `.limit(CAP)` the result length can never
+    // exceed CAP, so `rows.length >= CAP` (below) was equivalent to `=== CAP` —
+    // a table holding EXACTLY 500 leads (none older) wrongly showed the "older
+    // leads exist" banner. Fetching CAP+1 lets the extra row PROVE truncation;
+    // we trim back to CAP before returning.
+    query = query.limit(FOR_QUANTS_LEADS_FULL_VIEW_CAP + 1);
   } else {
     query = query.is("processed_at", null);
   }
@@ -106,11 +111,15 @@ export async function listForQuantsLeads({
       error: error.message ?? "Failed to load for-quants leads.",
     };
   }
-  const rows = (data as ForQuantsLeadRow[] | null) ?? [];
-  return {
-    rows,
-    hitCap: showAll && rows.length >= FOR_QUANTS_LEADS_FULL_VIEW_CAP,
-  };
+  // M-0519: the (CAP+1)th row is the truncation proof; trim it off the returned
+  // rows so the cap contract (≤ CAP rows) holds, and report hitCap iff it was
+  // actually present.
+  const fetched = (data as ForQuantsLeadRow[] | null) ?? [];
+  const hitCap = showAll && fetched.length > FOR_QUANTS_LEADS_FULL_VIEW_CAP;
+  const rows = hitCap
+    ? fetched.slice(0, FOR_QUANTS_LEADS_FULL_VIEW_CAP)
+    : fetched;
+  return { rows, hitCap };
 }
 
 export type SetLeadProcessedResult =

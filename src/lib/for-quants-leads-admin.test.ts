@@ -77,7 +77,10 @@ describe("listForQuantsLeads", () => {
     expect(result.hitCap).toBe(false);
   });
 
-  it("reports hitCap when showAll returns exactly the cap", async () => {
+  it("does NOT report hitCap at EXACTLY the cap — nothing is truncated (M-0519)", async () => {
+    // M-0519: with the over-fetch-by-one, exactly CAP rows means the (CAP+1)th
+    // row was absent, so nothing is truncated and the misleading "older leads
+    // exist" banner must stay hidden. (The old `>=` test asserted true here.)
     const rows = Array.from({ length: FOR_QUANTS_LEADS_FULL_VIEW_CAP }, (_, i) =>
       makeLead({
         id: `${i.toString(16).padStart(8, "0")}-0000-0000-0000-000000000000`,
@@ -88,6 +91,24 @@ describe("listForQuantsLeads", () => {
     const client = createMockSupabaseClient(store);
     const result = await listForQuantsLeads({ showAll: true, client });
 
+    expect(result.rows.length).toBe(FOR_QUANTS_LEADS_FULL_VIEW_CAP);
+    expect(result.hitCap).toBe(false);
+  });
+
+  it("reports hitCap AND trims back to the cap when MORE than the cap exist (M-0519)", async () => {
+    const rows = Array.from(
+      { length: FOR_QUANTS_LEADS_FULL_VIEW_CAP + 1 },
+      (_, i) =>
+        makeLead({
+          id: `${i.toString(16).padStart(8, "0")}-0000-0000-0000-000000000000`,
+        }),
+    );
+    seedTable(store, "for_quants_leads", rows);
+
+    const client = createMockSupabaseClient(store);
+    const result = await listForQuantsLeads({ showAll: true, client });
+
+    // The (CAP+1)th row proves truncation; rows are trimmed back to CAP.
     expect(result.rows.length).toBe(FOR_QUANTS_LEADS_FULL_VIEW_CAP);
     expect(result.hitCap).toBe(true);
   });
