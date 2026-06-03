@@ -156,6 +156,38 @@ describe("Risk Widgets — render without crash", () => {
     expect(screen.queryByText(/No extreme loss/i)).toBeNull();
   });
 
+  // M-0218 — the P5/P1 percentile thresholds must actually appear. They used
+  // to be <ReferenceLine x={percentile-string}> on a CATEGORY axis, which
+  // recharts silently discards (the string never matches a band-scale bin
+  // label), so the guides rendered nothing on every histogram. They now live
+  // as header text; this pins their presence so the dead-on-arrival regression
+  // can't return. Neuter: deleting the P5/P1 header spans fails these.
+  it("M-0218: TailRisk surfaces the P5 and P1 percentile thresholds in the histogram header", () => {
+    const compositeReturns = [
+      { date: "2024-01-01", value: -0.03 },
+      { date: "2024-01-02", value: -0.04 },
+      { date: "2024-01-03", value: -0.05 },
+      { date: "2024-01-04", value: -0.025 },
+      { date: "2024-01-05", value: -0.06 },
+      { date: "2024-01-06", value: -0.035 },
+      { date: "2024-01-07", value: 0.01 },
+      { date: "2024-01-08", value: 0.02 },
+    ];
+    render(
+      <TailRisk
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        data={{ strategies: [], analytics: null, compositeReturns } as any}
+        timeframe="1YTD"
+        width={4}
+        height={3}
+      />,
+    );
+    // Each threshold renders as "P5 -x.x%" / "P1 -x.x%" — assert the label AND
+    // an accompanying numeric, so a bare "P5" string couldn't pass vacuously.
+    expect(screen.getByText(/P5\s*-?\d/)).toBeInTheDocument();
+    expect(screen.getByText(/P1\s*-?\d/)).toBeInTheDocument();
+  });
+
   it("M-0220: TailRisk shows the empty state when no return breaches -2% (empty MUST appear)", () => {
     // All returns above the -2% tail threshold → zero tail events.
     const compositeReturns = [
@@ -229,6 +261,59 @@ describe("CorrelationMatrix — 3x3 cell count", () => {
       (c) => c.textContent,
     );
     expect(diagonalValues).toEqual(["1.00", "1.00", "1.00"]);
+  });
+
+  // M-0215 — pairwise correlation must align returns by calendar DATE, not by
+  // raw array index. When two strategies have offset/gapped date ranges,
+  // index-pairing correlates returns from different days → a wrong number.
+  it("M-0215: aligns returns by date (not index) for offset-range strategies", () => {
+    const mk = (pts: { date: string; value: number }[], alias: string) => ({
+      alias,
+      strategy: { strategy_analytics: { daily_returns: pts } },
+    });
+    // S1 spans 01-01..01-03 (rising); S2 spans 01-02..01-04 (a tent).
+    // Overlap = {01-02, 01-03}: there S1 rises 0.02→0.03 while S2 falls
+    // 0.06→0.02 → perfect NEGATIVE correlation (-1.00) when paired by date.
+    // The old index-pairing bug correlated S1=[0.01,0.02,0.03] against
+    // S2=[0.06,0.02,0.06], which evaluates to 0.00 — a measurably different
+    // cell, so this fixture discriminates the fix from the bug.
+    const dataOffset = {
+      strategies: [
+        mk(
+          [
+            { date: "2024-01-01", value: 0.01 },
+            { date: "2024-01-02", value: 0.02 },
+            { date: "2024-01-03", value: 0.03 },
+          ],
+          "S1",
+        ),
+        mk(
+          [
+            { date: "2024-01-02", value: 0.06 },
+            { date: "2024-01-03", value: 0.02 },
+            { date: "2024-01-04", value: 0.06 },
+          ],
+          "S2",
+        ),
+      ],
+      analytics: null,
+    };
+    render(
+      <CorrelationMatrix
+        data={dataOffset}
+        timeframe="1YTD"
+        width={4}
+        height={3}
+      />,
+    );
+    const cells = screen.getAllByTestId("corr-cell");
+    // 2x2: [0]=diag, [1]=corr(S1,S2), [2]=corr(S2,S1), [3]=diag.
+    expect(cells).toHaveLength(4);
+    expect(cells[0].textContent).toBe("1.00");
+    expect(cells[3].textContent).toBe("1.00");
+    // Date-aligned off-diagonal = -1.00 (index-pairing bug would render 0.00).
+    expect(cells[1].textContent).toBe("-1.00");
+    expect(cells[2].textContent).toBe("-1.00");
   });
 
   it("renders pre-computed correlation matrix when analytics provides one", () => {
