@@ -40,12 +40,25 @@ export function sanitizeCsvValue(val: string): string {
 
 /**
  * Parse a single CSV line into its fields, honouring quoted fields,
- * embedded commas, and escaped quotes (`""` → `"`). Each cell is passed
- * through `sanitizeCsvValue` before being returned.
+ * embedded commas, and escaped quotes (`""` → `"`).
+ *
+ * By default each cell is passed through {@link sanitizeCsvValue} (strips
+ * leading spreadsheet-formula characters). Pass `{ sanitize: false }` to get
+ * the raw, whitespace-trimmed cells instead — used by
+ * {@link parseCsvWithSchema} to match HEADER column names verbatim, because
+ * sanitisation is a data-cell guard that must never silently rewrite the
+ * column metadata it matches against the schema (audit H-0440).
  *
  * Does not handle multi-line quoted fields — see KNOWN LIMITATIONS above.
  */
-export function parseCsvLine(line: string): string[] {
+export function parseCsvLine(
+  line: string,
+  opts?: { sanitize?: boolean },
+): string[] {
+  const sanitize = opts?.sanitize ?? true;
+  // sanitizeCsvValue already trims; the raw path trims only.
+  const finalize = (cell: string): string =>
+    sanitize ? sanitizeCsvValue(cell) : cell.trim();
   const fields: string[] = [];
   let current = "";
   let inQuotes = false;
@@ -64,34 +77,40 @@ export function parseCsvLine(line: string): string[] {
     } else if (ch === '"') {
       inQuotes = true;
     } else if (ch === ",") {
-      fields.push(sanitizeCsvValue(current.trim()));
+      fields.push(finalize(current));
       current = "";
     } else {
       current += ch;
     }
   }
-  fields.push(sanitizeCsvValue(current.trim()));
+  fields.push(finalize(current));
   return fields;
 }
 
 /**
- * Parse raw CSV text into a 2D array of sanitized cells.
+ * Parse raw CSV text into a 2D array of cells.
  *
  * - Handles CRLF and LF line endings.
  * - Strips a leading UTF-8 BOM if present.
  * - Skips blank lines.
+ * - By default every cell is sanitised ({@link sanitizeCsvValue}); pass
+ *   `{ sanitize: false }` for raw, whitespace-trimmed cells (see
+ *   {@link parseCsvLine}).
  * - Returns every non-empty row including the header (row index 0) —
  *   callers that want a header/data split can take `result[0]` and
  *   `result.slice(1)`, or use {@link parseCsvWithSchema} instead.
  */
-export function parseCsv(text: string): string[][] {
+export function parseCsv(
+  text: string,
+  opts?: { sanitize?: boolean },
+): string[][] {
   // Strip BOM so spreadsheet-exported files (which often include `\uFEFF`)
   // don't end up with a hidden prefix on the first header cell.
   const stripped = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   return stripped
     .split(/\r?\n/)
     .filter((line) => line.trim().length > 0)
-    .map((line) => parseCsvLine(line));
+    .map((line) => parseCsvLine(line, opts));
 }
 
 /**
@@ -114,6 +133,12 @@ export function parseCsv(text: string): string[][] {
  * When `hasHeader === false`, the caller MUST pass `columns` in the
  * exact positional order of the CSV — there is no header to remap by.
  *
+ * Audit-2026-05-07 H-0440 (header verbatim): the header row is matched
+ * against `columns` WITHOUT `sanitizeCsvValue`. Sanitisation is a data-cell
+ * guard; applied to a header it silently rewrote column names (e.g.
+ * `+amount` → `amount`). Data cells ARE still sanitised before they reach
+ * `mapRow`, so persisted/re-exported values stay formula-safe.
+ *
  * @param raw       Raw CSV string (with or without trailing newlines).
  * @param columns   Required column names. When `hasHeader === true` these
  *                  are matched against the header case-insensitively in
@@ -133,7 +158,16 @@ export function parseCsvWithSchema<T>(
   mapRow: (row: Record<string, string>) => T | null,
   hasHeader: boolean = true,
 ): T[] {
-  const rows = parseCsv(raw);
+  // H-0440: parse the structure RAW (no per-cell sanitisation) so the header
+  // row is matched against the schema VERBATIM. sanitizeCsvValue is a
+  // data-cell guard — it strips leading spreadsheet-formula chars (`=`/`+`/
+  // `-`/`@`) so a persisted/re-exported VALUE can't smuggle a formula. Applied
+  // to a header it silently rewrites the column NAMES it then matches
+  // (`+amount` → `amount`, `-net_ticket` → `net_ticket`) and immediately
+  // discards — the header is never re-emitted — so a malformed/prefixed header
+  // should fail the explicit missing-column check below, not be coerced into a
+  // silent match. Data cells are sanitised per-cell in the row loop instead.
+  const rows = parseCsv(raw, { sanitize: false });
   if (rows.length === 0) return [];
 
   const wantedColumns = columns.map((c) => c.toLowerCase());
@@ -142,7 +176,8 @@ export function parseCsvWithSchema<T>(
   if (hasHeader) {
     // Lowercase the header so matching is case-insensitive (preserves the
     // behavior of the old partner-import parser which did
-    // `rows[0][0]?.toLowerCase() === "manager_email"`).
+    // `rows[0][0]?.toLowerCase() === "manager_email"`). Verbatim — see the
+    // H-0440 note above.
     header = rows[0].map((h) => h.trim().toLowerCase());
     for (const col of wantedColumns) {
       if (!header.includes(col)) {
@@ -164,7 +199,11 @@ export function parseCsvWithSchema<T>(
     if (cells.length === 0) continue;
     const rowObj: Record<string, string> = {};
     header.forEach((h, idx) => {
-      rowObj[h] = (cells[idx] ?? "").trim();
+      // Sanitise the DATA cell here (the parse above was raw) so any value
+      // later persisted or re-emitted into a spreadsheet stays formula-safe;
+      // only the header keys are kept verbatim (H-0440). sanitizeCsvValue
+      // already trims.
+      rowObj[h] = sanitizeCsvValue(cells[idx] ?? "");
     });
     const mapped = mapRow(rowObj);
     if (mapped !== null) results.push(mapped);

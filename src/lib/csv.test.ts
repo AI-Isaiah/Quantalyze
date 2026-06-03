@@ -66,6 +66,20 @@ describe("parseCsvLine", () => {
   it("preserves signed numerics in parsed fields", () => {
     expect(parseCsvLine("2024-01-15,-430.25")).toEqual(["2024-01-15", "-430.25"]);
   });
+
+  it("sanitises by default", () => {
+    expect(parseCsvLine("=SUM(A1),+cmd,@x")).toEqual(["SUM(A1)", "cmd", "x"]);
+  });
+
+  it("returns raw, trim-only cells when { sanitize: false } (H-0440)", () => {
+    // The raw path keeps leading formula chars verbatim (used for header
+    // matching) but still trims surrounding whitespace.
+    expect(parseCsvLine(" =SUM(A1) , +cmd ,@x", { sanitize: false })).toEqual([
+      "=SUM(A1)",
+      "+cmd",
+      "@x",
+    ]);
+  });
 });
 
 describe("parseCsv", () => {
@@ -131,6 +145,20 @@ describe("parseCsv", () => {
   it("returns empty array for empty input", () => {
     expect(parseCsv("")).toEqual([]);
     expect(parseCsv("\n\n")).toEqual([]);
+  });
+
+  it("passes { sanitize: false } through to every cell (H-0440)", () => {
+    const raw = "=email,+amount\nalice@x.com,=SUM(A1)";
+    // Raw: formula prefixes preserved on BOTH header and data rows.
+    expect(parseCsv(raw, { sanitize: false })).toEqual([
+      ["=email", "+amount"],
+      ["alice@x.com", "=SUM(A1)"],
+    ]);
+    // Default (sanitised) still strips them.
+    expect(parseCsv(raw)).toEqual([
+      ["email", "amount"],
+      ["alice@x.com", "SUM(A1)"],
+    ]);
   });
 
   it("preserves signed PnL values end-to-end", () => {
@@ -255,5 +283,71 @@ describe("parseCsvWithSchema", () => {
       }),
     );
     expect(rows).toEqual([{ email: "lp1@x.com", ticket: -5_000_000 }]);
+  });
+
+  // ---- H-0440: the header is metadata, matched verbatim, NOT sanitised -----
+
+  it("matches a header verbatim — does NOT strip a formula prefix to coerce a match (H-0440)", () => {
+    // Pre-fix, sanitizeCsvValue ran on the header too: `=email` was silently
+    // rewritten to `email` and the import succeeded against a coerced header.
+    // A formula-prefixed header is a malformed export; it must now fail the
+    // explicit missing-column check (loud failure) rather than be coerced.
+    const raw = "=email,tier\nalice@x.com,institutional";
+    expect(() =>
+      parseCsvWithSchema(raw, ["email", "tier"], (row) => row),
+    ).toThrowError(/Missing CSV header column: email/);
+  });
+
+  it("does NOT silently rewrite a '+'/'-' prefixed header column name (H-0440)", () => {
+    // `+amount` was silently mutated to `amount` and `-net` to `net` when the
+    // sanitiser ran over the header. Verbatim now: the prefixed names stay
+    // prefixed, so a schema that wants the bare names fails loudly instead of
+    // matching a name the partner never wrote.
+    const raw = "+amount,-net\n10,20";
+    expect(() =>
+      parseCsvWithSchema(raw, ["amount", "net"], (row) => row),
+    ).toThrowError(/Missing CSV header column: amount/);
+  });
+
+  it("still sanitises DATA cells even though the header is verbatim (H-0440)", () => {
+    // The header stays raw, but a data cell that begins with a formula char is
+    // still neutralised before it reaches mapRow (so persisted/re-exported
+    // values can't smuggle a spreadsheet formula).
+    const raw = "email,note\nalice@x.com,=SUM(A1:A9)";
+    const rows = parseCsvWithSchema<{ email: string; note: string }>(
+      raw,
+      ["email", "note"],
+      (row) => ({ email: row.email, note: row.note }),
+    );
+    expect(rows).toEqual([{ email: "alice@x.com", note: "SUM(A1:A9)" }]);
+  });
+
+  it("a clean header with formula-prefixed DATA still imports and is sanitised (H-0440)", () => {
+    // Regression guard: the common case — clean header, hostile data — is
+    // unaffected by the header-verbatim change.
+    const raw = "allocator_email,mandate_archetype,ticket_size_usd\n@evil@x.com,Neutral,1000";
+    const rows = parseCsvWithSchema<{ email: string; mandate: string }>(
+      raw,
+      ["allocator_email", "mandate_archetype", "ticket_size_usd"],
+      (row) => ({ email: row.allocator_email, mandate: row.mandate_archetype }),
+    );
+    // Leading `@` stripped from the data cell by sanitizeCsvValue.
+    expect(rows).toEqual([{ email: "evil@x.com", mandate: "Neutral" }]);
+  });
+
+  it("hasHeader=false: row 0 is DATA, positionally keyed AND sanitised (H-0440)", () => {
+    // The positional path has no header row, so row 0 is the FIRST data row.
+    // Under the H-0440 split (raw parse + per-cell sanitise in the loop) this
+    // is the one place where the row-loop sanitiser is the *only* guard on the
+    // first row. Prove it fires on index 0 (leading `@` stripped) while the
+    // signed-numeric carve-out survives positional mapping (`-5000000` kept).
+    const raw = "@evil@x.com,-5000000";
+    const rows = parseCsvWithSchema<{ email: string; ticket: string }>(
+      raw,
+      ["allocator_email", "ticket_size_usd"],
+      (row) => ({ email: row.allocator_email, ticket: row.ticket_size_usd }),
+      false,
+    );
+    expect(rows).toEqual([{ email: "evil@x.com", ticket: "-5000000" }]);
   });
 });

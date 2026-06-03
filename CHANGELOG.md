@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.87] - 2026-06-03
+### Fixed — H-0440: CSV header matched verbatim (formula-sanitiser no longer mutates column names)
+
+`sanitizeCsvValue` is a **data-cell** guard — it strips a leading spreadsheet-formula char (`=` / `+` / `-` / `@` / TAB / CR, with a carve-out that preserves signed numerics like `-430.25`) so a parsed value can't smuggle a formula when it is later persisted or re-emitted into a spreadsheet. But `parseCsv`/`parseCsvLine` applied it to **every** cell, including the **header** row that `parseCsvWithSchema` matches against a fixed schema and then discards. So a header cell was silently rewritten — `+amount` → `amount`, `-net_ticket` → `net_ticket`, `=manager_email` → `manager_email` — and the column name the partner actually wrote was never seen. For the live partner-import schemas (`manager_email`/`strategy_name`/`disclosure_tier`, `allocator_email`/`mandate_archetype`/`ticket_size_usd`) this was latent (no real column name starts with a formula char), but a formula-prefixed header was silently **coerced into a match** instead of surfacing as a malformed file.
+
+- **Fix (header is metadata, matched verbatim).** Added an `opts?: { sanitize?: boolean }` (default `true` → fully back-compat) to `parseCsvLine`/`parseCsv`. `parseCsvWithSchema` now parses the structure **raw** (`{ sanitize: false }`) so the header is matched against the schema **verbatim**, and sanitises **data** cells per-cell in the row loop (`sanitizeCsvValue(cells[idx] ?? "")`). Data values reaching `mapRow` are byte-identical to before (`sanitizeCsvValue` already trims); only the header stops being mutated. A formula-prefixed/malformed header now **fails loud** at the existing `Missing CSV header column: …` check (→ route 400) instead of being silently coerced (CLAUDE.md Rule 12).
+- **Scope.** Pure-TS lib change; sole production caller is the admin-only partner-import route, whose `countDataRows` (default sanitised `parseCsv`) and the H-0239 raw-vs-parsed delta are unaffected. The export-side guard (`audit-log-csv.ts`) is independent and untouched.
+
+Reviewed by a 6-lens specialist suite (code-reviewer, silent-failure-hunter, type-design-analyzer, pr-test-analyzer, security, performance) + an independent fresh-context Claude red team that attacked 6 break-vectors (header regression, weakened data guard, count/parse delta corruption, uncaught throw, CRLF/trailing-CR on the last header cell, signed-numeric-header) with executed parser traces and found nothing actionable. Applied the one specialist finding at threshold (a missing `hasHeader=false` positional-path test — row 0 is data). tsc 0 / eslint 0 / 6045 vitest; 8 new csv tests, the two header-verbatim guards proven to fail when the fix is reverted (Rule 9). Pre-existing ragged-row tier-downgrade in the route (a separate arity-validation class) was noted out-of-scope, not folded.
+
 ## [0.24.15.86] - 2026-06-03
 ### Fixed — F6: wizard/key submission idempotency
 
