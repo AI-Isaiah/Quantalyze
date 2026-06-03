@@ -7,57 +7,34 @@ Covers the critical findings that were previously uncovered:
 
 The supabase client is heavily mocked because the analytics service
 runs against a real Postgres in prod; in this local test env we only
-verify the routing/decision logic.
+verify the routing/decision logic — the client is injected per-test via
+`patch("routers.portfolio.get_supabase", ...)`.
+
+H-0806: this module used to run an `_install_stubs()` at import time that
+mutated `sys.modules`. Its `if name not in sys.modules` guard only protected the
+wholesale MagicMock replacement — the attribute writes that followed were
+unconditional, so it clobbered the real shared fastapi/supabase/slowapi modules
+process-globally for every later-collected test. The deps are installed in CI
+and the venv, so `routers.portfolio` is imported for real (the source-level
+regression tests below read the module file text, not the runtime objects, so
+they are unaffected).
 """
 
 from __future__ import annotations
 
 import asyncio
+import pathlib
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-
-def _install_stubs():
-    stubs = [
-        "supabase",
-        "slowapi",
-        "slowapi.util",
-        "fastapi",
-        "fastapi.routing",
-        "ccxt",
-        "ccxt.async_support",
-    ]
-    for name in stubs:
-        if name not in sys.modules:
-            sys.modules[name] = MagicMock()
-    sys.modules["supabase"].create_client = MagicMock()
-    sys.modules["supabase"].Client = MagicMock()
-    sys.modules["slowapi"].Limiter = MagicMock(return_value=MagicMock())
-    sys.modules["slowapi.util"].get_remote_address = MagicMock()
-    sys.modules["fastapi"].APIRouter = MagicMock(return_value=MagicMock())
-    sys.modules["fastapi"].HTTPException = type("HTTPException", (Exception,), {
-        "__init__": lambda self, status_code=None, detail=None, **kw: (
-            setattr(self, "status_code", status_code),
-            setattr(self, "detail", detail),
-            Exception.__init__(self, detail),
-        ),
-    })
-    sys.modules["fastapi"].Request = MagicMock()
-
-
-_install_stubs()
-
-# Now import after stubs are in place.
-from routers import portfolio as portfolio_mod  # noqa: E402
+from routers import portfolio as portfolio_mod
 
 # Read the raw source of routers/portfolio.py once for AST/source-level
-# regression checks. The endpoint coroutines themselves are wrapped by
-# MagicMock-stubbed slowapi decorators in this env, so inspect.getsource
-# on them fails.
-import pathlib
-
+# regression checks. _function_source() (below) walks the AST of this text, so
+# the source-level tests are independent of whether the runtime endpoint object
+# is the real coroutine or a decorated wrapper.
 _PORTFOLIO_SRC = (
     pathlib.Path(portfolio_mod.__file__).read_text(encoding="utf-8")
 )

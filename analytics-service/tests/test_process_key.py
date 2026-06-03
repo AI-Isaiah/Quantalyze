@@ -24,71 +24,42 @@ unit-level INTERNAL_API_TOKEN auth check.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import importlib
-import sys
+import pytest
+import slowapi
+import slowapi.extension
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+# H-0806: this module used to run an `_ensure_real_third_party()` purge that
+# `del`-ed fastapi/slowapi/starlette/pydantic/supabase from sys.modules and
+# re-imported them, to undo the MagicMock pollution that sibling router-test
+# files installed at import time. Those import-time fastapi/supabase perpetrators
+# have been removed, so the heavy purge is obsolete — and was harmful: the fastapi
+# re-import minted a SECOND `HTTPException` class identity, so a later-collected
+# app-building test (e.g. test_simulator_router) whose router raised the original
+# class went unhandled by its app's exception handler (keyed to the re-imported
+# class) → order-dependent 413/500 flake.
+#
+# ONE narrow job the purge still had remains: sibling files test_c19_portfolio_fixes
+# and test_routers_audit_2026_05_17 swap the `slowapi.Limiter` re-export to a no-op
+# shim *in place* at import (so their @limiter.limit decorators are passthroughs) and
+# restore it only at their module teardown. Collected before this file in CI's
+# deterministic order, they leave the canonical `services.rate_limit.limiter` — built
+# once from `from slowapi import Limiter` — cached as that no-op for the rest of the
+# session, which would make test_process_key_shares_main_limiter_instance pass
+# vacuously (noop-is-noop). The real class is never swapped (it lives at
+# `slowapi.extension.Limiter`), so restore the re-export from it and re-pop our own
+# router + service singletons so they rebind to a real Limiter — WITHOUT touching
+# fastapi/slowapi module identity.
+slowapi.Limiter = slowapi.extension.Limiter  # type: ignore[attr-defined]
+for _stale in ("services.rate_limit", "routers.process_key"):
+    sys.modules.pop(_stale, None)
 
-def _ensure_real_third_party() -> None:
-    """Undo sys.modules pollution from sibling tests.
-
-    Several pre-existing test files (test_routers_audit_emission*.py,
-    test_portfolio_router_logic.py) stub `slowapi`, `slowapi.util`,
-    `fastapi`, `fastapi.routing`, `supabase`, and `pydantic` either by
-    replacing the whole module entry with a MagicMock OR — the harder
-    case — by mutating attributes on an already-imported real module
-    (e.g. `sys.modules["fastapi"].APIRouter = MagicMock(...)`). The
-    second pattern means `__spec__` is still set on the module, so a
-    naive 'pop only if __spec__ is None' check misses it.
-
-    Strategy: pop EVERY fastapi/slowapi/etc entry unconditionally and
-    then re-import. The previously-imported objects in other test
-    modules keep their references (the popped module is GC-traced
-    through them), but our subsequent `from fastapi import APIRouter`
-    gets a fresh, untainted module with the real classes restored from
-    the on-disk source.
-
-    Drop the cached router modules too — without this, the limiter is a
-    MagicMock, `@limiter.limit("100/hour")` is a no-op decorator, and
-    the route is never registered (every request returns 404).
-    """
-    stubbed_roots = (
-        "slowapi",
-        "fastapi",
-        "starlette",
-        "pydantic",
-        "supabase",
-    )
-    for name in list(sys.modules):
-        if any(
-            name == root or name.startswith(root + ".")
-            for root in stubbed_roots
-        ):
-            del sys.modules[name]
-    # Drop the cached router + dependent routers so they rebind against
-    # the real slowapi/fastapi. Without this, the cached `limiter` is a
-    # MagicMock and `@limiter.limit("100/hour")` is a no-op → route
-    # un-registered → 404.
-    for cached in (
-        "routers.process_key",
-        "routers.csv",
-        "routers.internal",
-        "routers.portfolio",
-    ):
-        sys.modules.pop(cached, None)
-
-
-_ensure_real_third_party()
-
-import pytest  # noqa: E402
-from fastapi import FastAPI  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-
-process_key_router = importlib.import_module("routers.process_key")
-print(f"POST-IMPORT: routes = {[(r.methods, r.path) for r in process_key_router.router.routes]}", flush=True)
-print(f"POST-IMPORT: limiter = {type(process_key_router.limiter)}", flush=True)
+import routers.process_key as process_key_router  # noqa: E402
 from services import feature_flags  # noqa: E402
 
 
@@ -1859,8 +1830,18 @@ def test_process_key_shares_main_limiter_instance():
     binds to whichever Limiter the source file imports — so the
     in-process route counts and the app-state metrics were divorced.
     """
+    import slowapi.extension
     from services import rate_limit as _rl
 
+    # H-0806: pin that the singleton is the REAL slowapi Limiter, not a no-op shim
+    # leaked by a sibling test's in-place `slowapi.Limiter` swap. Without this, the
+    # `is` check below could pass vacuously as noop-is-noop and stop guarding the
+    # API-5 wiring it documents (the module header re-pops the singleton to keep
+    # this honest in full-suite collection order).
+    assert isinstance(_rl.limiter, slowapi.extension.Limiter), (
+        "API-5/H-0806: services.rate_limit.limiter must be a real slowapi Limiter, "
+        "not a no-op shim leaked by a sibling test's in-place slowapi.Limiter swap."
+    )
     assert process_key_router.limiter is _rl.limiter, (
         "API-5: process_key.limiter must be the singleton from "
         "services.rate_limit. A drift here means slowapi storage on the "

@@ -15,16 +15,19 @@ the audit fix pass:
   - matching candidate sort + NaN-safe idxmax (H-0570, H-0587)
   - per-email rate limit sliding window (H-0593)
 
-These tests are pure-Python — they install the same MagicMock stubs as
-test_portfolio_router_logic so the router can be imported without
-supabase / fastapi / ccxt installed in the local dev env.
+These tests are pure-Python — they import the router's helpers directly and
+drive them with locally-constructed mocks. (H-0806: this module used to install
+MagicMock stubs into sys.modules before importing the router. Because the
+post-guard attribute writes were unconditional — including
+`sys.modules["fastapi"].HTTPException = Exception`, a bare-Exception downgrade —
+it clobbered the real shared fastapi/supabase/slowapi modules process-globally
+for every later-collected test. The deps are installed in CI and the venv, so the
+stubs are gone and the helpers are imported for real.)
 """
 
 from __future__ import annotations
 
 import math
-import sys
-import types
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -32,36 +35,8 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-
-# Install stubs BEFORE importing routers.portfolio (same pattern as
-# test_portfolio_router_logic).
-def _install_stubs():
-    stubs = [
-        "supabase",
-        "slowapi",
-        "slowapi.util",
-        "fastapi",
-        "fastapi.routing",
-        "ccxt",
-        "ccxt.async_support",
-    ]
-    for name in stubs:
-        if name not in sys.modules:
-            sys.modules[name] = MagicMock()
-    sys.modules["supabase"].create_client = MagicMock()
-    sys.modules["supabase"].Client = MagicMock()
-    sys.modules["slowapi"].Limiter = MagicMock(return_value=MagicMock())
-    sys.modules["slowapi.util"].get_remote_address = MagicMock()
-    mock_router = MagicMock()
-    sys.modules["fastapi"].APIRouter = MagicMock(return_value=mock_router)
-    sys.modules["fastapi"].HTTPException = Exception
-    sys.modules["fastapi"].Request = MagicMock()
-
-
-_install_stubs()
-
-from routers import portfolio as portfolio_mod  # noqa: E402
-from routers.portfolio import (  # noqa: E402
+from routers import portfolio as portfolio_mod
+from routers.portfolio import (
     _build_normalized_weights,
     _check_verify_strategy_email_rate,
     _compute_sharpe_and_vol,

@@ -1,69 +1,24 @@
 """Tests for pure logic in the portfolio router — no HTTP, no Supabase, no exchange.
 
-The router imports services that chain through db.py → supabase, which isn't installed
-in the local dev env (it's a Docker/prod dep). We mock the heavy imports at sys.modules
-level before importing the router, so the alert logic can be tested in isolation.
+`routers.portfolio` and its dependencies (fastapi, supabase, slowapi, ccxt) are
+all installed via requirements.txt in CI and the dev venv, and the module imports
+with no import-time side effects (the Supabase client is built lazily inside
+`get_supabase()`, not at module load). So we import the alert-logic helpers for
+real and drive them with locally-constructed Supabase mocks.
+
+H-0806: this module used to run an `_install_stubs()` at import time that mutated
+`sys.modules`. Its `if name not in sys.modules` guard only protected the wholesale
+MagicMock replacement — the *attribute* writes that followed were unconditional, so
+it clobbered the REAL `fastapi.APIRouter/.HTTPException/.Request`,
+`supabase.create_client/.Client`, and `slowapi.Limiter` process-globally for every
+later-collected test (the textbook filesystem-order-dependent green/red CI). The
+deps are no longer optional, so the stub machinery is gone.
 """
 
-import sys
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
-
-def _install_stubs():
-    """Stub out all packages that aren't available in the local test env."""
-    stubs = [
-        "supabase",
-        "slowapi",
-        "slowapi.util",
-        "fastapi",
-        "fastapi.routing",
-        "ccxt",
-        "ccxt.async_support",
-    ]
-    for name in stubs:
-        if name not in sys.modules:
-            sys.modules[name] = MagicMock()
-
-    # supabase.create_client and Client
-    sys.modules["supabase"].create_client = MagicMock()
-    sys.modules["supabase"].Client = MagicMock()
-
-    # slowapi.Limiter needs to be callable
-    sys.modules["slowapi"].Limiter = MagicMock(return_value=MagicMock())
-    sys.modules["slowapi.util"].get_remote_address = MagicMock()
-
-    # fastapi.APIRouter needs prefix/tags kwargs
-    mock_router = MagicMock()
-    sys.modules["fastapi"].APIRouter = MagicMock(return_value=mock_router)
-    # H-0805: stub HTTPException as a REAL Exception SUBCLASS, not bare
-    # `Exception`. Aliasing it to `Exception` collapsed the type so that
-    # `except HTTPException: raise` in the router would catch every
-    # ValueError/KeyError/TypeError, and any `pytest.raises(HTTPException)`
-    # would match unrelated exceptions — a total loss of specificity vs
-    # production. A subclass that accepts the (status_code, detail) kwargs
-    # the router constructs preserves the production control flow.
-    sys.modules["fastapi"].HTTPException = _StubHTTPException
-    sys.modules["fastapi"].Request = MagicMock()
-
-
-class _StubHTTPException(Exception):
-    """Minimal stand-in for fastapi.HTTPException for the local (no-fastapi)
-    test env. Accepts the same status_code/detail kwargs the router passes so
-    `raise HTTPException(status_code=..., detail=...)` works, and — crucially —
-    is a DISTINCT subclass of Exception so `except HTTPException` does not
-    swallow plain ValueError/KeyError/TypeError (H-0805)."""
-
-    def __init__(self, status_code: int | None = None, detail: object = None, **kwargs):
-        self.status_code = status_code
-        self.detail = detail
-        super().__init__(detail)
-
-
-_install_stubs()
-
-# Now the import will succeed even without supabase/fastapi installed
-from routers.portfolio import _generate_alerts, _generate_rebalance_drift_alert  # noqa: E402
+from routers.portfolio import _generate_alerts, _generate_rebalance_drift_alert
 
 
 class TestGenerateAlerts:
@@ -245,27 +200,14 @@ class TestGenerateAlerts:
             assert payload["portfolio_id"] == "portfolio-1"
             assert isinstance(payload["message"], str) and payload["message"]
 
-    def test_httpexception_stub_is_distinct_from_base_exception(self):
-        """H-0805: the fastapi.HTTPException stub must be a proper Exception
-        SUBCLASS, not an alias of `Exception`. Otherwise `except HTTPException`
-        in the router would swallow ValueError/KeyError/TypeError and any
-        `pytest.raises(HTTPException)` would lose all specificity.
-
-        Asserts: HTTPException is a strict subclass of Exception, is NOT the
-        base Exception itself, and a plain ValueError is NOT an instance of it.
-        """
-        import fastapi
-
-        http_exc = fastapi.HTTPException
-        assert issubclass(http_exc, Exception)
-        assert http_exc is not Exception
-        # Specificity: a generic error must not be caught as an HTTPException.
-        assert not isinstance(ValueError("boom"), http_exc)
-        # And it must accept the kwargs the router constructs it with.
-        instance = http_exc(status_code=404, detail="not found")
-        assert isinstance(instance, http_exc)
-        assert instance.status_code == 404
-        assert instance.detail == "not found"
+    # H-0806: the former `test_httpexception_stub_is_distinct_from_base_exception`
+    # was removed with the stub it guarded. With the real fastapi imported it
+    # could only re-assert fastapi's own class semantics (vacuous per Rule 9 —
+    # it cannot fail on any change to OUR code). The invariant it cared about —
+    # the router's `except HTTPException` staying specific (not swallowing
+    # ValueError/KeyError/TypeError) — is exercised against the REAL
+    # fastapi.HTTPException by test_routers_audit_2026_05_17.py's
+    # `pytest.raises(HTTPException)` 404/400 endpoint tests.
 
 
 class TestGenerateRebalanceDriftAlert:
