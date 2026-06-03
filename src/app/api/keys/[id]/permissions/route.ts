@@ -63,6 +63,11 @@ interface PermissionPayload {
  * unstable_cache replays a memoized value (cache HIT, no decrypt). The handler
  * reads `wasFreshDecrypt()` to tag the audit row exactly — no wall-clock
  * heuristic, no sub-second-burst misclassification, no stamp-less edge case.
+ * This also stays correct on unstable_cache's stale-revalidation path: when a
+ * stale entry triggers a background revalidation, the body reruns (a real
+ * decrypt) and `didDecrypt` flips on its first synchronous statement — before
+ * the first await — so a served-stale response is still correctly counted as a
+ * decrypt, not a cache hit.
  */
 function makeCachedFetcher(keyId: string): {
   fetchPermissions: () => Promise<PermissionPayload>;

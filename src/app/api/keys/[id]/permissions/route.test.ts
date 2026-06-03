@@ -32,6 +32,11 @@ const STATE = vi.hoisted(() => ({
   // runs (a miss — sets didDecrypt, drives the stubbed upstream below).
   simulateCacheHit: false as boolean,
   cachedHitPayload: {} as Record<string, unknown>,
+  // Next's THIRD state (stale-while-revalidate): the body reruns in the
+  // background (a real decrypt, flips didDecrypt synchronously) but a STALE
+  // value is returned to the caller immediately.
+  simulateStaleRevalidate: false as boolean,
+  stalePayload: {} as Record<string, unknown>,
   // Stubbed upstream Python response for the cache-MISS path (the real body).
   upstreamPayload: {} as Record<string, unknown>,
   upstreamStatus: 200 as number,
@@ -75,6 +80,13 @@ vi.mock("next/cache", () => ({
   unstable_cache: (fn: () => Promise<unknown>) => {
     return async () => {
       if (STATE.simulateCacheHit) return STATE.cachedHitPayload;
+      if (STATE.simulateStaleRevalidate) {
+        // Stale-while-revalidate: kick off the body (background revalidation —
+        // its synchronous prefix flips didDecrypt before the first await) but
+        // return the prior STALE value immediately, as Next does.
+        void fn().catch(() => {});
+        return STATE.stalePayload;
+      }
       return fn();
     };
   },
@@ -103,6 +115,13 @@ beforeEach(() => {
     trade: false,
     withdraw: false,
     detected_at: "2026-04-16T00:00:00Z",
+  };
+  STATE.simulateStaleRevalidate = false;
+  STATE.stalePayload = {
+    read: false,
+    trade: true,
+    withdraw: false,
+    detected_at: "2026-04-15T00:00:00Z",
   };
   STATE.upstreamPayload = {
     read: true,
@@ -308,5 +327,37 @@ describe("GET /api/keys/[id]/permissions — decrypt-audit cache honesty (M-0325
     const audit = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
     expect(audit).toBeDefined();
     expect(audit!.args.p_metadata).toMatchObject({ cache_hit: true });
+  });
+
+  it("tags cache_hit:false on a stale-revalidation — the body reruns (real decrypt) even though a STALE value is served (red-team cache-detect)", async () => {
+    // Next's stale-while-revalidate path: the body reruns in the background (a
+    // genuine decrypt) and `didDecrypt` flips on its first synchronous statement
+    // before the first await, so even though the caller gets the STALE value the
+    // request is correctly counted as a decrypt — NOT a cache hit. This pins the
+    // synchronous-flag-flip guarantee the production code relies on.
+    STATE.simulateStaleRevalidate = true;
+    STATE.stalePayload = {
+      read: false,
+      trade: true,
+      withdraw: false,
+      detected_at: "2026-04-15T00:00:00Z",
+    };
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    // The STALE value is what the caller receives...
+    expect(body.trade).toBe(true);
+    expect(body.detected_at).toBe("2026-04-15T00:00:00Z");
+    // ...and the background body actually ran (its upstream decrypt fired).
+    expect(fetchSpy).toHaveBeenCalled();
+
+    await drainAuditMicrotasks();
+    const audit = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
+    expect(audit).toBeDefined();
+    // A real decrypt happened in the background → correctly NOT a cache hit.
+    expect(audit!.args.p_metadata).toMatchObject({ cache_hit: false });
   });
 });
