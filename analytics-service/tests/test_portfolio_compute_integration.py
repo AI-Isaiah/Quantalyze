@@ -331,6 +331,64 @@ class TestPartialDataTelemetry:
 
 
 # ---------------------------------------------------------------------------
+# M-0707 — correlation_history_sufficient data-quality flag
+# ---------------------------------------------------------------------------
+
+class TestCorrelationHistorySufficientFlag:
+    """M-0707: compute_correlation_matrix returns an all-None matrix (shaped
+    like a real result) when the dropna overlap is <10 rows — on the dashboard
+    that is indistinguishable from RLS-stripped data or a compute failure.
+    data_quality must carry a correlation_history_sufficient flag (mirroring
+    cov_history_sufficient) so the UI can render an explicit
+    insufficient-overlap state. Pre-fix the key is absent (KeyError), so both
+    cases below fail without the router change."""
+
+    @pytest.mark.asyncio
+    async def test_full_overlap_flag_true(self):
+        ret1 = _returns_records(seed=1)        # 60 business days
+        ret2 = _returns_records(seed=2)        # 60 business days, full overlap
+        ps = [
+            {"strategy_id": "s1", "current_weight": 0.6, "strategies": {"id": "s1", "name": "Alpha"}},
+            {"strategy_id": "s2", "current_weight": 0.4, "strategies": {"id": "s2", "name": "Beta"}},
+        ]
+        sa_rows = [
+            {"strategy_id": "s1", "returns_series": ret1, "equity_curve": _equity_records(ret1), "total_aum": 100.0},
+            {"strategy_id": "s2", "returns_series": ret2, "equity_curve": _equity_records(ret2), "total_aum": 50.0},
+        ]
+        sb, _ = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa_rows)
+
+        async def _fake_benchmark(symbol):
+            return None, True
+        with patch("routers.portfolio.get_supabase", return_value=sb), \
+             patch("routers.portfolio.get_benchmark_returns", side_effect=_fake_benchmark):
+            result = await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+
+        assert result["data_quality"]["correlation_history_sufficient"] is True
+
+    @pytest.mark.asyncio
+    async def test_short_overlap_flag_false(self):
+        ret1 = _returns_records(n=60, seed=1)
+        ret2 = _returns_records(n=5, seed=2)   # only 5 days -> overlap 5 < 10
+        ps = [
+            {"strategy_id": "s1", "current_weight": 0.6, "strategies": {"id": "s1", "name": "Alpha"}},
+            {"strategy_id": "s2", "current_weight": 0.4, "strategies": {"id": "s2", "name": "Beta"}},
+        ]
+        sa_rows = [
+            {"strategy_id": "s1", "returns_series": ret1, "equity_curve": _equity_records(ret1), "total_aum": 100.0},
+            {"strategy_id": "s2", "returns_series": ret2, "equity_curve": _equity_records(ret2), "total_aum": 50.0},
+        ]
+        sb, _ = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa_rows)
+
+        async def _fake_benchmark(symbol):
+            return None, True
+        with patch("routers.portfolio.get_supabase", return_value=sb), \
+             patch("routers.portfolio.get_benchmark_returns", side_effect=_fake_benchmark):
+            result = await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+
+        assert result["data_quality"]["correlation_history_sufficient"] is False
+
+
+# ---------------------------------------------------------------------------
 # C-0208 — TOCTOU concurrency guard
 # ---------------------------------------------------------------------------
 

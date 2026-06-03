@@ -32,9 +32,13 @@ def compute_rolling_correlation(strategy_returns: dict[str, pd.Series], window: 
             rolling = df[s1].rolling(window).corr(df[s2]).dropna()
             avg_corr = abs(float(rolling.mean())) if len(rolling) > 0 else 0
             pairs.append((f"{s1}:{s2}", rolling, avg_corr))
-    if len(ids) > MAX_ROLLING_PAIRS:
+    # M-0704: cap on the number of PAIRS, not the strategy count. The constant
+    # is a pair-count limit (n*(n-1)/2 pairs), so gating on len(ids) let e.g.
+    # 6 strategies (15 pairs) slip the cap and return all 15 series. Reference
+    # the constant in the slice too, rather than a hard-coded literal.
+    if len(pairs) > MAX_ROLLING_PAIRS:
         pairs.sort(key=lambda x: x[2], reverse=True)
-        pairs = pairs[:10]
+        pairs = pairs[:MAX_ROLLING_PAIRS]
     for key, rolling, _ in pairs:
         result[key] = [{"date": d.isoformat(), "value": _safe_float(v)} for d, v in rolling.items()]
     return result

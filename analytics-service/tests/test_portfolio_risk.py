@@ -126,6 +126,29 @@ def test_rolling_correlation_caps_top_pairs():
     assert len(result) <= 10
 
 
+def test_rolling_correlation_caps_on_pair_count_not_strategy_count():
+    """M-0704: the cap binds on PAIR count, not strategy count. 6 strategies
+    form 15 pairs (6*5/2) and must clamp to MAX_ROLLING_PAIRS (10), even though
+    the strategy count (6) is below the threshold.
+
+    Pre-fix the gate checked `len(ids) > MAX_ROLLING_PAIRS` — with 6 strategies
+    that is 6 > 10 == False, so the cap never fired and all 15 pair-series
+    leaked into the response (the existing caps test used 12 strategies, which
+    happened to trip the buggy strategy-count gate and hid this).
+    """
+    np.random.seed(21)
+    dates = pd.date_range("2026-01-01", periods=120, freq="D")
+    strategies = {
+        f"s{i}": pd.Series(np.random.normal(0.001, 0.02, 120), index=dates)
+        for i in range(6)
+    }
+    result = compute_rolling_correlation(strategies)
+    assert len(result) == 10, (
+        "6 strategies form 15 pairs; the cap must bind on pair count and clamp "
+        "to MAX_ROLLING_PAIRS (10), not on the strategy count"
+    )
+
+
 def test_risk_decomposition_zero_volatility():
     """All-zero weights produce zero portfolio vol → the marginal/component
     decomposition is genuinely undefined (you cannot attribute a share of a

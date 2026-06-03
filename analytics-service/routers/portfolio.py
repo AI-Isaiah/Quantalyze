@@ -837,6 +837,16 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # covariance path is tightened here.
         overlap_df = pd.DataFrame(strategy_returns).dropna()
         cov_history_sufficient = len(overlap_df) > 5
+        # M-0707: compute_correlation_matrix returns an all-None matrix (shaped
+        # like a real result) when there are <2 strategies OR the dropna overlap
+        # is <10 rows — on the dashboard that is indistinguishable from
+        # RLS-stripped data or a compute failure. Surface a data_quality flag
+        # (mirrors cov_history_sufficient) so the UI can render an explicit
+        # insufficient-overlap state. Mirrors compute_correlation_matrix's own
+        # gates (len(ids) < 2, len(df) < 10).
+        correlation_history_sufficient = (
+            len(strategy_returns) >= 2 and len(overlap_df) >= 10
+        )
         if cov_history_sufficient:
             # Build weights aligned to overlap_df columns.  overlap_df is built
             # from the same strategy_returns dict as df, so columns are identical;
@@ -1050,6 +1060,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             "vol_status": vol_status,
             "sharpe_status": sharpe_status,
             "cov_history_sufficient": cov_history_sufficient,
+            "correlation_history_sufficient": correlation_history_sufficient,
             "benchmark_error": benchmark_error,
             "matching_status": None,  # populated only on verify_strategy
         }
