@@ -62,6 +62,16 @@ function diffKey(d: ScenarioCommitDiff): string {
   }
 }
 
+// A diff paired with its array index `i` (for index-keyed server-error matching)
+// and its stable `key` (for perRow + the React key). Generic over the narrowed
+// diff kind so the per-section type-predicate filters keep their discriminated-
+// union narrowing without repeating the `{ i; key }` skeleton four times.
+type IndexedDiff<T extends ScenarioCommitDiff = ScenarioCommitDiff> = {
+  d: T;
+  i: number;
+  key: string;
+};
+
 // pr189-followup M13 (type-design-analyzer MED/8) — narrow
 // `rejection_reason` from `string?` to the `RejectionReason` enum so the
 // drawer can't write a non-enum value. The runtime check in allFilled()
@@ -219,6 +229,23 @@ export function ScenarioCommitDrawer({
     };
   }, []);
 
+  // M-0095 guard (type-design follow-up): perRow stable-keying is only safe if
+  // diffKey is unique within the batch. handleCommit guarantees it today, but the
+  // drawer's contract accepts diffs from future producers (it consumes the full
+  // 4-arm union) — so a collision would SILENTLY merge two rows' audit input into
+  // one bridge_outcome. Surface it loudly (Rule 12) instead of trusting the prose
+  // invariant. Fires only on a genuine collision (never for the current producer).
+  useEffect(() => {
+    if (diffs.length === 0) return;
+    const uniqueKeys = new Set(diffs.map(diffKey)).size;
+    if (uniqueKeys !== diffs.length) {
+      console.warn(
+        "[ScenarioCommitDrawer] diffKey collision — two diffs share a stable key; their per-row audit input (reason/percent/note) will merge onto one bridge_outcome. A producer emitted non-unique (kind, holding_ref/strategy_id) diffs.",
+        { diffCount: diffs.length, uniqueKeys },
+      );
+    }
+  }, [diffs]);
+
   // 1.5s success auto-close.
   useEffect(() => {
     if (state.kind !== "success") return;
@@ -278,25 +305,20 @@ export function ScenarioCommitDrawer({
   // diff's array index `i` (for server-error matching, which is index-keyed)
   // AND its stable `key` (for perRow + the React key) — replacing the per-row
   // O(N²) `diffs.indexOf(d)` the three sections used to call.
-  const indexed = diffs.map((d, i) => ({ d, i, key: diffKey(d) }));
+  const indexed: IndexedDiff[] = diffs.map((d, i) => ({ d, i, key: diffKey(d) }));
   // Type-predicate filters so each group keeps its discriminated-union
   // narrowing (a plain boolean predicate on `x.d.kind` would leave `x.d` as the
   // wide union and break `d.holding_ref` / `d.strategy_id` access below).
   const removed = indexed.filter(
-    (x): x is { d: VoluntaryRemoveDiff; i: number; key: string } =>
+    (x): x is IndexedDiff<VoluntaryRemoveDiff> =>
       x.d.kind === "voluntary_remove",
   );
   const added = indexed.filter(
-    (
-      x,
-    ): x is {
-      d: VoluntaryAddDiff | BridgeRecommendedDiff;
-      i: number;
-      key: string;
-    } => x.d.kind === "voluntary_add" || x.d.kind === "bridge_recommended",
+    (x): x is IndexedDiff<VoluntaryAddDiff | BridgeRecommendedDiff> =>
+      x.d.kind === "voluntary_add" || x.d.kind === "bridge_recommended",
   );
   const modified = indexed.filter(
-    (x): x is { d: VoluntaryModifyDiff; i: number; key: string } =>
+    (x): x is IndexedDiff<VoluntaryModifyDiff> =>
       x.d.kind === "voluntary_modify",
   );
   const response = state.kind === "success" || state.kind === "failure" ? state.response : null;
