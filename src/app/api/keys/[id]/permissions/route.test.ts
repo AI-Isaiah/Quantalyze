@@ -2,13 +2,20 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 
 /**
- * Tests for GET /api/keys/[id]/permissions — specifically the Task 7.1a
- * `api_key.decrypt` audit emission.
+ * Tests for GET /api/keys/[id]/permissions — the Task 7.1a `api_key.decrypt`
+ * audit emission and (M-0325) its cache_hit honesty.
  *
  * The live behaviour of the route (Python proxy, unstable_cache, ownership
- * check) is covered indirectly by the staging E2E. This file's job is
- * narrow: prove the audit event fires on success AND does NOT fire on
- * ownership rejection / 404 / rate-limit paths.
+ * check) is covered indirectly by the staging E2E. This file's job is narrow:
+ * prove the audit event fires on a real decrypt (cache MISS), is tagged
+ * cache_hit on a replay (cache HIT, no decrypt), and does NOT fire on
+ * ownership rejection / 404 / rate-limit / upstream-failure paths.
+ *
+ * M-0325 model: the route detects a decrypt via a request-local `didDecrypt`
+ * closure flag set ONLY when the cached fetcher body runs. We exercise that for
+ * real — the next/cache mock either runs the body (MISS, drives a stubbed
+ * upstream fetch) or replays a memoized value WITHOUT running it (HIT) — rather
+ * than injecting a synthetic timestamp.
  */
 
 vi.mock("server-only", () => ({}));
@@ -20,7 +27,15 @@ const STATE = vi.hoisted(() => ({
   keyRow: null as { id: string; user_id: string } | null,
   rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
   rateLimitOk: true as boolean,
-  fetcherImpl: null as (() => Promise<unknown>) | null,
+  // unstable_cache simulation: when true the cache REPLAYS cachedHitPayload
+  // without running the fetcher body (a hit — no decrypt). When false the body
+  // runs (a miss — sets didDecrypt, drives the stubbed upstream below).
+  simulateCacheHit: false as boolean,
+  cachedHitPayload: {} as Record<string, unknown>,
+  // Stubbed upstream Python response for the cache-MISS path (the real body).
+  upstreamPayload: {} as Record<string, unknown>,
+  upstreamStatus: 200 as number,
+  upstreamThrow: false as boolean,
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -53,13 +68,13 @@ vi.mock("@/lib/ratelimit", () => ({
   }),
 }));
 
-// Mock next/cache's unstable_cache so we can control the fetcher output
-// without touching the real Python service. Returns a function that when
-// called invokes STATE.fetcherImpl.
+// Emulate unstable_cache: a HIT returns the memoized value WITHOUT invoking the
+// body (so the route's didDecrypt closure flag stays false); a MISS runs the
+// body (which flips didDecrypt and calls the stubbed upstream fetch).
 vi.mock("next/cache", () => ({
   unstable_cache: (fn: () => Promise<unknown>) => {
     return async () => {
-      if (STATE.fetcherImpl) return STATE.fetcherImpl();
+      if (STATE.simulateCacheHit) return STATE.cachedHitPayload;
       return fn();
     };
   },
@@ -82,20 +97,48 @@ beforeEach(() => {
   STATE.keyRow = { id: KEY_ID, user_id: USER.id };
   STATE.rpcCalls = [];
   STATE.rateLimitOk = true;
-  STATE.fetcherImpl = async () => ({
+  STATE.simulateCacheHit = false;
+  STATE.cachedHitPayload = {
     read: true,
     trade: false,
     withdraw: false,
     detected_at: "2026-04-16T00:00:00Z",
-  });
+  };
+  STATE.upstreamPayload = {
+    read: true,
+    trade: false,
+    withdraw: false,
+    detected_at: "2026-04-16T00:00:00Z",
+  };
+  STATE.upstreamStatus = 200;
+  STATE.upstreamThrow = false;
+  process.env.INTERNAL_API_TOKEN = "test-internal-token";
+  // Stub the upstream Python call the cache-miss body makes.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      if (STATE.upstreamThrow) throw new Error("ECONNREFUSED upstream down");
+      return {
+        ok: STATE.upstreamStatus >= 200 && STATE.upstreamStatus < 300,
+        status: STATE.upstreamStatus,
+        statusText: "stub",
+        headers: {
+          get: (h: string) =>
+            h.toLowerCase() === "content-type" ? "application/json" : null,
+        },
+        json: async () => STATE.upstreamPayload,
+      };
+    }),
+  );
 });
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("GET /api/keys/[id]/permissions — audit-log emission (Task 7.1a)", () => {
-  it("emits api_key.decrypt via log_audit_event on a successful probe", async () => {
+  it("emits api_key.decrypt via log_audit_event on a successful (fresh) probe", async () => {
     const { GET } = await import("./route");
     const res = await GET(makeRequest(KEY_ID));
     expect(res.status).toBe(200);
@@ -104,17 +147,17 @@ describe("GET /api/keys/[id]/permissions — audit-log emission (Task 7.1a)", ()
 
     await drainAuditMicrotasks();
 
-    const auditCall = STATE.rpcCalls.find(
-      (c) => c.name === "log_audit_event",
-    );
+    const auditCall = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
     expect(auditCall).toBeDefined();
     expect(auditCall!.args).toMatchObject({
       p_action: "api_key.decrypt",
       p_entity_type: "api_key",
       p_entity_id: KEY_ID,
     });
+    // Fresh probe = cache miss = a real decrypt happened.
     expect(auditCall!.args.p_metadata).toMatchObject({
       route: "/api/keys/[id]/permissions",
+      cache_hit: false,
     });
   });
 
@@ -143,9 +186,7 @@ describe("GET /api/keys/[id]/permissions — audit-log emission (Task 7.1a)", ()
   });
 
   it("does NOT emit when the Python fetcher throws (502 path)", async () => {
-    STATE.fetcherImpl = async () => {
-      throw new Error("upstream 500");
-    };
+    STATE.upstreamThrow = true;
     const { GET } = await import("./route");
 
     // Silence console.error for the expected proxy-failure log.
@@ -174,21 +215,19 @@ describe("GET /api/keys/[id]/permissions — audit-log emission (Task 7.1a)", ()
 });
 
 describe("GET /api/keys/[id]/permissions — probe_error pass-through", () => {
-  // Regression: the TS PermissionPayload interface used to omit
-  // `probe_error`, so the cached fetcher implicitly stripped the
-  // field even though the Python service set it on the fail-CLOSED
-  // path. The frontend `KeyPermissionBadge` then mis-rendered "key
-  // may have been revoked" whenever the exchange API was just down.
-  // This test pins the forwarding contract so the field flows
-  // end-to-end on the success response.
+  // Regression: the TS PermissionPayload interface used to omit `probe_error`,
+  // so the cached fetcher implicitly stripped the field even though the Python
+  // service set it on the fail-CLOSED path. The frontend `KeyPermissionBadge`
+  // then mis-rendered "key may have been revoked" whenever the exchange API was
+  // just down. This test pins the forwarding contract end-to-end.
   it("forwards probe_error=true through to the response body", async () => {
-    STATE.fetcherImpl = async () => ({
+    STATE.upstreamPayload = {
       read: true,
       trade: true,
       withdraw: true,
       probe_error: true,
       detected_at: "2026-04-16T00:00:00Z",
-    });
+    };
     const { GET } = await import("./route");
     const res = await GET(makeRequest(KEY_ID));
     expect(res.status).toBe(200);
@@ -200,13 +239,13 @@ describe("GET /api/keys/[id]/permissions — probe_error pass-through", () => {
   });
 
   it("forwards probe_error=false on a clean probe", async () => {
-    STATE.fetcherImpl = async () => ({
+    STATE.upstreamPayload = {
       read: true,
       trade: false,
       withdraw: false,
       probe_error: false,
       detected_at: "2026-04-16T00:00:00Z",
-    });
+    };
     const { GET } = await import("./route");
     const res = await GET(makeRequest(KEY_ID));
     expect(res.status).toBe(200);
@@ -221,25 +260,19 @@ describe("GET /api/keys/[id]/permissions — probe_error pass-through", () => {
 
 describe("GET /api/keys/[id]/permissions — decrypt-audit cache honesty (M-0325)", () => {
   // The audit row used to assert an unconditional decrypt on every GET, but a
-  // 60s Next-layer cache hit re-uses the prior probe and decrypts NOTHING.
-  // The route now stamps `_fetchedAt` inside the cached body and tags the
-  // audit metadata with `cache_hit` so forensic decrypt counts stay honest.
-  it("tags cache_hit:false and strips the internal _fetchedAt on a fresh probe (cache miss)", async () => {
-    STATE.fetcherImpl = async () => ({
-      read: true,
-      trade: false,
-      withdraw: false,
-      detected_at: "2026-04-16T00:00:00Z",
-      _fetchedAt: Date.now(), // just fetched → real decrypt happened
-    });
+  // 60s Next-layer cache hit replays the prior probe and decrypts NOTHING. The
+  // route now derives cache_hit from a request-local `didDecrypt` flag set only
+  // when the cached body runs — exact, no wall-clock heuristic.
+  it("tags cache_hit:false when the body runs (cache miss → real decrypt)", async () => {
+    STATE.simulateCacheHit = false; // body runs
     const { GET } = await import("./route");
     const res = await GET(makeRequest(KEY_ID));
     expect(res.status).toBe(200);
 
     const body = await res.json();
-    // The internal stamp must never leak into the response body.
-    expect(body._fetchedAt).toBeUndefined();
     expect(body.read).toBe(true);
+    // No internal field leaks into the response body.
+    expect(body._fetchedAt).toBeUndefined();
 
     await drainAuditMicrotasks();
     const audit = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
@@ -250,20 +283,26 @@ describe("GET /api/keys/[id]/permissions — decrypt-audit cache honesty (M-0325
     });
   });
 
-  it("tags cache_hit:true when the memoized payload predates the request — no phantom decrypt logged", async () => {
-    STATE.fetcherImpl = async () => ({
+  it("tags cache_hit:true when the cache replays without running the body (no phantom decrypt — any timing)", async () => {
+    // The deterministic flag means even a hit that lands microseconds after the
+    // originating miss is correctly cache_hit:true (the sub-second-burst case
+    // the old timestamp heuristic mislabeled). The fetcher body must NOT run.
+    STATE.simulateCacheHit = true;
+    STATE.cachedHitPayload = {
       read: true,
       trade: false,
       withdraw: false,
       detected_at: "2026-04-16T00:00:00Z",
-      _fetchedAt: Date.now() - 5000, // served from cache 5s later → no decrypt
-    });
+    };
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
     const { GET } = await import("./route");
     const res = await GET(makeRequest(KEY_ID));
     expect(res.status).toBe(200);
-
     const body = await res.json();
-    expect(body._fetchedAt).toBeUndefined();
+    expect(body.read).toBe(true);
+
+    // Proof it was a true cache hit: the upstream Python fetch never ran.
+    expect(fetchSpy).not.toHaveBeenCalled();
 
     await drainAuditMicrotasks();
     const audit = STATE.rpcCalls.find((c) => c.name === "log_audit_event");

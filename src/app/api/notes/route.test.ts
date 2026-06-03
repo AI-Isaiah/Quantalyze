@@ -766,6 +766,64 @@ describe("PATCH /api/notes — rate limit + body-size guards (M-1140/M-1141)", (
     expect(body.error).toBe("Request body too large");
   });
 
+  it("M-1141: a malformed (non-numeric) content-length skips the 413 precheck and falls through to the byte-cap (Number.isFinite guard)", async () => {
+    // A garbage content-length parses to NaN; Number.isFinite(NaN) is false so
+    // the 413 precheck is skipped and a legitimate small body is NOT wrongly
+    // rejected — it flows to parse + the authoritative byte-cap. Dropping the
+    // isFinite guard would make `NaN > MAX` always false too (same result here),
+    // but pinning a 200 proves a junk header neither 413s a valid body nor is
+    // treated as oversized.
+    const { chain: notesChain } = userNotesUpsertChain();
+    mockFrom.mockImplementation((table: string) => {
+      if (table === "portfolios") return portfoliosChain(true);
+      if (table === "user_notes") return notesChain;
+      throw new Error(`unexpected from(${table})`);
+    });
+    const req = new NextRequest("http://localhost:3000/api/notes", {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        origin: "http://localhost:3000",
+        "content-length": "not-a-number",
+      },
+      body: JSON.stringify({
+        scope_kind: "portfolio",
+        scope_ref: PORTFOLIO_ID,
+        content: "small note",
+      }),
+    });
+    const { PATCH } = await import("./route");
+    const res = await PATCH(req);
+    expect(res.status).toBe(200);
+  });
+
+  it("M-1141: a multibyte body under the 120k char-cap but over the 100 KB byte-cap is rejected by the BYTE cap (not the char cap)", async () => {
+    // The whole reason the cap is enforced in BYTES (TextEncoder) and the Zod
+    // char-cap sits ABOVE it: a 4-byte emoji repeated ~26k times is ~52k UTF-16
+    // code units (< 120_000 char-max, so Zod passes) but ~104 KB of bytes
+    // (> 100 KB, so the byte-cap rejects with "100 KB"). A regression that
+    // checked chars instead of bytes would let this through.
+    const { chain: notesChain } = userNotesUpsertChain();
+    mockFrom.mockImplementation((table: string) => {
+      if (table === "portfolios") return portfoliosChain(true);
+      if (table === "user_notes") return notesChain;
+      throw new Error(`unexpected from(${table})`);
+    });
+    const emoji = "\u{1F600}"; // 4 UTF-8 bytes, 2 UTF-16 code units
+    const content = emoji.repeat(26_000); // ~52k chars, ~104 KB bytes
+    const { PATCH } = await import("./route");
+    const res = await PATCH(
+      makePatchReq({
+        scope_kind: "portfolio",
+        scope_ref: PORTFOLIO_ID,
+        content,
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("100 KB");
+  });
+
   it("M-1141 regression: a body over the 100 KB byte-cap but under the Zod char-max still says '100 KB'", async () => {
     // Pins the chosen max(120_000): a 103,424-byte body must reach the
     // authoritative TextEncoder byte-cap (and its "100 KB" message), NOT be

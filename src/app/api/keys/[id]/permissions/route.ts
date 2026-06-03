@@ -49,26 +49,29 @@ interface PermissionPayload {
 }
 
 /**
- * The cached payload carries an internal `_fetchedAt` epoch-ms stamp set at the
- * moment the upstream fetch actually ran. Because unstable_cache memoizes the
- * whole return value, a cache HIT replays the original `_fetchedAt` — so the
- * handler can tell "this request triggered a real decrypt" (fresh) from "served
- * from the 60s cache, no decrypt" (stale). Stripped before the response is
- * serialized (M-0325).
- */
-type CachedPermissionPayload = PermissionPayload & { _fetchedAt: number };
-
-/**
  * Fetch the live permission triple from the Python service. Wrapped in
  * unstable_cache so concurrent callers + repeat hits inside 5 minutes
  * collapse to a single upstream request.
  *
  * The cache tag/key array includes the keyId so a future invalidation hook
  * (e.g., on key rotation) can call revalidateTag.
+ *
+ * M-0325: a real exchange-credential DECRYPT happens ONLY when the cached body
+ * actually runs (i.e. a cache MISS — the only path that POSTs to Python). This
+ * factory is called per request, so `didDecrypt` is a request-local flag: it
+ * flips true iff THIS request's call ran the body, and stays false when
+ * unstable_cache replays a memoized value (cache HIT, no decrypt). The handler
+ * reads `wasFreshDecrypt()` to tag the audit row exactly — no wall-clock
+ * heuristic, no sub-second-burst misclassification, no stamp-less edge case.
  */
-function makeCachedFetcher(keyId: string) {
-  return unstable_cache(
-    async (): Promise<CachedPermissionPayload> => {
+function makeCachedFetcher(keyId: string): {
+  fetchPermissions: () => Promise<PermissionPayload>;
+  wasFreshDecrypt: () => boolean;
+} {
+  let didDecrypt = false;
+  const fetchPermissions = unstable_cache(
+    async (): Promise<PermissionPayload> => {
+      didDecrypt = true; // runs only on a cache MISS
       const internalToken = process.env.INTERNAL_API_TOKEN;
       if (!internalToken) {
         throw new Error(
@@ -98,14 +101,12 @@ function makeCachedFetcher(keyId: string) {
         throw new Error(`Upstream ${res.status}`);
       }
 
-      const payload = (await res.json()) as PermissionPayload;
-      // M-0325: stamp the real decrypt time INSIDE the cached body so it is
-      // memoized with the value. A later cache hit returns this same stamp.
-      return { ...payload, _fetchedAt: Date.now() };
+      return (await res.json()) as PermissionPayload;
     },
     [`key-permissions:${keyId}`],
     { revalidate: 60, tags: [`key-permissions:${keyId}`] },
   );
+  return { fetchPermissions, wasFreshDecrypt: () => didDecrypt };
 }
 
 export const GET = withAuth(
@@ -149,20 +150,19 @@ export const GET = withAuth(
     }
 
     try {
-      const fetcher = makeCachedFetcher(keyId);
-      const cached = await fetcher();
-      const { _fetchedAt, ...payload } = cached;
+      const { fetchPermissions, wasFreshDecrypt } = makeCachedFetcher(keyId);
+      const payload = await fetchPermissions();
 
       // Sprint 6 Task 7.1a — audit the decrypt event. M-0325: a real
-      // exchange-credential DECRYPT only happens on a cache MISS (when the
-      // fetcher body actually POSTs to the Python service; see migration 052
-      // header). The 60s Next-layer cache + the Python 15-min cache mean most
-      // probes inside that window decrypt NOTHING. Tag the audit row with
-      // whether THIS request triggered a decrypt — derived from whether the
-      // memoized `_fetchedAt` predates this request — so forensic
-      // "count decrypt events for key X" stops over-counting by the cache-hit
-      // ratio. Fire-and-forget; does not affect response latency or success.
-      const cacheHit = Date.now() - _fetchedAt > 1000;
+      // exchange-credential DECRYPT only happens on a cache MISS (the fetcher
+      // body actually POSTs to the Python service; see migration 052 header).
+      // The 60s Next-layer cache + the Python 15-min cache mean most probes
+      // inside that window decrypt NOTHING. Tag the audit row with whether THIS
+      // request triggered a decrypt — exactly, via the request-local
+      // `wasFreshDecrypt()` flag — so forensic "count decrypt events for key X"
+      // stops over-counting by the cache-hit ratio. Fire-and-forget; does not
+      // affect response latency or success.
+      const cacheHit = !wasFreshDecrypt();
       logAuditEvent(supabase, {
         action: "api_key.decrypt",
         entity_type: "api_key",

@@ -44,6 +44,11 @@ const MAX_CONTENT_BYTES = 100 * 1024; // 100 KB
 // can be omitted on a chunked body, in which case the parse + byte-cap catch it).
 const MAX_REQUEST_BYTES = 200 * 1024; // 200 KB
 
+// Module-scoped, reused across requests — TextEncoder is stateless, so a fresh
+// instance per call is pure allocation overhead (mirrors gdpr-export.ts's
+// SHARED_ENCODER, audit-2026-05-07 perf).
+const NOTE_ENCODER = new TextEncoder();
+
 const ALLOWED_KINDS = [
   "portfolio",
   "holding",
@@ -181,7 +186,7 @@ export async function PATCH(request: NextRequest) {
   }
   const { scope_kind, scope_ref, content } = parsed.data;
 
-  if (new TextEncoder().encode(content).length > MAX_CONTENT_BYTES) {
+  if (NOTE_ENCODER.encode(content).length > MAX_CONTENT_BYTES) {
     return NextResponse.json(
       { error: "Content exceeds 100 KB limit" },
       { status: 400, headers: NO_STORE_HEADERS },
