@@ -237,8 +237,15 @@ describe("MandateForm", () => {
     expect(
       screen.getByRole("checkbox", { name: "Long-Only" }),
     ).toHaveAttribute("aria-checked", "true");
+    // …and the dropped value produces no rogue chip (it isn't a canonical option).
+    expect(
+      screen.queryByRole("checkbox", { name: "obsolete_legacy_type" }),
+    ).not.toBeInTheDocument();
 
-    // …and a subsequent edit saves WITHOUT the unknown value.
+    // LOAD-BEARING guard: a subsequent edit saves WITHOUT the unknown value.
+    // (The checked-chip line above passes either way — MandateChipGroup only
+    // renders canonical options — so the save-payload assertion below is the
+    // one that fails if filterToKnown is removed.)
     fireEvent.click(screen.getByRole("checkbox", { name: "Market Neutral" }));
     const body = JSON.parse(
       fetchMock.mock.calls
@@ -247,6 +254,67 @@ describe("MandateForm", () => {
     );
     expect(body.preferred_strategy_types).toEqual(["Long-Only", "Market Neutral"]);
     expect(body.preferred_strategy_types).not.toContain("obsolete_legacy_type");
+  });
+
+  it("H-0377: Reset on a field loaded with a filtered value CLEARS it (does not revert-to-initial)", () => {
+    // The reset handlers set state to [] + save(field, null) rather than
+    // restoring the unfiltered `initial` prop — so a dropped legacy value can't
+    // resurface on reset. Pin that contract: a future revert-to-initial refactor
+    // must fail here.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({ success: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const prefs = populatedPrefs();
+    prefs.max_weight = null;
+    prefs.target_ticket_size_usd = null;
+    prefs.mandate_archetype = "";
+    prefs.preferred_strategy_types = ["Long-Only", "obsolete_legacy_type"];
+    render(<MandateForm initial={prefs} />);
+
+    // Only the strategy-types field carries a value → exactly one Reset button.
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    const body = JSON.parse(
+      fetchMock.mock.calls
+        .filter((c) => c[0] === "/api/preferences")
+        .at(-1)![1].body as string,
+    );
+    expect(body).toEqual({ preferred_strategy_types: null });
+  });
+
+  it("H-0377: a lowercase (case-insensitively-valid) excluded_exchange survives load + save (NOT exact-filtered)", () => {
+    // excluded_exchanges is deliberately NOT routed through filterToKnown: the
+    // server validates it case-insensitively while EXCHANGES is display-case, so
+    // a stored lowercase "binance" must survive. This pins that decision so a
+    // future "tidy-up" routing it through the exact filter fails loudly.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({ success: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const prefs = populatedPrefs();
+    prefs.max_weight = null;
+    prefs.target_ticket_size_usd = null;
+    prefs.mandate_archetype = "";
+    prefs.excluded_exchanges = ["binance"]; // lowercase — server-valid, display-case is "Binance"
+    render(<MandateForm initial={prefs} />);
+
+    // Toggle a second exchange; the lowercase value must ride along on save.
+    fireEvent.click(screen.getByRole("checkbox", { name: "OKX" }));
+    const body = JSON.parse(
+      fetchMock.mock.calls
+        .filter((c) => c[0] === "/api/preferences")
+        .at(-1)![1].body as string,
+    );
+    expect(body.excluded_exchanges).toContain("binance");
+    expect(body.excluded_exchanges).toContain("OKX");
   });
 
   it("rapid successive excluded_exchanges clicks send cumulative values (not overwrite)", () => {
