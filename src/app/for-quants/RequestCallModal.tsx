@@ -94,6 +94,11 @@ function RequestCallForm({
   const [email, setEmail] = useState("");
   const [preferredTime, setPreferredTime] = useState("");
   const [notes, setNotes] = useState("");
+  // H-0270 honeypot. A real (sighted or screen-reader) user never sees
+  // this field, so it stays "" and the server proceeds normally. A naive
+  // bot that fills every input populates it; the server then drops the
+  // lead silently (success-shaped 200, no insert, no founder email).
+  const [website, setWebsite] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -141,6 +146,9 @@ function RequestCallForm({
           email,
           preferred_time: preferredTime,
           notes,
+          // H-0270 honeypot — always sent so the server can evaluate it.
+          // "" for humans; bots fill it and get silently dropped.
+          website,
           wizard_context: wizardContext ?? null,
         }),
       });
@@ -222,6 +230,30 @@ function RequestCallForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
+      {/*
+        H-0270 honeypot. Hidden from humans — off-screen (not
+        `display:none`, which some bots skip), `aria-hidden` so screen
+        readers ignore it, `tabIndex={-1}` so it is unreachable by
+        keyboard, and `autoComplete="off"` so password managers don't
+        fill it. Naive bots that populate every input trip it; the server
+        then drops the lead silently. Kept in the layout tree (where bots
+        scrape) rather than removed so the bait actually works.
+      */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute -left-[9999px] top-0 h-px w-px overflow-hidden"
+      >
+        <label htmlFor="fq-website">Website (leave this blank)</label>
+        <input
+          id="fq-website"
+          name="website"
+          type="text"
+          tabIndex={-1}
+          autoComplete="off"
+          value={website}
+          onChange={(e) => setWebsite(e.target.value)}
+        />
+      </div>
       <Input
         ref={firstFieldRef}
         label="Name"

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { RequestCallModal } from "./RequestCallModal";
 
 /**
@@ -83,5 +83,65 @@ describe("<RequestCallModal> mailto fallback (G9.B.20)", () => {
     expect(mailtoLink.getAttribute("href")).toMatch(
       /^mailto:security@quantalyze\.com/,
     );
+  });
+});
+
+/**
+ * H-0270 honeypot. The modal must render a hidden `website` decoy field
+ * AND transmit its value in the POST body so the server-side honeypot
+ * check (route.ts) is reachable. Two assertions, two failure modes:
+ *  - missing/visible DOM field → bots never get baited;
+ *  - field present but not wired into the body → server check is dead.
+ * The second test fills the decoy and pins that the typed value reaches
+ * the payload (neuter: drop `website` from the fetch body → undefined).
+ */
+describe("<RequestCallModal> honeypot (H-0270)", () => {
+  it("renders a hidden, non-tabbable, aria-hidden honeypot 'website' field", () => {
+    render(<RequestCallModal open onClose={() => {}} ctaLocation="hero" />);
+    const honeypot = document.getElementById(
+      "fq-website",
+    ) as HTMLInputElement | null;
+    expect(honeypot).not.toBeNull();
+    // Removed from the keyboard tab order so humans can't land on it.
+    expect(honeypot!.tabIndex).toBe(-1);
+    // Password managers must not autofill it.
+    expect(honeypot!.getAttribute("autocomplete")).toBe("off");
+    // Wrapped in an aria-hidden container so screen readers skip it.
+    expect(honeypot!.closest("[aria-hidden='true']")).not.toBeNull();
+  });
+
+  it("transmits the honeypot value in the POST body so the server can evaluate it", async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => ({
+        ok: true,
+        json: async () => ({ ok: true }),
+      }),
+    );
+    const prevFetch = global.fetch;
+    global.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      render(<RequestCallModal open onClose={() => {}} ctaLocation="hero" />);
+      fireEvent.change(screen.getByLabelText("Name"), {
+        target: { value: "Jane" },
+      });
+      fireEvent.change(screen.getByLabelText("Firm"), {
+        target: { value: "Acme" },
+      });
+      fireEvent.change(screen.getByLabelText("Email"), {
+        target: { value: "jane@acme.example" },
+      });
+      const honeypot = document.getElementById("fq-website") as HTMLInputElement;
+      fireEvent.change(honeypot, { target: { value: "bot-was-here" } });
+
+      fireEvent.click(screen.getByRole("button", { name: /send request/i }));
+
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+      // Wiring proof: the decoy's value rides along in the payload.
+      expect(body.website).toBe("bot-was-here");
+    } finally {
+      global.fetch = prevFetch;
+    }
   });
 });

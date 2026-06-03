@@ -173,6 +173,20 @@ const WIZARD_CONTEXT_SCHEMA = z
       .regex(/^[A-Za-z0-9_-]+$/, "wizard_session_id must be an alphanumeric token")
       .optional(),
   })
+  // M-0317: `step` and `wizard_session_id` are independently optional,
+  // but the entire purpose of wizard_context is funnel cross-correlation
+  // — a `{ step }` with no session id is a lead the funnel can never join
+  // back to its parent view/click events, so the contract is silently
+  // broken. Tie the two: a present `step` requires `wizard_session_id`.
+  // Both in-app producers already satisfy this (RequestCallModal's
+  // RequestCallWizardContext always carries both; DesktopGate sends the
+  // literal "desktop-gate"), so the refine rejects only malformed or
+  // forged payloads — never legitimate traffic. The refine runs only on
+  // the object branch; `null`/missing short-circuit via nullable/optional.
+  .refine((ctx) => !ctx.step || Boolean(ctx.wizard_session_id), {
+    message: "wizard_session_id is required when step is set",
+    path: ["wizard_session_id"],
+  })
   .nullable()
   .optional();
 
@@ -213,6 +227,21 @@ const LEAD_SCHEMA = z.object({
     .max(2000, "Notes are too long")
     .optional()
     .or(z.literal("")),
+  /**
+   * H-0270 honeypot. A decoy field humans never see or fill —
+   * RequestCallModal renders it off-screen with `aria-hidden`,
+   * `tabIndex={-1}` and `autoComplete="off"`. Naive bots that auto-fill
+   * every input populate it. Accept ANY short string here (the field is
+   * stripped by Zod's default `.strip()` if absent from the schema, so
+   * it MUST be declared for `parsed.website` to survive) and bound it to
+   * the same 2KB cap as notes so it can't smuggle a large payload past
+   * the field-level limits. The post-parse check in POST drops a
+   * populated honeypot with a success-shaped 200 — a 400 here would
+   * teach the bot which field to skip. Cheap pre-Turnstile bot filter;
+   * the rotation-proof layer (Turnstile/hCaptcha) is deferred pending
+   * Cloudflare account + env wiring.
+   */
+  website: z.string().max(2000).optional(),
   /**
    * Optional wizard context payload — populated when the lead was
    * captured from inside /strategies/new/wizard. Stored on
@@ -323,8 +352,14 @@ export async function POST(req: NextRequest) {
       // saw one error at a time and had to fix-and-retry. G9.B.16.
       const fieldErrors: Record<string, string[]> = {};
       for (const issue of err.issues) {
-        const path = issue.path.join(".");
-        if (!path) continue;
+        // M-0320: a top-level issue (e.g. the body is a JSON array or a
+        // primitive, not an object) carries an empty `issue.path`.
+        // Pre-fix `if (!path) continue` silently dropped it, so the
+        // client received `{ error: "Invalid submission", fieldErrors:
+        // {} }` with nothing actionable to render. Bucket empty-path
+        // issues under a synthetic `_form` key so the root-level message
+        // survives to the client.
+        const path = issue.path.join(".") || "_form";
         const bucket = fieldErrors[path];
         if (bucket) {
           bucket.push(issue.message);
@@ -341,6 +376,33 @@ export async function POST(req: NextRequest) {
       { error: "Invalid JSON body" },
       { status: 400 },
     );
+  }
+
+  // Layer 3b — H-0270 honeypot short-circuit. `website` is a hidden
+  // field (see RequestCallModal) that a human form-filler never sees or
+  // touches; a non-empty value is a strong automated-submitter signal.
+  // Drop the lead with a SUCCESS-shaped 200 — insert nothing, email no
+  // one — so the bot believes it succeeded and does not escalate, while
+  // the operator still sees the trip in logs. Returning a 400 would tell
+  // the bot exactly which field to leave blank next time. This is the
+  // cheap layer; the rotation-proof control (Turnstile/hCaptcha, which
+  // residential-proxy + Origin spoofing can't defeat) is deferred
+  // pending Cloudflare infra. A legitimate caller that omits the field
+  // entirely (e.g. the wizard DesktopGate) is unaffected — `website` is
+  // optional and undefined never trips this branch.
+  if (parsed.website && parsed.website.trim().length > 0) {
+    // Fail-loud for OPS (silent only to the bot): log enough forensic
+    // context — email + IP + UA — that a real lead falsely dropped by an
+    // aggressive browser autofill is recoverable from logs. The honeypot
+    // VALUE itself is deliberately not logged (it could carry an injected
+    // payload). Specialist regression (silent-failure-hunter): the bare
+    // warn left a falsely-dropped lead with no recovery trail. Not routed
+    // to Sentry — bot trips are high-volume and would drown real alerts.
+    console.warn(
+      "[for-quants-lead] honeypot field populated — dropping lead silently",
+      { email: parsed.email, ip, ua: req.headers.get("user-agent") },
+    );
+    return NextResponse.json({ ok: true });
   }
 
   // Layer 4: service-role insert. Sanitize source_ip to a real INET value

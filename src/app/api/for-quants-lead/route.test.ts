@@ -912,4 +912,134 @@ describe("POST /api/for-quants-lead", () => {
       }
     });
   });
+
+  /**
+   * H-0270 — honeypot. The route accepts a hidden `website` field
+   * (RequestCallModal renders it off-screen) and treats a non-empty
+   * value as an automated-submitter signal: it drops the lead with a
+   * SUCCESS-shaped 200 (no DB insert, no founder email) so the bot
+   * believes it succeeded and never escalates, while the operator still
+   * sees the trip via console.warn. A 400 would teach the bot which
+   * field to skip. Fail-without-fix: removing the short-circuit lets the
+   * spam row through (dbState.inserted === 1) and fires the email.
+   */
+  describe("honeypot (H-0270)", () => {
+    it("drops a lead with a populated honeypot: 200 ok, NO insert, NO founder email, operator warn", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const { POST } = await import("./route");
+        const res = await POST(
+          makeRequest({ ...VALID_PAYLOAD, website: "http://spam.example" }),
+        );
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.ok).toBe(true);
+        // Load-bearing: no DB row written, no founder notification fired.
+        expect(dbState.inserted).toHaveLength(0);
+        await flushMicrotasks();
+        expect(emailState.sends).toBe(0);
+        // Fail-loud for ops, silent for the bot — AND the trip must carry
+        // forensic context (email) so a falsely-dropped real lead is
+        // recoverable from logs. Neuter: drop the context arg → undefined.
+        const honeypotWarn = warnSpy.mock.calls.find((args) =>
+          String(args[0]).includes("honeypot field populated"),
+        );
+        expect(honeypotWarn).toBeDefined();
+        expect((honeypotWarn![1] as { email?: string }).email).toBe(
+          VALID_PAYLOAD.email,
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("an empty honeypot does not block a legitimate lead", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest({ ...VALID_PAYLOAD, website: "" }));
+      expect(res.status).toBe(200);
+      expect(dbState.inserted).toHaveLength(1);
+    });
+
+    it("a whitespace-only honeypot is trimmed to empty → legitimate lead proceeds (no false positive)", async () => {
+      // A stray autofilled space must not cost a real founder lead. The
+      // route trims before testing, so "   " is treated as empty.
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest({ ...VALID_PAYLOAD, website: "   " }));
+      expect(res.status).toBe(200);
+      expect(dbState.inserted).toHaveLength(1);
+    });
+  });
+
+  /**
+   * M-0317 — wizard_context cross-correlation invariant. `step` and
+   * `wizard_session_id` are independently optional in the schema, but a
+   * step with no session id is a lead the funnel can never join back to
+   * its parent view/click events. The route now refines: a present step
+   * requires a session id. Fail-without-fix: removing the refine makes
+   * the no-session payload 200 again (and the broken funnel row lands).
+   */
+  describe("wizard_context step⇒session_id invariant (M-0317)", () => {
+    it("rejects wizard_context.step without wizard_session_id (400, nested fieldErrors key)", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeRequest({
+          ...VALID_PAYLOAD,
+          wizard_context: { step: "submit" },
+        }),
+      );
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(
+        body.fieldErrors["wizard_context.wizard_session_id"],
+      ).toBeDefined();
+      expect(dbState.inserted).toHaveLength(0);
+    });
+
+    it("accepts wizard_context with both step and a valid wizard_session_id (not over-rejected)", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeRequest({
+          ...VALID_PAYLOAD,
+          wizard_context: {
+            draft_strategy_id: null,
+            step: "submit",
+            wizard_session_id: "sess-1234",
+          },
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(dbState.inserted).toHaveLength(1);
+    });
+
+    it("accepts a null wizard_context (landing-page lead) — refine does not fire", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeRequest({ ...VALID_PAYLOAD, wizard_context: null }),
+      );
+      expect(res.status).toBe(200);
+      expect(dbState.inserted).toHaveLength(1);
+    });
+  });
+
+  /**
+   * M-0320 — top-level (empty-path) Zod issues must reach the client.
+   * A body that is a JSON array (not an object) produces a single issue
+   * with an empty path. Pre-fix `if (!path) continue` silently dropped
+   * it, so the client received `fieldErrors: {}` with nothing
+   * actionable. Post-fix it lands under a synthetic `_form` key.
+   * Fail-without-fix: reverting to the `continue` drop leaves
+   * fieldErrors empty.
+   */
+  describe("top-level Zod issues bucketed under _form (M-0320)", () => {
+    it("a JSON-array body surfaces a _form error instead of an empty fieldErrors", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest([]));
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.fieldErrors._form).toBeDefined();
+      expect(Array.isArray(body.fieldErrors._form)).toBe(true);
+      expect(body.fieldErrors._form.length).toBeGreaterThan(0);
+      expect(dbState.inserted).toHaveLength(0);
+    });
+  });
 });
