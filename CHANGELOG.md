@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.88] - 2026-06-03
+### Fixed — H1 (Lane 2): dispatch-audit freeze-survival + scope-tag truncation + panel code-split
+
+Three surgical HIGH-tier audit fixes from the 2026-06-03 reverify+triage sweep (48-agent reverify → 37-agent senior-judgment triage; this batch is the genuine-surgical, disjoint-from-Lane-1 subset). All in the frontend/messaging lane.
+
+- **H-0445 — `src/lib/email.ts`: notification-dispatch audit writes lost on a Vercel function freeze.** All three `void markDispatch(...)` fire-and-forget writes (the happy-path `'sent'` update + the two `'failed'` writes for Resend-not-configured and retries-exhausted) were bare floating promises. On Fluid Compute the instance can be reaped after the response flushes, dropping the write and stranding an already-sent/failed email's row at `'queued'` — the exact misleading `queued+age>threshold` operator signal the code's own comment warns about. New `scheduleDispatchAudit(run)` helper schedules each write via Next 16 `after()` (≈ Vercel `waitUntil`), which holds the instance until the write lands; outside a request scope (vitest/prerender) `after()` throws and we fall back to the prior bare fire-and-forget (byte-for-byte unchanged). Structurally mirrors `audit.ts`'s try-after/catch wrapper.
+- **H-0408 — `src/components/ui/ScopedBanner.tsx`: trust-critical scope tags silently truncated.** The title carried `truncate`, ellipsing a long partner scope tag (e.g. `acme-capital-management-pilot-2026`) on narrow viewports and breaking the banner's full-scope-identification promise. Swapped to `break-words` so it wraps; the parent already has `min-w-0`.
+- **H-1123 — `src/components/discovery/SimulateImpactButton.tsx`: 700-LOC panel in the first-paint bundle.** `PortfolioImpactPanel` (+ its chart renderers), mounted only on the user's first "Simulate Impact" click, was statically imported into the discovery/browse bundle. Code-split via `next/dynamic` (`ssr:false`, valid in this client component) with a `loading` backdrop so the click isn't a dead window during chunk download.
+
+Review: 6-lens specialist suite (code-reviewer, silent-failure-hunter, type-design-analyzer, pr-test-analyzer, security, performance) + a 3-angle fresh-context Claude red team. The red team caught a real gap — only the happy-path `after()` site was guarded — so the regression suite now pins **all three** `markDispatch` sites to the `after()` contract (each verified to fail when its site is neutered to bare `void`, Rule 9). New/updated tests: `email.test.ts` (3 H-0445 cases, collect-then-drain `after()` mock modelling real deferred semantics + `onTestFinished` cleanup), `ScopedBanner.test.tsx` (asserts no `truncate`), `SimulateImpactButton.test.tsx` (async lazy mount). tsc 0 / eslint 0 / 45 touched-file tests pass.
+
 ## [0.24.15.87] - 2026-06-03
 ### Fixed — H-0440: CSV header cells preserved verbatim (formula-sanitize only data cells)
 
