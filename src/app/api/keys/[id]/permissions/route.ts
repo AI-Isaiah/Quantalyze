@@ -49,6 +49,16 @@ interface PermissionPayload {
 }
 
 /**
+ * The cached payload carries an internal `_fetchedAt` epoch-ms stamp set at the
+ * moment the upstream fetch actually ran. Because unstable_cache memoizes the
+ * whole return value, a cache HIT replays the original `_fetchedAt` — so the
+ * handler can tell "this request triggered a real decrypt" (fresh) from "served
+ * from the 60s cache, no decrypt" (stale). Stripped before the response is
+ * serialized (M-0325).
+ */
+type CachedPermissionPayload = PermissionPayload & { _fetchedAt: number };
+
+/**
  * Fetch the live permission triple from the Python service. Wrapped in
  * unstable_cache so concurrent callers + repeat hits inside 5 minutes
  * collapse to a single upstream request.
@@ -58,7 +68,7 @@ interface PermissionPayload {
  */
 function makeCachedFetcher(keyId: string) {
   return unstable_cache(
-    async (): Promise<PermissionPayload> => {
+    async (): Promise<CachedPermissionPayload> => {
       const internalToken = process.env.INTERNAL_API_TOKEN;
       if (!internalToken) {
         throw new Error(
@@ -88,7 +98,10 @@ function makeCachedFetcher(keyId: string) {
         throw new Error(`Upstream ${res.status}`);
       }
 
-      return (await res.json()) as PermissionPayload;
+      const payload = (await res.json()) as PermissionPayload;
+      // M-0325: stamp the real decrypt time INSIDE the cached body so it is
+      // memoized with the value. A later cache hit returns this same stamp.
+      return { ...payload, _fetchedAt: Date.now() };
     },
     [`key-permissions:${keyId}`],
     { revalidate: 60, tags: [`key-permissions:${keyId}`] },
@@ -137,18 +150,26 @@ export const GET = withAuth(
 
     try {
       const fetcher = makeCachedFetcher(keyId);
-      const payload = await fetcher();
+      const cached = await fetcher();
+      const { _fetchedAt, ...payload } = cached;
 
-      // Sprint 6 Task 7.1a — audit the decrypt event. Each permissions
-      // probe causes the Python service to decrypt the stored credential
-      // to call the exchange (see migration 052 header). Fire-and-forget;
-      // does not affect response latency or success.
+      // Sprint 6 Task 7.1a — audit the decrypt event. M-0325: a real
+      // exchange-credential DECRYPT only happens on a cache MISS (when the
+      // fetcher body actually POSTs to the Python service; see migration 052
+      // header). The 60s Next-layer cache + the Python 15-min cache mean most
+      // probes inside that window decrypt NOTHING. Tag the audit row with
+      // whether THIS request triggered a decrypt — derived from whether the
+      // memoized `_fetchedAt` predates this request — so forensic
+      // "count decrypt events for key X" stops over-counting by the cache-hit
+      // ratio. Fire-and-forget; does not affect response latency or success.
+      const cacheHit = Date.now() - _fetchedAt > 1000;
       logAuditEvent(supabase, {
         action: "api_key.decrypt",
         entity_type: "api_key",
         entity_id: keyId,
         metadata: {
           route: "/api/keys/[id]/permissions",
+          cache_hit: cacheHit,
         },
       });
 

@@ -218,3 +218,56 @@ describe("GET /api/keys/[id]/permissions — probe_error pass-through", () => {
     expect(body.probe_error).toBe(false);
   });
 });
+
+describe("GET /api/keys/[id]/permissions — decrypt-audit cache honesty (M-0325)", () => {
+  // The audit row used to assert an unconditional decrypt on every GET, but a
+  // 60s Next-layer cache hit re-uses the prior probe and decrypts NOTHING.
+  // The route now stamps `_fetchedAt` inside the cached body and tags the
+  // audit metadata with `cache_hit` so forensic decrypt counts stay honest.
+  it("tags cache_hit:false and strips the internal _fetchedAt on a fresh probe (cache miss)", async () => {
+    STATE.fetcherImpl = async () => ({
+      read: true,
+      trade: false,
+      withdraw: false,
+      detected_at: "2026-04-16T00:00:00Z",
+      _fetchedAt: Date.now(), // just fetched → real decrypt happened
+    });
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    // The internal stamp must never leak into the response body.
+    expect(body._fetchedAt).toBeUndefined();
+    expect(body.read).toBe(true);
+
+    await drainAuditMicrotasks();
+    const audit = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
+    expect(audit).toBeDefined();
+    expect(audit!.args.p_metadata).toMatchObject({
+      route: "/api/keys/[id]/permissions",
+      cache_hit: false,
+    });
+  });
+
+  it("tags cache_hit:true when the memoized payload predates the request — no phantom decrypt logged", async () => {
+    STATE.fetcherImpl = async () => ({
+      read: true,
+      trade: false,
+      withdraw: false,
+      detected_at: "2026-04-16T00:00:00Z",
+      _fetchedAt: Date.now() - 5000, // served from cache 5s later → no decrypt
+    });
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body._fetchedAt).toBeUndefined();
+
+    await drainAuditMicrotasks();
+    const audit = STATE.rpcCalls.find((c) => c.name === "log_audit_event");
+    expect(audit).toBeDefined();
+    expect(audit!.args.p_metadata).toMatchObject({ cache_hit: true });
+  });
+});
