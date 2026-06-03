@@ -1836,3 +1836,137 @@ describe("NEW-C18-06 — drawer recomputes size_at_decision_usd from edited perc
     vi.unstubAllGlobals();
   });
 });
+
+// ===========================================================================
+// M-0095 / M-0094 — per-row audit input is bound to the diff's STABLE identity
+// (diffKey), not its array position, so a `diffs` reorder while the drawer is
+// open cannot rebind a note/reason to the wrong row (and the persistent
+// bridge_outcomes audit metadata stays correct). The render loops also drop the
+// O(N²) `diffs.indexOf(d)` (M-0094). The production composer freezes its
+// commitDiffs snapshot so this reorder isn't reachable today; these tests pin
+// the drawer's reorder-safe CONTRACT directly via a prop reorder.
+// ===========================================================================
+describe("M-0095 — per-row audit input follows diff identity across a reorder", () => {
+  const BTC: ScenarioCommitDiff = {
+    kind: "voluntary_remove",
+    holding_ref: "holding:binance:BTC:spot",
+    size_at_decision_usd: 1000,
+  };
+  const ETH: ScenarioCommitDiff = {
+    kind: "voluntary_remove",
+    holding_ref: "holding:binance:ETH:spot",
+    size_at_decision_usd: 500,
+  };
+
+  const rowByRef = (container: HTMLElement, ref: string) =>
+    Array.from(container.querySelectorAll("li")).find((li) =>
+      li.textContent?.includes(ref),
+    ) as HTMLLIElement;
+
+  it("a typed note tracks its diff (not the array slot) after the diffs reorder", () => {
+    const { rerender, container } = render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[BTC, ETH]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    const btcNote = container.querySelector(
+      'li[data-diff-index="0"] textarea',
+    ) as HTMLTextAreaElement;
+    fireEvent.change(btcNote, { target: { value: "exit BTC — thesis broke" } });
+
+    // Reorder the diffs while the drawer stays open (isOpen never flips, so
+    // perRow is NOT reset).
+    rerender(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[ETH, BTC]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+
+    // BTC is now at array index 1, but its note must still read back; the ETH
+    // row (now index 0) must NOT have inherited it. With the pre-fix index
+    // keying the value would have stayed on the slot and swapped onto ETH.
+    expect(
+      (rowByRef(container, "BTC").querySelector("textarea") as HTMLTextAreaElement)
+        .value,
+    ).toBe("exit BTC — thesis broke");
+    expect(
+      (rowByRef(container, "ETH").querySelector("textarea") as HTMLTextAreaElement)
+        .value,
+    ).toBe("");
+  });
+
+  it("the committed POST body ships each note with its own holding after a reorder (audit metadata not swapped)", async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string, _init: { method: string; body: string }) =>
+        new Response(
+          JSON.stringify({
+            recorded: 2,
+            results: [{ index: 0 }, { index: 1 }],
+            errors: [],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { rerender, container } = render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[BTC, ETH]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    // Fill both reasons (allFilled gate) + DISTINCT notes per holding.
+    fireEvent.change(screen.getByTestId("commit-rejection-0"), {
+      target: { value: "underperforming_peers" },
+    });
+    fireEvent.change(screen.getByTestId("commit-rejection-1"), {
+      target: { value: "underperforming_peers" },
+    });
+    fireEvent.change(
+      container.querySelector('li[data-diff-index="0"] textarea') as HTMLTextAreaElement,
+      { target: { value: "btc-note" } },
+    );
+    fireEvent.change(
+      container.querySelector('li[data-diff-index="1"] textarea') as HTMLTextAreaElement,
+      { target: { value: "eth-note" } },
+    );
+
+    // Reorder, then submit.
+    rerender(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[ETH, BTC]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    const btcOut = body.diffs.find((d: { holding_ref?: string }) =>
+      d.holding_ref?.includes("BTC"),
+    );
+    const ethOut = body.diffs.find((d: { holding_ref?: string }) =>
+      d.holding_ref?.includes("ETH"),
+    );
+    // The note must travel with its holding, not the (reordered) array slot —
+    // pre-fix index keying swaps these onto the wrong bridge_outcome.
+    expect(btcOut.note).toBe("btc-note");
+    expect(ethOut.note).toBe("eth-note");
+
+    vi.unstubAllGlobals();
+  });
+});

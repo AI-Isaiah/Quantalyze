@@ -30,8 +30,37 @@ import {
   REJECTION_REASON_LABELS,
   type RejectionReason,
 } from "@/lib/bridge-outcome-schema";
-import type { ScenarioCommitDiff } from "./ScenarioComposer";
+import type {
+  ScenarioCommitDiff,
+  VoluntaryRemoveDiff,
+  VoluntaryAddDiff,
+  VoluntaryModifyDiff,
+  BridgeRecommendedDiff,
+} from "./ScenarioComposer";
 import { captureToSentry } from "@/lib/sentry-capture";
+
+// M-0095 / M-0094: a STABLE, position-independent identity for a diff row. The
+// drawer's per-row inputs (rejection_reason / percent_allocated / note) feed the
+// persistent `bridge_outcomes` audit trail, so binding them to a diff's ARRAY
+// INDEX is fragile — if `diffs` ever reorders while the drawer is open, every
+// note/reason silently rebinds to the wrong row. Today that reorder is
+// unreachable (the composer freezes `commitDiffs` at handleCommit time and the
+// backdrop closes the drawer — which resets perRow — before a re-commit), but
+// keying perRow by content identity removes the fragility AND lets the render
+// loops drop the O(N²) `diffs.indexOf(d)` (M-0094). Each (kind, target) appears
+// at most once per commit batch — the composer emits one diff per holding_ref /
+// strategy_id per kind — so this is unique within a batch and survives reorder.
+function diffKey(d: ScenarioCommitDiff): string {
+  switch (d.kind) {
+    case "voluntary_remove":
+    case "voluntary_modify":
+      return `${d.kind}:${d.holding_ref}`;
+    case "voluntary_add":
+      return `${d.kind}:${d.strategy_id}`;
+    case "bridge_recommended":
+      return `${d.kind}:${d.holding_ref}:${d.strategy_id}`;
+  }
+}
 
 // pr189-followup M13 (type-design-analyzer MED/8) — narrow
 // `rejection_reason` from `string?` to the `RejectionReason` enum so the
@@ -141,7 +170,9 @@ export function ScenarioCommitDrawer({
   initHoldingsFingerprint = null,
 }: ScenarioCommitDrawerProps) {
   const [state, setState] = useState<SubmitState>({ kind: "idle" });
-  const [perRow, setPerRow] = useState<Record<number, PerRowState>>({});
+  // M-0095: keyed by diffKey(d) (stable diff identity), NOT array index, so a
+  // reorder of `diffs` can't rebind a row's audit input to the wrong diff.
+  const [perRow, setPerRow] = useState<Record<string, PerRowState>>({});
   const drawerRef = useRef<HTMLDivElement>(null);
   const errorBannerRef = useRef<HTMLDivElement>(null);
   const preflightModalRef = useRef<HTMLDivElement>(null);
@@ -243,11 +274,31 @@ export function ScenarioCommitDrawer({
 
   if (!isOpen) return null;
 
-  const removed = diffs.filter((d) => d.kind === "voluntary_remove");
-  const added = diffs.filter(
-    (d) => d.kind === "voluntary_add" || d.kind === "bridge_recommended",
+  // M-0094/M-0095: index `diffs` once (O(N)) so each render group carries the
+  // diff's array index `i` (for server-error matching, which is index-keyed)
+  // AND its stable `key` (for perRow + the React key) — replacing the per-row
+  // O(N²) `diffs.indexOf(d)` the three sections used to call.
+  const indexed = diffs.map((d, i) => ({ d, i, key: diffKey(d) }));
+  // Type-predicate filters so each group keeps its discriminated-union
+  // narrowing (a plain boolean predicate on `x.d.kind` would leave `x.d` as the
+  // wide union and break `d.holding_ref` / `d.strategy_id` access below).
+  const removed = indexed.filter(
+    (x): x is { d: VoluntaryRemoveDiff; i: number; key: string } =>
+      x.d.kind === "voluntary_remove",
   );
-  const modified = diffs.filter((d) => d.kind === "voluntary_modify");
+  const added = indexed.filter(
+    (
+      x,
+    ): x is {
+      d: VoluntaryAddDiff | BridgeRecommendedDiff;
+      i: number;
+      key: string;
+    } => x.d.kind === "voluntary_add" || x.d.kind === "bridge_recommended",
+  );
+  const modified = indexed.filter(
+    (x): x is { d: VoluntaryModifyDiff; i: number; key: string } =>
+      x.d.kind === "voluntary_modify",
+  );
   const response = state.kind === "success" || state.kind === "failure" ? state.response : null;
   // Errors whose `index` doesn't match a real diff row (e.g. index === -1
   // for network/parse failures) would otherwise be invisible — the per-row
@@ -302,7 +353,7 @@ export function ScenarioCommitDrawer({
   const allFilled = (() => {
     for (let i = 0; i < diffs.length; i++) {
       const d = diffs[i];
-      const r = perRow[i];
+      const r = perRow[diffKey(d)];
       if (d.kind === "voluntary_remove") {
         if (
           !r?.rejection_reason ||
@@ -325,13 +376,16 @@ export function ScenarioCommitDrawer({
     return true;
   })();
 
-  function setRow(idx: number, patch: PerRowState) {
-    setPerRow((prev) => ({ ...prev, [idx]: { ...prev[idx], ...patch } }));
+  function setRow(key: string, patch: PerRowState) {
+    setPerRow((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
   }
 
   function buildSubmitDiffs(): ScenarioCommitDiff[] {
-    return diffs.map((d, i) => {
-      const r = perRow[i] ?? {};
+    // Emitted in `diffs` array order, so the submitted index matches the
+    // server's index-keyed error/result response. Per-row input is read by
+    // stable diffKey, not position.
+    return diffs.map((d) => {
+      const r = perRow[diffKey(d)] ?? {};
       const note = r.note && r.note.length > 0 ? r.note : undefined;
       // retro audit (type-design-analyzer): branch on kind so the
       // discriminated union narrows correctly. Pre-narrowing the assigns
@@ -804,13 +858,12 @@ export function ScenarioCommitDrawer({
                   </div>
                 </div>
                 <ul className="mt-3 grid gap-3">
-                  {removed.map((d) => {
-                    const idx = diffs.indexOf(d);
+                  {removed.map(({ d, i: idx, key }) => {
                     const err = rowMatchedErrors.get(idx);
-                    const row = perRow[idx] ?? {};
+                    const row = perRow[key] ?? {};
                     return (
                       <li
-                        key={`r-${idx}`}
+                        key={key}
                         className="rounded-lg border border-border p-3"
                         data-diff-index={idx}
                       >
@@ -835,7 +888,7 @@ export function ScenarioCommitDrawer({
                                 // allFilled() check at L260 re-validates the
                                 // invariant defensively.
                                 const next = e.target.value as RejectionReason;
-                                setRow(idx, { rejection_reason: next });
+                                setRow(key, { rejection_reason: next });
                               }}
                               className="rounded border border-border bg-surface px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50"
                               aria-label={`Why not? (${d.holding_ref})`}
@@ -860,7 +913,7 @@ export function ScenarioCommitDrawer({
                               maxLength={2000}
                               value={row.note ?? ""}
                               onChange={(e) =>
-                                setRow(idx, { note: e.target.value })
+                                setRow(key, { note: e.target.value })
                               }
                               className="w-full rounded border border-border bg-surface px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50 resize-none"
                             />
@@ -893,13 +946,12 @@ export function ScenarioCommitDrawer({
                   </div>
                 </div>
                 <ul className="mt-3 grid gap-3">
-                  {added.map((d) => {
-                    const idx = diffs.indexOf(d);
+                  {added.map(({ d, i: idx, key }) => {
                     const err = rowMatchedErrors.get(idx);
-                    const row = perRow[idx] ?? {};
+                    const row = perRow[key] ?? {};
                     return (
                       <li
-                        key={`a-${idx}`}
+                        key={key}
                         className="rounded-lg border border-border p-3"
                         data-diff-index={idx}
                       >
@@ -920,7 +972,7 @@ export function ScenarioCommitDrawer({
                               value={row.percent_allocated ?? ""}
                               onChange={(e) => {
                                 const v = e.target.value;
-                                setRow(idx, {
+                                setRow(key, {
                                   percent_allocated:
                                     v === "" ? undefined : Number(v),
                                 });
@@ -939,7 +991,7 @@ export function ScenarioCommitDrawer({
                               maxLength={2000}
                               value={row.note ?? ""}
                               onChange={(e) =>
-                                setRow(idx, { note: e.target.value })
+                                setRow(key, { note: e.target.value })
                               }
                               className="w-full rounded border border-border bg-surface px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50 resize-none"
                             />
@@ -971,13 +1023,12 @@ export function ScenarioCommitDrawer({
                   </div>
                 </div>
                 <ul className="mt-3 grid gap-3">
-                  {modified.map((d) => {
-                    const idx = diffs.indexOf(d);
+                  {modified.map(({ d, i: idx, key }) => {
                     const err = rowMatchedErrors.get(idx);
-                    const row = perRow[idx] ?? {};
+                    const row = perRow[key] ?? {};
                     return (
                       <li
-                        key={`m-${idx}`}
+                        key={key}
                         className="rounded-lg border border-border p-3"
                         data-diff-index={idx}
                       >
@@ -995,7 +1046,7 @@ export function ScenarioCommitDrawer({
                               maxLength={2000}
                               value={row.note ?? ""}
                               onChange={(e) =>
-                                setRow(idx, { note: e.target.value })
+                                setRow(key, { note: e.target.value })
                               }
                               className="w-full rounded border border-border bg-surface px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50 resize-none"
                             />
