@@ -51,6 +51,7 @@ vi.mock("@/lib/csrf", () => ({
 vi.mock("@/lib/ratelimit", () => ({
   publicIpLimiter: null,
   userActionLimiter: null,
+  keysSyncUserLimiter: null,
   csvValidateLimiter: null,
   checkLimit: async () => rateLimitResult,
   getClientIp: () => "127.0.0.1",

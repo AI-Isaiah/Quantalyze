@@ -41,9 +41,27 @@ vi.mock("@/lib/analytics-client", () => ({
 }));
 
 const rpcMock = vi.fn();
+// F6 pre-Railway idempotency fence: the route does
+// `from("strategies").select(...).eq("user_id").eq("wizard_session_id").maybeSingle()`
+// BEFORE validate/encrypt. Default to "no existing draft" so the existing
+// happy-path tests still exercise the full Railway + RPC flow; the fence tests
+// below override draftLookupMock with `mockResolvedValueOnce`.
+const draftLookupMock = vi.fn(async () => ({ data: null, error: null }) as {
+  data: { id: string; api_key_id: string } | null;
+  error: null;
+});
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     rpc: (...args: unknown[]) => rpcMock(...args),
+    from: () => ({
+      select: () => ({
+        eq: () => ({
+          eq: () => ({
+            maybeSingle: () => draftLookupMock(),
+          }),
+        }),
+      }),
+    }),
   }),
 }));
 
@@ -286,6 +304,74 @@ describe("POST /api/strategies/create-with-key — P467 scope-rejection paths", 
     expect(encryptKeyMock).not.toHaveBeenCalled();
     expect(rpcMock).not.toHaveBeenCalled();
     consoleErr.mockRestore();
+  });
+});
+
+/**
+ * F6 (H-0304/H-0311) — pre-Railway idempotency fence. A double-submit or
+ * browser retry carrying the same wizard_session_id must NOT spin a second
+ * live-exchange validate + key encryption; the route returns the existing
+ * draft instead. Pins that the fence short-circuits BEFORE validateKey /
+ * encryptKey / the create_wizard_strategy RPC.
+ */
+describe("POST /api/strategies/create-with-key — idempotency fence (F6 H-0304/H-0311)", () => {
+  beforeEach(() => {
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    draftLookupMock.mockReset();
+    // Default: no existing draft (overridden per-test).
+    draftLookupMock.mockResolvedValue({ data: null, error: null });
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+    encryptKeyMock.mockResolvedValue({
+      api_key_encrypted: "encrypted-blob-base64",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: null,
+      nonce: null,
+      kek_version: 1,
+    });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+  });
+
+  it("returns the existing draft and skips Railway validate+encrypt+RPC when a draft already exists for this (user, wizard_session_id)", async () => {
+    draftLookupMock.mockResolvedValueOnce({
+      data: { id: STRATEGY_ID, api_key_id: API_KEY_ID },
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({
+      ok: true,
+      strategy_id: STRATEGY_ID,
+      api_key_id: API_KEY_ID,
+    });
+    // The whole point: the expensive/charged work never ran on the replay.
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("proceeds to validate+encrypt+RPC on the first submit (no existing draft)", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    // Fence consulted, found nothing → full flow runs exactly once.
+    expect(validateKeyMock).toHaveBeenCalledTimes(1);
+    expect(encryptKeyMock).toHaveBeenCalledTimes(1);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
   });
 });
 

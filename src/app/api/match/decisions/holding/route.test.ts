@@ -44,6 +44,9 @@ vi.mock("@/lib/api/withAuth", () => ({
 const mockHoldingSelectSingle = vi.fn();
 const mockStrategySelectSingle = vi.fn();
 const mockDecisionInsertSingle = vi.fn();
+// F6 (H-0436): the 23505 idempotent-replay branch looks up the existing
+// sent_as_intro decision via admin.from("match_decisions").select(...).eq×3.maybeSingle().
+const mockDecisionExistingMaybeSingle = vi.fn();
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
@@ -93,6 +96,16 @@ vi.mock("@/lib/supabase/admin", () => ({
           insert: (row: unknown) => ({
             select: () => ({
               single: () => mockDecisionInsertSingle(row),
+            }),
+          }),
+          // F6 (H-0436): existing-decision lookup on the 23505 replay path.
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                eq: () => ({
+                  maybeSingle: () => mockDecisionExistingMaybeSingle(),
+                }),
+              }),
             }),
           }),
         };
@@ -246,6 +259,98 @@ describe("POST /api/match/decisions/holding — happy path", () => {
 // ---------------------------------------------------------------------------
 // F9 H-0084 — server-side cancellation honoring
 // ---------------------------------------------------------------------------
+
+describe("POST /api/match/decisions/holding — idempotent replay on 23505 (F6 H-0436)", () => {
+  it("returns the existing decision id (200) without re-auditing when uniq_match_dec_sent_per_pair rejects a duplicate", async () => {
+    mockHoldingSelectSingle.mockResolvedValueOnce({
+      data: { id: "holding-row-id" },
+      error: null,
+    });
+    mockStrategySelectSingle.mockResolvedValueOnce({
+      data: { id: "11111111-2222-4333-8444-555555555555" },
+      error: null,
+    });
+    // The insert hits the partial-unique index → 23505 (the row already exists
+    // from a first, perceived-failed attempt).
+    mockDecisionInsertSingle.mockResolvedValueOnce({
+      data: null,
+      error: { code: "23505", message: "duplicate key value" },
+    });
+    mockDecisionExistingMaybeSingle.mockResolvedValueOnce({
+      data: { id: "existing-dec-uuid" },
+      error: null,
+    });
+
+    const res = await POST(
+      mkReq({
+        holding_ref: "holding:binance:BTC:spot",
+        top_candidate_strategy_id: "11111111-2222-4333-8444-555555555555",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.match_decision_id).toBe("existing-dec-uuid");
+    // Replay must NOT emit a second audit event — the original insert already did.
+    expect(logAuditEventAsUser).not.toHaveBeenCalled();
+  });
+
+  it("23505 but the existing-decision lookup returns null → 500, no undefined id leaked", async () => {
+    mockHoldingSelectSingle.mockResolvedValueOnce({
+      data: { id: "holding-row-id" },
+      error: null,
+    });
+    mockStrategySelectSingle.mockResolvedValueOnce({
+      data: { id: "11111111-2222-4333-8444-555555555555" },
+      error: null,
+    });
+    mockDecisionInsertSingle.mockResolvedValueOnce({
+      data: null,
+      error: { code: "23505", message: "duplicate key value" },
+    });
+    // The replay lookup faults / races (row gone) — must NOT return a 200 with
+    // an undefined match_decision_id; must fall through to 500.
+    mockDecisionExistingMaybeSingle.mockResolvedValueOnce({
+      data: null,
+      error: null,
+    });
+
+    const res = await POST(
+      mkReq({
+        holding_ref: "holding:binance:BTC:spot",
+        top_candidate_strategy_id: "11111111-2222-4333-8444-555555555555",
+      }),
+    );
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.match_decision_id).toBeUndefined();
+    expect(logAuditEventAsUser).not.toHaveBeenCalled();
+  });
+
+  it("still 500s on a non-23505 insert error (no silent swallow)", async () => {
+    mockHoldingSelectSingle.mockResolvedValueOnce({
+      data: { id: "holding-row-id" },
+      error: null,
+    });
+    mockStrategySelectSingle.mockResolvedValueOnce({
+      data: { id: "11111111-2222-4333-8444-555555555555" },
+      error: null,
+    });
+    mockDecisionInsertSingle.mockResolvedValueOnce({
+      data: null,
+      error: { code: "42P01", message: "relation does not exist" },
+    });
+
+    const res = await POST(
+      mkReq({
+        holding_ref: "holding:binance:BTC:spot",
+        top_candidate_strategy_id: "11111111-2222-4333-8444-555555555555",
+      }),
+    );
+    expect(res.status).toBe(500);
+    expect(mockDecisionExistingMaybeSingle).not.toHaveBeenCalled();
+  });
+});
 
 describe("POST /api/match/decisions/holding — abort honoring (F9 H-0084)", () => {
   it("returns 499 and does NOT insert/audit when the request is already aborted", async () => {

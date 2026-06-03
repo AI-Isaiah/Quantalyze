@@ -117,6 +117,47 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
+  // F6 (H-0304/H-0311): idempotency fence BEFORE the expensive Railway
+  // validate+encrypt. wizard_session_id is the client's stable idempotency
+  // token (localStorage; regenerated only on an explicit draft delete). If a
+  // draft already exists for this (user, session) — a double-click or browser
+  // retry — return it immediately and skip the duplicate live-exchange
+  // validate + key encryption, which otherwise burns the user's Railway probe
+  // budget AND the exchange's per-key validate quota on every retry. The DB
+  // layer (create_wizard_strategy's advisory-lock + select-existing fence and
+  // the strategies_user_wizard_session_uniq backstop) still guarantees no
+  // duplicate rows even if two first-time submits race past this check.
+  const supabase = await createClient();
+  const { data: existingDraft, error: existingDraftErr } = await supabase
+    .from("strategies")
+    .select("id, api_key_id")
+    .eq("user_id", user.id)
+    .eq("wizard_session_id", wizard_session_id)
+    .maybeSingle();
+  if (existingDraftErr) {
+    // Fence read failed — fall through to the RPC (whose advisory-lock +
+    // select-existing fence still dedups, so no duplicate draft results), but
+    // surface that the cheap pre-Railway short-circuit went dark so a
+    // persistent read fault is debuggable instead of silently re-charging
+    // Railway validate+encrypt on every retry (Rule 12 / the file's own
+    // console.error convention).
+    console.error(
+      "[strategies/create-with-key] idempotency fence SELECT failed; proceeding to RPC (DB fence still dedups):",
+      existingDraftErr.message,
+      existingDraftErr.code,
+    );
+  }
+  if (existingDraft?.id && existingDraft.api_key_id) {
+    return NextResponse.json(
+      {
+        ok: true,
+        strategy_id: existingDraft.id,
+        api_key_id: existingDraft.api_key_id,
+      },
+      { headers: NO_STORE_HEADERS },
+    );
+  }
+
   const exchangeNormalized = exchange.toLowerCase();
   const passphraseOrNull =
     typeof passphrase === "string" && passphrase.length > 0 ? passphrase : null;
@@ -187,7 +228,6 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       );
     }
 
-    const supabase = await createClient();
     // The generated types declare these RPC params as non-null strings, but
     // the underlying SQL function (per migration 031 + the envelope-encryption
     // contract above) accepts nulls for api_secret/passphrase/dek/nonce.

@@ -3,12 +3,13 @@ import { fetchTrades, computeAnalytics } from "@/lib/analytics-client";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, keysSyncUserLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEventAsUser } from "@/lib/audit";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import { isUuid } from "@/lib/utils";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -59,7 +60,38 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     return NextResponse.json({ error: "Missing strategy_id" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
-  const rl = await checkLimit(userActionLimiter, `keys-sync:${user.id}`);
+  // F6 (code-review): reject a malformed strategy_id BEFORE it becomes the
+  // limiter bucket key, so the per-(user, strategy) keyspace is bounded to real
+  // UUIDs — an attacker can't mint unlimited throwaway buckets (each with a
+  // fresh allowance + an ownership SELECT) from arbitrary strings. A
+  // valid-but-unowned id still gets the uniform 404 below (P458, no existence leak).
+  if (!isUuid(strategy_id)) {
+    return NextResponse.json({ error: "Invalid strategy_id" }, { status: 400, headers: NO_STORE_HEADERS });
+  }
+
+  // F6 (M-0327/H-0279): two-tier rate limit.
+  //  (1) A per-user AGGREGATE ceiling caps total endpoint volume so an
+  //      authenticated caller can't bypass the limit by varying strategy_id
+  //      across unbounded UUIDs (red-team) — checked first so probing is capped
+  //      before it can spend a per-strategy bucket or an ownership SELECT.
+  //  (2) A per-(user, strategy) bucket gives each strategy its own throughput,
+  //      so one allocator's concurrent resyncs don't starve each other and a
+  //      foreign strategy_id (CSRF/probe on a victim's session) can only exhaust
+  //      its own throwaway bucket, never the victim's owned-strategy buckets.
+  // A per-user-ONLY bucket (the pre-F6 `keys-sync:${user.id}`) had the
+  // starvation + cross-strategy-burn problem; a per-strategy-ONLY bucket
+  // removed the per-user ceiling. Both together close both holes.
+  const userRl = await checkLimit(keysSyncUserLimiter, `keys-sync-user:${user.id}`);
+  if (!userRl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(userRl.retryAfter) } },
+    );
+  }
+  const rl = await checkLimit(
+    userActionLimiter,
+    `keys-sync:${user.id}:${strategy_id}`,
+  );
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests" },
