@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.24.15.111] - 2026-06-04
+### Fixed — api/** route hygiene (combined PR-1+PR-2): 7 audit findings closed
+
+Combined the planned api-security and api-contract batches into one cross-surface PR (both former coordination blockers — prC admin, prD charts — had landed). Adversarial reverify (workflow `wa4vnafum`) of all 18 candidate findings against live code → **8 reverify-closed** (premise refuted / structurally impossible / fixing would regress a shipped decision), **3 kept as genuine-but-blocked defers**, **7 genuine-open fixed here**:
+
+- **M-1140 / M-1141** — `PATCH /api/notes` was the only mutating route with no rate limiter, combined with an unbounded `z.string()` body (~6 GB/hr write vector). Added `notesUpsertLimiter` (30/min), `content: z.string().max(120_000)`, and a `content-length > 200 KB` → 413 precheck before `request.json()`. The limiter sits AFTER body validation (B15 canonical `auth → validate → limit` order; the limiter-ordering test classifies the route CANONICAL).
+- **M-0325** — `api_key.decrypt` audit fired on every GET, including 60s `unstable_cache` HITs that decrypt nothing. Now derives `cache_hit` from a request-local `didDecrypt` closure flag set only when the cached body runs — exact (no wall-clock heuristic), correct on the stale-revalidation path too. Forensic decrypt counts are now honest.
+- **M-0301** — `bridge/outcome/[id]/curves` returned `[]` silently when a strategy's cumulative NAV at the rebase anchor was non-positive (a data-quality anomaly indistinguishable from no-data); now emits a stderr breadcrumb (no response-shape change).
+- **M-0914 / M-1004** — corrected operator-facing cron-cadence docstring drift (`sync-funding` "every 4 hours" and `warm-analytics` "every 5 minutes" → the actual daily schedules) across the route docstrings + adr-0008 / adr-0021.
+- **H-0317** — deleted the dead `GET /api/strategies/draft` route (zero callers; the wizard resume loads its draft server-side via `initialDraft`) + co-located test; pruned the stale no-store-coverage (34→33) and limiter-ordering manifest entries. User-approved dead-code gate.
+
+6-lens specialist suite (0 critical/high, clean security lens) → applied the convergent type-design finding (deterministic decrypt-detect) + perf/edge hardening → Claude red-team (4 attack lenses, **SHIP** on all). Every new guard Rule-9 neuter-verified. `tsc`/`eslint` clean.
+
 ## [0.24.15.110] - 2026-06-03
 ### Removed — dead-code cleanup: UndoToast + OutcomesWidget `__error` branch (user-approved)
 
