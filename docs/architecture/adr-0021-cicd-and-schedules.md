@@ -31,7 +31,7 @@ Current schedules (from `vercel.json`):
 ```json
 {
   "crons": [
-    { "path": "/api/cron/warm-analytics", "schedule": "*/5 * * * *" },
+    { "path": "/api/cron/warm-analytics", "schedule": "0 0 * * *" },
     { "path": "/api/alert-digest", "schedule": "0 9 * * *" }
   ]
 }

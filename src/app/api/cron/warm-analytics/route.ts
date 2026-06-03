@@ -2,17 +2,23 @@ import { NextRequest, NextResponse } from "next/server";
 import { safeCompare } from "@/lib/timing-safe-compare";
 
 /**
- * Vercel Cron — pings the Python analytics service /health every 5 minutes
- * so the friend's forwarded /demo URL never lands on a cold-started worker.
+ * Vercel Cron — pings the Python analytics service /health daily (00:00 UTC)
+ * so the friend's forwarded /demo URL is less likely to land on a cold-started
+ * worker. (Was a 5-minute cadence until the 2026-04-10 Hobby-plan downgrade
+ * to daily; see docs/runbooks/vercel-cron-upgrade.md. The route is also kept
+ * out of src/__tests__/vercel-cron-limits.test.ts's SUB_DAILY_ALLOWLIST, so
+ * the schedule cannot regress back to a sub-daily cadence without that guard
+ * failing.)
  *
  * Vercel Cron dispatches an HTTP GET (not POST) to the configured path with
  * a `Bearer ${CRON_SECRET}` header. We accept both verbs so the route also
  * works for manual curl-based health probes during incident response.
  *
  * Why a cron AND a per-request warmup?
- *   - Cron keeps the service warm during idle hours (belt).
- *   - Per-request warmup (`src/lib/warmup-analytics.ts`) closes the gap if
- *     the cron last ran > 5 min ago (suspenders).
+ *   - Cron is a once-daily safety net for the idle case (belt).
+ *   - Per-request warmup (`src/lib/warmup-analytics.ts`), fired on demo-page
+ *     render, is the actual hot-keeping mechanism between cron ticks
+ *     (suspenders) — and on daily cadence it does essentially all the work.
  *
  * Schedule + secret: see `vercel.json`.
  */
