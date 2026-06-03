@@ -62,7 +62,33 @@ function textColorForCorr(v: number): string {
 
 interface StrategyReturns {
   name: string;
-  values: number[];
+  // M-0215: keep dates so pairwise correlation aligns same-day returns.
+  // normalizeDailyReturns returns date-sorted points, so `dates` is sorted.
+  dates: string[];
+  dateMap: Map<string, number>;
+}
+
+/**
+ * M-0215: extract the two return arrays for a strategy pair restricted to the
+ * dates BOTH strategies report, in a single shared order — so `pearson`
+ * correlates same-calendar-day returns instead of pairing by raw array index
+ * (which mis-correlates whenever two strategies have different start dates or
+ * gaps). Mirrors RiskDecomposition.buildCovMatrix's common-date alignment.
+ */
+function alignedPair(
+  a: StrategyReturns,
+  b: StrategyReturns,
+): [number[], number[]] {
+  const av: number[] = [];
+  const bv: number[] = [];
+  for (const d of a.dates) {
+    const bVal = b.dateMap.get(d);
+    if (bVal !== undefined) {
+      av.push(a.dateMap.get(d)!);
+      bv.push(bVal);
+    }
+  }
+  return [av, bv];
 }
 
 function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
@@ -107,7 +133,13 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
             s?.strategy?.name ??
             "?"
           ).slice(0, 10);
-          strategies.push({ name, values: dr.map((d: DailyPoint) => d.value) });
+          const dates: string[] = [];
+          const dateMap = new Map<string, number>();
+          for (const d of dr as DailyPoint[]) {
+            dates.push(d.date);
+            dateMap.set(d.date, d.value);
+          }
+          strategies.push({ name, dates, dateMap });
         }
       }
     }
@@ -116,9 +148,11 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
 
     const n = strategies.length;
     const m: number[][] = Array.from({ length: n }, (_, i) =>
-      Array.from({ length: n }, (_, j) =>
-        i === j ? 1 : pearson(strategies[i].values, strategies[j].values),
-      ),
+      Array.from({ length: n }, (_, j) => {
+        if (i === j) return 1;
+        const [av, bv] = alignedPair(strategies[i], strategies[j]);
+        return pearson(av, bv);
+      }),
     );
     return { names: strategies.map((s) => s.name), matrix: m };
   }, [data]);

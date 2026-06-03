@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.106] - 2026-06-03
+### Fixed — PR-A: Allocations dashboard MEDIUM/LOW sweep (4 genuine fixes)
+
+First of four directory-aligned Lane-2 PRs that open the allocations dashboard surface and close its MEDIUM/LOW findings. A per-file reverify fan-out (15 agents) over ~21 findings isolated **4 genuine live defects**; the remaining ~14 reverified as sound declines (stale / speculative-scale perf / already-fixed / unifying-abstraction per the B14/B16/B17/M-0979 precedent) and were folded from the backlog.
+
+- **M-0086 [MED] label-truth** — `KpiStrip`'s Sharpe cell hardcoded the sub-copy `"12-month risk-adjusted return"`, but the displayed value is `computeScenario`'s annualized Sharpe over the **selected timeframe / full holdings history** (`scenario.ts`), never a fixed trailing 12 months. Relabelled to `"risk-adjusted return (selected period)"` — an honest window-copy parallel to the file's existing Avg ρ honest-pending fix. Regression test (neuter-verified: fails when reverted to the false label).
+- **M-0174 [MED] wrong regime label** — `RegimeDetector` built its composite from an **unweighted** `sum/count` mean across strategies, so the Bull/Bear/Range-bound label reflected an equal-weight benchmark, not the allocator's actual weighted portfolio (one 90%-weight winner among nine 1%-weight losers would show the losers' regime). Now uses the shared weighted `buildCompositeReturns` (per-date renormalized, F2 H-0158) like its sibling risk widgets (TailRisk / VarExpectedShortfall / RiskDecomposition). Regression tests: a 0.9/0.1 weighted fixture (resolves to Bull, not the flat equal-weight Range-bound) + a directly-injected `compositeReturns` override path — both neuter-verified.
+- **M-0215 [MED] wrong correlation** — `CorrelationMatrix` paired daily returns by **array index**, so two strategies with offset/gapped date ranges had returns from *different calendar days* correlated. Now date-aligned via a per-strategy `dateMap` + common-date intersection (mirrors the sibling `RiskDecomposition.buildCovMatrix`). Regression test with offset spans (date-aligned −1.00 vs the index bug's 0.00), neuter-verified.
+- **M-0218 [MED/LOW] dead-on-arrival annotation** — `TailRisk`'s P5/P1 percentile guides were `<ReferenceLine x={percentile-string}>` on a **categorical** XAxis, where recharts maps the continuous string to `undefined` and silently discards the line — so they never rendered on any histogram. Removed the dead lines; surfaced P5/P1 as honest header text. Regression test pins their presence, neuter-verified.
+
+A 3-lens specialist suite (code-review / type-design / pr-test-analyzer) + a fresh-context Claude red-team ran on the diff: verdict **SHIP**, every challenge REFUTED. `tsc`/`eslint` clean (the latter caught + fixed a react-hooks dep-array on the RegimeDetector memo); full vitest **6100 pass**.
+
+**Closed without code (reverify + specialist/red-team confirmed):** M-0025, M-0049, M-0050, M-0054, M-0080, M-1043, M-1082, M-1088, M-1090, M-0190, M-0192, M-0195, M-0204, L-0073 — each verified stale, already-fixed, speculative-scale perf, or a unifying-abstraction decline with no live defect. Four dead-code items (`UndoToast` M-0114/M-0115, `outcomes.test` `__error` M-0197/M-0198) are deferred to a gated dead-code pass (the dead-code-deletion gate requires explicit sign-off).
+
 ## [0.24.15.105] - 2026-06-03
 ### Fixed — H9 Bridge / StrategyBrowseDrawer cluster (H-0082) + closes the Lane-2 HIGH queue
 

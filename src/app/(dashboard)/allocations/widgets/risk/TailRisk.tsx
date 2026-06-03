@@ -8,7 +8,6 @@ import {
   YAxis,
   Tooltip,
   ResponsiveContainer,
-  ReferenceLine,
 } from "recharts";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { buildCompositeReturns } from "../lib/composite-returns";
@@ -94,12 +93,30 @@ function TailRiskInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
         >
           Extreme losses (below -2%)
         </span>
-        <span
-          className="rounded bg-red-50 px-1.5 py-0.5 font-metric text-[10px] tabular-nums"
-          style={{ color: "#DC2626" }}
-        >
-          {tailCount} events
-        </span>
+        {/* M-0218: P5/P1 percentile thresholds. Previously drawn as
+            <ReferenceLine x={…}> on a CATEGORY axis, where recharts maps a
+            continuous percentile string to `undefined` and discards the line —
+            so the guides never rendered. Surface them as honest header text. */}
+        <div className="flex items-center gap-2">
+          <span
+            className="font-metric text-[10px] tabular-nums"
+            style={{ color: "#CA8A04" }}
+          >
+            P5 {(p5 * 100).toFixed(1)}%
+          </span>
+          <span
+            className="font-metric text-[10px] tabular-nums"
+            style={{ color: "#DC2626" }}
+          >
+            P1 {(p1 * 100).toFixed(1)}%
+          </span>
+          <span
+            className="rounded bg-red-50 px-1.5 py-0.5 font-metric text-[10px] tabular-nums"
+            style={{ color: "#DC2626" }}
+          >
+            {tailCount} events
+          </span>
+        </div>
       </div>
 
       <div className="flex-1">
@@ -128,30 +145,6 @@ function TailRiskInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
                 borderRadius: 6,
               }}
               formatter={(v) => [Number(v), "Count"]}
-            />
-            {/* 5th percentile line */}
-            <ReferenceLine
-              x={`${(p5 * 100).toFixed(1)}%`}
-              stroke="#CA8A04"
-              strokeDasharray="4 3"
-              label={{
-                value: "P5",
-                position: "top",
-                fill: "#CA8A04",
-                fontSize: 10,
-              }}
-            />
-            {/* 1st percentile line */}
-            <ReferenceLine
-              x={`${(p1 * 100).toFixed(1)}%`}
-              stroke="#DC2626"
-              strokeDasharray="4 3"
-              label={{
-                value: "P1",
-                position: "top",
-                fill: "#DC2626",
-                fontSize: 10,
-              }}
             />
             <Bar
               dataKey="count"
