@@ -762,22 +762,6 @@ export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
 } as const;
 
 /**
- * Format the multi-rule cause sentence emitted by
- * `CsvValidationEnvelope` when more than one rule failed. Mirrors
- * the original literal `"Across {n} rule categories: {keys}."`.
- *
- * The keys are the raw pandera rule keys (e.g. `monotonic_dates`).
- * Caller is responsible for pre-mapping to human labels via
- * `CSV_RULE_LABELS` if it wants the human-readable variant.
- */
-export function formatCsvRuleCauseMulti(
-  byRule: Record<string, unknown>,
-): string {
-  const ruleKeys = Object.keys(byRule);
-  return `Across ${ruleKeys.length} rule categories: ${ruleKeys.join(", ")}.`;
-}
-
-/**
  * Format the single-rule cause sentence emitted by
  * `CsvValidationEnvelope` when exactly one rule failed. Mirrors the
  * original literal `"Rule violated: {human}. Expand below for the

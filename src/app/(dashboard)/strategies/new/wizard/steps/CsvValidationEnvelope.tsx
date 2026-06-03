@@ -43,10 +43,9 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
 
   let causeText: string;
   if (ruleCount > 1) {
-    // Phase 17 / DESIGN-05: matches `formatCsvRuleCauseMulti` shape but
-    // humanizes each key via CSV_RULE_LABELS first (the helper takes raw
-    // keys; this surface joins human-readable labels for byte-identical
-    // DOM).
+    // Phase 17 / DESIGN-05: "Across {n} rule categories: {labels}." — the keys
+    // are humanized via CSV_RULE_LABELS first (this surface joins
+    // human-readable labels rather than raw rule keys).
     const humanizedKeys = ruleKeys.map((r) => CSV_RULE_LABELS[r] ?? r);
     causeText = `Across ${ruleCount} rule categories: ${humanizedKeys.join(", ")}.`;
   } else if (ruleCount === 1 && errors.length > 0) {

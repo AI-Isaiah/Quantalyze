@@ -9,7 +9,6 @@ import {
   CSV_UPLOAD_STEP_HEADINGS,
   CSV_PREVIEW_STEP_HEADINGS,
   CSV_SUBMIT_STEP_HEADINGS,
-  formatCsvRuleCauseMulti,
   formatCsvRuleCauseSingle,
   formatColumnInDataframeMessage,
   type WizardErrorCode,
@@ -309,12 +308,6 @@ describe("wizardErrors", () => {
       );
       expect(CSV_SUBMIT_STEP_HEADINGS.submitCtaLabel).toBe("Submit strategy");
       expect(CSV_SUBMIT_STEP_HEADINGS.submittingCtaLabel).toBe("Submitting…");
-    });
-
-    it("formatCsvRuleCauseMulti formats the multi-rule cause sentence", () => {
-      expect(
-        formatCsvRuleCauseMulti({ rule_a: [], rule_b: [] }),
-      ).toBe("Across 2 rule categories: rule_a, rule_b.");
     });
 
     it("formatCsvRuleCauseSingle formats the single-rule cause sentence", () => {
