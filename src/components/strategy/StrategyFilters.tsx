@@ -3,20 +3,15 @@
 import { useState, useCallback, type ReactNode } from "react";
 import { STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "@/lib/constants";
 import { Button } from "@/components/ui/Button";
+// M-0514: SortKey/SortDir/ViewMode now live in the lib-layer SoT
+// `@/lib/discovery-types` so `@/lib/discovery-prefs` no longer type-imports from
+// this "use client" component. Re-exported below for back-compat with existing
+// importers of `@/components/strategy/StrategyFilters`.
+import type { SortKey, SortDir, ViewMode } from "@/lib/discovery-types";
 
 // --- Types ---
 
-export type SortKey =
-  | "computed_at"
-  | "cumulative_return"
-  | "cagr"
-  | "sharpe"
-  | "max_drawdown"
-  | "volatility"
-  | "aum";
-
-export type SortDir = "asc" | "desc";
-export type ViewMode = "table" | "grid";
+export type { SortKey, SortDir, ViewMode };
 
 export interface RangeFilter {
   from: string;

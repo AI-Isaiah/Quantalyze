@@ -23,7 +23,10 @@ export const SPARKLINE_TONE_COLOR: Record<SparklineTone, string> = {
 };
 
 export function sparklineTone(data: number[]): SparklineTone {
-  if (!data || data.length === 0) return "neutral";
+  // `data` is a non-nullable `number[]` under strict mode, so the prior
+  // `!data ||` disjunct was statically dead (M-0571) — keep only the real
+  // empty-array guard.
+  if (data.length === 0) return "neutral";
   const final = data[data.length - 1];
   if (final > 0) return "positive";
   if (final < 0) return "negative";

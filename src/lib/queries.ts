@@ -27,6 +27,7 @@ import type {
   DisclosureTier,
   ManagerIdentity,
   LazyMetricsPayload,
+  LazyMetricsPanelId,
   TradeMetrics,
   AnalyticsDataQualityFlags,
   ApiKey,
@@ -813,14 +814,11 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
  *   - trades       → []                              (scalars only)
  *   - exposure     → [exposure_series, turnover_series]
  */
-export type LazyMetricsPanelId =
-  | "overview"
-  | "equity"
-  | "drawdown"
-  | "returns_dist"
-  | "rolling"
-  | "trades"
-  | "exposure";
+// LazyMetricsPanelId is defined in ./types (H-1254 — single source of truth
+// shared with the client fetcher queries-client.ts, which cannot import this
+// server-only module). Imported above; re-exported here for back-compat with
+// any consumer of `@/lib/queries`.
+export type { LazyMetricsPanelId };
 
 /**
  * audit-2026-05-07 H-0496: encode the panel→kind mapping at the type

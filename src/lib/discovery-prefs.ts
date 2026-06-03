@@ -1,6 +1,6 @@
 "use client";
 
-import type { ViewMode, SortKey, SortDir } from "@/components/strategy/StrategyFilters";
+import type { ViewMode, SortKey, SortDir } from "@/lib/discovery-types";
 import { useCrossTabStorage, type StorageCodec, type DecodeResult } from "@/lib/storage/cross-tab";
 import { stripPoisonKeys } from "@/lib/storage/codecs";
 

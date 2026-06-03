@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.24.15.112] - 2026-06-04
+### Fixed — PR-2: src/lib data-contracts & type design (5 of 17 findings; brand declined)
+
+Sole-agent fold-plan PR-2. Adversarial reverify (workflow `wxbdiutb6`) of all 17 `src/lib` candidates → **2 already-fixed + 6 sound-declines deleted, 4 deferred, 5 point-fixed here, 1 → PR-5**. The campaign's brand bar (introduce a shared `Wealth`/`Usd` branded number or `Maybe<T>` only if it closes ≥3 findings by construction) was **not met** — 6 independent analyses confirmed every type-cluster candidate is already-branded (`WealthPoint`/`toWealth` + `Usd`/`Ratio`), already-closed (status guards), or on an orthogonal axis — so everything is point-fixed (B16/B17/B14 precedent).
+
+- **H-1254** — relocated `LazyMetricsPanelId` (7-value union) from the server-only `queries.ts` into client-safe `types.ts` as a single source of truth; `queries.ts` and `queries-client.ts` now import it and re-export for back-compat, eliminating the hand-synced duplicate that drifted because the client fetcher can't import the server module. Type-only.
+- **M-0514** — hoisted `SortKey`/`SortDir`/`ViewMode` from the `"use client"` `StrategyFilters.tsx` into a new neutral `src/lib/discovery-types.ts`, fixing a `src/lib`→component layering inversion (and latent import cycle); `StrategyFilters` re-exports, `discovery-prefs.ts` imports from the lib SoT. Type-only.
+- **M-0519** — corrected a `for-quants-leads` admin hitCap off-by-one: `.limit(CAP)` made `rows.length >= CAP` equivalent to `=== CAP`, so a table holding exactly 500 leads (none older) wrongly rendered the "older leads exist" banner. Now over-fetch CAP+1, `> CAP`, trim back to CAP.
+- **M-0571** — dropped a statically-dead `!data` disjunct in `sparklineTone` (non-nullable `number[]` under strict mode).
+- **M-0592** — deleted the dead `formatCsvRuleCauseMulti` export + its self-only test (user-approved dead-code gate; the one would-be consumer inlines its own humanized variant).
+
+4-lens specialist suite (0 critical/high; code-review ran the M-0519 Rule-9 neuter itself) + Claude red-team (SHIP_WITH_FIXES — the one finding was a stale-base/version-bump process note, addressed by this rebase). `tsc`/`eslint` clean; full vitest **6096 pass**. M-0530 (live-DB short-circuit test) + M-0865 (e2e env-helper) deferred to PR-5.
+
 ## [0.24.15.111] - 2026-06-04
 ### Fixed — api/** route hygiene (combined PR-1+PR-2): 7 audit findings closed
 
