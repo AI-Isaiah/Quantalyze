@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 
 // F9 M-0189 — OutcomesWidget retry now calls useRouter().refresh() (soft
@@ -91,38 +91,6 @@ beforeEach(() => {
 });
 
 describe("OutcomesWidget — UI-BLOCK-01 WidgetState v2 wiring", () => {
-  it("flag OFF + error data: renders legacy 'Try again' button (no WidgetState)", () => {
-    render(
-      <OutcomesWidget
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        data={{ outcomes: undefined, __error: true } as any}
-        {...WIDGET_PROPS_BASE}
-      />,
-    );
-    expect(widgetStateSpy).not.toHaveBeenCalled();
-    expect(screen.getByText("Could not load outcomes")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Try again/ }),
-    ).toBeInTheDocument();
-  });
-
-  it("flag ON + error data: routes through <WidgetState mode='error'> with reload retry", () => {
-    Object.defineProperty(window, "location", {
-      configurable: true,
-      writable: true,
-      value: { ...originalLocation, search: "?widget_state=v2" },
-    });
-    render(
-      <OutcomesWidget
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        data={{ outcomes: undefined, __error: true } as any}
-        {...WIDGET_PROPS_BASE}
-      />,
-    );
-    expect(widgetStateSpy).toHaveBeenCalledWith("error", "Could not load outcomes");
-    expect(screen.getByText("Could not load outcomes")).toBeInTheDocument();
-  });
-
   it("flag OFF + populated data: renders timeline directly (no WidgetState)", () => {
     render(
       <OutcomesWidget

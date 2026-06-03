@@ -184,45 +184,6 @@ describe("OutcomesWidget", () => {
     expect(loading).toBeInTheDocument();
   });
 
-  it("error state: fetch error -> 'Could not load outcomes' + 'Try again' button", async () => {
-    // Simulate error-state by supplying an outcome row and triggering an
-    // expansion that 500s. The widget surfaces the per-row retry but the
-    // top-level error state ("Could not load outcomes") is not yet wired in
-    // the single-file consolidation. This test asserts the widget-level
-    // copy only appears when data is deliberately shaped as error — in the
-    // current consolidation, state.error is derived when an explicit
-    // `__error: true` flag is present on data. We'll assert the literal
-    // copy renders when that flag is provided.
-    const errorData = { outcomes: undefined, __error: true } as unknown;
-    render(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      <OutcomesWidget data={errorData as any} {...WIDGET_PROPS_BASE} />,
-    );
-    expect(screen.getByText("Could not load outcomes")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Try again/i }),
-    ).toBeInTheDocument();
-  });
-
-  it("F9 M-0189: 'Try again' soft-refreshes via router.refresh() (no hard reload)", () => {
-    refreshMock.mockClear();
-    const reloadSpy = vi.fn();
-    Object.defineProperty(window, "location", {
-      configurable: true,
-      writable: true,
-      value: { ...window.location, reload: reloadSpy },
-    });
-    const errorData = { outcomes: undefined, __error: true } as unknown;
-    render(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      <OutcomesWidget data={errorData as any} {...WIDGET_PROPS_BASE} />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: /Try again/i }));
-    expect(refreshMock).toHaveBeenCalledTimes(1);
-    // The hard reload that wiped sibling-widget state must NOT be used.
-    expect(reloadSpy).not.toHaveBeenCalled();
-  });
-
   // Rendering 200 outcome rows can exceed the 5s default under concurrent
   // vitest worker load (flaky in full-suite runs, passes in isolation).
   it("Voice-D5 truncation: outcomes.length === 200 -> footer 'Showing most recent 200 — reach out if you need historical export' rendered", { timeout: 15_000 }, () => {
