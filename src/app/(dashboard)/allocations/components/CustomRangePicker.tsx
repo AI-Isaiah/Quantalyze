@@ -16,7 +16,10 @@ import { diffDays, isoDayFromDate, localMidnight, parseIsoDay } from "@/lib/date
 // Pixel-faithful port of the prototype range-picker.jsx (Allocator Dashboard
 // Standalone). The component still satisfies the f7 contract so existing
 // EquityChart callers don't change:
-//   - bound by `min` (= firstDate(equityDailyPoints)) and `max` (= today)
+//   - bound by `min` (= firstDate(composite)) and `max` (= today). EquityChart
+//     only renders the picker after its `if (!projection) return` guard, which
+//     requires composite.length > 0 — so `min` is a historical date <= `max`
+//     and the min>max degenerate clamp is unreachable in practice (H-1227).
 //   - bubbles `{ start, end }` ISO strings to the parent's `onApply`
 //   - dismisses on Escape, outside click, or Cancel
 //   - Apply disabled when start > end (mirrored by clamping inside the grid
