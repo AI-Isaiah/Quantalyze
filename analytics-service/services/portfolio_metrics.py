@@ -5,6 +5,7 @@ Uses 252 trading days for annualisation (matching services/metrics.py).
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from typing import Any
 
@@ -14,18 +15,46 @@ from scipy.optimize import brentq, newton
 
 from services.metrics import _safe_float
 
+logger = logging.getLogger("quantalyze.analytics.portfolio_metrics")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _parse_date(value: Any) -> pd.Timestamp:
-    """Parse an ISO date string, date, or datetime into a pd.Timestamp."""
+    """Parse an ISO date string, date, or datetime into a pd.Timestamp.
+
+    Numeric epochs are rejected loudly: the historical ``str(value)[:10]``
+    truncation silently turned a stringified epoch (e.g. 1700000000000 ->
+    "1700000000") into a 1970-era date or a mis-parse with no error
+    (audit M-0696). Callers must normalise epoch-ms to an ISO day string
+    upstream (see equity_reconstruction.epoch_ms_to_iso_day). For strings we
+    now parse the whole value so pandas raises on genuine garbage, then reduce
+    to the tz-naive calendar day this module compares against.
+    """
     if isinstance(value, pd.Timestamp):
         return value
     if isinstance(value, (date, datetime)):
         return pd.Timestamp(value)
-    return pd.Timestamp(str(value)[:10])
+    if isinstance(value, (int, float)):
+        raise TypeError(
+            f"_parse_date: numeric epoch {value!r} must be converted to an ISO "
+            "day string upstream (see epoch_ms_to_iso_day) before parsing — "
+            "refusing to guess units and silently truncate"
+        )
+    ts = pd.Timestamp(str(value))
+    if pd.isna(ts):
+        # An empty/whitespace string parses to NaT (and NaT has no .normalize()).
+        # The old code returned that NaT and let the caller's .normalize() crash
+        # with a cryptic AttributeError; fail loud with a clear message instead.
+        raise ValueError(f"_parse_date: could not parse {value!r} as a date")
+    if ts.tz is not None:
+        # Preserve the historical date-from-prefix behaviour: keep the local
+        # wall-clock calendar day and drop the offset, so the result stays
+        # tz-naive like the equity index this module compares against.
+        ts = ts.tz_localize(None)
+    return ts.normalize()
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +102,11 @@ def compute_twr(equity: pd.Series, events: list[dict[str, Any]]) -> float | None
         mask = (eq.index >= t0) & (eq.index <= t1)
         segment = eq[mask]
         if len(segment) < 2:
+            # M-0698: too few observations to form an interior return; skip.
+            logger.debug(
+                "compute_twr: dropping sub-period %s->%s (only %d observation(s) in range)",
+                t0.date(), t1.date(), len(segment),
+            )
             continue
 
         begin_val = float(segment.iloc[0])
@@ -92,6 +126,15 @@ def compute_twr(equity: pd.Series, events: list[dict[str, Any]]) -> float | None
         end_before_cf = end_val - cf_adjustment
 
         if begin_val == 0:
+            # M-0698: a zero begin-value means the portfolio passed through 0
+            # (a meaningful blow-up/recover event). We cannot form a ratio, so
+            # the sub-period is skipped — but warn so the resulting TWR being
+            # computed from a strict subset of sub-periods is visible in logs.
+            logger.warning(
+                "compute_twr: sub-period %s->%s has begin_val=0 (portfolio at zero); "
+                "skipping — TWR will be computed from a strict subset of sub-periods",
+                t0.date(), t1.date(),
+            )
             continue  # Cannot compute a ratio; skip this sub-period.
 
         sub_r = (end_before_cf / begin_val) - 1.0
@@ -163,19 +206,33 @@ def compute_mwr(
             return float("inf")
         return float(np.sum(amounts / (1.0 + rate) ** t_years))
 
-    # Try Newton's method first, then bisect as fallback.
+    # Try Newton's method first, then bisect as fallback. Log convergence
+    # failures (M-0697) so a None returned here from non-convergence is
+    # distinguishable in the logs from the no-cash-flows None returned at the
+    # top of the function — the caller observes only None in both cases.
     try:
         rate = newton(npv, x0=0.1, tol=1e-8, maxiter=200)
         result = _safe_float(rate)
         if result is not None and result > -1:
             return result
-    except (RuntimeError, ValueError):
-        pass
+    except (RuntimeError, ValueError) as exc:
+        # Routine fallback (brentq may still recover) — debug, not warning, so a
+        # successfully-recovered IRR does not emit a spurious WARNING. The
+        # terminal both-solvers-failed case below is the one that warrants a
+        # WARNING (M-0697: distinguishable from the silent no-data None).
+        logger.debug(
+            "compute_mwr: Newton IRR solve did not converge (%s); falling back to brentq",
+            exc,
+        )
 
     try:
         rate = brentq(npv, -0.9999, 100.0, xtol=1e-10, maxiter=500)
         return _safe_float(rate)
-    except ValueError:
+    except ValueError as exc:
+        logger.warning(
+            "compute_mwr: brentq IRR solve failed to bracket a root (%s); returning None",
+            exc,
+        )
         return None
 
 
@@ -206,7 +263,12 @@ def compute_modified_dietz(
     weighted_cf = 0.0
     for cf in cash_flows:
         amount = float(cf.get("amount", 0))
-        day = int(cf.get("day", 0))
+        # M-0695: clamp the day index into [0, period_days] so the weight stays
+        # in [0, 1]. An out-of-range day would otherwise invert (day > period_days
+        # -> negative weight) or over-weight (day < 0 -> weight > 1) the cash
+        # flow's contribution to the denominator, silently flipping the sign of
+        # the computed return.
+        day = min(max(int(cf.get("day", 0)), 0), period_days)
         # Weight: fraction of period remaining after the cash flow.
         weight = (period_days - day) / period_days
         total_cf += amount
