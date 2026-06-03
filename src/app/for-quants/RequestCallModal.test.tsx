@@ -145,3 +145,113 @@ describe("<RequestCallModal> honeypot (H-0270)", () => {
     }
   });
 });
+
+/**
+ * M-0373 — the modal is a non-trivial client state machine (inFlight
+ * double-click gate, submitting/submitted/error tri-state, fieldErrors →
+ * per-input rendering, success view echoing the email). Pin the four
+ * behaviors the audit flagged as untested. The double-click gate is the
+ * load-bearing one: a regression there sends the founder duplicate
+ * notifications and pollutes the Sprint-1 conversion metric.
+ */
+describe("<RequestCallModal> submit state machine (M-0373)", () => {
+  function fillRequiredFields() {
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "Jane" },
+    });
+    fireEvent.change(screen.getByLabelText("Firm"), {
+      target: { value: "Acme" },
+    });
+    fireEvent.change(screen.getByLabelText("Email"), {
+      target: { value: "jane@acme.example" },
+    });
+  }
+
+  it("inFlight ref bails the second of two synchronous submits → exactly one POST", async () => {
+    // Never-resolving fetch so the first submit stays in flight while the
+    // second submit fires before any await resolves.
+    const fetchMock = vi.fn(() => new Promise<never>(() => {}));
+    const prevFetch = global.fetch;
+    global.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      render(<RequestCallModal open onClose={() => {}} ctaLocation="hero" />);
+      fillRequiredFields();
+      // Submit on the FORM, not the button: a button click is also
+      // blocked by `disabled={submitting}` once React re-renders, which
+      // would mask whether the synchronous `inFlight` ref is doing its
+      // job. The form's onSubmit ignores the button's disabled state, so
+      // firing it twice isolates the ref gate (set synchronously before
+      // the await). Neuter: drop `if (inFlight.current) return` → 2 POSTs.
+      const form = screen
+        .getByRole("button", { name: /send request/i })
+        .closest("form") as HTMLFormElement;
+      fireEvent.submit(form);
+      fireEvent.submit(form);
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      global.fetch = prevFetch;
+    }
+  });
+
+  it("renders the success view echoing the submitted email on a 200", async () => {
+    const fetchMock = vi.fn(
+      async (_i: RequestInfo | URL, _init?: RequestInit) => ({
+        ok: true,
+        json: async () => ({ ok: true }),
+      }),
+    );
+    const prevFetch = global.fetch;
+    global.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      render(<RequestCallModal open onClose={() => {}} ctaLocation="hero" />);
+      fillRequiredFields();
+      fireEvent.click(screen.getByRole("button", { name: /send request/i }));
+      expect(await screen.findByText(/Request received/i)).toBeTruthy();
+      // The success copy echoes the email back to the user.
+      expect(screen.getByText(/jane@acme\.example/)).toBeTruthy();
+    } finally {
+      global.fetch = prevFetch;
+    }
+  });
+
+  it("renders an inline field error returned by the API (400 + fieldErrors)", async () => {
+    const fetchMock = vi.fn(
+      async (_i: RequestInfo | URL, _init?: RequestInit) => ({
+        ok: false,
+        json: async () => ({
+          error: "Invalid submission",
+          fieldErrors: { name: ["Name looks too short"] },
+        }),
+      }),
+    );
+    const prevFetch = global.fetch;
+    global.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      render(<RequestCallModal open onClose={() => {}} ctaLocation="hero" />);
+      fillRequiredFields();
+      fireEvent.click(screen.getByRole("button", { name: /send request/i }));
+      // firstFieldError("name") → the first message, rendered under Name.
+      expect(await screen.findByText("Name looks too short")).toBeTruthy();
+    } finally {
+      global.fetch = prevFetch;
+    }
+  });
+
+  it("renders the error message when the fetch rejects (network path)", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error("network down");
+    });
+    const prevFetch = global.fetch;
+    global.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      render(<RequestCallModal open onClose={() => {}} ctaLocation="hero" />);
+      fillRequiredFields();
+      fireEvent.click(screen.getByRole("button", { name: /send request/i }));
+      // The catch arm surfaces err.message via the role="alert" paragraph.
+      expect(await screen.findByText(/network down/i)).toBeTruthy();
+    } finally {
+      global.fetch = prevFetch;
+    }
+  });
+});
