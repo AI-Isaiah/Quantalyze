@@ -577,4 +577,41 @@ describe("M-2 (red-team) — failTerminal Sentry level for 400/401 vs 5xx", () =
     const errorCalls = sentryCalls.filter((c) => c.options.level === "error");
     expect(errorCalls.length).toBeGreaterThan(0);
   });
+
+  it("H-0380 cross-field race: field-A 5xx exhaustion does not clobber field-B's 'saved'", async () => {
+    // The per-field generation counter only drops stale responses for the SAME
+    // field. The shared form-level saveState atom was unguarded, so a slow field
+    // A failing terminally AFTER a fast field B succeeded would flip the banner
+    // from "saved" → "error" (showing the wrong outcome). The per-field error
+    // for A is still surfaced via fieldErrors regardless — only the shared
+    // banner is protected.
+    // Call order: save(A)→fetch#1, save(B)→fetch#2, then A's 3 retries→#3/#4/#5.
+    (fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(errorResponse(500, { error: "internal" })) // #1 A attempt 1
+      .mockResolvedValueOnce(okResponse()) //                              #2 B succeeds
+      .mockResolvedValueOnce(errorResponse(500, { error: "internal" })) // #3 A attempt 2
+      .mockResolvedValueOnce(errorResponse(500, { error: "internal" })) // #4 A attempt 3
+      .mockResolvedValueOnce(errorResponse(500, { error: "internal" })); // #5 A attempt 4
+
+    const { result } = renderHook(() => useMandateAutoSave(null));
+
+    await act(async () => {
+      const pA = result.current.save("max_weight", 0.25);
+      const pB = result.current.save("max_drawdown_tolerance", 0.3);
+      await pB; // B resolves 200 → setSaveState("saved")
+      // Drive A's full exponential backoff (1s + 2s + 4s) to terminal exhaustion.
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(4000);
+      await pA;
+    });
+
+    // B genuinely succeeded — the form-level banner must still read "saved",
+    // not be clobbered to "error" by A's terminal failure (the fix).
+    expect(result.current.saveState).toBe("saved");
+    // A's failure is NOT hidden — its per-field error is surfaced.
+    expect(result.current.fieldErrors.max_weight).toBeDefined();
+    // Sanity-pin the interleaving (5 calls: A×4 + B×1).
+    expect(fetch).toHaveBeenCalledTimes(5);
+  });
 });
