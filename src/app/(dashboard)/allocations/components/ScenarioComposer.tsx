@@ -380,11 +380,20 @@ export function ScenarioComposer({
   // `DailyPoint[]`. When the field is missing or shaped wrong at runtime, we
   // fall back to `[]`, which the frozen scenario-adapter warm-up gate
   // already excludes from the projection (Plan 01 D-01 + warm-up gate).
+  // M-0100: index the catalog by strategy id ONCE so the two added-strategy
+  // lookups below do O(1) Map.get per added strategy instead of an O(M)
+  // `strategies.find(...)` over the full SSR-lifted catalog (the twin loops
+  // were O(K·M) per run, re-scanning the whole catalog on every draft change).
+  const strategyById = useMemo(
+    () => new Map(strategies.map((s) => [s.strategy.id, s])),
+    [strategies],
+  );
+
   const addedStrategyReturnsLookup = useMemo<Record<string, DailyPoint[]>>(
     () => {
       const map: Record<string, DailyPoint[]> = {};
       for (const a of scenario.draft.addedStrategies) {
-        const found = strategies.find((s) => s.strategy.id === a.id);
+        const found = strategyById.get(a.id);
         const raw = found?.strategy.strategy_analytics?.daily_returns;
         // Runtime defensiveness: only accept a DailyPoint[]-shaped array.
         const arr = Array.isArray(raw) ? (raw as unknown as DailyPoint[]) : [];
@@ -392,7 +401,7 @@ export function ScenarioComposer({
       }
       return map;
     },
-    [scenario.draft.addedStrategies, strategies],
+    [scenario.draft.addedStrategies, strategyById],
   );
 
   const addedStrategyMetadataLookup = useMemo<
@@ -406,7 +415,7 @@ export function ScenarioComposer({
       Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
     > = {};
     for (const a of scenario.draft.addedStrategies) {
-      const found = strategies.find((s) => s.strategy.id === a.id);
+      const found = strategyById.get(a.id);
       if (found) {
         map[a.id] = {
           disclosure_tier: found.strategy.disclosure_tier,
@@ -416,7 +425,7 @@ export function ScenarioComposer({
       }
     }
     return map;
-  }, [scenario.draft.addedStrategies, strategies]);
+  }, [scenario.draft.addedStrategies, strategyById]);
 
   // -------------------------------------------------------------------------
   // Build scenario projection via adapter + frozen scenario.ts engine
@@ -477,15 +486,29 @@ export function ScenarioComposer({
     return map;
   }, [holdingsSummary]);
 
-  const scenarioMetrics = useMemo(() => {
-    const deAliased = collapseAliasedHoldingStrategies(
-      adapterOutput.strategies,
-      adapterOutput.state,
-      symbolByHoldingId,
-    );
-    const cache = buildDateMapCache(deAliased.strategies);
-    return computeScenario(deAliased.strategies, deAliased.state, cache);
-  }, [adapterOutput, symbolByHoldingId]);
+  // M-0102: hoist the de-alias collapse and the per-strategy date→index cache
+  // into their own memos. Previously buildDateMapCache ran inside the
+  // scenarioMetrics body, rebuilding the cache on every recompute. Each memo is
+  // keyed on the exact value it derives from, so the cache can never go stale
+  // relative to the strategies computeScenario receives (worst case it rebuilds
+  // as often as before; it never returns a cache mismatched to its strategies).
+  const deAliased = useMemo(
+    () =>
+      collapseAliasedHoldingStrategies(
+        adapterOutput.strategies,
+        adapterOutput.state,
+        symbolByHoldingId,
+      ),
+    [adapterOutput, symbolByHoldingId],
+  );
+  const dateMapCache = useMemo(
+    () => buildDateMapCache(deAliased.strategies),
+    [deAliased],
+  );
+  const scenarioMetrics = useMemo(
+    () => computeScenario(deAliased.strategies, deAliased.state, dateMapCache),
+    [deAliased, dateMapCache],
+  );
 
   // -------------------------------------------------------------------------
   // M4 — live baseline from payload (NOT recomputed here).
@@ -668,14 +691,7 @@ export function ScenarioComposer({
     for (const [scopeRef, on] of Object.entries(scenario.draft.toggleByScopeRef)) {
       if (on) continue;
       if (!scopeRef.startsWith("holding:")) continue;
-      const h = holdingsSummary.find(
-        (x) =>
-          buildHoldingRef({
-            venue: x.venue,
-            symbol: x.symbol,
-            holding_type: x.holding_type,
-          }) === scopeRef,
-      );
+      const h = holdingByRef.get(scopeRef);
       if (!h) continue;
       diffs.push({
         kind: "voluntary_remove",
@@ -1165,6 +1181,21 @@ function CompositionList({
     return map;
   }, [flaggedHoldings]);
 
+  // M-0101: precompute symbol → venues ONCE so each row's "merged across
+  // venues" note is an O(1) Map.get + a tiny same-symbol filter, instead of an
+  // O(N) holdingsSummary.filter scan per row (O(N²) across the list). The
+  // venue list preserves holdingsSummary order so the rendered join is byte-
+  // identical to the previous filter().map().
+  const venuesBySymbol = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const h of holdingsSummary) {
+      const list = map.get(h.symbol);
+      if (list) list.push(h.venue);
+      else map.set(h.symbol, [h.venue]);
+    }
+    return map;
+  }, [holdingsSummary]);
+
   return (
     <div className="mt-8 rounded-lg border border-border bg-surface p-4">
       <div className="mb-3 text-base font-semibold text-text-primary">
@@ -1182,9 +1213,9 @@ function CompositionList({
           const flagged = flaggedByRef.get(ref);
           const sharedSym = sharedSymbols.has(h.symbol);
           const otherVenuesForSym = sharedSym
-            ? holdingsSummary
-                .filter((x) => x.symbol === h.symbol && x.venue !== h.venue)
-                .map((x) => x.venue)
+            ? (venuesBySymbol.get(h.symbol) ?? []).filter(
+                (v) => v !== h.venue,
+              )
             : [];
           return (
             <li
