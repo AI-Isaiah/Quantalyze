@@ -2231,6 +2231,7 @@ export type Database = {
           supported_exchanges: string[]
           tenant_id: string | null
           user_id: string
+          wizard_session_id: string | null
         }
         Insert: {
           api_key_id?: string | null
@@ -2260,6 +2261,7 @@ export type Database = {
           supported_exchanges?: string[]
           tenant_id?: string | null
           user_id: string
+          wizard_session_id?: string | null
         }
         Update: {
           api_key_id?: string | null
@@ -2289,6 +2291,7 @@ export type Database = {
           supported_exchanges?: string[]
           tenant_id?: string | null
           user_id?: string
+          wizard_session_id?: string | null
         }
         Relationships: [
           {

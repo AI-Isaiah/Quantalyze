@@ -35,6 +35,9 @@ const {
   // H-0306: the auth boundary. Flipped to null in the unauthed test so the
   // REAL withAuth (this route does NOT mock it) hits its 401 branch.
   authState,
+  // F6 (M-0327/H-0279): capture the limiter bucket key so a regression that
+  // drops the per-strategy namespacing fails loudly.
+  checkLimitMock,
 } = vi.hoisted(() => ({
   TEST_USER: { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" },
   mockRpc: vi.fn(),
@@ -55,6 +58,7 @@ const {
     filters: [] as Array<[string, unknown]>,
   },
   authState: { user: { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" } as { id: string } | null },
+  checkLimitMock: vi.fn(),
 }));
 
 const TEST_STRATEGY_ID = "11111111-1111-1111-1111-111111111111";
@@ -105,7 +109,11 @@ vi.mock("@/lib/supabase/admin", () => ({
 
 vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: null,
-  checkLimit: async () => rateLimitResult,
+  keysSyncUserLimiter: null,
+  checkLimit: (...args: unknown[]) => {
+    checkLimitMock(...args);
+    return Promise.resolve(rateLimitResult);
+  },
 }));
 
 vi.mock("@/lib/analytics-client", () => ({
@@ -293,6 +301,25 @@ describe("POST /api/keys/sync", () => {
     expect(body1).toEqual(body2);
   });
 
+  // ── F6 (M-0327/H-0279): two-tier limiter (per-user ceiling + per-strategy) ──
+  it("checks BOTH a per-user aggregate ceiling AND a per-(user, strategy) bucket", async () => {
+    const { POST } = await import("./route");
+    await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+    // (1) Per-user ceiling caps total volume so distinct-UUID probing can't
+    //     bypass the limit (red-team).
+    expect(checkLimitMock).toHaveBeenCalledWith(
+      null, // keysSyncUserLimiter (mocked to null in this suite)
+      `keys-sync-user:${TEST_USER.id}`,
+    );
+    // (2) Per-strategy bucket gives each strategy its own throughput so concurrent
+    //     resyncs don't starve each other and a foreign id only burns its own bucket.
+    expect(checkLimitMock).toHaveBeenCalledWith(
+      null, // userActionLimiter (mocked to null in this suite)
+      `keys-sync:${TEST_USER.id}:${TEST_STRATEGY_ID}`,
+    );
+  });
+
   // ── 5. Rate limit exceeded → 429 ───────────────────────────────
   it("returns 429 with Retry-After when rate-limited", async () => {
     rateLimitResult.success = false;
@@ -344,6 +371,18 @@ describe("POST /api/keys/sync", () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toContain("Missing strategy_id");
+  });
+
+  // ── F6: malformed (non-UUID) strategy_id → 400 before the limiter ──
+  it("returns 400 when strategy_id is not a UUID (bounds the limiter keyspace)", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: "../../etc/passwd" }));
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("Invalid strategy_id");
+    // A garbage id must NOT consume a limiter token (it never reaches the gate).
+    expect(checkLimitMock).not.toHaveBeenCalled();
   });
 
   // ── 8. Phase 18 Day-2 Bug #1 — correlation_id propagation ───────

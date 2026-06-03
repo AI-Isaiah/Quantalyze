@@ -266,6 +266,17 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
     });
   }, [hydrated, step, wizardSessionId]);
 
+  // F6 (H-0187/M-0238): read `step` through a ref inside the auth listener so
+  // the subscription does NOT tear down + re-subscribe on every step
+  // transition. The previous `[wizardSessionId, step]` deps churned the
+  // supabase-js auth channel on each step, leaving a teardown→resubscribe
+  // window in which a token-refresh SIGNED_OUT could fire unheard (the wizard
+  // then 401s on finalize and misreports it as KEY_NETWORK_TIMEOUT). The
+  // listener now mounts once per wizard_session_id; telemetry still reports the
+  // live step via the ref.
+  const stepRef = useRef(step);
+  stepRef.current = step;
+
   useEffect(() => {
     const supabase = createClient();
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
@@ -274,7 +285,7 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
           setSessionExpired(true);
           trackForQuantsEventClient("wizard_error", {
             wizard_session_id: wizardSessionId,
-            step,
+            step: stepRef.current,
             code: "SESSION_EXPIRED",
           });
         }
@@ -283,7 +294,7 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
     return () => {
       subscription.unsubscribe();
     };
-  }, [wizardSessionId, step]);
+  }, [wizardSessionId]);
 
   // NEW-C14-11: bfcache restore guard. After the user clicks Submit and the
   // browser navigates away, bfcache may restore the final step with the
@@ -615,8 +626,16 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 onComplete={handleSyncComplete}
                 onTryAnotherKey={() => {
                   setStep("connect_key");
-                  // Delete the current draft so the next create-with-key can
-                  // land without the unique(user, api_key) trigger blocking.
+                  // Regenerate the idempotency token OPTIMISTICALLY (before the
+                  // fire-and-forget delete) so the next create-with-key always
+                  // carries a FRESH session and mints a new draft for the new
+                  // key. handleDeleteDraft also regenerates it, but only on a
+                  // confirmed 2xx/404 (NEW-C14-08) — if the DELETE fails, the old
+                  // session id would otherwise persist and the F6 fence would
+                  // silently replay the OLD draft + OLD key on resubmit
+                  // (red-team LOW-2). Regenerating here closes that window; the
+                  // orphaned old draft is reaped by the cleanup-wizard-drafts cron.
+                  setWizardSessionId(newWizardSessionId());
                   void handleDeleteDraft();
                   trackForQuantsEventClient("wizard_try_different_key", {
                     wizard_session_id: wizardSessionId,
