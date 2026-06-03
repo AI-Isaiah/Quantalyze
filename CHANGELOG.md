@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.15.94] - 2026-06-03
+### Added — sql-test for the compute_jobs RPC corrections (M-1137/M-1138 + G23-187-mig-01/03)
+
+Lands the behavioral + structural regression test for the `20260603120000` migration (PR #444), now that the test project is caught up to it. `supabase/tests/test_compute_jobs_rpc_error_clear_and_fanin.sql`:
+- **Part 1 (structural)** asserts the live function bodies clear `last_error`/`error_kind` on re-claim and that `mark_compute_job_done` uses the GIN `@>` set-based fan-in (not the regressed FOR-loop) — plus that the pre-existing C39 / intro-snapshot / P97 / strict-token invariants survived. Fails on any revert.
+- **Part 2 (functional)** seeds a `failed_retry` job carrying a prior-attempt error, claims it via the live priority RPC, and asserts the now-`running` row has `last_error`/`error_kind` cleared — transaction-isolated (epoch-dated + high-priority so the claim deterministically lands on the seeded row regardless of the shared pool) and self-cleaning.
+
+Test project `qmnijlgmdhviwzwfyzlc` was caught up to migration `20260603120000` (functions verified identical to prod + this test's logic verified passing) so the CI `sql-tests` job exercises it green.
+
 ## [0.24.15.93] - 2026-06-03
 ### Fixed — H4 Lane-2 for-quants-lead endpoint hardening (H-0270 + M-0317 + M-0320)
 
