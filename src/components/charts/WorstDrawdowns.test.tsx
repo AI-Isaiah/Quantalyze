@@ -193,6 +193,9 @@ describe("WorstDrawdowns", () => {
     const ongoingCell = within(row).getByText("ongoing");
     expect(ongoingCell).toBeInTheDocument();
     expect(ongoingCell.className).toContain("text-warning");
+    // M-0404: the ongoing cell must keep font-metric so it aligns in the mono
+    // column with the sibling date cells (removing font-metric fails this).
+    expect(ongoingCell.className).toContain("font-metric");
     // The days cell has a horizontal ellipsis (…) suffix.
     expect(within(row).getByText("62…")).toBeInTheDocument();
   });

@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import {
   CorrelationWithBenchmark,
@@ -386,5 +388,30 @@ describe("<CorrelationWithBenchmark />", () => {
     expect(screen.queryByText(/unavailable/i)).toBeNull();
     expect(screen.queryByText(/Insufficient history/i)).toBeNull();
     expect(screen.queryByText(/Computing analytics/i)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M-0399 — DESIGN.md chart-axis token conformance. The 2026-04-29 design
+// consolidation moved chart axis ticks to the shared CHART_TICK_STYLE (12px);
+// this was the lone v2-rendered chart still hardcoding `tick={{ fontSize: 11,
+// … }}`. The visual type-scale test (tests/visual/strategy-v2-type-scale.test.ts)
+// only greps Tailwind className strings, so it does NOT catch inline Recharts
+// SVG tick props — hence a source-grep guard here (mirrors RollingSortinoChart
+// Test 8). Recharts does not reliably paint ticks in jsdom, so a rendered
+// fontSize assertion would be non-discriminating; the source guard is exact.
+// ---------------------------------------------------------------------------
+describe("M-0399: axis ticks use the shared CHART_TICK_STYLE token (DESIGN.md)", () => {
+  const src = readFileSync(
+    resolve(process.cwd(), "src/components/charts/CorrelationWithBenchmark.tsx"),
+    "utf-8",
+  );
+
+  it("has zero inline tick={{ … fontSize literals (reverting the fix fails this)", () => {
+    expect(src).not.toMatch(/tick=\{\{[^}]*fontSize/);
+  });
+
+  it("spreads CHART_TICK_STYLE on its axes", () => {
+    expect(src).toMatch(/tick=\{CHART_TICK_STYLE\}/);
   });
 });

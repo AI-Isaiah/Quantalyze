@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.24.15.109] - 2026-06-03
+### Fixed — PR-D: Charts visual-conformance sweep (closes the Lane-2 M/L A→D campaign)
+
+Final of four directory-aligned Lane-2 PRs (A→C→B→D), opening the charts/strategy/portfolio/layout surface. A per-file reverify fan-out (11 agents) over 17 findings found the surface largely already-resolved: 3 already-closed by prior PRs, 10 sound declines, 1 routed to Lane-1, and **3 same-topic charts visual/code-quality fixes** here.
+
+- **M-0399 [MED] DESIGN token conformance** — `CorrelationWithBenchmark` was the lone v2-rendered chart hardcoding `tick={{ fontSize: 11, … }}` instead of the shared `CHART_TICK_STYLE` (12px, the 2026-04-29 DESIGN.md axis-tick consolidation). Swapped both axes to `tick={CHART_TICK_STYLE}` and pruned the now-unused `CHART_AXIS_TICK`/`CHART_FONT_MONO` imports. The existing visual type-scale test only greps Tailwind className strings, so it never caught inline Recharts SVG tick props — added a source-grep regression guard (mirrors `RollingSortinoChart` Test 8), neuter-verified.
+- **M-0404 [LOW] column alignment** — `WorstDrawdowns`'s ongoing-row Recovery cell dropped `font-metric`, so "ongoing" rendered in a proportional font while sibling date cells are mono. Added `font-metric` for alignment; pinned with a className assertion on the existing ongoing test, neuter-verified.
+- **M-0406 [LOW] stable React key** — `WorstDrawdowns` row key included the array index even though `(peakDate, troughDate)` uniquely identifies an episode; dropped the `-${i}` suffix for stable reconciliation (`i` is still used by the aria-label). Behavior-preserving (stateless rows; red-team traced both data paths to confirm no duplicate-key collision is reachable).
+
+A 3-lens specialist suite + a fresh-context Claude red-team ran on the diff: verdict **SHIP**, every challenge REFUTED, zero new findings. `tsc`/`eslint` clean; full vitest **6105 pass**.
+
+**Closed without code (13):** already-closed-by-prior-work — M-0402 (RollingMetrics non-finite Sharpe already guarded + tested), M-1162 (HeadlineMetricsPanel fetch-race closed by H-1252 / PR #443), M-0985 (StrategyTable bundle inflation closed by H-1123 / PR #440); and sound declines — M-0400, M-0401, M-0413, L-0058, L-0059, L-0061, M-1158, M-0454, **M-0455** (disconnected-keys: `disconnected_at` is allocator-side only — strategy-side keys are never soft-disconnected, and the server worker-dispatch filter + `api_key_disconnected` RPC make any sync a no-op), M-0472.
+
+**Routed to Lane-1:** M-1152 (StrategyActions silent-catch — the Lane-2 clause is closed + tested; the 2 remaining sub-parts are `src/app/api/admin/**` routes).
+
 ## [0.24.15.108] - 2026-06-03
 ### Fixed — PR-C: Mandate + Admin MEDIUM/LOW sweep (2 fixes; surface mostly already-sound)
 
