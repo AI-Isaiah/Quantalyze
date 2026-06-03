@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.15.95] - 2026-06-03
+### Fixed — H5 metrics-parity closed-set discipline (H-0461)
+
+`src/lib/metrics-parity-helper.ts` + `src/__tests__/metrics-parity.test.ts` (Lane 2). `EXPECTED_SIBLING_KINDS` was a hand-listed `new Set([...12 literals])` coupled to the `StrategyAnalyticsSeriesKind` union by nothing but a doc comment — adding or removing a kind in either place compiled green. Now a `SIBLING_KINDS` tuple `as const satisfies readonly StrategyAnalyticsSeriesKind[]` (rejects a non-union entry) plus a `_MissingSiblingKind = Exclude<Union, tuple[number]>` exhaustiveness const (rejects a union member missing from the tuple) pin **both** drift directions at compile time; both halves were tsc-neuter-verified (each breaks `tsc --noEmit` with TS2322). Mirrors the `WIZARD_STEP_KEYS` pattern in `api/for-quants-lead/route.ts`; `as const satisfies` is type-only so `EXPECTED_SIBLING_KINDS = new Set(SIBLING_KINDS)` is byte-identical at runtime. The test's sibling-kinds assertion moved from `length===size` + per-kind `toContain` (blind to a kind added to both the fixture and the set) to a symmetric `expect(new Set(keys)).toEqual(EXPECTED_SIBLING_KINDS)`, closing the fixture↔set leg at runtime (the set↔union leg is now compile-locked).
+
+Deferred (red-team-refuted as correctly scoped): **H-0460** — `FROZEN_TRADE_METRICS_KEYS satisfies readonly (keyof TradeMetrics)[]` is type-unsound (the 31-key frozen set is the Python JSONB-output contract and diverges from the curated 25-key TS interface by 8 Python-only keys + 2 TS-only keys that are actually top-level `metrics_json` scalars, not `trade_metrics` sub-blob keys); no sound Lane-2-only `satisfies` exists, the no-unknown direction is already runtime-gated, and the no-missing direction belongs to the Python parity suite (Lane 1). **H-1254** — consolidating `LazyMetricsPanelId` into `types.ts` requires editing `queries.ts` (Lane 1); a `types.ts`-only half-fix would create a 4th declaration. A 2-lens specialist (type-design + test) + fresh-context Claude red-team independently re-verified every drift vector and both deferrals → verdict SHIP.
+
 ## [0.24.15.94] - 2026-06-03
 ### Added — sql-test for the compute_jobs RPC corrections (M-1137/M-1138 + G23-187-mig-01/03)
 
