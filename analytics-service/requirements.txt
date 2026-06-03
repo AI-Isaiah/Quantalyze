@@ -4,10 +4,12 @@ quantstats==0.0.81
 ccxt>=4.0
 pandas==2.2.3
 numpy==2.2.4
-# Phase 12 / WR-02: pyarrow required by pd.read_parquet for the
-# golden_252d_input.parquet fixture (analytics-service/tests/conftest.py).
-# 18.1.0 is compatible with pandas==2.2.3 / numpy==2.2.4.
-pyarrow==18.1.0
+# NOTE: pyarrow is NOT here — it is a TEST-ONLY dependency (pd.read_parquet of the
+# golden_252d_input.parquet fixture, tests/conftest.py + tests/fixtures/regen_golden.py).
+# It was moved to requirements-dev.txt (H-0537) so the production Railway image (which
+# installs ONLY requirements.txt) no longer ships the ~40MB native Arrow wheel and its
+# transitive attack surface. pandas 2.2.3 does not require pyarrow at runtime; no
+# production code path reads parquet (trades/positions come from Supabase as JSON).
 pydantic==2.11.3
 python-dotenv==1.1.0
 httpx==0.28.1

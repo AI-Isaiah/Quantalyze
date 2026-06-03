@@ -29,6 +29,7 @@ import {
   cleanupLiveDbRow,
   advertiseLiveDbSkipReason,
   runIntrospectionSql,
+  signInAsTestUser,
 } from "@/lib/test-helpers/live-db";
 import { GetUserComputeJobsRowSchema } from "@/lib/analytics-schemas";
 
@@ -895,4 +896,146 @@ describe("audit-2026-05-07 apply — _assert_owner volatility", () => {
       expect(rows[0]!.provolatile).toBe("v");
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// G23-187-rls-02: get_user_compute_jobs tenant isolation (behavioral)
+// ---------------------------------------------------------------------------
+//
+// M-0783's COALESCE filter is body-grep'd above (the "COALESCE filter
+// pinned in body" block), but a substring match cannot prove the filter
+// actually scopes results to the caller — a `COALESCE(...) = v_auth_uid OR
+// TRUE` regression keeps the substring intact while leaking every tenant's
+// rows. The prior "no authed-JWT helper" blocker is now false:
+// `signInAsTestUser` (H-0038) hands back an anon-key client signed in as a
+// real user, so we can reach the RPC's `auth.uid()` branch and pin the
+// discriminating assertion the finding asks for — user A must never see
+// user B's compute_jobs row.
+
+describe("audit-2026-05-07 residual — G23-187-rls-02 get_user_compute_jobs tenant isolation", () => {
+  it.skipIf(!HAS_LIVE_DB)(
+    "authed user A sees only A's compute_jobs, never user B's row",
+    async () => {
+      const admin = createLiveAdminClient();
+      const cleanupUsers: string[] = [];
+      const { client: clientA, userId: userA } = await signInAsTestUser(
+        admin,
+        "rls02-a",
+        (id) => cleanupUsers.push(id),
+      );
+      const { userId: userB } = await signInAsTestUser(
+        admin,
+        "rls02-b",
+        (id) => cleanupUsers.push(id),
+      );
+      const stratA = await seedStrategy(admin, userA, "rls02-a");
+      const stratB = await seedStrategy(admin, userB, "rls02-b");
+      try {
+        const jobA = await insertComputeJob(admin, {
+          strategy_id: stratA,
+          kind: "sync_trades",
+          status: "failed_final",
+          attempts: 3,
+          max_attempts: 3,
+        });
+        const jobB = await insertComputeJob(admin, {
+          strategy_id: stratB,
+          kind: "sync_trades",
+          status: "failed_final",
+          attempts: 3,
+          max_attempts: 3,
+        });
+
+        // Call the RPC as authenticated user A — both params default, so
+        // {} exercises the real auth.uid() ownership branch.
+        const { data, error } = await clientA.rpc(
+          "get_user_compute_jobs",
+          {} as never,
+        );
+        expect(error).toBeNull();
+        const ids = new Set((data as { id: string }[]).map((r) => r.id));
+        // A sees A's own job.
+        expect(ids.has(jobA)).toBe(true);
+        // A must NOT see B's job. This is the load-bearing assertion: a
+        // `COALESCE(...) = v_auth_uid OR TRUE` regression (or any drop of
+        // the ownership predicate) flips this to true and leaks B's row.
+        expect(ids.has(jobB)).toBe(false);
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          strategyIds: [stratA, stratB],
+          userIds: cleanupUsers,
+        });
+      }
+    },
+    60_000,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// G23-187-rls-03: SECDEF worker/watchdog RPC EXECUTE-privilege REVOKEs
+// ---------------------------------------------------------------------------
+//
+// The parent migration REVOKEs EXECUTE on the worker/watchdog SECDEF RPCs
+// from {PUBLIC, anon, authenticated} (mark_done/mark_failed/reclaim/reset/
+// _assert_owner) and keeps EXECUTE on the user-facing read RPC
+// get_user_compute_jobs for `authenticated` only. Those REVOKEs are
+// asserted NOWHERE today — not in CI, not even in the migration's DO block
+// (which only greps function bodies). A future GRANT bundled into an
+// unrelated sweep (e.g. `GRANT EXECUTE ON mark_compute_job_failed TO
+// authenticated`, letting any logged-in user mass-fail running jobs) would
+// pass every existing gate. This lifts the privilege contract to the
+// has_function_privilege catalog so the regression fails the Vitest gate.
+//
+// Mirrors the scenario-commit-batch-tx.test.ts EXECUTE-privilege harness.
+// Exact identity args matter for overload resolution in
+// has_function_privilege.
+
+describe("audit-2026-05-07 residual — G23-187-rls-03 SECDEF RPC EXECUTE REVOKEs", () => {
+  const REVOKED_FROM_ALL: string[] = [
+    "public._assert_owner(regclass, uuid, text)",
+    "public.mark_compute_job_done(uuid, uuid)",
+    "public.mark_compute_job_failed(uuid, text, text, uuid)",
+    "public.reclaim_stuck_compute_jobs(interval)",
+    "public.reset_stalled_compute_jobs(interval, jsonb)",
+  ];
+  for (const sig of REVOKED_FROM_ALL) {
+    for (const role of ["anon", "authenticated", "public"] as const) {
+      it.skipIf(!HAS_INTROSPECTION)(
+        `${role} has NO EXECUTE on ${sig}`,
+        async () => {
+          const rows = await runIntrospectionSql<{ has_priv: boolean }>(
+            `SELECT has_function_privilege('${role}', '${sig}', 'EXECUTE') AS has_priv`,
+          );
+          expect(rows).toHaveLength(1);
+          expect(rows[0]!.has_priv).toBe(false);
+        },
+      );
+    }
+  }
+
+  // get_user_compute_jobs: authenticated KEEPS EXECUTE (it is the
+  // user-facing read RPC); anon/public do NOT. The positive case guards
+  // against an over-revocation that would break the live job-status read.
+  it.skipIf(!HAS_INTROSPECTION)(
+    "authenticated retains EXECUTE on get_user_compute_jobs",
+    async () => {
+      const rows = await runIntrospectionSql<{ has_priv: boolean }>(
+        `SELECT has_function_privilege('authenticated', 'public.get_user_compute_jobs(uuid, integer)', 'EXECUTE') AS has_priv`,
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.has_priv).toBe(true);
+    },
+  );
+  for (const role of ["anon", "public"] as const) {
+    it.skipIf(!HAS_INTROSPECTION)(
+      `${role} has NO EXECUTE on get_user_compute_jobs`,
+      async () => {
+        const rows = await runIntrospectionSql<{ has_priv: boolean }>(
+          `SELECT has_function_privilege('${role}', 'public.get_user_compute_jobs(uuid, integer)', 'EXECUTE') AS has_priv`,
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0]!.has_priv).toBe(false);
+      },
+    );
+  }
 });

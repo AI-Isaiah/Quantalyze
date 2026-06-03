@@ -4588,6 +4588,84 @@ class TestLoadPositionTimeSeriesNavSafety:
         )
 
     @pytest.mark.asyncio
+    async def test_non_finite_size_usd_is_coerced_and_surfaced(
+        self, caplog,
+    ) -> None:
+        """M-0654 isfinite branch: a size_usd that PARSES via float() but is
+        NaN/Inf must be coerced to 0.0, dropped from the grid, AND counted —
+        distinct from the ValueError path covered by the sibling test above.
+
+        WHY: without the `math.isfinite` guard, ``float('inf')`` (or 'nan')
+        passes the zero-tolerance skip (``abs(inf) < tol`` is False) and writes
+        ``signed=inf`` into positions_by_date, poisoning every turnover /
+        exposure cell that aggregates it — with no operator signal, since
+        ``size_malformed`` stays False and the counted warning never fires.
+        The "garbage" sibling test does NOT cover this branch: it raises
+        ValueError before `isfinite` is ever reached.
+        """
+        from services.analytics_runner import _load_position_time_series
+
+        snapshot_rows = [
+            {
+                "snapshot_date": "2024-01-15",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "size_usd": "10000",
+                "mark_price": "65000",
+            },
+            {
+                "snapshot_date": "2024-01-15",
+                "symbol": "ETHUSDT",
+                "side": "long",
+                "size_usd": "inf",  # parses to float('inf') — not a ValueError
+                "mark_price": "3500",
+            },
+        ]
+        mock_supabase = MagicMock()
+        t = MagicMock()
+        sel = MagicMock()
+        eq = MagicMock()
+        order = MagicMock()
+        order.execute.return_value = MagicMock(data=snapshot_rows)
+        order.range = _make_paged_range(snapshot_rows)
+        order.order.return_value = order
+        eq.order = MagicMock(return_value=order)
+        sel.eq.return_value = eq
+        t.select.return_value = sel
+        mock_supabase.table.return_value = t
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with caplog.at_level(
+            logging.WARNING, logger="quantalyze.analytics.runner"
+        ), patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ):
+            positions, prices, _ = await _load_position_time_series(
+                "strat-test", mock_supabase
+            )
+
+        # Good row survives; the non-finite row is coerced → 0.0 → dropped
+        # (NOT written as inf).
+        assert positions["2024-01-15"]["BTCUSDT"] == 10000.0
+        assert "ETHUSDT" not in positions.get("2024-01-15", {})
+        # No NaN/Inf leaked into ANY position cell — this is the assertion the
+        # missing isfinite guard breaks (signed=inf would land in the grid).
+        for sym_map in positions.values():
+            for v in sym_map.values():
+                assert math.isfinite(v), f"non-finite size leaked into grid: {v!r}"
+        # The drop is surfaced — same counter + warning as the ValueError path.
+        size_warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "size_usd" in r.getMessage()
+        ]
+        assert size_warnings, (
+            "a non-finite size_usd must emit a counted warning (M-0654); "
+            f"caplog={[r.getMessage() for r in caplog.records]}"
+        )
+
+    @pytest.mark.asyncio
     async def test_malformed_mark_price_is_surfaced_not_silently_dropped(
         self, caplog,
     ) -> None:

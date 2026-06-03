@@ -14,6 +14,31 @@ A 3-lens specialist suite (code-review / type-design / pr-test-analyzer) + a fre
 
 **Closed without code (reverify + red-team confirmed):** **H-1188** (ui_v2 scope is deliberate + documented + has a tested fail-loud breadcrumb), **H-0131** (mandate-fit's 3-tier rubric is the documented D-08 contract; the chip is informational and never gates Add), **H-0180** (DesktopGate mobile FOUC flashes an *empty* form — cosmetic, e2e-only), **H-0188** (`readCorrelationId` triplication — pure DRY, no live bug), **H-0199** (the "6 sequential queries" is one `Promise.all`, fires once/sync — premise false), **H-0376** (MandateForm 17-handler `bindField` extraction — gold-plating over tested code), **H-1232** (`SaveState` union — no mandate consumer renders the conflated value), **H-0444** (`getAuditAdminClient` cached-null requires a transiently-missing env var Vercel never produces — fictional), **H-0447** (already fixed by M-0269's `leadExists()` 404-vs-200 disambiguation in F5b). Same-topic Esc MEDIUMs **M-0061**/**M-0064** also closed (the `defaultPrevented` handshake landed in F9 #429; the cited multi-modal chain was pruned in #368; a full LIFO stack-manager is declined as speculative).
 
+## [0.24.15.104] - 2026-06-03
+### Changed — pyarrow moved off the production image (H-0537 + M-0595, supply-chain)
+
+`pyarrow==18.1.0` — a ~40 MB native Arrow wheel with CVE-2024-52338 (RCE) history — was pinned in `analytics-service/requirements.txt`, the file the **production Railway worker** installs (and which holds the Supabase service-role key), despite being used **only by tests** (`pd.read_parquet` of the `golden_252d_input.parquet` fixture in `tests/conftest.py` + `.to_parquet` in `tests/fixtures/regen_golden.py`). Moved it to `requirements-dev.txt` so the prod image (the Dockerfile installs **only** `requirements.txt`) no longer ships the native Arrow wheel or its transitive attack surface.
+
+- **Prod boot verified safe** — blocking `pyarrow` via an import hook and importing every production entrypoint (`main`/uvicorn app, `main_worker`, `services.analytics_runner`/`portfolio_optimizer`/`bridge_scoring`/`metrics`, `routers.portfolio`/`cron`) all succeed: no production module reads parquet or imports pyarrow (a red-team grep of the full non-test surface — services/routers/scripts — confirmed zero prod consumers; pandas 2.2.3 does not require pyarrow at runtime).
+- **Every test context keeps pyarrow** — `ci.yml` + `cassette-refresh.yml` already `pip install -r requirements.txt -r requirements-dev.txt`; the `analytics-service/Makefile` `install` target was updated from a hardcoded dev-dep list to `-r requirements.txt -r requirements-dev.txt` (a deploy-completeness review caught that `make test` would otherwise lose the parquet fixture) — now byte-for-byte the CI install.
+
+Residual carved (separate, lower-grade reproducible-builds initiative, not in this surgical move): H-0537's `--require-hashes` lockfile + mixed `==`/`>=` pin sub-items. Reviewed by a deploy/build-completeness specialist + a fresh-context red-team (SHIP; the one MEDIUM must-fix — the Makefile — applied).
+
+## [0.24.15.103] - 2026-06-03
+### Tests — Lane-1 TEST-GAP cohort (8 tests written; 28 gold-plating/not-a-bug findings deleted)
+
+Test-only change (zero production source) closing the Lane-1 slice of the FIX-LIST test-gap cohort (Lane 2 closed its 10 in #454). A 41-agent reverify fan-out classified all 41 Lane-1 TEST-GAP findings vs live code; **8 genuine gaps got tests, 28 were closed** (22 gold-plating DRY/type-design/naming NITs on already-covered test files + 5 not-a-bug + 1 already-covered), 5 deferred (need live-DB / a production change / verified-equivalent).
+
+**Tests written (each Rule-9 neuter-verified):**
+- **M-0732** `test_analytics_runner.py` — the non-finite (NaN/Inf) `size_usd` branch of `_load_position_time_series`: a value that parses via `float()` but is `inf`/`nan` must be coerced to 0.0 and dropped (not silently written as `signed=nan` poisoning every turnover/exposure cell). Neuter: delete the `math.isfinite` guard → `inf` leaks → fail.
+- **M-0887** `bridge/route.test.ts` — strengthened TC6 so the `.eq("user_id", session.id)` tenant filter is load-bearing (the mock now records the filtered columns) + new TC6b: a portfolio owned by another user 404s. Neuter: drop the route's `user_id` filter → the `eqCalls` ownership pin fails (the bare 404 check alone did not catch it).
+- **M-0568** `sec-005-api-keys-projection.test.ts` — re-armed the `FORBIDDEN_EMBED` production-scan regex to catch PostgREST hint-join syntax (`api_keys!inner(*)`, `api_keys!left(*)`, constraint-name hints) it was blind to, plus a positive/negative unit (verified zero false-positives against the 2 real production explicit-column hint joins).
+- **M-1124** new `supabase/tests/test_claim_compute_jobs_dedupe_partition.sql` — two same-partition `failed_retry` rows → `claim_compute_jobs_with_priority` dedupes to ≤1 claimed, no `23505` on `compute_jobs_one_inflight_per_kind_strategy`. Runs in the `sql-tests` CI job; concurrent-safe (BEGIN/ROLLBACK, scoped to the seeded `strategy_id`).
+- **L-0062** `critical-regressions.test.ts` — pins the `ci.yml` docs-link-check `lychee --offline` internal-only contract (neuter: drop `--offline` → fail).
+- **G23-187-rls-02 / G23-187-rls-03 / M-0017** (live-DB / introspection, `skipIf` gated) — two-user tenant isolation on `get_user_compute_jobs`; `EXECUTE`-REVOKE on the 5 SECDEF worker RPCs (anon/authenticated/public denied, `get_user_compute_jobs` keeps authenticated); the `api_key_rotation_reminder` cron `NOT EXISTS` dedup fires zero inserts on a recent reminder. All three invariants verified against the test project via MCP (not vacuous), matching the file's existing skip-in-CI pattern.
+
+A 41-agent reverify + a test-quality/SQL-correctness specialist pair + a fresh-context red-team (which re-applied every production neuter and replayed the SQL/cron against the live RPC) returned **SHIP, zero must-fix**. `tsc`/full changed-file vitest (139 passed) / pytest (13 passed) green.
+
 ## [0.24.15.102] - 2026-06-03
 ### Fixed — Portfolio-optimizer replacement-suggestion window alignment + dedupe-position (find_improvement_candidates)
 

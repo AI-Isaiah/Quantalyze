@@ -15,6 +15,16 @@
 # working.
 quantstats==0.0.81
 
+# H-0537 — pyarrow is TEST-ONLY: pd.read_parquet of the golden_252d_input.parquet
+# fixture (tests/conftest.py) + .to_parquet in tests/fixtures/regen_golden.py. Moved
+# off requirements.txt so the production Railway image (Dockerfile installs ONLY
+# requirements.txt) no longer ships the ~40MB native Arrow wheel + its transitive
+# attack surface. Every test context installs `requirements.txt -r requirements-dev.txt`
+# (ci.yml + cassette-refresh.yml + the analytics-service Makefile `install` target), so
+# the golden parquet fixture still loads in tests.
+# 18.1.0 is compatible with pandas==2.2.3 / numpy==2.2.4.
+pyarrow==18.1.0
+
 # Test + type-check tooling. Relocated here from the inline
 # `pip install -r requirements.txt pytest …` in .github/workflows/ci.yml so
 # the python job's setup-python `cache: pip` (keyed on requirements*.txt) also
