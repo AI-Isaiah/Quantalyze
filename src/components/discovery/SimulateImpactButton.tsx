@@ -1,8 +1,26 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useCallback, useState } from "react";
-import { PortfolioImpactPanel } from "@/components/portfolio/PortfolioImpactPanel";
 import { Tooltip } from "@/components/ui/Tooltip";
+
+// H-1123: PortfolioImpactPanel (~700 LOC + SVG chart renderers) is only
+// mounted on the user's first "Simulate Impact" click (the `open && portfolioId`
+// branch below), so code-split it out of the discovery/browse first-paint
+// bundle. `ssr: false` is valid here because this is a client component.
+const PortfolioImpactPanel = dynamic(
+  () =>
+    import("@/components/portfolio/PortfolioImpactPanel").then((m) => ({
+      default: m.PortfolioImpactPanel,
+    })),
+  {
+    ssr: false,
+    // Immediate backdrop while the chunk downloads so the click isn't a dead
+    // window — matches the panel's own `bg-black/20` overlay so it transitions
+    // seamlessly once mounted (review LOW: dead-click feedback gap).
+    loading: () => <div className="fixed inset-0 z-50 bg-black/20" aria-hidden="true" />,
+  },
+);
 
 interface SimulateImpactButtonProps {
   candidateStrategyId: string;
