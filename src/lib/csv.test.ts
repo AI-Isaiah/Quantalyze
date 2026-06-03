@@ -63,6 +63,22 @@ describe("parseCsvLine", () => {
     expect(parseCsvLine(" a , b , c ")).toEqual(["a", "b", "c"]);
   });
 
+  it("H-0440: sanitize:false preserves leading formula chars verbatim (header row)", () => {
+    // A header is column-identity metadata, not a re-emitted value — its
+    // leading +/-/@/= must NOT be stripped.
+    expect(parseCsvLine("=manager_email,-net_ticket,@type", false)).toEqual([
+      "=manager_email",
+      "-net_ticket",
+      "@type",
+    ]);
+    // ...while the default still sanitizes (data-cell injection defense).
+    expect(parseCsvLine("=manager_email,-net_ticket,@type")).toEqual([
+      "manager_email",
+      "net_ticket",
+      "type",
+    ]);
+  });
+
   it("preserves signed numerics in parsed fields", () => {
     expect(parseCsvLine("2024-01-15,-430.25")).toEqual(["2024-01-15", "-430.25"]);
   });
@@ -141,6 +157,22 @@ describe("parseCsv", () => {
       ["date", "pnl"],
       ["2024-01-15", "1250.50"],
       ["2024-01-16", "-430.25"],
+    ]);
+  });
+
+  it("H-0440: sanitizeFirstRow:false preserves the header but still sanitizes data rows", () => {
+    const raw = "=manager_email,-net_ticket\n=cmd|calc,-evil";
+    expect(parseCsv(raw, { sanitizeFirstRow: false })).toEqual([
+      ["=manager_email", "-net_ticket"], // header verbatim
+      ["cmd|calc", "evil"], // data still sanitized
+    ]);
+  });
+
+  it("H-0440: default (no opts) still sanitizes row 0 — back-compat unchanged", () => {
+    const raw = "=manager_email,-net_ticket\nalice,bob";
+    expect(parseCsv(raw)).toEqual([
+      ["manager_email", "net_ticket"],
+      ["alice", "bob"],
     ]);
   });
 });
@@ -255,5 +287,88 @@ describe("parseCsvWithSchema", () => {
       }),
     );
     expect(rows).toEqual([{ email: "lp1@x.com", ticket: -5_000_000 }]);
+  });
+
+  it("H-0440: a formula-prefixed header is preserved verbatim, not silently stripped into a match", () => {
+    // Pre-fix, `sanitizeCsvValue` stripped the leading `-` from the header
+    // (`-email` -> `email`), so a malformed/formula-prefixed header SILENTLY
+    // matched the `email` schema column. Headers are column-identity metadata
+    // and are now preserved verbatim, so this fails loud instead.
+    const raw = "-email,tier\nalice@x.com,institutional";
+    expect(() =>
+      parseCsvWithSchema(raw, ["email", "tier"], (row) => row),
+    ).toThrowError(/Missing CSV header column: email/);
+    // ...and the diagnostic is actionable: it names the offending header cell
+    // and tells the operator to strip the leading formula char (H-0440).
+    expect(() =>
+      parseCsvWithSchema(raw, ["email", "tier"], (row) => row),
+    ).toThrowError(/found a header cell "-email".*remove the leading "-"/);
+  });
+
+  it("H-0440: a multi-formula-char header advises removing the FULL leading run", () => {
+    // `=+manager_email` needs BOTH chars stripped — advising only the first
+    // would leave `+manager_email` and loop the operator on the same 400.
+    expect(() =>
+      parseCsvWithSchema("=+email\nx", ["email"], (row) => row),
+    ).toThrowError(/remove the leading "=\+" so the header reads "email"/);
+  });
+
+  it("H-0440: the missing-column diagnostic strips control chars and bounds width", () => {
+    // The echoed header is operator-controlled and reaches the 400 body — no
+    // control-char passthrough, and a pathologically wide header is truncated.
+    let msg = "";
+    try {
+      parseCsvWithSchema("=email\u0007,tier\na,b", ["manager_email"], (r) => r);
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toMatch(/Missing CSV header column: manager_email/);
+    expect(msg).not.toMatch(/[\x00-\x1f]/); // no control chars leak
+
+    const wide = Array.from({ length: 500 }, (_, i) => `c${i}`).join(",");
+    let wideMsg = "";
+    try {
+      parseCsvWithSchema(`${wide}\n1`, ["manager_email"], (r) => r);
+    } catch (e) {
+      wideMsg = (e as Error).message;
+    }
+    expect(wideMsg).toMatch(/\(\+\d+ more\)/); // truncated, not 500 cols echoed
+  });
+
+  it("H-0440: consistent verbatim headers — the digit-lookahead asymmetry is gone", () => {
+    // Pre-fix `-net_ticket` -> `net_ticket` (stripped, matched) but
+    // `-2024_pnl` -> `-2024_pnl` (digit-lookahead, NOT stripped, didn't
+    // match): same prefix, opposite outcome. Now BOTH are verbatim and
+    // neither silently matches its un-prefixed schema column.
+    expect(() =>
+      parseCsvWithSchema("-net_ticket\n1", ["net_ticket"], (row) => row),
+    ).toThrowError(/Missing CSV header column: net_ticket/);
+    expect(() =>
+      parseCsvWithSchema("-2024_pnl\n1", ["2024_pnl"], (row) => row),
+    ).toThrowError(/Missing CSV header column: 2024_pnl/);
+  });
+
+  it("H-0440: DATA cells are still formula-sanitized (injection defense intact)", () => {
+    // Only the header is exempt — a data cell that would inject a spreadsheet
+    // formula must still be neutralised.
+    const raw = "email,note\nalice@x.com,=cmd|calc";
+    const rows = parseCsvWithSchema<{ email: string; note: string }>(
+      raw,
+      ["email", "note"],
+      (row) => ({ email: row.email, note: row.note }),
+    );
+    expect(rows).toEqual([{ email: "alice@x.com", note: "cmd|calc" }]);
+  });
+
+  it("H-0440: hasHeader:false sanitizes row 0 (it is data, not a header)", () => {
+    const raw = "=cmd|calc,-5000";
+    const rows = parseCsvWithSchema<{ a: string; b: string }>(
+      raw,
+      ["a", "b"],
+      (row) => ({ a: row.a, b: row.b }),
+      false,
+    );
+    // row 0 is data: formula stripped from the first cell, signed numeric kept.
+    expect(rows).toEqual([{ a: "cmd|calc", b: "-5000" }]);
   });
 });
