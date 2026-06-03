@@ -23,14 +23,19 @@ PYTEST  = $(VENV)/bin/pytest
 
 help:
 	@echo "Targets:"
-	@echo "  install   — pip install -r requirements.txt + dev deps"
+	@echo "  install   — pip install -r requirements.txt -r requirements-dev.txt (matches CI)"
 	@echo "  lint      — mypy --strict on services/ingestion/ (MC-3 fix; the current CI gate)"
 	@echo "  typecheck — mypy on the full B-mypy floor surface (services/ routers/ models/)"
 	@echo "  test      — pytest with coverage (matches CI ci.yml)"
 	@echo "  ci        — full local CI gauntlet: lint + test"
 
 install:
-	$(PIP) install -r requirements.txt pytest pytest-cov pytest-asyncio pytest-mock cryptography mypy
+	# Single source of truth for dev/test deps: requirements-dev.txt carries the
+	# test tooling (pytest*, cryptography, mypy) AND the TEST-ONLY runtime deps
+	# (quantstats reference + pyarrow for the golden parquet fixture, H-0537).
+	# Byte-for-byte the install ci.yml / cassette-refresh.yml run, so `make test`
+	# matches CI and the parquet fixture loads.
+	$(PIP) install -r requirements.txt -r requirements-dev.txt
 
 lint:
 	$(MYPY) --strict --follow-imports=silent services/ingestion/
