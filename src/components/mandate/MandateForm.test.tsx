@@ -215,6 +215,40 @@ describe("MandateForm", () => {
     expect(marketNeutral).toHaveAttribute("aria-checked", "true");
   });
 
+  it("H-0377: filters unknown/legacy enum values from initial so they are not re-sent on save", () => {
+    // A leftover/obsolete DB value (a strategy type later dropped from
+    // STRATEGY_TYPES) is typed string[] but was cast straight to the enum union.
+    // The server validates membership against the SAME STRATEGY_TYPES, so
+    // without the intake filter the stale value rides along on the next save and
+    // is REJECTED (the field fails to persist). filterToKnown drops it at load.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({ success: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const prefs = populatedPrefs();
+    prefs.preferred_strategy_types = ["Long-Only", "obsolete_legacy_type"];
+    render(<MandateForm initial={prefs} />);
+
+    // The valid initial value survives the filter (its chip renders checked)…
+    expect(
+      screen.getByRole("checkbox", { name: "Long-Only" }),
+    ).toHaveAttribute("aria-checked", "true");
+
+    // …and a subsequent edit saves WITHOUT the unknown value.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Market Neutral" }));
+    const body = JSON.parse(
+      fetchMock.mock.calls
+        .filter((c) => c[0] === "/api/preferences")
+        .at(-1)![1].body as string,
+    );
+    expect(body.preferred_strategy_types).toEqual(["Long-Only", "Market Neutral"]);
+    expect(body.preferred_strategy_types).not.toContain("obsolete_legacy_type");
+  });
+
   it("rapid successive excluded_exchanges clicks send cumulative values (not overwrite)", () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

@@ -21,6 +21,20 @@ function toggleIn<T extends string>(list: T[], value: T): T[] {
   return list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
 }
 
+// H-0377: `AllocatorOwnPreferences` types these multi-selects as `string[] |
+// null` (unvalidated at read time). Casting straight to the enum unions let a
+// legacy/dropped DB value pass the cast, then silently vanish on the next save
+// (it fails the chip-inclusion check) — a silent data-loss path. Filter against
+// the canonical constant at the intake boundary so unknown values are dropped
+// explicitly, with no `as` lie and a real type narrowing.
+function filterToKnown<T extends string>(
+  values: readonly string[] | null | undefined,
+  allowed: readonly T[],
+): T[] {
+  const known = new Set<string>(allowed);
+  return (values ?? []).filter((v): v is T => known.has(v));
+}
+
 type StrategyType = (typeof STRATEGY_TYPES)[number];
 type Subtype = (typeof SUBTYPES)[number];
 type Exchange = (typeof EXCHANGES)[number];
@@ -49,9 +63,14 @@ export function MandateForm({ initial }: Props) {
   // Local state mirrors server state — optimistic for chip toggles + reset.
   const [maxWeight, setMaxWeight] = useState<number | null>(initial?.max_weight ?? null);
   const [preferredTypes, setPreferredTypes] = useState<StrategyType[]>(
-    (initial?.preferred_strategy_types as StrategyType[] | null) ?? [],
+    filterToKnown(initial?.preferred_strategy_types, STRATEGY_TYPES),
   );
   const [excludedExchanges, setExcludedExchanges] = useState<Exchange[]>(
+    // NOT filtered via filterToKnown: the server validates excluded_exchanges
+    // case-INSENSITIVELY (isSupportedExchange lowercases) while EXCHANGES is
+    // display-case ("Binance"), so the DB can legitimately hold a lowercase
+    // "binance" that an exact-case filter would wrongly drop. Display-vs-stored
+    // case normalization is a separate concern; left as the prior cast here.
     (initial?.excluded_exchanges as Exchange[] | null) ?? [],
   );
   const [ticketSize, setTicketSize] = useState<string>(
@@ -70,7 +89,7 @@ export function MandateForm({ initial }: Props) {
     initial?.liquidity_preference ?? null,
   );
   const [styleExclusions, setStyleExclusions] = useState<Subtype[]>(
-    (initial?.style_exclusions as Subtype[] | null) ?? [],
+    filterToKnown(initial?.style_exclusions, SUBTYPES),
   );
 
   // Ref-backed latest values for multi-select chip fields. Closure over the
