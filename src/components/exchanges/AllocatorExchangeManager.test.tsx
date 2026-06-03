@@ -407,6 +407,139 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
       screen.getByTestId("allocator-sync-helper").textContent,
     ).toContain("Sync request failed");
   });
+
+  // M-0407 (audit-2026-05-07) — handleAddKey inserts the encryption-critical
+  // fields with `?? `-fallbacks: dek_encrypted/nonce ?? null, kek_version ?? 1.
+  // The existing two handleAddKey tests above only assert downstream UI (pill /
+  // helper text) and happen to mock kek_version:1 — IDENTICAL to the fallback
+  // default — so the source could drop `result.kek_version` entirely and both
+  // still pass (non-discriminating coverage of an at-rest-credential field:
+  // a wrong KEK version = decrypt failure / encrypt under the wrong key). These
+  // three tests assert the row sent to .insert() carries the validate-and-encrypt
+  // RESULT values and exercises each fallback branch, including the nullish-vs-
+  // falsy `?? 1` (kek_version 0 is a valid version that must survive).
+  it("propagates the validate-and-encrypt ciphertext + kek_version into the api_keys insert (M-0407)", async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            api_key_encrypted: "CT_KEY",
+            api_secret_encrypted: "CT_SEC",
+            passphrase_encrypted: "CT_PASS",
+            dek_encrypted: "DEK_3",
+            nonce: "N_3",
+            kek_version: 3,
+          }),
+        });
+      }
+      if (url === "/api/allocator/holdings/sync") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, job_id: "job-1" }),
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    insertMock.mockReturnValue({ data: makeKey({ id: "new-key" }), error: null });
+
+    render(<AllocatorExchangeManager initialKeys={[]} />);
+    await submitAddKeyForm();
+
+    await waitFor(() => expect(insertMock).toHaveBeenCalledTimes(1));
+    // Neuter: `kek_version: result.kek_version ?? 1` -> `kek_version: 1` fails
+    // this (expects 3) while the two existing handleAddKey tests still pass.
+    expect(insertMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        user_id: "user-a",
+        api_key_encrypted: "CT_KEY",
+        api_secret_encrypted: "CT_SEC",
+        passphrase_encrypted: "CT_PASS",
+        dek_encrypted: "DEK_3",
+        nonce: "N_3",
+        kek_version: 3,
+      }),
+    );
+  });
+
+  it("applies the ?? fallbacks when validate-and-encrypt omits kek_version/dek_encrypted/nonce (M-0407)", async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          // Partial server response: only the two required ciphertexts.
+          json: async () => ({
+            api_key_encrypted: "CT",
+            api_secret_encrypted: "CT2",
+          }),
+        });
+      }
+      if (url === "/api/allocator/holdings/sync") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, job_id: "job-1" }),
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    insertMock.mockReturnValue({ data: makeKey({ id: "new-key-2" }), error: null });
+
+    render(<AllocatorExchangeManager initialKeys={[]} />);
+    await submitAddKeyForm();
+
+    await waitFor(() => expect(insertMock).toHaveBeenCalledTimes(1));
+    // Neuter: `result.dek_encrypted ?? null` -> `result.dek_encrypted` fails
+    // this (null vs undefined); same for nonce/passphrase_encrypted/kek_version.
+    expect(insertMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kek_version: 1,
+        dek_encrypted: null,
+        nonce: null,
+        passphrase_encrypted: null,
+      }),
+    );
+  });
+
+  it("preserves kek_version:0 from validate-and-encrypt (nullish ?? 1, not falsy || 1) (M-0407)", async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            api_key_encrypted: "CT",
+            api_secret_encrypted: "CT2",
+            dek_encrypted: "d",
+            nonce: "n",
+            kek_version: 0,
+          }),
+        });
+      }
+      if (url === "/api/allocator/holdings/sync") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, job_id: "job-1" }),
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    insertMock.mockReturnValue({ data: makeKey({ id: "new-key-3" }), error: null });
+
+    render(<AllocatorExchangeManager initialKeys={[]} />);
+    await submitAddKeyForm();
+
+    await waitFor(() => expect(insertMock).toHaveBeenCalledTimes(1));
+    // The discriminating case: kek_version 0 is a VALID version that must
+    // survive. Neuter: `?? 1` -> `|| 1` corrupts 0 to 1 (re-encrypt under the
+    // wrong KEK) and fails this assertion.
+    const row = insertMock.mock.calls[0][0] as { kek_version: number };
+    expect(row.kek_version).toBe(0);
+  });
 });
 
 describe("AllocatorExchangeManager — 5s polling (D-11)", () => {
