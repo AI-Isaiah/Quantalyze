@@ -47,16 +47,24 @@ def find_replacement_candidates(
     port_df = pd.DataFrame(portfolio_returns).dropna()
     if port_df.empty or incumbent_strategy_id not in port_df.columns:
         return []
+    # Dedupe duplicate timestamps last-write-wins (the G15-006 idiom in
+    # routers/simulator.py + _build_monthly_returns) so the per-candidate
+    # baseline reslice below cannot cartesian-amplify against a returns_series
+    # carrying a repeated date — routers/portfolio.py documents that
+    # `_records_to_series` does NOT dedupe its JSONB input. A no-op on the
+    # unique-date series the analytics pipeline normally produces.
+    port_df = port_df[~port_df.index.duplicated(keep="last")]
 
-    # Current portfolio metrics (with incumbent)
+    # Current-portfolio weights (with incumbent). The baseline metrics
+    # (sharpe / corr / dd) are NOT computed here over the full port_df window —
+    # they are recomputed PER CANDIDATE over that candidate's overlap window
+    # inside the loop below (M-0893), so each delta compares two portfolios
+    # over the same dates rather than mixing a full-window baseline with a
+    # candidate-window challenger.
     w_arr = np.array([weights.get(sid, 0) for sid in port_df.columns])
     w_sum = w_arr.sum()
     if w_sum > 0:
         w_arr = w_arr / w_sum
-    current_returns = (port_df * w_arr).sum(axis=1)
-    current_sharpe = _compute_sharpe(current_returns)
-    current_corr = _avg_corr(port_df)
-    current_dd = _max_drawdown(current_returns)
 
     # Weight of the incumbent to redistribute
     incumbent_weight = weights.get(incumbent_strategy_id, 0)
@@ -86,6 +94,25 @@ def find_replacement_candidates(
         ).dropna()
         if len(all_returns) < 30:
             continue
+
+        # M-0893: reslice the incumbent-portfolio baseline to THIS candidate's
+        # overlap window (the same window-alignment match_engine.py does for the
+        # ADD-semantics sibling, NEW-C08-01). new_* below are computed over
+        # all_returns' window (the candidate's track record, typically shorter
+        # than the full portfolio history); subtracting them from a full-window
+        # baseline let a short bull-run candidate out-rank a full-history one
+        # purely on a regime / sample-size mismatch (_compute_sharpe annualizes
+        # ×√252 regardless of window length). all_returns.index ⊆ port_df.index
+        # (remaining_df is a column-subset of the already-dropna'd port_df), so
+        # .loc never KeyErrors or introduces NaN and the incumbent is present on
+        # every aligned row; because port_df's index was deduped above it cannot
+        # cartesian-amplify, so the aligned baseline has exactly all_returns'
+        # rows. w_arr is unchanged because the column set is identical.
+        port_df_aligned = port_df.loc[all_returns.index]
+        current_returns = (port_df_aligned * w_arr).sum(axis=1)
+        current_sharpe = _compute_sharpe(current_returns)
+        current_corr = _avg_corr(port_df_aligned)
+        current_dd = _max_drawdown(current_returns)
 
         new_weights = {**base_weights, cid: incumbent_weight}
 
