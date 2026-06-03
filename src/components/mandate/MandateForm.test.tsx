@@ -440,6 +440,36 @@ describe("MandateSlider keyboard debounce (W-09 regression)", () => {
     vi.advanceTimersByTime(300);
     expect(onCommit).toHaveBeenCalledTimes(1);
   });
+
+  // M-0421 — only keys that move a range input's value should arm the debounced
+  // commit. Tab/Escape/Shift (focus-out, modifiers, SR-nav) must NOT schedule a
+  // redundant same-value PUT.
+  it("M-0421: a non-value key (Tab/Escape/Shift) does NOT arm a commit; a value key still does", () => {
+    const onCommit = vi.fn();
+    const { container } = render(
+      <MandateSlider
+        label="Test"
+        helper="h"
+        value={0.25}
+        min={0.05}
+        max={0.5}
+        step={0.01}
+        formatValue={(v) => String(v)}
+        onCommit={onCommit}
+      />,
+    );
+    const input = container.querySelector("input[type='range']")!;
+    // Non-value keys: even after the full debounce window, no commit fires.
+    fireEvent.keyUp(input, { key: "Tab" });
+    fireEvent.keyUp(input, { key: "Escape" });
+    fireEvent.keyUp(input, { key: "Shift" });
+    vi.advanceTimersByTime(300);
+    expect(onCommit).toHaveBeenCalledTimes(0);
+    // A real value key still commits — guards against over-tightening the gate.
+    fireEvent.keyUp(input, { key: "ArrowRight" });
+    vi.advanceTimersByTime(300);
+    expect(onCommit).toHaveBeenCalledTimes(1);
+  });
 });
 
 /**
