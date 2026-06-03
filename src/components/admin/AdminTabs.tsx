@@ -389,7 +389,10 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
         body: JSON.stringify({ id: rejectId, action: "reject", review_note: rejectNote }),
       });
       if (!res.ok) {
-        setError("Rejection failed.");
+        // M-0378: surface the server's rejection-specific reason (e.g. a
+        // missing review_note) instead of a generic string — mirrors approve().
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(data.error ?? "Rejection failed.");
         return;
       }
       setRejectId(null);

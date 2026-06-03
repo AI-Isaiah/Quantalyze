@@ -27,6 +27,24 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: vi.fn(), push: vi.fn() }),
 }));
 
+// jsdom does not implement HTMLDialogElement.showModal()/close(); the reject
+// flow renders a <Modal> (native <dialog>) whose useEffect calls them when
+// `open` flips. Stub them so opening the reject modal doesn't throw.
+if (typeof HTMLDialogElement !== "undefined") {
+  if (!HTMLDialogElement.prototype.showModal) {
+    HTMLDialogElement.prototype.showModal = function showModal() {
+      this.setAttribute("open", "");
+      (this as unknown as { open: boolean }).open = true;
+    };
+  }
+  if (!HTMLDialogElement.prototype.close) {
+    HTMLDialogElement.prototype.close = function close() {
+      this.removeAttribute("open");
+      (this as unknown as { open: boolean }).open = false;
+    };
+  }
+}
+
 const INTRO: IntroRequestRow = {
   id: "ir-1",
   status: "pending",
@@ -160,5 +178,31 @@ describe("AdminTabs — typed-row render paths (H-0353)", () => {
     fireEvent.click(screen.getByText("Managers"));
     expect(screen.getByText("Dave Manager")).toBeTruthy();
     expect(screen.getByText(/dave@example\.com/)).toBeTruthy();
+  });
+});
+
+// M-0378 — reject() must surface the server's rejection-specific reason (the
+// same error-body read approve() already does), not a generic "Rejection
+// failed." string. The reject path is fail-loud either way, but discarding the
+// server message hid actionable detail (e.g. a missing review note).
+describe("AdminTabs — Strategy Review reject surfaces the server error (M-0378)", () => {
+  it("renders the server-supplied rejection reason in the alert, not the generic fallback", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue({
+      ok: false,
+      json: async () => ({ error: "Review note is required." }),
+    } as unknown as Response);
+
+    renderTabs();
+    fireEvent.click(screen.getByText("Strategy Review"));
+    // The card's ghost "Reject" (first in DOM) opens the modal + sets rejectId.
+    fireEvent.click(screen.getAllByText("Reject")[0]);
+    // The modal's danger "Reject" (last in DOM) confirms → reject() → fetch.
+    const rejects = screen.getAllByText("Reject");
+    fireEvent.click(rejects[rejects.length - 1]);
+
+    // Server reason renders (was the generic "Rejection failed." before the fix).
+    expect(await screen.findByText("Review note is required.")).toBeTruthy();
+    expect(screen.queryByText("Rejection failed.")).toBeNull();
+    fetchMock.mockRestore();
   });
 });

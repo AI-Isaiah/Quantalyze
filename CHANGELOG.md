@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.108] - 2026-06-03
+### Fixed — PR-C: Mandate + Admin MEDIUM/LOW sweep (2 fixes; surface mostly already-sound)
+
+Second of four directory-aligned Lane-2 PRs (A→C→B→D), opening the mandate/** + admin/** surface. A per-file reverify fan-out (7 agents) over 11 findings found the surface largely sound already: **2 live fixes**, 8 sound declines, and 1 genuine bug that belongs to Lane-1.
+
+- **M-0378 [MED]** — `AdminTabs` `reject()` set a hardcoded `"Rejection failed."` and discarded the server's JSON `{error}` body, asymmetric with `approve()` (which reads it). The strategy-review route returns actionable reasons on every reject failure (400 invalid-note, 401/403/429/500). Now mirrors `approve()`: `setError(data.error ?? "Rejection failed.")`. Still fail-loud. Regression test in `AdminTabs.test.tsx` (neuter-verified).
+- **M-0421 [MED]** — `MandateSlider` `handleKeyUp` armed a debounced `onCommit` on **every** keyUp — including Tab/Escape/Shift/SR-nav — and `useMandateAutoSave.save()` has no same-value short-circuit, so a focus-out or modifier key scheduled a redundant same-value `PUT /api/preferences`. Gated `handleKeyUp` on a `COMMIT_KEYS` set (the value-moving keys: Arrow\*/Home/End/Page\*). Pointer/touch commit paths untouched. Regression test in `MandateForm.test.tsx` (neuter-verified; the existing rapid-ArrowRight debounce test still passes, so the gate isn't over-tightened).
+
+A 3-lens specialist suite + a fresh-context Claude red-team ran on the diff: verdict **SHIP**, both fixes empirically re-confirmed REAL_ISSUE + behavior-preserving (the red-team neuter-tested in a scratch checkout), every other challenge REFUTED, zero new findings. `tsc`/`eslint` clean; full vitest **6103 pass**.
+
+**Closed without code (8 — reverify + specialist/red-team confirmed):** M-0386 (SendIntroPanel holdings already fails loud, retry is a nicety), M-0387 (`Holding` type identical to the route shape — speculative dedup), L-0021 (filter compares strategy_id vs strategy_id — correct, not a mismatch), M-0390 (UserRolesPanel self-revoke has no present-day lockout — dashboard chrome reads the legacy `profiles.role`, not `user_app_roles`; admin self-revoke already blocked; reversible+audited; harm is future Sprint-7), M-0418 (MandateChipGroup Reset link byte-identical ×5 — pure DRY), **M-0425/M-1116/M-1117** (`useMandateAutoSave` error-swallow trio — already closed by a post-audit rewrite that routes every terminal outcome through `failTerminal → captureToSentry`).
+
+**Deferred to Lane-1:** M-0519 — `for-quants-leads-admin.ts` `hitCap` off-by-one (false "older leads exist" at exactly 500 rows) is genuine, but the module is `import "server-only"` (service-role chokepoint) = Lane-1; left for that lane with a noted clean fix (fetch CAP+1, compare `> CAP`; flip the exactly-cap test).
+
 ## [0.24.15.107] - 2026-06-03
 ### Fixed — H-0806: router-test `sys.modules` pollution → order-independent analytics suite
 

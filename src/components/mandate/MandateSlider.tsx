@@ -3,6 +3,20 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { ChangeEvent, KeyboardEvent, PointerEvent, TouchEvent } from "react";
 
+// M-0421: the only keys that move a native range input's value. A keyUp for any
+// other key (Tab/Escape/Shift/screen-reader nav) must NOT arm a commit, else it
+// schedules a redundant same-value PUT of an unchanged mandate.
+const COMMIT_KEYS = new Set([
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+]);
+
 interface Props {
   label: string;
   helper: string;
@@ -79,6 +93,10 @@ export function MandateSlider({
   }
 
   function handleKeyUp(e: KeyboardEvent<HTMLInputElement>) {
+    // M-0421: only arm the debounced commit for keys that actually change the
+    // slider value; ignore Tab/Escape/modifiers so they don't trigger a
+    // redundant same-value save.
+    if (!COMMIT_KEYS.has(e.key)) return;
     if (keyTimerRef.current) clearTimeout(keyTimerRef.current);
     const v = Number((e.currentTarget as HTMLInputElement).value);
     keyTimerRef.current = setTimeout(() => onCommit(v), 300);
