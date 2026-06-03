@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.97] - 2026-06-03
+### Fixed — H6 CustomRangePicker MEDIUM≥8 surface closure (M-0068 + M-1101 + M-1102 + M-1103 + M-1104 + M-1106)
+
+Closes the complete `CustomRangePicker.tsx` finding surface (Lane 2) — the dual-month date-range popover inside EquityChart. All 7 findings reverified LIVE against current main before fixing; a 5-lens specialist suite (code-review / silent-failure / type-design / test / perf) + a fresh-context Claude red-team ran on the diff (verdict FIX_THEN_SHIP, all 6 challenges REFUTED — the one fix was a test-fragility hardening, no production-logic change). tsc + eslint clean; 31 component tests pass (4 new, both fixes neuter-verified load-bearing; 3× no flake); 55 dependent EquityChart tests pass.
+
+- **M-0068** (c8) — the document `keydown`/`mousedown` listeners now attach **synchronously** on open instead of inside a `setTimeout(0)`; a one-tick `armed` ref gates only the outside-click branch (so the opening click still can't self-close), while Escape is responsive from the first frame with no window where the listener is absent. `pickDay` moved above the `if (!isOpen) return null` early return as a `useCallback` (Rules of Hooks preserved).
+- **M-1101** (c8) — `apply()`'s invalid-range guard now `console.warn`s loudly (Rule 12) before returning, surfacing the invariant if a future caller bypasses the disabled Apply button. Unreachable via the current UI (disabled button) so no component test by construction (red-team-confirmed honest).
+- **M-1102** (c8) — the popover is bounded to the viewport (`maxWidth`/`maxHeight` + `overflowY:auto` + `flexWrap`) so it degrades gracefully (scroll/wrap) instead of being clipped off-screen with no way to reach it. Caps are inert at normal dashboard widths → the pixel-faithful design is byte-identical (red-team-verified); anchor-aware repositioning flagged as a design-review follow-up.
+- **M-1103** (c8) PERF HALF — `React.memo(DayCell)` + `useCallback(pickDay)` + the `cells` memo keyed on year+month **primitives** (not the fresh `month` Date) collapses the 84-cell hover re-render storm (red-team-verified non-no-op via a cells-identity probe). The finding's "drop the `setViewMonth` jump" half is **DECLINED** — it contradicts the tested, intentional behavior in test M-1105 ("typing a Start date advances the visible calendar to that month"), and the premise is empirically false (a native date input only fires `onChange` on a *complete* date, so there is no partway-typed jump). Rule 7: surfaced, not averaged.
+- **M-1104** (c8) — `clampDate`'s silent rewrite of an out-of-range typed date is now announced via a visually-hidden `aria-live="polite"` region (fail-loud for assistive tech without altering the visual design; scoped to typed dates — preset clamps are defined "capped at available history" semantics).
+- **M-1106** (c8) — `pickDay`'s out-of-range guard now `console.warn`s loudly (Rule 12). Triple-guarded unreachable (disabled cell + `!disabled` onClick + the guard) so no component test by construction.
+
+Declined: **L-0073** (c9) — rewriting the `pickMode` `"start"|"end"` `useState` into a reducer/tagged-state machine; red-team-refuted as a speculative refactor of working, fully-tested code with zero representable-illegal-state to eliminate (Rule 2/3). Test hardening folded in from the review: a file-wide `afterEach(vi.useRealTimers())` (fixes a fake-timer-leak cross-shard flake vector — the file was 1 of 2 of 33 fake-timer files with no reset), the M-0068 Escape test switched to real timers for determinism, the stale "dead swap branch" title on the M-1099 reverse-pick test removed (doc-lie; the swap is live and correct), and the `cells` memo's `eslint-disable` removed by hoisting the dep primitives.
+
 ## [0.24.15.96] - 2026-06-03
 ### Fixed — server-only-lib request-security cluster (M-0901 + M-0548)
 
