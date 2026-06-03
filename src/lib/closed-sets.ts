@@ -90,6 +90,13 @@ export const ADMIN_ONLY_PREFERENCE_FIELDS = [
 
 // --- Liquidity preference enum ---------------------------------------------
 export const LIQUIDITY_PREFERENCES = ["high", "medium", "low"] as const;
+// M-0548: derive the type from the const so the AllocatorPreferences interface,
+// the validator, and the DB CHECK all trace to this single source of truth
+// (same `(typeof X)[number]` pattern as SupportedExchange above). Adding a tier
+// here widens the interface union automatically instead of drifting from a
+// hand-maintained copy. (Lane-2 component copies — MandateTabPanel, MandateForm,
+// mandate-gates, MandateSegmentedRadio — remain; a follow-up can point them here.)
+export type LiquidityPreference = (typeof LIQUIDITY_PREFERENCES)[number];
 
 // --- strategy_analytics.computation_status closed set ----------------------
 // SoT for the strategy_analytics.computation_status column. The analytics

@@ -18,6 +18,7 @@ import {
   ADMIN_ONLY_PREFERENCE_FIELDS,
   MAGNITUDE_CAPS,
   LIQUIDITY_PREFERENCES,
+  type LiquidityPreference,
   isSupportedExchange,
 } from "./closed-sets";
 
@@ -44,7 +45,7 @@ export interface AllocatorPreferences {
   // Phase 2 — mandate columns (migration 061)
   max_weight: number | null;
   correlation_ceiling: number | null;
-  liquidity_preference: "high" | "medium" | "low" | null;
+  liquidity_preference: LiquidityPreference | null;
   style_exclusions: string[] | null;
   mandate_edited_at: string | null;
   // Phase 3 — scoring weight overrides (migration 062). Phase 4 writes this
