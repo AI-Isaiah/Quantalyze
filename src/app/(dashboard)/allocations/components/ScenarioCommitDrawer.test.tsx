@@ -1836,3 +1836,232 @@ describe("NEW-C18-06 — drawer recomputes size_at_decision_usd from edited perc
     vi.unstubAllGlobals();
   });
 });
+
+// ===========================================================================
+// M-0095 / M-0094 — per-row audit input is bound to the diff's STABLE identity
+// (diffKey), not its array position, so a `diffs` reorder while the drawer is
+// open cannot rebind a note/reason to the wrong row (and the persistent
+// bridge_outcomes audit metadata stays correct). The render loops also drop the
+// O(N²) `diffs.indexOf(d)` (M-0094). The production composer freezes its
+// commitDiffs snapshot so this reorder isn't reachable today; these tests pin
+// the drawer's reorder-safe CONTRACT directly via a prop reorder.
+// ===========================================================================
+describe("M-0095 — per-row audit input follows diff identity across a reorder", () => {
+  const BTC: ScenarioCommitDiff = {
+    kind: "voluntary_remove",
+    holding_ref: "holding:binance:BTC:spot",
+    size_at_decision_usd: 1000,
+  };
+  const ETH: ScenarioCommitDiff = {
+    kind: "voluntary_remove",
+    holding_ref: "holding:binance:ETH:spot",
+    size_at_decision_usd: 500,
+  };
+
+  const rowByRef = (container: HTMLElement, ref: string) =>
+    Array.from(container.querySelectorAll("li")).find((li) =>
+      li.textContent?.includes(ref),
+    ) as HTMLLIElement;
+
+  it("a typed note tracks its diff (not the array slot) after the diffs reorder", () => {
+    const { rerender, container } = render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[BTC, ETH]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    const btcNote = container.querySelector(
+      'li[data-diff-index="0"] textarea',
+    ) as HTMLTextAreaElement;
+    fireEvent.change(btcNote, { target: { value: "exit BTC — thesis broke" } });
+
+    // Reorder the diffs while the drawer stays open (isOpen never flips, so
+    // perRow is NOT reset).
+    rerender(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[ETH, BTC]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+
+    // BTC is now at array index 1, but its note must still read back; the ETH
+    // row (now index 0) must NOT have inherited it. With the pre-fix index
+    // keying the value would have stayed on the slot and swapped onto ETH.
+    expect(
+      (rowByRef(container, "BTC").querySelector("textarea") as HTMLTextAreaElement)
+        .value,
+    ).toBe("exit BTC — thesis broke");
+    expect(
+      (rowByRef(container, "ETH").querySelector("textarea") as HTMLTextAreaElement)
+        .value,
+    ).toBe("");
+  });
+
+  it("the committed POST body ships each note with its own holding after a reorder (audit metadata not swapped)", async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string, _init: { method: string; body: string }) =>
+        new Response(
+          JSON.stringify({
+            recorded: 2,
+            results: [{ index: 0 }, { index: 1 }],
+            errors: [],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { rerender, container } = render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[BTC, ETH]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    // Fill both reasons (allFilled gate) + DISTINCT notes per holding.
+    fireEvent.change(screen.getByTestId("commit-rejection-0"), {
+      target: { value: "underperforming_peers" },
+    });
+    fireEvent.change(screen.getByTestId("commit-rejection-1"), {
+      target: { value: "underperforming_peers" },
+    });
+    fireEvent.change(
+      container.querySelector('li[data-diff-index="0"] textarea') as HTMLTextAreaElement,
+      { target: { value: "btc-note" } },
+    );
+    fireEvent.change(
+      container.querySelector('li[data-diff-index="1"] textarea') as HTMLTextAreaElement,
+      { target: { value: "eth-note" } },
+    );
+
+    // Reorder, then submit.
+    rerender(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[ETH, BTC]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    const btcOut = body.diffs.find((d: { holding_ref?: string }) =>
+      d.holding_ref?.includes("BTC"),
+    );
+    const ethOut = body.diffs.find((d: { holding_ref?: string }) =>
+      d.holding_ref?.includes("ETH"),
+    );
+    // The note must travel with its holding, not the (reordered) array slot —
+    // pre-fix index keying swaps these onto the wrong bridge_outcome.
+    expect(btcOut.note).toBe("btc-note");
+    expect(ethOut.note).toBe("eth-note");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("a voluntary_add percent + recomputed size ship with the correct strategy after a reorder", async () => {
+    const A_ADD: ScenarioCommitDiff = {
+      kind: "voluntary_add",
+      strategy_id: "strat-A",
+      size_at_decision_usd: 2000,
+    };
+    const B_ADD: ScenarioCommitDiff = {
+      kind: "voluntary_add",
+      strategy_id: "strat-B",
+      size_at_decision_usd: 3000,
+    };
+    const fetchSpy = vi.fn(
+      async (_url: string, _init: { method: string; body: string }) =>
+        new Response(
+          JSON.stringify({
+            recorded: 2,
+            results: [{ index: 0 }, { index: 1 }],
+            errors: [],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { rerender } = render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[A_ADD, B_ADD]}
+        onSubmitSuccess={NOOP}
+        scenarioAum={10000}
+      />,
+    );
+    // percent for strat-A (index 0) and strat-B (index 1), pre-reorder.
+    fireEvent.change(screen.getByTestId("commit-percent-0"), {
+      target: { value: "25" },
+    });
+    fireEvent.change(screen.getByTestId("commit-percent-1"), {
+      target: { value: "40" },
+    });
+
+    rerender(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[B_ADD, A_ADD]}
+        onSubmitSuccess={NOOP}
+        scenarioAum={10000}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    const aOut = body.diffs.find(
+      (d: { strategy_id?: string }) => d.strategy_id === "strat-A",
+    );
+    const bOut = body.diffs.find(
+      (d: { strategy_id?: string }) => d.strategy_id === "strat-B",
+    );
+    // percent AND the recomputed size sidecar (percent/100 * scenarioAum) must
+    // travel with the strategy, not the reordered slot.
+    expect(aOut.percent_allocated).toBe(25);
+    expect(aOut.size_at_decision_usd).toBe(2500); // 25% of 10000
+    expect(bOut.percent_allocated).toBe(40);
+    expect(bOut.size_at_decision_usd).toBe(4000); // 40% of 10000
+
+    vi.unstubAllGlobals();
+  });
+
+  it("warns loudly when two diffs collide on diffKey (invariant is fail-loud, not prose-only)", () => {
+    // Real timers so the guard useEffect flushes deterministically.
+    vi.useRealTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Two diffs sharing (kind, holding_ref) collide on diffKey.
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[BTC, { ...BTC }]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    expect(
+      warnSpy.mock.calls.some((c) =>
+        String(c[0]).includes("diffKey collision"),
+      ),
+    ).toBe(true);
+    warnSpy.mockRestore();
+  });
+});

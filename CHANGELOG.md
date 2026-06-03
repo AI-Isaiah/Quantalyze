@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.98] - 2026-06-03
+### Fixed — H7 ScenarioCommitDrawer perRow stable-keying (M-0094 + M-0095)
+
+`src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.tsx` (Lane 2). The drawer's per-row audit inputs (rejection_reason / percent_allocated / note — they become persistent `bridge_outcomes` audit metadata) were stored in `perRow` keyed by the diff's ARRAY INDEX, and the three render sections recovered that index with a per-row `diffs.indexOf(d)` (O(N²) per render).
+
+- **M-0095** (data-integrity, defense-in-depth) — a new `diffKey(d)` derives a stable, position-independent identity per diff (`kind` + `holding_ref`/`strategy_id`); `perRow` is now `Record<string,…>` keyed by diffKey and the React row key is diffKey too, so a `diffs` reorder while the drawer is open can no longer rebind a note/reason/percent to the wrong row (wrong bridge_outcome). The reorder is **unreachable through the production composer today** (it freezes `commitDiffs` at handleCommit + clears on close, perRow resets on `isOpen=false`, and the backdrop closes the drawer before any re-commit) — verified by the red-team — so this is defense-in-depth on a reusable component whose contract explicitly accepts future-producer diffs, not a live-bug fix. A `diffKey`-collision `console.warn` guard makes the load-bearing uniqueness invariant fail-loud (Rule 12) rather than silently merging two rows' audit input.
+- **M-0094** (perf) — the render loops read the array index + stable key from a single `indexed = diffs.map((d,i)=>({d,i,key}))` pass (type-predicate filters keep each group's discriminated-union narrowing), dropping the O(N²) `diffs.indexOf(d)`. The array index is still used for server-error matching (the route returns errors by submitted index) and the `data-diff-index`/`data-testid` hooks (test-compatible).
+
+A 4-lens specialist suite (code-review / silent-failure / type-design / test) + a fresh-context Claude red-team ran on the diff — **verdict SHIP, all 5 challenges REFUTED**: `diffKey` proven collision-free against the real producer (`holdingScopeKey` uniqueness + `scenario-state` dedupe guards), reachability/defensive framing confirmed honest, server-error index matching preserved, the React-key change safe (separate `<ul>` lists). 4 new regression tests (note + add-percent reorder-safety via the POST body, plus the collision-guard warn) all neuter-verified load-bearing (reverting to index keying swaps `eth-note`/`40↔25` onto the wrong diff). tsc + eslint clean; 47 drawer tests pass; full frontend suite green. ScenarioComposer lookup-perf (M-0099–M-0102) is the planned follow-up H8.
+
 ## [0.24.15.97] - 2026-06-03
 ### Fixed — H6 CustomRangePicker MEDIUM≥8 surface closure (M-0068 + M-1101 + M-1102 + M-1103 + M-1104 + M-1106)
 
