@@ -61,7 +61,17 @@ function buildAllowedHosts(): Set<string> {
   if (vercelUrl) {
     try {
       hosts.add(new URL(`https://${vercelUrl}`).host);
-    } catch { /* malformed — skip */ }
+    } catch {
+      // M-0901: surface a malformed value the same way the
+      // NEXT_PUBLIC_SITE_URL (L34) and NEXT_PUBLIC_ALLOWED_ORIGINS (L52)
+      // branches do, instead of dropping it silently. A silent skip here
+      // would 403 every preview-deployment POST with no operator-visible
+      // reason — the exact misconfig this warn makes greppable.
+      console.warn(
+        "[csrf] NEXT_PUBLIC_VERCEL_URL is not a valid host:",
+        vercelUrl,
+      );
+    }
   }
   if (process.env.NODE_ENV !== "production") {
     hosts.add("localhost:3000");

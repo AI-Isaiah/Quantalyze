@@ -125,4 +125,24 @@ describe("assertSameOrigin", () => {
     expect(() => assertSameOrigin(req)).not.toThrow();
     expect(assertSameOrigin(req)).toBeNull();
   });
+
+  it("WARNS (does not silently swallow) a malformed NEXT_PUBLIC_VERCEL_URL", () => {
+    // M-0901: the Vercel branch used to drop a malformed value silently while
+    // its two sibling branches (NEXT_PUBLIC_SITE_URL,
+    // NEXT_PUBLIC_ALLOWED_ORIGINS) warned. A silent skip 403s every preview
+    // POST with no operator-visible reason. The intent is to make the misconfig
+    // greppable, so assert the warn FIRES — not merely that it doesn't throw.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      vi.stubEnv("NODE_ENV", "development");
+      vi.stubEnv("NEXT_PUBLIC_VERCEL_URL", "%%not-a-host%%");
+      __resetAllowedHostsForTest();
+      expect(warnSpy).toHaveBeenCalledWith(
+        "[csrf] NEXT_PUBLIC_VERCEL_URL is not a valid host:",
+        "%%not-a-host%%",
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });
