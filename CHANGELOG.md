@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.24.15.103] - 2026-06-03
+### Tests — Lane-1 TEST-GAP cohort (8 tests written; 28 gold-plating/not-a-bug findings deleted)
+
+Test-only change (zero production source) closing the Lane-1 slice of the FIX-LIST test-gap cohort (Lane 2 closed its 10 in #454). A 41-agent reverify fan-out classified all 41 Lane-1 TEST-GAP findings vs live code; **8 genuine gaps got tests, 28 were closed** (22 gold-plating DRY/type-design/naming NITs on already-covered test files + 5 not-a-bug + 1 already-covered), 5 deferred (need live-DB / a production change / verified-equivalent).
+
+**Tests written (each Rule-9 neuter-verified):**
+- **M-0732** `test_analytics_runner.py` — the non-finite (NaN/Inf) `size_usd` branch of `_load_position_time_series`: a value that parses via `float()` but is `inf`/`nan` must be coerced to 0.0 and dropped (not silently written as `signed=nan` poisoning every turnover/exposure cell). Neuter: delete the `math.isfinite` guard → `inf` leaks → fail.
+- **M-0887** `bridge/route.test.ts` — strengthened TC6 so the `.eq("user_id", session.id)` tenant filter is load-bearing (the mock now records the filtered columns) + new TC6b: a portfolio owned by another user 404s. Neuter: drop the route's `user_id` filter → the `eqCalls` ownership pin fails (the bare 404 check alone did not catch it).
+- **M-0568** `sec-005-api-keys-projection.test.ts` — re-armed the `FORBIDDEN_EMBED` production-scan regex to catch PostgREST hint-join syntax (`api_keys!inner(*)`, `api_keys!left(*)`, constraint-name hints) it was blind to, plus a positive/negative unit (verified zero false-positives against the 2 real production explicit-column hint joins).
+- **M-1124** new `supabase/tests/test_claim_compute_jobs_dedupe_partition.sql` — two same-partition `failed_retry` rows → `claim_compute_jobs_with_priority` dedupes to ≤1 claimed, no `23505` on `compute_jobs_one_inflight_per_kind_strategy`. Runs in the `sql-tests` CI job; concurrent-safe (BEGIN/ROLLBACK, scoped to the seeded `strategy_id`).
+- **L-0062** `critical-regressions.test.ts` — pins the `ci.yml` docs-link-check `lychee --offline` internal-only contract (neuter: drop `--offline` → fail).
+- **G23-187-rls-02 / G23-187-rls-03 / M-0017** (live-DB / introspection, `skipIf` gated) — two-user tenant isolation on `get_user_compute_jobs`; `EXECUTE`-REVOKE on the 5 SECDEF worker RPCs (anon/authenticated/public denied, `get_user_compute_jobs` keeps authenticated); the `api_key_rotation_reminder` cron `NOT EXISTS` dedup fires zero inserts on a recent reminder. All three invariants verified against the test project via MCP (not vacuous), matching the file's existing skip-in-CI pattern.
+
+A 41-agent reverify + a test-quality/SQL-correctness specialist pair + a fresh-context red-team (which re-applied every production neuter and replayed the SQL/cron against the live RPC) returned **SHIP, zero must-fix**. `tsc`/full changed-file vitest (139 passed) / pytest (13 passed) green.
+
 ## [0.24.15.102] - 2026-06-03
 ### Fixed — Portfolio-optimizer replacement-suggestion window alignment + dedupe-position (find_improvement_candidates)
 

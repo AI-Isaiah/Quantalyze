@@ -31,6 +31,15 @@ const STATE = vi.hoisted(() => ({
     | { success: false; retryAfter: number; reason?: "ratelimit_misconfigured" },
   csrfShouldReject: false,
   portfolioFound: true,
+  // M-0887: whether the portfolio row that exists in the DB belongs to the
+  // session user. `portfolioFound` (legacy) collapses "no row" and "wrong
+  // owner" into one boolean; `portfolioOwnedBySession` lets a test assert the
+  // cross-tenant case where the row EXISTS but for another user — which the
+  // route must reject via the `.eq("user_id", user.id)` filter, not luck.
+  portfolioOwnedBySession: true,
+  // M-0887: records every `.eq(col, val)` the route applies to the
+  // `portfolios` query, so a test can pin that the tenant filter is present.
+  eqCalls: [] as Array<[string, unknown]>,
   findReplacementImpl: (async () => ({
     candidates: [],
   })) as (
@@ -50,21 +59,37 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     from: (table: string) => {
       if (table === "portfolios") {
-        return {
-          select: () => ({
-            eq: () => ({
-              eq: () => ({
-                single: async () =>
-                  STATE.portfolioFound
-                    ? {
-                        data: { id: "00000000-0000-0000-0000-000000000010" },
-                        error: null,
-                      }
-                    : { data: null, error: { message: "not found" } },
-              }),
-            }),
-          }),
-        };
+        // M-0887: the eq() chain RECORDS the column+value it filters on and
+        // models ownership by `user_id` (not a bare flag) so that dropping the
+        // tenant filter in the route is observable. Each builder node is BOTH
+        // chainable (`.eq`) and terminal (`.single`), so the route may end the
+        // chain at any depth — a row is returned ONLY when it applied both
+        // `.eq("id", …)` and `.eq("user_id", session.id)` AND the row is owned
+        // by the session user. Dropping the `.eq("user_id", …)` filter therefore
+        // surfaces as the foreign row leaking (no 404) + a missing-filter
+        // assertion, not a structural TypeError.
+        const makeNode = () => ({
+          eq: (col: string, val: unknown) => {
+            STATE.eqCalls.push([col, val]);
+            return makeNode();
+          },
+          single: async () => {
+            const idOk = STATE.eqCalls.some(([c]) => c === "id");
+            const ownerOk = STATE.eqCalls.some(
+              ([c, v]) => c === "user_id" && v === STATE.authUser?.id,
+            );
+            return idOk &&
+              ownerOk &&
+              STATE.portfolioFound &&
+              STATE.portfolioOwnedBySession
+              ? {
+                  data: { id: "00000000-0000-0000-0000-000000000010" },
+                  error: null,
+                }
+              : { data: null, error: { message: "not found" } };
+          },
+        });
+        return { select: () => makeNode() };
       }
       throw new Error(`unexpected from(${table})`);
     },
@@ -147,6 +172,8 @@ beforeEach(() => {
   STATE.checkLimitResult = { success: true };
   STATE.csrfShouldReject = false;
   STATE.portfolioFound = true;
+  STATE.portfolioOwnedBySession = true;
+  STATE.eqCalls = [];
   STATE.findReplacementImpl = async () => ({ candidates: [] });
   captureSpy.mockClear();
 });
@@ -338,6 +365,30 @@ describe("POST /api/bridge", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toBe("Portfolio not found");
+  });
+
+  it("TC6b — cross-tenant: a portfolio owned by another user 404s, and the route MUST filter on session user.id", async () => {
+    // M-0887: the discriminating cross-tenant case. The portfolio row EXISTS
+    // (portfolioFound stays true) but it is NOT owned by the session user.
+    // The route's ONLY defence against returning it is the
+    // `.eq("user_id", user.id)` filter on the portfolios query. TC6's
+    // flag-only mock could not detect that filter being dropped — this test
+    // both asserts the 404 (ownership-modelled mock) AND pins, on the recorded
+    // eq() chain, that the route actually applied the tenant filter.
+    STATE.portfolioOwnedBySession = false;
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe("Portfolio not found");
+    // Discriminating: the route must have scoped the lookup to the session
+    // user — without `.eq("user_id", user.id)` this assertion fails.
+    expect(STATE.eqCalls).toContainEqual(["user_id", STATE.authUser!.id]);
   });
 
   it("TC7 — happy path forwards body shape from analytics-client", async () => {
