@@ -576,6 +576,22 @@ export type StrategyAnalyticsSeriesRow =
  * that didn't emit that kind. Switching to `Partial<...>` forces consumers
  * to null-check before each key access, matching reality.
  */
+/**
+ * The 7 lazy-metrics panel ids — single source of truth (H-1254). Lives in
+ * client-safe types.ts so BOTH the server fetcher (queries.ts) and the client
+ * fetcher (queries-client.ts) reference one union; queries.ts is server-only
+ * and cannot be imported by the client module, which previously forced a
+ * hand-synced duplicate. Mirrors the SQL CASE in `fetch_strategy_lazy_metrics`.
+ */
+export type LazyMetricsPanelId =
+  | "overview"
+  | "equity"
+  | "drawdown"
+  | "returns_dist"
+  | "rolling"
+  | "trades"
+  | "exposure";
+
 export type LazyMetricsPayload = Partial<Record<StrategyAnalyticsSeriesKind, unknown>>;
 
 export interface Position {

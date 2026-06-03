@@ -1,22 +1,13 @@
 "use client";
 
 import { createClient } from "@/lib/supabase/client";
-import type { LazyMetricsPayload } from "./types";
+import type { LazyMetricsPayload, LazyMetricsPanelId } from "./types";
 
-/**
- * Mirror of `LazyMetricsPanelId` from `src/lib/queries.ts:441`. Redeclared
- * here as a type-only constant union so this client module never traces
- * into queries.ts (which is server-only via the `next/headers` chain).
- * Contract source: migration 087 SQL CASE in `fetch_strategy_lazy_metrics`.
- */
-export type LazyMetricsPanelId =
-  | "overview"
-  | "equity"
-  | "drawdown"
-  | "returns_dist"
-  | "rolling"
-  | "trades"
-  | "exposure";
+// H-1254: `LazyMetricsPanelId` now lives in the client-safe `./types` (single
+// source of truth shared with the server fetcher queries.ts), eliminating the
+// hand-synced duplicate that previously lived here. Re-exported so existing
+// importers of `@/lib/queries-client` keep compiling.
+export type { LazyMetricsPanelId };
 
 /**
  * Client-side mirror of `fetchStrategyLazyMetrics` (defined in
