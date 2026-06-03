@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import { detectRegimeChanges } from "@/lib/portfolio-stats";
-import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import { buildCompositeReturns } from "../lib/composite-returns";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
 import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 
@@ -20,28 +20,15 @@ function daysBetween(a: string, b: string): number {
 
 function RegimeDetectorInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
   const regime = useMemo(() => {
-    const strategies = data.strategies;
-
-    // Build composite daily returns from all strategies
-    const allReturnsMap = new Map<string, { sum: number; count: number }>();
-    for (const row of strategies) {
-      const dr = normalizeDailyReturns(
-        row.strategy?.strategy_analytics?.daily_returns,
-      );
-      for (const point of dr) {
-        const existing = allReturnsMap.get(point.date);
-        if (existing) {
-          existing.sum += point.value;
-          existing.count += 1;
-        } else {
-          allReturnsMap.set(point.date, { sum: point.value, count: 1 });
-        }
-      }
-    }
-
-    const composite = Array.from(allReturnsMap.entries())
-      .map(([date, { sum, count }]) => ({ date, value: sum / count }))
-      .sort((a, b) => a.date.localeCompare(b.date));
+    // M-0174: the regime LABEL must reflect the allocator's actual
+    // WEIGHTED portfolio, not an equal-weight average of every strategy.
+    // The prior inline `sum/count` mean ignored current_weight, so one
+    // 90%-weight winner among nine 1%-weight losers showed the losers'
+    // regime. Use the shared weighted composite (date-keyed, per-date
+    // renormalized — F2 H-0158) like the sibling risk widgets
+    // (TailRisk / VarExpectedShortfall / RiskDecomposition).
+    const composite =
+      data.compositeReturns ?? buildCompositeReturns(data.strategies);
 
     if (composite.length < 200) return null;
 
@@ -62,7 +49,7 @@ function RegimeDetectorInner({ data }: { data: RiskWidgetData } & BaseWidgetProp
       startDate: last.date,
       endDate: composite[composite.length - 1].date,
     };
-  }, [data.strategies]);
+  }, [data.strategies, data.compositeReturns]);
 
   if (!regime) {
     return (

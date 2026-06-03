@@ -27,6 +27,11 @@ function renderRegime(dailyReturns: Array<{ date: string; value: number }>) {
       data={{
         strategies: [
           {
+            // current_weight is required now that the composite is weighted
+            // (M-0174). A single weight-1 strategy's weighted composite equals
+            // its raw series, so these single-strategy fixtures behave exactly
+            // as before.
+            current_weight: 1,
             strategy: {
               strategy_analytics: { daily_returns: dailyReturns },
             },
@@ -100,6 +105,70 @@ describe("RegimeDetector", () => {
     expect(screen.getByText("Bear Market")).toBeInTheDocument();
     expect(screen.queryByText("Bull Market")).toBeNull();
     expect(screen.queryByText("Range-bound")).toBeNull();
+    expect(
+      screen.queryByText(/Insufficient data for regime detection/),
+    ).toBeNull();
+  });
+
+  // M-0174 — the regime composite must be WEIGHTED by current_weight, not an
+  // equal-weight mean. A 0.9-weight bullish strategy + a 0.1-weight bearish
+  // strategy is a Bull-Market portfolio; an unweighted mean of the two opposing
+  // series is flat (Range-bound). This fixture discriminates: it passes only
+  // when the dominant-weight strategy drives the label.
+  it("M-0174: weights the composite — a 0.9-weight bullish strategy dominates a 0.1-weight bearish one → 'Bull Market'", () => {
+    // Strategy A (0.9): down-then-up → bullish crossover when it dominates.
+    const bullish = makeReturns(350, (i) => (i < 250 ? -0.001 : 0.02));
+    // Strategy B (0.1): up-then-down → bearish on its own.
+    const bearish = makeReturns(350, (i) => (i < 250 ? 0.001 : -0.02));
+    render(
+      <RegimeDetector
+        data={{
+          strategies: [
+            {
+              current_weight: 0.9,
+              strategy: { strategy_analytics: { daily_returns: bullish } },
+            },
+            {
+              current_weight: 0.1,
+              strategy: { strategy_analytics: { daily_returns: bearish } },
+            },
+          ],
+        }}
+        {...baseProps}
+      />,
+    );
+
+    // Weighted: 0.9·(−0.001)+0.1·(0.001)=−0.0008 then 0.9·0.02+0.1·(−0.02)=0.016
+    // → down-then-up → bullish crossover. (Equal-weight mean = exactly flat →
+    // would render 'Range-bound', so this assertion fails under the unweighted
+    // sum/count regression.)
+    expect(screen.getByText("Bull Market")).toBeInTheDocument();
+    expect(screen.queryByText("Bear Market")).toBeNull();
+    expect(screen.queryByText("Range-bound")).toBeNull();
+    expect(
+      screen.queryByText(/Insufficient data for regime detection/),
+    ).toBeNull();
+  });
+
+  // M-0174 (override branch) — RegimeDetector reads `data.compositeReturns ??
+  // buildCompositeReturns(strategies)`. The precomputed-override side fires in
+  // some prod mounts but was otherwise untested here (the strategies fallback
+  // is what every other case exercises). Inject a 350-point bullish composite
+  // with NO strategies: only the override can drive the label.
+  it("M-0174: honors a directly-injected data.compositeReturns over the strategies fallback", () => {
+    const composite = makeReturns(350, (i) => (i < 250 ? -0.001 : 0.02));
+    render(
+      <RegimeDetector
+        // strategies empty → the fallback buildCompositeReturns([]) yields [];
+        // the injected composite is the ONLY data source.
+        data={{ strategies: [], compositeReturns: composite }}
+        {...baseProps}
+      />,
+    );
+    // Bullish crossover from the injected series. (Dropping the
+    // `data.compositeReturns ??` left operand → fallback over [] strategies →
+    // "Insufficient data", so this assertion fails without the override.)
+    expect(screen.getByText("Bull Market")).toBeInTheDocument();
     expect(
       screen.queryByText(/Insufficient data for regime detection/),
     ).toBeNull();

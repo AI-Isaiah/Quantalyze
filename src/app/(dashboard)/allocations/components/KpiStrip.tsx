@@ -394,7 +394,11 @@ export function KpiStrip({
       label: "Sharpe",
       raw: allKeysStale ? null : sharpeValue,
       formatted: formatNumber(allKeysStale ? null : sharpeValue, 2),
-      sub: resolveSub(sharpeValue, false, "12-month risk-adjusted return"),
+      // M-0086 label-truth: the value is computeScenario's annualized Sharpe
+      // over the SELECTED timeframe / full holdings history (scenario.ts), NOT
+      // a fixed trailing 12 months — the prior "12-month" sub-copy was a lie.
+      // Honest window-copy, parallel to the Avg ρ honest-pending fix.
+      sub: resolveSub(sharpeValue, false, "risk-adjusted return (selected period)"),
       metricKey: "sharpe",
     },
     {

@@ -85,6 +85,27 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
     expect(screen.getByText("1.73")).toBeTruthy();
   });
 
+  // M-0086 label-truth — the Sharpe value is computeScenario's annualized
+  // Sharpe over the SELECTED timeframe / full holdings history, NOT a fixed
+  // trailing 12 months. The sub-copy must say so; the prior "12-month
+  // risk-adjusted return" string was a lie an allocator would trust.
+  it("M-0086: Sharpe sub-copy is window-honest, not the false '12-month' label", () => {
+    render(
+      <KpiStrip
+        analytics={{ sharpe: 1.5 }}
+        metrics={EMPTY_METRICS}
+        timeframe="ALL"
+        aum={1_000_000}
+        snapshotCount={30}
+      />,
+    );
+    expect(
+      screen.getByText("risk-adjusted return (selected period)"),
+    ).toBeTruthy();
+    // The discredited fixed-window claim must be gone.
+    expect(screen.queryByText("12-month risk-adjusted return")).toBeNull();
+  });
+
   it("R4 honest copy — Avg ρ null path: renders '—' AND 'Requires per-holding correlation data (pending)'", () => {
     render(
       <KpiStrip
