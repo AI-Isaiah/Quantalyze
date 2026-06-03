@@ -129,7 +129,11 @@ export function CustomRangePicker({
   // the change is announced to assistive tech instead of happening invisibly
   // (a visible affordance would alter the pixel-faithful design — that is a
   // design-review follow-up; this surfaces the silent modification without
-  // touching the visual layout).
+  // touching the visual layout). Scope is TYPED dates only: the preset buttons
+  // (Last N / MTD / YTD / Max) also clamp start to min, but that is the
+  // preset's defined "capped at available history" semantics — not a surprising
+  // rewrite — so it is intentionally not announced. Re-typing the exact same
+  // out-of-range value is a no-op (identical notice → React bails the update).
   const [clampNotice, setClampNotice] = useState<string>("");
 
   const ref = useRef<HTMLDivElement>(null);
@@ -644,10 +648,10 @@ function MonthGrid({
   // fresh Date identities) on every hover — defeating React.memo(DayCell)
   // below. Keyed on the primitives, the cells (and each cell's Date identity)
   // are stable until the visible month actually changes.
+  const monthYear = month.getFullYear();
+  const monthIndex = month.getMonth();
   const cells = useMemo(() => {
-    const year = month.getFullYear();
-    const mIdx = month.getMonth();
-    const firstOfMonth = new Date(year, mIdx, 1);
+    const firstOfMonth = new Date(monthYear, monthIndex, 1);
     const gridStart = new Date(firstOfMonth);
     gridStart.setDate(1 - firstOfMonth.getDay());
     const out: Date[] = [];
@@ -657,8 +661,7 @@ function MonthGrid({
       out.push(d);
     }
     return out;
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- year+month primitives are the true identity of `month` here (see comment)
-  }, [month.getFullYear(), month.getMonth()]);
+  }, [monthYear, monthIndex]);
 
   const monthLabel = month.toLocaleDateString("en-US", {
     month: "long",

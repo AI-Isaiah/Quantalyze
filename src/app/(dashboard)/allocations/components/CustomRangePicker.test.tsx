@@ -1,5 +1,5 @@
 import { render, fireEvent, act } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CustomRangePicker } from "./CustomRangePicker";
 
@@ -25,6 +25,17 @@ const MIN = new Date(2024, 0, 1);
 const MAX = new Date(2024, 5, 30);
 
 describe("CustomRangePicker", () => {
+  // Several tests below opt into vi.useFakeTimers() inline and reset with
+  // vi.useRealTimers() at the end. If an assertion throws in between, that
+  // reset is skipped and the fake-timer mock leaks into the rest of the worker
+  // (vitest shards multiple files per worker), contaminating unrelated tests —
+  // the cross-shard flake class the repo's vitest.config.ts documents. This
+  // safety net guarantees a clean timer state between every test regardless of
+  // how the previous one exited.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("renders null when isOpen=false", () => {
     const { container } = render(
       <CustomRangePicker
@@ -332,7 +343,7 @@ describe("CustomRangePicker", () => {
   });
 
   it(
-    "M-1099 — clicking Apr 20 then Apr 10 (reverse) SHOULD swap to {2024-04-10, 2024-04-20} but the dead swap branch collapses it to {Apr10, Apr10} — fix in follow-up (the `|| d < start` clause in the first branch shadows the swap branch)",
+    "M-1099 — clicking Apr 20 then Apr 10 (reverse) swaps into a forward range {2024-04-10, 2024-04-20}",
     () => {
       const onApply = vi.fn();
       const { container, getByRole } = render(
@@ -700,8 +711,15 @@ describe("CustomRangePicker", () => {
   // setTimeout(0) deferral left a window where the keydown listener wasn't
   // attached yet and Escape was silently dead.
 
-  it("M-0068 — Escape fires onClose immediately, before the arming timer flushes", () => {
-    vi.useFakeTimers();
+  it("M-0068 — Escape fires onClose immediately, before the arming timer fires", () => {
+    // REAL timers on purpose. render() flushes the passive effect synchronously
+    // (so the keydown listener is attached), while the arming setTimeout(0) is a
+    // real macrotask that has NOT fired by the time we dispatch — so this still
+    // proves Escape is live BEFORE arming, but without depending on how RTL's
+    // act() flushes effects under a faked scheduler (the fragility that flaked
+    // this assertion to a hard failure during review). Discriminating: if the
+    // keydown attach is moved back inside the setTimeout, the listener is absent
+    // synchronously after render and onClose is never called.
     const onClose = vi.fn();
     render(
       <CustomRangePicker
@@ -712,11 +730,8 @@ describe("CustomRangePicker", () => {
         max={MAX}
       />,
     );
-    // Deliberately NO vi.runAllTimers(): pre-fix the keydown listener wasn't
-    // registered until the setTimeout fired, so this Escape was dropped.
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
-    vi.useRealTimers();
   });
 
   it("M-0068 — an outside click is still gated until the arming tick (opening click can't self-close)", () => {
