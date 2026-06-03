@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.107] - 2026-06-03
+### Fixed — H-0806: router-test `sys.modules` pollution → order-independent analytics suite
+
+The analytics test suite had a class of import-time `sys.modules` stub machinery that made CI green/red **filesystem-collection-order-dependent** — the exact anti-pattern H-0806 names. A reverify fan-out across all 12 `sys.modules`-touching test files isolated **3 perpetrators** plus a downstream purge:
+
+- **`test_portfolio_router_logic.py` / `test_portfolio_router_audit_2026_05_07.py` / `test_portfolio_compute_integration.py`** each ran an `_install_stubs()` whose `if name not in sys.modules` guard only protected the wholesale MagicMock replacement — the *attribute* writes that followed ran unconditionally, clobbering the **real** shared `fastapi.HTTPException/.APIRouter/.Request`, `supabase.create_client`, and `slowapi.Limiter` process-globally for every later-collected test (the worst being a bare `fastapi.HTTPException = Exception` downgrade). All of `fastapi`/`supabase`/`slowapi`/`ccxt` are installed in CI and the dev venv, so the stubs were stale. **Deleted the stub machinery; import the router for real.**
+- **`test_portfolio_router_logic.py`** also dropped the now-vacuous `test_httpexception_stub_is_distinct_from_base_exception` — with the real `fastapi` imported it could only re-assert fastapi's own class semantics (Rule 9). The invariant it cared about (the router's `except HTTPException` staying specific, not swallowing `ValueError`/`KeyError`/`TypeError`) is exercised against the **real** `fastapi.HTTPException` by `test_routers_audit_2026_05_17.py`'s `pytest.raises(HTTPException)` 404/400 endpoint tests.
+- **`test_process_key.py`** dropped its heavy `_ensure_real_third_party()` purge, which `del`+reimported `fastapi` — minting a **second `HTTPException` class identity** that left `test_simulator_router`'s 413 raised by the original class unhandled by its app's exception handler. Kept one narrow heal: restore `slowapi.Limiter` from the never-swapped `slowapi.extension.Limiter` and re-pop `services.rate_limit` + `routers.process_key` so the canonical limiter rebinds real (siblings `test_c19_portfolio_fixes` / `test_routers_audit_2026_05_17` swap `slowapi.Limiter` in place). `test_process_key_shares_main_limiter_instance` is strengthened to assert a **real** Limiter so it can't pass vacuously as noop-is-noop (Rule 9 — neuter-verified to fail without the heal).
+
+Result: the full CI-equivalent suite (`pytest --cov=services --cov-fail-under=80`) goes from **3 pre-existing order-dependent failures** on `origin/main` (`test_simulator_router` 413 + 2 `test_main_worker` loop tests) to **0** in the deterministic collection order CI uses — **2587 passed, 88.54 % coverage**. Reviewed by a 3-lens specialist suite (all SHIP) and a 3-lens adversarial red-team (no CI regression; strict net improvement in every order tested). Test-only; no production code touched.
+
 ## [0.24.15.106] - 2026-06-03
 ### Fixed — PR-A: Allocations dashboard MEDIUM/LOW sweep (4 genuine fixes)
 
