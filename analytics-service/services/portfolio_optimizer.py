@@ -1,8 +1,11 @@
+import logging
 import numpy as np
 import pandas as pd
 from datetime import date as _date
 from typing import Any, Optional
 from services.metrics import _safe_float
+
+logger = logging.getLogger("quantalyze.analytics.portfolio_optimizer")
 
 
 def find_improvement_candidates(
@@ -36,12 +39,38 @@ def find_improvement_candidates(
         new_sharpe = _compute_sharpe(new_port)
         new_avg_corr = _avg_corr(aligned)
         new_max_dd = _max_drawdown(new_port)
+        # M-0701: exclude a degenerate candidate whose OWN aligned returns have
+        # zero variance (e.g. a paused/all-zero strategy). Its correlation and
+        # diversification signal are undefined (NaN), so it cannot be
+        # meaningfully scored — dropping it is correct rather than ranking it on
+        # a partial 0-collapsed score that looks like a real "no improvement".
+        #
+        # This keys on the CANDIDATE column only (candidate-specific). It does
+        # NOT gate on new_avg_corr: _avg_corr is computed over the WHOLE blended
+        # frame, so a single flat EXISTING strategy would poison it to None for
+        # every candidate and silently drop ALL suggestions. A None new_avg_corr
+        # from a flat existing strategy instead leaves the correlation term at 0
+        # below, uniform across candidates. (new_sharpe/new_max_dd None — an
+        # exactly-zero-variance or empty blend — is also defensively excluded,
+        # though float noise makes new_sharpe None practically unreachable.)
+        if float(aligned[cid].std()) == 0.0 or new_sharpe is None or new_max_dd is None:
+            logger.debug(
+                "find_improvement_candidates: dropping degenerate candidate %s "
+                "(zero-variance returns or unscoreable blend)", cid,
+            )
+            continue
         # Use already-aligned frame to compute correlation with portfolio returns
         port_aligned = (aligned[list(port_df.columns)] * w_arr).sum(axis=1)
         corr_with_portfolio = float(port_aligned.corr(aligned[cid])) if len(aligned) > 10 else 0
-        sharpe_lift = (new_sharpe - current_sharpe) if current_sharpe is not None and new_sharpe is not None else 0
-        corr_reduction = (current_avg_corr - new_avg_corr) if current_avg_corr is not None and new_avg_corr is not None else 0
-        dd_improvement = (current_max_dd - new_max_dd) if current_max_dd is not None and new_max_dd is not None else 0
+        # A None metric on EITHER side of a delta means that axis has no
+        # comparable baseline (uniform across candidates), so it contributes 0.
+        sharpe_lift = (new_sharpe - current_sharpe) if current_sharpe is not None else 0
+        corr_reduction = (
+            (current_avg_corr - new_avg_corr)
+            if current_avg_corr is not None and new_avg_corr is not None
+            else 0
+        )
+        dd_improvement = (current_max_dd - new_max_dd) if current_max_dd is not None else 0
         score = w1 * sharpe_lift + w2 * corr_reduction + w3 * dd_improvement
         results.append({
             "strategy_id": cid,
@@ -146,9 +175,13 @@ def generate_narrative(analytics: dict[str, Any]) -> str:
                 month_name = _date(int(year_str), int(month_str), 1).strftime("%B %Y")
             except (ValueError, TypeError):
                 month_name = f"{month_str}/{year_str}"
+            # M-0903: top_share is a SIZE share (abs contribution / total abs),
+            # so "drove X% of the gain" is sign-blind. When the month LOST money
+            # the clause must say "decline", not "gain".
+            noun = "gain" if ret >= 0 else "decline"
             parts.append(
                 f"In {month_name}, portfolio returned {ret * 100:+.1f}%. "
-                f"{top_contrib.get('strategy_name', 'unknown')} drove {top_share * 100:.0f}% of the gain"
+                f"{top_contrib.get('strategy_name', 'unknown')} drove {top_share * 100:.0f}% of the {noun}"
             )
 
     # ── Optimizer recommendation sentence ───────────────────────────
@@ -158,21 +191,28 @@ def generate_narrative(analytics: dict[str, Any]) -> str:
         best_suggestion = suggestions[0]
         sharpe_lift = best_suggestion.get("sharpe_lift", 0)
         if sharpe_lift > 0 and worst_attr.get("strategy_name"):
-            # Compute current Sharpe from risk decomp or attribution context
-            current_sharpe_str = ""
-            new_sharpe_str = ""
+            # The recommendation sentence requires both a non-empty risk
+            # decomposition AND a portfolio-level Sharpe to quote the before/after.
+            portfolio_sharpe = analytics.get("portfolio_sharpe")
             risk_items = analytics.get("risk_decomposition", [])
-            if risk_items:
-                # Use portfolio-level sharpe if available
-                portfolio_sharpe = analytics.get("portfolio_sharpe")
-                if portfolio_sharpe is not None:
-                    current_sharpe_str = f"{portfolio_sharpe:.2f}"
-                    new_sharpe_str = f"{portfolio_sharpe + sharpe_lift:.2f}"
-            if current_sharpe_str and new_sharpe_str:
+            if risk_items and portfolio_sharpe is not None:
                 parts.append(
                     f"If you trim {worst_attr['strategy_name']} and redistribute to "
                     f"{best_suggestion.get('strategy_name', 'top candidates')}, "
-                    f"expected Sharpe moves from {current_sharpe_str} to {new_sharpe_str}"
+                    f"expected Sharpe moves from {portfolio_sharpe:.2f} to "
+                    f"{portfolio_sharpe + sharpe_lift:.2f}"
+                )
+            else:
+                # M-0904: the recommendation is warranted (positive lift, named
+                # underperformer) but a prerequisite is missing, so the
+                # actionable sentence silently vanishes. Warn so the asymmetric
+                # data flow is visible rather than degrading without a signal.
+                logger.warning(
+                    "generate_narrative: optimizer recommendation suppressed "
+                    "(sharpe_lift=%.4f, worst=%s) — %s missing",
+                    sharpe_lift,
+                    worst_attr.get("strategy_name"),
+                    "portfolio_sharpe" if portfolio_sharpe is None else "risk_decomposition",
                 )
 
     return ". ".join(parts) + "." if parts else "Portfolio analytics pending computation."
