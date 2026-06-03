@@ -36,11 +36,75 @@ const SOURCE_BADGE_LABEL: Record<StrategySource, string> = {
 const TABS = ["Intro Requests", "Strategy Review", "Allocators", "Managers", "Compute Jobs"] as const;
 type Tab = (typeof TABS)[number];
 
+// Row shapes match the exact SELECT columns in admin/page.tsx. Kept local
+// (not `Tables<'...'>` from database.types) because each is a column subset of
+// the base Row plus embedded join objects. Typing them here replaces the prior
+// `Array<Record<string, unknown>>` + per-field `as` casts so a Postgres column
+// rename is a compile error instead of a silently-blank admin tab (H-0353).
+// Exported for admin/page.tsx's `.returns<RowType[]>()` assertions and the
+// AdminTabs.test.tsx render coverage.
+export interface IntroRequestRow {
+  id: string;
+  status: string;
+  message: string | null;
+  admin_note: string | null;
+  created_at: string;
+  allocator_id: string;
+  strategy_id: string;
+  profiles: { display_name: string; company: string | null } | null;
+  // disclosure_tier is `string` in the DB; narrowed to the DisclosureTier
+  // union at the displayStrategyName() call site (see below).
+  strategies: {
+    id: string;
+    name: string;
+    codename: string | null;
+    disclosure_tier: string;
+  } | null;
+}
+
+export interface PendingStrategyRow {
+  id: string;
+  name: string;
+  status: string;
+  source: string;
+  strategy_types: string[];
+  created_at: string;
+  user_id: string;
+  profiles: { display_name: string } | null;
+  strategy_analytics: Array<{
+    cagr: number | null;
+    sharpe: number | null;
+    max_drawdown: number | null;
+    computation_status: string;
+    computed_at: string;
+  }> | null;
+}
+
+export interface PendingProfileRow {
+  id: string;
+  display_name: string;
+  company: string | null;
+  email: string | null;
+  role: string;
+  allocator_status: string;
+  created_at: string;
+}
+
+export interface PendingManagerRow {
+  id: string;
+  display_name: string;
+  company: string | null;
+  email: string | null;
+  role: string;
+  manager_status: string;
+  created_at: string;
+}
+
 interface AdminTabsProps {
-  introRequests: Array<Record<string, unknown>>;
-  pendingStrategies: Array<Record<string, unknown>>;
-  pendingAllocators: Array<Record<string, unknown>>;
-  pendingManagers?: Array<Record<string, unknown>>;
+  introRequests: IntroRequestRow[];
+  pendingStrategies: PendingStrategyRow[];
+  pendingAllocators: PendingProfileRow[];
+  pendingManagers?: PendingManagerRow[];
 }
 
 export function AdminTabs({ introRequests, pendingStrategies, pendingAllocators, pendingManagers = [] }: AdminTabsProps) {
@@ -97,7 +161,7 @@ const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
   { value: "declined", label: "Declined" },
 ];
 
-function IntroRequestsTab({ requests }: { requests: Array<Record<string, unknown>> }) {
+function IntroRequestsTab({ requests }: { requests: IntroRequestRow[] }) {
   const router = useRouter();
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -175,11 +239,14 @@ function IntroRequestsTab({ requests }: { requests: Array<Record<string, unknown
       ) : (
         <div className="space-y-3">
           {filtered.map((r) => {
-            const profile = r.profiles as Record<string, string> | null;
+            const profile = r.profiles;
+            // Narrow the DB's loose `disclosure_tier: string` to the
+            // DisplayableStrategy union; the embed columns are now typed, so a
+            // dropped/renamed join column surfaces at compile time.
             const strategy = r.strategies as DisplayableStrategy | null;
-            const status = r.status as string;
+            const status = r.status;
             return (
-              <Card key={r.id as string}>
+              <Card key={r.id}>
                 <div className="flex items-start justify-between">
                   <div>
                     <p className="text-sm font-medium text-text-primary">
@@ -195,28 +262,28 @@ function IntroRequestsTab({ requests }: { requests: Array<Record<string, unknown
                       <p className="text-[10px] text-text-muted mt-1 italic">Note: {r.admin_note}</p>
                     )}
                     <p className="text-[10px] text-text-muted mt-1">
-                      {new Date(r.created_at as string).toLocaleDateString()}
+                      {new Date(r.created_at).toLocaleDateString()}
                     </p>
                   </div>
                   <div className="flex items-center gap-2 ml-4 shrink-0">
                     <Badge label={status} type="status" />
                     {status === "pending" && (
                       <>
-                        <Button size="sm" onClick={() => handleAction(r.id as string, "intro_made")} disabled={loading === r.id as string}>
+                        <Button size="sm" onClick={() => handleAction(r.id, "intro_made")} disabled={loading === r.id}>
                           Intro Made
                         </Button>
-                        <Button size="sm" variant="ghost" onClick={() => handleAction(r.id as string, "declined")} disabled={loading === r.id as string}>
+                        <Button size="sm" variant="ghost" onClick={() => handleAction(r.id, "declined")} disabled={loading === r.id}>
                           Decline
                         </Button>
                       </>
                     )}
                     {status === "intro_made" && (
-                      <Button size="sm" onClick={() => handleAction(r.id as string, "completed")} disabled={loading === r.id as string}>
+                      <Button size="sm" onClick={() => handleAction(r.id, "completed")} disabled={loading === r.id}>
                         Mark Complete
                       </Button>
                     )}
                     {(status === "pending" || status === "intro_made") && (
-                      <Button size="sm" variant="ghost" onClick={() => { setNoteId(r.id as string); setNoteText((r.admin_note as string) ?? ""); }}>
+                      <Button size="sm" variant="ghost" onClick={() => { setNoteId(r.id); setNoteText(r.admin_note ?? ""); }}>
                         Note
                       </Button>
                     )}
@@ -282,7 +349,7 @@ function sourceBadgeLabel(source: string | undefined): string {
   return isStrategySource(source) ? SOURCE_BADGE_LABEL[source] : "legacy";
 }
 
-function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, unknown>> }) {
+function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] }) {
   const router = useRouter();
   const [loading, setLoading] = useState<string | null>(null);
   const [rejectId, setRejectId] = useState<string | null>(null);
@@ -352,9 +419,9 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
       )}
       <div className="space-y-3">
         {strategies.map((s) => {
-          const profile = s.profiles as Record<string, string> | null;
+          const profile = s.profiles;
           const analytics = extractAnalytics(s.strategy_analytics);
-          const source = s.source as string | undefined;
+          const source = s.source;
           // Phase 18 / round-2 (Red Team conf 4) — fresh-onboarding sources
           // (wizard, csv, allocator-connected, exchange) all get the accent
           // badge styling. Pre-fix only `wizard` got the accent; csv-onboarded
@@ -370,12 +437,12 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
             source === "binance" ||
             source === "bybit";
           return (
-            <Card key={s.id as string}>
+            <Card key={s.id}>
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="text-sm font-medium text-text-primary">
-                      {s.name as string}
+                      {s.name}
                     </p>
                     <span
                       className={cn(
@@ -400,9 +467,9 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
                     <MetricCell label="Max DD" value={formatPercent(analytics?.max_drawdown, 1)} />
                   </div>
 
-                  {(s.strategy_types as string[] | undefined)?.length ? (
+                  {s.strategy_types.length ? (
                     <div className="mt-3 flex flex-wrap gap-1">
-                      {(s.strategy_types as string[]).map((t) => (
+                      {s.strategy_types.map((t) => (
                         <Badge key={t} label={t} />
                       ))}
                     </div>
@@ -427,7 +494,7 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
                   <div className="flex gap-2">
                     <Button
                       size="sm"
-                      onClick={() => approve(s.id as string)}
+                      onClick={() => approve(s.id)}
                       disabled={loading === s.id}
                     >
                       Approve
@@ -435,7 +502,7 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
                     <Button
                       size="sm"
                       variant="ghost"
-                      onClick={() => setRejectId(s.id as string)}
+                      onClick={() => setRejectId(s.id)}
                     >
                       Reject
                     </Button>
@@ -482,7 +549,7 @@ function MetricCell({ label, value }: { label: string; value: string }) {
   );
 }
 
-function AllocatorsTab({ allocators }: { allocators: Array<Record<string, unknown>> }) {
+function AllocatorsTab({ allocators }: { allocators: PendingProfileRow[] }) {
   const router = useRouter();
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -509,13 +576,13 @@ function AllocatorsTab({ allocators }: { allocators: Array<Record<string, unknow
     <div className="space-y-3">
       {error && <p className="text-sm text-negative mb-3">{error}</p>}
       {allocators.map((a) => (
-        <Card key={a.id as string}>
+        <Card key={a.id}>
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-text-primary">{a.display_name as string}</p>
-              <p className="text-xs text-text-muted">{a.company as string ?? ""} {a.email ? `· ${a.email}` : ""}</p>
+              <p className="text-sm font-medium text-text-primary">{a.display_name}</p>
+              <p className="text-xs text-text-muted">{a.company ?? ""} {a.email ? `· ${a.email}` : ""}</p>
             </div>
-            <Button size="sm" onClick={() => approve(a.id as string)} disabled={loading === a.id}>
+            <Button size="sm" onClick={() => approve(a.id)} disabled={loading === a.id}>
               Approve
             </Button>
           </div>
@@ -530,7 +597,7 @@ function AllocatorsTab({ allocators }: { allocators: Array<Record<string, unknow
 // component (rather than parameterising AllocatorsTab) so a future role-
 // specific UI change on one side (extra metadata column, badge, etc.)
 // does not require a feature flag — just change the relevant component.
-function ManagersTab({ managers }: { managers: Array<Record<string, unknown>> }) {
+function ManagersTab({ managers }: { managers: PendingManagerRow[] }) {
   const router = useRouter();
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -557,13 +624,13 @@ function ManagersTab({ managers }: { managers: Array<Record<string, unknown>> })
     <div className="space-y-3">
       {error && <p className="text-sm text-negative mb-3">{error}</p>}
       {managers.map((m) => (
-        <Card key={m.id as string}>
+        <Card key={m.id}>
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-text-primary">{m.display_name as string}</p>
-              <p className="text-xs text-text-muted">{m.company as string ?? ""} {m.email ? `· ${m.email}` : ""}</p>
+              <p className="text-sm font-medium text-text-primary">{m.display_name}</p>
+              <p className="text-xs text-text-muted">{m.company ?? ""} {m.email ? `· ${m.email}` : ""}</p>
             </div>
-            <Button size="sm" onClick={() => approve(m.id as string)} disabled={loading === m.id}>
+            <Button size="sm" onClick={() => approve(m.id)} disabled={loading === m.id}>
               Approve
             </Button>
           </div>

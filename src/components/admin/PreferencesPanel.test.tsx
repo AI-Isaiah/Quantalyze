@@ -99,3 +99,38 @@ describe("PreferencesPanel — Minimum AUM segmented radio", () => {
     ).toBe("false");
   });
 });
+
+/**
+ * H-0358 — exclusion chip color semantics.
+ *
+ * "Excluded styles" and "Excluded exchanges" are both exclusion lists, but the
+ * style chips were green (accent) while the exchange chips were red (negative).
+ * The fix turns active excluded-style chips red to match. WHY it matters: the
+ * accent/green styling is reserved for the "Preferred …" inclusion groups, so a
+ * green excluded-style chip reads as "preferred" — the inverse of its meaning.
+ */
+describe("PreferencesPanel — exclusion chip semantics (H-0358)", () => {
+  it("active 'Excluded styles' chips use negative (red) styling, not accent", () => {
+    renderPanel({
+      style_exclusions: ["Trend Following"],
+    } as unknown as AllocatorPreferences);
+    const chip = screen.getByText("Trend Following").closest("button");
+    expect(chip).not.toBeNull();
+    // Matches the "Excluded exchanges" chips directly below in the panel.
+    expect(chip!.className).toContain("border-negative");
+    expect(chip!.className).toContain("text-negative");
+    // Must NOT use the inclusion (accent) styling reserved for "Preferred …".
+    expect(chip!.className).not.toContain("text-accent");
+  });
+
+  it("active 'Preferred strategy types' chips keep accent (inclusion) styling", () => {
+    // Guard the inverse: the fix must not bleed into the inclusion groups.
+    renderPanel({
+      preferred_strategy_types: ["Long-Only"],
+    } as unknown as AllocatorPreferences);
+    const chip = screen.getByText("Long-Only").closest("button");
+    expect(chip).not.toBeNull();
+    expect(chip!.className).toContain("text-accent");
+    expect(chip!.className).not.toContain("text-negative");
+  });
+});

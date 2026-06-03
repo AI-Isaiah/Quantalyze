@@ -3,7 +3,13 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { AdminTabs } from "@/components/admin/AdminTabs";
+import {
+  AdminTabs,
+  type IntroRequestRow,
+  type PendingStrategyRow,
+  type PendingProfileRow,
+  type PendingManagerRow,
+} from "@/components/admin/AdminTabs";
 
 export default async function AdminPage() {
   const supabase = await createClient();
@@ -18,7 +24,12 @@ export default async function AdminPage() {
       .from("contact_requests")
       .select("id, status, message, admin_note, created_at, allocator_id, strategy_id, profiles!contact_requests_allocator_id_fkey(display_name, company), strategies!contact_requests_strategy_id_fkey(id, name, codename, disclosure_tier)")
       .order("created_at", { ascending: false })
-      .limit(50),
+      .limit(50)
+      // createAdminClient() is untyped, so supabase-js infers each to-one
+      // embed (profiles/strategies) as an array; at runtime PostgREST returns a
+      // single object for these many-to-one joins. .returns<> asserts the real
+      // runtime shape so the typed AdminTabs props hold (H-0353).
+      .returns<IntroRequestRow[]>(),
     admin
       .from("strategies")
       .select(
@@ -27,13 +38,15 @@ export default async function AdminPage() {
          strategy_analytics (cagr, sharpe, max_drawdown, computation_status, computed_at)`,
       )
       .eq("status", "pending_review")
-      .order("created_at", { ascending: false }),
+      .order("created_at", { ascending: false })
+      .returns<PendingStrategyRow[]>(),
     admin
       .from("profiles")
       .select("id, display_name, company, email, role, allocator_status, created_at")
       .in("allocator_status", ["newbie", "pending"])
       .in("role", ["allocator", "both"])
-      .order("created_at", { ascending: false }),
+      .order("created_at", { ascending: false })
+      .returns<PendingProfileRow[]>(),
     // task #14 (2026-05-21): symmetric pending-managers query so the
     // universal-approval gate has a manager-side surface in the admin
     // dashboard. role IN ('manager','both') filter mirrors the allocator
@@ -45,7 +58,8 @@ export default async function AdminPage() {
       .select("id, display_name, company, email, role, manager_status, created_at")
       .in("manager_status", ["newbie", "pending"])
       .in("role", ["manager", "both"])
-      .order("created_at", { ascending: false }),
+      .order("created_at", { ascending: false })
+      .returns<PendingManagerRow[]>(),
   ]);
 
   return (

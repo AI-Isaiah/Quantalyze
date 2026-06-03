@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.24.15.91] - 2026-06-03
+## [0.24.15.92] - 2026-06-03
 ### Fixed — compute_jobs SECDEF-RPC corrections (M-1137/M-1138 + G23-187-mig-01/03)
 
 Two forward `CREATE OR REPLACE` corrections to `compute_jobs` queue RPCs in `supabase/migrations/20260603120000_compute_jobs_rpc_clear_error_and_gin_fanin.sql`, each re-based byte-for-byte (sed-extracted) on the latest live function body so no dedupe / C39 / throttle / strict-token invariant could be dropped, with only the surgical change per finding. A `STEP 3` self-verifying DO block pins **both** fixes **and** the pre-existing invariants of each rewritten body, so a future full-body rewrite fails loud rather than silently reverting them (which is exactly how G23-187 below regressed).
@@ -9,6 +9,17 @@ Two forward `CREATE OR REPLACE` corrections to `compute_jobs` queue RPCs in `sup
 - **G23-187-mig-01 / mig-03** — `mark_compute_job_done`'s fan-in advance is restored to the GIN-supported, set-based `parent_job_ids @> ARRAY[p_job_id]::uuid[]` UPDATE (semantically identical to the prior per-child `check_fan_in_ready` loop: `count(parents WHERE status <> 'done') = 0`). The B5 strict-token rewrite (`20260528183100`) had copied a pre-`20260516131500` body and silently reverted it to a per-child `= ANY(parent_job_ids)` FOR-loop the planner cannot push to the `compute_jobs_parent_lookup` GIN index, re-introducing the seq-scan + N+1 overhead H-0864 had closed. The set-based form was live in prod 2026-05-16 → 2026-05-28; the B5 strict-token gate is preserved verbatim.
 
 Recon: a 5-agent adversarial reverify against the latest deployed definitions caught the G23-187 fan-in regression (a finding my first pass had marked closed) and confirmed 15 sibling findings as reverify-closed by-design / superseded / one-time-resolved, plus re-affirmed 2 perf/observability defers (H-1237, M-1127). Reviewed by a 5-specialist suite (migration-reviewer, rls-policy-auditor, code-reviewer, silent-failure-hunter, security/perf) + a fresh-context Claude red team — zero must-fix findings; the rls-auditor positively confirmed no ACL widening and that the user/admin `last_error` redaction posture is preserved. A behavioral sql-test (structural + functional `last_error`-clearing) is staged pending a test-project catch-up.
+
+## [0.24.15.91] - 2026-06-03
+### Fixed — H3 Lane-2 component react/type/perf batch (H-0353/H-0358/H-0380/H-1252/H-1227)
+
+Five audit findings across the admin/mandate/strategy-v2/allocations frontend, closed as one Lane-2 batch. Each runtime fix was proven to fail when reverted (Rule 9); tsc + eslint clean; 53 tests across 5 files green. A 6-lens specialist + fresh-context red-team pass ran on the committed diff; their genuine findings (a 429-transient test gap, a second reachable picker-inversion site) were folded back in, and one M-6 "stranded banner" claim was declined as red-team-refuted and not a regression.
+
+- **H-0353** (`components/admin/AdminTabs.tsx`, `app/(dashboard)/admin/page.tsx`) — replace `Array<Record<string,unknown>>` props + per-field `as` casts with four exported row interfaces matching the admin SELECT columns; a column rename is now a compile error instead of a silently-blank tab. `createAdminClient()` is untyped, so each query asserts its runtime single-object embed shape via `.returns<RowType[]>()` (supabase-js otherwise mis-infers many-to-one embeds as arrays). First render coverage for the component, incl. the exploratory-tier privacy wiring of `displayStrategyName`.
+- **H-0358** (`components/admin/PreferencesPanel.tsx`) — "Excluded styles" chips use the negative (red) color, matching "Excluded exchanges" (accent/green is reserved for the "Preferred …" inclusion groups). The broader primitive-reuse refactor was declined (working+tested; the slider swap would regress the free-entry value contract).
+- **H-0380** (`components/mandate/useMandateAutoSave.ts`) — both error transitions (failTerminal + the 429 transient-retry write) keep a concurrent field's fresher "saved" banner instead of clobbering it to "error": `setSaveState(prev => prev === "saved" ? "saved" : "error")`. The per-field error write stays unconditional, so no error is hidden. Cross-field race tests cover both guarded sites.
+- **H-1252** (`components/strategy-v2/HeadlineMetricsPanel.tsx`) — add a `mountedRef`/`versionRef` guard (mirroring `hooks/useLazyPanelMetrics`) to the inline log_returns fetch so a stale strategy-A resolve cannot leak into strategy B if the `key={strategy.id}` remount is ever removed. Test 6c reproduces the A→B flip without a key remount.
+- **H-1227** (`app/(dashboard)/allocations/widgets/performance/EquityChart.tsx`, `components/CustomRangePicker.tsx`) — the `EquityChartWidgetInner` CUSTOM picker (not behind the `if (!projection) return` guard) inverted `min>max` on empty equity data (wall-clock `new Date()` > `localMidnightToday()`), producing a dead popover. Anchor the empty `minDate` fallback to `localMidnightToday()` so `min<=max` holds at both picker render sites.
 
 ## [0.24.15.90] - 2026-06-03
 ### Fixed — analytics numeric/silent-failure correctness batch (M-0695/0696/0697/0698/0748/0701/0903/0904/0704/0707)

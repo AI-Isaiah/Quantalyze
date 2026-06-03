@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { StrategyV2Detail } from "@/lib/queries";
 import { EquityCurve } from "@/components/charts/EquityCurve";
 import { DrawdownChart } from "@/components/charts/DrawdownChart";
@@ -108,6 +108,25 @@ export function HeadlineMetricsPanel({
     "idle" | "loading" | "ready" | "error"
   >("idle");
 
+  // H-1252: hook-level race guard mirroring useLazyPanelMetrics
+  // (src/hooks/useLazyPanelMetrics.ts:87-108). The other four lazy panels get
+  // this guard for free via that hook; HeadlineMetricsPanel fetches inline, so
+  // it needs its own. mountedRef blocks a post-unmount setState; versionRef
+  // (bumped on every strategyId change) drops a stale A-fetch resolve from
+  // clobbering B's state when the instance is reused without key={strategy.id}.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const versionRef = useRef(0);
+  useEffect(() => {
+    versionRef.current += 1;
+  }, [strategyId]);
+
   // panelId "equity" maps via migration 087 (line 165) to
   // ARRAY['log_returns_series']. The RPC returns
   // { log_returns_series: [{date, value}, ...] } on success or {} on
@@ -121,8 +140,14 @@ export function HeadlineMetricsPanel({
     if (nextView !== "log_returns") return;
     if (logReturnsStatus !== "idle") return;
     setLogReturnsStatus("loading");
+    // Capture the version at dispatch; ignore the resolve if the panel
+    // unmounted or strategyId changed while the fetch was in flight (H-1252).
+    const requestVersion = versionRef.current;
+    const isStillRelevant = () =>
+      mountedRef.current && versionRef.current === requestVersion;
     fetchStrategyLazyMetricsClient(strategyId, "equity")
       .then((payload) => {
+        if (!isStillRelevant()) return;
         const series =
           (payload as {
             log_returns_series?: { date: string; value: number }[];
@@ -131,6 +156,7 @@ export function HeadlineMetricsPanel({
         setLogReturnsStatus("ready");
       })
       .catch((err: unknown) => {
+        if (!isStillRelevant()) return;
         console.error("HeadlineMetricsPanel log_returns fetch failed", {
           strategyId,
           err,
