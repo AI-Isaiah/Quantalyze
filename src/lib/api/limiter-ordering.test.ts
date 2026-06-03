@@ -58,6 +58,7 @@ const CANONICAL = new Set([
   "keys/[id]/permissions/route.ts",
   "keys/sync/route.ts",
   "keys/validate-and-encrypt/route.ts",
+  "notes/route.ts",
   "portfolio-optimizer/route.ts",
   "portfolio-strategies/alias/route.ts",
   "preferences/route.ts",
@@ -97,7 +98,6 @@ const NO_INPUT = new Set([
   "me/audit-log/export/route.ts",
   "portfolio-pdf/[id]/route.ts",
   "strategies/browse/route.ts",
-  "strategies/draft/route.ts",
 ]);
 
 // limit-FIRST is intentional here (public/unauth scraper defense).

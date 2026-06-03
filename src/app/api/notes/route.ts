@@ -150,25 +150,10 @@ export async function PATCH(request: NextRequest) {
     );
   }
 
-  // M-1140 / M-1141: rate-limit the mutation. This was the only mutating PATCH
-  // in src/app/api/ with no limiter — combined with an unbounded body it was a
-  // ~6 GB/hr write vector. Mirror the watchlist/permissions inline-deny shape
-  // (per-user 429 + Retry-After); a non-success result on this autosave path
-  // is always a throttle, so collapse the prod-misconfig case into the same
-  // 429 as the sibling authed routes (bridge-curves, key-permissions) do.
-  const rl = await checkLimit(notesUpsertLimiter, `notes:${user.id}`);
-  if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      {
-        status: 429,
-        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
-      },
-    );
-  }
-
   // M-1141: bounce an oversized body via the declared content-length BEFORE
-  // `request.json()` allocates the parse buffer for it.
+  // `request.json()` allocates the parse buffer for it. Header-only (not a body
+  // read), so this can precede the limiter without burning a token on a body
+  // we never parse.
   const declaredLength = Number(request.headers.get("content-length") ?? "0");
   if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BYTES) {
     return NextResponse.json(
@@ -200,6 +185,26 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json(
       { error: "Content exceeds 100 KB limit" },
       { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // M-1140 / M-1141: rate-limit AFTER body validation — the B15 canonical order
+  // (auth -> validate -> rate-limit -> handler), so a malformed/oversized body
+  // returns 4xx WITHOUT burning the caller's token (the content-length precheck
+  // above already shields the parse buffer from an oversized body, and the
+  // limiter-ordering test classifies this route CANONICAL). notes was the only
+  // mutating PATCH in src/app/api/ with no limiter — combined with the unbounded
+  // body it was a ~6 GB/hr write vector. Inline-deny mirrors the sibling authed
+  // routes (per-user 429 + Retry-After), folding the prod-misconfig fail-closed
+  // case into the same 429 that bridge-curves / key-permissions emit.
+  const rl = await checkLimit(notesUpsertLimiter, `notes:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      {
+        status: 429,
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+      },
     );
   }
 

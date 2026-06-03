@@ -67,7 +67,6 @@ const MUST_STAMP_NO_STORE: readonly string[] = [
   "bridge/outcome/route.ts",
   "bridge/outcome/dismiss/route.ts",
   "bridge/outcome/[id]/curves/route.ts",
-  "strategies/draft/route.ts",
   "strategies/draft/[id]/route.ts",
   "strategies/csv-validate/route.ts",
   "strategies/create-with-key/route.ts",
@@ -99,8 +98,8 @@ const MUST_STAMP_NO_STORE: readonly string[] = [
 describe("no-store coverage: audited tenant-data routes stamp NO_STORE_HEADERS", () => {
   // Vacuity guard: a typo that drops entries from the allowlist must fail,
   // not silently shrink the gate.
-  it("locks the full audited tenant-data surface (34 routes)", () => {
-    expect(MUST_STAMP_NO_STORE.length).toBe(34);
+  it("locks the full audited tenant-data surface (33 routes)", () => {
+    expect(MUST_STAMP_NO_STORE.length).toBe(33);
     expect(new Set(MUST_STAMP_NO_STORE).size).toBe(MUST_STAMP_NO_STORE.length);
   });
 

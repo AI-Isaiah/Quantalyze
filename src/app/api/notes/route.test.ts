@@ -704,11 +704,14 @@ describe("PATCH /api/notes — rate limit + body-size guards (M-1140/M-1141)", (
     expect(rpcCalls).toHaveLength(0);
   });
 
-  it("M-1140: limiter runs BEFORE the body parse — a denied request never reaches request.json()", async () => {
-    // A malformed-JSON body returns 429 (limiter), not 400 (parse): proof the
-    // limiter short-circuits before the route allocates the parse buffer, so an
-    // abuser can't force the expensive path by spamming garbage bodies.
-    ratelimitState.ok = false;
+  it("M-1140 (B15): validation precedes the limiter — a malformed body returns 400 (not 429) even when the limiter would deny", async () => {
+    // Canonical B15 order (auth -> validate -> rate-limit): the body is parsed
+    // BEFORE the limiter is consumed, so a malformed body 400s WITHOUT burning
+    // the caller's token. A regression that moved checkLimit above
+    // request.json() would 429 here instead. (The structural guarantee lives in
+    // src/lib/api/limiter-ordering.test.ts, which classifies notes CANONICAL;
+    // this is the behavioral twin.)
+    ratelimitState.ok = false; // limiter set to deny
     const req = new NextRequest("http://localhost:3000/api/notes", {
       method: "PATCH",
       headers: {
@@ -719,7 +722,7 @@ describe("PATCH /api/notes — rate limit + body-size guards (M-1140/M-1141)", (
     });
     const { PATCH } = await import("./route");
     const res = await PATCH(req);
-    expect(res.status).toBe(429);
+    expect(res.status).toBe(400);
   });
 
   it("M-1141: an over-max content string is rejected at the Zod layer (before the byte-cap)", async () => {
