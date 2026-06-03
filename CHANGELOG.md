@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.104] - 2026-06-03
+### Changed — pyarrow moved off the production image (H-0537 + M-0595, supply-chain)
+
+`pyarrow==18.1.0` — a ~40 MB native Arrow wheel with CVE-2024-52338 (RCE) history — was pinned in `analytics-service/requirements.txt`, the file the **production Railway worker** installs (and which holds the Supabase service-role key), despite being used **only by tests** (`pd.read_parquet` of the `golden_252d_input.parquet` fixture in `tests/conftest.py` + `.to_parquet` in `tests/fixtures/regen_golden.py`). Moved it to `requirements-dev.txt` so the prod image (the Dockerfile installs **only** `requirements.txt`) no longer ships the native Arrow wheel or its transitive attack surface.
+
+- **Prod boot verified safe** — blocking `pyarrow` via an import hook and importing every production entrypoint (`main`/uvicorn app, `main_worker`, `services.analytics_runner`/`portfolio_optimizer`/`bridge_scoring`/`metrics`, `routers.portfolio`/`cron`) all succeed: no production module reads parquet or imports pyarrow (a red-team grep of the full non-test surface — services/routers/scripts — confirmed zero prod consumers; pandas 2.2.3 does not require pyarrow at runtime).
+- **Every test context keeps pyarrow** — `ci.yml` + `cassette-refresh.yml` already `pip install -r requirements.txt -r requirements-dev.txt`; the `analytics-service/Makefile` `install` target was updated from a hardcoded dev-dep list to `-r requirements.txt -r requirements-dev.txt` (a deploy-completeness review caught that `make test` would otherwise lose the parquet fixture) — now byte-for-byte the CI install.
+
+Residual carved (separate, lower-grade reproducible-builds initiative, not in this surgical move): H-0537's `--require-hashes` lockfile + mixed `==`/`>=` pin sub-items. Reviewed by a deploy/build-completeness specialist + a fresh-context red-team (SHIP; the one MEDIUM must-fix — the Makefile — applied).
+
 ## [0.24.15.103] - 2026-06-03
 ### Tests — Lane-1 TEST-GAP cohort (8 tests written; 28 gold-plating/not-a-bug findings deleted)
 
