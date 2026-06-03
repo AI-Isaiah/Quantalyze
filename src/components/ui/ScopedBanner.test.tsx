@@ -28,4 +28,15 @@ describe("ScopedBanner", () => {
     const { container } = render(<ScopedBanner tone="warning" title="x" />);
     expect(container.firstChild).toHaveClass("border-negative");
   });
+
+  it("H-0408: does not truncate the title — trust-critical scope tags must be shown in full", () => {
+    // A long partner scope tag must never be silently ellipsed: the banner
+    // promises full scope identification. The title element must not carry the
+    // `truncate` utility (overflow-hidden + nowrap + ellipsis); it should wrap.
+    const longTag = "acme-capital-management-pilot-program-2026-cohort-3";
+    render(<ScopedBanner tone="accent" title={longTag} />);
+    const titleEl = screen.getByText(longTag);
+    expect(titleEl).not.toHaveClass("truncate");
+    expect(titleEl).toHaveClass("break-words");
+  });
 });

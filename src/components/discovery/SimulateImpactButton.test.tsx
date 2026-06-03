@@ -34,7 +34,7 @@ describe("<SimulateImpactButton>", () => {
     expect(btn).toBeDisabled();
   });
 
-  it("opens the impact panel when clicked", () => {
+  it("opens the impact panel when clicked", async () => {
     // Prevent the panel's fetch from actually firing — we just need to see
     // the dialog mount.
     globalThis.fetch = vi.fn(
@@ -56,8 +56,14 @@ describe("<SimulateImpactButton>", () => {
 
     fireEvent.click(btn);
 
+    // aria-expanded flips synchronously on the button…
     expect(btn).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    // …but the panel is now code-split via next/dynamic (H-1123), so it
+    // mounts asynchronously after the lazy chunk resolves — await it.
+    // NOTE: this guards the behavioral contract (panel still opens on click),
+    // NOT the code-split itself — jsdom can't assert bundle boundaries, so the
+    // split is verified at build/bundle-analysis time, not here.
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
   });
 
   it("does not open the panel when disabled", () => {

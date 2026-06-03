@@ -1,3 +1,4 @@
+import { after } from "next/server";
 import { Resend } from "resend";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getCorrelationId } from "@/lib/correlation-id";
@@ -282,11 +283,14 @@ async function send(
       throw new Error("[email] Resend not configured — send failed");
     }
     // Fire-and-forget: on the non-throwing path, audit trail updates must
-    // never block the caller.
-    void markDispatch(admin, dispatchId, {
-      status: "failed",
-      error: "Resend not configured",
-    });
+    // never block the caller — but schedule via `after()` so the write
+    // survives Vercel function freeze (H-0445).
+    scheduleDispatchAudit(() =>
+      markDispatch(admin, dispatchId, {
+        status: "failed",
+        error: "Resend not configured",
+      }),
+    );
     return;
   }
 
@@ -360,10 +364,12 @@ async function send(
         `[email] Send failed after ${MAX_ATTEMPTS} attempts: ${errorMessage(sendError)}`,
       );
     }
-    void markDispatch(admin, dispatchId, {
-      status: "failed",
-      error: errorMessage(sendError),
-    });
+    scheduleDispatchAudit(() =>
+      markDispatch(admin, dispatchId, {
+        status: "failed",
+        error: errorMessage(sendError),
+      }),
+    );
     return;
   }
 
@@ -385,15 +391,45 @@ async function send(
     }
   }
 
-  // Happy path: Resend accepted the message. Fire-and-forget the update to
-  // 'sent' — the email is already delivered, so blocking the caller on the
-  // audit write only adds ~60ms of latency. A failure here does NOT mark
-  // the email as failed; the row stays in 'queued' and operators can spot
-  // stuck rows via the queued + age > threshold query.
-  void markDispatch(admin, dispatchId, {
-    status: "sent",
-    sent_at: new Date().toISOString(),
-  });
+  // Happy path: Resend accepted the message. Schedule the update to 'sent'
+  // via `after()` (H-0445) — the email is already delivered, so we don't
+  // block the caller on the audit write, but `after()` keeps the function
+  // instance alive until the write lands so a Vercel freeze can't strand the
+  // row at 'queued' for an email that was actually sent.
+  scheduleDispatchAudit(() =>
+    markDispatch(admin, dispatchId, {
+      status: "sent",
+      sent_at: new Date().toISOString(),
+    }),
+  );
+}
+
+/**
+ * Schedule a best-effort `notification_dispatches` audit write to run AFTER
+ * the response flushes (H-0445). Inside a Next request scope (route handlers,
+ * Server Actions, crons) this uses `after()` (Next 16, ≈ Vercel `waitUntil`)
+ * so the write survives Fluid Compute instance freeze — a bare fire-and-forget
+ * promise is reaped on suspension, leaving the row stuck at 'queued' for an
+ * email that was already sent/failed. Outside a request scope `after()` throws
+ * synchronously, so we fall back to a bare fire-and-forget (NOT a microtask) —
+ * byte-for-byte the prior `void markDispatch(...)` behavior. Structurally this
+ * mirrors `audit.ts`'s try-after/catch wrapper; it deliberately omits audit.ts's
+ * `queueMicrotask` + `[audit]`-prefixed warn because on Vercel Fluid Compute the
+ * route handlers that call this ALWAYS have `waitUntil`, so the catch arm only
+ * fires under vitest / prerender (never a prod drop to quantify). markDispatch
+ * never throws, but the defensive `.catch` guards a future regression from
+ * surfacing an unhandled rejection.
+ */
+function scheduleDispatchAudit(run: () => Promise<void>): void {
+  try {
+    after(() => run().catch(() => {}));
+  } catch {
+    // Outside a request scope (unit tests, prerender) `after()` throws. Fall
+    // back to a bare fire-and-forget — byte-for-byte the prior
+    // `void markDispatch(...)` behavior — so non-request callers and the
+    // existing synchronous test assertions are unaffected.
+    void run().catch(() => {});
+  }
 }
 
 /**
