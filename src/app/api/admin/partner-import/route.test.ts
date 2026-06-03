@@ -1011,4 +1011,30 @@ describe("NEW-C28 — partner-import input validation and audit fixes", () => {
     expect(auditEmissions[0].action).toBe("admin.partner_import");
     expect(auditEmissions[0].metadata.partial_completion).toBe(false);
   });
+
+  it("H-0440: a formula-prefixed CSV header fails loud as a 400, not a silent mis-match", async () => {
+    // A spreadsheet export artifact (a header cell beginning with `=`) must
+    // NOT be silently stripped-and-matched into the manager_email column —
+    // headers are preserved verbatim, so parseCsvWithSchema throws and the
+    // route converts it to an operator-actionable 400 with NO audit emission.
+    // Pins the parse-inside-try -> 400 wiring so a future refactor that hoists
+    // the parse out of the try (turning it into a 500/crash) lands red.
+    const formulaHeaderCsv = [
+      "=manager_email,strategy_name,disclosure_tier",
+      "alice@x,Acme Macro,institutional",
+    ].join("\n");
+    const res = await POST(
+      buildRequest({
+        partner_tag: "demo-partner",
+        managers_csv: formulaHeaderCsv,
+        allocators_csv: SAMPLE_ALLOCATORS_CSV,
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/Missing CSV header column: manager_email/);
+    // The diagnostic is operator-actionable (names the offending cell + fix).
+    expect(body.error).toMatch(/remove the leading "="/);
+    expect(auditEmissions).toHaveLength(0);
+  });
 });

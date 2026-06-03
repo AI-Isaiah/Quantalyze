@@ -19,9 +19,10 @@
  */
 
 /**
- * Strip leading formula characters from a cell to prevent CSV injection
- * when the parsed data is later re-emitted into a spreadsheet. Also trims
- * surrounding whitespace.
+ * Strip leading formula characters from a DATA cell to prevent CSV injection
+ * when the parsed value is later re-emitted into a spreadsheet. Also trims
+ * surrounding whitespace. NOT for header cells — those are column-identity
+ * metadata, not re-emitted values; see {@link parseCsvWithSchema} (H-0440).
  *
  * Only strips `+`, `-`, or `@` when followed by a non-numeric character —
  * otherwise `-430.25` would silently become `430.25` and corrupt signed
@@ -40,15 +41,24 @@ export function sanitizeCsvValue(val: string): string {
 
 /**
  * Parse a single CSV line into its fields, honouring quoted fields,
- * embedded commas, and escaped quotes (`""` → `"`). Each cell is passed
- * through `sanitizeCsvValue` before being returned.
+ * embedded commas, and escaped quotes (`""` → `"`).
+ *
+ * When `sanitize` is true (default) each cell is passed through
+ * {@link sanitizeCsvValue} — the formula-injection defense for DATA values
+ * that may later be re-emitted into a spreadsheet. Pass `sanitize: false` for
+ * a HEADER row, whose cells are column-identity metadata (not re-emitted
+ * values) and must be preserved verbatim so a leading `+`/`-`/`@`/`=` isn't
+ * silently stripped into a different column name (H-0440). Non-sanitized
+ * cells are still trimmed.
  *
  * Does not handle multi-line quoted fields — see KNOWN LIMITATIONS above.
  */
-export function parseCsvLine(line: string): string[] {
+export function parseCsvLine(line: string, sanitize: boolean = true): string[] {
   const fields: string[] = [];
   let current = "";
   let inQuotes = false;
+  // sanitizeCsvValue trims internally; the non-sanitize path trims explicitly.
+  const finish = (raw: string) => (sanitize ? sanitizeCsvValue(raw) : raw.trim());
 
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
@@ -64,18 +74,18 @@ export function parseCsvLine(line: string): string[] {
     } else if (ch === '"') {
       inQuotes = true;
     } else if (ch === ",") {
-      fields.push(sanitizeCsvValue(current.trim()));
+      fields.push(finish(current));
       current = "";
     } else {
       current += ch;
     }
   }
-  fields.push(sanitizeCsvValue(current.trim()));
+  fields.push(finish(current));
   return fields;
 }
 
 /**
- * Parse raw CSV text into a 2D array of sanitized cells.
+ * Parse raw CSV text into a 2D array of cells.
  *
  * - Handles CRLF and LF line endings.
  * - Strips a leading UTF-8 BOM if present.
@@ -83,15 +93,23 @@ export function parseCsvLine(line: string): string[] {
  * - Returns every non-empty row including the header (row index 0) —
  *   callers that want a header/data split can take `result[0]` and
  *   `result.slice(1)`, or use {@link parseCsvWithSchema} instead.
+ *
+ * Every cell is formula-sanitized by default. Pass `{ sanitizeFirstRow:
+ * false }` when row 0 is a HEADER — its cells are column-identity metadata
+ * and must NOT be formula-stripped (H-0440); data rows are always sanitized.
  */
-export function parseCsv(text: string): string[][] {
+export function parseCsv(
+  text: string,
+  opts: { sanitizeFirstRow?: boolean } = {},
+): string[][] {
+  const { sanitizeFirstRow = true } = opts;
   // Strip BOM so spreadsheet-exported files (which often include `\uFEFF`)
   // don't end up with a hidden prefix on the first header cell.
   const stripped = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   return stripped
     .split(/\r?\n/)
     .filter((line) => line.trim().length > 0)
-    .map((line) => parseCsvLine(line));
+    .map((line, idx) => parseCsvLine(line, idx === 0 ? sanitizeFirstRow : true));
 }
 
 /**
@@ -133,7 +151,13 @@ export function parseCsvWithSchema<T>(
   mapRow: (row: Record<string, string>) => T | null,
   hasHeader: boolean = true,
 ): T[] {
-  const rows = parseCsv(raw);
+  // H-0440: when row 0 is a header, do NOT formula-sanitize it — a header is
+  // column-identity metadata, and stripping a leading `+`/`-`/`@`/`=` would
+  // rewrite (or partially rewrite, via the digit-lookahead asymmetry in
+  // sanitizeCsvValue) the column name, silently matching the wrong column or
+  // raising a misleading "Missing CSV header column". Data rows stay
+  // sanitized. When `hasHeader` is false, row 0 IS data → sanitize it.
+  const rows = parseCsv(raw, { sanitizeFirstRow: !hasHeader });
   if (rows.length === 0) return [];
 
   const wantedColumns = columns.map((c) => c.toLowerCase());
@@ -146,7 +170,39 @@ export function parseCsvWithSchema<T>(
     header = rows[0].map((h) => h.trim().toLowerCase());
     for (const col of wantedColumns) {
       if (!header.includes(col)) {
-        throw new Error(`Missing CSV header column: ${col}`);
+        // H-0440: headers are preserved verbatim, so a column that fails to
+        // match ONLY because of a leading formula char (a spreadsheet export
+        // artifact, e.g. `=manager_email`) would otherwise produce a confusing
+        // "Missing column: manager_email" when the operator can plainly see a
+        // manager_email column. Name the near-match cell + the fix.
+        //
+        // The echoed header is operator-controlled and reaches the 400 body,
+        // so cap each echoed cell and strip control characters (no response
+        // bloat / no control-char passthrough), mirroring the route's
+        // capAuditMetadata discipline for the other attacker-influenced surface.
+        const STRIP_RE = /^[=+\-@\t\r]+/;
+        const safe = (s: string) =>
+          s.replace(/[\x00-\x1f]/g, "").slice(0, 80);
+        const nearMatch = header.find((h) => h.replace(STRIP_RE, "") === col);
+        if (nearMatch) {
+          // Advise removing the FULL leading formula run, not just its first
+          // char — `=+manager_email` needs both stripped to read `manager_email`.
+          const prefix = nearMatch.slice(
+            0,
+            nearMatch.length - nearMatch.replace(STRIP_RE, "").length,
+          );
+          throw new Error(
+            `Missing CSV header column: ${col} (found a header cell ` +
+              `"${safe(nearMatch)}" — remove the leading "${safe(prefix)}" so ` +
+              `the header reads "${col}"; CSV headers must not begin with =, +, -, or @)`,
+          );
+        }
+        const seen = header.slice(0, 20).map(safe).join(", ");
+        const more =
+          header.length > 20 ? ` …(+${header.length - 20} more)` : "";
+        throw new Error(
+          `Missing CSV header column: ${col} (headers seen: ${seen}${more})`,
+        );
       }
     }
     dataStartIdx = 1;
