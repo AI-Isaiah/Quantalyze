@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
-import { render, screen, within, waitFor } from "@testing-library/react";
+import { render, screen, within, waitFor, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 
 import EquityChartWidget from "./EquityChart";
@@ -292,5 +292,37 @@ describe("M-1068 — EquityChartWidget single-row header", () => {
     // aria-label="Series legend" row and the user would see two legends.
     const legends = container.querySelectorAll('[aria-label="Series legend"]');
     expect(legends.length).toBe(1);
+  });
+
+  // H-1227: the widget-level CUSTOM picker is NOT behind the inner chart's
+  // `if (!projection) return` guard — the period tabs render even on a
+  // first-connect card with no equity history (empty equityDailyPoints). With
+  // the empty `minDate` fallback as a wall-clock `new Date()` (e.g. 12:30) it
+  // exceeded `max=localMidnightToday()` (00:00), inverting min>max so EVERY day
+  // cell was disabled and Apply was permanently stuck — a dead popover. The fix
+  // anchors the fallback to localMidnightToday() (== max) so today stays
+  // selectable.
+  it("empty-data CUSTOM picker stays usable (min<=max → at least one day cell selectable) [H-1227]", () => {
+    seedTweaks({});
+    render(
+      <TweaksProvider>
+        <EquityChartWidget
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          data={{ equityDailyPoints: [] } as any}
+          timeframe="1YTD"
+          width={6}
+          height={4}
+        />
+      </TweaksProvider>,
+    );
+    // The header's period tabs render even while the inner chart body warms up.
+    fireEvent.click(screen.getByRole("tab", { name: "CUSTOM" }));
+    // Day-grid cells are <button>s whose label is a bare day-of-month number.
+    const dayCells = screen
+      .getAllByRole("button")
+      .filter((b) => /^\d{1,2}$/.test((b.textContent ?? "").trim()));
+    expect(dayCells.length).toBeGreaterThan(0);
+    // Pre-fix (min>max) every cell was disabled; the fix keeps today selectable.
+    expect(dayCells.some((b) => !(b as HTMLButtonElement).disabled)).toBe(true);
   });
 });

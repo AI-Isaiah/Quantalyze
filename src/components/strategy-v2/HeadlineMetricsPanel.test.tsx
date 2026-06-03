@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, waitFor } from "@testing-library/react";
 
 /**
  * Phase 14b-06 Task 3 — HeadlineMetricsPanel (Panel 2) segmented-control
@@ -276,6 +276,54 @@ describe("HeadlineMetricsPanel — Phase 14b-06 Task 3", () => {
 
     fireEvent.click(buttons.find((b) => b.textContent?.trim() === "Log returns")!);
     expect(queryByText("BTC benchmark")).toBeNull();
+  });
+
+  it("Test 6c (H-1252): a stale strategy-A log_returns fetch is discarded after strategyId changes to B", async () => {
+    // Reproduces the cross-strategy reuse race that `key={strategy.id}` prevents
+    // in production but which the hook-level mountedRef/versionRef guard must
+    // handle on its own (belt-and-suspenders). RollingMetricsPanel et al. get
+    // this guard via useLazyPanelMetrics; HeadlineMetricsPanel fetches inline.
+    // Without the guard, A's late resolve overwrites B's panel state.
+    let resolveA: (v: unknown) => void = () => {};
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveA = resolve;
+        }),
+    );
+
+    const { container, rerender } = render(
+      <HeadlineMetricsPanel {...BASE_PROPS} strategyId="strat-A" />,
+    );
+
+    // Activate Log returns for strategy A — fetch is now in flight (loading).
+    const lrButton = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "Log returns",
+    )!;
+    fireEvent.click(lrButton);
+    expect(container.textContent).toContain("Loading…");
+    expect(container.querySelector('[data-testid="equity-curve"]')).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith("strat-A", "equity");
+
+    // Cross-strategy reuse: SAME React instance, new strategyId (no key remount).
+    rerender(<HeadlineMetricsPanel {...BASE_PROPS} strategyId="strat-B" />);
+
+    // Resolve A's now-stale fetch. Without the versionRef guard this would
+    // setLogReturns(A) + setLogReturnsStatus("ready") on the B-bound instance,
+    // rendering A's distinctive 2099 series into B's panel.
+    await act(async () => {
+      resolveA({ log_returns_series: [{ date: "2099-01-01", value: 0.99 }] });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Guard held: A's resolve discarded → still loading, no EquityCurve for B.
+    expect(container.querySelector('[data-testid="equity-curve"]')).toBeNull();
+    expect(container.textContent).toContain("Loading…");
+    // No second fetch dispatched (status was "loading" ≠ "idle" after rerender).
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("Test 7: forbidden classes absent (no font-medium / text-xl / text-2xl)", async () => {

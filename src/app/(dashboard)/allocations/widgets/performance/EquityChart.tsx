@@ -2006,11 +2006,19 @@ function EquityChartWidgetInner({
   // local-midnight convention (NOT `new Date(parseISO(...))`, a UTC epoch)
   // so the picker — which reads `min` with local-time accessors — agrees
   // with this bound for users west of UTC instead of landing one day early.
+  // H-1227: the empty fallback is localMidnightToday() (NOT a wall-clock
+  // `new Date()`). Unlike the in-component EquityChart picker, this widget-level
+  // picker is NOT behind the `if (!projection) return` guard — the CUSTOM
+  // button is live even on a first-connect card with `equityDailyPoints: []`.
+  // A wall-clock `new Date()` (e.g. 14:30) would exceed `max=localMidnightToday()`
+  // (00:00), inverting min>max and rendering a fully dead popover (every cell
+  // disabled, Apply stuck). Anchoring min to today-midnight keeps min<=max so
+  // the no-data CUSTOM popover is at least openable on today.
   const minDate = useMemo(
     () =>
       anchored.length > 0
         ? localDateFromISO(anchored[0].date)
-        : new Date(),
+        : localMidnightToday(),
     [anchored],
   );
 

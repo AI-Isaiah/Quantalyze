@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.91] - 2026-06-03
+### Fixed — H3 Lane-2 component react/type/perf batch (H-0353/H-0358/H-0380/H-1252/H-1227)
+
+Five audit findings across the admin/mandate/strategy-v2/allocations frontend, closed as one Lane-2 batch. Each runtime fix was proven to fail when reverted (Rule 9); tsc + eslint clean; 53 tests across 5 files green. A 6-lens specialist + fresh-context red-team pass ran on the committed diff; their genuine findings (a 429-transient test gap, a second reachable picker-inversion site) were folded back in, and one M-6 "stranded banner" claim was declined as red-team-refuted and not a regression.
+
+- **H-0353** (`components/admin/AdminTabs.tsx`, `app/(dashboard)/admin/page.tsx`) — replace `Array<Record<string,unknown>>` props + per-field `as` casts with four exported row interfaces matching the admin SELECT columns; a column rename is now a compile error instead of a silently-blank tab. `createAdminClient()` is untyped, so each query asserts its runtime single-object embed shape via `.returns<RowType[]>()` (supabase-js otherwise mis-infers many-to-one embeds as arrays). First render coverage for the component, incl. the exploratory-tier privacy wiring of `displayStrategyName`.
+- **H-0358** (`components/admin/PreferencesPanel.tsx`) — "Excluded styles" chips use the negative (red) color, matching "Excluded exchanges" (accent/green is reserved for the "Preferred …" inclusion groups). The broader primitive-reuse refactor was declined (working+tested; the slider swap would regress the free-entry value contract).
+- **H-0380** (`components/mandate/useMandateAutoSave.ts`) — both error transitions (failTerminal + the 429 transient-retry write) keep a concurrent field's fresher "saved" banner instead of clobbering it to "error": `setSaveState(prev => prev === "saved" ? "saved" : "error")`. The per-field error write stays unconditional, so no error is hidden. Cross-field race tests cover both guarded sites.
+- **H-1252** (`components/strategy-v2/HeadlineMetricsPanel.tsx`) — add a `mountedRef`/`versionRef` guard (mirroring `hooks/useLazyPanelMetrics`) to the inline log_returns fetch so a stale strategy-A resolve cannot leak into strategy B if the `key={strategy.id}` remount is ever removed. Test 6c reproduces the A→B flip without a key remount.
+- **H-1227** (`app/(dashboard)/allocations/widgets/performance/EquityChart.tsx`, `components/CustomRangePicker.tsx`) — the `EquityChartWidgetInner` CUSTOM picker (not behind the `if (!projection) return` guard) inverted `min>max` on empty equity data (wall-clock `new Date()` > `localMidnightToday()`), producing a dead popover. Anchor the empty `minDate` fallback to `localMidnightToday()` so `min<=max` holds at both picker render sites.
+
 ## [0.24.15.90] - 2026-06-03
 ### Fixed — analytics numeric/silent-failure correctness batch (M-0695/0696/0697/0698/0748/0701/0903/0904/0704/0707)
 

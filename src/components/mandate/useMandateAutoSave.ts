@@ -176,7 +176,11 @@ export function useMandateAutoSave(
       sentryLevel?: "error" | "warning",
     ) => {
       setFieldErrors((prev) => ({ ...prev, [fieldName]: message }));
-      setSaveState("error");
+      // H-0380: never let one field's terminal failure clobber a concurrent
+      // fresher "saved" banner from a different field. The per-field error is
+      // still written above (unconditional), so no error is hidden — only the
+      // shared form-level banner is protected during the 2s "saved" flash.
+      setSaveState((prev) => (prev === "saved" ? "saved" : "error"));
       removeSavingField(fieldName);
       captureToSentry(
         originalError ?? new Error(`Mandate autosave terminal failure: ${fieldName}`),
@@ -381,7 +385,9 @@ export function useMandateAutoSave(
               ...prev,
               [fieldName]: `Saving too fast. Will retry in ${retryAfterSec}s.`,
             }));
-            setSaveState("error");
+            // H-0380: same banner-clobber guard as failTerminal — a transient
+            // 429 retry on field A must not overwrite field B's fresher "saved".
+            setSaveState((prev) => (prev === "saved" ? "saved" : "error"));
           }
           // Cap a hostile/huge Retry-After so the hook can't be pinned for
           // minutes; abortableWait() also resolves immediately on unmount.
