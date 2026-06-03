@@ -26,7 +26,7 @@
  *   (/allocations?tab=outcomes), NOT a dismissal toggle.
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { BridgeDrawer } from "./BridgeDrawer";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
@@ -104,6 +104,19 @@ export function BridgeWidget({
   onRetry,
 }: BridgeWidgetProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // L-0070 — memoize the empty-state's relative-date phrase on the most-recent
+  // outcome's created_at. `formatRelativeDate` does a `Date.parse` + a locale
+  // `toLocaleDateString` and defaults `now` to a fresh `new Date()`; calling it
+  // inline on every render re-ran all of that on each 30s dashboard payload
+  // refresh. Keyed on the timestamp string, it now recomputes only when the
+  // latest outcome actually changes (~once/day). Hook sits above the early
+  // returns so it runs unconditionally.
+  const lastOutcomeCreatedAt = outcomes[0]?.created_at;
+  const lastReviewedLabel = useMemo(
+    () => (lastOutcomeCreatedAt ? formatRelativeDate(lastOutcomeCreatedAt) : null),
+    [lastOutcomeCreatedAt],
+  );
 
   // H-1210 (F1 loud-fail) — `null` is the UNKNOWN signal: the upstream
   // dashboard payload failed to resolve flaggedHoldings. Render a distinct
@@ -214,7 +227,7 @@ export function BridgeWidget({
                 className="text-text-secondary"
                 data-testid="bridge-empty-last-reviewed"
               >
-                {formatRelativeDate(lastOutcome.created_at)}
+                {lastReviewedLabel}
               </span>
               <span aria-hidden className="mx-2">·</span>
               <span data-testid="bridge-empty-review-count">{reviewsLabel}</span>

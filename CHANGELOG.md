@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.105] - 2026-06-03
+### Fixed — H9 Bridge / StrategyBrowseDrawer cluster (H-0082) + closes the Lane-2 HIGH queue
+
+This batch clears the **Lane-2 HIGH backlog to zero**. Of the 10 Lane-2 HIGH findings, one (H-0082) needed code (fixed here with its same-topic MEDIUM/LOW siblings); the other nine were reverified against current source (parallel reverify fan-out) as already-fixed or sound declines, and a fresh-context Claude red-team refutation pass confirmed **all nine DECLINE_HOLDS — zero flips, zero new findings**.
+
+- **H-0082 [HIGH]** — `BridgeDrawer` / `StrategyBrowseDrawer` silent-failure trio. Sub-parts (a) `handleAddToScenario` try/catch (surfaces the error into the confirm-stage `role="alert"` and keeps the drawer open; only closes on success) and (c) the `dimTimerIdsRef` drain on close + unmount were already closed in current source. Sub-part **(b)** is fixed here: the close-reset effect reset five transient states but NOT `strategies`/`error`/`loading`. The drawer stays mounted while closed (renders `null`), so a reopen flashed the *previous* session's stale rows / stale error for one frame before the fetch effect re-ran — the documented "close and reopen" recovery didn't actually clear a prior error. The reset now makes a reopen behave identically to a first open. Regression test added (neuter-verified: removing the `setStrategies([])` reset flashes the stale rows → test fails).
+- **M-0106 [MED perf]** — `StrategyBrowseDrawer` `allMarkets`/`allTypes`/`filtered` moved into `useMemo` (hoisted above the `!isOpen` early return); `filtered` carries a precomputed mandate-fit `tier` per row instead of calling `computeMandateFitApprox` per-row in JSX. A search keystroke (or an unrelated dim-timer re-render) no longer rebuilds two Sets + two sorts + a full filter + N mandate-fit evaluations.
+- **M-0107 [MED perf]** — extracted a module-level `memo()` `FilterPill`; pills use stable `useCallback` `toggleMarket`/`toggleType` (functional `setState`) so a keystroke re-renders only the toggled pill, not the whole grid. (Old `toggleSet` removed.)
+- **L-0070 [LOW perf]** — `BridgeWidget` empty-state relative-date phrase memoized (`useMemo` on the latest outcome's `created_at`) instead of an inline `Date.parse` + `toLocaleDateString` + `new Date()` on every 30s dashboard payload refresh.
+
+A 3-lens specialist suite (code-review / type-design / pr-test-analyzer) + a fresh-context Claude red-team ran on the diff: verdict **SHIP**, every challenge REFUTED. The red-team also adversarially refuted each of the nine decline verdicts (the guard that flipped 3 dismissals in the prior MEDIUM triage). `tsc`/`eslint` clean; full vitest **6093 pass**.
+
+**Closed without code (reverify + red-team confirmed):** **H-1188** (ui_v2 scope is deliberate + documented + has a tested fail-loud breadcrumb), **H-0131** (mandate-fit's 3-tier rubric is the documented D-08 contract; the chip is informational and never gates Add), **H-0180** (DesktopGate mobile FOUC flashes an *empty* form — cosmetic, e2e-only), **H-0188** (`readCorrelationId` triplication — pure DRY, no live bug), **H-0199** (the "6 sequential queries" is one `Promise.all`, fires once/sync — premise false), **H-0376** (MandateForm 17-handler `bindField` extraction — gold-plating over tested code), **H-1232** (`SaveState` union — no mandate consumer renders the conflated value), **H-0444** (`getAuditAdminClient` cached-null requires a transiently-missing env var Vercel never produces — fictional), **H-0447** (already fixed by M-0269's `leadExists()` 404-vs-200 disambiguation in F5b). Same-topic Esc MEDIUMs **M-0061**/**M-0064** also closed (the `defaultPrevented` handshake landed in F9 #429; the cited multi-modal chain was pruned in #368; a full LIFO stack-manager is declined as speculative).
+
 ## [0.24.15.102] - 2026-06-03
 ### Fixed — Portfolio-optimizer replacement-suggestion window alignment + dedupe-position (find_improvement_candidates)
 

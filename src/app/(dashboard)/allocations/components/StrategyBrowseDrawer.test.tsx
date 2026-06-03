@@ -457,4 +457,61 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
     }
     await flush();
   });
+
+  it("H-0082(b) — reopening does NOT flash the previous session's stale rows or error", async () => {
+    const pending = () => new Promise<StrategyBrowseRow[]>(() => {});
+
+    // Session 1a: a successful load renders rows.
+    const { rerender } = render(
+      <StrategyBrowseDrawer
+        isOpen
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        allocatorMandate={MANDATE_BINANCE_OKX}
+        fetchStrategies={async () => FIVE_STRATS}
+      />,
+    );
+    await flush();
+    expect(screen.getByText("Momentum Alpha")).toBeInTheDocument();
+
+    // Close → the close-reset effect must clear `strategies` (and `error`).
+    rerender(
+      <StrategyBrowseDrawer
+        isOpen={false}
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        allocatorMandate={MANDATE_BINANCE_OKX}
+        fetchStrategies={async () => FIVE_STRATS}
+      />,
+    );
+    await flush();
+
+    // Reopen with a fetch that never resolves, so the close-reset alone governs
+    // the reopen render. The drawer stays mounted across close, so WITHOUT the
+    // H-0082(b) reset the previous session's 5 rows are still in state and flash
+    // here (the row <ul> is not gated on `loading`). With the reset they're gone.
+    rerender(
+      <StrategyBrowseDrawer
+        isOpen
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        allocatorMandate={MANDATE_BINANCE_OKX}
+        fetchStrategies={pending}
+      />,
+    );
+    // The discriminating assertion: WITHOUT the close-reset's setStrategies([]),
+    // the previous session's rows are still in state and render here (the row
+    // <ul> is not gated on `loading`). Neuter-verified: removing setStrategies([])
+    // makes this fail.
+    expect(screen.queryByText("Momentum Alpha")).not.toBeInTheDocument();
+
+    // NB the close-reset ALSO clears `error`/`loading` in the same block, but
+    // that is NOT separately unit-assertable: the fetch effect re-runs on every
+    // reopen and itself calls setError(null)+setLoading(true) at the top, so it
+    // masks the close-reset's contribution in everything except the one pre-
+    // effect frame (which RTL's act-wrapped rerender flushes past). The error/
+    // loading resets are covered by construction — same close block as the
+    // neuter-verified setStrategies([]) above — and remove the in-browser
+    // one-frame stale-error flash on reopen.
+  });
 });
