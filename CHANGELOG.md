@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.110] - 2026-06-03
+### Removed — dead-code cleanup: UndoToast + OutcomesWidget `__error` branch (user-approved)
+
+Closes the 4 dead-code findings the Lane-2 M/L campaign deferred to the dead-code-deletion gate (explicit user sign-off). Pure deletions; behavior-preserving.
+
+- **M-0114 / M-0115** — deleted the orphaned `UndoToast` component + its test. Zero production callers (grep-verified); leftover from the widget-grid dashboard retired in the B7 series.
+- **M-0197 / M-0198** — removed the `OutcomesWidget` `__error` sentinel branch end-to-end. A 3-lens specialist + red-team confirmed (via mount-chain + git-history trace) the sentinel was **speculative and never wired**: `getMyAllocationDashboard` returns a non-optional `outcomes: OutcomeRow[]` and throws on error (→ `app/error.tsx`); no producer ever set `__error`. Removed: the `if (data.__error)` guard in `resolveOutcomesView`, the `__error: z.unknown().optional()` schema field, the now-unreachable `{ kind: "error" }` `OutcomesView` variant + its render block + the orphaned `onRetry`/`useRouter` wiring, and the synthetic-`__error` test cases (the boundary suite keeps its 3 real `onInvalid="error"` / `outcomes.optional()` tests). Real error UX is unchanged — it's covered by the `withWidgetBoundary` error card (genuine schema drift) and `app/error.tsx` (the throw path).
+
+`tsc`/`eslint` clean; full vitest **6096 pass** (−9 deleted tests of unreachable paths; no live coverage lost). 3-lens specialist + Claude red-team: **SHIP**.
+
 ## [0.24.15.109] - 2026-06-03
 ### Fixed — PR-D: Charts visual-conformance sweep (closes the Lane-2 M/L A→D campaign)
 

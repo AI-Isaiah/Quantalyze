@@ -45,13 +45,4 @@ describe("OutcomesWidget — withWidgetBoundary wiring (onInvalid='error')", () 
     render(<OutcomesWidget data={{}} {...base} />);
     expect(screen.queryByRole("alert")).toBeNull();
   });
-
-  it("__error sentinel survives validation and reaches the widget's own error UI", () => {
-    // __error: z.unknown().optional() + .loose() keep the sentinel; the widget's
-    // own hasError branch renders (not the boundary's generic error card).
-    render(<OutcomesWidget data={{ __error: true }} {...base} />);
-    // Either way it must not crash; the widget's bespoke "Could not load
-    // outcomes" copy is shown for the sentinel path.
-    expect(screen.getByText(/could not load outcomes/i)).toBeTruthy();
-  });
 });

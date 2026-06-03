@@ -1,7 +1,6 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { Line, LineChart, ResponsiveContainer } from "recharts";
 import type { OutcomeRow } from "@/lib/queries";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
@@ -788,21 +787,14 @@ function LoadingState() {
  * replacing the ad-hoc `hasError` / `outcomes === undefined` / `length === 0`
  * chain. `resolveOutcomesView` is the single place the state machine is decided,
  * and the `switch (view.kind)` in render has a `never`-typed default, so TS
- * proves exhaustiveness — a new state cannot be added without handling it, and
- * the error path now carries a typed shape rather than a bare magic boolean.
+ * proves exhaustiveness — a new state cannot be added without handling it.
  */
 type OutcomesView =
-  | { kind: "error" }
   | { kind: "loading" }
   | { kind: "empty" }
   | { kind: "ok"; outcomes: OutcomeRow[] };
 
 function resolveOutcomesView(data: OutcomesWidgetData): OutcomesView {
-  // `{ __error: true }` sentinel: a consumer may splice it onto the payload on
-  // an upstream fetch failure, keeping error copy inside the widget bounds
-  // rather than failing the whole /allocations page. It is a declared schema
-  // field (`__error: z.unknown().optional()`), so this is a real producer path.
-  if (data.__error) return { kind: "error" };
   // `outcomes` absent = not loaded yet (the schema marks it optional so a
   // still-loading payload validates and reaches here).
   if (data.outcomes === undefined) return { kind: "loading" };
@@ -818,17 +810,8 @@ function OutcomesWidgetInner({
   data,
 }: { data: OutcomesWidgetData } & BaseWidgetProps) {
   const view = resolveOutcomesView(data);
-  const router = useRouter();
-  // F9 M-0189 — retry must soft-refresh (re-fetch server data only), not
-  // window.location.reload(). A hard reload discards every OTHER dashboard
-  // widget's in-memory state (open Bridge drawer, Tweaks panel, scroll). This
-  // widget is fed by props from a Server Component, so router.refresh() re-runs
-  // the server fetch and streams fresh props in without remounting the page.
-  const onRetry = useCallback(() => {
-    router.refresh();
-  }, [router]);
   // `outcomes` for the hooks below: the populated rows, or [] for the
-  // loading/empty/error states (hooks must run unconditionally, before the
+  // loading/empty states (hooks must run unconditionally, before the
   // `switch` returns). computeOutcomeKPIs([]) is a no-op zero-KPI result.
   const outcomes = view.kind === "ok" ? view.outcomes : [];
 
@@ -856,14 +839,9 @@ function OutcomesWidgetInner({
   // is a single population definition for each KPI and its sub-label.
 
   // Phase 11 / UI-BLOCK-01 — wire WidgetState v2 behind the feature flag.
-  // OutcomesWidget has 4 real branches (error / loading / empty /
-  // populated). Per the UI-BLOCK-01 contract we wire as many of those
-  // as the primitive can faithfully express:
-  //   - error    → <WidgetState mode="error" onRetry={router.refresh}>
-  //                Reuses the existing 'Could not load outcomes' copy. F9 M-0189:
-  //                retry is a soft router.refresh() (re-fetch server data only),
-  //                NOT window.location.reload() — a hard reload wiped sibling
-  //                widgets' in-memory state (Bridge drawer, Tweaks, scroll).
+  // OutcomesWidget has 3 reachable branches (loading / empty / populated).
+  // Per the UI-BLOCK-01 contract we wire as many of those as the primitive
+  // can faithfully express:
   //   - success  → <WidgetState mode="success">{populated card}</WidgetState>
   //                Bare children, no chrome — visual passthrough.
   //   - loading  → SKIPPED. The existing 3-cell + 5-row LoadingState skeleton
@@ -877,46 +855,6 @@ function OutcomesWidgetInner({
   // Documented in commit message; flag-gated so production renders are
   // unaffected when the flag is off.
   const v2 = isWidgetStateV2Enabled();
-
-  // Error
-  if (view.kind === "error") {
-    if (v2) {
-      return (
-        <WidgetState
-          mode="error"
-          error={{
-            message: "Could not load outcomes",
-            onRetry,
-          }}
-        />
-      );
-    }
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 p-4 text-center">
-        <span
-          aria-hidden="true"
-          className="text-2xl"
-          style={{ color: "var(--color-negative)" }}
-        >
-          {"⚠"}
-        </span>
-        <p
-          className="text-sm font-medium"
-          style={{ color: "var(--color-text-primary)" }}
-        >
-          Could not load outcomes
-        </p>
-        <button
-          type="button"
-          onClick={onRetry}
-          className="inline-block rounded-md border border-[var(--color-border)] px-4 py-2 text-sm font-medium"
-          style={{ color: "var(--color-text-primary)", backgroundColor: "var(--color-surface)" }}
-        >
-          Try again
-        </button>
-      </div>
-    );
-  }
 
   // Loading
   if (view.kind === "loading") {

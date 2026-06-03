@@ -151,18 +151,16 @@ const outcomeRowSchema = z
 
 /**
  * Contract for the direct-mount `OutcomesWidget` (OutcomesTabPanel). The mount
- * passes the WHOLE payload; the widget reads only `outcomes` plus the `__error`
- * sentinel. `outcomes` is `.optional()` ON PURPOSE: `outcomes === undefined` is
- * the loading path (the widget renders its own `<LoadingState />`), so a
- * still-loading payload must PASS the schema and reach the widget — the
- * boundary's `onInvalid: "error"` then fires only on genuine drift (a non-array
- * `outcomes`, a row with a bad `kind`/`delta`), not during load. `__error` is
- * only truthiness-checked, so `unknown` is correct.
+ * passes the WHOLE payload; the widget reads only `outcomes`. `outcomes` is
+ * `.optional()` ON PURPOSE: `outcomes === undefined` is the loading path (the
+ * widget renders its own `<LoadingState />`), so a still-loading payload must
+ * PASS the schema and reach the widget — the boundary's `onInvalid: "error"`
+ * then fires only on genuine drift (a non-array `outcomes`, a row with a bad
+ * `kind`/`delta`), not during load.
  */
 export const outcomesWidgetDataSchema = z
   .object({
     outcomes: z.array(outcomeRowSchema).optional(),
-    __error: z.unknown().optional(),
   })
   .loose(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: read-only widget render contract (withWidgetBoundary display), never spread into a write
 
