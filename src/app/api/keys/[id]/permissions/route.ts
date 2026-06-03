@@ -55,10 +55,28 @@ interface PermissionPayload {
  *
  * The cache tag/key array includes the keyId so a future invalidation hook
  * (e.g., on key rotation) can call revalidateTag.
+ *
+ * M-0325: a real exchange-credential DECRYPT happens ONLY when the cached body
+ * actually runs (i.e. a cache MISS — the only path that POSTs to Python). This
+ * factory is called per request, so `didDecrypt` is a request-local flag: it
+ * flips true iff THIS request's call ran the body, and stays false when
+ * unstable_cache replays a memoized value (cache HIT, no decrypt). The handler
+ * reads `wasFreshDecrypt()` to tag the audit row exactly — no wall-clock
+ * heuristic, no sub-second-burst misclassification, no stamp-less edge case.
+ * This also stays correct on unstable_cache's stale-revalidation path: when a
+ * stale entry triggers a background revalidation, the body reruns (a real
+ * decrypt) and `didDecrypt` flips on its first synchronous statement — before
+ * the first await — so a served-stale response is still correctly counted as a
+ * decrypt, not a cache hit.
  */
-function makeCachedFetcher(keyId: string) {
-  return unstable_cache(
+function makeCachedFetcher(keyId: string): {
+  fetchPermissions: () => Promise<PermissionPayload>;
+  wasFreshDecrypt: () => boolean;
+} {
+  let didDecrypt = false;
+  const fetchPermissions = unstable_cache(
     async (): Promise<PermissionPayload> => {
+      didDecrypt = true; // runs only on a cache MISS
       const internalToken = process.env.INTERNAL_API_TOKEN;
       if (!internalToken) {
         throw new Error(
@@ -93,6 +111,7 @@ function makeCachedFetcher(keyId: string) {
     [`key-permissions:${keyId}`],
     { revalidate: 60, tags: [`key-permissions:${keyId}`] },
   );
+  return { fetchPermissions, wasFreshDecrypt: () => didDecrypt };
 }
 
 export const GET = withAuth(
@@ -136,19 +155,26 @@ export const GET = withAuth(
     }
 
     try {
-      const fetcher = makeCachedFetcher(keyId);
-      const payload = await fetcher();
+      const { fetchPermissions, wasFreshDecrypt } = makeCachedFetcher(keyId);
+      const payload = await fetchPermissions();
 
-      // Sprint 6 Task 7.1a — audit the decrypt event. Each permissions
-      // probe causes the Python service to decrypt the stored credential
-      // to call the exchange (see migration 052 header). Fire-and-forget;
-      // does not affect response latency or success.
+      // Sprint 6 Task 7.1a — audit the decrypt event. M-0325: a real
+      // exchange-credential DECRYPT only happens on a cache MISS (the fetcher
+      // body actually POSTs to the Python service; see migration 052 header).
+      // The 60s Next-layer cache + the Python 15-min cache mean most probes
+      // inside that window decrypt NOTHING. Tag the audit row with whether THIS
+      // request triggered a decrypt — exactly, via the request-local
+      // `wasFreshDecrypt()` flag — so forensic "count decrypt events for key X"
+      // stops over-counting by the cache-hit ratio. Fire-and-forget; does not
+      // affect response latency or success.
+      const cacheHit = !wasFreshDecrypt();
       logAuditEvent(supabase, {
         action: "api_key.decrypt",
         entity_type: "api_key",
         entity_id: keyId,
         metadata: {
           route: "/api/keys/[id]/permissions",
+          cache_hit: cacheHit,
         },
       });
 

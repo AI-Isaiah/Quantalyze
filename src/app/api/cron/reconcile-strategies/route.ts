@@ -20,8 +20,7 @@ import { getCorrelationId } from "@/lib/correlation-id";
  * Schedule: "30 3 * * *" (03:30 UTC) — positioned to avoid:
  *   - 09:00 UTC alert-digest
  *   - 00:00 UTC warm-analytics (midnight)
- *   - sync-funding's 4-hour cadence (runs at 00/04/08/12/16/20, so 03:30
- *     gives ~30 min clearance from the 04:00 tick)
+ *   - sync-funding's daily 04:00 UTC tick (03:30 gives ~30 min clearance)
  *
  * See `vercel.json` crons array and migration 046.
  */

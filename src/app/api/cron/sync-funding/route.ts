@@ -5,7 +5,7 @@ import { SUPPORTED_EXCHANGES } from "@/lib/utils";
 import { getCorrelationId } from "@/lib/correlation-id";
 
 /**
- * Vercel Cron — every 4 hours, enqueue a `sync_funding` compute_job for
+ * Vercel Cron — daily (04:00 UTC), enqueue a `sync_funding` compute_job for
  * every strategy whose connected API key is on a perp-supporting exchange
  * (binance/okx/bybit). The Python worker does the actual fetch +
  * UPSERT into funding_fees.

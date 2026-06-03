@@ -62,6 +62,7 @@ type ReturnsPoint = { date: string; value: number };
 function rebaseToAnchor(
   series: ReturnsPoint[],
   allocatedAt: string,
+  logContext?: { strategyId: string },
 ): Array<{ date: string; nav: number }> {
   if (!series || series.length === 0) return [];
 
@@ -72,7 +73,23 @@ function rebaseToAnchor(
   if (postAnchor.length === 0) return [];
 
   const anchorValue = postAnchor[0].value;
-  if (!anchorValue || anchorValue <= 0) return [];
+  if (!anchorValue || anchorValue <= 0) {
+    // M-0301: a non-positive cumulative NAV at the rebase anchor is a
+    // DATA-QUALITY anomaly (the strategy's equity went to/below zero at
+    // allocation time) — distinct from the two benign empty-return cases
+    // above (no series at all / all points pre-anchor). Returning [] silently
+    // makes the UI render the same empty Sparkline as a genuine no-data case,
+    // so surface a stderr breadcrumb (matching the decisionErr/analyticsErr
+    // observability posture elsewhere in this route) when we have the strategy
+    // context. No response-shape change — the series is still dropped.
+    if (logContext) {
+      console.error(
+        "[api/bridge/outcome/curves] rebase rejected: non-positive anchor NAV",
+        { strategy_id: logContext.strategyId, anchor_value: anchorValue },
+      );
+    }
+    return [];
+  }
 
   return postAnchor.map((p) => ({
     date: p.date,
@@ -212,7 +229,9 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
   const rebaseAndWindow = (sid: string | null) => {
     if (!sid) return [];
     const series = rowsByStrategy.get(sid) ?? [];
-    return rebaseToAnchor(series, allocatedAt).filter((p) => p.date <= windowEnd);
+    return rebaseToAnchor(series, allocatedAt, { strategyId: sid }).filter(
+      (p) => p.date <= windowEnd,
+    );
   };
 
   return NextResponse.json({

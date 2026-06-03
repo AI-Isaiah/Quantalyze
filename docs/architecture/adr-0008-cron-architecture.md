@@ -30,7 +30,10 @@ codification.
 Assign each mechanism a workload class:
 
 1. **Infra health pings** (analytics warmup) -> Vercel Cron via
-   `vercel.json`. Schedule: every 5 minutes.
+   `vercel.json`. Schedule: daily (`0 0 * * *`). Originally every 5 minutes;
+   downgraded 2026-04-10 on the Hobby plan (see
+   `docs/runbooks/vercel-cron-upgrade.md`). The per-request warmup in
+   `src/lib/warmup-analytics.ts` is now the primary cold-start mitigation.
 
 2. **Cross-service orchestration** (match engine recompute, data sync) ->
    Supabase pg_cron calling FastAPI directly. Keeps secrets in DB GUCs,
@@ -56,7 +59,7 @@ Assign each mechanism a workload class:
 
 | Job | Schedule | Mechanism | Handler |
 |-----|----------|-----------|---------|
-| Analytics warmup | */5 * * * * | Vercel Cron (1) | `/api/cron/warm-analytics` |
+| Analytics warmup | 0 0 * * * | Vercel Cron (1) | `/api/cron/warm-analytics` |
 | Alert digest | 0 9 * * * | Vercel Cron (4) | `/api/alert-digest` |
 | Match recompute | Hourly | pg_cron (3) | FastAPI `/api/match/cron-recompute` |
 | Compute trigger | On insert | Edge Function (3) | `compute-trigger` |

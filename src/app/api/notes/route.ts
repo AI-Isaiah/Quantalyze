@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { assertSameOrigin } from "@/lib/csrf";
 import { logAuditEvent } from "@/lib/audit";
+import { checkLimit, notesUpsertLimiter } from "@/lib/ratelimit";
 import {
   checkScopeOwnership,
   type ScopeKind,
@@ -33,6 +34,21 @@ import {
 
 const MAX_CONTENT_BYTES = 100 * 1024; // 100 KB
 
+// M-1141: hard ceiling on the raw request body, checked from the
+// `content-length` header BEFORE `request.json()` allocates the parse buffer.
+// Generous headroom over MAX_CONTENT_BYTES (the JSON envelope adds scope_kind /
+// scope_ref / field names / quoting on top of the 100 KB content) so an honest
+// max-size note is never falsely rejected, while a multi-MB payload is bounced
+// with a 413 before it ever hits the JS heap. The TextEncoder byte-cap below
+// stays the authoritative post-parse guard (content-length is client-set and
+// can be omitted on a chunked body, in which case the parse + byte-cap catch it).
+const MAX_REQUEST_BYTES = 200 * 1024; // 200 KB
+
+// Module-scoped, reused across requests — TextEncoder is stateless, so a fresh
+// instance per call is pure allocation overhead (mirrors gdpr-export.ts's
+// SHARED_ENCODER, audit-2026-05-07 perf).
+const NOTE_ENCODER = new TextEncoder();
+
 const ALLOWED_KINDS = [
   "portfolio",
   "holding",
@@ -43,7 +59,13 @@ const ALLOWED_KINDS = [
 const BodySchema = z.object({
   scope_kind: z.enum(ALLOWED_KINDS),
   scope_ref: z.string().min(1).max(512),
-  content: z.string(),
+  // M-1141: coarse upper bound so Zod rejects an absurdly long string before
+  // the TextEncoder allocates a second copy for the precise byte-cap. Kept
+  // ABOVE the 100 KB byte budget (in chars) so a body that is over the byte
+  // cap but under this char cap still flows through to the authoritative
+  // MAX_CONTENT_BYTES check below and surfaces the "100 KB" message rather
+  // than a generic "Invalid body".
+  content: z.string().max(120_000),
 });
 
 /**
@@ -133,6 +155,18 @@ export async function PATCH(request: NextRequest) {
     );
   }
 
+  // M-1141: bounce an oversized body via the declared content-length BEFORE
+  // `request.json()` allocates the parse buffer for it. Header-only (not a body
+  // read), so this can precede the limiter without burning a token on a body
+  // we never parse.
+  const declaredLength = Number(request.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BYTES) {
+    return NextResponse.json(
+      { error: "Request body too large" },
+      { status: 413, headers: NO_STORE_HEADERS },
+    );
+  }
+
   let rawBody: unknown;
   try {
     rawBody = await request.json();
@@ -152,10 +186,30 @@ export async function PATCH(request: NextRequest) {
   }
   const { scope_kind, scope_ref, content } = parsed.data;
 
-  if (new TextEncoder().encode(content).length > MAX_CONTENT_BYTES) {
+  if (NOTE_ENCODER.encode(content).length > MAX_CONTENT_BYTES) {
     return NextResponse.json(
       { error: "Content exceeds 100 KB limit" },
       { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // M-1140 / M-1141: rate-limit AFTER body validation — the B15 canonical order
+  // (auth -> validate -> rate-limit -> handler), so a malformed/oversized body
+  // returns 4xx WITHOUT burning the caller's token (the content-length precheck
+  // above already shields the parse buffer from an oversized body, and the
+  // limiter-ordering test classifies this route CANONICAL). notes was the only
+  // mutating PATCH in src/app/api/ with no limiter — combined with the unbounded
+  // body it was a ~6 GB/hr write vector. Inline-deny mirrors the sibling authed
+  // routes (per-user 429 + Retry-After), folding the prod-misconfig fail-closed
+  // case into the same 429 that bridge-curves / key-permissions emit.
+  const rl = await checkLimit(notesUpsertLimiter, `notes:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      {
+        status: 429,
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+      },
     );
   }
 

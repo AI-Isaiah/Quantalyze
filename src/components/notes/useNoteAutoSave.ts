@@ -6,7 +6,9 @@
  * useMandateAutoSave with three simplifications:
  *
  *   1. No per-field fieldErrors map — single content field per hook instance.
- *   2. No 429 Retry-After handling — /api/notes has no rate limiter.
+ *   2. No 429 Retry-After backoff — /api/notes IS rate-limited
+ *      (notesUpsertLimiter, 30/min), but a 429 is treated as a terminal 4xx
+ *      error (item 3), not retried against the Retry-After header.
  *   3. No 4-attempt exponential backoff — on 5xx or network error, retry
  *      exactly ONCE after 2s, then surface the error. On 4xx, no retry.
  *

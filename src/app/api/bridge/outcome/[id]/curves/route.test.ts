@@ -512,6 +512,76 @@ describe("GET /api/bridge/outcome/[id]/curves", () => {
     errSpy.mockRestore();
   });
 
+  it("M-0301 — a non-positive cumulative NAV at the anchor logs a data-quality breadcrumb (not a silent empty curve)", async () => {
+    // The rebase anchor value is the cumulative NAV at allocated_at. If it is
+    // <= 0 (a strategy whose equity went to/below zero), rebaseToAnchor returns
+    // [] — previously indistinguishable at the UI from a genuine no-data empty
+    // curve. The fix surfaces a stderr breadcrumb (mirroring the decisionErr/
+    // analyticsErr posture) so the anomaly is observable. Removing the log
+    // (reverting to a bare `return []`) drops the breadcrumb and fails here.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.outcomeRow = {
+      id: OUTCOME_ID,
+      allocator_id: "00000000-0000-0000-0000-000000000001",
+      strategy_id: STRAT_ID,
+      match_decision_id: null, // isolate the replacement series
+      allocated_at: ALLOCATED_AT,
+    };
+    STATE.analyticsRows = [
+      {
+        strategy_id: STRAT_ID,
+        returns_series: [
+          { date: "2026-01-01", value: 0 }, // anchor NAV is non-positive
+          { date: "2026-01-15", value: 5 },
+        ],
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(OUTCOME_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // Series is still dropped (no response-shape change)…
+    expect(body.replacement).toEqual([]);
+    // …but the data-quality anomaly is now loud.
+    expect(errSpy).toHaveBeenCalledWith(
+      "[api/bridge/outcome/curves] rebase rejected: non-positive anchor NAV",
+      { strategy_id: STRAT_ID, anchor_value: 0 },
+    );
+    errSpy.mockRestore();
+  });
+
+  it("M-0301b — a benign empty series (all points pre-anchor) does NOT fire the non-positive-anchor breadcrumb", async () => {
+    // Guard against over-firing: the postAnchor.length===0 windowing case is a
+    // legitimate empty result, NOT a data-quality anomaly — it must stay silent.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.outcomeRow = {
+      id: OUTCOME_ID,
+      allocator_id: "00000000-0000-0000-0000-000000000001",
+      strategy_id: STRAT_ID,
+      match_decision_id: null,
+      allocated_at: ALLOCATED_AT,
+    };
+    STATE.analyticsRows = [
+      {
+        strategy_id: STRAT_ID,
+        returns_series: [
+          { date: "2025-06-01", value: 100 }, // entirely before the anchor
+          { date: "2025-09-01", value: 110 },
+        ],
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(), withParams(OUTCOME_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.replacement).toEqual([]);
+    expect(errSpy).not.toHaveBeenCalledWith(
+      "[api/bridge/outcome/curves] rebase rejected: non-positive anchor NAV",
+      expect.anything(),
+    );
+    errSpy.mockRestore();
+  });
+
   it("H-0256b — legitimate match_decision_id=NULL stays SILENT (no spurious error log)", async () => {
     // The empty-state UX for the genuine NULL case (migration 059 ON DELETE
     // SET NULL) must NOT log a match_decisions lookup error — only a real

@@ -59,6 +59,7 @@ vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: null,
   adminActionLimiter: null,
   publicIpLimiter: null,
+  notesUpsertLimiter: null,
   checkLimit: async () => ({ success: true, retryAfter: 0 }),
   getClientIp: () => "127.0.0.1",
   sanitizeInetForDb: (ip: string) => ip,
