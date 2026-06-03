@@ -100,12 +100,43 @@ afterEach(() => {
 });
 
 describe("AdminTabs — typed-row render paths (H-0353)", () => {
-  it("Intro Requests tab renders the joined profile display_name + company", () => {
+  it("Intro Requests tab renders the joined profile display_name + company + strategy name", () => {
     renderTabs();
     // profile.display_name and (company) — the join shape that the typed
     // IntroRequestRow.profiles now pins (was an `as Record<string,string>` cast).
     expect(screen.getByText(/Acme Capital/)).toBeTruthy();
     expect(screen.getByText(/Acme LLC/)).toBeTruthy();
+    // strategies embed flows through displayStrategyName: an institutional-tier
+    // strategy renders its name. Pins the `as DisplayableStrategy` narrowing
+    // wiring (the one remaining cast) at the admin call site.
+    expect(screen.getByText(/Alpha Strat/)).toBeTruthy();
+  });
+
+  it("Intro Requests tab does NOT leak an exploratory-tier strategy name (privacy branch wiring)", () => {
+    // displayStrategyName returns the synthetic "Strategy #<id8>" for a
+    // non-institutional, codename-less strategy — never the raw name. Pins that
+    // AdminTabs feeds the strategies embed through displayStrategyName (not the
+    // raw s.name) so the admin queue can't leak an exploratory founder's name.
+    const exploratory: IntroRequestRow = {
+      ...INTRO,
+      id: "ir-2",
+      strategies: {
+        id: "explor01-secret-id",
+        name: "Top Secret Strat",
+        codename: null,
+        disclosure_tier: "exploratory",
+      },
+    };
+    render(
+      <AdminTabs
+        introRequests={[exploratory]}
+        pendingStrategies={[]}
+        pendingAllocators={[]}
+        pendingManagers={[]}
+      />,
+    );
+    expect(screen.getByText(/Strategy #explor01/)).toBeTruthy();
+    expect(screen.queryByText(/Top Secret Strat/)).toBeNull();
   });
 
   it("Strategy Review tab renders strategy name + strategy_types + author", () => {

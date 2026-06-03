@@ -41,7 +41,8 @@ type Tab = (typeof TABS)[number];
 // the base Row plus embedded join objects. Typing them here replaces the prior
 // `Array<Record<string, unknown>>` + per-field `as` casts so a Postgres column
 // rename is a compile error instead of a silently-blank admin tab (H-0353).
-// Exported for the AdminTabs.types.test.ts contract test.
+// Exported for admin/page.tsx's `.returns<RowType[]>()` assertions and the
+// AdminTabs.test.tsx render coverage.
 export interface IntroRequestRow {
   id: string;
   status: string;
