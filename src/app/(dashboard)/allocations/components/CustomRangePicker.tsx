@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  memo,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -122,20 +124,39 @@ export function CustomRangePicker({
   // date in context.
   const [viewMonth, setViewMonth] = useState<Date>(() => startOfMonth(start));
 
+  // M-1104: when a manually-typed date falls outside [min, max], clampDate
+  // silently rewrites it. Mirror that adjustment into an aria-live region so
+  // the change is announced to assistive tech instead of happening invisibly
+  // (a visible affordance would alter the pixel-faithful design — that is a
+  // design-review follow-up; this surfaces the silent modification without
+  // touching the visual layout).
+  const [clampNotice, setClampNotice] = useState<string>("");
+
   const ref = useRef<HTMLDivElement>(null);
+  // M-0068: the document listeners attach SYNCHRONOUSLY on open (not inside a
+  // setTimeout), so there is no window in which a mousedown is silently dropped
+  // because the listener isn't registered yet, and Escape is responsive from
+  // the first frame. The one-tick `armed` ref only gates the OUTSIDE-CLICK
+  // branch — that defers it just past the click that opened the popover so the
+  // opening click can't immediately close it (the behavior the old setTimeout
+  // protected), without also deadening Escape during that tick.
+  const armed = useRef(false);
 
   // Outside-click + Esc dismissal.
   useEffect(() => {
     if (!isOpen) return;
+    armed.current = false;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     const onClick = (e: MouseEvent) => {
+      if (!armed.current) return;
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onClick);
     const t = setTimeout(() => {
-      document.addEventListener("keydown", onKey);
-      document.addEventListener("mousedown", onClick);
+      armed.current = true;
     }, 0);
     return () => {
       clearTimeout(t);
@@ -143,6 +164,44 @@ export function CustomRangePicker({
       document.removeEventListener("mousedown", onClick);
     };
   }, [isOpen, onClose]);
+
+  // M-1106 + M-1103: pickDay is memoized so it stays referentially stable
+  // across hover/re-render cycles — that is what lets React.memo(DayCell)
+  // collapse the 84-cell hover storm (the cell only re-renders when its own
+  // visual props change). Defined ABOVE the `if (!isOpen)` early return because
+  // useCallback is a hook and must run unconditionally every render.
+  const pickDay = useCallback(
+    (d: Date) => {
+      if (d < min || d > max) {
+        // The day cells disable out-of-range clicks at the button level and the
+        // onClick re-guards with `!disabled`, so reaching pickDay with an
+        // out-of-range date means an upstream guard was dropped by a refactor.
+        // Surface it loudly (Rule 12) instead of swallowing the invariant.
+        console.warn(
+          "[CustomRangePicker] pickDay received an out-of-range date — the disabled-cell guard upstream failed",
+          { date: toISODate(d), min: toISODate(min), max: toISODate(max) },
+        );
+        return;
+      }
+      if (pickMode === "start") {
+        setStart(d);
+        setEnd(d);
+        setPickMode("end");
+      } else {
+        // Completing the range. If the end pick lands before the current start,
+        // swap them so the result is a forward range rather than collapsing to
+        // a degenerate single day.
+        if (d < start) {
+          setStart(d);
+          setEnd(start);
+        } else {
+          setEnd(d);
+        }
+        setPickMode("start");
+      }
+    },
+    [min, max, pickMode, start],
+  );
 
   if (!isOpen) return null;
 
@@ -164,26 +223,6 @@ export function CustomRangePicker({
   // No-op for hover/pick state.
   const leftMonth = startOfMonth(viewMonth);
   const rightMonth = addMonths(leftMonth, 1);
-
-  function pickDay(d: Date) {
-    if (d < min || d > max) return;
-    if (pickMode === "start") {
-      setStart(d);
-      setEnd(d);
-      setPickMode("end");
-    } else {
-      // Completing the range. If the end pick lands before the current start,
-      // swap them so the result is a forward range rather than collapsing to a
-      // degenerate single day.
-      if (d < start) {
-        setStart(d);
-        setEnd(start);
-      } else {
-        setEnd(d);
-      }
-      setPickMode("start");
-    }
-  }
 
   function applyPreset(days: number) {
     const e = max;
@@ -222,7 +261,17 @@ export function CustomRangePicker({
   }
 
   function apply() {
-    if (invalid) return;
+    if (invalid) {
+      // M-1101: the Apply button is disabled while the range is invalid, so a
+      // call reaching here means a future caller bypassed the disabled gate
+      // (e.g. a re-bound Enter-key submit). Fail loudly (Rule 12) rather than a
+      // silent no-op that hides the invariant violation.
+      console.warn(
+        "[CustomRangePicker] apply() called with an invalid range (start > end) — the Apply button should be disabled",
+        { start: startIso, end: endIso },
+      );
+      return;
+    }
     onApply({ start: startIso, end: endIso });
   }
 
@@ -241,10 +290,40 @@ export function CustomRangePicker({
         borderRadius: 8,
         boxShadow: "0 12px 32px rgba(15, 23, 42, 0.12), 0 2px 6px rgba(15, 23, 42, 0.06)",
         display: "flex",
+        // M-1102: bound the popover to the viewport and let it scroll/wrap
+        // rather than being clipped off-screen with no way to reach it. At the
+        // dashboard's normal widths there is room for the ~650px layout, so
+        // these caps never engage and the design is pixel-identical; they only
+        // degrade gracefully (presets rail + calendar wrap, internal scroll)
+        // on narrow/half-screen viewports. (Anchor-aware repositioning — e.g.
+        // flipping right→left when the anchor sits near the left edge — needs
+        // measurement against the design contract and is a design-review item.)
+        flexWrap: "wrap",
+        maxWidth: "calc(100vw - 16px)",
+        maxHeight: "calc(100vh - 16px)",
+        overflowX: "hidden",
+        overflowY: "auto",
         fontFamily: "var(--font-sans)",
-        overflow: "hidden",
       }}
     >
+      {/* M-1104: visually-hidden live region announces silent clamp
+          adjustments to assistive tech without altering the visual design. */}
+      <div
+        aria-live="polite"
+        style={{
+          position: "absolute",
+          width: 1,
+          height: 1,
+          padding: 0,
+          margin: -1,
+          overflow: "hidden",
+          clip: "rect(0 0 0 0)",
+          whiteSpace: "nowrap",
+          border: 0,
+        }}
+      >
+        {clampNotice}
+      </div>
       {/* Presets rail */}
       <div
         style={{
@@ -301,6 +380,11 @@ export function CustomRangePicker({
               const d = parseISODate(v);
               if (d) {
                 const c = clampDate(d, min, max);
+                setClampNotice(
+                  sameDay(c, d)
+                    ? ""
+                    : `Start date ${toISODate(d)} is outside the allowed range; adjusted to ${toISODate(c)}.`,
+                );
                 setStart(c);
                 setViewMonth(startOfMonth(c));
               }
@@ -319,7 +403,15 @@ export function CustomRangePicker({
             max={maxIso}
             onChange={(v) => {
               const d = parseISODate(v);
-              if (d) setEnd(clampDate(d, min, max));
+              if (d) {
+                const c = clampDate(d, min, max);
+                setClampNotice(
+                  sameDay(c, d)
+                    ? ""
+                    : `End date ${toISODate(d)} is outside the allowed range; adjusted to ${toISODate(c)}.`,
+                );
+                setEnd(c);
+              }
             }}
           />
           <div
@@ -546,6 +638,12 @@ function MonthGrid({
   showPrev: boolean;
   showNext: boolean;
 }) {
+  // M-1103: key the cells memo on the month's year+month PRIMITIVES, not the
+  // `month` Date object. The parent passes a fresh `startOfMonth(...)` Date on
+  // every render, so a `[month]` dep would rebuild the 42-cell array (and mint
+  // fresh Date identities) on every hover — defeating React.memo(DayCell)
+  // below. Keyed on the primitives, the cells (and each cell's Date identity)
+  // are stable until the visible month actually changes.
   const cells = useMemo(() => {
     const year = month.getFullYear();
     const mIdx = month.getMonth();
@@ -559,7 +657,8 @@ function MonthGrid({
       out.push(d);
     }
     return out;
-  }, [month]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- year+month primitives are the true identity of `month` here (see comment)
+  }, [month.getFullYear(), month.getMonth()]);
 
   const monthLabel = month.toLocaleDateString("en-US", {
     month: "long",
@@ -655,7 +754,11 @@ function MonthGrid({
   );
 }
 
-function DayCell({
+// M-1103: memoized so the 84 day cells don't all re-render on every hover /
+// pick state change inside the picker. With the stable `cells` Date identities
+// (keyed on year+month) and the stable `onHover`/`onPick` callbacks, only the
+// cells whose own visual props actually change re-render.
+const DayCell = memo(function DayCell({
   d,
   inMonth,
   disabled,
@@ -714,4 +817,4 @@ function DayCell({
       {d.getDate()}
     </button>
   );
-}
+});

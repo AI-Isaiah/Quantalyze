@@ -691,4 +691,116 @@ describe("CustomRangePicker", () => {
       end: "2024-03-15",
     });
   });
+
+  // ─────────────────────────────────── M-0068 — listeners armed synchronously
+  //
+  // The document listeners now attach SYNCHRONOUSLY on open; only the
+  // outside-click branch is deferred one tick via the `armed` ref. Escape must
+  // therefore fire onClose WITHOUT first flushing the arming timer — the old
+  // setTimeout(0) deferral left a window where the keydown listener wasn't
+  // attached yet and Escape was silently dead.
+
+  it("M-0068 — Escape fires onClose immediately, before the arming timer flushes", () => {
+    vi.useFakeTimers();
+    const onClose = vi.fn();
+    render(
+      <CustomRangePicker
+        isOpen
+        onClose={onClose}
+        onApply={() => {}}
+        min={MIN}
+        max={MAX}
+      />,
+    );
+    // Deliberately NO vi.runAllTimers(): pre-fix the keydown listener wasn't
+    // registered until the setTimeout fired, so this Escape was dropped.
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("M-0068 — an outside click is still gated until the arming tick (opening click can't self-close)", () => {
+    vi.useFakeTimers();
+    const onClose = vi.fn();
+    render(
+      <div>
+        <span data-testid="outside">outside</span>
+        <CustomRangePicker
+          isOpen
+          onClose={onClose}
+          onApply={() => {}}
+          min={MIN}
+          max={MAX}
+        />
+      </div>,
+    );
+    const outside = document.querySelector('[data-testid="outside"]')!;
+    // Before the arming tick the `armed` ref gates the outside-click branch, so
+    // the click that opened the popover (same tick) cannot immediately close it.
+    fireEvent.mouseDown(outside);
+    expect(onClose).not.toHaveBeenCalled();
+    // After the arming tick, an outside click closes as normal.
+    act(() => {
+      vi.runAllTimers();
+    });
+    fireEvent.mouseDown(outside);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  // ─────────────────────────────────── M-1104 — clamp announced via aria-live
+  //
+  // clampDate silently rewrites an out-of-range typed date. The adjustment is
+  // now mirrored into a visually-hidden aria-live region so assistive tech is
+  // told the value changed (a visible affordance would deviate from the
+  // pixel-faithful design — that is a design-review follow-up).
+
+  it("M-1104 — typing an out-of-range Start date announces the clamp via the aria-live region", () => {
+    const min = new Date(2024, 0, 1); // 2024-01-01
+    const max = new Date(2024, 5, 30); // 2024-06-30
+    const { container } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={() => {}}
+        min={min}
+        max={max}
+        initialRange={{ start: "2024-02-01", end: "2024-06-30" }}
+      />,
+    );
+    const liveRegion = container.querySelector('[aria-live="polite"]');
+    expect(liveRegion).toBeTruthy();
+    // No clamp yet → empty.
+    expect(liveRegion!.textContent ?? "").toBe("");
+    const startInput = container.querySelectorAll<HTMLInputElement>(
+      'input[type="date"]',
+    )[0];
+    // 2099-01-01 is above max → clampDate pins it to 2024-06-30; the silent
+    // adjustment is announced.
+    fireEvent.change(startInput, { target: { value: "2099-01-01" } });
+    expect(liveRegion!.textContent).toContain("2024-06-30");
+    expect(liveRegion!.textContent).toMatch(/adjusted/i);
+  });
+
+  it("M-1104 — typing an in-range Start date leaves the aria-live region empty (no false announcement)", () => {
+    const min = new Date(2024, 0, 1);
+    const max = new Date(2024, 5, 30);
+    const { container } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={() => {}}
+        min={min}
+        max={max}
+        initialRange={{ start: "2024-02-01", end: "2024-06-30" }}
+      />,
+    );
+    const liveRegion = container.querySelector('[aria-live="polite"]');
+    const startInput = container.querySelectorAll<HTMLInputElement>(
+      'input[type="date"]',
+    )[0];
+    // 2024-03-15 is within [min, max] → no clamp → region stays empty.
+    fireEvent.change(startInput, { target: { value: "2024-03-15" } });
+    expect(liveRegion!.textContent ?? "").toBe("");
+  });
 });
