@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.99] - 2026-06-03
+### Fixed — H8 ScenarioComposer lookup/recompute perf (M-0099 + M-0100 + M-0101 + M-0102)
+
+`src/app/(dashboard)/allocations/components/ScenarioComposer.tsx` (Lane 2). Four behavior-preserving Map/memo refactors of O(N²)/recompute hot paths that ran on every weight keystroke or Commit gesture:
+
+- **M-0100** — the twin added-strategy lookups (`addedStrategyReturnsLookup` + `addedStrategyMetadataLookup`) each did `strategies.find(s => s.strategy.id === a.id)` over the full SSR-lifted catalog per added strategy (O(K·M), re-scanned twice). Now a single `strategyById` `Map<id, strategy>` built once per `strategies`; both memos do O(1) `.get(a.id)`.
+- **M-0099** — `handleCommit` resolved each toggled-off row via `holdingsSummary.find(buildHoldingRef(...) === scopeRef)` (O(N²) over the toggle map). Reuses the **existing** `holdingByRef` Map (built for `scenarioAum` by the prior H-0105 fix — the finding itself cited `scenarioAum` as the template) for O(1) `.get`.
+- **M-0101** — `CompositionList` recomputed `otherVenuesForSym` via a full `holdingsSummary.filter(...)` inside every row's render (O(N²)). Now a `venuesBySymbol` `Map<symbol, venue[]>` built once; each row does O(1) `.get(symbol)` + a tiny `.filter(!= h.venue)`. The venue list preserves `holdingsSummary` order so the rendered "Returns merged with …" join is byte-identical.
+- **M-0102** — `scenarioMetrics` rebuilt `buildDateMapCache(deAliased.strategies)` inside its memo body every recompute. Hoisted `deAliased` and `dateMapCache` into their own memos, each keyed on the exact value it derives from — the cache can never go stale relative to the strategies `computeScenario` receives (worst case it rebuilds as before; never a mismatched cache). Scoped to the cache hoist; the finding's KpiStrip-memo / input-debounce suggestions are out of scope (separate; the debounce would change UX timing).
+
+A 3-lens specialist suite (code-review / performance / type-design) + a fresh-context Claude red-team ran on the diff — **verdict SHIP, all 5 equivalence challenges REFUTED at the data layer**: M-0100's `find`-first-vs-`Map`-last divergence is ruled out by the `portfolio_strategies` PRIMARY KEY `(portfolio_id, strategy_id)` + single-portfolio filter + 1:1 inner join (no duplicate `strategy.id` possible); M-0101 verified byte-identical including the adversarial same-symbol/same-venue/two-holding_types duplicate case; M-0102 proven free of any stale-cache window (single-pass memo chain all keyed on `deAliased`; `computeScenario` only reads the cache, never mutates); M-0099's reused `holdingByRef` keyed identically (`holdingsSummary` is server-deduped on the same triple). Pure perf — no new behavior axis, so the existing 114-test scenario suite is the behavior contract. tsc + eslint clean; full frontend suite 6088 passed / 0 failed.
+
 ## [0.24.15.98] - 2026-06-03
 ### Fixed — H7 ScenarioCommitDrawer perRow stable-keying (M-0094 + M-0095)
 
