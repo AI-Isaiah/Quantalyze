@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.87] - 2026-06-03
+### Fixed — H-0440: CSV header cells preserved verbatim (formula-sanitize only data cells)
+
+`sanitizeCsvValue` — the CSV-injection defense that strips a leading `+`/`-`/`@`/`=` from a cell before it is re-emitted into a spreadsheet — was applied to **every** cell including the header row in `src/lib/csv.ts`. `parseCsvWithSchema` then matched the column schema against those mangled headers: a partner header like `-net_ticket` was silently stripped to `net_ticket` and matched, while `-2024_pnl` was not (the `(?=[^\d.]|$)` digit-lookahead asymmetry) — inconsistent, silent column **identity**.
+
+- A header is column-identity metadata, not a re-emitted value. Threaded a `sanitize` flag (`parseCsvLine(line, sanitize)`, `parseCsv(text, { sanitizeFirstRow })`) so `parseCsvWithSchema` parses with `sanitizeFirstRow: !hasHeader` — the header row is preserved verbatim while **data** rows stay formula-sanitized (injection defense intact, verified on both `hasHeader` paths). A formula-prefixed header now fails loud (it won't match → throws → the admin-only `partner-import` route, its sole consumer, returns a clean 400). The boundary rework also removes a pre-existing false-**positive** risk and makes header handling consistent.
+- The 400 diagnostic is operator-actionable: it names the offending header cell and the **full** leading formula run to remove (`=+manager_email` advises stripping `=+`, not just `=`, so the operator doesn't loop). The echoed header is operator-controlled and reaches the response body, so each echoed cell is control-char-stripped and length-capped, and the header list is truncated (no response bloat / no control-char passthrough).
+
+Chose design **(A) verbatim + fail-loud** over (B) robust-normalize after an adversarial design review: fail-loud on malformed column identity beats a silent strip-and-match given this route's documented account-rebind blast radius; (B)'s "zero regression" claim was refuted (the old sanitizer was already asymmetric; real spreadsheet exports use a BOM, handled separately, not formula-prefixed headers). Reviewed by a 4-lens specialist suite + a 3-angle fresh-context Claude red team on the post-fix state (caught the misleading single-char remediation + the uncapped/control-char echo — both fixed). 10 new `csv.ts` tests (4 proven to fail against the pre-fix parser, Rule 9) + 1 route-level contract test pinning the formula-header → 400 wiring. tsc 0 / eslint 0 / full vitest 6039.
+
 ## [0.24.15.86] - 2026-06-03
 ### Fixed — F6: wizard/key submission idempotency
 
