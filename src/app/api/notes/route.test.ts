@@ -77,6 +77,18 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
+// M-1140/M-1141: the route now imports the rate limiter. Mock it so the
+// existing tests keep the fail-OPEN passthrough (ok=true) and the new
+// rate-limit tests can flip it to deny without touching Upstash.
+const ratelimitState = vi.hoisted(() => ({ ok: true }));
+vi.mock("@/lib/ratelimit", () => ({
+  notesUpsertLimiter: { __name: "notesUpsertLimiter" },
+  checkLimit: async () =>
+    ratelimitState.ok
+      ? { success: true }
+      : { success: false, retryAfter: 30 },
+}));
+
 function makeGetReq(params: Record<string, string> = {}) {
   const url = new URL("http://localhost:3000/api/notes");
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
@@ -242,6 +254,7 @@ function resetMocks() {
   vi.clearAllMocks();
   authResult.data = { user: TEST_USER };
   rpcCalls.length = 0;
+  ratelimitState.ok = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -662,5 +675,116 @@ describe("PATCH /api/notes — ownership + validation", () => {
     );
 
     expect(res.status).toBe(403);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PATCH — rate limit + body-size DoS guards (M-1140 / M-1141)
+// ---------------------------------------------------------------------------
+
+describe("PATCH /api/notes — rate limit + body-size guards (M-1140/M-1141)", () => {
+  beforeEach(resetMocks);
+
+  it("M-1140: returns 429 + Retry-After (no-store) when the per-user limiter denies", async () => {
+    ratelimitState.ok = false;
+    const { PATCH } = await import("./route");
+    const res = await PATCH(
+      makePatchReq({
+        scope_kind: "portfolio",
+        scope_ref: PORTFOLIO_ID,
+        content: "x",
+      }),
+    );
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    // Deny path keeps the route's private/no-store contract.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    // The limiter must gate BEFORE any DB work — no ownership/upsert/audit ran.
+    expect(rpcCalls).toHaveLength(0);
+  });
+
+  it("M-1140: limiter runs BEFORE the body parse — a denied request never reaches request.json()", async () => {
+    // A malformed-JSON body returns 429 (limiter), not 400 (parse): proof the
+    // limiter short-circuits before the route allocates the parse buffer, so an
+    // abuser can't force the expensive path by spamming garbage bodies.
+    ratelimitState.ok = false;
+    const req = new NextRequest("http://localhost:3000/api/notes", {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        origin: "http://localhost:3000",
+      },
+      body: "{ not valid json",
+    });
+    const { PATCH } = await import("./route");
+    const res = await PATCH(req);
+    expect(res.status).toBe(429);
+  });
+
+  it("M-1141: an over-max content string is rejected at the Zod layer (before the byte-cap)", async () => {
+    // 120_001 chars > z.string().max(120_000). Without the Zod max this body
+    // would flow to the TextEncoder byte-cap and surface "100 KB"; WITH it,
+    // Zod rejects first with the generic "Invalid body" — proving the
+    // pre-allocation guard is in place.
+    const { PATCH } = await import("./route");
+    const res = await PATCH(
+      makePatchReq({
+        scope_kind: "portfolio",
+        scope_ref: PORTFOLIO_ID,
+        content: "x".repeat(120_001),
+      }),
+    );
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("Invalid body");
+  });
+
+  it("M-1141: an oversized declared content-length returns 413 before parsing", async () => {
+    const req = new NextRequest("http://localhost:3000/api/notes", {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        origin: "http://localhost:3000",
+        "content-length": String(300 * 1024), // > MAX_REQUEST_BYTES (200 KB)
+      },
+      body: JSON.stringify({
+        scope_kind: "portfolio",
+        scope_ref: PORTFOLIO_ID,
+        content: "x",
+      }),
+    });
+    const { PATCH } = await import("./route");
+    const res = await PATCH(req);
+
+    expect(res.status).toBe(413);
+    const body = await res.json();
+    expect(body.error).toBe("Request body too large");
+  });
+
+  it("M-1141 regression: a body over the 100 KB byte-cap but under the Zod char-max still says '100 KB'", async () => {
+    // Pins the chosen max(120_000): a 103,424-byte body must reach the
+    // authoritative TextEncoder byte-cap (and its "100 KB" message), NOT be
+    // swallowed by the coarse Zod char-limit as a generic "Invalid body".
+    const { chain: notesChain } = userNotesUpsertChain();
+    mockFrom.mockImplementation((table: string) => {
+      if (table === "portfolios") return portfoliosChain(true);
+      if (table === "user_notes") return notesChain;
+      throw new Error(`unexpected from(${table})`);
+    });
+
+    const { PATCH } = await import("./route");
+    const res = await PATCH(
+      makePatchReq({
+        scope_kind: "portfolio",
+        scope_ref: PORTFOLIO_ID,
+        content: "x".repeat(101 * 1024), // 103,424 bytes — over 100KB, under 120k chars
+      }),
+    );
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("100 KB");
   });
 });

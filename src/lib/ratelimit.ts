@@ -144,6 +144,17 @@ export const bridgeOutcomeCurvesLimiter = makeLimiter(60, "60 s");
 // stays well under abuse thresholds for the auth-only PUT path.
 export const mandateAutoSaveLimiter = makeLimiter(30, "60 s");
 
+// 30/minute per authenticated user — /api/notes PATCH multi-scope autosave
+// (M-1140 / M-1141, audit-2026-05-07). The note editor fires a blur-driven
+// upsert per scope the allocator touches (portfolio / holding /
+// bridge_outcome / strategy), so a review session realistically bursts a few
+// saves a minute. Before this limiter the route had NO rate cap at all: an
+// authed allocator could upsert ~6 GB/hr of arbitrary text into user_notes
+// (each call ran an ownership SELECT + upsert + audit RPC). 30/min mirrors the
+// mandate-autosave cadence and absorbs a real burst; kept as a distinct named
+// bucket so notes throughput stays independent of the mandate editor's.
+export const notesUpsertLimiter = makeLimiter(30, "60 s");
+
 // 60/minute per authenticated user — preferences GET (NEW-C07-05).
 // GET /api/preferences is an unbounded SELECT * on the authenticated
 // user's row with no rate-limit gate. An authenticated allocator can
