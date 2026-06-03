@@ -12,17 +12,31 @@
 import type { StrategyAnalyticsSeriesKind } from "./types";
 
 /**
- * `equity_series_1y` is INTENTIONALLY excluded from this set: it lives in
- * `metrics_json` (above-the-fold series), NOT in the
- * `strategy_analytics_series` sibling table. The strategy-detail v2
- * loader path-extracts it from `metrics_json` directly via
- * `metrics_json -> 'equity_series_1y'`, never via the
- * `fetch_strategy_lazy_metrics` RPC.
+ * The 12 sibling kinds as an ordered tuple, COMPILE-TIME coupled to the
+ * `StrategyAnalyticsSeriesKind` union (H-0461) so the exported set below
+ * can never silently drift from the union (pre-fix the only coupling was
+ * a doc comment — adding a kind to the union but not this list, or
+ * vice-versa, compiled green):
+ *   - `satisfies readonly StrategyAnalyticsSeriesKind[]` rejects any entry
+ *     here that is NOT a union member (catches a typo or a removed kind);
+ *   - the `_MissingSiblingKind` exhaustiveness check below rejects any
+ *     union member MISSING from this tuple (catches an added union kind
+ *     that forgets to update this list).
+ * Mirrors the WIZARD_STEP_KEYS pattern in
+ * src/app/api/for-quants-lead/route.ts.
  *
- * Set size MUST equal exactly 12 (matches Python's
- * `len(data['sibling']) == 12` invariant in test_metrics_parity_full).
+ * `equity_series_1y` is INTENTIONALLY excluded: it lives in `metrics_json`
+ * (above-the-fold series), NOT in the `strategy_analytics_series` sibling
+ * table. The strategy-detail v2 loader path-extracts it from `metrics_json`
+ * directly via `metrics_json -> 'equity_series_1y'`, never via the
+ * `fetch_strategy_lazy_metrics` RPC. The exclusion holds for free now: it
+ * is absent from the union, so the `satisfies` would reject it here too.
+ *
+ * Tuple length MUST equal exactly 12 (matches Python's
+ * `len(data['sibling']) == 12` invariant in test_metrics_parity_full); the
+ * union↔tuple coupling pins that to the union's own size.
  */
-export const EXPECTED_SIBLING_KINDS: ReadonlySet<StrategyAnalyticsSeriesKind> = new Set([
+const SIBLING_KINDS = [
   "daily_returns_grid",
   "rolling_sortino_3m",
   "rolling_sortino_6m",
@@ -35,7 +49,29 @@ export const EXPECTED_SIBLING_KINDS: ReadonlySet<StrategyAnalyticsSeriesKind> = 
   "exposure_series",
   "turnover_series",
   "log_returns_series",
-]);
+] as const satisfies readonly StrategyAnalyticsSeriesKind[];
+
+/**
+ * Compile-time exhaustiveness: if `StrategyAnalyticsSeriesKind` gains a
+ * variant and `SIBLING_KINDS` doesn't, `_MissingSiblingKind` becomes a
+ * non-`never` union and the `extends never ? true : never` assignment
+ * resolves to `never`, breaking the next `npm run typecheck` with a clear
+ * "Type 'true' is not assignable to type 'never'" pointing here. Zero
+ * runtime cost — type-only assertion (the runtime fixture↔set parity is
+ * gated separately in metrics-parity.test.ts).
+ */
+type _MissingSiblingKind = Exclude<
+  StrategyAnalyticsSeriesKind,
+  (typeof SIBLING_KINDS)[number]
+>;
+const _siblingKindsExhaustivenessCheck: _MissingSiblingKind extends never
+  ? true
+  : never = true;
+// Reference the binding so `noUnusedLocals` doesn't strip it.
+void _siblingKindsExhaustivenessCheck;
+
+export const EXPECTED_SIBLING_KINDS: ReadonlySet<StrategyAnalyticsSeriesKind> =
+  new Set(SIBLING_KINDS);
 
 /**
  * D-16 frozen `trade_metrics` keys.

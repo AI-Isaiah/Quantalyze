@@ -141,27 +141,27 @@ describe("METRICS-13 cross-runtime parity (TS schema gate)", () => {
     expect(() => assertTradeMixBucketCount(expected)).not.toThrow();
   });
 
-  it("expected sibling has all 12 H-A1 kinds (matches Python invariant)", () => {
+  it("expected sibling kinds EXACTLY equal the 12 H-A1 kinds (matches Python invariant)", () => {
     // H-A1 (REVIEWS.md): regen_golden.py simulates positions/prices/NAV →
     // exposure_series + turnover_series MUST be populated. Plan-checker Issue 6:
     // TS bar must match Python's tightened assertion to avoid false-green when
-    // H-A1 wiring regresses. Tracks EXPECTED_SIBLING_KINDS.size dynamically.
+    // H-A1 wiring regresses.
+    //
+    // H-0461: assert SYMMETRIC set-equality, not the pre-fix
+    // `length === size` + per-kind `toContain`. The old form caught a
+    // REMOVED kind but a kind ADDED to both the fixture AND
+    // EXPECTED_SIBLING_KINDS slipped through (length still matched,
+    // toContain only proves presence). `toEqual` on Sets catches drift in
+    // BOTH directions. The protection is split across two layers: the
+    // set <-> union leg is COMPILE-TIME locked in metrics-parity-helper.ts
+    // (the `satisfies` + exhaustiveness check), and THIS runtime assertion
+    // closes the remaining fixture <-> set leg (the committed Python-regen
+    // JSON can only be checked at runtime).
     const keys = Object.keys(expected.sibling);
-    expect(keys.length).toBe(EXPECTED_SIBLING_KINDS.size);
-    // Every H-A1 / D-01 kind MUST be present
-    expect(keys).toContain("rolling_sortino_3m");
-    expect(keys).toContain("rolling_sortino_6m");
-    expect(keys).toContain("rolling_sortino_12m");
-    expect(keys).toContain("rolling_volatility_3m");
-    expect(keys).toContain("rolling_volatility_6m");
-    expect(keys).toContain("rolling_volatility_12m");
-    expect(keys).toContain("rolling_alpha");
-    expect(keys).toContain("rolling_beta");
-    expect(keys).toContain("daily_returns_grid");
-    expect(keys).toContain("log_returns_series");
-    expect(keys).toContain("exposure_series"); // H-A1
-    expect(keys).toContain("turnover_series"); // H-A1
-    // H-D: equity_series_1y MUST NOT be a sibling kind (lives in metrics_json)
+    expect(new Set(keys)).toEqual(EXPECTED_SIBLING_KINDS);
+    // H-D: equity_series_1y MUST NOT be a sibling kind (lives in metrics_json).
+    // Redundant with the set-equality above (it's absent from the set), but
+    // kept as an explicit, greppable guard of the load-bearing invariant.
     expect(keys).not.toContain("equity_series_1y");
   });
 
