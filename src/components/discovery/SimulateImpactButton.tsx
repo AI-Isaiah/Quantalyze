@@ -13,7 +13,13 @@ const PortfolioImpactPanel = dynamic(
     import("@/components/portfolio/PortfolioImpactPanel").then((m) => ({
       default: m.PortfolioImpactPanel,
     })),
-  { ssr: false },
+  {
+    ssr: false,
+    // Immediate backdrop while the chunk downloads so the click isn't a dead
+    // window — matches the panel's own `bg-black/20` overlay so it transitions
+    // seamlessly once mounted (review LOW: dead-click feedback gap).
+    loading: () => <div className="fixed inset-0 z-50 bg-black/20" aria-hidden="true" />,
+  },
 );
 
 interface SimulateImpactButtonProps {

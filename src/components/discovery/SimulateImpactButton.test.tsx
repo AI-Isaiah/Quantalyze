@@ -60,6 +60,9 @@ describe("<SimulateImpactButton>", () => {
     expect(btn).toHaveAttribute("aria-expanded", "true");
     // …but the panel is now code-split via next/dynamic (H-1123), so it
     // mounts asynchronously after the lazy chunk resolves — await it.
+    // NOTE: this guards the behavioral contract (panel still opens on click),
+    // NOT the code-split itself — jsdom can't assert bundle boundaries, so the
+    // split is verified at build/bundle-analysis time, not here.
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
   });
 

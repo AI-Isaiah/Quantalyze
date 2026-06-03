@@ -410,10 +410,13 @@ async function send(
  * Server Actions, crons) this uses `after()` (Next 16, ≈ Vercel `waitUntil`)
  * so the write survives Fluid Compute instance freeze — a bare fire-and-forget
  * promise is reaped on suspension, leaving the row stuck at 'queued' for an
- * email that was already sent/failed. Outside a request scope (unit tests,
- * prerender) `after()` throws synchronously, so we fall back to a microtask —
- * preserving the prior `void markDispatch(...)` fire-and-forget behavior.
- * Mirrors the scheduling wrapper in `audit.ts` (logAuditEvent). markDispatch
+ * email that was already sent/failed. Outside a request scope `after()` throws
+ * synchronously, so we fall back to a bare fire-and-forget (NOT a microtask) —
+ * byte-for-byte the prior `void markDispatch(...)` behavior. Structurally this
+ * mirrors `audit.ts`'s try-after/catch wrapper; it deliberately omits audit.ts's
+ * `queueMicrotask` + `[audit]`-prefixed warn because on Vercel Fluid Compute the
+ * route handlers that call this ALWAYS have `waitUntil`, so the catch arm only
+ * fires under vitest / prerender (never a prod drop to quantify). markDispatch
  * never throws, but the defensive `.catch` guards a future regression from
  * surfacing an unhandled rejection.
  */

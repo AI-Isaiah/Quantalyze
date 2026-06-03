@@ -1,5 +1,13 @@
 /** @vitest-environment node */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  onTestFinished,
+} from "vitest";
 
 /**
  * Tests for src/lib/email.ts — the notification_dispatches audit trail
@@ -191,21 +199,30 @@ describe("email.ts — notification_dispatches audit trail", () => {
     expect(state.sendCalls[0].to).toBe("manager@example.com");
   });
 
-  it("H-0445: schedules the 'sent' dispatch write via after() so a Vercel freeze can't strand it at 'queued'", async () => {
-    // In a real request scope `after()` (Next 16 ≈ Vercel waitUntil) defers the
-    // audit write past the response flush AND keeps the function instance alive
-    // until it lands. Pre-fix the happy path was a bare `void markDispatch(...)`
-    // fire-and-forget promise that Fluid Compute could reap on suspension,
-    // leaving an already-sent email's row stuck at 'queued'. Mock next/server's
-    // `after` to prove the write is now scheduled through it. This test FAILS on
-    // the pre-fix code (after() is never touched → afterCallbacks stays empty).
-    const afterCallbacks: Array<() => void | Promise<void>> = [];
+  // --- H-0445: ALL THREE markDispatch sites schedule via Next 16 `after()`
+  // (≈ Vercel waitUntil) so a Fluid Compute instance freeze can't reap the
+  // fire-and-forget write and strand a dispatch row at 'queued'. The mock
+  // COLLECTS after() callbacks WITHOUT running them — matching real after()'s
+  // deferred, void-returning contract (it enqueues to onClose, it does not run
+  // inline) — and we drain them explicitly to model post-response execution.
+  // Each test FAILS if its site regresses to a bare `void markDispatch(...)`
+  // (after() never invoked → cbs stays empty). next/server is torn down via
+  // onTestFinished so a failing assertion can't leak the mock into later tests.
+  function collectAfterCallbacks(): Array<() => void | Promise<void>> {
+    const cbs: Array<() => void | Promise<void>> = [];
     vi.doMock("next/server", () => ({
       after: (cb: () => void | Promise<void>) => {
-        afterCallbacks.push(cb);
-        return cb();
+        cbs.push(cb);
       },
     }));
+    onTestFinished(() => vi.doUnmock("next/server"));
+    return cbs;
+  }
+  const drainAfter = (cbs: Array<() => void | Promise<void>>) =>
+    Promise.all(cbs.map((cb) => cb()));
+
+  it("H-0445 (happy path): the 'sent' write is scheduled via after(), not lost to a freeze", async () => {
+    const cbs = collectAfterCallbacks();
     vi.resetModules();
     const { notifyManagerIntroRequest } = await import("./email");
 
@@ -215,13 +232,52 @@ describe("email.ts — notification_dispatches audit trail", () => {
       "Long Vol Macro",
     );
 
-    // after() carried the dispatch write (the 'sent' update on the happy path).
-    expect(afterCallbacks.length).toBeGreaterThanOrEqual(1);
-    // …and the scheduled write actually ran: the row reached 'sent'.
+    // after() carried the write; the row is still 'queued' until after() drains
+    // (deferred past the response — exactly the freeze-survival window).
+    expect(cbs.length).toBeGreaterThanOrEqual(1);
+    expect(state.rows[0]?.status).toBe("queued");
+    await drainAfter(cbs);
     expect(state.rows[0]?.status).toBe("sent");
     expect(state.rows[0]?.sent_at).toBeTruthy();
+  });
 
-    vi.doUnmock("next/server");
+  it("H-0445 (Resend failure): the retries-exhausted 'failed' write is scheduled via after()", async () => {
+    state.resendShouldFail = true;
+    state.resendError = "Rate limit exceeded";
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const cbs = collectAfterCallbacks();
+    vi.resetModules();
+    const { notifyManagerApproved } = await import("./email");
+
+    await notifyManagerApproved(
+      "manager@example.com",
+      "Long Vol Macro",
+      "strategy-uuid",
+    );
+
+    expect(cbs.length).toBeGreaterThanOrEqual(1);
+    await drainAfter(cbs);
+    expect(state.rows[0]?.status).toBe("failed");
+    expect(state.rows[0]?.error).toBe("Rate limit exceeded");
+  });
+
+  it("H-0445 (no Resend key): the 'failed' write is scheduled via after()", async () => {
+    vi.stubEnv("RESEND_API_KEY", "");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cbs = collectAfterCallbacks();
+    vi.resetModules();
+    const { notifyAllocatorIntroStatus } = await import("./email");
+
+    await notifyAllocatorIntroStatus(
+      "allocator@example.com",
+      "Long Vol Macro",
+      "intro_made",
+    );
+
+    expect(cbs.length).toBeGreaterThanOrEqual(1);
+    await drainAfter(cbs);
+    expect(state.rows[0]?.status).toBe("failed");
+    expect(state.rows[0]?.error).toBe("Resend not configured");
   });
 
   it("writes cc into metadata when the helper passes a cc address", async () => {
