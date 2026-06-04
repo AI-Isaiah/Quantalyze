@@ -4,7 +4,7 @@ import secrets
 import logging
 import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
@@ -207,12 +207,20 @@ async def verify_service_key(request: Request, call_next):
     ):
         return await call_next(request)
 
+    # Return a JSONResponse directly — do NOT `raise HTTPException` here. This
+    # function is a Starlette BaseHTTPMiddleware, which sits ABOVE the
+    # ExceptionMiddleware that would translate an HTTPException into a clean
+    # response. A raise escapes to ServerErrorMiddleware, which renders a 500
+    # AND re-raises (so the Sentry integration captures it): every
+    # missing/empty X-Service-Key produced a 500 + a captured error instead of
+    # a clean 401 (Sentry QUANTALYZE-4). Returning the response fails closed
+    # with the correct status and zero Sentry noise.
     if not SERVICE_KEY:
-        raise HTTPException(status_code=503, detail="Service not configured")
+        return JSONResponse({"detail": "Service not configured"}, status_code=503)
 
     provided = request.headers.get("X-Service-Key", "")
     if not secrets.compare_digest(provided, SERVICE_KEY):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
 
     return await call_next(request)
 
