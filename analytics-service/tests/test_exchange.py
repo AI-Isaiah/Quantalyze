@@ -81,23 +81,39 @@ class TestAcloseExchange:
         await aclose_exchange(_FakeExchange())
 
     def test_worker_handlers_use_aclose_not_raw_close(self):
-        """Wiring guard: every exchange-owning module must close via
+        """Wiring guard: EVERY exchange-owning module must close via
         aclose_exchange, never a bare `await ...close()` that an asyncio.wait_for
         cancellation can interrupt mid-sequence. Testing the helper alone does
         not prove the call sites invoke it — this fails if any finally is
-        reverted to a raw close (QUANTALYZE-8/9/S regression)."""
+        reverted to a raw close (QUANTALYZE-8/9/S regression). Covers all 11
+        modules that own a ccxt exchange (the diff touched every one)."""
         import inspect
 
         import routers.cron as cron_router
+        import routers.debug_key_flow as debug_router
+        import routers.exchange as exchange_router
+        import routers.internal as internal_router
+        import routers.portfolio as portfolio_router
         import services.equity_reconstruction as eqr
         import services.funding_fetch as ff
+        import services.ingestion.binance as binance_adapter
+        import services.ingestion.bybit as bybit_adapter
+        import services.ingestion.okx as okx_adapter
         import services.job_worker as jw
 
+        # (module, raw close pattern that must NOT remain)
         checks = [
             (jw, "await ctx.exchange.close()"),
             (eqr, "await ctx.exchange.close()"),
             (ff, "await exchange.close()"),
             (cron_router, "await exchange.close()"),
+            (exchange_router, "await exchange.close()"),
+            (internal_router, "await exchange.close()"),
+            (portfolio_router, "await exchange.close()"),
+            (debug_router, "await exchange.close()"),
+            (okx_adapter, "await ex.close()"),
+            (bybit_adapter, "await ex.close()"),
+            (binance_adapter, "await ex.close()"),
         ]
         for mod, raw in checks:
             src = inspect.getsource(mod)
@@ -110,6 +126,77 @@ class TestAcloseExchange:
                 f"{mod.__name__} no longer references aclose_exchange — the "
                 "cancellation-safe close wiring was removed."
             )
+
+    @pytest.mark.asyncio
+    async def test_close_hang_is_bounded_normal_path(self, monkeypatch):
+        """A stuck close() must NOT hang aclose_exchange forever (which would
+        wedge the sequential worker loop). It's bounded by _ACLOSE_TIMEOUT_S and
+        degrades to a logged leak. Without the bound this test would hang."""
+        import services.exchange as exchange_mod
+
+        monkeypatch.setattr(exchange_mod, "_ACLOSE_TIMEOUT_S", 0.05)
+
+        class _HangingExchange:
+            async def close(self):
+                await asyncio.Event().wait()  # never completes
+
+        # Safety net: if the bound is broken this wait_for trips instead of the
+        # whole suite hanging.
+        await asyncio.wait_for(aclose_exchange(_HangingExchange()), timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_close_hang_is_bounded_under_cancellation(self, monkeypatch):
+        """Under cancellation, a stuck close() drain is also bounded — aclose
+        re-raises CancelledError within the bound instead of wedging the loop."""
+        import services.exchange as exchange_mod
+
+        monkeypatch.setattr(exchange_mod, "_ACLOSE_TIMEOUT_S", 0.05)
+
+        class _HangingExchange:
+            async def close(self):
+                await asyncio.Event().wait()
+
+        async def _caller():
+            await aclose_exchange(_HangingExchange())
+
+        task = asyncio.ensure_future(_caller())
+        await asyncio.sleep(0)
+        task.cancel()
+        # The bounded drain means this resolves quickly, not after forever.
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_wait_for_timeout_drains_close_end_to_end(self):
+        """End-to-end composition the fix exists for: a handler wrapped in
+        asyncio.wait_for whose timeout cancels it mid-fetch must still run its
+        `finally: await aclose_exchange(ex)` and DRAIN close() to completion —
+        so aiohttp releases the socket. This exercises the real
+        wait_for -> CancelledError -> finally -> drain flow, which the unit test
+        and the source-grep guard cannot see together."""
+        released = {"done": False}
+
+        class _FakeExchange:
+            async def close(self):
+                # ccxt releases the connector across several awaits.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                released["done"] = True
+
+        async def _handler():
+            ex = _FakeExchange()
+            try:
+                await asyncio.sleep(10)  # the slow fetch that will be timed out
+            finally:
+                await aclose_exchange(ex)
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_handler(), timeout=0.05)
+
+        assert released["done"] is True, (
+            "the handler's finally must drain close() to completion even when "
+            "asyncio.wait_for cancels it mid-fetch (QUANTALYZE-8/9/S)"
+        )
 
 
 class TestNormalizeSymbol:

@@ -105,10 +105,13 @@ def test_get_supabase_forces_http1(monkeypatch: pytest.MonkeyPatch) -> None:
             self.headers = kwargs.get("headers", {})
             self.timeout = kwargs.get("timeout", 60.0)
 
+    # Seed the session as supabase builds it: http2 on (no explicit flag) and
+    # carrying the auth material PostgREST needs (apikey + service-role bearer).
+    seeded_headers = {"apiKey": "svc-key", "Authorization": "Bearer svc-key"}
+    seeded_base_url = "https://proj.supabase.co/rest/v1"
     fake_client = MagicMock()
-    # Seed the session as supabase builds it (http2 on, no explicit flag).
     fake_client.postgrest.session = _RecordingSession(
-        base_url="https://proj.supabase.co", headers={}, timeout=60.0
+        base_url=seeded_base_url, headers=seeded_headers, timeout=60.0
     )
     monkeypatch.setattr("services.db.create_client", lambda url, key: fake_client)
 
@@ -122,6 +125,14 @@ def test_get_supabase_forces_http1(monkeypatch: pytest.MonkeyPatch) -> None:
             "(QUANTALYZE-T/V/E/D/7 HTTP/2 GOAWAY); the rebuild is missing."
         )
         assert _RecordingSession.last_kwargs.get("follow_redirects") is True
+        # SECURITY-LOAD-BEARING: the rebuild MUST carry the auth headers and
+        # base_url through, or every PostgREST call would go out unauthenticated
+        # (apikey/Authorization dropped). Guards against a refactor that drops
+        # `headers=session.headers` / `base_url=session.base_url`.
+        assert _RecordingSession.last_kwargs.get("headers") == seeded_headers, (
+            "rebuild dropped the auth headers — PostgREST calls would be anon"
+        )
+        assert _RecordingSession.last_kwargs.get("base_url") == seeded_base_url
     finally:
         get_supabase.cache_clear()  # don't poison the lru_cache for other tests
 

@@ -819,8 +819,16 @@ def create_exchange(exchange_name: str, api_key: str, api_secret: str, passphras
     return exchange
 
 
+# Upper bound (seconds) on how long aclose_exchange waits for ccxt close() —
+# both on the normal path and the cancellation drain. ccxt close() is normally
+# sub-second (its tail is a ~250ms timeout_on_exit sleep); the bound only bites
+# a genuinely stuck teardown, which then degrades to a logged leak rather than
+# wedging the sequential worker loop.
+_ACLOSE_TIMEOUT_S = float(os.getenv("EXCHANGE_CLOSE_TIMEOUT_S", "10"))
+
+
 async def aclose_exchange(exchange: ccxt.Exchange) -> None:
-    """Close a ccxt async exchange, cancellation-safe.
+    """Close a ccxt async exchange, cancellation-safe and bounded.
 
     A bare ``await exchange.close()`` inside a ``finally`` is best-effort: the
     worker wraps every exchange-owning handler in ``asyncio.wait_for(...)`` and
@@ -833,24 +841,47 @@ async def aclose_exchange(exchange: ccxt.Exchange) -> None:
     them to GC — the "Unclosed client session" / "Unclosed connector" warnings
     (Sentry QUANTALYZE-8/9/S).
 
-    Run ``close()`` in a shielded task and, if WE are cancelled while awaiting,
-    drain the task to completion so aiohttp actually releases the socket before
-    re-propagating the cancellation. A close() that itself raises (e.g. an SSL
-    shutdown error) is logged and swallowed — it is not a leak and must not mask
-    the handler's real error.
+    Run ``close()`` in a SHIELDED task and, if WE are cancelled while awaiting,
+    drain that task to completion so aiohttp actually releases the socket before
+    re-propagating the cancellation. Both awaits are BOUNDED by
+    ``_ACLOSE_TIMEOUT_S`` (shield wraps the task, so the timeout cancels only the
+    wrapper, never the close itself): a stuck close() degrades to a logged
+    leak-with-warning instead of wedging the SEQUENTIAL worker loop (the jobs run
+    one-at-a-time, so an unbounded drain on a hung close would stall the whole
+    worker until the 90s healthz restart). Shielding the drain too means a second
+    cancel (e.g. graceful shutdown) cannot abort close() mid-release. A close()
+    that raises (e.g. an SSL shutdown error) is logged and swallowed — it is not
+    a leak and must not mask the handler's real error.
     """
     task = asyncio.ensure_future(exchange.close())
     try:
-        await asyncio.shield(task)
+        await asyncio.wait_for(asyncio.shield(task), timeout=_ACLOSE_TIMEOUT_S)
     except asyncio.CancelledError:
+        # Our await was cancelled (handler's asyncio.wait_for timed out). Drain
+        # the shielded close — bounded, and itself shielded against a re-cancel.
         try:
-            await task
+            await asyncio.wait_for(asyncio.shield(task), timeout=_ACLOSE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "aclose_exchange: close() drain exceeded %ss under cancellation "
+                "— abandoning (connector may leak)", _ACLOSE_TIMEOUT_S,
+            )
+        except asyncio.CancelledError:
+            logger.warning(
+                "aclose_exchange: close() drain re-cancelled — abandoning "
+                "(connector may leak)"
+            )
         except Exception as exc:  # pragma: no cover - close failed mid-drain
             logger.warning(
                 "aclose_exchange: close() failed during cancellation drain (%s): %s",
                 type(exc).__name__, exc,
             )
         raise
+    except asyncio.TimeoutError:
+        logger.warning(
+            "aclose_exchange: close() exceeded %ss — abandoning (connector may leak)",
+            _ACLOSE_TIMEOUT_S,
+        )
     except Exception as exc:
         logger.warning(
             "aclose_exchange: exchange.close() failed (%s): %s",

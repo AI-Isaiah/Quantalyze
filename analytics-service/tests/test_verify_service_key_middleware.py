@@ -56,6 +56,31 @@ async def test_wrong_service_key_returns_clean_401(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
+async def test_correct_service_key_passes_middleware(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rule 12 cuts both ways: the gate must REJECT bad keys AND ADMIT good ones.
+    With the matching X-Service-Key the request passes verify_service_key to
+    call_next and reaches the route (which may then fail for unrelated reasons —
+    e.g. no DB env in the test — but must NOT be the middleware's 401/503). Guards
+    the happy path against a regression in the raise->return refactor."""
+    import main
+
+    monkeypatch.setattr(main, "SERVICE_KEY", "the-configured-key")
+
+    # raise_app_exceptions=False so a route-level error surfaces as a 5xx response
+    # rather than propagating — we only care that the middleware admitted the call.
+    transport = httpx.ASGITransport(app=main.app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/cron-sync", headers={"X-Service-Key": "the-configured-key"}
+        )
+
+    assert resp.status_code not in (401, 503), (
+        "a correct X-Service-Key must pass the auth middleware (reach the route); "
+        f"got {resp.status_code}, which is a middleware rejection."
+    )
+
+
+@pytest.mark.asyncio
 async def test_unconfigured_service_key_returns_clean_503(monkeypatch: pytest.MonkeyPatch) -> None:
     import main
 

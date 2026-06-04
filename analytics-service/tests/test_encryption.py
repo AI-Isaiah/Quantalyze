@@ -89,6 +89,18 @@ class TestEncryption:
         with pytest.raises(InvalidToken):
             decrypt_credentials(encrypted, self.test_kek)
 
+    def test_empty_string_dek_raises_invalid_token(self):
+        """The guard uses truthiness, so an empty-string column (as plausible as
+        NULL for a half-written text column) is ALSO parked as InvalidToken —
+        not allowed to fall through to Fernet("").decrypt and re-open the
+        opaque-error / retry-forever path. Locks intent against a refactor to an
+        `is None` check that would let "" slip through."""
+        encrypted = encrypt_credentials("key", "secret", None, self.test_kek)
+        encrypted["id"] = "00000000-0000-0000-0000-000000001095"
+        encrypted["dek_encrypted"] = ""
+        with pytest.raises(InvalidToken):
+            decrypt_credentials(encrypted, self.test_kek)
+
     def test_rotate_kek_null_dek_raises_invalid_token(self):
         """QUANTALYZE-M sibling: rotate_kek must not blow up with an opaque
         AttributeError mid-rotation on a malformed (NULL dek_encrypted) row."""
