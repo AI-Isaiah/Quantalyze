@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.15.114] - 2026-06-04
+### Fixed — PR-4: for-quants lead dedup (M-0324); migration auto-applies to prod
+
+Sole-agent fold-plan PR-4. Disprove-first reverify (workflow `wrxc0u3ox`) of the 5 SQL-migration candidates → only **M-0324** needs a migration; the rest are correctly deferred or re-routed (L-0051 defer: `funding_fees` is deliberately PRESERVE/Historical, a retention sweep would corrupt `positions.funding_pnl`; H-1237 stays DESIGN_HEAVY — needs prod EXPLAIN ANALYZE; M-1127 → PR-5 worker log; G23-182-mig-07 → PR-5 doc).
+
+- **M-0324** — `for_quants_leads` had no uniqueness, so `/api/for-quants-lead` retries / concurrent same-email POSTs each created a duplicate lead **and** a duplicate founder email (the route's own docblock anticipated this constraint but it was never written). New migration `20260604120000_for_quants_leads_email_day_unique.sql` adds a `UNIQUE (lower(email), ((created_at AT TIME ZONE 'UTC')::date))` index — the `AT TIME ZONE 'UTC'` form is IMMUTABLE/indexable (plain `created_at::date` is not). A pre-index dedup keeps one survivor per (email, UTC-day), **CRM-aware** (a row a human already `processed_at` wins over an earlier untouched dup) and **fail-loud** (`RAISE NOTICE` of the deleted count). The route now treats a `23505` insert as idempotent `200 {ok:true}` and fires no second founder email.
+
+Index expression + the full dedup (incl. the CRM-aware survivor + distinct-day preservation) were validated against the live test DB via temp-table assertion probes. migration-reviewer + rls-policy-auditor + adversarial pass (0 findings) + Claude red-team (SHIP; its one MEDIUM — survivor-selection ignored CRM/notify state — fixed here by the CRM-aware ranking + NOTICE). `tsc`/`eslint` clean; for-quants-lead route suite **37 pass** (incl. the neuter-verified 23505 idempotency test).
+
 ## [0.24.15.113] - 2026-06-04
 ### Fixed — PR-3: user-facing flows (9 of 18 findings; 5 reverify-closed, 4 deferred/routed)
 
