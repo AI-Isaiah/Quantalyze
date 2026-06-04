@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.24.15.116] - 2026-06-04
+### Fixed — live Sentry errors in analytics-service (QUANTALYZE-M / -4 / -T·V·E·D·7 / -1·5 residual; -8·9·S hardening)
+
+Triaged all 27 unresolved `quantalyze` Sentry issues (10-agent disprove-first investigation against the live prod DB + CI-pinned deps). Most were **already fixed** by the recent analytics fix-wave (PRs #288/#336/#390/#395/#397/#399) — the events predate the Railway deploys: QUANTALYZE-B/A (mark_compute_job_failed `last_error_kind` → hotfix mig 20260529180000), -2/-3 (null `strategy_id` filter), -N (sync_trades double-encoding), -P (`computation_status='stale'` → enqueue_compute_job), -Q (mixed-precision `to_datetime`), -6 (resync mints `wizard_session_id`). The genuinely-open code work, all in `analytics-service`:
+
+- **QUANTALYZE-M** — `decrypt_credentials`/`rotate_kek` now raise `InvalidToken` on a NULL/empty `dek_encrypted`/`api_key_encrypted` (DB-confirmed nullable; a malformed/seed row previously raised an opaque `AttributeError` that `classify_exception` mapped to `'unknown'` → **retried forever**). `InvalidToken` → `'permanent'`/`failed_final`, parked not hammered, error names the key id.
+- **QUANTALYZE-4** — `verify_service_key` middleware returns `JSONResponse(401/503)` instead of `raise HTTPException`: a raise inside a Starlette `BaseHTTPMiddleware` escaped to `ServerErrorMiddleware` → **500 + Sentry capture** instead of a clean 401 for every missing/empty `X-Service-Key`. Fail-closed semantics + skip-list unchanged; `secrets.compare_digest` retained.
+- **QUANTALYZE-T/V/E/D/7** — `get_supabase`/`get_user_scoped_supabase` rebuild the PostgREST session with `http2=False` (supabase 2.15.1 hardcodes `http2=True`; the Supabase edge sends HTTP/2 GOAWAY frames → `RemoteProtocolError: ConnectionTerminated`). Mirrors the blessed `test_compute_jobs_fencing` fixture; auth headers/base_url preserved (test-guarded).
+- **QUANTALYZE-1/-5 (residual)** — the two remaining unmigrated `.maybe_single().execute()` `.data` derefs (`match_eval`, `feature_flags`) now route through `one()` (postgrest returns literal `None` on zero rows). The Sentry-cited router sites were already fixed in PR #390; this closes the class.
+- **QUANTALYZE-8/9/S (hardening, not a definitive fix)** — new `aclose_exchange()` (shield + bounded drain) routed through all 24 exchange-close `finally` sites; makes ccxt close cancellation-safe and prevents a worker-loop **hang** if close() ever stalls. Empirically (py3.12) the dominant single-cancel paths (`wait_for` timeout) already complete a bare close, so these "Unclosed connector" events are most plausibly worker-restart/loop-teardown leaks — **to be confirmed by post-deploy observation**; if they persist the root cause is graceful-shutdown draining, not the close sites.
+
+Config/ops (no code; surfaced separately): QUANTALYZE-H (`RESEND_API_KEY` unset in Vercel prod — founder-lp-report cron correctly fails loud) and the `/cron-sync` caller (a Railway probe hitting the path without the service key). External/transient noise (resolve in Sentry): exchange rate limits (-C/-R/-K/-J) and Bybit 403 (-G/-F) — mitigation (classify→transient + 429 cooldown + OKX backoff) already correct.
+
+Process: 10-agent investigation → 5 fixes (each neuter-verified to fail without the fix) → 5-lens specialist suite (silent-failure/async/security/code-review/tests) → fixed the one MEDIUM (unbounded drain → bounded) + test/wiring gaps → Claude red-team → honest re-scoping of -8/9/S + removed a false-confidence test. 2600 analytics tests pass; `mypy --strict` clean against CI-pinned deps.
+
 ## [0.24.15.115] - 2026-06-04
 ### Docs — PR-5: docs hygiene + breach-notification runbook (M-1005, M-0984, G23-193-mig-03)
 
