@@ -454,6 +454,16 @@ export async function POST(req: NextRequest) {
     .select("id")
     .single();
 
+  // M-0324: the for_quants_leads_email_day_uniq index (lower(email), UTC-day)
+  // collapses network-retries / double-submits of the same email on the same
+  // day. A 23505 unique-violation here means "this lead was already captured
+  // today" — return the SAME idempotent success the original POST returned, and
+  // fall through BEFORE the after() block so we do NOT fire a second founder
+  // email for the duplicate. Distinct days still insert normally.
+  if (insertErr?.code === "23505") {
+    return NextResponse.json({ ok: true });
+  }
+
   if (insertErr || !inserted) {
     console.error("[for-quants-lead] insert failed:", insertErr);
     captureFailure(insertErr ?? new Error("insert returned no row"), "db_insert", {

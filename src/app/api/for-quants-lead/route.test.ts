@@ -68,6 +68,10 @@ const dbState = vi.hoisted(
   (): {
     inserted: Array<Record<string, unknown>>;
     insertShouldFail: boolean;
+    /** M-0324: inject a Postgres error CODE on the next insert (e.g. "23505"
+     *  unique-violation from for_quants_leads_email_day_uniq) so the route's
+     *  idempotent-dedup path can be pinned. */
+    insertErrorCode: string | null;
     adminClientShouldThrow: boolean;
     /** audit-2026-05-07 G9.B.7 / migration 115 — capture every
      *  notify-marker update the route makes inside its after()
@@ -87,6 +91,7 @@ const dbState = vi.hoisted(
   } => ({
     inserted: [],
     insertShouldFail: false,
+    insertErrorCode: null,
     adminClientShouldThrow: false,
     updates: [],
     updateResponseErrorQueue: [],
@@ -101,6 +106,20 @@ vi.mock("@/lib/supabase/admin", () => ({
     return {
       from: () => ({
         insert(payload: Record<string, unknown>) {
+          if (dbState.insertErrorCode) {
+            return {
+              select: () => ({
+                single: async () => ({
+                  data: null,
+                  error: {
+                    code: dbState.insertErrorCode,
+                    message:
+                      "duplicate key value violates unique constraint",
+                  },
+                }),
+              }),
+            };
+          }
           if (dbState.insertShouldFail) {
             return {
               select: () => ({
@@ -229,6 +248,7 @@ describe("POST /api/for-quants-lead", () => {
     process.env.VERCEL = "1";
     dbState.inserted = [];
     dbState.insertShouldFail = false;
+    dbState.insertErrorCode = null;
     dbState.adminClientShouldThrow = false;
     dbState.updates = [];
     dbState.updateResponseErrorQueue = [];
@@ -293,6 +313,28 @@ describe("POST /api/for-quants-lead", () => {
         preferred_time: "Tue morning PT",
         notes: "Running a market-neutral book on Binance.",
       });
+    });
+
+    it("M-0324: a 23505 unique-violation returns idempotent 200 { ok: true } and fires NO second founder email", async () => {
+      // After the for_quants_leads_email_day_uniq migration, a same-email/
+      // same-day retry hits the unique index and the insert returns 23505. The
+      // route must treat that as the SAME idempotent success the original POST
+      // returned — NOT a 500 — and crucially must NOT fire a duplicate founder
+      // email (the original submit already sent one). WHY it matters: the whole
+      // point of the dedup is to stop network-retries from spamming the founder
+      // CRM with duplicate leads + duplicate emails. Neuter check: drop the
+      // route's `insertErr?.code === "23505"` early-return and this 200/0-email
+      // assertion fails (the row falls through to the 500 branch).
+      dbState.insertErrorCode = "23505";
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest(VALID_PAYLOAD));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      // No row recorded (the insert was rejected) and no founder email sent.
+      expect(dbState.inserted).toHaveLength(0);
+      await flushMicrotasks();
+      expect(emailState.sends).toBe(0);
     });
 
     it("accepts minimal payload without optional fields", async () => {
