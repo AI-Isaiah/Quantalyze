@@ -38,6 +38,23 @@ name: Migration Policy
 # before use).
 #
 # Concurrency: per-PR group so a force-push cancels the in-flight check.
+#
+# Fork-PR limitation (audit-2026-05-07 G23-193-mig-03 — KNOWN, documented):
+# `on: pull_request` from a FORK runs WITHOUT access to repository secrets —
+# GitHub withholds `secrets.*` from fork-originated PRs by default. So on a
+# fork PR `SUPABASE_ACCESS_TOKEN` / `SUPABASE_DB_PASSWORD` are empty and the
+# `supabase link` / `db query` step that fetches the remote tip cannot run —
+# the backdate guard would error out (or, if the step were made non-fatal,
+# silently pass) rather than enforce. This is ACCEPTABLE today: the repo is
+# single-org with no external contributions, so every migration PR originates
+# from a same-repo branch that DOES receive secrets. **Before opening the repo
+# to outside contributions, this guard must be hardened** — e.g. switch to
+# `pull_request_target` with an explicit checkout of the fork head behind a
+# `github.event.pull_request.head.repo.fork == false` gate (and accept the
+# `pull_request_target` privilege-escalation caveats), or run the backdate
+# check on a trusted same-repo mirror of the PR. Until then, treat a fork PR
+# touching `supabase/migrations/` as REQUIRING manual review of the backdate
+# policy.
 
 on:
   pull_request:

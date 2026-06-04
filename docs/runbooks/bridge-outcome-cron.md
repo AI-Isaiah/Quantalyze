@@ -1,15 +1,12 @@
 # Bridge Outcome Cron Runbook
 
-> **STATUS: Partially stale (verified 2026-05-28).** The cron + migration
-> + delta math sections are accurate. The Vercel-Hobby cap rationale at
-> "Schedule → pg_cron only" is **wrong**: the repo runs on **Vercel Pro
-> with a 10-cron ceiling**, not Hobby with 2. The sister runbook
-> `docs/runbooks/vercel-cron-upgrade.md` is fully archived as stale; the
-> cron-sentinel at `src/__tests__/vercel-cron-limits.test.ts` enforces 10
-> (not 2). The pg_cron design choice for this job is still correct (it
-> is DB-side state-machine work, not a Next.js fetch), so the operational
-> guide below is valid — just disregard the Vercel-Hobby framing.
-> PR-3+4 cross-file review F-O-01 (audit-2026-05-07).
+> **STATUS: Current (2026-06-04).** The repo runs on **Vercel Pro** with a
+> 10-cron ceiling enforced by `src/__tests__/vercel-cron-limits.test.ts`; the
+> sister runbook `docs/runbooks/vercel-cron-upgrade.md` is archived as stale.
+> The pg_cron design choice for this job is deliberate — it is DB-side
+> state-machine work, not a Next.js fetch. (audit-2026-05-07 M-1005: the prior
+> body framing this job's pg_cron choice as a Vercel-Hobby 2-cron workaround
+> was stale and has been corrected below.)
 
 Operational guide for the `compute_bridge_outcome_deltas` daily cron job. See the
 implementation plan at `.planning/phases/01-outcome-tracker/01-04-PLAN.md` and the
@@ -34,11 +31,13 @@ migration at `supabase/migrations/20260418074935_bridge_outcome_cron.sql`.
 | Schedule | `0 3 * * *` — daily at 03:00 UTC |
 | Runtime | seconds (JSONB-indexed; batch sizes are small until Phase 4 materializes historical allocations) |
 
-**pg_cron only** — we do NOT use Vercel Cron for this job. Vercel Hobby has a 2-cron cap
-(`warm-analytics` + `alert-digest`); the sentinel
-`src/__tests__/vercel-cron-limits.test.ts` fails CI on any third entry.
-See `docs/runbooks/vercel-cron-upgrade.md` for the path to Vercel Pro if cron
-capacity becomes a constraint.
+**pg_cron only** — we do NOT use Vercel Cron for this job, by design rather than
+by quota: this is DB-side state-machine work (reading `bridge_outcomes` and
+writing deltas), not a Next.js fetch, so pg_cron is the natural home. The repo
+runs on **Vercel Pro**; the cron-quota guardrail at
+`src/__tests__/vercel-cron-limits.test.ts` enforces the 10-cron ceiling for the
+*Vercel* crons, but bridge-outcome deltas live in pg_cron regardless of that
+headroom.
 
 ## What it computes
 
@@ -141,7 +140,7 @@ SELECT * FROM public.compute_bridge_outcome_deltas();
    SELECT * FROM public.compute_bridge_outcome_deltas();
    -- Expect updated_count >= 0, failed_count = 0
    ```
-6. Verify Hobby cron sentinel still green:
+6. Verify the Vercel cron-limit sentinel still green:
    ```bash
    npm test -- src/__tests__/vercel-cron-limits
    ```
