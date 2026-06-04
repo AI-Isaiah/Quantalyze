@@ -501,6 +501,47 @@ def test_find_rank_in_batch_returns_rank_value():
     assert result == 7
 
 
+def test_find_rank_candidate_missing_returns_none():
+    """QUANTALYZE-1/-5 class: `.maybe_single().execute()` returns LITERAL None
+    (not a response with .data=None) on zero rows in postgrest 1.0.x. A
+    non-empty batch exists, so control REACHES the candidate maybe_single — but
+    the strategy isn't in that batch, so the candidate query returns None.
+
+    Pre-fix `if not cand_result.data:` did `None.data` → AttributeError. The
+    one() migration collapses the None case to a clean None return. This test
+    stubs the candidate execute() as the REAL None (the rank-value test above
+    stubs it as MagicMock(data={...}), which masks exactly this bug)."""
+    sb = MagicMock()
+
+    batches_chain = MagicMock()
+    batches_chain.select.return_value = batches_chain
+    batches_chain.eq.return_value = batches_chain
+    batches_chain.lt.return_value = batches_chain
+    batches_chain.order.return_value = batches_chain
+    batches_chain.limit.return_value = batches_chain
+    batches_chain.execute.return_value = MagicMock(data=[{"id": "batch-uuid"}])
+
+    selectable = MagicMock(spec=SyncSelectRequestBuilder)
+    selectable.eq.return_value = selectable
+    selectable.is_.return_value = selectable
+    selectable.maybe_single.return_value = selectable
+    # The real postgrest no-row behavior: maybe_single().execute() -> None.
+    selectable.execute.return_value = None
+
+    cands_table = MagicMock()
+    cands_table.select.return_value = selectable
+
+    def route_table(name):
+        return {"match_batches": batches_chain, "match_candidates": cands_table}[name]
+
+    sb.table.side_effect = route_table
+
+    result = _find_strategy_rank_in_latest_batch_before(
+        sb, "alloc-1", "strat-1", "2026-04-07T10:00:00Z"
+    )
+    assert result is None
+
+
 # ─── audit-2026-05-07 #27 + #52 regression tests ──────────────────────
 
 

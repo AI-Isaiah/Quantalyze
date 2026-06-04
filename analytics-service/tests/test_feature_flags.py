@@ -13,6 +13,7 @@ Mocks `services.db.get_supabase` since feature_flags.py imports lazily.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -99,6 +100,37 @@ async def test_supabase_outage_falls_back_to_env(monkeypatch):
     with patch("services.feature_flags.get_supabase", side_effect=_raise):
         result = await is_unified_backbone_active()
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_missing_kill_switch_row_literal_none_no_spurious_warn(monkeypatch, caplog):
+    """QUANTALYZE-1/-5 class: `.maybe_single().execute()` returns LITERAL None
+    (not a response with .data=None) on zero rows in postgrest 1.0.x. When no
+    kill-switch row is configured (the NORMAL case), pre-fix `result.data` on
+    None raised an AttributeError that the broad except swallowed and logged as
+    a spurious 'kill-switch read failed' WARN — conflating a benign absent row
+    with a real Supabase outage. The one() migration handles None cleanly: env
+    decides, with NO read-failure WARN. The existing tests mock the no-row case
+    as MagicMock(data=None), which masks exactly this bug."""
+    monkeypatch.setenv("PROCESS_KEY_UNIFIED_BACKBONE", "on")
+    fake_supabase = MagicMock()
+    maybe_single = (
+        fake_supabase.table.return_value.select.return_value.eq.return_value.maybe_single.return_value
+    )
+    maybe_single.execute.return_value = None  # the real postgrest no-row behavior
+
+    with caplog.at_level(logging.WARNING):
+        with patch("services.feature_flags.get_supabase", return_value=fake_supabase):
+            result = await is_unified_backbone_active()
+
+    # env=on with no kill row → no kill → True, and crucially no crash.
+    assert result is True
+    assert not any(
+        "kill-switch read failed" in r.getMessage() for r in caplog.records
+    ), (
+        "A missing kill-switch row (maybe_single -> None) must NOT be logged as "
+        "a read failure — that conflates a benign absent row with a real outage."
+    )
 
 
 @pytest.mark.asyncio

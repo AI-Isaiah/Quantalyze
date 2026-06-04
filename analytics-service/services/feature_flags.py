@@ -34,7 +34,7 @@ from typing import TypedDict
 
 # Imported eagerly so test code can monkey-patch
 # `services.feature_flags.get_supabase` (the most ergonomic patch target).
-from services.db import get_supabase
+from services.db import get_supabase, one
 
 logger = logging.getLogger("quantalyze.analytics.feature_flags")
 
@@ -120,7 +120,14 @@ async def is_unified_backbone_active() -> bool:
                 .maybe_single()
                 .execute()
             )
-            if result.data and result.data.get("value") == "off":
+            # `.maybe_single().execute()` returns LITERAL None on zero rows in
+            # postgrest 1.0.x — a bare `result.data` would raise AttributeError
+            # (swallowed by the except below as a spurious "read failed" WARN,
+            # conflating a benign missing-flag-row with a real outage). one()
+            # collapses the None/no-row case cleanly. Same maybe_single class as
+            # Sentry QUANTALYZE-1/-5.
+            flag_row = one(result)
+            if flag_row and flag_row.get("value") == "off":
                 kill_switch_off = True
         except Exception as exc:  # noqa: BLE001
             # Fail-soft on Supabase outage: don't block on connectivity. Env
