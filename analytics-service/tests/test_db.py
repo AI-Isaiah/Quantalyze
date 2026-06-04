@@ -86,6 +86,46 @@ def test_get_supabase_missing_env_raises(monkeypatch: pytest.MonkeyPatch) -> Non
         get_supabase()
 
 
+def test_get_supabase_forces_http1(monkeypatch: pytest.MonkeyPatch) -> None:
+    """QUANTALYZE-T/V/E/D/7: supabase==2.15.1 hardcodes http2=True in postgrest's
+    httpx client and exposes no ClientOptions seam; the Supabase edge sends
+    periodic HTTP/2 GOAWAY frames (httpx.RemoteProtocolError: ConnectionTerminated
+    error_code:1) that surfaced as recurring worker errors. get_supabase() must
+    rebuild the postgrest session with http2=False. Fails the moment the
+    _force_http1 rebuild is removed (the GOAWAY surface returns)."""
+    monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "svc-key")
+
+    class _RecordingSession:
+        last_kwargs: dict = {}
+
+        def __init__(self, **kwargs) -> None:
+            type(self).last_kwargs = kwargs
+            self.base_url = kwargs.get("base_url", "https://proj.supabase.co")
+            self.headers = kwargs.get("headers", {})
+            self.timeout = kwargs.get("timeout", 60.0)
+
+    fake_client = MagicMock()
+    # Seed the session as supabase builds it (http2 on, no explicit flag).
+    fake_client.postgrest.session = _RecordingSession(
+        base_url="https://proj.supabase.co", headers={}, timeout=60.0
+    )
+    monkeypatch.setattr("services.db.create_client", lambda url, key: fake_client)
+
+    get_supabase.cache_clear()
+    try:
+        client = get_supabase()
+        assert client is fake_client
+        # The rebuild reconstructed the session class with http2 explicitly off.
+        assert _RecordingSession.last_kwargs.get("http2") is False, (
+            "get_supabase must rebuild postgrest.session with http2=False "
+            "(QUANTALYZE-T/V/E/D/7 HTTP/2 GOAWAY); the rebuild is missing."
+        )
+        assert _RecordingSession.last_kwargs.get("follow_redirects") is True
+    finally:
+        get_supabase.cache_clear()  # don't poison the lru_cache for other tests
+
+
 def test_db_execute_runs_callable_in_thread() -> None:
     """db_execute is the wrapper every Supabase call goes through. Verify
     it actually runs the callable and returns its result. Uses asyncio.run
