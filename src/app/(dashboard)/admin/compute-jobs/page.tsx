@@ -37,11 +37,20 @@ export default async function ComputeJobsPage() {
     // Find strategies that have an api_key_id (connected exchange) but no fills
     admin.rpc("get_strategies_missing_fills"),
 
-    // Compute_analytics jobs with position_metrics_failed
+    // Compute_analytics jobs with position_metrics_failed.
+    //
+    // M-0023: push the predicate server-side via a JSONB selector + a
+    // head-only exact count, instead of fetching every non-null
+    // data_quality_flags row and filtering `position_metrics_failed === true`
+    // in JS. As analytics coverage grows, every strategy gets a non-null
+    // data_quality_flags object (even all-false), so the JS filter was
+    // migrating the whole table to the client. `->>` extracts the JSON value
+    // as text, so a JSON boolean `true` compares equal to the string "true";
+    // null/absent flags never match, replacing the old `.not(... is null)`.
     admin
       .from("strategy_analytics")
-      .select("strategy_id, data_quality_flags")
-      .not("data_quality_flags", "is", null),
+      .select("strategy_id", { count: "exact", head: true })
+      .eq("data_quality_flags->>position_metrics_failed", "true"),
   ]);
 
   const jobs = jobsResult.data ?? [];
@@ -51,11 +60,10 @@ export default async function ComputeJobsPage() {
     ? fillHealthResult.data.length
     : null;
 
-  // Count analytics rows where position_metrics_failed is true
-  const failedPositionMetrics = (dqfResult.data ?? []).filter((row) => {
-    const flags = row.data_quality_flags as Record<string, unknown> | null;
-    return flags?.position_metrics_failed === true;
-  }).length;
+  // Count analytics rows where position_metrics_failed is true (M-0023:
+  // server-side JSONB count via head:true exact count, not a JS filter over
+  // the full table).
+  const failedPositionMetrics = dqfResult.count ?? 0;
 
   // Job status summary
   const statusCounts: Record<string, number> = {};

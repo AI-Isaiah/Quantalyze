@@ -20,6 +20,20 @@ const nextConfig: NextConfig = {
         headers: [
           { key: "X-Frame-Options", value: "DENY" },
           { key: "X-Content-Type-Options", value: "nosniff" },
+          {
+            // Audit-2026-05-07 M-0987: the /security page (and the
+            // downloadable SOC2 packet) advertise "HSTS is enabled … with a
+            // one-year max-age", but no Strict-Transport-Security header was
+            // actually emitted — a diligence/MITM-downgrade gap. Emit the
+            // one-year header so the live response matches the claim.
+            // `preload` is intentionally omitted: it is an irreversible
+            // HSTS-preload-list commitment we have not submitted to, and
+            // advertising it unbacked would re-introduce this finding's
+            // exact "claim ≠ reality" problem. Browsers honour HSTS only
+            // over HTTPS, which Vercel serves exclusively.
+            key: "Strict-Transport-Security",
+            value: "max-age=31536000; includeSubDomains",
+          },
           { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
           {
             // Audit-2026-05-07 #53: pre-emptively whitelist Plausible

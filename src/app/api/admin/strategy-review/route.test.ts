@@ -185,6 +185,12 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
                     api_key_id: "key-1",
                     name: "Strat 1",
                     user_id: "user-1",
+                    // M-1152: the post-approve manager-notify reads
+                    // profiles.email (admin.from("profiles").select("email")
+                    // routes through this fallthrough). Present so the notify
+                    // branch is reachable; inert for every other test because
+                    // notifyManagerApproved is a no-op mock by default.
+                    email: "manager-e2e@test.local",
                   },
                   error: null,
                 }),
@@ -263,6 +269,43 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.success).toBe(true);
+  });
+
+  it("M-1152: logs a tagged console.error when the manager-approval notify throws", async () => {
+    // The post-approve "your strategy was approved" email is fire-and-forget
+    // (Promise.resolve(...).then(...).catch(...)) — the admin already has a 200
+    // by the time it settles. A regression that dropped the .catch back to a
+    // silent swallow would hide a broken notify side-effect with zero signal.
+    // Force notifyManagerApproved to throw and assert the tagged console.error
+    // fires. Neuter check: delete the route's notify-catch console.error and
+    // this fails.
+    mockAdminClient({
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    vi.doMock("@/lib/email", () => ({
+      // ASYNC rejection — the real production failure mode (notifyManagerApproved
+      // awaits send()). This only reaches the route's .catch() because the route
+      // RETURNs the notify promise from its .then(); against the old no-`return`
+      // code the rejection floats and this assertion fails (proving the fix).
+      notifyManagerApproved: async () => {
+        throw new Error("smtp down");
+      },
+    }));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await postApprove();
+    expect(res.status).toBe(200);
+
+    // Flush the fire-and-forget notify chain (resolve → then → notify → catch).
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(errSpy).toHaveBeenCalledWith(
+      "[admin/strategy-review] manager-approval notify failed:",
+      expect.anything(),
+    );
+    errSpy.mockRestore();
   });
 
   it("returns 409 when status-pinning UPDATE matches 0 rows (strategy left pending_review)", async () => {

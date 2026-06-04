@@ -7,6 +7,14 @@ import { safeCompare } from "@/lib/timing-safe-compare";
  * strategies (`source='wizard' AND status='draft'`) whose `created_at`
  * is older than 30 days. The user has clearly abandoned the wizard.
  *
+ * M-0255: REJECTED wizard drafts are EXEMPT. An admin rejection sets
+ * `review_note` (status stays 'draft', source stays 'wizard'), so a non-null
+ * review_note marks a "sent back for changes" row the user may still re-edit —
+ * one that carries trades + strategy_analytics. created_at is never reset on
+ * reject, so without this exemption the sweep CASCADE-deletes a rejected draft
+ * 30 days after its ORIGINAL submission — silent data loss. Only genuinely
+ * abandoned in-progress drafts (`review_note IS NULL`) are collected.
+ *
  * Why the policy: a wizard draft is a `strategies` row in the
  * draft → pending_review pipeline (migration 031). Without a sweep,
  * abandoned drafts accumulate forever and pollute both the user's
@@ -49,6 +57,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     .select("id, api_key_id")
     .eq("source", "wizard")
     .eq("status", "draft")
+    // M-0255: exempt rejected drafts (review_note set) from the sweep —
+    // only genuinely abandoned in-progress drafts are eligible.
+    .is("review_note", null)
     .lt("created_at", cutoff);
 
   if (selectError) {
@@ -85,7 +96,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     .delete({ count: "exact" })
     .in("id", draftIds)
     .eq("source", "wizard")
-    .eq("status", "draft");
+    .eq("status", "draft")
+    // M-0255: belt-and-suspenders TOCTOU guard — a row could have been
+    // rejected (review_note written) between the select above and now;
+    // never hard-delete a rejected draft.
+    .is("review_note", null);
 
   if (delError) {
     console.error("[cron/cleanup-wizard-drafts] delete failed:", delError);

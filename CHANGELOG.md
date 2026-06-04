@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.24.15.113] - 2026-06-04
+### Fixed — PR-3: user-facing flows (9 of 18 findings; 5 reverify-closed, 4 deferred/routed)
+
+Sole-agent fold-plan PR-3 (cross-lane, now single-agent). Disprove-first reverify (workflow `wioq7tmwn`) of all 18 user-facing-flow candidates → **5 reverify-closed + deleted** (H-0178 triple server-gated; M-0251 chip-namespace harm doesn't exist; L-0077 feature-not-bug 4th time; M-0353 inert on an unreachable backstop; M-0872 already unit-proven), **4 deferred/routed** (M-0988 nonce-CSP too large; M-0324→PR-4 migration; M-0352→PR-5 multi-runtime; M-0984→PR-5 docs), **9 fixed here**:
+
+- **M-0255** (DATA-LOSS) — admin-rejected wizard drafts (`source='wizard'`, `status='draft'`, `review_note` set) were both filter-hidden on `/strategies` AND CASCADE-hard-deleted by `cleanup-wizard-drafts` 30 days after the original submission (`created_at` is never reset on reject), silently dropping the strategy + its trades + analytics. Fix: exempt `review_note IS NOT NULL` via `.is("review_note", null)` at BOTH the cron SELECT and the belt-and-suspenders DELETE, and surface the rejection + feedback in the `/strategies` wizard-draft banner. Neuter-verified.
+- **M-1159** — `getStrategyDetailV2` collapsed a transient DB/transport error and a genuine 0-row miss into one `null`, so a Supabase outage rendered a misleading 404 instead of engaging the v2 error boundary. Now throws on any non-`PGRST116` error; `null` (→ `notFound()`) is reserved for the clean miss / RLS-invisible row.
+- **M-0987** — the `/security` page + SOC2 packet advertised HSTS but no `Strict-Transport-Security` header was emitted. Added `max-age=31536000; includeSubDomains` to the `/(.*)` block (`preload` intentionally omitted — an unbacked preload claim would re-create the same "claim ≠ reality" gap).
+- **M-0023** — `admin/compute-jobs` fetched every non-null `data_quality_flags` row and filtered `position_metrics_failed` in JS (migrating the table to the client as coverage grows). Now a server-side JSONB selector + `head:true` exact count.
+- **M-0230** — `/preferences` hard-redirected to `/profile?tab=mandate`, dropping inbound query params (e.g. onboarding-email UTMs). Now merges inbound `searchParams` (forcing `tab=mandate`).
+- **csv-format** — 11 CSV wizard errors deep-link `/security#csv-format`, an anchor that never existed (every "Read the full guide" link landed on the page top). Added a sourced `#csv-format` section; surfaced by the new M-0945 guard.
+- **M-0945** — replaced the one-directional `/security` anchor test (hardcoded list) with a bidirectional guard that derives every required anchor from `wizardErrors.ts` docsHref fragments, auto-covering future additions (would have caught `#csv-format`).
+- **M-0873 / M-0874 / M-1152** — test-gap closures: renamed a mislabeled e2e (it asserted `/for-quants` badge presence, not wizard draft state) + pointed at the real component coverage; added a service-role DB-persistence assertion to the mandate-form e2e (the slider-survives-reload check couldn't tell a real write from an optimistic toast); added behavioral tests for both admin notify-catch sites.
+
+6-specialist suite + Claude red-team. Specialists caught a **real production bug** (M-1152): the strategy-review manager-approval `.then()` didn't `return` the async notify, so its rejection floated and the `.catch()` could never fire — fixed (the test now exercises the real async-rejection path, neuter-verified) — plus a cross-test mock-state leak. Red-team caught a **false claim in the new `/security` copy** (it described a header formula-injection guard that `csv.ts` H-0440 explicitly does NOT do) — reworded to match reality. `tsc`/`eslint` clean; full vitest **6109 pass**.
+
 ## [0.24.15.112] - 2026-06-04
 ### Fixed — PR-2: src/lib data-contracts & type design (5 of 17 findings; brand declined)
 

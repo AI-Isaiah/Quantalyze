@@ -1,4 +1,6 @@
 import { test, expect } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 /**
  * E2E smoke tests for Sprint 5 Task 5.7 — public `/security` page +
@@ -89,32 +91,42 @@ test.describe("/security page", () => {
     ).toBeVisible();
   });
 
-  test("wizard deep-link anchors are still defined (regression guard)", async ({
+  test("every wizard docsHref /security#anchor resolves on /security (bidirectional guard)", async ({
     page,
   }) => {
-    // Every anchor below is referenced by either
-    //   - src/lib/wizardErrors.ts (docsHref values), or
-    //   - src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.tsx
-    // If one is removed, the wizard's scripted error surface 404s the
-    // "Read the full guide" link. This test asserts structural presence
-    // only, not content.
+    // M-0945: the prior guard only asserted that a HARDCODED anchor list still
+    // existed on /security — it never checked the REVERSE direction. So a new
+    // wizardErrors.ts docsHref pointing at a #fragment that /security does not
+    // define would ship a 404'ing "Read the full guide" link undetected — which
+    // is exactly how #csv-format slipped through (11 CSV error entries deep-link
+    // to /security#csv-format). Derive the required anchors FROM the wizard
+    // source so future docsHref additions are auto-covered and the guard fails
+    // the moment a referenced anchor goes missing.
+    const wizardErrorsSrc = readFileSync(
+      join(process.cwd(), "src/lib/wizardErrors.ts"),
+      "utf8",
+    );
+    const fragments = new Set<string>();
+    for (const m of wizardErrorsSrc.matchAll(/\/security#([a-z0-9-]+)/g)) {
+      fragments.add(m[1]);
+    }
+    // ConnectKeyStep.tsx builds `/security#${exchange}-readonly` dynamically,
+    // so the per-exchange literals never appear in source — add them explicitly.
+    for (const ex of ["binance", "okx", "bybit"]) {
+      fragments.add(`${ex}-readonly`);
+    }
+
+    // Sanity floor: a regex or cwd-path drift that derived an empty set would
+    // make the loop below vacuously pass. The wizard references far more than 5.
+    expect(fragments.size).toBeGreaterThanOrEqual(5);
+
     await page.goto("/security");
-
-    const anchors = [
-      "readonly-key",
-      "binance-readonly",
-      "okx-readonly",
-      "bybit-readonly",
-      "regenerate-key",
-      "egress-ips",
-      "sync-timing",
-      "draft-resume",
-      "thresholds",
-    ];
-
-    for (const id of anchors) {
+    for (const id of fragments) {
       const count = await page.locator(`#${id}`).count();
-      expect(count, `missing #${id} on /security`).toBeGreaterThan(0);
+      expect(
+        count,
+        `wizard docsHref references /security#${id} but that anchor is missing on /security`,
+      ).toBeGreaterThan(0);
     }
   });
 });

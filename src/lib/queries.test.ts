@@ -25,6 +25,10 @@ const recorders = vi.hoisted(() => {
     fromCalls: [] as string[], // user-client calls
     adminFromCalls: [] as string[], // admin-client calls
     strategyData: null as unknown,
+    // M-1159: error the strategies-table `.single()` resolves with. Default
+    // null (every existing test sees a clean resolve); set to a PostgrestError
+    // shape to drive getStrategyDetailV2's error-vs-missing branch.
+    strategyError: null as unknown,
     managerRowData: null as unknown,
     // RPC recorder for fetchStrategyLazyMetrics tests (Plan 12-08 / METRICS-15).
     // Each call records (rpcName, args); each test seeds a single response.
@@ -77,7 +81,10 @@ const buildChain = (data: unknown, recordStrategySelect = false) => {
   // chain so the existing `.single()` / `.maybeSingle()` resolution still works.
   chain.order = () => chain;
   chain.limit = () => chain;
-  chain.single = () => Promise.resolve({ data, error: null });
+  // M-1159: only the strategies-table chain (recordStrategySelect) surfaces
+  // a seeded error, so manager/other chains keep their clean-resolve contract.
+  chain.single = () =>
+    Promise.resolve({ data, error: recordStrategySelect ? recorders.strategyError : null });
   // `loadManagerIdentity` (the shared helper in manager-identity.ts) uses
   // `.maybeSingle()` — less fragile than `.single()` because it returns
   // `null` instead of throwing on an empty row set. The mock chain must
@@ -190,6 +197,11 @@ beforeEach(() => {
   recorders.fromCalls = [];
   recorders.adminFromCalls = [];
   recorders.strategyData = null;
+  // M-1159: reset the seeded strategies-table error per-test, matching every
+  // sibling recorder. Without this, a test that leaves a non-PGRST116 error set
+  // would leak into later strategies-table tests (getStrategyDetailV2 would
+  // throw the stale error), reporting red on correct code.
+  recorders.strategyError = null;
   recorders.managerRowData = null;
   recorders.rpcCalls = [];
   recorders.rpcResponse = { data: null, error: null };
@@ -842,6 +854,35 @@ describe("getStrategyDetailV2 — Plan 14b-06 panel4..7 mappings", () => {
     // existing chain returns null which we reproduce by leaving strategyData null.
     recorders.strategyData = null;
     const result = await getStrategyDetailV2("nonexistent-id");
+    expect(result).toBeNull();
+  });
+
+  // M-1159: getStrategyDetailV2 must NOT collapse a transient DB/transport
+  // error into the same `null` it returns for a genuine 0-row miss. A clean
+  // PGRST116 (no rows — also how RLS hides an invisible row) stays null so the
+  // v2 page renders notFound() (404). Any OTHER error must THROW so the
+  // route's error.tsx boundary (Reload + fall-back-to-v1 CTA) engages instead
+  // of a misleading "Strategy Not Found". WHY it matters: a Supabase outage on
+  // a real, published strategy should be a recoverable error state, never a
+  // 404 that tells the allocator the strategy does not exist.
+  it("Test 7b (M-1159): throws on a transient (non-PGRST116) DB error so error.tsx engages", async () => {
+    recorders.strategyData = null;
+    recorders.strategyError = {
+      code: "57014",
+      message: "canceling statement due to statement timeout",
+    };
+    await expect(getStrategyDetailV2("transient-err-id")).rejects.toThrow(
+      /getStrategyDetailV2.*failed/,
+    );
+  });
+
+  it("Test 7c (M-1159): returns null (not throw) on a clean PGRST116 0-row miss → notFound()", async () => {
+    recorders.strategyData = null;
+    recorders.strategyError = {
+      code: "PGRST116",
+      message: "JSON object requested, multiple (or no) rows returned",
+    };
+    const result = await getStrategyDetailV2("clean-miss-id");
     expect(result).toBeNull();
   });
 

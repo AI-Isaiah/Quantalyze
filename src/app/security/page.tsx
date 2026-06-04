@@ -552,6 +552,19 @@ export default function SecurityPage() {
               </p>
             </Section>
 
+            <Section id="csv-format" title="CSV upload format">
+              <p>
+                CSV uploads must be valid UTF-8 with a header row. Each format
+                you can select in the wizard (for example daily returns or a
+                trade log) has its own required columns; the header is matched
+                case-insensitively and in any order, and extra columns are
+                ignored. If a required column is missing or misspelled, the
+                wizard names the exact column it could not find. A leading
+                byte-order mark is stripped automatically. If parsing fails,
+                re-export your file as CSV (UTF-8) from your spreadsheet tool.
+              </p>
+            </Section>
+
             <Section id="acknowledgments" title="Researcher acknowledgments">
               <p>
                 We thank the security researchers who have reported issues

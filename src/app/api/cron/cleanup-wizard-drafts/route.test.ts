@@ -52,6 +52,9 @@ interface Recorders {
   }>;
   eqCalls: Array<{ stage: string; col: string; val: unknown }>;
   ltCalls: Array<{ col: string; val: unknown }>;
+  // M-0255: `.is(col, null)` filter calls, stage-tagged like eqCalls, so the
+  // rejected-draft exemption can be asserted on both the SELECT and the DELETE.
+  isCalls: Array<{ stage: string; col: string; val: unknown }>;
   inCalls: Array<{ col: string; vals: unknown[] }>;
   deleteCalls: Array<{ table: string; options: Record<string, unknown> | undefined }>;
   // The cron makes two strategies chain shapes plus one RPC. Each test seeds
@@ -74,6 +77,7 @@ function makeRecorders(): Recorders {
     selectCalls: [],
     eqCalls: [],
     ltCalls: [],
+    isCalls: [],
     inCalls: [],
     deleteCalls: [],
     selectDraftsResponse: { data: [], error: null },
@@ -211,6 +215,15 @@ function createSupabaseMock(recorders: Recorders) {
       chain.lt = (col: string, val: unknown) => {
         state.lts.push([col, val]);
         recorders.ltCalls.push({ col, val });
+        return chain;
+      };
+
+      chain.is = (col: string, val: unknown) => {
+        recorders.isCalls.push({
+          stage: `${state.table}:${state.verb ?? "?"}`,
+          col,
+          val,
+        });
         return chain;
       };
 
@@ -492,6 +505,39 @@ describe.each([
     // null api_key_id → no orphan-key sweep at all (no RPC, two from() calls).
     expect(recorders.fromCalls).toEqual(["strategies", "strategies"]);
     expect(recorders.rpcCalls).toHaveLength(0);
+  });
+
+  // --- M-0255: rejected wizard drafts are exempt from the hard-delete -----
+
+  it("M-0255: exempts rejected drafts via .is('review_note', null) on BOTH the SELECT and the DELETE", async () => {
+    // A rejected wizard draft is source='wizard' + status='draft' but carries
+    // a review_note (written by the admin reject path). Its created_at is never
+    // reset, so without the `.is("review_note", null)` guard the sweep would
+    // CASCADE-delete it — and its trades + strategy_analytics — 30 days after
+    // the ORIGINAL submission, which is silent data loss the user never sees.
+    // Both the discovery SELECT and the belt-and-suspenders DELETE must apply
+    // the exemption so a row rejected between the two statements is still
+    // spared. Neuter check: drop either `.is(...)` from the route → this fails.
+    const drafts: DraftRow[] = [{ id: "draft-inprogress", api_key_id: null }];
+    recorders.selectDraftsResponse = { data: drafts, error: null };
+    recorders.deleteDraftsResponse = { count: 1, error: null };
+
+    const handler = await getHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(recorders.isCalls).toEqual(
+      expect.arrayContaining([
+        { stage: "strategies:select", col: "review_note", val: null },
+        { stage: "strategies:delete", col: "review_note", val: null },
+      ]),
+    );
+    // Exactly one exemption per stage — no accidental drop or double-filter.
+    expect(
+      recorders.isCalls.filter((c) => c.col === "review_note" && c.val === null),
+    ).toHaveLength(2);
   });
 
   // --- Orphan-key revoke logic (the dangerous path) -----------------------

@@ -650,7 +650,22 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
   )
     .single();
 
-  if (error || !strategy) return null;
+  // M-1159: distinguish a transient DB/transport error from a genuine
+  // 0-row miss. `.single()` returns PGRST116 when the result has no rows —
+  // that is the "missing / unpublished / RLS-invisible" case the v2 page
+  // correctly renders as notFound() (404). Any OTHER error (network blip,
+  // statement timeout, 5xx from PostgREST) must THROW so the route's
+  // purpose-built error boundary (src/app/strategy/[id]/v2/error.tsx —
+  // "Reload" + fall-back-to-v1 CTA) engages, instead of being collapsed
+  // into a misleading "Strategy Not Found" 404. The thrown message is
+  // server-log only (Next.js replaces it with a generic digest on the
+  // client in production), so it cannot leak the query shape to the user.
+  if (error && error.code !== "PGRST116") {
+    throw new Error(
+      `getStrategyDetailV2(${strategyId}) failed: ${error.message}`,
+    );
+  }
+  if (!strategy) return null;
 
   // audit-2026-05-07 H-1255: narrowed to StrategyV2ProjectedColumns (the 9
   // columns SELECTed above, plus trust_tier which the type intentionally

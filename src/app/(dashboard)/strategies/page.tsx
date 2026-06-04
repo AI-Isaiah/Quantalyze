@@ -40,13 +40,22 @@ export default async function StrategiesPage() {
   // invariant while closing the dogfood UX gap (2026-05-21).
   const { data: wizardDraft } = await supabase
     .from("strategies")
-    .select("id, name, created_at")
+    .select("id, name, created_at, review_note")
     .eq("user_id", user.id)
     .eq("source", "wizard")
     .eq("status", "draft")
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
+
+  // M-0255: a rejected wizard draft is the SAME hidden row (source='wizard',
+  // status='draft') but with review_note set by the admin reject path. The
+  // inline list filter hides it AND the inline review_note render only fires
+  // for rows that survive the filter — so the rejection + feedback were never
+  // surfaced (and the cleanup cron would CASCADE-delete it). Surface it here in
+  // the banner instead, preserving the StrategyForm-routing safety invariant
+  // (the Resume CTA targets the wizard, which understands wizard state).
+  const wizardDraftRejected = Boolean(wizardDraft?.review_note);
 
   const strategyIds = strategies?.map((s) => s.id) ?? [];
 
@@ -76,21 +85,46 @@ export default async function StrategiesPage() {
       {wizardDraft && (
         <Card
           data-testid="wizard-draft-resume-banner"
-          className="mb-3 border-accent/40 bg-accent/5"
+          data-rejected={wizardDraftRejected ? "true" : "false"}
+          className={
+            wizardDraftRejected
+              ? "mb-3 border-negative/40 bg-negative/5"
+              : "mb-3 border-accent/40 bg-accent/5"
+          }
         >
           <div className="flex items-center justify-between gap-3">
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-text-primary">
-                You have an unfinished strategy draft.
-              </p>
-              <p className="mt-0.5 text-xs text-text-muted">
-                {wizardDraft.name
-                  ? `"${wizardDraft.name}" — started ${new Date(wizardDraft.created_at).toLocaleDateString()}. Drafts expire after 30 days.`
-                  : `Started ${new Date(wizardDraft.created_at).toLocaleDateString()}. Drafts expire after 30 days.`}
-              </p>
+              {wizardDraftRejected ? (
+                <>
+                  <p className="text-sm font-medium text-text-primary">
+                    Your strategy submission was sent back for changes.
+                  </p>
+                  <p className="mt-0.5 text-xs text-text-muted">
+                    {wizardDraft.name
+                      ? `"${wizardDraft.name}" needs revisions before it can be published.`
+                      : "Your draft needs revisions before it can be published."}
+                  </p>
+                  <p className="mt-2 text-xs text-negative bg-negative/5 rounded px-2 py-1">
+                    Review feedback: {wizardDraft.review_note}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-medium text-text-primary">
+                    You have an unfinished strategy draft.
+                  </p>
+                  <p className="mt-0.5 text-xs text-text-muted">
+                    {wizardDraft.name
+                      ? `"${wizardDraft.name}" — started ${new Date(wizardDraft.created_at).toLocaleDateString()}. Drafts expire after 30 days.`
+                      : `Started ${new Date(wizardDraft.created_at).toLocaleDateString()}. Drafts expire after 30 days.`}
+                  </p>
+                </>
+              )}
             </div>
             <Link href="/strategies/new/wizard">
-              <Button size="sm">Resume draft</Button>
+              <Button size="sm">
+                {wizardDraftRejected ? "Revise & resubmit" : "Resume draft"}
+              </Button>
             </Link>
           </div>
         </Card>

@@ -100,14 +100,20 @@ describe("getStrategyDetailV2 — H-1255 StrategyV2ProjectedColumns narrowing", 
     // projected type — this prevents the PR #106/#107 class of silent-undefined bug.
   });
 
-  it("H-1255-T2: getStrategyDetailV2 returns null for missing strategy", async () => {
-    // Ensure the visibility gate still works: missing row returns null.
+  it("H-1255-T2: getStrategyDetailV2 throws on a non-PGRST116 DB error (M-1159)", async () => {
+    // M-1159: a transient DB/transport error (no clean PGRST116 0-row code)
+    // must surface as a THROW so the v2 error boundary engages — it must NOT be
+    // collapsed into the same null a genuine missing row returns (which would
+    // render a misleading 404 on a Supabase outage).
     mockSingleResponse = { data: null, error: { message: "not found" } };
-    const result = await getStrategyDetailV2("nonexistent-id");
-    expect(result).toBeNull();
+    await expect(getStrategyDetailV2("nonexistent-id")).rejects.toThrow(
+      /getStrategyDetailV2.*failed/,
+    );
   });
 
-  it("H-1255-T3: getStrategyDetailV2 returns null for strategy error", async () => {
+  it("H-1255-T3: getStrategyDetailV2 returns null for a genuine PGRST116 missing row", async () => {
+    // The visibility gate: a clean 0-row miss (also how RLS hides a row) stays
+    // null so the v2 page renders notFound(). M-1159 keeps THIS path as null.
     mockSingleResponse = { data: null, error: { message: "PGRST116", code: "PGRST116" } };
     const result = await getStrategyDetailV2("missing-id");
     expect(result).toBeNull();
