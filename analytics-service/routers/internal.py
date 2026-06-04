@@ -42,7 +42,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from services.db import get_supabase, one
 from services.encryption import decrypt_credentials, get_kek
-from services.exchange import create_exchange
+from services.exchange import aclose_exchange, create_exchange
 from services.key_permissions import detect_permissions
 
 router = APIRouter(prefix="/internal", tags=["internal"])
@@ -238,7 +238,7 @@ async def get_key_permissions(
         raise HTTPException(status_code=502, detail="Exchange permission probe failed")
     finally:
         try:
-            await exchange.close()
+            await aclose_exchange(exchange)
         except Exception:
             pass
 

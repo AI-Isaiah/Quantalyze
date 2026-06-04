@@ -20,7 +20,7 @@ from typing import Any
 
 from supabase import Client
 
-from services.db import PaginatedSelectTruncated, paginated_select
+from services.db import PaginatedSelectTruncated, one, paginated_select
 
 logger = logging.getLogger(__name__)
 
@@ -411,13 +411,20 @@ def _find_strategy_rank_in_latest_batch_before(
         .maybe_single()
         .execute()
     )
-    if not cand_result.data:
+    # `.maybe_single().execute()` returns LITERAL None on zero rows in postgrest
+    # 1.0.x (supabase 2.15.1) — not an APIResponse with .data=None — so a bare
+    # `cand_result.data` raises AttributeError on the (normal) candidate-absent
+    # case. Route through one() (-> Row | None) which collapses both the None
+    # response and the no-row case. Same maybe_single class as Sentry
+    # QUANTALYZE-1/-5 (the router sites were migrated onto one() in PR #390).
+    cand_row = one(cand_result)
+    if not cand_row:
         return None
     # `rank` is a NOT NULL int column on match_candidates; isinstance-narrow the
     # Any-typed PostgREST scalar (supabase 2.15.1 leaves .data Any) back to int.
     # A non-int would mean SQL contract drift — fall through to None, the same
     # "not in batch" outcome the guard above produces.
-    rank = cand_result.data.get("rank")
+    rank = cand_row.get("rank")
     return rank if isinstance(rank, int) else None
 
 

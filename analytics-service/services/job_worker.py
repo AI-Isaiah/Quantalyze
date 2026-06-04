@@ -74,6 +74,7 @@ from services.closed_sets import (  # B8b: single-sourced closed sets, re-export
 from services.db import db_execute, get_supabase, one, rows
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
+    aclose_exchange,
     create_exchange,
     fetch_all_trades,
     fetch_raw_trades,
@@ -992,7 +993,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         raise
     finally:
         try:
-            await ctx.exchange.close()
+            await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
 
@@ -1652,7 +1653,7 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
         raise
     finally:
         try:
-            await ctx.exchange.close()
+            await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover
             pass
 
@@ -1714,7 +1715,7 @@ async def run_poll_positions_job(job: dict[str, Any]) -> DispatchResult:
         raise
     finally:
         try:
-            await ctx.exchange.close()
+            await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
 
@@ -1834,7 +1835,7 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             )
     finally:
         try:
-            await ctx.exchange.close()
+            await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
 
@@ -2042,7 +2043,7 @@ async def run_reconcile_strategy_job(job: dict[str, Any]) -> DispatchResult:
         raise
     finally:
         try:
-            await ctx.exchange.close()
+            await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
 

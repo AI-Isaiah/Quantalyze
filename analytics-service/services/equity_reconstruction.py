@@ -49,6 +49,7 @@ from services.job_worker import (
     _stamp_429,
     classify_exception,
 )
+from services.exchange import aclose_exchange
 from services.redact import scrub_freeform_string
 
 if TYPE_CHECKING:
@@ -2134,7 +2135,7 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
             {"error_kind": "permanent", "sanitized_message": "Deribit reconstruction deferred"},
         )
         try:
-            await ctx.exchange.close()
+            await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover
             pass
         return DispatchResult(
@@ -2157,7 +2158,7 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
             {"reason": "already_reconstructed_for_api_key"},
         )
         try:
-            await ctx.exchange.close()
+            await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover
             pass
         return DispatchResult(outcome=DispatchOutcome.DONE)
@@ -2216,7 +2217,7 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
             )
     finally:
         try:
-            await ctx.exchange.close()
+            await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
 
@@ -2614,7 +2615,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
         )
     finally:
         try:
-            await ctx.exchange.close()
+            await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
 

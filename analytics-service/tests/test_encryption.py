@@ -63,6 +63,52 @@ class TestEncryption:
         with pytest.raises(InvalidToken):
             decrypt_credentials(encrypted, other_kek)
 
+    def test_null_dek_raises_invalid_token_not_attributeerror(self):
+        """QUANTALYZE-M: api_keys.dek_encrypted is NULLABLE (a half-written /
+        SQL-seeded row can have NULL dek_encrypted, DB-confirmed). Pre-fix,
+        `encrypted_row["dek_encrypted"].encode()` raised an opaque
+        `AttributeError: 'NoneType' has no attribute 'encode'`, which
+        job_worker.classify_exception maps to 'unknown' → the job is RETRIED
+        FOREVER. The guard must fail loud and CLASSIFIABLE — InvalidToken maps
+        to 'permanent' (failed_final), so a malformed row is parked, not
+        hammered. Catching AttributeError instead of InvalidToken would pass on
+        the broken behavior; this asserts the right exception type."""
+        encrypted = encrypt_credentials("key", "secret", None, self.test_kek)
+        encrypted["id"] = "00000000-0000-0000-0000-000000001095"
+        encrypted["dek_encrypted"] = None
+        with pytest.raises(InvalidToken):
+            decrypt_credentials(encrypted, self.test_kek)
+
+    def test_null_api_key_encrypted_raises_invalid_token(self):
+        """Same QUANTALYZE-M class on the second envelope column: a NULL
+        api_key_encrypted must also fail loud as InvalidToken, not an opaque
+        AttributeError on `.encode()`."""
+        encrypted = encrypt_credentials("key", "secret", None, self.test_kek)
+        encrypted["id"] = "00000000-0000-0000-0000-000000001096"
+        encrypted["api_key_encrypted"] = None
+        with pytest.raises(InvalidToken):
+            decrypt_credentials(encrypted, self.test_kek)
+
+    def test_empty_string_dek_raises_invalid_token(self):
+        """The guard uses truthiness, so an empty-string column (as plausible as
+        NULL for a half-written text column) is ALSO parked as InvalidToken —
+        not allowed to fall through to Fernet("").decrypt and re-open the
+        opaque-error / retry-forever path. Locks intent against a refactor to an
+        `is None` check that would let "" slip through."""
+        encrypted = encrypt_credentials("key", "secret", None, self.test_kek)
+        encrypted["id"] = "00000000-0000-0000-0000-000000001095"
+        encrypted["dek_encrypted"] = ""
+        with pytest.raises(InvalidToken):
+            decrypt_credentials(encrypted, self.test_kek)
+
+    def test_rotate_kek_null_dek_raises_invalid_token(self):
+        """QUANTALYZE-M sibling: rotate_kek must not blow up with an opaque
+        AttributeError mid-rotation on a malformed (NULL dek_encrypted) row."""
+        new_kek = Fernet.generate_key().decode()
+        row = {"id": "00000000-0000-0000-0000-000000001095", "dek_encrypted": None}
+        with pytest.raises(InvalidToken):
+            rotate_kek(row, self.test_kek, new_kek, 2)
+
     def test_get_kek_missing(self):
         with patch.dict(os.environ, {}, clear=True):
             with pytest.raises(RuntimeError):

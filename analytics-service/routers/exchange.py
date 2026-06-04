@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
-from services.exchange import create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance
+from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
 from services.db import get_supabase, db_execute, one, rows
 from pydantic import BaseModel
@@ -62,7 +62,7 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
         raise HTTPException(status_code=500, detail="Key validation failed. Please check your credentials.")
     finally:
         try:
-            await exchange.close()
+            await aclose_exchange(exchange)
         except Exception:
             pass
 
@@ -194,7 +194,7 @@ async def fetch_trades(request: Request, req: FetchTradesRequest) -> dict[str, A
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to fetch trades from exchange")
     finally:
-        await exchange.close()
+        await aclose_exchange(exchange)
 
     # Store trades atomically with advisory lock (prevents concurrent sync race).
     # Pass `trades` (list[dict]) directly — pre-serializing via json.dumps causes

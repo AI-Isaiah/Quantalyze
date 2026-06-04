@@ -98,13 +98,28 @@ def decrypt_credentials(
     1. Decrypt the DEK with the KEK
     2. Decrypt the credentials with the DEK
     """
+    # api_keys.dek_encrypted is NULLABLE in the schema (a half-written or
+    # SQL-seeded credential row can have NULL dek_encrypted / api_key_encrypted).
+    # Calling `.encode()` on a None column raised an opaque
+    # `AttributeError: 'NoneType' object has no attribute 'encode'` (Sentry
+    # QUANTALYZE-M) which job_worker.classify_exception maps to 'unknown' →
+    # retried FOREVER. Fail loud and CLASSIFIABLE instead: InvalidToken is
+    # mapped to 'permanent' (failed_final), so a malformed row is parked, not
+    # hammered, and the error names the offending key id.
+    dek_encrypted = encrypted_row.get("dek_encrypted")
+    api_key_encrypted = encrypted_row.get("api_key_encrypted")
+    if not dek_encrypted or not api_key_encrypted:
+        raise InvalidToken(
+            f"api_key {encrypted_row.get('id')} has missing encryption columns "
+            "(dek_encrypted/api_key_encrypted is NULL) — malformed credential "
+            "row, cannot decrypt"
+        )
+
     kek_cipher = Fernet(kek)
-    dek = kek_cipher.decrypt(encrypted_row["dek_encrypted"].encode())
+    dek = kek_cipher.decrypt(dek_encrypted.encode())
 
     data_cipher = Fernet(dek)
-    payload = json.loads(
-        data_cipher.decrypt(encrypted_row["api_key_encrypted"].encode())
-    )
+    payload = json.loads(data_cipher.decrypt(api_key_encrypted.encode()))
 
     return payload["api_key"], payload["api_secret"], payload.get("passphrase")
 
@@ -116,8 +131,17 @@ def rotate_kek(
     new_version: int,
 ) -> dict[str, Any]:
     """Re-encrypt the DEK with a new KEK. Data stays untouched."""
+    # Same NULL-column guard as decrypt_credentials (QUANTALYZE-M): a malformed
+    # row with NULL dek_encrypted must fail loud, not raise an opaque
+    # AttributeError mid-rotation.
+    dek_encrypted = encrypted_row.get("dek_encrypted")
+    if not dek_encrypted:
+        raise InvalidToken(
+            f"api_key {encrypted_row.get('id')} has NULL dek_encrypted — "
+            "cannot rotate KEK for a malformed credential row"
+        )
     old_cipher = Fernet(old_kek)
-    dek = old_cipher.decrypt(encrypted_row["dek_encrypted"].encode())
+    dek = old_cipher.decrypt(dek_encrypted.encode())
 
     new_cipher = Fernet(new_kek)
     new_encrypted_dek = new_cipher.encrypt(dek)

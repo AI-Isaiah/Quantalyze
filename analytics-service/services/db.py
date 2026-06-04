@@ -42,6 +42,31 @@ _DB_POOL_SIZE = int(os.getenv("DB_THREAD_POOL_SIZE", "48"))
 _DB_EXECUTOR = ThreadPoolExecutor(max_workers=_DB_POOL_SIZE, thread_name_prefix="db-exec")
 
 
+def _force_http1(client: Client) -> Client:
+    """Rebuild the PostgREST httpx session with HTTP/2 disabled.
+
+    supabase==2.15.1 hardcodes ``http2=True`` when postgrest builds its httpx
+    client (postgrest/_sync/client.py create_session) and exposes no
+    ClientOptions seam to override it. With ``h2`` installed, the Supabase edge
+    periodically sends an HTTP/2 GOAWAY frame to recycle long-lived
+    connections, which httpx surfaces mid-stream as
+    ``httpx.RemoteProtocolError: ConnectionTerminated error_code:1`` (and
+    "Server disconnected") — Sentry QUANTALYZE-T/V/E/D/7. The worker uses a
+    thread pool with per-thread connections, so it gains nothing from HTTP/2
+    multiplexing; HTTP/1.1 removes the GOAWAY surface entirely. Mirrors the
+    admin fixture in tests/test_compute_jobs_fencing.py.
+    """
+    session = client.postgrest.session
+    client.postgrest.session = type(session)(
+        base_url=session.base_url,
+        headers=session.headers,
+        timeout=session.timeout,
+        follow_redirects=True,
+        http2=False,
+    )
+    return client
+
+
 @lru_cache(maxsize=1)
 def get_supabase() -> Client:
     """Module-level Supabase client singleton. Reuses connection pool."""
@@ -49,7 +74,7 @@ def get_supabase() -> Client:
     key = os.getenv("SUPABASE_SERVICE_KEY", "")
     if not url or not key:
         raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY required")
-    return create_client(url, key)
+    return _force_http1(create_client(url, key))
 
 
 def get_user_scoped_supabase(user_access_token: str) -> Client:
@@ -79,7 +104,7 @@ def get_user_scoped_supabase(user_access_token: str) -> Client:
         )
     if not user_access_token:
         raise ValueError("user_access_token is required for a user-scoped client")
-    client = create_client(url, anon)
+    client = _force_http1(create_client(url, anon))
     # Sets `Authorization: Bearer <user jwt>` on all PostgREST/RPC calls.
     client.postgrest.auth(user_access_token)
     return client

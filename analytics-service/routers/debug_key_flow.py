@@ -36,7 +36,7 @@ import structlog
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
-from services.exchange import create_exchange, validate_key_permissions
+from services.exchange import aclose_exchange, create_exchange, validate_key_permissions
 
 logger = structlog.get_logger()
 log = logging.getLogger("quantalyze.debug_key_flow")
@@ -151,7 +151,7 @@ async def validate_key(
     finally:
         if exchange is not None:
             try:
-                await exchange.close()
+                await aclose_exchange(exchange)
             except Exception:  # noqa: BLE001 — best-effort cleanup
                 pass
 
@@ -243,6 +243,6 @@ async def fetch_trades(
     finally:
         if exchange is not None:
             try:
-                await exchange.close()
+                await aclose_exchange(exchange)
             except Exception:  # noqa: BLE001 — best-effort cleanup
                 pass

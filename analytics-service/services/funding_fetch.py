@@ -44,7 +44,7 @@ import ccxt.async_support as ccxt
 from supabase import Client
 
 from services.db import db_execute
-from services.exchange import EXCHANGE_CLASSES, create_exchange, normalize_symbol
+from services.exchange import EXCHANGE_CLASSES, aclose_exchange, create_exchange, normalize_symbol
 from services.exchange_pagination import (
     PageRequest,
     PageResult,
@@ -829,7 +829,7 @@ async def fetch_funding(
         raise ValueError(f"Unsupported exchange for funding: {exchange_name}")
     finally:
         try:
-            await exchange.close()
+            await aclose_exchange(exchange)
         except Exception:  # pragma: no cover
             pass
 
