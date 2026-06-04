@@ -181,22 +181,27 @@ test.describe("FactsheetPreview verification badge regression (CRITICAL)", () =>
     await expect(badge).toContainText("Verified by Quantalyze");
   });
 
-  test("wizard SyncPreview would render badge in 'draft' state (unit-level assertion)", async ({
+  // M-0873: this test's old title claimed it covered the wizard's 'draft'
+  // SyncPreview, but it navigates to /for-quants (the VERIFIED page) and only
+  // asserts the badge exposes a data-verification-state attribute — it never
+  // drives the wizard nor proves a 'draft' value. Renamed to describe what it
+  // actually pins. The genuine 'draft'-state fences live where they can run in
+  // CI (the full wizard SyncPreview render is gated on live Railway analytics,
+  // so it is not e2e-drivable here):
+  //   - FactsheetPreview.test.tsx — the badge renders data-verification-state=
+  //     "draft" and NEVER "Verified by Quantalyze" for verificationState="draft"
+  //     (the "hard-codes verified" regression fence).
+  //   - SyncPreviewStep.tsx:633 passes verificationState="draft"; TS narrows the
+  //     prop to 'draft'|'pending'|'verified' so a typo cannot compile.
+  test("/for-quants factsheet badge exposes a data-verification-state attribute", async ({
     page,
   }) => {
-    // The full sync-preview render is gated on Railway analytics
-    // returning metrics. We assert the contract at the /for-quants
-    // level and rely on the unit tests for wizardErrors.ts +
-    // strategyGate.ts plus manual QA for the live Python sync.
-    // The regression fence is: FactsheetPreview.tsx accepts
-    // verificationState prop with 'draft' | 'pending' | 'verified',
-    // and the wizard passes 'draft'. TS enforces the type; this test
-    // documents the contract for future reviewers.
     await page.goto("/for-quants");
     const badge = page.locator(
       '[data-testid="factsheet-verification-badge"]',
     );
-    // sanity: the badge exposes the verification state via data attr
+    // The badge always surfaces its state via the data attr (the wizard reads
+    // the same component with verificationState="draft").
     await expect(badge).toHaveAttribute("data-verification-state");
   });
 });

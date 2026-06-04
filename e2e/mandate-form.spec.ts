@@ -152,6 +152,20 @@ test.describe("Phase 2 — Mandate Profile Builder", () => {
     const sliderAfter = page.getByLabel("Max weight per strategy");
     await expect(sliderAfter).toHaveValue("0.25");
     await expect(page.getByTestId("mandate-save-status")).not.toContainText("Not saved yet");
+
+    // M-0874: the slider surviving a reload is necessary but NOT sufficient —
+    // an optimistic "Mandate saved" toast plus a client cache that outlives the
+    // reload could green this test even if update_allocator_mandates 500'd.
+    // Prove the write actually landed by reading allocator_preferences.max_weight
+    // directly through the admin (service-role) client, bypassing the app
+    // entirely. This is the only assertion that fails if persistence breaks.
+    const { data: prefRow, error: prefErr } = await admin
+      .from("allocator_preferences")
+      .select("max_weight")
+      .eq("user_id", ctx.userId)
+      .single();
+    expect(prefErr).toBeNull();
+    expect(Number(prefRow?.max_weight)).toBeCloseTo(0.25, 5);
   });
 
   test("Advanced accordion expands and correlation_ceiling slider is reachable", async ({ page }) => {

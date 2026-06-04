@@ -264,7 +264,12 @@ export async function POST(req: NextRequest) {
         admin.from("profiles").select("email").eq("id", sd.user_id).single()
       ).then(({ data: profile }) => {
         if (profile?.email) {
-          notifyManagerApproved(profile.email, sd.name, id as string);
+          // M-1152: RETURN the async notify so its promise is chained into the
+          // .catch() below. notifyManagerApproved is async (awaits send()), so
+          // without the `return` its rejection is a discarded floating promise
+          // and the .catch() can NEVER fire on a real Resend/SMTP failure —
+          // making the tagged log (and any test of it) illusory.
+          return notifyManagerApproved(profile.email, sd.name, id as string);
         }
       }).catch((err) =>
         console.error(
