@@ -86,44 +86,38 @@ class TestAcloseExchange:
         cancellation can interrupt mid-sequence. Testing the helper alone does
         not prove the call sites invoke it — this fails if any finally is
         reverted to a raw close (QUANTALYZE-8/9/S regression). Covers all 11
-        modules that own a ccxt exchange (the diff touched every one)."""
-        import inspect
+        modules that own a ccxt exchange (the diff touched every one).
 
-        import routers.cron as cron_router
-        import routers.debug_key_flow as debug_router
-        import routers.exchange as exchange_router
-        import routers.internal as internal_router
-        import routers.portfolio as portfolio_router
-        import services.equity_reconstruction as eqr
-        import services.funding_fetch as ff
-        import services.ingestion.binance as binance_adapter
-        import services.ingestion.bybit as bybit_adapter
-        import services.ingestion.okx as okx_adapter
-        import services.job_worker as jw
+        Reads the source FILES by path (not `inspect.getsource` on imported
+        modules): importing routers.exchange here would load it with the real
+        slowapi limiter and pollute sys.modules, breaking
+        test_exchange_router_c0202's stub-reload fixture downstream."""
+        from pathlib import Path
 
-        # (module, raw close pattern that must NOT remain)
+        root = Path(__file__).resolve().parents[1]  # analytics-service/
+        # (relative path, raw close pattern that must NOT remain)
         checks = [
-            (jw, "await ctx.exchange.close()"),
-            (eqr, "await ctx.exchange.close()"),
-            (ff, "await exchange.close()"),
-            (cron_router, "await exchange.close()"),
-            (exchange_router, "await exchange.close()"),
-            (internal_router, "await exchange.close()"),
-            (portfolio_router, "await exchange.close()"),
-            (debug_router, "await exchange.close()"),
-            (okx_adapter, "await ex.close()"),
-            (bybit_adapter, "await ex.close()"),
-            (binance_adapter, "await ex.close()"),
+            ("services/job_worker.py", "await ctx.exchange.close()"),
+            ("services/equity_reconstruction.py", "await ctx.exchange.close()"),
+            ("services/funding_fetch.py", "await exchange.close()"),
+            ("routers/cron.py", "await exchange.close()"),
+            ("routers/exchange.py", "await exchange.close()"),
+            ("routers/internal.py", "await exchange.close()"),
+            ("routers/portfolio.py", "await exchange.close()"),
+            ("routers/debug_key_flow.py", "await exchange.close()"),
+            ("services/ingestion/okx.py", "await ex.close()"),
+            ("services/ingestion/bybit.py", "await ex.close()"),
+            ("services/ingestion/binance.py", "await ex.close()"),
         ]
-        for mod, raw in checks:
-            src = inspect.getsource(mod)
+        for rel, raw in checks:
+            src = (root / rel).read_text()
             assert raw not in src, (
-                f"{mod.__name__} contains a raw `{raw}` — exchange-owning "
-                "handlers must close via aclose_exchange (QUANTALYZE-8/9/S "
-                "cancellation-safe close)."
+                f"{rel} contains a raw `{raw}` — exchange-owning handlers must "
+                "close via aclose_exchange (QUANTALYZE-8/9/S cancellation-safe "
+                "close)."
             )
             assert "aclose_exchange" in src, (
-                f"{mod.__name__} no longer references aclose_exchange — the "
+                f"{rel} no longer references aclose_exchange — the "
                 "cancellation-safe close wiring was removed."
             )
 
