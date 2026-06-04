@@ -27,7 +27,7 @@ from models.schemas import (
 from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
 from services.db import chunked_in_query, get_supabase, one, rows
-from services.exchange import create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions
+from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions
 from services.metrics import _safe_float, sanitize_metrics
 from services.portfolio_metrics import compute_twr, compute_mwr, compute_period_returns
 from services.portfolio_optimizer import find_improvement_candidates, generate_narrative
@@ -2222,7 +2222,7 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
         raise HTTPException(status_code=500, detail="Key validation failed. Please check your credentials.")
     finally:
         try:
-            await exchange.close()
+            await aclose_exchange(exchange)
         except Exception as exc:
             # Don't break the response, but DO log — connection leaks and SSL
             # shutdown errors are operator-relevant.
@@ -2251,7 +2251,7 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
             trades = await fetch_all_trades(exchange)
             account_balance = await fetch_usdt_balance(exchange)
         finally:
-            await exchange.close()
+            await aclose_exchange(exchange)
 
         if not trades or len(trades) < 2:
             _fail_vr("Insufficient trade history. At least 2 trades required for verification.")

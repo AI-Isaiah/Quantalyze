@@ -64,7 +64,7 @@ class OkxAdapter:
                 ),
             )
         finally:
-            await ex.close()
+            await exchange_service.aclose_exchange(ex)
 
     async def fetch_raw(self, creds_or_file: dict[str, Any]) -> list[Trade]:
         ex = exchange_service.create_exchange(
@@ -79,7 +79,7 @@ class OkxAdapter:
             )
             return [_normalize_trade(r, "okx") for r in raw]
         finally:
-            await ex.close()
+            await exchange_service.aclose_exchange(ex)
 
     def compute_metrics(self, trades: list[Trade]) -> MetricsSnapshot:
         # Lazy import: P8 ships EquityCurveBuilder in Wave 2; the adapter

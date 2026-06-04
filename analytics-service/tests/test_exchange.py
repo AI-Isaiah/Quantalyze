@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -6,10 +7,109 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import ccxt.async_support as ccxt_async
 
 from services.exchange import (
+    aclose_exchange,
     create_exchange,
     normalize_symbol,
     validate_key_permissions,
 )
+
+
+class TestAcloseExchange:
+    """QUANTALYZE-8/9/S — aclose_exchange must release the aiohttp
+    session/connector even when the awaiting coroutine is cancelled.
+
+    The worker wraps exchange-owning handlers in asyncio.wait_for(...); on
+    timeout the handler is CANCELLED and a bare `await exchange.close()` in a
+    finally can be interrupted mid-sequence (ccxt close() is multi-await),
+    leaking the session/connector to GC ("Unclosed connector"). aclose_exchange
+    shields+drains close() so it always runs to completion.
+    """
+
+    @pytest.mark.asyncio
+    async def test_closes_on_normal_path(self):
+        closed = {"done": False}
+
+        class _FakeExchange:
+            async def close(self):
+                closed["done"] = True
+
+        await aclose_exchange(_FakeExchange())
+        assert closed["done"] is True
+
+    @pytest.mark.asyncio
+    async def test_close_completes_under_cancellation(self):
+        """The load-bearing case: cancel the awaiting frame mid-close and assert
+        close() still ran to completion. A bare `await exchange.close()` would
+        be aborted by the propagating CancelledError, leaking the connector;
+        the shield+drain runs it to the end first."""
+        closed = {"done": False}
+
+        class _FakeExchange:
+            async def close(self):
+                # ccxt close() is a multi-await sequence — simulate yield points
+                # at which a propagating CancelledError could otherwise abort it.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                closed["done"] = True
+
+        ex = _FakeExchange()
+
+        async def _caller():
+            await aclose_exchange(ex)
+
+        task = asyncio.ensure_future(_caller())
+        await asyncio.sleep(0)  # let _caller enter aclose_exchange + schedule close
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert closed["done"] is True, (
+            "aclose_exchange must DRAIN close() to completion under cancellation "
+            "so the aiohttp session/connector is actually released (QUANTALYZE-8/9/S)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_close_error_is_swallowed_not_propagated(self):
+        """A close() that raises (e.g. SSL shutdown) is not a leak and must not
+        mask the handler's real error — it is logged and swallowed."""
+
+        class _FakeExchange:
+            async def close(self):
+                raise RuntimeError("SSL shutdown boom")
+
+        # Must NOT raise.
+        await aclose_exchange(_FakeExchange())
+
+    def test_worker_handlers_use_aclose_not_raw_close(self):
+        """Wiring guard: every exchange-owning module must close via
+        aclose_exchange, never a bare `await ...close()` that an asyncio.wait_for
+        cancellation can interrupt mid-sequence. Testing the helper alone does
+        not prove the call sites invoke it — this fails if any finally is
+        reverted to a raw close (QUANTALYZE-8/9/S regression)."""
+        import inspect
+
+        import routers.cron as cron_router
+        import services.equity_reconstruction as eqr
+        import services.funding_fetch as ff
+        import services.job_worker as jw
+
+        checks = [
+            (jw, "await ctx.exchange.close()"),
+            (eqr, "await ctx.exchange.close()"),
+            (ff, "await exchange.close()"),
+            (cron_router, "await exchange.close()"),
+        ]
+        for mod, raw in checks:
+            src = inspect.getsource(mod)
+            assert raw not in src, (
+                f"{mod.__name__} contains a raw `{raw}` — exchange-owning "
+                "handlers must close via aclose_exchange (QUANTALYZE-8/9/S "
+                "cancellation-safe close)."
+            )
+            assert "aclose_exchange" in src, (
+                f"{mod.__name__} no longer references aclose_exchange — the "
+                "cancellation-safe close wiring was removed."
+            )
 
 
 class TestNormalizeSymbol:

@@ -61,7 +61,7 @@ class BybitAdapter:
                 ),
             )
         finally:
-            await ex.close()
+            await exchange_service.aclose_exchange(ex)
 
     async def fetch_raw(self, creds_or_file: dict[str, Any]) -> list[Trade]:
         ex = exchange_service.create_exchange(
@@ -76,7 +76,7 @@ class BybitAdapter:
             )
             return [_normalize_trade(r, "bybit") for r in raw]
         finally:
-            await ex.close()
+            await exchange_service.aclose_exchange(ex)
 
     def compute_metrics(self, trades: list[Trade]) -> MetricsSnapshot:
         from services.equity_reconstruction import EquityCurveBuilder

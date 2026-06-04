@@ -819,6 +819,45 @@ def create_exchange(exchange_name: str, api_key: str, api_secret: str, passphras
     return exchange
 
 
+async def aclose_exchange(exchange: ccxt.Exchange) -> None:
+    """Close a ccxt async exchange, cancellation-safe.
+
+    A bare ``await exchange.close()`` inside a ``finally`` is best-effort: the
+    worker wraps every exchange-owning handler in ``asyncio.wait_for(...)`` and
+    on timeout the handler coroutine is CANCELLED (which is exactly what happens
+    during a Bybit/OKX rate-limit storm, since ``enableRateLimit=True`` makes the
+    fetch crawl toward the timeout ceiling). ccxt's ``close()`` is a multi-await
+    sequence (ws_close -> session.close -> close_connector -> ...); a re-raised
+    ``CancelledError`` at any of those await points aborts it BEFORE the
+    underlying aiohttp ``ClientSession``/``TCPConnector`` are released, leaking
+    them to GC — the "Unclosed client session" / "Unclosed connector" warnings
+    (Sentry QUANTALYZE-8/9/S).
+
+    Run ``close()`` in a shielded task and, if WE are cancelled while awaiting,
+    drain the task to completion so aiohttp actually releases the socket before
+    re-propagating the cancellation. A close() that itself raises (e.g. an SSL
+    shutdown error) is logged and swallowed — it is not a leak and must not mask
+    the handler's real error.
+    """
+    task = asyncio.ensure_future(exchange.close())
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        except Exception as exc:  # pragma: no cover - close failed mid-drain
+            logger.warning(
+                "aclose_exchange: close() failed during cancellation drain (%s): %s",
+                type(exc).__name__, exc,
+            )
+        raise
+    except Exception as exc:
+        logger.warning(
+            "aclose_exchange: exchange.close() failed (%s): %s",
+            type(exc).__name__, exc,
+        )
+
+
 async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     """Validate that the API key is functional using safe read-only operations.
 

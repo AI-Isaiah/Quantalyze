@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 
 from services.db import get_supabase, rows
 from services.encryption import decrypt_credentials, get_kek
-from services.exchange import create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions
+from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions
 
 router = APIRouter(prefix="/api", tags=["cron"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -310,7 +310,7 @@ async def _sync_single_key(
             trades = await fetch_all_trades(exchange, since_ms=since_ms)
             account_balance = await fetch_usdt_balance(exchange)
         finally:
-            await exchange.close()
+            await aclose_exchange(exchange)
 
         # Store trades atomically via RPC — one call per linked strategy.
         # Each RPC is wrapped so one failing strategy does NOT abort the
@@ -528,11 +528,11 @@ async def _sync_key_with_timeout(key_row: dict[str, Any], kek: bytes) -> dict[st
             timeout=KEY_SYNC_TIMEOUT,
         )
     except asyncio.TimeoutError:
-        # `wait_for` cancels the inner coroutine, which best-effort runs
-        # the inner `finally: await exchange.close()`. A cancelled
-        # finally can itself be interrupted, so the aiohttp session may
-        # leak. Log so the symptom ("Unclosed connector" warnings) maps
-        # back to a specific key and isn't a mystery.
+        # `wait_for` cancels the inner coroutine, which runs the inner
+        # `finally: await aclose_exchange(exchange)`. aclose_exchange
+        # shields+drains ccxt's close() so the aiohttp session/connector are
+        # released even under this cancellation (was Sentry QUANTALYZE-8/9/S —
+        # "Unclosed connector"). Still log so a key timeout maps to a key.
         strategy_ids = list(key_row.get("strategy_ids") or [])
         logger.warning(
             "cron_sync: key %s timed out after %ds — exchange connection "

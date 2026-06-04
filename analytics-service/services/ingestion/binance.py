@@ -71,7 +71,7 @@ class BinanceAdapter:
                 ),
             )
         finally:
-            await ex.close()
+            await exchange_service.aclose_exchange(ex)
 
     async def fetch_raw(self, creds_or_file: dict[str, Any]) -> list[Trade]:
         # CR-01 fix — build supabase client locally rather than expecting
@@ -110,7 +110,7 @@ class BinanceAdapter:
             )
             return [_normalize_trade(r, "binance") for r in raw]
         finally:
-            await ex.close()
+            await exchange_service.aclose_exchange(ex)
 
     def compute_metrics(self, trades: list[Trade]) -> MetricsSnapshot:
         from services.equity_reconstruction import EquityCurveBuilder
