@@ -848,10 +848,13 @@ async def aclose_exchange(exchange: ccxt.Exchange) -> None:
     wrapper, never the close itself): a stuck close() degrades to a logged
     leak-with-warning instead of wedging the SEQUENTIAL worker loop (the jobs run
     one-at-a-time, so an unbounded drain on a hung close would stall the whole
-    worker until the 90s healthz restart). Shielding the drain too means a second
-    cancel (e.g. graceful shutdown) cannot abort close() mid-release. A close()
-    that raises (e.g. an SSL shutdown error) is logged and swallowed — it is not
-    a leak and must not mask the handler's real error.
+    worker until the 90s healthz restart). The drain is itself shielded: the
+    shield keeps the close() task from being cancelled, so a single cancel always
+    drains it; a SECOND cancel (e.g. a graceful-shutdown teardown) abandons the
+    drain with a warning rather than aborting close() mid-await (the connector may
+    then leak only if the loop stops before close() finishes). A close() that
+    raises (e.g. an SSL shutdown error) is logged and swallowed — it is not a leak
+    and must not mask the handler's real error.
     """
     task = asyncio.ensure_future(exchange.close())
     try:

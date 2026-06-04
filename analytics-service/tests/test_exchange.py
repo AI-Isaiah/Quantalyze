@@ -166,37 +166,14 @@ class TestAcloseExchange:
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=2.0)
 
-    @pytest.mark.asyncio
-    async def test_wait_for_timeout_drains_close_end_to_end(self):
-        """End-to-end composition the fix exists for: a handler wrapped in
-        asyncio.wait_for whose timeout cancels it mid-fetch must still run its
-        `finally: await aclose_exchange(ex)` and DRAIN close() to completion —
-        so aiohttp releases the socket. This exercises the real
-        wait_for -> CancelledError -> finally -> drain flow, which the unit test
-        and the source-grep guard cannot see together."""
-        released = {"done": False}
-
-        class _FakeExchange:
-            async def close(self):
-                # ccxt releases the connector across several awaits.
-                await asyncio.sleep(0)
-                await asyncio.sleep(0)
-                released["done"] = True
-
-        async def _handler():
-            ex = _FakeExchange()
-            try:
-                await asyncio.sleep(10)  # the slow fetch that will be timed out
-            finally:
-                await aclose_exchange(ex)
-
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(_handler(), timeout=0.05)
-
-        assert released["done"] is True, (
-            "the handler's finally must drain close() to completion even when "
-            "asyncio.wait_for cancels it mid-fetch (QUANTALYZE-8/9/S)"
-        )
+    # NOTE: deliberately NO `asyncio.wait_for(handler, timeout)` end-to-end test.
+    # Empirically (Python 3.12) wait_for cancels the handler ONCE and then awaits
+    # its `finally` to completion, so even a BARE `await exchange.close()` in the
+    # finally finishes — such a test passes with AND without aclose_exchange and
+    # would be false confidence (Rule 9). The genuine leak/abort case is a cancel
+    # landing directly on the close await (worker shutdown / loop teardown), which
+    # test_close_completes_under_cancellation models with real teeth (it fails on
+    # a bare close). The bounded-drain hang tests above cover the hang class.
 
 
 class TestNormalizeSymbol:
