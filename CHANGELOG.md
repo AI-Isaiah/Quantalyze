@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.115] - 2026-06-04
+### Docs — PR-5: docs hygiene + breach-notification runbook (M-1005, M-0984, G23-193-mig-03)
+
+Sole-agent fold-plan PR-5 (the campaign's final actionable batch). Disprove-first reverify (workflow `wgijtpg7l`) of the 15 remaining un-triaged findings → 6 reverify-closed (incl. both open HIGH red-team findings H-1059/H-1060 — the original red-teamer had read only docs, not live code), 8 genuinely deferred (design-heavy / cross-runtime / repo-policy / CI-baseline infra), and these 3 small actionable doc fixes:
+
+- **M-0984** — `/security` publicly commits to a 72-hour GDPR Article 33 breach-notification SLA with no operational runbook behind it. Added `docs/runbooks/breach-notification.md` (awareness clock, incident roles, the customer notice template mapping to the four elements published on `/security` + Article 33(3), the Article 33 delay-justification template, and the Article 33(5) record-keeping requirement), and pointed the `soc2-readiness.md` "Incident response" row at it. Roles are honest placeholders (founder-operated); no invented contacts.
+- **M-1005** — corrected `docs/runbooks/bridge-outcome-cron.md`: a stale body block framed this job's pg_cron choice as a Vercel-Hobby 2-cron workaround, contradicting the file's own banner. Rewritten to reality (Vercel Pro; the sentinel `vercel-cron-limits.test.ts` enforces the 10-cron ceiling for the *Vercel* crons; pg_cron is the deliberate home for DB-side state-machine work).
+- **G23-193-mig-03** — documented the fork-PR limitation in `migration-policy.yml`: a fork-originated `pull_request` runs without repo secrets, so the backdate guard can't query the remote tip — acceptable for a single-org repo today, must be hardened (gated `pull_request_target` or a trusted same-repo mirror) before opening to outside contributions.
+
+Claude red-team (SHIP) verified the GDPR Art.33/34/33(3)/33(5) content is accurate and the public-promise-vs-legal-obligation reconciliation is correct; its one MEDIUM (the runbook implied a structured "security contact" field that does not exist) was fixed to reality pre-merge. Deferred with deeper rationale: M-1127 (a clean dedup-drop signal needs the declined SQL NOTICE; a worker-side proxy is noisy + adds hot-loop cost — disproportionate for a pre-client observability gap), G23-182-mig-07 (a comment in an already-applied migration), G23-193-mig-04 (workflow REJECT-path test).
+
 ## [0.24.15.114] - 2026-06-04
 ### Fixed — PR-4: for-quants lead dedup (M-0324); migration auto-applies to prod
 
