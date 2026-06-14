@@ -12,6 +12,10 @@ New regression test `test_synthesized_schema_drift_makes_ccxt_raise[okx,bybit]` 
 
 Note: cassette-refresh success ("≥6 of 7 days green") was a Phase 19 soak exit criterion — it was unsatisfiable for the entire soak window, so that criterion never actually held.
 
+### Fixed — phase19-error-rollup cron test time-bomb (was breaking `frontend-test` for every open PR)
+
+`src/app/api/cron/phase19-error-rollup/route.test.ts` pinned the soak flip at `2026-05-25T15:51:07Z` but never pinned the clock, so the non-backfill (live 24h) tests derived `day_index` from real `now − flip`. They passed only while wall-clock time stayed inside the flip+14d soak window — green on 2026-06-04 (day ~10), then red from 2026-06-08 (day 15+), where the route correctly short-circuits `window_post_soak` (200, no Sentry fetch) and 9 assertions broke (`fetch` never called, 200 instead of 500). The route's production behavior is correct — the soak is over — so the test had rotted, not the code. Fixed by pinning the clock to a fixed in-window date (`vi.useFakeTimers({ toFake: ["Date"] })` + `setSystemTime("2026-05-30")`, faking only `Date` so promise/async scheduling is untouched). Surfaced while landing the cassette-refresh fix above: it was failing `frontend-test` shard 2/2 on every open PR, blocking the merge queue repo-wide, not just this branch.
+
 ## [0.24.15.116] - 2026-06-04
 ### Fixed — live Sentry errors in analytics-service (QUANTALYZE-M / -4 / -T·V·E·D·7 / -1·5 residual; -8·9·S hardening)
 
