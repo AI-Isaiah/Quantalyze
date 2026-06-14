@@ -131,3 +131,46 @@ def test_schema_drift_raises_or_returns_partial(broker):
             # it as a valid drift exception class — the wizard's error
             # envelope catches all of these the same way.
             pass
+
+
+# --- SCHEMA DRIFT — synthesizer regression (the cassette-refresh gate) ----------
+
+@pytest.mark.parametrize("broker", ["okx", "bybit"])
+def test_synthesized_schema_drift_makes_ccxt_raise(broker, tmp_path):
+    """The daily cassette-refresh workflow REGENERATES schema-drift.yaml from a
+    freshly-recorded happy.yaml via record_cassettes._synthesize_schema_drift,
+    then replays it through test_schema_drift_raises_or_returns_partial. That
+    replay passes only if ccxt RAISES: its `has_canonical` check includes
+    `"info"`, which ccxt always passes through on a non-raising parse, so the
+    "returns partial" branch is unreachable.
+
+    Regression for the cassette-refresh gate (red 22/22 since 2026-05-27): the
+    prior synthesizer dropped a single canonical field. For OKX's multi-row
+    `data[].details[]` payload ccxt shrugged that off, returned a full balance
+    with `info`, and the job failed its own replay every run. This asserts the
+    synthesizer emits a cassette ccxt detects as drift — i.e. the soak gate can
+    actually go green. Fails against the field-drop synthesizer (OKX), passes
+    against the error-envelope synthesizer.
+    """
+    import importlib.util
+
+    _skip_if_no_cassette(broker, "happy")
+
+    rc_path = Path(__file__).resolve().parents[1] / "scripts" / "record_cassettes.py"
+    spec = importlib.util.spec_from_file_location("record_cassettes", rc_path)
+    rc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rc)  # fresh instance, NOT registered in sys.modules
+
+    broker_dir = tmp_path / broker
+    broker_dir.mkdir(parents=True)
+    happy_dst = broker_dir / "happy.yaml"
+    happy_dst.write_bytes((_CASSETTE_DIR / broker / "happy.yaml").read_bytes())
+
+    rc.CASSETTE_DIR = tmp_path  # synthesize under tmp, never touch committed fixtures
+    drift = rc._synthesize_schema_drift(broker, happy_dst)
+
+    # Absolute path bypasses phase16_vcr's cassette_library_dir join.
+    with phase16_vcr.use_cassette(str(drift)):
+        ex = _make_exchange(broker, TEST_CREDS[broker])
+        with pytest.raises((ccxt.ExchangeError, KeyError, ValueError, TypeError)):
+            ex.fetch_balance()
