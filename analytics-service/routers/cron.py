@@ -439,11 +439,22 @@ async def _sync_single_key(
             sid for sid, stored in per_strategy_stored.items() if stored > 0
         ]
         recompute_enqueue_errors: dict[str, str] = {}
+        # Funding-inclusive CSV route by default (derive_broker_dailies ->
+        # compute_analytics_from_csv); legacy trades-only compute_analytics when
+        # the kill-switch is off. MUST mirror the sync_trades epilogue
+        # (job_worker.run_sync_trades_job) — otherwise this periodic re-sync
+        # would overwrite the funding-inclusive factsheet with funding-EXCLUDING
+        # returns on the next cron tick.
+        from services.job_worker import BROKER_DAILIES_VIA_FUNDING
+
+        _recompute_kind = (
+            "derive_broker_dailies" if BROKER_DAILIES_VIA_FUNDING else "compute_analytics"
+        )
         for sid in recompute_strategy_ids:
             try:
                 supabase.rpc(
                     "enqueue_compute_job",
-                    {"p_strategy_id": sid, "p_kind": "compute_analytics"},
+                    {"p_strategy_id": sid, "p_kind": _recompute_kind},
                 ).execute()
             except Exception as enq_exc:
                 # logger.exception (active traceback) so the full stack reaches

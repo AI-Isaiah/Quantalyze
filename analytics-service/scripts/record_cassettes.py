@@ -135,44 +135,51 @@ def _synthesize_rate_limit(broker: str, happy_path: Path) -> Path:
     return target
 
 
-def _drop_canonical_field(obj, field: str) -> bool:
-    if isinstance(obj, dict):
-        if field in obj:
-            del obj[field]
-            return True
-        return any(_drop_canonical_field(v, field) for v in obj.values())
-    if isinstance(obj, list):
-        return any(_drop_canonical_field(v, field) for v in obj)
-    return False
+# Schema-drift simulation: replace the happy 200 body with the broker's native
+# ERROR ENVELOPE — a non-success status code inside the JSON body that ccxt
+# raises on (ExchangeError class). We deliberately do NOT drop a single
+# canonical field: for a multi-row payload (e.g. OKX `data[].details[]`) ccxt
+# keys the field-less row under `None` and STILL returns a full balance whose
+# raw `info` block is always present, so the replay assertion in
+# test_repro_key_flow.py ("must raise OR omit free/info") is unsatisfiable and
+# the cassette-refresh job fails its own replay gate (it did, every run since
+# 2026-05-27). An error code raises regardless of how the payload shape drifts,
+# mirrors the hand-validated committed cassette, and is the drift class the
+# wizard's broker-quirk error envelope actually catches. ccxt reads these
+# in-body status codes (OKX `code`, Bybit `retCode`, Binance `code`) before
+# parsing the balance, so the exact HTTP status / Content-Length on the
+# replayed response does not matter.
+_DRIFT_ERROR_BODY = {
+    "okx": {
+        "code": "99999",
+        "msg": "unrecognized OKX response shape (schema drift simulated)",
+        "data": [],
+    },
+    "bybit": {
+        "retCode": 10001,
+        "retMsg": "unrecognized Bybit response shape (schema drift simulated)",
+        "result": {},
+    },
+    "binance": {
+        "code": -1000,
+        "msg": "unrecognized Binance response shape (schema drift simulated)",
+    },
+}
 
 
 def _synthesize_schema_drift(broker: str, happy_path: Path) -> Path:
     target = CASSETTE_DIR / broker / "schema-drift.yaml"
-    print(f"[syn ] {broker}/schema-drift.yaml — drop ccxt-canonical field per broker")
+    body = _DRIFT_ERROR_BODY.get(broker)
+    if body is None:
+        sys.exit(f"no schema-drift error envelope defined for broker {broker!r}")
+    print(f"[syn ] {broker}/schema-drift.yaml — broker error envelope (ccxt raises)")
+    # Reuse the recorded happy request/response envelope (so vcr still matches
+    # ccxt's outgoing request) and swap only the final response body.
     data = _load_yaml(happy_path)
     last = data["interactions"][-1]
-    body_str = last["response"]["body"]["string"]
-    parsed = json.loads(body_str)
-    # ccxt's parse_balance assembles canonical free/used/total dicts from
-    # broker-specific fields. To trigger the test_schema_drift branch
-    # ("result missing 'free'/'info'"), we must drop a field ccxt actually
-    # reads — the test exercises the wizard's broker-quirk error path.
-    #
-    # Bybit:   result.list[].coin[].coin     (the currency symbol; without it,
-    #                                         ccxt cannot key the balance row)
-    # OKX:     data[].details[].ccy          (analogous symbol)
-    # Binance: balances[].asset              (analogous symbol)
-    drop_field = {
-        "bybit": "coin",
-        "okx": "ccy",
-        "binance": "asset",
-    }.get(broker, "")
-    dropped = drop_field and _drop_canonical_field(parsed, drop_field)
-    if not dropped:
-        sys.exit(f"could not find ccxt-canonical drift field for {broker} in happy.yaml")
-    last["response"]["body"]["string"] = json.dumps(parsed)
+    last["response"]["body"]["string"] = json.dumps(body)
     _dump_yaml(data, target)
-    print(f"[ok  ] {target.name}: synthesized (dropped '{drop_field}')")
+    print(f"[ok  ] {target.name}: synthesized (error envelope)")
     return target
 
 

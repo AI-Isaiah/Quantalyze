@@ -461,7 +461,16 @@ async def fetch_funding_okx(
     three_months_ago_ms = int(
         (datetime.now(timezone.utc).timestamp() - 90 * 86400) * 1000
     )
-    need_archive = since_ms is not None and since_ms < three_months_ago_ms
+    # since_ms IS None means "full history" — the recent /account/bills endpoint
+    # only retains ~3 months, so a full backfill MUST also hit the archive or
+    # all funding older than 90 days is silently dropped. Pre-fix this gate read
+    # `since_ms is not None and ...`, so the full-history caller
+    # (derive_broker_dailies / first sync) got only 90 days of funding while
+    # realized PnL spanned inception — corrupting the equity anchor for any OKX
+    # account older than 3 months. Mirror the realized path's convention
+    # (services.exchange.fetch_daily_pnl `should_fetch_archive`). Recent +
+    # archive overlap is deduped by match_key below, so fetching both is safe.
+    need_archive = since_ms is None or since_ms < three_months_ago_ms
 
     async def _paginate(endpoint_name: str) -> None:
         endpoint = getattr(exchange, endpoint_name, None)

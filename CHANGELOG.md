@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.24.15.119] - 2026-06-14
+### Security — dependency vulnerability remediation (`npm audit fix`, lockfile-only)
+
+`npm audit fix` (non-breaking, semver-compatible only) resolving 11 of 13 advisories — all 5 high + 6 of 8 moderate. Every bumped package traces to an advisory; all resolved versions stay inside the ranges already declared in `package.json`, so **no direct-dependency range was edited** — only the lockfile's resolved versions move. Frontend gate green on the patched tree (typecheck, lint 0 errors, `next build`, 6110 vitest passing).
+
+HIGH:
+- **next** 16.2.4 → 16.2.9 (within the declared `^16.2.3`) — clears 13 advisories incl. SSRF via WebSocket upgrades (GHSA-c4j6-fc7j-m34r), RSC/middleware cache poisoning (GHSA-3g8h-86w9-wvmq, GHSA-vfv6-92ff-j949, GHSA-wfc6-r584-vfw7), middleware/proxy bypass (GHSA-26hh-7cqf-hhc6, GHSA-492v-c6pp-mqqv, GHSA-267c-6grr-h53f, GHSA-36qx-fr4f-26g5), CSP-nonce + beforeInteractive XSS (GHSA-ffhc-5mcf-pf4q, GHSA-gx5p-jg67-6x7h), and DoS in RSC / Cache Components / Image Optimization (GHSA-8h8q-6873-q5fj, GHSA-mg66-mrh9-m8jx, GHSA-h64f-5h5j-jqjh).
+- **esbuild** 0.27.7 → 0.28.1 (via `tsx` 4.21.0 → 4.22.4) — RCE via `NPM_CONFIG_REGISTRY` binary-integrity gap (GHSA-gv7w-rqvm-qjhr) + dev-server arbitrary file read (GHSA-g7r4-m6w7-qqqr).
+- **fast-uri** → 3.1.2 — path traversal + host confusion via percent-encoding (GHSA-q3j6-qgpj-74h6, GHSA-v39h-62p7-jpjc).
+- **protobufjs** → 8.6.3 / 7.6.4 (via OpenTelemetry exporters) — overlong-UTF-8 decoding (GHSA-q6x5-8v7m-xcrf) + recursive-descriptor DoS (GHSA-jggg-4jg4-v7c6).
+
+MODERATE:
+- **ws** → 8.21.0 — uninitialized-memory disclosure (GHSA-58qx-3vcg-4xpx).
+- **uuid** — vulnerable `uuid@10.0.0` transitive path eliminated (not upgraded): `resend` 6.12.2 → 6.12.4 now pulls `svix` 1.92.2 (above the vulnerable ≤1.91.1 range) plus `standardwebhooks` 1.0.0, neither of which depends on `uuid`, so zero `uuid` nodes remain in the lockfile — closing the missing buffer-bounds read in v3/v5/v6 (GHSA-w5hq-g745-h8pq).
+- **brace-expansion** → 5.0.6 — `max` DoS bypass (GHSA-jxxr-4gwj-5jf2).
+- **ip-address** → 10.2.0 — XSS in Address6 HTML emitters (GHSA-v2v4-37r5-5v8g).
+- Lockfile self-version field resynced to the package version (was drifted at `0.24.9.25`).
+
+**Not fixed (deliberate):** 2 remaining moderate `postcss` advisories (GHSA-qx2v-qp2m-jg93) are bundled inside `next`'s own dependency tree and unreachable at 16.2.9; the only `npm audit fix --force` remedy downgrades Next.js 16 → 9, a destructive framework rollback. Left until Next ships a patched postcss. A deliberate Next.js minor/major upgrade is out of scope for a security-patch PR.
+
+## [0.24.15.118] - 2026-06-14
+### Added — broker API key full-history → funding-inclusive daily-return series → factsheet via the standard CSV route
+
+When a broker API key is added, the strategy's factsheet is now compiled from a daily-return series derived from the key's ENTIRE history, reusing the CSV analytics route (`compute_analytics_from_csv` → `run_csv_strategy_analytics` → `compute_all_metrics`). The load-bearing change vs the legacy trades-only path: the daily series now INCLUDES funding PnL.
+
+**Why funding matters (the bug this fixes):** `fetch_daily_pnl` excludes funding by design (C-0319). For crypto-perp strategies funding is the dominant return driver — on a live Bybit read-key (190k principal → 245.6k over ~5 months) the split was realized trading +15,773 (+8.3%), **funding +38,766 (+20.4%)**, open unrealized −680. The realized-only series reported **+6.8% (Sharpe 0.49)** where true equity growth is **~+28.8% (Sharpe 1.27)** — funding was two-thirds of the profit and was silently dropped. The new path combines realized PnL + funding, anchored to the account's current total equity (NAV incl. unrealized), so initial capital is derived correctly (anchor-to-today, reconstruct backward) and the factsheet matches reality.
+
+- **New `analytics-service/services/broker_dailies.py`** — `combine_realized_and_funding()` merges realized daily PnL + per-day funding into one series via the existing `trades_to_daily_returns_with_status`, gap-filled to every calendar day (the "all days" requirement + `compute_all_metrics`' ascending-DatetimeIndex contract). Funding is sign-encoded into `daily_pnl`-shaped records so it flows through unchanged.
+- **New `derive_broker_dailies` compute-job kind** (`services/job_worker.py`) — preflight → fetch equity + full-history realized PnL + funding → derive → service-role upsert into `csv_daily_returns` (chunked) → enqueue `compute_analytics_from_csv`. The `sync_trades` epilogue and `routers/cron.py` `cron_sync` periodic recompute now enqueue this kind under the `BROKER_DAILIES_VIA_FUNDING` flag (default ON; set `false` to instantly revert to legacy trades-only `compute_analytics`). `<2`-day accounts stamp a terminal `failed` status so the wizard poller never hangs.
+- **OKX equity read fix** (`services/exchange.py` `fetch_okx_total_equity_usd` / `fetch_account_equity_usd`) — ccxt's unified `fetch_balance()` crashes on OKX in ccxt 4.5.x (`load_markets` keysort: `'<' not supported between str and NoneType`), so the equity anchor is read via the raw `private_get_account_balance` `totalEq`. Also repairs a LATENT PROD BUG: `equity_reconstruction._fetch_current_equity` hit the same crash, silently shipping an un-anchored reconstructed curve for every OKX allocator.
+- **OKX funding archive-window fix** (`services/funding_fetch.py`) — `fetch_funding_okx(since_ms=None)` (full history) was gated `since_ms is not None and ...`, so the archive endpoint was never fetched and OKX funding was capped at ~90 days while realized PnL spanned inception — corrupting the anchor for OKX accounts older than 3 months. Now treats `None` as "fetch everything" (mirrors `fetch_daily_pnl`); recent+archive overlap is deduped by `match_key`.
+- **Migration `20260614120000_derive_broker_dailies_kind.sql`** — registers the strategy-scoped kind in `compute_job_kinds` + `compute_jobs_kind_check` + `compute_jobs_kind_target_coherence` (DROP+ADD strict-superset, self-verifying DO block) + `main_worker.py` watchdog override.
+
+Trade-off (kill-switch reversible): API-key strategies now render via the CSV-route factsheet shape — headline metrics (cumulative / CAGR / Sharpe / drawdown) are correct and funding-inclusive, but per-trade and exposure panels are hidden (`csv_source` flag), since a daily-return series carries no per-fill data.
+
+Validated end-to-end against two live read-only keys (OKX + Bybit): full history downloaded, equity anchor read (OKX via raw `totalEq`, no heuristic capital), every calendar day present, Bybit reproduces the true ~+29%. Tests: new `tests/test_broker_dailies.py` (combine/gap-fill/funding-regression/OKX-equity/OKX-archive) + handler/dispatch/cron coverage; 2618 analytics tests pass.
+
+## [0.24.15.117] - 2026-06-14
+### Fixed — cassette-refresh workflow: OKX schema-drift synthesis + leak-gate clean-scan abort (red 22/22 since inception)
+
+The daily `cassette-refresh.yml` (re-records OKX+Bybit broker cassettes so the unified key-flow replay suite catches schema rotations before the live `/process-key` route does) had **never once been green** — every one of its 22 scheduled runs since 2026-05-27 failed. Two stacked latent bugs, the second hidden behind the first:
+
+- **OKX schema-drift synthesis (`analytics-service/scripts/record_cassettes.py`)** — `_synthesize_schema_drift` simulated drift by deleting one ccxt-canonical field (OKX `ccy`). OKX's balance payload has multiple `data[].details[]` rows, so dropping one `ccy` leaves a parseable response: ccxt re-derives `free/used/total` and **always** passes through the raw `info` block, so `fetch_balance()` returns a full balance and never raises. The replay gate `test_schema_drift_raises_or_returns_partial` only passes when ccxt raises (its `has_canonical` check includes `"info"`, which is always present on a non-raising parse), so the synthesized OKX cassette was structurally unsatisfiable and the job died at the pytest step every run. Fixed by emitting a broker-native error envelope (OKX `code:"99999"`, Bybit `retCode:10001`, Binance `code:-1000`) that ccxt raises on regardless of how the payload shape drifts — the same strategy the hand-validated committed OKX cassette already used (the fixture had been hand-fixed but the generator never was, which is what hid the divergence). Removed the now-unused `_drop_canonical_field` helper.
+- **Leak-gate Layer B (`scripts/repro-key-flow.sh`)** — `high_entropy_hits=$(grep ... | grep -v ... | wc -l)` under `set -euo pipefail` aborts the whole script when the credential scan finds nothing (the first grep exits 1, pipefail propagates it) — i.e. the **healthy clean-scan case** failed. Never surfaced before because the script always died at the pytest step first. Fixed by lifting errexit (`set +e`/`set -e`) around the scan so only a real count > 0 fails the gate; nounset and the rest of errexit are untouched.
+
+New regression test `test_synthesized_schema_drift_makes_ccxt_raise[okx,bybit]` synthesizes the drift cassette from the committed `happy.yaml` and asserts ccxt raises — it fails against the old field-drop synthesizer (OKX) and passes against the error-envelope one. Both committed schema-drift cassettes regenerated (OKX: cosmetic JSON spacing only; Bybit: flipped field-drop → error envelope). Verified e2e: full replay + both leak-gate layers green (`repro-key-flow.sh` exit 0, "ALL CHECKS PASSED"); `test_repro_key_flow.py` 10 passed / 4 skipped; all 2686 analytics tests still collect.
+
+Note: cassette-refresh success ("≥6 of 7 days green") was a Phase 19 soak exit criterion — it was unsatisfiable for the entire soak window, so that criterion never actually held.
+
+### Fixed — phase19-error-rollup cron test time-bomb (was breaking `frontend-test` for every open PR)
+
+`src/app/api/cron/phase19-error-rollup/route.test.ts` pinned the soak flip at `2026-05-25T15:51:07Z` but never pinned the clock, so the non-backfill (live 24h) tests derived `day_index` from real `now − flip`. They passed only while wall-clock time stayed inside the flip+14d soak window — green on 2026-06-04 (day ~10), then red from 2026-06-08 (day 15+), where the route correctly short-circuits `window_post_soak` (200, no Sentry fetch) and 9 assertions broke (`fetch` never called, 200 instead of 500). The route's production behavior is correct — the soak is over — so the test had rotted, not the code. Fixed by pinning the clock to a fixed in-window date (`vi.useFakeTimers({ toFake: ["Date"] })` + `setSystemTime("2026-05-30")`, faking only `Date` so promise/async scheduling is untouched). Surfaced while landing the cassette-refresh fix above: it was failing `frontend-test` shard 2/2 on every open PR, blocking the merge queue repo-wide, not just this branch.
+
 ## [0.24.15.116] - 2026-06-04
 ### Fixed — live Sentry errors in analytics-service (QUANTALYZE-M / -4 / -T·V·E·D·7 / -1·5 residual; -8·9·S hardening)
 

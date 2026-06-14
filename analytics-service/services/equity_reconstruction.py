@@ -2006,6 +2006,21 @@ async def _fetch_current_equity(
     failing the whole job.
     """
     partial_unpriced: set[str] = set()
+    # OKX: ccxt's unified fetch_balance() crashes (load_markets keysort,
+    # str < None TypeError in ccxt 4.5.x) so the anchor here silently returned
+    # None for every OKX account, shipping an UN-anchored reconstructed curve.
+    # Read OKX's own marked-to-USD account equity via the raw endpoint instead;
+    # totalEq already includes open-position unrealized PnL, so the unified
+    # uPnL gate below (which skips it for OKX/Bybit) is already satisfied.
+    if venue.lower() == "okx":
+        from services.exchange import fetch_okx_total_equity_usd
+
+        eq = await fetch_okx_total_equity_usd(exchange)
+        if eq is not None:
+            return eq, partial_unpriced
+        # eq is None → fall through to the generic path (which will most
+        # likely also fail and return None, preserving the advisory-anchor
+        # contract: an un-anchored series ships rather than failing the job).
     try:
         balance = await exchange.fetch_balance()
         if not isinstance(balance, dict):

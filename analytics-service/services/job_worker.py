@@ -165,6 +165,19 @@ WORKER_FENCE_V2: Final[bool] = (
     os.environ.get("WORKER_FENCE_V2", "true").lower() != "false"
 )
 
+# When a key's history sync completes, derive the strategy's daily-return
+# series from realized PnL + FUNDING (anchored to current equity) and compile
+# the factsheet via the standard CSV route, instead of the legacy trades-only
+# compute_analytics whose returns EXCLUDE funding (the dominant return driver
+# for perp strategies — see services.broker_dailies). Defaults ON. Set
+# BROKER_DAILIES_VIA_FUNDING=false in the Railway worker env as an instant
+# kill-switch to revert the sync epilogue to compute_analytics. Read once at
+# import (same rollout-window rationale as the flags above); tests flip it via
+# monkeypatch on this module attribute.
+BROKER_DAILIES_VIA_FUNDING: Final[bool] = (
+    os.environ.get("BROKER_DAILIES_VIA_FUNDING", "true").lower() != "false"
+)
+
 logger = logging.getLogger("quantalyze.analytics.job_worker")
 
 
@@ -245,6 +258,7 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "reconstruct_allocator_history": 30 * 60,   # Phase 07 / D-01 / RESEARCH.md §1E — 30 min full backfill
     "refresh_allocator_equity_daily": 3 * 60,   # Phase 07 / D-02 — one-day delta per key (VOICES-ACCEPTED f1)
     "process_key_long": 30 * 60,   # Phase 19 / BACKBONE-09 — 30 min ceiling supports 90-day OKX archive backfill
+    "derive_broker_dailies": 15 * 60,  # full-history realized PnL + funding fetch (mirrors sync_trades envelope)
 }
 
 
@@ -1475,17 +1489,23 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # the user sees a real error instead of an indefinite spinner. The
     # daily cron will still re-enqueue and the next successful run will
     # upsert computation_status back to 'computing' / 'complete'.
+    # Follow-on analytics kind: the funding-inclusive CSV route by default
+    # (derive_broker_dailies → compute_analytics_from_csv), or the legacy
+    # trades-only compute_analytics when the kill-switch is off.
+    _follow_on_kind = (
+        "derive_broker_dailies" if BROKER_DAILIES_VIA_FUNDING else "compute_analytics"
+    )
     try:
-        def _enqueue_compute_analytics() -> None:
+        def _enqueue_follow_on() -> None:
             ctx.supabase.rpc(
                 "enqueue_compute_job",
-                {"p_strategy_id": strategy_id, "p_kind": "compute_analytics"},
+                {"p_strategy_id": strategy_id, "p_kind": _follow_on_kind},
             ).execute()
 
-        await db_execute(_enqueue_compute_analytics)
+        await db_execute(_enqueue_follow_on)
         logger.info(
-            "sync_trades: enqueued follow-on compute_analytics for strategy %s",
-            strategy_id,
+            "sync_trades: enqueued follow-on %s for strategy %s",
+            _follow_on_kind, strategy_id,
         )
     except Exception as exc:  # noqa: BLE001
         # logger.exception (not warning) — operators must see the stack
@@ -1690,6 +1710,140 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
         "sync_funding: upserted %d funding rows for strategy %s",
         result["inserted"], strategy_id,
     )
+    return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
+async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
+    """Broker key full-history → daily-return series → standard CSV route.
+
+    Downloads the API key's entire history (realized PnL bills + funding),
+    derives ONE daily-return series anchored to the account's current total
+    equity (NAV incl. unrealized), persists it to csv_daily_returns, and
+    enqueues compute_analytics_from_csv so the standard CSV pipeline compiles
+    the factsheet. Funding is INCLUDED because it is the dominant return driver
+    for perp strategies and fetch_daily_pnl excludes it by design — a
+    realized-only series understates the true return by a large margin (see
+    services.broker_dailies for the live-account reconciliation).
+
+    Pre-flight: same as sync_trades (strategy + api_key load, circuit breaker,
+    decrypt, exchange create). On 429, stamps last_429_at.
+    """
+    ctx = await _exchange_preflight(job, "run_derive_broker_dailies_job")
+    if isinstance(ctx, DispatchResult):
+        return ctx
+
+    strategy_id = job["strategy_id"]
+    venue = ctx.key_row["exchange"]
+
+    from services.broker_dailies import combine_realized_and_funding
+    from services.exchange import fetch_account_equity_usd
+    from services.funding_fetch import (
+        fetch_funding_binance,
+        fetch_funding_okx,
+        fetch_funding_bybit,
+    )
+
+    try:
+        # Current total equity = the initial-capital anchor (anchor-to-today,
+        # reconstruct backward). OKX is read via raw totalEq inside
+        # fetch_account_equity_usd (ccxt fetch_balance crashes on OKX).
+        equity, balance_error = await fetch_account_equity_usd(ctx.exchange, venue)
+        # since_ms=None ⇒ ENTIRE account history (OKX inception via archive
+        # bills, Binance inception, Bybit last 365 days).
+        realized = await fetch_all_trades(ctx.exchange, since_ms=None)
+        if venue == "binance":
+            funding = await fetch_funding_binance(ctx.exchange, strategy_id, None)
+        elif venue == "okx":
+            funding = await fetch_funding_okx(ctx.exchange, strategy_id, None)
+        elif venue == "bybit":
+            funding = await fetch_funding_bybit(ctx.exchange, strategy_id, None)
+        else:
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=f"derive_broker_dailies: venue {venue} not supported",
+                error_kind="permanent",
+            )
+    except ccxt.RateLimitExceeded as exc:
+        await _stamp_429(ctx.supabase, ctx.key_row, exc)
+        raise
+    finally:
+        try:
+            await aclose_exchange(ctx.exchange)
+        except Exception:  # pragma: no cover
+            pass
+
+    returns, meta = combine_realized_and_funding(
+        realized, funding, account_balance=equity, balance_error=balance_error,
+    )
+    if len(returns) < 2:
+        # Brand-new / inactive account: not enough history to compile a
+        # factsheet (compute_all_metrics needs >=2 days). Stamp a TERMINAL
+        # 'failed' status so the wizard's sync-preview poller reaches a gate
+        # instead of spinning forever on a never-arriving 'complete' — mirrors
+        # run_csv_strategy_analytics' own <2 branch and the legacy
+        # compute_analytics path. The next sync re-derives once history grows.
+        logger.info(
+            "derive_broker_dailies: <2 daily-return days for strategy %s "
+            "(realized=%d funding=%d) — marking insufficient-history",
+            strategy_id, len(realized), len(funding),
+        )
+
+        def _mark_insufficient() -> None:
+            ctx.supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": strategy_id,
+                    "computation_status": "failed",
+                    "computation_error": (
+                        "Insufficient broker history. At least 2 days of "
+                        "activity required."
+                    ),
+                    "data_quality_flags": {"csv_source": True},
+                },
+                on_conflict="strategy_id",
+            ).execute()
+
+        await db_execute(_mark_insufficient)
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    # Service-role upsert into csv_daily_returns. The worker has no auth.uid()
+    # session so it cannot call persist_csv_daily_returns (auth-gated); it
+    # writes the table directly like it does for trades. PK (strategy_id, date)
+    # makes the re-derive idempotent. Chunked so a long-history account can't
+    # exceed PostgREST's request-size ceiling in a single upsert.
+    rows_payload = [
+        {
+            "strategy_id": strategy_id,
+            "date": ts.date().isoformat(),
+            "daily_return": float(val),
+        }
+        for ts, val in returns.items()
+    ]
+
+    _UPSERT_CHUNK = 1000
+    for _start in range(0, len(rows_payload), _UPSERT_CHUNK):
+        _batch = rows_payload[_start:_start + _UPSERT_CHUNK]
+
+        def _upsert_dailies(batch: list[dict[str, Any]] = _batch) -> None:
+            ctx.supabase.table("csv_daily_returns").upsert(
+                batch, on_conflict="strategy_id,date",
+            ).execute()
+
+        await db_execute(_upsert_dailies)
+    logger.info(
+        "derive_broker_dailies: upserted %d daily-return rows for strategy %s "
+        "(venue=%s realized=%d funding=%d heuristic_capital=%s)",
+        len(rows_payload), strategy_id, venue, len(realized), len(funding),
+        meta.get("used_heuristic_capital"),
+    )
+
+    # Hand off to the standard CSV analytics route to compile the factsheet.
+    def _enqueue_csv_analytics() -> None:
+        ctx.supabase.rpc(
+            "enqueue_compute_job",
+            {"p_strategy_id": strategy_id, "p_kind": "compute_analytics_from_csv"},
+        ).execute()
+
+    await db_execute(_enqueue_csv_analytics)
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
@@ -2717,6 +2871,9 @@ async def dispatch(job: dict[str, Any]) -> DispatchResult:
         handler = run_poll_positions_job
     elif kind == "sync_funding":
         handler = run_sync_funding_job
+    elif kind == "derive_broker_dailies":
+        # Broker key full-history → dailies → standard CSV route.
+        handler = run_derive_broker_dailies_job
     elif kind == "reconcile_strategy":
         handler = run_reconcile_strategy_job
     elif kind == "compute_intro_snapshot":
