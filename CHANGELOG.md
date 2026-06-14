@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.24.15.119] - 2026-06-14
+### Security — dependency vulnerability remediation (`npm audit fix`, lockfile-only)
+
+`npm audit fix` (non-breaking, semver-compatible only) resolving 11 of 13 advisories — all 5 high + 6 of 8 moderate. Every bumped package traces to an advisory; all resolved versions stay inside the ranges already declared in `package.json`, so **no direct-dependency range was edited** — only the lockfile's resolved versions move. Frontend gate green on the patched tree (typecheck, lint 0 errors, `next build`, 6110 vitest passing).
+
+HIGH:
+- **next** 16.2.4 → 16.2.9 (within the declared `^16.2.3`) — clears 13 advisories incl. SSRF via WebSocket upgrades (GHSA-c4j6-fc7j-m34r), RSC/middleware cache poisoning (GHSA-3g8h-86w9-wvmq, GHSA-vfv6-92ff-j949, GHSA-wfc6-r584-vfw7), middleware/proxy bypass (GHSA-26hh-7cqf-hhc6, GHSA-492v-c6pp-mqqv, GHSA-267c-6grr-h53f, GHSA-36qx-fr4f-26g5), CSP-nonce + beforeInteractive XSS (GHSA-ffhc-5mcf-pf4q, GHSA-gx5p-jg67-6x7h), and DoS in RSC / Cache Components / Image Optimization (GHSA-8h8q-6873-q5fj, GHSA-mg66-mrh9-m8jx, GHSA-h64f-5h5j-jqjh).
+- **esbuild** 0.27.7 → 0.28.1 (via `tsx` 4.21.0 → 4.22.4) — RCE via `NPM_CONFIG_REGISTRY` binary-integrity gap (GHSA-gv7w-rqvm-qjhr) + dev-server arbitrary file read (GHSA-g7r4-m6w7-qqqr).
+- **fast-uri** → 3.1.2 — path traversal + host confusion via percent-encoding (GHSA-q3j6-qgpj-74h6, GHSA-v39h-62p7-jpjc).
+- **protobufjs** → 8.6.3 / 7.6.4 (via OpenTelemetry exporters) — overlong-UTF-8 decoding (GHSA-q6x5-8v7m-xcrf) + recursive-descriptor DoS (GHSA-jggg-4jg4-v7c6).
+
+MODERATE:
+- **ws** → 8.21.0 — uninitialized-memory disclosure (GHSA-58qx-3vcg-4xpx).
+- **uuid** → ≥11.1.1 (via `resend` → `svix`) — missing buffer-bounds check in v3/v5/v6 (GHSA-w5hq-g745-h8pq).
+- **brace-expansion** → 5.0.6 — `max` DoS bypass (GHSA-jxxr-4gwj-5jf2).
+- **ip-address** → 10.2.0 — XSS in Address6 HTML emitters (GHSA-v2v4-37r5-5v8g).
+- Lockfile self-version field resynced to the package version (was drifted at `0.24.9.25`).
+
+**Not fixed (deliberate):** 2 remaining moderate `postcss` advisories (GHSA-qx2v-qp2m-jg93) are bundled inside `next`'s own dependency tree and unreachable at 16.2.9; the only `npm audit fix --force` remedy downgrades Next.js 16 → 9, a destructive framework rollback. Left until Next ships a patched postcss. A deliberate Next.js minor/major upgrade is out of scope for a security-patch PR.
+
 ## [0.24.15.118] - 2026-06-14
 ### Added — broker API key full-history → funding-inclusive daily-return series → factsheet via the standard CSV route
 
