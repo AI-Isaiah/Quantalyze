@@ -13,7 +13,7 @@ HIGH:
 
 MODERATE:
 - **ws** → 8.21.0 — uninitialized-memory disclosure (GHSA-58qx-3vcg-4xpx).
-- **uuid** → ≥11.1.1 (via `resend` → `svix`) — missing buffer-bounds check in v3/v5/v6 (GHSA-w5hq-g745-h8pq).
+- **uuid** — vulnerable `uuid@10.0.0` transitive path eliminated (not upgraded): `resend` 6.12.2 → 6.12.4 dropped its pinned `svix` and now depends on `standardwebhooks` directly, so no `uuid` node remains in the lockfile — closing the missing buffer-bounds read in v3/v5/v6 (GHSA-w5hq-g745-h8pq).
 - **brace-expansion** → 5.0.6 — `max` DoS bypass (GHSA-jxxr-4gwj-5jf2).
 - **ip-address** → 10.2.0 — XSS in Address6 HTML emitters (GHSA-v2v4-37r5-5v8g).
 - Lockfile self-version field resynced to the package version (was drifted at `0.24.9.25`).
