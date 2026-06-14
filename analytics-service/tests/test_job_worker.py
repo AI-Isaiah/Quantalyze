@@ -521,6 +521,20 @@ class TestDispatchRouting:
         mock_trades.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_dispatch_routes_derive_broker_dailies(self) -> None:
+        """derive_broker_dailies must route to its own handler."""
+        job = {"id": "job-bd", "kind": "derive_broker_dailies", "strategy_id": "s-bd"}
+        with patch(
+            "services.job_worker.run_derive_broker_dailies_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+        ) as mock_handler, patch(
+            "services.job_worker.sync_strategy_analytics_status",
+            new=AsyncMock(return_value=None),
+        ):
+            await dispatch(job)
+        mock_handler.assert_awaited_once_with(job)
+
+    @pytest.mark.asyncio
     async def test_dispatch_routes_sync_funding(self) -> None:
         job = {"id": "job-fund", "kind": "sync_funding", "strategy_id": "s-fund"}
         with patch(
@@ -1101,10 +1115,13 @@ class TestSyncTradesEnqueuesComputeAnalytics:
     async def test_sync_trades_enqueues_compute_analytics_on_success(
         self,
     ) -> None:
-        """Successful run_sync_trades_job MUST call enqueue_compute_job
-        with kind='compute_analytics' for the same strategy. Asserted via
-        the supabase.rpc call signature so a future refactor that moves
-        the enqueue elsewhere still has to land the same RPC call."""
+        """Successful run_sync_trades_job MUST call enqueue_compute_job for
+        the same strategy. Default (BROKER_DAILIES_VIA_FUNDING on) enqueues
+        the funding-inclusive CSV route via kind='derive_broker_dailies';
+        the legacy trades-only kind='compute_analytics' is covered by the
+        flag-off companion below. Asserted via the supabase.rpc call signature
+        so a future refactor that moves the enqueue elsewhere still has to land
+        the same RPC call."""
         from services.job_worker import run_sync_trades_job
 
         mock_exchange = AsyncMock()
@@ -1157,6 +1174,8 @@ class TestSyncTradesEnqueuesComputeAnalytics:
             new=AsyncMock(side_effect=lambda fn: fn()),
         ), patch(
             "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
+        ), patch(
+            "services.job_worker.BROKER_DAILIES_VIA_FUNDING", True,
         ):
             result = await run_sync_trades_job(job)
 
@@ -1177,7 +1196,133 @@ class TestSyncTradesEnqueuesComputeAnalytics:
         )
         payload = enqueue_calls[0]
         assert payload["p_strategy_id"] == "strat-phase-18"
-        assert payload["p_kind"] == "compute_analytics"
+        # Default: funding-inclusive CSV route (derive_broker_dailies →
+        # compute_analytics_from_csv). Funding is the dominant return driver
+        # for perp strategies and the legacy compute_analytics excluded it.
+        assert payload["p_kind"] == "derive_broker_dailies"
+
+    @pytest.mark.asyncio
+    async def test_sync_trades_enqueues_compute_analytics_when_flag_off(
+        self,
+    ) -> None:
+        """Kill-switch: BROKER_DAILIES_VIA_FUNDING off reverts the sync
+        epilogue to the legacy trades-only kind='compute_analytics'."""
+        from services.job_worker import run_sync_trades_job
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-flag-off", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "okx",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        rpc_calls: list[tuple[str, dict]] = []
+
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            rpc_calls.append((name, payload))
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=5)
+            return stub
+
+        mock_ctx.supabase.rpc.side_effect = _rpc
+        mock_update = MagicMock()
+        mock_eq = MagicMock()
+        mock_eq.execute.return_value = MagicMock(data=[])
+        mock_update.eq.return_value = mock_eq
+        mock_ctx.supabase.table.return_value.update.return_value = mock_update
+
+        job = {"id": "job-flag-off", "kind": "sync_trades", "strategy_id": "strat-flag-off"}
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
+        ), patch(
+            "services.job_worker.BROKER_DAILIES_VIA_FUNDING", False,
+        ):
+            result = await run_sync_trades_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        enqueue_calls = [p for (n, p) in rpc_calls if n == "enqueue_compute_job"]
+        assert len(enqueue_calls) == 1
+        assert enqueue_calls[0]["p_kind"] == "compute_analytics"
+
+
+class TestDeriveBrokerDailies:
+    """run_derive_broker_dailies_job: broker key full-history -> dailies -> CSV route."""
+
+    @pytest.mark.asyncio
+    async def test_marks_failed_on_insufficient_history(self) -> None:
+        """HIGH-2 regression: when <2 daily-return days are derived (brand-new /
+        inactive account), the handler MUST stamp a TERMINAL
+        strategy_analytics.computation_status='failed' so the wizard
+        sync-preview poller reaches a gate instead of spinning forever on a
+        never-arriving 'complete'."""
+        from services.job_worker import run_derive_broker_dailies_job
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = AsyncMock()
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-empty", "user_id": "user-1"}
+        mock_ctx.key_row = {"id": "key-1", "exchange": "okx", "user_id": "user-1"}
+
+        analytics_upserts: list[dict] = []
+
+        def _table(name: str) -> MagicMock:
+            tbl = MagicMock()
+
+            def _upsert(payload: dict, **_kw: object) -> MagicMock:
+                if name == "strategy_analytics":
+                    analytics_upserts.append(payload)
+                stub = MagicMock()
+                stub.execute.return_value = MagicMock(data=1)
+                return stub
+
+            tbl.upsert.side_effect = _upsert
+            return tbl
+
+        mock_ctx.supabase.table.side_effect = _table
+
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-empty"}
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades", new=AsyncMock(return_value=[]),
+        ), patch(
+            "services.job_worker.aclose_exchange", new=AsyncMock(),
+        ), patch(
+            "services.exchange.fetch_account_equity_usd",
+            new=AsyncMock(return_value=(10000.0, False)),
+        ), patch(
+            "services.funding_fetch.fetch_funding_okx", new=AsyncMock(return_value=[]),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ):
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        assert len(analytics_upserts) == 1, (
+            f"expected one strategy_analytics upsert; got {analytics_upserts}"
+        )
+        assert analytics_upserts[0]["computation_status"] == "failed"
+        assert analytics_upserts[0]["data_quality_flags"] == {"csv_source": True}
 
     @pytest.mark.asyncio
     async def test_sync_trades_enqueue_failure_does_not_fail_job(

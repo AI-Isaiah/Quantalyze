@@ -457,8 +457,9 @@ class TestMultiStrategyFanOut:
             c.args[1]["p_strategy_id"] for c in sync_trades_calls
         )
         assert invoked_strategies == ["strat-A", "strat-B", "strat-C"]
-        # And one compute_analytics recompute enqueued per stored strategy
-        # (the trigger that replaced the broken 'stale' marker).
+        # And one recompute enqueued per stored strategy (the trigger that
+        # replaced the broken 'stale' marker). Default kind is the funding-
+        # inclusive CSV route (derive_broker_dailies), mirroring sync_trades.
         enqueue_calls = [
             c for c in mock_supabase.rpc.call_args_list
             if c.args[0] == "enqueue_compute_job"
@@ -466,7 +467,7 @@ class TestMultiStrategyFanOut:
         assert sorted(c.args[1]["p_strategy_id"] for c in enqueue_calls) == [
             "strat-A", "strat-B", "strat-C",
         ]
-        assert all(c.args[1]["p_kind"] == "compute_analytics" for c in enqueue_calls)
+        assert all(c.args[1]["p_kind"] == "derive_broker_dailies" for c in enqueue_calls)
         # Result reports per-strategy breakdown
         assert result["per_strategy_stored"] == {
             "strat-A": 3,
@@ -2250,8 +2251,10 @@ class TestC0197CronTriggersAnalyticsRecompute:
         assert sorted(a["p_strategy_id"] for a in enqueue_args) == ["strat-A", "strat-B"], (
             f"Expected one enqueue_compute_job per stored strategy; got {enqueue_args!r}"
         )
-        assert all(a["p_kind"] == "compute_analytics" for a in enqueue_args), (
-            f"Every recompute enqueue must be kind=compute_analytics; got {enqueue_args!r}"
+        # Default (BROKER_DAILIES_VIA_FUNDING on): the funding-inclusive CSV
+        # route via derive_broker_dailies, mirroring the sync_trades epilogue.
+        assert all(a["p_kind"] == "derive_broker_dailies" for a in enqueue_args), (
+            f"Every recompute enqueue must be kind=derive_broker_dailies; got {enqueue_args!r}"
         )
 
         # The illegal `computation_status='stale'` write must be GONE — it
