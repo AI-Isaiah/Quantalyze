@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.120] - 2026-06-14
+### Added — MT5 Expert Advisor → daily-returns ingestion (Approach A, GSD Phase 20)
+
+A read-only MetaTrader 5 Expert Advisor that exports a strategy's flow-adjusted, equity-based daily-return series as a `date,daily_return` CSV the existing `daily_returns` pipeline ingests unchanged — so MT5 strategies feed the same CSV → analytics → factsheet path crypto strategies already use, with **zero production-service changes and no new annualization basis**. The EA's daily-return math runs in MQL5 (under Wine, no CI harness), so the strategy is: pin the EA's *output contract* with checked-in golden fixtures, test ingestion/KPI interpretation in the existing Python suite, and gate first-live-KPI trust on a one-time manual demo-account reconcile.
+
+- **`tools/mt5/QuantalyzeDailyReturns.mq5`** — read-only EA. Tracks `AccountInfoDouble(ACCOUNT_EQUITY)` (incl. floating PnL, never BALANCE); flow-adjusts deposits/withdrawals out of the return `(equity_close − net_external_flows − prior_close_equity)/prior_close_equity` while keeping swap/commission costs in; emits one row per calendar day (the venues trade 24/7/365 — every row is a real return, no synthetic weekend zeros); day-1 inception return is `0.0` (no divide-by-zero); detects rollover via the date component of `TimeTradeServer()` (DST-safe); persists `prior_close_equity` to an `MQL5\Files` state file atomically (temp + rename, fail-loud on corruption, single-instance lock); flags large intraday flows; on a multi-day outage emits fewer rows (one cumulative gap-spanning row, no fabricated zeros). Calls **no** trade-mutation API.
+- **`analytics-service/tests/test_mt5_golden_fixtures.py`** + 15 golden CSV fixtures — pin the EA output contract through the verified `validate_csv(fmt="daily_returns")` + `compute_all_metrics` pipeline. 16 tests (T1–T13); KPI oracles derived from the live `compute_all_metrics` at the product-wide `periods=252`. Highest-signal must-pass: T2 deposit-day (trading return, not a cash spike), T5 dense-calendar vol @252, T7 auto-÷100 boundary-bracket, T9 EUR hard-fail.
+- **`.github/workflows/ci.yml`** — "MT5 EA read-only static check" (T16): recursively scans `tools/mt5/**/*.{mq5,mqh}` and fails on any low-level or CTrade-method trade-mutation token; proven to pass on the real EA and fail on synthetic `OrderSendAsync(` / `exec.Buy(` fixtures.
+- **`tools/mt5/README.md`** — USD-only rationale, deploy/run, file locations, row cap, and the numeric **T14/T15** manual demo-account reconcile worksheet (the only validation of the MQL5 balance-deal classification + restart-state, which gate first-live-KPI — NOT phase CI completion).
+
+Reviewed: research → plan → adversarial red-team (caught a calendar/annualization bug; corrected to dense @ existing-252 after confirming the venues trade all days and `compute_all_metrics` @252 is the product-wide displayed convention) → post-implementation EA review caught 3 money-path bugs (inception date, close timing, multi-day-outage zero-fabrication), all root-cause fixed.
+
 ## [0.24.15.119] - 2026-06-14
 ### Security — dependency vulnerability remediation (`npm audit fix`, lockfile-only)
 
