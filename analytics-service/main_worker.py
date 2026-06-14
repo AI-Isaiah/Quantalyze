@@ -157,6 +157,10 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # legitimate backfills mid-run and produces duplicate state-machine
     # transitions through transition_strategy_verification.
     "process_key_long": "40 minutes",  # handler timeout = 30 minutes
+    # Broker key full-history → dailies → CSV route. Handler timeout = 15
+    # minutes (full-history realized PnL + funding fetch); watchdog must be
+    # strictly greater. Mirrors the sync_trades 15→30 pairing.
+    "derive_broker_dailies": "30 minutes",  # handler timeout = 15 minutes
 }
 
 

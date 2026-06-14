@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.24.15.118] - 2026-06-14
+### Added — broker API key full-history → funding-inclusive daily-return series → factsheet via the standard CSV route
+
+When a broker API key is added, the strategy's factsheet is now compiled from a daily-return series derived from the key's ENTIRE history, reusing the CSV analytics route (`compute_analytics_from_csv` → `run_csv_strategy_analytics` → `compute_all_metrics`). The load-bearing change vs the legacy trades-only path: the daily series now INCLUDES funding PnL.
+
+**Why funding matters (the bug this fixes):** `fetch_daily_pnl` excludes funding by design (C-0319). For crypto-perp strategies funding is the dominant return driver — on a live Bybit read-key (190k principal → 245.6k over ~5 months) the split was realized trading +15,773 (+8.3%), **funding +38,766 (+20.4%)**, open unrealized −680. The realized-only series reported **+6.8% (Sharpe 0.49)** where true equity growth is **~+28.8% (Sharpe 1.27)** — funding was two-thirds of the profit and was silently dropped. The new path combines realized PnL + funding, anchored to the account's current total equity (NAV incl. unrealized), so initial capital is derived correctly (anchor-to-today, reconstruct backward) and the factsheet matches reality.
+
+- **New `analytics-service/services/broker_dailies.py`** — `combine_realized_and_funding()` merges realized daily PnL + per-day funding into one series via the existing `trades_to_daily_returns_with_status`, gap-filled to every calendar day (the "all days" requirement + `compute_all_metrics`' ascending-DatetimeIndex contract). Funding is sign-encoded into `daily_pnl`-shaped records so it flows through unchanged.
+- **New `derive_broker_dailies` compute-job kind** (`services/job_worker.py`) — preflight → fetch equity + full-history realized PnL + funding → derive → service-role upsert into `csv_daily_returns` (chunked) → enqueue `compute_analytics_from_csv`. The `sync_trades` epilogue and `routers/cron.py` `cron_sync` periodic recompute now enqueue this kind under the `BROKER_DAILIES_VIA_FUNDING` flag (default ON; set `false` to instantly revert to legacy trades-only `compute_analytics`). `<2`-day accounts stamp a terminal `failed` status so the wizard poller never hangs.
+- **OKX equity read fix** (`services/exchange.py` `fetch_okx_total_equity_usd` / `fetch_account_equity_usd`) — ccxt's unified `fetch_balance()` crashes on OKX in ccxt 4.5.x (`load_markets` keysort: `'<' not supported between str and NoneType`), so the equity anchor is read via the raw `private_get_account_balance` `totalEq`. Also repairs a LATENT PROD BUG: `equity_reconstruction._fetch_current_equity` hit the same crash, silently shipping an un-anchored reconstructed curve for every OKX allocator.
+- **OKX funding archive-window fix** (`services/funding_fetch.py`) — `fetch_funding_okx(since_ms=None)` (full history) was gated `since_ms is not None and ...`, so the archive endpoint was never fetched and OKX funding was capped at ~90 days while realized PnL spanned inception — corrupting the anchor for OKX accounts older than 3 months. Now treats `None` as "fetch everything" (mirrors `fetch_daily_pnl`); recent+archive overlap is deduped by `match_key`.
+- **Migration `20260614120000_derive_broker_dailies_kind.sql`** — registers the strategy-scoped kind in `compute_job_kinds` + `compute_jobs_kind_check` + `compute_jobs_kind_target_coherence` (DROP+ADD strict-superset, self-verifying DO block) + `main_worker.py` watchdog override.
+
+Trade-off (kill-switch reversible): API-key strategies now render via the CSV-route factsheet shape — headline metrics (cumulative / CAGR / Sharpe / drawdown) are correct and funding-inclusive, but per-trade and exposure panels are hidden (`csv_source` flag), since a daily-return series carries no per-fill data.
+
+Validated end-to-end against two live read-only keys (OKX + Bybit): full history downloaded, equity anchor read (OKX via raw `totalEq`, no heuristic capital), every calendar day present, Bybit reproduces the true ~+29%. Tests: new `tests/test_broker_dailies.py` (combine/gap-fill/funding-regression/OKX-equity/OKX-archive) + handler/dispatch/cron coverage; 2618 analytics tests pass.
+
 ## [0.24.15.117] - 2026-06-14
 ### Fixed — cassette-refresh workflow: OKX schema-drift synthesis + leak-gate clean-scan abort (red 22/22 since inception)
 

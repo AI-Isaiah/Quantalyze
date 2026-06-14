@@ -2628,6 +2628,64 @@ async def fetch_usdt_balance_with_status(
     return None, False
 
 
+async def fetch_okx_total_equity_usd(exchange: ccxt.Exchange) -> float | None:
+    """Read OKX unified-account total equity (USD, incl. open-position
+    unrealized PnL) via the RAW ``private_get_account_balance`` endpoint.
+
+    ccxt's unified ``fetch_balance()`` calls ``load_markets()`` →
+    ``set_markets()`` → ``keysort(markets_by_id)`` → ``sorted()``, which raises
+    ``TypeError: '<' not supported between 'str' and 'NoneType'`` on OKX in
+    ccxt 4.5.x because a market carries a ``None`` id. The raw private call has
+    no such dependency (it's the same path ``fetch_daily_pnl`` already uses for
+    OKX bills). ``totalEq`` is OKX's own marked-to-USD account equity, which is
+    exactly the initial-capital anchor the daily-return derivation needs.
+
+    Returns the equity float, or None on any failure / non-positive value.
+    """
+    try:
+        raw = await exchange.private_get_account_balance()
+    except Exception as e:  # noqa: BLE001
+        # NEW-C13-10 parity: scrub before logging — signed-request errors can
+        # embed the HMAC signature in str(e).
+        logger.warning(
+            "OKX raw account balance fetch failed: exc_class=%s scrubbed=%s",
+            type(e).__name__, scrub_freeform_string(str(e)),
+        )
+        return None
+    data = (raw or {}).get("data") or []
+    if not data or not isinstance(data, list):
+        return None
+    raw_eq = data[0].get("totalEq") if isinstance(data[0], dict) else None
+    if raw_eq is None:
+        return None
+    try:
+        eq = float(raw_eq)
+    except (TypeError, ValueError):
+        return None
+    return eq if eq > 0 else None
+
+
+async def fetch_account_equity_usd(
+    exchange: ccxt.Exchange, venue: str,
+) -> tuple[float | None, bool]:
+    """Total account equity in USD (NAV incl. unrealized PnL) for the
+    initial-capital anchor, dispatched by venue.
+
+    OKX is read via the raw ``totalEq`` endpoint (``fetch_okx_total_equity_usd``)
+    because ccxt's unified ``fetch_balance()`` crashes on OKX in ccxt 4.5.x.
+    Other venues use ``fetch_usdt_balance_with_status`` — for unified-margin
+    USDT accounts the USDT total equals account equity (uPnL settles in USDT).
+
+    Returns ``(equity, balance_error)`` mirroring
+    ``fetch_usdt_balance_with_status``: balance_error=True means the read
+    failed (caller treats initial capital as heuristic / sets a DQ flag).
+    """
+    if venue == "okx":
+        eq = await fetch_okx_total_equity_usd(exchange)
+        return eq, eq is None
+    return await fetch_usdt_balance_with_status(exchange)
+
+
 # ---------------------------------------------------------------------------
 # Phase 19 / BACKBONE-06 — fetch_mark_prices for open-perp valuation.
 # ---------------------------------------------------------------------------

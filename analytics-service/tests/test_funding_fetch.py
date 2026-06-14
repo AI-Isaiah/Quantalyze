@@ -227,6 +227,11 @@ class TestFetchFundingOKX:
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
         mock_exchange.private_get_account_bills = AsyncMock(return_value={"data": []})
+        # since_ms=None now also hits the archive endpoint (full-history fix):
+        # stub it empty so the empty-data assertion is unaffected.
+        mock_exchange.private_get_account_bills_archive = AsyncMock(
+            return_value={"data": []}
+        )
         rows = await fetch_funding_okx(mock_exchange, STRATEGY_ID, since_ms=None)
         assert rows == []
 
@@ -393,6 +398,10 @@ class TestMatchKeyDeterminism:
                 },
             ]
         })
+        # since_ms=None now also hits the archive endpoint (full-history fix).
+        mock_exchange.private_get_account_bills_archive = AsyncMock(
+            return_value={"data": []}
+        )
 
         rows = await fetch_funding_okx(
             mock_exchange, STRATEGY_ID, since_ms=None
@@ -777,6 +786,10 @@ class TestOKXRaisesOnSilentPaths:
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
         mock_exchange.private_get_account_bills = AsyncMock(
+            return_value={"data": []}
+        )
+        # since_ms=None now also hits the archive endpoint (full-history fix).
+        mock_exchange.private_get_account_bills_archive = AsyncMock(
             return_value={"data": []}
         )
         rows = await fetch_funding_okx(
@@ -1502,6 +1515,11 @@ class TestDroppedRowCounterOKXAndBybit:
                 },
             ]
         })
+        # since_ms=None now also hits the archive endpoint (full-history fix):
+        # stub it empty so the dropped-count assertion reflects the recent page.
+        mock_exchange.private_get_account_bills_archive = AsyncMock(
+            return_value={"data": []}
+        )
 
         caplog.set_level(
             logging.WARNING, logger="quantalyze.analytics.funding_fetch"
