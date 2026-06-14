@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.117] - 2026-06-14
+### Fixed — cassette-refresh workflow: OKX schema-drift synthesis + leak-gate clean-scan abort (red 22/22 since inception)
+
+The daily `cassette-refresh.yml` (re-records OKX+Bybit broker cassettes so the unified key-flow replay suite catches schema rotations before the live `/process-key` route does) had **never once been green** — every one of its 22 scheduled runs since 2026-05-27 failed. Two stacked latent bugs, the second hidden behind the first:
+
+- **OKX schema-drift synthesis (`analytics-service/scripts/record_cassettes.py`)** — `_synthesize_schema_drift` simulated drift by deleting one ccxt-canonical field (OKX `ccy`). OKX's balance payload has multiple `data[].details[]` rows, so dropping one `ccy` leaves a parseable response: ccxt re-derives `free/used/total` and **always** passes through the raw `info` block, so `fetch_balance()` returns a full balance and never raises. The replay gate `test_schema_drift_raises_or_returns_partial` only passes when ccxt raises (its `has_canonical` check includes `"info"`, which is always present on a non-raising parse), so the synthesized OKX cassette was structurally unsatisfiable and the job died at the pytest step every run. Fixed by emitting a broker-native error envelope (OKX `code:"99999"`, Bybit `retCode:10001`, Binance `code:-1000`) that ccxt raises on regardless of how the payload shape drifts — the same strategy the hand-validated committed OKX cassette already used (the fixture had been hand-fixed but the generator never was, which is what hid the divergence). Removed the now-unused `_drop_canonical_field` helper.
+- **Leak-gate Layer B (`scripts/repro-key-flow.sh`)** — `high_entropy_hits=$(grep ... | grep -v ... | wc -l)` under `set -euo pipefail` aborts the whole script when the credential scan finds nothing (the first grep exits 1, pipefail propagates it) — i.e. the **healthy clean-scan case** failed. Never surfaced before because the script always died at the pytest step first. Fixed by lifting errexit (`set +e`/`set -e`) around the scan so only a real count > 0 fails the gate; nounset and the rest of errexit are untouched.
+
+New regression test `test_synthesized_schema_drift_makes_ccxt_raise[okx,bybit]` synthesizes the drift cassette from the committed `happy.yaml` and asserts ccxt raises — it fails against the old field-drop synthesizer (OKX) and passes against the error-envelope one. Both committed schema-drift cassettes regenerated (OKX: cosmetic JSON spacing only; Bybit: flipped field-drop → error envelope). Verified e2e: full replay + both leak-gate layers green (`repro-key-flow.sh` exit 0, "ALL CHECKS PASSED"); `test_repro_key_flow.py` 10 passed / 4 skipped; all 2686 analytics tests still collect.
+
+Note: cassette-refresh success ("≥6 of 7 days green") was a Phase 19 soak exit criterion — it was unsatisfiable for the entire soak window, so that criterion never actually held.
+
 ## [0.24.15.116] - 2026-06-04
 ### Fixed — live Sentry errors in analytics-service (QUANTALYZE-M / -4 / -T·V·E·D·7 / -1·5 residual; -8·9·S hardening)
 
