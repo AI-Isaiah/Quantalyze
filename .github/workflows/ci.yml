@@ -283,6 +283,53 @@ jobs:
           done
       - name: Check for banned packages (supply-chain)
         run: node scripts/check-banned-packages.mjs
+      # Phase 20 / T16 — the recording MT5 EA is READ-ONLY by CI invariant.
+      # An EA with account access is a Tampering/Elevation risk, so we FAIL the
+      # build on ANY trade-mutation token in tools/mt5 source. This is the M4
+      # red-team HARDENING of the original denylist, which scanned only top-level
+      # *.mq5 and missed the two most common ways an MQL5 EA actually places a
+      # trade. The check now covers, scanning BOTH *.mq5 AND included *.mqh
+      # headers RECURSIVELY (grep -r descends subdirs):
+      #   - the low-level / declaration surface:
+      #       OrderSend, OrderSendAsync, OrderModify, OrderDelete,
+      #       PositionClose, PositionModify, the CTrade class, and `trade.`
+      #   - the CTrade METHOD-CALL surface (a CTrade instance named ANYTHING,
+      #     not just `trade`, calling): .Buy( .Sell( .BuyStop( .SellStop(
+      #       .BuyLimit( .SellLimit( .PositionOpen( .PositionClose(
+      #       .PositionClosePartial( .PositionReverse( .OrderOpen(
+      # Pure grep, like the banned-packages step — NO new dependency.
+      #
+      # KNOWN RESIDUAL LIMIT (documented, not defeated): grep is line-literal, so
+      # a token inside a COMMENT (e.g. `// OrderSend disabled`) trips a SAFE-SIDE
+      # false positive, and deliberate in-comment whitespace/identifier evasion is
+      # not caught by a static grep. That residual is accepted: the manual T14
+      # demo-reconcile is the runtime backstop, and a false positive merely forces
+      # a human to confirm the EA is read-only (fail-safe direction).
+      - name: MT5 EA read-only static check
+        run: |
+          # Low-level / declaration surface + CTrade method-call surface.
+          DENY_LOWLEVEL='OrderSend|OrderSendAsync|OrderModify|OrderDelete|CTrade|PositionClose|PositionModify|trade\.'
+          DENY_METHODS='\.(Buy|Sell|BuyStop|SellStop|BuyLimit|SellLimit|PositionOpen|PositionClose|PositionClosePartial|PositionReverse|OrderOpen)[[:space:]]*\('
+
+          if [ ! -d tools/mt5 ]; then
+            echo "MT5 EA static check: tools/mt5 absent — nothing to scan."
+            exit 0
+          fi
+
+          # grep -r exits 1 on no-match; under the runner's `set -e` that would
+          # abort the step at the assignment, so we neutralize it with `|| true`
+          # and derive the verdict from whether any line was captured — NOT from
+          # grep's own exit code (a no-match must be a PASS, only a positive
+          # denylist match is a FAIL). `grep -rnE` reports file:line for the log.
+          MATCHES=$(grep -rnE --include='*.mq5' --include='*.mqh' \
+            -e "$DENY_LOWLEVEL" -e "$DENY_METHODS" tools/mt5 || true)
+
+          if [ -n "$MATCHES" ]; then
+            echo "::error::MT5 EA must be read-only (no order/trade mutation API). Forbidden token(s) found in tools/mt5:"
+            echo "$MATCHES"
+            exit 1
+          fi
+          echo "MT5 EA static check: clean (0 trade-mutation tokens in tools/mt5/**/*.{mq5,mqh})."
       - name: Check GDPR export coverage (Task 7.3)
         run: npx tsx scripts/check-gdpr-export-coverage.ts
 
