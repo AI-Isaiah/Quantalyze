@@ -169,10 +169,16 @@ log "Layer A OK: no DEBUG_KEY_FLOW_* values found in cassettes"
 HIGH_ENTROPY_RE='[A-Za-z0-9+/=_-]{40,}'
 KEY_FIELD_RE='(sign(ature)?|api[-_]?key|api[-_]?secret|passphrase)'
 
+# grep exits 1 when no signing-key line matches — the HEALTHY (clean) case.
+# Under `set -euo pipefail` that 1 propagates and aborts the gate before the
+# count is ever checked. Lift errexit just for the scan so only a genuine
+# count > 0 (below) fails the gate; a clean scan must pass, not abort.
+set +e
 high_entropy_hits=$(grep -rEi "${KEY_FIELD_RE}.*${HIGH_ENTROPY_RE}" tests/cassettes/ 2>/dev/null \
   | grep -v -F '[REDACTED]' \
   | grep -v -F '<REDACTED>' \
   | wc -l | tr -d '[:space:]')
+set -e
 
 if [ "${high_entropy_hits:-0}" -gt 0 ]; then
   log "Layer B FAIL: $high_entropy_hits high-entropy literals found in signing-key-named fields"

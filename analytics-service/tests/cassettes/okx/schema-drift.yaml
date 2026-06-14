@@ -47411,8 +47411,8 @@ interactions:
     uri: https://www.okx.com/api/v5/account/balance
   response:
     body:
-      string: '{"code":"99999","msg":"unrecognized OKX response shape (schema drift
-        simulated)","data":[]}'
+      string: '{"code": "99999", "msg": "unrecognized OKX response shape (schema drift
+        simulated)", "data": []}'
     headers:
       CF-RAY:
       - 9f4ec104291ebc72-ZRH

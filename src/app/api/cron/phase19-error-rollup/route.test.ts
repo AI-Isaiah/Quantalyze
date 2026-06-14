@@ -108,6 +108,14 @@ function makeRequest(opts: {
 describe("/api/cron/phase19-error-rollup", () => {
   beforeEach(() => {
     vi.resetModules();
+    // Pin the clock inside the soak window (flip 2026-05-25 → day 6). The
+    // non-backfill (live 24h) tests derive day_index from now-minus-flip, so
+    // without a fixed clock they pass only while real time is within flip+14d
+    // and rot afterwards (green 2026-06-04, red from 2026-06-08 → window_post_soak
+    // short-circuits before fetch). Fake only Date so promise/async scheduling
+    // is untouched.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-05-30T12:00:00Z"));
     adminRecorders.flagRow = { value: "on", updated_at: "2026-05-25T15:51:07Z" };
     adminRecorders.flagErr = null;
     adminRecorders.rpcArgs = [];
@@ -120,6 +128,7 @@ describe("/api/cron/phase19-error-rollup", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     delete process.env.CRON_SECRET;
     delete process.env.SENTRY_ORG_SLUG;

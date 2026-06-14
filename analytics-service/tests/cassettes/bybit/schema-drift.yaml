@@ -29516,14 +29516,8 @@ interactions:
     uri: https://api.bybit.com/v5/account/wallet-balance?accountType=UNIFIED
   response:
     body:
-      string: '{"retCode": 0, "retMsg": "OK", "result": {"list": [{"accountIMRate":
-        "0.1379", "totalMaintenanceMarginByMp": "1577.36786646", "totalInitialMargin":
-        "26973.94560188", "accountType": "UNIFIED", "accountMMRate": "0.008", "accountMMRateByMp":
-        "0.008", "accountIMRateByMp": "0.1379", "totalInitialMarginByMp": "26973.94560188",
-        "totalMaintenanceMargin": "1577.36786646", "totalEquity": "195591.49327452",
-        "totalMarginBalance": "195591.49327452", "totalAvailableBalance": "168617.54767264",
-        "totalPerpUPL": "3051.45245236", "totalWalletBalance": "192540.04082216",
-        "accountLTV": "0"}]}, "retExtInfo": {}, "time": 1778056036281}'
+      string: '{"retCode": 10001, "retMsg": "unrecognized Bybit response shape (schema
+        drift simulated)", "result": {}}'
     headers:
       Connection:
       - keep-alive
