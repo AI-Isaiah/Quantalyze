@@ -97,13 +97,19 @@ jobs:
           rm -f analytics-service/tests/cassettes/bybit/auth-fail.yaml
 
       - name: Record cassettes + leak gate
+        id: record
         env:
           DEBUG_KEY_FLOW_OKX_KEY: ${{ secrets.DEBUG_KEY_FLOW_OKX_KEY }}
           DEBUG_KEY_FLOW_OKX_SECRET: ${{ secrets.DEBUG_KEY_FLOW_OKX_SECRET }}
           DEBUG_KEY_FLOW_OKX_PASSPHRASE: ${{ secrets.DEBUG_KEY_FLOW_OKX_PASSPHRASE }}
           DEBUG_KEY_FLOW_BYBIT_KEY: ${{ secrets.DEBUG_KEY_FLOW_BYBIT_KEY }}
           DEBUG_KEY_FLOW_BYBIT_SECRET: ${{ secrets.DEBUG_KEY_FLOW_BYBIT_SECRET }}
-        run: bash scripts/repro-key-flow.sh --record
+        # --allow-partial: a geo-blocked/unreachable broker (e.g. Bybit blocks
+        # GitHub's US runner IPs at CloudFront) is restored from git and skipped
+        # so the reachable broker still refreshes + PRs. The job is still failed
+        # loud at the end via the "Enforce broker reachability" step, AFTER any
+        # PR for the reachable broker has been opened.
+        run: bash scripts/repro-key-flow.sh --record --allow-partial
 
       - name: Detect cassette diff
         id: diff
@@ -123,6 +129,9 @@ jobs:
         with:
           branch: chore/cassette-refresh-${{ github.run_number }}
           delete-branch: true
+          # Bound the commit's blast radius to cassettes only — never sweep an
+          # unrelated dirty workspace path (or a stray file) into the auto-PR.
+          add-paths: analytics-service/tests/cassettes/**
           commit-message: |
             chore(cassettes): daily refresh — broker schema drift detected
 
@@ -165,6 +174,8 @@ jobs:
         if: always()
         env:
           DIFF_CHANGED: ${{ steps.diff.outputs.changed }}
+          FAILED_BROKERS: ${{ steps.record.outputs.failed_brokers }}
+          SKIPPED_BROKERS: ${{ steps.record.outputs.skipped_brokers }}
         run: |
           {
             echo "## Cassette refresh summary"
@@ -176,6 +187,49 @@ jobs:
             else
               echo "**Status:** Recording or leak gate failed before diff check."
             fi
+            if [ -n "$FAILED_BROKERS" ]; then
+              echo ""
+              echo "**Unreachable broker(s):** \`$FAILED_BROKERS\` — restored from git unchanged (geo-block/outage). Re-record from a permitted egress; the run is failed loud below."
+            fi
+            if [ -n "$SKIPPED_BROKERS" ]; then
+              echo ""
+              echo "**Skipped (creds missing):** \`$SKIPPED_BROKERS\` — a DEBUG_KEY_FLOW_* secret is unset/expired, so this broker silently stopped refreshing. Restore the repo secret; the run is failed loud below."
+            fi
             echo ""
             echo "Brokers attempted: OKX + Bybit (Binance out of scope)."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Fail the run LOUD if any broker did not refresh — but only after the
+      # reachable-broker PR (if any) has been opened above. Keeps the schema-drift
+      # PR flowing while making a broker that dropped out (unreachable OR missing
+      # creds) an unmissable red signal, not a silently-green "all stable".
+      # Scheduled (non-force) runs re-use the existing cassettes (no live calls)
+      # and have all creds present, so neither failed_brokers nor skipped_brokers
+      # is set — the daily cron stays green.
+      - name: Enforce broker reachability (fail loud on partial)
+        if: always()
+        env:
+          FAILED_BROKERS: ${{ steps.record.outputs.failed_brokers }}
+          SKIPPED_BROKERS: ${{ steps.record.outputs.skipped_brokers }}
+          RECORD_OUTCOME: ${{ steps.record.outcome }}
+        run: |
+          rc=0
+          if [ -n "$FAILED_BROKERS" ]; then
+            echo "::error title=Cassette refresh: broker unreachable::Could not record broker(s): $FAILED_BROKERS (geo-block or outage). Reachable brokers were refreshed and PR'd; these were restored from git unchanged. Re-record the blocked broker(s) from a permitted egress (self-hosted runner / proxy) — do NOT record locally unless you rotate the keys afterward."
+            rc=1
+          fi
+          if [ -n "$SKIPPED_BROKERS" ]; then
+            echo "::error title=Cassette refresh: broker creds missing::Broker(s) skipped for missing credentials: $SKIPPED_BROKERS. Every DEBUG_KEY_FLOW_* secret is expected in CI, so a skip means an unset/expired repo secret — that broker silently stopped refreshing for schema drift. Restore the secret in repo Settings → Secrets and variables → Actions."
+            rc=1
+          fi
+          if [ "$RECORD_OUTCOME" != "success" ]; then
+            echo "::error::Record/leak-gate step did not succeed (outcome=$RECORD_OUTCOME) — see the 'Record cassettes + leak gate' log."
+            rc=1
+          fi
+          # Explicit `if` (not `&& echo`): GitHub Actions runs this with `bash -eo
+          # pipefail`, so a `[ ... ] && echo` that evaluated false would abort the
+          # step under errexit before reaching `exit`. The if/exit form is robust.
+          if [ "$rc" = "0" ]; then
+            echo "All credentialed brokers recorded successfully (or schemas stable)."
+          fi
+          exit "$rc"

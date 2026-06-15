@@ -20,13 +20,22 @@
 #                                                       run the leak gate.
 #                                                       Requires DEBUG_KEY_FLOW_*
 #                                                       env vars set.
+#   bash scripts/repro-key-flow.sh --record --allow-partial
+#                                                       as --record, but a broker
+#                                                       that fails to record (e.g.
+#                                                       geo-block) is restored from
+#                                                       git and skipped instead of
+#                                                       aborting; reachable brokers
+#                                                       still refresh. CI-only —
+#                                                       local runs should stay strict.
 #
 # Exit codes:
 #   0 — replay clean, no leaks
 #   1 — replay failed OR a known DEBUG_KEY_FLOW_* env value found in cassettes
 #       OR a high-entropy literal found in a signing-key-named field
 #   2 — pre-flight failure (missing test files, vcrpy not installed)
-#   3 — --record mode failed (missing creds OR broker call failed)
+#   3 — --record failed: missing creds, a broker call failed, OR (under
+#       --allow-partial) a failed broker could not be safely restored from git
 #
 # Run daily during the Phase 19 stability window per Theme 5 mitigation. The
 # .github/workflows/cassette-refresh.yml workflow invokes --record mode + opens
@@ -42,14 +51,19 @@ fail() { log "FAIL: $*"; exit 1; }
 
 # --- --record subcommand --------------------------------------------------
 MODE="replay"
+ALLOW_PARTIAL=0   # --allow-partial: a broker that fails to record (e.g. geo-block)
+                  # is restored from git and skipped instead of aborting the whole
+                  # run, so reachable brokers still refresh. Used by
+                  # cassette-refresh.yml; OFF by default so local runs stay strict.
 for arg in "$@"; do
   case "$arg" in
     --record) MODE="record" ;;
+    --allow-partial) ALLOW_PARTIAL=1 ;;
     --help|-h)
       grep -E '^#( |$)' "$0" | sed 's/^# \?//' | head -40
       exit 0
       ;;
-    *) fail "unknown arg: $arg (use --record or --help)" ;;
+    *) fail "unknown arg: $arg (use --record, --allow-partial, or --help)" ;;
   esac
 done
 
@@ -64,6 +78,10 @@ if [ "$MODE" = "record" ]; then
     fail "missing analytics-service/.venv/bin/python — bootstrap the venv first"
   fi
   recorded=0
+  failed_brokers=""
+  skipped_brokers=""   # creds absent — intentional locally, but a MISCONFIG in CI
+                       # where every DEBUG_KEY_FLOW_* secret is expected. Tracked so a
+                       # silently-dropped broker is surfaced (a skip ≠ a green run).
   for broker in okx bybit; do
     case "$broker" in
       okx)
@@ -71,6 +89,7 @@ if [ "$MODE" = "record" ]; then
           || [ -z "${DEBUG_KEY_FLOW_OKX_SECRET:-}" ] \
           || [ -z "${DEBUG_KEY_FLOW_OKX_PASSPHRASE:-}" ]; then
           log "skip $broker — DEBUG_KEY_FLOW_OKX_KEY/SECRET/PASSPHRASE not all set"
+          skipped_brokers="${skipped_brokers:+$skipped_brokers,}$broker"
           continue
         fi
         ;;
@@ -78,19 +97,55 @@ if [ "$MODE" = "record" ]; then
         if [ -z "${DEBUG_KEY_FLOW_BYBIT_KEY:-}" ] \
           || [ -z "${DEBUG_KEY_FLOW_BYBIT_SECRET:-}" ]; then
           log "skip $broker — DEBUG_KEY_FLOW_BYBIT_KEY/SECRET not all set"
+          skipped_brokers="${skipped_brokers:+$skipped_brokers,}$broker"
           continue
         fi
         ;;
     esac
     log "recording $broker (idempotent — happy/auth-fail re-used if present)"
-    if ! .venv/bin/python scripts/record_cassettes.py "$broker"; then
+    if .venv/bin/python scripts/record_cassettes.py "$broker"; then
+      recorded=$((recorded + 1))
+    elif [ "$ALLOW_PARTIAL" = "1" ]; then
+      # Broker unreachable (geo-block / outage). The restore below is load-bearing,
+      # not cosmetic: force_refresh may have deleted this broker's happy/auth-fail,
+      # and a partial recording can leave a 4xx body in happy.yaml — either would
+      # land a broken cassette in the auto-PR and break the replay suite. Restore
+      # the whole broker dir from git so the diff (and any PR) covers ONLY the
+      # brokers that recorded cleanly. If we cannot prove the dir is byte-identical
+      # to HEAD afterward the on-disk state is untrusted, so hard-fail (exit 3)
+      # rather than risk a corrupt cassette. Do NOT swallow the checkout error.
+      log "WARN: record_cassettes.py failed for $broker — restoring its cassettes from git and continuing (--allow-partial)"
+      if ! git checkout -- "tests/cassettes/$broker"; then
+        log "FAIL: could not git-restore tests/cassettes/$broker after a failed record — refusing to continue with possibly-corrupt cassettes"
+        exit 3
+      fi
+      # --porcelain (not `git diff --quiet`) so a stray UNTRACKED file also trips
+      # this — `git checkout` restores tracked files but does not remove untracked
+      # ones, and an untracked cassette would still be swept into the auto-PR.
+      if [ -n "$(git status --porcelain -- "tests/cassettes/$broker")" ]; then
+        log "FAIL: tests/cassettes/$broker not clean after restore (tracked diff or stray untracked file) — refusing to continue with possibly-corrupt cassettes"
+        exit 3
+      fi
+      failed_brokers="${failed_brokers:+$failed_brokers,}$broker"
+    else
       log "FAIL: record_cassettes.py exited non-zero for $broker"
       exit 3
     fi
-    recorded=$((recorded + 1))
   done
   if [ "$recorded" = "0" ]; then
-    fail "no broker creds available — set DEBUG_KEY_FLOW_OKX_* and/or DEBUG_KEY_FLOW_BYBIT_*"
+    fail "no broker recorded — creds unset or every broker unreachable (set DEBUG_KEY_FLOW_OKX_* / DEBUG_KEY_FLOW_BYBIT_* and check egress)"
+  fi
+  if [ -n "$failed_brokers" ]; then
+    log "PARTIAL: $recorded broker(s) recorded; UNREACHABLE (restored from git, unchanged): $failed_brokers"
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+      echo "failed_brokers=$failed_brokers" >> "$GITHUB_OUTPUT"
+    fi
+  fi
+  if [ -n "$skipped_brokers" ]; then
+    log "SKIPPED (creds not set): $skipped_brokers — fine locally, but in CI every broker secret is expected, so a skip means an expired/unset DEBUG_KEY_FLOW_* secret silently stopped that broker refreshing"
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+      echo "skipped_brokers=$skipped_brokers" >> "$GITHUB_OUTPUT"
+    fi
   fi
   log "recorded $recorded broker(s); running leak gate next"
   # Fall through to leak-gate sections below.

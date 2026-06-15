@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.24.15.121] - 2026-06-15
+### Fixed — cassette-refresh: per-broker tolerance + fail-loud on any broker that doesn't refresh
+
+The broker-cassette refresh workflow (`cassette-refresh.yml`) failed the whole job atomically when one broker was unreachable — and Bybit blocks GitHub's US-based runner IPs at CloudFront (403), so a manual `force_refresh` always died at Bybit and discarded OKX's legitimately re-recorded cassettes. The recorder is now per-broker tolerant: a broker that can't record is restored from git and skipped so the reachable broker still refreshes and PRs, while the run is failed loud at the end so an unreachable (or missing-creds) broker is never a silently-green "all stable".
+
+- **`scripts/repro-key-flow.sh`** — new `--allow-partial` flag (CI-only; local runs stay strict). A broker whose `record_cassettes.py` fails is git-restored (whole broker dir) and recorded in `failed_brokers`; reachable brokers continue. The restore is load-bearing: if `git checkout` fails OR `git status --porcelain` shows the dir still dirty (a tracked diff or a stray untracked file), it hard-fails (exit 3) rather than risk a corrupt or partial cassette reaching the auto-PR. A broker skipped for missing creds is now tracked in `skipped_brokers` (previously dropped silently). The two-layer secret-leak gate still runs unconditionally over all cassettes on every path.
+- **`.github/workflows/cassette-refresh.yml`** — the record step runs `--allow-partial`; the auto-PR is scoped to `add-paths: analytics-service/tests/cassettes/**` so it can never sweep an unrelated dirty path into the commit; the job summary surfaces unreachable and creds-missing brokers; and a new "Enforce broker reachability" step fails the run loud (after any reachable-broker PR has already opened) if a broker was unreachable, skipped for missing creds, or the record step did not succeed. Scheduled (non-force) runs re-use the existing cassettes with all creds present, so the daily cron stays green.
+
+Reviewed: silent-failure-hunter + Testing + Maintainability specialists + a fresh-context Claude adversarial pass, which caught the silent-green hole (a broker dropped for missing/expired creds produced a green run with no signal) and an untracked-stray-file gap in the restore guard — both fixed and verified by isolated git-fixture simulation (unreachable, creds-missing, and stray-file paths) plus a planted-leak proof that the gate still blocks.
+
 ## [0.24.15.120] - 2026-06-14
 ### Added — MT5 Expert Advisor → daily-returns ingestion (Approach A, GSD Phase 20)
 
