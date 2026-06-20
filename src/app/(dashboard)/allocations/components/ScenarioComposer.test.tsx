@@ -2040,4 +2040,242 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     fireEvent.change(btcInput, { target: { value: "0.5" } });
     expect(screen.queryByRole("alert")).toBeNull();
   });
+
+  // -------------------------------------------------------------------------
+  // H-0133 (P1 blocker) + R4 leverage — the projection must reflect the draft's
+  // weight AND leverage edits, not just the commit diff. These drive the REAL
+  // computeScenario (adapter mocked to real series, like H-0487 above) so a
+  // regression that re-severs the call-site wiring fails here, not silently.
+  // -------------------------------------------------------------------------
+  function mkRealStrat(
+    id: string,
+    returns: Array<{ date: string; value: number }>,
+  ) {
+    return {
+      id,
+      name: id,
+      codename: null,
+      disclosure_tier: "public",
+      strategy_types: [] as string[],
+      markets: [] as string[],
+      start_date: returns[0].date,
+      daily_returns: returns,
+      cagr: null,
+      sharpe: null,
+      volatility: null,
+      max_drawdown: null,
+    };
+  }
+  function mockTwoStrategies() {
+    const dates = Array.from({ length: 12 }, (_, i) =>
+      `2026-01-${String(i + 1).padStart(2, "0")}`,
+    );
+    const btc = dates.map((date, i) => ({
+      date,
+      value: [0.02, -0.01, 0.03, -0.02, 0.01][i % 5],
+    }));
+    const eth = dates.map((date, i) => ({
+      date,
+      value: [-0.01, 0.005, -0.02][i % 3],
+    }));
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [mkRealStrat(REF_BTC, btc), mkRealStrat(REF_ETH, eth)],
+      state: {
+        selected: { [REF_BTC]: true, [REF_ETH]: true },
+        weights: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
+        startDates: {},
+      },
+    });
+  }
+  const lastScenarioMetrics = () => {
+    const calls = vi.mocked(KpiStrip).mock.calls;
+    return calls[calls.length - 1][0].scenarioMetrics;
+  };
+
+  it("H-0133 — moving a weight slider MOVES the projection (reweighting changes scenarioMetrics, not just the commit diff)", () => {
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const beforeTwr = lastScenarioMetrics()?.twr;
+    // Re-weight BTC to 90% — the blend must shift toward BTC's profile.
+    const input = document.getElementById(
+      `weight-${REF_BTC}`,
+    ) as HTMLInputElement;
+    expect(input).not.toBeNull();
+    act(() => {
+      fireEvent.change(input, { target: { value: "0.9" } });
+    });
+    const afterTwr = lastScenarioMetrics()?.twr;
+    expect(afterTwr).not.toBe(beforeTwr);
+  });
+
+  it("R4 — a per-row leverage edit reaches the projection (2× changes vol) and surfaces the caveat", () => {
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const beforeVol = lastScenarioMetrics()?.volatility;
+    // Caveat hidden until a non-default multiplier is applied.
+    expect(screen.queryByTestId("scenario-leverage-caveat")).toBeNull();
+    const lev = document.getElementById(
+      `leverage-${REF_BTC}`,
+    ) as HTMLInputElement;
+    expect(lev).not.toBeNull();
+    act(() => {
+      fireEvent.change(lev, { target: { value: "2" } });
+    });
+    expect(lastScenarioMetrics()?.volatility).not.toBe(beforeVol);
+    expect(
+      screen.getByTestId("scenario-leverage-caveat"),
+    ).toBeInTheDocument();
+  });
+
+  it("R4 — leverage clamps LOUDLY: a >MAX paste surfaces an error (never silently swallowed)", () => {
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const lev = document.getElementById(
+      `leverage-${REF_BTC}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(lev, { target: { value: "999" } });
+    });
+    expect(screen.getByRole("alert").textContent).toMatch(/clamped to 10/i);
+  });
+
+  it("R3 guard — the projection renders NO peer/allocator/comparator factsheet panels (no false precision on a hypothetical blend)", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Positive control: the projection DID render its KPI surface.
+    expect(screen.getByTestId("kpi-strip-mock")).toBeInTheDocument();
+    // The hazard: FactsheetBody's api-only panels (peer percentile, allocator
+    // blends, returns signatures) peer-rank a blend that doesn't exist — a
+    // no-invented-data violation. The composer builds from scenarioMetrics +
+    // KpiStrip, NEVER FactsheetBody / buildAllocatorPortfolioFactsheetPayload
+    // (which hardcodes ingestSource:"api"), so these are structurally absent.
+    // A future Impact view that wires FactsheetBody into the projection trips
+    // this guard. (The payload/type-level ingestSource gate — api shows / csv
+    // suppresses — is pinned in src/lib/factsheet/audit-c20.test.ts.)
+    expect(document.getElementById("factsheet-allocator")).toBeNull();
+    expect(document.getElementById("factsheet-signatures")).toBeNull();
+    expect(screen.queryByText(/percentile/i)).toBeNull();
+    expect(screen.queryByText(/ranked against peers/i)).toBeNull();
+  });
+
+  it("H-0133 regression — toggling a REAL strategy OFF removes it from the active set (the explicit-toggle arm, isolated from weight rescaling)", () => {
+    // Pre-H-0133 the projection read adapterOutput.state directly, so a toggle
+    // only ever moved the COMMIT diff — the live metrics ignored it. The fix
+    // routes `selected` through the toggle map, so dropping a leg must actually
+    // EXCLUDE it from computeScenario's activeStrategies. A plain "twr changed"
+    // assertion is NOT a valid discriminator: toggleHolding PRESERVES the off-
+    // row's weight and rescales the OTHER rows, so the curve moves even if the
+    // toggled leg stays selected. The clean isolator is the correlation: with
+    // both legs active there is one off-diagonal pair (avg_pairwise_correlation
+    // is a number); once ETH is genuinely excluded only BTC is active, there are
+    // no pairs, so avg_pairwise_correlation collapses to null. If the memo's
+    // `toggle === undefined ? … : toggle` FALSE arm were re-severed, ETH would
+    // stay in the active set and this would remain a number.
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Positive control: two active legs → a real pairwise correlation exists.
+    expect(typeof lastScenarioMetrics()?.avg_pairwise_correlation).toBe("number");
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("switch", {
+          name: /Toggle ETH on\/off in scenario/i,
+        }),
+      );
+    });
+    // ETH dropped from the active set → only BTC remains → no pairs → null.
+    expect(lastScenarioMetrics()?.avg_pairwise_correlation).toBeNull();
+  });
+
+  it("R4 — a NEGATIVE leverage clamps LOUDLY to 0 (shorting isn't modeled — never silently swallowed)", () => {
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const lev = document.getElementById(
+      `leverage-${REF_BTC}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(lev, { target: { value: "-3" } });
+    });
+    expect(screen.getByRole("alert").textContent).toMatch(/negative/i);
+  });
+
+  it("R4 — a non-finite leverage paste surfaces an inline error and KEEPS the prior value (fail-loud, no silent drop)", () => {
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const lev = document.getElementById(
+      `leverage-${REF_BTC}`,
+    ) as HTMLInputElement;
+    // jsdom sanitizes a non-numeric `<input type=number>` value to "" before
+    // React reads it (Number("") = 0 → happy path), so force a non-finite
+    // value through the controlled-input bridge by patching the value getter —
+    // mirrors the non-finite WEIGHT test above.
+    const originalDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    );
+    Object.defineProperty(lev, "value", {
+      configurable: true,
+      get: () => "Infinity",
+    });
+    act(() => {
+      fireEvent.change(lev);
+    });
+    expect(screen.getByTestId("scenario-commit-error").textContent).toMatch(
+      /invalid leverage/i,
+    );
+    // Restore the native getter so the read-back reflects React's controlled
+    // value (not the patched "Infinity"): the rejected paste left the displayed
+    // multiplier untouched at the 1× default.
+    if (originalDescriptor) {
+      Object.defineProperty(lev, "value", originalDescriptor);
+    }
+    expect(lev.value).toBe("1");
+  });
 });

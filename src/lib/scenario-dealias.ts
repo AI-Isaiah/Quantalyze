@@ -86,11 +86,18 @@ export function collapseAliasedHoldingStrategies(
   const selected: Record<string, boolean> = {};
   const weights: Record<string, number> = {};
   const startDates: Record<string, string> = {};
+  // R4 — carry the optional per-strategy leverage through the collapse. Only
+  // emit it when the input state carries it, so a pre-R4 state (no leverage)
+  // returns a byte-identical { selected, weights, startDates } shape and every
+  // existing de-alias test stays green.
+  const hasLeverage = state.leverage !== undefined;
+  const leverage: Record<string, number> = {};
 
   const carry = (id: string): void => {
     selected[id] = state.selected[id] ?? false;
     weights[id] = state.weights[id] ?? 0;
     if (state.startDates[id] !== undefined) startDates[id] = state.startDates[id];
+    if (hasLeverage) leverage[id] = state.leverage![id] ?? 1;
   };
 
   for (const s of passthrough) {
@@ -112,14 +119,25 @@ export function collapseAliasedHoldingStrategies(
     outStrategies.push(rep);
     let summedSelectedWeight = 0;
     let anySelected = false;
+    // R4 — weighted-average leverage across the SELECTED members so the merged
+    // exposure reflects each venue's leverage in proportion to its weight
+    // (Σ wᵢ·Lᵢ / Σ wᵢ); without this, a per-row leverage on an aliased venue
+    // would be silently dropped at the collapse.
+    let weightedLevSum = 0;
     for (const member of group) {
       if (state.selected[member.id]) {
         anySelected = true;
-        summedSelectedWeight += state.weights[member.id] ?? 0;
+        const w = state.weights[member.id] ?? 0;
+        summedSelectedWeight += w;
+        if (hasLeverage) weightedLevSum += w * (state.leverage![member.id] ?? 1);
       }
     }
     selected[rep.id] = anySelected;
     weights[rep.id] = summedSelectedWeight;
+    if (hasLeverage) {
+      leverage[rep.id] =
+        summedSelectedWeight > 0 ? weightedLevSum / summedSelectedWeight : 1;
+    }
     // Carry the EARLIEST include-from across the aliased group, not blindly the
     // representative's. The weight-equivalence guarantee relies on aliased
     // members sharing a start date — which they do today, since they share a
@@ -140,5 +158,10 @@ export function collapseAliasedHoldingStrategies(
     }
   }
 
-  return { strategies: outStrategies, state: { selected, weights, startDates } };
+  return {
+    strategies: outStrategies,
+    state: hasLeverage
+      ? { selected, weights, startDates, leverage }
+      : { selected, weights, startDates },
+  };
 }

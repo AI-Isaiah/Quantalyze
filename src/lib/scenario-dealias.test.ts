@@ -326,3 +326,119 @@ describe("production adapter id ↔ symbol-map key alignment (H-0487/H-0493)", (
     expect(fixed.avg_pairwise_correlation).not.toBe(1);
   });
 });
+
+describe("collapseAliasedHoldingStrategies — R4 leverage carry/merge", () => {
+  const symbolMap = new Map([
+    [BTC_BINANCE, "BTC"],
+    [BTC_OKX, "BTC"],
+    [ETH_BINANCE, "ETH"],
+  ]);
+
+  it("omits the leverage key entirely when the input state carries none (byte-identical pre-R4 shape)", () => {
+    const strategies = [mkStrat(BTC_BINANCE, BTC), mkStrat(ETH_BINANCE, ETH)];
+    const state: ScenarioState = {
+      selected: { [BTC_BINANCE]: true, [ETH_BINANCE]: true },
+      weights: { [BTC_BINANCE]: 0.5, [ETH_BINANCE]: 0.5 },
+      startDates: { [BTC_BINANCE]: DATES[0], [ETH_BINANCE]: DATES[0] },
+    };
+    const out = collapseAliasedHoldingStrategies(
+      strategies,
+      state,
+      new Map([
+        [BTC_BINANCE, "BTC"],
+        [ETH_BINANCE, "ETH"],
+      ]),
+    );
+    expect("leverage" in out.state).toBe(false);
+  });
+
+  it("carries per-strategy leverage through for non-aliased holdings", () => {
+    const strategies = [mkStrat(BTC_BINANCE, BTC), mkStrat(ETH_BINANCE, ETH)];
+    const state: ScenarioState = {
+      selected: { [BTC_BINANCE]: true, [ETH_BINANCE]: true },
+      weights: { [BTC_BINANCE]: 0.5, [ETH_BINANCE]: 0.5 },
+      startDates: { [BTC_BINANCE]: DATES[0], [ETH_BINANCE]: DATES[0] },
+      leverage: { [BTC_BINANCE]: 2, [ETH_BINANCE]: 3 },
+    };
+    const out = collapseAliasedHoldingStrategies(
+      strategies,
+      state,
+      new Map([
+        [BTC_BINANCE, "BTC"],
+        [ETH_BINANCE, "ETH"],
+      ]),
+    );
+    expect(out.state.leverage?.[BTC_BINANCE]).toBe(2);
+    expect(out.state.leverage?.[ETH_BINANCE]).toBe(3);
+  });
+
+  it("weight-averages leverage across aliased same-symbol venues (no silent drop of a venue's leverage)", () => {
+    const strategies = [
+      mkStrat(BTC_BINANCE, BTC),
+      mkStrat(BTC_OKX, BTC),
+      mkStrat(ETH_BINANCE, ETH),
+    ];
+    const state: ScenarioState = {
+      selected: { [BTC_BINANCE]: true, [BTC_OKX]: true, [ETH_BINANCE]: true },
+      weights: { [BTC_BINANCE]: 0.3, [BTC_OKX]: 0.1, [ETH_BINANCE]: 0.6 },
+      startDates: {
+        [BTC_BINANCE]: DATES[0],
+        [BTC_OKX]: DATES[0],
+        [ETH_BINANCE]: DATES[0],
+      },
+      // binance 2× @ w0.3, okx 4× @ w0.1 → ΣwᵢLᵢ/Σwᵢ = (0.6 + 0.4)/0.4 = 2.5
+      leverage: { [BTC_BINANCE]: 2, [BTC_OKX]: 4, [ETH_BINANCE]: 1 },
+    };
+    const out = collapseAliasedHoldingStrategies(strategies, state, symbolMap);
+    expect(out.state.leverage?.[BTC_BINANCE]).toBeCloseTo(2.5, 10);
+    expect(out.state.leverage?.[ETH_BINANCE]).toBe(1);
+  });
+
+  it("aliased leverage merge falls back to 1.0 when the selected weight mass is 0", () => {
+    const strategies = [mkStrat(BTC_BINANCE, BTC), mkStrat(BTC_OKX, BTC)];
+    const state: ScenarioState = {
+      selected: { [BTC_BINANCE]: true, [BTC_OKX]: true },
+      weights: { [BTC_BINANCE]: 0, [BTC_OKX]: 0 },
+      startDates: { [BTC_BINANCE]: DATES[0], [BTC_OKX]: DATES[0] },
+      leverage: { [BTC_BINANCE]: 2, [BTC_OKX]: 4 },
+    };
+    const out = collapseAliasedHoldingStrategies(strategies, state, symbolMap);
+    expect(out.state.leverage?.[BTC_BINANCE]).toBe(1);
+  });
+
+  it("carry() defaults a leverage-bearing state's MISSING id to 1.0 (a partial leverage map can't drop a non-aliased holding's exposure)", () => {
+    // hasLeverage is true (BTC carries 2×) but ETH is absent from the map — the
+    // `?? 1` carry fallback must default it to 1×, not undefined/NaN.
+    const strategies = [mkStrat(BTC_BINANCE, BTC), mkStrat(ETH_BINANCE, ETH)];
+    const state: ScenarioState = {
+      selected: { [BTC_BINANCE]: true, [ETH_BINANCE]: true },
+      weights: { [BTC_BINANCE]: 0.5, [ETH_BINANCE]: 0.5 },
+      startDates: { [BTC_BINANCE]: DATES[0], [ETH_BINANCE]: DATES[0] },
+      leverage: { [BTC_BINANCE]: 2 }, // ETH intentionally missing
+    };
+    const out = collapseAliasedHoldingStrategies(
+      strategies,
+      state,
+      new Map([
+        [BTC_BINANCE, "BTC"],
+        [ETH_BINANCE, "ETH"],
+      ]),
+    );
+    expect(out.state.leverage?.[BTC_BINANCE]).toBe(2);
+    expect(out.state.leverage?.[ETH_BINANCE]).toBe(1);
+  });
+
+  it("aliased merge defaults a member MISSING from the leverage map to 1.0 (no NaN poisoning the weighted average)", () => {
+    // binance 2× @ w0.5, okx absent → treated as 1× @ w0.5
+    // → ΣwᵢLᵢ/Σwᵢ = (0.5·2 + 0.5·1)/1.0 = 1.5
+    const strategies = [mkStrat(BTC_BINANCE, BTC), mkStrat(BTC_OKX, BTC)];
+    const state: ScenarioState = {
+      selected: { [BTC_BINANCE]: true, [BTC_OKX]: true },
+      weights: { [BTC_BINANCE]: 0.5, [BTC_OKX]: 0.5 },
+      startDates: { [BTC_BINANCE]: DATES[0], [BTC_OKX]: DATES[0] },
+      leverage: { [BTC_BINANCE]: 2 }, // BTC_OKX intentionally missing
+    };
+    const out = collapseAliasedHoldingStrategies(strategies, state, symbolMap);
+    expect(out.state.leverage?.[BTC_BINANCE]).toBeCloseTo(1.5, 10);
+  });
+});
