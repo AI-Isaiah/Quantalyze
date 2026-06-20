@@ -1,0 +1,16 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "supabase/functions/*/index.ts",
+    "scripts/seed-full-app-demo.ts",
+    "scripts/build-security-packet.mjs",
+    "scripts/check-gdpr-export-coverage.ts",
+    "scripts/check-gdpr-export-coverage.test.ts",
+    "scripts/vitest.config.ts",
+    "src/lib/observability.ts"
+  ],
+  "ignoreDependencies": [
+    "postcss",
+    "hast-util-sanitize"
+  ]
+}

@@ -94,6 +94,10 @@ describe("recharts accessibilityLayer={false} contract (whole codebase)", () => 
     // 3 portfolio + 1 strategy + 4 strategy-v2). Floor kept just below the live
     // count purely as a glob/path-regression guard (catches readChartFiles
     // silently matching 0 files).
-    expect(files.length).toBeGreaterThanOrEqual(20);
+    // tech-debt #13 (dead-code removal): deleted 2 zero-importer recharts
+    // charts (src/components/charts/MonthlyReturnsBar.tsx, RiskOfRuin.tsx;
+    // never rendered, so no live accessibility surface), dropping the live
+    // count to 19 — floor lowered to 18 to stay just below it.
+    expect(files.length).toBeGreaterThanOrEqual(18);
   });
 });

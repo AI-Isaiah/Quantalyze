@@ -87,6 +87,16 @@ Assign each mechanism a workload class:
   `supabase/migrations/20260408215026_schedule_match_cron_hourly.sql` (lines 65-79).
 - Edge Functions: `supabase/functions/compute-trigger/index.ts`,
   `supabase/functions/notify-admin/index.ts`.
+  > **⚠ Doc-vs-live drift (flagged 2026-06-20, tech-debt #13):** these two
+  > functions are described above as in-production infrastructure, but a live
+  > check of the prod project found **zero deployed edge functions** and **no
+  > DB trigger / migration invokes them** (no `net.http_post`, no `functions/v1`
+  > reference anywhere in `supabase/migrations/`). The source files are kept (a
+  > prior dead-code pass deferred them for exactly this reason), but the
+  > deployment described here is not currently live. Resolve before relying on
+  > this path: either (re)deploy + wire the invocation, or retire this section
+  > and the source if the compute/notify paths now run elsewhere (the Railway
+  > self-polling worker + `analytics-service/routers/cron.py` cover compute).
 - Python cron: `analytics-service/routers/cron.py` (`cron_sync` at lines 297-688).
 - `cron_runs` table: `supabase/migrations/20260408113029_cron_heartbeat.sql`.
 - `vercel.json` crons block: `vercel.json` (lines 6-9).

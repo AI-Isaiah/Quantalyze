@@ -17,15 +17,10 @@
     "worker:dev": "cd analytics-service && .venv/bin/python main_worker.py"
   },
   "dependencies": {
-    "@dnd-kit/core": "^6.3.1",
-    "@dnd-kit/sortable": "^10.0.0",
-    "@dnd-kit/utilities": "^3.2.2",
-    "@opentelemetry/otlp-transformer": "0.215.0",
     "@sentry/nextjs": "^10.48.0",
     "@sparticuz/chromium": "^133.0.0",
     "@supabase/ssr": "^0.10.0",
     "@supabase/supabase-js": "^2.101.1",
-    "@tanstack/react-table": "^8.21.3",
     "@upstash/ratelimit": "^2.0.8",
     "@upstash/redis": "^1.37.0",
     "lightweight-charts": "^5.1.0",
@@ -64,5 +59,5 @@
     "typescript": "^5",
     "vitest": "^4.1.2"
   },
-  "version": "0.24.15.130"
+  "version": "0.24.15.131"
 }
