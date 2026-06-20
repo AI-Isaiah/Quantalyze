@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.15.124] - 2026-06-20
+### Changed — Dependency hygiene: Dependabot now watches npm + pip, and the nightly audit gate catches HIGH advisories
+
+Tech-debt audit (2026-06-09) findings #1 and #3. The repo's only dependency automation was Dependabot for GitHub Actions, and its config comment falsely claimed Renovate covered npm/python — no Renovate config exists anywhere. Meanwhile the nightly `npm audit` gate only failed on CRITICAL, so HIGH advisories accumulated silently.
+
+- **`.github/dependabot.yml`** — added `npm` (root) and `pip` (analytics-service) ecosystem update blocks, grouped weekly like the existing github-actions block (security advisories collapse into one PR, routine minor/patch into another; `open-pull-requests-limit: 5`). Corrected the false Renovate comment and added a scope note that pip coverage is manifest-level (analytics-service still has no lock file — reproducible-build hardening is tracked separately as tech-debt #7).
+- **`.github/workflows/nightly.yml`** — raised the nightly `npm audit` gate from `--audit-level=critical` to `--audit-level=high` (with matching wording in the auto-filed issue), so HIGH advisories now page instead of rotting. Verified it passes on the current tree (0 high / 0 critical).
+- **`package-lock.json`** — `npm audit fix` (no `--force`): patches dompurify 3.4.2→3.4.11 (XSS advisories on the sanitizer, pulled via an in-range posthog-js bump) plus a low `@babel` advisory; the lockfile regeneration also re-resolved the Sentry subtree (net −79 packages, all official-registry/trusted-parent). The remaining 8 moderate advisories are deferred: the OpenTelemetry chain (needs a semver-major bump) and the postcss-via-`next` chain (only `--force` fixes it, which would downgrade Next 16→9).
+
+Reviewed: Testing + Maintainability specialists (no findings) + Claude and Codex adversarial passes (both recommend merge; Codex's pip-coverage-overstatement note was addressed via the scope-note comment).
+
 ## [0.24.15.123] - 2026-06-20
 ### Changed — Phase 19 PR-D: verification_requests is now a read-only VIEW over strategy_verifications
 

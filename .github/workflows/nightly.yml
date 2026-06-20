@@ -180,9 +180,9 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - name: npm audit (critical-severity gate)
-        run: npm audit --audit-level=critical
-      - name: Open or update GitHub issue on critical advisory
+      - name: npm audit (high-severity gate)
+        run: npm audit --audit-level=high
+      - name: Open or update GitHub issue on high/critical advisory
         if: failure()
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
@@ -212,9 +212,9 @@ jobs:
               });
               return;
             }
-            const title = `Nightly npm audit found a critical advisory (${today})`;
+            const title = `Nightly npm audit found a high/critical advisory (${today})`;
             const body = [
-              "`npm audit --audit-level=critical` failed in the nightly workflow.",
+              "`npm audit --audit-level=high` failed in the nightly workflow.",
               "",
               `Workflow run: ${runUrl}`,
               "",
