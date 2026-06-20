@@ -639,3 +639,137 @@ describe("computeScenario — [G8.E.7] NaN/Infinity guard on cumulative wealth",
   });
 });
 
+// =========================================================================
+// R4 — per-strategy leverage (ScenarioState.leverage)
+// =========================================================================
+describe("computeScenario — R4 leverage multiplier", () => {
+  const dates = buildDates("2024-01-02", 30);
+  // Two genuinely different series so correlation is well-defined and the
+  // blend isn't degenerate.
+  const stratA = alternatingStrategy("a", dates, 0.02, -0.01);
+  const stratB = alternatingStrategy("b", dates, -0.015, 0.025);
+  const strategies = [stratA, stratB];
+  const cache = buildDateMapCache(strategies);
+  const baseState = defaultState(strategies); // equal weights, NO leverage field
+
+  it("an absent leverage field is byte-identical to an explicit all-1× field (pre-R4 invariance)", () => {
+    const withUndef = computeScenario(strategies, baseState, cache);
+    const withOnes = computeScenario(
+      strategies,
+      { ...baseState, leverage: { a: 1, b: 1 } },
+      cache,
+    );
+    expect(withOnes).toEqual(withUndef);
+  });
+
+  it("uniform 2× leverage scales volatility ~2× but leaves Sharpe + correlation INVARIANT (the honesty caveat)", () => {
+    const base = computeScenario(strategies, baseState, cache);
+    const levered = computeScenario(
+      strategies,
+      { ...baseState, leverage: { a: 2, b: 2 } },
+      cache,
+    );
+    // Uniform leverage scales every daily portfolio return by L, so vol scales by L.
+    expect(levered.volatility!).toBeCloseTo(2 * base.volatility!, 4);
+    // Sharpe = mean/vol — both scale by L, so it cancels. This is exactly why
+    // the UI MUST caveat that risk-adjusted metrics are leverage-invariant.
+    expect(levered.sharpe!).toBeCloseTo(base.sharpe!, 3);
+    // Correlation is built from the RAW per-strategy series, never the levered
+    // portfolio sum → identical matrix + avg |ρ|.
+    expect(levered.correlation_matrix).toEqual(base.correlation_matrix);
+    expect(levered.avg_pairwise_correlation).toBe(base.avg_pairwise_correlation);
+    // Leverage MOVES return (the whole point): cumulative TWR differs.
+    expect(levered.twr).not.toBe(base.twr);
+  });
+
+  it("per-strategy leverage re-tilts the blend (levering one leg ≠ baseline) without touching correlation", () => {
+    const base = computeScenario(strategies, baseState, cache);
+    const tilted = computeScenario(
+      strategies,
+      { ...baseState, leverage: { a: 3, b: 1 } },
+      cache,
+    );
+    expect(tilted.volatility).not.toBe(base.volatility);
+    expect(tilted.correlation_matrix).toEqual(base.correlation_matrix);
+  });
+
+  it("non-finite or negative leverage defends to 1.0 (a bad caller can't poison the curve)", () => {
+    const base = computeScenario(strategies, baseState, cache);
+    const poisoned = computeScenario(
+      strategies,
+      { ...baseState, leverage: { a: NaN, b: -5 } },
+      cache,
+    );
+    // NaN → 1.0 and a negative L → 1.0, so the metrics equal the unlevered baseline.
+    expect(poisoned.twr).toBe(base.twr);
+    expect(poisoned.volatility).toBe(base.volatility);
+    expect(poisoned.sharpe).toBe(base.sharpe);
+  });
+
+  it("Infinity leverage defends to 1.0 (the value the UI input can produce — never poisons the curve)", () => {
+    // The ScenarioComposer non-finite test feeds an "Infinity" paste; the UI
+    // rejects it, but the engine must ALSO defend (Number.isFinite catches it),
+    // so a future caller that bypasses the UI clamp can't blow up the curve.
+    const base = computeScenario(strategies, baseState, cache);
+    const inf = computeScenario(
+      strategies,
+      { ...baseState, leverage: { a: Infinity, b: 1 } },
+      cache,
+    );
+    expect(inf.twr).toBe(base.twr);
+    expect(inf.volatility).toBe(base.volatility);
+  });
+
+  it("L=0 is admitted (the >=0 guard): it ZEROES a leg's return but KEEPS its weight mass — dilution, not exclusion", () => {
+    // 0× is a legitimate UI value (min=0). Unlike toggling a leg OFF (which
+    // removes it from activeStrategies), a 0× leg still occupies the un-levered
+    // weight denominator, so it dilutes the rest of the book rather than
+    // dropping out. The blend must therefore differ from BOTH the baseline AND
+    // a pure single-leg projection.
+    const base = computeScenario(strategies, baseState, cache);
+    const zeroed = computeScenario(
+      strategies,
+      { ...baseState, leverage: { a: 0, b: 1 } },
+      cache,
+    );
+    expect(zeroed.twr).not.toBe(base.twr);
+    // Correlation is built from the raw series, untouched by leverage → both legs
+    // still present in the matrix (0× is NOT exclusion).
+    expect(zeroed.correlation_matrix).toEqual(base.correlation_matrix);
+  });
+
+  it("leverage that drives a daily portfolio return below -100% trips the catastrophic-loss guard (honest null KPIs, not garbage)", () => {
+    // A -50% single day is a plausible market crash that the guard deliberately
+    // does NOT trip at 1× (pinned in the [catastrophic-day guard] sanity test).
+    // Leverage is a NEW way to push that day's PORTFOLIO return past -100%:
+    // -0.5 × 3 = -1.5 → cumulative wealth flips sign → the guard MUST return
+    // null KPIs so KpiStrip renders honest em-dashes instead of astronomical
+    // garbage TWR. Without leverage feeding the cumulative-wealth chain, this
+    // interaction would be untested and a regression could surface false metrics.
+    const dates = buildDates("2024-01-02", 50);
+    const crashDay: DailyPoint[] = dates.map((date, i) => ({
+      date,
+      value: i === 5 ? -0.5 : 0.001,
+    }));
+    const strategy: StrategyForBuilder = {
+      ...constantReturnStrategy("a", dates, 0),
+      daily_returns: crashDay,
+    };
+    const cache1 = buildDateMapCache([strategy]);
+    // Control: at 1× the -50% day is survivable → metrics compute.
+    const unlevered = computeScenario([strategy], defaultState([strategy]), cache1);
+    expect(unlevered.twr).not.toBeNull();
+    // 3× turns the -50% day into a -150% portfolio day → guard trips.
+    const levered = computeScenario(
+      [strategy],
+      { ...defaultState([strategy]), leverage: { a: 3 } },
+      cache1,
+    );
+    expect(levered.twr).toBeNull();
+    expect(levered.volatility).toBeNull();
+    expect(levered.sharpe).toBeNull();
+    expect(levered.max_drawdown).toBeNull();
+    expect(levered.equity_curve).toEqual([]);
+  });
+});
+

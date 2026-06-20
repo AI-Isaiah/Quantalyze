@@ -65,6 +65,21 @@ export interface ScenarioState {
   selected: Record<string, boolean>;
   weights: Record<string, number>; // 0..1 (or any non-negative — renormalized)
   startDates: Record<string, string>; // ISO date; strategy included from >= this
+  /**
+   * R4 — optional per-strategy leverage multiplier (id → L; default 1.0 when
+   * absent). Applied as `wᵢ·Lᵢ·rᵢ` in the portfolio daily-return sum below, so
+   * leverage scales exposure / return / vol / max-DD. Deliberately NOT applied
+   * to the per-strategy series the correlation matrix is built from — leverage
+   * is a scale transform and a single strategy's `L·r` has the SAME Pearson
+   * correlations as `r` (it cancels in the std-normalised covariance). v1 models
+   * leverage as daily-return scaling with NO borrow/funding cost, so risk-
+   * adjusted metrics (Sharpe/Sortino) and the correlation matrix are leverage-
+   * invariant — the UI must caveat that.
+   *
+   * Additive + optional: a state without `leverage` is byte-identical to the
+   * pre-R4 behaviour, so every `scenario.test.ts` pin holds unchanged.
+   */
+  leverage?: Record<string, number>;
 }
 
 export interface ComputedMetrics {
@@ -148,6 +163,15 @@ export function computeScenario(
   const normWeight = (id: string) =>
     totalWeight > 0 ? (state.weights[id] ?? 0) / totalWeight : 0;
 
+  // R4 — per-strategy leverage multiplier (default 1.0). A non-finite or
+  // negative L falls back to 1.0 (no shorting in v1); the UI clamps to a
+  // non-negative ceiling (MAX_LEVERAGE in ScenarioComposer), but the engine
+  // stays defensive so a bad caller can't poison the curve.
+  const lev = (id: string): number => {
+    const L = state.leverage?.[id];
+    return Number.isFinite(L) && (L as number) >= 0 ? (L as number) : 1;
+  };
+
   const strategyStart = new Map<string, string>();
   for (const s of activeStrategies) {
     const chosen = state.startDates[s.id] ?? s.start_date ?? "2022-01-01";
@@ -202,7 +226,10 @@ export function computeScenario(
       const from = strategyStart.get(s.id)!;
       if (commonDates[i] < from) continue;
       const w = normWeight(s.id);
-      r += w * strategyReturns[s.id][i];
+      // R4 — leverage AMPLIFIES exposure: scale the return by Lᵢ in the
+      // numerator but renormalize by the (un-levered) weight mass, so a 2x
+      // strategy genuinely contributes 2x its return rather than cancelling.
+      r += w * lev(s.id) * strategyReturns[s.id][i];
       activeWeightSum += w;
     }
     portDaily[i] = activeWeightSum > 0 ? r / activeWeightSum : 0;
