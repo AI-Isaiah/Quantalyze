@@ -4,7 +4,7 @@ Portfolio intelligence platform for quant allocators. Connect exchange API keys,
 
 ## Prerequisites
 
-- Node.js 20.9+
+- Node.js 20+ (pinned in `.nvmrc`; enforced by `package.json` `engines`)
 - Python 3.12 (for the analytics service — pinned; matches the Dockerfile and CI)
 - [Supabase CLI](https://supabase.com/docs/guides/cli) and a [Supabase](https://supabase.com) project
 

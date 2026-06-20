@@ -11,7 +11,7 @@ For local setup, see [README.md](README.md). For architecture decisions, see
 
 ## Prerequisites
 
-- Node.js 20.9+
+- Node.js 20+ (pinned in `.nvmrc`; enforced by `package.json` `engines`)
 - Python 3.12 (pinned — the analytics service Dockerfile and CI both use
   3.12; do not develop against 3.13/3.14, it drifts from CI)
 - [Supabase CLI](https://supabase.com/docs/guides/cli) for migrations
