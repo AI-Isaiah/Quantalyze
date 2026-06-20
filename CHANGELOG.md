@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.24.15.128] - 2026-06-20
+## [0.24.15.129] - 2026-06-20
 ### Added — Scenario Composer: per-strategy leverage what-if + the weight/toggle sliders now actually move the projection
 
 Allocators can now stress-test a blend two ways that previously did nothing or didn't exist.
@@ -12,6 +12,18 @@ Allocators can now stress-test a blend two ways that previously did nothing or d
 Engine stays defensive: a non-finite or negative leverage falls back to 1.0 (no shorting in v1), and a leverage that drives a daily portfolio return below −100% trips the existing catastrophic-loss guard (honest null KPIs / em-dashes, not astronomical garbage).
 
 Reviewed: pre-landing review army (testing, maintainability, performance, design) + fresh-context Claude red-team. The red-team caught a decision-integrity hazard — an allocator could lever up, see inflated KPIs, and commit a mandate carrying no leverage — fixed by making the caveat state leverage is not saved on commit. Coverage: lib engine + de-alias at 100%, component flows ~97%; added tests for the leverage→catastrophic-guard interaction, the Infinity/0× boundaries, and a mutation-verified regression test pinning the toggle-exclusion fix (it fails on a severed-wiring mutant).
+## [0.24.15.128] - 2026-06-20
+### Changed — Analytics observability: cassette-refresh failure alerting + deployed-SHA in /health
+
+Tech-debt audit (2026-06-09) findings #8 and #9 (the autonomous, no-secret slices).
+
+- **`.github/workflows/cassette-refresh.yml`** [#8] — added an `if: failure()` dedup'd issue-filing step (mirrors `nightly.yml`; label `nightly-canary-failure:cassette-refresh`) + `issues: write` perm. This daily OKX/Bybit schema-drift early-warning had NO failure alerting — it failed 17/17 runs (a stale synthesis fixture, since fixed in PR #471) with the only signal being red in the Actions tab that everyone learned to ignore. A future regression now pages someone. (The synthesis fix already landed; the runs went green 2026-06-16+. This adds the missing alerting so the next break can't rot silently.)
+- **`analytics-service/main.py`** [#9a] — `/health` now returns `git_sha` (from `RAILWAY_GIT_COMMIT_SHA`, the runtime var Railway injects on GitHub-trigger deploys; falls back to `GIT_COMMIT_SHA` then `"unknown"`). Railway skips a deploy silently when main CI is red, leaving the worker on stale code with no machine-checkable signal; the deployed commit is now observable. Captured at import (fixed per deploy), present in both the 200 and 503 bodies. New `analytics-service/tests/test_health.py` guards the field (2 tests).
+
+The **#9b** post-merge SHA-verify workflow (curl /health, fail loud if deployed SHA != main HEAD) is **deferred**: it needs the prod analytics URL as a GitHub repo variable, which only lives in Vercel's env today. Tracked for the user-gated batch alongside #12/#18.
+
+Reviewed: fresh-context adversarial pass — both changes sound (no HIGH/MEDIUM); confirmed `RAILWAY_GIT_COMMIT_SHA` is the correct runtime var, the failure step fires correctly + is injection-safe (env-passed values only), and the regression test genuinely fails when the field is removed. CI-workflow + analytics-only — no frontend/migration impact.
+
 ## [0.24.15.127] - 2026-06-20
 ### Changed — TypeScript coverage is now a CI gate (ratcheted thresholds)
 

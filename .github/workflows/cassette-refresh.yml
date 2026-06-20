@@ -52,6 +52,10 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # tech-debt #8: needed by the if:failure() issue-filing step so a broken
+      # cassette-refresh pages someone instead of rotting silently in the
+      # Actions tab (this workflow had no failure alerting; nightly.yml does).
+      issues: write
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -233,3 +237,56 @@ jobs:
             echo "All credentialed brokers recorded successfully (or schemas stable)."
           fi
           exit "$rc"
+
+      # tech-debt #8: this workflow is the OKX/Bybit schema-drift early-warning
+      # system, but it had NO failure alerting — it failed 17/17 runs (a stale
+      # synthesis fixture, fixed in PR #471) with the only signal being red in
+      # the Actions tab that everyone learned to ignore. Mirror nightly.yml's
+      # dedup'd issue-on-failure so a future regression pages someone. Fires on
+      # ANY failed step above (record/leak-gate, broker-reachability, the
+      # auto-PR step). Env-passed values only — no untrusted github.event.*.
+      - name: Open or update GitHub issue on failure
+        if: failure()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          RUN_ID: ${{ github.run_id }}
+          REPO_NAME: ${{ github.repository }}
+        with:
+          script: |
+            const { RUN_ID, REPO_NAME } = process.env;
+            const today = new Date().toISOString().slice(0, 10);
+            const dedupLabel = "nightly-canary-failure:cassette-refresh";
+            const runUrl = `https://github.com/${REPO_NAME}/actions/runs/${RUN_ID}`;
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: dedupLabel,
+              per_page: 1,
+            });
+            if (existing.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing[0].number,
+                body: `Cassette refresh failed again on ${today}. Workflow run: ${runUrl}`,
+              });
+              return;
+            }
+            const title = `Cassette refresh failed on ${today}`;
+            const body = [
+              "The daily OKX/Bybit cassette-refresh workflow failed. This is the broker schema-drift early-warning system — a failure means it is no longer protecting against a live-sync break from a broker API rotation.",
+              "",
+              `Workflow run: ${runUrl}`,
+              "",
+              "Likely causes: a broker schema rotation the recorder can't parse, a stale schema-drift synthesis fixture (see analytics-service/scripts/record_cassettes.py), a missing/expired DEBUG_KEY_FLOW_* secret, or a broker geo-block on the GitHub runner.",
+              "",
+              "Auto-filed by .github/workflows/cassette-refresh.yml. Deduplicated by the `" + dedupLabel + "` label; subsequent failures comment here until this issue is closed.",
+            ].join("\n");
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ["nightly-probe", "p1", dedupLabel],
+            });
