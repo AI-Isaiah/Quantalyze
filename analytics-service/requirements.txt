@@ -15,7 +15,7 @@ python-dotenv==1.1.0
 httpx==0.28.1
 slowapi==0.1.9
 supabase==2.15.1
-cryptography>=44.0
+cryptography>=49.0.0
 # Phase 15 / CSV-01..CSV-02: pandera CSV row-schema validation +
 # python-multipart UploadFile parsing for /api/csv/validate (the only
 # multipart route in the service). pandera 0.20.x is compatible with
