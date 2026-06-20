@@ -8,6 +8,17 @@ depending on the soon-to-be-compacted session memory.
 The local artifacts (`.planning/audit-2026-05-07/`) are gitignored, so the
 tracked substance of this PR is this runbook plus a VERSION bump.
 
+> **Status note (2026-06-20):** this is a historical snapshot of the 2026-05-17
+> pass; its counts are accurate for that date, not today. The campaign's working
+> queue has since moved to `.planning/v1.0.0-DEFERRED-AUDIT-DECISIONS.md` (still
+> gitignored). The **durable, tracked** record of what remains deferred — IDs,
+> rationale, and the "do NOT implement" landmine warnings — is
+> [`docs/deferred-findings.md`](../deferred-findings.md). Read that for remaining
+> work; the gitignored paths below are per-developer and may not exist locally.
+> The per-file `FIX-REPORT-*.md` / `FIX-BRIEF-*.md` reports this pass cited as
+> "checked into the repo" were campaign residue and have since been removed
+> (their substance is folded into the working queue + `CHANGELOG.md`).
+
 ## Summary
 
 | Metric | Value |
@@ -126,10 +137,16 @@ STILL_LIVE per finding.
 
 ## Next session
 
-1. Read `.planning/audit-2026-05-07/FIX-LIST.md` to see remaining work
-   (1929 findings: 135 C / 726 H / 995 M / 73 L).
-2. Read `.planning/audit-2026-05-07/FIX-LIST-FIXED.md` for the closure log
-   (46 new closures + prior 114 from the 2026-05-17 morning pass).
+1. Read [`docs/deferred-findings.md`](../deferred-findings.md) for the durable,
+   tracked list of what remains deferred (incl. the do-NOT-implement landmines).
+   The full working queue (if present locally) is
+   `.planning/v1.0.0-DEFERRED-AUDIT-DECISIONS.md` — formerly
+   `.planning/audit-2026-05-07/FIX-LIST.md`; both gitignored, per-developer.
+   (Counts here — 1929 findings: 135 C / 726 H / 995 M / 73 L — are the
+   2026-05-17 snapshot; the campaign has since closed the criticals and the
+   bulk of the queue.)
+2. The closure log (`FIX-LIST-FIXED.md`) lives alongside the working queue in
+   the gitignored `.planning/` dir.
 3. Top priority hotspots: `src/app/api/account/export/route.ts` (6 C),
    `src/app/api/admin/partner-import/route.ts` (6 C),
    `analytics-service/routers/cron.py` (4 C),
@@ -141,7 +158,9 @@ STILL_LIVE per finding.
 
 | Artifact | Type | Status |
 |----------|------|--------|
-| `.planning/audit-2026-05-07/FIX-LIST.md` | gitignored | rewritten 2026-05-17 |
+| `docs/deferred-findings.md` | tracked | durable deferred-findings record (added 2026-06-20) |
+| `.planning/v1.0.0-DEFERRED-AUDIT-DECISIONS.md` | gitignored | current working queue (was `FIX-LIST.md`) |
+| `.planning/audit-2026-05-07/FIX-LIST.md` | gitignored | rewritten 2026-05-17 (since relocated) |
 | `.planning/audit-2026-05-07/FIX-LIST-FIXED.md` | gitignored | appended 2026-05-17 |
 | `.planning/audit-2026-05-07/FIX-LIST.backup-precompact-2026-05-17.md` | gitignored | snapshot pre-pass |
 | `docs/runbooks/fix-list-reverify-2026-05-17.md` | tracked | this file |

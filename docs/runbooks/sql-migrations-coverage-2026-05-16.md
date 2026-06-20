@@ -12,8 +12,11 @@ Status legend:
 - **OBSOLETE** — original behavior changed; no longer applies
 - **OUT_OF_SCOPE_SQL** — requires app-side / process changes; not a SQL fix
 
-Source FIX-LIST: `.planning/audit-2026-05-07/FIX-LIST.md` (not in this worktree;
-.planning is gitignored). Findings transcribed from main repo.
+Source FIX-LIST: the campaign working queue, gitignored and per-developer (now
+`.planning/v1.0.0-DEFERRED-AUDIT-DECISIONS.md`, formerly
+`.planning/audit-2026-05-07/FIX-LIST.md`). For the durable, tracked record of
+what remains deferred, see [`docs/deferred-findings.md`](../deferred-findings.md).
+Findings transcribed from main repo.
 
 ---
 

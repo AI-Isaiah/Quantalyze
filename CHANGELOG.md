@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.126] - 2026-06-20
+### Changed — Repo hygiene: durable deferred-findings record + campaign-residue cleanup
+
+Tech-debt audit (2026-06-09) findings #6 and #10. The audit campaign's deferred-findings record (with the "do NOT implement" landmine warnings that prevent future data-loss) existed only in a gitignored, per-developer file; the repo root carried stale one-off campaign reports.
+
+- **`docs/deferred-findings.md` (new)** [#6] — durable, git-tracked record of the 22 deliberately-deferred audit findings: IDs, files, defer rationale, and a prominent section for the 4 "do NOT implement" landmines (M-0892/M-0703 — correlation precompute is unsound/structurally-impossible; M-0938 — raising `_PAGE_SIZE` silently undercounts `funding_pnl` past the PostgREST `max_rows=1000` cap; L-0051 — a `funding_fees` retention sweep corrupts funding-P&L attribution). The working queue stays gitignored (`.planning/v1.0.0-DEFERRED-AUDIT-DECISIONS.md`); this is the deliverable, regenerable via `grep '^#### '`.
+- **`docs/runbooks/{fix-list-reverify-2026-05-17,sql-migrations-coverage-2026-05-16,audit-canonical-integration-2026-05-17}.md`** [#6] — repointed the dangling "read the gitignored FIX-LIST for remaining work" references at the new tracked doc, with a status note that the gitignored paths are historical/per-developer.
+- **`TODOS.md`** [#10] — retired the `complete_with_warnings` CHECK P0 (shipped in migration `20260602120000`, PR #406) to the file's DONE convention; verified the original note's `portfolio_analytics` half was a precaution, not a live bug (no producer writes `complete_with_warnings` there — only `strategy_analytics` and a distinct `sync_status` column).
+- **Removed campaign residue at repo root** [#10] — `git rm` of 6 tracked one-off reports (`FIX-REPORT.md`, `FIX-REPORT-portfolio-py.md`, `FIX-REPORT-equity-reconstruction-py.md`, `FIX-BRIEF-portfolio-py.md`, `FIX-BRIEF-equity-reconstruction-py.md`, `follow-up-pr-findings.md`) plus the untracked `fix-list-cluster.md` (+ `.bak`). Their substance is already in `CHANGELOG.md` + the working queue. No markdown link pointed at them (verified — lychee-safe).
+
+Reviewed: fresh-context Claude fact-check of the load-bearing landmine warnings + 22-finding table against the source (all accurate, none softened, count correct, no fabrication). Docs/hygiene only — no application code changed. The `.planning/codebase` regeneration in #10 is deferred (gitignored, local, heavyweight).
+
 ## [0.24.15.125] - 2026-06-20
 ### Changed — Documentation accuracy: CONTRIBUTING ops doc, README setup, compute-queue runbook
 

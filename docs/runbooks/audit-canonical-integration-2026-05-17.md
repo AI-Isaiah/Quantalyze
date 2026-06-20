@@ -5,6 +5,13 @@ locally in `.planning/audit-2026-05-07/` and records the data structure here so
 future sessions can navigate. Local files are per-developer (gitignored); the
 tracked substance of this PR is this runbook plus a VERSION bump.
 
+> **Note:** this runbook documents the *campaign machinery* (the working set),
+> which is intentionally local-only. The **durable record of what remains
+> deferred** — finding IDs, defer rationale, and the "do NOT implement" landmine
+> warnings — is tracked at [`docs/deferred-findings.md`](../deferred-findings.md).
+> The working queue has since been relocated to
+> `.planning/v1.0.0-DEFERRED-AUDIT-DECISIONS.md` (still gitignored).
+
 ## Scope
 
 Three integration tasks, completed locally against

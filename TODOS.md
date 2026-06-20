@@ -46,22 +46,9 @@ Plan 05 ships live-DB regression tests for 1-row / all-zero / NaN-Inf CSVs. The 
 
 Five additional findings from the post-PR red-team pass against Phase 19.1. Fixes 1-4 landed in this branch (commits prefixed `19.1-redteam`). The items below are the remaining follow-ups that need separate plans / migrations / monitoring infra.
 
-#### P0 — `complete_with_warnings` CHECK constraint missing
+#### ~~P0 — `complete_with_warnings` CHECK constraint missing~~ — ✅ DONE (B9, 2026-06-02)
 
-Pre-existing production bug NOT introduced by Phase 19.1, but surfaced during the red-team pass. The PROD `strategy_analytics_computation_status_check` constraint admits only `pending|computing|complete|failed`. However, `analytics-service/services/analytics_runner.py:1322` writes `complete_with_warnings` when `consumer_specific_flags` is non-empty (the OKX exchange runner uses this path). Writes that hit this branch silently fail (or were rare enough to not surface). Same gap exists on `portfolio_analytics_computation_status_check`.
-
-**Action:** ship a new migration `2026MMddhhmmss_widen_strategy_analytics_computation_status.sql`:
-
-```sql
-ALTER TABLE strategy_analytics DROP CONSTRAINT strategy_analytics_computation_status_check;
-ALTER TABLE strategy_analytics ADD CONSTRAINT strategy_analytics_computation_status_check
-  CHECK (computation_status IN ('pending','computing','complete','complete_with_warnings','failed'));
--- repeat for portfolio_analytics
-```
-
-Add a regression test that asserts the widened set is admitted (INSERT round-trip for each value).
-
-**Priority:** P0 — affects the existing exchange runner today.
+Shipped in migration `20260602120000_strategy_analytics_computation_status_add_complete_with_warnings.sql` (PR #406): the `strategy_analytics_computation_status_check` CHECK was widened to `('pending','computing','complete','complete_with_warnings','failed')` with a self-verifying DO block + the `check-zod-db-check-parity.test.ts` regression gate. The `portfolio_analytics` half of the original note was a precaution, not a live bug — verified 2026-06-20 that no producer ever writes `complete_with_warnings` to `portfolio_analytics.computation_status` (only `strategy_analytics`, plus a distinct `sync_status` column), so no widening was needed there.
 
 #### P1 — Unified backbone CSV-finalize broken-by-construction
 
