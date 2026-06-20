@@ -95,6 +95,13 @@ import type { AddedStrategy } from "../lib/scenario-state";
  */
 const SYNTHETIC_BASELINE_AUM = 1;
 
+/**
+ * R4 — leverage v1 bounds. No shorting (L ≥ 0); a 10× ceiling keeps the
+ * projection in a sane range. Module-scoped so the composer's fail-loud change
+ * handler and the CompositionList input share a single source of truth.
+ */
+const MAX_LEVERAGE = 10;
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -325,6 +332,14 @@ export function ScenarioComposer({
   //       displayed value that doesn't match underlying state.
   const [commitError, setCommitError] = useState<string | null>(null);
 
+  // R4 — per-strategy leverage multipliers (ref → L). Ephemeral exploration
+  // state: NOT persisted to the draft and NOT part of the commit diff. Leverage
+  // is a what-if overlay on the projection, so it resets on reload and is never
+  // recorded as a mandate decision (default 1.0 when a ref is absent).
+  // ponytail: ephemeral useState; promote to the persisted draft only if
+  // allocators ask for leverage to survive a reload.
+  const [leverageByRef, setLeverageByRef] = useState<Record<string, number>>({});
+
   function handleWeightChange(scopeRef: string, weight: number) {
     if (!Number.isFinite(weight)) {
       // F-08: log non-finite weight so a regression (broken input component,
@@ -355,6 +370,35 @@ export function ScenarioComposer({
       setCommitError(null);
     }
     scenario.setWeightOverride(scopeRef, weight);
+  }
+
+  // R4 — leverage input change handler. Mirrors handleWeightChange's fail-loud
+  // contract: a non-finite paste is rejected (the prior value is kept), and an
+  // out-of-range value is clamped to [0, MAX_LEVERAGE] with a visible message so
+  // the clamp is never silent. A value of exactly 1 IS stored (not treated as
+  // absent) so the controlled input stays in sync after a clamp.
+  function handleLeverageChange(scopeRef: string, leverage: number) {
+    if (!Number.isFinite(leverage)) {
+      console.warn(
+        "[ScenarioComposer] handleLeverageChange received non-finite leverage",
+        { scopeRef, leverage },
+      );
+      setCommitError(
+        `Invalid leverage — enter a number between 0 and ${MAX_LEVERAGE}. The previous value was kept.`,
+      );
+      return;
+    }
+    if (leverage < 0) {
+      setCommitError(
+        "Leverage can't be negative — shorting isn't modeled in this projection. Clamped to 0.",
+      );
+    } else if (leverage > MAX_LEVERAGE) {
+      setCommitError(`Leverage clamped to ${MAX_LEVERAGE}× — the maximum modeled leverage.`);
+    } else {
+      setCommitError(null);
+    }
+    const clamped = Math.min(MAX_LEVERAGE, Math.max(0, leverage));
+    setLeverageByRef((prev) => ({ ...prev, [scopeRef]: clamped }));
   }
 
   // M3 — Empty state computed flag. The early-return moves to the END of
@@ -486,6 +530,42 @@ export function ScenarioComposer({
     return map;
   }, [holdingsSummary]);
 
+  // -------------------------------------------------------------------------
+  // H-0133 — wire the draft's weight + toggle state INTO the projection.
+  // The adapter computes value-proportional default weights and marks every
+  // added strategy weight 0 / selected=true; the user's slider edits live in
+  // `scenario.draft.weightOverrides` and only ever reached the COMMIT diff, so
+  // "the slider did not move the projection" (reweighting silently no-op'd).
+  // Overlay the draft state — the canonical sum-to-1 map the CompositionList
+  // input already DISPLAYS — onto the adapter strategies BEFORE the collapse so
+  // computeScenario reflects exactly what the UI shows. `selected` comes from
+  // the toggle map for ALL refs (holdings AND added) so toggling an added
+  // strategy off now actually excludes it (it carries a real weight post-fix).
+  // R4 leverage rides the SAME projection state; the collapse weight-averages it
+  // across aliased venues and computeScenario applies `wᵢ·Lᵢ·rᵢ`.
+  const projectionState = useMemo(() => {
+    const selected: Record<string, boolean> = {};
+    const weights: Record<string, number> = {};
+    const leverage: Record<string, number> = {};
+    for (const s of adapterOutput.strategies) {
+      const toggle = scenario.draft.toggleByScopeRef[s.id];
+      selected[s.id] =
+        toggle === undefined ? (adapterOutput.state.selected[s.id] ?? true) : toggle;
+      const ov = scenario.draft.weightOverrides[s.id];
+      weights[s.id] = Number.isFinite(ov)
+        ? (ov as number)
+        : (adapterOutput.state.weights[s.id] ?? 0);
+      const L = leverageByRef[s.id];
+      leverage[s.id] = Number.isFinite(L) ? (L as number) : 1;
+    }
+    return { selected, weights, startDates: adapterOutput.state.startDates, leverage };
+  }, [
+    adapterOutput,
+    scenario.draft.toggleByScopeRef,
+    scenario.draft.weightOverrides,
+    leverageByRef,
+  ]);
+
   // M-0102: hoist the de-alias collapse and the per-strategy date→index cache
   // into their own memos. Previously buildDateMapCache ran inside the
   // scenarioMetrics body, rebuilding the cache on every recompute. Each memo is
@@ -496,10 +576,10 @@ export function ScenarioComposer({
     () =>
       collapseAliasedHoldingStrategies(
         adapterOutput.strategies,
-        adapterOutput.state,
+        projectionState,
         symbolByHoldingId,
       ),
-    [adapterOutput, symbolByHoldingId],
+    [adapterOutput.strategies, projectionState, symbolByHoldingId],
   );
   const dateMapCache = useMemo(
     () => buildDateMapCache(deAliased.strategies),
@@ -508,6 +588,19 @@ export function ScenarioComposer({
   const scenarioMetrics = useMemo(
     () => computeScenario(deAliased.strategies, deAliased.state, dateMapCache),
     [deAliased, dateMapCache],
+  );
+
+  // R4 — show the leverage caveat only when a non-default multiplier ACTUALLY
+  // moves the projection: derive it from `projectionState` (the state fed to the
+  // collapse + computeScenario) rather than the raw `leverageByRef`, so a stale
+  // multiplier on a row that is toggled off or carries zero weight — which
+  // contributes nothing to the curve — never surfaces a misleading caveat.
+  const leverageApplied = Object.entries(projectionState.leverage).some(
+    ([id, L]) =>
+      Number.isFinite(L) &&
+      L !== 1 &&
+      projectionState.selected[id] === true &&
+      (projectionState.weights[id] ?? 0) > 0,
   );
 
   // -------------------------------------------------------------------------
@@ -954,6 +1047,18 @@ export function ScenarioComposer({
         />
       </div>
 
+      {leverageApplied && (
+        <p
+          data-testid="scenario-leverage-caveat"
+          className="mt-2 text-[11px] text-text-muted"
+        >
+          Leverage modeled as daily-return scaling; excludes borrow / funding
+          cost — risk-adjusted metrics (Sharpe, Sortino) and the correlation
+          matrix are leverage-invariant here. This is an exploration-only
+          what-if overlay; it is not recorded when you commit this scenario.
+        </p>
+      )}
+
       <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* B14 / NEW-C09-04 (H-1226): the Scenario-tab chart renders the inner
             header (no `hideHeader`), so plumb the real sync state. Without it
@@ -1037,6 +1142,8 @@ export function ScenarioComposer({
         sharedSymbols={sharedSymbols}
         onToggle={scenario.toggleHolding}
         onSetWeight={handleWeightChange}
+        leverageByRef={leverageByRef}
+        onSetLeverage={handleLeverageChange}
         onRemoveAdded={scenario.removeAddedStrategy}
         onCompare={(scopeRef, candidateId) =>
           router.push(
@@ -1159,6 +1266,9 @@ interface CompositionListProps {
   sharedSymbols: Set<string>;
   onToggle: (scopeRef: string) => void;
   onSetWeight: (scopeRef: string, weight: number) => void;
+  /** R4 — ref → leverage multiplier (default 1.0 when absent). */
+  leverageByRef: Record<string, number>;
+  onSetLeverage: (scopeRef: string, leverage: number) => void;
   onRemoveAdded: (id: string) => void;
   onCompare: (scopeRef: string, candidateId: string) => void;
 }
@@ -1170,6 +1280,8 @@ function CompositionList({
   sharedSymbols,
   onToggle,
   onSetWeight,
+  leverageByRef,
+  onSetLeverage,
   onRemoveAdded,
   onCompare,
 }: CompositionListProps) {
@@ -1272,6 +1384,22 @@ function CompositionList({
                   onChange={(e) => onSetWeight(ref, Number(e.target.value))}
                   className="w-20 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
                 />
+                <label className="sr-only" htmlFor={`leverage-${ref}`}>
+                  {h.symbol} leverage
+                </label>
+                <input
+                  id={`leverage-${ref}`}
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max={MAX_LEVERAGE}
+                  value={(leverageByRef[ref] ?? 1).toString()}
+                  disabled={!enabled}
+                  title="Leverage multiplier (1× = unlevered; excludes borrow cost)"
+                  aria-label={`${h.symbol} leverage multiplier`}
+                  onChange={(e) => onSetLeverage(ref, Number(e.target.value))}
+                  className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+                />
                 {flagged && flagged.top_candidate_strategy_id && (
                   <button
                     type="button"
@@ -1337,6 +1465,22 @@ function CompositionList({
                   disabled={!enabled}
                   onChange={(e) => onSetWeight(a.id, Number(e.target.value))}
                   className="w-20 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+                />
+                <label className="sr-only" htmlFor={`leverage-${a.id}`}>
+                  {a.name} leverage
+                </label>
+                <input
+                  id={`leverage-${a.id}`}
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max={MAX_LEVERAGE}
+                  value={(leverageByRef[a.id] ?? 1).toString()}
+                  disabled={!enabled}
+                  title="Leverage multiplier (1× = unlevered; excludes borrow cost)"
+                  aria-label={`${a.name} leverage multiplier`}
+                  onChange={(e) => onSetLeverage(a.id, Number(e.target.value))}
+                  className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
                 />
                 <button
                   type="button"
