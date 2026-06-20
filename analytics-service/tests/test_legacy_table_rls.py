@@ -26,7 +26,7 @@ _MIGRATION_PATH = (
     pathlib.Path(__file__).resolve().parents[2]
     / "supabase"
     / "migrations"
-    / "20260509082818_verification_requests_view_shim.sql"
+    / "20260620120000_verification_requests_view_shim_apply.sql"
 )
 
 
