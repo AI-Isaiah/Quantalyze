@@ -1053,8 +1053,9 @@ export function ScenarioComposer({
           className="mt-2 text-[11px] text-text-muted"
         >
           Leverage modeled as daily-return scaling; excludes borrow / funding
-          cost — risk-adjusted metrics (Sharpe, Sortino) and the correlation
-          matrix are leverage-invariant here. This is an exploration-only
+          cost. The correlation matrix is leverage-invariant; risk-adjusted
+          ratios (Sharpe, Sortino) shift when you lever individual legs, since
+          per-leg leverage re-tilts the blend. This is an exploration-only
           what-if overlay; it is not recorded when you commit this scenario.
         </p>
       )}
