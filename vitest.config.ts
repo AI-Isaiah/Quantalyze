@@ -44,10 +44,14 @@ export default defineConfig({
       "tools/eslint-plugin-quantalyze/tests/**/*.test.ts",
     ],
     setupFiles: ["src/test-setup.ts"],
-    // Coverage tracking — measurement only, NOT a CI gate yet.
-    // Thresholds are intentionally low (60%) to establish a floor; the
-    // ## Test Coverage section in CLAUDE.md tracks 80% as the target.
-    // CI gating is a separate decision (see PR D scope item #2).
+    // Coverage tracking — GATED in CI by the `frontend-coverage` job
+    // (.github/workflows/ci.yml), which runs the full (non-sharded) suite
+    // with --coverage and fails if any metric drops below the thresholds
+    // below. Thresholds are a RATCHET: set a few points under measured
+    // actual (2026-06-20: lines 85.2 / statements 83.3 / functions 77.4 /
+    // branches 75.5) so a real regression trips the gate but normal noise
+    // does not. When actual climbs durably, raise these to match. See the
+    // ## Test Coverage section in CLAUDE.md (target 80) and tech-debt #11.
     coverage: {
       provider: "v8",
       reporter: ["text", "html", "json-summary"],
@@ -67,10 +71,10 @@ export default defineConfig({
         "coverage/**",
       ],
       thresholds: {
-        lines: 60,
-        functions: 60,
-        branches: 60,
-        statements: 60,
+        lines: 82,
+        functions: 74,
+        branches: 72,
+        statements: 80,
       },
     },
   },

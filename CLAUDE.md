@@ -6,15 +6,20 @@ The TypeScript test suite tracks coverage via `@vitest/coverage-v8`. Run
 `npm run test:coverage` to produce a v8 report (text + HTML + JSON
 summary in `coverage/`).
 
-- **Minimum**: 60% lines / functions / branches / statements. Configured
-  as a Vitest threshold in `vitest.config.ts` so the local run fails the
-  reporter if a regression dips below the floor.
+- **Gate (ratchet)**: lines 82 / statements 80 / functions 74 / branches 72,
+  configured as Vitest thresholds in `vitest.config.ts`. These are set a few
+  points under measured actual (2026-06-20: 85.2 / 83.3 / 77.4 / 75.5) so a
+  real regression fails CI but normal noise does not. When actual climbs
+  durably, raise the thresholds to match.
 - **Target**: 80%, matching the `--cov-fail-under=80` gate the
-  `analytics-service/` Python suite already enforces.
+  `analytics-service/` Python suite already enforces. Lines and statements
+  already clear it; functions and branches are the next ratchet.
 
-Coverage is currently measurement-only — it is NOT a blocking CI gate.
-Promoting it to a gate is a separate decision tracked in the long-tail
-tech-debt backlog.
+Coverage is **a blocking CI gate** as of tech-debt #11 (2026-06-20): the
+`frontend-coverage` job in `.github/workflows/ci.yml` runs the full suite with
+`--coverage` and the aggregator `frontend` check gates branch protection on it.
+(The prior 60% floor was enforced nowhere — CI ran vitest sharded without
+`--coverage`.)
 
 ## Design System
 Always read DESIGN.md before making any visual or UI decisions.
