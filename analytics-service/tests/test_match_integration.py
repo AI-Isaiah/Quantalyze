@@ -8,6 +8,7 @@ decorators needed on async defs.
 """
 from __future__ import annotations
 
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -29,6 +30,18 @@ except ImportError:
     DispatchOutcome = None           # type: ignore
     DispatchResult = None            # type: ignore
     IMPORTS_OK = False
+
+# tech-debt #26: fail loud in CI instead of silently skipping. Wave 1 has
+# landed, so IMPORTS_OK is always True under normal operation. Without this,
+# a broken routers.match / services.job_worker import would flip all 5
+# integration tests to green skips with no red signal. Mirror the
+# _need_supabase CI=true hard-fail precedent: blow up collection in CI, keep
+# the graceful local-dev skip.
+if not IMPORTS_OK and os.environ.get("CI", "").lower() == "true":
+    raise ImportError(
+        "test_match_integration.py: routers.match / services.job_worker import "
+        "failed in CI — failing loud instead of silently skipping (tech-debt #26)."
+    )
 
 
 # -------------------------------------------------------------------------

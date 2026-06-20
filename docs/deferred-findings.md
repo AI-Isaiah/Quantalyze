@@ -93,3 +93,50 @@ a time-based delete would **corrupt funding-P&L attribution**. At zero clients +
 Severity shown as `audit→reverify` where a 2026-06-04 re-verification pass
 downgraded the finding. Full per-finding evidence, fix text, and the dated
 re-verification trail live in the gitignored working queue.
+
+---
+
+## 2026-06-09 tech-debt audit — deferred findings
+
+A separate audit (`.planning/tech-debt/TECH-DEBT-AUDIT-2026-06-09.md`, 42 ranked
+findings) is being fixed in priority-ordered batches. Most landed; these are the
+deliberate deferrals (rationale recorded here so it survives beyond one machine).
+
+### #24 · CI shared test-DB serialization · ⚠️ DO NOT apply the naive fix
+
+Observation: only the `python` CI job carries the `shared-test-db` concurrency
+group; `sql-tests` and `e2e` do not, so concurrent PRs share the test Supabase
+project (qmnijlgmdhviwzwfyzlc) un-serialized.
+
+**Do NOT add `sql-tests` / `e2e` to the existing `shared-test-db` group.** Two
+reasons: (1) the **sql-tests half is refuted** — those tests are deliberately
+engineered for shared-project concurrency (BEGIN/ROLLBACK + `gen_random_uuid`-
+scoped fixtures, with in-file red-team notes), so serializing them is needless.
+(2) A GitHub concurrency group permits at most **one running + one pending**;
+adding more jobs to `shared-test-db` with `cancel-in-progress: false` *worsens*
+the cross-PR pending-run cancellation that **already caused a Railway-deploy
+skip during B3b** (a newer run cancelled an older pending python run → CI
+"failure" → Railway skipped the analytics deploy). The only real residual risk
+is e2e-vs-e2e across PRs, and `scripts/seed-demo-data.ts` is delete-then-reseed
+idempotent (a clobbered run self-heals on its own seed step, which runs before
+its specs). If ever justified by observed e2e flakes, add e2e to its **own
+distinct** group (e.g. `shared-test-db-e2e`) — never widen `shared-test-db`
+membership. Defer: low real-world impact vs. a documented footgun. Root-cause
+fix remains the ephemeral-CI-DB recipe (PR #316, reverted for image-pull time).
+
+### #18 · Auto-apply migrations to the TEST project before PROD · blocked on secrets
+
+Genuine debt (migrations auto-apply to prod on merge but the shared test project
+is caught up only by hand via MCP — recurring toil + a sometimes-stale e2e
+signal). Remediation needs a `test-apply` job in `supabase-migrate.yml` gated on
+two new secrets — `TEST_SUPABASE_ACCESS_TOKEN` + `TEST_SUPABASE_DB_PASSWORD` —
+that **only the repo owner can create**. Deferred until those secrets exist;
+surface as a user action when the owner is available.
+
+### #23 date-bomb half · already fixed (do not re-fix)
+
+The audit's "9 phase19-error-rollup test failures are Node-version skew" claim
+was refuted: they were a date-bomb (a fixture pinned to a fixed `updated_at`),
+**already fixed in PR #471 (v0.24.15.117)** via `vi.setSystemTime`. The pin
+half of #23 (`.nvmrc` + `package.json` engines) was landed; this note exists so
+the date-bomb isn't re-investigated.

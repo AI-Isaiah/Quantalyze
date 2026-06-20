@@ -3,23 +3,17 @@ import path from "node:path";
 import { test, expect } from "@playwright/test";
 
 /**
- * C-0300 sentinel — fails CI if the chromium-linux baseline PNGs are
- * not committed. The screenshot regression spec below is excluded from
- * the unconditional CI command list (.github/workflows/ci.yml e2e job)
- * because Playwright fails with "snapshot doesn't exist" until the
- * Linux baselines are generated. Excluding the spec also means nothing
- * forced the baselines to ever land — the spec could stay dormant
- * forever and no signal would fire.
+ * C-0300 sentinel — a fast filesystem guard that the chromium-linux
+ * baseline PNGs are committed. The baselines have landed and this whole
+ * spec now runs unconditionally in CI (tech-debt #25 dropped the old
+ * `--grep "C-0300 sentinel"` gate and added the spec to the e2e job's
+ * unconditional command list). The sentinel is retained as a cheap,
+ * page-fixture-free guard: if a baseline PNG is ever deleted it fails in
+ * ~ms with a clear message, before the slower screenshot comparisons run.
  *
- * This sentinel runs in CI via the e2e job's `--grep` invocation so the
- * absence of baseline files is loud, not silent. It checks the
- * filesystem only (no `page` fixture) so it costs ~ms and is unaffected
- * by whether the dev server is up.
- *
- * Recovery: regenerate baselines via the Docker command in the file
- * comment below, then commit the PNGs under
- * `e2e/demo-screenshot.spec.ts-snapshots/`. Once baselines exist the
- * full screenshot regression suite can be enabled in ci.yml.
+ * Recovery if a baseline is missing: regenerate via the Docker command in
+ * the file comment below, then commit the PNGs under
+ * `e2e/demo-screenshot.spec.ts-snapshots/`.
  */
 test("C-0300 sentinel: chromium-linux baselines committed", () => {
   const snapshotDir = path.join(
@@ -55,12 +49,12 @@ test("C-0300 sentinel: chromium-linux baselines committed", () => {
  * NOT the seeded production render.
  *
  * --- Current state ---
- * This spec is NOT in the CI command list (.github/workflows/ci.yml).
- * Reason: chromium-linux baseline PNGs must be generated inside the
- * Playwright Linux Docker image before CI can compare against them,
- * otherwise Playwright fails every test with "snapshot doesn't exist".
+ * ACTIVE: this spec runs unconditionally in the e2e job's Playwright
+ * command (.github/workflows/ci.yml) as of tech-debt #25. The
+ * chromium-linux baselines are committed under
+ * `e2e/demo-screenshot.spec.ts-snapshots/`.
  *
- * --- Baseline generation (one-time bootstrap) ---
+ * --- Baseline generation / refresh ---
  * Run the Playwright Linux image over the repo to produce baselines
  * that match CI's chromium-linux profile, then commit the PNGs:
  *
@@ -81,13 +75,12 @@ test("C-0300 sentinel: chromium-linux baselines committed", () => {
  *       npx playwright test e2e/demo-screenshot.spec.ts --update-snapshots
  *     '
  *
- * Then commit `e2e/demo-screenshot.spec.ts-snapshots/demo-*-chromium-linux.png`
- * and re-enable the spec in ci.yml.
- *
- * --- Baseline refresh after intentional UI changes ---
- * Same command, same commit flow. Inspect the diff in
- * `e2e/demo-screenshot.spec.ts-snapshots/` before committing — make
- * sure every delta is intentional.
+ * Then commit `e2e/demo-screenshot.spec.ts-snapshots/demo-*-chromium-linux.png`.
+ * Inspect the diff before committing — make sure every delta is
+ * intentional. If the GitHub `ubuntu-latest` runner image diverges from
+ * the jammy baseline image enough to fail on font antialiasing, the
+ * cleanest fix is to regenerate the baselines from the failing CI run's
+ * uploaded actual-PNG artifacts (i.e. on the runner image itself).
  */
 test.describe("Screenshot regression: /demo", () => {
   // The demo page is a server component so there's no hydration flash to
@@ -107,7 +100,13 @@ test.describe("Screenshot regression: /demo", () => {
       await page.waitForLoadState("networkidle");
       await expect(page).toHaveScreenshot(file, {
         fullPage: true,
-        maxDiffPixelRatio: 0.02,
+        // Full-page tolerance matches the repo's full-page precedent
+        // (strategy-v2-chart-parity.spec.ts uses 0.05 for its full-page
+        // shot, 0.02 for per-panel). The baselines were generated in the
+        // playwright jammy Docker image; ±5% absorbs cross-distro font
+        // antialiasing vs the ubuntu-latest runner while still catching
+        // real regressions (a layout/color/content break far exceeds 5%).
+        maxDiffPixelRatio: 0.05,
       });
     });
   }

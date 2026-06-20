@@ -49,6 +49,20 @@ except ImportError:
     )
     IMPORTS_OK = False
 
+# tech-debt #26: fail loud in CI instead of silently skipping. The "wave 0"
+# scaffolding era is over — services.feedback_engine ships, so IMPORTS_OK is
+# always True under normal operation. If a refactor renames/removes a symbol,
+# the per-test `pytest.skip("wave 0 placeholder")` guards below would flip ~31
+# tests to green skips with no red signal, silently losing the feedback-engine
+# unit fence. Mirror the _need_supabase CI=true hard-fail precedent
+# (tests/test_compute_jobs_fencing.py): blow up collection in CI, keep the
+# graceful local-dev skip.
+if not IMPORTS_OK and os.environ.get("CI", "").lower() == "true":
+    raise ImportError(
+        "test_feedback_engine.py: services.feedback_engine import failed in CI "
+        "— failing loud instead of silently skipping the suite (tech-debt #26)."
+    )
+
 # Golden scenario fixture names — D2 finding, three scenarios.
 GOLDEN_SCENARIOS = (
     ("cold",    "feedback_engine_v1_cold_golden.json"),
