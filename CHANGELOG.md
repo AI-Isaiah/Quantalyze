@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.24.15.124] - 2026-06-20
+### Changed — Dependency hygiene: Dependabot now watches npm + pip, and the nightly audit gate catches HIGH advisories
+
+Tech-debt audit (2026-06-09) findings #1 and #3. The repo's only dependency automation was Dependabot for GitHub Actions, and its config comment falsely claimed Renovate covered npm/python — no Renovate config exists anywhere. Meanwhile the nightly `npm audit` gate only failed on CRITICAL, so HIGH advisories accumulated silently.
+
+- **`.github/dependabot.yml`** — added `npm` (root) and `pip` (analytics-service) ecosystem update blocks, grouped weekly like the existing github-actions block (security advisories collapse into one PR, routine minor/patch into another; `open-pull-requests-limit: 5`). Corrected the false Renovate comment and added a scope note that pip coverage is manifest-level (analytics-service still has no lock file — reproducible-build hardening is tracked separately as tech-debt #7).
+- **`.github/workflows/nightly.yml`** — raised the nightly `npm audit` gate from `--audit-level=critical` to `--audit-level=high` (with matching wording in the auto-filed issue), so HIGH advisories now page instead of rotting. Verified against the current tree (0 high / 0 critical).
+- **`docs/runbooks/ci-hardening-permissions-c0293.md`** — corrected the stale reference to the old `critical` gate level.
+
+This batch is intentionally **automation-only** — no lockfile changes. The actual advisory remediation (the current prod tree has 8 moderate: a dompurify XSS chain via posthog-js, the OpenTelemetry chain, and postcss-via-`next`) is left to flow through the Dependabot security PRs this batch enables, rather than a hand-run `npm audit fix` (an earlier attempt pruned `vite`/`esbuild` from the lockfile and broke `npm ci`). The OpenTelemetry chain needs a semver-major bump and postcss-via-`next` only fixes under `--force` (which downgrades Next 16→9), so both are deferred regardless.
+
+Reviewed: Testing + Maintainability specialists (no findings) + Claude and Codex adversarial passes (both recommend merge; Codex's pip-coverage-overstatement note was addressed via the scope-note comment).
+
 ## [0.24.15.123] - 2026-06-20
 ### Changed — Phase 19 PR-D: verification_requests is now a read-only VIEW over strategy_verifications
 

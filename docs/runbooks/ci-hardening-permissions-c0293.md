@@ -61,7 +61,7 @@ Workflow default: `permissions: contents: read`
 | Job | Permissions | Justification |
 |-----|-------------|---------------|
 | `demo-pdf-coldstart` | `contents: read` + `issues: write` | The `failure()` path uses actions/github-script to file an auto-issue against the repo so the broken staging cold-start is surfaced to the maintainer queue. |
-| `npm-audit` | `contents: read` + `issues: write` | The `failure()` path files an auto-issue when `npm audit --audit-level=critical` finds a new advisory. |
+| `npm-audit` | `contents: read` + `issues: write` | The `failure()` path files an auto-issue when `npm audit --audit-level=high` finds a new advisory. |
 
 ### `supabase-migrate.yml`
 

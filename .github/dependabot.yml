@@ -13,10 +13,18 @@
 # checkout v4.3.1 vs v6.0.2, setup-node v4.4.0 vs v6.4.0,
 # upload-artifact v4.6.2 vs v7.0.1, cache v4.3.0 vs v5.0.5).
 #
-# This config does NOT enable npm/python ecosystem updates — Renovate
-# already covers those via the existing npm-audit nightly job and
-# analytics-service requirements-{dev,test}.txt. github-actions is
-# the gap.
+# npm (root) and pip (analytics-service) ecosystems are covered by the
+# update blocks below. The nightly npm-audit job (nightly.yml) is
+# detection-only — it gates CI on advisory severity but never opens
+# update PRs — so Dependabot is the only mechanism that actually moves
+# the pins. (There is no Renovate config anywhere in this repo; an
+# earlier version of this comment incorrectly claimed Renovate covered
+# npm/python.)
+#
+# Scope note: pip coverage is manifest-level. analytics-service still has
+# no lock file and some runtime pins are ranges (e.g. ccxt>=4.0), so the
+# fully-resolved transitive graph that Railway builds is NOT gated here —
+# that reproducible-build hardening is tracked separately (tech-debt #7).
 
 version: 2
 
@@ -46,4 +54,54 @@ updates:
           - "patch"
     labels:
       - "ci"
+      - "dependencies"
+
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    # Same one-page-a-week grouping as github-actions: security advisories
+    # collapse into a single PR, routine minor/patch bumps into another.
+    groups:
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      npm-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "dependencies"
+
+  - package-ecosystem: pip
+    directory: "/analytics-service"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps-py)"
+      include: "scope"
+    groups:
+      pip-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      pip-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
       - "dependencies"
