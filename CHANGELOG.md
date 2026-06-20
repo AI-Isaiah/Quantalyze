@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.130] - 2026-06-20
+### Changed — Fail-loud the disarmed CI/deploy safety nets (nightly canary + Railway deploy verify)
+
+Tech-debt audit (2026-06-09) findings #12 and #9b — both "a safety net is silently off/unverified while everything looks green."
+
+- **`.github/workflows/nightly.yml`** [#12] — the demo-PDF cold-start canary preflight now **fails the run** (was a `::warning::` that let nightly conclude green) when `STAGING_BASE_URL` is empty. The canary has been silently disabled since it shipped (STAGING_BASE_URL + DEMO_PDF_SECRET both unset), giving false confidence in the investor-facing PDF/factsheet path. Failing loud forces it to be resolved (wire it or delete it). The independent `npm-audit` job still runs (no `needs: preflight`), so the security signal isn't masked. (User chose fail-loud over wiring-with-a-secret or deleting; accepted recurring-red-until-configured.)
+- **`.github/workflows/analytics-deploy-verify.yml` (new)** [#9b] — a scheduled (every 6h) + manual probe that curls the prod analytics `/health`, reads the deployed `git_sha` (from #9a), and compares it to main HEAD. On a **persistent** mismatch (after a ~30 min convergence window that tolerates an in-progress deploy) it fails loud + files a dedup'd issue — closing the "Railway silently skipped the deploy → prod on stale code" gap. **This fired for real during this batch**: B3b's merge had its main-CI `python` job cancelled under the `shared-test-db` concurrency group, so Railway skipped the deploy; recovered by re-running CI. Schedule/dispatch only (no push trigger — `github.sha` races interleaved merges there).
+
+Deferred: **#18** (test-project migration auto-apply) — needs two new GitHub secrets the user opted to defer. The health URL defaults to the public Railway domain so the probe never silently no-ops on an unset variable (the anti-pattern #12 fixes).
+
+Reviewed: fresh-context adversarial pass caught a HIGH (empty `github.sha` → false-green in the verify probe — fixed with a fail-fast guard) + the push-trigger SHA race + an optimistic window + a null-parse edge (all fixed). nightly fail-loud confirmed to not mask the npm-audit signal. Workflow-only — no app code.
+
 ## [0.24.15.129] - 2026-06-20
 ### Added — Scenario Composer: per-strategy leverage what-if + the weight/toggle sliders now actually move the projection
 

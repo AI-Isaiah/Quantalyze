@@ -15,9 +15,12 @@ jobs:
   # C-0294 fix: single source of truth for the STAGING_BASE_URL guard.
   # Previously the same trim check existed both as a job-level `if:` and
   # as a shell step inside the probe — drift risk. Now this job decides
-  # once, emits a workflow-summary warning when the canary is disabled
-  # (so silent disablement is visible in the Actions tab), and downstream
-  # jobs gate on `needs.preflight.outputs.staging_enabled == 'true'`.
+  # once and downstream jobs gate on
+  # `needs.preflight.outputs.staging_enabled == 'true'`.
+  # tech-debt #12: when STAGING_BASE_URL is empty this job now FAILS (was a
+  # warning that let the nightly conclude green with the canary skipped — a
+  # permanently-off canary reporting success). Failing loud forces the
+  # disablement to be resolved (wire it or delete it) rather than rot silently.
   preflight:
     runs-on: ubuntu-latest
     outputs:
@@ -31,14 +34,24 @@ jobs:
           trimmed="$(echo "$STAGING_BASE_URL" | tr -d '[:space:]')"
           if [ -z "$trimmed" ]; then
             echo "staging_enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::STAGING_BASE_URL is empty/whitespace — demo-PDF canary is DISABLED."
             {
               echo "## Nightly canary status"
               echo ""
               echo "**demo-pdf-coldstart: DISABLED** — \`STAGING_BASE_URL\` is empty or whitespace."
               echo ""
-              echo "Set \`STAGING_BASE_URL\` in repo variables to re-enable the canary."
+              echo "FAILING this run (tech-debt #12) so the disablement can't masquerade as"
+              echo "a green nightly. To resolve: set \`STAGING_BASE_URL\` (+ \`DEMO_PDF_SECRET\`)"
+              echo "in repo variables/secrets to enable the canary, or delete the"
+              echo "\`demo-pdf-coldstart\` job if PDF cold-start monitoring is not wanted."
             } >> "$GITHUB_STEP_SUMMARY"
+            # tech-debt #12: this used to emit a ::warning:: and let the workflow
+            # conclude `success` with the canary skipped — a permanently-disabled
+            # canary reporting green every night (false confidence). Fail loud so
+            # the disablement is surfaced and gets resolved (wire it or delete it)
+            # instead of rotting silently. The user accepted recurring-red-until-
+            # configured for this (no separate staging exists; secret not set).
+            echo "::error::STAGING_BASE_URL is empty — the demo-PDF cold-start canary is DISABLED and this nightly run is being failed so the disablement is not silent. Set STAGING_BASE_URL (+ DEMO_PDF_SECRET) to enable, or remove the demo-pdf-coldstart job."
+            exit 1
           else
             echo "staging_enabled=true" >> "$GITHUB_OUTPUT"
             {

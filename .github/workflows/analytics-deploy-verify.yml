@@ -1,0 +1,144 @@
+name: Analytics deploy verify (prod SHA vs main HEAD)
+
+# tech-debt #9b — close the "Railway silently skipped the deploy" gap.
+#
+# Railway deploys the analytics service on a GREEN main CI check-suite and
+# SKIPS silently when it is red/cancelled (skippedReason="CI check suite
+# failed"), leaving the prod worker on stale code with no signal. Nothing in
+# the repo detected this — so "merged and verified" could be a false belief.
+#
+# This probe compares the deployed commit (exposed in /health by #9a, the
+# `git_sha` field from RAILWAY_GIT_COMMIT_SHA) against main HEAD. A fresh
+# merge legitimately lags (CI ~5-8m + Railway build ~3m), so it retries over
+# a convergence window and only fails on a PERSISTENT mismatch — which means
+# the deploy was skipped (or the worker is stuck on old code). On failure it
+# files a dedup'd GitHub issue (mirrors nightly.yml / cassette-refresh.yml).
+#
+# The health URL is a PUBLIC Railway domain (no auth, no secret); defaulted
+# here so the probe ALWAYS runs (never silently no-ops on an unset variable —
+# the exact anti-pattern tech-debt #12 fixes). Override with the
+# ANALYTICS_HEALTH_URL repo variable only if the domain changes.
+#
+# Schedule + manual only (NO push trigger): on `push`, github.sha is the pushed
+# commit, but Railway deploys main HEAD on ANY push, so an interleaved
+# non-analytics merge advances prod past the analytics commit this run checks →
+# false alarm. On schedule/dispatch, github.sha IS current main HEAD, which is
+# exactly what prod converges to. After an analytics merge, dispatch this
+# manually for an immediate check; otherwise the 6h schedule bounds detection.
+
+on:
+  schedule:
+    # Every 6h. A skipped deploy stays stale until the next merge, so a 6h
+    # probe bounds "prod silently on stale code" to at most ~6h.
+    - cron: "15 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: analytics-deploy-verify
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      # This job doesn't actually need the repo (it curls /health and compares
+      # to github.sha), but the C-0293 critical-regressions invariant requires
+      # every workflow to check out with persist-credentials:false — so we
+      # conform rather than carve out a checkout-less exemption to that guard.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Compare prod /health git_sha to main HEAD
+        id: probe
+        env:
+          HEALTH_URL: ${{ vars.ANALYTICS_HEALTH_URL || 'https://quantalyze-analytics-production.up.railway.app/health' }}
+          MAIN_SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          # Fail fast if MAIN_SHA is somehow empty: otherwise the prefix-match
+          # `case "$deployed" in "$MAIN_SHA"*)` becomes `in *)` and matches ANY
+          # deployed SHA → a false GREEN, the exact fail-silent hole this probe
+          # exists to kill.
+          if [ -z "$MAIN_SHA" ]; then
+            echo "::error::github.sha (MAIN_SHA) is empty — cannot verify the deploy. Failing rather than risk a false pass."
+            exit 1
+          fi
+          # Convergence window: tolerate a deploy-in-progress (CI + Railway
+          # build) before declaring the deploy skipped. ~30 min covers the
+          # python job queued behind others on the shared-test-db serialization
+          # group (the check-suite Railway waits on) + the Railway build.
+          deadline=$(( $(date +%s) + 1800 ))
+          deployed=""
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            body="$(curl -s --max-time 15 "$HEALTH_URL" || true)"
+            deployed="$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read() or "{}").get("git_sha") or "")' 2>/dev/null || echo "")"
+            # Match if either SHA is a prefix of the other (full vs short).
+            match=0
+            if [ -n "$deployed" ] && [ "$deployed" != "unknown" ]; then
+              case "$MAIN_SHA" in "$deployed"*) match=1 ;; esac
+              case "$deployed" in "$MAIN_SHA"*) match=1 ;; esac
+            fi
+            if [ "$match" = "1" ]; then
+              echo "OK: prod analytics is on main HEAD ($deployed)"
+              exit 0
+            fi
+            echo "prod git_sha='$deployed' vs main HEAD='$MAIN_SHA' — not converged; retrying in 60s"
+            sleep 60
+          done
+          echo "deployed_sha=$deployed" >> "$GITHUB_OUTPUT"
+          echo "::error::prod analytics git_sha ('$deployed') != main HEAD ('$MAIN_SHA') after the convergence window. The Railway deploy was likely SKIPPED (main CI red/cancelled) — prod is running STALE analytics code. Recover: rerun the main CI for this SHA until green, then 'railway redeploy' / 'railway up' from the analytics service."
+          exit 1
+
+      - name: Open or update GitHub issue on persistent staleness
+        if: failure()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          RUN_ID: ${{ github.run_id }}
+          REPO_NAME: ${{ github.repository }}
+          MAIN_SHA: ${{ github.sha }}
+          DEPLOYED_SHA: ${{ steps.probe.outputs.deployed_sha }}
+        with:
+          script: |
+            const { RUN_ID, REPO_NAME, MAIN_SHA, DEPLOYED_SHA } = process.env;
+            const today = new Date().toISOString().slice(0, 10);
+            const dedupLabel = "analytics-deploy-stale";
+            const runUrl = `https://github.com/${REPO_NAME}/actions/runs/${RUN_ID}`;
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: dedupLabel,
+              per_page: 1,
+            });
+            const detail = `prod /health git_sha = \`${DEPLOYED_SHA || "(absent)"}\`, main HEAD = \`${MAIN_SHA}\`.`;
+            if (existing.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing[0].number,
+                body: `Still stale on ${today}. ${detail} Workflow run: ${runUrl}`,
+              });
+              return;
+            }
+            const body = [
+              "The prod analytics service is running STALE code: its deployed commit does not match main HEAD after the convergence window.",
+              "",
+              detail,
+              "",
+              `Workflow run: ${runUrl}`,
+              "",
+              "Most likely the Railway deploy was SKIPPED because the main CI check-suite was red/cancelled (a cancelled `python` job under the `shared-test-db` concurrency group is a known cause). Recover: rerun the main CI for the merge SHA until green, then `railway redeploy` (or `railway up`) the analytics service. Confirm by re-running this workflow.",
+              "",
+              "Auto-filed by .github/workflows/analytics-deploy-verify.yml (tech-debt #9). Deduplicated by the `" + dedupLabel + "` label; subsequent failures comment here until closed.",
+            ].join("\n");
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Analytics prod is running stale code (deploy skipped?) — ${today}`,
+              body,
+              labels: ["analytics-service", "p1", dedupLabel],
+            });
