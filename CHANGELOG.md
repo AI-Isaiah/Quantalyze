@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.132] - 2026-06-21
+### Changed — Re-arm the disarmed CI/test safety nets + pin the Node runtime
+
+Tech-debt audit (2026-06-09) findings #25, #26, #23, #16 — the audit's "safety nets silently disarmed: green CI while the check never runs" cluster, plus a runtime-skew pin. All CI/test/config; no application code.
+
+- **Visual-regression spec is now live [#25]** — `e2e/demo-screenshot.spec.ts` runs unconditionally in the e2e job instead of only its `--grep "C-0300 sentinel"` filesystem guard. The chromium-linux baselines landed weeks ago but the gate was never flipped, so visual regressions on the public `/demo` marketing surface shipped unchecked while a green sentinel implied coverage. The full-page tolerance is set to `0.05` (matching the repo's own full-page precedent in `strategy-v2-chart-parity.spec.ts`) to absorb runner-image font antialiasing while still catching real layout/color/content regressions.
+- **Import-guard tests fail loud in CI [#26]** — three analytics test files (`test_feedback_engine.py`, `test_match_engine.py`, `test_match_integration.py`) guarded ~67 test bodies behind a "wave 0 placeholder" `pytest.skip` that silently turns a broken `services.*` import into green skips. The scaffolding era is over (those modules ship), so a module-level CI hard-fail now blows up collection if the import breaks — mirroring the existing `_need_supabase` CI=true precedent, with the graceful local-dev skip preserved. Verified both ways: happy-path collection still green, broken-import-under-CI raises.
+- **pytest coverage gate widened to the route layer [#16]** — the gate measured only `--cov=services`, leaving `routers/` (7.8k LOC) and `main_worker.py` outside the only Python coverage floor, so the F5a/F5b API-hygiene fixes had no regression floor. Now `--cov=services --cov=routers --cov=main_worker` in both `ci.yml` and the `Makefile` (kept byte-identical). Measured combined coverage 87% clears the existing 80 floor; the low routers (`exchange.py` 32%, `internal.py` 36%, `csv.py` 42%) are now inside the denominator and can no longer regress unseen.
+- **Node runtime pinned [#23]** — added `.nvmrc` (`20`) + `package.json` `"engines": { "node": ">=20" }` to match the CI pin, so local dev (was running unpinned, on Node 25) and CI agree. `>=20` documents the floor without forcing Vercel off its build default. The audit's companion claim — "9 phase19-error-rollup tests fail from Node skew" — was already fixed as a date-bomb in #471 (clock pinned via `vi.setSystemTime`); not re-touched.
+
+Deferred: **#24** (shared test-DB serialization) — the sql-tests half is refuted (those tests are engineered for shared-project concurrency via BEGIN/ROLLBACK + `gen_random_uuid` scoping) and the naive remediation would worsen the cross-PR pending-run cancellation that already caused a Railway-deploy skip in the prior batch. Rationale recorded in `docs/deferred-findings.md`.
+
+Reviewed: read-only recon verified current state of all five findings (line numbers had shifted under three new CI jobs); fresh-context adversarial review flagged the #25 jammy-baseline-vs-noble-runner font-AA risk (managed via the 0.05 tolerance + watching the first e2e run) and the now-stale spec comments (fixed). Full suites green after fixes: vitest 6,135 pass, pytest 2,638 pass at 86.99% with the widened gate exiting 0.
+
 ## [0.24.15.131] - 2026-06-21
 ### Removed — Dead code at scale + wire knip so it can't come back (tech-debt #13)
 

@@ -46,6 +46,19 @@ except ImportError:
     _compute_mandate_fit_score = None  # type: ignore
     MANDATE_FIT_IMPORTED = False
 
+# tech-debt #26: fail loud in CI instead of silently skipping. As the comment
+# above notes, MANDATE_FIT_IMPORTED is always True under normal operation. The
+# match_engine core imports (lines above) are unguarded and already fail loud,
+# but a broken _compute_mandate_fit_score import would flip ~31 mandate-fit
+# tests to green skips with no red signal. Mirror the _need_supabase CI=true
+# hard-fail precedent: blow up collection in CI, keep the graceful local skip.
+if not MANDATE_FIT_IMPORTED and os.environ.get("CI", "").lower() == "true":
+    raise ImportError(
+        "test_match_engine.py: services.match_engine._compute_mandate_fit_score "
+        "import failed in CI — failing loud instead of silently skipping the "
+        "mandate-fit tests (tech-debt #26)."
+    )
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 

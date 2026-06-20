@@ -1,6 +1,9 @@
 {
   "name": "quantalyze",
   "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0",
     "build": "next build",
@@ -59,5 +62,5 @@
     "typescript": "^5",
     "vitest": "^4.1.2"
   },
-  "version": "0.24.15.131"
+  "version": "0.24.15.132"
 }
