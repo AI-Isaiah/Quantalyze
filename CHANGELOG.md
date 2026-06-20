@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.131] - 2026-06-21
+### Removed — Dead code at scale + wire knip so it can't come back (tech-debt #13)
+
+Tech-debt audit (2026-06-09) finding #13. knip was installed but ran nowhere, so dead code drifted unbounded.
+
+- **Deleted 13 verified zero-importer files (~4,712 LOC).** The headline is **`supabase/types.generated.ts`** (3,256 lines) — a stale duplicate of the live generated DB types (`src/lib/database.types.ts`), last regenerated at migration 072/073 while prod is at 194 (~120 migrations behind). It was imported by nothing and was a real correctness trap: an agent opening it as "the schema" would write confidently-wrong code. Also removed 12 dead UI components (`_v1-deprecated.tsx`, `v2/RangePicker.tsx`, `charts/MonthlyReturnsBar.tsx`, `charts/RiskOfRuin.tsx`, a `FounderInsights`+`AddFounderNote` cluster, `AllocationPie.tsx`, `MultiLineEquityChart.tsx`, `strategy-v2/LazyPanelPlaceholder.tsx`, `strategy/ComputeStatus.tsx`, `strategy/MetadataCards.tsx`, and the shadowed `ui/MetricCard.tsx`).
+- **Removed 5 unused npm deps** — `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities`, `@tanstack/react-table`, `@opentelemetry/otlp-transformer`. The otlp-transformer removal also **clears a HIGH `protobufjs` advisory** (`npm audit --omit=dev` HIGH count 3→0) — its exact pin transitively forced the vulnerable protobufjs, and finding #1 had proposed bumping it; removal is strictly better since nothing imports it (the SD-CRITICAL-03 telemetry guard is satisfied by `@sentry/nextjs`, not otlp).
+- **Wired knip** — new `knip.json` declaring the real entry points (supabase edge functions, manually-run scripts, `observability.ts`) + a **non-blocking** `knip` CI job (`.github/workflows/ci.yml`) that surfaces NEW unused files/deps in the run summary, scoped to files+dependencies (baseline now zero). Intentionally not in the `frontend` aggregator's `needs:`, so it never gates a merge; promote to a gate once the exports/types baseline is also zero.
+- **`docs/architecture/adr-0008-cron-architecture.md`** — flagged a doc-vs-live drift: the two Supabase edge functions (`compute-trigger`, `notify-admin`) documented as in-production are deployed nowhere on prod and invoked by no DB trigger. Source kept (per the dead-code gate; a prior pass deferred them); the ADR now records the mismatch to resolve.
+
+Kept (recon was wrong): **`src/lib/observability.ts`** was in the proposed delete set but is guarded by the OBSERV-12 presence test (`observ12-fixtures-presence.test.ts`, Phase 16 / PR #111 restored it bit-for-bit after a prior deletion to protect the e2e-replay/diagnostic harness). The full test suite caught the would-be re-deletion; it's a deliberate keep, now declared as a knip entry. `tests/visual/chart-accessibility-layer.test.ts` smoke-floor lowered 20→18 (two deleted charts imported recharts; live count is now 19).
+
+Reviewed: read-only recon agent verified every deletion zero-reference; full vitest suite (6,135 pass) caught the OBSERV-12 guard before it shipped; fresh-context adversarial review confirmed no other anti-deletion guards, no dynamic/non-import references to the deleted files, deps clean, and the knip CI job non-blocking + C-0293-compliant + pipefail-safe. tsc 0, build ok.
+
 ## [0.24.15.130] - 2026-06-20
 ### Changed — Fail-loud the disarmed CI/deploy safety nets (nightly canary + Railway deploy verify)
 
