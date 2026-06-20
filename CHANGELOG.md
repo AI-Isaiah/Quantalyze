@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.24.15.127] - 2026-06-20
+### Added — Scenario Composer: per-strategy leverage what-if + the weight/toggle sliders now actually move the projection
+
+Allocators can now stress-test a blend two ways that previously did nothing or didn't exist.
+
+- **Per-strategy leverage overlay (R4)** — each composition row gets a leverage multiplier input (1× = unlevered, clamped to [0, 10]×). The projection applies it as `wᵢ·Lᵢ·rᵢ` in the portfolio daily-return sum, so a 2× leg genuinely contributes 2× its return — scaling exposure, return, volatility, and max-drawdown. Leverage is **deliberately not** applied to the correlation matrix or to risk-adjusted ratios: a single levered series has the same Pearson correlations as the un-levered one (the scale cancels), so Sharpe/Sortino and the correlation matrix are leverage-invariant. A caveat under the chart says so, and also states that leverage is an exploration-only what-if overlay — it is not recorded when you commit the scenario. The input is fail-loud: a non-finite paste is rejected with the prior value kept, and an out-of-range value is clamped to [0, 10]× with a visible message (never silently swallowed).
+- **H-0133 (fixed) — reweighting/toggling now changes the live projection.** The composition weight sliders and on/off toggles previously only fed the *commit diff*; the projected KPIs ignored them, so moving a slider appeared to do nothing. The draft's weight + toggle (and now leverage) state is overlaid onto the adapter strategies *before* the de-alias collapse, so `computeScenario` reflects exactly what the row inputs show. Toggling a holding off now removes it from the active set (it no longer lingers in the blend at its preserved weight).
+- **De-alias collapse carries leverage (R4)** — when same-symbol venues (e.g. BTC on Binance + OKX) are merged into one exposure, their leverage is weight-averaged across the selected members (`Σ wᵢ·Lᵢ / Σ wᵢ`) so a per-venue multiplier isn't silently dropped at the merge. A pre-R4 state without leverage stays byte-identical (the `leverage` key is omitted entirely), so every existing pin holds.
+
+Engine stays defensive: a non-finite or negative leverage falls back to 1.0 (no shorting in v1), and a leverage that drives a daily portfolio return below −100% trips the existing catastrophic-loss guard (honest null KPIs / em-dashes, not astronomical garbage).
+
+Reviewed: pre-landing review army (testing, maintainability, performance, design) + fresh-context Claude red-team. The red-team caught a decision-integrity hazard — an allocator could lever up, see inflated KPIs, and commit a mandate carrying no leverage — fixed by making the caveat state leverage is not saved on commit. Coverage: lib engine + de-alias at 100%, component flows ~97%; added tests for the leverage→catastrophic-guard interaction, the Infinity/0× boundaries, and a mutation-verified regression test pinning the toggle-exclusion fix (it fails on a severed-wiring mutant).
+
 ## [0.24.15.126] - 2026-06-20
 ### Changed — Repo hygiene: durable deferred-findings record + campaign-residue cleanup
 
