@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.15.122] - 2026-06-20
+### Fixed — daily_enqueue_loop loop-isolation tests no longer depend on test-DB state
+
+`test_main_worker.py::TestLoopFailureIsolation` had two daily_enqueue tests that failed (`expected exactly one initial tick, got 0`) whenever the shared test DB held a same-day `daily_loop` poll_positions row. Root cause was not a timing race (the prior hypothesis) but a missing mock: `daily_enqueue_loop` gates its startup tick behind `_daily_enqueue_already_ran_today()`, which runs a real Supabase query; the gate was added after these tests (redteam-2026-05 W1) and they were never updated to control it, so they were non-hermetic (green in CI without a same-day row, red locally with one).
+
+- **`analytics-service/tests/test_main_worker.py`** — added `TestLoopFailureIsolation._gate_not_run_today` and patched `main_worker._daily_enqueue_already_ran_today` to `False` in both daily_enqueue tests, so the initial tick fires deterministically regardless of DB state. The tests still assert their original intent (initial-tick exception isolation + prompt SHUTDOWN exit). Test-only change; production `daily_enqueue_loop` is unchanged (the gate is intentionally fail-safe). `test_main_worker.py` now 41/41 green.
+
 ## [0.24.15.121] - 2026-06-15
 ### Fixed — cassette-refresh: per-broker tolerance + fail-loud on any broker that doesn't refresh
 

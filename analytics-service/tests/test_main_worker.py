@@ -558,6 +558,21 @@ class TestLoopFailureIsolation:
 
         return new_event, restore
 
+    @staticmethod
+    async def _gate_not_run_today() -> bool:
+        """Force daily_enqueue_loop's startup gate to 'not run today' so the
+        initial tick fires deterministically, independent of test-DB state.
+
+        `_daily_enqueue_already_ran_today()` makes a REAL Supabase query and
+        returns True whenever a `daily_loop` poll_positions row exists for the
+        current UTC day. The two daily_enqueue tests below exercise the loop's
+        initial-tick isolation and SHUTDOWN-exit paths — not the DB gate — so
+        without this stub they fail (ticks=0, initial tick skipped) on any
+        environment whose test DB happens to hold a same-day daily_loop row.
+        The gate was added after these tests (redteam-2026-05 W1) and they were
+        never updated to mock it."""
+        return False
+
     @pytest.mark.asyncio
     async def test_dispatch_loop_survives_a_tick_exception_then_exits_on_shutdown(self) -> None:
         from main_worker import dispatch_loop
@@ -653,7 +668,8 @@ class TestLoopFailureIsolation:
                 ticks += 1
                 raise RuntimeError("startup enqueue RPC down")
 
-            with patch("main_worker.daily_enqueue_tick", new=_failing_initial_tick):
+            with patch("main_worker.daily_enqueue_tick", new=_failing_initial_tick), \
+                 patch("main_worker._daily_enqueue_already_ran_today", new=self._gate_not_run_today):
                 loop_task = asyncio.create_task(
                     daily_enqueue_loop(interval=0.01)
                 )
@@ -688,7 +704,8 @@ class TestLoopFailureIsolation:
                 nonlocal ticks
                 ticks += 1
 
-            with patch("main_worker.daily_enqueue_tick", new=_ok_tick):
+            with patch("main_worker.daily_enqueue_tick", new=_ok_tick), \
+                 patch("main_worker._daily_enqueue_already_ran_today", new=self._gate_not_run_today):
                 # interval is deliberately HUGE — if the loop ignored SHUTDOWN
                 # and waited the interval, the 2s asyncio.wait timeout below
                 # would leave the task pending and the assertion would fail.
