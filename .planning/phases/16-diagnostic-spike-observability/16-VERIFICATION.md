@@ -276,3 +276,16 @@ This proves the admin gate (Plan 16-07 Task 4) is wired correctly. Full SSE smok
 Phase status remains `human_needed`. The two founder gates (Plan 16-07 Task 5 + Plan 16-08 Task 3) are still the blockers for full goal achievement.
 
 _Playwright addendum: Claude (orchestrator), via mcp__plugin_playwright_playwright__*_
+
+---
+
+## RE-VERIFICATION — 2026-06-20 (superseded by later phases)
+
+Phase 16 was the diagnostic-spike phase; its purpose (surface the wizard bug + stand up observability) was served, and its open items are now resolved or superseded by later phases:
+
+- **SC-1 (correlation_id in the 5th layer, compute_jobs.metadata)** ✅ RESOLVED — fixed in Phase 18 FIX-01. `src/app/api/keys/sync/route.ts:253-259` now calls `getCorrelationId()` and threads `p_metadata: { correlation_id }` into the enqueue RPC (comment explicitly cites "the SC-1 fifth layer").
+- **12 vcrpy cassettes** — evolved: OKX + Bybit (4 scenarios each = 8) are recorded and refreshed daily by `.github/workflows/cassette-refresh.yml`; Binance was deliberately dropped (no test keys, v0.24.15.121). The original "12 = 3 brokers × 4" requirement is superseded by the 2-broker reality.
+- **SSE smoke test (DEBUG_KEY_FLOW_*)** — moot: the diagnostic SSE tooling existed to locate the wizard bug; that bug was found and root-caused-fixed in Phase 18 (FIX-01), and Phase 19 then shipped the unified backbone (now complete with PR-D). The diagnostic no longer gates anything.
+- **Day-2 decision** — `.planning/phase-16/day-2-decision.md` records `status: COMMIT`; Phase 19 was in fact built and is now complete. The gate resolved to COMMIT and executed.
+
+Residual founder action (optional, non-blocking): re-record live SSE smoke / fill the Day-2 doc retroactively if a formal sign-off is wanted. Otherwise Phase 16 is effectively complete-by-supersession.

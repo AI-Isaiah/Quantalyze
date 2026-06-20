@@ -11,13 +11,21 @@ and runs `scripts/verify-no-legacy-writes.sh`. This **replaces** the prior
 approach (test project + an audit trigger that was never shipped to prod),
 under which the green hourly runs were no-op skips and proved nothing.
 
-**Honest status as of 2026-05-25:** the kill-switch is **OFF** in prod
-(`feature_flags.process_key_unified_backbone`), `flag_flipped_at` below is
-unrecorded, and **the 168h soak has NOT started.** When the switch is flipped
-to `on`, record the real ISO-8601 timestamp in `flag_flipped_at` below — the
-script reads it to (a) start the window and (b) count post-flip writes to the
-legacy `verification_requests` table. The gate now fails loud if the flag is
-flipped without recording here, or rolled back mid-window.
+**Status as of 2026-06-20 (live gate):** kill-switch **ON** in prod since the
+flip recorded below; the 168h soak is **COMPLETE and green.** Latest hourly
+`phase-19-stability.yml` run reports: soak ~620h elapsed (≫168h), **0** writes
+to legacy `verification_requests` since the flip, **14/7** daily error-rate
+rows recorded, `max_error_rate` **0.0%** (< 0.5% threshold) — all *automated*
+exit criteria pass. **PR-D ✅ LANDED + PROD-VERIFIED 2026-06-20** (PR #477, v0.24.15.123, migration
+`20260620120000_verification_requests_view_shim_apply.sql`). verification_requests
+is now a security_invoker VIEW; `_legacy` base table renamed; all object-checks
+verified on prod; the hourly gate now reports "gate retired". Customer-feedback
+entry was logged as a GAP (no onboarding teams yet — Theme 4 ship-anyway) in
+`customer-signal-gap.md`. Phase 19 view-shim sequence is COMPLETE.
+
+_Superseded 2026-05-25 note: "kill-switch OFF, soak NOT started." That was true
+at the moment of writing; the flag was flipped the same day (timestamp below)
+and the window has long since elapsed._
 
 ## Flag Flip Timestamp
 

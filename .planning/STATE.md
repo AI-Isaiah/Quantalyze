@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0.0
 milestone_name: API-Key Rewrite
-status: executing
+status: Awaiting next milestone
 stopped_at: context exhaustion at 76% (2026-05-07)
-last_updated: "2026-05-28T04:45:00.000Z"
-last_activity: 2026-05-28 -- Phase 15 marked roadmap-complete (re-verified 10/10; PR #327 v0.24.9.35 close-out)
+last_updated: "2026-06-20T14:33:49.938Z"
+last_activity: 2026-06-20 — Milestone v1.0.0 completed and archived
 progress:
-  total_phases: 6
-  completed_phases: 5
-  total_plans: 46
-  completed_plans: 42
-  percent: 91
+  total_phases: 1
+  completed_phases: 1
+  total_plans: 3
+  completed_plans: 3
+  percent: 100
 ---
 
 # Project State
@@ -26,12 +26,10 @@ See: `.planning/PROJECT.md` (updated 2026-04-30 at v1.0.0 milestone start)
 
 ## Current Position
 
-Phase: 19.1 (csv-analytics-factsheet-pipeline-prior-work-on-feat-csv-anal) — COMPLETE
-Plan: 10 of 10
-Status: Phase 19.1 COMPLETE — Plan 09 (prod e2e verification, VERDICT PASS: Orara-Statarb-L/S5 full pipeline) + Plan 10 (stop-gap removal + B3 render-gate widening across page + PDF exports + discarded-branch cleanup) shipped as v0.24.9.34 (PR #326, merge 4ec36ad2). B3 residual follow-up logged (6 other-surface computation_status gates, 0 prod rows, null-safe).
-Last activity: 2026-05-28 -- Phase 15 CLOSED via `/gsd-autonomous --only 15`: the two /qa bugs (P1 CSV-wizard strategyName lost on refresh; P2 /admin/csv-status "View factsheet" 404) were fixed + shipped as v0.24.9.35 (PR #327) on 2026-05-27, merged to main + Vercel prod deploy verified READY; ROADMAP/STATE/VERIFICATION markers reconciled 2026-05-28. (Prior same-day: Phase 19.1 completed via PR #326.)
-
-Progress: 5 of 6 milestone phases complete (15, 16, 17, 18, 19.1 — disk-complete + roadmap-marked). Phase 19 disk-complete but roadmap markers not flipped; out of scope of `/gsd-autonomous --only 15`. NOTE: phase/percent counters drift across partial updates — reconcile at milestone-ship time, not blocking.
+Phase: Milestone v1.0.0 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-06-20 — Milestone v1.0.0 completed and archived
 
 ## Phase 15 Closure (2026-05-28)
 
@@ -49,6 +47,7 @@ No re-plan/re-execute was run — the work was already complete on disk; only th
 Phase 18 (Root-Cause Fix + Founder LP Skeleton) marked **roadmap-complete** via `/gsd-autonomous --only 18`. All 4 plans (18-01…18-04) executed; `18-VERIFICATION.md` records **7/7 must-haves verified** (2026-05-06). Code shipped in-flight via PR #116 + commits `a48a92e`/`1960f54`. No re-plan/re-execute was run — the work was already complete on disk; only the ROADMAP Phase Summary checkbox needed ticking.
 
 Three items remain in `human_needed` status — **deferred to /ship-time founder action, NOT code work**:
+
 - **FIX-02** — founder runs own OKX key through wizard + fills `.planning/phase-18/founder-okx-smoke.md`
 - **FIX-03** — ≥3 of 10 onboarding teams reach `strategy_verifications.status='published'`
 - **LP-03** — founder writes verbatim dogfood commitment in `.planning/phase-18/dogfood-commitment.md` (currently `PENDING`)
@@ -165,6 +164,12 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - 11 User Challenges from autoplan accepted: UC-A (CSV-first Phase 15), UC-B (drop MT5/IBKR API adapters), UC-C (defer pgvector to v2), UC-D (Phase 17 Design Contract before Phase 19), UC-E modified (let PR #90 merge but pin restore-e2e-fixtures FIRST), UC-F (founder LP skeleton in Phase 18), UC-G subsumed by UC-D, UC-H (PostHog mobile audit), UC-I (Phase 16 spike + Day-2 decision gate), UC-J (4-hour competitive teardown), UC-K (cron-based rollback monitor).
 - Out of scope for v1: match-flag UX, FoF landing surface, pgvector+HNSW migration, MT5+IBKR API adapters, pricing experiment, IC-handoff PDF (Eltican Positron Dashboard reference template), branded LP design — deferred to v2 design doc, opened only after Phase 19 stability window passes.
 - Roadmap created 2026-04-30: 5 phases (15-19), conditional Phase 19 gated on Day-2 decision, 39/39 REQs mapped, wave structure ratified, 11 phase-internal gates encoded.
+- [Phase ?]: Phase 20: MT5 fixtures DENSE calendar-daily at live periods=252; KPI oracles from real quantstats@252 pipeline
+- [Phase ?]: Phase 20: T10/T11/T13 scoped as ingestion pins; deal classification + DST correctness deferred to manual T14 (EA-side MQL5)
+- [Phase ?]: Phase 20: MT5 EA DEAL_TYPE_CORRECTION default=COST (configurable via CorrectionIsFlow input); every CORRECTION deal logged to audit sidecar for T14 broker confirmation (H6)
+- [Phase ?]: Phase 20: EA doc comments avoid forbidden-token names verbatim so the 20-03 raw-source read-only CI grep (which scans comments) stays clean — no comment-stripping needed
+- [Phase ?]: Phase 20: T14/T15 (demo-account numeric reconcile + restart-state) are HUMAN-PENDING — they have no CI harness and gate the first live KPI, not phase CI completion
+- [Phase ?]: Phase 20 T16: MT5 EA read-only invariant CI-enforced via pure-grep denylist over tools/mt5/**/*.{mq5,mqh} (low-level + CTrade method surface); comment-evasion accepted residual, T14 reconcile is runtime backstop.
 
 ## Accumulated Context
 
@@ -175,6 +180,7 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - Roadmap (2026-04-30) ratified 5-phase structure with explicit wave dependencies + 11 phase-internal gates. Conditional Phase 19 modeled in `.planning/ROADMAP.md` "Conditional Execution Logic" diagram.
 - 2026-05-06 — Phase 18 plan-phase records that BACKBONE-06 (open-perp correctness) + BACKBONE-07 (TWR ≠ YTD reconciliation) push from Phase 18 to Phase 19 per `.planning/phases/18-root-cause-fix-founder-lp-skeleton/18-CONTEXT.md` L22-23. Rationale: Phase 19's `IngestionAdapter.reconstruct_positions` + equity-curve refactor absorbs the same call sites; Phase 18 already heavy with FIX-04 redact mirror + LP cron + 10-team verification. Day-2 doc Section 5's "IN (Phase 18)" rows are now superseded — see `.planning/phase-16/day-2-decision.md` Section 5 REVISED header AND inline row supersede annotations (Adversarial revision 2026-05-06: W6).
 - Phase 19.1 inserted after Phase 19: CSV → analytics → factsheet pipeline (prior work on feat/csv-analytics-pipeline-2026-05-21 may be discarded) (URGENT)
+- 2026-06-14 — Phase 20 added: MT5 EA daily-returns ingestion (Approach A). Spec = autoplan Phase 3 Eng test plan, preserved at `.planning/phases/20-mt5-ea-daily-returns-ingestion-approach-a/TEST-PLAN.md`: MQL5 EA (Wine, no CI harness) emits `date,daily_return` CSV → pin output contract with checked-in golden fixtures (T1–T13), test ingestion/KPI in the Python suite, gate first live KPIs on a one-time manual demo-account reconcile (T14/T15) + read-only EA static check (T16). Must-pass before any KPI is page-visible: T2 (deposit-day), T5 (gap), T14 (manual reconcile). Note: roadmap had been dormant since Phase 19.1 (May 28) while the project shipped v0.24.x via gstack/audit flows — Phase 20 re-engages GSD phase tracking. Not planned yet (run `/gsd:plan-phase 20`).
 
 ### Cross-AI dual-voice review conventions (from v0.17.0.0 onward)
 
@@ -185,7 +191,7 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-05-07T18:55:59.984Z
+Last session: 2026-06-14T18:04:29.107Z
 Stopped at: context exhaustion at 76% (2026-05-07)
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
@@ -193,3 +199,25 @@ Stopped at: context exhaustion at 76% (2026-05-07)
 **Next phase:** Phase 15 (CSV Unblock) — Wave 1 entry condition: Theme 4 founder pings 10 teams, ≥3 reply threshold (≥3 unlocks; <3 ships anyway with logged gap).
 
 **Planned Phase:** 16 (Diagnostic Spike + Observability) — 10 plans — 2026-05-01T08:29:28.242Z
+
+## Deferred Items
+
+Items acknowledged and deferred at v1.0.0 milestone close on 2026-06-20. Full
+checklist in `.planning/MILESTONE-v1.0.0-FOUNDER-ACTIONS.md`.
+
+| Category | Item | Why deferred |
+|----------|------|--------------|
+| verification | Phase 18 FIX-03 — ≥3 onboarding teams reach published | No onboarding teams onboarded yet (needs real clients) |
+| verification | Phase 19 #2 — ≥1 real customer-feedback entry | Needs real client submission (logged gap, Theme 4 ship-anyway) |
+| verification | Phase 20 T14/T15 — MT5 demo-account reconcile | Needs founder on an MT5 demo terminal (no CI harness) |
+| verification | Phase 18 FIX-02 — founder OKX wizard smoke run | Founder live run; LP-03 dogfood commitment text pending |
+| verification | Phase 19 #3 — Sentry events probe (real token) | Needs live SENTRY_AUTH_TOKEN |
+| verification | Phase 19 #5 — Vercel INTERNAL_API_TOKEN parity | Needs `vercel env pull` against prod secrets |
+| uat | Phase 16 — SSE smoke / Day-2 fill | Superseded: diagnostic served its purpose (bug fixed P18, backbone shipped P19/PR-D) |
+| ops | RESEND_API_KEY in Vercel prod | Founder must set before 2026-07-01 (monthly LP-report cron) |
+
+Resolved at close (post-PR-D): Phase 19 PR-B→PR-D 168h gate, 7-day stability, and quantstats probe all VERIFIED; Phase 16 correlation_id 5th layer + cassettes superseded by Phase 18 + cassette-refresh.
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone
