@@ -1,7 +1,7 @@
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
 quantstats==0.0.81
-ccxt>=4.0
+ccxt>=4.5.59
 pandas==2.2.3
 numpy==2.2.4
 # NOTE: pyarrow is NOT here — it is a TEST-ONLY dependency (pd.read_parquet of the
