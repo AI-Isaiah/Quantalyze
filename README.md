@@ -5,8 +5,8 @@ Portfolio intelligence platform for quant allocators. Connect exchange API keys,
 ## Prerequisites
 
 - Node.js 20.9+
-- Python 3.14+ (for analytics service)
-- A [Supabase](https://supabase.com) project
+- Python 3.12 (for the analytics service — pinned; matches the Dockerfile and CI)
+- [Supabase CLI](https://supabase.com/docs/guides/cli) and a [Supabase](https://supabase.com) project
 
 ## Quick Start
 
@@ -20,13 +20,17 @@ npm install
 cp .env.example .env.local
 # Edit .env.local with your Supabase project URL and anon key
 
-# 3. Run database migrations
-# In Supabase SQL Editor, run ALL files in supabase/migrations/ in
-# numeric order (001 through 026+). Before running migration 011,
-# set the admin email so is_admin backfills automatically:
+# 3. Apply database migrations with the Supabase CLI
+#   supabase link --project-ref <your-project-ref>
+#   supabase db push
+# (supabase/migrations/ holds 190+ timestamp-named migrations.) Set the
+# admin email before the is_admin backfill migration runs, so it backfills
+# automatically:
 #   ALTER DATABASE postgres SET app.admin_email = 'you@example.com';
 #
-# See CHANGELOG.md for details on what each migration adds.
+# IMPORTANT: on this repo, merging a supabase/migrations/** file to main
+# AUTO-APPLIES it to the PRODUCTION database. Read CONTRIBUTING.md
+# ("Deploy semantics") before touching migrations.
 
 # 4. Start the dev server
 npm run dev
@@ -55,7 +59,7 @@ quantalyze/
   analytics-service/  # FastAPI backend (Python) — strategy + portfolio + match analytics
     services/         # metrics, portfolio_metrics, portfolio_risk, portfolio_optimizer, match_engine, match_eval
     routers/          # analytics, cron, exchange, portfolio, match
-  supabase/           # Database migrations (011 = perfect match engine, 014 = strategies.codename)
+  supabase/           # Database migrations (timestamp-named; auto-applied to prod on merge — see CONTRIBUTING.md)
   e2e/                # Playwright specs (auth, discovery, match-queue, demo-public, portfolio-pdf-demo, ...)
   .github/workflows/  # CI + nightly probes (demo PDF cold-start)
   docs/
@@ -68,6 +72,15 @@ quantalyze/
 
 Version and changelog live in `VERSION` (4-digit `MAJOR.MINOR.PATCH.MICRO`) and
 `CHANGELOG.md` — `/ship` bumps both. The current release is tracked in `VERSION`.
+
+## Deploys
+
+Merging to `main` deploys to production automatically: Vercel (frontend) on
+every push, Railway (analytics) on green CI, and Supabase migrations under
+`supabase/migrations/**` apply to the prod database on merge. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) for the full deploy semantics and the
+operational gotchas (test-DB lag, Railway skip-on-red-CI, version-bump rules)
+before merging.
 
 ## Tech Stack
 

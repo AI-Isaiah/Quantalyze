@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.125] - 2026-06-20
+### Changed — Documentation accuracy: CONTRIBUTING ops doc, README setup, compute-queue runbook
+
+Tech-debt audit (2026-06-09) findings #4, #5, #29 — fixing docs that were stale or actively dangerous (a fresh agent or new engineer would have learned the deploy rules by causing an incident). Every fact was re-verified against the live repo, not the 11-day-old audit.
+
+- **`CONTRIBUTING.md` (new)** [#4] — captures the deploy semantics that previously lived only in agent memory: merging to main auto-deploys via three paths (Vercel on push, Supabase migrations apply to prod on merge, Railway on green CI / skips silently on red), plus the invariants that bite (VERSION+package.json bump together, `SUPABASE_SERVICE_KEY` for Railway one-offs, the test-DB-lag e2e failure pattern).
+- **`README.md`** [#5] — corrected Python 3.14→3.12 (matches Dockerfile/CI), replaced the prod-dangerous "paste migrations 001–026 into the SQL Editor" Quick Start with `supabase db push` + an explicit warning that merging migrations auto-applies to prod, refreshed the stale structure annotation, and added a Deploys section linking CONTRIBUTING.
+- **`docs/runbooks/compute-queue.md`** [#29] — removed the dangerous banner that told operators NOT to enable the queue (it has been the live prod path for months), replaced a machine-local `~/.claude/plans/...` reference with the tracked ADRs, and corrected the operating model throughout to the self-polling Railway worker (30s dispatch + 60s watchdog loops in `main_worker.py`): fixed dead file refs (`services/jobs.py`, `routers/jobs.py`, the removed Vercel fallback cron + `COMPUTE_QUEUE_HMAC_SECRET`, `src/lib/compute-queue.ts`), the pg_cron-watchdog claims, and the `TRUNCATE` rationale (the queue now carries cron-seeded maintenance jobs that a user action won't restore).
+- **`.github/workflows/supabase-migrate.yml`** — fixed header comments that claimed "workflow_dispatch-only" and implied a human pre-apply review; the `on:` block actually auto-applies migrations to prod on push to main with no human gate (the exact misinformation #4 targets).
+
+Reviewed: Claude doc-fact-check (every deploy/infra claim verified against the live repo; 2 minor inaccuracies fixed) + Codex adversarial (4 findings on residual operating-model staleness, all fixed). Docs-only — no application code changed.
+
 ## [0.24.15.124] - 2026-06-20
 ### Changed — Dependency hygiene: Dependabot now watches npm + pip, and the nightly audit gate catches HIGH advisories
 
