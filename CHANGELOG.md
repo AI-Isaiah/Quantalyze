@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.24.15.127] - 2026-06-20
+### Changed — TypeScript coverage is now a CI gate (ratcheted thresholds)
+
+Tech-debt audit (2026-06-09) finding #11. CI ran vitest **sharded without `--coverage`**, so the 60% thresholds in `vitest.config.ts` (themselves 15-25 points below actual) were enforced nowhere — coverage could silently fall 20+ points. This resolves the "promoting to a gate is a separate decision" deferral the prior CLAUDE.md flagged: the data made it free (the suite already clears the gate with margin).
+
+- **`.github/workflows/ci.yml`** — new `frontend-coverage` job runs the full (non-sharded) suite with `--coverage` and is wired into the `frontend` aggregator's `needs:` + result-check, so branch protection gates on it. Runs in parallel with the python critical path (~5m), so wall-clock is unchanged.
+- **`vitest.config.ts`** — thresholds ratcheted 60→**lines 82 / statements 80 / functions 74 / branches 72**, a few points under measured actual (2026-06-20: 85.2 / 83.3 / 77.4 / 75.5) so a real regression trips the gate but normal noise does not.
+- **`CLAUDE.md`** — Test Coverage section updated from "measurement-only" to gated, with the ratchet rationale.
+
+Coverage must be its own (non-sharded) job because sharded runs each see only half the files. The job uses `--test-timeout=20000` (not the shards' tight 5s): it can't shard, so it runs the whole suite through one worker pool plus v8 coverage overhead, and the generous timeout absorbs the documented worker-contention stalls (`vitest.config.ts:6-16`) so an innocent PR is never blocked by a spurious timeout. Verified deterministic across repeated local runs.
+
+Reviewed: fresh-context adversarial pass on the CI wiring caught a HIGH (the non-sharded run re-introduced the worker-contention timeout flake — reproduced, then fixed with the timeout bump) plus 2 LOW (cache-key write race → restore-only; live-DB-env footgun → documented), all fixed. Lines/statements already clear the 80% target; functions/branches are the next ratchet.
+
 ## [0.24.15.126] - 2026-06-20
 ### Changed — Repo hygiene: durable deferred-findings record + campaign-residue cleanup
 

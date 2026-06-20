@@ -240,6 +240,66 @@ jobs:
       - name: Run vitest shard ${{ matrix.shard }}/2
         run: npx vitest run --shard=${{ matrix.shard }}/2 --reporter=dot
 
+  frontend-coverage:
+    # tech-debt #11: coverage is now a CI GATE (was measurement-only with a
+    # 60% floor enforced nowhere). Runs the FULL suite non-sharded with
+    # --coverage — sharded runs each see only half the files, so coverage
+    # has to be its own job. The vitest.config.ts thresholds (ratcheted to a
+    # few points under measured actual) fail this job on a real regression.
+    # Runs in parallel with the python critical path (~5m), so it does not
+    # extend wall-clock.
+    #
+    # WHY --test-timeout=20000 (not the 5s default the shards use): the
+    # frontend-test shards avoid the documented worker-contention timeout
+    # flake (see vitest.config.ts:6-16) by splitting the file set in half.
+    # This job can't shard (coverage needs the whole suite in one run), so it
+    # runs the full set through the maxWorkers=cpus-1 pool PLUS v8 coverage
+    # overhead — heavier per-worker load than a shard. A generous timeout
+    # absorbs the contention stalls so an innocent PR is never blocked by a
+    # spurious 5s timeout; the shards keep the tight 5s for fast real-hang
+    # feedback. This job is off the critical path, so the slack costs nothing.
+    #
+    # DO NOT add NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY env to
+    # this job: that would un-skip ~284 live-DB tests (src/lib/test-helpers/
+    # live-db.ts), shifting the coverage denominator and invalidating the
+    # ratchet baseline (which was measured with those tests skipped).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 20
+          cache: npm
+      - name: Restore node_modules
+        id: node_modules_cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+      - name: npm ci (cache miss; retry transient network failures)
+        if: steps.node_modules_cache.outputs.cache-hit != 'true'
+        run: |
+          n=0
+          until npm ci --prefer-offline --no-audit --no-fund; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "npm ci failed after $n attempts"; exit 1; fi
+            echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
+      # Restore-ONLY (the frontend-test shards own the write of this key) so
+      # all three vitest jobs don't race the write-once cache key.
+      - name: Restore vitest transform (node_modules/.vite)
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: node_modules/.vite
+          key: ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts') }}-${{ hashFiles('src/**', 'tests/**') }}
+          restore-keys: |
+            ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts') }}-
+      - name: Run vitest with coverage (full suite, gated thresholds)
+        run: npx vitest run --coverage --test-timeout=20000 --reporter=dot
+
   frontend-policy:
     # Banned-package check + GDPR export coverage. PR-C moved npm audit
     # to the nightly workflow because (a) it's a security signal, not a
@@ -452,6 +512,7 @@ jobs:
       - frontend-typecheck
       - frontend-lint
       - frontend-test
+      - frontend-coverage
       - frontend-policy
       - frontend-build
     if: always()
@@ -463,6 +524,7 @@ jobs:
             "frontend-typecheck=${{ needs.frontend-typecheck.result }}" \
             "frontend-lint=${{ needs.frontend-lint.result }}" \
             "frontend-test=${{ needs.frontend-test.result }}" \
+            "frontend-coverage=${{ needs.frontend-coverage.result }}" \
             "frontend-policy=${{ needs.frontend-policy.result }}" \
             "frontend-build=${{ needs.frontend-build.result }}"; do
             name="${r%=*}"; result="${r#*=}"
