@@ -1,28 +1,36 @@
 name: Supabase Migrate
 
-# Applies Supabase migrations to production on workflow_dispatch.
+# Applies Supabase migrations to production automatically on push to main
+# (paths: supabase/migrations/**), and on manual workflow_dispatch.
 #
 # Flow:
 #   1. `plan` job prints `supabase db push --include-all --dry-run` so the
 #      EXACT command + flags the apply step will run are visible in the run
-#      log first (the dry-run output IS what the operator approves).
+#      log first. NOTE: on the auto-push path there is no human approval gate
+#      between plan and apply (required reviewers are a scale-stage TODO
+#      below) — the dry-run is an audit-log record of what the apply runs,
+#      not a pre-apply sign-off.
 #   2. `apply` job runs the same command without --dry-run on the
 #      `Production` GitHub Environment.
 #
 # Backdated-migration policy is enforced at PR-time, NOT here. See
 # `.github/workflows/migration-policy.yml` — that workflow runs on
 # `pull_request` events and rejects backdated additions before they
-# can merge. By the time this workflow runs (workflow_dispatch on
-# main), the files have already been merged, so a guard here fires
+# can merge. By the time this workflow runs (on push to main, or
+# workflow_dispatch), the files have already been merged, so a guard here fires
 # too late to prevent the bad merge and instead blocks legitimate
 # unapplied legacy migrations from applying via `--include-all`.
 #
 # Safety story (BUILD stage — required-reviewer gates NOT yet configured):
-#   - workflow_dispatch-only (no auto-trigger on push)
+#   - Auto-applies on push to main touching supabase/migrations/** (push
+#     trigger re-enabled by PR-Y2 2026-05-25 after timestamp-drift
+#     reconciliation); migration-drift-check.yml gates drift at PR-time
 #   - Backdated-migration safety guard runs at PR-time in
 #     migration-policy.yml (the right place to block the addition)
 #   - Two-step plan-then-apply: the plan step uses --dry-run with the same
-#     --include-all flag, so what the operator eyeballs IS what runs
+#     --include-all flag, so the logged plan IS exactly what the apply runs
+#     (command fidelity for the audit trail — not a human pre-apply gate;
+#     see the required-reviewer TODO below)
 #   - At scale (>=10 active clients), add required-reviewer protection to
 #     the `Production` GitHub Environment per ADR-0009 (TODO). The
 #     `environment: Production` lines below already pin the job to that
@@ -142,10 +150,11 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
           SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
-        # Plan output IS what apply runs, modulo --dry-run. The reviewer
-        # eyeballs the same `db push --include-all` command + flags here
-        # before approving the apply step — "what the reviewer approves
-        # IS what runs" invariant (red-team HIGH conf-8).
+        # Plan output IS what apply runs, modulo --dry-run: this plan step
+        # logs the exact `db push --include-all` command + flags the apply
+        # step runs (command-fidelity invariant, red-team HIGH conf-8). On
+        # the auto-push path this fidelity feeds the audit trail; it is NOT a
+        # human pre-apply gate (required reviewers are a scale-stage TODO).
         run: |
           supabase link --project-ref "$SUPABASE_PROJECT_REF"
           supabase db push --include-all --dry-run
@@ -184,7 +193,9 @@ jobs:
         # Without it, db push refuses with "Found local migration ... that is below remote tip".
         #
         # Safety story (BUILD stage — required reviewers NOT yet configured):
-        #   - workflow_dispatch-only (no auto-trigger on push)
+        #   - Auto-applies on push to main touching supabase/migrations/**
+        #     (push trigger re-enabled by PR-Y2 2026-05-25); drift is gated
+        #     at PR-time by migration-drift-check.yml
         #   - Backdated additions are blocked at PR-time by
         #     `.github/workflows/migration-policy.yml` against the
         #     `.github/migrate-backdated-allowlist.txt` exception channel

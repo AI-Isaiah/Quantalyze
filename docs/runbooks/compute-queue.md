@@ -5,17 +5,24 @@ Sprint 2 Task 2.9. Use this page when you get a Sentry alert, when the
 wizard is stuck, or when you need to understand queue health during a
 deploy.
 
-This is a setup recipe and incident-response reference, not a spec. For
-the full architecture see the plan at
-`~/.claude/plans/lazy-hugging-raccoon.md` and migration 032.
+This is a setup recipe and incident-response reference, not a spec. For the
+architecture see the ADRs
+[`adr-0006-analytics-service-boundary`](../architecture/adr-0006-analytics-service-boundary.md)
+and [`adr-0008-cron-architecture`](../architecture/adr-0008-cron-architecture.md),
+plus the queue migration
+`supabase/migrations/20260411144407_compute_jobs_queue.sql`.
 
-> **⚠️ DO NOT flip `USE_COMPUTE_JOBS_QUEUE=true` until Round 2 ships.**
-> Round 1 lands the SQL schema + RPCs + types + runbook only. The Python
-> worker, the Next.js enqueue path, the Vercel fallback cron, and the
-> `pg_try_advisory_xact_lock` double-execution guard all ship in Round 2.
-> Until then, the queue exists but is intentionally dormant. Flipping the
-> flag early would expose the watchdog-reclaim double-execution window
-> that only the Round 2 advisory lock closes.
+> **Status: the `compute_jobs` queue is the production path.** It has been
+> live in prod for months — the Python worker, the `enqueue_compute_job`
+> RPC, the 10-minute watchdog reclaim, and the B5a/B5b claim-token fencing
+> all shipped. Under the Phase-19 unified backbone
+> (`PROCESS_KEY_UNIFIED_BACKBONE`), `analytics-service/routers/process_key.py`
+> is the primary dispatch. `USE_COMPUTE_JOBS_QUEUE` now selects between two
+> *legacy fallback* paths for older flows / the manual "Sync now" button:
+> `true` enqueues into `compute_jobs`, `false` uses the in-process
+> `after()` path. **Do NOT disable the queue as a first incident step** —
+> it powers all strategy analytics; treat flag-off as a last-resort
+> rollback (see "Rollback procedure"), not a default.
 
 ## What the queue is
 
@@ -31,8 +38,8 @@ three kinds:
 
 Jobs survive Vercel function crashes, Railway cold starts, and
 double-submit races. Retries happen automatically with exponential
-backoff (`+30s`, `+2min`, then `failed_final`). A pg_cron watchdog
-reclaims stuck jobs every 10 minutes.
+backoff (`+30s`, `+2min`, then `failed_final`). The Railway worker's
+60s watchdog loop (`reset_stalled_compute_jobs`) reclaims stuck jobs.
 
 Jobs are idempotent: only one in-flight row per `(target, kind)` exists
 at any moment, enforced by partial unique indexes.
@@ -43,15 +50,14 @@ at any moment, enforced by partial unique indexes.
 - `pg_net` extension enabled in Supabase
 - `app.analytics_service_url` GUC set to the Railway worker URL
 - `app.analytics_service_key` GUC set to the Railway service key
-- `USE_COMPUTE_JOBS_QUEUE` env var on Vercel:
-  - `false` = `/api/keys/sync` and `/api/strategies/finalize-wizard`
-    both use the legacy `after()` path (rollback)
-  - `true` = both endpoints enqueue `sync_trades` into compute_jobs
-    (shipped state). The wizard enqueue (v0.22.38.1, H-0330) is the
-    primary path for new strategies; `/api/keys/sync` is the manual
-    "Sync now" button on the keys page
-- `COMPUTE_QUEUE_HMAC_SECRET` env var (shared between Vercel fallback
-  cron and Railway tick endpoint) for replay protection
+- The Railway worker (`python -m main_worker`) running — it self-polls and
+  drains the queue (30s dispatch loop + 60s watchdog). There is no external
+  tick cron or HMAC secret anymore.
+- `USE_COMPUTE_JOBS_QUEUE` env var on Vercel — selects the *legacy fallback*
+  enqueue path; the Phase-19 `process_key` backbone is the primary dispatch:
+  - `false` = `/api/keys/sync` and `/api/strategies/finalize-wizard` use the
+    in-process `after()` path
+  - `true` = those endpoints enqueue `sync_trades` into `compute_jobs`
 
 Before flipping the flag on production, verify each prerequisite by
 running the three observability queries below against the staging DB.
@@ -138,10 +144,11 @@ WHERE status = 'running'
 ORDER BY claimed_at;
 ```
 
-Expected output: **empty**. The watchdog runs inside every tick and
-resets running-but-stuck jobs back to `pending`. If this query returns
-rows, either the watchdog is broken or the worker is genuinely still
-processing a very long job.
+Expected output: **empty**. The worker's 60s watchdog loop
+(`reset_stalled_compute_jobs`) resets running-but-stuck jobs back to
+`pending`. If this query returns rows, either the watchdog loop is broken
+(worker down/crash-looping) or the worker is genuinely still processing a
+very long job.
 
 Manual override: call `SELECT reclaim_stuck_compute_jobs(interval '5
 minutes');` to force a reclaim with a tighter window.
@@ -150,8 +157,9 @@ minutes');` to force a reclaim with a tighter window.
 
 When an exchange returns 429 the Python runner calls
 `update_api_key_rate_limit(api_key_id)` which stamps
-`api_keys.last_429_at = now()`. The per-exchange cooldown windows live
-in `analytics-service/services/jobs.py::get_circuit_breaker_window`:
+`api_keys.last_429_at = now()`. The per-exchange cooldown windows are the
+`EXCHANGE_COOLDOWNS` dict in `analytics-service/services/job_worker.py`,
+enforced by `_check_circuit_breaker`:
 
 - Bybit: 10 minutes
 - Binance: 2 minutes
@@ -174,21 +182,25 @@ ORDER BY last_429_at DESC;
 
 ## Incident response
 
-### Alert: "Compute tick failed 3 times in a row"
+### Alert: jobs not draining / worker dispatch stalled
 
-Sentry fires this when the Railway `/api/jobs/tick` endpoint returns
-5xx three ticks in a row (3 minutes of downtime).
+The queue is drained by the Railway worker (`analytics-service/main_worker.py`,
+CMD `python -m main_worker`): a **30s dispatch loop**
+(`claim_compute_jobs_with_priority`) and a **60s watchdog loop**
+(`reset_stalled_compute_jobs`). The worker self-polls — there is no external
+`/api/jobs/tick` endpoint or Vercel fallback cron anymore.
 
-1. Check Railway status — is the service up?
-2. If up: check the compute-jobs-fallback Vercel cron at `*/5 * * * *`
-   — it should be absorbing the failures with HMAC-verified retries to
-   the Railway tick
-3. If the fallback is also failing: the issue is deeper (Railway region
-   outage, DB connectivity). Flip `USE_COMPUTE_JOBS_QUEUE=false` to fall
-   back to the legacy `after()` path, then diagnose
-4. If Railway is down and the fallback can't help: existing pending
-   jobs stay safe in the table. Users see "Queued" in the wizard until
-   Railway recovers. No data loss
+1. Check Railway: is the worker service up and not crash-looping? Its logs
+   should show the dispatch/watchdog loops ticking.
+2. Run Query 1. A climbing `pending` count with ~0 `running` means the
+   dispatch loop is not claiming — the worker is down or stuck. Restart the
+   Railway service.
+3. If the worker is healthy but jobs still fail, it is downstream (DB
+   connectivity, exchange API). Diagnose via Query 2.
+4. If the worker is down: existing pending jobs stay safe in the table — no
+   data loss. Users see "Queued" until the worker recovers and drains them.
+   Flipping `USE_COMPUTE_JOBS_QUEUE=false` only routes *new* enqueues to the
+   legacy `after()` path; it does not drain the existing backlog.
 
 ### Alert: "More than 5 jobs in failed_final (24h)"
 
@@ -202,7 +214,7 @@ Sentry fires this when Query 2 would return 6+ `failed_final` rows.
      strategies (insufficient trades, zero variance). Talk to the
      managers
    - `error_kind = 'unknown'` → classifier gap. File a fix to
-     `classify_exception` in `analytics-service/services/jobs.py`
+     `classify_exception` in `analytics-service/services/job_worker.py`
 
 ### Stuck in `computing` forever (wizard)
 
@@ -247,8 +259,13 @@ SELECT status, count(*) FROM compute_jobs GROUP BY status;
 TRUNCATE compute_jobs;
 ```
 
-Safe because no referential data depends on queue history today, and
-every strategy gets its next compute on the next user action.
+No referential data depends on queue history today. But the queue now
+carries cron/worker-seeded maintenance jobs (e.g. `sync_funding`,
+`reconcile_strategy`, `poll_positions`, broker dailies), not just
+user-triggered computes — a `TRUNCATE` drops any in-flight backfill, which
+is NOT restored by a user action; it waits for that job's next scheduled
+tick (daily/cron). Drain only when the table itself is the problem, and
+expect maintenance jobs to re-seed on their own schedule, not instantly.
 
 **Watchdog too aggressive** (reclaim window is too short for genuine
 long jobs):
@@ -258,8 +275,8 @@ long jobs):
 SELECT reclaim_stuck_compute_jobs(interval '30 minutes');
 ```
 
-Or for a permanent bump: edit migration 033's pg_cron schedule to pass
-a larger interval. Ship a follow-up migration.
+Or for a permanent change: adjust the watchdog loop's stall threshold /
+interval in `analytics-service/main_worker.py` and redeploy the worker.
 
 ## Retry is idempotent
 
@@ -280,16 +297,20 @@ simultaneous processing of the same job id.
 
 ## Related files
 
-- Migration: `supabase/migrations/20260411144407_compute_jobs_queue.sql`
-- pg_cron schedule: `supabase/migrations/033_compute_jobs_cron.sql`
-- Worker: `analytics-service/routers/jobs.py`,
-  `analytics-service/services/jobs.py`
-- Next.js enqueue helper: `src/lib/compute-queue.ts`
-- Next.js enqueue call sites:
+- Queue + watchdog migrations:
+  `supabase/migrations/20260411144407_compute_jobs_queue.sql` (queue, RPCs,
+  `reclaim_stuck_compute_jobs`) and
+  `20260412094449_compute_jobs_admin_and_defer.sql`
+- Primary dispatch (Phase-19 unified backbone):
+  `analytics-service/routers/process_key.py`
+- Worker tick + circuit breaker: `analytics-service/routers/cron.py`,
+  `analytics-service/services/job_worker.py`
+- Next.js enqueue call sites (call the `enqueue_compute_job` RPC directly —
+  there is no longer a central `src/lib` helper):
   - `src/app/api/strategies/finalize-wizard/route.ts` (`after()` block,
-    H-0330 — primary for new strategies)
+    H-0330 — fallback path for new strategies)
   - `src/app/api/keys/sync/route.ts` (manual "Sync now" button)
 - Admin UI: `src/app/(dashboard)/admin/compute-jobs/page.tsx`,
   `src/components/admin/ComputeJobsTable.tsx`
 - Wizard integration: `src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx`
-- Fallback cron: `src/app/api/cron/compute-jobs-fallback/route.ts`
+- Worker entrypoint: `analytics-service/main_worker.py` (the 3 asyncio loops)
