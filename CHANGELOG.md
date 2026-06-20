@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.123] - 2026-06-20
+### Changed — Phase 19 PR-D: verification_requests is now a read-only VIEW over strategy_verifications
+
+Lands the parked Phase 19 / BACKBONE-04 step (d) view-shim after the 168h production soak completed green (~620h elapsed since the kill-switch flip 2026-05-25T15:51:07Z; 0 writes to the legacy table; 14/7 daily error-rate rows recorded, max 0.0% < 0.5%). The legacy `verification_requests` BASE TABLE is renamed to `verification_requests_legacy` and replaced by a `security_invoker` VIEW over `strategy_verifications WHERE flow_type='teaser'`; new code already writes `strategy_verifications` directly via `/process-key`.
+
+- **`supabase/migrations/20260620120000_verification_requests_view_shim_apply.sql`** — rename + VIEW (PII columns hard-mapped to NULL) + 3 INSTEAD OF triggers that reject all writes (SQLSTATE 42501) + legacy-table RLS (admin SELECT + 90-day public-token window) + drops the soak audit trigger + repoints `sanitize_user`'s GDPR delete to the renamed base table (drift-guarded, byte-preserving). STEP 0.5 apply-time gate self-aborts unless the kill-switch is `on`, so a premature apply is impossible. STEP 0/6 self-verify every invariant. Auto-applies to prod on merge.
+- **`supabase/migrations/down/20260620120000-rollback.sql`** — tested Stage-D reversal (drops VIEW + triggers, renames back, restores `sanitize_user`).
+- **Hardening (rls-policy-auditor):** added `REVOKE ALL ON verification_requests_legacy FROM PUBLIC` ahead of the role-specific REVOKEs, so the predicate-less M-6 SELECT policy can never be reached by a PUBLIC grant that travels through the table rename.
+- **`analytics-service/tests/test_legacy_table_rls.py`** — `_MIGRATION_PATH` repointed from the inert `20260509082818` placeholder to this apply migration (2/2 green).
+
+Reviewed: migration-reviewer + rls-policy-auditor (both GO); all prod preconditions re-verified live (BASE TABLE, kill-switch on, `sanitize_user` un-repointed, 9 VIEW columns present, M-5 count 0). The customer-feedback exit gate is logged as a gap (no onboarding teams yet — Theme 4 ship-anyway policy) in `.planning/phase-19/customer-signal-gap.md`.
+
 ## [0.24.15.122] - 2026-06-20
 ### Fixed — daily_enqueue_loop loop-isolation tests no longer depend on test-DB state
 
