@@ -77,6 +77,17 @@ WORKER_STALE_THRESHOLD_S = 90.0
 # but mis-read on a top-down scan).
 _PROCESS_START_AT = time.time()
 
+# tech-debt #9: expose the deployed git commit in /health so a post-merge probe
+# (or a human) can assert "prod is running main HEAD" — Railway skips the deploy
+# silently when main CI is red, leaving the worker on stale code with no signal.
+# Railway injects RAILWAY_GIT_COMMIT_SHA into the runtime env; fall back to the
+# generic GIT_COMMIT_SHA, else "unknown" in local/dev where neither is set.
+_DEPLOYED_SHA = (
+    os.getenv("RAILWAY_GIT_COMMIT_SHA")
+    or os.getenv("GIT_COMMIT_SHA")
+    or "unknown"
+)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -260,6 +271,7 @@ async def health():
     body = {
         "status": "stale" if stale else "ok",
         "version": "0.1.0",
+        "git_sha": _DEPLOYED_SHA,
         "worker_last_tick_at": WORKER_LAST_TICK_AT,
         "worker_age_s": (now - WORKER_LAST_TICK_AT) if WORKER_LAST_TICK_AT else None,
     }
