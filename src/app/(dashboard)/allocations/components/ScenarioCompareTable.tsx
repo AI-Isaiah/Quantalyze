@@ -125,6 +125,25 @@ function findWinner(
   return bestIdx;
 }
 
+/**
+ * Count how many columns have a real (non-null finite) value for `key`.
+ *
+ * HONESTY tightening BEYOND the CompareTable analog: CompareTable marks a lone
+ * real column as the winner, but a ✓ on a metric where only one column has a
+ * value implies a comparison that didn't happen (the others are em-dashed). The
+ * milestone forbids implying absent comparisons, so we suppress the ✓ (and the
+ * accent) unless at least 2 columns are real for that metric.
+ */
+function realValueCount(
+  columns: ScenarioColumn[],
+  key: keyof ComputedMetrics,
+): number {
+  return columns.reduce(
+    (n, c) => (getValue(c.metrics, key) != null ? n + 1 : n),
+    0,
+  );
+}
+
 export function ScenarioCompareTable({
   columns,
   liveBook,
@@ -145,10 +164,14 @@ export function ScenarioCompareTable({
     );
   }
 
-  // Sharpe leader for the neutral callout (findWinner skips nulls).
+  // Sharpe leader for the neutral callout (findWinner skips nulls). Suppress it
+  // when fewer than 2 columns have a real Sharpe — a lone real Sharpe is not a
+  // "leader" over an absent field (same honesty tightening as the per-metric ✓).
   const sharpeWinnerIdx = findWinner(allColumns, "sharpe", true);
   const sharpeLeaderName =
-    sharpeWinnerIdx !== null ? allColumns[sharpeWinnerIdx].name : null;
+    sharpeWinnerIdx !== null && realValueCount(allColumns, "sharpe") >= 2
+      ? allColumns[sharpeWinnerIdx].name
+      : null;
 
   return (
     <div className="space-y-3">
@@ -180,12 +203,17 @@ export function ScenarioCompareTable({
           <tbody>
             {METRICS.map((metric) => {
               const winnerIdx = findWinner(allColumns, metric.key, metric.higherIsBetter);
+              // Honesty tightening (beyond the CompareTable analog): only crown a
+              // winner when >= 2 columns have a real value for this metric. A lone
+              // real column (others em-dashed) gets NO ✓ — a ✓ would imply a
+              // comparison that didn't happen.
+              const hasComparison = realValueCount(allColumns, metric.key) >= 2;
               return (
                 <tr key={metric.key} className="border-b border-border/50 hover:bg-page/50">
                   <td className="px-4 py-2.5 text-xs text-text-muted">{metric.label}</td>
                   {allColumns.map((c, i) => {
                     const val = getValue(c.metrics, metric.key);
-                    const isWinner = winnerIdx === i && allColumns.length > 1;
+                    const isWinner = winnerIdx === i && hasComparison;
                     return (
                       <td
                         key={`${c.name}-${i}`}

@@ -208,6 +208,47 @@ describe("ScenarioCompareTable", () => {
     expect(within(healthyStamp).getByText(methodologyLine(120))).toBeInTheDocument();
   });
 
+  it("suppresses the winner ✓ when only one column has a real value for a metric", () => {
+    // One real column + one fully-degenerate (em-dash) column. The metric has a
+    // single real value, so there is no comparison — NO ✓ may render for it
+    // (a lone ✓ would imply a comparison that didn't happen).
+    render(
+      <ScenarioCompareTable
+        columns={[col("Real", healthy(120, { sharpe: 1.7 })), col("Empty", degenerate(0))]}
+        liveBook={null}
+      />,
+    );
+
+    // No winner mark for sharpe (only one real value).
+    expect(screen.queryByTestId("winner-sharpe")).toBeNull();
+    // The real value is still rendered (just without the ✓ / accent).
+    const realCell = screen.getByTestId("cell-Real-sharpe");
+    expect(realCell.textContent).toContain("1.70");
+    expect(realCell.textContent).not.toContain("✓");
+    // The Sharpe-leader callout is also suppressed (no comparison happened).
+    expect(screen.queryByTestId("sharpe-leader")).toBeNull();
+  });
+
+  it("still shows the winner ✓ when two columns have real values", () => {
+    // Two real columns → a genuine comparison → the ✓ appears on the leader.
+    render(
+      <ScenarioCompareTable
+        columns={[
+          col("Low", healthy(120, { sharpe: 1.0 })),
+          col("High", healthy(120, { sharpe: 2.5 })),
+        ]}
+        liveBook={null}
+      />,
+    );
+
+    const winner = screen.getByTestId("winner-sharpe");
+    expect(winner.textContent).toContain("2.50");
+    expect(winner.textContent).toContain("✓");
+    expect(winner.className).toContain("text-accent");
+    // And the Sharpe-leader callout names the leader.
+    expect(screen.getByTestId("sharpe-leader")).toHaveTextContent("High");
+  });
+
   it("renders the under-selection hint with fewer than 2 columns", () => {
     render(<ScenarioCompareTable columns={[]} liveBook={null} />);
     expect(
