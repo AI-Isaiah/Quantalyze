@@ -2349,4 +2349,74 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       `Avg |ρ| ${expected}`,
     );
   });
+
+  // -------------------------------------------------------------------------
+  // IMPACT-01 — persistent PROJECTED honesty badge + coverage caveat. The
+  // badge is always visible (not a tooltip) and uses the neutral-outline token,
+  // NOT bg-accent / warning / role="alert" / <Badge>. The caveat names the live
+  // N + the shortest-history strategy via shortestHistoryName.
+  // -------------------------------------------------------------------------
+  it("IMPACT-01 — the composer renders the PROJECTED badge unconditionally (even with no leverage applied)", () => {
+    // No mockTwoStrategies → default adapter (no strategies, no leverage).
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Leverage caveat is absent (nothing levered) — proves the PROJECTED badge
+    // is NOT gated on leverage.
+    expect(screen.queryByTestId("scenario-leverage-caveat")).toBeNull();
+    const badge = screen.getByTestId("scenario-projected-badge");
+    expect(badge).toBeInTheDocument();
+    expect(badge.textContent).toBe(
+      "PROJECTED — hypothetical, not your live book",
+    );
+  });
+
+  it("IMPACT-01 — the PROJECTED badge is a neutral-outline pill (border-text-muted/text-text-muted), NOT bg-accent / warning / role=alert / <Badge>", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const badge = screen.getByTestId("scenario-projected-badge");
+    // Neutral outline tokens present.
+    expect(badge.className).toContain("border-text-muted");
+    expect(badge.className).toContain("text-text-muted");
+    // Wrong signals absent: no accent fill, no warning amber, no alert role.
+    expect(badge.className).not.toContain("bg-accent");
+    expect(badge.className).not.toMatch(/warning|amber/);
+    expect(badge.getAttribute("role")).not.toBe("alert");
+    // It is a plain <span> pill, not the filled <Badge> primitive (which
+    // carries a fill + a distinct class signature).
+    expect(badge.tagName.toLowerCase()).toBe("span");
+  });
+
+  it("IMPACT-01 — the coverage caveat names the live N overlapping days AND the shortest-history strategy name", () => {
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const caveat = screen.getByTestId("scenario-coverage-caveat");
+    const n = lastScenarioMetrics()?.n;
+    expect(typeof n).toBe("number");
+    const text = caveat.textContent?.replace(/\s+/g, " ").trim() ?? "";
+    // Live N (not a hardcoded number) from scenarioMetrics.n.
+    expect(text).toContain(`Projected from ${n} overlapping days.`);
+    // The shortest-history strategy name (REF_BTC/REF_ETH share window length
+    // 12, so first-by-input-order REF_BTC wins the deterministic tiebreak).
+    expect(text).toContain(`Shortest history: ${REF_BTC}.`);
+    expect(text).toContain("Not a forecast.");
+  });
 });

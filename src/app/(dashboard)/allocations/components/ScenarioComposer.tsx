@@ -63,6 +63,7 @@ import {
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
 import { Card } from "@/components/ui/Card";
+import { shortestHistoryName } from "@/lib/scenario-history";
 import { useScenarioState } from "../hooks/useScenarioState";
 import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 import {
@@ -602,6 +603,14 @@ export function ScenarioComposer({
     return out;
   }, [deAliased]);
 
+  // IMPACT-01 — the shortest-history strategy name for the coverage caveat.
+  // Pure helper (unit-tested in scenario-history.test.ts); reads only the
+  // de-aliased set the composer already holds. null when the set is empty.
+  const coverageShortestName = useMemo(
+    () => shortestHistoryName(deAliased.strategies),
+    [deAliased],
+  );
+
   // R4 — show the leverage caveat only when a non-default multiplier ACTUALLY
   // moves the projection: derive it from `projectionState` (the state fed to the
   // collapse + computeScenario) rather than the raw `leverageByRef`, so a stale
@@ -1004,10 +1013,41 @@ export function ScenarioComposer({
       data-widget-id="scenario-composer"
       className="mx-auto flex max-w-[1100px] flex-col"
     >
-      <h2 className="text-2xl font-semibold text-text-primary">Scenario</h2>
+      {/* IMPACT-01 — persistent PROJECTED honesty pill. Always rendered (NOT a
+          tooltip/hover), plain text, NO role="alert". Neutral-outline token per
+          UI-SPEC §4 — calm "label/metadata" signal, deliberately NOT bg-accent
+          (= verified/action), NOT warning-amber (= transient error), NOT the
+          filled <Badge> primitive. A projection is a hypothetical, not your
+          live book — the badge says so unconditionally. */}
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="text-2xl font-semibold text-text-primary">Scenario</h2>
+        <span
+          data-testid="scenario-projected-badge"
+          className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-[10px] uppercase tracking-wide font-semibold text-text-muted"
+        >
+          PROJECTED — hypothetical, not your live book
+        </span>
+      </div>
       <p className="mt-1 text-sm text-text-muted">
         Compose a draft portfolio and project KPI / equity / drawdown impact vs
         your live baseline.
+      </p>
+
+      {/* IMPACT-01 — coverage caveat. Names the live overlapping-day count
+          (scenarioMetrics.n) AND the shortest-history strategy via the
+          unit-tested shortestHistoryName helper — no invented numbers, no
+          re-implemented helper. Reuses the leverage-caveat typography. The
+          "Shortest history" half is omitted when the de-aliased set is empty
+          (helper → null), so the caveat never names a phantom strategy. */}
+      <p
+        data-testid="scenario-coverage-caveat"
+        className="mt-2 text-[11px] text-text-muted"
+      >
+        Projected from {scenarioMetrics.n} overlapping days.
+        {coverageShortestName !== null
+          ? ` Shortest history: ${coverageShortestName}.`
+          : ""}{" "}
+        Not a forecast.
       </p>
 
       {scenario.fingerprintMismatch && (
