@@ -2430,11 +2430,16 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const n = lastScenarioMetrics()?.n;
     expect(typeof n).toBe("number");
     const text = caveat.textContent?.replace(/\s+/g, " ").trim() ?? "";
-    // Live N (not a hardcoded number) from scenarioMetrics.n.
-    expect(text).toContain(`Projected from ${n} overlapping days.`);
+    // HONEST-01 — the canonical methodology line names the ACTUAL method
+    // ("Historical realized"), the live N overlapping days, and the honest
+    // horizon ("not a forecast"), middot-separated, folded into the one caveat.
+    expect(text).toContain("Historical realized");
+    expect(text).toContain("not a forecast");
+    // Live N (not a hardcoded number) from scenarioMetrics.n, in the canonical
+    // middot-separated form.
+    expect(text).toContain(`Historical realized · ${n} overlapping days · not a forecast`);
     // The shortest-history strategy name (REF_BTC/REF_ETH share window length
     // 12, so first-by-input-order REF_BTC wins the deterministic tiebreak).
     expect(text).toContain(`Shortest history: ${REF_BTC}.`);
-    expect(text).toContain("Not a forecast.");
   });
 });

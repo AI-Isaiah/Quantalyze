@@ -1060,11 +1060,11 @@ export function ScenarioComposer({
         data-testid="scenario-coverage-caveat"
         className="mt-2 text-[11px] text-text-muted"
       >
-        Projected from {scenarioMetrics.n} overlapping days.
+        Historical realized · {scenarioMetrics.n} overlapping days · not a
+        forecast.
         {coverageShortestName !== null
           ? ` Shortest history: ${coverageShortestName}.`
-          : ""}{" "}
-        Not a forecast.
+          : ""}
       </p>
 
       {scenario.fingerprintMismatch && (

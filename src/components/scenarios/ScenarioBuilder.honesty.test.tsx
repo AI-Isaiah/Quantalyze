@@ -107,13 +107,17 @@ describe("ScenarioBuilder honesty surface", () => {
       "PROJECTED — hypothetical, not your live book",
     );
 
-    // IMPACT-01 — the coverage caveat names the live N overlapping days AND the
+    // IMPACT-01 / HONEST-01 — the coverage caveat is the canonical methodology
+    // line: it leads with the ACTUAL method ("Historical realized"), names the
+    // live N overlapping days, the honest horizon ("not a forecast"), then the
     // shortest-history strategy ("Short Leg" has the fewest return points).
     const caveat = screen.getByTestId("scenario-coverage-caveat");
     const text = caveat.textContent?.replace(/\s+/g, " ").trim() ?? "";
-    expect(text).toMatch(/^Projected from \d+ overlapping days\./);
+    // Anchored on the new line front (the methodology label moved to the front,
+    // so the prior /^Projected from …/ anchor would break here).
+    expect(text).toMatch(/^Historical realized · \d+ overlapping days · not a forecast/);
+    expect(text).toContain("Historical realized");
     expect(text).toContain("Shortest history: Short Leg.");
-    expect(text).toContain("Not a forecast.");
   });
 
   it("IMPACT-01 — the honesty badges are neutral-outline pills, NOT bg-accent / warning / role=alert / <Badge>", () => {

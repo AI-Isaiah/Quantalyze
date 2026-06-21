@@ -297,9 +297,8 @@ export function ScenarioBuilder({ strategies }: Props) {
           data-testid="scenario-coverage-caveat"
           className="mt-2 text-[11px] text-text-muted"
         >
-          Projected from {metrics.n} overlapping days.
-          {shortestName ? ` Shortest history: ${shortestName}.` : ""} Not a
-          forecast.
+          Historical realized · {metrics.n} overlapping days · not a forecast.
+          {shortestName ? ` Shortest history: ${shortestName}.` : ""}
         </p>
       </div>
 
