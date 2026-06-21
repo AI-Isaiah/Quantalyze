@@ -269,7 +269,7 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     ).toBe("true");
   });
 
-  it("?tab=scenario → Scenario panel visible (PR3: hidden from tablist, still routable via URL + + Allocation chip)", async () => {
+  it("?tab=scenario → Scenario panel visible AND Scenario tab present + selected in tablist (SURF-01, Phase 21)", async () => {
     setSearchParams("tab=scenario");
     render(<AllocationsTabs {...STUB_PROPS} />);
     // Phase 10 / 10-06b — ScenarioComposer is dynamic-imported (next/dynamic
@@ -277,11 +277,13 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     // helper would race with the loading-skeleton fallback; the async
     // helper polls until the testid appears.
     await expectOnlyVisibleBodyAsync("scenario-body");
-    // PR3 (HANDOFF dashboard parity) — Scenario is no longer rendered as
-    // a button in the tablist (truth screenshot is 5 tabs). It remains
-    // routable via ?tab=scenario and via the green "+ Allocation" chip,
-    // so the panel is mounted but no tab role exists for it.
-    expect(screen.queryByRole("tab", { name: "Scenario" })).toBeNull();
+    // SURF-01 (Phase 21) — Scenario is now a visible tab button in the
+    // tablist (added to VISIBLE_TAB_KEYS), reversing the prior PR3
+    // "hidden from tablist" contract. It remains independently routable
+    // via ?tab=scenario and the green "+ Allocation" chip.
+    const scenarioTab = screen.getByRole("tab", { name: "Scenario" });
+    expect(scenarioTab).toBeInTheDocument();
+    expect(scenarioTab.getAttribute("aria-selected")).toBe("true");
   });
 
   it("?tab=performance (legacy alias) → Overview + router.replace strips the param", () => {
@@ -336,12 +338,13 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
-  it("ArrowRight wraps focus across the visible tabs in VISIBLE_TAB_KEYS order (Scenario excluded)", () => {
+  it("ArrowRight wraps focus across the visible tabs in VISIBLE_TAB_KEYS order (includes Scenario, SURF-01)", () => {
     setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    // Visible tablist excludes Scenario. Overview is the factsheet view,
-    // so there's no separate Analytics tab. Wrap from Risk → Overview.
-    const order = ["Overview", "Holdings", "Outcomes", "Mandate", "Risk"];
+    // SURF-01 (Phase 21) — Scenario is now in VISIBLE_TAB_KEYS, so the
+    // keyboard walk includes it as the last visible tab. Overview is the
+    // factsheet view (no separate Analytics tab). Wrap from Scenario → Overview.
+    const order = ["Overview", "Holdings", "Outcomes", "Mandate", "Risk", "Scenario"];
     for (let i = 0; i < order.length; i++) {
       mockReplace.mockClear();
       const current = screen.getByRole("tab", { name: order[i] });

@@ -206,7 +206,7 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
  *   /allocations?tab=outcomes     → Outcomes
  *   /allocations?tab=mandate      → Mandate
  *   /allocations?tab=risk         → Risk
- *   /allocations?tab=scenario     → Scenario (panel only — no tab button)
+ *   /allocations?tab=scenario     → Scenario (now a visible tab — SURF-01, Phase 21)
  *   /allocations?tab=<unknown>    → Overview (D-04 silent fallback)
  *
  * Per VOICES-ACCEPTED f3: `activeTab` is DERIVED from `searchParams` on
