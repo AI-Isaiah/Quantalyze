@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.1.0
 milestone_name: Scenario Analysis
-status: executing
+status: verifying
 stopped_at: Completed 21-02-PLAN.md
-last_updated: "2026-06-21T15:19:21.834Z"
+last_updated: "2026-06-21T15:30:20.181Z"
 last_activity: 2026-06-21
 progress:
   total_phases: 8
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 4
-  completed_plans: 3
-  percent: 0
+  completed_plans: 4
+  percent: 13
 ---
 
 # Project State
@@ -28,10 +28,10 @@ See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 
 Phase: 21 (Surfacing, Correlation & Honest Projection) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-06-21
 
-Progress: [████████░░] 75%
+Progress: [██████████] 100%
 
 ## Milestone Roadmap (v1.1.0 Scenario Analysis)
 
@@ -210,6 +210,9 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - [Phase ?]: Phase 21-02: ids.length<2 is the load-bearing CORR-02 gate (engine returns a non-null 1x1 matrix for 1 strategy); empty-state routing checks overlappingDays<10 first
 - [Phase ?]: Phase 21-03: own-book composer mounts CorrelationHeatmap with de-aliased labels; Avg |ρ| single-sourced from scenarioMetrics.avg_pairwise_correlation
 - [Phase ?]: Phase 21-03: IMPACT-02 no-peer-ranking guard keys on a render-only data-testid (not queryByText, which only matched a title= attr) + a positive-control isolation render; mutation-verified falsifiable both directions
+- [Phase ?]: Phase 21-04: example-universe Sandbox brought to honesty parity — new header row with Example universe (SURF-03) + persistent PROJECTED (IMPACT-01) neutral-outline pills, coverage caveat (metrics.n + shortestHistoryName(strategies)), Avg |ρ| relabel; parent PageHeader + frozen engine untouched
+- [Phase ?]: Phase 21-04: ScenarioBuilder takes the already-collapsed strategies prop (no internal de-alias) so shortestHistoryName(strategies) is the faithful caveat call; Avg |ρ| appears twice by design (MetricCard label + single-sourced heatmap caption), tests assert getAllByText length >= 1
+- [Phase ?]: Phase 21-04: IMPACT-02 Sandbox neuter guard keys on the render-only data-testid percentile-rank-badge (added in 21-03) + isolated positive control; mutation-verified falsifiable (wiring the badge into ScenarioBuilder made the ABSENT assertion fail), reverted
 
 ## Accumulated Context
 
@@ -231,7 +234,7 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-06-21T15:18:44.394Z
+Last session: 2026-06-21T15:30:00.484Z
 Stopped at: Completed 21-02-PLAN.md
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30

@@ -29,7 +29,7 @@ Railway deploy.
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 21: Surfacing, Correlation & Honest Projection** - Make scenarios reachable, show the correlation heatmap, and lock the "PROJECTED — hypothetical" framing (already-designed, client-only foundation)
+- [x] **Phase 21: Surfacing, Correlation & Honest Projection** - Make scenarios reachable, show the correlation heatmap, and lock the "PROJECTED — hypothetical" framing (already-designed, client-only foundation) (completed 2026-06-21)
 - [ ] **Phase 22: Methodology-Honesty Scaffolding** - Per-stat method/overlap-N/horizon disclosure + a shared minimum-sample gate the heavy quant phases reuse
 - [ ] **Phase 23: Scenario Persistence & Compare** - Save / reopen / list / rename / delete named scenarios (DB + RLS + `schema_version`) and compare 2+ side-by-side (the spine)
 - [ ] **Phase 24: Benchmark Comparison** - Overlay a benchmark on the scenario projection with tracking error / information ratio / alpha-beta over the aligned window
@@ -54,7 +54,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   - [x] 21-01-PLAN.md — Surfacing: visible Scenario tab + allocator-only Strategy Sandbox sidebar link (SURF-01/02/03) [wave 1]
   - [x] 21-02-PLAN.md — Correlation presentational: show-all heatmap + honest empty states + Avg |ρ| relabel + shortestHistoryName helper (CORR-02/03/04) [wave 1]
   - [x] 21-03-PLAN.md — Own-book composer: heatmap mount + PROJECTED badge/caveat + R3 neuter guard (CORR-01, CORR-03, IMPACT-01/02) [wave 2]
-  - [ ] 21-04-PLAN.md — Strategy Sandbox: Example-universe + PROJECTED framing + Avg |ρ| relabel + neuter guard (SURF-03, CORR-03, IMPACT-01/02) [wave 2]
+  - [x] 21-04-PLAN.md — Strategy Sandbox: Example-universe + PROJECTED framing + Avg |ρ| relabel + neuter guard (SURF-03, CORR-03, IMPACT-01/02) [wave 2]
 **UI hint**: yes
 
 ### Phase 22: Methodology-Honesty Scaffolding
@@ -142,7 +142,7 @@ Phases execute in numeric order: 21 → 22 → 23 → 24 → 25 → 26 → 27 �
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 21. Surfacing, Correlation & Honest Projection | 3/4 | In Progress|  |
+| 21. Surfacing, Correlation & Honest Projection | 4/4 | Complete   | 2026-06-21 |
 | 22. Methodology-Honesty Scaffolding | 0/TBD | Not started | - |
 | 23. Scenario Persistence & Compare | 0/TBD | Not started | - |
 | 24. Benchmark Comparison | 0/TBD | Not started | - |
