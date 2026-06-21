@@ -51,10 +51,28 @@ ALTER TABLE scenarios ENABLE ROW LEVEL SECURITY;
 -- and writes only their own rows; the WITH CHECK blocks writing a row owned by
 -- another allocator (defence-in-depth on top of the route always sourcing
 -- allocator_id from auth, never the request body).
+--
+-- `TO authenticated` scopes the policy to the role the request-scoped client
+-- actually connects as. Without it the policy applies to ALL roles incl. anon;
+-- `allocator_id = auth.uid()` already evaluates false for anon (auth.uid() is
+-- NULL), but pinning the role makes the intent explicit and keeps the policy
+-- from being the only thing standing between anon and the rows.
 CREATE POLICY scenarios_owner ON scenarios
   FOR ALL
+  TO authenticated
   USING (allocator_id = auth.uid())
   WITH CHECK (allocator_id = auth.uid());
+
+-- Defense-in-depth: REVOKE all default grants from anon. Mirrors the api_keys
+-- hardening (20260410225608_api_keys_column_revoke.sql) — a fresh table inherits
+-- Supabase's default `GRANT ALL ON TABLE scenarios TO anon, authenticated`, so
+-- anon retains table-level privileges even though the RLS predicate denies every
+-- row. There is no public-read use case for a private per-allocator scenario
+-- store; drop anon's grants entirely so anon is blocked at BOTH the grant layer
+-- and the RLS layer. `authenticated` keeps its default grants — the
+-- request-scoped client connects as `authenticated`, and the scenarios_owner
+-- policy (above) scopes its rows.
+REVOKE ALL ON scenarios FROM anon;
 
 -- List ordering: most-recently-updated first, scoped to the owning allocator.
 CREATE INDEX scenarios_allocator_updated_idx
