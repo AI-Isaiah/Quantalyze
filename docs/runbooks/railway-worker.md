@@ -12,7 +12,7 @@ curl -s https://quantalyze-analytics-production.up.railway.app/health
 Returns JSON: `{status, version, git_sha, worker_last_tick_at, worker_age_s}`.
 - `status: "ok"` + low `worker_age_s` → worker is ticking. Healthy.
 - `status: "stale"` / HTTP 503 → `worker_age_s` exceeded the ~90s tick threshold:
-  the worker process is wedged or dead. `railway.toml` sets
+  the worker process is wedged or dead. `analytics-service/railway.toml` sets
   `restartPolicyType = "ON_FAILURE"` with `restartPolicyMaxRetries = 3`, so a
   crash self-restarts up to 3×; beyond that it stays down.
 - `git_sha` ≠ current `main` HEAD → prod is on **stale code** (likely a skipped
@@ -72,4 +72,4 @@ railway ssh "cd /app && python -m scripts.<name>"
 - Exact Railway CLI for restart-without-redeploy and replica scaling varies by
   CLI version and is not pinned in this repo — prefer the dashboard Redeploy
   flow above, or confirm with `railway --help`.
-- Current replica count is a dashboard setting, not in `railway.toml`.
+- Current replica count is a dashboard setting, not in `analytics-service/railway.toml`.
