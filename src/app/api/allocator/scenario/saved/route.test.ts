@@ -17,6 +17,8 @@
  *   T_S12 GET DB error → redacted + 500 + Cache-Control
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 
@@ -277,5 +279,32 @@ describe("GET /api/allocator/scenario/saved", () => {
     const json = await res.json();
     expect(JSON.stringify(json)).not.toContain("does not exist");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+});
+
+// ===========================================================================
+// Tenant-isolation client choice (static guard)
+// ===========================================================================
+//
+// The GET list path has NO `.eq("allocator_id")` — tenant isolation relies
+// ENTIRELY on RLS scoping the user-scoped client to `auth.uid()`. If a future
+// edit swapped this route to a service-role (BYPASSRLS) client, every tenant's
+// rows would leak with ALL of the behavioural tests above still green (they
+// mock the client). Pin the client choice statically: the route must source the
+// user-scoped client and must NOT import an admin / service-role client.
+
+describe("scenario/saved route — tenant-isolation client choice", () => {
+  const routeSrc = readFileSync(join(__dirname, "route.ts"), "utf8");
+
+  it("imports the user-scoped client from @/lib/supabase/server", () => {
+    expect(routeSrc).toContain('from "@/lib/supabase/server"');
+  });
+
+  it("does NOT import an admin / service-role client (RLS is the only tenant gate)", () => {
+    // A BYPASSRLS client would silently leak every tenant — the list path has no
+    // explicit .eq("allocator_id") backstop.
+    expect(routeSrc).not.toContain("@/lib/supabase/admin");
+    expect(routeSrc).not.toMatch(/service[_-]?role/i);
+    expect(routeSrc).not.toContain("createServiceClient");
   });
 });
