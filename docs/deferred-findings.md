@@ -140,3 +140,23 @@ was refuted: they were a date-bomb (a fixture pinned to a fixed `updated_at`),
 **already fixed in PR #471 (v0.24.15.117)** via `vi.setSystemTime`. The pin
 half of #23 (`.nvmrc` + `package.json` engines) was landed; this note exists so
 the date-bomb isn't re-investigated.
+
+### #2 full-schema half · functions shipped, tables/columns/policies/triggers deferred
+
+The canonical-SQL-snapshot finding (#2, P32) was landed for **functions only**:
+`scripts/dump-sql-functions.ts` replays the migrations and commits each
+function's latest body to `supabase/schema/functions/`, gated by
+`.github/workflows/sql-function-snapshot.yml`. That covers the dominant redefine
+class (200 `CREATE OR REPLACE FUNCTION`) and the regression that actually shipped
+(G23-187, a function-body silent revert).
+
+**Deferred: a full-schema snapshot covering tables/columns/policies/triggers.**
+Functions are text-replayable because they are wholesale `CREATE OR REPLACE`;
+tables evolve via incremental `ALTER TABLE ADD/DROP COLUMN` etc., which a text
+replay can't faithfully reconstruct. A correct full-schema dump needs the
+**Supabase local stack (Docker) in CI** (`supabase db start` → apply migrations →
+`supabase db dump --schema-only`), which is net-new CI infra (no current job runs
+a local stack) and carries docker flake + per-change-regenerate-via-docker cost.
+Until then, the **B5b near-miss class (a reverted COLUMN, `pre_terminus_balance_unknown`)
+is NOT gated** — only function bodies are. Revisit when the docker-in-CI cost is
+justified (or fold into #18's test-project work, which already needs a live DB).
