@@ -17,7 +17,9 @@
     "verify:phase18": "tsx scripts/verify-phase18-artifacts.ts",
     "check:founder-lp-readiness": "tsx scripts/check-founder-lp-readiness.ts",
     "check:admin-route-manifest": "tsx scripts/check-admin-route-manifest.ts",
-    "worker:dev": "cd analytics-service && .venv/bin/python main_worker.py"
+    "worker:dev": "cd analytics-service && .venv/bin/python main_worker.py",
+    "schema:functions": "tsx scripts/dump-sql-functions.ts",
+    "schema:functions:check": "tsx scripts/dump-sql-functions.ts --check"
   },
   "dependencies": {
     "@sentry/nextjs": "^10.48.0",
@@ -62,5 +64,5 @@
     "typescript": "^5",
     "vitest": "^4.1.2"
   },
-  "version": "0.24.15.132"
+  "version": "0.24.15.133"
 }
