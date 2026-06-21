@@ -496,7 +496,7 @@ const addedStrategySchema = z.object({
  *  validated as a number here; the version *trichotomy* (higher → read-only,
  *  equal → adopt, lower/missing → reset) is applied by the codec below, not by
  *  the schema. `userWeightOverrides` is optional so pre-B7 blobs validate. */
-const scenarioDraftSchema = z.object({
+export const scenarioDraftSchema = z.object({
   schema_version: z.number(),
   init_holdings_fingerprint: z.string(),
   toggleByScopeRef: z.record(z.string(), z.boolean()),
