@@ -773,3 +773,106 @@ describe("computeScenario — R4 leverage multiplier", () => {
   });
 });
 
+// =========================================================================
+// portfolio_daily_returns — additive OPTIONAL full-resolution daily series
+// (Plan 24-01, BENCH-01: the source the benchmark inner-join reads from)
+// =========================================================================
+
+describe("computeScenario — portfolio_daily_returns (full daily series)", () => {
+  it("[24-01] exposes the FULL daily series: length === n, dates span effective_start..effective_end, UNROUNDED", () => {
+    const dates = buildDates("2024-01-02", 30);
+    // A constant daily return carried to MORE than 5 decimal places. As a
+    // single weight-1, leverage-1 strategy, portDaily[i] === this value
+    // exactly. If the field were rounded (.toFixed(5)) the trailing digits
+    // would be lost — so equality below proves the series is UNROUNDED.
+    const r = 0.0012345678;
+    const strategies = [constantReturnStrategy("a", dates, r)];
+    const cache = buildDateMapCache(strategies);
+    const metrics = computeScenario(strategies, defaultState(strategies), cache);
+
+    const series = metrics.portfolio_daily_returns;
+    expect(series).toBeDefined();
+    // Full resolution: one point per common date, NOT the every-5-day
+    // downsample the equity_curve uses.
+    expect(series!.length).toBe(metrics.n);
+    expect(series!.length).toBe(30);
+    expect(series!.length).toBeGreaterThan(metrics.equity_curve.length);
+
+    // Dates run along the engine's internal daily axis.
+    expect(series![0].date).toBe(metrics.effective_start);
+    expect(series![series!.length - 1].date).toBe(metrics.effective_end);
+    expect(series![0].date).toBe(dates[0]);
+    expect(series![series!.length - 1].date).toBe(dates[29]);
+
+    // Unrounded: the exact 10-decimal daily return survives. A .toFixed(5)
+    // field would have collapsed this to 0.00123.
+    expect(series![0].value).toBe(r);
+    expect(series![15].value).toBe(r);
+    // Sanity: the rounded equity_curve point at the same place would NOT
+    // equal the raw daily return (it is cumulative AND 5-decimal rounded).
+    expect(series![0].value).not.toBe(
+      Number((series![0].value as number).toFixed(5)),
+    );
+  });
+
+  it("[24-01] equals [] on a degenerate scenario (single strategy, <10 days)", () => {
+    const dates = buildDates("2024-01-02", 5); // < 10 → n<10 early return
+    const strategies = [constantReturnStrategy("a", dates, 0.001)];
+    const cache = buildDateMapCache(strategies);
+    const metrics = computeScenario(strategies, defaultState(strategies), cache);
+
+    expect(metrics.n).toBe(5);
+    expect(metrics.twr).toBeNull(); // confirms we are on the degenerate path
+    expect(metrics.portfolio_daily_returns).toEqual([]);
+  });
+
+  it("[24-01] equals [] when no strategies are selected", () => {
+    const dates = buildDates("2024-01-02", 30);
+    const strategies = [constantReturnStrategy("a", dates, 0.001)];
+    const cache = buildDateMapCache(strategies);
+    const state = defaultState(strategies);
+    state.selected["a"] = false;
+    const metrics = computeScenario(strategies, state, cache);
+
+    expect(metrics.n).toBe(0);
+    expect(metrics.portfolio_daily_returns).toEqual([]);
+  });
+
+  it("[24-01] equals [] on the non-finite / catastrophic-loss guard path", () => {
+    const dates = buildDates("2024-01-02", 30);
+    // A -100% single day trips the catastrophic-loss guard (minCumulative<=0).
+    const poisoned = constantReturnStrategy("a", dates, 0.001, {
+      daily_returns: dates.map((date, i) => ({
+        date,
+        value: i === 10 ? -1 : 0.001,
+      })),
+    });
+    const cache = buildDateMapCache([poisoned]);
+    const metrics = computeScenario([poisoned], defaultState([poisoned]), cache);
+
+    expect(metrics.twr).toBeNull(); // guard tripped
+    expect(metrics.equity_curve).toEqual([]);
+    expect(metrics.portfolio_daily_returns).toEqual([]);
+  });
+
+  it("[24-01] for a multi-strategy blend the series equals the engine's weighted portDaily (matches equity_curve at shared sample points)", () => {
+    const dates = buildDates("2024-01-02", 30);
+    // Equal-weight: portDaily = (0.002 + -0.001)/2 = 0.0005 every day.
+    const strategies = [
+      constantReturnStrategy("a", dates, 0.002),
+      constantReturnStrategy("b", dates, -0.001),
+    ];
+    const cache = buildDateMapCache(strategies);
+    const metrics = computeScenario(strategies, defaultState(strategies), cache);
+
+    const series = metrics.portfolio_daily_returns!;
+    expect(series.length).toBe(30);
+    for (const pt of series) {
+      expect(pt.value).toBeCloseTo(0.0005, 12);
+    }
+    // The first equity_curve point (i=0, return form) is the first daily
+    // return; it must match the first portfolio_daily_returns value.
+    expect(metrics.equity_curve[0].value).toBeCloseTo(series[0].value, 4);
+  });
+});
+
