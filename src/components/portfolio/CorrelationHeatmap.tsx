@@ -147,8 +147,11 @@ const EMPTY_BODY_FEW_STRATEGIES =
   "Add at least 2 active strategies to see how they move together.";
 const EMPTY_BODY_FEW_DAYS =
   "These strategies share fewer than 10 overlapping trading days — too little history for an honest correlation. Pick strategies with longer common history.";
+// Surface-neutral: this shared component also renders on the static
+// portfolio-detail factsheet (no interactive "selection"), so the copy must
+// not assume the scenario composer's toggle UX. See CR-01 (Phase 21 review).
 const EMPTY_BODY_COMBINED =
-  "Need at least 2 strategies with 10 or more overlapping days. Adjust your selection to see the correlation heatmap.";
+  "Need at least 2 strategies with 10 or more overlapping days to show a correlation heatmap.";
 
 export function CorrelationHeatmap({
   correlationMatrix,

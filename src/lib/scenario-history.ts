@@ -12,11 +12,15 @@
  * new server field (Assumption A1).
  *
  * "Shortest history" is defined as the FEWEST available trading days, i.e. the
- * shortest `daily_returns` window. The strategy with the fewest return points
- * is the one whose short record most constrains an honest correlation/overlap;
- * naming it tells the allocator which strategy is limiting the analysis. (An
- * earliest-start definition would name a strategy that may nonetheless have a
- * dense record; window length is the count that actually feeds the overlap.)
+ * shortest `daily_returns` window — and the user-facing copy says exactly that
+ * ("Shortest history: {name}"). It is a transparent PROXY for the most
+ * history-limited strategy, not a provable claim that this strategy alone
+ * caps the overlap `n`: the binding overlap constraint depends on WHICH dates
+ * each strategy covers, not merely how many points it has, so a strategy with
+ * fewer points but dense common-window coverage may not be the true limiter.
+ * Naming the fewest-points strategy is an honest, deterministic heuristic that
+ * points the allocator at the most likely limiting record without inventing a
+ * precise per-strategy overlap attribution the client data can't support.
  *
  * Mirrors the location/export convention of its sibling `scenario-dealias.ts`
  * and the pure-reduce shape of the `pickTopTenByAvgCorr` fn it replaces.

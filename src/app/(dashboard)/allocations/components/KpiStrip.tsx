@@ -374,7 +374,15 @@ export function KpiStrip({
       label: "AUM",
       raw: allKeysStale ? null : aumValue,
       formatted: formatCurrency(allKeysStale ? null : aumValue),
-      sub: resolveSub(aumValue, true, null),
+      // WR-02 (Phase 21 review): in scenario mode the AUM is the projected sum
+      // of toggled-ON holdings, not live AUM, and the cell has no delta pill
+      // (metricKey: null). Disclose that it is projected so a shrunk number
+      // isn't mistaken for the allocator's real book size.
+      sub: resolveSub(
+        aumValue,
+        true,
+        mode === "scenario" ? "Projected — sum of enabled holdings" : null,
+      ),
       // AUM is sourced from analytics.total_aum, NOT the scenario engine.
       // ComputedMetrics has no AUM field; suppress scenario rendering.
       metricKey: null,

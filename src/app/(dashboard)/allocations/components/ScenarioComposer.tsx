@@ -252,22 +252,30 @@ export interface ScenarioComposerProps {
  * weight on the live-baseline path — better empty than mis-typed.
  */
 function liveBaselineToComputedMetrics(
-  baseline: MyAllocationDashboardPayload["liveBaselineMetrics"],
+  baseline: MyAllocationDashboardPayload["liveBaselineMetrics"] | null | undefined,
 ): ComputedMetrics {
+  // WR-05 (Phase 21 review): the type says liveBaselineMetrics is non-optional,
+  // but this component receives `payload` prop-drilled across a "use client"
+  // boundary + a runtime cast (see the `payload as ...` coercion below), so a
+  // stale client cache or a partial SSR payload could omit it or send a null
+  // equity array. Defensively default to an empty-but-valid ComputedMetrics so
+  // a missing baseline degrades (empty strip + delta) instead of throwing
+  // `Cannot read properties of undefined` and crashing the whole Scenario tab.
+  const eq = baseline?.equity ?? [];
   return {
-    n: baseline.equity.length,
-    twr: baseline.ytdTwr,
+    n: eq.length,
+    twr: baseline?.ytdTwr ?? null,
     cagr: null,
     volatility: null,
-    sharpe: baseline.sharpe,
+    sharpe: baseline?.sharpe ?? null,
     sortino: null,
-    max_drawdown: baseline.maxDd,
+    max_drawdown: baseline?.maxDd ?? null,
     max_dd_days: null,
     correlation_matrix: null,
-    avg_pairwise_correlation: baseline.avgRho,
+    avg_pairwise_correlation: baseline?.avgRho ?? null,
     equity_curve: [],
-    effective_start: baseline.equity[0]?.date ?? null,
-    effective_end: baseline.equity[baseline.equity.length - 1]?.date ?? null,
+    effective_start: eq[0]?.date ?? null,
+    effective_end: eq[eq.length - 1]?.date ?? null,
   };
 }
 
@@ -355,11 +363,8 @@ export function ScenarioComposer({
       return;
     }
     // NEW-C18-07: surface an explicit error when the user enters a value >1
-    // (e.g. via paste). The state layer (setWeightOverride → clampWeight) silently
-    // clamps to 1, so without this check a weight of 1.5 appears to commit at 100%
-    // AUM with no feedback. Showing the error makes the clamping visible and
-    // consistent with the non-finite path above. The value is still forwarded so
-    // the input snaps to the clamped value instead of freezing.
+    // (e.g. via paste). Showing the error makes the clamping visible and
+    // consistent with the non-finite path above.
     if (weight > 1) {
       setCommitError(
         "Weight clamped to 1 — the maximum allocation is 100% of portfolio AUM.",
@@ -372,7 +377,13 @@ export function ScenarioComposer({
       // "clamped" error message would persist until the next input event.
       setCommitError(null);
     }
-    scenario.setWeightOverride(scopeRef, weight);
+    // WR-03 (Phase 21 review): clamp authoritatively at THIS boundary — the
+    // boundary the "clamped to 1" message describes — instead of trusting the
+    // state layer's clampWeight to use the same bound. Mirrors handleLeverageChange,
+    // which clamps locally before dispatch. Keeps the message and the stored value
+    // in lockstep even if the downstream clamp bound ever changes.
+    const clampedWeight = Math.min(1, Math.max(0, weight));
+    scenario.setWeightOverride(scopeRef, clampedWeight);
   }
 
   // R4 — leverage input change handler. Mirrors handleWeightChange's fail-loud
@@ -554,12 +565,18 @@ export function ScenarioComposer({
       const toggle = scenario.draft.toggleByScopeRef[s.id];
       selected[s.id] =
         toggle === undefined ? (adapterOutput.state.selected[s.id] ?? true) : toggle;
+      // WR-04 (Phase 21 review): narrow with `typeof` instead of `Number.isFinite`
+      // + `as number` so the compiler keeps protecting these reads against future
+      // value-type drift (e.g. a `null` "cleared" sentinel) rather than the cast
+      // silently swallowing it. Behavior is identical: an absent/NaN override
+      // falls back; an explicit finite 0 is honored.
       const ov = scenario.draft.weightOverrides[s.id];
-      weights[s.id] = Number.isFinite(ov)
-        ? (ov as number)
-        : (adapterOutput.state.weights[s.id] ?? 0);
+      weights[s.id] =
+        typeof ov === "number" && Number.isFinite(ov)
+          ? ov
+          : (adapterOutput.state.weights[s.id] ?? 0);
       const L = leverageByRef[s.id];
-      leverage[s.id] = Number.isFinite(L) ? (L as number) : 1;
+      leverage[s.id] = typeof L === "number" && Number.isFinite(L) ? L : 1;
     }
     return { selected, weights, startDates: adapterOutput.state.startDates, leverage };
   }, [

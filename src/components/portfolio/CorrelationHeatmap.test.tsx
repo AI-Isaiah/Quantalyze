@@ -55,6 +55,37 @@ describe("<CorrelationHeatmap>", () => {
     expect(screen.queryByText(/Avg \|ρ\|/)).toBeNull();
   });
 
+  // CR-01 (Phase 21 review) — this is a SHARED presentational component: besides
+  // the two scenario surfaces it also renders on the static portfolio-detail
+  // factsheet (portfolios/[id]/page.tsx), which passes neither `overlappingDays`
+  // nor an interactive "selection" UX. The empty-state copy must stay
+  // surface-neutral so it is honest on a read-only page (no toggle/selection
+  // language that only exists in the scenario composer).
+  it("CR-01: empty-state copy is surface-neutral for the no-host-context (portfolio-detail) caller", () => {
+    const { rerender } = render(
+      <CorrelationHeatmap correlationMatrix={null} strategyNames={{}} />,
+    );
+    // null matrix, no overlappingDays → the combined-reason fallback copy.
+    expect(
+      screen.getByText(
+        /Need at least 2 strategies with 10 or more overlapping days/i,
+      ),
+    ).toBeInTheDocument();
+    // It must NOT reference the scenario composer's interactive selection UX.
+    expect(screen.queryByText(/adjust your selection/i)).toBeNull();
+
+    // Single-strategy portfolio (1×1 matrix, no overlappingDays) → the
+    // few-strategies copy, also free of interactive-selection language.
+    rerender(
+      <CorrelationHeatmap
+        correlationMatrix={{ "p-1": { "p-1": 1 } }}
+        strategyNames={{ "p-1": "Solo" }}
+      />,
+    );
+    expect(screen.queryByText(/adjust your selection/i)).toBeNull();
+    expect(screen.queryByRole("figure")).toBeNull();
+  });
+
   // CORR-02 — the < 10-overlapping-days case arrives as a null matrix WITH the
   // host's overlappingDays prop set. The body copy must name the DAYS reason,
   // distinct from the < 2-strategies copy, and show no number.
