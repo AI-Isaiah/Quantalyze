@@ -1,0 +1,89 @@
+# analytics-service runtime dependencies — SOURCE manifest (tech-debt #7).
+#
+# This .in file is the human-edited source of DIRECT runtime deps. The
+# fully-pinned lock (direct + every transitive) is the generated
+# `requirements.txt`, which is what Dockerfile / ci.yml / cassette-refresh /
+# Makefile actually install — so prod (Railway) builds are reproducible and a
+# new ccxt/transitive can no longer silently change LP-facing money-math
+# behavior with zero repo diff (the aiohttp 3.14 incident proved that class).
+#
+# Regenerate the lock after editing this file:
+#   cd analytics-service && make lock        # (uv pip compile --python-version 3.12 --universal)
+# CI/prod is Python 3.12 — always compile against 3.12, never the local venv.
+#
+# Dev/test-only deps (pytest, pyarrow, mypy, …) live in requirements-dev.txt and
+# are NOT shipped to prod (Dockerfile installs only requirements.txt).
+
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+quantstats==0.0.81
+# ccxt parses live broker payloads feeding equity reconstruction + trade
+# ingestion; it releases near-daily and the unified API can change behavior
+# between releases. Pinned exactly (was `>=4.0`) so a rebuild can't float it.
+# 4.5.59 is the version the cassette + equity-reconstruction/funding suites are
+# verified green against (tech-debt #7); the code's 4.5.x workarounds
+# (equity_reconstruction.py, exchange.py) target this line. To bump: Dependabot
+# opens a PR against requirements.txt, then re-run `make lock` and commit the
+# regenerated lock (Dependabot's own pip-compile won't match the uv/universal
+# format).
+ccxt==4.5.59
+pandas==2.2.3
+numpy==2.2.4
+# NOTE: pyarrow is NOT here — it is a TEST-ONLY dependency (pd.read_parquet of the
+# golden_252d_input.parquet fixture, tests/conftest.py + tests/fixtures/regen_golden.py).
+# It was moved to requirements-dev.txt (H-0537) so the production Railway image (which
+# installs ONLY requirements.txt) no longer ships the ~40MB native Arrow wheel and its
+# transitive attack surface. pandas 2.2.3 does not require pyarrow at runtime; no
+# production code path reads parquet (trades/positions come from Supabase as JSON).
+pydantic==2.11.3
+python-dotenv==1.1.0
+httpx==0.28.1
+slowapi==0.1.9
+supabase==2.15.1
+cryptography>=44.0
+# Phase 15 / CSV-01..CSV-02: pandera CSV row-schema validation +
+# python-multipart UploadFile parsing for /api/csv/validate (the only
+# multipart route in the service). pandera 0.20.x is compatible with
+# pandas==2.2.3 / numpy==2.2.4 (already pinned above).
+pandera==0.20.4
+# Phase 18 NOTE — Python 3.14 dev workaround (CI is unaffected):
+# pandera 0.20.4 declares multimethod<=1.10.0. multimethod 1.10 uses
+# `typing.Union` as a base type, which crashes pytest collection of
+# test_csv_validator.py on Python 3.14 (`TypeError: type 'typing.Union'
+# is not an acceptable base type`). CI runs on Python 3.12 where 1.10
+# works fine — no pin needed. Local devs on 3.14 must manually run:
+#   .venv/bin/pip install -U 'multimethod>=1.12,<2.0' --no-deps
+# (--no-deps to bypass pandera's <=1.10 constraint). multimethod 2.x
+# removes the `overload` symbol pandera 0.20.4 imports, so stay on 1.x.
+python-multipart==0.0.27
+# Phase 16 / OBSERV-09: structlog JSON-format logs with correlation_id contextvar.
+structlog==25.5.0
+# Phase 16 / OBSERV-10: psycopg required for direct-DSN trigger/RLS audit tests
+# (analytics-service/tests/test_trigger_rls_audit.py). supabase-py is HTTP-only
+# (postgrest), so this dep is NOT transitive — it must be pinned explicitly.
+# The trigger/RPC audit tests connect via TEST_SUPABASE_DB_URL on port 5432 and
+# need a libpq binding to assert behavior under service-role context where
+# auth.uid() returns NULL (Pitfall 5).
+psycopg[binary]==3.2.10
+# Phase 16 / OBSERV-04 + OBSERV-05: sentry-sdk[fastapi] FastAPI/Starlette integrations
+# + before_send PII scrub (FULL mirror of src/lib/admin/pii-scrub.ts: 8 exact keys +
+# DENYLIST_PREFIX sb-ec- + JWT_SHAPE regex + broker signing headers per FIX 7).
+# vcrpy pin lands in Plan 8 (16-08).
+sentry-sdk[fastapi]==2.58.0
+# Phase 16 / OBSERV-08: vcrpy pinned for deterministic local-repro of the unified
+# key flow. Records 12 cassettes (3 brokers × 4 scenarios) at
+# analytics-service/tests/cassettes/ and replays them in CI with NO network
+# access. record_mode='once' enforced in tests/conftest_vcr.py — never 'all'.
+# Three-layer redaction (filter_headers + filter_query_parameters +
+# before_record_response deep walker) covers Bybit v5 / OKX / Binance signing
+# variants per Plan 16-08 FIX 3 (Binance signs via QUERY string, not headers).
+vcrpy==8.1.1
+# aiohttp upper-bound: vcrpy 8.1.1's aiohttp stub
+# (vcr/stubs/aiohttp_stubs.py) imports aiohttp.streams.AsyncStreamReaderMixin
+# at module load. aiohttp 3.14.0 (released 2026-06) removed that symbol, so the
+# unpinned transitive resolve (supabase->realtime requires >=3.11.18,<4.0.0)
+# floats to 3.14.0 and every vcr-backed test in test_repro_key_flow.py fails at
+# import with `module 'aiohttp.streams' has no attribute 'AsyncStreamReaderMixin'`.
+# No released vcrpy supports aiohttp 3.14 yet (vcrpy#927 open), so pin below 3.14
+# until vcrpy ships a 3.14-compatible stub; resolves to the last-known-good 3.13.5.
+aiohttp<3.14
