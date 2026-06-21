@@ -226,7 +226,7 @@ export function ScenarioComparePanel({
     if (!includeLiveBook) return null;
     try {
       const metrics = computeMetricsForDraft(
-        buildLiveBookDraft(liveInputs),
+        buildLiveBookDraft(),
         liveInputs,
       );
       return { name: "Live book", metrics };

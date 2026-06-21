@@ -3,7 +3,7 @@
  *
  * Plan 23-03 (PERSIST-04) — the compare engine. Extracts the composer's
  * adapter → projectionState → de-alias → computeScenario chain
- * (`ScenarioComposer.tsx:460-630`) into a testable pure helper so a SAVED
+ * (the composer's `projectionState` memo) into a testable pure helper so a SAVED
  * draft re-resolves its return series from the live payload and runs the
  * FROZEN `computeScenario` (SCENARIO-05) — yielding the SAME `ComputedMetrics`
  * the composer would show for that draft over the same live inputs. No new
@@ -13,7 +13,7 @@
  * Honesty invariants this helper preserves (test-pinned in scenario-compare.test.ts):
  *
  *   - NO leverage. Leverage is ephemeral `useState` in the composer
- *     (`ScenarioComposer.tsx:361-367`), NEVER persisted — a saved `ScenarioDraft`
+ *     (the composer's `leverageByRef` state), NEVER persisted — a saved `ScenarioDraft`
  *     carries no leverage field. The projection state built here OMITS the
  *     optional `leverage` map entirely, so `computeScenario`'s `lev()` defaults
  *     every leg to 1 and the byte-identical pre-R4 path runs. We never read a
@@ -52,8 +52,8 @@ import type { ScenarioDraft } from "./scenario-state";
 
 /**
  * The slice of the composer's live payload the compare engine needs. Mirrors
- * the inputs the composer assembles before `buildStrategyForBuilderSet`
- * (`ScenarioComposer.tsx:460-559`):
+ * the inputs the composer assembles before its `buildStrategyForBuilderSet`
+ * adapter call:
  *   - holdingsSummary            — the live holdings (symbol/venue/type/value)
  *   - holdingReturnsByScopeRef   — reconstructed per-holding series, keyed by ref
  *   - addedStrategyReturnsLookup — payload.strategies → daily_returns, by id
@@ -92,7 +92,8 @@ export function computeMetricsForDraft(
 ): ComputedMetrics {
   // Read-only-tokens model: live holdings are FIXED context — no per-holding
   // toggle exists, so a current-schema (v2) draft never disables a holding.
-  // The disabled set is genuinely always empty (matches ScenarioComposer:513).
+  // The disabled set is genuinely always empty (matches the composer's
+  // `disabledHoldingRefs` memo).
   const disabledHoldingRefs = new Set<string>();
 
   const adapterOutput = buildStrategyForBuilderSet(
@@ -112,7 +113,7 @@ export function computeMetricsForDraft(
 
   // Overlay the draft's toggle + weight state onto the adapter defaults BEFORE
   // the collapse, so computeScenario reflects exactly what the saved draft
-  // encodes — the same wiring the composer does at ScenarioComposer:579-606.
+  // encodes — the same wiring the composer does in its `projectionState` memo.
   //
   // Deliberately NO `leverage` key: leverage is never persisted (a saved draft
   // has no leverage field), so omitting it makes computeScenario's `lev()`
@@ -163,9 +164,7 @@ export function computeMetricsForDraft(
  * fall back to the adapter defaults (every holding selected, value-proportional
  * weights), which IS the live book.
  */
-export function buildLiveBookDraft(
-  _liveInputs: ScenarioCompareInputs,
-): ScenarioDraft {
+export function buildLiveBookDraft(): ScenarioDraft {
   return {
     schema_version: 2,
     init_holdings_fingerprint: "live-book",

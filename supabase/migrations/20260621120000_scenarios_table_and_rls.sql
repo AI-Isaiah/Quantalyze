@@ -63,8 +63,8 @@ CREATE POLICY scenarios_owner ON scenarios
   USING (allocator_id = auth.uid())
   WITH CHECK (allocator_id = auth.uid());
 
--- Defense-in-depth: REVOKE all default grants from anon. Mirrors the api_keys
--- hardening (20260410225608_api_keys_column_revoke.sql) — a fresh table inherits
+-- Defense-in-depth: REVOKE all default grants from anon. Follows the api_keys
+-- anon-hardening precedent (20260410225608_api_keys_column_revoke.sql) — a fresh table inherits
 -- Supabase's default `GRANT ALL ON TABLE scenarios TO anon, authenticated`, so
 -- anon retains table-level privileges even though the RLS predicate denies every
 -- row. There is no public-read use case for a private per-allocator scenario

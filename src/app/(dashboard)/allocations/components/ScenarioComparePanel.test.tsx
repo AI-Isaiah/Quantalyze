@@ -37,8 +37,7 @@ vi.mock("../lib/scenario-compare", async (importOriginal) => {
     ...actual,
     computeMetricsForDraft: (draft: ScenarioDraft, inputs: ScenarioCompareInputs) =>
       mockComputeMetricsForDraft(draft, inputs),
-    buildLiveBookDraft: (inputs: ScenarioCompareInputs) =>
-      mockBuildLiveBookDraft(inputs),
+    buildLiveBookDraft: () => mockBuildLiveBookDraft(),
   };
 });
 

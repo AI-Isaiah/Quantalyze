@@ -217,7 +217,7 @@ describe("buildLiveBookDraft", () => {
     };
     const inputs = liveInputs(holdings, returnsByRef);
 
-    const liveDraft = buildLiveBookDraft(inputs);
+    const liveDraft = buildLiveBookDraft();
     // No added strategies, no leverage on the synthetic draft.
     expect(liveDraft.addedStrategies).toHaveLength(0);
 
@@ -241,7 +241,7 @@ describe("buildLiveBookDraft", () => {
       [holdingRef("binance", "BTC", "spot")]: altReturns(shortDates, 0.01, -0.01),
     });
 
-    const m = computeMetricsForDraft(buildLiveBookDraft(inputs), inputs);
+    const m = computeMetricsForDraft(buildLiveBookDraft(), inputs);
     expect(m.sharpe).toBeNull();
     expect(m.sharpe).not.toBe(0);
   });
