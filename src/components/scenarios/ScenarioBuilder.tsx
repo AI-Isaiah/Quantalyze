@@ -32,6 +32,7 @@
 import { useMemo, useState } from "react";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
 import { Card } from "@/components/ui/Card";
+import { shortestHistoryName } from "@/lib/scenario-history";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import {
   buildDateMapCache,
@@ -209,6 +210,15 @@ export function ScenarioBuilder({ strategies }: Props) {
     return out;
   }, [strategies]);
 
+  // IMPACT-01 coverage caveat: name the de-aliased strategy whose record most
+  // constrains the overlap (fewest daily_returns points). `strategies` is the
+  // already-collapsed set the page passes in (page.tsx:131), mirroring the
+  // composer's `shortestHistoryName(deAliased.strategies)`. null on an empty set.
+  const shortestName = useMemo(
+    () => shortestHistoryName(strategies),
+    [strategies],
+  );
+
   const selectedCount = Object.values(state.selected).filter(Boolean).length;
 
   function toggle(id: string) {
@@ -265,6 +275,34 @@ export function ScenarioBuilder({ strategies }: Props) {
 
   return (
     <div className="mt-6 space-y-6">
+      {/* Honesty framing — SURF-03 "Example universe" label + IMPACT-01
+          persistent PROJECTED badge and coverage caveat. New header row at the
+          top of the container (the page title lives in the parent PageHeader). */}
+      <div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            data-testid="sandbox-example-universe-badge"
+            className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-[10px] uppercase tracking-wide font-semibold text-text-muted"
+          >
+            Example universe
+          </span>
+          <span
+            data-testid="scenario-projected-badge"
+            className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-[10px] uppercase tracking-wide font-semibold text-text-muted"
+          >
+            PROJECTED — hypothetical, not your live book
+          </span>
+        </div>
+        <p
+          data-testid="scenario-coverage-caveat"
+          className="mt-2 text-[11px] text-text-muted"
+        >
+          Projected from {metrics.n} overlapping days.
+          {shortestName ? ` Shortest history: ${shortestName}.` : ""} Not a
+          forecast.
+        </p>
+      </div>
+
       {/* KPI strip */}
       <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <MetricCard
@@ -281,7 +319,7 @@ export function ScenarioBuilder({ strategies }: Props) {
           negative={metrics.max_drawdown !== null && metrics.max_drawdown < 0}
         />
         <MetricCard
-          label="Avg |corr|"
+          label="Avg |ρ|"
           value={formatNumber(metrics.avg_pairwise_correlation)}
         />
       </div>
@@ -435,6 +473,8 @@ export function ScenarioBuilder({ strategies }: Props) {
         <CorrelationHeatmap
           correlationMatrix={metrics.correlation_matrix}
           strategyNames={strategyNames}
+          overlappingDays={metrics.n}
+          avgAbsCorrelation={metrics.avg_pairwise_correlation}
         />
       </Card>
     </div>
