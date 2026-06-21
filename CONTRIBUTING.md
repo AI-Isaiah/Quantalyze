@@ -91,3 +91,13 @@ so "is prod running main HEAD?" is not machine-checkable today.
   file instead of grepping every migration. The "SQL Function Snapshot — Drift
   Gate" CI check (`.github/workflows/sql-function-snapshot.yml`, which runs
   `npm run schema:functions:check`) fails if the committed snapshot is stale.
+- Python dependency lock: `analytics-service/requirements.txt` is a **generated
+  lock**, not hand-edited. Edit the source manifest
+  `analytics-service/requirements.in` and run `make lock` (in
+  `analytics-service/`) to regenerate the fully-pinned `requirements.txt`, then
+  commit both. `make lock` runs `uv pip compile --python-version 3.12
+  --universal` (CI/prod is 3.12; `--universal` keeps the lock installable on
+  both macOS dev and Linux CI/Railway), so you need `uv` on PATH. Dependabot
+  bumps land on `requirements.txt` directly — re-run `make lock` to restore the
+  canonical format before merging. Dev/test-only deps stay in
+  `requirements-dev.txt` (range-pinned, not shipped to prod).

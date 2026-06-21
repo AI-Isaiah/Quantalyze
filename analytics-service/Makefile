@@ -19,15 +19,23 @@ PY      = $(VENV)/bin/python
 MYPY    = $(VENV)/bin/mypy
 PYTEST  = $(VENV)/bin/pytest
 
-.PHONY: help install lint typecheck test ci
+.PHONY: help install lock lint typecheck test ci
 
 help:
 	@echo "Targets:"
 	@echo "  install   — pip install -r requirements.txt -r requirements-dev.txt (matches CI)"
+	@echo "  lock      — regenerate requirements.txt (the pinned lock) from requirements.in"
 	@echo "  lint      — mypy --strict on services/ingestion/ (MC-3 fix; the current CI gate)"
 	@echo "  typecheck — mypy on the full B-mypy floor surface (services/ routers/ models/)"
 	@echo "  test      — pytest with coverage (matches CI ci.yml)"
 	@echo "  ci        — full local CI gauntlet: lint + test"
+
+# tech-debt #7: requirements.txt is a generated lock; requirements.in is the
+# source. Always compile against 3.12 (CI/prod) and --universal so the lock
+# installs on both mac (dev) and linux (CI/Railway). Needs `uv` on PATH. After
+# editing requirements.in (e.g. a Dependabot bump), run this and commit the lock.
+lock:
+	uv pip compile requirements.in --python-version 3.12 --universal -o requirements.txt
 
 install:
 	# Single source of truth for dev/test deps: requirements-dev.txt carries the

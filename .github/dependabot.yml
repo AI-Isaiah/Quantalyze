@@ -21,10 +21,14 @@
 # earlier version of this comment incorrectly claimed Renovate covered
 # npm/python.)
 #
-# Scope note: pip coverage is manifest-level. analytics-service still has
-# no lock file and some runtime pins are ranges (e.g. ccxt>=4.0), so the
-# fully-resolved transitive graph that Railway builds is NOT gated here —
-# that reproducible-build hardening is tracked separately (tech-debt #7).
+# Scope note: pip coverage is now lock-level (tech-debt #7 closed).
+# analytics-service/requirements.in is the source manifest; requirements.txt
+# is the fully-pinned `uv pip compile --universal` lock that Dockerfile/CI
+# install — so the transitive graph Railway builds is reproducible and ccxt is
+# pinned exactly. Dependabot opens the bump PR against requirements.txt; a
+# human re-runs `make lock` (in analytics-service/) to restore the canonical
+# uv/universal format before merging. requirements-dev.txt (test-only, not
+# shipped to prod) is intentionally still range-pinned.
 
 version: 2
 
