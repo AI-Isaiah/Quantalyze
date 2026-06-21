@@ -37,6 +37,19 @@ import { scenarioDraftSchema } from "@/app/(dashboard)/allocations/lib/scenario-
 
 export const runtime = "nodejs";
 
+// FIX A (HIGH, DoS / storage-poison) — hard byte cap on the raw request body,
+// enforced BEFORE JSON.parse so an oversized payload is rejected (413) without
+// parsing unbounded input. 256 KB is generous vs a real draft (a fully-loaded
+// portfolio draft serialises to a few KB) yet tiny vs a DoS payload. This is
+// the route-layer twin of the schema-level `.max()` caps in
+// scenarioDraftSchema (defense-in-depth): the schema bounds entry counts, this
+// bounds total bytes before any work happens. We chose an inline guard over
+// routing through withAuthLimited/readJsonBounded because withAuthLimited
+// composes withAuth (NOT withAllocatorAuth) — adopting it would drop the
+// allocator-role gate, a security regression and a large refactor. The inline
+// guard preserves the existing withAllocatorAuth wrapper + B15 limiter ordering.
+export const MAX_DRAFT_BODY_BYTES = 256_000;
+
 // Reuse the canonical draft contract (scenario-state.ts) for the `draft`
 // field — do NOT author a second validator. `name` mirrors the SQL CHECK
 // `length(btrim(name)) between 1 and 120`.
@@ -59,6 +72,18 @@ export const POST = withAllocatorAuth(
       return NextResponse.json(
         { error: "Invalid request body" },
         { status: 400, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    // FIX A — reject an oversized body BEFORE JSON.parse (DoS / storage-poison).
+    // Measure UTF-8 bytes (Buffer.byteLength), not UTF-16 code units, so a
+    // multibyte payload is bounded accurately. No rate-limit token is consumed
+    // (the limiter fires AFTER validation, per B15 ordering) and nothing is
+    // written.
+    if (Buffer.byteLength(rawBody, "utf8") > MAX_DRAFT_BODY_BYTES) {
+      return NextResponse.json(
+        { error: "Request body too large" },
+        { status: 413, headers: NO_STORE_HEADERS },
       );
     }
 

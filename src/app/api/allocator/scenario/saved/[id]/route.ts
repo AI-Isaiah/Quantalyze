@@ -42,10 +42,16 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import { scenarioDraftSchema } from "@/app/(dashboard)/allocations/lib/scenario-state";
+import { MAX_DRAFT_BODY_BYTES } from "../route";
 
 export const runtime = "nodejs";
 
 type RouteCtx = { params: Promise<{ id: string }> };
+
+// FIX A (HIGH, DoS / storage-poison) — sentinel returned by readBody when the
+// raw body exceeds MAX_DRAFT_BODY_BYTES. Distinct from `undefined` (body read
+// failure → 400) and `null` (empty body) so PATCH/PUT can map it to 413.
+const BODY_TOO_LARGE = Symbol("body_too_large");
 
 // PostgREST "no rows returned" from a .single() on an update that matched 0
 // rows. Under RLS a non-owned (or non-existent) id is filtered out of the
@@ -79,12 +85,25 @@ async function readBody(req: NextRequest): Promise<unknown> {
   } catch {
     return undefined; // signals a 400 to the caller (distinct from null body)
   }
+  // FIX A — reject an oversized body BEFORE JSON.parse (DoS / storage-poison).
+  // UTF-8 bytes, not UTF-16 code units. The caller maps BODY_TOO_LARGE → 413
+  // before consuming a rate-limit token or writing anything.
+  if (Buffer.byteLength(rawBody, "utf8") > MAX_DRAFT_BODY_BYTES) {
+    return BODY_TOO_LARGE;
+  }
   if (rawBody === "") return null;
   try {
     return JSON.parse(rawBody);
   } catch {
     return null;
   }
+}
+
+function bodyTooLarge(): NextResponse {
+  return NextResponse.json(
+    { error: "Request body too large" },
+    { status: 413, headers: NO_STORE_HEADERS },
+  );
 }
 
 async function denyRateLimit(userId: string): Promise<NextResponse | null> {
@@ -113,6 +132,7 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<NextRespon
   return withAllocatorAuth(
     async (_req: NextRequest, user: AllocatorUser): Promise<NextResponse> => {
       const body = await readBody(req);
+      if (body === BODY_TOO_LARGE) return bodyTooLarge();
       if (body === undefined) {
         return NextResponse.json(
           { error: "Invalid request body" },
@@ -172,6 +192,7 @@ export async function PUT(req: NextRequest, ctx: RouteCtx): Promise<NextResponse
   return withAllocatorAuth(
     async (_req: NextRequest, user: AllocatorUser): Promise<NextResponse> => {
       const body = await readBody(req);
+      if (body === BODY_TOO_LARGE) return bodyTooLarge();
       if (body === undefined) {
         return NextResponse.json(
           { error: "Invalid request body" },

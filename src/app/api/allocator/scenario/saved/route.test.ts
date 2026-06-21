@@ -115,7 +115,8 @@ vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 // Imports after mocks
 // ---------------------------------------------------------------------------
 
-import { GET, POST } from "./route";
+import { GET, POST, MAX_DRAFT_BODY_BYTES } from "./route";
+import { scenarioDraftSchema } from "@/app/(dashboard)/allocations/lib/scenario-state";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -135,6 +136,16 @@ function mkPost(body: unknown) {
     method: "POST",
     headers: { "content-type": "application/json", origin: "http://localhost" },
     body: JSON.stringify(body),
+  });
+}
+
+// FIX A — POST with a raw (already-serialised) body string, so a test can
+// craft an oversized payload that the byte-cap must reject before parse.
+function mkPostRaw(rawBody: string) {
+  return new NextRequest(new URL("http://localhost/api/allocator/scenario/saved"), {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "http://localhost" },
+    body: rawBody,
   });
 }
 
@@ -245,6 +256,69 @@ describe("POST /api/allocator/scenario/saved", () => {
     insertResult = { data: null, error: { message: "boom" } };
     const err = await POST(mkPost({ name: "x", draft: VALID_DRAFT }));
     expect(err.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  // FIX A (HIGH, DoS / storage-poison) — an oversized raw body is rejected
+  // with 413 BEFORE JSON.parse, WITHOUT writing (no insert) and WITHOUT
+  // consuming a rate-limit token (the limiter fires after validation).
+  it("T_S13 — oversized body → 413, no insert, no token consumed", async () => {
+    // A raw string comfortably over the 256 KB cap. Doesn't even need to be
+    // valid JSON — the byte-cap runs before parse.
+    const oversized = "x".repeat(MAX_DRAFT_BODY_BYTES + 1);
+    const res = await POST(mkPostRaw(oversized));
+    expect(res.status).toBe(413);
+    expect(fromSpy).not.toHaveBeenCalled(); // nothing written
+    expect(checkLimitMock).not.toHaveBeenCalled(); // no token burned
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("T_S14 — a normal (under-cap) draft still saves", async () => {
+    const res = await POST(mkPost({ name: "Normal", draft: VALID_DRAFT }));
+    expect(res.status).toBe(200);
+    expect(fromSpy).toHaveBeenCalledWith("scenarios");
+  });
+});
+
+// ===========================================================================
+// FIX A — schema-level draft caps (defense-in-depth; bounds the persisted blob)
+// ===========================================================================
+//
+// The route's byte-cap (above) is the outer gate; scenarioDraftSchema's
+// per-field `.max()` / entry-count caps are the inner gate that bounds the
+// jsonb actually persisted. Pin BOTH ends: a realistic draft validates, an
+// over-cap synthetic draft is rejected by safeParse (so the route never
+// inserts it). Caps are far above any real portfolio, so this can only fail if
+// a future edit removes or shrinks them below a legitimate draft.
+
+describe("scenarioDraftSchema — FIX A entry-count / length caps", () => {
+  it("accepts a realistic draft (well under every cap)", () => {
+    expect(scenarioDraftSchema.safeParse(VALID_DRAFT).success).toBe(true);
+  });
+
+  it("rejects an over-cap toggleByScopeRef (synthetic mega-map)", () => {
+    const huge: Record<string, boolean> = {};
+    for (let i = 0; i < 2001; i++) huge[`holding:x:S${i}:spot`] = true;
+    const bad = { ...VALID_DRAFT, toggleByScopeRef: huge };
+    expect(scenarioDraftSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("rejects an over-cap addedStrategies array", () => {
+    const many = Array.from({ length: 201 }, (_v, i) => ({
+      id: `id-${i}`,
+      name: `S${i}`,
+      markets: [],
+      strategy_types: [],
+    }));
+    const bad = { ...VALID_DRAFT, addedStrategies: many };
+    expect(scenarioDraftSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("rejects an over-length init_holdings_fingerprint", () => {
+    const bad = {
+      ...VALID_DRAFT,
+      init_holdings_fingerprint: "x".repeat(200_001),
+    };
+    expect(scenarioDraftSchema.safeParse(bad).success).toBe(false);
   });
 });
 

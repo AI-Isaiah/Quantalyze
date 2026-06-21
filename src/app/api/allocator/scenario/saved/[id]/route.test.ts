@@ -11,7 +11,9 @@
  *   T_I6  PATCH success → 200; update fired
  *   T_I7  PUT success → 200; update touches updated_at + schema_version
  *   T_I8  DELETE success → 200
- *   T_I9  PATCH/PUT/DELETE of a NON-OWNED id (0 rows) → 404 (not 403)
+ *   T_I9  PATCH/PUT/DELETE on a PGRST116 / empty result → 404 (not 403)
+ *         (these prove the mock-injected 0-rows path returns 404, NOT tenant
+ *         isolation — the real cross-tenant proof is supabase/tests/test_scenarios_rls.sql)
  *   T_I10 DB error → redacted stable message (NOT raw error.message), 500
  *   T_I11 NO_STORE_HEADERS on every response (success + error)
  */
@@ -108,6 +110,7 @@ vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 // ---------------------------------------------------------------------------
 
 import { PATCH, PUT, DELETE } from "./route";
+import { MAX_DRAFT_BODY_BYTES } from "../route";
 
 const VALID_ID = "11111111-2222-4333-8444-555555555555";
 const PGRST_NO_ROWS = "PGRST116";
@@ -128,6 +131,19 @@ function mkReq(method: string, body?: unknown) {
       method,
       headers: { "content-type": "application/json", origin: "http://localhost" },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    },
+  );
+}
+
+// FIX A — request with a raw (already-serialised) body string so a test can
+// craft an oversized payload the byte-cap must reject before parse.
+function mkReqRaw(method: string, rawBody: string) {
+  return new NextRequest(
+    new URL(`http://localhost/api/allocator/scenario/saved/${VALID_ID}`),
+    {
+      method,
+      headers: { "content-type": "application/json", origin: "http://localhost" },
+      body: rawBody,
     },
   );
 }
@@ -201,7 +217,12 @@ describe("PATCH (rename)", () => {
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
-  it("T_I9 — non-owned id (0 rows / PGRST116) → 404, not 403", async () => {
+  // NOTE: the 0-rows result is MOCK-INJECTED (updateResult.error = PGRST116),
+  // so this proves "PGRST116 / empty result → 404 (RLS-filtered row not
+  // visible)" — it does NOT exercise real RLS and would stay green even if the
+  // scenarios_owner policy were dropped. The actual cross-tenant isolation
+  // proof lives in supabase/tests/test_scenarios_rls.sql.
+  it("T_I9 — PGRST116 / empty result → 404 (RLS-filtered row not visible), not 403", async () => {
     updateResult = { data: null, error: { code: PGRST_NO_ROWS, message: "no rows" } };
     const res = await PATCH(mkReq("PATCH", { name: "x" }), ctx(VALID_ID));
     expect(res.status).toBe(404);
@@ -243,7 +264,9 @@ describe("PUT (update draft)", () => {
     expect(lastEqFilter).toEqual(["id", VALID_ID]);
   });
 
-  it("T_I9b — PUT of a non-owned id → 404", async () => {
+  // Mock-injected PGRST116 → 404; not a real RLS exercise. Cross-tenant proof:
+  // supabase/tests/test_scenarios_rls.sql.
+  it("T_I9b — PUT on a PGRST116 / empty result → 404 (RLS-filtered row not visible)", async () => {
     updateResult = { data: null, error: { code: PGRST_NO_ROWS, message: "no rows" } };
     const res = await PUT(mkReq("PUT", { name: "x", draft: VALID_DRAFT }), ctx(VALID_ID));
     expect(res.status).toBe(404);
@@ -261,6 +284,24 @@ describe("PUT (update draft)", () => {
     expect(json.message).toContain("Couldn't update this scenario");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
+
+  // FIX A (HIGH, DoS / storage-poison) — an oversized raw body is rejected
+  // with 413 BEFORE JSON.parse, WITHOUT writing (no update) and WITHOUT
+  // consuming a rate-limit token.
+  it("T_I12 — PUT oversized body → 413, no update, no token consumed", async () => {
+    const oversized = "x".repeat(MAX_DRAFT_BODY_BYTES + 1);
+    const res = await PUT(mkReqRaw("PUT", oversized), ctx(VALID_ID));
+    expect(res.status).toBe(413);
+    expect(fromSpy).not.toHaveBeenCalled(); // nothing written
+    expect(checkLimitMock).not.toHaveBeenCalled(); // no token burned
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("T_I13 — a normal (under-cap) PUT still updates", async () => {
+    const res = await PUT(mkReq("PUT", { name: "Updated", draft: VALID_DRAFT }), ctx(VALID_ID));
+    expect(res.status).toBe(200);
+    expect(fromSpy).toHaveBeenCalledWith("scenarios");
+  });
 });
 
 // ===========================================================================
@@ -277,7 +318,9 @@ describe("DELETE", () => {
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
-  it("T_I9c — DELETE of a non-owned id (0 rows returned) → 404, not 403", async () => {
+  // Mock-injected empty result (deleteResult.data = []) → 404; not a real RLS
+  // exercise. Cross-tenant proof: supabase/tests/test_scenarios_rls.sql.
+  it("T_I9c — DELETE on an empty result (0 rows returned) → 404 (RLS-filtered row not visible), not 403", async () => {
     deleteResult = { data: [], error: null };
     const res = await DELETE(mkReq("DELETE"), ctx(VALID_ID));
     expect(res.status).toBe(404);

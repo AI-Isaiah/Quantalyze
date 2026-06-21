@@ -492,18 +492,51 @@ const addedStrategySchema = z.object({
   strategy_types: z.array(z.string()),
 });
 
+/**
+ * Red-team FIX A (HIGH, DoS / storage-poison) — bound the entry count of every
+ * unbounded `z.record(...)` in the draft. The save/update routes persist this
+ * blob verbatim into `scenarios.draft` (jsonb); an UNCAPPED record let a
+ * hostile client write an arbitrarily large map (millions of synthetic keys)
+ * and poison the row / inflate storage. `MAX_DRAFT_RECORD_ENTRIES` is set far
+ * beyond any realistic portfolio (a real allocator has <~100 holdings + a
+ * handful of added strategies; 2000 is ~20× the largest plausible book) so a
+ * LEGITIMATE draft is never rejected, while a synthetic mega-map is. Applied as
+ * a `.refine()` on each record because zod has no native key-count cap.
+ *
+ * This mirrors the commit route's `.max()` DoS caps
+ * (`init_holdings_fingerprint: z.string().max(200_000)`,
+ * `diffs: z.array(...).max(50)`) — see commit/route.ts.
+ */
+const MAX_DRAFT_RECORD_ENTRIES = 2000;
+const MAX_DRAFT_KEY_LENGTH = 512;
+
+const boundedRecord = <V extends z.ZodTypeAny>(value: V, label: string) =>
+  z
+    .record(z.string().max(MAX_DRAFT_KEY_LENGTH), value)
+    .refine((o) => Object.keys(o).length <= MAX_DRAFT_RECORD_ENTRIES, {
+      message: `${label}: too many entries (max ${MAX_DRAFT_RECORD_ENTRIES})`,
+    });
+
 /** Whole-shape validation for a persisted ScenarioDraft. `schema_version` is
  *  validated as a number here; the version *trichotomy* (higher → read-only,
  *  equal → adopt, lower/missing → reset) is applied by the codec below, not by
- *  the schema. `userWeightOverrides` is optional so pre-B7 blobs validate. */
+ *  the schema. `userWeightOverrides` is optional so pre-B7 blobs validate.
+ *
+ *  FIX A — every variable-length field carries a GENEROUS upper bound so the
+ *  persisted blob cannot be inflated without limit (DoS / storage-poison). The
+ *  caps sit comfortably above any realistic portfolio so a legitimate draft
+ *  validates unchanged; they only reject a synthetic mega-payload. */
 export const scenarioDraftSchema = z.object({
   schema_version: z.number(),
-  init_holdings_fingerprint: z.string(),
-  toggleByScopeRef: z.record(z.string(), z.boolean()),
-  addedStrategies: z.array(addedStrategySchema),
-  weightOverrides: z.record(z.string(), z.number()),
-  userWeightOverrides: z.record(z.string(), z.number()).optional(),
-  lastEditedAt: z.string(),
+  // Mirror the commit route's `init_holdings_fingerprint: z.string().max(200_000)`.
+  init_holdings_fingerprint: z.string().max(200_000),
+  toggleByScopeRef: boundedRecord(z.boolean(), "toggleByScopeRef"),
+  // A real draft adds a handful of strategies; 200 is far beyond any UI flow.
+  addedStrategies: z.array(addedStrategySchema).max(200),
+  weightOverrides: boundedRecord(z.number(), "weightOverrides"),
+  userWeightOverrides: boundedRecord(z.number(), "userWeightOverrides").optional(),
+  // ISO-8601 timestamp (`new Date().toISOString()` is 24 chars); 64 is generous.
+  lastEditedAt: z.string().max(64),
 });
 
 /**
