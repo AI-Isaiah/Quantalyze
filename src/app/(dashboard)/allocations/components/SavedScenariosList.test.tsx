@@ -322,4 +322,49 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     // The second row has NOT entered a confirm state.
     expect(screen.queryByText('Delete "Aggressive tilt"?')).toBeNull();
   });
+
+  // -------------------------------------------------------------------------
+  // T_SL12 — A hard list-load failure (listLoadError + empty rows) renders an
+  //          honest ERROR state, NOT the "No saved scenarios yet" empty card.
+  //          An unloaded list must never masquerade as an empty list (#509).
+  // -------------------------------------------------------------------------
+  it("T_SL12 listLoadError with empty rows shows an honest error alert, NOT the empty card", () => {
+    render(
+      <SavedScenariosList
+        rows={[]}
+        listLoadError
+        onOpen={vi.fn()}
+        onCompare={vi.fn()}
+      />,
+    );
+    // Distinct error copy via the canonical role="alert" path.
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(
+      "Couldn't load your saved scenarios. Try again.",
+    );
+    // The fabricated "no scenarios" empty state must NOT appear.
+    expect(screen.queryByText("No saved scenarios yet")).toBeNull();
+    expect(
+      screen.queryByText(/Compose a draft above, then choose/i),
+    ).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // T_SL13 — listLoadError is IGNORED when prior rows are cached: a transient
+  //          refetch failure must not blow away an already-loaded list.
+  // -------------------------------------------------------------------------
+  it("T_SL13 listLoadError with cached rows keeps the rows rendered (no error state)", () => {
+    render(
+      <SavedScenariosList
+        rows={ROWS}
+        listLoadError
+        onOpen={vi.fn()}
+        onCompare={vi.fn()}
+      />,
+    );
+    // The cached rows still render; no error alert displaces them.
+    expect(screen.getByText("Conservative blend")).toBeInTheDocument();
+    expect(screen.getByText("Aggressive tilt")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
 });

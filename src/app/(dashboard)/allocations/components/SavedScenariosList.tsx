@@ -53,6 +53,15 @@ export interface CompareSelection {
 
 interface SavedScenariosListProps {
   rows: SavedScenarioListRow[];
+  /**
+   * True when the list GET failed (non-2xx or threw) AND no prior rows are
+   * cached. When set with an empty `rows`, the list renders an honest ERROR
+   * state ("Couldn't load…") instead of the "No saved scenarios yet" empty card
+   * — an unloaded list must never masquerade as an empty list (a fabricated
+   * fact, the #509 lesson). If `rows` is non-empty (a prior load succeeded),
+   * the cached rows stay rendered and this flag is ignored.
+   */
+  listLoadError?: boolean;
   /** Delegates a row to the composer's codec-trichotomy Open handler (Plan 04). */
   onOpen: (row: SavedScenarioOpenRow) => void;
   /** Raises the >= 2 compare selection to the parent (mounts the compare panel). */
@@ -92,6 +101,7 @@ function validateName(raw: string): { name: string | null; error: string | null 
 
 export function SavedScenariosList({
   rows,
+  listLoadError = false,
   onOpen,
   onCompare,
   onMutated,
@@ -218,7 +228,18 @@ export function SavedScenariosList({
         Saved scenarios
       </h2>
 
-      {localRows.length === 0 ? (
+      {listLoadError && localRows.length === 0 ? (
+        // Hard load failure with nothing cached → honest ERROR state (canonical
+        // error path, role="alert"), NOT the "No saved scenarios yet" empty card
+        // (which would fabricate "you have no scenarios" from a transport
+        // failure — the #509 heading/body honesty lesson).
+        <div
+          role="alert"
+          className="rounded-md border border-negative/40 bg-surface px-4 py-3 text-sm text-negative"
+        >
+          Couldn&apos;t load your saved scenarios. Try again.
+        </div>
+      ) : localRows.length === 0 ? (
         <EmptyStateCard
           heading="No saved scenarios yet"
           body={

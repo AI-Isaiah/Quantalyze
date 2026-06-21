@@ -759,6 +759,11 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
 // component's hooks never run on the rollback path.
 function ScenarioTabContent(props: MyAllocationDashboardPayload) {
   const [savedRows, setSavedRows] = useState<SavedScenarioListRow[]>([]);
+  // A hard list-load failure (non-2xx or thrown fetch). Distinct from "no saved
+  // scenarios" — an unloaded list must NOT masquerade as an empty list (a
+  // fabricated fact). Cleared on the next successful load. Drives the list's
+  // honest error state.
+  const [listLoadError, setListLoadError] = useState(false);
   const [compareSelection, setCompareSelection] =
     useState<CompareSelection | null>(null);
   // The composer hands us its imperative Open handler via onRegisterOpen; we
@@ -773,12 +778,26 @@ function ScenarioTabContent(props: MyAllocationDashboardPayload) {
       const res = await fetch("/api/allocator/scenario/saved", {
         method: "GET",
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        // A non-2xx (incl. the route's redacted 500) is a HARD failure. Surface
+        // it: an unloaded list rendered as "No saved scenarios yet" would be a
+        // fabricated fact. Leave the prior rows in place; flag the error.
+        warnAudit("scenario_list_load_failed", { status: res.status });
+        setListLoadError(true);
+        return;
+      }
       const rows = (await res.json()) as SavedScenarioListRow[];
-      if (Array.isArray(rows)) setSavedRows(rows);
-    } catch {
-      // A transient list-load failure leaves the prior list in place; the
-      // composer + compare surfaces stay usable. No fabricated rows.
+      if (Array.isArray(rows)) {
+        setSavedRows(rows);
+        setListLoadError(false);
+      }
+    } catch (err) {
+      // A thrown fetch (network / parse) is the same class of hard failure —
+      // do NOT swallow it into a silent empty list. The composer + compare
+      // surfaces stay usable; the list shows an honest error state. No
+      // fabricated rows.
+      warnAudit("scenario_list_load_failed", { status: "throw", error: String(err) });
+      setListLoadError(true);
     }
   }, []);
 
@@ -830,6 +849,7 @@ function ScenarioTabContent(props: MyAllocationDashboardPayload) {
 
       <SavedScenariosList
         rows={savedRows}
+        listLoadError={listLoadError}
         onOpen={handleOpen}
         onCompare={handleCompare}
         onMutated={handleMutated}
