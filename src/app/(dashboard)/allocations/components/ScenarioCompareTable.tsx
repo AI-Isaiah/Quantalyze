@@ -32,6 +32,16 @@ import {
 export interface ScenarioColumn {
   name: string;
   metrics: ComputedMetrics;
+  /**
+   * True when this column's saved draft was UNDECODABLE (codec "reset" — an
+   * older/incompatible format), as opposed to a decodable-but-degenerate draft.
+   * Both flow through as NULL metrics with n=0, but the footer stamp must
+   * DISTINGUISH them: an undecodable column renders the "older format" stamp
+   * (the column can't be compared because of its format), NOT the sample-floor
+   * "shares 0 overlapping days — fewer than the 60 needed" copy (which conflates
+   * "older format" with "insufficient history" — the #509 heading/body class).
+   */
+  undecodable?: boolean;
 }
 
 interface MetricRow {
@@ -77,6 +87,14 @@ function getValue(metrics: ComputedMetrics, key: keyof ComputedMetrics): number 
   const val = metrics[key];
   return typeof val === "number" && Number.isFinite(val) ? val : null;
 }
+
+/**
+ * Footer stamp for an undecodable (codec "reset", older-format) column. DISTINCT
+ * from the sample-floor copy: this column can't be compared because of its saved
+ * FORMAT, not because of a short overlap window — naming "0 overlapping days"
+ * here would be the #509 heading/body conflation.
+ */
+const OLDER_FORMAT_STAMP = "Saved in an older format — can't be compared";
 
 /** Mirrors CompareTable.formatValue: null → "—" (em-dash honesty). */
 function formatValue(value: number | null, format: MetricRow["format"]): string {
@@ -208,7 +226,14 @@ export function ScenarioCompareTable({
                     data-testid={`stamp-${c.name}`}
                     className="text-right px-4 py-2 align-top"
                   >
-                    {verdict.ok ? (
+                    {c.undecodable ? (
+                      // Undecodable (older format) takes precedence over the
+                      // sample-floor verdict: this column can't be compared
+                      // because of its FORMAT, not a short overlap window.
+                      <span className="block text-xs text-text-muted">
+                        {OLDER_FORMAT_STAMP}
+                      </span>
+                    ) : verdict.ok ? (
                       <span className="text-xs font-metric text-text-muted">
                         {methodologyLine(c.metrics.n)}
                       </span>

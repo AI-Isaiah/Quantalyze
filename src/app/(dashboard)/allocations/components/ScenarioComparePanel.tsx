@@ -201,7 +201,12 @@ export function ScenarioComparePanel({
     () =>
       selectedRows.map((row) => {
         const draft = decodeDraft(row.draft, defaultDraft);
-        if (draft === null) return { name: row.name, metrics: NULL_METRICS };
+        // A reset (older/incompatible format) draft can't be compared — mark
+        // the column `undecodable` so the table renders the "older format"
+        // footer stamp, NOT the sample-floor "0 overlapping days" copy (which
+        // would conflate older-format with insufficient-history, the #509 class).
+        if (draft === null)
+          return { name: row.name, metrics: NULL_METRICS, undecodable: true };
         try {
           return { name: row.name, metrics: computeMetricsForDraft(draft, liveInputs) };
         } catch (err) {

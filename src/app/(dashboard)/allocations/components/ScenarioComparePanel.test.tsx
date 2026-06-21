@@ -270,6 +270,11 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
     const cell = screen.getByTestId("cell-Old format-sharpe");
     expect(cell).toHaveTextContent("—");
     expect(cell.textContent).not.toBe("0");
+    // FIX 6: the reset column's footer carries the DISTINCT older-format stamp,
+    // not the sample-floor "0 overlapping days" copy.
+    const stamp = screen.getByTestId("stamp-Old format");
+    expect(stamp).toHaveTextContent("Saved in an older format — can't be compared");
+    expect(stamp.textContent).not.toMatch(/overlapping days/);
   });
 
   // -------------------------------------------------------------------------

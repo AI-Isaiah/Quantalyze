@@ -215,6 +215,45 @@ describe("ScenarioCompareTable", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders the older-format stamp for an undecodable column, NOT the overlap-days floor copy", () => {
+    // An undecodable (codec 'reset') column carries n=0 NULL metrics AND the
+    // undecodable flag → its footer must say "older format", not "shares 0
+    // overlapping days — fewer than the 60 needed" (the #509 conflation).
+    render(
+      <ScenarioCompareTable
+        columns={[
+          col("Healthy", healthy(120)),
+          { ...col("Older", degenerate(0)), undecodable: true },
+        ]}
+        liveBook={null}
+      />,
+    );
+
+    const olderStamp = screen.getByTestId("stamp-Older");
+    expect(
+      within(olderStamp).getByText(/Saved in an older format — can't be compared/),
+    ).toBeInTheDocument();
+    // The sample-floor "overlapping days" copy must NOT appear for this column.
+    expect(olderStamp.textContent).not.toMatch(/overlapping days/);
+    expect(olderStamp.textContent).not.toMatch(/Not enough history for this estimate/);
+  });
+
+  it("a decodable-but-degenerate n=0 column STILL shows the sample-floor copy (not older-format)", () => {
+    // A genuinely degenerate column (n=0 but DECODABLE — no undecodable flag)
+    // must keep the floor copy; only the reset-decode case changes (FIX 6).
+    render(
+      <ScenarioCompareTable
+        columns={[col("Healthy", healthy(120)), col("Degenerate", degenerate(0))]}
+        liveBook={null}
+      />,
+    );
+
+    const degenStamp = screen.getByTestId("stamp-Degenerate");
+    // n=0 < floor(60) → the below-floor body names the actual overlap (0 days).
+    expect(within(degenStamp).getByText(/overlapping days/)).toBeInTheDocument();
+    expect(degenStamp.textContent).not.toMatch(/Saved in an older format/);
+  });
+
   it("treats a NaN/non-finite metric as honest absence ('—'), never the winner", () => {
     // A NaN twr must read as "—" at the SOURCE (getValue), so it cannot be
     // crowned the Cumulative Return winner. Three columns: one NaN + two finite,
