@@ -91,6 +91,22 @@ so "is prod running main HEAD?" is not machine-checkable today.
   file instead of grepping every migration. The "SQL Function Snapshot — Drift
   Gate" CI check (`.github/workflows/sql-function-snapshot.yml`, which runs
   `npm run schema:functions:check`) fails if the committed snapshot is stale.
+- Generated DB types: `src/lib/database.types.ts` is produced by `npx supabase
+  gen types typescript --linked` against the live remote schema. After a
+  migration that changes a table/column/enum, regenerate and commit it — then
+  **re-apply the two hand-written sections a fresh regen wipes**: the
+  GENERATED-FILE/NUMERIC-precision header preamble and the `for_quants_leads`
+  HAND-PATCHED block (its comment explains why — a regen linked to a project
+  missing migration 115 silently reverts the `notify_*` columns). The `[#14]`
+  block in `critical-regressions.test.ts` fails CI if either section is lost, so
+  you'll be told if a regen stripped them. (There is no auto-diff against the
+  live schema — that needs prod creds + a normalizer; see
+  `docs/deferred-findings.md` #14.)
+- Env manifest: `.env.example` is the **enforced** manifest. Every literal
+  `process.env.<KEY>` read in `src/` must be documented there (with its owning
+  plane), or allowlisted in `src/__tests__/contracts/env-manifest.test.ts` as a
+  platform/test/indirect key; and every active key there must be read in `src/`
+  (no dead entries). Add a key in the same PR that introduces its read.
 - Python dependency lock: `analytics-service/requirements.txt` is a **generated
   lock**, not hand-edited. Edit the source manifest
   `analytics-service/requirements.in` and run `make lock` (in
