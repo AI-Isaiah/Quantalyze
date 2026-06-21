@@ -58,9 +58,14 @@ describe("PERSIST-01 — database.types scenarios hand-patch", () => {
 
   it("scenarios.Update makes every column optional", () => {
     type Update = Database["public"]["Tables"]["scenarios"]["Update"];
-    expectTypeOf<NonNullable<Update["name"]>>().toEqualTypeOf<string>();
-    expectTypeOf<NonNullable<Update["draft"]>>().toEqualTypeOf<Json>();
-    expectTypeOf<NonNullable<Update["schema_version"]>>().toEqualTypeOf<number>();
-    expectTypeOf<NonNullable<Update["updated_at"]>>().toEqualTypeOf<string>();
+    // Strip only `undefined` (the optionality), not `null` — `Json` itself is
+    // nullable, so `NonNullable` would over-strip and break the draft pin.
+    type Defined<T> = Exclude<T, undefined>;
+    expectTypeOf<Defined<Update["name"]>>().toEqualTypeOf<string>();
+    expectTypeOf<Defined<Update["draft"]>>().toEqualTypeOf<Json>();
+    expectTypeOf<Defined<Update["schema_version"]>>().toEqualTypeOf<number>();
+    expectTypeOf<Defined<Update["updated_at"]>>().toEqualTypeOf<string>();
+    // Optionality itself: undefined is an allowed value for each field.
+    expectTypeOf<undefined>().toMatchTypeOf<Update["name"]>();
   });
 });

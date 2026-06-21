@@ -1095,6 +1095,59 @@ export type Database = {
           },
         ]
       }
+      // HAND-PATCHED — scenarios added by migration 20260621120000
+      // (Phase 23 / PERSIST-01). This block CANNOT be produced by
+      // `supabase gen types typescript` without prod DB access, and a regen
+      // linked to a project missing this migration silently reverts the block
+      // and breaks tsc on the scenario save/update/list routes. Re-apply this
+      // block after any regeneration, and verify migration 20260621120000 is
+      // present in the linked project. (Mirror of the for_quants_leads
+      // tripwire above; pinned by src/lib/database.types.test.ts.)
+      scenarios: {
+        Row: {
+          allocator_id: string
+          created_at: string
+          draft: Json
+          id: string
+          name: string
+          schema_version: number
+          updated_at: string
+        }
+        Insert: {
+          allocator_id: string
+          created_at?: string
+          draft: Json
+          id?: string
+          name: string
+          schema_version: number
+          updated_at?: string
+        }
+        Update: {
+          allocator_id?: string
+          created_at?: string
+          draft?: Json
+          id?: string
+          name?: string
+          schema_version?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "scenarios_allocator_id_fkey"
+            columns: ["allocator_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "scenarios_allocator_id_fkey"
+            columns: ["allocator_id"]
+            isOneToOne: false
+            referencedRelation: "public_profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       feature_flags: {
         // Phase 19 / BACKBONE-05 (migration 104). Kill-switch row written by
         // /api/cron/flag-monitor on auto-rollback. CHECK (value IN ('on','off')).
