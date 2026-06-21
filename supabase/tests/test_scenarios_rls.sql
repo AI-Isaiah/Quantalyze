@@ -54,6 +54,8 @@ DECLARE
   visible_cnt INTEGER;
   affected    INTEGER;
   b_name      TEXT;
+  raised      BOOLEAN;
+  err_state   TEXT;
 BEGIN
   -- ----- SEED (service role / superuser context — bypasses RLS) ----------
 
@@ -62,9 +64,14 @@ BEGIN
   VALUES (uid_a, '00000000-0000-0000-0000-000000000000',
           'test-scen-rls-tenant-a@quantalyze.test', now(), now());
 
+  -- The on_auth_user_created trigger pre-creates the profile row (without a
+  -- role) the instant the auth.users INSERT above commits its row trigger, so
+  -- ON CONFLICT DO NOTHING would leave role NULL and never land 'allocator'.
+  -- DO UPDATE the role + display_name (mirrors test_api_key_delete_atomicity).
   INSERT INTO profiles (id, display_name, email, role)
   VALUES (uid_a, 'scen-rls tenant a', 'test-scen-rls-tenant-a@quantalyze.test', 'allocator')
-  ON CONFLICT (id) DO NOTHING;
+  ON CONFLICT (id) DO UPDATE
+    SET role = EXCLUDED.role, display_name = EXCLUDED.display_name;
 
   INSERT INTO scenarios (allocator_id, name, draft, schema_version)
   VALUES (uid_a, 'tenant a scenario', '{"k":"a"}'::jsonb, 1)
@@ -77,7 +84,8 @@ BEGIN
 
   INSERT INTO profiles (id, display_name, email, role)
   VALUES (uid_b, 'scen-rls tenant b', 'test-scen-rls-tenant-b@quantalyze.test', 'allocator')
-  ON CONFLICT (id) DO NOTHING;
+  ON CONFLICT (id) DO UPDATE
+    SET role = EXCLUDED.role, display_name = EXCLUDED.display_name;
 
   INSERT INTO scenarios (allocator_id, name, draft, schema_version)
   VALUES (uid_b, 'tenant b scenario', '{"k":"b"}'::jsonb, 1)
@@ -202,6 +210,41 @@ BEGIN
       'TEST FAILED (Assertion 4): tenant B row vanished during tenant A own-row writes';
   END IF;
   RAISE NOTICE 'Assertion 4 OK: tenant A can update + delete its OWN row; tenant B row untouched.';
+
+  -- ----- ASSERTION 5: anon (no forged jwt) cannot read scenarios --------
+  -- Defense-in-depth: migration 20260621120000 REVOKEs ALL on scenarios from
+  -- anon, so a SELECT as the anon role lacks the table-level grant entirely —
+  -- it raises permission_denied (ERRCODE 42501) BEFORE RLS row-filtering even
+  -- applies. (With NO forged request.jwt.claims, auth.uid() is also NULL, so the
+  -- scenarios_owner predicate would deny every row even if the grant survived —
+  -- but the REVOKE makes the grant layer the binding constraint here.) Pin the
+  -- exception so a future re-GRANT to anon (which would re-expose the rows to
+  -- the RLS-only gate) fails this test loudly. Note tenant B's row still exists
+  -- here (A only deleted its own in Assertion 4), so a missing REVOKE would let
+  -- anon SELECT a real row — exactly the leak this guards.
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  SET LOCAL ROLE anon;
+
+  raised := FALSE;
+  BEGIN
+    -- A bare existence check is enough to trip the table-level grant gate.
+    PERFORM 1 FROM scenarios WHERE id = scen_b_id;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    err_state := SQLSTATE;
+  END;
+
+  RESET ROLE;
+
+  IF NOT raised THEN
+    RAISE EXCEPTION
+      'TEST FAILED (Assertion 5): anon SELECT on scenarios SUCCEEDED — the REVOKE ALL FROM anon (migration 20260621120000) was not applied or was re-granted. anon must be blocked at the grant layer.';
+  END IF;
+  IF err_state <> '42501' THEN
+    RAISE EXCEPTION
+      'TEST FAILED (Assertion 5): anon SELECT raised %, expected 42501 (insufficient_privilege from the table-level REVOKE)', err_state;
+  END IF;
+  RAISE NOTICE 'Assertion 5 OK: anon SELECT on scenarios rejected with ERRCODE 42501 (REVOKE ALL FROM anon enforced).';
 
   -- ----- TEARDOWN -------------------------------------------------------
   -- ON DELETE CASCADE chains auth.users -> profiles -> scenarios. One delete
