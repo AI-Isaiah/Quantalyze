@@ -118,7 +118,7 @@ The Python analytics service computes strategy metrics from exchange trade data.
 cd analytics-service
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt   # generated lock — to change deps, edit requirements.in and run `make lock`
 
 # Set environment variables (see .env.example for full list)
 export SERVICE_KEY=your-key
