@@ -160,3 +160,37 @@ a local stack) and carries docker flake + per-change-regenerate-via-docker cost.
 Until then, the **B5b near-miss class (a reverted COLUMN, `pre_terminus_balance_unknown`)
 is NOT gated** — only function bodies are. Revisit when the docker-in-CI cost is
 justified (or fold into #18's test-project work, which already needs a live DB).
+
+### #14 live-schema half · types-drift detection deferred (regen automation + hand-patch guard shipped)
+
+The generated-DB-types finding (#14, P24) was landed for the parts with a sound,
+credential-free fix:
+- The **stale orphan twin** `supabase/types.generated.ts` is gone (deleted in
+  B4 / #13, PR #497) — the dangerous "agent opens the stale file as the schema"
+  landmine is closed.
+- The **regen procedure** is documented (CONTRIBUTING "Workflow") and the
+  hand-written sections a regen wipes are guarded: the `[#14]` block in
+  `critical-regressions.test.ts` fails CI if the GENERATED-FILE header preamble,
+  the `for_quants_leads` HAND-PATCHED migration-115 tripwire comment, or the
+  `notify_*` columns are lost. The realized regression class (a regen silently
+  reverting columns) also breaks `tsc` at the call site, so it is double-covered.
+
+**Deferred: automated live-schema drift detection** (the audit's proposed
+"regenerate at PR time and diff" remediation, which it flagged ADJUSTED/unsound).
+Two reasons it is not a clean win:
+1. **Unsound against the test project.** Migrations auto-apply to PROD on merge,
+   but the TEST project lags (manual catch-up) — so a PR-time regen-and-diff
+   against test false-positives on every not-yet-applied migration (this is
+   finding #18). It would have to run against PROD, needing prod creds in the
+   gate.
+2. **A naive diff false-positives nightly.** `supabase gen types` output has
+   neither our hand-written header preamble nor the HAND-PATCHED comment block, so
+   a bare `git diff` reports drift every run regardless of actual schema change. A
+   sound probe needs a comment/header-agnostic structural normalizer (parse both
+   sides to `(table, column, type)` triples).
+
+Revisit if type/schema drift recurs despite the guard + tsc coverage; the sound
+shape is a **scheduled** (not PR-blocking) probe that regenerates against prod,
+structurally normalizes, and files a dedup'd issue on real drift (mirroring
+`analytics-deploy-verify.yml`), explicitly exiting 0 so it never red-checks HEAD
+(the #9b deploy-monitor self-block lesson).
