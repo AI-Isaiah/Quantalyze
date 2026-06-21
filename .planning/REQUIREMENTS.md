@@ -28,7 +28,7 @@ Requirements for the v1.1.0 milestone. Each maps to a roadmap phase.
 ### Methodology honesty (cross-cutting; research-driven differentiator)
 
 - [x] **HONEST-01**: Every projected stat surfaces its method + overlapping-N + horizon (e.g. "Historical bootstrap · 412 overlapping days · not a forecast")
-- [ ] **HONEST-02**: A shared minimum-sample gate (tunable floor, conservative default for distributional/tail outputs) renders an honest empty state below the floor — reused by Stress and Monte-Carlo
+- [x] **HONEST-02**: A shared minimum-sample gate (tunable floor, conservative default for distributional/tail outputs) renders an honest empty state below the floor — reused by Stress and Monte-Carlo
 
 ### Persistence & comparison (new #1, #6)
 
@@ -101,7 +101,7 @@ v1.0.0's Phase 20 (no reset) — this milestone is Phases 21–28.
 | IMPACT-01 | Phase 21 | Complete |
 | IMPACT-02 | Phase 21 | Complete |
 | HONEST-01 | Phase 22 | Complete |
-| HONEST-02 | Phase 22 | Pending |
+| HONEST-02 | Phase 22 | Complete |
 | PERSIST-01 | Phase 23 | Pending |
 | PERSIST-02 | Phase 23 | Pending |
 | PERSIST-03 | Phase 23 | Pending |

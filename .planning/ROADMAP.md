@@ -30,7 +30,7 @@ Railway deploy.
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 21: Surfacing, Correlation & Honest Projection** - Make scenarios reachable, show the correlation heatmap, and lock the "PROJECTED — hypothetical" framing (already-designed, client-only foundation) (completed 2026-06-21)
-- [ ] **Phase 22: Methodology-Honesty Scaffolding** - Per-stat method/overlap-N/horizon disclosure + a shared minimum-sample gate the heavy quant phases reuse
+- [x] **Phase 22: Methodology-Honesty Scaffolding** - Per-stat method/overlap-N/horizon disclosure + a shared minimum-sample gate the heavy quant phases reuse (completed 2026-06-21)
 - [ ] **Phase 23: Scenario Persistence & Compare** - Save / reopen / list / rename / delete named scenarios (DB + RLS + `schema_version`) and compare 2+ side-by-side (the spine)
 - [ ] **Phase 24: Benchmark Comparison** - Overlay a benchmark on the scenario projection with tracking error / information ratio / alpha-beta over the aligned window
 - [ ] **Phase 25: Read-Only Sharing** - Generate / revoke a read-only share link that renders a saved scenario without leaking the live book or any other tenant's data
@@ -68,7 +68,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 2 plans
 Plans:
 - [x] 22-01-PLAN.md — HONEST-01: fold the methodology line ("Historical realized · {N} overlapping days · not a forecast") into both the composer + sandbox coverage caveats
-- [ ] 22-02-PLAN.md — HONEST-02: build the shared sample-floor primitive (SAMPLE_FLOOR_OVERLAPPING_DAYS=60 + gate), the below-floor honest empty state, and the single-source regression pin
+- [x] 22-02-PLAN.md — HONEST-02: build the shared sample-floor primitive (SAMPLE_FLOOR_OVERLAPPING_DAYS=60 + gate), the below-floor honest empty state, and the single-source regression pin
 **UI hint**: yes
 
 ### Phase 23: Scenario Persistence & Compare
@@ -146,7 +146,7 @@ Phases execute in numeric order: 21 → 22 → 23 → 24 → 25 → 26 → 27 �
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 21. Surfacing, Correlation & Honest Projection | 4/4 | Complete    | 2026-06-21 |
-| 22. Methodology-Honesty Scaffolding | 1/2 | In Progress|  |
+| 22. Methodology-Honesty Scaffolding | 2/2 | Complete   | 2026-06-21 |
 | 23. Scenario Persistence & Compare | 0/TBD | Not started | - |
 | 24. Benchmark Comparison | 0/TBD | Not started | - |
 | 25. Read-Only Sharing | 0/TBD | Not started | - |

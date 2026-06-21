@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.1.0
 milestone_name: Scenario Analysis
-status: executing
+status: verifying
 stopped_at: Completed 22-01-PLAN.md
-last_updated: "2026-06-21T16:35:44.720Z"
+last_updated: "2026-06-21T16:45:11.220Z"
 last_activity: 2026-06-21
 progress:
   total_phases: 8
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 6
-  completed_plans: 5
-  percent: 13
+  completed_plans: 6
+  percent: 25
 ---
 
 # Project State
@@ -28,10 +28,10 @@ See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 
 Phase: 22 (Methodology-Honesty Scaffolding) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-06-21
 
-Progress: [████████░░] 83%
+Progress: [██████████] 100%
 
 ## Milestone Roadmap (v1.1.0 Scenario Analysis)
 
@@ -215,6 +215,8 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - [Phase ?]: Phase 21-04: IMPACT-02 Sandbox neuter guard keys on the render-only data-testid percentile-rank-badge (added in 21-03) + isolated positive control; mutation-verified falsifiable (wiring the badge into ScenarioBuilder made the ABSENT assertion fail), reverted
 - [Phase ?]: Phase 22-01: HONEST-01 method label rendered VERBATIM 'Historical realized' (realized stats over the overlap window); 'bootstrap' NOT claimed (that is Phase 27)
 - [Phase ?]: Phase 22-01: methodology line folded into the one existing caveat <p> (no second line, no token/DOM change); N inline in DM Sans (not Geist Mono), matching the shipped Phase-21 line; sandbox anchored ^Projected regex updated same-task
+- [Phase ?]: Phase 22-02: HONEST-02 single source = src/lib/sample-floor.ts (SAMPLE_FLOOR_OVERLAPPING_DAYS=60, named distinctively NOT MIN_* to dodge min-history grep collision); evaluateSampleFloor guard-first (null/NaN/Infinity/negative -> no-usable-n FIRST never passes), then below-floor, else ok; per-call floor override honored
+- [Phase ?]: Phase 22-02: SampleFloorEmptyState COPIES the CorrelationHeatmap shell verbatim (does not import/modify it; different statistic-specific threshold, shared visual shell); imports copy builders+heading from @/lib/sample-floor; not role=alert, no red/warning; 0/1-strategy is a call-site strategyCount prop (gate cannot see count) taking precedence; pinned in CONTRACT_GUARDS + REGISTRY.md, EXPECTED_RULES untouched; NOT wired into live composer/sandbox projection (deferred to 26/27)
 
 ## Accumulated Context
 
@@ -236,7 +238,7 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-06-21T16:35:44.716Z
+Last session: 2026-06-21T16:44:32.155Z
 Stopped at: Completed 22-01-PLAN.md
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
