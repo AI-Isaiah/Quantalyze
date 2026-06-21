@@ -10,9 +10,18 @@ name: Analytics deploy verify (prod SHA vs main HEAD)
 # This probe compares the deployed commit (exposed in /health by #9a, the
 # `git_sha` field from RAILWAY_GIT_COMMIT_SHA) against main HEAD. A fresh
 # merge legitimately lags (CI ~5-8m + Railway build ~3m), so it retries over
-# a convergence window and only fails on a PERSISTENT mismatch — which means
-# the deploy was skipped (or the worker is stuck on old code). On failure it
-# files a dedup'd GitHub issue (mirrors nightly.yml / cassette-refresh.yml).
+# a convergence window and, on a PERSISTENT mismatch — which means the deploy
+# was skipped (or the worker is stuck on old code) — files a dedup'd GitHub
+# issue (mirrors nightly.yml / cassette-refresh.yml) AND emits a warning.
+#
+# CRITICAL: this job exits 0 even when prod is stale. It MUST NOT fail the
+# check. A red check on a (HEAD) commit makes Railway's "wait for CI" treat the
+# commit's check-suite as red and SKIP the very deploy this probe verifies — a
+# self-defeating deadlock that left prod stale on 2026-06-21 when the 6h
+# schedule fired while a deploy was still pending (the failed `verify` check on
+# the merge SHA caused Railway to skip it, so prod never converged and the
+# check stayed red). The dedup'd P1 issue is the loud signal; the green check
+# keeps deploys flowing.
 #
 # The health URL is a PUBLIC Railway domain (no auth, no secret); defaulted
 # here so the probe ALWAYS runs (never silently no-ops on an unset variable —
@@ -64,8 +73,10 @@ jobs:
           # deployed SHA → a false GREEN, the exact fail-silent hole this probe
           # exists to kill.
           if [ -z "$MAIN_SHA" ]; then
-            echo "::error::github.sha (MAIN_SHA) is empty — cannot verify the deploy. Failing rather than risk a false pass."
-            exit 1
+            # Degenerate (github.sha is always set on schedule/dispatch). Warn but
+            # exit 0 — never red-check HEAD (it would block Railway, see header).
+            echo "::warning::github.sha (MAIN_SHA) is empty — cannot verify the deploy this run."
+            exit 0
           fi
           # Convergence window: tolerate a deploy-in-progress (CI + Railway
           # build) before declaring the deploy skipped. ~30 min covers the
@@ -90,11 +101,15 @@ jobs:
             sleep 60
           done
           echo "deployed_sha=$deployed" >> "$GITHUB_OUTPUT"
-          echo "::error::prod analytics git_sha ('$deployed') != main HEAD ('$MAIN_SHA') after the convergence window. The Railway deploy was likely SKIPPED (main CI red/cancelled) — prod is running STALE analytics code. Recover: rerun the main CI for this SHA until green, then 'railway redeploy' / 'railway up' from the analytics service."
-          exit 1
+          echo "stale=true" >> "$GITHUB_OUTPUT"
+          # Do NOT exit non-zero (see the header): a failed check on this commit
+          # makes Railway skip the deploy this probe verifies. Alert via the
+          # dedup'd issue (next step) + this warning; keep the check green.
+          echo "::warning::prod analytics git_sha ('$deployed') != main HEAD ('$MAIN_SHA') after the convergence window. Likely a skipped/stuck Railway deploy — see the auto-filed 'analytics-deploy-stale' issue. Recover: 'railway redeploy' / 'railway up' the analytics service."
+          exit 0
 
       - name: Open or update GitHub issue on persistent staleness
-        if: failure()
+        if: steps.probe.outputs.stale == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           RUN_ID: ${{ github.run_id }}
