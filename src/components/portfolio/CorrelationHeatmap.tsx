@@ -148,9 +148,15 @@ const DIAG_BG = "#F1F5F9";
 const MISSING_BG = "#F8F9FA";
 const MUTED_FG = "#64748B";
 
-// CORR-02 — empty-state copy (UI-SPEC §Copywriting Contract). The heading is
-// shared; the body names the SPECIFIC reason so the allocator knows what to fix.
-const EMPTY_HEADING = "Not enough overlap to correlate";
+// CORR-02 — empty-state copy (UI-SPEC §Copywriting Contract). The heading AND
+// body are reason-routed together: a shared "Not enough overlap" heading lied on
+// the engine-nulled and few-strategies branches (70 overlapping days, but the
+// heading claimed too little) — it contradicted its own body. Each reason now
+// gets a heading that matches its body (found by /qa on prod, 2026-06-21).
+const HEADING_FEW_DAYS = "Not enough overlap to correlate";
+const HEADING_ENGINE_NULLED = "Correlation unavailable for this scenario";
+const HEADING_FEW_STRATEGIES = "Not enough strategies to correlate";
+const HEADING_COMBINED = "Correlation unavailable";
 const EMPTY_BODY_FEW_STRATEGIES =
   "Add at least 2 active strategies to see how they move together.";
 const EMPTY_BODY_FEW_DAYS =
@@ -188,6 +194,7 @@ export function CorrelationHeatmap({
     // (genuine 1-strategy) case. Explicit branches (not a nested ternary) so each
     // path is independently auditable (review IN-04) and the engine-nulled case
     // (review CRITICAL) can't fall through to the wrong copy:
+    let heading: string;
     let body: string;
     if (overlappingDays !== undefined && overlappingDays >= 1 && overlappingDays < 10) {
       // Too-short window — engine returns a null matrix with 1 <= n < 10. The
@@ -195,6 +202,7 @@ export function CorrelationHeatmap({
       // 0-active early-return), which is a too-few-strategies state, NOT a short
       // window — it must fall through to the few-strategies branch below, never
       // claim "fewer than 10 overlapping days" when there are zero (review red-team).
+      heading = HEADING_FEW_DAYS;
       body = EMPTY_BODY_FEW_DAYS;
     } else if (
       correlationMatrix === null &&
@@ -203,8 +211,10 @@ export function CorrelationHeatmap({
     ) {
       // Adequate window but the engine STILL nulled the matrix → non-finite
       // returns or a fully drawn-down (<=0 wealth) projection. The allocator
-      // already has >=2 strategies and enough days, so "add more strategies"
-      // would be an actively wrong lie — name the real cause instead.
+      // already has >=2 strategies and enough days, so neither "add more
+      // strategies" NOR "not enough overlap" is honest — both the heading and the
+      // body must name the real cause (non-finite / leverage wipeout).
+      heading = HEADING_ENGINE_NULLED;
       body = EMPTY_BODY_ENGINE_NULLED;
     } else if (
       ids.length < 2 &&
@@ -212,13 +222,15 @@ export function CorrelationHeatmap({
     ) {
       // A genuine < 2-strategy set: a non-null 1×1 matrix (ids.length === 1)
       // with a 10+-day window, or a scenario host that passed overlappingDays.
+      heading = HEADING_FEW_STRATEGIES;
       body = EMPTY_BODY_FEW_STRATEGIES;
     } else {
       // Standalone null matrix with no host context (e.g. the portfolio-detail
       // caller passes no overlappingDays) — surface-neutral combined copy.
+      heading = HEADING_COMBINED;
       body = EMPTY_BODY_COMBINED;
     }
-    return <EmptyStateCard heading={EMPTY_HEADING} body={body} />;
+    return <EmptyStateCard heading={heading} body={body} />;
   }
 
   const n = ids.length;

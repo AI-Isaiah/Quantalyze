@@ -12,9 +12,10 @@ describe("<CorrelationHeatmap>", () => {
     render(
       <CorrelationHeatmap correlationMatrix={null} strategyNames={{}} />,
     );
-    // CORR-02 — the heading names the reason; no bare "No data".
+    // CORR-02 — the heading names the reason; no bare "No data". With no host
+    // context (no overlappingDays) this is the surface-neutral combined branch.
     expect(
-      screen.getByText("Not enough overlap to correlate"),
+      screen.getByText("Correlation unavailable"),
     ).toBeInTheDocument();
     // No fabricated number ever renders in the empty state.
     expect(screen.queryByText(/Avg \|ρ\|/)).toBeNull();
@@ -24,8 +25,9 @@ describe("<CorrelationHeatmap>", () => {
     render(
       <CorrelationHeatmap correlationMatrix={{}} strategyNames={{}} />,
     );
+    // Empty object → few-strategies branch (0 ids, non-null matrix).
     expect(
-      screen.getByText("Not enough overlap to correlate"),
+      screen.getByText("Not enough strategies to correlate"),
     ).toBeInTheDocument();
   });
 
@@ -42,7 +44,7 @@ describe("<CorrelationHeatmap>", () => {
       />,
     );
     expect(
-      screen.getByText("Not enough overlap to correlate"),
+      screen.getByText("Not enough strategies to correlate"),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
@@ -125,10 +127,17 @@ describe("<CorrelationHeatmap>", () => {
         overlappingDays={200}
       />,
     );
+    // The HEADING names the real cause (engine-nulled), not overlap. Found on
+    // prod by /qa 2026-06-21: the shared "Not enough overlap to correlate"
+    // heading contradicted its own body here — 200 overlapping days IS enough
+    // overlap; the matrix nulled because the projected returns are non-finite.
     expect(
-      screen.getByText("Not enough overlap to correlate"),
+      screen.getByText("Correlation unavailable for this scenario"),
     ).toBeInTheDocument();
-    // Names the real cause (non-finite / fully drawn down).
+    // The heading must NOT claim insufficient overlap — that is the lie this
+    // regression guards against. With 200 days, "not enough overlap" is false.
+    expect(screen.queryByText("Not enough overlap to correlate")).toBeNull();
+    // Body names the real cause (non-finite / fully drawn down).
     expect(
       screen.getByText(/non-finite or the curve is fully drawn down/i),
     ).toBeInTheDocument();
