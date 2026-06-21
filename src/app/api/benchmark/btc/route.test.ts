@@ -19,7 +19,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 //   .eq("symbol","BTC").order("date",{ascending:true})` → { data, error }.
 // `orderResult` is what that terminal `.order(...)` resolves to; each test
 // sets it before invoking GET.
-const { orderResult, mockOrder, mockEq, mockSelect, mockFrom } = vi.hoisted(
+const { orderResult, mockOrder, mockEq, mockFrom } = vi.hoisted(
   () => {
     const orderResult: { value: { data: unknown; error: unknown } } = {
       value: { data: [], error: null },
