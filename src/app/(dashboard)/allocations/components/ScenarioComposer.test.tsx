@@ -2278,4 +2278,75 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     }
     expect(lev.value).toBe("1");
   });
+
+  // -------------------------------------------------------------------------
+  // CORR-01 / CORR-03 — own-book composer mounts the CorrelationHeatmap with
+  // de-aliased labels and a single-sourced Avg |ρ| value. The real
+  // CorrelationHeatmap is NOT mocked here, so these assertions exercise the
+  // genuine presentational component fed by the composer's scenarioMetrics.
+  // -------------------------------------------------------------------------
+  it("CORR-01 — with ≥2 active de-aliased strategies (≥10 overlapping days) the composer renders the heatmap with de-aliased axis labels", () => {
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The de-aliased strategy names (REF_BTC / REF_ETH = the holding scopeRefs,
+    // which mkRealStrat sets as both id AND name) appear as heatmap axis labels.
+    // Each name renders twice (column header + row header), so use getAllByText.
+    expect(screen.getAllByText(REF_BTC).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText(REF_ETH).length).toBeGreaterThanOrEqual(2);
+    // The heatmap figure is present (the real component's role="figure" wrapper).
+    expect(
+      screen.getByRole("figure", { name: /Pairwise correlation heatmap/i }),
+    ).toBeInTheDocument();
+    // Sanity: two active legs → a real pairwise correlation exists (not the
+    // empty-state branch).
+    expect(typeof lastScenarioMetrics()?.avg_pairwise_correlation).toBe("number");
+  });
+
+  it("CORR-02 — with <2 active strategies the composer heatmap renders the honest empty state, never a 1×1 grid", () => {
+    // Default adapter mock returns ZERO strategies → scenarioMetrics.correlation_matrix
+    // is null → the heatmap delegates to its reason-routed empty state.
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.getByText("Not enough overlap to correlate"),
+    ).toBeInTheDocument();
+    // No degenerate grid: the figure (which only renders for ≥2 strategies) is absent.
+    expect(screen.queryByRole("figure", { name: /Pairwise correlation heatmap/i }))
+      .toBeNull();
+  });
+
+  it("CORR-03 — the heatmap caption Avg |ρ| value is single-sourced: it equals scenarioMetrics.avg_pairwise_correlation passed to KpiStrip (no second average)", () => {
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The exact value the composer fed to KpiStrip (the single source of truth).
+    const stripValue = lastScenarioMetrics()?.avg_pairwise_correlation;
+    expect(typeof stripValue).toBe("number");
+    const expected = (stripValue as number).toFixed(2);
+    // The heatmap caption renders that SAME value (2dp), not a self-computed one.
+    // "Avg |ρ|" text only exists in the heatmap caption here (KpiStrip is mocked).
+    const caption = screen.getByText("Avg |ρ|").closest("div");
+    expect(caption?.textContent?.replace(/\s+/g, " ")).toContain(
+      `Avg |ρ| ${expected}`,
+    );
+  });
 });
