@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1.0
 milestone_name: Scenario Analysis
 status: executing
-stopped_at: context exhaustion at 76% (2026-05-07)
-last_updated: "2026-06-21T14:53:48.198Z"
+stopped_at: Completed 21-02-PLAN.md
+last_updated: "2026-06-21T15:06:50.353Z"
 last_activity: 2026-06-21
 progress:
   total_phases: 8
   completed_phases: 0
   total_plans: 4
-  completed_plans: 1
+  completed_plans: 2
   percent: 0
 ---
 
@@ -27,11 +27,11 @@ See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 ## Current Position
 
 Phase: 21 (Surfacing, Correlation & Honest Projection) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-06-21
 
-Progress: [███░░░░░░░] 25%
+Progress: [█████░░░░░] 50%
 
 ## Milestone Roadmap (v1.1.0 Scenario Analysis)
 
@@ -205,6 +205,9 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - [Phase ?]: Phase 20 T16: MT5 EA read-only invariant CI-enforced via pure-grep denylist over tools/mt5/**/*.{mq5,mqh} (low-level + CTrade method surface); comment-evasion accepted residual, T14 reconcile is runtime backstop.
 - [Phase ?]: Phase 21-01: surfaced Scenario tab via single VISIBLE_TAB_KEYS edit (already a wired TabKey; render loop + keyboard nav both derive from it)
 - [Phase ?]: Phase 21-01: Strategy Sandbox sidebar link gated on isAllocator ONLY (not showsAllocatorWorkspace); admin-only sees nothing; server gate at scenarios/page.tsx untouched
+- [Phase ?]: Phase 21-02: CORR-04 satisfied by show-all heatmap removal of pickTopTenByAvgCorr (not a top-10 disclosure); aria-label names the true strategy count
+- [Phase ?]: Phase 21-02: shortest history = fewest daily_returns points (window length); first-seen tiebreak; empty->null, single->lone name
+- [Phase ?]: Phase 21-02: ids.length<2 is the load-bearing CORR-02 gate (engine returns a non-null 1x1 matrix for 1 strategy); empty-state routing checks overlappingDays<10 first
 
 ## Accumulated Context
 
@@ -226,8 +229,8 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-06-21T14:53:39.619Z
-Stopped at: context exhaustion at 76% (2026-05-07)
+Last session: 2026-06-21T15:06:50.349Z
+Stopped at: Completed 21-02-PLAN.md
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
 

@@ -52,7 +52,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. The projection is persistently framed "PROJECTED — hypothetical, not your live book" with coverage caveats (N overlapping days, shortest history), and never peer-ranks or shows allocator/peer-percentile panels on the blend — locked by a neuter-check regression test.
 **Plans**: 4 plans in 2 waves
   - [x] 21-01-PLAN.md — Surfacing: visible Scenario tab + allocator-only Strategy Sandbox sidebar link (SURF-01/02/03) [wave 1]
-  - [ ] 21-02-PLAN.md — Correlation presentational: show-all heatmap + honest empty states + Avg |ρ| relabel + shortestHistoryName helper (CORR-02/03/04) [wave 1]
+  - [x] 21-02-PLAN.md — Correlation presentational: show-all heatmap + honest empty states + Avg |ρ| relabel + shortestHistoryName helper (CORR-02/03/04) [wave 1]
   - [ ] 21-03-PLAN.md — Own-book composer: heatmap mount + PROJECTED badge/caveat + R3 neuter guard (CORR-01, CORR-03, IMPACT-01/02) [wave 2]
   - [ ] 21-04-PLAN.md — Strategy Sandbox: Example-universe + PROJECTED framing + Avg |ρ| relabel + neuter guard (SURF-03, CORR-03, IMPACT-01/02) [wave 2]
 **UI hint**: yes
@@ -142,7 +142,7 @@ Phases execute in numeric order: 21 → 22 → 23 → 24 → 25 → 26 → 27 �
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 21. Surfacing, Correlation & Honest Projection | 1/4 | In Progress|  |
+| 21. Surfacing, Correlation & Honest Projection | 2/4 | In Progress|  |
 | 22. Methodology-Honesty Scaffolding | 0/TBD | Not started | - |
 | 23. Scenario Persistence & Compare | 0/TBD | Not started | - |
 | 24. Benchmark Comparison | 0/TBD | Not started | - |
