@@ -1080,6 +1080,7 @@ describe("Critical regression guards", () => {
           `${WORKFLOW_DIR}/migration-drift-check.yml`,
           `${WORKFLOW_DIR}/migration-policy-self-test.yml`,
           `${WORKFLOW_DIR}/migration-policy.yml`,
+          `${WORKFLOW_DIR}/sql-function-snapshot.yml`,
           `${WORKFLOW_DIR}/supabase-migrate.yml`,
         ]);
       });

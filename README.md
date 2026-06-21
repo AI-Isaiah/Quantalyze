@@ -108,6 +108,7 @@ before merging.
 | `npm run verify:phase18` | Verify Phase 18 artifacts (canonical redactor parity, founder LP cron, migration 100) |
 | `npm run check:founder-lp-readiness` | Pre-flight check for `FOUNDER_LP_STRATEGY_ID` (status=published, has factsheet) before the monthly cron's first tick |
 | `npm run worker:dev` | Run the analytics worker locally against `analytics-service/.env` |
+| `npm run schema:functions` | Regenerate the canonical SQL function snapshot in `supabase/schema/functions/` (run after a migration adds/changes/drops a function; the "SQL Function Snapshot — Drift Gate" CI check fails if it is stale) |
 
 ## Analytics Service (Optional)
 

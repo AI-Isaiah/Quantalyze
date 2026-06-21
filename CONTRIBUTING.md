@@ -84,3 +84,10 @@ so "is prod running main HEAD?" is not machine-checkable today.
 - Migrations: one logical change per migration; never edit an
   already-merged migration (it has already applied to prod) — ship a forward
   migration instead.
+- SQL function snapshot: when a migration adds, changes, or drops a SQL
+  function, run `npm run schema:functions` and commit the regenerated
+  `supabase/schema/functions/` — these files are the canonical current body of
+  every function (replayed from the migrations) and exist so you can read one
+  file instead of grepping every migration. The "SQL Function Snapshot — Drift
+  Gate" CI check (`.github/workflows/sql-function-snapshot.yml`, which runs
+  `npm run schema:functions:check`) fails if the committed snapshot is stale.

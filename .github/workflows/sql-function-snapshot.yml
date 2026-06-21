@@ -1,0 +1,84 @@
+name: SQL Function Snapshot — Drift Gate
+
+# tech-debt #2: canonical current-state of the SECURITY DEFINER SQL functions.
+#
+# Business logic lives in functions redefined via CREATE OR REPLACE across ~194
+# append-only migrations (mark_compute_job_done x9, etc.), with no committed
+# current-state artifact — so the only way to know a function's live body was to
+# grep every migration and apply them mentally in order. That opacity caused a
+# silent prod regression (G23-187: a rewrite copied a stale body, reverting a
+# GIN fan-in to a seq-scan loop) and a near-miss (B5b).
+#
+# scripts/dump-sql-functions.ts replays the migrations and writes each
+# function's latest body to supabase/schema/functions/<name>.sql. This gate
+# regenerates the same way and FAILS if the committed snapshot is stale — so a
+# migration that changes a function body without regenerating the snapshot is
+# caught, and the CREATE OR REPLACE diff becomes reviewable against the
+# canonical body.
+#
+# Hermetic by design: pure text replay, NO database, NO Docker, NO secrets — so
+# the gate can never flake (and runs identically on fork PRs, unlike the
+# prod-linked migration-drift-check.yml). This is ORTHOGONAL to
+# migration-drift-check.yml (which guards repo-files-vs-prod-applied-set) — this
+# guards migrations-produce-the-committed-function-bodies.
+#
+# SCOPE: functions only. Tables/columns/policies/triggers evolve via incremental
+# ALTERs that text-replay can't reconstruct; a full-schema snapshot needs the
+# Supabase local stack in CI (deferred — see docs/deferred-findings.md).
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**'
+      - 'supabase/schema/**'
+      - 'scripts/dump-sql-functions.ts'
+      - '.github/workflows/sql-function-snapshot.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**'
+      - 'supabase/schema/**'
+      - 'scripts/dump-sql-functions.ts'
+      - '.github/workflows/sql-function-snapshot.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: sql-function-snapshot-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot-drift:
+    runs-on: ubuntu-latest
+    # No `environment: Production`, no secrets — hermetic text replay only.
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 20
+          cache: npm
+      - name: Restore node_modules
+        id: node_modules_cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+      - name: npm ci (cache miss; retry transient network failures)
+        if: steps.node_modules_cache.outputs.cache-hit != 'true'
+        run: |
+          n=0
+          until npm ci --prefer-offline --no-audit --no-fund; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "npm ci failed after $n attempts"; exit 1; fi
+            echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
+      - name: Parser self-test
+        run: npx tsx scripts/dump-sql-functions.ts --self-test
+      - name: Snapshot drift check
+        run: npx tsx scripts/dump-sql-functions.ts --check
