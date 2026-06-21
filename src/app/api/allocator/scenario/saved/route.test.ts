@@ -111,6 +111,13 @@ vi.mock("@/lib/ratelimit", () => ({
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
+// logAuditEvent imports server-only + next/server `after`; mock it so the route
+// import resolves under jsdom and so a test can assert the save emit fires.
+const logAuditEventMock = vi.fn();
+vi.mock("@/lib/audit", () => ({
+  logAuditEvent: (...args: unknown[]) => logAuditEventMock(...args),
+}));
+
 // ---------------------------------------------------------------------------
 // Imports after mocks
 // ---------------------------------------------------------------------------
@@ -276,6 +283,26 @@ describe("POST /api/allocator/scenario/saved", () => {
     const res = await POST(mkPost({ name: "Normal", draft: VALID_DRAFT }));
     expect(res.status).toBe(200);
     expect(fromSpy).toHaveBeenCalledWith("scenarios");
+  });
+
+  it("T_S15 — a successful save emits a scenario.save audit event for the new id", async () => {
+    insertResult = { data: { id: "scen-NEW", name: "Audited" }, error: null };
+    const res = await POST(mkPost({ name: "Audited", draft: VALID_DRAFT }));
+    expect(res.status).toBe(200);
+    expect(logAuditEventMock).toHaveBeenCalledTimes(1);
+    const [, event] = logAuditEventMock.mock.calls[0] as [unknown, Record<string, unknown>];
+    expect(event.action).toBe("scenario.save");
+    expect(event.entity_type).toBe("scenario");
+    expect(event.entity_id).toBe("scen-NEW");
+    // Privacy: metadata carries NO draft contents — only schema_version + name length.
+    expect(event.metadata).toEqual({ schema_version: 2, name_length: "Audited".length });
+  });
+
+  it("T_S16 — a FAILED save (DB error) does NOT emit an audit event", async () => {
+    insertResult = { data: null, error: { message: "boom" } };
+    const res = await POST(mkPost({ name: "x", draft: VALID_DRAFT }));
+    expect(res.status).toBe(500);
+    expect(logAuditEventMock).not.toHaveBeenCalled();
   });
 });
 

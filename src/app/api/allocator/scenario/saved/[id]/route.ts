@@ -39,7 +39,13 @@ import { createClient } from "@/lib/supabase/server";
 import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
-import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
+import {
+  userActionLimiter,
+  checkLimit,
+  isRateLimitMisconfigured,
+  type CheckLimitResult,
+} from "@/lib/ratelimit";
+import { logAuditEvent } from "@/lib/audit";
 import { isUuid } from "@/lib/utils";
 import { scenarioDraftSchema } from "@/app/(dashboard)/allocations/lib/scenario-state";
 import { MAX_DRAFT_BODY_BYTES } from "../route";
@@ -106,9 +112,17 @@ function bodyTooLarge(): NextResponse {
   );
 }
 
-async function denyRateLimit(userId: string): Promise<NextResponse | null> {
-  const rl = await checkLimit(userActionLimiter, `scenario_save:${userId}`);
-  if (rl.success) return null;
+// B15 limiter ordering — the `checkLimit(` call is INLINED in each mutating
+// method (not extracted here) so the limiter-ordering test can statically
+// verify, per method, that body validation (`safeParse`) precedes the limiter.
+// Extracting the limiter to a helper would hide that ordering from the
+// per-method scan (limiter-ordering.test.ts), so only the RESPONSE-building is
+// factored out here. This helper never consumes a token — it just shapes the
+// 429/503 envelope from an already-failed `checkLimit` result. Narrow to the
+// failed variant of CheckLimitResult so `rl.retryAfter` is in scope.
+type RateLimitDenied = Extract<CheckLimitResult, { success: false }>;
+
+function denyRateLimitResponse(rl: RateLimitDenied): NextResponse {
   if (isRateLimitMisconfigured(rl)) {
     return NextResponse.json(
       { error: "Rate limiter unavailable" },
@@ -147,8 +161,10 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<NextRespon
         );
       }
 
-      const denied = await denyRateLimit(user.id);
-      if (denied) return denied;
+      // B15 limiter ordering — consume the token only AFTER body validation
+      // (the safeParse above). A 400 never burns one of the caller's tokens.
+      const rl = await checkLimit(userActionLimiter, `scenario_save:${user.id}`);
+      if (!rl.success) return denyRateLimitResponse(rl);
 
       const supabase = await createClient();
       const { data, error } = await supabase
@@ -175,6 +191,15 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<NextRespon
           { status: 500, headers: NO_STORE_HEADERS },
         );
       }
+
+      // Fire-and-forget audit (user_note.* pattern). Self-owned, RLS-scoped.
+      // Metadata carries the new name length only — no draft contents.
+      logAuditEvent(supabase, {
+        action: "scenario.rename",
+        entity_type: "scenario",
+        entity_id: id,
+        metadata: { name_length: parsed.data.name.length },
+      });
 
       return NextResponse.json(data, { status: 200, headers: NO_STORE_HEADERS });
     },
@@ -207,8 +232,10 @@ export async function PUT(req: NextRequest, ctx: RouteCtx): Promise<NextResponse
         );
       }
 
-      const denied = await denyRateLimit(user.id);
-      if (denied) return denied;
+      // B15 limiter ordering — consume the token only AFTER body validation
+      // (the safeParse above). A 400 never burns one of the caller's tokens.
+      const rl = await checkLimit(userActionLimiter, `scenario_save:${user.id}`);
+      if (!rl.success) return denyRateLimitResponse(rl);
 
       const supabase = await createClient();
       // Touch updated_at = now() in the payload — there is no set_updated_at
@@ -244,6 +271,18 @@ export async function PUT(req: NextRequest, ctx: RouteCtx): Promise<NextResponse
         );
       }
 
+      // Fire-and-forget audit (user_note.* pattern). Metadata carries the new
+      // draft's schema_version + name length only — no draft contents.
+      logAuditEvent(supabase, {
+        action: "scenario.update",
+        entity_type: "scenario",
+        entity_id: id,
+        metadata: {
+          schema_version: parsed.data.draft.schema_version,
+          name_length: parsed.data.name.length,
+        },
+      });
+
       return NextResponse.json(data, { status: 200, headers: NO_STORE_HEADERS });
     },
   )(req);
@@ -259,8 +298,11 @@ export async function DELETE(req: NextRequest, ctx: RouteCtx): Promise<NextRespo
 
   return withAllocatorAuth(
     async (_req: NextRequest, user: AllocatorUser): Promise<NextResponse> => {
-      const denied = await denyRateLimit(user.id);
-      if (denied) return denied;
+      // DELETE carries no request body — the limiter runs after the uuid
+      // validation + auth gate (no body to validate first). The per-method
+      // ordering check legitimately skips a body-less method.
+      const rl = await checkLimit(userActionLimiter, `scenario_save:${user.id}`);
+      if (!rl.success) return denyRateLimitResponse(rl);
 
       const supabase = await createClient();
       // .select() returns the deleted rows; under RLS a non-owned id matches
@@ -289,6 +331,14 @@ export async function DELETE(req: NextRequest, ctx: RouteCtx): Promise<NextRespo
           { status: 404, headers: NO_STORE_HEADERS },
         );
       }
+
+      // Fire-and-forget audit (user_note.* pattern). Only emitted when a row
+      // was actually deleted (the 0-rows path above returns 404 first).
+      logAuditEvent(supabase, {
+        action: "scenario.delete",
+        entity_type: "scenario",
+        entity_id: id,
+      });
 
       return NextResponse.json({ success: true }, { status: 200, headers: NO_STORE_HEADERS });
     },

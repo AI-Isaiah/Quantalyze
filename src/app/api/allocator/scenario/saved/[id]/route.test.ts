@@ -105,6 +105,13 @@ vi.mock("@/lib/ratelimit", () => ({
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
+// logAuditEvent imports server-only + next/server `after`; mock it so the route
+// import resolves under jsdom and the rename/update/delete emits are assertable.
+const logAuditEventMock = vi.fn();
+vi.mock("@/lib/audit", () => ({
+  logAuditEvent: (...args: unknown[]) => logAuditEventMock(...args),
+}));
+
 // ---------------------------------------------------------------------------
 // Imports after mocks
 // ---------------------------------------------------------------------------
@@ -333,5 +340,59 @@ describe("DELETE", () => {
     expect(res.status).toBe(500);
     const json = await res.json();
     expect(JSON.stringify(json)).not.toContain("connection reset");
+  });
+});
+
+// ===========================================================================
+// Audit emission (audit-coverage gate)
+// ===========================================================================
+//
+// Every scenario mutation logs a scenario.* audit event for the row id, and a
+// FAILED/empty mutation must NOT emit (the audit row would falsely assert a
+// change that never landed).
+
+describe("audit emission", () => {
+  it("PATCH success emits scenario.rename for the id", async () => {
+    const res = await PATCH(mkReq("PATCH", { name: "Renamed" }), ctx(VALID_ID));
+    expect(res.status).toBe(200);
+    expect(logAuditEventMock).toHaveBeenCalledTimes(1);
+    const [, event] = logAuditEventMock.mock.calls[0] as [unknown, Record<string, unknown>];
+    expect(event.action).toBe("scenario.rename");
+    expect(event.entity_type).toBe("scenario");
+    expect(event.entity_id).toBe(VALID_ID);
+  });
+
+  it("PUT success emits scenario.update for the id", async () => {
+    const res = await PUT(mkReq("PUT", { name: "Updated", draft: VALID_DRAFT }), ctx(VALID_ID));
+    expect(res.status).toBe(200);
+    expect(logAuditEventMock).toHaveBeenCalledTimes(1);
+    const [, event] = logAuditEventMock.mock.calls[0] as [unknown, Record<string, unknown>];
+    expect(event.action).toBe("scenario.update");
+    expect(event.entity_type).toBe("scenario");
+    expect(event.entity_id).toBe(VALID_ID);
+  });
+
+  it("DELETE success emits scenario.delete for the id", async () => {
+    const res = await DELETE(mkReq("DELETE"), ctx(VALID_ID));
+    expect(res.status).toBe(200);
+    expect(logAuditEventMock).toHaveBeenCalledTimes(1);
+    const [, event] = logAuditEventMock.mock.calls[0] as [unknown, Record<string, unknown>];
+    expect(event.action).toBe("scenario.delete");
+    expect(event.entity_type).toBe("scenario");
+    expect(event.entity_id).toBe(VALID_ID);
+  });
+
+  it("a 404 (PGRST116) rename does NOT emit an audit event", async () => {
+    updateResult = { data: null, error: { code: PGRST_NO_ROWS, message: "no rows" } };
+    const res = await PATCH(mkReq("PATCH", { name: "x" }), ctx(VALID_ID));
+    expect(res.status).toBe(404);
+    expect(logAuditEventMock).not.toHaveBeenCalled();
+  });
+
+  it("a 404 (0 rows) delete does NOT emit an audit event", async () => {
+    deleteResult = { data: [], error: null };
+    const res = await DELETE(mkReq("DELETE"), ctx(VALID_ID));
+    expect(res.status).toBe(404);
+    expect(logAuditEventMock).not.toHaveBeenCalled();
   });
 });

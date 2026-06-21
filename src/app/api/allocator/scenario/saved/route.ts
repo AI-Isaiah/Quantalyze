@@ -33,6 +33,7 @@ import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAu
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
+import { logAuditEvent } from "@/lib/audit";
 import { scenarioDraftSchema } from "@/app/(dashboard)/allocations/lib/scenario-state";
 
 export const runtime = "nodejs";
@@ -152,6 +153,21 @@ export const POST = withAllocatorAuth(
         { status: 500, headers: NO_STORE_HEADERS },
       );
     }
+
+    // Self-owned, RLS-scoped scenario create. Fire-and-forget audit (the
+    // user_note.* pattern): actor = the allocator (auth.uid() inside the RPC),
+    // entity = the new scenario id. Metadata carries no draft contents — only
+    // the schema_version + name length, mirroring the notes route's
+    // content_length-not-content privacy posture.
+    logAuditEvent(supabase, {
+      action: "scenario.save",
+      entity_type: "scenario",
+      entity_id: data.id,
+      metadata: {
+        schema_version: parsed.data.draft.schema_version,
+        name_length: parsed.data.name.length,
+      },
+    });
 
     return NextResponse.json(data, { status: 200, headers: NO_STORE_HEADERS });
   },
