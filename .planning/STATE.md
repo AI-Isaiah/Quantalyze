@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.1.0
 milestone_name: Scenario Analysis
-status: verifying
-stopped_at: Completed 21-02-PLAN.md
-last_updated: "2026-06-21T15:30:20.181Z"
+status: ready_to_plan
+stopped_at: Phase 21 complete (4/4) — ready to discuss Phase 22
+last_updated: 2026-06-21T16:01:36.372Z
 last_activity: 2026-06-21
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 4
-  completed_plans: 4
+  completed_plans: 52
   percent: 13
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
-**Current focus:** Phase 21 — Surfacing, Correlation & Honest Projection
+**Current focus:** Phase 22 — methodology honesty scaffolding
 **Last milestone:** v1.0.0 API-Key Rewrite (Phases 15–20, shipped 2026-06-20).
 
 ## Current Position
 
-Phase: 21 (Surfacing, Correlation & Honest Projection) — EXECUTING
-Plan: 4 of 4
-Status: Phase complete — ready for verification
+Phase: 22
+Plan: Not started
+Status: Ready to plan
 Last activity: 2026-06-21
 
 Progress: [██████████] 100%

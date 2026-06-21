@@ -142,7 +142,7 @@ Phases execute in numeric order: 21 → 22 → 23 → 24 → 25 → 26 → 27 �
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 21. Surfacing, Correlation & Honest Projection | 4/4 | Complete   | 2026-06-21 |
+| 21. Surfacing, Correlation & Honest Projection | 4/4 | Complete    | 2026-06-21 |
 | 22. Methodology-Honesty Scaffolding | 0/TBD | Not started | - |
 | 23. Scenario Persistence & Compare | 0/TBD | Not started | - |
 | 24. Benchmark Comparison | 0/TBD | Not started | - |
