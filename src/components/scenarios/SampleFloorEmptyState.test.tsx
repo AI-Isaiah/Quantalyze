@@ -65,6 +65,20 @@ describe("<SampleFloorEmptyState>", () => {
     expect(html).not.toMatch(/text-red|bg-red|border-red/);
   });
 
+  it("WR-02: a passing (ok) verdict renders NOTHING — never a self-contradictory card", () => {
+    // A mis-wired call site that passes an ok verdict (n >= floor) must not get
+    // a "{n} days — fewer than the {floor} needed" lie; the component fails loud
+    // by rendering null so the bug surfaces instead of a dishonest card.
+    const { container } = render(
+      <SampleFloorEmptyState verdict={evaluateSampleFloor(100)} feature="stress" />,
+    );
+    expect(evaluateSampleFloor(100).reason).toBe("ok");
+    expect(container.innerHTML).toBe("");
+    expect(
+      screen.queryByText("Not enough history for this estimate"),
+    ).toBeNull();
+  });
+
   it("renders the pinned CorrelationHeatmap shell tokens verbatim", () => {
     const { container } = render(
       <SampleFloorEmptyState verdict={evaluateSampleFloor(30)} feature="stress" />,

@@ -11,10 +11,15 @@ import {
 /**
  * HONEST-02 single-source pin (CONTRACT_GUARDS-registered).
  *
- * Pins the floor VALUE + EVERY gate branch (Pitfall 4 coverage defense for the
- * blocking gate: functions 74 / branches 72). The pin MUST FAIL if a future
- * feature hardcodes `60` instead of overriding per-call, or if a gate branch is
- * silently changed/dropped (Rule 9/12 fail-loud; T-22-05 drift mitigation).
+ * Pins the canonical floor VALUE + EVERY gate branch (Pitfall 4 coverage defense
+ * for the blocking gate: functions 74 / branches 72). The pin fails loud if the
+ * value is changed or a gate branch is silently dropped (Rule 9/12; T-22-05 drift).
+ *
+ * SCOPE (WR-01, Phase 22 review — honest about what this enforces): this pins the
+ * VALUE at its single definition point; it does NOT yet detect a *consumer* that
+ * hardcodes `60` instead of importing `SAMPLE_FLOOR_OVERLAPPING_DAYS` — no such
+ * consumer exists until Phases 26/27. When those land, add the actual teeth here
+ * (a literal-ban grep/AST sweep, or an eslint-plugin-quantalyze rule).
  *
  * Mirrors the exhaustive degenerate-matrix style of `scenario-history.test.ts`
  * (one `it` per branch). There is NO Python distributional floor this phase, so
@@ -23,7 +28,7 @@ import {
  */
 
 describe("SAMPLE_FLOOR_OVERLAPPING_DAYS value pin", () => {
-  it("equals 60 (HONEST-02 single source; fails loud if forked)", () => {
+  it("equals 60 (HONEST-02 single-source value pin; fails loud if the value changes)", () => {
     expect(SAMPLE_FLOOR_OVERLAPPING_DAYS).toBe(60);
   });
 });

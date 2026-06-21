@@ -50,6 +50,12 @@ export function SampleFloorEmptyState({
 }: SampleFloorEmptyStateProps) {
   const { n, floor, reason } = verdict;
 
+  // WR-02 (Phase 22 review): this component's precondition is "the gate decided
+  // below-floor". If a (future P26/27) call site mis-wires it with a PASSING
+  // verdict, render nothing rather than a self-contradictory "{n} days — fewer
+  // than the {floor} needed" card for an n >= floor verdict (fail loud, not lie).
+  if (reason === "ok") return null;
+
   let body: string;
   if (strategyCount !== undefined && strategyCount < 2) {
     body = fewStrategiesBody(floor);
