@@ -4,13 +4,13 @@ milestone: v1.1.0
 milestone_name: Scenario Analysis
 status: executing
 stopped_at: Completed 21-02-PLAN.md
-last_updated: "2026-06-21T15:06:50.353Z"
+last_updated: "2026-06-21T15:19:21.834Z"
 last_activity: 2026-06-21
 progress:
   total_phases: 8
   completed_phases: 0
   total_plans: 4
-  completed_plans: 2
+  completed_plans: 3
   percent: 0
 ---
 
@@ -27,11 +27,11 @@ See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 ## Current Position
 
 Phase: 21 (Surfacing, Correlation & Honest Projection) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-06-21
 
-Progress: [█████░░░░░] 50%
+Progress: [████████░░] 75%
 
 ## Milestone Roadmap (v1.1.0 Scenario Analysis)
 
@@ -208,6 +208,8 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - [Phase ?]: Phase 21-02: CORR-04 satisfied by show-all heatmap removal of pickTopTenByAvgCorr (not a top-10 disclosure); aria-label names the true strategy count
 - [Phase ?]: Phase 21-02: shortest history = fewest daily_returns points (window length); first-seen tiebreak; empty->null, single->lone name
 - [Phase ?]: Phase 21-02: ids.length<2 is the load-bearing CORR-02 gate (engine returns a non-null 1x1 matrix for 1 strategy); empty-state routing checks overlappingDays<10 first
+- [Phase ?]: Phase 21-03: own-book composer mounts CorrelationHeatmap with de-aliased labels; Avg |ρ| single-sourced from scenarioMetrics.avg_pairwise_correlation
+- [Phase ?]: Phase 21-03: IMPACT-02 no-peer-ranking guard keys on a render-only data-testid (not queryByText, which only matched a title= attr) + a positive-control isolation render; mutation-verified falsifiable both directions
 
 ## Accumulated Context
 
@@ -229,7 +231,7 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-06-21T15:06:50.349Z
+Last session: 2026-06-21T15:18:44.394Z
 Stopped at: Completed 21-02-PLAN.md
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
