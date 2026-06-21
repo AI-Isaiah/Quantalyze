@@ -1,0 +1,62 @@
+interactions:
+- request:
+    body: null
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      User-Agent:
+      - python-requests/2.33.1
+    method: GET
+    uri: https://www.okx.com/api/v5/asset/currencies
+  response:
+    body:
+      string: '{"msg": "Invalid OK-ACCESS-KEY", "code": "50111"}'
+    headers:
+      CF-RAY:
+      - a061113bdf66f877-ZRH
+      Cache-Control:
+      - no-cache, no-store, max-age=0, must-revalidate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '46'
+      Content-Type:
+      - application/json
+      Date:
+      - Wed, 03 Jun 2026 19:22:34 GMT
+      Server:
+      - cloudflare
+      b-locale:
+      - en_US
+      cf-cache-status:
+      - DYNAMIC
+      content-security-policy:
+      - frame-ancestors 'self'
+      expires:
+      - '0'
+      pragma:
+      - no-cache
+      set-cookie:
+      - __cf_bm=8keJOV3JB2Hx6bggQbGgTb3pHTNnxagU4FMkr7A4_yw-1780514554.2142942-1.0.1.1-11lOWsJGS6.Aw.unK7mGPTQIiiVgtqZlKmEjYEd7aHlf60dQkslOLQ7tfb.1dVkhgma8oRj6SOtrNsiG_WARznVo5VMQASuA6InfOqjiboAKRhQESKqcuD6mXBW18l3p;
+        HttpOnly; SameSite=None; Secure; Path=/; Domain=okx.com; Expires=Wed, 03 Jun
+        2026 19:52:34 GMT
+      strict-transport-security:
+      - max-age=31536000 ; includeSubDomains
+      vary:
+      - Origin
+      x-brokerid:
+      - '0'
+      x-content-type-options:
+      - nosniff
+      x-frame-options:
+      - SAMEORIGIN
+      x-xss-protection:
+      - 1; mode=block
+    status:
+      code: 401
+      message: Unauthorized
+version: 1

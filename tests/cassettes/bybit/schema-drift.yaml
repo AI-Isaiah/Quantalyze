@@ -1,0 +1,53 @@
+interactions:
+- request:
+    body: null
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Type:
+      - application/json
+      User-Agent:
+      - python-requests/2.33.1
+    method: GET
+    uri: https://api.bybit.com/v5/asset/coin/query-info
+  response:
+    body:
+      string: '{"retCode": 10003, "retMsg": "API key is invalid.", "result": {}, "retExtInfo":
+        {}, "time": 1780514559862}'
+    headers:
+      Cache-Control:
+      - no-store
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '97'
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Wed, 03 Jun 2026 19:22:39 GMT
+      Ret_code:
+      - '10003'
+      Server:
+      - Openresty
+      Timenow:
+      - '1780514559862'
+      Traceid:
+      - 55b7acc685b7ea274db1990d29945566
+      Via:
+      - 1.1 b0b28ec8da60bdc40e5fb6dc8ad8eae8.cloudfront.net (CloudFront)
+      X-Amz-Cf-Id:
+      - cY8MagRAP3GUDQf7hmGv8cKlo9PRpDaSOrWRFKWr0Z3S2_G456qSvw==
+      X-Amz-Cf-Pop:
+      - ZRH52-P1
+      X-Cache:
+      - Miss from cloudfront
+      x-cld-src:
+      - Loc-A
+    status:
+      code: 200
+      message: OK
+version: 1

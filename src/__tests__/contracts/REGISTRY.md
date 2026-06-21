@@ -49,6 +49,10 @@ The authoritative list is `CONTRACT_GUARDS` in `contracts-registry.test.ts`
 and the two `check-*` CI-gate scripts). Edit that array + this file together when
 adding or removing a guard.
 
+| Guard | Batch | Invariant |
+|---|---|---|
+| `src/lib/sample-floor.test.ts` | Phase22 | `SAMPLE_FLOOR_OVERLAPPING_DAYS=60` value pin + every `evaluateSampleFloor` gate branch (ok / below-floor / no-usable-n incl. null/NaN/Infinity/negative / per-call override). The HONEST-02 single-source floor — fails loud if a future feature (Phases 26/27) forks its own floor instead of importing this one. |
+
 ## Adding a new by-construction guard
 
 1. Write the guard where it's most local (or add a rule to `eslint-plugin-quantalyze`).

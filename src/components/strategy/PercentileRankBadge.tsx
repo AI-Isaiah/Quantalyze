@@ -41,6 +41,13 @@ export function PercentileRankBadge({
 
   return (
     <span
+      // IMPACT-02 (21-03) — render-only signal for the ScenarioComposer R3
+      // neuter guard. The guard asserts NO PercentileRankBadge renders on a
+      // hypothetical scenario blend (no false peer-ranking). "percentile" lives
+      // only in the title= attribute and the visible labels ("Sharpe", "Max DD")
+      // collide with the honest KPI strip, so the guard needs a unique,
+      // non-colliding testid. Adds no behavior; changes nothing else.
+      data-testid="percentile-rank-badge"
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium",
         tier === "top" && "border-emerald-200 bg-emerald-50 text-emerald-700",

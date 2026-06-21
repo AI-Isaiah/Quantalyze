@@ -66,6 +66,9 @@ import {
   type StrategyForBuilder,
 } from "@/lib/scenario";
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
+import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
+import { Card } from "@/components/ui/Card";
+import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { useScenarioState } from "../hooks/useScenarioState";
 import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 import {
@@ -251,22 +254,30 @@ export interface ScenarioComposerProps {
  * weight on the live-baseline path — better empty than mis-typed.
  */
 function liveBaselineToComputedMetrics(
-  baseline: MyAllocationDashboardPayload["liveBaselineMetrics"],
+  baseline: MyAllocationDashboardPayload["liveBaselineMetrics"] | null | undefined,
 ): ComputedMetrics {
+  // WR-05 (Phase 21 review): the type says liveBaselineMetrics is non-optional,
+  // but this component receives `payload` prop-drilled across a "use client"
+  // boundary + a runtime cast (see the `payload as ...` coercion below), so a
+  // stale client cache or a partial SSR payload could omit it or send a null
+  // equity array. Defensively default to an empty-but-valid ComputedMetrics so
+  // a missing baseline degrades (empty strip + delta) instead of throwing
+  // `Cannot read properties of undefined` and crashing the whole Scenario tab.
+  const eq = baseline?.equity ?? [];
   return {
-    n: baseline.equity.length,
-    twr: baseline.ytdTwr,
+    n: eq.length,
+    twr: baseline?.ytdTwr ?? null,
     cagr: null,
     volatility: null,
-    sharpe: baseline.sharpe,
+    sharpe: baseline?.sharpe ?? null,
     sortino: null,
-    max_drawdown: baseline.maxDd,
+    max_drawdown: baseline?.maxDd ?? null,
     max_dd_days: null,
     correlation_matrix: null,
-    avg_pairwise_correlation: baseline.avgRho,
+    avg_pairwise_correlation: baseline?.avgRho ?? null,
     equity_curve: [],
-    effective_start: baseline.equity[0]?.date ?? null,
-    effective_end: baseline.equity[baseline.equity.length - 1]?.date ?? null,
+    effective_start: eq[0]?.date ?? null,
+    effective_end: eq[eq.length - 1]?.date ?? null,
   };
 }
 
@@ -367,11 +378,8 @@ export function ScenarioComposer({
       return;
     }
     // NEW-C18-07: surface an explicit error when the user enters a value >1
-    // (e.g. via paste). The state layer (setWeightOverride → clampWeight) silently
-    // clamps to 1, so without this check a weight of 1.5 appears to commit at 100%
-    // AUM with no feedback. Showing the error makes the clamping visible and
-    // consistent with the non-finite path above. The value is still forwarded so
-    // the input snaps to the clamped value instead of freezing.
+    // (e.g. via paste). Showing the error makes the clamping visible and
+    // consistent with the non-finite path above.
     if (weight > 1) {
       setCommitError(
         "Weight clamped to 1 — the maximum allocation is 100% of portfolio AUM.",
@@ -384,7 +392,13 @@ export function ScenarioComposer({
       // "clamped" error message would persist until the next input event.
       setCommitError(null);
     }
-    scenario.setWeightOverride(scopeRef, weight);
+    // WR-03 (Phase 21 review): clamp authoritatively at THIS boundary — the
+    // boundary the "clamped to 1" message describes — instead of trusting the
+    // state layer's clampWeight to use the same bound. Mirrors handleLeverageChange,
+    // which clamps locally before dispatch. Keeps the message and the stored value
+    // in lockstep even if the downstream clamp bound ever changes.
+    const clampedWeight = Math.min(1, Math.max(0, weight));
+    scenario.setWeightOverride(scopeRef, clampedWeight);
   }
 
   // R4 — leverage input change handler. Mirrors handleWeightChange's fail-loud
@@ -570,12 +584,18 @@ export function ScenarioComposer({
       const toggle = scenario.draft.toggleByScopeRef[s.id];
       selected[s.id] =
         toggle === undefined ? (adapterOutput.state.selected[s.id] ?? true) : toggle;
+      // WR-04 (Phase 21 review): narrow with `typeof` instead of `Number.isFinite`
+      // + `as number` so the compiler keeps protecting these reads against future
+      // value-type drift (e.g. a `null` "cleared" sentinel) rather than the cast
+      // silently swallowing it. Behavior is identical: an absent/NaN override
+      // falls back; an explicit finite 0 is honored.
       const ov = scenario.draft.weightOverrides[s.id];
-      weights[s.id] = Number.isFinite(ov)
-        ? (ov as number)
-        : (adapterOutput.state.weights[s.id] ?? 0);
+      weights[s.id] =
+        typeof ov === "number" && Number.isFinite(ov)
+          ? ov
+          : (adapterOutput.state.weights[s.id] ?? 0);
       const L = leverageByRef[s.id];
-      leverage[s.id] = Number.isFinite(L) ? (L as number) : 1;
+      leverage[s.id] = typeof L === "number" && Number.isFinite(L) ? L : 1;
     }
     return { selected, weights, startDates: adapterOutput.state.startDates, leverage };
   }, [
@@ -607,6 +627,26 @@ export function ScenarioComposer({
   const scenarioMetrics = useMemo(
     () => computeScenario(deAliased.strategies, deAliased.state, dateMapCache),
     [deAliased, dateMapCache],
+  );
+
+  // CORR-01 — de-aliased axis labels for the CorrelationHeatmap, built like the
+  // `strategyNames` memo in ScenarioBuilder.tsx (the mount analog), BUT keyed on
+  // the de-aliased set (the sandbox keys on its raw marketplace `strategies`,
+  // which it never de-aliases). Keyed on the SAME de-aliased set computeScenario
+  // consumes, so the heatmap labels always match the matrix the engine produced
+  // (no stale alias surviving the collapse).
+  const strategyNames = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const s of deAliased.strategies) out[s.id] = s.name;
+    return out;
+  }, [deAliased]);
+
+  // IMPACT-01 — the shortest-history strategy name for the coverage caveat.
+  // Pure helper (unit-tested in scenario-history.test.ts); reads only the
+  // de-aliased set the composer already holds. null when the set is empty.
+  const coverageShortestName = useMemo(
+    () => shortestHistoryName(deAliased.strategies),
+    [deAliased],
   );
 
   // R4 — show the leverage caveat only when a non-default multiplier ACTUALLY
@@ -658,7 +698,7 @@ export function ScenarioComposer({
   // re-render (which produces a new `holdingsSummary` array reference)
   // busted the memo and re-ran the quadratic loop. Pre-build a
   // `Map<scopeRef, holding>` once per holdingsSummary so the lookup is
-  // O(1) — same pattern as `flaggedByRef` (L863) and the
+  // O(1) — same pattern as `flaggedByRef` (in `CompositionList`) and the
   // ScenarioCommitDrawer adapter Maps. The memo deps are unchanged.
   //
   // retro audit (red-team L9 c7): split into TWO memos so the O(N)
@@ -943,10 +983,40 @@ export function ScenarioComposer({
       data-widget-id="scenario-composer"
       className="mx-auto flex max-w-[1100px] flex-col"
     >
-      <h2 className="text-2xl font-semibold text-text-primary">Scenario</h2>
+      {/* IMPACT-01 — persistent PROJECTED honesty pill. Always rendered (NOT a
+          tooltip/hover), plain text, NO role="alert". Neutral-outline token per
+          UI-SPEC §4 — calm "label/metadata" signal, deliberately NOT bg-accent
+          (= verified/action), NOT warning-amber (= transient error), NOT the
+          filled <Badge> primitive. A projection is a hypothetical, not your
+          live book — the badge says so unconditionally. */}
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="text-2xl font-semibold text-text-primary">Scenario</h2>
+        <span
+          data-testid="scenario-projected-badge"
+          className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-[10px] uppercase tracking-wide font-semibold text-text-muted"
+        >
+          PROJECTED — hypothetical, not your live book
+        </span>
+      </div>
       <p className="mt-1 text-sm text-text-muted">
         Compose a draft portfolio and project KPI / equity / drawdown impact vs
         your live baseline.
+      </p>
+
+      {/* IMPACT-01 — coverage caveat. Names the live overlapping-day count
+          (scenarioMetrics.n) AND the shortest-history strategy via the
+          unit-tested shortestHistoryName helper — no invented numbers, no
+          re-implemented helper. Reuses the leverage-caveat typography. The
+          "Shortest history" half is omitted when the de-aliased set is empty
+          (helper → null), so the caveat never names a phantom strategy. */}
+      <p
+        data-testid="scenario-coverage-caveat"
+        className="mt-2 text-[11px] text-text-muted"
+      >
+        {methodologyLine(scenarioMetrics.n)}
+        {coverageShortestName !== null
+          ? ` Shortest history: ${coverageShortestName}.`
+          : ""}
       </p>
 
       {scenario.fingerprintMismatch && (
@@ -1051,6 +1121,31 @@ export function ScenarioComposer({
           )}
         </div>
       </div>
+
+      {/* CORR-01 / CORR-03 — pairwise correlation heatmap on the own-book
+          scenario surface. Mirrors the ScenarioBuilder "Pairwise correlation"
+          card. The matrix + single-sourced Avg |ρ| come straight from
+          scenarioMetrics (the same value KpiStrip reads), and the axis labels
+          are the de-aliased strategy names — the heatmap never computes its own
+          average and the <2-strategy / <10-day cases delegate to its honest
+          reason-routed empty state (never a 1×1 grid). */}
+      <Card className="mt-6">
+        <div className="mb-3">
+          <h2 className="text-sm font-semibold text-text-primary">
+            Pairwise correlation
+          </h2>
+          <p className="text-xs text-text-muted mt-0.5">
+            Live-computed from the scenario&apos;s daily returns. Teal =
+            diversifying, orange = concentrated.
+          </p>
+        </div>
+        <CorrelationHeatmap
+          correlationMatrix={scenarioMetrics.correlation_matrix}
+          strategyNames={strategyNames}
+          overlappingDays={scenarioMetrics.n}
+          avgAbsCorrelation={scenarioMetrics.avg_pairwise_correlation}
+        />
+      </Card>
 
       {flaggedHoldings.length > 0 && (
         <div className="mt-8 rounded-lg border border-border bg-surface p-4">

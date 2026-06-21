@@ -453,3 +453,86 @@ describe("AllocationsTabs — scenario panel v2 branching (Plan 06b Task 2)", ()
     expect(html).toContain('id="panel-scenario"');
   });
 });
+
+// ---------------------------------------------------------------------------
+// SURF-01 (Phase 21) — Scenario is a VISIBLE tab in the strip.
+//
+// Before Phase 21 the Scenario surface was routable-but-hidden (reachable
+// only via ?tab=scenario or the "+ Allocation" chip). SURF-01 adds "scenario"
+// to VISIBLE_TAB_KEYS so a visible tab button renders AND keyboard arrow-nav
+// reaches it. These tests pin the visible-button + keyboard-reach contract
+// and guard the deep-link from regressing.
+// ---------------------------------------------------------------------------
+describe("AllocationsTabs — Scenario visible tab (SURF-01)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    mockReplace.mockReset();
+    vi.mocked(useRouter).mockReturnValue({
+      replace: mockReplace,
+      refresh: mockRefresh,
+      push: mockPush,
+      back: vi.fn(),
+      forward: vi.fn(),
+      prefetch: vi.fn(),
+    } as unknown as ReturnType<typeof useRouter>);
+  });
+
+  it("renders a visible 'Scenario' tab button in the tablist", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    // The tab strip is the role="tablist" labelled "Allocation surfaces".
+    const tablist = screen.getByRole("tablist", {
+      name: /Allocation surfaces/i,
+    });
+    const scenarioTab = screen.getByRole("tab", { name: "Scenario" });
+    expect(scenarioTab).toBeInTheDocument();
+    expect(tablist).toContainElement(scenarioTab);
+    // It carries the wired ARIA contract (id + controls the existing panel).
+    expect(scenarioTab).toHaveAttribute("id", "tab-scenario");
+    expect(scenarioTab).toHaveAttribute("aria-controls", "panel-scenario");
+  });
+
+  it("clicking the Scenario tab routes to ?tab=scenario", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Scenario" }));
+    expect(mockReplace).toHaveBeenCalled();
+    const url = String(mockReplace.mock.calls[0][0]);
+    expect(url).toContain("tab=scenario");
+  });
+
+  it("keyboard arrow-nav reaches the Scenario tab (ArrowRight from Risk)", () => {
+    // Risk is the tab immediately before Scenario in VISIBLE_TAB_KEYS, so a
+    // single ArrowRight from Risk must land on Scenario. If "scenario" were
+    // missing from the keyboard-nav set this routes nowhere (no tab=scenario).
+    setSearchParams("tab=risk");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const riskTab = screen.getByRole("tab", { name: "Risk" });
+    fireEvent.keyDown(riskTab, { key: "ArrowRight" });
+    expect(mockReplace).toHaveBeenCalled();
+    const url = String(mockReplace.mock.calls[0][0]);
+    expect(url).toContain("tab=scenario");
+  });
+
+  it("End key jumps to the Scenario tab (now the last visible tab)", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const overviewTab = screen.getByRole("tab", { name: "Overview" });
+    fireEvent.keyDown(overviewTab, { key: "End" });
+    expect(mockReplace).toHaveBeenCalled();
+    const url = String(mockReplace.mock.calls[0][0]);
+    expect(url).toContain("tab=scenario");
+  });
+
+  it("?tab=scenario deep-link still resolves to the Scenario panel (no regression)", async () => {
+    setSearchParams("tab=scenario");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    // Deep-link resolves: the Scenario panel is visible (not hidden) and the
+    // composer body renders. The tab button reflects the selected state.
+    const scenarioTab = screen.getByRole("tab", { name: "Scenario" });
+    expect(scenarioTab).toHaveAttribute("aria-selected", "true");
+    expect(
+      await screen.findByTestId("scenario-composer-body"),
+    ).toBeInTheDocument();
+  });
+});

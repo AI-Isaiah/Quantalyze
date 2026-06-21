@@ -140,6 +140,10 @@ import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
+// IMPACT-02 — imported REAL (never mocked) so the R3 guard's positive control
+// renders a genuine PercentileRankBadge in isolation, proving the testid query
+// that asserts ABSENCE on the projection is non-vacuous.
+import { PercentileRankBadge } from "@/components/strategy/PercentileRankBadge";
 
 // --- localStorage mock (vi.stubGlobal — Phase 08 / 06a precedent) --------
 
@@ -2229,6 +2233,32 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     return calls[calls.length - 1][0].scenarioMetrics;
   };
 
+  // Phase 21 CORR-01/02/03 + IMPACT helper — mock the scenario-adapter to return
+  // TWO active de-aliased strategies sharing 12 overlapping days (above the
+  // <10-day correlation gate, below the 60-day distributional floor). Re-added
+  // after the #507 merge dropped it (the merge took #507's top-of-file region).
+  function mockTwoStrategies() {
+    const dates = Array.from({ length: 12 }, (_, i) =>
+      `2026-01-${String(i + 1).padStart(2, "0")}`,
+    );
+    const btc = dates.map((date, i) => ({
+      date,
+      value: [0.02, -0.01, 0.03, -0.02, 0.01][i % 5],
+    }));
+    const eth = dates.map((date, i) => ({
+      date,
+      value: [-0.01, 0.005, -0.02][i % 3],
+    }));
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [mkRealStrat(REF_BTC, btc), mkRealStrat(REF_ETH, eth)],
+      state: {
+        selected: { [REF_BTC]: true, [REF_ETH]: true },
+        weights: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
+        startDates: {},
+      },
+    });
+  }
+
   it("H-0133 — moving a weight slider MOVES the projection (reweighting changes scenarioMetrics, not just the commit diff)", () => {
     mockHoldingPlusStrategy();
     const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
@@ -2321,8 +2351,22 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // suppresses — is pinned in src/lib/factsheet/audit-c20.test.ts.)
     expect(document.getElementById("factsheet-allocator")).toBeNull();
     expect(document.getElementById("factsheet-signatures")).toBeNull();
-    expect(screen.queryByText(/percentile/i)).toBeNull();
+    // IMPACT-02 — the ABSENT assertion for the peer badge keys on a UNIQUE
+    // render-only data-testid, NOT queryByText(/percentile/i) (which matched
+    // NOTHING because "percentile" lives only in PercentileRankBadge's title=
+    // attribute — a vacuous pass) and NOT a visible label like "Sharpe" (which
+    // collides with the honest KPI strip / MetricCards on this surface). If a
+    // PercentileRankBadge is ever wired into the projection, this FAILS.
+    expect(screen.queryByTestId("percentile-rank-badge")).toBeNull();
     expect(screen.queryByText(/ranked against peers/i)).toBeNull();
+
+    // Positive control — prove the testid query is NON-VACUOUS. Render a real
+    // PercentileRankBadge in isolation and assert the SAME query FINDS it. If
+    // the testid were ever renamed/removed (silently breaking the ABSENT guard
+    // above into a vacuous pass), this control fails loudly.
+    cleanup();
+    render(<PercentileRankBadge metric="sharpe" percentile={95} />);
+    expect(screen.getByTestId("percentile-rank-badge")).toBeInTheDocument();
   });
 
   it("H-0133 regression — toggling a REAL strategy OFF removes it from the active set (the explicit-toggle arm, isolated from weight rescaling)", () => {
@@ -2421,5 +2465,151 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       Object.defineProperty(lev, "value", originalDescriptor);
     }
     expect(lev.value).toBe("1");
+  });
+
+  // -------------------------------------------------------------------------
+  // CORR-01 / CORR-03 — own-book composer mounts the CorrelationHeatmap with
+  // de-aliased labels and a single-sourced Avg |ρ| value. The real
+  // CorrelationHeatmap is NOT mocked here, so these assertions exercise the
+  // genuine presentational component fed by the composer's scenarioMetrics.
+  // -------------------------------------------------------------------------
+  it("CORR-01 — with ≥2 active de-aliased strategies (≥10 overlapping days) the composer renders the heatmap with de-aliased axis labels", () => {
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The de-aliased strategy names (REF_BTC / REF_ETH = the holding scopeRefs,
+    // which mkRealStrat sets as both id AND name) appear as heatmap axis labels.
+    // Each name renders twice (column header + row header), so use getAllByText.
+    expect(screen.getAllByText(REF_BTC).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText(REF_ETH).length).toBeGreaterThanOrEqual(2);
+    // The heatmap figure is present (the real component's role="figure" wrapper).
+    expect(
+      screen.getByRole("figure", { name: /Pairwise correlation heatmap/i }),
+    ).toBeInTheDocument();
+    // Sanity: two active legs → a real pairwise correlation exists (not the
+    // empty-state branch).
+    expect(typeof lastScenarioMetrics()?.avg_pairwise_correlation).toBe("number");
+  });
+
+  it("CORR-02 — with <2 active strategies the composer heatmap renders the honest empty state, never a 1×1 grid", () => {
+    // Default adapter mock returns ZERO strategies → scenarioMetrics.correlation_matrix
+    // is null → the heatmap delegates to its reason-routed empty state.
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.getByText("Not enough overlap to correlate"),
+    ).toBeInTheDocument();
+    // No degenerate grid: the figure (which only renders for ≥2 strategies) is absent.
+    expect(screen.queryByRole("figure", { name: /Pairwise correlation heatmap/i }))
+      .toBeNull();
+  });
+
+  it("CORR-03 — the heatmap caption Avg |ρ| value is single-sourced: it equals scenarioMetrics.avg_pairwise_correlation passed to KpiStrip (no second average)", () => {
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The exact value the composer fed to KpiStrip (the single source of truth).
+    const stripValue = lastScenarioMetrics()?.avg_pairwise_correlation;
+    expect(typeof stripValue).toBe("number");
+    const expected = (stripValue as number).toFixed(2);
+    // The heatmap caption renders that SAME value (2dp), not a self-computed one.
+    // "Avg |ρ|" text only exists in the heatmap caption here (KpiStrip is mocked).
+    const caption = screen.getByText("Avg |ρ|").closest("div");
+    expect(caption?.textContent?.replace(/\s+/g, " ")).toContain(
+      `Avg |ρ| ${expected}`,
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // IMPACT-01 — persistent PROJECTED honesty badge + coverage caveat. The
+  // badge is always visible (not a tooltip) and uses the neutral-outline token,
+  // NOT bg-accent / warning / role="alert" / <Badge>. The caveat names the live
+  // N + the shortest-history strategy via shortestHistoryName.
+  // -------------------------------------------------------------------------
+  it("IMPACT-01 — the composer renders the PROJECTED badge unconditionally (even with no leverage applied)", () => {
+    // No mockTwoStrategies → default adapter (no strategies, no leverage).
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Leverage caveat is absent (nothing levered) — proves the PROJECTED badge
+    // is NOT gated on leverage.
+    expect(screen.queryByTestId("scenario-leverage-caveat")).toBeNull();
+    const badge = screen.getByTestId("scenario-projected-badge");
+    expect(badge).toBeInTheDocument();
+    expect(badge.textContent).toBe(
+      "PROJECTED — hypothetical, not your live book",
+    );
+  });
+
+  it("IMPACT-01 — the PROJECTED badge is a neutral-outline pill (border-text-muted/text-text-muted), NOT bg-accent / warning / role=alert / <Badge>", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const badge = screen.getByTestId("scenario-projected-badge");
+    // Neutral outline tokens present.
+    expect(badge.className).toContain("border-text-muted");
+    expect(badge.className).toContain("text-text-muted");
+    // Wrong signals absent: no accent fill, no warning amber, no alert role.
+    expect(badge.className).not.toContain("bg-accent");
+    expect(badge.className).not.toMatch(/warning|amber/);
+    expect(badge.getAttribute("role")).not.toBe("alert");
+    // It is a plain <span> pill, not the filled <Badge> primitive (which
+    // carries a fill + a distinct class signature).
+    expect(badge.tagName.toLowerCase()).toBe("span");
+  });
+
+  it("IMPACT-01 — the coverage caveat names the live N overlapping days AND the shortest-history strategy name", () => {
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const caveat = screen.getByTestId("scenario-coverage-caveat");
+    const n = lastScenarioMetrics()?.n;
+    expect(typeof n).toBe("number");
+    const text = caveat.textContent?.replace(/\s+/g, " ").trim() ?? "";
+    // HONEST-01 — the canonical methodology line names the ACTUAL method
+    // ("Historical realized"), the live N overlapping days, and the honest
+    // horizon ("not a forecast"), middot-separated, folded into the one caveat.
+    expect(text).toContain("Historical realized");
+    expect(text).toContain("not a forecast");
+    // Live N (not a hardcoded number) from scenarioMetrics.n, in the canonical
+    // middot-separated form.
+    expect(text).toContain(`Historical realized · ${n} overlapping days · not a forecast`);
+    // The shortest-history strategy name (REF_BTC/REF_ETH share window length
+    // 12, so first-by-input-order REF_BTC wins the deterministic tiebreak).
+    expect(text).toContain(`Shortest history: ${REF_BTC}.`);
   });
 });

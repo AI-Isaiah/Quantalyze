@@ -9,12 +9,12 @@ import type { ComputedMetrics } from "@/lib/scenario";
  * Sister suite to `KpiStrip.warmup.test.tsx` (Phase 07 invariants), which
  * is preserved verbatim and must continue passing in parallel. This file
  * locks the new designer shape:
- *   1. 5 cells in order: AUM / YTD TWR / Sharpe / Max DD 12m / Avg ρ
+ *   1. 5 cells in order: AUM / YTD TWR / Sharpe / Max DD 12m / Avg |ρ|
  *   2. Numeric formatting via formatPercent / formatNumber / formatCurrency
- *   3. R4 honest Avg ρ null-path: "Requires per-holding correlation data
+ *   3. R4 honest Avg |ρ| null-path: "Requires per-holding correlation data
  *      (pending)" when analytics.avg_correlation is null
  *   4. Stale path beats pending-copy on every cell
- *   5. Warmup precedence beats pending-copy on Avg ρ
+ *   5. Warmup precedence beats pending-copy on Avg |ρ|
  *
  * Fixture builder mirrors the warmup test for consistency.
  */
@@ -49,7 +49,7 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
       />,
     );
 
-    const labels = ["AUM", "YTD TWR", "Sharpe", "Max DD 12m", "Avg ρ"];
+    const labels = ["AUM", "YTD TWR", "Sharpe", "Max DD 12m", "Avg |ρ|"];
     const group = screen.getByRole("group", { name: "Portfolio KPIs" });
     // Each cell renders its label as the first child of the cell wrapper;
     // we assert order by mapping over the rendered label nodes.
@@ -106,7 +106,7 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
     expect(screen.queryByText("12-month risk-adjusted return")).toBeNull();
   });
 
-  it("R4 honest copy — Avg ρ null path: renders '—' AND 'Requires per-holding correlation data (pending)'", () => {
+  it("R4 honest copy — Avg |ρ| null path: renders '—' AND 'Requires per-holding correlation data (pending)'", () => {
     render(
       <KpiStrip
         analytics={{
@@ -121,7 +121,7 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
         snapshotCount={30}
       />,
     );
-    // Em-dash present somewhere (the Avg ρ value cell).
+    // Em-dash present somewhere (the Avg |ρ| value cell).
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
     // The honest pending-copy is the user-visible signal that the field
     // is not yet wired; assert it explicitly.
@@ -134,7 +134,7 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
     ).toBeNull();
   });
 
-  it("Avg ρ loaded path: 0.42 renders the loaded-data sub-copy, NOT the pending copy", () => {
+  it("Avg |ρ| loaded path: 0.42 renders the loaded-data sub-copy, NOT the pending copy", () => {
     render(
       <KpiStrip
         analytics={{
@@ -180,13 +180,13 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
     expect(
       screen.getAllByText("Last sync stale — awaiting next update").length,
     ).toBe(5);
-    // Stale precedence beats the Avg ρ pending copy.
+    // Stale precedence beats the Avg |ρ| pending copy.
     expect(
       screen.queryByText("Requires per-holding correlation data (pending)"),
     ).toBeNull();
   });
 
-  it("Venue-specific warmup precedence beats Avg ρ pending copy", () => {
+  it("Venue-specific warmup precedence beats Avg |ρ| pending copy", () => {
     render(
       <KpiStrip
         analytics={null}
@@ -200,7 +200,7 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
       />,
     );
     // Venue-specific copy renders on null-value cells (YTD, Sharpe,
-    // Max DD, Avg ρ — AUM is exempt per Phase 07 / 07-03 f9).
+    // Max DD, Avg |ρ| — AUM is exempt per Phase 07 / 07-03 f9).
     expect(
       screen.getAllByText("Only 3 months of history available on OKX")
         .length,
@@ -211,7 +211,7 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
     ).toBeNull();
   });
 
-  it("Generic warmup precedence (minHistoryDepthMonths > 3): default copy beats Avg ρ pending copy", () => {
+  it("Generic warmup precedence (minHistoryDepthMonths > 3): default copy beats Avg |ρ| pending copy", () => {
     render(
       <KpiStrip
         analytics={null}
@@ -235,7 +235,7 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
 
   // ---------------------------------------------------------------------------
   // M-0085 — non-finite (NaN / Infinity) inputs to the per-cell formatters.
-  // The Sharpe + Avg ρ cells route through formatNumber, which guards with
+  // The Sharpe + Avg |ρ| cells route through formatNumber, which guards with
   // `!Number.isFinite` → renders "—" (safe). The YTD TWR + Max DD cells route
   // through formatPercent, and AUM through formatCurrency — NEITHER guards
   // non-finite, so a NaN leaks as "NaN%" / "$NaN" into the allocator's KPI
@@ -243,7 +243,7 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
   // the leak is a production bug in the shared formatters (src/lib/utils.ts),
   // surfaced here for a follow-up fix.
   // ---------------------------------------------------------------------------
-  it("M-0085: Sharpe + Avg ρ degrade to em-dash for NaN/Infinity (formatNumber is finite-guarded)", () => {
+  it("M-0085: Sharpe + Avg |ρ| degrade to em-dash for NaN/Infinity (formatNumber is finite-guarded)", () => {
     const { rerender } = render(
       <KpiStrip
         analytics={{ sharpe: NaN, avg_correlation: NaN }}

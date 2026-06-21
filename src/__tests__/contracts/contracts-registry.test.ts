@@ -81,6 +81,7 @@ const CONTRACT_GUARDS: Guard[] = [
   { path: "src/__tests__/widget-state-no-duplicate-empty.test.ts", batch: "UI", invariant: "EmptyState reuse (no duplicate copy) grep sweep" },
   { path: "src/app/factsheet/[id]/v2/factsheet-context.codec.test.ts", batch: "B7c", invariant: "factsheet view-state codec byte-compat + poison-strip" },
   { path: "src/app/(dashboard)/allocations/context/TweaksContext.codec.test.ts", batch: "B7", invariant: "tweaks codec byte-compat + poison-strip" },
+  { path: "src/lib/sample-floor.test.ts", batch: "Phase22", invariant: "SAMPLE_FLOOR_OVERLAPPING_DAYS=60 + gate branch behavior (HONEST-02 single source)" },
   // Check scripts (run as CI gates, not vitest):
   { path: "scripts/check-admin-route-manifest.ts", batch: "C-0153", invariant: "ADMIN_ROUTE_MANIFEST ↔ admin route files completeness (lint gate)" },
   { path: "scripts/check-gdpr-export-coverage.ts", batch: "GDPR", invariant: "all user-owned tables declared in the export manifest (CI gate)" },

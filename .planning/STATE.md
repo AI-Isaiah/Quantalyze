@@ -1,35 +1,68 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0.0
-milestone_name: API-Key Rewrite
-status: Awaiting next milestone
-stopped_at: context exhaustion at 76% (2026-05-07)
-last_updated: "2026-06-20T14:33:49.938Z"
-last_activity: 2026-06-20 — Milestone v1.0.0 completed and archived
+milestone: v1.1.0
+milestone_name: Scenario Analysis
+status: ready_to_plan
+stopped_at: Phase 22 complete (2/2) — ready to discuss Phase 23
+last_updated: 2026-06-21T16:58:07.701Z
+last_activity: 2026-06-21
 progress:
-  total_phases: 1
-  completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
-  percent: 100
+  total_phases: 8
+  completed_phases: 2
+  total_plans: 6
+  completed_plans: 54
+  percent: 25
 ---
 
 # Project State
 
 ## Project Reference
 
-See: `.planning/PROJECT.md` (updated 2026-04-30 at v1.0.0 milestone start)
+See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 
-**Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked.
-**Current focus:** Phase 19.1 — csv-analytics-factsheet-pipeline-prior-work-on-feat-csv-anal
-**Last milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 (shipped 2026-04-29). v0.17.1.x cleanup landed at v0.17.1.31 on 2026-04-30, all 5 carryover items closed.
+**Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
+**Current focus:** Phase 23 — scenario persistence & compare
+**Last milestone:** v1.0.0 API-Key Rewrite (Phases 15–20, shipped 2026-06-20).
 
 ## Current Position
 
-Phase: Milestone v1.0.0 complete
-Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-06-20 — Milestone v1.0.0 completed and archived
+Phase: 23
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-06-21
+
+Progress: [██████████] 100%
+
+## Milestone Roadmap (v1.1.0 Scenario Analysis)
+
+Phases continue from v1.0.0's Phase 20 (no reset). Build order respects the
+research dependency chain: foundation/honesty scaffolding first, persistence as
+the spine, sharing/benchmark read from it, and the heavy/high-false-confidence
+trio (stress, monte-carlo, optimizer) lands last on top of the honesty
+scaffolding. See `.planning/ROADMAP.md` for full phase detail + success criteria.
+
+| Phase | Goal (one line) | Requirements | Depends on |
+|-------|-----------------|--------------|------------|
+| 21. Surfacing, Correlation & Honest Projection | Reachable scenario surfaces + correlation heatmap + "PROJECTED — hypothetical" framing | SURF-01..03, CORR-01..04, IMPACT-01..02 (9) | — (first) |
+| 22. Methodology-Honesty Scaffolding | Per-stat method/N/horizon disclosure + shared minimum-sample gate (reused by 26/27) | HONEST-01..02 (2) | 21 |
+| 23. Scenario Persistence & Compare | Save / reopen / list / rename / delete + compare 2+ side-by-side (the spine) | PERSIST-01..04 (4) | 21 |
+| 24. Benchmark Comparison | Benchmark overlay + tracking error / IR / alpha-beta on the aligned window | BENCH-01 (1) | 23 |
+| 25. Read-Only Sharing | Revocable share link with no live-book / cross-tenant leak (RLS gate) | SHARE-01..03 (3) | 23 |
+| 26. Stress Testing & VaR | β-propagated parameterized shock + disclosed VaR/CVaR | STRESS-01..02 (2) | 22 |
+| 27. Forward Uncertainty (Monte-Carlo Bands) | Joint block-bootstrap forward bands, honest to N, floor-gated | SIM-01 (1) | 22 |
+| 28. Weight Optimizer | Python min-vol/max-Sharpe solver, write-to-draft-only, TS↔Python parity | OPT-01..02 (2) | 22 |
+
+**Coverage:** 23/23 v1 requirements mapped to exactly one phase (no orphans, no duplicates).
+
+**Key risk gates carried from research (encode at plan-phase time, not requirements):**
+
+- Phase 22's sample-floor gate is the single source of truth reused by 26 + 27 — pin it once.
+- Phase 25 RLS leak is the highest-cost silent failure: snapshot don't reference; token-scoped SECURITY DEFINER read; assert on cross-tenant *content* (RLS fails silently). Reuse PR #477 `security_invoker` + REVOKE PUBLIC pattern.
+- Phase 28 optimizer is the one new Python endpoint (Railway deploy + TS↔Python golden-fixture parity); highest false-confidence risk (overfit) → min-vol default, Ledoit-Wolf shrinkage, write-to-draft-only, deterministic.
+- `schema_version` must exist from the FIRST `scenarios` migration (Phase 23) so 26/27/28 can add fields.
+
+---
+## Accumulated Context — v1.0.0 (carried forward as project memory)
 
 ## Phase 15 Closure (2026-05-28)
 
@@ -170,6 +203,20 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - [Phase ?]: Phase 20: EA doc comments avoid forbidden-token names verbatim so the 20-03 raw-source read-only CI grep (which scans comments) stays clean — no comment-stripping needed
 - [Phase ?]: Phase 20: T14/T15 (demo-account numeric reconcile + restart-state) are HUMAN-PENDING — they have no CI harness and gate the first live KPI, not phase CI completion
 - [Phase ?]: Phase 20 T16: MT5 EA read-only invariant CI-enforced via pure-grep denylist over tools/mt5/**/*.{mq5,mqh} (low-level + CTrade method surface); comment-evasion accepted residual, T14 reconcile is runtime backstop.
+- [Phase ?]: Phase 21-01: surfaced Scenario tab via single VISIBLE_TAB_KEYS edit (already a wired TabKey; render loop + keyboard nav both derive from it)
+- [Phase ?]: Phase 21-01: Strategy Sandbox sidebar link gated on isAllocator ONLY (not showsAllocatorWorkspace); admin-only sees nothing; server gate at scenarios/page.tsx untouched
+- [Phase ?]: Phase 21-02: CORR-04 satisfied by show-all heatmap removal of pickTopTenByAvgCorr (not a top-10 disclosure); aria-label names the true strategy count
+- [Phase ?]: Phase 21-02: shortest history = fewest daily_returns points (window length); first-seen tiebreak; empty->null, single->lone name
+- [Phase ?]: Phase 21-02: ids.length<2 is the load-bearing CORR-02 gate (engine returns a non-null 1x1 matrix for 1 strategy); empty-state routing checks overlappingDays<10 first
+- [Phase ?]: Phase 21-03: own-book composer mounts CorrelationHeatmap with de-aliased labels; Avg |ρ| single-sourced from scenarioMetrics.avg_pairwise_correlation
+- [Phase ?]: Phase 21-03: IMPACT-02 no-peer-ranking guard keys on a render-only data-testid (not queryByText, which only matched a title= attr) + a positive-control isolation render; mutation-verified falsifiable both directions
+- [Phase ?]: Phase 21-04: example-universe Sandbox brought to honesty parity — new header row with Example universe (SURF-03) + persistent PROJECTED (IMPACT-01) neutral-outline pills, coverage caveat (metrics.n + shortestHistoryName(strategies)), Avg |ρ| relabel; parent PageHeader + frozen engine untouched
+- [Phase ?]: Phase 21-04: ScenarioBuilder takes the already-collapsed strategies prop (no internal de-alias) so shortestHistoryName(strategies) is the faithful caveat call; Avg |ρ| appears twice by design (MetricCard label + single-sourced heatmap caption), tests assert getAllByText length >= 1
+- [Phase ?]: Phase 21-04: IMPACT-02 Sandbox neuter guard keys on the render-only data-testid percentile-rank-badge (added in 21-03) + isolated positive control; mutation-verified falsifiable (wiring the badge into ScenarioBuilder made the ABSENT assertion fail), reverted
+- [Phase ?]: Phase 22-01: HONEST-01 method label rendered VERBATIM 'Historical realized' (realized stats over the overlap window); 'bootstrap' NOT claimed (that is Phase 27)
+- [Phase ?]: Phase 22-01: methodology line folded into the one existing caveat <p> (no second line, no token/DOM change); N inline in DM Sans (not Geist Mono), matching the shipped Phase-21 line; sandbox anchored ^Projected regex updated same-task
+- [Phase ?]: Phase 22-02: HONEST-02 single source = src/lib/sample-floor.ts (SAMPLE_FLOOR_OVERLAPPING_DAYS=60, named distinctively NOT MIN_* to dodge min-history grep collision); evaluateSampleFloor guard-first (null/NaN/Infinity/negative -> no-usable-n FIRST never passes), then below-floor, else ok; per-call floor override honored
+- [Phase ?]: Phase 22-02: SampleFloorEmptyState COPIES the CorrelationHeatmap shell verbatim (does not import/modify it; different statistic-specific threshold, shared visual shell); imports copy builders+heading from @/lib/sample-floor; not role=alert, no red/warning; 0/1-strategy is a call-site strategyCount prop (gate cannot see count) taking precedence; pinned in CONTRACT_GUARDS + REGISTRY.md, EXPECTED_RULES untouched; NOT wired into live composer/sandbox projection (deferred to 26/27)
 
 ## Accumulated Context
 
@@ -191,8 +238,8 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-06-14T18:04:29.107Z
-Stopped at: context exhaustion at 76% (2026-05-07)
+Last session: 2026-06-21T16:44:32.155Z
+Stopped at: Completed 22-01-PLAN.md
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
 

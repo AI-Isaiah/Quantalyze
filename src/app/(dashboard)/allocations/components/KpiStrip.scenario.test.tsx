@@ -117,6 +117,52 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
     expect(sharpeDelta!.className).toMatch(/text-positive/);
   });
 
+  it("WR-02: mode='scenario' AUM cell discloses it is the projected enabled-holdings sum", () => {
+    render(
+      <KpiStrip
+        analytics={{
+          ytd_twr: 0.15,
+          sharpe: 1.2,
+          max_drawdown_12m: -0.08,
+          avg_correlation: 0.42,
+        }}
+        metrics={LIVE_METRICS}
+        timeframe="ALL"
+        aum={650_000}
+        snapshotCount={30}
+        mode="scenario"
+        scenarioMetrics={SCENARIO_IMPROVEMENT}
+        liveMetrics={LIVE_METRICS}
+      />,
+    );
+    // The AUM cell in scenario mode is the toggled-on projected sum, not live
+    // AUM, and has no delta pill (metricKey: null) — it must disclose it is
+    // projected so the shrunk number isn't read as the allocator's real book.
+    expect(
+      screen.getByText("Projected — sum of enabled holdings"),
+    ).toBeInTheDocument();
+  });
+
+  it("WR-02: mode='live' AUM cell does NOT show the projected disclosure", () => {
+    render(
+      <KpiStrip
+        analytics={{
+          ytd_twr: 0.15,
+          sharpe: 1.2,
+          max_drawdown_12m: -0.08,
+          avg_correlation: 0.42,
+        }}
+        metrics={LIVE_METRICS}
+        timeframe="ALL"
+        aum={1_000_000}
+        snapshotCount={30}
+      />,
+    );
+    expect(
+      screen.queryByText("Projected — sum of enabled holdings"),
+    ).toBeNull();
+  });
+
   it("T3: mode='scenario' Max DD improvement → '-4.00%' primary + positive delta pill (down-good direction)", () => {
     const { container } = render(
       <KpiStrip
