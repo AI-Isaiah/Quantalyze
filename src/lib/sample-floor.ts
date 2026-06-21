@@ -130,3 +130,32 @@ export function noUsableSampleBody(): string {
 export function fewStrategiesBody(floor: number): string {
   return `Add at least 2 active strategies with ${floor}+ overlapping days for an honest estimate.`;
 }
+
+/**
+ * Route a below-floor verdict to its body copy — the single owner of the
+ * reason precedence (matches the gate's "never fabricate a number" contract):
+ *   1. 0/1-strategy (caller count < 2)  → few-strategies body (no overlap N to name)
+ *   2. no-usable-n (null/NaN/non-finite) → no-number body
+ *   3. below-floor (finite n < floor)    → names the actual N + the floor
+ *
+ * Takes a non-passing verdict; an `"ok"` verdict is a CALLER bug (the gate said
+ * the sample is adequate, so there is no honest body to render). We fall back
+ * to the no-number body rather than fabricate a "{n} — fewer than {floor}" lie;
+ * the render layer (`SampleFloorEmptyState`) drops the card entirely on `ok`.
+ */
+export function sampleFloorBody(
+  verdict: SampleFloorVerdict,
+  {
+    feature = "distributional",
+    strategyCount,
+  }: { feature?: string; strategyCount?: number } = {},
+): string {
+  const { n, floor, reason } = verdict;
+  if (strategyCount !== undefined && strategyCount < 2) {
+    return fewStrategiesBody(floor);
+  }
+  if (reason === "below-floor") {
+    return belowFloorBody(n, floor, feature);
+  }
+  return noUsableSampleBody();
+}

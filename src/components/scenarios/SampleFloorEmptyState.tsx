@@ -1,10 +1,9 @@
 "use client";
 
+import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import {
   SAMPLE_FLOOR_HEADING,
-  belowFloorBody,
-  noUsableSampleBody,
-  fewStrategiesBody,
+  sampleFloorBody,
   type SampleFloorVerdict,
 } from "@/lib/sample-floor";
 
@@ -27,15 +26,11 @@ interface SampleFloorEmptyStateProps {
 /**
  * HONEST-02 — the shared below-floor honest empty state.
  *
- * Reuses the Phase-21 `CorrelationHeatmap` empty-state shell VERBATIM (the
- * pinned tokens; UI-SPEC §2) — it does NOT import or modify `CorrelationHeatmap`
- * (different statistic-specific threshold, same visual shell). The body copy +
- * heading come from `@/lib/sample-floor` (never re-authored here).
- *
- * Reason precedence (matches the gate's "never fabricate a number" contract):
- *   1. 0/1-strategy (caller count < 2)  → few-strategies body (no overlap N to name)
- *   2. no-usable-n (null/NaN/non-finite) → no-number body
- *   3. below-floor (finite n < floor)    → names the actual N + the floor
+ * Renders the shared `EmptyStateCard` shell (the pinned tokens; UI-SPEC §2),
+ * the same primitive `CorrelationHeatmap` renders (different statistic-specific
+ * threshold, same visual shell). The body copy + heading come from
+ * `@/lib/sample-floor` (never re-authored here), and `sampleFloorBody` owns the
+ * reason precedence so this layer only decides whether to render at all.
  *
  * A below-floor state is honest absence, NOT an error — not an alert role, no
  * red/warning color (UI-SPEC Color).
@@ -48,27 +43,16 @@ export function SampleFloorEmptyState({
   feature = "distributional",
   strategyCount,
 }: SampleFloorEmptyStateProps) {
-  const { n, floor, reason } = verdict;
-
   // WR-02 (Phase 22 review): this component's precondition is "the gate decided
   // below-floor". If a (future P26/27) call site mis-wires it with a PASSING
   // verdict, render nothing rather than a self-contradictory "{n} days — fewer
   // than the {floor} needed" card for an n >= floor verdict (fail loud, not lie).
-  if (reason === "ok") return null;
-
-  let body: string;
-  if (strategyCount !== undefined && strategyCount < 2) {
-    body = fewStrategiesBody(floor);
-  } else if (reason === "no-usable-n" || n == null) {
-    body = noUsableSampleBody();
-  } else {
-    body = belowFloorBody(n, floor, feature);
-  }
+  if (verdict.reason === "ok") return null;
 
   return (
-    <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center text-text-muted text-sm">
-      <div className="font-semibold text-text-secondary">{SAMPLE_FLOOR_HEADING}</div>
-      <div className="mt-1 text-[11px]">{body}</div>
-    </div>
+    <EmptyStateCard
+      heading={SAMPLE_FLOOR_HEADING}
+      body={sampleFloorBody(verdict, { feature, strategyCount })}
+    />
   );
 }

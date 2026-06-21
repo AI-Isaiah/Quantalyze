@@ -28,6 +28,21 @@
 import type { StrategyForBuilder } from "@/lib/scenario";
 
 /**
+ * Canonical coverage-caveat methodology line (IMPACT-01, HONEST-01).
+ *
+ * Single source of the literal both projection surfaces render — the composer
+ * (own-book) and the Strategy Sandbox (example universe). It leads with the
+ * ACTUAL method ("Historical realized"), names the live overlapping-day count,
+ * and the honest horizon ("not a forecast"). Each call site appends its own
+ * "Shortest history: {name}." clause (from `shortestHistoryName`) where the
+ * de-aliased set is in scope; this builder owns only the invariant prefix so
+ * the two surfaces cannot drift.
+ */
+export function methodologyLine(n: number): string {
+  return `Historical realized · ${n} overlapping days · not a forecast.`;
+}
+
+/**
  * Return the NAME of the strategy with the shortest return history (fewest
  * `daily_returns` points) in the de-aliased strategy set.
  *

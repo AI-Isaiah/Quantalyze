@@ -2,6 +2,8 @@
 
 import { Fragment } from "react";
 
+import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
+
 interface CorrelationHeatmapProps {
   correlationMatrix: Record<string, Record<string, number>> | null;
   strategyNames: Record<string, string>;
@@ -216,12 +218,7 @@ export function CorrelationHeatmap({
       // caller passes no overlappingDays) — surface-neutral combined copy.
       body = EMPTY_BODY_COMBINED;
     }
-    return (
-      <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center text-text-muted text-sm">
-        <div className="font-semibold text-text-secondary">{EMPTY_HEADING}</div>
-        <div className="mt-1 text-[11px]">{body}</div>
-      </div>
-    );
+    return <EmptyStateCard heading={EMPTY_HEADING} body={body} />;
   }
 
   const n = ids.length;

@@ -32,7 +32,7 @@
 import { useMemo, useState } from "react";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
 import { Card } from "@/components/ui/Card";
-import { shortestHistoryName } from "@/lib/scenario-history";
+import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import {
   buildDateMapCache,
@@ -300,7 +300,7 @@ export function ScenarioBuilder({ strategies }: Props) {
           data-testid="scenario-coverage-caveat"
           className="mt-2 text-[11px] text-text-muted"
         >
-          Historical realized · {metrics.n} overlapping days · not a forecast.
+          {methodologyLine(metrics.n)}
           {shortestName ? ` Shortest history: ${shortestName}.` : ""}
         </p>
       </div>

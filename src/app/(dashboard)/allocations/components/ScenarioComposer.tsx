@@ -63,7 +63,7 @@ import {
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
 import { Card } from "@/components/ui/Card";
-import { shortestHistoryName } from "@/lib/scenario-history";
+import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { useScenarioState } from "../hooks/useScenarioState";
 import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 import {
@@ -610,10 +610,12 @@ export function ScenarioComposer({
     [deAliased, dateMapCache],
   );
 
-  // CORR-01 — de-aliased axis labels for the CorrelationHeatmap, built exactly
-  // like ScenarioBuilder.tsx:206-210 (the mount analog). Keyed on the SAME
-  // de-aliased set computeScenario consumes, so the heatmap labels always match
-  // the matrix the engine produced (no stale alias surviving the collapse).
+  // CORR-01 — de-aliased axis labels for the CorrelationHeatmap, built like the
+  // `strategyNames` memo in ScenarioBuilder.tsx (the mount analog), BUT keyed on
+  // the de-aliased set (the sandbox keys on its raw marketplace `strategies`,
+  // which it never de-aliases). Keyed on the SAME de-aliased set computeScenario
+  // consumes, so the heatmap labels always match the matrix the engine produced
+  // (no stale alias surviving the collapse).
   const strategyNames = useMemo(() => {
     const out: Record<string, string> = {};
     for (const s of deAliased.strategies) out[s.id] = s.name;
@@ -677,7 +679,7 @@ export function ScenarioComposer({
   // re-render (which produces a new `holdingsSummary` array reference)
   // busted the memo and re-ran the quadratic loop. Pre-build a
   // `Map<scopeRef, holding>` once per holdingsSummary so the lookup is
-  // O(1) — same pattern as `flaggedByRef` (L863) and the
+  // O(1) — same pattern as `flaggedByRef` (in `CompositionList`) and the
   // ScenarioCommitDrawer adapter Maps. The memo deps are unchanged.
   //
   // retro audit (red-team L9 c7): split into TWO memos so the O(N)
@@ -1060,8 +1062,7 @@ export function ScenarioComposer({
         data-testid="scenario-coverage-caveat"
         className="mt-2 text-[11px] text-text-muted"
       >
-        Historical realized · {scenarioMetrics.n} overlapping days · not a
-        forecast.
+        {methodologyLine(scenarioMetrics.n)}
         {coverageShortestName !== null
           ? ` Shortest history: ${coverageShortestName}.`
           : ""}
