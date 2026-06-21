@@ -43,8 +43,18 @@ export const SCENARIO_STORAGE_KEY_BASE = "allocations.scenario_v0_15";
 /** Bumped when the persisted ScenarioDraft shape changes incompatibly. Loads with
  *  a different schema_version are dropped on read (return null) so the hook
  *  re-initializes from current live holdings — the reset-on-mismatch idiom
- *  shared by the versioned-storage codecs. */
-export const SCENARIO_SCHEMA_VERSION = 1;
+ *  shared by the versioned-storage codecs.
+ *
+ *  v1 → v2 (read-only-tokens model): live holdings are now FIXED context — the UI
+ *  no longer renders a per-holding toggle or weight/leverage input. A v1 draft
+ *  could carry a holding toggled OFF or manually reweighted; under the new UI that
+ *  state is unreachable AND silently mis-drives the projection / scenarioAum /
+ *  diffCount (a holding excluded from the curve with no affordance to re-enable,
+ *  and a diffCount that enables Commit while handleCommit produces nothing). The
+ *  bump drops those legacy drafts on load so every draft starts from the current
+ *  holdings with all holdings included — the clean root fix, not a per-consumer
+ *  guard against legacy toggle state. */
+export const SCENARIO_SCHEMA_VERSION = 2;
 
 /** N1 — eliminates cross-tenant collision at the persistence layer. Returns
  *  "allocations.scenario_v0_15.{allocatorId}". */
