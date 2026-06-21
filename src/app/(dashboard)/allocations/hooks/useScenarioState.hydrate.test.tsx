@@ -25,6 +25,7 @@ import { useScenarioState } from "./useScenarioState";
 import {
   scenarioStorageKey,
   computeHoldingsFingerprint,
+  defaultDraftFromHoldings,
   SCENARIO_SCHEMA_VERSION,
   type ScenarioDraft,
   type HoldingForDefault,
@@ -141,6 +142,21 @@ describe("useScenarioState — hydrateFromSaved reopen seam (Phase 23 Plan 04)",
     // fingerprint) into `value`, so the existing storedMismatch derivation
     // fires with no special-casing.
     expect(result.current.fingerprintMismatch).toBe(true);
+
+    // HONESTY CONTRACT (FIX 9): the WORKING draft must be the DEFAULT (current
+    // holdings, all-on) — NOT the mismatched saved draft's toggles. The saved
+    // draft was built for a DIFFERENT book; exposing its toggles would silently
+    // edit a draft the user never composed for THIS book.
+    const def = defaultDraftFromHoldings(HOLDINGS_2);
+    expect(result.current.draft.toggleByScopeRef).toEqual(def.toggleByScopeRef);
+    // Concretely: the default has BOTH holdings on; the mismatched saved draft
+    // has only BTC (no ETH key at all). The exposed draft must show the default.
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(true);
+    expect(result.current.draft.toggleByScopeRef[REF_ETH]).toBe(true);
+    // And it must NOT be the stale saved draft (which omits ETH entirely).
+    expect(result.current.draft.toggleByScopeRef).not.toEqual(
+      mismatchedSavedDraft().toggleByScopeRef,
+    );
   });
 
   it("T_HYD3 hydrate routes through setValue, NOT removeStored — it does NOT destructively wipe the allocator-scoped localStorage key", () => {
