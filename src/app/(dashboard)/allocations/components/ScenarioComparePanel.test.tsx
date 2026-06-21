@@ -300,4 +300,51 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
     expect(inputs.symbolByHoldingId).toBeInstanceOf(Map);
     expect(inputs.symbolByHoldingId.size).toBe(1);
   });
+
+  // -------------------------------------------------------------------------
+  // T_CP7 — A THROWING compute for one column does NOT crash the tab: that
+  //         column falls back to a NULL-metrics ("—") column and the others
+  //         still render. The panel is mounted outside an error boundary, so an
+  //         unguarded synchronous throw in render would blank the whole tab.
+  // -------------------------------------------------------------------------
+  it("T_CP7 a throwing column falls back to an em-dash column; the panel still renders", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockComputeMetricsForDraft
+      .mockReturnValueOnce(metrics({ twr: 0.2, sharpe: 1.0 })) // healthy column
+      .mockImplementationOnce(() => {
+        throw new Error("engine boom");
+      }); // throwing column
+
+    // Rendering must NOT throw (no crash propagated out of the panel).
+    expect(() =>
+      render(
+        <ScenarioComparePanel
+          selectedRows={[
+            row("a", "Alpha", v2Draft("fp-a")),
+            row("b", "Boom", v2Draft("fp-b")),
+          ]}
+          includeLiveBook={false}
+          payload={PAYLOAD}
+        />,
+      ),
+    ).not.toThrow();
+
+    // The healthy column still renders its real value.
+    expect(screen.getByText("Alpha")).toBeInTheDocument();
+    expect(screen.getByTestId("cell-Alpha-twr")).not.toHaveTextContent("—");
+
+    // The throwing column degraded to honest absence (em-dash), not a crash
+    // and not a fabricated 0.
+    expect(screen.getByText("Boom")).toBeInTheDocument();
+    const boomCell = screen.getByTestId("cell-Boom-sharpe");
+    expect(boomCell).toHaveTextContent("—");
+    expect(boomCell.textContent).not.toBe("0");
+
+    // A breadcrumb was logged for the failed column.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("scenario_compare_compute_failed"),
+      expect.objectContaining({ id: "b" }),
+    );
+    warnSpy.mockRestore();
+  });
 });

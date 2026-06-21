@@ -77,6 +77,17 @@ interface ComparePayloadStrategy {
   };
 }
 
+/**
+ * Non-blocking breadcrumb for a per-column compute failure. Mirrors
+ * AllocationsTabs.warnAudit (a console.warn breadcrumb, no new telemetry
+ * surface) — the panel is its own module, so it carries its own small helper
+ * rather than importing the tab-level one.
+ */
+function warnAudit(tag: string, detail: Record<string, unknown> = {}): void {
+  if (typeof console === "undefined") return;
+  console.warn(`[ScenarioComparePanel] ${tag}`, detail);
+}
+
 /** A NULL-metrics column — honest absence for a draft that can't be compared. */
 const NULL_METRICS: ComputedMetrics = {
   n: 0,
@@ -181,27 +192,46 @@ export function ScenarioComparePanel({
   );
 
   // Per-selection columns: decode → compute (ok/readonly) or null (reset).
+  // The compute runs SYNCHRONOUSLY in render and the panel is mounted outside
+  // any error boundary, so a single throwing draft would crash the whole
+  // Scenario tab. Guard each column: a throw falls back to the honest-absence
+  // NULL_METRICS column (one "—" column) and logs a breadcrumb — one bad column
+  // never blanks the tab.
   const columns: ScenarioColumn[] = useMemo(
     () =>
       selectedRows.map((row) => {
         const draft = decodeDraft(row.draft, defaultDraft);
-        const metrics =
-          draft === null
-            ? NULL_METRICS
-            : computeMetricsForDraft(draft, liveInputs);
-        return { name: row.name, metrics };
+        if (draft === null) return { name: row.name, metrics: NULL_METRICS };
+        try {
+          return { name: row.name, metrics: computeMetricsForDraft(draft, liveInputs) };
+        } catch (err) {
+          warnAudit("scenario_compare_compute_failed", {
+            id: row.id,
+            error: String(err),
+          });
+          return { name: row.name, metrics: NULL_METRICS };
+        }
       }),
     [selectedRows, defaultDraft, liveInputs],
   );
 
   // The live-book column — synthetic all-on draft through the SAME engine path.
+  // Same crash exposure as the per-selection columns above → same guard.
   const liveBook: ScenarioColumn | null = useMemo(() => {
     if (!includeLiveBook) return null;
-    const metrics = computeMetricsForDraft(
-      buildLiveBookDraft(liveInputs),
-      liveInputs,
-    );
-    return { name: "Live book", metrics };
+    try {
+      const metrics = computeMetricsForDraft(
+        buildLiveBookDraft(liveInputs),
+        liveInputs,
+      );
+      return { name: "Live book", metrics };
+    } catch (err) {
+      warnAudit("scenario_compare_compute_failed", {
+        id: "__live_book__",
+        error: String(err),
+      });
+      return { name: "Live book", metrics: NULL_METRICS };
+    }
   }, [includeLiveBook, liveInputs]);
 
   return (
