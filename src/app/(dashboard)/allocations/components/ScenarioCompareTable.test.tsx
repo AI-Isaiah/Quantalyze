@@ -109,19 +109,19 @@ describe("ScenarioCompareTable", () => {
       />,
     );
 
-    // The degenerate column has its own scope so we can assert ALL of its
-    // value cells are em-dashes and NONE of them is a fabricated 0/0.00%/N/A.
-    const emptyCol = screen.getByTestId("scenario-col-Empty");
-    const dashes = within(emptyCol).getAllByText("—");
-    expect(dashes.length).toBe(6); // all six metric cells
-
-    const emptyText = emptyCol.textContent ?? "";
-    expect(emptyText).not.toMatch(/0\.00/);
-    expect(emptyText).not.toMatch(/0%/);
-    expect(emptyText).not.toMatch(/\bN\/A\b/);
-    // No bare "0" value cell (the methodology stamp n is allowed elsewhere).
-    expect(within(emptyCol).queryByText("0")).toBeNull();
-    expect(within(emptyCol).queryByText("0.00")).toBeNull();
+    // Assert EVERY one of the degenerate column's six value cells is an
+    // em-dash and NONE is a fabricated 0 / "0.00%" / "N/A". Each value cell
+    // carries data-testid="cell-{name}-{metricKey}".
+    const metricKeys = ["twr", "cagr", "sharpe", "sortino", "max_drawdown", "volatility"];
+    for (const key of metricKeys) {
+      const cell = screen.getByTestId(`cell-Empty-${key}`);
+      expect(cell.textContent).toBe("—");
+      // Honesty invariant: a fabricated 0 must FAIL this test.
+      expect(cell.textContent).not.toMatch(/0\.00/);
+      expect(cell.textContent).not.toMatch(/0%/);
+      expect(cell.textContent).not.toMatch(/\bN\/A\b/);
+      expect(cell.textContent).not.toBe("0");
+    }
   });
 
   it("stamps each column's OWN methodologyLine(n) — heterogeneous, no shared header", () => {
@@ -158,9 +158,14 @@ describe("ScenarioCompareTable", () => {
     expect(sharpeWinner.textContent).toContain("✓");
     expect(sharpeWinner.textContent).toContain("2.40");
 
-    // Max Drawdown is higherIsBetter=false → the LEAST-negative (Alpha, -5%) wins.
+    // Max Drawdown: computeScenario stores it as a NEGATIVE number, so the
+    // least-severe drawdown is the HIGHEST value → higherIsBetter=true (matching
+    // the shipped CompareTable flag). Alpha (-5%) is least-severe and wins;
+    // a winner-inverted flag (false) would crown the WORST (-30%) — this asserts
+    // we did NOT invert.
     const ddWinner = screen.getByTestId("winner-max_drawdown");
     expect(ddWinner.textContent).toContain("-5.00%");
+    expect(ddWinner.textContent).not.toContain("-30.00%");
     expect(ddWinner.className).toContain("text-accent");
   });
 
@@ -190,12 +195,17 @@ describe("ScenarioCompareTable", () => {
       />,
     );
 
-    // n=30 is below SAMPLE_FLOOR_OVERLAPPING_DAYS (60) → neutral floor copy.
-    const thinCol = screen.getByTestId("scenario-col-Thin");
-    expect(within(thinCol).getByText(/Not enough history for this estimate/)).toBeInTheDocument();
+    // n=30 is below SAMPLE_FLOOR_OVERLAPPING_DAYS (60) → neutral floor copy
+    // in that column's window-stamp cell (data-testid="stamp-{name}").
+    const thinStamp = screen.getByTestId("stamp-Thin");
+    expect(within(thinStamp).getByText(/Not enough history for this estimate/)).toBeInTheDocument();
     // Honest absence is calm — no alert role, no red/amber.
-    expect(thinCol.querySelector('[role="alert"]')).toBeNull();
-    expect(thinCol.className).not.toMatch(/text-negative|text-warning|border-negative|border-warning/);
+    expect(thinStamp.querySelector('[role="alert"]')).toBeNull();
+    expect(thinStamp.innerHTML).not.toMatch(/text-negative|text-warning|border-negative|border-warning/);
+
+    // A healthy column keeps its window stamp, not the floor copy.
+    const healthyStamp = screen.getByTestId("stamp-Healthy");
+    expect(within(healthyStamp).getByText(methodologyLine(120))).toBeInTheDocument();
   });
 
   it("renders the under-selection hint with fewer than 2 columns", () => {
