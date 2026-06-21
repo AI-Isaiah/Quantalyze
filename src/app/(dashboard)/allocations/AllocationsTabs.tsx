@@ -187,17 +187,15 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
 /**
  * Phase 09.1 Plan 02 / D-05 / D-06 — Tabs shell for /allocations.
  *
- * Visible tablist (PR3 dashboard parity — 5 buttons, see VISIBLE_TAB_KEYS):
+ * Visible tablist (see VISIBLE_TAB_KEYS):
  *   - Overview (default) — wraps AllocationDashboardV2.
  *   - Holdings — full-width HoldingsTable.
  *   - Outcomes — full-width OutcomesWidget.
  *   - Mandate  — link to /profile?tab=mandate + MandateSnapshot.
  *   - Risk     — curated grid of risk widgets.
- *
- * Routable-but-hidden surface:
  *   - Scenario — ScenarioComposer (V2 default) / ScenarioStub (rollback).
- *     Reachable only via ?tab=scenario or the "+ Allocation" header chip;
- *     no tab button is rendered in the tablist.
+ *     SURF-01 (Phase 21): now a visible tab button; still independently
+ *     reachable via ?tab=scenario or the "+ Allocation" header chip.
  *
  * URL state (D-04 / D-05):
  *   /allocations                  → Overview
@@ -238,17 +236,19 @@ type TabKey =
   | "risk"
   | "scenario";
 
-// Visible tab strip. Scenario remains routable via ?tab=scenario for the
-// "+ Allocation" chip, but no button for it lives in the visible tablist.
-// Overview is now the factsheet view (full equity curve + factsheet panel
-// layout aggregated across the allocator's strategies), so there is no
-// separate Analytics tab.
+// Visible tab strip. SURF-01 (Phase 21): Scenario is now a visible tab in
+// the strip — it remains independently reachable via ?tab=scenario and the
+// "+ Allocation" chip, but it also renders its own button here so allocators
+// can discover the scenario surface directly. Overview is the factsheet view
+// (full equity curve + factsheet panel layout aggregated across the
+// allocator's strategies), so there is no separate Analytics tab.
 const VISIBLE_TAB_KEYS: readonly TabKey[] = [
   "overview",
   "holdings",
   "outcomes",
   "mandate",
   "risk",
+  "scenario",
 ] as const;
 
 // audit-2026-05-07 M-1045 (silent-failure-hunter c8) — D-04 says unknown
@@ -424,9 +424,10 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     scenario: null,
   });
   const handleTabKeyDown = (e: KeyboardEvent<HTMLButtonElement>, key: TabKey) => {
-    // PR3 — keyboard nav only walks VISIBLE_TAB_KEYS (5 surfaces). Scenario
-    // is reachable via "+ Allocation" / direct URL so excluding it from
-    // arrow nav doesn't strand the panel.
+    // Keyboard nav walks VISIBLE_TAB_KEYS. SURF-01 (Phase 21): Scenario is
+    // now part of that set (a visible tab), so arrow-nav reaches it for
+    // free — no separate keyboard-nav array. It also stays reachable via
+    // "+ Allocation" / direct ?tab=scenario URL.
     //
     // Tweaks showOutcomes=Hide path: when the user hides the Outcomes
     // tab via the Tweaks panel, the CSS rule in globals.css drops the
