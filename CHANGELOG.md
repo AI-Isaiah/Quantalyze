@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.15.135] - 2026-06-21
+### Fixed — analytics-deploy-verify no longer self-blocks the deploy it monitors
+
+The `analytics-deploy-verify` probe (tech-debt #9b, shipped in v0.24.15.130) had a self-defeating bug: it runs on a 6h schedule and **failed the check** (exit 1) when prod hadn't yet converged to main HEAD. A scheduled run's check attaches to the HEAD commit, and Railway's "wait for CI" treats a red check on the commit as a failed suite and **skips the deploy** — so the probe's own red check blocked the very deploy it was verifying, leaving prod stale and the check permanently red. This fired on 2026-06-21: the 6h schedule happened to run while the v0.24.15.134 (Python lock) deploy was still pending, failed, and Railway skipped that deploy.
+
+- **`.github/workflows/analytics-deploy-verify.yml`** — the probe now **exits 0** on persistent non-convergence (never red-checks HEAD) and alerts via the existing dedup'd `analytics-deploy-stale` P1 issue plus a `::warning::` annotation. The issue is the loud signal; the green check keeps deploys flowing. The issue-filer is now gated on a `stale=true` step output instead of `if: failure()`, and the degenerate empty-`github.sha` guard also exits 0 with a warning. Detection is unchanged (same convergence window, same issue); only the gating side effect is removed.
+
+No application/product change — CI workflow only. The v0.24.15.134 Python lock reaches prod with this deploy (its own deploy was the one Railway skipped).
+
 ## [0.24.15.134] - 2026-06-21
 ### Changed — Reproducible analytics-service builds: Python lock file + exact ccxt pin (tech-debt #7)
 
