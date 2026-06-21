@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.1.0
 milestone_name: Scenario Analysis
-status: ready_to_plan
-stopped_at: Phase 21 complete (4/4) — ready to discuss Phase 22
-last_updated: 2026-06-21T16:01:36.372Z
+status: executing
+stopped_at: Completed 22-01-PLAN.md
+last_updated: "2026-06-21T16:35:44.720Z"
 last_activity: 2026-06-21
 progress:
   total_phases: 8
   completed_phases: 1
-  total_plans: 4
-  completed_plans: 52
+  total_plans: 6
+  completed_plans: 5
   percent: 13
 ---
 
@@ -21,17 +21,17 @@ progress:
 See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
-**Current focus:** Phase 22 — methodology honesty scaffolding
+**Current focus:** Phase 22 — Methodology-Honesty Scaffolding
 **Last milestone:** v1.0.0 API-Key Rewrite (Phases 15–20, shipped 2026-06-20).
 
 ## Current Position
 
-Phase: 22
-Plan: Not started
-Status: Ready to plan
+Phase: 22 (Methodology-Honesty Scaffolding) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
 Last activity: 2026-06-21
 
-Progress: [██████████] 100%
+Progress: [████████░░] 83%
 
 ## Milestone Roadmap (v1.1.0 Scenario Analysis)
 
@@ -213,6 +213,8 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - [Phase ?]: Phase 21-04: example-universe Sandbox brought to honesty parity — new header row with Example universe (SURF-03) + persistent PROJECTED (IMPACT-01) neutral-outline pills, coverage caveat (metrics.n + shortestHistoryName(strategies)), Avg |ρ| relabel; parent PageHeader + frozen engine untouched
 - [Phase ?]: Phase 21-04: ScenarioBuilder takes the already-collapsed strategies prop (no internal de-alias) so shortestHistoryName(strategies) is the faithful caveat call; Avg |ρ| appears twice by design (MetricCard label + single-sourced heatmap caption), tests assert getAllByText length >= 1
 - [Phase ?]: Phase 21-04: IMPACT-02 Sandbox neuter guard keys on the render-only data-testid percentile-rank-badge (added in 21-03) + isolated positive control; mutation-verified falsifiable (wiring the badge into ScenarioBuilder made the ABSENT assertion fail), reverted
+- [Phase ?]: Phase 22-01: HONEST-01 method label rendered VERBATIM 'Historical realized' (realized stats over the overlap window); 'bootstrap' NOT claimed (that is Phase 27)
+- [Phase ?]: Phase 22-01: methodology line folded into the one existing caveat <p> (no second line, no token/DOM change); N inline in DM Sans (not Geist Mono), matching the shipped Phase-21 line; sandbox anchored ^Projected regex updated same-task
 
 ## Accumulated Context
 
@@ -234,8 +236,8 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-06-21T15:30:00.484Z
-Stopped at: Completed 21-02-PLAN.md
+Last session: 2026-06-21T16:35:44.716Z
+Stopped at: Completed 22-01-PLAN.md
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
 

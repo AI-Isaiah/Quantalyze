@@ -65,7 +65,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   1. Every projected stat surfaces its method, overlapping-N, and horizon inline (e.g. "Historical bootstrap · 412 overlapping days · not a forecast").
   2. A shared minimum-sample gate (tunable floor, conservative default for distributional/tail outputs) renders an honest empty state below the floor, and is the single gate later reused by Stress and Monte-Carlo (one source of truth, regression-pinned).
   3. A deliberately degenerate input (0/1 strategy, below-floor overlap, non-finite returns) produces the honest empty state, never a fabricated number or false-precision output.
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [x] 22-01-PLAN.md — HONEST-01: fold the methodology line ("Historical realized · {N} overlapping days · not a forecast") into both the composer + sandbox coverage caveats
+- [ ] 22-02-PLAN.md — HONEST-02: build the shared sample-floor primitive (SAMPLE_FLOOR_OVERLAPPING_DAYS=60 + gate), the below-floor honest empty state, and the single-source regression pin
 **UI hint**: yes
 
 ### Phase 23: Scenario Persistence & Compare
@@ -143,7 +146,7 @@ Phases execute in numeric order: 21 → 22 → 23 → 24 → 25 → 26 → 27 �
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 21. Surfacing, Correlation & Honest Projection | 4/4 | Complete    | 2026-06-21 |
-| 22. Methodology-Honesty Scaffolding | 0/TBD | Not started | - |
+| 22. Methodology-Honesty Scaffolding | 1/2 | In Progress|  |
 | 23. Scenario Persistence & Compare | 0/TBD | Not started | - |
 | 24. Benchmark Comparison | 0/TBD | Not started | - |
 | 25. Read-Only Sharing | 0/TBD | Not started | - |
