@@ -7,7 +7,7 @@ import type { ComputedMetrics } from "@/lib/scenario";
 /**
  * Phase 09.1 / Plan 06 (D-09): designer-aligned 5-cell KPI strip.
  *
- * Shape (left → right): AUM / YTD TWR / Sharpe / Max DD 12m / Avg ρ.
+ * Shape (left → right): AUM / YTD TWR / Sharpe / Max DD 12m / Avg |ρ|.
  * Each cell renders { label, formatted value, sub helper line }.
  *
  * **Phase 07 / 07-03 invariants preserved verbatim:**
@@ -22,7 +22,7 @@ import type { ComputedMetrics } from "@/lib/scenario";
  *   - `formatPercent` / `formatNumber` / `formatCurrency` already render `—`
  *     for null inputs (Phase 07 f8 invariant).
  *
- * **R4 honest copy (Plan 06 §threat T-09.1-06-03):** Avg ρ has no real
+ * **R4 honest copy (Plan 06 §threat T-09.1-06-03):** Avg |ρ| has no real
  * source field on the production payload yet — `MyAllocationDashboardPayload`
  * does not carry a portfolio-wide average correlation. Rather than label the
  * em-dash as "average pairwise correlation across holdings" (which would
@@ -171,7 +171,7 @@ function valueColorClass(raw: number | null): string {
 /**
  * Phase 10 / 10-04 D-16. Per-KPI improvement direction.
  *   - "up-good": higher is better (TWR, CAGR, Sharpe, Sortino, AUM, score)
- *   - "down-good": lower is better (Volatility, Avg ρ — diversification)
+ *   - "down-good": lower is better (Volatility, Avg |ρ| — diversification)
  *
  * **Deviation from 10-04 plan (Rule 1 — bug fix):** the plan listed
  * `max_drawdown: "down-good"` but `src/lib/scenario.ts` stores
@@ -240,7 +240,7 @@ function deltaSign(
 /**
  * Phase 10 / 10-04. Format a signed delta for display in the pill body
  * AND for the aria-label. Mirrors the per-cell formatter shape:
- *   - Sharpe / Sortino / score / Avg ρ → unitless 2-decimal number
+ *   - Sharpe / Sortino / score / Avg |ρ| → unitless 2-decimal number
  *   - twr / cagr / max_drawdown / volatility → percent with sign
  *   - aum → currency
  */
@@ -313,7 +313,7 @@ export function KpiStrip({
   //  - Max DD 12m: prefer analytics.max_drawdown_12m; fall back to
   //    metrics.max_drawdown so the legacy "all-time max DD" still renders
   //    if the 12m field isn't present yet.
-  //  - Avg ρ: prefer analytics.avg_correlation, then fall back to
+  //  - Avg |ρ|: prefer analytics.avg_correlation, then fall back to
   //    metrics.avg_pairwise_correlation (review-pass P2 fix — parallel to
   //    Plan 10's `metricKey: "avg_pairwise_correlation"` scenario-mode
   //    lookup, so the tooltip "Live: X" pill in scenario mode reads the
@@ -352,7 +352,7 @@ export function KpiStrip({
   }
 
   /**
-   * Avg ρ has its own precedence because the "honest pending" copy is
+   * Avg |ρ| has its own precedence because the "honest pending" copy is
    * what makes the null path safe per R4 / threat T-09.1-06-03:
    *   1. allKeysStale → STALE_SUB
    *   2. warmupHelper && null → warmupHelper  (warm-up beats pending)
@@ -397,7 +397,7 @@ export function KpiStrip({
       // M-0086 label-truth: the value is computeScenario's annualized Sharpe
       // over the SELECTED timeframe / full holdings history (scenario.ts), NOT
       // a fixed trailing 12 months — the prior "12-month" sub-copy was a lie.
-      // Honest window-copy, parallel to the Avg ρ honest-pending fix.
+      // Honest window-copy, parallel to the Avg |ρ| honest-pending fix.
       sub: resolveSub(sharpeValue, false, "risk-adjusted return (selected period)"),
       metricKey: "sharpe",
     },
@@ -413,7 +413,12 @@ export function KpiStrip({
       metricKey: "max_drawdown",
     },
     {
-      label: "Avg ρ",
+      // CORR-03 — the label reads "Avg |ρ|" (off-diagonal ABSOLUTE mean) so the
+      // strip names exactly the value avgRhoValue carries
+      // (avg_pairwise_correlation, scenario.ts:399). Label-only change: the
+      // value and the honest-pending semantics (AVG_RHO_*_SUB / stale → null)
+      // are unchanged.
+      label: "Avg |ρ|",
       raw: allKeysStale ? null : avgRhoValue,
       formatted: formatNumber(allKeysStale ? null : avgRhoValue, 2),
       sub: resolveAvgRhoSub(avgRhoValue),
