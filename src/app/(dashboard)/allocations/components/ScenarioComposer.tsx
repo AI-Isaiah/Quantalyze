@@ -15,7 +15,12 @@
  *   4. EquityChart + DrawdownChart with scenarioSeries / scenarioDailyPoints
  *   5. Bridge inline card (only when flaggedHoldings.length > 0) embedding
  *      ScenarioFlaggedHoldingsList — RESEARCH §Architecture decision
- *   6. CompositionList — toggle/weight/per-row delta/Compare/Remove
+ *   6. CompositionList — read-only-tokens model: live holdings are FIXED
+ *      context (symbol · venue · USD value, plus the multi-venue caveat and the
+ *      Bridge "Compare →" deep-link); only ADDED strategies carry the
+ *      interactive controls (toggle / weight / leverage / Remove). A commit
+ *      therefore emits only voluntary_add — holdings produce no
+ *      voluntary_remove / voluntary_modify decision.
  *   7. "Add more strategies" CTA row → opens StrategyBrowseDrawer
  *   8. ScenarioFooter (sticky)
  *
@@ -186,24 +191,21 @@ export type ScenarioCommitDiff =
 
 /**
  * pr189-followup H6 (type-design-analyzer HIGH/8) — narrower union for the
- * composer→drawer hand-off. `handleCommit` only constructs the two kinds
- * below today (voluntary_remove + voluntary_add); the wider four-arm
- * `ScenarioCommitDiff` is the WIRE contract for the server, not the
- * producer contract for the composer.
+ * composer→drawer hand-off. The wider four-arm `ScenarioCommitDiff` is the WIRE
+ * contract for the server, not the producer contract for the composer.
  *
- * NEW-C18-01: ComposerProducedDiff is widened to include VoluntaryModifyDiff
- * now that handleCommit emits weight-change diffs. The seam is still narrower
- * than the full wire contract (bridge_recommended is not produced here).
+ * Read-only-tokens model: live holdings are FIXED context — they cannot be
+ * toggled off or reweighted — so the composer no longer emits voluntary_remove
+ * or voluntary_modify. The ONLY diff `handleCommit` produces is voluntary_add
+ * (for an added strategy). (Prior revisions produced voluntary_remove on a
+ * holding toggle-off and voluntary_modify on a holding reweight; both controls
+ * were removed with the per-token UI.)
  *
- * The drawer still consumes the full `ScenarioCommitDiff[]` because it
- * has to render and submit any kind (including future kinds wired by
- * other producers). The seam is producer-side narrowness, not consumer-
- * side narrowness.
+ * The drawer still consumes the full `ScenarioCommitDiff[]` because it has to
+ * render and submit any kind (including future kinds wired by other producers).
+ * The seam is producer-side narrowness, not consumer-side narrowness.
  */
-export type ComposerProducedDiff =
-  | VoluntaryRemoveDiff
-  | VoluntaryAddDiff
-  | VoluntaryModifyDiff;
+export type ComposerProducedDiff = VoluntaryAddDiff;
 
 export interface ScenarioComposerProps {
   payload: MyAllocationDashboardPayload;
@@ -266,6 +268,19 @@ function liveBaselineToComputedMetrics(
     effective_start: baseline.equity[0]?.date ?? null,
     effective_end: baseline.equity[baseline.equity.length - 1]?.date ?? null,
   };
+}
+
+/** Read-only-tokens model: live holdings display their USD value (no editable
+ *  weight). Whole-dollar USD; a non-finite value (sold-down / coingecko_fallback
+ *  rows can surface null) renders an em dash rather than "$NaN". */
+function formatUsd0(n: number): string {
+  return Number.isFinite(n)
+    ? n.toLocaleString("en-US", {
+        style: "currency",
+        currency: "USD",
+        maximumFractionDigits: 0,
+      })
+    : "—";
 }
 
 // ---------------------------------------------------------------------------
@@ -475,14 +490,13 @@ export function ScenarioComposer({
   // Build scenario projection via adapter + frozen scenario.ts engine
   // (B4-pinned positional signature).
   // -------------------------------------------------------------------------
-  const disabledHoldingRefs = useMemo(() => {
-    const set = new Set<string>();
-    for (const [k, v] of Object.entries(scenario.draft.toggleByScopeRef)) {
-      const isHoldingRef = k.startsWith("holding:");
-      if (!v && isHoldingRef) set.add(k);
-    }
-    return set;
-  }, [scenario.draft.toggleByScopeRef]);
+  // Read-only-tokens model: live holdings are FIXED context — there is no
+  // per-holding toggle in the UI, so in a current-schema (v2) draft a holding is
+  // never disabled. Legacy v1 drafts that disabled a holding are dropped on load
+  // by the SCENARIO_SCHEMA_VERSION bump, not papered over here — so this set is
+  // genuinely always empty (the adapter path stays neutral too).
+  // ponytail: empty set, not a derived memo — holdings are never disabled here.
+  const disabledHoldingRefs = useMemo(() => new Set<string>(), []);
 
   const adapterOutput = useMemo(
     () =>
@@ -538,11 +552,16 @@ export function ScenarioComposer({
   // "the slider did not move the projection" (reweighting silently no-op'd).
   // Overlay the draft state — the canonical sum-to-1 map the CompositionList
   // input already DISPLAYS — onto the adapter strategies BEFORE the collapse so
-  // computeScenario reflects exactly what the UI shows. `selected` comes from
-  // the toggle map for ALL refs (holdings AND added) so toggling an added
-  // strategy off now actually excludes it (it carries a real weight post-fix).
-  // R4 leverage rides the SAME projection state; the collapse weight-averages it
-  // across aliased venues and computeScenario applies `wᵢ·Lᵢ·rᵢ`.
+  // computeScenario reflects exactly what the UI shows. `selected` reads the
+  // toggle map for ALL refs; in the read-only-tokens model holdings have no
+  // toggle UI, so a current-schema (v2) draft never carries a disabled holding
+  // (legacy v1 drafts that did are dropped on load by the SCENARIO_SCHEMA_VERSION
+  // bump) — a holding therefore resolves selected=true, and only ADDED strategies
+  // can be toggled off, which now actually excludes them (they carry a real weight
+  // post-fix). R4 leverage rides the SAME projection state; holdings have no
+  // leverage UI so their multiplier is always 1, while an added strategy's
+  // multiplier flows through here. The collapse weight-averages leverage across
+  // aliased venues and computeScenario applies `wᵢ·Lᵢ·rᵢ`.
   const projectionState = useMemo(() => {
     const selected: Record<string, boolean> = {};
     const weights: Record<string, number> = {};
@@ -759,82 +778,14 @@ export function ScenarioComposer({
   // -------------------------------------------------------------------------
   // Build commit diffs and route to the ScenarioCommitDrawer (Plan 07).
   // -------------------------------------------------------------------------
-  // NEW-C18-01: pre-compute the default holding weights (value-proportional
-  // from holdingsSummary) so handleCommit can detect weight changes and emit
-  // voluntary_modify diffs without re-deriving the full default draft.
-  const defaultWeightsForCommit = useMemo(() => {
-    const total = holdingsSummary.reduce(
-      (s, h) => s + (Number.isFinite(h.value_usd) ? h.value_usd : 0),
-      0,
-    );
-    const weights: Record<string, number> = {};
-    for (const h of holdingsSummary) {
-      const ref = buildHoldingRef({
-        venue: h.venue,
-        symbol: h.symbol,
-        holding_type: h.holding_type,
-      });
-      weights[ref] = total > 0 ? (Number.isFinite(h.value_usd) ? h.value_usd : 0) / total : 0;
-    }
-    return weights;
-  }, [holdingsSummary]);
-
   function handleCommit() {
+    // Read-only-tokens model: live holdings are FIXED context — they cannot be
+    // toggled off or reweighted in the UI, so they never produce a
+    // voluntary_remove or voluntary_modify decision. (Adding a strategy still
+    // renormalizes holding weights for the blend, but that dilution is a
+    // mechanical consequence of the add, not a holding decision the allocator
+    // made.) The only committable decision is adding a strategy → voluntary_add.
     const diffs: ComposerProducedDiff[] = [];
-    for (const [scopeRef, on] of Object.entries(scenario.draft.toggleByScopeRef)) {
-      if (on) continue;
-      if (!scopeRef.startsWith("holding:")) continue;
-      const h = holdingByRef.get(scopeRef);
-      if (!h) continue;
-      diffs.push({
-        kind: "voluntary_remove",
-        holding_ref: scopeRef,
-        // Defensive coalesce — holdingsSummary types value_usd as `number`,
-        // but in-flight rows from coingecko_fallback / mixed sources can land
-        // as null/undefined for sold-down holdings (BTC at $0 etc). Schema
-        // accepts non-negative; the field is metadata-only on the wire (RPC
-        // 082 does not consume it), so `?? 0` is safe.
-        size_at_decision_usd: Number.isFinite(h.value_usd) ? h.value_usd : 0,
-      });
-    }
-
-    // NEW-C18-01: emit voluntary_modify for every enabled live holding whose
-    // weight differs from its initial (default) weight by more than epsilon.
-    // This covers the rebalance case: user sees projected KPIs shift, clicks
-    // Commit, expects the rebalance to be recorded — previously it was silently
-    // dropped. Only applies to enabled holdings (toggle=ON); toggled-OFF
-    // holdings are already captured as voluntary_remove above.
-    for (const h of holdingsSummary) {
-      const ref = buildHoldingRef({
-        venue: h.venue,
-        symbol: h.symbol,
-        holding_type: h.holding_type,
-      });
-      const isOn = scenario.draft.toggleByScopeRef[ref] !== false;
-      if (!isOn) continue;
-      const currentWeight = scenario.draft.weightOverrides[ref] ?? 0;
-      const defaultWeight = defaultWeightsForCommit[ref] ?? 0;
-      if (Math.abs(currentWeight - defaultWeight) <= 1e-6) continue;
-      // F-02: apply the same per-row size gate that protects voluntary_add diffs.
-      // A voluntary_modify diff with size_at_decision_usd=0 reaches the daily-delta
-      // cron, which divides realized PnL by that size → division-by-zero. A zero
-      // value_usd can arise from sold-down or coingecko_fallback rows.
-      const modifySize = Number.isFinite(h.value_usd) ? h.value_usd : 0;
-      if (modifySize <= 0) {
-        setCommitError(
-          `Can't record a weight change for "${ref}": holding has zero USD value. ` +
-            `Remove or skip this holding before committing.`,
-        );
-        return;
-      }
-      diffs.push({
-        kind: "voluntary_modify",
-        holding_ref: ref,
-        new_weight: currentWeight,
-        percent_allocated: currentWeight * 100,
-        size_at_decision_usd: modifySize,
-      });
-    }
 
     // Refuse the commit when scenarioAum<=0 with voluntary_adds present:
     // every add row would land with size_at_decision_usd:0 and the
@@ -877,7 +828,7 @@ export function ScenarioComposer({
     // inconsistency worth surfacing to the user.
     if (diffs.length === 0) {
       setCommitError(
-        "Nothing to commit — the scenario has no changes. Adjust holdings or weights and try again.",
+        "Nothing to commit — add a strategy to record a scenario change. (If a stale draft is stuck, use Reset to start from your current holdings.)",
       );
       return;
     }
@@ -1315,14 +1266,17 @@ function CompositionList({
         Composition
       </div>
       <ul className="grid gap-2">
+        {/* Read-only-tokens model: live holdings are FIXED context. They render
+            read-only (symbol · venue · USD value) with no toggle / weight /
+            leverage — those controls live only on the added-strategy rows below.
+            The multi-venue caveat and the Bridge "Compare →" deep-link stay
+            because both are read-only affordances. */}
         {holdingsSummary.map((h) => {
           const ref = buildHoldingRef({
             venue: h.venue,
             symbol: h.symbol,
             holding_type: h.holding_type,
           });
-          const enabled = draft.toggleByScopeRef[ref] !== false;
-          const weight = draft.weightOverrides[ref] ?? 0;
           const flagged = flaggedByRef.get(ref);
           const sharedSym = sharedSymbols.has(h.symbol);
           const otherVenuesForSym = sharedSym
@@ -1334,28 +1288,9 @@ function CompositionList({
             <li
               key={ref}
               data-scope-ref={ref}
-              className={`flex items-center justify-between gap-3 rounded-md border border-border p-3 ${
-                enabled ? "" : "opacity-50 line-through"
-              }`}
+              className="flex items-center justify-between gap-3 rounded-md border border-border p-3"
             >
               <div className="flex min-w-0 items-center gap-3">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={enabled}
-                  aria-label={`Toggle ${h.symbol} on/off in scenario`}
-                  onClick={() => onToggle(ref)}
-                  className={`flex h-5 w-9 items-center rounded-full transition-colors ${
-                    enabled ? "bg-accent" : "bg-border"
-                  }`}
-                >
-                  <span
-                    aria-hidden
-                    className={`h-4 w-4 rounded-full bg-white transition-transform ${
-                      enabled ? "translate-x-4" : "translate-x-0.5"
-                    }`}
-                  />
-                </button>
                 <span className="font-mono text-sm text-text-primary">
                   {h.symbol}
                 </span>
@@ -1371,36 +1306,9 @@ function CompositionList({
                 )}
               </div>
               <div className="flex items-center gap-2">
-                <label className="sr-only" htmlFor={`weight-${ref}`}>
-                  {h.symbol} weight
-                </label>
-                <input
-                  id={`weight-${ref}`}
-                  type="number"
-                  step="0.001"
-                  min="0"
-                  max="1"
-                  value={weight.toFixed(3)}
-                  disabled={!enabled}
-                  onChange={(e) => onSetWeight(ref, Number(e.target.value))}
-                  className="w-20 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
-                />
-                <label className="sr-only" htmlFor={`leverage-${ref}`}>
-                  {h.symbol} leverage
-                </label>
-                <input
-                  id={`leverage-${ref}`}
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  max={MAX_LEVERAGE}
-                  value={(leverageByRef[ref] ?? 1).toString()}
-                  disabled={!enabled}
-                  title="Leverage multiplier (1× = unlevered; excludes borrow cost)"
-                  aria-label={`${h.symbol} leverage multiplier`}
-                  onChange={(e) => onSetLeverage(ref, Number(e.target.value))}
-                  className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
-                />
+                <span className="font-mono text-xs text-text-secondary">
+                  {formatUsd0(h.value_usd)}
+                </span>
                 {flagged && flagged.top_candidate_strategy_id && (
                   <button
                     type="button"
@@ -1546,8 +1454,8 @@ function ResetConfirmationModal({
         </h3>
         <p className="mt-2 text-sm text-text-secondary">
           This reinitializes the scenario from your current live holdings. Any
-          toggled-off holdings, added strategies, and weight changes in the
-          draft will be lost. This can&apos;t be undone.
+          added strategies and their weight / leverage changes in the draft will
+          be lost. This can&apos;t be undone.
         </p>
         <div className="mt-6 flex justify-end gap-3">
           <button

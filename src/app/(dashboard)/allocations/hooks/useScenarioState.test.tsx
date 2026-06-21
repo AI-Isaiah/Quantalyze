@@ -122,7 +122,7 @@ describe("useScenarioState", () => {
   it("T_USE2 first mount + localStorage has draft with MATCHING fingerprint at allocator-scoped key → resumes the persisted draft", () => {
     const fp = computeHoldingsFingerprint(HOLDINGS_2);
     const persisted: ScenarioDraft = {
-      schema_version: 1,
+      schema_version: 2,
       init_holdings_fingerprint: fp,
       toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: true },
       addedStrategies: [],
@@ -144,7 +144,7 @@ describe("useScenarioState", () => {
 
   it("T_USE3 first mount + localStorage has draft with MISMATCHED fingerprint → default-init draft AND fingerprintMismatch=true", () => {
     const persisted: ScenarioDraft = {
-      schema_version: 1,
+      schema_version: 2,
       init_holdings_fingerprint: "stale-fingerprint-XYZ",
       toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: true },
       addedStrategies: [],
@@ -308,7 +308,7 @@ describe("useScenarioState", () => {
   it("T_USE9 reset → removeItem called with allocator-scoped key + draft reinitialized + fingerprintMismatch cleared", () => {
     // Seed a stale-fingerprint draft so reset has an actual mismatch to clear.
     const persisted: ScenarioDraft = {
-      schema_version: 1,
+      schema_version: 2,
       init_holdings_fingerprint: "stale-fingerprint",
       toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: true },
       addedStrategies: [],
@@ -340,7 +340,7 @@ describe("useScenarioState", () => {
 
   it("T_USE10 dismissFingerprintMismatchBanner → fingerprintMismatch=false, draft unchanged", () => {
     const persisted: ScenarioDraft = {
-      schema_version: 1,
+      schema_version: 2,
       init_holdings_fingerprint: "stale",
       toggleByScopeRef: { [REF_BTC]: true, [REF_ETH]: true },
       addedStrategies: [],
@@ -468,7 +468,7 @@ describe("useScenarioState", () => {
     // Allocator B persists a draft whose fingerprint does NOT match B's
     // current holdings (M1 — the stale-NEW allocator path).
     const draftB_stale: ScenarioDraft = {
-      schema_version: 1,
+      schema_version: 2,
       init_holdings_fingerprint: "stale-not-matching-current-B-holdings",
       toggleByScopeRef: {
         "holding:kraken:DOGE:spot": true,
@@ -583,7 +583,7 @@ describe("useScenarioState", () => {
   it("B7a-2 — editing while the fingerprint-mismatch banner is up rebases onto the default draft and clears the mismatch", () => {
     // Stored draft is a valid v1 blob but for a DIFFERENT holdings set.
     const persisted: ScenarioDraft = {
-      schema_version: 1,
+      schema_version: 2,
       init_holdings_fingerprint: "stale-different-holdings",
       toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: false },
       addedStrategies: [],
@@ -621,7 +621,7 @@ describe("useScenarioState", () => {
     // Default weights for HOLDINGS_2 are BTC 0.6 / ETH 0.4. Persist a draft
     // whose userWeightOverrides[BTC] diverges from the default 0.6.
     const persisted = {
-      schema_version: 1,
+      schema_version: 2,
       init_holdings_fingerprint: fp,
       toggleByScopeRef: { [REF_BTC]: true, [REF_ETH]: true },
       addedStrategies: [],
@@ -723,7 +723,7 @@ describe("useScenarioState", () => {
 
     const scopedKey = scenarioStorageKey(ALLOCATOR_A);
     const staleForeign: ScenarioDraft = {
-      schema_version: 1,
+      schema_version: 2,
       init_holdings_fingerprint: "stale-other-tab-holdings",
       toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: false },
       addedStrategies: [],
@@ -779,7 +779,7 @@ describe("useScenarioState", () => {
     store.set(
       scenarioStorageKey(ALLOCATOR_B),
       JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         init_holdings_fingerprint: "stale-not-matching-B",
         toggleByScopeRef: { "holding:kraken:DOGE:spot": true },
         addedStrategies: [],

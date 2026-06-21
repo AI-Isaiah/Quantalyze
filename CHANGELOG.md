@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.137] - 2026-06-21
+### Changed — Scenario Composer: live holdings are read-only context; leverage + toggle are per-strategy only (fixes #496)
+
+The Scenario Composer now treats your live token holdings as **fixed context** and moves every interactive control to the strategies you add on top. Per user direction: "leverage should be per strategy, not per token; I should not be able to toggle tokens at all, just entire strategies."
+
+- **Read-only holding rows.** Each live holding renders `symbol · venue · USD value` with the multi-venue "Returns merged" caveat and the Bridge "Compare →" deep-link. The per-holding on/off toggle, weight input, and leverage input are gone. All toggle / weight / leverage controls now live exclusively on the added-strategy rows (unchanged there). The model is "your current portfolio is fixed; explore by adding strategies on top, each with its own weight and leverage."
+- **#496 fixed at the root.** Per-strategy leverage now reaches the projection and the leverage caveat renders correctly. The bug (leverage may not reach the projection for holdings) is moot because holdings no longer carry leverage at all; strategy leverage was always wired correctly and is now the only leverage path.
+- **Commit simplified to `voluntary_add` only.** Since holdings can't be toggled off or reweighted, `handleCommit` no longer emits `voluntary_remove` / `voluntary_modify` for holdings (those loops + the `defaultWeightsForCommit` memo were deleted; `ComposerProducedDiff` narrowed to `VoluntaryAddDiff`). Deliberate, user-approved tradeoff: you can no longer drop a live holding from a scenario, so the Bridge swap-out + `voluntary_remove` path is retired. Bridge can still **add** a replacement strategy.
+- **Draft schema v1 → v2.** Live holdings are no longer toggle/weight-bearing, so a legacy v1 draft that disabled or reweighted a holding under the old UI is dropped on load (reset from current holdings). Without the bump, such a draft would silently exclude a holding from the projection and AUM with no UI to re-enable it, and inflate the change-count into a "Nothing to commit" dead-end — surfaced by the pre-landing adversarial review and pinned by a regression test. Reset-modal + empty-commit copy updated to match the read-only model.
+
+Reviewed: typecheck + lint clean; full frontend suite 6151 pass / 284 skip; fresh-context specialist + adversarial review on the full diff (both independently caught the stale-draft silent-drop, fixed via the schema bump). Coverage audit 95% → gap closed (formatUsd0 non-finite branch now tested).
+
 ## [0.24.15.136] - 2026-06-21
 ### Added — systemic guards: env manifest, DB-types hand-patch, ops runbooks (tech-debt #14/#15/#17)
 

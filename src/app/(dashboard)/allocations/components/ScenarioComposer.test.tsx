@@ -235,6 +235,33 @@ const REF_ETH = "holding:binance:ETH:spot";
 const REF_SOL = "holding:binance:SOL:spot";
 const REF_BTC_OKX = "holding:okx:BTC:spot";
 
+// Read-only-tokens model: live holdings are fixed context with NO per-holding
+// toggle / weight / leverage controls. Every interactive gesture (toggle,
+// reweight, lever, remove) now lives on the ADDED-STRATEGY rows. The browse
+// drawer is module-mocked to capture its onAdd so any test can inject an added
+// strategy without driving the (mocked) drawer internals; `addStrategy` is the
+// shared "make an interactive row / make a diff" helper that replaces the old
+// "toggle a holding" gesture.
+let browseOnAdd: ((s: unknown) => void) | null = null;
+
+interface AddStrategyInput {
+  id: string;
+  name: string;
+  markets: string[];
+  strategy_types: string[];
+}
+
+/** Inject an added strategy via the (mocked) browse drawer's captured onAdd.
+ *  The capturing mock records onAdd on first render even while the drawer is
+ *  closed, so no Browse click is needed. Works in both the empty-state branch
+ *  and the main body. */
+function addStrategy(s: AddStrategyInput): void {
+  expect(browseOnAdd).not.toBeNull();
+  act(() => {
+    browseOnAdd!(s);
+  });
+}
+
 // Build a baseline payload — every test extends/overrides specific fields.
 function makePayload(
   overrides: Partial<MyAllocationDashboardPayload> = {},
@@ -314,6 +341,18 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       strategies: [],
       state: { selected: {}, weights: {}, startDates: {} },
     });
+    // Capturing browse-drawer mock — records onAdd so `addStrategy` can inject
+    // an added strategy. Same render output as the factory default (isOpen ? div
+    // : null); tests that need a custom drawer still override it inline.
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
     cleanup();
   });
 
@@ -359,16 +398,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(screen.getByTestId("kpi-strip-mock")).toBeInTheDocument();
     expect(screen.getByTestId("equity-chart-mock")).toBeInTheDocument();
     expect(screen.getByTestId("drawdown-chart-mock")).toBeInTheDocument();
-    // Composition list — three rows for BTC / ETH / SOL
-    expect(
-      screen.getByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("switch", { name: /Toggle ETH on\/off in scenario/i }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("switch", { name: /Toggle SOL on\/off in scenario/i }),
-    ).toBeInTheDocument();
+    // Read-only-tokens model: composition list renders BTC / ETH / SOL as
+    // read-only rows (symbol text), NOT interactive toggle switches.
+    expect(screen.queryAllByRole("switch")).toHaveLength(0);
+    expect(screen.getByText("BTC")).toBeInTheDocument();
+    expect(screen.getByText("ETH")).toBeInTheDocument();
+    expect(screen.getByText("SOL")).toBeInTheDocument();
     // ScenarioFooter — Commit + Reset buttons
     expect(screen.getByTestId("scenario-footer-commit")).toBeInTheDocument();
     expect(screen.getByTestId("scenario-footer-reset")).toBeInTheDocument();
@@ -519,30 +554,78 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_C6 — Composition list renders 3 toggle switches with proper aria-label
+  // T_C6 — Read-only-tokens model: holdings render read-only (no toggle switch);
+  // each row shows its USD value. The only switches in the list are added
+  // strategies (none here).
   // -------------------------------------------------------------------------
-  it("T_C6 Composition list renders one toggle switch per holding with role='switch' + aria-label", () => {
+  it("T_C6 Composition list renders holdings read-only (no toggle switch); each row shows its USD value", () => {
     const payload = makePayload();
-    render(
+    const { container } = render(
       <ScenarioComposer
         payload={payload}
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
       />,
     );
-    const switches = screen.getAllByRole("switch");
-    expect(switches.length).toBe(3);
-    for (const sw of switches) {
-      expect(sw.getAttribute("aria-label")).toMatch(
-        /Toggle .* on\/off in scenario/i,
-      );
-    }
+    // No per-holding toggle: holdings are fixed context.
+    expect(screen.queryAllByRole("switch")).toHaveLength(0);
+    // BTC's read-only row shows its USD value ($60,000 from the fixture).
+    const btcRow = container.querySelector(`[data-scope-ref="${REF_BTC}"]`);
+    expect(btcRow).not.toBeNull();
+    expect((btcRow as HTMLElement).textContent ?? "").toMatch(/\$60,000/);
+    // …and no editable weight / leverage inputs on the holding row.
+    expect(btcRow?.querySelector("input")).toBeNull();
   });
 
   // -------------------------------------------------------------------------
-  // T_C7 — Toggle off ETH → row dims, weight input disabled, props re-derive
+  // formatUsd0 non-finite branch — a sold-down / coingecko_fallback row can
+  // surface a non-finite value_usd; the read-only row must render "—", never
+  // "$NaN". (value_usd is typed number, so NaN is the runtime-only case.)
   // -------------------------------------------------------------------------
-  it("T_C7 Toggle off ETH → row strikethrough+opacity-50; weight input disabled; KpiStrip re-renders", () => {
+  it("read-only holding row renders '—' for a non-finite value_usd (not '$NaN')", () => {
+    const payload = makePayload({
+      holdingsSummary: [{ ...HOLDING_BTC, value_usd: Number.NaN }],
+    });
+    const { container } = render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const btcRow = container.querySelector(`[data-scope-ref="${REF_BTC}"]`);
+    expect(btcRow).not.toBeNull();
+    expect((btcRow as HTMLElement).textContent ?? "").toContain("—");
+    expect((btcRow as HTMLElement).textContent ?? "").not.toMatch(/NaN/);
+  });
+
+  // -------------------------------------------------------------------------
+  // Schema v2 (read-only-tokens) — a LEGACY v1 draft that disabled a holding
+  // under the OLD per-token UI must be DROPPED on load (version mismatch →
+  // reset), so the holding is never silently excluded from the projection /
+  // scenarioAum with no affordance to re-enable it. Pins the
+  // SCENARIO_SCHEMA_VERSION 1→2 bump as the fix for the stale-draft silent-drop
+  // bug (caught by adversarial review). Discriminator: with the bump, scenarioAum
+  // is the full portfolio (100k, BTC included) → KpiStrip.aum=100000; WITHOUT it
+  // the adopted v1 draft would exclude the toggled-off BTC (aum 40k).
+  // -------------------------------------------------------------------------
+  it("legacy v1 draft with a holding toggled off is dropped on load (holding not stuck-excluded)", () => {
+    lsStore.set(
+      `allocations.scenario_v0_15.${ALLOCATOR_A}`,
+      JSON.stringify({
+        schema_version: 1, // legacy version → MUST reset under the v2 bump
+        init_holdings_fingerprint:
+          "BTC:binance:spot|ETH:binance:spot|SOL:binance:spot",
+        toggleByScopeRef: {
+          [REF_BTC]: false,
+          [REF_ETH]: true,
+          [REF_SOL]: true,
+        },
+        addedStrategies: [],
+        weightOverrides: { [REF_BTC]: 0, [REF_ETH]: 0.75, [REF_SOL]: 0.25 },
+        lastEditedAt: "2026-01-01T00:00:00Z",
+      }),
+    );
     const payload = makePayload();
     render(
       <ScenarioComposer
@@ -551,18 +634,44 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    const callsBefore = vi.mocked(KpiStrip).mock.calls.length;
-    const ethSwitch = screen.getByRole("switch", {
-      name: /Toggle ETH on\/off in scenario/i,
+    // Legacy draft dropped (schema mismatch) → fresh default with ALL holdings
+    // included; scenarioAum flows to KpiStrip.aum = full portfolio (60+30+10k).
+    const kpiProps = vi.mocked(KpiStrip).mock.calls.at(-1)?.[0];
+    expect(kpiProps?.aum).toBe(100_000);
+  });
+
+  // -------------------------------------------------------------------------
+  // T_C7 — Toggle off an ADDED STRATEGY → row dims, weight input disabled,
+  // KpiStrip re-renders. (Holdings are read-only; the toggle gesture now lives
+  // only on added-strategy rows.)
+  // -------------------------------------------------------------------------
+  it("T_C7 Toggle off an added strategy → row strikethrough+opacity-50; weight input disabled; KpiStrip re-renders", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: "strat-toggle",
+      name: "Toggle Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
     });
-    fireEvent.click(ethSwitch);
+    const callsBefore = vi.mocked(KpiStrip).mock.calls.length;
+    const stratSwitch = screen.getByRole("switch", {
+      name: /Toggle Toggle Strat on\/off in scenario/i,
+    });
+    fireEvent.click(stratSwitch);
     // Row visual treatment — weight input disabled
-    const ethWeightInput = screen.getByLabelText(/ETH weight/i);
-    expect((ethWeightInput as HTMLInputElement).disabled).toBe(true);
+    const weightInput = screen.getByLabelText(/Toggle Strat weight/i);
+    expect((weightInput as HTMLInputElement).disabled).toBe(true);
     // Strikethrough is signaled via line-through style or class
-    const ethRow = ethWeightInput.closest("[data-scope-ref]");
-    expect(ethRow).not.toBeNull();
-    expect(ethRow?.className).toMatch(/opacity-50|line-through/);
+    const row = weightInput.closest("[data-scope-ref]");
+    expect(row).not.toBeNull();
+    expect(row?.className).toMatch(/opacity-50|line-through/);
     // KpiStrip re-rendered with updated props
     expect(vi.mocked(KpiStrip).mock.calls.length).toBeGreaterThan(callsBefore);
   });
@@ -653,7 +762,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // -------------------------------------------------------------------------
   // T_C11 — Footer Commit disabled when diff_count = 0
   // -------------------------------------------------------------------------
-  it("T_C11 Sticky footer Commit disabled when diff_count=0; enabled after toggling one holding", () => {
+  it("T_C11 Sticky footer Commit disabled when diff_count=0; enabled after adding one strategy", () => {
     const payload = makePayload();
     render(
       <ScenarioComposer
@@ -666,11 +775,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       "scenario-footer-commit",
     ) as HTMLButtonElement;
     expect(commit.disabled).toBe(true);
-    fireEvent.click(
-      screen.getByRole("switch", {
-        name: /Toggle BTC on\/off in scenario/i,
-      }),
-    );
+    // Read-only-tokens model: a diff is produced by ADDING a strategy, not by
+    // toggling a holding.
+    addStrategy({
+      id: "strat-c11",
+      name: "C11 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
     expect(commit.disabled).toBe(false);
   });
 
@@ -710,11 +822,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    fireEvent.click(
-      screen.getByRole("switch", {
-        name: /Toggle BTC on\/off in scenario/i,
-      }),
-    );
+    addStrategy({
+      id: "strat-c13",
+      name: "C13 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
     expect(
       (screen.getByTestId("scenario-footer-commit") as HTMLButtonElement)
         .disabled,
@@ -740,11 +853,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    fireEvent.click(
-      screen.getByRole("switch", {
-        name: /Toggle BTC on\/off in scenario/i,
-      }),
-    );
+    addStrategy({
+      id: "strat-c14",
+      name: "C14 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
     fireEvent.click(screen.getByTestId("scenario-footer-reset"));
     fireEvent.click(screen.getByRole("button", { name: /^Cancel$/i }));
     expect(
@@ -766,7 +880,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     lsStore.set(
       `allocations.scenario_v0_15.${ALLOCATOR_A}`,
       JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         init_holdings_fingerprint: "STALE_FINGERPRINT_NOT_MATCHING",
         toggleByScopeRef: { [REF_BTC]: true },
         addedStrategies: [],
@@ -814,7 +928,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     lsStore.set(
       `allocations.scenario_v0_15.${ALLOCATOR_A}`,
       JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         init_holdings_fingerprint: "STALE_FINGERPRINT_NOT_MATCHING",
         toggleByScopeRef: { [REF_BTC]: true },
         addedStrategies: [],
@@ -919,20 +1033,22 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         useInternalCommitDrawer={false}
       />,
     );
-    fireEvent.click(
-      screen.getByRole("switch", {
-        name: /Toggle BTC on\/off in scenario/i,
-      }),
-    );
+    // Read-only-tokens model: the only committable decision is adding a strategy.
+    addStrategy({
+      id: "strat-c18",
+      name: "C18 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
     fireEvent.click(screen.getByTestId("scenario-footer-commit"));
     expect(onCommitRequested).toHaveBeenCalled();
     const diffs = onCommitRequested.mock.calls[0][0];
     expect(Array.isArray(diffs)).toBe(true);
-    // Toggling BTC off should produce a voluntary_remove diff for it.
+    // Adding a strategy should produce a voluntary_add diff for it.
     expect(
       diffs.some(
-        (d: { kind: string; holding_ref?: string }) =>
-          d.kind === "voluntary_remove" && d.holding_ref === REF_BTC,
+        (d: { kind: string; strategy_id?: string }) =>
+          d.kind === "voluntary_add" && d.strategy_id === "strat-c18",
       ),
     ).toBe(true);
   });
@@ -1179,22 +1295,19 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         [REF_ETH]: [{ date: "2026-01-01", value: 0.0015 }],
       },
     });
-    render(
+    const { container } = render(
       <ScenarioComposer
         payload={payload}
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
       />,
     );
-    // Both BTC rows render the multi-venue caveat
+    // Both BTC rows render the multi-venue caveat (read-only rows keep it).
     const tooltips = screen.getAllByText(/Returns merged with/i);
     expect(tooltips.length).toBeGreaterThanOrEqual(2);
-    // ETH row has no shared symbol — no caveat
-    const ethRow = screen
-      .getByRole("switch", {
-        name: /Toggle ETH on\/off in scenario/i,
-      })
-      .closest("[data-scope-ref]");
+    // ETH row has no shared symbol — no caveat. Located by data-scope-ref since
+    // holdings no longer render a toggle switch.
+    const ethRow = container.querySelector(`[data-scope-ref="${REF_ETH}"]`);
     expect(ethRow).not.toBeNull();
     expect(
       (ethRow as HTMLElement).textContent ?? "",
@@ -1454,7 +1567,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    const btcInput = screen.getByLabelText(/BTC weight/i) as HTMLInputElement;
+    // Read-only-tokens model: weight inputs live on added-strategy rows.
+    addStrategy({
+      id: "strat-nf",
+      name: "NF Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    const btcInput = screen.getByLabelText(/NF Strat weight/i) as HTMLInputElement;
     // Force a non-finite synthetic event through React's controlled-input
     // bridge. We can't just write `target: { value: "Infinity" }` because
     // jsdom's `<input type="number">` sanitizes the value to "" before
@@ -1495,19 +1615,20 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    // Toggle BTC off → at least one diff exists
-    fireEvent.click(
-      screen.getByRole("switch", {
-        name: /Toggle BTC on\/off in scenario/i,
-      }),
-    );
+    // Add a strategy → at least one diff exists
+    addStrategy({
+      id: "strat-c21",
+      name: "C21 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
     // Drawer not yet open
     expect(screen.queryByTestId("commit-drawer-mock")).toBeNull();
     // Click commit
     fireEvent.click(screen.getByTestId("scenario-footer-commit"));
     // Drawer opens with isOpen=true
     expect(screen.getByTestId("commit-drawer-mock")).toBeInTheDocument();
-    // The diffs prop carries the voluntary_remove for BTC
+    // The diffs prop carries the voluntary_add for the strategy
     const drawerProps = vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0];
     expect(drawerProps).toBeDefined();
     expect(drawerProps?.isOpen).toBe(true);
@@ -1515,8 +1636,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(
       drawerProps?.diffs.some(
         (d) =>
-          d.kind === "voluntary_remove" &&
-          d.holding_ref === REF_BTC,
+          d.kind === "voluntary_add" &&
+          d.strategy_id === "strat-c21",
       ),
     ).toBe(true);
   });
@@ -1535,9 +1656,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
     // Produce at least one diff so the commit pipeline opens.
-    fireEvent.click(
-      screen.getByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
-    );
+    addStrategy({
+      id: "strat-b11a",
+      name: "B11a Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
     fireEvent.click(screen.getByTestId("scenario-footer-commit"));
 
     const drawerProps = vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0];
@@ -1570,9 +1694,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    fireEvent.click(
-      screen.getByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
-    );
+    addStrategy({
+      id: "strat-b11b",
+      name: "B11b Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
     fireEvent.click(screen.getByTestId("scenario-footer-commit"));
     const frozen = vi
       .mocked(ScenarioCommitDrawer)
@@ -1603,12 +1730,15 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // NEW-C18-01 — uses useInternalCommitDrawer=false to inspect the diff
-  // payload passed to onCommitRequested. Changing a weight produces a
-  // voluntary_modify diff alongside any other changes in the batch.
-  // Before this fix, weight changes were silently dropped.
+  // Read-only-tokens model — live holdings are FIXED context: they cannot be
+  // toggled off or reweighted, so a commit emits ONLY voluntary_add (for added
+  // strategies) and NEVER a voluntary_remove / voluntary_modify for a holding.
+  // (Replaces the prior NEW-C18-01 voluntary_modify-on-holding-reweight test,
+  // whose behavior was removed with the per-token controls.) Adding a strategy
+  // renormalizes holding weights for the blend, but that dilution is a
+  // mechanical consequence of the add, not a recorded holding decision.
   // -------------------------------------------------------------------------
-  it("NEW-C18-01: changing BTC weight and committing emits voluntary_modify in the diff array", () => {
+  it("Read-only tokens: commit emits ONLY voluntary_add (no voluntary_modify/remove for fixed holdings)", () => {
     const payload = makePayload();
     const onCommitRequested = vi.fn();
     render(
@@ -1621,29 +1751,32 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
 
-    // Change BTC weight to a non-default value to produce a modify diff.
-    const btcInput = screen.getByLabelText(/BTC weight/i) as HTMLInputElement;
-    fireEvent.change(btcInput, { target: { value: "0.800" } });
-
-    // Toggle ETH off to produce a remove diff that unlocks the Commit button.
-    fireEvent.click(
-      screen.getByRole("switch", { name: /Toggle ETH on\/off in scenario/i }),
-    );
+    addStrategy({
+      id: "strat-only-add",
+      name: "OnlyAdd Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
 
     fireEvent.click(screen.getByTestId("scenario-footer-commit"));
     expect(onCommitRequested).toHaveBeenCalled();
 
-    const diffs = onCommitRequested.mock.calls[0][0] as Array<{ kind: string; holding_ref?: string }>;
-    // voluntary_modify must appear for BTC (its weight changed).
-    const modifyDiff = diffs.find(
-      (d) => d.kind === "voluntary_modify" && d.holding_ref === REF_BTC,
-    );
-    expect(modifyDiff).toBeDefined();
-    // voluntary_remove must appear for ETH (toggled off).
-    const removeDiff = diffs.find(
-      (d) => d.kind === "voluntary_remove" && d.holding_ref === REF_ETH,
-    );
-    expect(removeDiff).toBeDefined();
+    const diffs = onCommitRequested.mock.calls[0][0] as Array<{
+      kind: string;
+      strategy_id?: string;
+    }>;
+    // The added strategy is committed as voluntary_add…
+    expect(
+      diffs.some(
+        (d) => d.kind === "voluntary_add" && d.strategy_id === "strat-only-add",
+      ),
+    ).toBe(true);
+    // …and NOTHING is a holding modify/remove (those paths no longer exist).
+    expect(
+      diffs.some(
+        (d) => d.kind === "voluntary_modify" || d.kind === "voluntary_remove",
+      ),
+    ).toBe(false);
   });
 
   // -------------------------------------------------------------------------
@@ -1663,7 +1796,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     lsStore.set(
       `allocations.scenario_v0_15.${ALLOCATOR_A}`,
       JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         init_holdings_fingerprint: "STALE_FINGERPRINT_NOT_MATCHING",
         toggleByScopeRef: { [REF_BTC]: true, [REF_ETH]: true, [REF_SOL]: true },
         addedStrategies: [],
@@ -1691,14 +1824,17 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
 
     // Dismiss: "Keep my draft" clears the mismatch flag.
     fireEvent.click(screen.getByRole("button", { name: /Keep my draft/i }));
-    // Banner gone, fingerprintMismatch=false. Now toggle BTC off to produce a diff.
+    // Banner gone, fingerprintMismatch=false. Now add a strategy to produce a diff.
     expect(
       screen.queryByText(/Your live holdings have changed since you last edited the scenario/i),
     ).not.toBeInTheDocument();
-    // Toggle BTC off to produce a diff → button enables.
-    fireEvent.click(
-      screen.getByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
-    );
+    // Add a strategy to produce a diff → button enables.
+    addStrategy({
+      id: "strat-c18-10",
+      name: "C18-10 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
     expect(commit.disabled).toBe(false);
   });
 
@@ -1724,42 +1860,51 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    // Toggle BTC off to produce a diff.
-    fireEvent.click(
-      screen.getByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
-    );
+    // Add a strategy to produce a diff.
+    addStrategy({
+      id: "strat-c18-13",
+      name: "C18-13 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
     fireEvent.click(screen.getByTestId("scenario-footer-commit"));
     expect(screen.getByTestId("commit-drawer-mock")).toBeInTheDocument();
     // Simulate a successful commit.
     act(() => {
       capturedOnSubmitSuccess?.();
     });
-    // After success, the draft is reset (all toggles back to ON, diff=0).
+    // After success, the draft is reset (added strategy cleared, diff=0).
     const commit = screen.getByTestId(
       "scenario-footer-commit",
     ) as HTMLButtonElement;
     expect(commit.disabled).toBe(true);
-    // Now toggle BTC off again — but the ScenarioCommitDrawer should
-    // receive a fresh (non-stale) diffs array when opened again.
-    fireEvent.click(
-      screen.getByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
-    );
+    // Now add another strategy — the ScenarioCommitDrawer should receive a
+    // fresh (non-stale) diffs array when opened again.
+    addStrategy({
+      id: "strat-c18-13b",
+      name: "C18-13b Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
     fireEvent.click(screen.getByTestId("scenario-footer-commit"));
     const drawerCalls = vi.mocked(ScenarioCommitDrawer).mock.calls;
     const lastCall = drawerCalls.at(-1)?.[0];
-    // NEW-C18-01: toggling BTC off also renormalizes ETH+SOL weights, which
-    // now differ from their defaults → voluntary_modify diffs for ETH and SOL.
-    // The diff array is: 1 voluntary_remove (BTC) + 2 voluntary_modify (ETH, SOL).
+    // Read-only-tokens model: the fresh diff array is a single voluntary_add for
+    // the newly-added strategy (no stale rows from the prior commit).
     expect(lastCall?.diffs).toBeDefined();
-    const kinds = (lastCall?.diffs ?? []).map((d: { kind: string }) => d.kind);
-    expect(kinds).toContain("voluntary_remove");
-    // BTC remove is present.
     expect(
       lastCall?.diffs.some(
-        (d: { kind: string; holding_ref?: string }) =>
-          d.kind === "voluntary_remove" && d.holding_ref === REF_BTC,
+        (d: { kind: string; strategy_id?: string }) =>
+          d.kind === "voluntary_add" && d.strategy_id === "strat-c18-13b",
       ),
     ).toBe(true);
+    // No stale row from the first (already-committed) strategy.
+    expect(
+      lastCall?.diffs.some(
+        (d: { kind: string; strategy_id?: string }) =>
+          d.strategy_id === "strat-c18-13",
+      ),
+    ).toBe(false);
   });
 
   // -------------------------------------------------------------------------
@@ -1780,9 +1925,16 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
 
-    // Enter a weight exceeding 1 for BTC.
-    const btcInput = screen.getByLabelText(/BTC weight/i) as HTMLInputElement;
-    fireEvent.change(btcInput, { target: { value: "1.5" } });
+    // Read-only-tokens model: weight inputs live on added-strategy rows.
+    addStrategy({
+      id: "strat-w1",
+      name: "W1 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    // Enter a weight exceeding 1 for the strategy.
+    const wInput = screen.getByLabelText(/W1 Strat weight/i) as HTMLInputElement;
+    fireEvent.change(wInput, { target: { value: "1.5" } });
 
     // An inline error must appear explaining the clamping.
     const alert = screen.getByRole("alert");
@@ -1860,8 +2012,13 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // could mistake an illustrative curve for one backed by real capital.
   // -------------------------------------------------------------------------
   it("NEW-C18-14: scenarioAum=0 renders synthetic-baseline disclosure text", () => {
-    // All live holdings toggled off → scenarioAum = 0.
-    const payload = makePayload();
+    // Read-only-tokens model: holdings can't be toggled off, so scenarioAum=0 is
+    // reached the only way left — no live holdings at all, plus an added strategy
+    // (which moves the composer out of the empty-state branch into the body).
+    const payload = makePayload({
+      holdingsSummary: [],
+      holdingReturnsByScopeRef: {},
+    });
     render(
       <ScenarioComposer
         payload={payload}
@@ -1870,18 +2027,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
 
-    // Toggle all three holdings off so scenarioAum collapses to 0.
-    fireEvent.click(
-      screen.getByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
-    );
-    fireEvent.click(
-      screen.getByRole("switch", { name: /Toggle ETH on\/off in scenario/i }),
-    );
-    fireEvent.click(
-      screen.getByRole("switch", { name: /Toggle SOL on\/off in scenario/i }),
-    );
+    addStrategy({
+      id: "strat-zero-aum",
+      name: "Zero AUM Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
 
-    // Disclosure must now be visible.
+    // Disclosure must now be visible (no live capital → synthetic $1 baseline).
     expect(
       screen.getByText(/Illustrative shape only — no live capital connected/i),
     ).toBeInTheDocument();
@@ -1911,7 +2064,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     lsStore.set(
       `allocations.scenario_v0_15.${ALLOCATOR_A}`,
       JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         // Correct fingerprint → draft is loaded, no mismatch banner.
         init_holdings_fingerprint: MATCHING_FP,
         toggleByScopeRef: {
@@ -1969,51 +2122,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // F-02 regression — voluntary_modify zero-size gate
-  // Before this fix: a weight change on a holding with value_usd=0 produced
-  // a voluntary_modify with size_at_decision_usd:0 and passed it to the
-  // commit drawer (cron division-by-zero hazard). After: it surfaces an error.
+  // (Removed) F-02 — voluntary_modify zero-size gate. The read-only-tokens
+  // model dropped the holding voluntary_modify path entirely (live holdings are
+  // fixed context and can't be reweighted), so the zero-value-holding modify
+  // hazard it guarded against no longer exists. The remaining zero-size gate on
+  // voluntary_add is still covered by NEW-C18-05.
   // -------------------------------------------------------------------------
-  it("F-02: voluntary_modify for zero-value holding → named error, no commit", () => {
-    // Payload with one holding at value_usd=0.
-    const payload = makePayload({
-      holdingsSummary: [
-        { ...HOLDING_BTC, value_usd: 0 }, // zero value
-        HOLDING_ETH,
-        HOLDING_SOL,
-      ],
-    });
-    const onCommitRequested = vi.fn();
-    render(
-      <ScenarioComposer
-        payload={payload}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-        useInternalCommitDrawer={false}
-        onCommitRequested={onCommitRequested}
-      />,
-    );
-
-    // Change BTC weight — BTC has value_usd=0, so modify diff must be rejected.
-    const btcInput = screen.getByLabelText(/BTC weight/i) as HTMLInputElement;
-    fireEvent.change(btcInput, { target: { value: "0.800" } });
-
-    // Also toggle ETH off so diffCount>0 and the footer enables.
-    fireEvent.click(
-      screen.getByRole("switch", { name: /Toggle ETH on\/off in scenario/i }),
-    );
-
-    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
-    // F-02: error must reference the zero-value holding.
-    const alerts = screen.getAllByRole("alert");
-    expect(
-      alerts.some((a) =>
-        /zero USD value|can't record a weight change/i.test(a.textContent ?? ""),
-      ),
-    ).toBe(true);
-    // Commit must not proceed.
-    expect(onCommitRequested).not.toHaveBeenCalled();
-  });
 
   // -------------------------------------------------------------------------
   // IMP-3 regression — commitError clears unconditionally on weight <= 1
@@ -2030,14 +2144,21 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    const btcInput = screen.getByLabelText(/BTC weight/i) as HTMLInputElement;
+    // Read-only-tokens model: weight inputs live on added-strategy rows.
+    addStrategy({
+      id: "strat-imp3",
+      name: "IMP3 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    const wInput = screen.getByLabelText(/IMP3 Strat weight/i) as HTMLInputElement;
 
     // Trigger the >1 error.
-    fireEvent.change(btcInput, { target: { value: "1.5" } });
+    fireEvent.change(wInput, { target: { value: "1.5" } });
     expect(screen.getByRole("alert").textContent).toMatch(/clamped to 1/i);
 
     // Enter a valid weight — error must disappear.
-    fireEvent.change(btcInput, { target: { value: "0.5" } });
+    fireEvent.change(wInput, { target: { value: "0.5" } });
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
@@ -2066,7 +2187,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       max_drawdown: null,
     };
   }
-  function mockTwoStrategies() {
+  // Read-only-tokens model: weight + leverage + toggle live ONLY on added
+  // strategies. To drive the projection from the UI we mock the adapter to
+  // return one fixed live holding (REF_BTC) plus one added strategy (STRAT_A);
+  // the test adds STRAT_A so its weight/leverage/toggle inputs render and feed
+  // projectionState. Two distinct series → a real pairwise correlation exists
+  // (so the toggle-off-collapses-to-null isolator works).
+  const STRAT_A = "strat-proj-a";
+  function mockHoldingPlusStrategy() {
     const dates = Array.from({ length: 12 }, (_, i) =>
       `2026-01-${String(i + 1).padStart(2, "0")}`,
     );
@@ -2074,17 +2202,26 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       date,
       value: [0.02, -0.01, 0.03, -0.02, 0.01][i % 5],
     }));
-    const eth = dates.map((date, i) => ({
+    const strat = dates.map((date, i) => ({
       date,
       value: [-0.01, 0.005, -0.02][i % 3],
     }));
     vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [mkRealStrat(REF_BTC, btc), mkRealStrat(REF_ETH, eth)],
+      strategies: [mkRealStrat(REF_BTC, btc), mkRealStrat(STRAT_A, strat)],
       state: {
-        selected: { [REF_BTC]: true, [REF_ETH]: true },
-        weights: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
+        selected: { [REF_BTC]: true, [STRAT_A]: true },
+        weights: { [REF_BTC]: 0.5, [STRAT_A]: 0.5 },
         startDates: {},
       },
+    });
+  }
+  /** Add STRAT_A so its row (weight + leverage + toggle inputs) renders. */
+  function addStratA() {
+    addStrategy({
+      id: STRAT_A,
+      name: "Strat A",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
     });
   }
   const lastScenarioMetrics = () => {
@@ -2093,8 +2230,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   };
 
   it("H-0133 — moving a weight slider MOVES the projection (reweighting changes scenarioMetrics, not just the commit diff)", () => {
-    mockTwoStrategies();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    mockHoldingPlusStrategy();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
     render(
       <ScenarioComposer
         payload={payload}
@@ -2102,10 +2239,11 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
+    addStratA();
     const beforeTwr = lastScenarioMetrics()?.twr;
-    // Re-weight BTC to 90% — the blend must shift toward BTC's profile.
+    // Re-weight the strategy to 90% — the blend must shift toward its profile.
     const input = document.getElementById(
-      `weight-${REF_BTC}`,
+      `weight-${STRAT_A}`,
     ) as HTMLInputElement;
     expect(input).not.toBeNull();
     act(() => {
@@ -2115,9 +2253,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(afterTwr).not.toBe(beforeTwr);
   });
 
-  it("R4 — a per-row leverage edit reaches the projection (2× changes vol) and surfaces the caveat", () => {
-    mockTwoStrategies();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+  it("R4 — a per-strategy leverage edit reaches the projection (2× changes vol) and surfaces the caveat", () => {
+    mockHoldingPlusStrategy();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
     render(
       <ScenarioComposer
         payload={payload}
@@ -2125,11 +2263,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
+    addStratA();
     const beforeVol = lastScenarioMetrics()?.volatility;
     // Caveat hidden until a non-default multiplier is applied.
     expect(screen.queryByTestId("scenario-leverage-caveat")).toBeNull();
     const lev = document.getElementById(
-      `leverage-${REF_BTC}`,
+      `leverage-${STRAT_A}`,
     ) as HTMLInputElement;
     expect(lev).not.toBeNull();
     act(() => {
@@ -2142,8 +2281,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("R4 — leverage clamps LOUDLY: a >MAX paste surfaces an error (never silently swallowed)", () => {
-    mockTwoStrategies();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    mockHoldingPlusStrategy();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
     render(
       <ScenarioComposer
         payload={payload}
@@ -2151,8 +2290,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
+    addStratA();
     const lev = document.getElementById(
-      `leverage-${REF_BTC}`,
+      `leverage-${STRAT_A}`,
     ) as HTMLInputElement;
     act(() => {
       fireEvent.change(lev, { target: { value: "999" } });
@@ -2198,8 +2338,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // no pairs, so avg_pairwise_correlation collapses to null. If the memo's
     // `toggle === undefined ? … : toggle` FALSE arm were re-severed, ETH would
     // stay in the active set and this would remain a number.
-    mockTwoStrategies();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    mockHoldingPlusStrategy();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
     render(
       <ScenarioComposer
         payload={payload}
@@ -2207,22 +2347,24 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    // Positive control: two active legs → a real pairwise correlation exists.
+    addStratA();
+    // Positive control: two active legs (BTC holding + Strat A) → a real
+    // pairwise correlation exists.
     expect(typeof lastScenarioMetrics()?.avg_pairwise_correlation).toBe("number");
     act(() => {
       fireEvent.click(
         screen.getByRole("switch", {
-          name: /Toggle ETH on\/off in scenario/i,
+          name: /Toggle Strat A on\/off in scenario/i,
         }),
       );
     });
-    // ETH dropped from the active set → only BTC remains → no pairs → null.
+    // Strat A dropped from the active set → only BTC remains → no pairs → null.
     expect(lastScenarioMetrics()?.avg_pairwise_correlation).toBeNull();
   });
 
   it("R4 — a NEGATIVE leverage clamps LOUDLY to 0 (shorting isn't modeled — never silently swallowed)", () => {
-    mockTwoStrategies();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    mockHoldingPlusStrategy();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
     render(
       <ScenarioComposer
         payload={payload}
@@ -2230,8 +2372,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
+    addStratA();
     const lev = document.getElementById(
-      `leverage-${REF_BTC}`,
+      `leverage-${STRAT_A}`,
     ) as HTMLInputElement;
     act(() => {
       fireEvent.change(lev, { target: { value: "-3" } });
@@ -2240,8 +2383,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("R4 — a non-finite leverage paste surfaces an inline error and KEEPS the prior value (fail-loud, no silent drop)", () => {
-    mockTwoStrategies();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    mockHoldingPlusStrategy();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
     render(
       <ScenarioComposer
         payload={payload}
@@ -2249,8 +2392,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
+    addStratA();
     const lev = document.getElementById(
-      `leverage-${REF_BTC}`,
+      `leverage-${STRAT_A}`,
     ) as HTMLInputElement;
     // jsdom sanitizes a non-numeric `<input type=number>` value to "" before
     // React reads it (Number("") = 0 → happy path), so force a non-finite
