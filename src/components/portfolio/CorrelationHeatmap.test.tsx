@@ -112,6 +112,35 @@ describe("<CorrelationHeatmap>", () => {
     expect(screen.queryByText(/Avg \|ρ\|/)).toBeNull();
   });
 
+  // Review CRITICAL (silent-failure F1) — the engine nulls the matrix for a
+  // THIRD reason beyond 0-strategies / <10-days: non-finite returns or a
+  // leveraged wipeout (<=0 wealth), which arrives as a NULL matrix WITH a large
+  // overlappingDays and >=2 real strategies. That must NOT read as "add more
+  // strategies" (the allocator already has them) — it names the real cause.
+  it("CRITICAL: null matrix with an ADEQUATE window (engine-nulled / wipeout) names the cause, NOT 'add strategies'", () => {
+    render(
+      <CorrelationHeatmap
+        correlationMatrix={null}
+        strategyNames={{ "a-1": "Alpha", "b-2": "Beta" }}
+        overlappingDays={200}
+      />,
+    );
+    expect(
+      screen.getByText("Not enough overlap to correlate"),
+    ).toBeInTheDocument();
+    // Names the real cause (non-finite / fully drawn down).
+    expect(
+      screen.getByText(/non-finite or the curve is fully drawn down/i),
+    ).toBeInTheDocument();
+    // Must NOT lie with the few-strategies copy — there ARE >=2 strategies + 200 days.
+    expect(
+      screen.queryByText(
+        "Add at least 2 active strategies to see how they move together.",
+      ),
+    ).toBeNull();
+    expect(screen.queryByText(/fewer than 10 overlapping/i)).toBeNull();
+  });
+
   it("renders labels for each strategy in the matrix", () => {
     render(
       <CorrelationHeatmap

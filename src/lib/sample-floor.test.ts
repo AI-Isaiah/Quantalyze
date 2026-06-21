@@ -153,6 +153,39 @@ describe("evaluateSampleFloor — per-call floor override (Stress/MC bring their
   });
 });
 
+describe("evaluateSampleFloor — invalid floor override never weakens the gate (review F2)", () => {
+  // A non-finite / non-positive floor is a caller bug. It must NOT make
+  // `n < floor` always-false and silently pass an inadequate sample; it clamps
+  // back to the conservative default and reports that default.
+  it("NaN floor → does NOT pass; clamps to the default 60 (n=30 → below-floor)", () => {
+    expect(evaluateSampleFloor(30, NaN)).toEqual({
+      ok: false,
+      n: 30,
+      floor: 60,
+      reason: "below-floor",
+    });
+  });
+
+  it("negative floor → does NOT pass every n; clamps to default (n=30 → below-floor)", () => {
+    const v = evaluateSampleFloor(30, -1);
+    expect(v.ok).toBe(false);
+    expect(v.floor).toBe(60);
+  });
+
+  it("zero floor → clamps to default rather than passing n=0", () => {
+    expect(evaluateSampleFloor(0, 0).ok).toBe(false);
+  });
+
+  it("Infinity floor → clamps to default (n=120 → ok at 60, not below an infinite bar)", () => {
+    expect(evaluateSampleFloor(120, Infinity)).toEqual({
+      ok: true,
+      n: 120,
+      floor: 60,
+      reason: "ok",
+    });
+  });
+});
+
 describe("reason-body copy — names the right numbers, never fabricates", () => {
   it("below-floor body names BOTH the actual N and the floor + the feature noun", () => {
     const body = belowFloorBody(30, 60, "stress");

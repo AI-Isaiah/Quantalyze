@@ -5,6 +5,12 @@ import { Fragment } from "react";
 interface CorrelationHeatmapProps {
   correlationMatrix: Record<string, Record<string, number>> | null;
   strategyNames: Record<string, string>;
+  // NOTE (review type-design F4): the two optional props below intentionally
+  // MIRROR the nullability of their `ComputedMetrics` source — `overlappingDays`
+  // mirrors `n: number` (never null), `avgAbsCorrelation` mirrors
+  // `avg_pairwise_correlation: number | null`. The asymmetry is deliberate, not
+  // an oversight; absence (`undefined`) on either means "no host context"
+  // (the portfolio-detail caller passes neither).
   /**
    * CORR-02 — the host's overlapping-day count (`scenarioMetrics.n`). Lets the
    * presentational heatmap distinguish the `< 10 overlapping days` empty-state
@@ -152,6 +158,12 @@ const EMPTY_BODY_FEW_DAYS =
 // not assume the scenario composer's toggle UX. See CR-01 (Phase 21 review).
 const EMPTY_BODY_COMBINED =
   "Need at least 2 strategies with 10 or more overlapping days to show a correlation heatmap.";
+// Review CRITICAL (silent-failure F1): the engine ALSO nulls the matrix when the
+// projected returns are non-finite or the curve is fully drawn down to <=0 wealth
+// (scenario.ts — newly reachable via R4 leverage), with an ADEQUATE window and
+// >=2 strategies. That must NOT read as "add more strategies" — name the real cause.
+const EMPTY_BODY_ENGINE_NULLED =
+  "Correlation can't be computed for this scenario — the projected returns are non-finite or the curve is fully drawn down. Try lower leverage or different strategies.";
 
 export function CorrelationHeatmap({
   correlationMatrix,
@@ -169,21 +181,37 @@ export function CorrelationHeatmap({
   //     returns a 1×1 `{id:{id:1}}`. This `ids.length < 2` gate is the ONLY
   //     thing preventing a degenerate 1×1 grid (and a fabricated Avg |ρ|).
   if (!correlationMatrix || ids.length < 2) {
-    // Route the body copy by the actual reason:
-    //   - The < 10-overlapping-days case arrives from the engine as a NULL
-    //     matrix (ids.length === 0) WITH the host's `overlappingDays` set, so
-    //     check it FIRST — a too-short window names the days reason.
-    //   - A genuine < 2-strategy set has a non-null 1×1 matrix (ids.length === 1)
-    //     with a 10+-day window → the few-strategies copy.
-    //   - Anything else (e.g. a standalone null matrix with no host context)
-    //     gets the combined fallback that names BOTH thresholds.
-    const tooFewDays = overlappingDays !== undefined && overlappingDays < 10;
-    const tooFewStrategies = ids.length < 2 && !tooFewDays;
-    const body = tooFewDays
-      ? EMPTY_BODY_FEW_DAYS
-      : tooFewStrategies && (correlationMatrix !== null || overlappingDays !== undefined)
-        ? EMPTY_BODY_FEW_STRATEGIES
-        : EMPTY_BODY_COMBINED;
+    // Route the body copy by the actual reason. The engine nulls the matrix for
+    // THREE distinct reasons (scenario.ts); a non-null 1×1 matrix is a fourth
+    // (genuine 1-strategy) case. Explicit branches (not a nested ternary) so each
+    // path is independently auditable (review IN-04) and the engine-nulled case
+    // (review CRITICAL) can't fall through to the wrong copy:
+    let body: string;
+    if (overlappingDays !== undefined && overlappingDays < 10) {
+      // Too-short window — engine returns a null matrix with n < 10.
+      body = EMPTY_BODY_FEW_DAYS;
+    } else if (
+      correlationMatrix === null &&
+      overlappingDays !== undefined &&
+      overlappingDays >= 10
+    ) {
+      // Adequate window but the engine STILL nulled the matrix → non-finite
+      // returns or a fully drawn-down (<=0 wealth) projection. The allocator
+      // already has >=2 strategies and enough days, so "add more strategies"
+      // would be an actively wrong lie — name the real cause instead.
+      body = EMPTY_BODY_ENGINE_NULLED;
+    } else if (
+      ids.length < 2 &&
+      (correlationMatrix !== null || overlappingDays !== undefined)
+    ) {
+      // A genuine < 2-strategy set: a non-null 1×1 matrix (ids.length === 1)
+      // with a 10+-day window, or a scenario host that passed overlappingDays.
+      body = EMPTY_BODY_FEW_STRATEGIES;
+    } else {
+      // Standalone null matrix with no host context (e.g. the portfolio-detail
+      // caller passes no overlappingDays) — surface-neutral combined copy.
+      body = EMPTY_BODY_COMBINED;
+    }
     return (
       <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center text-text-muted text-sm">
         <div className="font-semibold text-text-secondary">{EMPTY_HEADING}</div>

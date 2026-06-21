@@ -53,6 +53,23 @@ describe("<SampleFloorEmptyState>", () => {
     expect(body.textContent).toContain("60");
   });
 
+  it("review F3: no-usable-n verdict WITH strategyCount>=2 renders the no-number body, never 'null' or few-strategies", () => {
+    // The "engine nulled the metrics despite >=2 strategies" P26/27 state: the
+    // strategyCount<2 branch must NOT fire, and the no-usable-n branch must win
+    // (never fall through to belowFloorBody(n=null) → a "null overlapping days" leak).
+    render(
+      <SampleFloorEmptyState
+        verdict={evaluateSampleFloor(null)}
+        strategyCount={5}
+        feature="stress"
+      />,
+    );
+    const body = screen.getByText(/usable return history/);
+    expect(body.textContent).not.toMatch(/\d/);
+    expect(body.textContent).not.toMatch(/null/i);
+    expect(screen.queryByText(/Add at least 2 active strategies/)).toBeNull();
+  });
+
   it("is NOT an alert and carries no negative/warning color class (honest absence, not an error)", () => {
     const { container } = render(
       <SampleFloorEmptyState verdict={evaluateSampleFloor(30)} feature="stress" />,

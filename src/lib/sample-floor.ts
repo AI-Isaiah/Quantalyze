@@ -38,14 +38,17 @@ export const SAMPLE_FLOOR_OVERLAPPING_DAYS = 60;
 
 export type SampleFloorReason = "ok" | "below-floor" | "no-usable-n";
 
-export interface SampleFloorVerdict {
-  ok: boolean;
-  /** The validated finite day count, or `null` when the input was unusable. */
-  n: number | null;
-  /** The floor actually applied (the per-call override, or the default). */
-  floor: number;
-  reason: SampleFloorReason;
-}
+/**
+ * Discriminated on `reason` so illegal states are UNREPRESENTABLE (review
+ * type-design F1): `ok` is a per-variant literal tied to `reason` (can't drift —
+ * `{ ok: true, reason: "below-floor" }` matches no member), and `n` is a finite
+ * `number` in the `"ok"`/`"below-floor"` arms and `null` ONLY in `"no-usable-n"`.
+ * Callers may read `verdict.ok` or test `verdict.reason === "ok"`.
+ */
+export type SampleFloorVerdict =
+  | { ok: true; reason: "ok"; n: number; floor: number }
+  | { ok: false; reason: "below-floor"; n: number; floor: number }
+  | { ok: false; reason: "no-usable-n"; n: null; floor: number };
 
 /**
  * Floor check on a finite overlapping-day count `n`.
@@ -57,19 +60,28 @@ export interface SampleFloorVerdict {
  *   3. else                                         → `"ok"`.
  *
  * `floor` defaults to `SAMPLE_FLOOR_OVERLAPPING_DAYS`; Stress/MC pass their own
- * bar per call. Never throws.
+ * bar per call. A non-finite or non-positive `floor` is a CALLER bug, not a
+ * "no minimum" — review finding (silent-failure F2 / type-design F2): an
+ * unvalidated `NaN`/`Infinity`/`<=0` floor would make `n < floor` always-false
+ * and silently pass every `n`, rendering a false-precision estimate (the exact
+ * harm this primitive prevents). We clamp such a floor back to the conservative
+ * default rather than throw (the "never throws" contract is preserved). Never throws.
  */
 export function evaluateSampleFloor(
   n: number | null | undefined,
   floor: number = SAMPLE_FLOOR_OVERLAPPING_DAYS,
 ): SampleFloorVerdict {
+  // Guard the floor on the same fail-safe axis as `n`: a bad override can never
+  // weaken the gate into passing an inadequate sample.
+  const safeFloor =
+    Number.isFinite(floor) && floor > 0 ? floor : SAMPLE_FLOOR_OVERLAPPING_DAYS;
   if (n == null || !Number.isFinite(n) || n < 0) {
-    return { ok: false, n: null, floor, reason: "no-usable-n" };
+    return { ok: false, n: null, floor: safeFloor, reason: "no-usable-n" };
   }
-  if (n < floor) {
-    return { ok: false, n, floor, reason: "below-floor" };
+  if (n < safeFloor) {
+    return { ok: false, n, floor: safeFloor, reason: "below-floor" };
   }
-  return { ok: true, n, floor, reason: "ok" };
+  return { ok: true, n, floor: safeFloor, reason: "ok" };
 }
 
 /**

@@ -210,10 +210,13 @@ export function ScenarioBuilder({ strategies }: Props) {
     return out;
   }, [strategies]);
 
-  // IMPACT-01 coverage caveat: name the de-aliased strategy whose record most
-  // constrains the overlap (fewest daily_returns points). `strategies` is the
-  // already-collapsed set the page passes in (page.tsx:131), mirroring the
-  // composer's `shortestHistoryName(deAliased.strategies)`. null on an empty set.
+  // IMPACT-01 coverage caveat: name the strategy whose record most constrains
+  // the projection (fewest daily_returns points). `strategies` is the example
+  // marketplace universe the page passes in — these are DISTINCT strategies, NOT
+  // de-aliased own-book holdings (that aliasing only happens on the composer's
+  // own-book path; the sandbox never calls collapseAliasedHoldingStrategies).
+  // `shortestHistoryName` reads only name + daily_returns.length, so it is correct
+  // either way. null on an empty set.
   const shortestName = useMemo(
     () => shortestHistoryName(strategies),
     [strategies],
