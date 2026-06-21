@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.15.134] - 2026-06-21
+### Changed — Reproducible analytics-service builds: Python lock file + exact ccxt pin (tech-debt #7)
+
+Tech-debt audit (2026-06-09) finding #7 (P28). The analytics service — which computes LP-facing financial metrics — had no Python lock file and floated `ccxt>=4.0` (releases near-daily, parses live broker payloads feeding equity reconstruction and trade ingestion). Every Railway image rebuild could silently pick up a different ccxt or transitive with changed behavior, with zero diff in the repo. This already bit once (an unpinned transitive aiohttp floated to 3.14 and broke every VCR-backed test).
+
+- **`analytics-service/requirements.in` (new)** — the human-edited source manifest (all the original incident comments preserved), with `ccxt` pinned exactly (was `>=4.0`).
+- **`analytics-service/requirements.txt` (now a generated lock)** — `uv pip compile --python-version 3.12 --universal` output: **98 packages exact-pinned** (was 14 direct deps with 3 floats). `--universal` so the one lock installs on both linux (CI/Railway) and macOS (dev); resolves with zero source builds on the `python:3.12-slim` prod image. Every install site (Dockerfile, ci.yml, cassette-refresh.yml, Makefile) already pointed at `requirements.txt`, so they pick up the lock with no change.
+- **`ccxt==4.5.59`** — the version the cassette + equity-reconstruction/funding suites are verified green against (the code's 4.5.x workarounds target this line). `cryptography` resolves to 49.0.0 (the codebase uses only the high-level Fernet API, so the version jump is format-stable for existing encrypted broker keys). `supabase` stays at the pinned 2.15.1 (matching CI), `aiohttp` at 3.13.5 (below the 3.14 break).
+- **`make lock`** (new Makefile target) regenerates the lock from `requirements.in`; always compiled against 3.12.
+
+`requirements-dev.txt` (test-only tooling, never shipped to prod via the Dockerfile) is intentionally left range-pinned — out of scope for the prod-reproducibility fix. A `make lock` drift CI gate was considered and declined: `uv pip compile` output varies by uv version, so the gate would flake on a uv bump; the test suite already catches a missing dependency and Dependabot drives bumps.
+
+Reviewed: a recon spike generated the lock and ran the ccxt-sensitive suites green before implementation; full python suite 2,638 pass / 82 skip on a fresh 3.12 venv with the committed lock + dev deps installed together; fresh-context adversarial review confirmed the universal lock installs on linux 3.12 with zero source builds (all manylinux wheels), the cryptography 44→49 jump is safe for the Fernet-only usage, and the floating dev `cryptography` cannot shadow the runtime `==49.0.0` pin. The review caught two stale comments (a now-false `tech-debt #7 is open` note in `dependabot.yml`, and an over-optimistic "Dependabot regenerates the lock" line) — both fixed.
+
 ## [0.24.15.133] - 2026-06-21
 ### Added — Canonical SQL function snapshot + drift gate (tech-debt #2)
 
