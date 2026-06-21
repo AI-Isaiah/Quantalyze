@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.24.15.136] - 2026-06-21
+### Added — systemic guards: env manifest, DB-types hand-patch, ops runbooks (tech-debt #14/#15/#17)
+
+Tech-debt audit (2026-06-09), the three P24 "systemic guard" findings. All three were process/observability gaps, not bugs — closed with sound, credential-free gates rather than the audit's as-written remediations (one of which it flagged unsound).
+
+- **#15 — env/config is now an enforced manifest.** `src/` read ~58 distinct `process.env` keys while `.env.example` documented ~30, so real app config (`ALERT_ACK_SECRET`, `RESEND_WEBHOOK_SECRET`, the server-side `POSTHOG_*` trio, `NEXT_PUBLIC_ALLOWED_ORIGINS`, `RESEND_ALERT_FROM`, `USE_COMPUTE_JOBS_QUEUE`) drifted into "undocumented unless you grep", and a dead entry (`PORTFOLIO_PDF_SECRET`, read nowhere repo-wide) lingered. This already bit: `RESEND_API_KEY` unset in Vercel prod silently disabled the founder-LP report cron.
+  - `src/__tests__/contracts/env-manifest.test.ts` (new) enforces `.env.example` **bidirectionally**: every literal `process.env.<KEY>` read in `src/` is documented (or allowlisted as a platform/test/indirect key), and every active key is actually read (no dead entries). Runs in `contracts.yml` + the frontend test job; registered in the contracts registry.
+  - `.env.example` rewritten as the manifest: missing keys added with owning-plane annotations (Vercel / Railway / Supabase GUC / GitHub), the dead `PORTFOLIO_PDF_SECRET` removed, the stale rate-limit comment fixed (it fail-CLOSEs in prod, not "all requests allowed"), and the `SUPABASE_SERVICE_KEY` (Python) vs `SUPABASE_SERVICE_ROLE_KEY` (TS) naming tripwire called out.
+  - `src/instrumentation.ts` — a prod-only (`VERCEL_ENV==="production"`) warn-loud at startup lists unset soft-skip keys (RESEND/Sentry/PostHog) so a missing key shows in the deploy log instead of only when the feature silently fails to run. Warn-only, never crashes; covered by `src/instrumentation.test.ts`.
+
+- **#14 — generated DB-types hand-patch is now guarded.** `src/lib/database.types.ts` is generated but carries two hand-written sections a fresh `supabase gen types` overwrite strips: the GENERATED/NUMERIC-precision header and the `for_quants_leads` HAND-PATCHED block (a regen against a project missing migration 115 silently reverts the `notify_*` columns — a prior CRITICAL). The `[#14]` block in `critical-regressions.test.ts` fails CI if either section or the protected columns are lost, turning a silent wipe into a local, explanatory failure. The regen procedure is documented in CONTRIBUTING. The stale orphan twin `supabase/types.generated.ts` was already deleted (B4/#13). The audit's automated live-schema drift gate is deferred (`docs/deferred-findings.md` #14) as unsound: a test-project diff false-positives on the migration lag (#18), and a naive prod diff false-positives on the hand-written header/comments every run — a sound probe needs prod creds + a structural normalizer.
+
+- **#17 — four operational runbooks** under `docs/runbooks/` with a new README index: `deploy-rollback.md` (Vercel promote-previous / Railway redeploy / schema forward-fix), `railway-worker.md` (health check, restart, the skipped-deploy gotcha + #9b self-block recovery, SSH one-offs), `migration-failure.md` (apply-workflow failure, C-0331 Reverted guard, `schema_migrations` version-stamp drift repair, DOWN scripts), and `sentry-triage.md` (EU `de.sentry.io` region trap, deploy-lag-vs-event gotcha, read-only-MCP resolve-list convention). Facts cross-checked against the live workflows/config; unverifiable bits (exact Sentry project name, replica count) are labelled, not invented.
+
+Reviewed: typecheck + lint clean; full frontend suite 6147 pass / 284 skip; fresh-context adversarial review on the full diff returned GO, catching one latent gate fragility (`DEMO_PDF_SECRET` is also a computed-accessor read and survived the dead-entry check only by coincidence — added to the test's `INDIRECT_READS` so the guard rests on the documented mechanism).
+
 ## [0.24.15.135] - 2026-06-21
 ### Fixed — analytics-deploy-verify no longer self-blocks the deploy it monitors
 
