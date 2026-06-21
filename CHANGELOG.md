@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.15.138] - 2026-06-21
+### Added — Scenario Analysis v1.1.0 (Phases 21 & 22): reachable surfaces, honest correlation, methodology disclosure
+
+The scenario draft engine becomes a discoverable, honesty-first analysis surface.
+
+- **Surfacing (SURF-01..03).** The own-book **Scenario** tab is now a visible tab in the allocations tablist (and keyboard-reachable), not only a `?tab=scenario` deep-link. The example-universe **Strategy Sandbox** is reachable from the sidebar for allocators only (managers/admins see no entry; the server gate is unchanged), labeled "Strategy Sandbox" with an "Example universe" badge.
+- **Correlation (CORR-01..04).** Both the own-book composer and the Sandbox render a pairwise **correlation heatmap** (de-aliased labels, all strategies shown in a scrollable container). A single-strategy, `<10`-overlapping-day, or non-finite/wiped-out scenario renders an honest, reason-named empty state — never a 1×1 grid or a fabricated number. "Avg |ρ|" (off-diagonal absolute mean) is single-sourced so the heatmap caption and the KPI strip can't diverge.
+- **Honest projection (IMPACT-01..02).** A persistent "PROJECTED — hypothetical, not your live book" badge + a coverage caveat (N overlapping days + shortest-history strategy) frame both surfaces. A regression-pinned neuter check guarantees a hypothetical blend is never peer-ranked.
+- **Methodology honesty (HONEST-01..02).** Every projected stat discloses its method inline — "Historical realized · {N} overlapping days · not a forecast" — on both surfaces. A new single-source minimum-sample floor primitive (`src/lib/sample-floor.ts`, conservative 60-overlapping-day default, tunable) + a shared honest below-floor empty state are built and pinned for Phases 26 (Stress/VaR) and 27 (Monte-Carlo) to reuse.
+
+Internal: extracted a shared `EmptyStateCard` primitive; scenario engine left frozen; no new dependencies.
+
 ## [0.24.15.137] - 2026-06-21
 ### Changed — Scenario Composer: live holdings are read-only context; leverage + toggle are per-strategy only (fixes #496)
 
