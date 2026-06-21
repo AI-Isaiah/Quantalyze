@@ -141,9 +141,14 @@ export const GET = withAllocatorAuth(
     const supabase = await createClient();
     // RLS scopes the SELECT to the caller (allocator_id = auth.uid()); no
     // explicit .eq needed, but the policy is the gate. Ordered by recency.
+    // `draft` is included so the saved-scenarios list (Plan 23-05) can Open or
+    // Compare a row without a second per-row round-trip — the planner's
+    // discretion default in the Plan 23-05 interfaces note. Open decodes the
+    // draft through the codec trichotomy at the composer; Compare runs it
+    // through computeMetricsForDraft. RLS already scopes the rows to the caller.
     const { data, error } = await supabase
       .from("scenarios")
-      .select("id, name, schema_version, created_at, updated_at")
+      .select("id, name, schema_version, created_at, updated_at, draft")
       .order("updated_at", { ascending: false });
 
     if (error) {

@@ -241,6 +241,12 @@ export interface ScenarioComposerProps {
    * the composer simply never receives an Open request.
    */
   onRegisterOpen?: (open: (row: SavedScenarioRow) => void) => void;
+  /**
+   * Phase 23 / PERSIST-03 — fired after a scenario Save (POST) or Update (PUT)
+   * succeeds, so a host that renders the saved-scenarios list (Plan 05) can
+   * refetch and stay consistent. Optional — absent hosts simply don't refetch.
+   */
+  onScenarioSaved?: () => void;
   /** Legacy callback API. When `useInternalCommitDrawer === false`, the
    *  composer fires this callback INSTEAD of opening its own
    *  ScenarioCommitDrawer — host owns the commit-confirmation surface.
@@ -332,6 +338,7 @@ export function ScenarioComposer({
   onCommitRequested,
   useInternalCommitDrawer = true,
   onRegisterOpen,
+  onScenarioSaved,
 }: ScenarioComposerProps) {
   const {
     holdingsSummary,
@@ -609,6 +616,8 @@ export function ScenarioComposer({
       }
       setNameInputOpen(false);
       setNameValue("");
+      // PERSIST-03 — let a host's saved-scenarios list refetch the new row.
+      onScenarioSaved?.();
     } catch {
       setSaveError(
         "Couldn't save this scenario. Check your connection and try again.",
@@ -640,6 +649,9 @@ export function ScenarioComposer({
         setSaveError(
           "Couldn't save this scenario. Check your connection and try again.",
         );
+      } else {
+        // PERSIST-03 — let a host's saved-scenarios list refetch (name/order).
+        onScenarioSaved?.();
       }
     } catch {
       setSaveError(

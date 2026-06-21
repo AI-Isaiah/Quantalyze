@@ -20,7 +20,7 @@
  * scenario-state hook + adapter pipeline (covered by ScenarioComposer.test).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
 import type { ReadonlyURLSearchParams } from "next/navigation";
 
@@ -101,24 +101,69 @@ vi.mock("./ScenarioStub", () => ({
 // `loading` fallback inside the dynamic() wrapper is bypassed because
 // next/dynamic resolves synchronously when the module export is already
 // available in the test bundle.
+//
+// Phase 23 / Plan 05 — the stub also captures `onRegisterOpen` /
+// `onScenarioSaved` so the integration wiring is assertable: it exposes an
+// Open button (calls the registered handler) and a Save button (fires
+// onScenarioSaved → the host refetches the list).
 vi.mock("./components/ScenarioComposer", () => ({
   ScenarioComposer: vi.fn(
     (props: {
       payload: { holdingReturnsByScopeRef?: Record<string, unknown> };
       allocatorId: string;
       allocatorMandate: unknown;
-    }) => (
-      <div
-        data-testid="scenario-composer-body"
-        data-allocator-id={props.allocatorId}
-        data-has-returns={
-          props.payload.holdingReturnsByScopeRef ? "true" : "false"
-        }
-        data-has-mandate={props.allocatorMandate ? "true" : "false"}
-      >
-        SCENARIO_COMPOSER_BODY
-      </div>
-    ),
+      onRegisterOpen?: (open: (row: unknown) => void) => void;
+      onScenarioSaved?: () => void;
+    }) => {
+      props.onRegisterOpen?.((row) => {
+        (
+          globalThis as { __lastOpenedRow?: unknown }
+        ).__lastOpenedRow = row;
+      });
+      return (
+        <div
+          data-testid="scenario-composer-body"
+          data-allocator-id={props.allocatorId}
+          data-has-returns={
+            props.payload.holdingReturnsByScopeRef ? "true" : "false"
+          }
+          data-has-mandate={props.allocatorMandate ? "true" : "false"}
+          data-has-register-open={props.onRegisterOpen ? "true" : "false"}
+        >
+          SCENARIO_COMPOSER_BODY
+          <button
+            type="button"
+            data-testid="composer-fire-saved"
+            onClick={() => props.onScenarioSaved?.()}
+          >
+            fire-saved
+          </button>
+        </div>
+      );
+    },
+  ),
+}));
+
+// Phase 23 / Plan 05 — the saved-scenarios list + compare panel mount adjacent
+// to the composer on the V2 scenario path. Mock both to marker stubs so this
+// wiring test asserts they mount (and are handed the list rows / payload)
+// without exercising their internals (covered by their own tests).
+vi.mock("./components/SavedScenariosList", () => ({
+  SavedScenariosList: (props: { rows: unknown[] }) => (
+    <div
+      data-testid="saved-scenarios-list-body"
+      data-row-count={props.rows.length}
+    >
+      SAVED_SCENARIOS_LIST_BODY
+    </div>
+  ),
+}));
+
+vi.mock("./components/ScenarioComparePanel", () => ({
+  ScenarioComparePanel: () => (
+    <div data-testid="scenario-compare-panel-body">
+      SCENARIO_COMPARE_PANEL_BODY
+    </div>
   ),
 }));
 
@@ -293,6 +338,97 @@ describe("AllocationsTabs — scenario panel v2 branching (Plan 06b Task 2)", ()
     expect(body.getAttribute("data-has-mandate")).toBe("true");
     const props = vi.mocked(ScenarioComposer).mock.calls[0][0];
     expect(props.allocatorMandate).toBe(STUB_PROPS.mandate);
+  });
+
+  // -------------------------------------------------------------------------
+  // T_AT5a (Plan 23-05) — SavedScenariosList mounts on the V2 scenario path,
+  //          adjacent to the composer, fed the GET list rows.
+  // -------------------------------------------------------------------------
+  it("T_AT5a SavedScenariosList mounts on the V2 scenario path with the fetched rows", async () => {
+    const listRows = [
+      {
+        id: "s1",
+        name: "Saved one",
+        schema_version: 2,
+        created_at: "c",
+        updated_at: "u",
+        draft: { schema_version: 2 },
+      },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => listRows }) as Response),
+    );
+    setSearchParams("tab=scenario");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    // The composer AND the list both render on the V2 path.
+    expect(
+      await screen.findByTestId("scenario-composer-body"),
+    ).toBeInTheDocument();
+    const list = await screen.findByTestId("saved-scenarios-list-body");
+    expect(list).toBeInTheDocument();
+    // The list was handed the fetched rows.
+    await waitFor(() =>
+      expect(list.getAttribute("data-row-count")).toBe("1"),
+    );
+    // The GET list endpoint was queried.
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "/api/allocator/scenario/saved",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // T_AT5b (Plan 23-05) — the composer receives onRegisterOpen + a save fires
+  //          the host's list refetch (onScenarioSaved → re-GET).
+  // -------------------------------------------------------------------------
+  it("T_AT5b composer receives onRegisterOpen and a save refetches the list", async () => {
+    const fetchMock = vi.fn(
+      async () => ({ ok: true, json: async () => [] }) as Response,
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    setSearchParams("tab=scenario");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const body = await screen.findByTestId("scenario-composer-body");
+    expect(body.getAttribute("data-has-register-open")).toBe("true");
+    // One GET on mount.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    // A composer save fires onScenarioSaved → the host refetches.
+    fireEvent.click(screen.getByTestId("composer-fire-saved"));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+
+  // -------------------------------------------------------------------------
+  // T_AT5c (Plan 23-05) — the ScenarioStub rollback path renders NEITHER the
+  //          list NOR the compare panel (the new surfaces are V2-only).
+  // -------------------------------------------------------------------------
+  it("T_AT5c the ScenarioStub rollback path does not mount the list or compare panel", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => [] }) as Response),
+    );
+    lsStore.set("allocations.ui_v2", "false");
+    setSearchParams("tab=scenario");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    expect(screen.getByTestId("scenario-stub-body")).toBeInTheDocument();
+    expect(screen.queryByTestId("saved-scenarios-list-body")).toBeNull();
+    expect(screen.queryByTestId("scenario-compare-panel-body")).toBeNull();
+    expect(screen.queryByTestId("scenario-composer-body")).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // T_AT5d (Plan 23-05) — the compare panel is NOT mounted until a selection
+  //          is active (no fabricated compare surface on first paint).
+  // -------------------------------------------------------------------------
+  it("T_AT5d compare panel is not mounted before a selection is active", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => [] }) as Response),
+    );
+    setSearchParams("tab=scenario");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    await screen.findByTestId("saved-scenarios-list-body");
+    expect(screen.queryByTestId("scenario-compare-panel-body")).toBeNull();
   });
 
   // -------------------------------------------------------------------------
