@@ -26,6 +26,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import type { ReadonlyURLSearchParams } from "next/navigation";
 
+// Read-only-tokens model: live holdings are fixed context (no per-holding
+// toggle). The only interactive draft gesture is adding/toggling a STRATEGY, so
+// this integration test exercises draft preservation via an added strategy. The
+// hoisted holder lets the (hoisted) StrategyBrowseDrawer mock factory stash the
+// composer's onAdd callback for the test to invoke.
+const scenarioHoisted = vi.hoisted(() => ({
+  browseOnAdd: null as ((s: unknown) => void) | null,
+}));
+
 // --- next/navigation mocks --------------------------------------------------
 
 const mockReplace = vi.fn();
@@ -89,8 +98,16 @@ vi.mock("./components/KpiStrip", () => ({
   KpiStrip: () => <div data-testid="kpi-strip-mock" />,
 }));
 vi.mock("./components/StrategyBrowseDrawer", () => ({
-  StrategyBrowseDrawer: ({ isOpen }: { isOpen: boolean }) =>
-    isOpen ? <div data-testid="browse-drawer-mock" /> : null,
+  StrategyBrowseDrawer: ({
+    isOpen,
+    onAdd,
+  }: {
+    isOpen: boolean;
+    onAdd: (s: unknown) => void;
+  }) => {
+    scenarioHoisted.browseOnAdd = onAdd;
+    return isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+  },
 }));
 vi.mock("./components/BridgeDrawer", () => ({
   BridgeDrawer: ({ isOpen }: { isOpen: boolean }) =>
@@ -200,6 +217,7 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
   };
 
   beforeEach(() => {
+    scenarioHoisted.browseOnAdd = null;
     mockReplace.mockReset();
     mockRefresh.mockReset();
     mockPush.mockReset();
@@ -240,27 +258,48 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
     }
   });
 
-  it("toggling a holding off in Scenario, leaving to Overview, and re-entering preserves the toggle (draft survives unmount/remount via localStorage)", async () => {
+  it("adding + toggling a strategy in Scenario, leaving to Overview, and re-entering preserves the draft (survives unmount/remount via localStorage)", async () => {
     // Start on the Scenario tab so the REAL composer mounts.
     setSearchParams("tab=scenario");
     const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
 
-    // The real composer renders its composition list with a switch per holding.
-    const btcSwitch = await screen.findByRole("switch", {
-      name: /Toggle BTC on\/off in scenario/i,
-    });
-    // Default: BTC is ON.
-    expect(btcSwitch.getAttribute("aria-checked")).toBe("true");
-
-    // Toggle BTC OFF — useScenarioState updates the in-memory draft. As of
-    // B7a-2 the localStorage write is DEBOUNCED (no synchronous setItem per
-    // toggle, H-0125); the pending write flushes on the composer unmount below.
+    // Wait for the real composer body to mount (the browse drawer renders with
+    // it and hands back its onAdd). Then inject two strategies — the interactive
+    // rows in the read-only-tokens model.
+    expect(await screen.findByTestId("kpi-strip-mock")).toBeInTheDocument();
+    expect(scenarioHoisted.browseOnAdd).not.toBeNull();
     await act(async () => {
-      fireEvent.click(btcSwitch);
+      scenarioHoisted.browseOnAdd!({
+        id: "strat-alpha",
+        name: "Alpha",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+    });
+    await act(async () => {
+      scenarioHoisted.browseOnAdd!({
+        id: "strat-beta",
+        name: "Beta",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+    });
+
+    // Both strategy rows render a toggle switch, default ON.
+    const betaSwitch = await screen.findByRole("switch", {
+      name: /Toggle Beta on\/off in scenario/i,
+    });
+    expect(betaSwitch.getAttribute("aria-checked")).toBe("true");
+
+    // Toggle Beta OFF — useScenarioState updates the in-memory draft. As of
+    // B7a-2 the localStorage write is DEBOUNCED (no synchronous setItem per
+    // edit, H-0125); the pending write flushes on the composer unmount below.
+    await act(async () => {
+      fireEvent.click(betaSwitch);
     });
     expect(
       screen
-        .getByRole("switch", { name: /Toggle BTC on\/off in scenario/i })
+        .getByRole("switch", { name: /Toggle Beta on\/off in scenario/i })
         .getAttribute("aria-checked"),
     ).toBe("false");
 
@@ -271,7 +310,7 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
     rerender(<AllocationsTabs {...STUB_PROPS} />);
     expect(screen.getByTestId("overview-v2")).toBeInTheDocument();
     expect(
-      screen.queryByRole("switch", { name: /Toggle BTC on\/off in scenario/i }),
+      screen.queryByRole("switch", { name: /Toggle Beta on\/off in scenario/i }),
     ).toBeNull();
 
     // The draft was persisted under the allocator-scoped scenario key (flushed
@@ -282,34 +321,34 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
     expect(persistedKeys.length).toBeGreaterThan(0);
 
     // RE-ENTER scenario → composer remounts → useScenarioState hydrates from
-    // localStorage. The BTC toggle-off MUST survive the round trip.
+    // localStorage. The added strategies AND the Beta toggle-off MUST survive.
     setSearchParams("tab=scenario");
     rerender(<AllocationsTabs {...STUB_PROPS} />);
-    const btcSwitchAfter = await screen.findByRole("switch", {
-      name: /Toggle BTC on\/off in scenario/i,
+    const betaAfter = await screen.findByRole("switch", {
+      name: /Toggle Beta on\/off in scenario/i,
     });
-    expect(btcSwitchAfter.getAttribute("aria-checked")).toBe("false");
+    expect(betaAfter.getAttribute("aria-checked")).toBe("false");
 
-    // ETH was never toggled — it stays ON across the round trip (proves we
+    // Alpha was never toggled — it stays ON across the round trip (proves we
     // restored the actual draft, not a blanket all-off / all-on default).
     expect(
       screen
-        .getByRole("switch", { name: /Toggle ETH on\/off in scenario/i })
+        .getByRole("switch", { name: /Toggle Alpha on\/off in scenario/i })
         .getAttribute("aria-checked"),
     ).toBe("true");
   });
 
-  it("a fresh draft (no persisted state, no prior edit) re-enters Scenario with all holdings ON (default-init, no spurious mismatch across mounts)", async () => {
-    // No prior edit. Mount scenario, leave, re-enter — both holdings stay ON.
-    // This pins that the unmount/remount cycle does NOT recompute a fingerprint
-    // that spuriously differs from the just-written draft (the failure mode the
-    // finding calls out: "fingerprint recomputation differs across mounts").
+  it("a fresh draft (no persisted state, no prior edit) re-enters Scenario cleanly with read-only holdings (no spurious mismatch across mounts)", async () => {
+    // No prior edit. Mount scenario, leave, re-enter. This pins that the
+    // unmount/remount cycle does NOT recompute a fingerprint that spuriously
+    // differs from the just-written draft (the failure mode the finding calls
+    // out: "fingerprint recomputation differs across mounts").
     setSearchParams("tab=scenario");
     const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
-    const list = await screen.findByRole("switch", {
-      name: /Toggle BTC on\/off in scenario/i,
-    });
-    expect(list.getAttribute("aria-checked")).toBe("true");
+    expect(await screen.findByTestId("kpi-strip-mock")).toBeInTheDocument();
+    // Read-only-tokens model: a fresh draft has no added strategies → no toggle
+    // switches at all (holdings are read-only).
+    expect(screen.queryAllByRole("switch")).toHaveLength(0);
 
     // Leave and re-enter without any edit.
     setSearchParams("");
@@ -317,15 +356,10 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
     setSearchParams("tab=scenario");
     rerender(<AllocationsTabs {...STUB_PROPS} />);
 
-    const btcAfter = await screen.findByRole("switch", {
-      name: /Toggle BTC on\/off in scenario/i,
-    });
-    const ethAfter = screen.getByRole("switch", {
-      name: /Toggle ETH on\/off in scenario/i,
-    });
-    expect(btcAfter.getAttribute("aria-checked")).toBe("true");
-    expect(ethAfter.getAttribute("aria-checked")).toBe("true");
-    // No fingerprint-mismatch banner should be showing on a clean re-entry.
+    // Composer remounts cleanly: body present, still no switches…
+    expect(await screen.findByTestId("kpi-strip-mock")).toBeInTheDocument();
+    expect(screen.queryAllByRole("switch")).toHaveLength(0);
+    // …and no fingerprint-mismatch banner on a clean re-entry.
     expect(screen.queryByText(/Keep my draft/i)).toBeNull();
   });
 });

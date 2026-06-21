@@ -66,10 +66,9 @@ const STRAT_B: AddedStrategy = {
 };
 
 describe("defaultDraftFromHoldings", () => {
-  it("T1.1 enables every holding and weights = value_usd / total; schema_version = 1", () => {
+  it("T1.1 enables every holding and weights = value_usd / total; schema_version = current", () => {
     const draft = defaultDraftFromHoldings(HOLDINGS_2);
     expect(draft.schema_version).toBe(SCENARIO_SCHEMA_VERSION);
-    expect(draft.schema_version).toBe(1);
     expect(draft.toggleByScopeRef).toEqual({
       "holding:binance:BTC:spot": true,
       "holding:binance:ETH:spot": true,
