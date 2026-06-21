@@ -2499,7 +2499,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
 
   it("CORR-02 — with <2 active strategies the composer heatmap renders the honest empty state, never a 1×1 grid", () => {
     // Default adapter mock returns ZERO strategies → scenarioMetrics.correlation_matrix
-    // is null → the heatmap delegates to its reason-routed empty state.
+    // is null → the heatmap delegates to its reason-routed empty state. With <2
+    // strategies the honest heading names the STRATEGY-COUNT reason, not overlap
+    // (v0.24.15.139 fix: the heading must match its body, not contradict it).
     const payload = makePayload();
     render(
       <ScenarioComposer
@@ -2509,7 +2511,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
     expect(
-      screen.getByText("Not enough overlap to correlate"),
+      screen.getByText("Not enough strategies to correlate"),
     ).toBeInTheDocument();
     // No degenerate grid: the figure (which only renders for ≥2 strategies) is absent.
     expect(screen.queryByRole("figure", { name: /Pairwise correlation heatmap/i }))

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.24.15.139] - 2026-06-21
+### Fixed — Correlation heatmap empty-state heading no longer contradicts its own body
+
+Found by post-deploy `/qa` on the live allocator Scenario tab. The correlation heatmap used a single shared heading ("Not enough overlap to correlate") for every empty-state reason. When the engine nulled the matrix for a scenario with **plenty** of overlap (e.g. 70 overlapping days) because the projected returns were non-finite or the curve was fully drawn down, the heading claimed too little overlap while the body said the opposite ("non-finite or the curve is fully drawn down — try lower leverage"). Same lie on the few-strategies branch. Each reason now gets a heading that matches its body: engine-nulled → "Correlation unavailable for this scenario", few-strategies → "Not enough strategies to correlate", few-days → "Not enough overlap to correlate" (unchanged), no-host-context → "Correlation unavailable". Regression test updated — it previously pinned the contradictory heading; it now fails if the heading claims insufficient overlap when the real cause is engine-nulled.
+
 ## [0.24.15.138] - 2026-06-21
 ### Added — Scenario Analysis v1.1.0 (Phases 21 & 22): reachable surfaces, honest correlation, methodology disclosure
 
