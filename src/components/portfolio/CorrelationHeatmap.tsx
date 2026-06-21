@@ -1,10 +1,25 @@
 "use client";
 
-import { Fragment, useMemo } from "react";
+import { Fragment } from "react";
 
 interface CorrelationHeatmapProps {
   correlationMatrix: Record<string, Record<string, number>> | null;
   strategyNames: Record<string, string>;
+  /**
+   * CORR-02 — the host's overlapping-day count (`scenarioMetrics.n`). Lets the
+   * presentational heatmap distinguish the `< 10 overlapping days` empty-state
+   * reason from the `< 2 strategies` reason. Optional: when absent, the gate
+   * still fires on `< 2` strategies and falls back to the combined copy.
+   */
+  overlappingDays?: number;
+  /**
+   * CORR-03 — the single-sourced off-diagonal absolute-mean correlation
+   * (`scenarioMetrics.avg_pairwise_correlation`). The heatmap NEVER computes its
+   * own average; it renders whatever the host passes so the caption and the KPI
+   * strip cannot diverge. Optional + nullable: a null/absent value hides the
+   * caption (e.g. a 1-strategy or degenerate set has no Avg |ρ|).
+   */
+  avgAbsCorrelation?: number | null;
 }
 
 /**
@@ -125,33 +140,51 @@ const DIAG_BG = "#F1F5F9";
 const MISSING_BG = "#F8F9FA";
 const MUTED_FG = "#64748B";
 
-function pickTopTenByAvgCorr(
-  matrix: Record<string, Record<string, number>>,
-): string[] {
-  const all = Object.keys(matrix);
-  if (all.length <= 10) return all;
-  const scored = all.map((id) => {
-    const row = matrix[id];
-    const others = all.filter((other) => other !== id);
-    const avg =
-      others.reduce((sum, other) => sum + Math.abs(row[other] ?? 0), 0) /
-      (others.length || 1);
-    return { id, avg };
-  });
-  scored.sort((a, b) => b.avg - a.avg);
-  return scored.slice(0, 10).map((entry) => entry.id);
-}
+// CORR-02 — empty-state copy (UI-SPEC §Copywriting Contract). The heading is
+// shared; the body names the SPECIFIC reason so the allocator knows what to fix.
+const EMPTY_HEADING = "Not enough overlap to correlate";
+const EMPTY_BODY_FEW_STRATEGIES =
+  "Add at least 2 active strategies to see how they move together.";
+const EMPTY_BODY_FEW_DAYS =
+  "These strategies share fewer than 10 overlapping trading days — too little history for an honest correlation. Pick strategies with longer common history.";
+const EMPTY_BODY_COMBINED =
+  "Need at least 2 strategies with 10 or more overlapping days. Adjust your selection to see the correlation heatmap.";
 
-export function CorrelationHeatmap({ correlationMatrix, strategyNames }: CorrelationHeatmapProps) {
-  const ids = useMemo(
-    () => (correlationMatrix ? pickTopTenByAvgCorr(correlationMatrix) : []),
-    [correlationMatrix],
-  );
+export function CorrelationHeatmap({
+  correlationMatrix,
+  strategyNames,
+  overlappingDays,
+  avgAbsCorrelation = null,
+}: CorrelationHeatmapProps) {
+  // CORR-04 (show-all): render EVERY id from the matrix — no top-10 truncation.
+  const ids = correlationMatrix ? Object.keys(correlationMatrix) : [];
 
-  if (!correlationMatrix || ids.length === 0) {
+  // CORR-02 — reason-routed empty state. Triggers on:
+  //   - a null matrix (the engine nulls it for 0 active strategies AND for
+  //     < 10 overlapping days — scenario.ts:192-208), OR
+  //   - fewer than 2 ids. The engine does NOT null a 1-strategy matrix; it
+  //     returns a 1×1 `{id:{id:1}}`. This `ids.length < 2` gate is the ONLY
+  //     thing preventing a degenerate 1×1 grid (and a fabricated Avg |ρ|).
+  if (!correlationMatrix || ids.length < 2) {
+    // Route the body copy by the actual reason:
+    //   - The < 10-overlapping-days case arrives from the engine as a NULL
+    //     matrix (ids.length === 0) WITH the host's `overlappingDays` set, so
+    //     check it FIRST — a too-short window names the days reason.
+    //   - A genuine < 2-strategy set has a non-null 1×1 matrix (ids.length === 1)
+    //     with a 10+-day window → the few-strategies copy.
+    //   - Anything else (e.g. a standalone null matrix with no host context)
+    //     gets the combined fallback that names BOTH thresholds.
+    const tooFewDays = overlappingDays !== undefined && overlappingDays < 10;
+    const tooFewStrategies = ids.length < 2 && !tooFewDays;
+    const body = tooFewDays
+      ? EMPTY_BODY_FEW_DAYS
+      : tooFewStrategies && (correlationMatrix !== null || overlappingDays !== undefined)
+        ? EMPTY_BODY_FEW_STRATEGIES
+        : EMPTY_BODY_COMBINED;
     return (
       <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center text-text-muted text-sm">
-        No correlation data available.
+        <div className="font-semibold text-text-secondary">{EMPTY_HEADING}</div>
+        <div className="mt-1 text-[11px]">{body}</div>
       </div>
     );
   }
@@ -162,15 +195,21 @@ export function CorrelationHeatmap({ correlationMatrix, strategyNames }: Correla
   }
 
   return (
-    <div
-      role="figure"
-      aria-label={`Pairwise correlation heatmap, ${n} strategies. Teal indicates negative correlation (diversifying), burnt orange indicates positive correlation (concentration risk).`}
-      className="overflow-x-auto"
-    >
+    <div>
+      {/* CORR-04 (show-all): both axes scroll inside a bounded container so a
+          large-N grid never pushes the page; cells stay >= 48px wide. The
+          figure keeps overflow-x-auto for horizontal scroll; the wrapper adds
+          the vertical bound (~70vh). aria-label below names the TRUE id count
+          (n = ids.length), not a capped 10. */}
       <div
-        className="grid gap-px bg-border"
-        style={{ gridTemplateColumns: `80px repeat(${n}, minmax(48px, 1fr))` }}
+        role="figure"
+        aria-label={`Pairwise correlation heatmap, ${n} strategies. Teal indicates negative correlation (diversifying), burnt orange indicates positive correlation (concentration risk).`}
+        className="max-h-[70vh] overflow-x-auto overflow-y-auto"
       >
+        <div
+          className="grid gap-px bg-border"
+          style={{ gridTemplateColumns: `80px repeat(${n}, minmax(48px, 1fr))` }}
+        >
         {/* Top-left empty corner */}
         <div className="bg-surface" />
         {/* Column headers */}
@@ -220,9 +259,20 @@ export function CorrelationHeatmap({ correlationMatrix, strategyNames }: Correla
                 </div>
               );
             })}
-          </Fragment>
-        ))}
+            </Fragment>
+          ))}
+        </div>
       </div>
+      {/* CORR-03 — single-sourced "Avg |ρ|" caption. The value is the host's
+          off-diagonal absolute-mean correlation; the heatmap NEVER computes its
+          own average (prevents caption/KPI-strip divergence). Rendered only when
+          the host passes a finite number — a degenerate/null average shows no
+          caption rather than a fabricated 0.00. */}
+      {avgAbsCorrelation != null && Number.isFinite(avgAbsCorrelation) ? (
+        <div className="mt-2 text-[11px] text-text-muted">
+          Avg |ρ| <span className="font-metric">{avgAbsCorrelation.toFixed(2)}</span>
+        </div>
+      ) : null}
     </div>
   );
 }
