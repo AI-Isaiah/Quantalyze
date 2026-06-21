@@ -61,6 +61,8 @@ import {
   type StrategyForBuilder,
 } from "@/lib/scenario";
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
+import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
+import { Card } from "@/components/ui/Card";
 import { useScenarioState } from "../hooks/useScenarioState";
 import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 import {
@@ -590,6 +592,16 @@ export function ScenarioComposer({
     [deAliased, dateMapCache],
   );
 
+  // CORR-01 — de-aliased axis labels for the CorrelationHeatmap, built exactly
+  // like ScenarioBuilder.tsx:206-210 (the mount analog). Keyed on the SAME
+  // de-aliased set computeScenario consumes, so the heatmap labels always match
+  // the matrix the engine produced (no stale alias surviving the collapse).
+  const strategyNames = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const s of deAliased.strategies) out[s.id] = s.name;
+    return out;
+  }, [deAliased]);
+
   // R4 — show the leverage caveat only when a non-default multiplier ACTUALLY
   // moves the projection: derive it from `projectionState` (the state fed to the
   // collapse + computeScenario) rather than the raw `leverageByRef`, so a stale
@@ -1100,6 +1112,31 @@ export function ScenarioComposer({
           )}
         </div>
       </div>
+
+      {/* CORR-01 / CORR-03 — pairwise correlation heatmap on the own-book
+          scenario surface. Mirrors the ScenarioBuilder "Pairwise correlation"
+          card. The matrix + single-sourced Avg |ρ| come straight from
+          scenarioMetrics (the same value KpiStrip reads), and the axis labels
+          are the de-aliased strategy names — the heatmap never computes its own
+          average and the <2-strategy / <10-day cases delegate to its honest
+          reason-routed empty state (never a 1×1 grid). */}
+      <Card className="mt-6">
+        <div className="mb-3">
+          <h2 className="text-sm font-semibold text-text-primary">
+            Pairwise correlation
+          </h2>
+          <p className="text-xs text-text-muted mt-0.5">
+            Live-computed from the scenario&apos;s daily returns. Teal =
+            diversifying, orange = concentrated.
+          </p>
+        </div>
+        <CorrelationHeatmap
+          correlationMatrix={scenarioMetrics.correlation_matrix}
+          strategyNames={strategyNames}
+          overlappingDays={scenarioMetrics.n}
+          avgAbsCorrelation={scenarioMetrics.avg_pairwise_correlation}
+        />
+      </Card>
 
       {flaggedHoldings.length > 0 && (
         <div className="mt-8 rounded-lg border border-border bg-surface p-4">
