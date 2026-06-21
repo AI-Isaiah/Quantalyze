@@ -140,6 +140,10 @@ import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
+// IMPACT-02 — imported REAL (never mocked) so the R3 guard's positive control
+// renders a genuine PercentileRankBadge in isolation, proving the testid query
+// that asserts ABSENCE on the projection is non-vacuous.
+import { PercentileRankBadge } from "@/components/strategy/PercentileRankBadge";
 
 // --- localStorage mock (vi.stubGlobal — Phase 08 / 06a precedent) --------
 
@@ -2181,8 +2185,22 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // suppresses — is pinned in src/lib/factsheet/audit-c20.test.ts.)
     expect(document.getElementById("factsheet-allocator")).toBeNull();
     expect(document.getElementById("factsheet-signatures")).toBeNull();
-    expect(screen.queryByText(/percentile/i)).toBeNull();
+    // IMPACT-02 — the ABSENT assertion for the peer badge keys on a UNIQUE
+    // render-only data-testid, NOT queryByText(/percentile/i) (which matched
+    // NOTHING because "percentile" lives only in PercentileRankBadge's title=
+    // attribute — a vacuous pass) and NOT a visible label like "Sharpe" (which
+    // collides with the honest KPI strip / MetricCards on this surface). If a
+    // PercentileRankBadge is ever wired into the projection, this FAILS.
+    expect(screen.queryByTestId("percentile-rank-badge")).toBeNull();
     expect(screen.queryByText(/ranked against peers/i)).toBeNull();
+
+    // Positive control — prove the testid query is NON-VACUOUS. Render a real
+    // PercentileRankBadge in isolation and assert the SAME query FINDS it. If
+    // the testid were ever renamed/removed (silently breaking the ABSENT guard
+    // above into a vacuous pass), this control fails loudly.
+    cleanup();
+    render(<PercentileRankBadge metric="sharpe" percentile={95} />);
+    expect(screen.getByTestId("percentile-rank-badge")).toBeInTheDocument();
   });
 
   it("H-0133 regression — toggling a REAL strategy OFF removes it from the active set (the explicit-toggle arm, isolated from weight rescaling)", () => {
