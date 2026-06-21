@@ -66,10 +66,16 @@ const METRICS: MetricRow[] = [
   { label: "Volatility", key: "volatility", format: "percent", higherIsBetter: false },
 ];
 
-/** Read a single numeric metric off ComputedMetrics; null when absent/non-number. */
+/**
+ * Read a single numeric metric off ComputedMetrics; null when absent/non-number
+ * OR non-finite. A NaN/Infinity must be treated as honest absence at the SOURCE
+ * (→ winner logic skips it, the cell renders "—") rather than relying on the
+ * downstream formatPercent/formatNumber to coerce it — otherwise findWinner
+ * could crown a NaN column as the "winner".
+ */
 function getValue(metrics: ComputedMetrics, key: keyof ComputedMetrics): number | null {
   const val = metrics[key];
-  return typeof val === "number" ? val : null;
+  return typeof val === "number" && Number.isFinite(val) ? val : null;
 }
 
 /** Mirrors CompareTable.formatValue: null → "—" (em-dash honesty). */

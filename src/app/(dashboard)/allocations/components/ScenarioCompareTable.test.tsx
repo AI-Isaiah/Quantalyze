@@ -214,4 +214,30 @@ describe("ScenarioCompareTable", () => {
       screen.getByText("Select 2 or more scenarios (or the live book) to compare."),
     ).toBeInTheDocument();
   });
+
+  it("treats a NaN/non-finite metric as honest absence ('—'), never the winner", () => {
+    // A NaN twr must read as "—" at the SOURCE (getValue), so it cannot be
+    // crowned the Cumulative Return winner. Three columns: one NaN + two finite,
+    // so winner logic still has >= 2 real values (FIX 7 only suppresses the ✓
+    // when fewer than 2 columns are real — irrelevant here).
+    const nanCol = healthy(120, { twr: NaN });
+    const lowReal = healthy(120, { twr: 0.1 });
+    const highReal = healthy(120, { twr: 0.25 });
+    render(
+      <ScenarioCompareTable
+        columns={[col("Broken", nanCol), col("Low", lowReal), col("High", highReal)]}
+        liveBook={null}
+      />,
+    );
+
+    // The NaN column's twr cell renders the em-dash, not "NaN" / "NaN%".
+    const brokenCell = screen.getByTestId("cell-Broken-twr");
+    expect(brokenCell.textContent).toBe("—");
+    expect(brokenCell.textContent).not.toMatch(/NaN/i);
+
+    // The winner is the highest FINITE column — the NaN column never wins.
+    const twrWinner = screen.getByTestId("winner-twr");
+    expect(twrWinner.textContent).toContain("25.00%");
+    expect(twrWinner.textContent).not.toMatch(/NaN|—/);
+  });
 });
