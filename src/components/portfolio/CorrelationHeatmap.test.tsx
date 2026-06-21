@@ -141,6 +141,26 @@ describe("<CorrelationHeatmap>", () => {
     expect(screen.queryByText(/fewer than 10 overlapping/i)).toBeNull();
   });
 
+  // Review red-team finding 1 — a zero-strategies scenario (all toggled off →
+  // engine 0-active early return: n=0, null matrix) must NOT be mislabeled as a
+  // short window ("fewer than 10 overlapping days"); there are ZERO strategies,
+  // so the honest message is the few-strategies copy.
+  it("zero strategies (overlappingDays=0, null matrix) renders the few-strategies copy, NOT the days copy", () => {
+    render(
+      <CorrelationHeatmap
+        correlationMatrix={null}
+        strategyNames={{}}
+        overlappingDays={0}
+      />,
+    );
+    expect(
+      screen.getByText(
+        "Add at least 2 active strategies to see how they move together.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/fewer than 10 overlapping/i)).toBeNull();
+  });
+
   it("renders labels for each strategy in the matrix", () => {
     render(
       <CorrelationHeatmap

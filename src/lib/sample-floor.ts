@@ -73,8 +73,11 @@ export function evaluateSampleFloor(
 ): SampleFloorVerdict {
   // Guard the floor on the same fail-safe axis as `n`: a bad override can never
   // weaken the gate into passing an inadequate sample.
+  // `floor >= 1`, not `> 0`: overlapping-day counts are integers >= 1, so a
+  // fractional floor (e.g. 0.5) would pass every realistic n and silently
+  // bypass the gate — clamp it to the default too (review red-team finding 2).
   const safeFloor =
-    Number.isFinite(floor) && floor > 0 ? floor : SAMPLE_FLOOR_OVERLAPPING_DAYS;
+    Number.isFinite(floor) && floor >= 1 ? floor : SAMPLE_FLOOR_OVERLAPPING_DAYS;
   if (n == null || !Number.isFinite(n) || n < 0) {
     return { ok: false, n: null, floor: safeFloor, reason: "no-usable-n" };
   }

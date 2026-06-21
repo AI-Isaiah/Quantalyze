@@ -187,8 +187,12 @@ export function CorrelationHeatmap({
     // path is independently auditable (review IN-04) and the engine-nulled case
     // (review CRITICAL) can't fall through to the wrong copy:
     let body: string;
-    if (overlappingDays !== undefined && overlappingDays < 10) {
-      // Too-short window — engine returns a null matrix with n < 10.
+    if (overlappingDays !== undefined && overlappingDays >= 1 && overlappingDays < 10) {
+      // Too-short window — engine returns a null matrix with 1 <= n < 10. The
+      // `>= 1` lower bound matters: n === 0 means NO strategies are active (engine
+      // 0-active early-return), which is a too-few-strategies state, NOT a short
+      // window — it must fall through to the few-strategies branch below, never
+      // claim "fewer than 10 overlapping days" when there are zero (review red-team).
       body = EMPTY_BODY_FEW_DAYS;
     } else if (
       correlationMatrix === null &&

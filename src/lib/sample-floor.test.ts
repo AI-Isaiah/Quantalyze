@@ -184,6 +184,17 @@ describe("evaluateSampleFloor — invalid floor override never weakens the gate 
       reason: "ok",
     });
   });
+
+  it("fractional floor 0<floor<1 → clamps to default, does NOT pass every integer n (red-team f2)", () => {
+    // 0.5 > 0 but day counts are integers >= 1, so a sub-1 floor would pass n=5
+    // and bypass the gate. It must clamp to the default 60 instead.
+    expect(evaluateSampleFloor(5, 0.5)).toEqual({
+      ok: false,
+      n: 5,
+      floor: 60,
+      reason: "below-floor",
+    });
+  });
 });
 
 describe("reason-body copy — names the right numbers, never fabricates", () => {
