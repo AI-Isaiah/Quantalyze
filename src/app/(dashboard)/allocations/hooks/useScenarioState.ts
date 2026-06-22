@@ -80,6 +80,20 @@ export interface UseScenarioStateReturn {
   setWeightOverride: (scopeRef: string, weight: number) => void;
   reset: () => void;
   dismissFingerprintMismatchBanner: () => void;
+  /**
+   * Phase 23 / PERSIST-02 — the reopen seam. Writes a saved scenario's draft
+   * into the in-memory working draft via the SAME `setValue` path the mutators
+   * use (NOT `removeStored`, which would destructively wipe the localStorage
+   * key — Pitfall 6). Because the saved draft carries its own
+   * `init_holdings_fingerprint`, the existing `fingerprintMismatch` banner
+   * DERIVES automatically when the saved draft was built against a different
+   * holdings set — there is no `loadedFromDb` bypass branch (Pitfall 2). The
+   * codec trichotomy (`scenarioDraftCodec`: ok / readonly / reset) is applied
+   * by the caller BEFORE invoking this — a `reset` draft is never hydrated (the
+   * composer renders an honest "older format" notice instead). A fresh open
+   * un-dismisses the banner so a freshly-opened drifted scenario shows it.
+   */
+  hydrateFromSaved: (draft: ScenarioDraft) => void;
 }
 
 export function useScenarioState(
@@ -239,6 +253,23 @@ export function useScenarioState(
     setMismatchDismissed(true);
   }, []);
 
+  // Phase 23 / PERSIST-02 — reopen a saved scenario. Routed through `setValue`
+  // (the mutator path), NOT `removeStored` (the reset path): the saved draft
+  // becomes the in-memory working draft and autosave persists it on the next
+  // edit, without destructively wiping the allocator-scoped key. The
+  // fingerprint-mismatch banner is NOT special-cased here — it derives from
+  // `value.init_holdings_fingerprint !== fingerprint` on the next render, so a
+  // drifted saved draft surfaces the existing banner with no extra branch. A
+  // fresh open un-dismisses the banner (a freshly-opened drifted scenario gets
+  // a fresh banner). The codec trichotomy runs in the caller before this.
+  const hydrateFromSaved = useCallback(
+    (saved: ScenarioDraft) => {
+      setValue(() => saved);
+      setMismatchDismissed(false);
+    },
+    [setValue],
+  );
+
   // M8 / H-0126 — diffCount counts:
   //   (a) toggle changes vs the default-init toggleByScopeRef,
   //   (b) added strategies (each is a user-explicit add),
@@ -279,5 +310,6 @@ export function useScenarioState(
     setWeightOverride,
     reset,
     dismissFingerprintMismatchBanner,
+    hydrateFromSaved,
   };
 }

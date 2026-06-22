@@ -162,6 +162,13 @@ AuditAction = Literal[
     "user_note.holding.update",
     "user_note.bridge_outcome.update",
     "user_note.strategy.update",
+    # --- Phase 23: persisted allocator scenario drafts (TS-only call sites) --
+    # No Python emitter; kept here so the TS<->Python AuditAction parity test
+    # (test_audit.py::test_action_literal_matches_ts_union) stays green.
+    "scenario.save",
+    "scenario.rename",
+    "scenario.update",
+    "scenario.delete",
     "admin.kill_switch",
     "match.decision_record",
     "match.decision_delete",
@@ -240,6 +247,8 @@ AuditEntityType = Literal[
     "strategy",
     "partner_import",
     "user_note",
+    # --- Phase 23: persisted allocator scenario drafts ----------------------
+    "scenario",
     "investor_attestation",
     "trades_upload",
     # --- /review follow-up (T4-C1 + T4-M6) ----------------------------------

@@ -6,8 +6,14 @@ logged here, not fixed in-plan.
 
 ---
 
-## DI-21-01 — `AllocationsTabs.test.tsx` not updated when 21-01 surfaced the Scenario tab
+## DI-21-01 — `AllocationsTabs.test.tsx` not updated when 21-01 surfaced the Scenario tab — ✅ RESOLVED
 
+- **Resolved:** 2026-06-21 by the orchestrator (post-execution integration gate),
+  commit `e4ceee7d`. The `?tab=scenario` test now asserts the Scenario tab is
+  present + selected; the ArrowRight-wrap `order` array includes Scenario as the
+  last visible tab; a stale URL-state docstring in `AllocationsTabs.tsx` was also
+  corrected. `AllocationsTabs.test.tsx` → 42/42; full phase-21 spec set → 185/185;
+  `tsc --noEmit` → 0 errors.
 - **Discovered during:** Plan 21-04 execution (Wave-3 verification batch).
 - **Symptom:** 2 failing tests in
   `src/app/(dashboard)/allocations/AllocationsTabs.test.tsx`:

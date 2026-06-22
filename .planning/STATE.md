@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.1.0
 milestone_name: Scenario Analysis
-status: ready_to_plan
-stopped_at: Phase 22 complete (2/2) — ready to discuss Phase 23
-last_updated: 2026-06-21T16:58:07.701Z
-last_activity: 2026-06-21
+status: verifying
+stopped_at: Completed 24-03-PLAN.md
+last_updated: "2026-06-22T00:10:28.377Z"
+last_activity: 2026-06-22
 progress:
   total_phases: 8
-  completed_phases: 2
-  total_plans: 6
-  completed_plans: 54
-  percent: 25
+  completed_phases: 4
+  total_plans: 14
+  completed_plans: 14
+  percent: 50
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
-**Current focus:** Phase 23 — scenario persistence & compare
+**Current focus:** Phase 24 — Benchmark Comparison
 **Last milestone:** v1.0.0 API-Key Rewrite (Phases 15–20, shipped 2026-06-20).
 
 ## Current Position
 
-Phase: 23
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-06-21
+Phase: 24 (Benchmark Comparison) — EXECUTING
+Plan: 3 of 3
+Status: Phase complete — ready for verification
+Last activity: 2026-06-22
 
 Progress: [██████████] 100%
 
@@ -217,6 +217,20 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - [Phase ?]: Phase 22-01: methodology line folded into the one existing caveat <p> (no second line, no token/DOM change); N inline in DM Sans (not Geist Mono), matching the shipped Phase-21 line; sandbox anchored ^Projected regex updated same-task
 - [Phase ?]: Phase 22-02: HONEST-02 single source = src/lib/sample-floor.ts (SAMPLE_FLOOR_OVERLAPPING_DAYS=60, named distinctively NOT MIN_* to dodge min-history grep collision); evaluateSampleFloor guard-first (null/NaN/Infinity/negative -> no-usable-n FIRST never passes), then below-floor, else ok; per-call floor override honored
 - [Phase ?]: Phase 22-02: SampleFloorEmptyState COPIES the CorrelationHeatmap shell verbatim (does not import/modify it; different statistic-specific threshold, shared visual shell); imports copy builders+heading from @/lib/sample-floor; not role=alert, no red/warning; 0/1-strategy is a call-site strategyCount prop (gate cannot see count) taking precedence; pinned in CONTRACT_GUARDS + REGISTRY.md, EXPECTED_RULES untouched; NOT wired into live composer/sandbox projection (deferred to 26/27)
+- [Phase ?]: Phase 23-01: scenarios.name carries no uniqueness constraint (same-titled variants; UNIQUE = 23505 timebomb)
+- [Phase ?]: Phase 23-01: no set_updated_at trigger fn (dump-sql-functions snapshot gate); UPDATE route touches updated_at=now()
+- [Phase ?]: Phase 23-01: scenarios_owner FOR ALL RLS (USING+WITH CHECK allocator_id=auth.uid()); RLS test asserts cross-tenant content by row id, negative write = ROW_COUNT 0 not 42501
+- [Phase ?]: Phase 23-01: scenarios block hand-patched into database.types.ts (no gen types); expectTypeOf-pinned; [#14] tripwire (migration 115 notify_*) preserved
+- [Phase ?]: Phase 23-03: ScenarioCompareTable Max Drawdown uses higherIsBetter=true (tested CompareTable flag); signed max_drawdown means least-severe=highest, so UI-SPEC false would crown the worst drawdown (winner inversion). Rule 1 fix, test-pinned.
+- [Phase ?]: Phase 23-03: live-book compare column via synthetic all-on equity-weight draft through computeMetricsForDraft (same engine path), NOT payload.liveBaselineMetrics; per-column methodologyLine stamp in tfoot, not a shared-window header.
+- [Phase ?]: Phase 23-02: scenario CRUD via single-row supabase.from('scenarios') under RLS (no RPC); allocator_id always from withAllocatorAuth never the body (test-proven); [id] handlers await ctx.params + isUuid()-validate before delegating to withAllocatorAuth-wrapped inner (withAuth does not forward ctx); non-owned id -> 0 rows -> 404 not 403; PUT touches updated_at=now() in payload (no trigger fn)
+- [Phase ?]: Phase 23-04: hydrateFromSaved routes through setValue (not removeStored) so the fingerprint-mismatch banner derives automatically with no loadedFromDb bypass; localStorage key never wiped on reopen (Pitfall 2/6)
+- [Phase ?]: Phase 23-04: Open decodes row.draft through scenarioDraftCodec (never a bare cast); reset=honest 'older format' notice + NO hydrate (never a silent empty composer), readonly=hydrate+block edits, ok=hydrate+adopt id
+- [Phase ?]: Phase 23-04: loadedScenarioId tracked in composer state; handleReset wraps scenario.reset() across all reset paths; Save/Save-as-new POST, Update PUTs; Open driven via onRegisterOpen seam for the future saved-scenarios list
+- [Phase ?]: Phase 23-05: SavedScenariosList + ScenarioComparePanel wired on the Scenario tab via a ScenarioTabContent sub-component (V2 path only); GET list returns draft (Rule 3); onScenarioSaved composer seam (Rule 2) refetches the list; compare columns decode via codec trichotomy (reset/degenerate -> em-dash, never 0)
+- [Phase ?]: Phase 24-02: GET /api/benchmark/btc returns BTC DAILY RETURNS [{date,value}] (pct-change of close_price, first row dropped, asc) as PUBLIC-cacheable shared market data (Cache-Control: public s-maxage=3600 SWR) — deliberate contrast with allocator no-store; read-error OR <2 rows degrade to 200 [] (honest empty, never 500); no params, BTC hard-coded, no tenant data, no migration/Python (Railway no-op)
+- [Phase ?]: Plan 24-03: wired the BTC overlay onto EquityChart.benchmark (SVG widget) fed a cumulative-wealth curve via computeStrategyCurve (24-RESEARCH Pitfall 3)
+- [Phase 24]: Plan 24-03: extracted ScenarioBenchmarkSection so the honesty invariants are unit-testable without mounting the 1900-line composer
 
 ## Accumulated Context
 
@@ -238,8 +252,8 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-06-21T16:44:32.155Z
-Stopped at: Completed 22-01-PLAN.md
+Last session: 2026-06-22T00:10:28.374Z
+Stopped at: Completed 24-03-PLAN.md
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
 

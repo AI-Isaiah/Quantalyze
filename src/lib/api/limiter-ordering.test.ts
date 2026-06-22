@@ -50,6 +50,12 @@ const WRAPPER = new Set([
 
 const CANONICAL = new Set([
   "allocator/scenario/commit/route.ts",
+  // Phase 23 scenario CRUD — validate-then-limit (B15). saved/route.ts (POST)
+  // parses + safeParses the body before checkLimit; saved/[id]/route.ts inlines
+  // checkLimit in each mutating method AFTER safeParse (PATCH/PUT) / after the
+  // uuid + auth gate (body-less DELETE), mirroring commit/route.ts.
+  "allocator/scenario/saved/route.ts",
+  "allocator/scenario/saved/[id]/route.ts",
   "attestation/route.ts",
   "bridge/route.ts",
   "bridge/outcome/[id]/curves/route.ts",

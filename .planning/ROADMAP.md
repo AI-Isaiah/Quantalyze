@@ -31,8 +31,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 21: Surfacing, Correlation & Honest Projection** - Make scenarios reachable, show the correlation heatmap, and lock the "PROJECTED — hypothetical" framing (already-designed, client-only foundation) (completed 2026-06-21)
 - [x] **Phase 22: Methodology-Honesty Scaffolding** - Per-stat method/overlap-N/horizon disclosure + a shared minimum-sample gate the heavy quant phases reuse (completed 2026-06-21)
-- [ ] **Phase 23: Scenario Persistence & Compare** - Save / reopen / list / rename / delete named scenarios (DB + RLS + `schema_version`) and compare 2+ side-by-side (the spine)
-- [ ] **Phase 24: Benchmark Comparison** - Overlay a benchmark on the scenario projection with tracking error / information ratio / alpha-beta over the aligned window
+- [x] **Phase 23: Scenario Persistence & Compare** - Save / reopen / list / rename / delete named scenarios (DB + RLS + `schema_version`) and compare 2+ side-by-side (the spine) (completed 2026-06-21)
+- [x] **Phase 24: Benchmark Comparison** - Overlay a benchmark on the scenario projection with tracking error / information ratio / alpha-beta over the aligned window (completed 2026-06-22)
 - [ ] **Phase 25: Read-Only Sharing** - Generate / revoke a read-only share link that renders a saved scenario without leaking the live book or any other tenant's data
 - [ ] **Phase 26: Stress Testing & VaR** - Parameterized β-propagated market shock + a disclosed downside measure (historical VaR + CVaR / Expected Shortfall)
 - [ ] **Phase 27: Forward Uncertainty (Monte-Carlo Bands)** - Block-bootstrap forward confidence bands / return distribution, honest to sample size, gated below the minimum-sample floor
@@ -80,7 +80,12 @@ Plans:
   2. An allocator reopens a saved scenario and it rehydrates into the composer, re-resolving return series from the live payload and surfacing the existing fingerprint-mismatch banner when holdings drifted (never a silent recompute over a changed strategy set).
   3. An allocator lists, renames, and deletes their saved scenarios.
   4. An allocator compares 2+ saved scenarios (and the live book) side-by-side, ranked by Sharpe / return improvement, with each scenario's overlap window and N stamped and any degenerate scenario showing an honest em-dash rather than a fabricated 0.
-**Plans**: TBD
+**Plans**: 5 plans in 4 waves
+  - [x] 23-01-PLAN.md — scenarios table + owner RLS migration + rollback + two-tenant content RLS test + hand-patched database.types (Wave 1)
+  - [x] 23-02-PLAN.md — allocator-owned CRUD routes (POST/GET saved + PATCH/PUT/DELETE [id]) + route tests; export scenarioDraftSchema (Wave 2)
+  - [x] 23-03-PLAN.md — pure computeMetricsForDraft helper + ScenarioCompareTable (per-column methodologyLine, em-dash, winner) (Wave 1)
+  - [x] 23-04-PLAN.md — hydrateFromSaved seam + Save/Update toolbar + codec-trichotomy reopen (drift banner / reset / readonly honesty) (Wave 3)
+  - [x] 23-05-PLAN.md — SavedScenariosList + ScenarioComparePanel + mount on the Scenario tab (Wave 4)
 **UI hint**: yes
 
 ### Phase 24: Benchmark Comparison
@@ -91,7 +96,10 @@ Plans:
   1. The scenario projection overlays a benchmark series (reusing `benchmark_prices` / `benchmark.py`) aligned to the scenario's common-overlap window.
   2. The comparison surfaces tracking error, information ratio, and alpha-beta computed over that aligned window, using the product-wide 252-day annualization (no √365 / monthly path).
   3. When the benchmark series does not cover the scenario window (or is missing), an honest "benchmark comparison unavailable" empty state renders instead of a mismatched-window comparison.
-**Plans**: TBD
+**Plans**: 3 plans in 2 waves
+  - [x] 24-01-PLAN.md — additive `portfolio_daily_returns` on `computeScenario` + pure `scenario-benchmark.ts` (inner-join + TE/IR/alpha/beta, 252-annualized, golden-tested) [wave 1]
+  - [x] 24-02-PLAN.md — GET `/api/benchmark/btc` shared-data route (BTC daily returns, public cache, error→200-empty, no tenant data) [wave 1]
+  - [x] 24-03-PLAN.md — composer wiring: fetch + cumulative-wealth overlay on `EquityChart.benchmark` + `ScenarioBenchmarkSection` (metrics / two honest empty states / em-dash) [wave 2]
 **UI hint**: yes
 
 ### Phase 25: Read-Only Sharing
@@ -147,8 +155,8 @@ Phases execute in numeric order: 21 → 22 → 23 → 24 → 25 → 26 → 27 �
 |-------|----------------|--------|-----------|
 | 21. Surfacing, Correlation & Honest Projection | 4/4 | Complete    | 2026-06-21 |
 | 22. Methodology-Honesty Scaffolding | 2/2 | Complete    | 2026-06-21 |
-| 23. Scenario Persistence & Compare | 0/TBD | Not started | - |
-| 24. Benchmark Comparison | 0/TBD | Not started | - |
+| 23. Scenario Persistence & Compare | 5/5 | Complete   | 2026-06-21 |
+| 24. Benchmark Comparison | 3/3 | Complete   | 2026-06-22 |
 | 25. Read-Only Sharing | 0/TBD | Not started | - |
 | 26. Stress Testing & VaR | 0/TBD | Not started | - |
 | 27. Forward Uncertainty (Monte-Carlo Bands) | 0/TBD | Not started | - |

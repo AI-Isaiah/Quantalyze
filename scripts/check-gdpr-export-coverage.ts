@@ -370,6 +370,17 @@ export const SANITIZE_PARITY_ALLOWLIST: Record<
     reason:
       "Strategy-scoped CSV daily-return series (migration 20260522111839). ON DELETE CASCADE from strategies ensures erasure when the parent strategy is deleted during sanitize. No explicit sanitize_user matrix row needed; mirrors strategy_analytics policy.",
   },
+  // scenarios: Phase 23 (migration 20260621120000) — the allocator's own saved
+  // ScenarioDraft config, user-owned via `allocator_id NOT NULL REFERENCES
+  // profiles ON DELETE CASCADE`. The CASCADE FK erases every scenario row when
+  // the profile is deleted during sanitize, so no explicit sanitize_user matrix
+  // row is required. The sanitize_user migration pre-dates this table, so it
+  // has no matrix entry; the CASCADE is the erasure mechanism. Mirrors the
+  // csv_daily_returns allowlist pattern (CASCADE-from-parent erasure).
+  scenarios: {
+    reason:
+      "Allocator's own saved ScenarioDraft config (migration 20260621120000). ON DELETE CASCADE from profiles erases all scenario rows when the profile is sanitized/deleted. No explicit sanitize_user matrix row needed; mirrors csv_daily_returns CASCADE-erasure allowlist.",
+  },
 };
 
 /**

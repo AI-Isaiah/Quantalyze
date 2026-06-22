@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -10,6 +11,15 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";
 import { ScenarioStub } from "./ScenarioStub";
+import { SavedScenariosList } from "./components/SavedScenariosList";
+import type {
+  SavedScenarioListRow,
+  SavedScenarioOpenRow,
+  CompareSelection,
+} from "./components/SavedScenariosList";
+import { ScenarioComparePanel } from "./components/ScenarioComparePanel";
+import type { ScenarioComparePanelProps } from "./components/ScenarioComparePanel";
+import type { SavedScenarioRow } from "./components/ScenarioComposer";
 import { TweaksProvider, useTweakValue } from "./context/TweaksContext";
 import { TweaksToggle } from "./components/TweaksToggle";
 import { Tweaks } from "./components/Tweaks";
@@ -709,14 +719,10 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
       >
         {activeTab === "scenario" &&
           (isUiV2 ? (
-            // H3 — allocator_id propagated from the SSR-lifted payload.
-            // allocatorMandate is read from the existing `props.mandate`
-            // field; no new prop on AllocationsTabs is needed.
-            <ScenarioComposer
-              payload={props}
-              allocatorId={props.allocator_id}
-              allocatorMandate={props.mandate}
-            />
+            // Phase 23 / PERSIST-03+04 — the composer + the saved-scenarios
+            // list + the in-tab compare panel, wired together on the V2
+            // scenario path. The ScenarioStub rollback path below is untouched.
+            <ScenarioTabContent {...props} />
           ) : (
             <ScenarioStub
               flaggedHoldings={props.flaggedHoldings}
@@ -736,6 +742,127 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
       <OutcomesTabRedirectGuard activeTab={activeTab} onRedirect={changeTab} />
     </div>
     </TweaksProvider>
+  );
+}
+
+// Phase 23 / PERSIST-03+04 — the Scenario-tab integration surface (V2 path).
+//
+// Holds the saved-scenarios list state + the compare selection + the composer's
+// imperative Open handler, and renders ScenarioComposer + SavedScenariosList +
+// (when a >=2 compare selection is active) ScenarioComparePanel, all handed the
+// SAME SSR-lifted payload — no second authenticated route, no second compute
+// fetch. The list fetches GET /api/allocator/scenario/saved on mount and
+// refetches after a Save/Update/rename/delete so it stays consistent.
+//
+// A dedicated sub-component (not inline in the conditional branch) keeps these
+// hooks unconditional — the V2/ScenarioStub gate lives one level up, so this
+// component's hooks never run on the rollback path.
+function ScenarioTabContent(props: MyAllocationDashboardPayload) {
+  const [savedRows, setSavedRows] = useState<SavedScenarioListRow[]>([]);
+  // A hard list-load failure (non-2xx or thrown fetch). Distinct from "no saved
+  // scenarios" — an unloaded list must NOT masquerade as an empty list (a
+  // fabricated fact). Cleared on the next successful load. Drives the list's
+  // honest error state.
+  const [listLoadError, setListLoadError] = useState(false);
+  const [compareSelection, setCompareSelection] =
+    useState<CompareSelection | null>(null);
+  // The composer hands us its imperative Open handler via onRegisterOpen; we
+  // call it from the list's Open affordance to drive the codec-trichotomy
+  // hydrate (Plan 04). Stored in a ref so re-registration doesn't re-render.
+  const composerOpenRef = useRef<((row: SavedScenarioRow) => void) | null>(null);
+
+  // Fetch the caller's saved scenarios (RLS-scoped). The GET returns the draft
+  // alongside metadata so Open/Compare have it without a second round-trip.
+  const refetchSaved = useCallback(async () => {
+    try {
+      const res = await fetch("/api/allocator/scenario/saved", {
+        method: "GET",
+      });
+      if (!res.ok) {
+        // A non-2xx (incl. the route's redacted 500) is a HARD failure. Surface
+        // it: an unloaded list rendered as "No saved scenarios yet" would be a
+        // fabricated fact. Leave the prior rows in place; flag the error.
+        warnAudit("scenario_list_load_failed", { status: res.status });
+        setListLoadError(true);
+        return;
+      }
+      const rows = (await res.json()) as SavedScenarioListRow[];
+      if (Array.isArray(rows)) {
+        setSavedRows(rows);
+        setListLoadError(false);
+      }
+    } catch (err) {
+      // A thrown fetch (network / parse) is the same class of hard failure —
+      // do NOT swallow it into a silent empty list. The composer + compare
+      // surfaces stay usable; the list shows an honest error state. No
+      // fabricated rows.
+      warnAudit("scenario_list_load_failed", { status: "throw", error: String(err) });
+      setListLoadError(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    // Fetch-on-mount: setSavedRows runs only AFTER the awaited fetch resolves
+    // (a later microtask), so it is NOT a synchronous cascading render the rule
+    // warns about — the static rule can't see through the async boundary.
+    // Matches the codebase convention for fetch-on-mount effects (BridgeDrawer /
+    // StrategyBrowseDrawer scope the same disable). CLAUDE.md Rule 11.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void refetchSaved();
+  }, [refetchSaved]);
+
+  const handleRegisterOpen = useCallback(
+    (open: (row: SavedScenarioRow) => void) => {
+      composerOpenRef.current = open;
+    },
+    [],
+  );
+
+  // The list's Open delegates to the composer's codec-trichotomy Open handler.
+  const handleOpen = useCallback((row: SavedScenarioOpenRow) => {
+    composerOpenRef.current?.(row);
+  }, []);
+
+  // The list's Compare raises the >=2 selection; mounting ScenarioComparePanel.
+  const handleCompare = useCallback((selection: CompareSelection) => {
+    setCompareSelection(selection);
+  }, []);
+
+  // After any mutation the composer makes (Save/Update), refetch so the list is
+  // consistent. Passed to the composer's onMutated seam if present; also fired
+  // by the list itself after rename/delete.
+  const handleMutated = useCallback(() => {
+    void refetchSaved();
+  }, [refetchSaved]);
+
+  return (
+    <div className="space-y-6">
+      {/* H3 — allocator_id propagated from the SSR-lifted payload.
+          allocatorMandate is read from the existing `props.mandate` field. */}
+      <ScenarioComposer
+        payload={props}
+        allocatorId={props.allocator_id}
+        allocatorMandate={props.mandate}
+        onRegisterOpen={handleRegisterOpen}
+        onScenarioSaved={handleMutated}
+      />
+
+      <SavedScenariosList
+        rows={savedRows}
+        listLoadError={listLoadError}
+        onOpen={handleOpen}
+        onCompare={handleCompare}
+        onMutated={handleMutated}
+      />
+
+      {compareSelection && (
+        <ScenarioComparePanel
+          selectedRows={compareSelection.rows}
+          includeLiveBook={compareSelection.includeLiveBook}
+          payload={props as unknown as ScenarioComparePanelProps["payload"]}
+        />
+      )}
+    </div>
   );
 }
 

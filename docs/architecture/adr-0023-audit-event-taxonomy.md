@@ -151,6 +151,10 @@ action doesn't belong in audit_log — it belongs in product analytics
 | `user_note.holding.update` | `user_note` | caller's `profiles.id` (no single row aggregates a holding scope — see Research Finding #8) | scope_kind, scope_ref, content_length |
 | `user_note.bridge_outcome.update` | `user_note` | `bridge_outcomes.id` (scope_ref as UUID) | scope_kind, scope_ref, content_length |
 | `user_note.strategy.update` | `user_note` | `strategies.id` (scope_ref as UUID) | scope_kind, scope_ref, content_length |
+| `scenario.save` | `scenario` | `scenarios.id` (the newly inserted saved-scenario row) | schema_version, name_length |
+| `scenario.rename` | `scenario` | `scenarios.id` | name_length |
+| `scenario.update` | `scenario` | `scenarios.id` | schema_version, name_length |
+| `scenario.delete` | `scenario` | `scenarios.id` (only emitted when a row was actually deleted — the 0-rows path returns 404 first) | — |
 | `admin.kill_switch` | `system_flag` | acting admin's `profiles.id` (system_flags keyed on text `key`, no UUID available) | flag, new_value |
 | `match.decision_record` | `match_decision` | `match_decisions.id` | allocator_id, strategy_id, decision |
 | `match.decision_delete` | `match_decision` | `match_decisions.id` of the removed row | allocator_id, strategy_id, decision |
@@ -262,6 +266,27 @@ further. Content is NEVER echoed into metadata (D-14/D-20 privacy
 invariant); metadata carries `{scope_kind, scope_ref, content_length}`
 only. The audit-fanout integration test asserts `metadata.content`
 is `undefined` across all four kinds.
+
+Phase 23 (persisted allocator scenarios, migration 20260621120000)
+added four `scenario.*` actions plus the `scenario` entity_type. A saved
+scenario is the allocator's own named what-if config (a `ScenarioDraft`
+JSONB on the owner-RLS-scoped `scenarios` table), so the family mirrors
+the `user_note.*` model: self-owned content that logs its own CRUD and
+anchors every event on `scenarios.id`. Emission sites (all via the
+user-scoped `logAuditEvent`, `auth.uid()` is the owner):
+
+- `scenario.save` — `POST /api/allocator/scenario/saved` (create).
+- `scenario.rename` — `PATCH /api/allocator/scenario/saved/[id]`.
+- `scenario.update` — `PUT /api/allocator/scenario/saved/[id]` (save the
+  current draft over an existing row).
+- `scenario.delete` — `DELETE /api/allocator/scenario/saved/[id]`, emitted
+  only after a row was actually removed (a non-owned id matches 0 rows
+  under RLS and returns 404 before any audit fires).
+
+The draft contents are NEVER echoed into metadata (same D-14/D-20
+privacy posture as the notes family): metadata carries the draft's
+`schema_version` and the `name_length` only — never the name string or
+the draft body.
 
 ### 5. user_id is derived from `auth.uid()` in the RPC
 `log_audit_event` is SECURITY DEFINER (migration 049). Inside the

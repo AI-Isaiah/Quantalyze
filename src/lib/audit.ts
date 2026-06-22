@@ -389,6 +389,17 @@ export type AuditAction =
   | "user_note.holding.update"
   | "user_note.bridge_outcome.update"
   | "user_note.strategy.update"
+  // --- Phase 23: persisted allocator scenario drafts (scenario.*) ----------
+  // Self-owned, RLS-scoped saved ScenarioDraft config (the allocator's own
+  // named what-if). Mirrors the user_note.* family (self-owned content that
+  // logs its CRUD). entity_type is scenario and entity_id is the scenarios id.
+  // (Keep this comment free of the semicolon character and of double quotes —
+  // the Python parity test's TS union parser captures only up to the union's
+  // first semicolon. See the mandate_preference.update.failed note below.)
+  | "scenario.save"
+  | "scenario.rename"
+  | "scenario.update"
+  | "scenario.delete"
   | "admin.kill_switch"
   | "match.decision_record"
   | "match.decision_delete"
@@ -490,6 +501,8 @@ export type AuditEntityType =
   | "partner_import"
   // --- Phase 08: multi-scope notes — replaces the legacy portfolio_note entity
   | "user_note"
+  // --- Phase 23: persisted allocator scenario drafts ------------------------
+  | "scenario"
   | "investor_attestation"
   | "trades_upload"
   // --- /review follow-up (T4-C1 + T4-M6) ------------------------------
@@ -582,6 +595,11 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP = {
   "user_note.holding.update": "user_note",
   "user_note.bridge_outcome.update": "user_note",
   "user_note.strategy.update": "user_note",
+  // Phase 23: persisted allocator scenario drafts — entity_id = scenarios.id.
+  "scenario.save": "scenario",
+  "scenario.rename": "scenario",
+  "scenario.update": "scenario",
+  "scenario.delete": "scenario",
   // Admin / system actions
   "admin.kill_switch": "system_flag",
   "match.decision_record": "match_decision",

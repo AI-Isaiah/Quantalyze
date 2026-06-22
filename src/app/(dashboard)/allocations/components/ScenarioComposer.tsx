@@ -55,12 +55,13 @@
  * (sticky-footer right CTA) but routes the click to the callback prop.
  */
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   buildDateMapCache,
   computeScenario,
+  computeStrategyCurve,
   type ComputedMetrics,
   type DailyPoint,
   type StrategyForBuilder,
@@ -69,6 +70,12 @@ import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
 import { Card } from "@/components/ui/Card";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
+import { Button } from "@/components/ui/Button";
+import {
+  defaultDraftFromHoldings,
+  scenarioDraftCodec,
+  type AddedStrategy,
+} from "../lib/scenario-state";
 import { useScenarioState } from "../hooks/useScenarioState";
 import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 import {
@@ -83,9 +90,9 @@ import { BridgeDrawer } from "./BridgeDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { ScenarioFooter } from "./ScenarioFooter";
 import { ScenarioFlaggedHoldingsList } from "../ScenarioFlaggedHoldingsList";
+import { ScenarioBenchmarkSection } from "./ScenarioBenchmarkSection";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import type { AllocatorMandateForFit } from "../lib/mandate-fit";
-import type { AddedStrategy } from "../lib/scenario-state";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -210,10 +217,38 @@ export type ScenarioCommitDiff =
  */
 export type ComposerProducedDiff = VoluntaryAddDiff;
 
+/**
+ * Phase 23 / PERSIST-02 — a saved-scenario row as it arrives from the
+ * `/api/allocator/scenario/saved` list / DB row. The `draft` is the persisted
+ * JSONB blob; the composer decodes it through `scenarioDraftCodec` (never a
+ * bare cast — M-0153) before hydrating, so an older-format (`reset`) blob shows
+ * an honest notice and a newer-version (`readonly`) blob blocks edits.
+ */
+export interface SavedScenarioRow {
+  id: string;
+  name: string;
+  /** The persisted draft JSONB. Decoded through the codec, NOT cast. */
+  draft: unknown;
+}
+
 export interface ScenarioComposerProps {
   payload: MyAllocationDashboardPayload;
   allocatorId: string;
   allocatorMandate: AllocatorMandateForFit | null;
+  /**
+   * Phase 23 / PERSIST-02 — the saved-scenarios list (a later plan) registers
+   * to receive the composer's imperative Open handler. Calling it with a saved
+   * row decodes the row's draft through the codec trichotomy and hydrates
+   * (ok / readonly) or shows an honest notice (reset). Optional — when absent
+   * the composer simply never receives an Open request.
+   */
+  onRegisterOpen?: (open: (row: SavedScenarioRow) => void) => void;
+  /**
+   * Phase 23 / PERSIST-03 — fired after a scenario Save (POST) or Update (PUT)
+   * succeeds, so a host that renders the saved-scenarios list (Plan 05) can
+   * refetch and stay consistent. Optional — absent hosts simply don't refetch.
+   */
+  onScenarioSaved?: () => void;
   /** Legacy callback API. When `useInternalCommitDrawer === false`, the
    *  composer fires this callback INSTEAD of opening its own
    *  ScenarioCommitDrawer — host owns the commit-confirmation surface.
@@ -304,6 +339,8 @@ export function ScenarioComposer({
   allocatorMandate,
   onCommitRequested,
   useInternalCommitDrawer = true,
+  onRegisterOpen,
+  onScenarioSaved,
 }: ScenarioComposerProps) {
   const {
     holdingsSummary,
@@ -365,6 +402,44 @@ export function ScenarioComposer({
   // ponytail: ephemeral useState; promote to the persisted draft only if
   // allocators ask for leverage to survive a reload.
   const [leverageByRef, setLeverageByRef] = useState<Record<string, number>>({});
+
+  // -------------------------------------------------------------------------
+  // Phase 23 / PERSIST-02 — Save / Update / Save-as-new toolbar + reopen state.
+  // -------------------------------------------------------------------------
+  // The id of the saved scenario currently open in the composer (null = a fresh
+  // unsaved draft). Open() sets it; handleReset() clears it. Drives the
+  // Save-vs-Update toolbar split.
+  const [loadedScenarioId, setLoadedScenarioId] = useState<string | null>(null);
+  // The open scenario's name — sent unchanged on Update (PUT requires a name).
+  const [loadedScenarioName, setLoadedScenarioName] = useState<string | null>(null);
+  // A readonly (newer-version) scenario hydrates but blocks the Update gesture —
+  // the user may only fork it via "Save as new scenario".
+  const [loadedReadonly, setLoadedReadonly] = useState(false);
+  // The honest reopen notice (reset → "older format"; readonly → "read-only").
+  const [openNotice, setOpenNotice] = useState<string | null>(null);
+  // Inline name input (NOT a modal). Opened by "Save scenario" (first save) and
+  // by "Save as new scenario" (fork) — both POST a new row, so no mode flag is
+  // needed; the success handler adopts the returned id either way.
+  const [nameInputOpen, setNameInputOpen] = useState(false);
+  const [nameValue, setNameValue] = useState("");
+  const [nameError, setNameError] = useState<string | null>(null);
+  // A hard save/open failure → the canonical error copy (separate from the
+  // weight/leverage commitError surface).
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savePending, setSavePending] = useState(false);
+
+  // BENCH-01 — the BTC benchmark daily-returns series, fetched once from the
+  // shared market-data route. `btcAvailable` is false until a non-empty series
+  // arrives; a failed/empty fetch leaves it false so the benchmark section
+  // renders the honest "unavailable" empty state and the overlay is suppressed
+  // (24-RESEARCH Pitfall 5: a transport failure degrades to the empty state,
+  // never a red alert). The series is RAW daily returns — the section consumes
+  // them for the metrics, and the chart overlay derives a cumulative-WEALTH
+  // curve from the SAME series (Pitfall 3).
+  const [btcDaily, setBtcDaily] = useState<DailyPoint[]>([]);
+  const [btcAvailable, setBtcAvailable] = useState(false);
+  // Overlay toggle, default ON per UI-SPEC §Component Inventory.
+  const [showBenchmark, setShowBenchmark] = useState(true);
 
   function handleWeightChange(scopeRef: string, weight: number) {
     if (!Number.isFinite(weight)) {
@@ -428,6 +503,240 @@ export function ScenarioComposer({
     }
     const clamped = Math.min(MAX_LEVERAGE, Math.max(0, leverage));
     setLeverageByRef((prev) => ({ ...prev, [scopeRef]: clamped }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 23 / PERSIST-02 — Save / Update / Save-as-new + codec-trichotomy Open.
+  // -------------------------------------------------------------------------
+
+  // Reset wrapper — clears the loaded-scenario tracking alongside the hook's
+  // localStorage clear so a fresh draft is no longer "the open saved scenario".
+  // Every reset path (banner Reset, ResetConfirmationModal confirm, commit
+  // success) routes through this so loadedScenarioId can never go stale.
+  const handleReset = useCallback(() => {
+    scenario.reset();
+    setLoadedScenarioId(null);
+    setLoadedScenarioName(null);
+    setLoadedReadonly(false);
+    setOpenNotice(null);
+    setNameInputOpen(false);
+    setSaveError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scenario.reset]);
+
+  // Open a saved scenario. The row's persisted draft is decoded through the
+  // SAME codec the hook uses on a localStorage read (M-0153: never a bare
+  // `row.draft as ScenarioDraft`). The default draft (current holdings) is the
+  // codec's absent/corrupt fallback and the schema source of truth.
+  //   ok       → hydrate + adopt the id (editable).
+  //   readonly → hydrate (the user's real data) + adopt the id, but block the
+  //              Update gesture and show the read-only notice.
+  //   reset    → do NOT hydrate (never a silent empty composer) — show the
+  //              honest "older format" notice; the open is refused.
+  const openSavedScenario = useCallback(
+    (row: SavedScenarioRow) => {
+      setSaveError(null);
+      const defaultDraft = defaultDraftFromHoldings(
+        holdingsSummary as Parameters<typeof defaultDraftFromHoldings>[0],
+      );
+      const decoded = scenarioDraftCodec(defaultDraft).decode(
+        JSON.stringify(row.draft),
+      );
+
+      if (decoded.outcome === "reset") {
+        // Older incompatible / corrupt format — honest notice, no hydrate.
+        setOpenNotice(
+          "This saved scenario uses an older format and can't be reopened.",
+        );
+        return;
+      }
+
+      if (decoded.outcome === "readonly") {
+        // Newer-version blob: hydrate the user's real data but block edits.
+        scenario.hydrateFromSaved(decoded.value);
+        setLoadedScenarioId(row.id);
+        setLoadedScenarioName(row.name);
+        setLoadedReadonly(true);
+        setOpenNotice(
+          "This scenario was saved by a newer version and is read-only here.",
+        );
+        setNameInputOpen(false);
+        return;
+      }
+
+      // ok — adopt the draft + id; clear any prior notice / readonly flag. The
+      // fingerprint-mismatch banner (drift) derives automatically from the
+      // hydrated draft's fingerprint vs current holdings — no special-casing.
+      scenario.hydrateFromSaved(decoded.value);
+      setLoadedScenarioId(row.id);
+      setLoadedScenarioName(row.name);
+      setLoadedReadonly(false);
+      setOpenNotice(null);
+      setNameInputOpen(false);
+    },
+    // hydrateFromSaved/reset are stable useCallbacks; holdingsSummary is the
+    // only render-varying input.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [holdingsSummary, scenario.hydrateFromSaved],
+  );
+
+  // Register the imperative Open handler with the parent (the saved-scenarios
+  // list, a later plan). Re-registers when the handler identity changes.
+  const onRegisterOpenRef = useRef(onRegisterOpen);
+  onRegisterOpenRef.current = onRegisterOpen;
+  useEffect(() => {
+    onRegisterOpenRef.current?.(openSavedScenario);
+  }, [openSavedScenario]);
+
+  // BENCH-01 — fetch the shared BTC daily-returns series once on mount. The
+  // route returns `[{date,value}]` (raw daily returns) and degrades to `[]` on
+  // its own read errors, so any non-2xx / non-array / empty / thrown result
+  // leaves `btcAvailable=false` → the benchmark section shows the honest empty
+  // state and the overlay is hidden (never a red alert).
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/benchmark/btc")
+      .then((r) => {
+        if (!r.ok) {
+          // F-08: a persistent non-2xx (500 / CDN / route-contract break) is
+          // otherwise invisible — the honest-degrade state hides it. Log so a
+          // regression is visible in production console rather than silently
+          // swallowed. Keep the degrade (return [] → btcAvailable=false).
+          console.warn(
+            "[ScenarioComposer] /api/benchmark/btc non-ok response",
+            { status: r.status },
+          );
+          return [];
+        }
+        return r.json();
+      })
+      .then((d) => {
+        if (cancelled) return;
+        const series = Array.isArray(d) ? (d as DailyPoint[]) : [];
+        setBtcDaily(series);
+        setBtcAvailable(series.length > 0);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        // F-08: a thrown fetch (network / abort / JSON parse) is also logged
+        // so the silent degrade is observable. State stays honest.
+        console.warn("[ScenarioComposer] /api/benchmark/btc fetch failed", err);
+        setBtcDaily([]);
+        setBtcAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // BENCH-01 — the chart overlay series. `EquityChart.benchmark` runs
+  // `anchorFromFirstPositive` (divide-by-first), so it expects a CUMULATIVE-
+  // WEALTH curve (~1.0 base), NOT raw daily returns — derive it via
+  // `computeStrategyCurve` from the same BTC daily returns the metrics use
+  // (24-RESEARCH Pitfall 3). Suppressed (undefined) when the toggle is off or
+  // the benchmark is unavailable, which hides the overlay.
+  const btcWealth = useMemo(
+    () =>
+      showBenchmark && btcAvailable
+        ? computeStrategyCurve(btcDaily)
+        : undefined,
+    [showBenchmark, btcAvailable, btcDaily],
+  );
+
+  // Validate the trimmed name against the SQL CHECK (1..120) mirrored in the
+  // save route. Returns the trimmed name on success, or null after setting the
+  // inline error copy (UI-SPEC §Copywriting).
+  function validateName(raw: string): string | null {
+    const trimmed = raw.trim();
+    if (trimmed.length < 1) {
+      setNameError("Enter a name to save this scenario.");
+      return null;
+    }
+    if (trimmed.length > 120) {
+      setNameError("Scenario names are limited to 120 characters.");
+      return null;
+    }
+    setNameError(null);
+    return trimmed;
+  }
+
+  // POST a new scenario (first save OR "save as new"). On success adopt the
+  // returned id as the loaded scenario (editable, not readonly).
+  async function postNewScenario(name: string) {
+    setSavePending(true);
+    setSaveError(null);
+    try {
+      const res = await fetch("/api/allocator/scenario/saved", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, draft: scenario.draft }),
+      });
+      if (!res.ok) {
+        setSaveError(
+          "Couldn't save this scenario. Check your connection and try again.",
+        );
+        return;
+      }
+      const data: { id?: string; name?: string } = await res.json();
+      if (data.id) {
+        setLoadedScenarioId(data.id);
+        setLoadedScenarioName(data.name ?? name);
+        setLoadedReadonly(false);
+        setOpenNotice(null);
+      }
+      setNameInputOpen(false);
+      setNameValue("");
+      // PERSIST-03 — let a host's saved-scenarios list refetch the new row.
+      onScenarioSaved?.();
+    } catch {
+      setSaveError(
+        "Couldn't save this scenario. Check your connection and try again.",
+      );
+    } finally {
+      setSavePending(false);
+    }
+  }
+
+  // PUT the current draft back to the open scenario row (the "Update scenario"
+  // gesture). Blocked when the loaded scenario is readonly.
+  async function putUpdateScenario() {
+    if (!loadedScenarioId || loadedReadonly) return;
+    setSavePending(true);
+    setSaveError(null);
+    try {
+      const res = await fetch(
+        `/api/allocator/scenario/saved/${loadedScenarioId}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: loadedScenarioName ?? "Scenario",
+            draft: scenario.draft,
+          }),
+        },
+      );
+      if (!res.ok) {
+        setSaveError(
+          "Couldn't save this scenario. Check your connection and try again.",
+        );
+      } else {
+        // PERSIST-03 — let a host's saved-scenarios list refetch (name/order).
+        onScenarioSaved?.();
+      }
+    } catch {
+      setSaveError(
+        "Couldn't save this scenario. Check your connection and try again.",
+      );
+    } finally {
+      setSavePending(false);
+    }
+  }
+
+  // Submit the inline name input (first save or save-as-new fork).
+  function handleNameSubmit() {
+    const name = validateName(nameValue);
+    if (name === null) return;
+    void postNewScenario(name);
   }
 
   // M3 — Empty state computed flag. The early-return moves to the END of
@@ -997,7 +1306,115 @@ export function ScenarioComposer({
         >
           PROJECTED — hypothetical, not your live book
         </span>
+
+        {/* Phase 23 / PERSIST-02 — Save / Update / Save-as-new toolbar. Lives
+            in this same header row per UI-SPEC §Component Inventory 1. Inline
+            name input (NOT a modal). The control set keys off loadedScenarioId:
+            no scenario open → "Save scenario"; a saved scenario open → "Update
+            scenario" + "Save as new scenario" (a readonly open omits the
+            editable Update and offers only the fork). */}
+        <div
+          data-testid="scenario-save-toolbar"
+          className="ml-auto flex flex-wrap items-center gap-2"
+        >
+          {loadedScenarioId === null ? (
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              onClick={() => {
+                setNameError(null);
+                setNameValue("");
+                setNameInputOpen(true);
+              }}
+            >
+              Save scenario
+            </Button>
+          ) : (
+            <>
+              {!loadedReadonly && (
+                <Button
+                  type="button"
+                  variant="primary"
+                  size="sm"
+                  disabled={savePending}
+                  onClick={() => {
+                    void putUpdateScenario();
+                  }}
+                >
+                  Update scenario
+                </Button>
+              )}
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  setNameError(null);
+                  setNameValue("");
+                  setNameInputOpen(true);
+                }}
+              >
+                Save as new scenario
+              </Button>
+            </>
+          )}
+        </div>
       </div>
+
+      {nameInputOpen && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            value={nameValue}
+            onChange={(e) => setNameValue(e.target.value)}
+            placeholder="Name this scenario"
+            aria-label="Name this scenario"
+            className="min-w-[220px] rounded-md border border-border px-3 py-2 text-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/50"
+          />
+          <Button
+            type="button"
+            variant="primary"
+            size="sm"
+            disabled={savePending}
+            onClick={handleNameSubmit}
+          >
+            Save
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setNameInputOpen(false);
+              setNameError(null);
+            }}
+          >
+            Cancel
+          </Button>
+        </div>
+      )}
+      {nameError && (
+        <p className="mt-1 text-xs text-negative">{nameError}</p>
+      )}
+      {openNotice && (
+        <p
+          data-testid="scenario-open-notice"
+          className="mt-2 text-xs text-text-muted"
+        >
+          {openNotice}
+        </p>
+      )}
+      {saveError && (
+        <div
+          role="alert"
+          data-testid="scenario-save-error"
+          className="mt-2 rounded-md border border-negative bg-[rgba(220,38,38,0.05)] p-3 text-sm text-negative"
+        >
+          {saveError}
+        </div>
+      )}
+
       <p className="mt-1 text-sm text-text-muted">
         Compose a draft portfolio and project KPI / equity / drawdown impact vs
         your live baseline.
@@ -1035,7 +1452,7 @@ export function ScenarioComposer({
             <button
               type="button"
               onClick={() => {
-                scenario.reset();
+                handleReset();
               }}
               className="rounded-md border border-border px-3 py-1 text-xs text-text-secondary hover:border-negative hover:text-negative"
             >
@@ -1087,12 +1504,38 @@ export function ScenarioComposer({
             the header stamp showed "sync just now" / "no sync yet" to a synced
             allocator — a lie. `stale`/`lastSyncAt` come from the live baseline
             the scenario projects from. */}
-        <EquityChart
-          equityDailyPoints={equityDailyPoints}
-          scenarioSeries={scenarioWealthSeries}
-          stale={allKeysStale}
-          lastSyncAt={lastSyncAt}
-        />
+        <div>
+          {/* BENCH-01 — the BTC overlay rides the existing EquityChart SVG
+              widget's `benchmark` prop (cumulative-WEALTH form via `btcWealth`),
+              NOT the lightweight-charts equity-curve component (24-RESEARCH
+              Pitfall 3). `btcWealth` is undefined when the toggle is off or the
+              benchmark is unavailable, which hides the overlay. */}
+          <EquityChart
+            equityDailyPoints={equityDailyPoints}
+            scenarioSeries={scenarioWealthSeries}
+            benchmark={btcWealth}
+            stale={allKeysStale}
+            lastSyncAt={lastSyncAt}
+          />
+          {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted #94A3B8
+              line swatch (UI-SPEC §Copywriting / §Color). Disabled when the
+              benchmark series is unavailable so the control can't promise an
+              overlay there is no data for. */}
+          <label className="mt-2 flex items-center gap-1.5 text-xs text-text-muted">
+            <input
+              type="checkbox"
+              checked={showBenchmark}
+              disabled={!btcAvailable}
+              onChange={(e) => setShowBenchmark(e.target.checked)}
+            />
+            <span
+              aria-hidden="true"
+              className="inline-block h-0.5 w-4"
+              style={{ backgroundColor: "#94A3B8" }}
+            />
+            BTC Benchmark
+          </label>
+        </div>
         <div className="h-[300px] relative">
           {/* DrawdownChart extends WidgetProps (data + timeframe + width + height
               required for the legacy widget-grid path). On the Scenario tab
@@ -1121,6 +1564,20 @@ export function ScenarioComposer({
           )}
         </div>
       </div>
+
+      {/* BENCH-01 — "vs BTC" active-return section. Reads the active scenario's
+          full daily portfolio returns (`scenarioMetrics.portfolio_daily_returns`
+          — OPTIONAL, so `?? []`) + the fetched BTC daily returns, inner-joins
+          by date, and renders TE/IR/alpha/beta over the intersection window OR
+          the honest "unavailable" empty state (below the 30-day floor, no
+          overlap, or a failed fetch via `btcAvailable=false`). */}
+      <Card className="mt-6">
+        <ScenarioBenchmarkSection
+          portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
+          btcDaily={btcDaily}
+          benchmarkAvailable={btcAvailable}
+        />
+      </Card>
 
       {/* CORR-01 / CORR-03 — pairwise correlation heatmap on the own-book
           scenario surface. Mirrors the ScenarioBuilder "Pairwise correlation"
@@ -1269,7 +1726,7 @@ export function ScenarioComposer({
       {resetModalOpen && (
         <ResetConfirmationModal
           onConfirm={() => {
-            scenario.reset();
+            handleReset();
             setResetModalOpen(false);
           }}
           onCancel={() => setResetModalOpen(false)}
@@ -1295,7 +1752,7 @@ export function ScenarioComposer({
           setCommitDiffs([]);
           // B11 / NEW-C18-10: clear the frozen fingerprint alongside the diffs.
           setCommitFingerprint(null);
-          scenario.reset();
+          handleReset();
         }}
       />
     </div>

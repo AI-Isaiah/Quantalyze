@@ -109,6 +109,23 @@ export interface ComputedMetrics {
   equity_curve: Array<{ date: string; value: number }>;
   effective_start: string | null;
   effective_end: string | null;
+  /**
+   * BENCH-01 (Plan 24-01): the FULL-resolution daily portfolio-return series —
+   * one point per common date, in cumulative-RETURN-per-day form (NOT wealth),
+   * UNROUNDED (unlike the downsampled, 5-decimal-rounded `equity_curve` above).
+   * This is the source the BTC benchmark inner-join aligns against; the
+   * benchmark math needs every date at full precision, so do not round or
+   * downsample it. Consumers needing wealth form convert separately.
+   *
+   * Declared OPTIONAL so it is fully additive: external `ComputedMetrics`
+   * construction sites that this engine does not own — `liveBaselineTo
+   * ComputedMetrics` (ScenarioComposer.tsx) and `NULL_METRICS`
+   * (ScenarioComparePanel.tsx) — compile UNCHANGED and need no edit. They read
+   * it with a `?? []` default. `computeScenario` itself ALWAYS sets it: to the
+   * real series on the success path, or `[]` on every degenerate early-return
+   * (no overlap rather than a false window). Consumers read it with `?? []`.
+   */
+  portfolio_daily_returns?: Array<{ date: string; value: number }>;
 }
 
 /**
@@ -152,6 +169,7 @@ export function computeScenario(
       equity_curve: [],
       effective_start: null,
       effective_end: null,
+      portfolio_daily_returns: [],
     };
   }
 
@@ -204,6 +222,7 @@ export function computeScenario(
       equity_curve: [],
       effective_start: commonDates[0] ?? null,
       effective_end: commonDates[n - 1] ?? null,
+      portfolio_daily_returns: [],
     };
   }
 
@@ -234,6 +253,18 @@ export function computeScenario(
     }
     portDaily[i] = activeWeightSum > 0 ? r / activeWeightSum : 0;
   }
+
+  // BENCH-01 (Plan 24-01): full-resolution daily portfolio-return series,
+  // exact dates, UNROUNDED — the source the BTC benchmark inner-join aligns
+  // against. Built from the same axis (commonDates) and weighted/renormalized/
+  // leveraged returns (portDaily) the engine already computed above; the
+  // benchmark math must NOT re-derive these (drift risk). Do not round or
+  // downsample. Suppressed (→ []) on the degenerate early-returns above so a
+  // degenerate scenario yields no false overlap window.
+  const portfolio_daily_returns = commonDates.map((date, i) => ({
+    date,
+    value: portDaily[i],
+  }));
 
   // Cumulative (full-resolution) used for TWR / CAGR / drawdown. Equity
   // curve output is downsampled below for payload size.
@@ -293,6 +324,7 @@ export function computeScenario(
       equity_curve: [],
       effective_start: commonDates[0],
       effective_end: commonDates[n - 1],
+      portfolio_daily_returns: [],
     };
   }
 
@@ -428,6 +460,7 @@ export function computeScenario(
     equity_curve,
     effective_start: commonDates[0],
     effective_end: commonDates[n - 1],
+    portfolio_daily_returns,
   };
 }
 

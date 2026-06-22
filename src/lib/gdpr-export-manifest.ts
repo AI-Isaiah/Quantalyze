@@ -649,6 +649,16 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   { kind: "direct", table: "organization_members", user_column: "user_id" },
   { kind: "direct", table: "portfolios", user_column: "user_id" },
   { kind: "direct", table: "profiles", user_column: "id" },
+  // Phase 23 (migration 20260621120000): scenarios is user-owned via
+  // allocator_id (NOT NULL REFERENCES profiles ON DELETE CASCADE). A saved
+  // ScenarioDraft is the allocator's own named what-if config — personal data
+  // GDPR Art. 15 entitles them to export. The `draft` JSONB is exported as-is
+  // (the user authored it; no cross-tenant/PII content beyond their own
+  // config). Erasure is handled by the ON DELETE CASCADE from profiles, so the
+  // sanitize_user matrix needs no explicit row — see SANITIZE_PARITY_ALLOWLIST
+  // in scripts/check-gdpr-export-coverage.ts (mirrors the csv_daily_returns
+  // CASCADE-erasure allowlist pattern).
+  { kind: "direct", table: "scenarios", user_column: "allocator_id" },
   { kind: "direct", table: "strategies", user_column: "user_id" },
   { kind: "direct", table: "user_app_roles", user_column: "user_id" },
   { kind: "direct", table: "user_favorites", user_column: "user_id" },
