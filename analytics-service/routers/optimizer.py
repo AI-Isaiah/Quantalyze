@@ -6,9 +6,14 @@ shared secret (service-to-service only — the Next.js allocator route is the so
 caller and it forwards only the authenticated allocator's own draft-scoped
 series). Stateless: no DB, no migration. All math + the degeneracy gate live in
 the pure service so they are unit-tested without HTTP (test_optimizer.py).
-"""
 
-from __future__ import annotations
+NOTE — DO NOT add ``from __future__ import annotations`` to this module. Under
+PEP-563 stringification the BaseModel-typed ``req`` body hint is resolved
+through slowapi's wrapper globals (where the model isn't defined), so the
+pinned CI fastapi (0.115.x) misclassifies it as a query param → 422. The newer
+local fastapi (0.135.x) unwraps correctly and hides the bug. Same gotcha
+documented in routers/process_key.py.
+"""
 
 import logging
 
