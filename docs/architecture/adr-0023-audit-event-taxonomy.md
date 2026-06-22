@@ -155,6 +155,8 @@ action doesn't belong in audit_log — it belongs in product analytics
 | `scenario.rename` | `scenario` | `scenarios.id` | name_length |
 | `scenario.update` | `scenario` | `scenarios.id` | schema_version, name_length |
 | `scenario.delete` | `scenario` | `scenarios.id` (only emitted when a row was actually deleted — the 0-rows path returns 404 first) | — |
+| `scenario.share` | `scenario` | `scenarios.id` (the scenario a share link was minted for, not the `scenario_shares` row) | share_id |
+| `scenario.share.revoke` | `scenario` | `scenarios.id` (the scenario whose active share was revoked) | revoked_count |
 | `admin.kill_switch` | `system_flag` | acting admin's `profiles.id` (system_flags keyed on text `key`, no UUID available) | flag, new_value |
 | `match.decision_record` | `match_decision` | `match_decisions.id` | allocator_id, strategy_id, decision |
 | `match.decision_delete` | `match_decision` | `match_decisions.id` of the removed row | allocator_id, strategy_id, decision |
@@ -287,6 +289,28 @@ The draft contents are NEVER echoed into metadata (same D-14/D-20
 privacy posture as the notes family): metadata carries the draft's
 `schema_version` and the `name_length` only — never the name string or
 the draft body.
+
+Phase 25 (read-only scenario sharing, migration 20260622120000) added
+two more actions to the family, `scenario.share` and
+`scenario.share.revoke`, plus the `scenario_shares` table. Both anchor
+on `scenarios.id` (NOT the `scenario_shares` row id), so an auditor can
+trace minting and revocation of a scenario's link from the same
+`entity_id` axis as its CRUD. Emission sites (both via the user-scoped
+`logAuditEvent`, owner = `auth.uid()`):
+
+- `scenario.share` — `POST /api/allocator/scenario/share` mints a
+  revocable link. Emitted once per mint; metadata carries the
+  `scenario_shares.id` (`share_id`) only — never the share token (raw or
+  hashed). Because the mint RPC revokes any prior active share, the
+  superseded share is NOT separately logged as a revoke (that would
+  double-log one user action).
+- `scenario.share.revoke` — `POST /api/allocator/scenario/share/revoke`
+  sets `revoked_at` (the row is never deleted, so the share trail is
+  preserved). Metadata carries `revoked_count` (0 on a benign
+  double-revoke, which converges silently rather than erroring).
+
+The share token never reaches the audit log in any form — same privacy
+posture as the draft body above.
 
 ### 5. user_id is derived from `auth.uid()` in the RPC
 `log_audit_event` is SECURITY DEFINER (migration 049). Inside the
