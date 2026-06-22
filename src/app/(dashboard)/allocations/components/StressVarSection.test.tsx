@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { render, screen, within, fireEvent } from "@testing-library/react";
 import { StressVarSection } from "./StressVarSection";
 import { SAMPLE_FLOOR_OVERLAPPING_DAYS } from "@/lib/sample-floor";
+import { VAR_CONFIDENCE_LABEL } from "../lib/scenario-stress";
 
 /**
  * Plan 26-02 Task 2 — the state-matrix + honesty pins for the StressVarSection.
@@ -96,10 +97,16 @@ describe("StressVarSection", () => {
     expect(screen.getByText("Expected Shortfall (CVaR, 95%)")).toBeTruthy();
 
     // The VaR is NEVER bare: the FULL methodology line, incl. the literal N and
-    // the 95% confidence extension — not just the "overlapping days" substring.
+    // the confidence extension — not just the "overlapping days" substring. The
+    // confidence label is the lib's VAR_CONFIDENCE_LABEL (derived from the SAME
+    // constant the quantile is computed at), so the displayed "%" can never drift
+    // from the actual computation (WR-02).
     expect(container.textContent).toContain(
-      `Historical realized · ${OK_N} overlapping days · not a forecast. 95% confidence.`,
+      `Historical realized · ${OK_N} overlapping days · not a forecast. ${VAR_CONFIDENCE_LABEL} confidence.`,
     );
+    // The label is the shipped 95% headline — pinned so a silent constant change
+    // that desyncs the lib from the UI fails loud.
+    expect(VAR_CONFIDENCE_LABEL).toBe("95%");
 
     // Heading names the scenario (VaR) N, not a union window.
     expect(

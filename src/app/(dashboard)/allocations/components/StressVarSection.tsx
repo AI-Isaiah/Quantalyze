@@ -10,7 +10,10 @@ import {
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { SampleFloorEmptyState } from "@/components/scenarios/SampleFloorEmptyState";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
-import { computeScenarioStress } from "../lib/scenario-stress";
+import {
+  computeScenarioStress,
+  VAR_CONFIDENCE_LABEL,
+} from "../lib/scenario-stress";
 import type { DailyPoint } from "@/lib/scenario";
 
 /**
@@ -207,10 +210,12 @@ export function StressVarSection({
         />
       </div>
       {/* VaR/CVaR disclosure — names the scenario N (varN). Single-sourced via
-          methodologyLine, extended with the 95% confidence level exactly as the
-          sibling appends its annualization note. Never a bare VaR. */}
+          methodologyLine, extended with the confidence level derived from the
+          SAME VAR_CONFIDENCE constant the lib computes the quantile at, so the
+          displayed "%" can never drift from the actual computation (WR-02).
+          Never a bare VaR. */}
       <p className="mt-2 text-[11px] text-text-muted">
-        {methodologyLine(result.varN)} 95% confidence.
+        {methodologyLine(result.varN)} {VAR_CONFIDENCE_LABEL} confidence.
       </p>
       {/* β-shock disclosure — names the BTC inner-join N (betaN) + the shock
           assumptions. Rendered as its OWN caption only when the two Ns differ,

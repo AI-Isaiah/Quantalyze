@@ -57,13 +57,26 @@ export interface ScenarioStress {
   beta: number | null;
   /** β_portfolio · shock — signed return. `null` when β is null. */
   projectedImpact: number | null;
-  /** Historical VaR at `confidence` (signed return quantile). `null` on degeneracy. */
+  /** Historical VaR at `VAR_CONFIDENCE` (signed return quantile). `null` on degeneracy. */
   var: number | null;
   /** CVaR / Expected Shortfall — mean of the tail at/beyond VaR. `null` on degeneracy. */
   cvar: number | null;
 }
 
 const NULL_VAR = { var: null as number | null, cvar: null as number | null };
+
+/**
+ * The VaR/CVaR confidence level. Locked to a single named constant — NOT an
+ * `opts` knob — so it can never drift from the hard-coded "95% confidence."
+ * disclosure label the section renders (`StressVarSection.tsx`). The headline
+ * UI label is `VAR_CONFIDENCE_LABEL`, derived from this value, so the displayed
+ * confidence and the computed quantile are the same source of truth. If a future
+ * surface needs a non-95% confidence, expose it as an opt AND derive the label
+ * from it in the same change — never reintroduce one without the other.
+ */
+export const VAR_CONFIDENCE = 0.95;
+/** The displayed confidence label, derived from `VAR_CONFIDENCE` (no drift). */
+export const VAR_CONFIDENCE_LABEL = `${Math.round(VAR_CONFIDENCE * 100)}%`;
 
 /**
  * Compute the stress / VaR result over the already-leveraged scenario daily
@@ -77,15 +90,18 @@ const NULL_VAR = { var: null as number | null, cvar: null as number | null };
  * @param portfolioDaily  Already-leveraged `portfolio_daily_returns` (`[]` when
  *                        the engine suppresses a degenerate scenario).
  * @param btcDaily        The BTC factor daily-return series (the shock factor).
- * @param opts.confidence VaR/CVaR confidence (default 0.95 — the locked headline).
  * @param opts.shock      Factor shock magnitude (default −0.30 — "BTC −30%").
+ *
+ * VaR/CVaR confidence is NOT an opt: it is locked to `VAR_CONFIDENCE` (0.95) so
+ * the computed quantile can never desync from the section's hard-coded "95%"
+ * disclosure label (WR-02). A non-default confidence would have to be added here
+ * AND wired into the rendered label in the same change.
  */
 export function computeScenarioStress(
   portfolioDaily: DailyPoint[],
   btcDaily: DailyPoint[],
-  opts?: { confidence?: number; shock?: number },
+  opts?: { shock?: number },
 ): ScenarioStress {
-  const confidence = opts?.confidence ?? 0.95;
   const shock = opts?.shock ?? -0.3;
 
   // ── VaR / CVaR path (STRESS-02) — WRAP, never fork ──────────────────
@@ -93,7 +109,7 @@ export function computeScenarioStress(
   // engine already emits `[]` for n<10 / constant / non-finite, so length===0
   // is the scenario-side degenerate short-circuit.
   const varN = portfolioDaily.length;
-  const { var: var_, cvar } = computeVarPath(portfolioDaily, confidence);
+  const { var: var_, cvar } = computeVarPath(portfolioDaily);
 
   // ── β-shock path (STRESS-01) — REUSE the β source, never re-derive ──
   // computeScenarioBenchmark already inner-joins, computes cov/var via the
@@ -117,7 +133,6 @@ export function computeScenarioStress(
  */
 function computeVarPath(
   portfolioDaily: DailyPoint[],
-  confidence: number,
 ): { var: number | null; cvar: number | null } {
   // 1. The engine emits [] for n<10 / constant / non-finite → scenario-side null.
   if (portfolioDaily.length === 0) return NULL_VAR;
@@ -149,7 +164,7 @@ function computeVarPath(
   // 3. Non-empty, non-constant series → the floor-quantile VaR + tail-mean CVaR.
   // NO leverage multiplier — leverage is baked into portfolio_daily_returns.
   return {
-    var: computeVaR(values, confidence),
-    cvar: computeExpectedShortfall(values, confidence),
+    var: computeVaR(values, VAR_CONFIDENCE),
+    cvar: computeExpectedShortfall(values, VAR_CONFIDENCE),
   };
 }

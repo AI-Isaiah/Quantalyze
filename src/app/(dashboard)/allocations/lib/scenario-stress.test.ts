@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { computeScenarioStress, type ScenarioStress } from "./scenario-stress";
+import {
+  computeScenarioStress,
+  VAR_CONFIDENCE,
+  VAR_CONFIDENCE_LABEL,
+  type ScenarioStress,
+} from "./scenario-stress";
 
 /**
  * Falsifiable pins for the scenario stress / VaR engine (Plan 26-01,
@@ -356,5 +361,42 @@ describe("computeScenarioStress — degenerate null paths (em-dash source)", () 
     expect(r.projectedImpact).toBeNull();
     // VaR side is still well-defined here (the portfolio series is non-constant).
     expect(r.var).not.toBeNull();
+  });
+});
+
+// =========================================================================
+// 10. Confidence/label drift — the displayed label is derived from the SAME
+//     constant the quantile is computed at (WR-02). There is NO confidence opt.
+// =========================================================================
+
+describe("computeScenarioStress — confidence is locked, label cannot drift (WR-02)", () => {
+  it("VAR_CONFIDENCE_LABEL is derived from VAR_CONFIDENCE — they cannot disagree", () => {
+    // The label the section renders ("95% confidence.") is a pure function of the
+    // confidence the lib computes the quantile at. If a future edit changes one
+    // without the other, this fails loud. (e.g. setting VAR_CONFIDENCE to 0.99
+    // without updating the derivation would surface "95%" against a 99% quantile.)
+    expect(VAR_CONFIDENCE_LABEL).toBe(`${Math.round(VAR_CONFIDENCE * 100)}%`);
+    // The shipped headline confidence is 95%.
+    expect(VAR_CONFIDENCE).toBe(0.95);
+    expect(VAR_CONFIDENCE_LABEL).toBe("95%");
+  });
+
+  it("the computed VaR is the quantile at VAR_CONFIDENCE — the label names the actual computation", () => {
+    // Golden 20-value series (same oracle as the top of this file): the floor
+    // quantile at confidence 0.95 is sorted[floor(0.05·20)] = sorted[1] = -0.060.
+    // This pins that the number behind the "95%" label IS the 95% quantile —
+    // there is no opt that could compute a different quantile under that label.
+    const SORTED = [
+      -0.08, -0.06, -0.045, -0.03, -0.025, -0.02, -0.015, -0.01, -0.005, 0.0,
+      0.005, 0.01, 0.012, 0.015, 0.018, 0.02, 0.025, 0.03, 0.04, 0.06,
+    ];
+    const d = days(20);
+    const port: DP[] = d.map((date, i) => ({ date, value: SORTED[i] }));
+    const btc: DP[] = d.map((date, i) => ({ date, value: i % 2 === 0 ? 0.01 : -0.008 }));
+    const idx = Math.floor((1 - VAR_CONFIDENCE) * SORTED.length); // floor(0.05·20)=1
+    const expectedVaR = [...SORTED].sort((a, b) => a - b)[idx]; // -0.060
+    const r = computeScenarioStress(port, btc);
+    expect(r.var).toBeCloseTo(expectedVaR, 12);
+    expect(r.var).toBe(-0.06);
   });
 });
