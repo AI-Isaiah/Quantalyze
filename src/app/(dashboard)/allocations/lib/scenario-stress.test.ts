@@ -348,6 +348,73 @@ describe("computeScenarioStress — degenerate null paths (em-dash source)", () 
     expect(r.cvar).toBeNull();
   });
 
+  it("two-N at the lib level — betaN=1 (single overlapping BTC date) ⇒ beta/impact null, but varN=64 ⇒ var well-defined", () => {
+    // The lib-level mirror of the StressVarSection two-N invariant: the scenario
+    // series is a full 64 finite days (varN=64 → var is well-defined), but BTC
+    // overlaps on exactly ONE of those dates → betaN=1. computeScenarioBenchmark
+    // returns beta=null for an overlap < 2 (NULL_RESULT), so projectedImpact is
+    // null. The VaR side is computed over the full 64-day scenario series and is
+    // independent of the BTC overlap — it must stay non-null. This is the
+    // load-bearing two-N decoupling: a short β window never suppresses VaR.
+    const d = manyDays(64);
+    const port: DP[] = d.map((date, i) => ({
+      date,
+      // A real non-degenerate downside series (so var is well-defined).
+      value: i % 7 === 0 ? -0.05 : 0.01 + (i % 5) * 0.003,
+    }));
+    // BTC carries ONLY the FIRST portfolio date — the inner-join overlap is 1.
+    const btc: DP[] = [{ date: d[0], value: 0.012 }];
+    const r = computeScenarioStress(port, btc, { shock: -0.3 });
+    expect(r.varN).toBe(64);
+    expect(r.betaN).toBe(1); // single overlapping BTC date → 1
+    expect(r.beta).toBeNull(); // n<2 overlap → NULL_RESULT
+    expect(r.projectedImpact).toBeNull(); // null β → null impact (em-dash)
+    // VaR is over the FULL 64-day scenario series, decoupled from the BTC window.
+    expect(r.var).not.toBeNull();
+    expect(r.cvar).not.toBeNull();
+  });
+
+  it("finite-guard completeness — a -Infinity in the portfolio ⇒ var/cvar null; a NaN in the BTC ⇒ beta/impact null while var stays non-null", () => {
+    const d = manyDays(64);
+
+    // (a) A -Infinity contaminant on the PORTFOLIO axis defeats the relative-
+    //     scale guard (the same way +Infinity/NaN do — -Infinity <= x is not the
+    //     short-circuit the guard relies on) and would reach computeVaR's sort →
+    //     a corrupted quantile. The finite-check must surface null instead. (The
+    //     existing matrix covers NaN + +Infinity in the portfolio; this pins the
+    //     -Infinity arm of `!values.every(Number.isFinite)` explicitly.)
+    const portNegInf: DP[] = d.map((date, i) => ({
+      date,
+      value: i === 30 ? -Infinity : i % 7 === 0 ? -0.05 : 0.01 + (i % 5) * 0.003,
+    }));
+    const btcOk: DP[] = d.map((date, i) => ({ date, value: i % 2 === 0 ? 0.012 : -0.009 }));
+    const rNegInf = computeScenarioStress(portNegInf, btcOk, { shock: -0.3 });
+    expect(rNegInf.varN).toBe(64);
+    expect(rNegInf.var).toBeNull();
+    expect(rNegInf.cvar).toBeNull();
+
+    // (b) A NaN on the BTC axis must null beta/projectedImpact (the β path runs
+    //     over the BTC overlap) while the VaR path — computed over the clean
+    //     PORTFOLIO series, which never touches the BTC contaminant — stays
+    //     well-defined. This proves the two paths' finite-guards are independent:
+    //     a poisoned factor series never silently corrupts the VaR estimate.
+    const portOk: DP[] = d.map((date, i) => ({
+      date,
+      value: i % 7 === 0 ? -0.05 : 0.01 + (i % 5) * 0.003,
+    }));
+    const btcNaN: DP[] = d.map((date, i) => ({
+      date,
+      value: i === 17 ? NaN : i % 2 === 0 ? 0.012 : -0.009,
+    }));
+    const rNaN = computeScenarioStress(portOk, btcNaN, { shock: -0.3 });
+    expect(rNaN.betaN).toBe(64);
+    expect(rNaN.beta).toBeNull(); // a NaN-contaminated factor ⇒ no honest β
+    expect(rNaN.projectedImpact).toBeNull();
+    // The VaR side is over the clean portfolio series — unaffected by the BTC NaN.
+    expect(rNaN.var).not.toBeNull();
+    expect(rNaN.cvar).not.toBeNull();
+  });
+
   it("degenerate null — constant BTC over the overlap (n>=60) ⇒ beta/projectedImpact null", () => {
     // computeScenarioBenchmark null-guards the constant-benchmark via its
     // relative-scale test, so beta is null ⇒ projectedImpact is null — never a

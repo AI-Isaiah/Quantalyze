@@ -122,8 +122,21 @@ export function computeScenarioStress(
   // computeScenarioBenchmark sets n = innerJoinByDate(...).p.length.)
   const bench = computeScenarioBenchmark(portfolioDaily, btcDaily);
   const betaN = bench.n;
-  const beta = bench.beta;
-  // null β (degenerate / constant BTC / below n<2 overlap) ⇒ null impact ⇒ "—".
+  // Finite-aware short-circuit on the β path — mirror computeVarPath's guard for
+  // the SECOND (factor) axis. A NaN/Infinity injected through btcDaily defeats
+  // computeScenarioBenchmark's relative-scale degeneracy test (the float-residue
+  // guard short-circuits on a tiny std, not on NaN: Math.sqrt(NaN) <= x is
+  // false), so it falls through to computeAlphaBeta, whose `varB > 0 ? : 0`
+  // branch returns a FABRICATED finite β = 0 (not NaN, not null) for a
+  // contaminated factor series → a fabricated projectedImpact = 0, the exact
+  // false-confidence the "fully null-safe" contract forbids. A non-finite
+  // contaminant anywhere in the factor feed makes it untrustworthy, so surface
+  // null β ⇒ null impact ("—"). Checked on the raw btcDaily values (no second
+  // inner-join — the dedupe keeps computeScenarioBenchmark the sole join site).
+  const btcIsFinite = btcDaily.every((d) => Number.isFinite(d.value));
+  const beta = btcIsFinite ? bench.beta : null;
+  // null β (degenerate / constant BTC / below n<2 overlap / non-finite factor)
+  // ⇒ null impact ⇒ "—".
   const projectedImpact = beta === null ? null : beta * shock;
 
   return { varN, betaN, beta, projectedImpact, var: var_, cvar };
