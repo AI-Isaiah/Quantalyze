@@ -261,7 +261,15 @@ export function SavedScenariosList({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ scenario_id: row.id }),
         });
-        if (!res.ok) {
+        // 404 is CONVERGENCE-to-revoked, not a failure: the revoke route returns
+        // 404 when there is no active share to revoke (a benign double-revoke
+        // across two tabs, a stale has_active_share flag, or an already-expired
+        // share). The share IS gone — the end-state matches a 200, so transition
+        // the row to no-active-share, clear the confirm, fire onMutated, and
+        // suppress the misleading error toast. The route's 404 contract is
+        // unchanged (it preserves the no-existence-oracle posture); the client
+        // simply stops treating "already revoked" as "revoke failed".
+        if (!res.ok && res.status !== 404) {
           // Honest failure — the share stays active, onMutated NOT fired.
           // Dismiss the inline confirm so the still-active Copy link + Revoke
           // controls surface alongside the role=alert error.

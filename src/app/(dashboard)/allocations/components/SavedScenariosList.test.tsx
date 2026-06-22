@@ -675,6 +675,51 @@ describe("SavedScenariosList — Share affordance (Plan 25-03)", () => {
   });
 
   // -------------------------------------------------------------------------
+  // T_SH_UI7b — Revoke IDEMPOTENCY: a 404 (already-revoked / stale flag /
+  //             double-revoke) is convergence-to-revoked, NOT a failure. The
+  //             share is gone, so the row transitions to no-active-share,
+  //             onMutated fires, and NO misleading role=alert error is shown.
+  // -------------------------------------------------------------------------
+  it("T_SH_UI7b revoke 404 converges to revoked (no error alert, row goes to none, onMutated fires)", async () => {
+    const rows: SavedScenarioListRow[] = [
+      { ...ROWS[0], has_active_share: true },
+    ];
+    // The revoke route returns 404 — the share is already gone (a benign
+    // double-revoke / stale has_active_share). This is the only fetch.
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      json: async () => ({}),
+    } as Response);
+    const onMutated = vi.fn();
+    render(
+      <SavedScenariosList
+        rows={rows}
+        onOpen={vi.fn()}
+        onCompare={vi.fn()}
+        onMutated={onMutated}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Revoke$/ }));
+    const confirmRevoke = screen
+      .getAllByRole("button", { name: /^Revoke$/ })
+      .at(-1) as HTMLElement;
+    fireEvent.click(confirmRevoke);
+
+    // The row converges to the none state — Share is offered again (the share
+    // IS gone, so the active controls must NOT linger as if revoke failed).
+    await screen.findByRole("button", { name: /^Share$/ });
+    // onMutated fires (same end-state as a 200) so the parent refetch reconciles.
+    expect(onMutated).toHaveBeenCalled();
+    // NO misleading error toast — a 404 here is convergence, not a failure.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/Couldn't revoke this link/i)).toBeNull();
+    // The active controls are gone (no Copy link / Revoke after convergence).
+    expect(screen.queryByRole("button", { name: /^Copy link$/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Revoke$/ })).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
   // T_SH_UI8 — Revoke "Keep link" dismisses the confirm without a POST.
   // -------------------------------------------------------------------------
   it("T_SH_UI8 'Keep link' dismisses the revoke confirm without a POST", () => {
