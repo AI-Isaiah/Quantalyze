@@ -77,11 +77,29 @@ ALTER TABLE scenario_shares ENABLE ROW LEVEL SECURITY;
 -- on top of the route always sourcing created_by from auth, never the body).
 -- `TO authenticated` pins the policy to the role the request-scoped client
 -- connects as; combined with the REVOKE below, anon is blocked at both layers.
+--
+-- CR-01 OWNER-COHERENCE (the leak-chain fix): `created_by = auth.uid()` alone
+-- is NOT enough — it lets an authenticated allocator mint a share for ANY
+-- scenario_id (incl. another tenant's), because the FK only checks the scenario
+-- EXISTS, not that the caller owns it. The EXISTS clause binds the share to a
+-- scenario the CALLER owns (scenarios.allocator_id = auth.uid()), so the DB
+-- itself rejects a cross-tenant share at WITH CHECK time. This is layer 2 of 3
+-- (route ownership probe + this RLS clause + the RPC owner-coherence predicate);
+-- since the read RPC is SECURITY DEFINER (RLS does not protect its body), the
+-- table policy and the route are the only places this can be enforced at write
+-- time, and the RPC predicate is the read-time backstop for any mis-created row.
 CREATE POLICY scenario_shares_owner ON scenario_shares
   FOR ALL
   TO authenticated
   USING (created_by = auth.uid())
-  WITH CHECK (created_by = auth.uid());
+  WITH CHECK (
+    created_by = auth.uid()
+    AND EXISTS (
+      SELECT 1 FROM public.scenarios s
+      WHERE s.id = scenario_shares.scenario_id
+        AND s.allocator_id = auth.uid()
+    )
+  );
 
 -- Defense-in-depth: a fresh table inherits Supabase's default GRANT ALL TO
 -- anon. There is no public-read use case for the share table — the ONLY public
@@ -132,9 +150,21 @@ BEGIN
   -- Gate: active (non-revoked) share only. Not found → RETURN (0 rows) → the
   -- page notFound()s. An unknown, a revoked, and a cross-tenant token all take
   -- this same exit — no oracle distinguishing "revoked" from "never existed".
+  --
+  -- CR-01 OWNER-COHERENCE (read-time backstop): the join also requires the
+  -- share's creator to OWN the referenced scenario (s.allocator_id =
+  -- sh.created_by). This is layer 3 of the defence-in-depth — even a share row
+  -- that somehow bypassed the table WITH CHECK (a future RLS loosening, a
+  -- service-role mis-insert, a data migration) can NEVER resolve another
+  -- tenant's scenario content through this SECURITY DEFINER path, because the
+  -- creator-owns-the-scenario invariant is re-checked here at read time. A row
+  -- whose created_by is not the scenario owner falls through to 0 rows (→ 404),
+  -- exactly like an unknown/revoked token — no oracle.
   SELECT s.* INTO v_scenario
     FROM scenario_shares sh
-    JOIN scenarios s ON s.id = sh.scenario_id
+    JOIN scenarios s
+      ON s.id = sh.scenario_id
+     AND s.allocator_id = sh.created_by
    WHERE sh.token_hash = p_token_hash
      AND sh.revoked_at IS NULL;
   IF NOT FOUND THEN
@@ -173,6 +203,78 @@ COMMENT ON FUNCTION public.get_shared_scenario(TEXT) IS
   'the draft addedStrategies[].id PUBLISHED strategy_analytics series. NEVER '
   'reads holdings/AUM/api_keys/portfolios. Token is hashed in Node (Plan 25-02); '
   'this takes the precomputed sha256 hex. GRANTed to service_role only.';
+
+-- --------------------------------------------------------------------------
+-- STEP 2b: create_scenario_share(p_scenario_id, p_token_hash) — ATOMIC mint
+-- --------------------------------------------------------------------------
+-- WR-02 ATOMICITY: the generate route previously did a pre-revoke UPDATE and a
+-- separate INSERT as two non-atomic statements. If the pre-revoke succeeded but
+-- the INSERT failed (transient 5xx, a 23505 race against the partial unique
+-- index), the scenario was left with NO active share even though one existed a
+-- moment earlier — the prior link was dead with no replacement. This function
+-- folds revoke-then-insert into ONE transaction: a PL/pgSQL function runs in a
+-- single (sub)transaction, so any error inside it rolls back BOTH writes. The
+-- "one active share per scenario" invariant is therefore never violated by a
+-- partial write — either the new share replaces the old atomically, or nothing
+-- changes.
+--
+-- SECURITY INVOKER (the default; stated explicitly): unlike get_shared_scenario
+-- (the anon read path, DEFINER), this runs AS THE CALLER so RLS still gates it.
+-- The scenario_shares_owner policy enforces created_by = auth.uid() AND the
+-- CR-01 owner-coherence EXISTS clause, so a caller cannot mint a share for a
+-- scenario they do not own through this RPC either — the WITH CHECK rejects the
+-- INSERT (raising, which rolls the function back). created_by is sourced from
+-- auth.uid() INSIDE the function, never a parameter, so a forged created_by is
+-- impossible.
+--
+-- search_path = public, pg_temp matches the read-path canon. STABLE is wrong
+-- here (this writes) — VOLATILE (the default) is correct and omitted.
+CREATE FUNCTION public.create_scenario_share(
+  p_scenario_id UUID,
+  p_token_hash  TEXT
+)
+RETURNS UUID
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_share_id UUID;
+BEGIN
+  -- Revoke any prior active share for this scenario. RLS scopes this to the
+  -- caller's own rows (created_by = auth.uid()); a scenario the caller does not
+  -- own matches 0 rows. This and the INSERT below are in ONE transaction.
+  UPDATE scenario_shares
+     SET revoked_at = now()
+   WHERE scenario_id = p_scenario_id
+     AND revoked_at IS NULL;
+
+  -- Insert the new active share. created_by is auth.uid() (never a param), so
+  -- the RLS WITH CHECK (created_by = auth.uid() AND the caller owns the
+  -- scenario) gates it; a non-owned scenario raises here and rolls back the
+  -- revoke above — the prior link is NOT left dead with no replacement.
+  INSERT INTO scenario_shares (scenario_id, created_by, token_hash)
+  VALUES (p_scenario_id, auth.uid(), p_token_hash)
+  RETURNING id INTO v_share_id;
+
+  RETURN v_share_id;
+END;
+$$;
+
+COMMENT ON FUNCTION public.create_scenario_share(UUID, TEXT) IS
+  'Phase 25 / SHARE-01 (WR-02). ATOMIC revoke-prior + insert-new share for a '
+  'scenario in ONE transaction so a failed insert never leaves the scenario '
+  'with zero active shares. SECURITY INVOKER — RLS gates it as the caller; '
+  'created_by is auth.uid() inside the body (never a parameter). Returns the '
+  'new share row id. The route hashes the token in Node (Plan 25-02) and passes '
+  'the precomputed sha256 hex.';
+
+-- create_scenario_share runs SECURITY INVOKER (RLS-gated as the caller) and is
+-- invoked by the authenticated owner route. anon must never reach it (the
+-- generate route is allocator-auth gated); REVOKE from anon + PUBLIC as
+-- defense-in-depth and GRANT EXECUTE to authenticated.
+REVOKE ALL ON FUNCTION public.create_scenario_share(UUID, TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.create_scenario_share(UUID, TEXT) TO authenticated;
 
 -- --------------------------------------------------------------------------
 -- STEP 3: strip PUBLIC/anon grants, grant service_role only, self-verify

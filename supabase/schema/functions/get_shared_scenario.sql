@@ -34,9 +34,21 @@ BEGIN
   -- Gate: active (non-revoked) share only. Not found → RETURN (0 rows) → the
   -- page notFound()s. An unknown, a revoked, and a cross-tenant token all take
   -- this same exit — no oracle distinguishing "revoked" from "never existed".
+  --
+  -- CR-01 OWNER-COHERENCE (read-time backstop): the join also requires the
+  -- share's creator to OWN the referenced scenario (s.allocator_id =
+  -- sh.created_by). This is layer 3 of the defence-in-depth — even a share row
+  -- that somehow bypassed the table WITH CHECK (a future RLS loosening, a
+  -- service-role mis-insert, a data migration) can NEVER resolve another
+  -- tenant's scenario content through this SECURITY DEFINER path, because the
+  -- creator-owns-the-scenario invariant is re-checked here at read time. A row
+  -- whose created_by is not the scenario owner falls through to 0 rows (→ 404),
+  -- exactly like an unknown/revoked token — no oracle.
   SELECT s.* INTO v_scenario
     FROM scenario_shares sh
-    JOIN scenarios s ON s.id = sh.scenario_id
+    JOIN scenarios s
+      ON s.id = sh.scenario_id
+     AND s.allocator_id = sh.created_by
    WHERE sh.token_hash = p_token_hash
      AND sh.revoked_at IS NULL;
   IF NOT FOUND THEN

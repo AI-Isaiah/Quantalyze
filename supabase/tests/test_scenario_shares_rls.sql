@@ -21,7 +21,14 @@
 --   * tenant B's token resolves ONLY B's content, never A's (cross-tenant read);
 --   * anon has NO direct SELECT on scenario_shares (42501, REVOKE ALL FROM anon);
 --   * tenant A cannot revoke tenant B's share row (RLS silently scopes → 0 rows,
---     not 42501).
+--     not 42501);
+--   * CR-01: tenant A cannot MINT a share for tenant B's scenario — the
+--     scenario_shares_owner WITH CHECK owner-coherence EXISTS clause rejects the
+--     INSERT (42501) (layer 2);
+--   * CR-01: even a force-inserted mis-owned share row (created_by=A pointing at
+--     B's scenario, inserted from the RLS-bypassing seeding context) NEVER
+--     resolves through get_shared_scenario — the RPC's owner-coherence join
+--     predicate (s.allocator_id = sh.created_by) returns 0 rows (layer 3).
 --
 -- The token model is hash-in-Node (Plan 25-02 owns the digest): the RPC takes
 -- p_token_hash TEXT (a precomputed sha256 hex). This test IS the digest caller
@@ -332,6 +339,70 @@ BEGIN
       'TEST FAILED (Assertion 7): tenant B share was revoked by tenant A — CROSS-TENANT WRITE persisted';
   END IF;
   RAISE NOTICE 'Assertion 7 OK: tenant A revoke of tenant B share affected 0 rows; B share untouched.';
+
+  -- ----- ASSERTION 8: CR-01 — A CANNOT MINT A SHARE FOR B''s SCENARIO ----
+  -- The leak the phase brief names: an authenticated allocator minting a public
+  -- share link for a scenario they do NOT own. As tenant A (forged JWT,
+  -- authenticated role) attempt to INSERT a scenario_shares row pointing at
+  -- tenant B''s scenario (scen_b_id) with created_by = A. The
+  -- scenario_shares_owner WITH CHECK requires created_by = auth.uid() AND
+  -- EXISTS(scenarios s WHERE s.id = scenario_id AND s.allocator_id = auth.uid())
+  -- — B''s scenario is NOT owned by A, so the WITH CHECK fails → 42501
+  -- (RLS WITH CHECK violation, "new row violates row-level security policy").
+  -- This is the layer-2 (table RLS) half of the CR-01 fix. If the owner-coherence
+  -- EXISTS clause were removed, this INSERT would SUCCEED — the test fails loudly.
+  PERFORM set_config(
+    'request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'authenticated')::text,
+    true
+  );
+  SET LOCAL ROLE authenticated;
+  raised := FALSE;
+  BEGIN
+    INSERT INTO scenario_shares (scenario_id, created_by, token_hash)
+    VALUES (scen_b_id, uid_a, encode(sha256('a-forges-share-for-b'::bytea), 'hex'));
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    err_state := SQLSTATE;
+  END;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  IF NOT raised THEN
+    RAISE EXCEPTION
+      'TEST FAILED (Assertion 8): tenant A INSERT of a share for tenant B''s scenario SUCCEEDED — CROSS-TENANT SHARE MINT (CR-01). The scenario_shares_owner WITH CHECK owner-coherence EXISTS clause is missing or loosened.';
+  END IF;
+  IF err_state <> '42501' THEN
+    RAISE EXCEPTION
+      'TEST FAILED (Assertion 8): tenant A cross-tenant share INSERT raised %, expected 42501 (RLS WITH CHECK violation)', err_state;
+  END IF;
+  RAISE NOTICE 'Assertion 8 OK: tenant A cannot mint a share for tenant B''s scenario (RLS WITH CHECK rejected with 42501).';
+
+  -- ----- ASSERTION 9: CR-01 RPC backstop — a mis-owned share NEVER resolves
+  -- Defense-in-depth (layer 3): even if a cross-tenant share row somehow exists
+  -- (a future RLS loosening, a service-role mis-insert, a data migration), the
+  -- get_shared_scenario RPC''s owner-coherence join predicate
+  -- (s.allocator_id = sh.created_by) must refuse to resolve another tenant''s
+  -- content. We force-insert such a row from the SEEDING (superuser) context —
+  -- which BYPASSES RLS, so it sidesteps Assertion 8''s WITH CHECK — and then
+  -- prove the RPC returns 0 rows (→ 404) and NEVER B''s name/draft/series.
+  INSERT INTO scenario_shares (scenario_id, created_by, token_hash)
+  VALUES (scen_b_id, uid_a, encode(sha256('mis-owned-share-row'::bytea), 'hex'));
+  -- ^ created_by = A, scenario_id = B''s scenario. A is NOT B''s scenario owner.
+  SELECT * INTO r
+    FROM public.get_shared_scenario(encode(sha256('mis-owned-share-row'::bytea), 'hex'));
+  IF r.name IS NOT NULL THEN
+    RAISE EXCEPTION
+      'TEST FAILED (Assertion 9): the RPC resolved a mis-owned share (created_by=A pointing at B''s scenario) and returned name=% — CROSS-TENANT DISCLOSURE (CR-01). The get_shared_scenario owner-coherence predicate (s.allocator_id = sh.created_by) is missing or loosened.', r.name;
+  END IF;
+  -- Belt-and-braces: the RPC must return 0 rows for that token, not just a NULL
+  -- name row.
+  SELECT count(*) INTO row_cnt
+    FROM public.get_shared_scenario(encode(sha256('mis-owned-share-row'::bytea), 'hex'));
+  IF row_cnt <> 0 THEN
+    RAISE EXCEPTION
+      'TEST FAILED (Assertion 9): the RPC returned % rows for a mis-owned share, expected 0 (→ 404) — CR-01 owner-coherence predicate missing.', row_cnt;
+  END IF;
+  RAISE NOTICE 'Assertion 9 OK: a force-inserted mis-owned share (A→B) resolves to 0 rows; B''s content never disclosed via an A-created share.';
 
   -- ----- TEARDOWN -------------------------------------------------------
   -- ON DELETE CASCADE chains auth.users -> profiles -> {strategies, scenarios}
