@@ -39,10 +39,6 @@ import {
   type StrategyForBuilder,
   type DailyPoint,
 } from "@/lib/scenario";
-import {
-  computeScenarioBenchmark,
-  type ScenarioBenchmark,
-} from "@/app/(dashboard)/allocations/lib/scenario-benchmark";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 
 /** One `get_shared_scenario` series row (RPC `series` jsonb element). */
@@ -66,10 +62,10 @@ export interface ResolvedOk {
   kind: "ok";
   name: string;
   metrics: ComputedMetrics;
-  /** Full-resolution daily portfolio returns for the BTC benchmark inner-join. */
+  /** Full-resolution daily portfolio returns for the BTC benchmark inner-join.
+   *  The page passes these to ScenarioBenchmarkSection, which recomputes the
+   *  benchmark internally — this layer does not pre-compute it. */
   portfolioDaily: DailyPoint[];
-  /** Benchmark active-return metrics (null-safe; computed from the BTC series). */
-  benchmark: ScenarioBenchmark;
   /** De-aliased strategy-id → name map for the correlation heatmap labels. */
   strategyNames: Record<string, string>;
 }
@@ -103,13 +99,13 @@ function neutralDefaultDraft(): ScenarioDraft {
 
 /**
  * Resolve a `get_shared_scenario` RPC row into a render-ready projection or an
- * honest-absence signal. `btcDaily` is the public BTC daily-return series (may
- * be `[]` when the benchmark route degraded — the benchmark section then shows
- * its honest "unavailable" empty state).
+ * honest-absence signal. The BTC benchmark series is NOT consumed here: the
+ * page passes the resolved `portfolioDaily` to ScenarioBenchmarkSection, which
+ * recomputes the benchmark internally from the BTC series. This layer owns only
+ * the codec-trichotomy + the scenario projection.
  */
 export function resolveSharedScenario(
   row: SharedScenarioRow,
-  btcDaily: DailyPoint[],
 ): ResolvedSharedScenario {
   // The codec's `decode` takes a raw STRING (localStorage shape). The RPC hands
   // us a parsed jsonb object, so re-serialize it to drive the same trichotomy.
@@ -189,14 +185,12 @@ export function resolveSharedScenario(
   const metrics = computeScenario(strategies, state, dateMapCache);
 
   const portfolioDaily = metrics.portfolio_daily_returns ?? [];
-  const benchmark = computeScenarioBenchmark(portfolioDaily, btcDaily);
 
   return {
     kind: "ok",
     name: row.name,
     metrics,
     portfolioDaily,
-    benchmark,
     strategyNames,
   };
 }

@@ -91,7 +91,6 @@ describe("resolveSharedScenario — DI-23-01 honest-absence (SHARE-02)", () => {
 
     const result = resolveSharedScenario(
       { name: "Future scenario", draft: aheadDraft, schema_version: 3, series: okSeriesRows() },
-      makeSeries(3),
     );
 
     expect(result.kind).toBe("honest-absence");
@@ -108,7 +107,6 @@ describe("resolveSharedScenario — DI-23-01 honest-absence (SHARE-02)", () => {
 
     const result = resolveSharedScenario(
       { name: "Broken", draft: garbage, schema_version: 2, series: [] },
-      makeSeries(0),
     );
 
     expect(result.kind).toBe("honest-absence");
@@ -118,7 +116,6 @@ describe("resolveSharedScenario — DI-23-01 honest-absence (SHARE-02)", () => {
   it("valid ok draft with a published series → kind:'ok' with non-null computeScenario metrics", () => {
     const result = resolveSharedScenario(
       { name: "Two-strategy blend", draft: okDraft(), schema_version: 2, series: okSeriesRows() },
-      makeSeries(11),
     );
 
     expect(result.kind).toBe("ok");
@@ -142,7 +139,6 @@ describe("resolveSharedScenario — DI-23-01 honest-absence (SHARE-02)", () => {
 
     const result = resolveSharedScenario(
       { name: "Holdings reweight only", draft: emptyDraft, schema_version: 2, series: [] },
-      makeSeries(0),
     );
 
     // series=[] is the EXPECTED state for a holdings-only reweight, not a bug:
@@ -160,7 +156,6 @@ describe("resolveSharedScenario — DI-23-01 honest-absence (SHARE-02)", () => {
   it("returns the strategy name map for the resolved series (de-aliased labels for the heatmap)", () => {
     const result = resolveSharedScenario(
       { name: "Blend", draft: okDraft(), schema_version: 2, series: okSeriesRows() },
-      [],
     );
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") throw new Error("expected ok");
@@ -230,7 +225,6 @@ describe("resolveSharedScenario — owner-projection parity (WR-05)", () => {
           { strategy_id: STRAT_B, daily_returns: seriesB },
         ],
       },
-      [],
     );
     expect(recipient.kind).toBe("ok");
     if (recipient.kind !== "ok") throw new Error("expected ok");
@@ -276,7 +270,6 @@ describe("resolveSharedScenario — owner-projection parity (WR-05)", () => {
           { strategy_id: STRAT_B, daily_returns: seriesB },
         ],
       },
-      [],
     );
     expect(recipient.kind).toBe("ok");
     if (recipient.kind !== "ok") throw new Error("expected ok");
@@ -305,7 +298,6 @@ describe("resolveSharedScenario — owner-projection parity (WR-05)", () => {
         schema_version: 2,
         series: [{ strategy_id: STRAT_A, daily_returns: seriesA }],
       },
-      [],
     );
     expect(aOnly.kind).toBe("ok");
     if (aOnly.kind !== "ok") throw new Error("expected ok");

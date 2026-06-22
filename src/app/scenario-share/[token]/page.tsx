@@ -132,8 +132,11 @@ export default async function ScenarioSharePage({
   }
 
   // 4. Public BTC benchmark series (cacheable — NOT no-store). 5. Resolve.
+  // The resolve layer no longer consumes btcDaily (the benchmark is recomputed
+  // inside ScenarioBenchmarkSection from portfolioDaily + btcDaily); the page
+  // still fetches it here to feed the chart overlay + the section directly.
   const btcDaily = await fetchBtcDaily();
-  const resolved = resolveSharedScenario(row, btcDaily);
+  const resolved = resolveSharedScenario(row);
 
   // DI-23-01 — a version-ahead / undecodable / dangling-ref draft is honest
   // absence, NEVER a live-book substitution and NEVER a 404 (the link IS valid).

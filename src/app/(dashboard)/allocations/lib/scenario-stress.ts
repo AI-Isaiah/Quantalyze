@@ -46,7 +46,7 @@
 
 import { computeVaR, computeExpectedShortfall } from "@/lib/portfolio-stats";
 import { mean, type DailyPoint } from "@/lib/portfolio-math-utils";
-import { computeScenarioBenchmark, innerJoinByDate } from "./scenario-benchmark";
+import { computeScenarioBenchmark } from "./scenario-benchmark";
 
 export interface ScenarioStress {
   /** VaR window overlap (the scenario N = `portfolioDaily.length`). */
@@ -114,11 +114,15 @@ export function computeScenarioStress(
   // ── β-shock path (STRESS-01) — REUSE the β source, never re-derive ──
   // computeScenarioBenchmark already inner-joins, computes cov/var via the
   // golden-tested computeAlphaBeta, AND null-guards the constant-benchmark
-  // degeneracy via its relative-scale test. Its `.n` IS the inner-join overlap
-  // (the BTC-overlap N) — but we read betaN from innerJoinByDate explicitly so
-  // the two-N intent is unambiguous at the call site.
-  const betaN = innerJoinByDate(portfolioDaily, btcDaily).p.length;
-  const beta = computeScenarioBenchmark(portfolioDaily, btcDaily).beta;
+  // degeneracy via its relative-scale test. Call it ONCE and read both fields
+  // off the single result: `.n` IS the inner-join overlap (the BTC-overlap N =
+  // betaN) and `.beta` is the CAPM β. (Previously this also called
+  // innerJoinByDate separately just to count the overlap — a second, redundant
+  // inner-join over the same two series. betaN === bench.n by construction:
+  // computeScenarioBenchmark sets n = innerJoinByDate(...).p.length.)
+  const bench = computeScenarioBenchmark(portfolioDaily, btcDaily);
+  const betaN = bench.n;
+  const beta = bench.beta;
   // null β (degenerate / constant BTC / below n<2 overlap) ⇒ null impact ⇒ "—".
   const projectedImpact = beta === null ? null : beta * shock;
 
