@@ -374,7 +374,7 @@ describe("toWealth — red-team M2: false-positive warn threshold", () => {
     ];
     toWealth(pts);
     const tweaksWarns = warnSpy.mock.calls.filter(
-      (c) => typeof c[0] === "string" && c[0].includes("[EquityChart] toWealth"),
+      (c) => typeof c[0] === "string" && c[0].includes("[scenario] toWealth"),
     );
     expect(tweaksWarns.length).toBe(0);
     warnSpy.mockRestore();
@@ -388,7 +388,7 @@ describe("toWealth — red-team M2: false-positive warn threshold", () => {
     ];
     toWealth(pts);
     const tweaksWarns = warnSpy.mock.calls.filter(
-      (c) => typeof c[0] === "string" && c[0].includes("[EquityChart] toWealth"),
+      (c) => typeof c[0] === "string" && c[0].includes("[scenario] toWealth"),
     );
     expect(tweaksWarns.length).toBe(0);
     warnSpy.mockRestore();
@@ -402,7 +402,7 @@ describe("toWealth — red-team M2: false-positive warn threshold", () => {
     ];
     toWealth(pts);
     const tweaksWarns = warnSpy.mock.calls.filter(
-      (c) => typeof c[0] === "string" && c[0].includes("[EquityChart] toWealth"),
+      (c) => typeof c[0] === "string" && c[0].includes("[scenario] toWealth"),
     );
     expect(tweaksWarns.length).toBeGreaterThanOrEqual(1);
     warnSpy.mockRestore();

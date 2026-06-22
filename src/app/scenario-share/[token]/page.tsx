@@ -19,16 +19,24 @@ import {
   getClientIp,
 } from "@/lib/ratelimit";
 import { hashShareToken } from "@/lib/scenario-share-token";
-import { computeStrategyCurve, type DailyPoint } from "@/lib/scenario";
+// toWealth MUST come from the pure @/lib/scenario module, NOT from the
+// EquityChart widget — that widget is "use client", and calling a client
+// module's exported function from this Server Component throws the RSC
+// "Attempted to call toWealth() from the server but toWealth() is on the
+// client" boundary error (a 500 on every valid share link). The bogus-token
+// 404 path never reaches the toWealth() call, so this only surfaces for a
+// link that actually resolves a scenario.
+import {
+  computeStrategyCurve,
+  toWealth,
+  type DailyPoint,
+} from "@/lib/scenario";
 import { methodologyLine } from "@/lib/scenario-history";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { Card } from "@/components/ui/Card";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
-import {
-  EquityChart,
-  toWealth,
-} from "@/app/(dashboard)/allocations/widgets/performance/EquityChart";
+import { EquityChart } from "@/app/(dashboard)/allocations/widgets/performance/EquityChart";
 import { ScenarioBenchmarkSection } from "@/app/(dashboard)/allocations/components/ScenarioBenchmarkSection";
 import {
   resolveSharedScenario,

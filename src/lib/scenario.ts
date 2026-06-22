@@ -486,6 +486,49 @@ export function computeStrategyCurve(
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// NEW-C04-03: branded WealthPoint type + toWealth() constructor.
+//
+// MUST live in this PURE (non-"use client") module, NOT in the EquityChart
+// widget. EquityChart is `"use client"`; the public scenario-share page is a
+// Server Component that calls `toWealth()` during server render. A function
+// exported from a "use client" module throws "Attempted to call toWealth()
+// from the server but toWealth() is on the client" when invoked server-side
+// (a runtime RSC-boundary error → 500). Keeping the constructor here lets both
+// the server page and the client chart import it; EquityChart re-exports it for
+// its existing client-side importers.
+//
+// `computeScenario().equity_curve` produces cumulative RETURN values (e.g.
+// 0.18 = +18%). The chart needs cumulative WEALTH (starting at ~1.0). Callers
+// MUST convert via `toWealth()` before passing scenarioSeries; a raw
+// DailyPoint[] fails to typecheck so the silent 0%-baseline miscompare is
+// caught at compile time.
+// ---------------------------------------------------------------------------
+
+/** Branded DailyPoint in cumulative-WEALTH form (value starts near 1.0). */
+export type WealthPoint = DailyPoint & { readonly __wealthBrand: true };
+
+/**
+ * Convert a cumulative-RETURN point to WEALTH form. Pass
+ * `computeScenario().equity_curve` through this before forwarding to
+ * `scenarioSeries`. A cheap boundary warn fires when the first value is < 0.05
+ * (a reliable indicator of an unconverted RETURN-form array: return-form starts
+ * near 0.0 = 0% cumulative gain, wealth-form starts near 1.0; a value strictly
+ * < 0.05 means a –95%+ cumulative return at t=0, implausible for any dataset
+ * that passes the leading-zero trim, so it reliably indicates a miscall).
+ */
+export function toWealth(points: DailyPoint[]): WealthPoint[] {
+  if (points.length > 0 && points[0].value < 0.05) {
+    if (typeof console !== "undefined") {
+      console.warn(
+        "[scenario] toWealth: first value < 0.05 — input is likely raw RETURN-form (not wealth). Did you forget to call toWealth() or add +1?",
+        { first: points[0] },
+      );
+    }
+  }
+  return points.map((p) => ({ ...p, __wealthBrand: true as const }));
+}
+
 /**
  * Compute a weighted composite cumulative curve for a set of strategies
  * with explicit per-strategy weights. Thin wrapper over computeScenario
