@@ -251,4 +251,40 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     await expect(renderPage("err")).rejects.toThrow("__NOT_FOUND__");
     expect(notFoundMock).toHaveBeenCalledTimes(1);
   });
+
+  it("WR-03 — a hung/aborted benchmark fetch degrades to benchmark-unavailable, never stalls or throws the page", async () => {
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+
+    // Simulate the AbortController firing: fetch rejects with an AbortError
+    // (DOMException name "AbortError"), exactly as a timed-out self-fetch does.
+    // The page's fetchBtcDaily catch must swallow it → [] → benchmark
+    // unavailable, and the page must still render the scenario (NOT 404, NOT a
+    // thrown render). Without the AbortController + timeout this fetch would
+    // hang forever on a real hung route; here we prove the catch handles the
+    // abort rejection rather than propagating.
+    const abortErr = new Error("The operation was aborted");
+    abortErr.name = "AbortError";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: { signal?: AbortSignal }) => {
+        // Honour the abort signal the page passes — reject as a real aborted
+        // fetch would, proving the page wired the signal AND handles the reject.
+        if (init?.signal) throw abortErr;
+        throw abortErr;
+      }),
+    );
+
+    const html = await renderPage("hung-benchmark");
+
+    // The page rendered the scenario despite the benchmark fetch aborting.
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(html).toContain("My Q3 Blend");
+    // Benchmark degraded to its honest "unavailable" state ([] → false).
+    expect(html).toContain("benchmark:false");
+    // The fetch WAS attempted with an abort signal (the timeout is wired).
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    expect(fetchMock).toHaveBeenCalled();
+    const init = fetchMock.mock.calls[0]?.[1] as { signal?: AbortSignal } | undefined;
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
 });

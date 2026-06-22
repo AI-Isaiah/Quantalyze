@@ -45,13 +45,24 @@ export const runtime = "nodejs";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
+// WR-03 — bound the benchmark self-fetch so a slow/hung /api/benchmark/btc
+// cannot stall every anonymous render of this force-dynamic, sessionless public
+// page (the phase's only anon entry point — a cheap DoS-amplification surface).
+// Without a timeout the plain catch below only handles a thrown/!res.ok result,
+// NOT a hung socket; each scraped token request would hold a function instance
+// open. 2.5s degrades a hung benchmark to the honest "unavailable" empty state.
+const BENCHMARK_FETCH_TIMEOUT_MS = 2500;
+
 /** Fetch the public BTC daily-return series for the benchmark overlay. The
  *  route is shared market data and stays cacheable — we do NOT add no-store to
- *  it. A failed / empty fetch degrades the benchmark section to its honest
- *  "unavailable" empty state ([] → benchmarkAvailable=false), never an error. */
+ *  it. A failed / empty / TIMED-OUT fetch degrades the benchmark section to its
+ *  honest "unavailable" empty state ([] → benchmarkAvailable=false), never an
+ *  error and never a stalled page (WR-03). */
 async function fetchBtcDaily(): Promise<DailyPoint[]> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), BENCHMARK_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(`${APP_URL}/api/benchmark/btc`);
+    const res = await fetch(`${APP_URL}/api/benchmark/btc`, { signal: ctrl.signal });
     if (!res.ok) return [];
     const json = (await res.json()) as unknown;
     if (!Array.isArray(json)) return [];
@@ -64,7 +75,11 @@ async function fetchBtcDaily(): Promise<DailyPoint[]> {
         Number.isFinite((p as DailyPoint).value),
     );
   } catch {
+    // A timeout (AbortError), a thrown fetch, or a non-ok response all degrade
+    // to the honest benchmark-unavailable empty state — never a thrown page.
     return [];
+  } finally {
+    clearTimeout(timer);
   }
 }
 
