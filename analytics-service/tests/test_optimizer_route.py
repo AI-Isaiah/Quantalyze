@@ -11,12 +11,20 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-import main
-
 KEY = "test-service-key"
 
 
 def _client(monkeypatch) -> TestClient:
+    # Lazy import — do NOT import `main` (and, transitively, every router) at
+    # module COLLECTION time. test_c19_portfolio_fixes patches
+    # `slowapi.Limiter = _NoopLimiter` at its import time (restored only in its
+    # module teardown); a collection-time `import main` here would, when collected
+    # after test_c19, import routers.simulator inside that pollution window and
+    # bind its limiter to the noop — breaking the G15-004 limiter-singleton test.
+    # Importing at test-run time (pollution already restored, modules cached)
+    # avoids perturbing the import order.
+    import main
+
     monkeypatch.setattr(main, "SERVICE_KEY", KEY)
     return TestClient(main.app)
 
