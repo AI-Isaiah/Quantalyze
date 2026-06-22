@@ -256,6 +256,78 @@ describe("StressVarSection", () => {
     expect(impactValue.textContent).not.toContain("0.00");
   });
 
+  it("β caption matches the data (#509, WR-03): a suppressed '—' impact never carries an affirmative β methodology claim", () => {
+    // OK_N overlapping days but a CONSTANT BTC series → var(b)=0 → β null →
+    // projectedImpact null (em-dash), while n >= floor so the ok path renders.
+    // The β/shock methodology caption ("linear β propagation over N … not a
+    // forecast") must NOT render: it would assert a methodology + N for a value
+    // that did not produce a usable number. The honest "too short" note shows
+    // instead, and the VaR disclosure (which DOES have a value) stays.
+    const dates = buildDates("2024-01-01", OK_N);
+    const portfolioDaily = series(dates, (i) => (i % 2 === 0 ? 0.012 : -0.006));
+    const btcDaily = series(dates, () => 0.003); // constant → β null → impact null
+
+    const { container } = render(
+      <StressVarSection
+        portfolioDaily={portfolioDaily}
+        btcDaily={btcDaily}
+        btcAvailable={true}
+        n={OK_N}
+        strategyCount={3}
+      />,
+    );
+
+    // The impact cell IS the em-dash (precondition for the caption gate).
+    expect(
+      screen.getByTestId("stress-value-projected-impact").textContent,
+    ).toBe("—");
+
+    // The affirmative β methodology caption MUST be absent — neither phrasing
+    // (the twoNs branch nor the single-caption branch) may render against "—".
+    expect(container.textContent).not.toContain("linear β propagation");
+    expect(container.textContent).not.toContain("Single-factor (BTC)");
+
+    // The honest replacement note IS shown.
+    expect(container.textContent).toContain(
+      "BTC overlap too short to project a shock",
+    );
+
+    // The VaR/CVaR disclosure (which DOES carry a value in this ok path) still
+    // renders — only the β caption is gated, not the VaR caption.
+    expect(container.textContent).toContain(
+      `Historical realized · ${OK_N} overlapping days · not a forecast. ${VAR_CONFIDENCE_LABEL} confidence.`,
+    );
+  });
+
+  it("β caption present when the impact IS shown (#509, WR-03): the affirmative methodology claim accompanies a real value", () => {
+    // The positive control for the gate above: a real β → a real impact → the
+    // β methodology caption DOES render (with its N). This proves the gate keys
+    // on impact-shown, not blanket suppression.
+    const dates = buildDates("2024-01-01", OK_N);
+    const portfolioDaily = series(dates, (i) => (i % 2 === 0 ? 0.012 : -0.006));
+    const btcDaily = series(dates, (i) => (i % 2 === 0 ? 0.02 : -0.012)); // non-degenerate
+
+    const { container } = render(
+      <StressVarSection
+        portfolioDaily={portfolioDaily}
+        btcDaily={btcDaily}
+        btcAvailable={true}
+        n={OK_N}
+        strategyCount={3}
+      />,
+    );
+
+    // A real impact (not the em-dash).
+    expect(
+      screen.getByTestId("stress-value-projected-impact").textContent,
+    ).not.toBe("—");
+    // The affirmative β methodology caption renders, and the "too short" note does NOT.
+    expect(container.textContent).toContain("linear β propagation");
+    expect(container.textContent).not.toContain(
+      "BTC overlap too short to project a shock",
+    );
+  });
+
   it("monochrome losses: the VaR/CVaR loss cells carry NO red / text-negative class (divergence from VarExpectedShortfall.tsx)", () => {
     // A loss-producing series → a negative VaR (the floor quantile) + a more
     // negative CVaR. Those are losses — they must render as neutral data.

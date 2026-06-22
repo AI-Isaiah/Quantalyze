@@ -178,6 +178,12 @@ export function StressVarSection({
   // differ; each number names its own true N (the two-N trap). Render two
   // captions when they differ, a single VaR/CVaR caption otherwise.
   const twoNs = result.varN !== result.betaN;
+  // The β-shock impact is suppressed to "—" whenever the BTC inner-join is
+  // degenerate (constant BTC) or too short (betaN < 2 ⇒ benchmark returns null).
+  // The β/shock methodology caption must NOT affirm a methodology + N for a
+  // value that did not, in fact, produce a usable number (#509: caption matches
+  // data). Only render the β caption when the impact is actually shown.
+  const impactShown = result.projectedImpact !== null;
 
   return (
     <div>
@@ -218,17 +224,26 @@ export function StressVarSection({
         {methodologyLine(result.varN)} {VAR_CONFIDENCE_LABEL} confidence.
       </p>
       {/* β-shock disclosure — names the BTC inner-join N (betaN) + the shock
-          assumptions. Rendered as its OWN caption only when the two Ns differ,
-          so each number names its true N. */}
-      {twoNs ? (
-        <p className="mt-1 text-[11px] text-text-muted">
-          {methodologyLine(result.betaN)} Single-factor (BTC), linear β
-          propagation, point-in-time.
-        </p>
+          assumptions. Rendered only when the impact value is actually SHOWN
+          (#509: a "—" impact never carries an affirmative β methodology claim).
+          When shown, it is its OWN caption only if the two Ns differ, so each
+          number names its true N. When the impact is suppressed, swap in an
+          honest note that the BTC overlap was insufficient. */}
+      {impactShown ? (
+        twoNs ? (
+          <p className="mt-1 text-[11px] text-text-muted">
+            {methodologyLine(result.betaN)} Single-factor (BTC), linear β
+            propagation, point-in-time.
+          </p>
+        ) : (
+          <p className="mt-1 text-[11px] text-text-muted">
+            Single-factor (BTC), linear β propagation over {result.betaN}{" "}
+            overlapping days, point-in-time — not a forecast.
+          </p>
+        )
       ) : (
         <p className="mt-1 text-[11px] text-text-muted">
-          Single-factor (BTC), linear β propagation over {result.betaN}{" "}
-          overlapping days, point-in-time — not a forecast.
+          BTC overlap too short to project a shock.
         </p>
       )}
     </div>
