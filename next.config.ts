@@ -41,9 +41,18 @@ const nextConfig: NextConfig = {
             // integration does not silently fail under CSP. Adding the
             // directive now is safer than discovering at deploy time
             // that telemetry is blocked.
+            // Phase 27 (SIM-01): the Monte-Carlo forward simulation runs in a
+            // Web Worker. Next 16/Turbopack emits it as a same-origin
+            // `/_next/static/media/*.worker` chunk, which `default-src 'self'`
+            // already covers — but we declare `worker-src 'self' blob:`
+            // explicitly so a blob-instantiated worker (HMR in `next dev`, or a
+            // future bundler change to a blob bootstrap) can never silently fail
+            // CSP in only one environment. This is the Phase-25-class prod-only
+            // CSP failure mode, closed pre-emptively. Adding `worker-src` only
+            // relaxes the worker source list; it cannot weaken script execution.
             key: "Content-Security-Policy",
             value:
-              "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://plausible.io; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://plausible.io",
+              "default-src 'self'; worker-src 'self' blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://plausible.io; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://plausible.io",
           },
         ],
       },
