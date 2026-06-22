@@ -61,6 +61,7 @@ import { useRouter } from "next/navigation";
 import {
   buildDateMapCache,
   computeScenario,
+  computeStrategyCurve,
   type ComputedMetrics,
   type DailyPoint,
   type StrategyForBuilder,
@@ -89,6 +90,7 @@ import { BridgeDrawer } from "./BridgeDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { ScenarioFooter } from "./ScenarioFooter";
 import { ScenarioFlaggedHoldingsList } from "../ScenarioFlaggedHoldingsList";
+import { ScenarioBenchmarkSection } from "./ScenarioBenchmarkSection";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
@@ -426,6 +428,19 @@ export function ScenarioComposer({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savePending, setSavePending] = useState(false);
 
+  // BENCH-01 — the BTC benchmark daily-returns series, fetched once from the
+  // shared market-data route. `btcAvailable` is false until a non-empty series
+  // arrives; a failed/empty fetch leaves it false so the benchmark section
+  // renders the honest "unavailable" empty state and the overlay is suppressed
+  // (24-RESEARCH Pitfall 5: a transport failure degrades to the empty state,
+  // never a red alert). The series is RAW daily returns — the section consumes
+  // them for the metrics, and the chart overlay derives a cumulative-WEALTH
+  // curve from the SAME series (Pitfall 3).
+  const [btcDaily, setBtcDaily] = useState<DailyPoint[]>([]);
+  const [btcAvailable, setBtcAvailable] = useState(false);
+  // Overlay toggle, default ON per UI-SPEC §Component Inventory.
+  const [showBenchmark, setShowBenchmark] = useState(true);
+
   function handleWeightChange(scopeRef: string, weight: number) {
     if (!Number.isFinite(weight)) {
       // F-08: log non-finite weight so a regression (broken input component,
@@ -572,6 +587,45 @@ export function ScenarioComposer({
   useEffect(() => {
     onRegisterOpenRef.current?.(openSavedScenario);
   }, [openSavedScenario]);
+
+  // BENCH-01 — fetch the shared BTC daily-returns series once on mount. The
+  // route returns `[{date,value}]` (raw daily returns) and degrades to `[]` on
+  // its own read errors, so any non-2xx / non-array / empty / thrown result
+  // leaves `btcAvailable=false` → the benchmark section shows the honest empty
+  // state and the overlay is hidden (never a red alert).
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/benchmark/btc")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((d) => {
+        if (cancelled) return;
+        const series = Array.isArray(d) ? (d as DailyPoint[]) : [];
+        setBtcDaily(series);
+        setBtcAvailable(series.length > 0);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setBtcDaily([]);
+        setBtcAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // BENCH-01 — the chart overlay series. `EquityChart.benchmark` runs
+  // `anchorFromFirstPositive` (divide-by-first), so it expects a CUMULATIVE-
+  // WEALTH curve (~1.0 base), NOT raw daily returns — derive it via
+  // `computeStrategyCurve` from the same BTC daily returns the metrics use
+  // (24-RESEARCH Pitfall 3). Suppressed (undefined) when the toggle is off or
+  // the benchmark is unavailable, which hides the overlay.
+  const btcWealth = useMemo(
+    () =>
+      showBenchmark && btcAvailable
+        ? computeStrategyCurve(btcDaily)
+        : undefined,
+    [showBenchmark, btcAvailable, btcDaily],
+  );
 
   // Validate the trimmed name against the SQL CHECK (1..120) mirrored in the
   // save route. Returns the trimmed name on success, or null after setting the
@@ -1434,12 +1488,38 @@ export function ScenarioComposer({
             the header stamp showed "sync just now" / "no sync yet" to a synced
             allocator — a lie. `stale`/`lastSyncAt` come from the live baseline
             the scenario projects from. */}
-        <EquityChart
-          equityDailyPoints={equityDailyPoints}
-          scenarioSeries={scenarioWealthSeries}
-          stale={allKeysStale}
-          lastSyncAt={lastSyncAt}
-        />
+        <div>
+          {/* BENCH-01 — the BTC overlay rides the existing EquityChart SVG
+              widget's `benchmark` prop (cumulative-WEALTH form via `btcWealth`),
+              NOT the lightweight-charts equity-curve component (24-RESEARCH
+              Pitfall 3). `btcWealth` is undefined when the toggle is off or the
+              benchmark is unavailable, which hides the overlay. */}
+          <EquityChart
+            equityDailyPoints={equityDailyPoints}
+            scenarioSeries={scenarioWealthSeries}
+            benchmark={btcWealth}
+            stale={allKeysStale}
+            lastSyncAt={lastSyncAt}
+          />
+          {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted #94A3B8
+              line swatch (UI-SPEC §Copywriting / §Color). Disabled when the
+              benchmark series is unavailable so the control can't promise an
+              overlay there is no data for. */}
+          <label className="mt-2 flex items-center gap-1.5 text-xs text-text-muted">
+            <input
+              type="checkbox"
+              checked={showBenchmark}
+              disabled={!btcAvailable}
+              onChange={(e) => setShowBenchmark(e.target.checked)}
+            />
+            <span
+              aria-hidden="true"
+              className="inline-block h-0.5 w-4"
+              style={{ backgroundColor: "#94A3B8" }}
+            />
+            BTC Benchmark
+          </label>
+        </div>
         <div className="h-[300px] relative">
           {/* DrawdownChart extends WidgetProps (data + timeframe + width + height
               required for the legacy widget-grid path). On the Scenario tab
@@ -1468,6 +1548,20 @@ export function ScenarioComposer({
           )}
         </div>
       </div>
+
+      {/* BENCH-01 — "vs BTC" active-return section. Reads the active scenario's
+          full daily portfolio returns (`scenarioMetrics.portfolio_daily_returns`
+          — OPTIONAL, so `?? []`) + the fetched BTC daily returns, inner-joins
+          by date, and renders TE/IR/alpha/beta over the intersection window OR
+          the honest "unavailable" empty state (below the 30-day floor, no
+          overlap, or a failed fetch via `btcAvailable=false`). */}
+      <Card className="mt-6">
+        <ScenarioBenchmarkSection
+          portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
+          btcDaily={btcDaily}
+          benchmarkAvailable={btcAvailable}
+        />
+      </Card>
 
       {/* CORR-01 / CORR-03 — pairwise correlation heatmap on the own-book
           scenario surface. Mirrors the ScenarioBuilder "Pairwise correlation"

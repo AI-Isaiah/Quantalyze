@@ -172,7 +172,7 @@ describe("ScenarioBenchmarkSection", () => {
     const portfolioDaily = series(dates, (i) => (i % 2 === 0 ? 0.012 : -0.006));
     const btcDaily = series(dates, () => 0.003); // constant → degenerate beta
 
-    const { container } = render(
+    render(
       <ScenarioBenchmarkSection
         portfolioDaily={portfolioDaily}
         btcDaily={btcDaily}

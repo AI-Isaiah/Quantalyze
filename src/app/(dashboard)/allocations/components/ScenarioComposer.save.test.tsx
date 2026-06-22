@@ -249,6 +249,33 @@ function openRow(row: SavedScenarioRow) {
   });
 }
 
+// BENCH-01 — the composer now fires a benign GET /api/benchmark/btc on mount.
+// These tests assert the SAVE/UPDATE request specifically, so filter the global
+// fetch mock to the scenario-save endpoint (the benchmark fetch is unrelated
+// transport and must not pollute the save-request assertions).
+const SAVE_URL_RE = /\/api\/allocator\/scenario\/saved/;
+function saveCalls(
+  fetchMock: ReturnType<typeof vi.fn>,
+): Array<[string, RequestInit | undefined]> {
+  return fetchMock.mock.calls.filter((c) =>
+    SAVE_URL_RE.test(String(c[0])),
+  ) as Array<[string, RequestInit | undefined]>;
+}
+
+// A fetch mock that answers the benchmark series with an empty array (so
+// btcAvailable stays false — irrelevant to the save flow) and routes every
+// other URL to `saveResponse`.
+function makeFetchMock(
+  saveResponse: () => { ok: boolean; status: number; json: () => Promise<unknown> },
+): ReturnType<typeof vi.fn> {
+  return vi.fn(async (url: string) => {
+    if (String(url).startsWith("/api/benchmark/btc")) {
+      return { ok: true, status: 200, json: async () => [] };
+    }
+    return saveResponse();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Test suite
 // ---------------------------------------------------------------------------
@@ -293,7 +320,11 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
   // T_SAVE2 — name validation: empty → copy; >120 → copy
   // -------------------------------------------------------------------------
   it("T_SAVE2 inline name validation: empty → 'Enter a name…'; over 120 chars → limit copy; no POST fired", () => {
-    const fetchMock = vi.fn();
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "x" }),
+    }));
     vi.stubGlobal("fetch", fetchMock);
 
     renderComposer();
@@ -308,7 +339,8 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     expect(
       screen.getByText(/Enter a name to save this scenario\./i),
     ).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    // No SAVE request fired (the benchmark GET is unrelated transport).
+    expect(saveCalls(fetchMock)).toHaveLength(0);
 
     // Over-length submit.
     fireEvent.change(input, { target: { value: "x".repeat(121) } });
@@ -316,7 +348,7 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     expect(
       screen.getByText(/Scenario names are limited to 120 characters\./i),
     ).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(saveCalls(fetchMock)).toHaveLength(0);
   });
 
   // -------------------------------------------------------------------------
@@ -324,11 +356,11 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
   //           flips to Update + Save-as-new
   // -------------------------------------------------------------------------
   it("T_SAVE3 valid name → POST /api/allocator/scenario/saved → on success toolbar flips to 'Update scenario' + 'Save as new scenario'", async () => {
-    const fetchMock = vi.fn(async () => ({
+    const fetchMock = makeFetchMock(() => ({
       ok: true,
       status: 200,
       json: async () => ({ id: NEW_ID, name: "My scenario" }),
-    })) as unknown as typeof fetch;
+    }));
     vi.stubGlobal("fetch", fetchMock);
 
     renderComposer();
@@ -339,9 +371,9 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(saveCalls(fetchMock)).toHaveLength(1);
     });
-    const [url, init] = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [url, init] = saveCalls(fetchMock)[0];
     expect(url).toBe("/api/allocator/scenario/saved");
     expect((init as RequestInit).method).toBe("POST");
     const body = JSON.parse((init as RequestInit).body as string);
@@ -365,11 +397,11 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
   //           then Update → PUT that row's id
   // -------------------------------------------------------------------------
   it("T_SAVE4 Open(ok row) → toolbar shows 'Update scenario'; Update → PUT /api/allocator/scenario/saved/{id}", async () => {
-    const fetchMock = vi.fn(async () => ({
+    const fetchMock = makeFetchMock(() => ({
       ok: true,
       status: 200,
       json: async () => ({ id: SAVED_ID, name: "Saved" }),
-    })) as unknown as typeof fetch;
+    }));
     vi.stubGlobal("fetch", fetchMock);
 
     renderComposer();
@@ -380,9 +412,9 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
 
     fireEvent.click(updateBtn);
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(saveCalls(fetchMock)).toHaveLength(1);
     });
-    const [url, init] = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [url, init] = saveCalls(fetchMock)[0];
     expect(url).toBe(`/api/allocator/scenario/saved/${SAVED_ID}`);
     expect((init as RequestInit).method).toBe("PUT");
   });
@@ -391,11 +423,11 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
   // T_SAVE5 — Save as new (a scenario is open) → POST a NEW row → new id
   // -------------------------------------------------------------------------
   it("T_SAVE5 with a scenario open, 'Save as new scenario' → POST (new row) and adopts the new id", async () => {
-    const fetchMock = vi.fn(async () => ({
+    const fetchMock = makeFetchMock(() => ({
       ok: true,
       status: 200,
       json: async () => ({ id: NEW_ID, name: "Copy" }),
-    })) as unknown as typeof fetch;
+    }));
     vi.stubGlobal("fetch", fetchMock);
 
     renderComposer();
@@ -410,9 +442,9 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(saveCalls(fetchMock)).toHaveLength(1);
     });
-    const [url, init] = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [url, init] = saveCalls(fetchMock)[0];
     expect(url).toBe("/api/allocator/scenario/saved");
     expect((init as RequestInit).method).toBe("POST");
   });
