@@ -24,9 +24,11 @@ import type { DailyPoint } from "@/lib/scenario";
  *
  * Honesty invariants (test-pinned):
  *   - {N} in the heading is the ALIGNED intersection count, never the union.
- *   - Two DISTINCT empty-state bodies (#509): a no-overlap / not-covered window
- *     (incl. a failed/empty fetch) vs an overlap below the 30-day floor. The
- *     heading is constant; the body names the specific reason.
+ *   - THREE DISTINCT empty-state bodies (#509): the SCENARIO itself produced no
+ *     returns (degenerate active set) vs a no-overlap / not-covered benchmark
+ *     window (incl. a failed/empty fetch) vs an overlap below the 30-day floor.
+ *     The heading is constant; the body names the SPECIFIC, TRUE reason — a
+ *     degenerate scenario must NOT be misattributed to benchmark coverage.
  *   - Every metric value flows through `formatPercent`/`formatNumber`, so a
  *     null/non-finite metric renders the em-dash "—" — never a fabricated 0.
  *   - The empty state is the neutral `EmptyStateCard` (no alert role, no
@@ -40,6 +42,11 @@ import type { DailyPoint } from "@/lib/scenario";
 
 // Empty-state copy (UI-SPEC §Copywriting — verbatim; heading MUST match body).
 const EMPTY_HEADING = "Benchmark comparison unavailable";
+// The scenario itself produced no daily returns (no active strategies / a
+// degenerate active set). The cause is scenario-side, NOT benchmark coverage —
+// blaming BTC here would be a heading-matches-body lie (#509).
+const NO_SCENARIO_RETURNS_BODY =
+  "This scenario has no projected return history yet, so there's nothing to compare against BTC. Add strategies with enough history to the scenario first.";
 const NO_OVERLAP_BODY =
   "The BTC benchmark series doesn't cover this scenario's date window, so there's nothing to compare against. Pick strategies whose history overlaps the benchmark.";
 function belowFloorBody(n: number): string {
@@ -100,10 +107,20 @@ export function ScenarioBenchmarkSection({
   const n = p.length;
   const verdict = evaluateSampleFloor(n, BENCHMARK_FLOOR);
 
-  // Empty-state routing (order matters — #509):
-  //   1. fetch failed/empty OR zero overlap → the benchmark doesn't cover the
-  //      window → the NO-OVERLAP body.
+  // Empty-state routing (order matters — #509; the body must name the TRUE
+  // cause, checked most-specific first):
+  //   0. the SCENARIO produced no returns (degenerate active set) → the
+  //      scenario-side body. Checked FIRST so a degenerate scenario is never
+  //      misattributed to benchmark coverage (n is 0 here for that reason, not
+  //      because BTC fails to overlap a real window).
+  //   1. fetch failed/empty OR zero overlap on a real scenario window → the
+  //      benchmark doesn't cover it → the NO-OVERLAP body.
   //   2. a real but below-floor overlap → the BELOW-FLOOR body naming {n}.
+  if (portfolioDaily.length === 0) {
+    return (
+      <EmptyStateCard heading={EMPTY_HEADING} body={NO_SCENARIO_RETURNS_BODY} />
+    );
+  }
   if (!benchmarkAvailable || n === 0) {
     return <EmptyStateCard heading={EMPTY_HEADING} body={NO_OVERLAP_BODY} />;
   }

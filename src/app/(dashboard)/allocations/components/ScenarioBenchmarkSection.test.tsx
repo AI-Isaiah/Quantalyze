@@ -170,6 +170,35 @@ describe("ScenarioBenchmarkSection", () => {
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
+  it("names the SCENARIO-side cause (not the no-overlap body) when the scenario itself produced no returns", () => {
+    // A degenerate scenario (no active strategies / below the engine floor)
+    // yields portfolio_daily_returns: [] from computeScenario. The section is
+    // mounted UNCONDITIONALLY in the composer, so [] reaches it here. Before the
+    // fix this fell into the `n === 0` branch and blamed BTC coverage ("doesn't
+    // cover this scenario's date window") — a false cause and a heading-matches-
+    // body lie (#509): the scenario has no window at all. The body must name the
+    // scenario-side cause instead.
+    const btcDaily = series(buildDates("2024-01-01", 40)); // a real, fine benchmark
+    const { container } = render(
+      <ScenarioBenchmarkSection
+        portfolioDaily={[]}
+        btcDaily={btcDaily}
+        benchmarkAvailable={true}
+      />,
+    );
+
+    expect(screen.getByText(EMPTY_HEADING)).toBeTruthy();
+    // Scenario-side reason present…
+    expect(container.textContent).toContain(
+      "This scenario has no projected return history yet",
+    );
+    // …and the benchmark-coverage body explicitly ABSENT (must not misattribute
+    // an empty scenario to BTC not covering the window).
+    expect(container.textContent).not.toContain(NO_OVERLAP_BODY);
+    // Honest absence — never an alert.
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
   it("renders an em-dash '—' for a null metric (constant benchmark → beta null), never a fabricated 0", () => {
     // 40 overlapping days but a CONSTANT benchmark → var(b)=0 → beta/alpha null,
     // while n >= 30 so the metrics path renders (not an empty state).

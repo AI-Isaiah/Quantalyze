@@ -562,4 +562,45 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
       screen.getByRole("button", { name: /^Save scenario$/i }),
     ).toBeInTheDocument();
   });
+
+  // -------------------------------------------------------------------------
+  // T_SAVE10 — hard Update(PUT) failure → canonical error copy (the Update path
+  //            is a distinct branch from the POST tested in T_SAVE9), and the
+  //            open scenario is NOT silently dropped on failure.
+  // -------------------------------------------------------------------------
+  it("T_SAVE10 a hard Update(PUT) failure (500) routes the canonical error and keeps the scenario open", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: false,
+      status: 500,
+      json: async () => ({
+        error: "Update failed",
+        message:
+          "Couldn't save this scenario. Check your connection and try again.",
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    openRow({ id: SAVED_ID, name: "Saved", draft: okDraft() });
+
+    const updateBtn = await screen.findByRole("button", {
+      name: /Update scenario/i,
+    });
+    fireEvent.click(updateBtn);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Couldn't save this scenario\./i),
+      ).toBeInTheDocument();
+    });
+    // It was the PUT (Update) path, not a POST.
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe(`/api/allocator/scenario/saved/${SAVED_ID}`);
+    expect((init as RequestInit).method).toBe("PUT");
+    // The row stays open — a failed update must not silently drop back to the
+    // unopened "Save scenario" state (that would imply the update succeeded).
+    expect(
+      screen.getByRole("button", { name: /Update scenario/i }),
+    ).toBeInTheDocument();
+  });
 });

@@ -216,6 +216,72 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
   });
 
   // -------------------------------------------------------------------------
+  // T_SL7b — Rename FAILURE is loud: an honest alert, no false success signal,
+  //          and the row is NOT optimistically renamed (fail-loud honesty).
+  // -------------------------------------------------------------------------
+  it("T_SL7b Rename failure shows an honest alert and does not signal success", async () => {
+    // The PATCH route returns non-ok — the only fetch this test makes.
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({}),
+    } as Response);
+    const onMutated = vi.fn();
+    render(
+      <SavedScenariosList
+        rows={ROWS}
+        onOpen={vi.fn()}
+        onCompare={vi.fn()}
+        onMutated={onMutated}
+      />,
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: /^Rename$/ })[0]);
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "Renamed blend" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+
+    // Honest, visible failure (role=alert), with the rename-specific copy.
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Couldn't rename this scenario");
+    // onMutated fires ONLY on success — it must NOT fire on a failed rename
+    // (proves the optimistic setLocalRows after the !ok return never ran).
+    expect(onMutated).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // T_SL7c — Delete FAILURE is loud: honest alert, the row is NOT optimistically
+  //          removed, and no false success signal.
+  // -------------------------------------------------------------------------
+  it("T_SL7c Delete failure shows an honest alert and keeps the row", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({}),
+    } as Response);
+    const onMutated = vi.fn();
+    render(
+      <SavedScenariosList
+        rows={ROWS}
+        onOpen={vi.fn()}
+        onCompare={vi.fn()}
+        onMutated={onMutated}
+      />,
+    );
+    const firstRow = screen
+      .getByText("Conservative blend")
+      .closest("[data-testid='saved-scenario-row']") as HTMLElement;
+    fireEvent.click(within(firstRow).getByRole("button", { name: /^Delete$/ }));
+    fireEvent.click(within(firstRow).getByRole("button", { name: /^Delete$/ }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Couldn't delete this scenario");
+    // Row NOT optimistically removed on failure.
+    expect(screen.getByText("Conservative blend")).toBeInTheDocument();
+    expect(onMutated).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
   // T_SL8 — Selection checkboxes are keyboard-focusable + name-labeled; a
   //         Live book pseudo-row participates.
   // -------------------------------------------------------------------------
