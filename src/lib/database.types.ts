@@ -1148,6 +1148,63 @@ export type Database = {
           },
         ]
       }
+      // HAND-PATCHED — scenario_shares added by migration 20260622120000
+      // (Phase 25 / SHARE-02, SHARE-03). Like the scenarios block above, this
+      // CANNOT be produced by `supabase gen types typescript` without prod DB
+      // access, and a regen linked to a project missing this migration silently
+      // reverts the block and breaks tsc on the share generate/revoke routes
+      // (Plan 25-03) that type `.from("scenario_shares")`. Re-apply this block
+      // after any regeneration, and verify migration 20260622120000 is present
+      // in the linked project. Pinned by src/lib/database.types.test.ts.
+      scenario_shares: {
+        Row: {
+          created_at: string
+          created_by: string
+          id: string
+          revoked_at: string | null
+          scenario_id: string
+          token_hash: string
+        }
+        Insert: {
+          created_at?: string
+          created_by: string
+          id?: string
+          revoked_at?: string | null
+          scenario_id: string
+          token_hash: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string
+          id?: string
+          revoked_at?: string | null
+          scenario_id?: string
+          token_hash?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "scenario_shares_scenario_id_fkey"
+            columns: ["scenario_id"]
+            isOneToOne: false
+            referencedRelation: "scenarios"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "scenario_shares_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "scenario_shares_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "public_profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       feature_flags: {
         // Phase 19 / BACKBONE-05 (migration 104). Kill-switch row written by
         // /api/cron/flag-monitor on auto-rollback. CHECK (value IN ('on','off')).

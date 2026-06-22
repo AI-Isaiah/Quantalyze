@@ -39,9 +39,9 @@ Requirements for the v1.1.0 milestone. Each maps to a roadmap phase.
 
 ### Sharing (new #2)
 
-- [ ] **SHARE-01**: Allocator can generate a read-only share link for a saved scenario
-- [ ] **SHARE-02**: A recipient can view a shared scenario read-only without exposing the allocator's live book, holdings, or any other tenant's data (snapshot, token-scoped read path)
-- [ ] **SHARE-03**: Allocator can revoke a share link
+- [x] **SHARE-01**: Allocator can generate a read-only share link for a saved scenario
+- [x] **SHARE-02**: A recipient can view a shared scenario read-only without exposing the allocator's live book, holdings, or any other tenant's data (snapshot, token-scoped read path)
+- [x] **SHARE-03**: Allocator can revoke a share link
 
 ### Benchmark comparison (new #7)
 
@@ -49,8 +49,8 @@ Requirements for the v1.1.0 milestone. Each maps to a roadmap phase.
 
 ### Stress testing (new #3)
 
-- [ ] **STRESS-01**: Allocator can apply a parameterized market shock (e.g. "BTC −30%") propagated through each strategy's data-derived β to the shocked factor, and see the projected impact
-- [ ] **STRESS-02**: Allocator sees a downside risk measure — historical VaR + CVaR/Expected Shortfall — with method, window, and confidence level disclosed
+- [x] **STRESS-01**: Allocator can apply a parameterized market shock (e.g. "BTC −30%") propagated through each strategy's data-derived β to the shocked factor, and see the projected impact
+- [x] **STRESS-02**: Allocator sees a downside risk measure — historical VaR + CVaR/Expected Shortfall — with method, window, and confidence level disclosed
 
 ### Forward uncertainty (new #4)
 
@@ -107,11 +107,11 @@ v1.0.0's Phase 20 (no reset) — this milestone is Phases 21–28.
 | PERSIST-03 | Phase 23 | Complete |
 | PERSIST-04 | Phase 23 | Complete |
 | BENCH-01 | Phase 24 | Complete |
-| SHARE-01 | Phase 25 | Pending |
-| SHARE-02 | Phase 25 | Pending |
-| SHARE-03 | Phase 25 | Pending |
-| STRESS-01 | Phase 26 | Pending |
-| STRESS-02 | Phase 26 | Pending |
+| SHARE-01 | Phase 25 | Complete |
+| SHARE-02 | Phase 25 | Complete |
+| SHARE-03 | Phase 25 | Complete |
+| STRESS-01 | Phase 26 | Complete |
+| STRESS-02 | Phase 26 | Complete |
 | SIM-01 | Phase 27 | Pending |
 | OPT-01 | Phase 28 | Pending |
 | OPT-02 | Phase 28 | Pending |

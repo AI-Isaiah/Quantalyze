@@ -91,6 +91,7 @@ import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { ScenarioFooter } from "./ScenarioFooter";
 import { ScenarioFlaggedHoldingsList } from "../ScenarioFlaggedHoldingsList";
 import { ScenarioBenchmarkSection } from "./ScenarioBenchmarkSection";
+import { StressVarSection } from "./StressVarSection";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
@@ -1576,6 +1577,25 @@ export function ScenarioComposer({
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
           btcDaily={btcDaily}
           benchmarkAvailable={btcAvailable}
+        />
+      </Card>
+
+      {/* STRESS-01 / STRESS-02 (Plan 26-02) — the "Stress & VaR" section on the
+          own-book scenario surface. A sibling of the benchmark section above:
+          props-only over the same already-leveraged portfolio_daily_returns + the
+          fetched BTC factor series, it lets the allocator pick a BTC shock preset
+          and read the β-propagated projected impact + historical VaR(95%)/CVaR with
+          a mandatory inline disclosure, OR the honest empty state (degenerate
+          scenario / BTC unavailable / below the Phase-22 sample floor). Own-book
+          composer ONLY — the example-universe Strategy Sandbox stress/VaR is
+          deferred. Every prop is already in scope; no new state/fetch/memo. */}
+      <Card className="mt-6">
+        <StressVarSection
+          portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
+          btcDaily={btcDaily}
+          btcAvailable={btcAvailable}
+          n={scenarioMetrics.n}
+          strategyCount={deAliased.strategies.length}
         />
       </Card>
 

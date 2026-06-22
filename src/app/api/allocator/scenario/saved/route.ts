@@ -204,6 +204,42 @@ export const GET = withAllocatorAuth(
       );
     }
 
-    return NextResponse.json(data ?? [], { status: 200, headers: NO_STORE_HEADERS });
+    // WR-01 — populate has_active_share per row so the Share/Copy/Revoke
+    // affordance (SavedScenariosList, Plan 25-03) survives a reload/refetch.
+    // The component reads `row.has_active_share`, but the SELECT above never
+    // returned it, so the Share state silently reset to "no active share" on
+    // every reload (the comment claiming it was "derived from the saved-
+    // scenarios payload" was a false claim). One extra read against
+    // scenario_shares (active = revoked_at IS NULL); RLS scopes BOTH reads to
+    // the caller (scenario_shares_owner created_by = auth.uid()), so no .eq is
+    // needed. A failure to load the share set is NON-FATAL — the rows still
+    // render (every row simply defaults to no active share, the prior
+    // behaviour) rather than failing the whole list.
+    const scenarios = data ?? [];
+    const { data: activeShares, error: shareError } = await supabase
+      .from("scenario_shares")
+      .select("scenario_id")
+      .is("revoked_at", null);
+
+    if (shareError) {
+      // Non-fatal: log + Sentry, but still return the scenarios (without the
+      // active-share flag) rather than 500ing the whole list on a share-lookup
+      // hiccup. The list is the primary payload; the share badge is enrichment.
+      console.error("scenario_list share-lookup error", {
+        user: user.id,
+        message: shareError.message,
+      });
+      captureToSentry(shareError, { tags: { area: "scenario-list" } });
+    }
+
+    const activeShareScenarioIds = new Set(
+      (activeShares ?? []).map((s) => s.scenario_id),
+    );
+    const rows = scenarios.map((s) => ({
+      ...s,
+      has_active_share: activeShareScenarioIds.has(s.id),
+    }));
+
+    return NextResponse.json(rows, { status: 200, headers: NO_STORE_HEADERS });
   },
 );

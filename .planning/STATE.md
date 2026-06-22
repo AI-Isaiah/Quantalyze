@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.1.0
 milestone_name: Scenario Analysis
-status: verifying
-stopped_at: Completed 24-03-PLAN.md
-last_updated: "2026-06-22T00:10:28.377Z"
+status: ready_to_plan
+stopped_at: Phase 26 complete (2/2) — ready to discuss Phase 27
+last_updated: 2026-06-22T12:33:30.625Z
 last_activity: 2026-06-22
 progress:
   total_phases: 8
-  completed_phases: 4
-  total_plans: 14
-  completed_plans: 14
-  percent: 50
+  completed_phases: 6
+  total_plans: 20
+  completed_plans: 68
+  percent: 75
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
-**Current focus:** Phase 24 — Benchmark Comparison
+**Current focus:** Phase 27 — forward uncertainty (monte carlo bands)
 **Last milestone:** v1.0.0 API-Key Rewrite (Phases 15–20, shipped 2026-06-20).
 
 ## Current Position
 
-Phase: 24 (Benchmark Comparison) — EXECUTING
-Plan: 3 of 3
-Status: Phase complete — ready for verification
+Phase: 27
+Plan: Not started
+Status: Ready to plan
 Last activity: 2026-06-22
 
 Progress: [██████████] 100%
@@ -231,6 +231,20 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - [Phase ?]: Phase 24-02: GET /api/benchmark/btc returns BTC DAILY RETURNS [{date,value}] (pct-change of close_price, first row dropped, asc) as PUBLIC-cacheable shared market data (Cache-Control: public s-maxage=3600 SWR) — deliberate contrast with allocator no-store; read-error OR <2 rows degrade to 200 [] (honest empty, never 500); no params, BTC hard-coded, no tenant data, no migration/Python (Railway no-op)
 - [Phase ?]: Plan 24-03: wired the BTC overlay onto EquityChart.benchmark (SVG widget) fed a cumulative-wealth curve via computeStrategyCurve (24-RESEARCH Pitfall 3)
 - [Phase 24]: Plan 24-03: extracted ScenarioBenchmarkSection so the honesty invariants are unit-testable without mounting the 1900-line composer
+- [Phase ?]: Phase 25-01: share read path is hash-in-Node — get_shared_scenario(p_token_hash TEXT) takes a precomputed sha256 hex; no pgcrypto digest (Plan 25-02 owns the single digest site). search_path=public,pg_temp; body-shape self-assert proves no api_keys/portfolios + revoke gate + published filter.
+- [Phase 25]: Phase 25-02: scenario-share-token.ts is the single sha256 digest source-of-truth — mintShareToken() = randomBytes(32)->base64url raw (43 chars, URL-only) + hashShareToken(raw) sha256 hex (the only thing at rest, == get_shared_scenario p_token_hash). random+stored-hash (revocable per SHARE-03), NO env secret (distinct from demo-pdf-token HMAC); Node crypto only, no installs. 6 TDD unit tests pin entropy/format/determinism + known sha256 vectors so an algorithm change vs the RPC fails CI loudly. SHARE-01 complete.
+- [Phase 25]: 25-03: validate share scenario_id via isUuid (UUID_RE), not zod v4 .uuid() which enforces RFC-4122 variant bits and rejects valid Postgres ids
+- [Phase 25]: 25-03: generate stores only token_hash; raw token returned once in the URL; Copy link re-generates (list never holds the raw token)
+- [Phase 25]: 25-03: scenario.share/scenario.share.revoke audit actions (TS+Python parity); scenario_shares registered as a GDPR direct user-owned table
+- [Phase 25]: 25-04 recipient page renders an inline return-form KPI strip, NOT KpiStrip (KpiStrip leaks USD/AUM)
+- [Phase 25]: 25-04 DI-23-01 closed: share-resolve branches on codec outcome, only ok computes, never reads .value on non-ok, neutral holdings-free default
+- [Phase 25]: 25-04 public page revoke immediacy via force-dynamic + no-store; RPC revoked_at IS NULL is the gate; resolve to revoke to 404 page-tested (SHARE-03)
+- [Phase 25]: 25-04 toWealth imported from EquityChart module (its real export), not @/lib/scenario (stale JSDoc)
+- [Phase ?]: 26-01: WRAP computeVaR/computeExpectedShortfall + computeScenarioBenchmark behind a null-on-degenerate envelope (never fork); reuse computeScenarioBenchmark for beta to inherit the constant-BTC relative-scale guard
+- [Phase ?]: 26-01: track two distinct overlap-Ns (varN scenario overlap, betaN BTC inner-join overlap); VaR computed on the already-leveraged series with no leverage multiplier
+- [Phase ?]: 26-02: StressVarSection is props-only over computeScenarioStress; only local state is the shock-preset useState — em-dash on null, monochrome losses, imported floor SoT
+- [Phase ?]: 26-02: two-N disclosure — single VaR/CVaR caption when varN===betaN; a distinct methodologyLine(betaN) caption only when the Ns differ
+- [Phase ?]: 26-02: mounted in the own-book ScenarioComposer ONLY (sibling Card after ScenarioBenchmarkSection); ScenarioBuilder untouched
 
 ## Accumulated Context
 
@@ -252,8 +266,8 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-06-22T00:10:28.374Z
-Stopped at: Completed 24-03-PLAN.md
+Last session: 2026-06-22T12:13:00.245Z
+Stopped at: Completed 25-04-PLAN.md (recipient page + share-resolve)
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
 
