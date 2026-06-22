@@ -7,8 +7,10 @@
  *     INTERSECTION (inner-join) — only dates present in BOTH survive, with NO
  *     zero-fill and NO interpolation. This is the load-bearing honesty step:
  *     the scenario engine's own date axis is a zero-filled UNION (late
- *     strategies contribute 0 before their inception, `scenario.ts:181-189`),
- *     but the benchmark must NOT be zero-filled — a non-overlapping day is an
+ *     strategies contribute 0 before their inception — the union-date axis +
+ *     zero-fill-before-inception + renormalizing weighted-sum in
+ *     `computeScenario`, scenario.ts), but the benchmark must NOT be
+ *     zero-filled — a non-overlapping day is an
  *     absence, not a 0% return. Mirrors `analytics-service/routers/portfolio.py
  *     :915-916` (`reindex(...).dropna()`).
  *
@@ -21,12 +23,15 @@
  * Honesty invariants (tested):
  *   - A degenerate window (n<2) yields `null` for every field — never a
  *     fabricated 0 — so the UI renders an em-dash.
- *   - A CONSTANT benchmark (population var(b)=0) yields `null` for beta/alpha.
- *     `computeAlphaBeta` returns {alpha:0, beta:0} for BOTH n<2 AND var(b)=0 —
- *     those two are indistinguishable from its return value, so the
- *     constant-benchmark case is detected HERE (varB computed first) rather
- *     than inferred from the helper's silent 0.
- *   - te=0 (p≡b) yields a `null` information ratio (guard te>0 before dividing).
+ *   - A CONSTANT benchmark yields `null` for beta/alpha. `computeAlphaBeta` is
+ *     NOT a safe net here: it returns {alpha:0, beta:0} only for n<2, but for a
+ *     numerically-constant benchmark with n>=2 its `varB>0?:0` branch does not
+ *     fire (float residue leaves varB ~1e-37, not exactly 0), so it returns a
+ *     meaningless finite beta (~2) and alpha = meanR*252 — a fabricated number,
+ *     not 0. So the constant-benchmark case MUST be detected HERE (varB
+ *     computed first) via the relative-scale guard and surfaced as null.
+ *   - te=0 (p≡b) yields a `null` information ratio (guard via relative-scale
+ *     degeneracy on the excess series, not exact te>0).
  *   - All annualization is ×252 / ×√252 via the reused helpers — never √365.
  */
 
@@ -114,9 +119,12 @@ export function computeScenarioBenchmark(
   const informationRatio = teIsDegenerate ? null : (excessMean * 252) / te;
 
   // var(b): POPULATION variance of the aligned benchmark. Computed FIRST so
-  // the constant-benchmark degenerate case is detected here, not inferred from
-  // computeAlphaBeta's silent {alpha:0, beta:0} (which is indistinguishable
-  // from its n<2 return). A constant benchmark must surface "—", not a 0.
+  // the constant-benchmark degenerate case is detected here. computeAlphaBeta
+  // is NOT a safe net: it returns {alpha:0, beta:0} only for n<2, but for a
+  // numerically-constant benchmark with n>=2 its `varB>0?:0` branch does not
+  // fire (float residue leaves varB ~1e-37, not exactly 0), so it returns a
+  // meaningless finite beta (~2) and alpha = meanR*252 — a fabricated number,
+  // not 0. A constant benchmark must surface "—", not a 0.
   //
   // Degeneracy is detected by RELATIVE scale, not exact `varB === 0`: a
   // genuinely constant series (e.g. every value 0.003) does NOT yield an exact
@@ -141,7 +149,8 @@ export function computeScenarioBenchmark(
     beta = ab.beta;
   }
 
-  // Pearson sample correlation (mirror scenario.ts:389 — sample cov / std·std).
+  // Pearson sample correlation (mirror the correlation_matrix loop in
+  // scenario.ts — sample cov / std·std).
   // Null (not 0) when either side has effectively zero variance: an undefined
   // correlation is an absence, rendered as an em-dash, not a fabricated 0. The
   // degeneracy test is the SAME relative-scale check used for beta/alpha, so a

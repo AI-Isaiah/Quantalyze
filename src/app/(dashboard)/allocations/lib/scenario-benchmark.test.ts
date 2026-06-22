@@ -185,9 +185,13 @@ describe("computeScenarioBenchmark — null degenerate paths (em-dash source)", 
   });
 
   it("constant benchmark (var(b)=0) → beta & alpha are null, NOT a fabricated 0", () => {
-    // computeAlphaBeta returns {alpha:0, beta:0} for BOTH n<2 AND var(b)=0 —
-    // indistinguishable from its return value. The lib must detect var(b)=0
-    // itself and surface null so the UI renders "—", not "0.00".
+    // computeAlphaBeta is NOT a safe net: it returns {alpha:0, beta:0} only for
+    // n<2, but for a numerically-constant benchmark with n>=2 its `varB>0?:0`
+    // branch does not fire (float residue leaves varB ~1e-37, not exactly 0),
+    // so it returns a meaningless finite beta (~2) and alpha = meanR*252 — a
+    // fabricated number, not 0. The lib must detect the constant benchmark
+    // itself via the relative-scale guard and surface null so the UI renders
+    // "—", not "0.00".
     const d = days(6);
     const port: DP[] = d.map((date, i) => ({
       date,

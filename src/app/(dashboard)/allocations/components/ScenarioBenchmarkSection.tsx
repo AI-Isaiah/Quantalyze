@@ -12,7 +12,7 @@ import type { DailyPoint } from "@/lib/scenario";
 
 /**
  * Plan 24-03 (BENCH-01) — the user-visible "vs BTC" active-return section,
- * extracted OUT of the 1900-line ScenarioComposer so its honesty invariants are
+ * extracted OUT of the large ScenarioComposer so its honesty invariants are
  * unit-testable in isolation (ScenarioBenchmarkSection.test.tsx).
  *
  * Purely presentational over props: the composer fetches the BTC daily-returns
