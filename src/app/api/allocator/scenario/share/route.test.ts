@@ -298,6 +298,26 @@ describe("POST /api/allocator/scenario/share (Plan 25-03 SHARE-01)", () => {
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
+  it("T_SH11b — ownership probe ERROR (not 0 rows) → 500 redacted, NO mint, the raw DB message never leaks", async () => {
+    // Distinct from T_SH11 (0 rows → 404, the caller does not own it): here the
+    // probe SELECT itself ERRORS (a transient DB fault). The route must fail
+    // closed with the SAME redacted stable message as a mint error (NEVER echo
+    // error.message — it leaks schema/column names), must NOT proceed to mint a
+    // share, and must carry NO_STORE_HEADERS. This pins the ownershipError branch
+    // that sits between the limiter and the mint.
+    ownershipResult = { data: null, error: { message: "probe boom" } };
+    const res = await POST(mkPost({ scenario_id: SCENARIO_ID }));
+    expect(res.status).toBe(500);
+    const json = (await res.json()) as { message?: string };
+    // The redacted, UI-facing message — identical to the mint-error path.
+    expect(json.message).toBe("Couldn't create a share link. Try again.");
+    // The raw DB error text must NEVER reach the recipient.
+    expect(JSON.stringify(json)).not.toContain("probe boom");
+    // No share was minted — the create RPC must NOT run after a probe error.
+    expect(rpcSpy).not.toHaveBeenCalled();
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
   it("T_SH12 — CR-01: the ownership probe runs against `scenarios` scoped by id BEFORE the create RPC", async () => {
     await POST(mkPost({ scenario_id: SCENARIO_ID }));
     // The probe selects from `scenarios` filtered to the requested id; RLS

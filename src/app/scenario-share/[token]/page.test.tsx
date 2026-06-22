@@ -169,7 +169,19 @@ beforeEach(() => {
 
 describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
   it("resolves a valid token → renders the scenario NAME + PROJECTED framing, NO leak", async () => {
-    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    // Inject an allocator-identity-shaped field into the RPC row so the no-leak
+    // assertion below is FALSIFIABLE: the fixture's own fields contain no "@",
+    // so `not.toContain("@")` would pass VACUOUSLY without this. The resolve
+    // layer reads ONLY name/draft/series; an over-returning RPC body (a future
+    // SELECT * regression, an extra column) that surfaced an allocator email
+    // through the page would make the assertion fail loud. The "@" must be
+    // absent because the page never reads this field — not because no field
+    // ever carried one.
+    const rowWithIdentity = {
+      ...okRow(),
+      allocator_email: "owner@quantalyze.app",
+    };
+    rpcMock.mockResolvedValueOnce({ data: [rowWithIdentity], error: null });
 
     const html = await renderPage();
 
@@ -197,7 +209,11 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     expect(html.toLowerCase()).not.toContain("allocated_amount");
     expect(html.toLowerCase()).not.toContain("account_balance");
     expect(html.toLowerCase()).not.toContain("value_usd");
-    // No allocator identity surfaced (the fixture allocator email pattern).
+    // No allocator identity surfaced. The injected allocator-email field (and
+    // any "@") must be ABSENT — the page never reads it. This is now falsifiable
+    // (the fixture carries a real "owner@quantalyze.app"); if the page ever
+    // surfaced the RPC row's identity-shaped fields, both assertions fail loud.
+    expect(html).not.toContain("owner@quantalyze.app");
     expect(html.toLowerCase()).not.toContain("@");
   });
 
