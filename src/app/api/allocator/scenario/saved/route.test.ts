@@ -48,21 +48,26 @@ vi.mock("@/lib/api/withAllocatorAuth", () => ({
 
 // ---------------------------------------------------------------------------
 // Mock supabase server client — a chainable query builder.
-//   .from("scenarios").insert(payload).select(cols).single()  → { data, error }
-//   .from("scenarios").select(cols).order(...)                 → { data, error }
-// The insert/select payloads are captured so the cross-tenant + RLS-ordering
-// assertions can inspect them.
+//   .from("scenarios").insert(payload).select(cols).single()       → { data, error }
+//   .from("scenarios").select(cols).order(...)                      → { data, error }
+//   .from("scenario_shares").select("scenario_id").is("revoked_at", null) → { data, error }
+// The insert/select payloads are captured so the cross-tenant + RLS-ordering +
+// has_active_share (WR-01) assertions can inspect them.
 // ---------------------------------------------------------------------------
 
 type DbResult = { data: unknown; error: { code?: string; message: string } | null };
 let insertResult: DbResult = { data: { id: "scen-1" }, error: null };
 let listResult: DbResult = { data: [], error: null };
+// WR-01 — the active-share lookup against scenario_shares (revoked_at IS NULL).
+let activeSharesResult: DbResult = { data: [], error: null };
 let lastInsertPayload: Record<string, unknown> | null = null;
 const orderSpy = vi.fn();
+const sharesIsSpy = vi.fn();
 
-function buildChain() {
+function buildChain(table: string) {
   // Insert path: insert() -> select() -> single() resolves insertResult.
-  // List path: select() -> order() resolves listResult.
+  // List path: scenarios select() -> order() resolves listResult.
+  // Active-share path: scenario_shares select() -> is() resolves activeSharesResult.
   const chain = {
     insert(payload: Record<string, unknown>) {
       lastInsertPayload = payload;
@@ -78,13 +83,17 @@ function buildChain() {
           orderSpy(cols, col, opts);
           return Promise.resolve(listResult);
         },
+        is: (col: string, val: unknown) => {
+          sharesIsSpy(table, cols, col, val);
+          return Promise.resolve(activeSharesResult);
+        },
       };
     },
   };
   return chain;
 }
 
-const fromSpy = vi.fn(() => buildChain());
+const fromSpy = vi.fn((table: string) => buildChain(table));
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({ from: fromSpy }),
 }));
@@ -168,6 +177,7 @@ beforeEach(() => {
   rateLimitState = "allow";
   insertResult = { data: { id: "scen-1", name: "My scenario" }, error: null };
   listResult = { data: [], error: null };
+  activeSharesResult = { data: [], error: null };
   lastInsertPayload = null;
 });
 
@@ -371,6 +381,65 @@ describe("GET /api/allocator/scenario/saved", () => {
     const json = await res.json();
     expect(json).toHaveLength(1);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  // WR-01 — has_active_share must be POPULATED server-side from a scenario_shares
+  // lookup (active = revoked_at IS NULL), not left undefined. Pre-fix the field
+  // never appeared in the payload, so the Share/Copy/Revoke affordance silently
+  // reset to "Share" on every reload. This pins that a row WITH an active,
+  // un-revoked share resolves has_active_share=true and one WITHOUT resolves
+  // false — sourced from the DB, never a default. (The mock returns the
+  // scenario_shares set; if the route stopped joining it, every row would be
+  // `false` and the true assertion below would fail.)
+  it("T_S17 — GET populates has_active_share from scenario_shares (revoked_at IS NULL)", async () => {
+    listResult = {
+      data: [
+        { id: "scen-SHARED", name: "Has share", schema_version: 2, created_at: "c", updated_at: "u" },
+        { id: "scen-PLAIN", name: "No share", schema_version: 2, created_at: "c", updated_at: "u" },
+      ],
+      error: null,
+    };
+    // Only scen-SHARED has an active (non-revoked) share.
+    activeSharesResult = { data: [{ scenario_id: "scen-SHARED" }], error: null };
+
+    const res = await GET(mkGet());
+    expect(res.status).toBe(200);
+
+    // The active-share lookup ran against scenario_shares, filtered to the
+    // active (revoked_at IS NULL) rows. RLS scopes it to the caller.
+    expect(fromSpy).toHaveBeenCalledWith("scenario_shares");
+    expect(sharesIsSpy).toHaveBeenCalledWith(
+      "scenario_shares",
+      "scenario_id",
+      "revoked_at",
+      null,
+    );
+
+    const json = (await res.json()) as Array<{ id: string; has_active_share: boolean }>;
+    const shared = json.find((r) => r.id === "scen-SHARED");
+    const plain = json.find((r) => r.id === "scen-PLAIN");
+    // Populated from the DB — NOT undefined, NOT a blanket default.
+    expect(shared?.has_active_share).toBe(true);
+    expect(plain?.has_active_share).toBe(false);
+  });
+
+  // WR-01 — a failure of the share-lookup is NON-FATAL: the scenarios still
+  // render (every row defaults to no active share) rather than 500ing the whole
+  // list. The list is the primary payload; the share badge is enrichment.
+  it("T_S18 — a scenario_shares lookup error is non-fatal; rows still return (has_active_share=false)", async () => {
+    listResult = {
+      data: [{ id: "scen-1", name: "A", schema_version: 2, created_at: "c", updated_at: "u" }],
+      error: null,
+    };
+    activeSharesResult = { data: null, error: { message: "share lookup boom" } };
+
+    const res = await GET(mkGet());
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as Array<{ id: string; has_active_share: boolean }>;
+    expect(json).toHaveLength(1);
+    expect(json[0].has_active_share).toBe(false);
+    // The raw share-lookup error must never reach the client.
+    expect(JSON.stringify(json)).not.toContain("share lookup boom");
   });
 
   it("T_S12 — GET DB error → redacted 500 + Cache-Control", async () => {
