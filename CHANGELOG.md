@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.25.0.0] - 2026-06-22
+### Added — Scenario Analysis v1.1.0 (Phases 23 & 24): save, reopen & compare scenarios, benchmark vs BTC
+
+Allocators can now **save, reopen, and compare** scenario drafts, and measure any scenario **against BTC**.
+
+- **Save & reopen (PERSIST-01..03).** Name and save a scenario draft from the composer, then reopen it later from a new "Saved scenarios" list (rename inline, delete behind an inline confirm). Saved scenarios are owner-private — per-allocator row-level security, never readable by another allocator or by anonymous callers — and are included in your GDPR data export. Reopening is honest about drift: a scenario saved against a since-changed book surfaces the existing "your holdings changed" banner, and one written in an incompatible older/newer format shows a clear notice instead of silently loading an empty composer.
+- **Side-by-side compare (PERSIST-04).** Select two or more saved scenarios (plus your live book) and compare their projected metrics in one table — Sharpe, Sortino, return, volatility, max drawdown — with the best value per row marked. A degenerate metric renders an em-dash "—", never a fabricated 0, and each column stamps its own overlap window.
+- **Benchmark vs BTC (BENCH-01).** The active scenario projection gains a "vs BTC" section: tracking error, information ratio, alpha, and beta computed over the **intersection** (inner-join) of the scenario's and BTC's dates, 252-day annualized, plus a BTC overlay on the projection chart. Below the 30-overlapping-day floor, a benchmark fetch failure, no date overlap, or a scenario that produced no returns each render a **distinct, honest** "unavailable" reason — the benchmark is never blamed for an empty scenario, and no metric is fabricated.
+
+Internal: new `scenarios` table + owner-RLS migration (anon revoked); scenario CRUD routes (allocator id bound from auth, redacted error envelopes, 256 KB body cap, rate-limit-after-validation, no-store) enrolled in the audit-log, GDPR-export, and limiter-ordering manifest gates; new public/cacheable `/api/benchmark/btc` daily-returns route that coerces PostgREST DECIMAL-as-string; pure-TS active-return helpers reusing the golden-tested `computeAlphaBeta`/`computeTrackingError`. No analytics-service change, no new dependencies.
+
+Reviewed: full frontend suite 6359 pass / 284 skip; typecheck + lint clean; Python audit-parity 23 pass. Whole-branch review (migration-reviewer + RLS auditor both clean; security/silent-failure clean; 97% diff coverage; cross-phase red-team) fixed one reachable honesty bug it surfaced — the benchmark empty state now names a degenerate scenario as the cause rather than misattributing it to BTC coverage — and added failure-path tests for rename/delete and Update. Two product-level red-team observations were logged as deferred (DI-23-02 drifted-reopen composition semantics, DI-23-03 stale compare snapshot).
+
 ## [0.24.15.139] - 2026-06-21
 ### Fixed — Correlation heatmap empty-state heading no longer contradicts its own body
 
