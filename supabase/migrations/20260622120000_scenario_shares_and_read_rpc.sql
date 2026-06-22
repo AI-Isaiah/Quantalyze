@@ -290,7 +290,11 @@ GRANT EXECUTE ON FUNCTION public.get_shared_scenario(TEXT) TO service_role;
 DO $$
 BEGIN
   PERFORM public._assert_no_public_execute('public.get_shared_scenario(text)');
-  RAISE NOTICE 'Migration 25-01: PUBLIC EXECUTE absence verified for get_shared_scenario.';
+  -- Parity hardening for the INVOKER mint RPC: it is RLS-gated and anon has no
+  -- auth.uid(), but assert PUBLIC has no EXECUTE so a future grant drift on it
+  -- ships red, matching the read RPC's discipline.
+  PERFORM public._assert_no_public_execute('public.create_scenario_share(uuid, text)');
+  RAISE NOTICE 'Migration 25-01: PUBLIC EXECUTE absence verified for get_shared_scenario + create_scenario_share.';
 END $$;
 
 -- --------------------------------------------------------------------------

@@ -11,6 +11,11 @@ BEGIN;
 SET lock_timeout = '3s';
 
 DROP FUNCTION IF EXISTS public.get_shared_scenario(TEXT);
+-- create_scenario_share is NOT dropped by DROP TABLE ... CASCADE (a function body
+-- referencing a table is not a tracked dependency), so drop it explicitly — else
+-- it survives as an orphan referencing the dropped table and a forward re-apply
+-- would hit CREATE FUNCTION on an existing function and abort.
+DROP FUNCTION IF EXISTS public.create_scenario_share(UUID, TEXT);
 DROP TABLE IF EXISTS scenario_shares CASCADE;
 
 COMMIT;
