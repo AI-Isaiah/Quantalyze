@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.26.0.2] - 2026-06-22
+### Fixed — opening a real shared scenario no longer 500s
+
+Post-deploy `/qa` on v0.26.0.1 caught that the share recipient page returned HTTP 500 for every link that actually resolved a scenario (the bogus-token path 404s before the failing line, so the prior canary and the mocked unit tests both missed it). The page is a Server Component and imported `toWealth()` from the `EquityChart` `"use client"` widget, then called it during server render — Next throws "Attempted to call toWealth() from the server but toWealth() is on the client." So an unknown link 404'd correctly, but a valid link crashed.
+
+- **`toWealth()` + the `WealthPoint` type moved to the pure `@/lib/scenario` module.** The server page imports them from there; `EquityChart` re-exports them so its client-side importers (the composer, the chart tests) are unchanged. Pure function, zero behavior change — it just no longer lives behind the client boundary.
+- **Regression guard:** a static boundary test scans the page's server-render entrypoints (`page.tsx` + `share-resolve.ts`) and fails if any of them *calls* a binding imported from a `"use client"` module (rendering a client component as JSX or importing a `type` is allowed). vitest can't reproduce the RSC runtime error, so this static guard is the durable catch; it covers named/default/namespace imports and is proven to fail without the fix. Plus direct `toWealth` unit tests at its new home. The guard scans the two direct entrypoints, not the full transitive closure (documented ceiling).
+
+Reviewed: full frontend suite green (6461); typecheck + lint clean; fresh-context Testing + Maintainability + Red Team passes — all three confirmed the fix is correct and complete (every server-side call on the page resolves to a non-client module, no import cycle, no other Server Component imports `toWealth` from the widget); their findings were guard-test robustness improvements, applied here.
+
 ## [0.26.0.1] - 2026-06-22
 ### Fixed — read-only share links now actually open for anonymous recipients
 
