@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.1.0
 milestone_name: Scenario Analysis
-status: ready_to_plan
-stopped_at: Phase 25 complete (4/4) — ready to discuss Phase 26
-last_updated: 2026-06-22T11:18:57.455Z
+status: executing
+stopped_at: Completed 25-04-PLAN.md (recipient page + share-resolve)
+last_updated: "2026-06-22T12:02:19.472Z"
 last_activity: 2026-06-22
 progress:
   total_phases: 8
   completed_phases: 5
-  total_plans: 18
-  completed_plans: 66
+  total_plans: 20
+  completed_plans: 19
   percent: 63
 ---
 
@@ -21,17 +21,17 @@ progress:
 See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
-**Current focus:** Phase 26 — stress testing & var
+**Current focus:** Phase 26 — Stress Testing & VaR
 **Last milestone:** v1.0.0 API-Key Rewrite (Phases 15–20, shipped 2026-06-20).
 
 ## Current Position
 
-Phase: 26
-Plan: Not started
-Status: Ready to plan
+Phase: 26 (Stress Testing & VaR) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
 Last activity: 2026-06-22
 
-Progress: [██████████] 100%
+Progress: [██████████] 95%
 
 ## Milestone Roadmap (v1.1.0 Scenario Analysis)
 
@@ -240,6 +240,8 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - [Phase 25]: 25-04 DI-23-01 closed: share-resolve branches on codec outcome, only ok computes, never reads .value on non-ok, neutral holdings-free default
 - [Phase 25]: 25-04 public page revoke immediacy via force-dynamic + no-store; RPC revoked_at IS NULL is the gate; resolve to revoke to 404 page-tested (SHARE-03)
 - [Phase 25]: 25-04 toWealth imported from EquityChart module (its real export), not @/lib/scenario (stale JSDoc)
+- [Phase ?]: 26-01: WRAP computeVaR/computeExpectedShortfall + computeScenarioBenchmark behind a null-on-degenerate envelope (never fork); reuse computeScenarioBenchmark for beta to inherit the constant-BTC relative-scale guard
+- [Phase ?]: 26-01: track two distinct overlap-Ns (varN scenario overlap, betaN BTC inner-join overlap); VaR computed on the already-leveraged series with no leverage multiplier
 
 ## Accumulated Context
 
@@ -261,7 +263,7 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-06-22T10:35:31.907Z
+Last session: 2026-06-22T12:01:47.986Z
 Stopped at: Completed 25-04-PLAN.md (recipient page + share-resolve)
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
