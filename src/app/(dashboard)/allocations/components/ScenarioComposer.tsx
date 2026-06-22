@@ -92,6 +92,7 @@ import { ScenarioFooter } from "./ScenarioFooter";
 import { ScenarioFlaggedHoldingsList } from "../ScenarioFlaggedHoldingsList";
 import { ScenarioBenchmarkSection } from "./ScenarioBenchmarkSection";
 import { StressVarSection } from "./StressVarSection";
+import { MonteCarloSection } from "./MonteCarloSection";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
@@ -1594,6 +1595,23 @@ export function ScenarioComposer({
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
           btcDaily={btcDaily}
           btcAvailable={btcAvailable}
+          n={scenarioMetrics.n}
+          strategyCount={deAliased.strategies.length}
+        />
+      </Card>
+
+      {/* SIM-01 (Plan 27-02) — the "Forward uncertainty" Monte-Carlo section on
+          the own-book scenario surface. A sibling of the Stress & VaR section
+          above: it block-bootstraps the same already-leveraged
+          portfolio_daily_returns OFF THE MAIN THREAD (a Web Worker) into forward
+          confidence bands with a mandatory method/paths/N disclosure, OR the
+          honest empty/computing/error state (degenerate scenario / below the
+          Phase-22 sample floor / worker failure). Own-book composer ONLY — the
+          example-universe Strategy Sandbox bands are deferred. Every prop is
+          already in scope; the section owns the worker lifecycle internally. */}
+      <Card className="mt-6">
+        <MonteCarloSection
+          portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
           n={scenarioMetrics.n}
           strategyCount={deAliased.strategies.length}
         />
