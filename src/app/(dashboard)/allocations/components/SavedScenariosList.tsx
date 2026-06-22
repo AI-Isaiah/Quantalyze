@@ -35,6 +35,14 @@ export interface SavedScenarioListRow {
   updated_at: string;
   /** The persisted draft JSONB — decoded by the composer's codec on Open. */
   draft: unknown;
+  /**
+   * Whether the row currently has an active (non-revoked) share link. Derived
+   * from the saved-scenarios payload — the Share affordance reads this rather
+   * than firing a per-row probe fetch (Plan 25-03). Absent → treated as no
+   * active share. A successful generate/revoke transitions the per-row local
+   * state immediately; the parent's onMutated refetch reconciles it.
+   */
+  has_active_share?: boolean;
 }
 
 /** The shape the composer's imperative Open handler consumes (Plan 04). */
@@ -134,6 +142,143 @@ export function SavedScenariosList({
   );
   // A hard mutation failure → the canonical error copy.
   const [mutationError, setMutationError] = useState<string | null>(null);
+
+  // --- Share affordance (Plan 25-03) ---
+  // Per-row local override of the active-share state (keyed by row id). The
+  // initial active-share state is DERIVED from row data (has_active_share); a
+  // successful generate sets `true`, a successful revoke sets `false`. Reading
+  // this map with the row default avoids a per-row probe fetch.
+  const [shareActiveById, setShareActiveById] = useState<
+    Record<string, boolean>
+  >({});
+  // The row id whose Share is currently generating (button disabled).
+  const [generatingShareId, setGeneratingShareId] = useState<string | null>(
+    null,
+  );
+  // The row id showing the transient "Link copied!" badge (role=status).
+  const [copiedShareId, setCopiedShareId] = useState<string | null>(null);
+  // The row id showing the transient "Copy failed" alert (clipboard failure;
+  // the link IS still generated — audit-#43 honest failure).
+  const [copyFailedShareId, setCopyFailedShareId] = useState<string | null>(
+    null,
+  );
+  // The row id awaiting the inline Revoke confirmation.
+  const [confirmingRevokeId, setConfirmingRevokeId] = useState<string | null>(
+    null,
+  );
+
+  // Whether a row currently has an active share: the local override wins, else
+  // the row-data default. A row with no override and no row flag has none.
+  const hasActiveShare = useCallback(
+    (row: SavedScenarioListRow): boolean =>
+      shareActiveById[row.id] ?? row.has_active_share ?? false,
+    [shareActiveById],
+  );
+
+  // Clipboard discipline mirrors ShareableLink.tsx (audit-#43): try
+  // navigator.clipboard, fall back to execCommand, and report success ONLY on a
+  // real copy. Returns whether the copy actually succeeded.
+  const copyToClipboard = useCallback(async (url: string): Promise<boolean> => {
+    try {
+      await navigator.clipboard.writeText(url);
+      return true;
+    } catch {
+      // Fall through to the legacy execCommand path.
+    }
+    let fallbackSucceeded = false;
+    const input = document.createElement("input");
+    try {
+      input.value = url;
+      document.body.appendChild(input);
+      input.select();
+      fallbackSucceeded = document.execCommand("copy");
+    } catch {
+      fallbackSucceeded = false;
+    } finally {
+      if (input.parentNode) input.parentNode.removeChild(input);
+    }
+    return fallbackSucceeded;
+  }, []);
+
+  const generateShare = useCallback(
+    async (row: SavedScenarioListRow) => {
+      setMutationError(null);
+      setCopyFailedShareId(null);
+      setGeneratingShareId(row.id);
+      try {
+        const res = await fetch("/api/allocator/scenario/share", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scenario_id: row.id }),
+        });
+        if (!res.ok) {
+          // Honest failure — onMutated NOT fired (T_SL7b/T_SL7c contract).
+          setMutationError("Couldn't create a share link. Try again.");
+          return;
+        }
+        const { url } = (await res.json()) as { url?: string };
+        // The link is now generated → the row is active regardless of whether
+        // the clipboard write lands (audit-#43: never block the link on copy).
+        setShareActiveById((prev) => ({ ...prev, [row.id]: true }));
+        const copied = url ? await copyToClipboard(url) : false;
+        if (copied) {
+          setCopiedShareId(row.id);
+          setCopyFailedShareId(null);
+          setTimeout(() => setCopiedShareId(null), 2000);
+        } else {
+          // The success badge fires ONLY on a real clipboard success.
+          setCopyFailedShareId(row.id);
+          setTimeout(() => setCopyFailedShareId(null), 4000);
+        }
+        onMutated?.();
+      } catch {
+        setMutationError("Couldn't create a share link. Try again.");
+      } finally {
+        setGeneratingShareId(null);
+      }
+    },
+    [copyToClipboard, onMutated],
+  );
+
+  const copyExistingShare = useCallback(
+    async (row: SavedScenarioListRow) => {
+      setMutationError(null);
+      // Re-generate to obtain a fresh URL (the raw token is only ever returned
+      // by the generate route; the list never holds it). The route pre-revokes
+      // the prior active share and mints a new one, so "Copy link" always hands
+      // out a working link.
+      await generateShare(row);
+    },
+    [generateShare],
+  );
+
+  const confirmRevoke = useCallback(
+    async (row: SavedScenarioListRow) => {
+      setMutationError(null);
+      try {
+        const res = await fetch("/api/allocator/scenario/share/revoke", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scenario_id: row.id }),
+        });
+        if (!res.ok) {
+          // Honest failure — the share stays active, onMutated NOT fired.
+          // Dismiss the inline confirm so the still-active Copy link + Revoke
+          // controls surface alongside the role=alert error.
+          setMutationError("Couldn't revoke this link. Try again.");
+          setConfirmingRevokeId(null);
+          return;
+        }
+        setShareActiveById((prev) => ({ ...prev, [row.id]: false }));
+        setConfirmingRevokeId(null);
+        onMutated?.();
+      } catch {
+        setMutationError("Couldn't revoke this link. Try again.");
+        setConfirmingRevokeId(null);
+      }
+    },
+    [onMutated],
+  );
 
   const toggleSelected = useCallback((key: string) => {
     setSelected((prev) => {
@@ -270,6 +415,11 @@ export function SavedScenariosList({
             {localRows.map((row) => {
               const isRenaming = renamingId === row.id;
               const isConfirmingDelete = confirmingDeleteId === row.id;
+              const isConfirmingRevoke = confirmingRevokeId === row.id;
+              const rowShareActive = hasActiveShare(row);
+              const isGenerating = generatingShareId === row.id;
+              const isCopied = copiedShareId === row.id;
+              const isCopyFailed = copyFailedShareId === row.id;
               return (
                 <li
                   key={row.id}
@@ -355,6 +505,28 @@ export function SavedScenariosList({
                           Cancel
                         </Button>
                       </div>
+                    ) : isConfirmingRevoke ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-text-secondary">
+                          Revoke this share link? Anyone with the link will lose
+                          access.
+                        </span>
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          autoFocus
+                          onClick={() => confirmRevoke(row)}
+                        >
+                          Revoke
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setConfirmingRevokeId(null)}
+                        >
+                          Keep link
+                        </Button>
+                      </div>
                     ) : (
                       <>
                         <Button
@@ -388,6 +560,85 @@ export function SavedScenariosList({
                         >
                           Delete
                         </Button>
+                        {/* Share affordance (Plan 25-03). State machine:
+                            none → Share; active → Copy link + Revoke. The
+                            transient copied (role=status) / copy-failed
+                            (role=alert) badges sit ALONGSIDE the controls so a
+                            just-generated share settles straight to its active
+                            controls (the badge fades on its timer). */}
+                        {rowShareActive ? (
+                          <>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              disabled={isGenerating}
+                              onClick={() => copyExistingShare(row)}
+                            >
+                              {isGenerating ? "Generating…" : "Copy link"}
+                            </Button>
+                            <Button
+                              variant="danger"
+                              size="sm"
+                              onClick={() => {
+                                setRenamingId(null);
+                                setConfirmingDeleteId(null);
+                                setConfirmingRevokeId(row.id);
+                              }}
+                            >
+                              Revoke
+                            </Button>
+                          </>
+                        ) : (
+                          <Button
+                            variant="primary"
+                            size="sm"
+                            disabled={isGenerating}
+                            onClick={() => generateShare(row)}
+                          >
+                            {isGenerating ? "Generating…" : "Share"}
+                          </Button>
+                        )}
+                        {isCopied && (
+                          <span
+                            role="status"
+                            aria-live="polite"
+                            className="inline-flex items-center gap-1 px-1 text-xs text-positive"
+                          >
+                            <svg
+                              className="h-3.5 w-3.5"
+                              viewBox="0 0 16 16"
+                              fill="currentColor"
+                              aria-hidden="true"
+                            >
+                              <path
+                                fillRule="evenodd"
+                                d="M8 15A7 7 0 108 1a7 7 0 000 14zm3.28-8.72a.75.75 0 00-1.06-1.06L7 8.44 5.78 7.22a.75.75 0 00-1.06 1.06l1.75 1.75a.75.75 0 001.06 0l3.75-3.75z"
+                                clipRule="evenodd"
+                              />
+                            </svg>
+                            Link copied!
+                          </span>
+                        )}
+                        {isCopyFailed && (
+                          <span
+                            role="alert"
+                            className="inline-flex items-center gap-1 px-1 text-xs text-negative"
+                          >
+                            <svg
+                              className="h-3.5 w-3.5"
+                              viewBox="0 0 16 16"
+                              fill="currentColor"
+                              aria-hidden="true"
+                            >
+                              <path
+                                fillRule="evenodd"
+                                d="M8 15A7 7 0 108 1a7 7 0 000 14zm0-10a.75.75 0 01.75.75v3a.75.75 0 01-1.5 0v-3A.75.75 0 018 5zm0 6.5a.75.75 0 100-1.5.75.75 0 000 1.5z"
+                                clipRule="evenodd"
+                              />
+                            </svg>
+                            Copy failed — copy the link manually
+                          </span>
+                        )}
                       </>
                     )}
                   </div>
