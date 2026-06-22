@@ -319,3 +319,38 @@ class PortfolioBridgeResponse(BaseModel):
     portfolio_id: str
     underperformer_strategy_id: str
     candidates: list[dict[str, Any]] = []
+
+
+# ── Phase 28 (OPT-01/02) — Weight Optimizer ─────────────────────────────────
+# Stateless: the caller passes the draft-scoped strategies' daily-return series
+# directly (no portfolio_id / DB read), so the endpoint is pure compute. The
+# Next.js route is allocator-authed and forwards ONLY the caller's own series.
+
+
+class OptimizerDailyPoint(BaseModel):
+    """One daily-return point, mirroring the frontend `DailyPoint` { date, value }."""
+
+    date: str
+    value: float
+
+
+class OptimizeWeightsRequest(BaseModel):
+    # strategy_id -> its daily-return series (intersection-aligned server-side).
+    series: dict[str, list[OptimizerDailyPoint]]
+    objective: Literal["min_vol", "max_sharpe"] = "min_vol"
+
+
+class OptimizeWeightsResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    ok: bool
+    objective: str
+    # The overlap N the optimizer fit on, and the strategy count k.
+    n: int
+    k: int
+    # Suggested long-only, sum-to-1 weights {strategy_id: weight}, or None on a
+    # degenerate / under-sampled input (the UI renders the honest empty state).
+    weights: Optional[dict[str, float]] = None
+    # ALWAYS true — these weights are fit IN-SAMPLE, never a forecast.
+    in_sample: bool = True
+    reason: str

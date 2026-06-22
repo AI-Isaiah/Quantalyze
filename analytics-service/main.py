@@ -24,7 +24,7 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 
-from routers import analytics, cron, exchange, internal, match, portfolio, simulator, csv
+from routers import analytics, cron, exchange, internal, match, optimizer, portfolio, simulator, csv
 from routers import process_key as process_key_router
 from routers.debug_key_flow import router as debug_key_flow_router
 
@@ -241,6 +241,7 @@ app.include_router(cron.router)
 app.include_router(exchange.router)
 app.include_router(match.router)
 app.include_router(portfolio.router)
+app.include_router(optimizer.router)
 app.include_router(simulator.router)
 app.include_router(internal.router)
 app.include_router(csv.router)
