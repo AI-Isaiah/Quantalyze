@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1.0
 milestone_name: Scenario Analysis
 status: executing
-stopped_at: Completed 24-03-PLAN.md
-last_updated: "2026-06-22T09:50:56.704Z"
+stopped_at: Completed 25-03-PLAN.md
+last_updated: "2026-06-22T10:19:13.597Z"
 last_activity: 2026-06-22
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 18
-  completed_plans: 16
+  completed_plans: 17
   percent: 50
 ---
 
@@ -27,11 +27,11 @@ See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 ## Current Position
 
 Phase: 25 (Read-Only Sharing) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-06-22
 
-Progress: [█████████░] 89%
+Progress: [█████████░] 94%
 
 ## Milestone Roadmap (v1.1.0 Scenario Analysis)
 
@@ -233,6 +233,9 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - [Phase 24]: Plan 24-03: extracted ScenarioBenchmarkSection so the honesty invariants are unit-testable without mounting the 1900-line composer
 - [Phase ?]: Phase 25-01: share read path is hash-in-Node — get_shared_scenario(p_token_hash TEXT) takes a precomputed sha256 hex; no pgcrypto digest (Plan 25-02 owns the single digest site). search_path=public,pg_temp; body-shape self-assert proves no api_keys/portfolios + revoke gate + published filter.
 - [Phase 25]: Phase 25-02: scenario-share-token.ts is the single sha256 digest source-of-truth — mintShareToken() = randomBytes(32)->base64url raw (43 chars, URL-only) + hashShareToken(raw) sha256 hex (the only thing at rest, == get_shared_scenario p_token_hash). random+stored-hash (revocable per SHARE-03), NO env secret (distinct from demo-pdf-token HMAC); Node crypto only, no installs. 6 TDD unit tests pin entropy/format/determinism + known sha256 vectors so an algorithm change vs the RPC fails CI loudly. SHARE-01 complete.
+- [Phase 25]: 25-03: validate share scenario_id via isUuid (UUID_RE), not zod v4 .uuid() which enforces RFC-4122 variant bits and rejects valid Postgres ids
+- [Phase 25]: 25-03: generate stores only token_hash; raw token returned once in the URL; Copy link re-generates (list never holds the raw token)
+- [Phase 25]: 25-03: scenario.share/scenario.share.revoke audit actions (TS+Python parity); scenario_shares registered as a GDPR direct user-owned table
 
 ## Accumulated Context
 
@@ -254,8 +257,8 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-06-22T09:50:56.700Z
-Stopped at: Completed 24-03-PLAN.md
+Last session: 2026-06-22T10:19:13.593Z
+Stopped at: Completed 25-03-PLAN.md
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
 

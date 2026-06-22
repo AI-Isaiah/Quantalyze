@@ -113,7 +113,7 @@ Plans:
 **Plans**: 4 plans in 2 waves
   - [x] 25-01-PLAN.md — scenario_shares table + owner RLS + REVOKE anon + partial unique index + get_shared_scenario SECURITY DEFINER read RPC + self-verify + down/ rollback + two-tenant/anon CONTENT-leak + revoke-immediacy SQL test + database.types hand-patch [wave 1]
   - [x] 25-02-PLAN.md — scenario-share-token.ts (256-bit randomBytes → base64url, sha256 hash-in-Node single source-of-truth) + entropy/format/hash unit test [wave 1]
-  - [ ] 25-03-PLAN.md — allocator generate + revoke routes (hash-not-raw, created_by-from-auth, pre-revoke, 0-rows→404) + SavedScenariosList Share affordance (copied-only-on-success, role=alert honest failures) [wave 2]
+  - [x] 25-03-PLAN.md — allocator generate + revoke routes (hash-not-raw, created_by-from-auth, pre-revoke, 0-rows→404) + SavedScenariosList Share affordance (copied-only-on-success, role=alert honest failures) [wave 2]
   - [ ] 25-04-PLAN.md — public force-dynamic /scenario-share/[token] page + share-resolve helper (DI-23-01 honest-absence, never a live-book substitution) + limit-first RPC-gated read + resolve→revoke→404 test [wave 2]
 **UI hint**: yes
 
@@ -161,7 +161,7 @@ Phases execute in numeric order: 21 → 22 → 23 → 24 → 25 → 26 → 27 �
 | 22. Methodology-Honesty Scaffolding | 2/2 | Complete    | 2026-06-21 |
 | 23. Scenario Persistence & Compare | 5/5 | Complete   | 2026-06-21 |
 | 24. Benchmark Comparison | 3/3 | Complete   | 2026-06-22 |
-| 25. Read-Only Sharing | 2/4 | In Progress|  |
+| 25. Read-Only Sharing | 3/4 | In Progress|  |
 | 26. Stress Testing & VaR | 0/TBD | Not started | - |
 | 27. Forward Uncertainty (Monte-Carlo Bands) | 0/TBD | Not started | - |
 | 28. Weight Optimizer | 0/TBD | Not started | - |
