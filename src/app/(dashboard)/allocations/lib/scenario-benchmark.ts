@@ -99,8 +99,19 @@ export function computeScenarioBenchmark(
 
   // Tracking error + information ratio always come from the reused helper.
   const te = computeTrackingError(p, b); // std(p−b)·√252
-  const excessMean = mean(p.map((v, i) => v - b[i]));
-  const informationRatio = te > 0 ? (excessMean * 252) / te : null;
+  const diff = p.map((v, i) => v - b[i]);
+  const excessMean = mean(diff);
+  // IR degeneracy is detected by RELATIVE scale, NOT an exact `te > 0` — the
+  // SAME float-residue trap beta/alpha/correlation already guard. A
+  // numerically-constant-but-NONZERO excess (e.g. steady +0.003/day
+  // outperformance) leaves te = std(excess)·√252 ≈ 1e-16 (mean-subtraction
+  // residue), which passes `> 0` and fabricates IR ≈ excessMean·252/1e-16 ≈
+  // 2.5e15, a finite number formatNumber would render. Test instead whether
+  // the excess series' own dispersion (std = te/√252) is negligible relative
+  // to its level → surface null so the UI renders "—".
+  const stdExcess = te / Math.sqrt(252);
+  const teIsDegenerate = stdExcess <= 1e-12 * (Math.abs(excessMean) + 1e-12);
+  const informationRatio = teIsDegenerate ? null : (excessMean * 252) / te;
 
   // var(b): POPULATION variance of the aligned benchmark. Computed FIRST so
   // the constant-benchmark degenerate case is detected here, not inferred from

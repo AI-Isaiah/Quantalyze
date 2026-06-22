@@ -202,6 +202,29 @@ describe("computeScenarioBenchmark — null degenerate paths (em-dash source)", 
     expect(r.correlation).toBeNull();
   });
 
+  it("numerically-constant NONZERO excess (steady outperformance) → information ratio is null, never a fabricated ~1e15", () => {
+    // A steady +0.003/day outperformance: the excess series (p−b) is a
+    // numerically CONSTANT but NONZERO 0.003 every day. te = std(excess)·√252
+    // is ~1e-16 float residue (from mean-subtraction), which passes an exact
+    // `te > 0` guard → IR = excessMean·252/1e-16 ≈ 2.5e15: a FABRICATED finite
+    // number formatNumber would render. The SAME relative-scale degeneracy test
+    // beta/alpha/correlation already apply must gate IR too → null.
+    const d = days(30);
+    // Non-degenerate benchmark (real variance) so only the EXCESS is degenerate.
+    const bench: DP[] = d.map((date, i) => ({
+      date,
+      value: i % 2 === 0 ? 0.01 : -0.006,
+    }));
+    // port = bench + 0.003 every day → excess ≡ 0.003 (constant, nonzero).
+    const port: DP[] = bench.map((x) => ({ ...x, value: x.value + 0.003 }));
+    const r = computeScenarioBenchmark(port, bench);
+    expect(r.n).toBe(30);
+    expect(r.informationRatio).toBeNull();
+    // Sanity: this is NOT the te=0 (p≡b) case — there IS real excess, just
+    // numerically constant. te is a tiny float residue, not exactly 0.
+    expect(r.trackingError).not.toBeNull();
+  });
+
   it("te=0 (p ≡ b) → information ratio is null (guard te>0 before dividing)", () => {
     const d = days(6);
     const series = d.map((date, i) => ({
