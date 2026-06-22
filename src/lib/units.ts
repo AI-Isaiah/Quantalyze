@@ -39,10 +39,12 @@
  *  - `DELTA_UNITS` (simulatorSchema.ts NEW-C11-06)
  *
  * Not re-exported (deliberately):
- *  - `WealthPoint`, `toWealth`, `VisibleAligned` from EquityChart.tsx
- *    (NEW-C04-03 / NEW-C04-04). That module is React-heavy; re-exporting
- *    from a server-importable unit module would pull the chart tree into
- *    RSC bundles.
+ *  - `VisibleAligned` from EquityChart.tsx (NEW-C04-04). That module is
+ *    React-heavy; re-exporting from a server-importable unit module would
+ *    pull the chart tree into RSC bundles. (`WealthPoint` + `toWealth`,
+ *    NEW-C04-03, now live in the pure `@/lib/scenario` module — moved there
+ *    so the server-rendered scenario-share page can call `toWealth()` without
+ *    tripping the RSC client-boundary error; import them from `@/lib/scenario`.)
  *  - `holdingEquityContribution` from queries.ts (NEW-C03-01). queries.ts
  *    is `server-only` (Next.js server-component-only), so re-exporting
  *    from a utility module would forbid client-side imports of `units`.
