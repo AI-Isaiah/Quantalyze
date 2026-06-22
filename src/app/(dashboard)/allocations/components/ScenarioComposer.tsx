@@ -596,15 +596,31 @@ export function ScenarioComposer({
   useEffect(() => {
     let cancelled = false;
     fetch("/api/benchmark/btc")
-      .then((r) => (r.ok ? r.json() : []))
+      .then((r) => {
+        if (!r.ok) {
+          // F-08: a persistent non-2xx (500 / CDN / route-contract break) is
+          // otherwise invisible — the honest-degrade state hides it. Log so a
+          // regression is visible in production console rather than silently
+          // swallowed. Keep the degrade (return [] → btcAvailable=false).
+          console.warn(
+            "[ScenarioComposer] /api/benchmark/btc non-ok response",
+            { status: r.status },
+          );
+          return [];
+        }
+        return r.json();
+      })
       .then((d) => {
         if (cancelled) return;
         const series = Array.isArray(d) ? (d as DailyPoint[]) : [];
         setBtcDaily(series);
         setBtcAvailable(series.length > 0);
       })
-      .catch(() => {
+      .catch((err) => {
         if (cancelled) return;
+        // F-08: a thrown fetch (network / abort / JSON parse) is also logged
+        // so the silent degrade is observable. State stays honest.
+        console.warn("[ScenarioComposer] /api/benchmark/btc fetch failed", err);
         setBtcDaily([]);
         setBtcAvailable(false);
       });

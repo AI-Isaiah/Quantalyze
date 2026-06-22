@@ -41,6 +41,7 @@ import {
   fireEvent,
   act,
   cleanup,
+  waitFor,
 } from "@testing-library/react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
@@ -2613,5 +2614,74 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // The shortest-history strategy name (REF_BTC/REF_ETH share window length
     // 12, so first-by-input-order REF_BTC wins the deterministic tiebreak).
     expect(text).toContain(`Shortest history: ${REF_BTC}.`);
+  });
+
+  // -------------------------------------------------------------------------
+  // BENCH-01 overlay wiring — RUNTIME pin (not a static grep).
+  //
+  // The overlay (`EquityChart.benchmark={btcWealth}`) was previously pinned
+  // ONLY by static grep: a bad rewire (wrong prop, or raw daily returns
+  // instead of cumulative-WEALTH form) would pass the whole vitest suite.
+  // This drives the real mount-effect fetch to resolve with a BTC daily-
+  // returns series and asserts EquityChart actually RECEIVES the benchmark
+  // prop, in cumulative-WEALTH form (~1.0 base), via mock.calls — mirroring
+  // the wealth-form assertion pattern in T_C19 / M-0096 above.
+  // -------------------------------------------------------------------------
+  it("BENCH-01 EquityChart.benchmark is wired in cumulative-WEALTH form (~1.0 base) once the fetch resolves", async () => {
+    // Raw BTC daily returns the /api/benchmark/btc route would return. The
+    // composer derives btcWealth = computeStrategyCurve(these) → ~1.0-base
+    // wealth curve, and passes it as EquityChart.benchmark (showBenchmark
+    // defaults to true, so the toggle is on).
+    const btcDailyReturns = [
+      { date: "2024-01-02", value: 0.01 },
+      { date: "2024-01-03", value: -0.008 },
+      { date: "2024-01-04", value: 0.012 },
+    ];
+    const fetchStub = vi.fn(async () => ({
+      ok: true,
+      json: async () => btcDailyReturns,
+    }));
+    vi.stubGlobal("fetch", fetchStub);
+
+    try {
+      const payload = makePayload();
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+
+      // The benchmark fetch fires on mount; wait until EquityChart has been
+      // re-rendered with a defined `benchmark` prop (the post-resolve render).
+      await waitFor(() => {
+        expect(fetchStub).toHaveBeenCalledWith("/api/benchmark/btc");
+        const calls = vi.mocked(EquityChart).mock.calls;
+        const withBenchmark = calls.find(
+          (c) => (c[0] as { benchmark?: unknown }).benchmark !== undefined,
+        );
+        expect(withBenchmark).toBeTruthy();
+      });
+
+      const calls = vi.mocked(EquityChart).mock.calls;
+      const last = calls[calls.length - 1][0] as {
+        benchmark?: Array<{ date: string; value: number }>;
+      };
+      // Defined (toggle on + series available) — NOT undefined/raw returns.
+      expect(last.benchmark).toBeDefined();
+      const benchmark = last.benchmark ?? [];
+      expect(benchmark.length).toBe(btcDailyReturns.length);
+
+      // Cumulative-WEALTH form (~1.0 base), NOT raw daily returns (~0.0). A
+      // rewire passing the raw returns would fail this (values ≈ 0.01).
+      // First point = 1·(1+0.01) = 1.01.
+      expect(benchmark[0].value).toBeCloseTo(1.01, 6);
+      for (const pt of benchmark) {
+        expect(pt.value).toBeGreaterThan(0.5);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
