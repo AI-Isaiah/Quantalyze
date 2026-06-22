@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.1.0
 milestone_name: Scenario Analysis
-status: verifying
+status: executing
 stopped_at: Completed 24-03-PLAN.md
-last_updated: "2026-06-22T00:10:28.377Z"
+last_updated: "2026-06-22T09:46:51.634Z"
 last_activity: 2026-06-22
 progress:
   total_phases: 8
   completed_phases: 4
-  total_plans: 14
-  completed_plans: 14
+  total_plans: 18
+  completed_plans: 15
   percent: 50
 ---
 
@@ -21,17 +21,17 @@ progress:
 See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
-**Current focus:** Phase 24 — Benchmark Comparison
+**Current focus:** Phase 25 — Read-Only Sharing
 **Last milestone:** v1.0.0 API-Key Rewrite (Phases 15–20, shipped 2026-06-20).
 
 ## Current Position
 
-Phase: 24 (Benchmark Comparison) — EXECUTING
-Plan: 3 of 3
-Status: Phase complete — ready for verification
+Phase: 25 (Read-Only Sharing) — EXECUTING
+Plan: 2 of 4
+Status: Ready to execute
 Last activity: 2026-06-22
 
-Progress: [██████████] 100%
+Progress: [████████░░] 83%
 
 ## Milestone Roadmap (v1.1.0 Scenario Analysis)
 
@@ -231,6 +231,7 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - [Phase ?]: Phase 24-02: GET /api/benchmark/btc returns BTC DAILY RETURNS [{date,value}] (pct-change of close_price, first row dropped, asc) as PUBLIC-cacheable shared market data (Cache-Control: public s-maxage=3600 SWR) — deliberate contrast with allocator no-store; read-error OR <2 rows degrade to 200 [] (honest empty, never 500); no params, BTC hard-coded, no tenant data, no migration/Python (Railway no-op)
 - [Phase ?]: Plan 24-03: wired the BTC overlay onto EquityChart.benchmark (SVG widget) fed a cumulative-wealth curve via computeStrategyCurve (24-RESEARCH Pitfall 3)
 - [Phase 24]: Plan 24-03: extracted ScenarioBenchmarkSection so the honesty invariants are unit-testable without mounting the 1900-line composer
+- [Phase ?]: Phase 25-01: share read path is hash-in-Node — get_shared_scenario(p_token_hash TEXT) takes a precomputed sha256 hex; no pgcrypto digest (Plan 25-02 owns the single digest site). search_path=public,pg_temp; body-shape self-assert proves no api_keys/portfolios + revoke gate + published filter.
 
 ## Accumulated Context
 
@@ -252,7 +253,7 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-06-22T00:10:28.374Z
+Last session: 2026-06-22T09:46:25.606Z
 Stopped at: Completed 24-03-PLAN.md
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
