@@ -83,8 +83,13 @@ describe("ScenarioBenchmarkSection", () => {
     expect(screen.getByText("Alpha")).toBeTruthy();
     expect(screen.getByText("Beta")).toBeTruthy();
 
-    // Methodology stamp: overlapping days + the 252-annualized note.
-    expect(container.textContent).toContain("overlapping days");
+    // Methodology stamp: the EXACT methodologyLine(N) output — not just the
+    // "overlapping days" substring. Asserting only the substring would let a
+    // mutation passing methodologyLine(0) (a wrong/fabricated N) still pass;
+    // pinning the N inside the line catches it.
+    expect(container.textContent).toContain(
+      "Historical realized · 40 overlapping days · not a forecast.",
+    );
     expect(container.textContent).toContain(
       "252-day annualized active returns",
     );
@@ -196,5 +201,16 @@ describe("ScenarioBenchmarkSection", () => {
       "benchmark-value-beta",
     );
     expect(betaValue.textContent).toBe("—");
+
+    // Alpha is ALSO null on a constant benchmark (var(b)=0) — assert its cell
+    // renders the em-dash too, never a fabricated "0.00".
+    const alphaLabel = screen.getByText("Alpha");
+    const alphaRow = alphaLabel.closest("[data-testid='benchmark-row-alpha']");
+    expect(alphaRow).toBeTruthy();
+    const alphaValue = within(alphaRow as HTMLElement).getByTestId(
+      "benchmark-value-alpha",
+    );
+    expect(alphaValue.textContent).toBe("—");
+    expect(alphaValue.textContent).not.toContain("0.00");
   });
 });
