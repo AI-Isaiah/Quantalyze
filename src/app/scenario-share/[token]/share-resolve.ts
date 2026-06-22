@@ -160,9 +160,24 @@ export function resolveSharedScenario(
       max_drawdown: null,
     });
     // An added strategy is "selected" when its ref is toggled on (default true
-    // when the toggle entry is absent — added strategies enter enabled).
+    // when the toggle entry is absent — added strategies enter enabled). This
+    // mirrors computeMetricsForDraft's owner-side rule (`toggle === undefined ?
+    // default(true) : toggle`).
     selected[id] = draft.toggleByScopeRef[id] !== false;
-    weights[id] = draft.weightOverrides[id] ?? 0;
+    // WR-05 — derive the weight EXACTLY as the owner's projection does
+    // (scenario-compare.ts computeMetricsForDraft): take the explicit override
+    // ONLY when it is a finite number, else fall back to the engine default for
+    // an un-overridden ADDED strategy, which is 0 (the deliberate, test-pinned
+    // invariant in scenario-adapter.ts buildStrategyForBuilderSet — a non-zero
+    // default would let a never-weighted add slip a fabricated size past the
+    // commit gate). The prior `?? 0` diverged from the owner in two ways: it
+    // passed a NaN/Infinity override straight through to computeScenario (the
+    // owner rejects non-finite and falls back to 0), and `??` only guards
+    // null/undefined. Matching the finite-guard makes the SHARED projection
+    // equal the OWNER's saved projection for any mixed explicit/implicit-weight
+    // draft — the page's whole value proposition is an honest projection.
+    const ov = draft.weightOverrides[id];
+    weights[id] = typeof ov === "number" && Number.isFinite(ov) ? ov : 0;
     startDates[id] = daily[0]?.date ?? "2022-01-01";
   }
 
