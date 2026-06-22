@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.1.0
 milestone_name: Scenario Analysis
-status: executing
-stopped_at: Completed 25-03-PLAN.md
-last_updated: "2026-06-22T10:19:13.597Z"
+status: verifying
+stopped_at: Completed 25-04-PLAN.md (recipient page + share-resolve)
+last_updated: "2026-06-22T10:35:31.911Z"
 last_activity: 2026-06-22
 progress:
   total_phases: 8
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 18
-  completed_plans: 17
-  percent: 50
+  completed_plans: 18
+  percent: 63
 ---
 
 # Project State
@@ -28,10 +28,10 @@ See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 
 Phase: 25 (Read-Only Sharing) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-06-22
 
-Progress: [█████████░] 94%
+Progress: [██████████] 100%
 
 ## Milestone Roadmap (v1.1.0 Scenario Analysis)
 
@@ -236,6 +236,10 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - [Phase 25]: 25-03: validate share scenario_id via isUuid (UUID_RE), not zod v4 .uuid() which enforces RFC-4122 variant bits and rejects valid Postgres ids
 - [Phase 25]: 25-03: generate stores only token_hash; raw token returned once in the URL; Copy link re-generates (list never holds the raw token)
 - [Phase 25]: 25-03: scenario.share/scenario.share.revoke audit actions (TS+Python parity); scenario_shares registered as a GDPR direct user-owned table
+- [Phase 25]: 25-04 recipient page renders an inline return-form KPI strip, NOT KpiStrip (KpiStrip leaks USD/AUM)
+- [Phase 25]: 25-04 DI-23-01 closed: share-resolve branches on codec outcome, only ok computes, never reads .value on non-ok, neutral holdings-free default
+- [Phase 25]: 25-04 public page revoke immediacy via force-dynamic + no-store; RPC revoked_at IS NULL is the gate; resolve to revoke to 404 page-tested (SHARE-03)
+- [Phase 25]: 25-04 toWealth imported from EquityChart module (its real export), not @/lib/scenario (stale JSDoc)
 
 ## Accumulated Context
 
@@ -257,8 +261,8 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-06-22T10:19:13.593Z
-Stopped at: Completed 25-03-PLAN.md
+Last session: 2026-06-22T10:35:31.907Z
+Stopped at: Completed 25-04-PLAN.md (recipient page + share-resolve)
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
 

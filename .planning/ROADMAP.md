@@ -33,7 +33,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 22: Methodology-Honesty Scaffolding** - Per-stat method/overlap-N/horizon disclosure + a shared minimum-sample gate the heavy quant phases reuse (completed 2026-06-21)
 - [x] **Phase 23: Scenario Persistence & Compare** - Save / reopen / list / rename / delete named scenarios (DB + RLS + `schema_version`) and compare 2+ side-by-side (the spine) (completed 2026-06-21)
 - [x] **Phase 24: Benchmark Comparison** - Overlay a benchmark on the scenario projection with tracking error / information ratio / alpha-beta over the aligned window (completed 2026-06-22)
-- [ ] **Phase 25: Read-Only Sharing** - Generate / revoke a read-only share link that renders a saved scenario without leaking the live book or any other tenant's data
+- [x] **Phase 25: Read-Only Sharing** - Generate / revoke a read-only share link that renders a saved scenario without leaking the live book or any other tenant's data (completed 2026-06-22)
 - [ ] **Phase 26: Stress Testing & VaR** - Parameterized β-propagated market shock + a disclosed downside measure (historical VaR + CVaR / Expected Shortfall)
 - [ ] **Phase 27: Forward Uncertainty (Monte-Carlo Bands)** - Block-bootstrap forward confidence bands / return distribution, honest to sample size, gated below the minimum-sample floor
 - [ ] **Phase 28: Weight Optimizer** - Python analytics-service min-vol / max-Sharpe solver (Ledoit-Wolf shrinkage, long-only, write-to-draft-only) with TS↔Python parity pinned
@@ -114,7 +114,7 @@ Plans:
   - [x] 25-01-PLAN.md — scenario_shares table + owner RLS + REVOKE anon + partial unique index + get_shared_scenario SECURITY DEFINER read RPC + self-verify + down/ rollback + two-tenant/anon CONTENT-leak + revoke-immediacy SQL test + database.types hand-patch [wave 1]
   - [x] 25-02-PLAN.md — scenario-share-token.ts (256-bit randomBytes → base64url, sha256 hash-in-Node single source-of-truth) + entropy/format/hash unit test [wave 1]
   - [x] 25-03-PLAN.md — allocator generate + revoke routes (hash-not-raw, created_by-from-auth, pre-revoke, 0-rows→404) + SavedScenariosList Share affordance (copied-only-on-success, role=alert honest failures) [wave 2]
-  - [ ] 25-04-PLAN.md — public force-dynamic /scenario-share/[token] page + share-resolve helper (DI-23-01 honest-absence, never a live-book substitution) + limit-first RPC-gated read + resolve→revoke→404 test [wave 2]
+  - [x] 25-04-PLAN.md — public force-dynamic /scenario-share/[token] page + share-resolve helper (DI-23-01 honest-absence, never a live-book substitution) + limit-first RPC-gated read + resolve→revoke→404 test [wave 2]
 **UI hint**: yes
 
 ### Phase 26: Stress Testing & VaR
@@ -161,7 +161,7 @@ Phases execute in numeric order: 21 → 22 → 23 → 24 → 25 → 26 → 27 �
 | 22. Methodology-Honesty Scaffolding | 2/2 | Complete    | 2026-06-21 |
 | 23. Scenario Persistence & Compare | 5/5 | Complete   | 2026-06-21 |
 | 24. Benchmark Comparison | 3/3 | Complete   | 2026-06-22 |
-| 25. Read-Only Sharing | 3/4 | In Progress|  |
+| 25. Read-Only Sharing | 4/4 | Complete   | 2026-06-22 |
 | 26. Stress Testing & VaR | 0/TBD | Not started | - |
 | 27. Forward Uncertainty (Monte-Carlo Bands) | 0/TBD | Not started | - |
 | 28. Weight Optimizer | 0/TBD | Not started | - |
