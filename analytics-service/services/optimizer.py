@@ -35,6 +35,7 @@ import logging
 from typing import Literal
 
 import numpy as np
+import numpy.typing as npt
 from scipy.optimize import minimize
 
 logger = logging.getLogger("quantalyze.analytics.optimizer")
@@ -75,7 +76,7 @@ class OptimizerResult:
         self.in_sample = True  # ALWAYS — never present these as a forecast.
 
 
-def ledoit_wolf_shrinkage(returns: np.ndarray) -> np.ndarray:
+def ledoit_wolf_shrinkage(returns: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """Analytical Ledoit-Wolf shrinkage of the sample covariance toward a scaled
     identity target ``m·I`` (Ledoit & Wolf 2004, JMVA).
 
@@ -109,7 +110,7 @@ def ledoit_wolf_shrinkage(returns: np.ndarray) -> np.ndarray:
     b2 = min(b_bar2, d2)
     shrinkage = 0.0 if d2 <= 0 else max(0.0, min(1.0, b2 / d2))
 
-    shrunk: np.ndarray = shrinkage * target + (1.0 - shrinkage) * sample
+    shrunk: npt.NDArray[np.float64] = shrinkage * target + (1.0 - shrinkage) * sample
     return shrunk
 
 
@@ -179,11 +180,12 @@ def optimize_weights(
     constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
 
     if objective == "max_sharpe":
-        def neg_objective(w: np.ndarray) -> float:
-            vol = np.sqrt(max(w @ cov @ w, 1e-18))
+        def neg_objective(w: npt.NDArray[np.float64]) -> float:
+            variance = float(w @ cov @ w)
+            vol = float(np.sqrt(max(variance, 1e-18)))
             return float(-(w @ mean_annual) / vol)
     else:  # min_vol (default)
-        def neg_objective(w: np.ndarray) -> float:
+        def neg_objective(w: npt.NDArray[np.float64]) -> float:
             return float(w @ cov @ w)
 
     result = minimize(
