@@ -2,6 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
+// WealthPoint + toWealth() live in the pure @/lib/scenario module (NOT here):
+// this widget is "use client", and the server-rendered scenario-share page
+// calls toWealth() during render — a function exported from a client module
+// throws the RSC "called on the server" boundary error. We import them for this
+// widget's own Props + re-export below so client-side importers are unchanged.
+import { toWealth, type WealthPoint } from "@/lib/scenario";
 import { CustomRangePicker } from "../../components/CustomRangePicker";
 import { useTweakValue } from "../../context/TweaksContext";
 import { WidgetState } from "../../components/WidgetState";
@@ -135,57 +141,12 @@ function alignedSeries<T>(arr: T[]): VisibleAligned<T> {
   return arr as unknown as VisibleAligned<T>;
 }
 
-// ---------------------------------------------------------------------------
-// NEW-C04-03: branded WealthPoint type
-//
-// `computeScenario().equity_curve` produces cumulative RETURN values (e.g.
-// 0.18 = +18%). This chart needs cumulative WEALTH (starting at ~1.0). The
-// caller MUST convert via `toWealth()` before passing scenarioSeries. A raw
-// DailyPoint[] fails to typecheck so the silent 0%-baseline miscompare is
-// caught at compile time.
-//
-// `toWealth()` is the single constructor — all new call sites must go through
-// it; existing call sites (ScenarioComposer.tsx `value + 1`) are equivalent
-// and type-compatible via a cast (preferred: refactor to toWealth).
-// ---------------------------------------------------------------------------
-
-/** Branded DailyPoint in cumulative-WEALTH form (value starts near 1.0). */
-export type WealthPoint = DailyPoint & { readonly __wealthBrand: true };
-
-/**
- * Convert a cumulative-RETURN point to WEALTH form.
- * Pass `computeScenario().equity_curve` through this before forwarding to
- * `scenarioSeries`. A cheap boundary warn fires when the first value is < 0.05
- * (reliable indicator of an unconverted RETURN-form array; see inline comment).
- */
-export function toWealth(points: DailyPoint[]): WealthPoint[] {
-  // C2/SF-4 fix: threshold was 0.5, which fired a false-positive warn for any
-  // strategy whose cumulative wealth at t=0 is below 50% (e.g. a –55% drawdown
-  // strategy has wealth[0] ≈ 0.45, legitimately below 0.5 after +1 conversion).
-  // Raw RETURN-form arrays start at 0.xx or negative, so they're well below
-  // 0.1 — tightening to 0.1 correctly catches miscalls without false-positives
-  // for deeply-underwater but correctly-converted WEALTH arrays.
-  //
-  // red-team M2 fix: the 0.1 threshold still fires a false positive for strategies
-  // with >90% cumulative drawdown since inception (wealth[0] = 0.09 for –91%).
-  // That is a legitimate wealth value, not a miscall. The distinguishing property
-  // of an unconverted RETURN-form array is that the first value is near ZERO
-  // (return-form starts at 0.0 = 0% cumulative gain), while wealth-form starts
-  // near 1.0 (= 100% of initial value). A value in [0.05, 0.95) is ambiguous
-  // (either deeply underwater wealth OR a partially-converted return), but values
-  // strictly < 0.05 reliably indicate a miscall (–95% cumulative return at t=0
-  // is implausible for any dataset that passes the f7 leading-zero trim). Use
-  // 0.05 as the threshold.
-  if (points.length > 0 && points[0].value < 0.05) {
-    if (typeof console !== "undefined") {
-      console.warn(
-        "[EquityChart] toWealth: first value < 0.05 — input is likely raw RETURN-form (not wealth). Did you forget to call toWealth() or add +1?",
-        { first: points[0] },
-      );
-    }
-  }
-  return points.map((p) => ({ ...p, __wealthBrand: true as const }));
-}
+// NEW-C04-03: the branded WealthPoint type + toWealth() constructor moved to
+// the pure @/lib/scenario module (see the import at the top of this file for
+// why — RSC server/client boundary). Re-exported here so the existing
+// client-side importers (ScenarioComposer, the EquityChart tests) keep their
+// `from "./EquityChart"` import path unchanged.
+export { toWealth, type WealthPoint };
 
 type Props = {
   equityDailyPoints: DailyPoint[];

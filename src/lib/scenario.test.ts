@@ -1,9 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   buildDateMapCache,
   computeScenario,
   computeStrategyCurve,
   computeCompositeCurve,
+  toWealth,
   type StrategyForBuilder,
   type DailyPoint,
   type ScenarioState,
@@ -873,6 +874,57 @@ describe("computeScenario — portfolio_daily_returns (full daily series)", () =
     // The first equity_curve point (i=0, return form) is the first daily
     // return; it must match the first portfolio_daily_returns value.
     expect(metrics.equity_curve[0].value).toBeCloseTo(series[0].value, 4);
+  });
+});
+
+/**
+ * toWealth() moved here from the EquityChart "use client" widget so the
+ * server-rendered scenario-share page can call it without the RSC client/server
+ * boundary 500 (see scenario-share/[token]/page-server-boundary.test.ts).
+ * Its behavior was previously exercised only via the EquityChart re-export;
+ * these tests pin the constructor at its new home, imported directly from
+ * "./scenario".
+ */
+describe("toWealth (pure constructor, RSC-safe home)", () => {
+  it("brands each point and preserves date+value", () => {
+    const pts: DailyPoint[] = [
+      { date: "2024-01-01", value: 1.0 },
+      { date: "2024-01-02", value: 1.1 },
+    ];
+    const w = toWealth(pts);
+    expect(w).toHaveLength(2);
+    expect(w[0]).toMatchObject({ date: "2024-01-01", value: 1.0, __wealthBrand: true });
+    expect(w[1]).toMatchObject({ date: "2024-01-02", value: 1.1, __wealthBrand: true });
+  });
+
+  it("returns [] for empty input and never warns", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(toWealth([])).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("warns when the first value is below the 0.05 miscall threshold (likely raw RETURN-form)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    toWealth([
+      { date: "2024-01-01", value: 0.04 },
+      { date: "2024-01-02", value: 0.05 },
+    ]);
+    const hits = warn.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].includes("[scenario] toWealth"),
+    );
+    expect(hits.length).toBeGreaterThanOrEqual(1);
+    warn.mockRestore();
+  });
+
+  it("does NOT warn at the 0.05 boundary (a legitimately deep but valid wealth curve)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    toWealth([
+      { date: "2024-01-01", value: 0.05 },
+      { date: "2024-01-02", value: 0.06 },
+    ]);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
 
