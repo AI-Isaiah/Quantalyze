@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.1.0
 milestone_name: Scenario Analysis
-status: verifying
-stopped_at: Completed 25-04-PLAN.md (recipient page + share-resolve)
-last_updated: "2026-06-22T12:13:10.575Z"
+status: ready_to_plan
+stopped_at: Phase 26 complete (2/2) — ready to discuss Phase 27
+last_updated: 2026-06-22T12:33:30.625Z
 last_activity: 2026-06-22
 progress:
   total_phases: 8
   completed_phases: 6
   total_plans: 20
-  completed_plans: 20
+  completed_plans: 68
   percent: 75
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
-**Current focus:** Phase 26 — Stress Testing & VaR
+**Current focus:** Phase 27 — forward uncertainty (monte carlo bands)
 **Last milestone:** v1.0.0 API-Key Rewrite (Phases 15–20, shipped 2026-06-20).
 
 ## Current Position
 
-Phase: 26 (Stress Testing & VaR) — EXECUTING
-Plan: 2 of 2
-Status: Phase complete — ready for verification
+Phase: 27
+Plan: Not started
+Status: Ready to plan
 Last activity: 2026-06-22
 
 Progress: [██████████] 100%
