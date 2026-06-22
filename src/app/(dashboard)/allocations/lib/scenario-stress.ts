@@ -124,6 +124,16 @@ function computeVarPath(
 
   const values = portfolioDaily.map((d) => d.value);
 
+  // 1b. Finite-aware short-circuit — honor the "fully null-safe" contract for a
+  // NaN/Infinity injected DIRECTLY through this public signature, independent of
+  // the upstream `computeScenario` producer. A non-finite contaminant defeats the
+  // relative-scale guard below (NaN <= NaN is false, so it would NOT short-circuit)
+  // and reaches `computeVaR`, whose `sort((a,b) => a - b)` returns NaN for any pair
+  // involving the contaminant → an undefined ordering / corrupted (possibly
+  // non-NaN-but-wrong) quantile that the section would render as a confident,
+  // fabricated number. Surface null instead so no fabricated value can escape.
+  if (!values.every(Number.isFinite)) return NULL_VAR;
+
   // 2. Relative-scale degeneracy guard (copied from scenario-benchmark.ts:139-140).
   // A numerically-constant n>=60 window leaves a float-residue variance (~1e-37)
   // that an exact `=== 0` would miss, letting computeVaR return a meaningless

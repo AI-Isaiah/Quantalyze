@@ -305,6 +305,44 @@ describe("computeScenarioStress — degenerate null paths (em-dash source)", () 
     expect(r.cvar).toBeNull();
   });
 
+  it("degenerate null — a NaN injected DIRECTLY through the public signature ⇒ var/cvar null (WR-01)", () => {
+    // The module docstring claims the result is "fully null-safe" on a non-finite
+    // series. The function's OWN guard must honor that contract independent of the
+    // upstream producer: a NaN defeats the relative-scale guard (NaN <= NaN is
+    // false), so without an explicit finite-check it would reach computeVaR, whose
+    // sort comparator returns NaN for any pair touching the contaminant → a
+    // corrupted (possibly non-NaN-but-WRONG) quantile rendered as a confident,
+    // fabricated number. The honest result is a clean null.
+    const d = manyDays(64);
+    const port: DP[] = d.map((date, i) => ({
+      date,
+      // A real non-degenerate downside series, but with ONE NaN contaminant.
+      value: i === 13 ? NaN : i % 7 === 0 ? -0.05 : 0.01 + (i % 5) * 0.003,
+    }));
+    const btc: DP[] = d.map((date, i) => ({ date, value: i % 2 === 0 ? 0.01 : -0.008 }));
+    const r = computeScenarioStress(port, btc);
+    // The window N is still the full length — only the estimate is suppressed.
+    expect(r.varN).toBe(64);
+    // var/cvar MUST be null, never NaN and never a corrupted finite quantile.
+    expect(r.var).toBeNull();
+    expect(r.cvar).toBeNull();
+  });
+
+  it("degenerate null — an Infinity injected DIRECTLY through the public signature ⇒ var/cvar null (WR-01)", () => {
+    // Infinity participates in arithmetic without short-circuiting to NaN in every
+    // path, so it is a distinct contaminant from NaN — assert it is also suppressed.
+    const d = manyDays(64);
+    const port: DP[] = d.map((date, i) => ({
+      date,
+      value: i === 20 ? Infinity : i % 7 === 0 ? -0.05 : 0.01 + (i % 5) * 0.003,
+    }));
+    const btc: DP[] = d.map((date, i) => ({ date, value: i % 2 === 0 ? 0.01 : -0.008 }));
+    const r = computeScenarioStress(port, btc);
+    expect(r.varN).toBe(64);
+    expect(r.var).toBeNull();
+    expect(r.cvar).toBeNull();
+  });
+
   it("degenerate null — constant BTC over the overlap (n>=60) ⇒ beta/projectedImpact null", () => {
     // computeScenarioBenchmark null-guards the constant-benchmark via its
     // relative-scale test, so beta is null ⇒ projectedImpact is null — never a
