@@ -119,6 +119,18 @@ CREATE UNIQUE INDEX scenario_shares_one_active_idx
 CREATE INDEX scenario_shares_scenario_idx
   ON scenario_shares (scenario_id);
 
+-- HOT-PATH index for the get_shared_scenario read RPC. That SECURITY DEFINER
+-- function is the SOLE anon/public read path and gates on
+-- `WHERE sh.token_hash = p_token_hash`. Without an index on token_hash, every
+-- anon share-page load is a seq scan over scenario_shares — a cost that grows
+-- with every share ever minted (revoked rows are retained, never deleted). On a
+-- force-dynamic public page that is a cheap DoS-amplification surface, so cover
+-- the lookup with a btree. NON-unique: token_hash is not unique across revoked
+-- re-shares of the same scenario (the partial-unique constraint is on
+-- scenario_id WHERE revoked_at IS NULL, not on token_hash).
+CREATE INDEX scenario_shares_token_hash_idx
+  ON scenario_shares (token_hash);
+
 -- --------------------------------------------------------------------------
 -- STEP 2: get_shared_scenario(p_token_hash) — the leak-scoped read RPC
 -- --------------------------------------------------------------------------
