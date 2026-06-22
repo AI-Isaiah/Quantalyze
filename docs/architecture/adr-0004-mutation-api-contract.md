@@ -45,7 +45,7 @@ proxy (optimistic session check)
 
 4. **Rate limiting by route class**:
    - Sensitive writes (attestation, deletion, key operations): `userActionLimiter`
-   - Public-IP endpoints (PDF generation): `publicIpLimiter`
+   - Public-IP endpoints (PDF generation, public read GETs like `/api/benchmark/btc`): `publicIpLimiter`
    - Admin operations: `adminActionLimiter`
 
 ### Routes requiring retrofit
