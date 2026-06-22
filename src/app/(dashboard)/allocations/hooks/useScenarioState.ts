@@ -45,6 +45,7 @@ import {
   addStrategyBridge as addBridgePure,
   removeAddedStrategy as removePure,
   setWeightOverride as setWeightPure,
+  applyWeightOverrides as applyWeightsPure,
   type ScenarioDraft,
   type AddedStrategy,
   type HoldingForDefault,
@@ -78,6 +79,7 @@ export interface UseScenarioStateReturn {
   addStrategyBridge: (holdingScopeRef: string, s: AddedStrategy) => void;
   removeAddedStrategy: (id: string) => void;
   setWeightOverride: (scopeRef: string, weight: number) => void;
+  applyWeightOverrides: (weights: Record<string, number>) => void;
   reset: () => void;
   dismissFingerprintMismatchBanner: () => void;
   /**
@@ -243,6 +245,12 @@ export function useScenarioState(
     },
     [setValue, baseOf],
   );
+  const applyWeightOverrides = useCallback(
+    (weights: Record<string, number>) => {
+      setValue((prev) => applyWeightsPure(baseOf(prev), weights));
+    },
+    [setValue, baseOf],
+  );
   const reset = useCallback(() => {
     // removeStored: removeItem the scoped key + set in-memory to the default
     // WITHOUT re-persisting it (the next user edit persists). Clears the banner.
@@ -308,6 +316,7 @@ export function useScenarioState(
     addStrategyBridge,
     removeAddedStrategy,
     setWeightOverride,
+    applyWeightOverrides,
     reset,
     dismissFingerprintMismatchBanner,
     hydrateFromSaved,

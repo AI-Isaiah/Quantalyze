@@ -474,6 +474,51 @@ export function setWeightOverride(
   };
 }
 
+/**
+ * Apply a FULL weight vector atomically (Phase 28 OPT-01 — "Apply suggested
+ * weights to the draft").
+ *
+ * CRITICAL distinction from `setWeightOverride`: that primitive sets ONE ref and
+ * proportionally renormalizes the OTHERS to keep the total at 1.0. Looping it
+ * over a vector is WRONG — each call re-scales the weights written by the
+ * previous calls, so the draft lands at a DIFFERENT allocation than the one
+ * supplied (only the last ref is exact). This writes every provided ref in ONE
+ * pass and renormalizes over the enabled set exactly once, so applying an
+ * optimizer's sum-to-1 vector reproduces it (within float error). Non-finite /
+ * negative / empty input is a no-op (defensive). Every provided ref is recorded
+ * as a user-explicit override (the allocator clicked Apply).
+ */
+export function applyWeightOverrides(
+  draft: ScenarioDraft,
+  weights: Record<string, number>,
+): ScenarioDraft {
+  const refs = Object.keys(weights);
+  if (refs.length === 0) return draft;
+  if (!refs.every((r) => Number.isFinite(weights[r]) && weights[r] >= 0)) {
+    return draft;
+  }
+
+  const enabledIds = enabledIdsOf(draft);
+  // Start from the current map, overwrite the provided refs, then renormalize
+  // ONCE over the enabled set (a single normalization, NOT the per-ref rebalance
+  // setWeightOverride does). renormalizeWeights only writes enabled ids, so a
+  // disabled ref keeps its prior stored weight (restored if toggled back on).
+  const merged: Record<string, number> = { ...draft.weightOverrides };
+  for (const r of refs) merged[r] = clampWeight(weights[r]);
+  const normalized = renormalizeWeights(merged, enabledIds);
+  const nextWeights: Record<string, number> = { ...merged, ...normalized };
+
+  return {
+    ...draft,
+    weightOverrides: clampAllWeights(nextWeights),
+    userWeightOverrides: {
+      ...(draft.userWeightOverrides ?? {}),
+      ...Object.fromEntries(refs.map((r) => [r, nextWeights[r] ?? merged[r]])),
+    },
+    lastEditedAt: new Date().toISOString(),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // B7 cross-tab storage codec — zod-validated parse + version trichotomy.
 // The cross-tab primitive (useCrossTabStorage) owns the localStorage

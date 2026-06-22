@@ -11,6 +11,8 @@ import {
   BridgeResponseSchema,
   CsvValidateResponseSchema,
   type CsvValidateResponse,
+  OptimizeWeightsResponseSchema,
+  type OptimizeWeightsResponse,
 } from "./analytics-schemas";
 import { SimulatorResponseSchema } from "./api/simulatorSchema";
 
@@ -185,6 +187,22 @@ export async function encryptKey(exchange: string, apiKey: string, apiSecret: st
     passphrase: passphrase ?? null,
   });
   return parseResponse(EncryptKeyResponseSchema, data, "/api/encrypt-key");
+}
+
+/**
+ * Phase 28 (OPT-01/02) — request suggested long-only scenario weights from the
+ * Python optimizer. `series` is the draft-scoped strategies' daily-return series
+ * (id -> [{date, value}]); the Next route (allocator-authed) forwards ONLY the
+ * caller's own series. Returns `weights: null` on a degenerate / under-sampled
+ * input (the UI renders the honest empty state) — never a fabricated vector.
+ * The weights are fit IN-SAMPLE (`in_sample: true`); the UI discloses that.
+ */
+export async function optimizeScenarioWeights(
+  series: Record<string, Array<{ date: string; value: number }>>,
+  objective: "min_vol" | "max_sharpe",
+): Promise<OptimizeWeightsResponse> {
+  const data = await analyticsRequest("/api/optimize-weights", { series, objective });
+  return parseResponse(OptimizeWeightsResponseSchema, data, "/api/optimize-weights");
 }
 
 /**

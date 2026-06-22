@@ -98,6 +98,23 @@ export const PortfolioOptimizerResponseSchema = z.object({
   persisted: z.boolean().optional(),
 }).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; suggestions are open-shaped by design (Python fans out per-candidate), wrapper pinned, never spread into a write
 
+// --- /api/optimize-weights (Phase 28, OPT-01/02) ---
+// Strict object (NOT passthrough): the weight-optimizer contract is fixed and
+// the suggested weights are CONSUMED (written into the editable scenario draft),
+// so any Python-side drift must fail the parse loudly rather than render a
+// silently-wrong weight vector. `weights` is null on a degenerate / under-sampled
+// input (the UI renders the honest empty state); `in_sample` is always true.
+export const OptimizeWeightsResponseSchema = z.object({
+  ok: z.boolean(),
+  objective: z.enum(["min_vol", "max_sharpe"]),
+  n: z.number(),
+  k: z.number(),
+  weights: z.record(z.string(), z.number()).nullable(),
+  in_sample: z.boolean(),
+  reason: z.string(),
+});
+export type OptimizeWeightsResponse = z.infer<typeof OptimizeWeightsResponseSchema>;
+
 // --- /api/verify-strategy ---
 // `results` + `matched_strategy_id` are CONSUMED by verify-strategy/route.ts:396
 // (`results` is spread into the strategy_verifications.metrics_snapshot JSONB

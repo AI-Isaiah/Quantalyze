@@ -70,6 +70,10 @@ const CANONICAL = new Set([
   "keys/validate-and-encrypt/route.ts",
   "notes/route.ts",
   "portfolio-optimizer/route.ts",
+  // Phase 28 weight optimizer — parses + validates the body (objective + series
+  // shape + non-finite + payload caps) BEFORE checkLimit, so a 400 never burns a
+  // token (B15 validate-then-limit).
+  "scenario/optimize/route.ts",
   "portfolio-strategies/alias/route.ts",
   "preferences/route.ts",
   "simulator/route.ts",
