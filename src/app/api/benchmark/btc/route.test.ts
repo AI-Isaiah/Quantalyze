@@ -201,4 +201,27 @@ describe("GET /api/benchmark/btc", () => {
     expect(body).toEqual([{ date: "2024-01-03", value: expect.any(Number) }]);
     expect(body[0].value).toBeCloseTo(0.1, 10); // 110/100 − 1
   });
+
+  it("skips a point with a non-positive CURRENT close (finite-but-corrupt return)", async () => {
+    // A zero/negative `close` yields a finite return <= -1 (<= -100%/day) that
+    // passes the Number.isFinite(value) check and would silently poison TE/IR/beta.
+    // The numerator must be guarded for positivity, not only finiteness.
+    setRows([
+      { date: "2024-01-01", close_price: 100 },
+      { date: "2024-01-02", close_price: 0 }, // close <= 0 → point skipped
+      { date: "2024-01-03", close_price: 110 }, // prevClose=0 → also skipped
+      { date: "2024-01-04", close_price: 121 },
+    ]);
+    const { GET } = await import("./route");
+    const res = await GET();
+    const body = (await res.json()) as Array<{ date: string; value: number }>;
+
+    for (const r of body) {
+      expect(Number.isFinite(r.value)).toBe(true);
+      expect(r.value).toBeGreaterThan(-1); // no <= -100%/day corruption leaks through
+    }
+    // Only 2024-01-04 (121/110 − 1) survives; the 0-close point and its successor drop.
+    expect(body).toEqual([{ date: "2024-01-04", value: expect.any(Number) }]);
+    expect(body[0].value).toBeCloseTo(0.1, 10); // 121/110 − 1
+  });
 });

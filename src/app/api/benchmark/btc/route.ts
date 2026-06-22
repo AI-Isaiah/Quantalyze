@@ -101,12 +101,15 @@ export async function GET(): Promise<NextResponse> {
     // Number("") === 0 and Number(null) === 0 are caught by `prevClose <= 0`.
     const prevClose = Number(rows[i - 1].close_price);
     const close = Number(rows[i].close_price);
-    // Guard a null/zero/negative/non-finite prior close: skip the point rather
-    // than emit Infinity/NaN. A non-finite return would corrupt downstream metrics.
+    // Guard a null/zero/negative/non-finite close on EITHER end: skip the point
+    // rather than emit Infinity/NaN or a finite-but-corrupt return (a non-positive
+    // `close` yields value <= -1, i.e. <= -100%/day, which would silently poison
+    // TE/IR/beta downstream). A non-finite return would corrupt them too.
     if (
       !Number.isFinite(prevClose) ||
       prevClose <= 0 ||
-      !Number.isFinite(close)
+      !Number.isFinite(close) ||
+      close <= 0
     ) {
       continue;
     }
