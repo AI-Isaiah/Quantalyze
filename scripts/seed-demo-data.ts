@@ -732,7 +732,31 @@ async function main() {
   }
 
   console.log("[seed] Upserting profiles (3 allocators + 4 managers) ...");
-  const profileRows = [
+  // Explicit element type (defensive). The allocator rows (allocator_status)
+  // and manager rows (manager_status/bio/years_trading/aum_range/linkedin)
+  // have different shapes, so an un-annotated array infers a UNION. This
+  // seed's client is currently UNTYPED (`createClient(url, key)` with no
+  // `<Database>` generic ⇒ Database=any), so `.upsert(row)` accepts `any`
+  // and the union is harmless TODAY. But the moment the client is typed
+  // `createClient<Database>(…)`, `.upsert` enforces `RejectExcessProperties`
+  // over the union members — and the branches disagree on which optional
+  // keys are present, so it stops compiling (the build error this pre-empts).
+  // One explicit shape with the variant fields optional keeps it a single
+  // type the profiles upsert accepts under either client typing.
+  type ProfileSeedRow = {
+    id: string;
+    display_name: string;
+    company: string | null;
+    email: string;
+    role: string;
+    allocator_status?: string;
+    manager_status?: string;
+    bio?: string;
+    years_trading?: number;
+    aum_range?: string;
+    linkedin?: string;
+  };
+  const profileRows: ProfileSeedRow[] = [
     {
       id: ALLOCATOR_COLD,
       display_name: "Cold Start Capital",

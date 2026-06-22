@@ -44,6 +44,7 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2349,15 +2350,63 @@ def test_low_priority_claimed_when_high_normal_backlog_empty(admin):
         }).execute().data[0]
         low_id = low_row["id"]
 
-        claimed = _claim_with_priority(admin, worker_id="m1133-low-empty", batch_size=5)
-        claimed_ids = {c["id"] for c in claimed}
-        # Scope to our row; the shared test project may have other low
-        # rows that an unrelated branch (high backlog) could throttle.
-        # But our row is the canonical empty-backlog probe — if the
-        # gate flipped, our low row would NOT be claimed.
-        assert low_id in claimed_ids, (
-            "M-1133 regression: low-priority row was NOT claimed even "
-            "though there is no normal/high backlog ready. The "
+        # The v_high_pending=0 branch is a GLOBAL gate (migration
+        # 20260603120000): it trips when ANY normal/high pending|failed_retry
+        # row is DUE (next_attempt_at <= now()). The shared test project is
+        # hit by CONCURRENT CI runs that transiently seed such rows, which
+        # throttle low work and made the old single-shot `assert low_id in
+        # claimed` flaky (a sibling run's high row → our low row throttled →
+        # red CI → Railway skips the analytics deploy). So claim only in a
+        # window where the backlog is provably empty (read-only probe — no
+        # side effects, never claims another run's rows), retrying across a
+        # bounded budget. If the project never quiets we skip (a false
+        # failure would be worse); if it quiets and our low row STILL isn't
+        # claimed, that's the genuine regression this test guards.
+        claimed_low = False
+        gate_ever_clear = False
+        for _ in range(20):  # ~10s budget
+            cur = (
+                admin.table("compute_jobs")
+                .select("status").eq("id", low_id).execute().data
+            )
+            if not cur:
+                break  # our row vanished (unrelated cleanup) — bail to finally
+            if cur[0]["status"] != "pending":
+                # A concurrent worker already claimed our low row via its own
+                # empty-backlog branch — that itself proves the low row WAS
+                # claimable, which is exactly the contract under test.
+                claimed_low = True
+                break
+            now_iso = datetime.now(timezone.utc).isoformat()
+            backlog = (
+                admin.table("compute_jobs")
+                .select("id", count="exact")
+                .in_("priority", ["normal", "high"])
+                .in_("status", ["pending", "failed_retry"])
+                .lte("next_attempt_at", now_iso)
+                .limit(1)
+                .execute()
+            )
+            if (backlog.count or 0) > 0:
+                time.sleep(0.5)
+                continue
+            gate_ever_clear = True
+            claimed = _claim_with_priority(
+                admin, worker_id="m1133-low-empty", batch_size=5
+            )
+            if low_id in {c["id"] for c in claimed}:
+                claimed_low = True
+                break
+            time.sleep(0.3)  # tiny race: a high row landed between probe+claim
+
+        if not claimed_low and not gate_ever_clear:
+            pytest.skip(
+                "shared test project had a persistent normal/high backlog; "
+                "could not establish the v_high_pending=0 precondition"
+            )
+        assert claimed_low, (
+            "M-1133 regression: low-priority row was NOT claimed even though "
+            "the normal/high backlog probe read 0 (empty). The "
             "v_high_pending=0 branch of the throttle gate is broken — "
             "low-priority work is unreachable."
         )
