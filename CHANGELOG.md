@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.26.0.1] - 2026-06-22
+### Fixed — read-only share links now actually open for anonymous recipients
+
+A post-deploy canary on v0.26.0.0 caught that the public scenario-share recipient page never worked for its intended audience: the auth proxy (`src/proxy.ts`) was 307-redirecting `/scenario-share/[token]` to `/login` because the route was never added to `PUBLIC_ROUTES`. The whole point of a share link is a recipient without an account, so the feature was dead on arrival for anonymous visitors.
+
+- **`/scenario-share/[token]` is now public.** Added to `PUBLIC_ROUTES` plus the auth-bounce-exempt set (a shared artifact like `/factsheet`/`/strategy`/`/portfolio-pdf`), so an anonymous recipient renders the read-only scenario and a signed-in viewer opening their own link is not bounced to the dashboard. No change to what the page exposes — it still resolves only the token-scoped, leak-scoped `get_shared_scenario` read path.
+- **`/api/benchmark/btc` is now public** so the recipient page's server-side benchmark-overlay fetch resolves anonymously (it returns only shared BTC market data — date + close-price-derived daily returns, zero tenant data). Becoming public removed its implicit session-gate, so it now carries the same per-IP rate limit (`publicIpLimiter`, 10/min) as the other public DB-touching GETs: an attacker can otherwise cache-bust (`?x=rand`) past the CDN and hit the unbounded `SELECT` on every request.
+
+Regression tests: anonymous + authenticated render of `/scenario-share/[token]` and `/api/benchmark/btc` pinned in `proxy.test.ts`, with sibling-bypass negatives (`/scenario-shareEVIL`, `/api/benchmark/btc-evil` must still 307) so a predicate regression to a bare prefix is caught; the BTC route's 429/503 deny paths pinned in its route test; the route registered in the B15 limiter-ordering manifest. Reviewed: full frontend suite green; typecheck + lint clean; a fresh-context security specialist (no attack-surface expansion or data leak — sibling-bypass impossible, route tree enumerated, read RPC leak-scoped) plus an adversarial red-team pass whose reachable findings were fixed (the missing rate limit + the sibling-bypass test gap). Deferred as out-of-scope follow-ups: the recipient page's env-var self-fetch base URL and its shared `unknown` rate-limit bucket (both pre-existing, mitigated patterns in the already-shipped page).
+
 ## [0.26.0.0] - 2026-06-22
 ### Added — Scenario Analysis v1.1.0 (Phases 25 & 26): share a scenario read-only, stress-test it, see downside risk
 
