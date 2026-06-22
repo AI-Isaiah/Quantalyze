@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { captureToSentry } from "@/lib/sentry-capture";
+import {
+  publicIpLimiter,
+  checkLimit,
+  getClientIp,
+  isRateLimitMisconfigured,
+} from "@/lib/ratelimit";
 
 /**
  * Phase 24 / Plan 24-02 — GET /api/benchmark/btc
@@ -35,6 +41,16 @@ import { captureToSentry } from "@/lib/sentry-capture";
  *
  * Security: no query params are accepted; the symbol is hard-coded 'BTC'
  * (V5 input-validation — no user input reaches SQL; CONTEXT locks BTC-only).
+ *
+ * Rate limit: this route is in PUBLIC_ROUTES (proxy.ts) so the anonymous
+ * scenario-share recipient page can self-fetch the benchmark overlay. Being
+ * public removed the implicit session-gate that was its only request cap, so
+ * it now carries publicIpLimiter (10/min/IP) like the other public DB-touching
+ * GETs (demo/match, portfolio-pdf). The CDN `s-maxage` only absorbs identical
+ * URLs; an attacker can bust the cache with `?x=rand` (Vercel keys on the full
+ * URL) and hit the unbounded SELECT on every request, so the per-IP limiter —
+ * not the cache — is the abuse defense. Cached hits never reach the function,
+ * so the limiter does not throttle legitimate cached reads.
  */
 
 // AGENTS.md: the SSR cookie client needs the Node.js runtime; Edge would skip
@@ -58,7 +74,29 @@ function emptyResponse(): NextResponse {
   });
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(req?: Request): Promise<NextResponse> {
+  // Per-IP rate limit (publicIpLimiter, 10/min). `req` is always supplied by
+  // Next in production; it is optional only so existing no-arg unit-test calls
+  // stay valid. Header-stripped traffic shares the `benchmark-btc:unknown`
+  // bucket (documented getClientIp tradeoff — platform edge is the outer cap).
+  const rl = await checkLimit(
+    publicIpLimiter,
+    `benchmark-btc:${getClientIp(req?.headers ?? new Headers())}`,
+  );
+  if (!rl.success) {
+    return NextResponse.json(
+      {
+        error: isRateLimitMisconfigured(rl)
+          ? "Service temporarily unavailable"
+          : "Too many requests",
+      },
+      {
+        status: isRateLimitMisconfigured(rl) ? 503 : 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
+    );
+  }
+
   const supabase = await createClient();
 
   // RLS `SELECT USING(true)` lets the anon SSR client read; it CANNOT write
