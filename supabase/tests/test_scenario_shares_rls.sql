@@ -385,6 +385,17 @@ BEGIN
   -- content. We force-insert such a row from the SEEDING (superuser) context —
   -- which BYPASSES RLS, so it sidesteps Assertion 8''s WITH CHECK — and then
   -- prove the RPC returns 0 rows (→ 404) and NEVER B''s name/draft/series.
+  --
+  -- B''s scenario still has its seeded ACTIVE share (Assertion 7 confirmed A
+  -- could not revoke it). The scenario_shares_one_active_idx partial unique
+  -- index forbids a SECOND active share per scenario, so revoke B''s seeded
+  -- share first. This does NOT weaken the assertion: the force-inserted row is
+  -- still active (revoked_at IS NULL) and still mis-owned (created_by = A, which
+  -- is NOT scen_b''s owner B) — exactly what the RPC owner-coherence backstop is
+  -- probed on. (In production create_scenario_share revoke-then-inserts in one
+  -- transaction, so the invariant is never violated; only this superuser
+  -- force-insert must mirror that ordering.)
+  UPDATE scenario_shares SET revoked_at = now() WHERE id = share_b_id;
   INSERT INTO scenario_shares (scenario_id, created_by, token_hash)
   VALUES (scen_b_id, uid_a, encode(sha256('mis-owned-share-row'::bytea), 'hex'));
   -- ^ created_by = A, scenario_id = B''s scenario. A is NOT B''s scenario owner.
