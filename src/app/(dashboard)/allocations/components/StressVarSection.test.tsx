@@ -299,6 +299,67 @@ describe("StressVarSection", () => {
     );
   });
 
+  it("β-impact gates on its OWN sample floor (betaN): varN >= floor renders VaR/CVaR but 2 <= betaN < floor suppresses the impact to '—' + the short-overlap note", () => {
+    // The honesty invariant the two-N FLOOR (not just the caption) enforces:
+    // ~80 fully-finite scenario days (varN >= floor → the ok path renders and
+    // VaR/CVaR carry real values), but a BTC series that inner-joins to only ~5
+    // overlapping dates (2 <= betaN < floor). computeScenarioBenchmark returns a
+    // FINITE β over those 5 days (it only nulls for n<2 / degeneracy), so the
+    // projected impact would be a confident β·shock percentage fit on 5 days —
+    // exactly the under-sampled false precision the floor exists to prevent. The
+    // impact MUST render "—" + the short-overlap note, while VaR/CVaR (gated on
+    // varN) still show real loss values.
+    const portDates = buildDates("2024-01-01", OK_N + 16); // 80 days, varN >= floor
+    const portfolioDaily = series(
+      portDates,
+      (i) => (i % 2 === 0 ? -0.03 : 0.012), // a real downside tail for VaR/CVaR
+    );
+    // BTC overlaps ONLY the first 5 of the portfolio's dates → betaN = 5, which
+    // is >= 2 (β is finite, not nulled by the <2 guard) but < the 60-day floor.
+    const btcDaily = series(
+      portDates.slice(0, 5),
+      (i) => (i % 2 === 0 ? 0.02 : -0.012), // non-degenerate factor → finite β
+    );
+
+    const { container } = render(
+      <StressVarSection
+        portfolioDaily={portfolioDaily}
+        btcDaily={btcDaily}
+        btcAvailable={true}
+        n={OK_N + 16}
+        strategyCount={3}
+      />,
+    );
+
+    // The ok path renders (varN >= floor) — this is NOT a below-floor empty state.
+    expect(screen.queryByText(FLOOR_HEADING)).toBeNull();
+    expect(screen.getByText("Value at Risk (95%)")).toBeTruthy();
+
+    // VaR / CVaR carry REAL values (gated on varN, which clears the floor) —
+    // they must NOT be suppressed by the short BTC overlap.
+    expect(screen.getByTestId("stress-value-var").textContent).not.toBe("—");
+    expect(screen.getByTestId("stress-value-cvar").textContent).not.toBe("—");
+
+    // The projected impact is suppressed to "—" — a confident β·shock fit on 5
+    // overlapping days is the under-sampled fabrication the floor prevents.
+    const impactValue = screen.getByTestId("stress-value-projected-impact");
+    expect(impactValue.textContent).toBe("—");
+    expect(impactValue.textContent).not.toContain("0.00");
+    expect(impactValue.textContent).not.toMatch(/%/); // never a finite percent
+
+    // The affirmative β methodology caption MUST be absent (caption matches
+    // data, #509); the honest short-overlap note shows instead.
+    expect(container.textContent).not.toContain("linear β propagation");
+    expect(container.textContent).toContain(
+      "BTC overlap too short to project a shock",
+    );
+
+    // The VaR/CVaR disclosure (which DOES carry a value) still renders.
+    expect(container.textContent).toContain(
+      `Historical realized · ${OK_N + 16} overlapping days · not a forecast. ${VAR_CONFIDENCE_LABEL} confidence.`,
+    );
+  });
+
   it("β caption present when the impact IS shown (#509, WR-03): the affirmative methodology claim accompanies a real value", () => {
     // The positive control for the gate above: a real β → a real impact → the
     // β methodology caption DOES render (with its N). This proves the gate keys

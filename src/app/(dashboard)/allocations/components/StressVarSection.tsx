@@ -178,12 +178,27 @@ export function StressVarSection({
   // differ; each number names its own true N (the two-N trap). Render two
   // captions when they differ, a single VaR/CVaR caption otherwise.
   const twoNs = result.varN !== result.betaN;
+  // The β-propagated impact must clear its OWN sample floor (betaN), not merely
+  // ride on varN's. VaR/CVaR gate on varN above; the β·shock impact is a SECOND
+  // estimate over a SECOND, potentially-shorter window (the BTC inner-join), so
+  // the two-N principle applies to the FLOOR, not just the caption. A confident
+  // β·shock percentage fit on 2 ≤ betaN < floor overlapping days is exactly the
+  // under-sampled false precision the floor exists to prevent — even when varN
+  // clears the floor and the VaR/CVaR rows render. So suppress the impact to "—"
+  // (with the short-overlap note, the same one the betaN<2 ⇒ null branch uses)
+  // whenever betaN is below its own floor — independent of whether
+  // computeScenarioBenchmark already nulled β for degeneracy/<2 overlap.
+  const betaFloor = evaluateSampleFloor(
+    result.betaN,
+    SAMPLE_FLOOR_OVERLAPPING_DAYS,
+  );
   // The β-shock impact is suppressed to "—" whenever the BTC inner-join is
-  // degenerate (constant BTC) or too short (betaN < 2 ⇒ benchmark returns null).
-  // The β/shock methodology caption must NOT affirm a methodology + N for a
-  // value that did not, in fact, produce a usable number (#509: caption matches
-  // data). Only render the β caption when the impact is actually shown.
-  const impactShown = result.projectedImpact !== null;
+  // degenerate (constant BTC) or too short (betaN < 2 ⇒ benchmark returns null)
+  // OR below its own sample floor (2 ≤ betaN < floor). The β/shock methodology
+  // caption must NOT affirm a methodology + N for a value that did not, in fact,
+  // produce a usable number (#509: caption matches data). Only render the β
+  // caption + the impact value when the impact is actually shown.
+  const impactShown = result.projectedImpact !== null && betaFloor.ok;
 
   return (
     <div>
@@ -202,7 +217,7 @@ export function StressVarSection({
         <MetricRow
           metric="projected-impact"
           label="Projected portfolio impact"
-          value={formatPercent(result.projectedImpact)}
+          value={formatPercent(impactShown ? result.projectedImpact : null)}
         />
         <MetricRow
           metric="var"
