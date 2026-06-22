@@ -381,6 +381,17 @@ export const SANITIZE_PARITY_ALLOWLIST: Record<
     reason:
       "Allocator's own saved ScenarioDraft config (migration 20260621120000). ON DELETE CASCADE from profiles erases all scenario rows when the profile is sanitized/deleted. No explicit sanitize_user matrix row needed; mirrors csv_daily_returns CASCADE-erasure allowlist.",
   },
+  // scenario_shares: Phase 25 (migration 20260622120000) — the allocator's own
+  // share-link state, user-owned via `created_by NOT NULL REFERENCES profiles
+  // ON DELETE CASCADE` (and `scenario_id ... REFERENCES scenarios ON DELETE
+  // CASCADE`). Both CASCADE FKs erase every share row when the profile is
+  // deleted during sanitize, so no explicit sanitize_user matrix row is
+  // required. The sanitize_user migration pre-dates this table; the CASCADE is
+  // the erasure mechanism. Mirrors the scenarios allowlist pattern.
+  scenario_shares: {
+    reason:
+      "Allocator's own scenario share-link state (migration 20260622120000). ON DELETE CASCADE from profiles (and from scenarios) erases all share rows when the profile is sanitized/deleted. No explicit sanitize_user matrix row needed; mirrors the scenarios CASCADE-erasure allowlist.",
+  },
 };
 
 /**

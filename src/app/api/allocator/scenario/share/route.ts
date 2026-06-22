@@ -42,6 +42,7 @@ import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAu
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
+import { logAuditEvent } from "@/lib/audit";
 import { isUuid } from "@/lib/utils";
 import { mintShareToken } from "@/lib/scenario-share-token";
 
@@ -127,6 +128,12 @@ export const POST = withAllocatorAuth(
     // index (migration 25-01) never trips. RLS scopes this to the caller
     // (created_by = auth.uid()); a scenario the caller does not own matches 0
     // rows and is a no-op.
+    //
+    // @audit-skip: internal step of generate, not an independent event. The
+    // meaningful action — a (new) share link now exists — is emitted as the
+    // single scenario.share audit event after the insert below. A pre-revoke of
+    // the prior link is implicit in re-sharing; emitting a separate
+    // scenario.share.revoke here would double-log one user gesture.
     const { error: revokeError } = await supabase
       .from("scenario_shares")
       .update({ revoked_at: new Date().toISOString() })
@@ -152,7 +159,7 @@ export const POST = withAllocatorAuth(
     // created_by is ALWAYS sourced from auth (T-25-08); a body-supplied
     // created_by never reaches here (the body schema strips it). RLS
     // WITH CHECK (created_by = auth.uid()) is defense-in-depth.
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("scenario_shares")
       .insert({
         scenario_id: scenarioId,
@@ -172,6 +179,16 @@ export const POST = withAllocatorAuth(
         { status: 500, headers: NO_STORE_HEADERS },
       );
     }
+
+    // Fire-and-forget audit (the scenario.* family). Self-owned, RLS-scoped.
+    // entity = the shared scenario. Metadata carries NO token / draft content —
+    // only the new share row id, mirroring the saved-route privacy posture.
+    logAuditEvent(supabase, {
+      action: "scenario.share",
+      entity_type: "scenario",
+      entity_id: scenarioId,
+      metadata: { share_id: data.id },
+    });
 
     // The raw token appears ONLY here. No audit log carries the token or any
     // draft content (mirrors the saved-route privacy posture).

@@ -56,6 +56,10 @@ const CANONICAL = new Set([
   // uuid + auth gate (body-less DELETE), mirroring commit/route.ts.
   "allocator/scenario/saved/route.ts",
   "allocator/scenario/saved/[id]/route.ts",
+  // Phase 25 scenario sharing — both validate the scenario_id (safeParse via
+  // isUuid) BEFORE checkLimit, so a 400 never burns a token (B15 ordering).
+  "allocator/scenario/share/route.ts",
+  "allocator/scenario/share/revoke/route.ts",
   "attestation/route.ts",
   "bridge/route.ts",
   "bridge/outcome/[id]/curves/route.ts",

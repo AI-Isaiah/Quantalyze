@@ -658,6 +658,18 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   // sanitize_user matrix needs no explicit row — see SANITIZE_PARITY_ALLOWLIST
   // in scripts/check-gdpr-export-coverage.ts (mirrors the csv_daily_returns
   // CASCADE-erasure allowlist pattern).
+  // Phase 25 (migration 20260622120000): scenario_shares is user-owned via
+  // created_by (NOT NULL REFERENCES profiles ON DELETE CASCADE). A share row is
+  // the allocator's own share-link state for one of their scenarios — personal
+  // data GDPR Art. 15 entitles them to export (it records that they created /
+  // revoked a link, and when). The `token_hash` is an opaque sha256 digest (the
+  // raw bearer token is never persisted), so the export carries no usable
+  // secret. Erasure is the ON DELETE CASCADE from profiles (and, transitively,
+  // from scenarios), so the sanitize_user matrix needs no explicit row — see
+  // SANITIZE_PARITY_ALLOWLIST in scripts/check-gdpr-export-coverage.ts (mirrors
+  // the scenarios CASCADE-erasure allowlist pattern). Sorted before `scenarios`
+  // ('_' < 's') to satisfy the manifest's alphabetical-order gate.
+  { kind: "direct", table: "scenario_shares", user_column: "created_by" },
   { kind: "direct", table: "scenarios", user_column: "allocator_id" },
   { kind: "direct", table: "strategies", user_column: "user_id" },
   { kind: "direct", table: "user_app_roles", user_column: "user_id" },

@@ -169,6 +169,10 @@ AuditAction = Literal[
     "scenario.rename",
     "scenario.update",
     "scenario.delete",
+    # Phase 25: read-only scenario sharing (TS-only call sites; no Python
+    # emitter). Kept here so the TS<->Python AuditAction parity test stays green.
+    "scenario.share",
+    "scenario.share.revoke",
     "admin.kill_switch",
     "match.decision_record",
     "match.decision_delete",

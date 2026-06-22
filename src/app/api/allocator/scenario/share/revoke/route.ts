@@ -31,6 +31,7 @@ import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAu
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
+import { logAuditEvent } from "@/lib/audit";
 import { isUuid } from "@/lib/utils";
 
 export const runtime = "nodejs";
@@ -125,6 +126,16 @@ export const POST = withAllocatorAuth(
         { status: 404, headers: NO_STORE_HEADERS },
       );
     }
+
+    // Fire-and-forget audit (the scenario.* family) — only emitted when a row
+    // was actually revoked (the 0-rows path returns 404 first). entity = the
+    // scenario; metadata carries no token content.
+    logAuditEvent(supabase, {
+      action: "scenario.share.revoke",
+      entity_type: "scenario",
+      entity_id: scenarioId,
+      metadata: { revoked_count: data.length },
+    });
 
     return NextResponse.json({ success: true }, { status: 200, headers: NO_STORE_HEADERS });
   },

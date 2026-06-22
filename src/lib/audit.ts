@@ -400,6 +400,12 @@ export type AuditAction =
   | "scenario.rename"
   | "scenario.update"
   | "scenario.delete"
+  // Phase 25: read-only scenario sharing. share = a share link was minted
+  // (entity_id = scenarios.id). share.revoke = the active share was revoked
+  // (revoked_at set, never deleted — the audit trail is preserved). Metadata
+  // carries NO token / draft content (same privacy posture as scenario.save).
+  | "scenario.share"
+  | "scenario.share.revoke"
   | "admin.kill_switch"
   | "match.decision_record"
   | "match.decision_delete"
@@ -600,6 +606,8 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP = {
   "scenario.rename": "scenario",
   "scenario.update": "scenario",
   "scenario.delete": "scenario",
+  "scenario.share": "scenario",
+  "scenario.share.revoke": "scenario",
   // Admin / system actions
   "admin.kill_switch": "system_flag",
   "match.decision_record": "match_decision",
