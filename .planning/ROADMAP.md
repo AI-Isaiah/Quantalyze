@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 23: Scenario Persistence & Compare** - Save / reopen / list / rename / delete named scenarios (DB + RLS + `schema_version`) and compare 2+ side-by-side (the spine) (completed 2026-06-21)
 - [x] **Phase 24: Benchmark Comparison** - Overlay a benchmark on the scenario projection with tracking error / information ratio / alpha-beta over the aligned window (completed 2026-06-22)
 - [x] **Phase 25: Read-Only Sharing** - Generate / revoke a read-only share link that renders a saved scenario without leaking the live book or any other tenant's data (completed 2026-06-22)
-- [ ] **Phase 26: Stress Testing & VaR** - Parameterized β-propagated market shock + a disclosed downside measure (historical VaR + CVaR / Expected Shortfall)
+- [x] **Phase 26: Stress Testing & VaR** - Parameterized β-propagated market shock + a disclosed downside measure (historical VaR + CVaR / Expected Shortfall) (completed 2026-06-22)
 - [ ] **Phase 27: Forward Uncertainty (Monte-Carlo Bands)** - Block-bootstrap forward confidence bands / return distribution, honest to sample size, gated below the minimum-sample floor
 - [ ] **Phase 28: Weight Optimizer** - Python analytics-service min-vol / max-Sharpe solver (Ledoit-Wolf shrinkage, long-only, write-to-draft-only) with TS↔Python parity pinned
 
@@ -162,7 +162,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 26-02-PLAN.md — Presentational StressVarSection (SegmentedControl shock, VaR/CVaR rows, #509 guard-order empty states, floor SoT, two-N disclosure) + state-matrix tests + own-book composer mount (STRESS-01/02) [wave 2]
+- [x] 26-02-PLAN.md — Presentational StressVarSection (SegmentedControl shock, VaR/CVaR rows, #509 guard-order empty states, floor SoT, two-N disclosure) + state-matrix tests + own-book composer mount (STRESS-01/02) [wave 2]
 
 **UI hint**: yes
 
@@ -206,7 +206,7 @@ Phases execute in numeric order: 21 → 22 → 23 → 24 → 25 → 26 → 27 �
 | 23. Scenario Persistence & Compare | 5/5 | Complete   | 2026-06-21 |
 | 24. Benchmark Comparison | 3/3 | Complete   | 2026-06-22 |
 | 25. Read-Only Sharing | 4/4 | Complete    | 2026-06-22 |
-| 26. Stress Testing & VaR | 1/2 | In Progress|  |
+| 26. Stress Testing & VaR | 2/2 | Complete   | 2026-06-22 |
 | 27. Forward Uncertainty (Monte-Carlo Bands) | 0/TBD | Not started | - |
 | 28. Weight Optimizer | 0/TBD | Not started | - |
 

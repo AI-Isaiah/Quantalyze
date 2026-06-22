@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.1.0
 milestone_name: Scenario Analysis
-status: executing
+status: verifying
 stopped_at: Completed 25-04-PLAN.md (recipient page + share-resolve)
-last_updated: "2026-06-22T12:02:19.472Z"
+last_updated: "2026-06-22T12:13:10.575Z"
 last_activity: 2026-06-22
 progress:
   total_phases: 8
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 20
-  completed_plans: 19
-  percent: 63
+  completed_plans: 20
+  percent: 75
 ---
 
 # Project State
@@ -28,10 +28,10 @@ See: `.planning/PROJECT.md` (reconstructed 2026-06-21 at v1.1.0 milestone start)
 
 Phase: 26 (Stress Testing & VaR) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-06-22
 
-Progress: [██████████] 95%
+Progress: [██████████] 100%
 
 ## Milestone Roadmap (v1.1.0 Scenario Analysis)
 
@@ -242,6 +242,9 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 - [Phase 25]: 25-04 toWealth imported from EquityChart module (its real export), not @/lib/scenario (stale JSDoc)
 - [Phase ?]: 26-01: WRAP computeVaR/computeExpectedShortfall + computeScenarioBenchmark behind a null-on-degenerate envelope (never fork); reuse computeScenarioBenchmark for beta to inherit the constant-BTC relative-scale guard
 - [Phase ?]: 26-01: track two distinct overlap-Ns (varN scenario overlap, betaN BTC inner-join overlap); VaR computed on the already-leveraged series with no leverage multiplier
+- [Phase ?]: 26-02: StressVarSection is props-only over computeScenarioStress; only local state is the shock-preset useState — em-dash on null, monochrome losses, imported floor SoT
+- [Phase ?]: 26-02: two-N disclosure — single VaR/CVaR caption when varN===betaN; a distinct methodologyLine(betaN) caption only when the Ns differ
+- [Phase ?]: 26-02: mounted in the own-book ScenarioComposer ONLY (sibling Card after ScenarioBenchmarkSection); ScenarioBuilder untouched
 
 ## Accumulated Context
 
@@ -263,7 +266,7 @@ Three items remain in `human_needed` status — **deferred to /ship-time founder
 
 ## Session Continuity
 
-Last session: 2026-06-22T12:01:47.986Z
+Last session: 2026-06-22T12:13:00.245Z
 Stopped at: Completed 25-04-PLAN.md (recipient page + share-resolve)
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
