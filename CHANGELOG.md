@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.28.0.1] - 2026-06-22
+### Fixed — admin deletion-approve rate-limit test no longer flakes the prod deploy
+
+The `POST /api/admin/deletion-requests/[id]/approve` test's two `@/lib/ratelimit`-override cases (429 denial, 503 fail-closed-on-misconfig) used a per-test `vi.resetModules() + vi.doMock() + await import("./route")` dance. In the single-process `frontend-coverage` job the route's eager imports race that re-mock, so the default always-pass mock services the call and the test sees `200` instead of `429`/`503`. The describe's `{ retry: 5 }` was **exhausted** there (every attempt raced the same way), turning CI red — which makes Railway **silently skip** the analytics prod deploy (deploy-on-green-CI).
+
+- Drove the rate-limit result off a shared mutable `state.rateLimitResult` (default `{ success: true }`, reset in `beforeEach`) read at **call time** by the always-installed `buildDefaultRateLimitMock`, and made its `isRateLimitMisconfigured` mirror the real module. The two override tests now flip `state` instead of swapping the module — no race window, deterministic. Assertions (recorder identifier, fail-closed `sanitize_user` not called, status/Retry-After) are byte-identical.
+- `retry: 5` stays for the remaining `@/lib/supabase/admin` doMock tests (migrating those is the tracked follow-up). A fresh-context Claude red-team verified the change is semantics-preserving (and that the new mock is *more* faithful than the old hardcoded `isRateLimitMisconfigured: () => false`).
+
 ## [0.28.0.0] - 2026-06-22
 ### Added — weight optimizer: suggested long-only scenario weights (Phase 28, OPT-01/02)
 

@@ -60,6 +60,18 @@ const state = vi.hoisted(() => ({
   signOutCalls: vi.fn(),
   signOutShouldFail: false as false | { message: string },
   signOutShouldThrow: false as false | Error,
+  // Result the ALWAYS-installed `@/lib/ratelimit` mock returns, read at
+  // call time (mirrors how `deletionRow`/`casWins` flip behavior on the
+  // always-installed mocks). Default = pass. Per-test flip to a denial /
+  // misconfigured shape — NOT a `resetModules()+doMock()+reimport` dance,
+  // which races the route's eager imports under the single-process
+  // coverage run (retry:5 was EXHAUSTED there, silently skipping the prod
+  // analytics deploy via Railway-skip-on-red).
+  rateLimitResult: { success: true } as {
+    success: boolean;
+    retryAfter?: number;
+    reason?: string;
+  },
 }));
 
 // Track call ORDER so we can assert requireRole (and thus the rate-limit
@@ -170,9 +182,13 @@ const { buildDefaultAdminMock, buildDefaultRateLimitMock } = vi.hoisted(
       adminActionLimiter: {} as unknown,
       checkLimit: async (_limiter: unknown, identifier: string) => {
         recorder(identifier);
-        return { success: true } as const;
+        // Read live `state` at CALL time (closure over the hoisted state),
+        // so per-test denial/misconfigured flips take effect without a
+        // resetModules+doMock reimport that races the route's eager imports.
+        return state.rateLimitResult;
       },
-      isRateLimitMisconfigured: () => false,
+      isRateLimitMisconfigured: (r: { reason?: string }) =>
+        r?.reason === "ratelimit_misconfigured",
     }),
   }),
 );
@@ -355,6 +371,14 @@ function reapplyDefaultMocks() {
 // failure mode the comment describes. Bumping retry is the smallest
 // fix that aligns with the documented mitigation; the structural fix
 // (state-flag-driven default mock) is tracked as follow-up.
+//
+// 2026-06-22: structural fix DONE for the `@/lib/ratelimit` axis — the two
+// rate-limit override tests now drive `state.rateLimitResult` through the
+// always-installed mock (no resetModules+doMock+reimport), eliminating that
+// race. retry:5 stays because the `@/lib/supabase/admin` override tests
+// still use the doMock dance; migrating those to `state` is the remaining
+// follow-up. (The ratelimit flake had EXHAUSTED retry:5 in the single-
+// process coverage job, going red and Railway-skipping the prod deploy.)
 describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 5 }, () => {
   beforeEach(() => {
     callOrder.length = 0;
@@ -370,6 +394,7 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 5 }, 
     state.signOutCalls.mockReset();
     state.signOutShouldFail = false;
     state.signOutShouldThrow = false;
+    state.rateLimitResult = { success: true };
     rateLimitRecorder.mockReset();
     vi.resetModules();
     reapplyDefaultMocks();
@@ -461,16 +486,10 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 5 }, 
       rejected_at: null,
     };
 
-    // Replace the rate-limit module just for this test with a denial.
-    vi.resetModules();
-    vi.doMock("@/lib/ratelimit", () => ({
-      adminActionLimiter: {} as unknown,
-      checkLimit: async (_l: unknown, identifier: string) => {
-        rateLimitRecorder(identifier);
-        return { success: false, retryAfter: 42 } as const;
-      },
-      isRateLimitMisconfigured: () => false,
-    }));
+    // Denial via the always-installed (state-driven) mock — NOT a
+    // resetModules+doMock+reimport dance, which races the route's eager
+    // imports under the single-process coverage run.
+    state.rateLimitResult = { success: false, retryAfter: 42 };
 
     const { POST } = await import("./route");
     const res = await POST(makeReq(), makeCtx());
@@ -506,17 +525,13 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 5 }, 
       rejected_at: null,
     };
 
-    vi.resetModules();
-    vi.doMock("@/lib/ratelimit", () => ({
-      adminActionLimiter: {} as unknown,
-      checkLimit: async () => ({
-        success: false,
-        retryAfter: 60,
-        reason: "ratelimit_misconfigured",
-      }) as const,
-      isRateLimitMisconfigured: (r: { reason?: string }) =>
-        r.reason === "ratelimit_misconfigured",
-    }));
+    // Misconfigured via the always-installed (state-driven) mock — the
+    // `reason` makes isRateLimitMisconfigured() true → fail-CLOSED 503.
+    state.rateLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
 
     const { POST } = await import("./route");
     const res = await POST(makeReq(), makeCtx());
