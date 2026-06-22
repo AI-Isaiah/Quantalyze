@@ -4,7 +4,7 @@ import { createServerClient } from "@supabase/ssr";
 // the proxy gate (see admin-route block below). Page-level `isAdminUser` is
 // the authoritative check.
 
-const PUBLIC_ROUTES = ["/login", "/signup", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/legal", "/demo", "/api/demo", "/for-quants", "/api/for-quants-lead", "/security"];
+const PUBLIC_ROUTES = ["/login", "/signup", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/scenario-share", "/api/benchmark/btc", "/legal", "/demo", "/api/demo", "/for-quants", "/api/for-quants-lead", "/security"];
 const ADMIN_ROUTES = ["/admin", "/api/admin"];
 const DEFAULT_AUTHENTICATED_ROUTE = "/discovery/crypto-sma";
 
@@ -71,7 +71,8 @@ export async function proxy(request: NextRequest) {
   //       instead of being bounced to the dashboard.
   //
   //   (b) Shared artifacts (`/factsheet/:id`, `/strategy/:id`, `/browse`,
-  //       `/portfolio-pdf/:id`) — these live in PUBLIC_ROUTES so unauthed
+  //       `/portfolio-pdf/:id`, `/scenario-share/:token`) — these live in
+  //       PUBLIC_ROUTES so unauthed
   //       users following a shared link can render them, but authenticated
   //       users ALSO need to view them (a logged-in allocator clicking the
   //       "Factsheet" button on a strategy detail page must NOT be yanked
@@ -96,6 +97,8 @@ export async function proxy(request: NextRequest) {
   const isPortfolioPdfRoute =
     path === "/portfolio-pdf" || path.startsWith("/portfolio-pdf/");
   const isLegalRoute = path === "/legal" || path.startsWith("/legal/");
+  const isScenarioShareRoute =
+    path === "/scenario-share" || path.startsWith("/scenario-share/");
   const isAuthBounceExempt =
     isDemoRoute ||
     isForQuantsRoute ||
@@ -104,7 +107,8 @@ export async function proxy(request: NextRequest) {
     isStrategyRoute ||
     isBrowseRoute ||
     isPortfolioPdfRoute ||
-    isLegalRoute;
+    isLegalRoute ||
+    isScenarioShareRoute;
   if (session && isPublicRoute && !isApiRoute && !isAuthBounceExempt) {
     const redirect = request.nextUrl.searchParams.get("redirect");
     const safePath = redirect && /^\/[a-z]/.test(redirect) ? redirect : DEFAULT_AUTHENTICATED_ROUTE;

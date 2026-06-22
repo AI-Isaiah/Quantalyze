@@ -39,6 +39,20 @@ vi.mock("@/lib/supabase/server", () => ({
 // Silence the route's server-side error log in the error-degrade test.
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
+// Rate limit (publicIpLimiter). `rlResult` controls the mocked checkLimit;
+// it defaults to success so the existing data-contract tests below are
+// unaffected, and the two rate-limit tests flip it to deny (429 / 503).
+const { rlResult } = vi.hoisted(() => ({
+  rlResult: { value: { success: true } as Record<string, unknown> },
+}));
+vi.mock("@/lib/ratelimit", () => ({
+  publicIpLimiter: {},
+  checkLimit: vi.fn(async () => rlResult.value),
+  getClientIp: vi.fn(() => "test-ip"),
+  isRateLimitMisconfigured: (r: { reason?: string }) =>
+    r?.reason === "ratelimit_misconfigured",
+}));
+
 function setRows(rows: Array<{ date: string; close_price: number }>) {
   orderResult.value = { data: rows, error: null };
 }
@@ -54,6 +68,34 @@ describe("GET /api/benchmark/btc", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     orderResult.value = { data: [], error: null };
+    rlResult.value = { success: true };
+  });
+
+  it("rate-limits anonymous abuse with 429 (public route has no session gate left)", async () => {
+    // Being in PUBLIC_ROUTES (proxy.ts) removed the implicit session-gate that
+    // was this route's only request cap. The per-IP limiter is now the abuse
+    // defense against cache-busted (`?x=rand`) hammering of the unbounded SELECT.
+    rlResult.value = { success: false, retryAfter: 30 };
+    const { GET } = await import("./route");
+    const res = await GET(new Request("https://x/api/benchmark/btc"));
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    // A deny must NOT be cached as if it were the benchmark series.
+    expect(res.headers.get("Cache-Control") ?? "").not.toContain("s-maxage");
+    // It must not have touched the DB.
+    expect(mockFrom).not.toHaveBeenCalled();
+  });
+
+  it("returns 503 (fail-closed) when the limiter is misconfigured", async () => {
+    rlResult.value = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(new Request("https://x/api/benchmark/btc"));
+    expect(res.status).toBe(503);
+    expect(mockFrom).not.toHaveBeenCalled();
   });
 
   it("returns BTC daily returns as [{date,value}], ascending, pct-changed (first row dropped)", async () => {

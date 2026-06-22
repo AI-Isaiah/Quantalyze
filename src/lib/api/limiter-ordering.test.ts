@@ -103,6 +103,11 @@ const NO_INPUT = new Set([
   "account/export/route.ts",
   "admin/allocators/[id]/holdings/route.ts",
   "admin/deletion-requests/[id]/approve/route.ts",
+  // Public BTC benchmark GET — added to PUBLIC_ROUTES so the anonymous
+  // scenario-share recipient page can self-fetch the overlay. publicIpLimiter
+  // (10/min/IP), no request body (symbol hard-coded), limit-FIRST before the DB
+  // read. Same shape as demo/match below (public per-IP, no body).
+  "benchmark/btc/route.ts",
   "demo/match/[allocator_id]/route.ts",
   "factsheet/[id]/pdf/route.ts",
   "me/audit-log/export/route.ts",

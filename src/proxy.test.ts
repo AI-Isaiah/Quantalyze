@@ -233,6 +233,13 @@ describe("proxy public-route gating (anonymous session)", () => {
       "/factsheet/abc-123",
       "/api/factsheet/abc-123/pdf",
       "/portfolio-pdf",
+      // SHARE-02/03 (v0.26.0.0 follow-up): the public recipient page AND its
+      // server-side BTC benchmark fetch (page.tsx fetches /api/benchmark/btc
+      // cookie-lessly) must render for ANONYMOUS recipients — a share link is
+      // for people without accounts. Pre-fix proxy.ts omitted both from
+      // PUBLIC_ROUTES, so anon hit 307 → /login and the feature was dead.
+      "/scenario-share/abc-token-123",
+      "/api/benchmark/btc",
       "/for-quants",
       "/for-quants/about",
       "/security",
@@ -273,6 +280,14 @@ describe("proxy public-route gating (anonymous session)", () => {
       "/legalese", // sibling of /legal
       "/securityaudit", // sibling of /security
       "/for-quants-eval", // sibling of /for-quants
+      // SHARE-02/03 sibling-bypass guards. The new /scenario-share +
+      // /api/benchmark/btc public entries use the same `=== route ||
+      // startsWith(route + "/")` predicate; these siblings MUST still 307 so a
+      // future regression to a bare `startsWith(route)` is caught loudly.
+      "/scenario-shareEVIL", // sibling of /scenario-share, no separator
+      "/scenario-share-x", // hyphenated sibling
+      "/api/benchmark/btc-evil", // sibling of /api/benchmark/btc, no separator
+      "/api/benchmarkX", // sibling of the /api/benchmark/btc parent
       // Authenticated API.
       "/api/keys-management/rotate", // sibling of /api/keys
       "/api/portfolios/list",
@@ -334,6 +349,10 @@ describe("proxy public-route gating (anonymous session)", () => {
       "/browse/sub",
       "/portfolio-pdf",
       "/portfolio-pdf/abc-123",
+      // SHARE-02/03: a share link is a shared artifact — an authenticated
+      // viewer (the sharer verifying their own link, or a logged-in LP) must
+      // see the recipient page, not bounce to /discovery/crypto-sma.
+      "/scenario-share/abc-token-123",
       "/legal",
       "/legal/privacy",
     ])(
