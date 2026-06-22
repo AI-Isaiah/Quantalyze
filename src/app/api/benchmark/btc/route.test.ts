@@ -107,7 +107,7 @@ describe("GET /api/benchmark/btc", () => {
     expect(cc).not.toContain("private");
   });
 
-  it("degrades to HTTP 200 with [] on a read error (never 500)", async () => {
+  it("degrades to HTTP 200 with [] on a read error (never 500) AND captures the error", async () => {
     setError();
     const { GET } = await import("./route");
     const res = await GET();
@@ -117,6 +117,17 @@ describe("GET /api/benchmark/btc", () => {
     expect(body).toEqual([]);
     // still cacheable on the degraded path
     expect(res.headers.get("Cache-Control") ?? "").toContain("public");
+
+    // The degrade path MUST stay observable — a refactor that drops the
+    // server-side capture would otherwise make this a true silent failure
+    // with a green suite. Pin that captureToSentry fired with the route tag.
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    expect(captureToSentry).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tags: expect.objectContaining({ route: "api/benchmark/btc" }),
+      }),
+    );
   });
 
   it("returns [] for an empty / missing benchmark_prices result (200)", async () => {
@@ -143,6 +154,33 @@ describe("GET /api/benchmark/btc", () => {
       expect(row).not.toHaveProperty("symbol");
       expect(row).not.toHaveProperty("close_price");
     }
+  });
+
+  it("coerces STRING close_price (PostgREST DECIMAL-as-string) to a correct non-empty series", async () => {
+    // PostgREST serializes Postgres numeric/DECIMAL columns as JSON STRINGS to
+    // preserve precision (even though database.types.ts types close_price as
+    // `number`). The route MUST coerce both ends with Number(...) before the
+    // finite/positive guards — otherwise the per-point `typeof !== "number"`
+    // guard is true for EVERY string row, every row hits `continue`, and the
+    // route returns [] for valid prod data (the feature shows "unavailable").
+    setRows([
+      { date: "2024-01-01", close_price: "68000.00" },
+      { date: "2024-01-02", close_price: "68000.50" },
+      { date: "2024-01-03", close_price: "67320.495" }, // −1% from prior
+    ] as unknown as Array<{ date: string; close_price: number }>);
+
+    const { GET } = await import("./route");
+    const res = await GET();
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as Array<{ date: string; value: number }>;
+    // Must be non-empty: the string rows must NOT all be dropped by the guard.
+    expect(body).toHaveLength(2);
+    expect(body[0].date).toBe("2024-01-02");
+    expect(body[0].value).toBeCloseTo(68000.5 / 68000 - 1, 10);
+    expect(body[1].date).toBe("2024-01-03");
+    expect(body[1].value).toBeCloseTo(67320.495 / 68000.5 - 1, 10);
+    for (const r of body) expect(Number.isFinite(r.value)).toBe(true);
   });
 
   it("skips a point with a non-positive prior close instead of emitting Infinity/NaN", async () => {

@@ -91,15 +91,21 @@ export async function GET(): Promise<NextResponse> {
   // each value = close / prevClose − 1, stamped at the current row's date.
   const series: BenchmarkReturnPoint[] = [];
   for (let i = 1; i < rows.length; i += 1) {
-    const prevClose = rows[i - 1].close_price;
-    const close = rows[i].close_price;
-    // Guard a null/zero/negative prior close: skip the point rather than emit
-    // Infinity/NaN. A non-finite return would corrupt the downstream metrics.
+    // PostgREST serializes Postgres `numeric`/`DECIMAL` as JSON STRINGS to
+    // preserve precision (even though database.types.ts:459 types close_price
+    // as `number`), so the driver may yield either a string or a number.
+    // Coerce BOTH ends with Number(...) before the finite/positive guards
+    // (mirrors benchmark.py `.astype(float)` and the asNumber DB-numeric
+    // contract in portfolio-analytics-adapter.ts). The existing `<= 0` /
+    // non-finite guards still neutralize the empty/null cases —
+    // Number("") === 0 and Number(null) === 0 are caught by `prevClose <= 0`.
+    const prevClose = Number(rows[i - 1].close_price);
+    const close = Number(rows[i].close_price);
+    // Guard a null/zero/negative/non-finite prior close: skip the point rather
+    // than emit Infinity/NaN. A non-finite return would corrupt downstream metrics.
     if (
-      typeof prevClose !== "number" ||
       !Number.isFinite(prevClose) ||
       prevClose <= 0 ||
-      typeof close !== "number" ||
       !Number.isFinite(close)
     ) {
       continue;
