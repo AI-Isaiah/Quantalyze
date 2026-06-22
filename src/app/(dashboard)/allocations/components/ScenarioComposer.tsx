@@ -93,6 +93,7 @@ import { ScenarioFlaggedHoldingsList } from "../ScenarioFlaggedHoldingsList";
 import { ScenarioBenchmarkSection } from "./ScenarioBenchmarkSection";
 import { StressVarSection } from "./StressVarSection";
 import { MonteCarloSection } from "./MonteCarloSection";
+import { WeightOptimizerSection } from "./WeightOptimizerSection";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
@@ -1614,6 +1615,28 @@ export function ScenarioComposer({
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
           n={scenarioMetrics.n}
           strategyCount={deAliased.strategies.length}
+        />
+      </Card>
+
+      {/* OPT-01 / OPT-02 (Plan 28-02) — the "Suggested weights" optimizer on the
+          own-book scenario surface. Allocates long-only across the ACTIVE
+          de-aliased strategies (the same set the projection blends) via the
+          Python analytics-service (min-vol default / max-Sharpe gated, Ledoit-Wolf
+          shrinkage). Suggested weights write to the editable DRAFT only on an
+          explicit Apply (via scenario.setWeightOverride) — never auto-committed.
+          Own-book composer ONLY; the example-universe Sandbox optimizer is
+          deferred. */}
+      <Card className="mt-6">
+        <WeightOptimizerSection
+          strategies={deAliased.strategies
+            .filter((s) => deAliased.state.selected[s.id])
+            .map((s) => ({ id: s.id, name: s.name, dailyReturns: s.daily_returns }))}
+          onApply={(weights) => {
+            // Atomic full-vector apply — NOT a loop of setWeightOverride (which
+            // renormalizes the others on each call and would land a different
+            // allocation than the optimizer suggested).
+            scenario.applyWeightOverrides(weights);
+          }}
         />
       </Card>
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.28.0.0] - 2026-06-22
+### Added — weight optimizer: suggested long-only scenario weights (Phase 28, OPT-01/02)
+
+The own-book Scenario composer can now suggest a long-only allocation for an objective, computed by the analytics-service (the milestone's one new Python endpoint), and apply it to the editable draft.
+
+- **Min-volatility (default) / max-Sharpe (gated) solver.** `services/optimizer.py` runs scipy SLSQP over a **hand-rolled analytical Ledoit-Wolf shrunk** covariance (Ledoit & Wolf 2004 scaled-identity — no scikit-learn dep) — long-only, sum-to-1, 252-annualized. Shrinkage fights the in-sample overfit that a raw covariance over a short window produces. Deterministic (fixed equal-weight start, no random restart): identical input gives identical weights, and a one-day data extension moves them by under a few percent.
+- **Honest gates.** Below the sample floor (or n insufficient relative to strategy count), or on a constant/non-finite series, or — for max-Sharpe — an all-losing book, it returns no weights and the UI shows a reason-routed empty state, never a fabricated vector. Every suggestion carries the **in-sample caveat** (fit to the past, not a forecast) and the overlap window it used; max-Sharpe additionally warns it is the most overfit-prone objective.
+- **Write-to-draft-only.** The suggested weights apply to the editable draft on an explicit "Apply" via a new **atomic** `applyWeightOverrides` (writes the full vector and renormalizes once — fixing a bug where looping the single-ref `setWeightOverride` would have landed a different allocation than the one shown). Nothing auto-commits; the existing Save flow is the separate commit. If the selection changes between Suggest and Apply, the stale weights are refused (re-run) rather than mis-applied.
+- **TS↔Python convention parity** (252 annualization, sample floor, per-strategy observation gate) is pinned by a shared golden fixture asserted in both suites, so the frontend floor and the service gate can't drift apart.
+- **Service boundary.** New `POST /api/optimize-weights` (X-Service-Key, stateless — takes the draft-scoped series, no DB read) behind the allocator-authed `/api/scenario/optimize` Next route (CSRF + approval gate + payload caps + per-user rate limit, validate-then-limit, upstream-detail redaction).
+
+Reviewed: full frontend suite green (6513); analytics suite + `mypy --strict` clean; typecheck + lint + production build clean. A fresh-context Claude red-team verified the Ledoit-Wolf formula, the SLSQP setup, determinism, and the route security numerically, and caught a **critical** apply-to-draft bug (the per-ref rebalance corrupting the applied vector) plus the selection-drift, the magnitude render, and the all-losing-book max-Sharpe pathology — all fixed and regression-pinned (44 phase tests across Python + TS).
+
 ## [0.27.0.0] - 2026-06-22
 ### Added — forward uncertainty: Monte-Carlo confidence bands on the own-book scenario (Phase 27, SIM-01)
 

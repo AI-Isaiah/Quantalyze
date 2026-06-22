@@ -1,0 +1,7 @@
+{
+  "_doc": "TS<->Python convention parity for the weight optimizer (Phase 28, OPT-02). The Python suite (test_optimizer_parity.py) and the TS suite (src/lib/scenario-optimizer-parity.test.ts) BOTH assert their own constants against this single fixture. If either codebase changes its annualization, sample floor, or per-strategy observation gate independently, the other side's parity test fails CI loudly — the conventions can never silently drift apart.",
+  "trading_days": 252,
+  "sample_floor": 60,
+  "min_obs_per_strategy": 10,
+  "null_semantics": "A degenerate / under-sampled / non-finite input yields weights=null (ok=false) in Python, which the frontend renders as an honest empty state — never a fabricated 0 weight."
+}
