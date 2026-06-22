@@ -39,7 +39,7 @@ Requirements for the v1.1.0 milestone. Each maps to a roadmap phase.
 
 ### Sharing (new #2)
 
-- [ ] **SHARE-01**: Allocator can generate a read-only share link for a saved scenario
+- [x] **SHARE-01**: Allocator can generate a read-only share link for a saved scenario
 - [x] **SHARE-02**: A recipient can view a shared scenario read-only without exposing the allocator's live book, holdings, or any other tenant's data (snapshot, token-scoped read path)
 - [x] **SHARE-03**: Allocator can revoke a share link
 
@@ -107,7 +107,7 @@ v1.0.0's Phase 20 (no reset) — this milestone is Phases 21–28.
 | PERSIST-03 | Phase 23 | Complete |
 | PERSIST-04 | Phase 23 | Complete |
 | BENCH-01 | Phase 24 | Complete |
-| SHARE-01 | Phase 25 | Pending |
+| SHARE-01 | Phase 25 | Complete |
 | SHARE-02 | Phase 25 | Complete |
 | SHARE-03 | Phase 25 | Complete |
 | STRESS-01 | Phase 26 | Pending |
