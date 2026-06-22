@@ -32,10 +32,10 @@ Requirements for the v1.1.0 milestone. Each maps to a roadmap phase.
 
 ### Persistence & comparison (new #1, #6)
 
-- [ ] **PERSIST-01**: Allocator can save a named scenario to the database (JSONB draft = refs + weights + leverage + added strategies + `schema_version`; never raw return series)
-- [ ] **PERSIST-02**: Allocator can reopen a saved scenario, rehydrating the draft into the composer
-- [ ] **PERSIST-03**: Allocator can list, rename, and delete their saved scenarios
-- [ ] **PERSIST-04**: Allocator can compare 2+ saved scenarios (and the live book) side-by-side, ranked by Sharpe / return improvement
+- [x] **PERSIST-01**: Allocator can save a named scenario to the database (JSONB draft = refs + weights + leverage + added strategies + `schema_version`; never raw return series)
+- [x] **PERSIST-02**: Allocator can reopen a saved scenario, rehydrating the draft into the composer
+- [x] **PERSIST-03**: Allocator can list, rename, and delete their saved scenarios
+- [x] **PERSIST-04**: Allocator can compare 2+ saved scenarios (and the live book) side-by-side, ranked by Sharpe / return improvement
 
 ### Sharing (new #2)
 
@@ -45,7 +45,7 @@ Requirements for the v1.1.0 milestone. Each maps to a roadmap phase.
 
 ### Benchmark comparison (new #7)
 
-- [ ] **BENCH-01**: The scenario projection surfaces performance vs a benchmark (reusing `benchmark_prices` / `benchmark.py`), including tracking error / information ratio / alpha-beta over the overlap window
+- [x] **BENCH-01**: The scenario projection surfaces performance vs a benchmark (reusing `benchmark_prices` / `benchmark.py`), including tracking error / information ratio / alpha-beta over the overlap window
 
 ### Stress testing (new #3)
 
@@ -102,11 +102,11 @@ v1.0.0's Phase 20 (no reset) — this milestone is Phases 21–28.
 | IMPACT-02 | Phase 21 | Complete |
 | HONEST-01 | Phase 22 | Complete |
 | HONEST-02 | Phase 22 | Complete |
-| PERSIST-01 | Phase 23 | Pending |
-| PERSIST-02 | Phase 23 | Pending |
-| PERSIST-03 | Phase 23 | Pending |
-| PERSIST-04 | Phase 23 | Pending |
-| BENCH-01 | Phase 24 | Pending |
+| PERSIST-01 | Phase 23 | Complete |
+| PERSIST-02 | Phase 23 | Complete |
+| PERSIST-03 | Phase 23 | Complete |
+| PERSIST-04 | Phase 23 | Complete |
+| BENCH-01 | Phase 24 | Complete |
 | SHARE-01 | Phase 25 | Pending |
 | SHARE-02 | Phase 25 | Pending |
 | SHARE-03 | Phase 25 | Pending |
