@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.28.0.2] - 2026-06-22
+### Fixed — post-v1.1.0 cleanup: seed-script type hardening + two flaky tests that skip the prod deploy
+
+Three independent hardening fixes, all aimed at deploy reliability (flaky CI silently skips the Railway analytics deploy).
+
+- **`scripts/seed-demo-data.ts`** — gave the heterogeneous `profileRows` array an explicit `ProfileSeedRow` element type. The seed client is currently untyped (`createClient` with no `<Database>` generic), so this is harmless today, but it pre-empts the `next build` type error that appears the moment the client is typed `<Database>`: the allocator/manager rows infer a union and `.upsert(row)` then fails `RejectExcessProperties` over the mismatched optional keys.
+- **`analytics-service/tests/test_compute_jobs_fencing.py`** — `test_low_priority_claimed_when_high_normal_backlog_empty` was flaky against the shared test project: the `v_high_pending=0` throttle is a GLOBAL gate, so a concurrent CI run's normal/high pending row throttled this test's low row → `expected low in claimed` failed. Now a read-only probe (predicate identical to migration `20260603120000`'s `v_high_pending`) waits for the global backlog to clear before claiming, retries across a bounded budget, skips honestly if the project never quiets, and still fails loud on a genuine M-1133 regression. No new side effects (same `batch_size=5` claim as before).
+- **`src/app/api/admin/deletion-requests/[id]/approve/route.test.ts`** — migrated the last three `@/lib/supabase/admin` override tests off the `vi.resetModules()+vi.doMock()+await import()` dance (which races the route's eager imports in the single-process coverage job) onto call-time `state.updateError` / `state.sanitizeRpcError` flags read by the always-installed mock. With every override axis now state-driven, the describe's `{ retry: 5 }` bandaid is removed so a real regression fails loudly. Assertions byte-identical; 18/18 deterministic across repeated runs.
+
+Reviewed: a fresh-context Claude red-team verified all three are semantics-preserving (caught that the seed comment's original rationale was wrong — the client is untyped — and the comment was corrected). Probe predicate confirmed identical to the SQL gate; supabase-py API confirmed against pinned postgrest 1.0.2.
+
 ## [0.28.0.1] - 2026-06-22
 ### Fixed — admin deletion-approve rate-limit test no longer flakes the prod deploy
 

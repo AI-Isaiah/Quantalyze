@@ -72,6 +72,14 @@ const state = vi.hoisted(() => ({
     retryAfter?: number;
     reason?: string;
   },
+  // Admin-client failure injection read at CALL time by the always-installed
+  // buildDefaultAdminMock (same state-driven pattern as rateLimitResult /
+  // casWins). Per-test flip these instead of a resetModules+doMock+reimport
+  // dance — that dance races the route's eager imports in the single-process
+  // coverage job (the exact flake that red'd CI and skipped the prod deploy).
+  // Default = no error.
+  updateError: false as false | { message: string },
+  sanitizeRpcError: false as false | { message: string },
 }));
 
 // Track call ORDER so we can assert requireRole (and thus the rate-limit
@@ -82,10 +90,11 @@ const callOrder: string[] = [];
  * audit-2026-05-07 maintainability M (DRY) — factories so the
  * default-shape mocks are defined ONCE and consumed by BOTH the hoisted
  * `vi.mock` (above the describe) and `reapplyDefaultMocks()` (called
- * after `vi.resetModules` per-test). Per-test divergent overrides
- * (denial / misconfig / UPDATE error) still inline their own shape —
- * those intentionally differ from the default and must not share the
- * factory.
+ * after `vi.resetModules` per-test). Per-test divergent behavior
+ * (denial / misconfig / UPDATE error / sanitize-RPC error) is now driven
+ * off mutable `state.*` flags the factory reads at CALL time — NOT inline
+ * `vi.doMock` overrides, which raced the route's eager imports and flaked
+ * (see the retry note on the describe).
  *
  * Wrapped in `vi.hoisted` so the factories are available to the hoisted
  * `vi.mock(..., factory)` calls that vitest pulls above any non-hoisted
@@ -102,6 +111,8 @@ const { buildDefaultAdminMock, buildDefaultRateLimitMock } = vi.hoisted(
         signOutCalls: (userId: string, scope: string) => void;
         signOutShouldFail: false | { message: string };
         signOutShouldThrow: false | Error;
+        updateError: false | { message: string };
+        sanitizeRpcError: false | { message: string };
       },
       order: string[],
       testRequestId: string,
@@ -135,6 +146,13 @@ const { buildDefaultAdminMock, buildDefaultRateLimitMock } = vi.hoisted(
                 is: (_completedCol: string, _completedNull: unknown) => ({
                   is: (_rejectedCol: string, _rejectedNull: unknown) => ({
                     select: async (_cols: string) => {
+                      // s.updateError simulates the CAS UPDATE failing at the
+                      // DB (H-0216/M-0265): the route must still have emitted
+                      // account.sanitize and return 500. Record nothing on
+                      // the error path (mirrors the old inline override).
+                      if (s.updateError) {
+                        return { data: null, error: s.updateError };
+                      }
                       s.updateCompleted(patch);
                       return {
                         data: s.casWins ? [{ id: testRequestId }] : [],
@@ -150,6 +168,12 @@ const { buildDefaultAdminMock, buildDefaultRateLimitMock } = vi.hoisted(
         rpc: async (name: string, args: Record<string, unknown>) => {
           order.push(`rpc:${name}`);
           s.sanitizeRpc(name, args);
+          // s.sanitizeRpcError simulates sanitize_user failing: the route's
+          // rpcErr early-return must short-circuit BEFORE the audit emit, the
+          // CAS UPDATE, and signOut (testing-MED + C-0022/C-0023).
+          if (s.sanitizeRpcError) {
+            return { data: null, error: s.sanitizeRpcError };
+          }
           return { data: true, error: null };
         },
         // Audit-2026-05-07 C-0022 / C-0023 (red-team c8): the approve
@@ -350,36 +374,22 @@ function reapplyDefaultMocks() {
   );
 }
 
-// File-wide retry. Multiple tests in this describe use the
-// `vi.resetModules() + vi.doMock('@/lib/ratelimit'|'@/lib/supabase/admin')
-// + await import('./route')` pattern. Under heavy CI shard-1 concurrency
-// the route's eager module imports can race the per-test doMock
-// registration, leading to the DEFAULT (always-success / always-pass)
-// mock servicing the route call instead of the per-test override. Tests
-// then expect a 4xx/5xx but get the happy-path 200. Pass rate locally
-// is 100%, in CI 1276/1277 typically — the failure rotates across tests
-// in the describe block. Retry absorbs the race while we land the
-// larger refactor that moves per-test rate-limit/admin overrides onto
-// a shared mutable `state` object (mirroring how `state.deletionRow` /
-// `state.casWins` flip on the always-installed mocks), eliminating the
-// resetModules+doMock dance entirely.
+// HISTORY: this describe carried `{ retry: 5 }` for ~2 years because every
+// divergent test used a `vi.resetModules() + vi.doMock('@/lib/ratelimit' |
+// '@/lib/supabase/admin') + await import('./route')` dance. The route's eager
+// module imports race that per-test re-mock, so the DEFAULT always-pass mock
+// services the call and the test sees the happy-path 200 instead of its
+// 4xx/5xx. The race got WORSE in the single-process `frontend-coverage` job
+// (no sharding): retry:5 was EXHAUSTED, CI went red, and Railway silently
+// skipped the analytics prod deploy (deploy-on-green-CI).
 //
-// 2026-05-22: retry bumped 2 → 5 after PR #276 (v0.24.7.0) shard-1
-// re-composition pushed the race past the 2-retry budget on every run.
-// Two consecutive CI runs failed deterministically on rpcErr-suppresses
-// or H-0216/M-0265 with `expected 500 to be 200` — same shape, same
-// failure mode the comment describes. Bumping retry is the smallest
-// fix that aligns with the documented mitigation; the structural fix
-// (state-flag-driven default mock) is tracked as follow-up.
-//
-// 2026-06-22: structural fix DONE for the `@/lib/ratelimit` axis — the two
-// rate-limit override tests now drive `state.rateLimitResult` through the
-// always-installed mock (no resetModules+doMock+reimport), eliminating that
-// race. retry:5 stays because the `@/lib/supabase/admin` override tests
-// still use the doMock dance; migrating those to `state` is the remaining
-// follow-up. (The ratelimit flake had EXHAUSTED retry:5 in the single-
-// process coverage job, going red and Railway-skipping the prod deploy.)
-describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 5 }, () => {
+// 2026-06-22: structural fix COMPLETE. Every divergent axis (rate-limit
+// denial/misconfig, admin UPDATE error, admin sanitize-RPC error) now drives
+// a mutable `state.*` flag read at CALL time by the ALWAYS-installed factory
+// mocks (mirroring how `state.deletionRow` / `state.casWins` already work).
+// No test swaps a module anymore, so there is no import race and `retry` is
+// removed — a real regression now fails loudly instead of being masked.
+describe("POST /api/admin/deletion-requests/[id]/approve (P452)", () => {
   beforeEach(() => {
     callOrder.length = 0;
     state.authedUser = null;
@@ -395,6 +405,8 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 5 }, 
     state.signOutShouldFail = false;
     state.signOutShouldThrow = false;
     state.rateLimitResult = { success: true };
+    state.updateError = false;
+    state.sanitizeRpcError = false;
     rateLimitRecorder.mockReset();
     vi.resetModules();
     reapplyDefaultMocks();
@@ -611,52 +623,9 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 5 }, 
       rejected_at: null,
     };
 
-    // Override the admin client mock for this test so the UPDATE
-    // returns an error. We have to re-mock the whole module.
-    vi.resetModules();
-    vi.doMock("@/lib/supabase/admin", () => ({
-      createAdminClient: () => ({
-        from: (_table: string) => ({
-          select: () => ({
-            eq: () => ({
-              maybeSingle: async () => ({
-                data: state.deletionRow,
-                error: null,
-              }),
-            }),
-          }),
-          // red-team-CRITICAL: CAS chain now has TWO `.is(...)` calls
-          // (completed_at then rejected_at) before .select().
-          update: (_patch: Record<string, unknown>) => ({
-            eq: (_idCol: string, _idVal: string) => ({
-              is: (_c1: string, _n1: unknown) => ({
-                is: (_c2: string, _n2: unknown) => ({
-                  select: async (_cols: string) => ({
-                    data: null,
-                    error: { message: "transient db error" },
-                  }),
-                }),
-              }),
-            }),
-          }),
-        }),
-        rpc: async (name: string, args: Record<string, unknown>) => {
-          state.sanitizeRpc(name, args);
-          return { data: true, error: null };
-        },
-        // C-0022 / C-0023: route invokes admin.auth.admin.signOut after
-        // emit lands. Provide a no-op recorder so the per-test override
-        // doesn't crash the route on an undefined-method access.
-        auth: {
-          admin: {
-            signOut: async (userId: string, scope: string) => {
-              state.signOutCalls(userId, scope);
-              return { error: null };
-            },
-          },
-        },
-      }),
-    }));
+    // CAS UPDATE fails at the DB — state-driven via the always-installed
+    // mock (no resetModules+doMock+reimport race).
+    state.updateError = { message: "transient db error" };
 
     const { POST } = await import("./route");
     const res = await POST(makeReq(), makeCtx());
@@ -707,65 +676,13 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 5 }, 
       rejected_at: null,
     };
 
-    // Override the admin client mock so sanitize_user errors out. The
-    // route must short-circuit at the rpcErr branch (the `if (rpcErr)`
-    // block immediately after the sanitize_user RPC call) BEFORE
-    // emitting any audit and BEFORE attempting the CAS UPDATE. Avoid
-    // pinning a literal line range — the route docstring + red-team
-    // commits have re-flowed the line numbers; the structural anchor
-    // ("rpcErr early-return guarding the synchronous emit + CAS") is
-    // what this test pins.
-    vi.resetModules();
-    vi.doMock("@/lib/supabase/admin", () => ({
-      createAdminClient: () => ({
-        from: (_table: string) => ({
-          select: () => ({
-            eq: () => ({
-              maybeSingle: async () => ({
-                data: state.deletionRow,
-                error: null,
-              }),
-            }),
-          }),
-          // UPDATE must NEVER be reached on the rpcErr branch — wire
-          // the mock to record-and-fail so a regression that skips the
-          // early-return surfaces as an explicit assertion failure
-          // (state.updateCompleted called) rather than a silent pass.
-          // red-team-CRITICAL: CAS chain has TWO `.is(...)` calls now.
-          update: (patch: Record<string, unknown>) => ({
-            eq: (_idCol: string, _idVal: string) => ({
-              is: (_c1: string, _n1: unknown) => ({
-                is: (_c2: string, _n2: unknown) => ({
-                  select: async (_cols: string) => {
-                    state.updateCompleted(patch);
-                    return { data: [], error: null };
-                  },
-                }),
-              }),
-            }),
-          }),
-        }),
-        rpc: async (name: string, args: Record<string, unknown>) => {
-          state.sanitizeRpc(name, args);
-          return {
-            data: null,
-            error: { message: "rpc failed" },
-          };
-        },
-        // C-0022 / C-0023: must NOT be invoked on the rpcErr branch
-        // (the route short-circuits before signOut). Recorder is
-        // enough — the assertion below checks state.signOutCalls was
-        // never called.
-        auth: {
-          admin: {
-            signOut: async (userId: string, scope: string) => {
-              state.signOutCalls(userId, scope);
-              return { error: null };
-            },
-          },
-        },
-      }),
-    }));
+    // sanitize_user errors — state-driven via the always-installed mock
+    // (no resetModules+doMock+reimport race). The route's rpcErr early-
+    // return must short-circuit BEFORE emitting any audit and BEFORE the
+    // CAS UPDATE, so the default mock's updateCompleted spy stays uncalled
+    // (the assertion below verifies it). Structural anchor: "rpcErr early-
+    // return guarding the synchronous emit + CAS".
+    state.sanitizeRpcError = { message: "rpc failed" };
 
     const { POST } = await import("./route");
     const res = await POST(makeReq(), makeCtx());
@@ -1167,48 +1084,10 @@ describe("POST /api/admin/deletion-requests/[id]/approve (P452)", { retry: 5 }, 
       rejected_at: null,
     };
 
-    vi.resetModules();
-    vi.doMock("@/lib/supabase/admin", () => ({
-      createAdminClient: () => ({
-        from: (_table: string) => ({
-          select: () => ({
-            eq: () => ({
-              maybeSingle: async () => ({
-                data: state.deletionRow,
-                error: null,
-              }),
-            }),
-          }),
-          update: (_patch: Record<string, unknown>) => ({
-            eq: (_idCol: string, _idVal: string) => ({
-              is: (_c1: string, _n1: unknown) => ({
-                is: (_c2: string, _n2: unknown) => ({
-                  select: async (_cols: string) => ({
-                    data: [],
-                    error: null,
-                  }),
-                }),
-              }),
-            }),
-          }),
-        }),
-        rpc: async (name: string, args: Record<string, unknown>) => {
-          state.sanitizeRpc(name, args);
-          return {
-            data: null,
-            error: { message: "rpc failed" },
-          };
-        },
-        auth: {
-          admin: {
-            signOut: async (userId: string, scope: string) => {
-              state.signOutCalls(userId, scope);
-              return { error: null };
-            },
-          },
-        },
-      }),
-    }));
+    // sanitize_user errors — state-driven via the always-installed mock.
+    // rpcErr short-circuits before signOut, so the default mock's signOut
+    // recorder stays uncalled (verified below).
+    state.sanitizeRpcError = { message: "rpc failed" };
 
     const { POST } = await import("./route");
     const res = await POST(makeReq(), makeCtx());
