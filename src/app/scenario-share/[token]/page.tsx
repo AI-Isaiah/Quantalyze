@@ -53,6 +53,11 @@ const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 // open. 2.5s degrades a hung benchmark to the honest "unavailable" empty state.
 const BENCHMARK_FETCH_TIMEOUT_MS = 2500;
 
+// The persistent PROJECTED framing. Single-sourced so the badge and the subtext
+// can never drift apart — both render the same literal (the subtext only
+// prefixes "Shared scenario · ").
+const PROJECTED_LABEL = "PROJECTED — hypothetical, not a live book";
+
 /** Fetch the public BTC daily-return series for the benchmark overlay. The
  *  route is shared market data and stays cacheable — we do NOT add no-store to
  *  it. A failed / empty / TIMED-OUT fetch degrades the benchmark section to its
@@ -188,11 +193,11 @@ export default async function ScenarioSharePage({
             data-testid="scenario-projected-badge"
             className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-[10px] uppercase tracking-wide font-semibold text-text-muted"
           >
-            PROJECTED — hypothetical, not a live book
+            {PROJECTED_LABEL}
           </span>
         </div>
         <p className="mt-2 text-sm text-text-secondary">
-          Shared scenario · PROJECTED — hypothetical, not a live book
+          Shared scenario · {PROJECTED_LABEL}
         </p>
         <p className="mt-1 text-xs text-text-muted">{methodologyLine(metrics.n)}</p>
       </header>

@@ -166,7 +166,7 @@ function computeVarPath(
   // fabricated number. Surface null instead so no fabricated value can escape.
   if (!values.every(Number.isFinite)) return NULL_VAR;
 
-  // 2. Relative-scale degeneracy guard (copied from scenario-benchmark.ts:139-140).
+  // 2. Relative-scale degeneracy guard (the relative-scale degeneracy guard in scenario-benchmark.ts).
   // A numerically-constant n>=60 window leaves a float-residue variance (~1e-37)
   // that an exact `=== 0` would miss, letting computeVaR return a meaningless
   // (constant) quantile that the section would render as a fabricated number.
