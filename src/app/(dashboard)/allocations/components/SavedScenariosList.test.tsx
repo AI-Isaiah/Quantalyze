@@ -6,7 +6,7 @@
  * "Compare selected" CTA, and an honest EmptyStateCard when none exist.
  *
  * Honesty + UI-SPEC invariants pinned here:
- *   - Empty list → EmptyStateCard heading "No saved scenarios yet" matches the
+ *   - Empty list → EmptyStateCard heading "No saved portfolios yet" matches the
  *     UI-SPEC body (the #509 heading-matches-body lesson).
  *   - Rename → inline edit input (NOT a modal) → PATCH with the TRIMMED name;
  *     empty / >120 shows the validation copy and does NOT PATCH.
@@ -72,7 +72,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     render(
       <SavedScenariosList rows={[]} onOpen={vi.fn()} onCompare={vi.fn()} />,
     );
-    expect(screen.getByText("No saved scenarios yet")).toBeInTheDocument();
+    expect(screen.getByText("No saved portfolios yet")).toBeInTheDocument();
     expect(
       screen.getByText(/Compose a draft above, then choose/i),
     ).toBeInTheDocument();
@@ -123,7 +123,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     fireEvent.click(screen.getAllByRole("button", { name: /^Rename$/ })[0]);
     // Inline input, NOT a modal.
     expect(screen.queryByRole("dialog")).toBeNull();
-    const input = screen.getByLabelText(/rename scenario/i);
+    const input = screen.getByLabelText(/rename portfolio/i);
     fireEvent.change(input, { target: { value: "  Renamed blend  " } });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
 
@@ -146,13 +146,13 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
       <SavedScenariosList rows={ROWS} onOpen={vi.fn()} onCompare={vi.fn()} />,
     );
     fireEvent.click(screen.getAllByRole("button", { name: /^Rename$/ })[0]);
-    const input = screen.getByLabelText(/rename scenario/i);
+    const input = screen.getByLabelText(/rename portfolio/i);
 
     // Empty (whitespace) → validation copy, no PATCH.
     fireEvent.change(input, { target: { value: "   " } });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
     expect(
-      screen.getByText("Enter a name to save this scenario."),
+      screen.getByText("Enter a name to save this portfolio."),
     ).toBeInTheDocument();
     expect(mockFetch).not.toHaveBeenCalled();
 
@@ -160,7 +160,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     fireEvent.change(input, { target: { value: "x".repeat(121) } });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
     expect(
-      screen.getByText("Scenario names are limited to 120 characters."),
+      screen.getByText("Portfolio names are limited to 120 characters."),
     ).toBeInTheDocument();
     expect(mockFetch).not.toHaveBeenCalled();
   });
@@ -243,7 +243,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
 
     // Honest, visible failure (role=alert), with the rename-specific copy.
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Couldn't rename this scenario");
+    expect(alert.textContent).toContain("Couldn't rename this portfolio");
     // onMutated fires ONLY on success — it must NOT fire on a failed rename
     // (proves the optimistic setLocalRows after the !ok return never ran).
     expect(onMutated).not.toHaveBeenCalled();
@@ -275,7 +275,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     fireEvent.click(within(firstRow).getByRole("button", { name: /^Delete$/ }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Couldn't delete this scenario");
+    expect(alert.textContent).toContain("Couldn't delete this portfolio");
     // Row NOT optimistically removed on failure.
     expect(screen.getByText("Conservative blend")).toBeInTheDocument();
     expect(onMutated).not.toHaveBeenCalled();
@@ -319,7 +319,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     expect(compareCta).toBeDisabled();
     expect(
       screen.getByText(
-        "Select 2 or more scenarios (or the live book) to compare.",
+        "Select 2 or more portfolios (or the live book) to compare.",
       ),
     ).toBeInTheDocument();
 
@@ -406,10 +406,10 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     // Distinct error copy via the canonical role="alert" path.
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent(
-      "Couldn't load your saved scenarios. Try again.",
+      "Couldn't load your saved portfolios. Try again.",
     );
-    // The fabricated "no scenarios" empty state must NOT appear.
-    expect(screen.queryByText("No saved scenarios yet")).toBeNull();
+    // The fabricated "no portfolios" empty state must NOT appear.
+    expect(screen.queryByText("No saved portfolios yet")).toBeNull();
     expect(
       screen.queryByText(/Compose a draft above, then choose/i),
     ).toBeNull();

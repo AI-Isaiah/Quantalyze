@@ -15,9 +15,15 @@ import { cn } from "@/lib/utils";
  * >= 2 selections (incl. the live book) and raises the selected rows +
  * includeLiveBook flag to the parent (which mounts ScenarioComparePanel).
  *
+ * Phase 29 (UNIFY-05) — the UI copy surfaces the noun "portfolio" while the
+ * persistence (the `scenarios` table + `/api/allocator/scenario/saved*` routes)
+ * and all code/route/state names stay "scenario". Copy-only relabel; the
+ * fetch URLs, the codec-trichotomy Open delegation, the Share affordance and
+ * the Compare gate are byte-identical.
+ *
  * Honesty + UI-SPEC invariants:
  *   - Empty list → EmptyStateCard whose heading MATCHES its body (the #509
- *     lesson) — "No saved scenarios yet".
+ *     lesson) — "No saved portfolios yet".
  *   - Rename / Delete are INLINE (no modal): Rename reveals a text input that
  *     PATCHes the trimmed name (1..120, else the validation copy + no PATCH);
  *     Delete reveals a small "Delete "{name}"?" danger confirm.
@@ -64,7 +70,7 @@ interface SavedScenariosListProps {
   /**
    * True when the list GET failed (non-2xx or threw) AND no prior rows are
    * cached. When set with an empty `rows`, the list renders an honest ERROR
-   * state ("Couldn't load…") instead of the "No saved scenarios yet" empty card
+   * state ("Couldn't load…") instead of the "No saved portfolios yet" empty card
    * — an unloaded list must never masquerade as an empty list (a fabricated
    * fact, the #509 lesson). If `rows` is non-empty (a prior load succeeded),
    * the cached rows stay rendered and this flag is ignored.
@@ -98,11 +104,11 @@ function timestampLabel(row: SavedScenarioListRow): string {
 function validateName(raw: string): { name: string | null; error: string | null } {
   const trimmed = raw.trim();
   if (trimmed.length < 1)
-    return { name: null, error: "Enter a name to save this scenario." };
+    return { name: null, error: "Enter a name to save this portfolio." };
   if (trimmed.length > 120)
     return {
       name: null,
-      error: "Scenario names are limited to 120 characters.",
+      error: "Portfolio names are limited to 120 characters.",
     };
   return { name: trimmed, error: null };
 }
@@ -319,7 +325,7 @@ export function SavedScenariosList({
           body: JSON.stringify({ name }),
         });
         if (!res.ok) {
-          setMutationError("Couldn't rename this scenario. Try again.");
+          setMutationError("Couldn't rename this portfolio. Try again.");
           return;
         }
         setLocalRows((prev) =>
@@ -329,7 +335,7 @@ export function SavedScenariosList({
         setRenameValue("");
         onMutated?.();
       } catch {
-        setMutationError("Couldn't rename this scenario. Try again.");
+        setMutationError("Couldn't rename this portfolio. Try again.");
       }
     },
     [renameValue, onMutated],
@@ -343,7 +349,7 @@ export function SavedScenariosList({
           method: "DELETE",
         });
         if (!res.ok) {
-          setMutationError("Couldn't delete this scenario. Try again.");
+          setMutationError("Couldn't delete this portfolio. Try again.");
           return;
         }
         setLocalRows((prev) => prev.filter((r) => r.id !== row.id));
@@ -355,7 +361,7 @@ export function SavedScenariosList({
         setConfirmingDeleteId(null);
         onMutated?.();
       } catch {
-        setMutationError("Couldn't delete this scenario. Try again.");
+        setMutationError("Couldn't delete this portfolio. Try again.");
       }
     },
     [onMutated],
@@ -373,31 +379,31 @@ export function SavedScenariosList({
   }, [compareEnabled, onCompare, selectedRows, includeLiveBook]);
 
   return (
-    <section className="space-y-3" aria-labelledby="saved-scenarios-heading">
+    <section className="space-y-3" aria-labelledby="saved-portfolios-heading">
       <h2
-        id="saved-scenarios-heading"
+        id="saved-portfolios-heading"
         className="text-base font-semibold text-text-primary"
       >
-        Saved scenarios
+        Saved portfolios
       </h2>
 
       {listLoadError && localRows.length === 0 ? (
         // Hard load failure with nothing cached → honest ERROR state (canonical
-        // error path, role="alert"), NOT the "No saved scenarios yet" empty card
-        // (which would fabricate "you have no scenarios" from a transport
+        // error path, role="alert"), NOT the "No saved portfolios yet" empty card
+        // (which would fabricate "you have no portfolios" from a transport
         // failure — the #509 heading/body honesty lesson).
         <div
           role="alert"
           className="rounded-md border border-negative/40 bg-surface px-4 py-3 text-sm text-negative"
         >
-          Couldn&apos;t load your saved scenarios. Try again.
+          Couldn&apos;t load your saved portfolios. Try again.
         </div>
       ) : localRows.length === 0 ? (
         <EmptyStateCard
-          heading="No saved scenarios yet"
+          heading="No saved portfolios yet"
           body={
-            'Compose a draft above, then choose "Save scenario" to keep it here. ' +
-            "Saved scenarios reopen into the composer and can be compared side-by-side."
+            'Compose a draft above, then choose "Save portfolio" to keep it here. ' +
+            "Saved portfolios reopen into the composer and can be compared side-by-side."
           }
         />
       ) : (
@@ -446,7 +452,7 @@ export function SavedScenariosList({
                       <div className="flex flex-col gap-1">
                         <input
                           type="text"
-                          aria-label={`Rename scenario ${row.name}`}
+                          aria-label={`Rename portfolio ${row.name}`}
                           value={renameValue}
                           onChange={(e) => {
                             setRenameValue(e.target.value);
@@ -673,7 +679,7 @@ export function SavedScenariosList({
             </Button>
             {!compareEnabled && (
               <p className={cn("text-xs text-text-muted")}>
-                Select 2 or more scenarios (or the live book) to compare.
+                Select 2 or more portfolios (or the live book) to compare.
               </p>
             )}
           </div>
