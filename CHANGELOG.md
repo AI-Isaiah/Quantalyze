@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.29.0.0] - 2026-06-23
+### Added — one allocator composer: blank-slate / example / book entry + factsheet graphs on the blend (v1.2 Phases 29-30)
+
+The own-book Scenario composer becomes the single place to build a portfolio from any source and read it at factsheet depth. Three fractured surfaces (the own-book Scenario tab, the example-universe `/scenarios` builder, legacy `/portfolios`) did overlapping jobs; this unifies the composer's front door and gives the blended portfolio the same distribution and rolling-metric graphs a single strategy's factsheet shows.
+
+- **Three entry modes, one surface (Phase 29).** A segmented "From my book" / "Blank slate" control (routed through the existing reset-confirmation discipline) lets an allocator start empty or from their holdings, then add any verified or example-universe strategy from the Browse drawer — all on the existing `scenarios` store (no schema change). The drawer tags example strategies with a neutral "Example" provenance pill, and the composer copy now reads "portfolio" throughout.
+- **Added strategies actually move the projection.** A new RLS-scoped `GET /api/strategies/[id]/returns` lazily supplies one published strategy's `daily_returns` the moment it is added (the dashboard payload is book-only, so a browse-added strategy previously contributed nothing and was warm-up-gated out). One id per call, read through the RLS server client + `withPublishedOnly` — never the service-role bypass the legacy `/scenarios` page used.
+- **Factsheet graphs on the blended portfolio (Phase 30).** The composer renders a returns distribution (histogram + quantiles) and rolling Sharpe / volatility / Sortino (3M/6M/12M windows) computed directly off the engine's unrounded `portfolio_daily_returns`, plus a drawdown chart reskinned to the shared chart tokens. Rolling vol/Sharpe are numerically identical to the existing `computeRollingMetric` (sample-std × √252) and Sortino mirrors the frozen engine. The blend is never ranked, scored, or percentile-badged against peers (honesty invariant) — graphs only.
+
+### Fixed
+- **"Copy link" on a saved portfolio no longer silently revokes the recipient's link.** It re-invoked the share-generate route, which atomically rotates the token — so copying a link killed any link already shared. It now reuses the URL captured when the link was generated; when that URL isn't recoverable (a prior session, after a reload — the token is hash-only and never re-fetchable) it asks before generating a new one, instead of rotating silently.
+- **One canonical `daily_returns` parser across both trust boundaries.** The lazy route and the book path now both normalize the column through `normalizeDailyReturns`, which handles the array, flat-dict, and TYPED nested year-record shapes (reconstructing `YYYY-MM-DD` from `MM-DD` inner keys). Previously the route's bare `Array.isArray` cast and the book path's hand-rolled flatten each silently dropped the nested shape to `[]` (a real series warm-up-gated out, no signal) in different ways — they can no longer drift.
+- **Blend graphs gate consistently on usable history.** A non-finite-poisoned series now reports zero usable points, so the rolling-window control shows the "awaiting more data" banner instead of enabling a window that renders empty charts.
+
+Reviewed: full frontend suite green (6565); typecheck + lint clean; headed-browser /qa against real prod data (the 15-strategy example universe) validated the composer, lazy-add, and every blend graph in the phase pass. A six-specialist fan-out + a fresh-context Claude red-team reviewed this ship — the api-contract specialist caught the route's nested-shape silent-drop (fixed via the canonical parser) and the red-team caught the `normalizeBookReturns`/`normalizeDailyReturns` divergence (now consolidated to one parser) plus a duplicated comment; all regression-pinned (route R4b/R7b, blend-panel `usableN`, WR-03a/b).
+
 ## [0.28.0.2] - 2026-06-22
 ### Fixed — post-v1.1.0 cleanup: seed-script type hardening + two flaky tests that skip the prod deploy
 
