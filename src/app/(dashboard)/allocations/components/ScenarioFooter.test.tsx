@@ -167,14 +167,15 @@ describe("ScenarioFooter", () => {
 
     const region = screen.getByRole("region", {
       name: "Scenario draft summary and actions",
-    });
+    }) as HTMLElement;
     expect(region).toBeTruthy();
 
-    // Inline styles applied via the `style` prop.
-    const footer = container.querySelector("footer");
-    expect(footer).not.toBeNull();
-    expect(footer!.style.position).toBe("sticky");
-    expect(footer!.style.bottom).toBe("0px");
+    // JOURNEY-03 (a11y): the region landmark is a <div role="region">, NOT a
+    // <footer> (axe aria-allowed-role rejects role="region" on <footer>).
+    // Assert there is no <footer>, and the region carries the sticky style.
+    expect(container.querySelector("footer")).toBeNull();
+    expect(region.style.position).toBe("sticky");
+    expect(region.style.bottom).toBe("0px");
   });
 
   it("T_F9 Reset button has ghost+hover-destructive className tokens (text-text-secondary base; hover:text-negative)", () => {

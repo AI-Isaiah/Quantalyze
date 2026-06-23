@@ -103,7 +103,11 @@ export function ScenarioFooter({
           .join(" · ");
 
   return (
-    <footer
+    // JOURNEY-03 (a11y) — a labeled region landmark on a <div>, NOT a <footer>:
+    // axe aria-allowed-role rejects role="region" on a <footer> (footer's
+    // allowed roles don't include region). The region landmark + label are what
+    // matter; a sticky bar is not a page contentinfo footer anyway.
+    <div
       role="region"
       aria-label="Scenario draft summary and actions"
       style={FOOTER_STYLE}
@@ -135,6 +139,6 @@ export function ScenarioFooter({
           Commit scenario
         </button>
       </div>
-    </footer>
+    </div>
   );
 }

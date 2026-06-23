@@ -557,11 +557,17 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
             My Allocation
           </h1>
         </div>
-        <div
-          role="tablist"
-          aria-label="Allocation surfaces"
-          className="ml-auto flex items-center gap-1"
-        >
+        {/* JOURNEY-03 (a11y) — the row holds the tablist AND two action
+            buttons (Export, + Allocation). A role="tablist" may contain ONLY
+            role="tab" children (axe aria-required-children, critical), so the
+            tablist wraps just the tabs; the actions are siblings in the same
+            flex row. */}
+        <div className="ml-auto flex items-center gap-1">
+          <div
+            role="tablist"
+            aria-label="Allocation surfaces"
+            className="flex items-center gap-1"
+          >
           {VISIBLE_TAB_KEYS.map((key) => {
             const isActive = activeTab === key;
             const label = TAB_LABELS[key];
@@ -599,6 +605,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
               </button>
             );
           })}
+          </div>
           <span aria-hidden className="mx-2 h-4 w-px bg-border" />
           <button
             type="button"

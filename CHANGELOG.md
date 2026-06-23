@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.30.0.1] - 2026-06-23
+### Changed — journey polish: Bridge→composer continuity, accessible blank slate, composer a11y gate (v1.2 Phase 33)
+
+The last phase of v1.2 polishes the path to the now-settled composer. It is a verification-and-polish phase: the only product behavior change is a keyboard focus ring on the blank-slate calls-to-action; the rest is the test coverage that proves the journey actually works.
+
+- **Carrying a Bridge recommendation into the composer is now pinned by a real test (JOURNEY-01).** A non-vacuous, falsifiable regression test drives the live seam — clicking a Bridge candidate's "Add to scenario" runs `addStrategyBridge` and the blended projection's TWR and volatility actually move, not just a membership flag. It also guards the reachability hinge (the composer-owned drawer is the only path that seeds the draft; the portfolio-level `BridgeWidget` drawers never were), so the seam can't silently go dead.
+- **The blank-slate front door is keyboard-accessible (JOURNEY-02).** The "Connect Exchange" and "Browse strategies" calls-to-action on an empty composer now show the same accent focus ring the rest of the surface uses, so keyboard users can see where they are.
+- **The unified composer is covered by an automated WCAG-AA scan (JOURNEY-03).** A new axe-core end-to-end spec scans `/allocations?tab=scenario` at WCAG-AA across both the blank-slate front door and the composed surface (it seeds a strategy and drives the Browse drawer so the composer reaches its composed state with the Phase-30 cards mounted before scanning). It is wired into the seed-gated CI e2e job and uses no rule suppression. The chart-SVG leaf a11y (histogram / rolling metrics) is independently covered by `strategy-v2-axe.spec.ts`.
+
+### Fixed
+- **Duplicate `<main>` landmark on `/allocations` (accessibility).** The new composer axe scan immediately caught it: the page nested its own `<main>` inside `DashboardChrome`'s `<main aria-label="Dashboard content">`, tripping axe `landmark-no-duplicate-main`. The page wrapper is now a `<div>`; the chrome owns the single main landmark. No visual change.
+- **Action buttons inside the `role="tablist"` (accessibility, critical).** The "Allocation surfaces" tab bar wrapped the "Export" and "+ Allocation" buttons inside its `role="tablist"`, which may only contain `role="tab"` children (axe `aria-required-children`, critical). The tablist now wraps just the tabs; the two actions are siblings in the same flex row. No visual change.
+- **`role="region"` on a `<footer>` element (accessibility).** The scenario composer's sticky draft-summary bar (`ScenarioFooter`) put `role="region"` on a `<footer>`, which axe `aria-allowed-role` rejects (footer's allowed roles don't include region). It is now a `<div role="region">` with the same label and sticky style — the labeled-region landmark is preserved, on an element that allows it. No visual change.
+
+Reviewed: full frontend suite green (6580); typecheck + lint clean; the frozen scenario engine (`src/lib/scenario.ts`) is byte-for-byte unchanged (guard-enforced). A five-specialist fan-out + a fresh-context Claude adversarial red-team reviewed this ship. The red-team caught a FLOW-01-class trap the specialists missed: the new axe spec had been given its seed-env gate but was never added to CI's hand-maintained spec list, so JOURNEY-03's "automated checks" would never have run — fixed by wiring it in. The same pass tightened the scan's readiness gates to assert the chart bodies rendered (not just the card wrappers), so "scan the graphs" is proven rather than assumed.
+
 ## [0.30.0.0] - 2026-06-23
 ### Changed — graphs-lead composer layout + one allocator entry point (v1.2 Phases 31-32)
 
