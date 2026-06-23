@@ -78,6 +78,7 @@ import { RollingSortinoChart } from "@/components/charts/RollingSortinoChart";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { PartialDataBanner } from "@/components/strategy-v2/PartialDataBanner";
 import { Card } from "@/components/ui/Card";
+import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { Button } from "@/components/ui/Button";
 import {
@@ -2242,22 +2243,46 @@ export function ScenarioComposer({
         </div>
       )}
 
-      <CompositionList
-        draft={scenario.draft}
-        holdingsSummary={holdingsSummary}
-        flaggedHoldings={flaggedHoldings}
-        sharedSymbols={sharedSymbols}
-        onToggle={scenario.toggleHolding}
-        onSetWeight={handleWeightChange}
-        leverageByRef={leverageByRef}
-        onSetLeverage={handleLeverageChange}
-        onRemoveAdded={handleRemoveAdded}
-        onCompare={(scopeRef, candidateId) =>
-          router.push(
-            `/compare?ids=${encodeURIComponent(scopeRef)},${candidateId}`,
-          )
-        }
-      />
+      {/* LAYOUT-01 / LAYOUT-02 (Pitfall 5) — the composition controls
+          (toggle / weight / leverage) become the collapsible section so the
+          factsheet-grade graphs rendered ABOVE in DOM order lead the surface
+          when an allocator collapses to focus on the projection. The lifted
+          CollapsibleSection is a native <details>: CompositionList stays MOUNTED
+          when collapsed (the browser only HIDES it), and every in-progress edit
+          survives collapse→expand because the edit state (`leverageByRef`,
+          `scenario.draft.weightOverrides`) lives in THIS parent, ABOVE the
+          collapsible boundary — never moved down into CompositionList. The list
+          is an UNCONDITIONAL child: never gate it behind an open-flag conditional
+          (that would unmount it on collapse and wipe the edits — the
+          silent-failure surface the phase-31 guard enforces against).
+          Default-EXPANDED — an allocator composing needs the
+          controls visible; hiding to focus on the graphs is opt-in. Composer-
+          scoped storageKey (independent of the factsheet `factsheet-collapse:`
+          namespace) persists the choice across reloads. No onToggle — composer
+          collapse analytics are out of scope this phase. */}
+      <CollapsibleSection
+        id="composer-composition-controls"
+        title="Strategies & weights"
+        defaultOpen={true}
+        storageKey="composer-collapse:controls"
+      >
+        <CompositionList
+          draft={scenario.draft}
+          holdingsSummary={holdingsSummary}
+          flaggedHoldings={flaggedHoldings}
+          sharedSymbols={sharedSymbols}
+          onToggle={scenario.toggleHolding}
+          onSetWeight={handleWeightChange}
+          leverageByRef={leverageByRef}
+          onSetLeverage={handleLeverageChange}
+          onRemoveAdded={handleRemoveAdded}
+          onCompare={(scopeRef, candidateId) =>
+            router.push(
+              `/compare?ids=${encodeURIComponent(scopeRef)},${candidateId}`,
+            )
+          }
+        />
+      </CollapsibleSection>
 
       <div className="mt-8 rounded-lg border border-border bg-surface p-4">
         <div className="text-base font-semibold text-text-primary">
