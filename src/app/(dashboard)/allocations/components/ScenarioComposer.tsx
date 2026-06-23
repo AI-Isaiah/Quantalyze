@@ -67,7 +67,15 @@ import {
   type StrategyForBuilder,
 } from "@/lib/scenario";
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
+import { buildBlendPanels } from "@/lib/scenario-blend-panels";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
+import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
+import { ReturnQuantiles } from "@/components/charts/ReturnQuantiles";
+import { RollingMetrics } from "@/components/charts/RollingMetrics";
+import { RollingVolatilityChart } from "@/components/charts/RollingVolatilityChart";
+import { RollingSortinoChart } from "@/components/charts/RollingSortinoChart";
+import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
+import { PartialDataBanner } from "@/components/strategy-v2/PartialDataBanner";
 import { Card } from "@/components/ui/Card";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { Button } from "@/components/ui/Button";
@@ -119,6 +127,17 @@ const SYNTHETIC_BASELINE_AUM = 1;
  * handler and the CompositionList input share a single source of truth.
  */
 const MAX_LEVERAGE = 10;
+
+/**
+ * GRAPH-03 — human label for each rolling-window length, used in the
+ * below-floor empty-banner copy ("…for the {window} rolling window."). The
+ * window itself stays the trading-day count (63/126/252) everywhere else.
+ */
+const WINDOW_LABEL: Record<number, string> = {
+  63: "3M",
+  126: "6M",
+  252: "12M",
+};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -568,6 +587,11 @@ export function ScenarioComposer({
   const [btcAvailable, setBtcAvailable] = useState(false);
   // Overlay toggle, default ON per UI-SPEC §Component Inventory.
   const [showBenchmark, setShowBenchmark] = useState(true);
+
+  // GRAPH-03 — rolling-metrics window. 3M/6M/12M map to 63/126/252 trading-day
+  // windows (client-side, 252-annualization basis — NOT the per-strategy panel's
+  // 90/180/365 backend keys). Default 6M=126 per UI-SPEC §Component Inventory.
+  const [rollingWindow, setRollingWindow] = useState(126);
 
   function handleWeightChange(scopeRef: string, weight: number) {
     if (!Number.isFinite(weight)) {
@@ -1281,6 +1305,18 @@ export function ScenarioComposer({
   const scenarioMetrics = useMemo(
     () => computeScenario(deAliased.strategies, deAliased.state, dateMapCache),
     [deAliased, dateMapCache],
+  );
+
+  // GRAPH-02 / GRAPH-03 — derive every blend-graph series from the SAME
+  // unrounded `portfolio_daily_returns` the benchmark / stress / MC sections
+  // read (never the rounded/downsampled `equity_curve`). `buildBlendPanels` is
+  // the single pure-TS adapter (Plan 30-01); the host stays props-only. Memoized
+  // on the return series + the selected window so it recomputes only when the
+  // blend or the toggle changes.
+  const portfolioDaily = scenarioMetrics.portfolio_daily_returns ?? [];
+  const blendPanels = useMemo(
+    () => buildBlendPanels(portfolioDaily, rollingWindow),
+    [portfolioDaily, rollingWindow],
   );
 
   // CORR-01 — de-aliased axis labels for the CorrelationHeatmap, built like the
@@ -2061,6 +2097,113 @@ export function ScenarioComposer({
           overlappingDays={scenarioMetrics.n}
           avgAbsCorrelation={scenarioMetrics.avg_pairwise_correlation}
         />
+      </Card>
+
+      {/* GRAPH-02 — Returns distribution of the BLEND. Histogram (fed the
+          CUMULATIVE-wealth series the adapter builds — ReturnHistogram derives
+          daily internally) + 5-number quantile box, both off the same
+          `portfolio_daily_returns` the sections above read. Owns its own
+          method/overlap-N/horizon disclosure (the page PROJECTED badge is NOT
+          sufficient — GRAPH-04); below the 10-point floor the body swaps to a
+          neutral role="status" PartialDataBanner (never role="alert" — absence
+          on a derived-client panel is honest-neutral, not an error). LEAF charts
+          only — no per-strategy panel wrapper, no factsheet body / metrics
+          column / allocator-portfolio payload builder / percentile-rank badge,
+          no api-ingest literal (LOCKED honesty invariant — a what-if has no
+          verified track record to peer-rank). */}
+      <Card className="mt-6" data-panel="blend-returns-distribution" aria-label="Returns distribution">
+        <div className="mb-3">
+          <h2 className="text-base font-semibold text-text-primary">
+            Returns distribution
+          </h2>
+        </div>
+        {portfolioDaily.length < 10 ? (
+          <PartialDataBanner
+            heading="Awaiting more data"
+            body="This portfolio needs at least 10 overlapping daily returns to chart its distribution."
+          />
+        ) : (
+          <div className="space-y-6">
+            <div>
+              <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
+                Return histogram
+              </h3>
+              <ReturnHistogram returns={blendPanels.histogramSeries} bins={20} />
+            </div>
+            <div>
+              <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
+                Return quantiles
+              </h3>
+              <ReturnQuantiles data={blendPanels.quantiles} />
+            </div>
+            <p className="text-xs text-text-muted">
+              Distribution of {scenarioMetrics.n} overlapping daily returns ·
+              historical realized · not a forecast.
+            </p>
+          </div>
+        )}
+      </Card>
+
+      {/* GRAPH-03 — Rolling metrics of the BLEND. SegmentedControl (3M/6M/12M →
+          63/126/252-day windows, default 6M=126; an option is disabled when the
+          usable history is shorter than its window) + rolling Sharpe (keyed
+          sharpe_365d so RollingMetrics resolves the CHART_ACCENT stroke; we pass
+          daysOfHistory={usableN} so the avg reference line self-suppresses below
+          365 days rather than disabling the whole chart) + rolling volatility +
+          rolling Sortino, all from the same adapter. Owns its own
+          window/method/horizon disclosure (GRAPH-04); below the selected window's
+          floor the body swaps to the neutral role="status" PartialDataBanner —
+          never role="alert". */}
+      <Card className="mt-6" data-panel="blend-rolling" aria-label="Rolling metrics">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-base font-semibold text-text-primary">
+            Rolling metrics
+          </h2>
+          <SegmentedControl
+            ariaLabel="Rolling window"
+            activeId={String(rollingWindow)}
+            onChange={(id) => setRollingWindow(Number(id))}
+            options={[
+              { id: "63", label: "3M", disabled: blendPanels.usableN < 63 },
+              { id: "126", label: "6M", disabled: blendPanels.usableN < 126 },
+              { id: "252", label: "12M", disabled: blendPanels.usableN < 252 },
+            ]}
+          />
+        </div>
+        {blendPanels.usableN < rollingWindow ? (
+          <PartialDataBanner
+            heading="Awaiting more data"
+            body={`This portfolio needs at least ${rollingWindow} overlapping daily returns for the ${WINDOW_LABEL[rollingWindow] ?? `${rollingWindow}-day`} rolling window.`}
+          />
+        ) : (
+          <div className="space-y-6">
+            <div>
+              <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
+                Rolling Sharpe
+              </h3>
+              <RollingMetrics
+                data={blendPanels.rollingSharpe}
+                daysOfHistory={blendPanels.usableN}
+              />
+            </div>
+            <div>
+              <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
+                Rolling volatility
+              </h3>
+              <RollingVolatilityChart data={blendPanels.rollingVol} />
+            </div>
+            <div>
+              <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
+                Rolling Sortino
+              </h3>
+              <RollingSortinoChart data={blendPanels.rollingSortino} />
+            </div>
+            <p className="text-xs text-text-muted">
+              {rollingWindow}-day rolling window · 252-day annualized ·{" "}
+              {scenarioMetrics.n} overlapping days · not a forecast.
+            </p>
+          </div>
+        )}
       </Card>
 
       {flaggedHoldings.length > 0 && (
