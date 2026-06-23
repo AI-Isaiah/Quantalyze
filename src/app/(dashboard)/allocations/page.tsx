@@ -56,7 +56,11 @@ export default async function MyAllocationPage() {
   ]);
 
   return (
-    <main className="max-w-[1280px] mx-auto p-6 pb-20">
+    // JOURNEY-03 (a11y) — this page renders INSIDE DashboardChrome's
+    // `<main aria-label="Dashboard content">`, so a second <main> here is a
+    // duplicate landmark (axe `landmark-no-duplicate-main`, WCAG best-practice).
+    // Use a plain <div>; the chrome owns the single main landmark.
+    <div className="max-w-[1280px] mx-auto p-6 pb-20">
       <Suspense fallback={<div />}>
         {/* PR1 QA — page-level PageHeader removed in favor of the
             AllocationsTabs inline header (title + entity name + tabs +
@@ -72,6 +76,6 @@ export default async function MyAllocationPage() {
           <AllocationsTabs {...payload} />
         </AllocationProvider>
       </Suspense>
-    </main>
+    </div>
   );
 }

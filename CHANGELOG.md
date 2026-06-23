@@ -9,6 +9,9 @@ The last phase of v1.2 polishes the path to the now-settled composer. It is a ve
 - **The blank-slate front door is keyboard-accessible (JOURNEY-02).** The "Connect Exchange" and "Browse strategies" calls-to-action on an empty composer now show the same accent focus ring the rest of the surface uses, so keyboard users can see where they are.
 - **The unified composer is covered by an automated WCAG-AA scan (JOURNEY-03).** A new axe-core end-to-end spec scans `/allocations?tab=scenario` at WCAG-AA across both the blank-slate front door and the composed surface (it seeds a strategy and drives the Browse drawer so the Phase-30 distribution and rolling-metric graphs actually render before scanning). It is wired into the seed-gated CI e2e job and uses no rule suppression.
 
+### Fixed
+- **Duplicate `<main>` landmark on `/allocations` (accessibility).** The new composer axe scan immediately caught it: the page nested its own `<main>` inside `DashboardChrome`'s `<main aria-label="Dashboard content">`, tripping axe `landmark-no-duplicate-main`. The page wrapper is now a `<div>`; the chrome owns the single main landmark. No visual change.
+
 Reviewed: full frontend suite green (6580); typecheck + lint clean; the frozen scenario engine (`src/lib/scenario.ts`) is byte-for-byte unchanged (guard-enforced). A five-specialist fan-out + a fresh-context Claude adversarial red-team reviewed this ship. The red-team caught a FLOW-01-class trap the specialists missed: the new axe spec had been given its seed-env gate but was never added to CI's hand-maintained spec list, so JOURNEY-03's "automated checks" would never have run — fixed by wiring it in. The same pass tightened the scan's readiness gates to assert the chart bodies rendered (not just the card wrappers), so "scan the graphs" is proven rather than assumed.
 
 ## [0.30.0.0] - 2026-06-23
