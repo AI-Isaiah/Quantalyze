@@ -144,7 +144,15 @@ export function buildBlendPanels(
     portfolioDaily.length < MIN_USABLE ||
     portfolioDaily.length < window
   ) {
-    return { ...EMPTY, usableN };
+    // A non-finite value poisons the ENTIRE series (LOCKED pin), so there are
+    // effectively 0 USABLE points — report 0, NOT the finite count. usableN is
+    // the gate the composer's SegmentedControl + panel body key on
+    // (`usableN < window`); a finite count ≥ a smaller window would otherwise
+    // enable that window and render empty charts instead of the "Awaiting more
+    // data" banner. A merely-too-short (but all-finite) series keeps its real
+    // count: re-running at a smaller window legitimately recovers it, so its
+    // gate must reflect the history actually available.
+    return { ...EMPTY, usableN: hasNonFinite ? 0 : usableN };
   }
 
   // ── Histogram cumulative-wealth (Pitfall 1) ───────────────────────

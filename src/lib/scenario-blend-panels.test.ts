@@ -189,4 +189,31 @@ describe("buildBlendPanels — convention pins", () => {
     );
     expectEmpty(buildBlendPanels(withInf, WINDOW));
   });
+
+  // ── 8. usableN is the gate signal — must stay consistent with the body ──
+  // The composer disables a SegmentedControl window and gates the panel body on
+  // `usableN < window`. So usableN MUST mean "points actually usable to chart":
+  //   (a) a non-finite-poisoned series collapses EVERY series → 0 usable, so
+  //       usableN is 0 (NOT the 251 finite points) — otherwise the 3M/6M window
+  //       would enable and render empty charts instead of the awaiting banner.
+  //   (b) a merely-too-short but ALL-finite series keeps its real count, so a
+  //       re-run at a window it CAN serve is correctly enabled.
+  it("usableN: poisoned series → 0 (not finite count); too-short finite series → real count", () => {
+    // (a) 251 finite + 1 NaN, window 63: collapses, and usableN is 0 — so
+    // `usableN < 63` is true and every window stays disabled / banner shown.
+    const poisoned: DailyPoint[] = DAILY.map((p, i) =>
+      i === 100 ? { ...p, value: NaN } : p,
+    );
+    const poisonedPanels = buildBlendPanels(poisoned, WINDOW);
+    expect(poisonedPanels.usableN).toBe(0);
+    expect(poisonedPanels.usableN).toBeLessThan(WINDOW); // gate → banner, not empty charts
+
+    // (b) 70 all-finite points, window 252 (too short for 252): collapses for
+    // THIS window, but usableN is the real 70 — so a re-run at window 63 (which
+    // 70 points CAN serve) is correctly enabled, not falsely gated to 0.
+    const tooShort = DAILY.slice(0, 70);
+    const tooShortPanels = buildBlendPanels(tooShort, 252);
+    expect(tooShortPanels.usableN).toBe(70);
+    expect(buildBlendPanels(tooShort, WINDOW).rollingVol.length).toBeGreaterThan(0);
+  });
 });
