@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.30.0.1] - 2026-06-23
+### Changed — journey polish: Bridge→composer continuity, accessible blank slate, composer a11y gate (v1.2 Phase 33)
+
+The last phase of v1.2 polishes the path to the now-settled composer. It is a verification-and-polish phase: the only product behavior change is a keyboard focus ring on the blank-slate calls-to-action; the rest is the test coverage that proves the journey actually works.
+
+- **Carrying a Bridge recommendation into the composer is now pinned by a real test (JOURNEY-01).** A non-vacuous, falsifiable regression test drives the live seam — clicking a Bridge candidate's "Add to scenario" runs `addStrategyBridge` and the blended projection's TWR and volatility actually move, not just a membership flag. It also guards the reachability hinge (the composer-owned drawer is the only path that seeds the draft; the portfolio-level `BridgeWidget` drawers never were), so the seam can't silently go dead.
+- **The blank-slate front door is keyboard-accessible (JOURNEY-02).** The "Connect Exchange" and "Browse strategies" calls-to-action on an empty composer now show the same accent focus ring the rest of the surface uses, so keyboard users can see where they are.
+- **The unified composer is covered by an automated WCAG-AA scan (JOURNEY-03).** A new axe-core end-to-end spec scans `/allocations?tab=scenario` at WCAG-AA across both the blank-slate front door and the composed surface (it seeds a strategy and drives the Browse drawer so the Phase-30 distribution and rolling-metric graphs actually render before scanning). It is wired into the seed-gated CI e2e job and uses no rule suppression.
+
+Reviewed: full frontend suite green (6580); typecheck + lint clean; the frozen scenario engine (`src/lib/scenario.ts`) is byte-for-byte unchanged (guard-enforced). A five-specialist fan-out + a fresh-context Claude adversarial red-team reviewed this ship. The red-team caught a FLOW-01-class trap the specialists missed: the new axe spec had been given its seed-env gate but was never added to CI's hand-maintained spec list, so JOURNEY-03's "automated checks" would never have run — fixed by wiring it in. The same pass tightened the scan's readiness gates to assert the chart bodies rendered (not just the card wrappers), so "scan the graphs" is proven rather than assumed.
+
 ## [0.30.0.0] - 2026-06-23
 ### Changed — graphs-lead composer layout + one allocator entry point (v1.2 Phases 31-32)
 
