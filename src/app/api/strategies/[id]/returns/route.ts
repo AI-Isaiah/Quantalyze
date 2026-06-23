@@ -55,7 +55,7 @@ import {
   isRateLimitMisconfigured,
 } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
-import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { normalizeDailyReturns, type DailyPoint } from "@/lib/portfolio-math-utils";
 
 // AGENTS.md: default to the Node.js runtime explicitly. The route touches the
 // supabase server client; Edge runtime would skip the Node-only paths the
@@ -158,14 +158,21 @@ export async function GET(
         );
       }
 
-      // Honest empty: an absent analytics row, a NULL column, or any
-      // non-array value collapses to [] — NEVER a fabricated flat series
-      // (29-RESEARCH Pitfall 4). The added strategy is then warm-up-gated out
-      // of the projection until a real series is present, which is correct.
+      // Normalize the raw JSONB through the canonical parser, NOT a bare
+      // Array.isArray cast. `strategy_analytics.daily_returns` is TYPED as a
+      // year-keyed nested record (types.ts:304) and the Python analytics writer
+      // can store it that way; reading the column RAW from the DB here (no
+      // queries.ts flattening, unlike the book path) means the nested shape
+      // reaches us directly. A bare `Array.isArray(raw) ? raw : []` would
+      // silently drop a real nested-shape series to [] — the exact WR-05
+      // silent-data-loss the book path's normalizeBookReturns already guards.
+      // normalizeDailyReturns handles array + flat-dict + nested-record,
+      // validates every point, and date-sorts. A genuinely absent/NULL/unusable
+      // value still collapses to [] (honest empty, 29-RESEARCH Pitfall 4 — the
+      // added strategy is then warm-up-gated out until a real series exists,
+      // which is correct), NEVER a fabricated series.
       const raw = (data as { daily_returns: unknown } | null)?.daily_returns;
-      const daily_returns: DailyPoint[] = Array.isArray(raw)
-        ? (raw as DailyPoint[])
-        : [];
+      const daily_returns: DailyPoint[] = normalizeDailyReturns(raw);
 
       const body: ReturnsResponse = { daily_returns };
       return NextResponse.json(body, { status: 200, headers: NO_STORE_HEADERS });

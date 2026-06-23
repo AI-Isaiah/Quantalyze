@@ -67,6 +67,7 @@ import {
   type StrategyForBuilder,
 } from "@/lib/scenario";
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
+import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import { buildBlendPanels } from "@/lib/scenario-blend-panels";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
 import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
@@ -129,9 +130,12 @@ const SYNTHETIC_BASELINE_AUM = 1;
 const MAX_LEVERAGE = 10;
 
 /**
- * GRAPH-03 — human label for each rolling-window length, used in the
- * below-floor empty-banner copy ("…for the {window} rolling window."). The
- * window itself stays the trading-day count (63/126/252) everywhere else.
+ * GRAPH-03 — single source of truth for the rolling-window set: maps each
+ * trading-day window length (63/126/252) to its human label. Drives BOTH the
+ * SegmentedControl options and the below-floor empty-banner copy ("…for the
+ * {label} rolling window."), so the window set and its labels can never drift
+ * between the two. The window itself stays the trading-day count everywhere
+ * the math runs.
  */
 const WINDOW_LABEL: Record<number, string> = {
   63: "3M",
@@ -351,68 +355,39 @@ function formatUsd0(n: number): string {
     : "—";
 }
 
-/** A `{ date, value }` point with both fields the right runtime type. */
-function isDailyPoint(p: unknown): p is DailyPoint {
-  return (
-    typeof p === "object" &&
-    p !== null &&
-    typeof (p as { date?: unknown }).date === "string" &&
-    typeof (p as { value?: unknown }).value === "number"
-  );
-}
-
 /**
  * WR-05 (Phase 29 review) — book-returns boundary normalizer.
  *
- * The upstream `StrategyAnalytics.daily_returns` field is TYPED as a year-keyed
- * nested record (`Record<string, Record<string, number>>`) but the runtime
- * payload from queries.ts SOMETIMES surfaces it as a flat `DailyPoint[]` on the
- * scenario-sandbox path. The previous `raw as unknown as DailyPoint[]` double
- * cast asserted the array shape over a known type mismatch: if the book path
- * ever surfaced the year-keyed-record shape, `Array.isArray` was false → the
- * code silently dropped a book strategy's REAL returns to `[]` (warm-up-gated
- * out of the projection) with no signal. Per CLAUDE.md Rule 12 (fail loud), this
- * normalizer explicitly handles BOTH shapes and warns on a genuinely unexpected
- * one so a regression is observable instead of silently swallowed.
+ * `StrategyAnalytics.daily_returns` is TYPED as a year-keyed nested record
+ * (`Record<string, Record<string, number>>`, types.ts:304) but the runtime
+ * payload from queries.ts SOMETIMES surfaces it as a flat `DailyPoint[]`. A bare
+ * `raw as unknown as DailyPoint[]` cast silently dropped the nested shape to
+ * `[]` (the book strategy's REAL returns warm-up-gated out of the projection,
+ * no signal). Delegate to the CANONICAL `normalizeDailyReturns` so this book
+ * trust boundary and the lazy `/api/strategies/[id]/returns` route boundary
+ * parse the column through ONE tested parser and cannot drift — it handles
+ * array + flat-dict + nested year-record (reconstructing `YYYY-MM-DD` from
+ * `MM-DD` inner keys, which a hand-rolled `Object.values` flatten dropped the
+ * year off of), validates every point, and date-sorts.
  *
- * Returns the normalized `DailyPoint[]`, or `null` when `raw` is absent/unusable
- * (the caller then falls through to the lazily-fetched series or `[]`).
+ * Returns the normalized `DailyPoint[]`, or `null` ONLY when `raw` is absent —
+ * the caller's `?? lazy ?? []` chain depends on `null` (NOT `[]`, which would
+ * short-circuit `??`) to fall through to the lazily-fetched series.
  */
 function normalizeBookReturns(raw: unknown): DailyPoint[] | null {
   if (raw == null) return null;
-  // Common runtime shape — a flat DailyPoint[]. Validate every element so a
-  // malformed array (a shape regression) is caught, not blindly trusted.
-  if (Array.isArray(raw)) {
-    return raw.every(isDailyPoint) ? raw : [];
+  const normalized = normalizeDailyReturns(raw);
+  // Fail-loud (Rule 12): a NON-array raw that yields zero usable points is a
+  // genuine shape regression (a primitive, or an object with no finite
+  // returns) — surface it instead of silently feeding [] into the projection.
+  // An empty/short array is a legitimate "no data yet", so it stays quiet.
+  if (normalized.length === 0 && !Array.isArray(raw)) {
+    console.warn(
+      "[ScenarioComposer] book daily_returns has an unexpected shape; degraded to [] (WR-05)",
+      { rawType: typeof raw },
+    );
   }
-  // Typed shape — a year-keyed nested record `{ "2026": { "2026-01-01": r } }`.
-  // Flatten to a date-sorted DailyPoint[] so it still reaches the engine.
-  if (typeof raw === "object") {
-    const out: DailyPoint[] = [];
-    let sawNumber = false;
-    for (const year of Object.values(raw as Record<string, unknown>)) {
-      if (typeof year !== "object" || year === null) continue;
-      for (const [date, value] of Object.entries(
-        year as Record<string, unknown>,
-      )) {
-        if (typeof value === "number") {
-          out.push({ date, value });
-          sawNumber = true;
-        }
-      }
-    }
-    if (sawNumber) {
-      out.sort((a, b) => a.date.localeCompare(b.date));
-      return out;
-    }
-  }
-  // Neither a DailyPoint[] nor a year-keyed record of numbers — a genuine shape
-  // regression. Surface it (Rule 12) instead of silently dropping to [].
-  console.warn(
-    "[ScenarioComposer] book daily_returns has an unexpected shape; dropping to [] (WR-05)",
-    { rawType: typeof raw },
-  );
-  return [];
+  return normalized;
 }
 
 // ---------------------------------------------------------------------------
@@ -815,15 +790,6 @@ export function ScenarioComposer({
       // draft — masking the failure). Guard the serialization and route any
       // failure to the SAME honest "older format" reset notice (Rule 12: fail
       // loud, never a silent empty/default composer).
-      // WR-04 (Phase 29 review): `row.draft` is `unknown`. The stringify→parse
-      // roundtrip re-serializes data that was already a parsed object; a value
-      // containing a BigInt throws a TypeError, and `JSON.stringify(undefined)`
-      // returns the JS value `undefined` (not a string). The pre-fix code let
-      // the TypeError escape and fed `undefined` into the codec's `string|null`
-      // param (which treats null as "absent" → silently hydrates the DEFAULT
-      // draft — masking the failure). Guard the serialization and route any
-      // failure to the SAME honest "older format" reset notice (Rule 12: fail
-      // loud, never a silent empty/default composer).
       let serializedDraft: string | undefined;
       try {
         serializedDraft = JSON.stringify(row.draft);
@@ -1085,10 +1051,11 @@ export function ScenarioComposer({
         // UNIFY-04 — payload (book) wins when present; otherwise the lazily-
         // fetched series fills the gap; otherwise [] (warm-up-gated out until a
         // real series arrives — NEVER a fabricated flat series). WR-05: normalize
-        // the book series at this trust boundary (handles BOTH the runtime
-        // DailyPoint[] shape AND the typed year-keyed-record shape, warns on an
-        // unexpected one) instead of a `raw as unknown as DailyPoint[]` cast that
-        // silently dropped the year-keyed shape to [].
+        // the book series at this trust boundary via the canonical
+        // normalizeDailyReturns (shared with the lazy /api/strategies/[id]/returns
+        // route so the two boundaries can't drift) instead of a
+        // `raw as unknown as DailyPoint[]` cast that silently dropped the
+        // year-keyed shape to [].
         const fromBook = normalizeBookReturns(raw);
         map[a.id] = fromBook ?? addedReturnsById[a.id] ?? [];
       }
@@ -2174,11 +2141,11 @@ export function ScenarioComposer({
             ariaLabel="Rolling window"
             activeId={String(rollingWindow)}
             onChange={(id) => setRollingWindow(Number(id))}
-            options={[
-              { id: "63", label: "3M", disabled: blendPanels.usableN < 63 },
-              { id: "126", label: "6M", disabled: blendPanels.usableN < 126 },
-              { id: "252", label: "12M", disabled: blendPanels.usableN < 252 },
-            ]}
+            options={Object.keys(WINDOW_LABEL).map((w) => ({
+              id: w,
+              label: WINDOW_LABEL[Number(w)],
+              disabled: blendPanels.usableN < Number(w),
+            }))}
           />
         </div>
         {blendPanels.usableN < rollingWindow ? (

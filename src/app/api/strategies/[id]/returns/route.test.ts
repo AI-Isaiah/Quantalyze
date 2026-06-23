@@ -19,6 +19,10 @@ import { NextRequest } from "next/server";
  *         non-existent / cross-tenant / not-readable-under-RLS) + NO_STORE
  *   R4  — 200 + { daily_returns: DailyPoint[] } on a published strategy whose
  *         strategy_analytics row carries a daily_returns array
+ *   R4b — 200 + a flattened, date-sorted DailyPoint[] when daily_returns is the
+ *         TYPED nested year-keyed record ({ "2022": { "01-10": r } }, types.ts:
+ *         304). WR-05 silent-data-loss guard: a bare Array.isArray cast drops
+ *         this real series to [] (the bug the book path already normalizes away)
  *   R5  — 200 + { daily_returns: [] } when the analytics row is absent
  *   R5b — 200 + { daily_returns: [] } when daily_returns is a non-array
  *         (honest empty, never fabricated)
@@ -26,6 +30,9 @@ import { NextRequest } from "next/server";
  *         (NOT the raw error.message); captureToSentry called with
  *         tags.route === "api/strategies/returns"; Cache-Control private,no-store
  *   R7  — 429 + Retry-After when checkLimit returns success:false, keyed per user
+ *   R7b — 503 + Retry-After when the limiter is MISCONFIGURED (reason=
+ *         'ratelimit_misconfigured') — a canary/health-check must see an outage,
+ *         not a throttle (the 503 vs 429 distinction the route comment justifies)
  *   R8  — Non-vacuity: the route uses withPublishedOnly on the strategies probe
  *         (observe .eq("status","published")), and NO createAdminClient is
  *         imported/called (the mock exposes only the RLS createClient; an admin
@@ -279,6 +286,28 @@ describe("GET /api/strategies/[id]/returns", () => {
     expect(STATE.observedFilters.analyticsEqStrategyId).toBe(PUBLISHED_ID);
   });
 
+  it("R4b — TYPED nested year-keyed record → 200 + flattened, date-sorted series (WR-05 guard)", async () => {
+    // The canonical stored shape (types.ts:304) is a year → MM-DD → return
+    // nested record. The route reads strategy_analytics.daily_returns RAW from
+    // the DB (no queries.ts flattening), so this shape reaches it directly. A
+    // bare `Array.isArray(raw) ? raw : []` would drop this real series to [];
+    // normalizeDailyReturns flattens + zero-pads + date-sorts it.
+    STATE.analyticsRow = {
+      daily_returns: {
+        "2022": { "01-11": 0.0031, "01-10": -0.007462 },
+      },
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // Real returns are preserved (NOT dropped to []) and emerge date-sorted.
+    expect(body.daily_returns).toEqual([
+      { date: "2022-01-10", value: -0.007462 },
+      { date: "2022-01-11", value: 0.0031 },
+    ]);
+  });
+
   it("R5 — absent analytics row → 200 + { daily_returns: [] } (honest empty)", async () => {
     STATE.analyticsRow = null;
     const { GET } = await import("./route");
@@ -328,6 +357,26 @@ describe("GET /api/strategies/[id]/returns", () => {
     expect(STATE.rateLimitKey).toBe(
       "returns:00000000-0000-0000-0000-000000000001",
     );
+  });
+
+  it("R7b — misconfigured limiter → 503 + Retry-After (canary sees an outage, not a throttle)", async () => {
+    // A misconfigured/unreachable limiter must surface as a 503 (service
+    // unavailable), NOT a 429 (throttle): a health/canary check distinguishes
+    // "rate limiter is down" from "this caller is being throttled". A
+    // regression that collapses this branch into the plain 429 would make an
+    // outage look like normal throttling.
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 5,
+      reason: "ratelimit_misconfigured",
+    } as typeof STATE.checkLimitResult & { reason: string };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("5");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    const body = await res.json();
+    expect(body.error).toMatch(/unavailable/i);
   });
 
   it("R8 — non-vacuity: existence probe is published-gated (withPublishedOnly) + no admin client", async () => {
