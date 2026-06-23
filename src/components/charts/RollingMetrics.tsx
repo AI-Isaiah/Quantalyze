@@ -45,6 +45,23 @@ interface RollingMetricsProps {
    * `PerformanceReport` always passes it.
    */
   daysOfHistory?: number;
+  /**
+   * Optional per-series label override for the visible Legend + Tooltip text,
+   * keyed by the same data key used in {@link data}. Decouples the
+   * stroke-resolution key (which {@link STROKE_BY_KEY} maps to a color) from
+   * the user-visible label.
+   *
+   * Phase 30 (WR-01): the blend Rolling-Sharpe series is keyed `sharpe_365d`
+   * so it resolves the {@link CHART_ACCENT} stroke, but its actual rolling
+   * window is allocator-selectable (63/126/252 days). Without this override the
+   * default {@link LABELS} lookup would mislabel a 3M/6M window line as "365d",
+   * contradicting the panel's own window disclosure. Callers pass the true
+   * window label here; the accent stroke is unaffected.
+   *
+   * Falls back to {@link LABELS} (then the raw key) for any series not present
+   * in this map, so existing callers that omit it are unchanged.
+   */
+  seriesLabels?: Record<string, string>;
 }
 
 const STROKE_BY_KEY: Record<string, string> = {
@@ -63,7 +80,13 @@ export function RollingMetrics({
   data,
   overallSharpe,
   daysOfHistory,
+  seriesLabels,
 }: RollingMetricsProps) {
+  // WR-01: resolve the visible label from the optional override first, then
+  // the default LABELS map, then the raw key — keeping the STROKE_BY_KEY accent
+  // resolution (below) entirely independent of the displayed text.
+  const labelFor = (name: string) =>
+    seriesLabels?.[name] ?? LABELS[name] ?? name;
   // Merge by date key (series have different lengths due to window sizes).
   // Memoized so the O(N·K) merge+sort runs once per `data` reference change
   // rather than on every parent render.
@@ -133,9 +156,9 @@ export function RollingMetrics({
           />
           <Tooltip
             contentStyle={{ fontSize: 12, borderColor: CHART_BORDER }}
-            formatter={(v, name) => [Number(v).toFixed(2), LABELS[String(name)] ?? name]}
+            formatter={(v, name) => [Number(v).toFixed(2), labelFor(String(name))]}
           />
-          <Legend formatter={(name: string) => LABELS[name] ?? name} />
+          <Legend formatter={(name: string) => labelFor(name)} />
           {renderReferenceLine && (
             <ReferenceLine
               y={overallSharpe as number}

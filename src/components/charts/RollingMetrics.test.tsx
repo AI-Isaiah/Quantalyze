@@ -21,20 +21,50 @@ vi.mock("recharts", () => {
     <div data-testid="ref-line" data-y={y} data-label={label?.value ?? ""} />
   );
   RefLine.displayName = "RechartsMockReferenceLine";
+  // WR-01 — the real Legend/Tooltip invoke their `formatter` to derive the
+  // visible series text. Tooltip in jsdom never opens (no hover geometry) and
+  // Legend would need a `payload`, so we invoke the formatters directly with the
+  // chart's data keys and render their output. This lets a test OBSERVE the
+  // user-visible label (the thing WR-01 is about) without recharts internals.
+  // Existing tests never query these testids, so they are unaffected.
+  const Legend = ({
+    formatter,
+  }: {
+    formatter?: (name: string) => React.ReactNode;
+  }) => <div data-testid="legend">{formatter ? formatter("sharpe_365d") : null}</div>;
+  Legend.displayName = "RechartsMockLegend";
+  const Tooltip = ({
+    formatter,
+  }: {
+    formatter?: (value: number, name: string) => [string, React.ReactNode];
+  }) => (
+    <div data-testid="tooltip">
+      {formatter ? formatter(0.5, "sharpe_365d")[1] : null}
+    </div>
+  );
+  Tooltip.displayName = "RechartsMockTooltip";
   return {
     ResponsiveContainer: makePassthrough("ResponsiveContainer"),
     LineChart: makePassthrough("LineChart"),
     Line: NullComponent,
     XAxis: NullComponent,
     YAxis: NullComponent,
-    Tooltip: NullComponent,
-    Legend: NullComponent,
+    Tooltip,
+    Legend,
     ReferenceLine: RefLine,
   };
 });
 
 const sampleData = {
   sharpe_30d: [
+    { date: "2024-01-01", value: 0.5 },
+    { date: "2024-01-02", value: 0.6 },
+  ],
+};
+
+// WR-01 — the blend panel's single accent-keyed Rolling-Sharpe series.
+const sampleData365 = {
+  sharpe_365d: [
     { date: "2024-01-01", value: 0.5 },
     { date: "2024-01-02", value: 0.6 },
   ],
@@ -177,5 +207,44 @@ describe("RollingMetrics min-history gate (P69)", () => {
         /Insufficient history for institutional-grade long-run Sharpe reference/,
       ),
     ).toBeNull();
+  });
+});
+
+describe("RollingMetrics seriesLabels override (WR-01)", () => {
+  // The blend Rolling-Sharpe series is keyed `sharpe_365d` ONLY so it resolves
+  // the CHART_ACCENT stroke via STROKE_BY_KEY. Its real window is selectable
+  // (63/126/252). Without an override, the default LABELS lookup mislabels a
+  // 6-month line as "365d" in BOTH the legend and the tooltip — a factsheet
+  // honesty defect (WR-01). The override must drive the visible text to the
+  // true window while leaving the accent-key untouched.
+  it("legend text reflects the seriesLabels override, not the default 365d", () => {
+    render(
+      <RollingMetrics
+        data={sampleData365}
+        seriesLabels={{ sharpe_365d: "126d" }}
+      />,
+    );
+    const legend = screen.getByTestId("legend");
+    expect(legend.textContent).toBe("126d");
+    // Falsifiable: drops to "365d" if the override is ignored (pre-WR-01 bug).
+    expect(legend.textContent).not.toBe("365d");
+  });
+
+  it("tooltip text reflects the seriesLabels override, not the default 365d", () => {
+    render(
+      <RollingMetrics
+        data={sampleData365}
+        seriesLabels={{ sharpe_365d: "126d" }}
+      />,
+    );
+    const tooltip = screen.getByTestId("tooltip");
+    expect(tooltip.textContent).toBe("126d");
+    expect(tooltip.textContent).not.toBe("365d");
+  });
+
+  it("falls back to the default LABELS map when seriesLabels is omitted (existing callers unchanged)", () => {
+    render(<RollingMetrics data={sampleData365} />);
+    expect(screen.getByTestId("legend").textContent).toBe("365d");
+    expect(screen.getByTestId("tooltip").textContent).toBe("365d");
   });
 });

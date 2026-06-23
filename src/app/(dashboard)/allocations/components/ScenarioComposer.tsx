@@ -2188,6 +2188,12 @@ export function ScenarioComposer({
               <RollingMetrics
                 data={blendPanels.rollingSharpe}
                 daysOfHistory={blendPanels.usableN}
+                // WR-01 — the series is keyed `sharpe_365d` ONLY so RollingMetrics
+                // resolves the CHART_ACCENT stroke; that key's default LABELS text
+                // ("365d") would lie about the selected window. Override the visible
+                // legend/tooltip label with the true window count (matches the
+                // "{rollingWindow}-day rolling window" disclosure below).
+                seriesLabels={{ sharpe_365d: `${rollingWindow}d` }}
               />
             </div>
             <div>
