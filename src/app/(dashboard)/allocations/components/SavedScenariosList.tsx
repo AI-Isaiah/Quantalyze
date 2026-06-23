@@ -183,6 +183,18 @@ export function SavedScenariosList({
   const [confirmingRevokeId, setConfirmingRevokeId] = useState<string | null>(
     null,
   );
+  // The row id awaiting the inline "replace link" confirmation (the cache-miss
+  // arm of Copy link — see copyExistingShare / WR-03).
+  const [confirmingReplaceId, setConfirmingReplaceId] = useState<string | null>(
+    null,
+  );
+  // Per-row cache of the raw share URL captured at generation (keyed by row id).
+  // The generate route externalises the raw token EXACTLY ONCE (only its hash is
+  // persisted, T-25-12), so the URL can never be re-fetched. Caching it for the
+  // session lets "Copy link" hand out the SAME link without re-minting — which
+  // would rotate the token and silently kill the recipient's existing link
+  // (WR-03). Empty after a reload / for a share generated in a prior session.
+  const [shareUrlById, setShareUrlById] = useState<Record<string, string>>({});
 
   // Whether a row currently has an active share: the local override wins, else
   // the row-data default. A row with no override and no row flag has none.
@@ -217,6 +229,24 @@ export function SavedScenariosList({
     return fallbackSucceeded;
   }, []);
 
+  // Copy a URL and fire the transient copied (role=status) / copy-failed
+  // (role=alert) badge for the row. The success badge fires ONLY on a real
+  // clipboard success (audit-#43). Shared by generate and Copy link.
+  const copyUrlWithBadge = useCallback(
+    async (rowId: string, url: string | undefined) => {
+      const copied = url ? await copyToClipboard(url) : false;
+      if (copied) {
+        setCopiedShareId(rowId);
+        setCopyFailedShareId(null);
+        setTimeout(() => setCopiedShareId(null), 2000);
+      } else {
+        setCopyFailedShareId(rowId);
+        setTimeout(() => setCopyFailedShareId(null), 4000);
+      }
+    },
+    [copyToClipboard],
+  );
+
   const generateShare = useCallback(
     async (row: SavedScenarioListRow) => {
       setMutationError(null);
@@ -237,16 +267,11 @@ export function SavedScenariosList({
         // The link is now generated → the row is active regardless of whether
         // the clipboard write lands (audit-#43: never block the link on copy).
         setShareActiveById((prev) => ({ ...prev, [row.id]: true }));
-        const copied = url ? await copyToClipboard(url) : false;
-        if (copied) {
-          setCopiedShareId(row.id);
-          setCopyFailedShareId(null);
-          setTimeout(() => setCopiedShareId(null), 2000);
-        } else {
-          // The success badge fires ONLY on a real clipboard success.
-          setCopyFailedShareId(row.id);
-          setTimeout(() => setCopyFailedShareId(null), 4000);
-        }
+        // Cache the raw URL for the session so a subsequent "Copy link" hands
+        // out THIS link without re-minting (WR-03). The token is only returned
+        // here once, so this is the only chance to capture it.
+        if (url) setShareUrlById((prev) => ({ ...prev, [row.id]: url }));
+        await copyUrlWithBadge(row.id, url);
         onMutated?.();
       } catch {
         setMutationError("Couldn't create a share link. Try again.");
@@ -254,19 +279,32 @@ export function SavedScenariosList({
         setGeneratingShareId(null);
       }
     },
-    [copyToClipboard, onMutated],
+    [copyUrlWithBadge, onMutated],
   );
 
   const copyExistingShare = useCallback(
     async (row: SavedScenarioListRow) => {
       setMutationError(null);
-      // Re-generate to obtain a fresh URL (the raw token is only ever returned
-      // by the generate route; the list never holds it). The route pre-revokes
-      // the prior active share and mints a new one, so "Copy link" always hands
-      // out a working link.
-      await generateShare(row);
+      const cachedUrl = shareUrlById[row.id];
+      if (cachedUrl) {
+        // Copy the SAME link generated this session — no re-mint, no token
+        // rotation, so a recipient's existing link keeps working (WR-03 fix).
+        setCopyFailedShareId(null);
+        await copyUrlWithBadge(row.id, cachedUrl);
+        return;
+      }
+      // Cache miss (active share from a prior session / after a reload): the raw
+      // token was externalised exactly once at generation and is never
+      // re-fetchable (hash-only storage, T-25-12), so the existing link cannot
+      // be reproduced. Minting a new one is the only way to hand out a working
+      // URL — but that revokes the old link, so it must be EXPLICIT, never
+      // silent. Surface the replace-confirm instead of regenerating.
+      setRenamingId(null);
+      setConfirmingDeleteId(null);
+      setConfirmingRevokeId(null);
+      setConfirmingReplaceId(row.id);
     },
-    [generateShare],
+    [shareUrlById, copyUrlWithBadge],
   );
 
   const confirmRevoke = useCallback(
@@ -295,6 +333,14 @@ export function SavedScenariosList({
           return;
         }
         setShareActiveById((prev) => ({ ...prev, [row.id]: false }));
+        // Drop the cached URL — the link is dead; a stale entry must never let
+        // "Copy link" hand out a revoked URL.
+        setShareUrlById((prev) => {
+          if (!(row.id in prev)) return prev;
+          const next = { ...prev };
+          delete next[row.id];
+          return next;
+        });
         setConfirmingRevokeId(null);
         onMutated?.();
       } catch {
@@ -441,6 +487,7 @@ export function SavedScenariosList({
               const isRenaming = renamingId === row.id;
               const isConfirmingDelete = confirmingDeleteId === row.id;
               const isConfirmingRevoke = confirmingRevokeId === row.id;
+              const isConfirmingReplace = confirmingReplaceId === row.id;
               const rowShareActive = hasActiveShare(row);
               const isGenerating = generatingShareId === row.id;
               const isCopied = copiedShareId === row.id;
@@ -550,6 +597,33 @@ export function SavedScenariosList({
                           onClick={() => setConfirmingRevokeId(null)}
                         >
                           Keep link
+                        </Button>
+                      </div>
+                    ) : isConfirmingReplace ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-text-secondary">
+                          This link&apos;s URL can&apos;t be shown again.
+                          Generate a new link? The previous link will stop
+                          working.
+                        </span>
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          autoFocus
+                          disabled={isGenerating}
+                          onClick={() => {
+                            setConfirmingReplaceId(null);
+                            generateShare(row);
+                          }}
+                        >
+                          {isGenerating ? "Generating…" : "Generate new link"}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setConfirmingReplaceId(null)}
+                        >
+                          Keep current link
                         </Button>
                       </div>
                     ) : (

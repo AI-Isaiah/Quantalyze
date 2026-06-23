@@ -794,4 +794,69 @@ describe("SavedScenariosList — Share affordance (Plan 25-03)", () => {
       screen.getByRole("button", { name: /^Copy link$/ }),
     ).toBeInTheDocument();
   });
+
+  // -------------------------------------------------------------------------
+  // WR-03 — "Copy link" must NOT silently rotate the share token.
+  //   (a) After generating this session, Copy link re-copies the SAME cached
+  //       URL with NO second POST to /share — so a recipient's link survives.
+  //   (b) On a share active only from row data (prior session / reload, no
+  //       cached URL), Copy link surfaces an explicit "replace" confirm and
+  //       does NOT mint until the user confirms — the rotation is never silent.
+  // -------------------------------------------------------------------------
+  const shareGenerateCalls = () =>
+    mockFetch.mock.calls.filter(
+      ([u]) => String(u).endsWith("/api/allocator/scenario/share"),
+    ).length;
+
+  it("WR-03a Copy link re-copies the same cached URL without a second /share POST", async () => {
+    const shareUrl = "https://share.example.com/scenario-share/tok-stable";
+    mockFetch.mockResolvedValueOnce(okJson({ url: shareUrl }));
+    render(
+      <SavedScenariosList rows={ROWS} onOpen={vi.fn()} onCompare={vi.fn()} />,
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: /^Share$/ })[0]);
+    await waitFor(() => expect(clipboardWrite).toHaveBeenCalledWith(shareUrl));
+    const copyBtn = await screen.findByRole("button", { name: /^Copy link$/ });
+    const generatesAfterShare = shareGenerateCalls();
+    expect(generatesAfterShare).toBe(1);
+
+    clipboardWrite.mockClear();
+    fireEvent.click(copyBtn);
+    // Same URL copied again...
+    await waitFor(() => expect(clipboardWrite).toHaveBeenCalledWith(shareUrl));
+    // ...and NO new mint: the generate route was not POSTed a second time, so
+    // the token was not rotated and the recipient's link still works.
+    expect(shareGenerateCalls()).toBe(generatesAfterShare);
+  });
+
+  it("WR-03b Copy link on a prior-session active share asks before replacing (no silent rotation)", async () => {
+    const rows: SavedScenarioListRow[] = [
+      { ...ROWS[0], has_active_share: true },
+    ];
+    render(
+      <SavedScenariosList rows={rows} onOpen={vi.fn()} onCompare={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Copy link$/ }));
+    // No mint — the explicit replace-confirm appears instead of a silent rotate.
+    expect(shareGenerateCalls()).toBe(0);
+    expect(
+      screen.getByText(/previous link will stop working/i),
+    ).toBeInTheDocument();
+
+    // "Keep current link" backs out with no mint.
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Keep current link$/ }),
+    );
+    expect(shareGenerateCalls()).toBe(0);
+
+    // Re-open the confirm and explicitly replace → exactly one mint.
+    fireEvent.click(screen.getByRole("button", { name: /^Copy link$/ }));
+    mockFetch.mockResolvedValueOnce(
+      okJson({ url: "https://share.example.com/scenario-share/tok-new" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Generate new link$/ }),
+    );
+    await waitFor(() => expect(shareGenerateCalls()).toBe(1));
+  });
 });
