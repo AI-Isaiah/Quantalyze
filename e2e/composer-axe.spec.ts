@@ -117,21 +117,31 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
       page.locator("h2", { hasText: "Portfolio" }).first(),
     ).toBeVisible({ timeout: 10_000 });
 
-    // BOTH Phase-30 graph cards must be mounted before scanning — adapt the
-    // strategy-v2-axe scroll-each-card-ready idiom. axe false-greens on an
-    // empty <main>; gating on the cards keeps the scan honest about the
-    // surface JOURNEY-03 actually covers.
+    // BOTH Phase-30 graph cards must have rendered their CHART BODY (not the
+    // "Awaiting more data" PartialDataBanner) before scanning — adapt the
+    // strategy-v2-axe scroll-each-card-ready idiom. The data-panel <Card>
+    // wrappers mount unconditionally, so asserting the wrapper alone would
+    // pass even on a degenerate blend; we gate on the chart-body <h3> anchors
+    // ("Return histogram" / "Rolling Sharpe") that render ONLY in the
+    // non-degenerate branch (ScenarioComposer.tsx:2097/2150). The 400-day
+    // seeded strategy clears the 10-point histogram floor and the 126-day
+    // default rolling window, so both bodies render real charts; a degenerate
+    // blend would fail these gates loudly rather than scan a hollow banner.
     await page
       .locator('[data-panel="blend-returns-distribution"]')
       .scrollIntoViewIfNeeded();
     await expect(
-      page.locator('[data-panel="blend-returns-distribution"]'),
+      page.locator('[data-panel="blend-returns-distribution"] h3', {
+        hasText: "Return histogram",
+      }),
     ).toBeVisible({ timeout: 10_000 });
 
     await page.locator('[data-panel="blend-rolling"]').scrollIntoViewIfNeeded();
-    await expect(page.locator('[data-panel="blend-rolling"]')).toBeVisible({
-      timeout: 10_000,
-    });
+    await expect(
+      page.locator('[data-panel="blend-rolling"] h3', {
+        hasText: "Rolling Sharpe",
+      }),
+    ).toBeVisible({ timeout: 10_000 });
 
     const composed = await buildAxe(page).analyze();
     expect(composed.violations).toEqual([]);
