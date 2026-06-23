@@ -1644,7 +1644,7 @@ export function ScenarioComposer({
           filled <Badge> primitive. A projection is a hypothetical, not your
           live book — the badge says so unconditionally. */}
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-2xl font-semibold text-text-primary">Scenario</h2>
+        <h2 className="text-2xl font-semibold text-text-primary">Portfolio</h2>
         <span
           data-testid="scenario-projected-badge"
           className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-[10px] uppercase tracking-wide font-semibold text-text-muted"
