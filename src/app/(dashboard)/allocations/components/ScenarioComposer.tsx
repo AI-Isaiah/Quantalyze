@@ -1310,10 +1310,14 @@ export function ScenarioComposer({
   // GRAPH-02 / GRAPH-03 — derive every blend-graph series from the SAME
   // unrounded `portfolio_daily_returns` the benchmark / stress / MC sections
   // read (never the rounded/downsampled `equity_curve`). `buildBlendPanels` is
-  // the single pure-TS adapter (Plan 30-01); the host stays props-only. Memoized
-  // on the return series + the selected window so it recomputes only when the
-  // blend or the toggle changes.
-  const portfolioDaily = scenarioMetrics.portfolio_daily_returns ?? [];
+  // the single pure-TS adapter (Plan 30-01); the host stays props-only. Both
+  // memos key on the ENGINE output reference (`scenarioMetrics.portfolio_daily_returns`)
+  // — NOT a `?? []` expression that allocates a fresh array each render and would
+  // defeat the memoization (react-hooks/exhaustive-deps).
+  const portfolioDaily = useMemo(
+    () => scenarioMetrics.portfolio_daily_returns ?? [],
+    [scenarioMetrics.portfolio_daily_returns],
+  );
   const blendPanels = useMemo(
     () => buildBlendPanels(portfolioDaily, rollingWindow),
     [portfolioDaily, rollingWindow],
