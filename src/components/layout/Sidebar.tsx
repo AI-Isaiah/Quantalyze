@@ -64,12 +64,14 @@ function buildNavSections(
       badge: flaggedCount,
     });
   }
-  // FLOW-03 (Phase 32): the standalone "Strategy Sandbox" nav item (→
-  // /scenarios) is retired. The example-universe Sandbox was absorbed into
-  // the unified composer (Phase 29), and /scenarios now 307-redirects to
-  // /allocations?tab=scenario. A separate nav entry would loop the allocator
-  // back into the composer they already reach via "My Allocation" — so the
-  // allocator now has ONE discoverable entry point (/allocations, above).
+  // FLOW-03 (Phase 32): the standalone "Strategy Sandbox" nav item (which
+  // pointed at the now-retired Sandbox route) is removed. The example-universe
+  // Sandbox was absorbed into the unified composer (Phase 29), and the legacy
+  // route now 307-redirects to /allocations?tab=scenario. A separate nav entry
+  // would loop the allocator back into the composer they already reach via
+  // "My Allocation" — so the allocator now has ONE discoverable entry point
+  // (/allocations, above). The phase-32 frozen-spine guard pins this: no
+  // Sandbox-route reference may reappear in this file.
   if (showsManagerWorkspace) {
     workspaceItems.push(
       { label: "Strategies", href: "/strategies", icon: BarChartIcon },
