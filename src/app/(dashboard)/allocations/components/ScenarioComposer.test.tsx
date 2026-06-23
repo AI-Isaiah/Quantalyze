@@ -413,6 +413,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     ).toBeInTheDocument();
     const browseBtn = screen.getByRole("button", { name: /Browse strategies/i });
     expect(browseBtn).toBeInTheDocument();
+    // FLOW-02 (landmine #2) — the blank slate must NOT link back to the retired
+    // /scenarios Sandbox: after retirement that link 307-loops the user from the
+    // composer's front door straight back into the composer. Non-vacuous: this
+    // FAILED before the ScenarioComposer.tsx L1619-1624 self-loop <p> deletion.
+    expect(
+      document.querySelector('a[href="/scenarios"]'),
+    ).toBeNull();
+    expect(screen.queryByText(/Strategy Sandbox/i)).toBeNull();
     fireEvent.click(browseBtn);
     expect(screen.getByTestId("browse-drawer-mock")).toBeInTheDocument();
   });
@@ -2975,7 +2983,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // suppresses — is pinned in src/lib/factsheet/audit-c20.test.ts.)
     expect(document.getElementById("factsheet-allocator")).toBeNull();
     expect(document.getElementById("factsheet-signatures")).toBeNull();
-    // IMPACT-02 — the ABSENT assertion for the peer badge keys on a UNIQUE
+    // IMPACT-02 — after FLOW-02 (Phase 32) retired the ScenarioBuilder Sandbox
+    // and its honesty test, THIS is the SOLE peer-rank-suppression coverage in
+    // the codebase. It is a verified superset of the deleted
+    // ScenarioBuilder.honesty.test.tsx guard (it runs with the Phase-30 blend
+    // panels mounted). Do not weaken it.
+    // The ABSENT assertion for the peer badge keys on a UNIQUE
     // render-only data-testid, NOT queryByText(/percentile/i) (which matched
     // NOTHING because "percentile" lives only in PercentileRankBadge's title=
     // attribute — a vacuous pass) and NOT a visible label like "Sharpe" (which

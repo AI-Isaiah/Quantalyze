@@ -1616,12 +1616,6 @@ export function ScenarioComposer({
               Browse strategies
             </button>
           </div>
-          <p className="mt-6 text-xs text-text-muted">
-            Want to compare strategies without your portfolio?{" "}
-            <Link href="/scenarios" className="text-accent underline">
-              Try the Strategy Sandbox →
-            </Link>
-          </p>
         </div>
         <StrategyBrowseDrawer
           isOpen={browseOpen}
@@ -1995,7 +1989,7 @@ export function ScenarioComposer({
           and read the β-propagated projected impact + historical VaR(95%)/CVaR with
           a mandatory inline disclosure, OR the honest empty state (degenerate
           scenario / BTC unavailable / below the Phase-22 sample floor). Own-book
-          composer ONLY — the example-universe Strategy Sandbox stress/VaR is
+          composer ONLY — stress/VaR over an arbitrary example universe is
           deferred. Every prop is already in scope; no new state/fetch/memo. */}
       <Card className="mt-6">
         <StressVarSection
@@ -2013,8 +2007,8 @@ export function ScenarioComposer({
           portfolio_daily_returns OFF THE MAIN THREAD (a Web Worker) into forward
           confidence bands with a mandatory method/paths/N disclosure, OR the
           honest empty/computing/error state (degenerate scenario / below the
-          Phase-22 sample floor / worker failure). Own-book composer ONLY — the
-          example-universe Strategy Sandbox bands are deferred. Every prop is
+          Phase-22 sample floor / worker failure). Own-book composer ONLY —
+          forward bands over an arbitrary example universe are deferred. Every prop is
           already in scope; the section owns the worker lifecycle internally. */}
       <Card className="mt-6">
         <MonteCarloSection
