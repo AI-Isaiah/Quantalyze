@@ -79,15 +79,17 @@ const PortfolioOptimizer = dynamic(
 
 /* ---------- State sub-components ---------- */
 
-function EmptyState() {
+function EmptyState({ portfolioId }: { portfolioId: string }) {
   return (
     <Card className="text-center py-12">
       <p className="text-text-muted mb-2">This portfolio has no strategies yet.</p>
       <p className="text-sm text-text-secondary mb-6">
         Browse the marketplace and add strategies to start building your portfolio.
       </p>
+      {/* FLOW-01: carry ?portfolio so the strategy added on discovery attaches
+          back to THIS portfolio (AddToPortfolio reads the param). */}
       <Link
-        href="/discovery/crypto-sma"
+        href={`/discovery/crypto-sma?portfolio=${portfolioId}`}
         className="inline-flex items-center rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
       >
         Add your first strategy
@@ -434,7 +436,7 @@ export default async function PortfolioDashboardPage({
         }
       />
 
-      {state === "empty" && <EmptyState />}
+      {state === "empty" && <EmptyState portfolioId={id} />}
       {state === "pending" && <PendingState />}
       {state === "computing" && <ComputingState />}
       {state === "stale" && analytics && (
