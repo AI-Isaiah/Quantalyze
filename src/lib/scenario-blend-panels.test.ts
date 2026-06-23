@@ -59,23 +59,27 @@ describe("buildBlendPanels — convention pins", () => {
   // window length (n), NOT the count of down days; numerator = mean × 252.
   // This assert FAILS if the adapter divides by down-day count.
   it("sortino divides downside RMS by the TOTAL window n (not down-day count)", () => {
-    // 5-pt window, 2 down days. Hand-computed against ÷n=5 (NOT ÷downDays=2).
-    const r = [0.02, -0.01, 0.03, -0.02, 0.01];
+    // 10-pt window (the LOCKED MIN_USABLE floor), 3 down days. Hand-computed
+    // against ÷n=10 (NOT ÷downDays=3) so length === window ⇒ exactly one point.
+    const r = [
+      0.02, -0.01, 0.03, -0.02, 0.01, 0.015, -0.005, 0.008, 0.012, 0.004,
+    ];
     const tiny: DailyPoint[] = r.map((value, i) => ({
       date: new Date(2025, 0, 2 + i).toISOString().slice(0, 10),
       value,
     }));
-    const window = 5;
+    const window = 10;
+    const downDayCount = r.filter((x) => x < 0).length; // 3
 
-    const m = r.reduce((s, v) => s + v, 0) / r.length; // 0.006
+    const m = r.reduce((s, v) => s + v, 0) / r.length;
     let downSq = 0;
-    for (const x of r) if (x < 0) downSq += x * x; // 0.0001 + 0.0004 = 0.0005
-    const ddByN = Math.sqrt(downSq / window) * Math.sqrt(252); // ÷5
+    for (const x of r) if (x < 0) downSq += x * x;
+    const ddByN = Math.sqrt(downSq / window) * Math.sqrt(252); // ÷10 (total n)
     const expected = ddByN > 0 ? (m * 252) / ddByN : 0;
 
     // The WRONG convention (÷ down-day count) would give a different value —
     // assert we are NOT that, proving the pin.
-    const ddByDownDays = Math.sqrt(downSq / 2) * Math.sqrt(252);
+    const ddByDownDays = Math.sqrt(downSq / downDayCount) * Math.sqrt(252);
     const wrong = (m * 252) / ddByDownDays;
 
     const panels = buildBlendPanels(tiny, window);
