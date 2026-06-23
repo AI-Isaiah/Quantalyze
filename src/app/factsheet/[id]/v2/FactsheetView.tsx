@@ -15,7 +15,7 @@ import { StreakDistributionPanel } from "./AnalyticalPanels";
 import { EndOfYearBarsPanel, QuantileBoxPlotPanel } from "./DistributionPanels";
 import { MasterBrush } from "./MasterBrush";
 import { StressWindowsPanel } from "./StressWindowsPanel";
-import { CollapsibleSection, FACTSHEET_OPEN_ALL_EVENT } from "./CollapsibleSection";
+import { CollapsibleSection, COLLAPSIBLE_OPEN_ALL_EVENT } from "@/components/ui/CollapsibleSection";
 import { LazyMount } from "./LazyMount";
 // IMPORTANT-1/FINDING-8 (b06-codereview/silentfailure): Import the single-source
 // formatters from format.ts so FactsheetView uses the same implementation that
@@ -193,6 +193,9 @@ export function FactsheetBody({
               title="Performance"
               storageKey={`factsheet-collapse:${payload.strategyId}:perf`}
               defaultOpen
+              onToggle={(open) =>
+                trackFactsheetEvent("factsheet_v2_section_toggle", { section: "factsheet-perf", open })
+              }
             >
               <PerformanceCharts />
             </CollapsibleSection>
@@ -201,6 +204,9 @@ export function FactsheetBody({
               title="Distribution"
               storageKey={`factsheet-collapse:${payload.strategyId}:dist`}
               defaultOpen
+              onToggle={(open) =>
+                trackFactsheetEvent("factsheet_v2_section_toggle", { section: "factsheet-dist", open })
+              }
             >
               <HistogramChart />
               <QuantileBoxPlotPanel />
@@ -211,6 +217,9 @@ export function FactsheetBody({
               title="Heatmaps"
               storageKey={`factsheet-collapse:${payload.strategyId}:heatmaps`}
               defaultOpen
+              onToggle={(open) =>
+                trackFactsheetEvent("factsheet_v2_section_toggle", { section: "factsheet-heatmaps", open })
+              }
             >
               <MonthlyReturnsHeatmap />
               <DailyReturnsHeatmap />
@@ -220,6 +229,9 @@ export function FactsheetBody({
               title="Stress Windows"
               storageKey={`factsheet-collapse:${payload.strategyId}:stress`}
               defaultOpen
+              onToggle={(open) =>
+                trackFactsheetEvent("factsheet_v2_section_toggle", { section: "factsheet-stress", open })
+              }
             >
               <StressWindowsPanel />
             </CollapsibleSection>
@@ -236,6 +248,9 @@ export function FactsheetBody({
                 subtitle="event studies — heavy compute, defaults open"
                 storageKey={`factsheet-collapse:${payload.strategyId}:signatures`}
                 defaultOpen
+                onToggle={(open) =>
+                  trackFactsheetEvent("factsheet_v2_section_toggle", { section: "factsheet-signatures", open })
+                }
               >
                 <LazyMount minHeight={500}>
                   <SignaturesSection />
@@ -250,6 +265,9 @@ export function FactsheetBody({
               title="Streaks"
               storageKey={`factsheet-collapse:${payload.strategyId}:streak`}
               defaultOpen
+              onToggle={(open) =>
+                trackFactsheetEvent("factsheet_v2_section_toggle", { section: "factsheet-streak", open })
+              }
             >
               <StreakDistributionPanel />
             </CollapsibleSection>
@@ -819,11 +837,11 @@ function ControlBar() {
   const resetView = () => {
     resetXRange();
     setComparator(payload.activeComparator);
-    // "Reset view" means "show everything" — broadcast FACTSHEET_OPEN_ALL_EVENT
+    // "Reset view" means "show everything" — broadcast COLLAPSIBLE_OPEN_ALL_EVENT
     // so every CollapsibleSection pops open. localStorage is left alone; the
     // next user toggle will rewrite it.
     if (typeof window !== "undefined") {
-      window.dispatchEvent(new Event(FACTSHEET_OPEN_ALL_EVENT));
+      window.dispatchEvent(new Event(COLLAPSIBLE_OPEN_ALL_EVENT));
     }
     trackFactsheetEvent("factsheet_v2_reset_view", { strategy_id: payload.strategyId });
   };
