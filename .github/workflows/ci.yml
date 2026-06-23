@@ -238,17 +238,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts') }}-
       - name: Run vitest shard ${{ matrix.shard }}/2
-        # --maxWorkers=2 + --test-timeout=20000 (was the implicit cpus-1 / 5s
-        # default): v1.2 Phases 29-30 added heavy RTL component tests that pushed
-        # the shards past the existing headroom. The tests are correct — green on
-        # the full local suite AND under a capped-worker local repro
-        # (--maxWorkers=3 --coverage, all thresholds met) — so the red was purely
-        # CI worker-contention (the documented vitest.config.ts:6-16 flake), not a
-        # real failure. Capping to 2 workers on the 4-vCPU runner gives each heavy
-        # render more CPU (less oversubscription), and the generous timeout (same
-        # the coverage job uses) keeps a contention stall from red-checking an
-        # innocent PR. The cpus-1 default still applies on dev machines.
-        run: npx vitest run --shard=${{ matrix.shard }}/2 --reporter=dot --maxWorkers=2 --test-timeout=20000
+        run: npx vitest run --shard=${{ matrix.shard }}/2 --reporter=dot
 
   frontend-coverage:
     # tech-debt #11: coverage is now a CI GATE (was measurement-only with a
@@ -308,13 +298,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts') }}-
       - name: Run vitest with coverage (full suite, gated thresholds)
-        # --maxWorkers=2 + 30s (was 20s): the full non-shardable suite under v8
-        # coverage is the heaviest vitest job; v1.2 Phases 29-30's added RTL load
-        # tripped even the 20s safety net on the contended 4-vCPU runner (correct
-        # tests — see the shard note above + the local capped-worker repro that
-        # passed all thresholds). Halve the worker oversubscription and widen the
-        # timeout; this job is off the critical path, so the slack is free.
-        run: npx vitest run --coverage --test-timeout=30000 --reporter=dot --maxWorkers=2
+        run: npx vitest run --coverage --test-timeout=20000 --reporter=dot
 
   frontend-policy:
     # Banned-package check + GDPR export coverage. PR-C moved npm audit
