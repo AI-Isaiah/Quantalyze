@@ -99,6 +99,60 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
   });
 
   // -------------------------------------------------------------------------
+  // WR-04 (Phase 29 review) — a malformed/empty timestamp must NOT render
+  // "Saved Invalid Date". The pre-fix `updated.getTime() > created.getTime()`
+  // compared NaN > NaN (false) and fell through to `Saved ${fmt(<Invalid
+  // Date>)}`, which renders the literal string "Invalid Date" to the user.
+  // NON-VACUOUS: this fails on the pre-fix code (the row text contains "Invalid
+  // Date") and passes once timestampLabel guards on Number.isFinite.
+  // -------------------------------------------------------------------------
+  it("WR-04 a row with a malformed timestamp renders 'Saved' (never 'Saved Invalid Date')", () => {
+    const badRow: SavedScenarioListRow = {
+      id: "33333333-3333-3333-3333-333333333333",
+      name: "Corrupt timestamp blend",
+      schema_version: 2,
+      created_at: "not-a-date",
+      updated_at: "",
+      draft: { schema_version: 2 },
+    };
+    render(
+      <SavedScenariosList rows={[badRow]} onOpen={vi.fn()} onCompare={vi.fn()} />,
+    );
+    const row = screen.getByText("Corrupt timestamp blend").closest("li");
+    expect(row).not.toBeNull();
+    const rowEl = row as HTMLElement;
+    // Honest fallback — a bare "Saved", and crucially NOT "Invalid Date".
+    expect(within(rowEl).getByText("Saved")).toBeInTheDocument();
+    expect(rowEl.textContent).not.toContain("Invalid Date");
+  });
+
+  // WR-04 — a row where created_at is malformed but updated_at is valid still
+  // renders a real "Saved <date>" off the finite timestamp (not "Invalid Date"
+  // and not silently dropping a usable date).
+  it("WR-04 a row with one finite timestamp renders 'Saved <date>' off the finite one", () => {
+    const halfBadRow: SavedScenarioListRow = {
+      id: "44444444-4444-4444-4444-444444444444",
+      name: "Half-corrupt blend",
+      schema_version: 2,
+      created_at: "garbage",
+      updated_at: "2026-06-10T10:00:00Z",
+      draft: { schema_version: 2 },
+    };
+    render(
+      <SavedScenariosList
+        rows={[halfBadRow]}
+        onOpen={vi.fn()}
+        onCompare={vi.fn()}
+      />,
+    );
+    const rowEl = screen
+      .getByText("Half-corrupt blend")
+      .closest("li") as HTMLElement;
+    expect(rowEl.textContent).not.toContain("Invalid Date");
+    expect(within(rowEl).getByText(/^Saved\s+\S/)).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
   // T_SL3 — Open delegates the row to the parent (composer Open handler).
   // -------------------------------------------------------------------------
   it("T_SL3 Open raises the row to onOpen (delegates to the composer Open handler)", () => {

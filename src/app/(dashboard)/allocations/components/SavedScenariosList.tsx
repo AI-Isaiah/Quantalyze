@@ -90,15 +90,26 @@ function timestampLabel(row: SavedScenarioListRow): string {
   // Updated time when it differs from created (a real edit), else "saved".
   const created = new Date(row.created_at);
   const updated = new Date(row.updated_at);
+  const c = created.getTime();
+  const u = updated.getTime();
   const fmt = (d: Date) =>
     d.toLocaleDateString(undefined, {
       year: "numeric",
       month: "short",
       day: "numeric",
     });
-  return updated.getTime() > created.getTime()
-    ? `Updated ${fmt(updated)}`
-    : `Saved ${fmt(created)}`;
+  // WR-04 (Phase 29 review): a malformed/empty timestamp column yields a NaN
+  // getTime(); `NaN > NaN` is false, so the pre-fix code silently fell through
+  // to `Saved <Invalid Date>` (fmt of an invalid Date renders the literal
+  // string "Invalid Date" to the user). Guard explicitly: if neither timestamp
+  // is finite, fall back to a bare "Saved" rather than printing "Invalid Date".
+  if (!Number.isFinite(c) && !Number.isFinite(u)) return "Saved";
+  // Prefer "Updated" only when BOTH are finite and updated is genuinely later;
+  // otherwise show "Saved" off whichever timestamp is finite.
+  if (Number.isFinite(u) && Number.isFinite(c) && u > c) {
+    return `Updated ${fmt(updated)}`;
+  }
+  return `Saved ${fmt(Number.isFinite(c) ? created : updated)}`;
 }
 
 function validateName(raw: string): { name: string | null; error: string | null } {
