@@ -899,6 +899,304 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // WR-01 (Phase 29 review) — a FAILED lazy fetch must NOT poison the strategy's
+  //   series for the session. Pre-fix, the error path called `settle([])`, which
+  //   wrote `addedReturnsById[id] = []` (an array, not undefined). The add seam
+  //   guards re-fetch with `addedReturnsById[s.id] === undefined`, so a remove +
+  //   re-add of the SAME id never re-fetched — it reused the poisoned [] and the
+  //   strategy was warm-up-gated out of the projection forever. NON-VACUOUS:
+  //   asserts a SECOND fetch fires on re-add (fails on pre-fix code where the
+  //   re-add is a silent no-op), and that the retried (now-succeeding) fetch
+  //   lands the real series into the adapter's returns-lookup.
+  // -------------------------------------------------------------------------
+  it("WR-01 a failed lazy fetch leaves the id retryable: remove + re-add re-fetches and the retry's series reaches the projection", async () => {
+    let attempt = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        attempt += 1;
+        // First add → fail (network down). Second add (the retry) → succeed.
+        if (attempt === 1) return Promise.reject(new Error("network down"));
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ daily_returns: LAZY_SERIES }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const returnsCalls = () =>
+      fetchMock.mock.calls.filter((c) =>
+        String(c[0]).includes(`/api/strategies/${LAZY_ID}/returns`),
+      ).length;
+
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // First add → the fetch fires and FAILS.
+    addStrategy({
+      id: LAZY_ID,
+      name: "Retryable Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await waitFor(() => expect(returnsCalls()).toBe(1));
+    // The failed fetch settled to an honest [] in the lookup.
+    await waitFor(() => expect(latestReturnsLookup()[LAZY_ID]).toEqual([]));
+
+    // Remove the added strategy (the real CompositionList Remove button).
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Remove from scenario/i }),
+      );
+    });
+
+    // Re-add the SAME id. WR-01: because the failed fetch left the entry
+    // undefined (and WR-02 purged it on remove), the add seam MUST re-fetch.
+    addStrategy({
+      id: LAZY_ID,
+      name: "Retryable Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // The non-vacuous assertion: a SECOND fetch fired (pre-fix this stays 1).
+    await waitFor(() => expect(returnsCalls()).toBe(2));
+
+    // The retry succeeded, so the real series now reaches the adapter lookup —
+    // the projection is no longer permanently gated out by the transient fail.
+    await waitFor(() =>
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual(LAZY_SERIES),
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // WR-02 (Phase 29 review) — removing an added strategy mid-flight must ABORT
+  //   the in-flight fetch and PURGE the loading affordance. Pre-fix,
+  //   onRemoveAdded={scenario.removeAddedStrategy} only mutated the draft; the
+  //   AbortController was never aborted (only unmount aborted) and
+  //   loadingReturnsIds/addedReturnsById kept the removed id. NON-VACUOUS:
+  //   asserts the fetch's AbortSignal fired `abort` (fails on pre-fix code) and
+  //   the "Loading returns…" affordance disappears.
+  // -------------------------------------------------------------------------
+  it("WR-02 removing an added strategy mid-flight aborts the in-flight fetch and clears the loading affordance", async () => {
+    let capturedSignal: AbortSignal | null = null;
+    const fetchMock = vi.fn((url: string, init?: { signal?: AbortSignal }) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        capturedSignal = init?.signal ?? null;
+        // Never resolves — the fetch stays in flight so the remove must abort it.
+        return new Promise(() => {});
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    addStrategy({
+      id: LAZY_ID,
+      name: "In-flight Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // The in-flight fetch fired and handed an un-aborted signal to the request.
+    await waitFor(() => expect(capturedSignal).not.toBeNull());
+    expect(capturedSignal!.aborted).toBe(false);
+    // The honest in-flight affordance is showing while the fetch is pending.
+    await waitFor(() =>
+      expect(screen.getByTestId("scenario-loading-returns")).toBeInTheDocument(),
+    );
+
+    // Remove the strategy mid-flight.
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Remove from scenario/i }),
+      );
+    });
+
+    // WR-02: the in-flight request's signal was aborted (pre-fix: stays false).
+    await waitFor(() => expect(capturedSignal!.aborted).toBe(true));
+    // And the loading affordance is purged (the removed id dropped from state).
+    await waitFor(() =>
+      expect(screen.queryByTestId("scenario-loading-returns")).toBeNull(),
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // WR-05 (Phase 29 review) — the book-returns boundary must NOT silently drop a
+  //   correctly-shaped series, and must honestly normalize the year-keyed-record
+  //   shape rather than the pre-fix `raw as unknown as DailyPoint[]` cast (which
+  //   relied on Array.isArray and dropped the typed nested-record shape to []).
+  //   NON-VACUOUS: a year-keyed-record book series is FLATTENED into the
+  //   projection lookup (pre-fix it was dropped to []), and a DailyPoint[] book
+  //   series survives intact.
+  // -------------------------------------------------------------------------
+  const BOOK_ID = "bbbbbbbb-1111-2222-3333-444444444444";
+
+  function makePayloadWithBookStrategy(
+    dailyReturns: unknown,
+  ): MyAllocationDashboardPayload {
+    // A book strategy is one already in payload.strategies — no lazy fetch fires.
+    return makePayload({
+      strategies: [
+        {
+          // Minimal StrategyWithAnalytics-shaped row; only the fields the
+          // composer's returns/metadata lookups read are populated.
+          strategy: {
+            id: BOOK_ID,
+            disclosure_tier: "verified",
+            strategy_analytics: {
+              cagr: 0.1,
+              sharpe: 1.0,
+              daily_returns: dailyReturns,
+            },
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+      ],
+    });
+  }
+
+  it("WR-05 a correctly-shaped DailyPoint[] book series survives into the adapter returns-lookup (not silently dropped)", () => {
+    const series = [
+      { date: "2026-03-01", value: 0.01 },
+      { date: "2026-03-02", value: -0.004 },
+    ];
+    render(
+      <ScenarioComposer
+        payload={makePayloadWithBookStrategy(series)}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: BOOK_ID,
+      name: "Book Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    expect(latestReturnsLookup()[BOOK_ID]).toEqual(series);
+  });
+
+  it("WR-05 a year-keyed-record book series is FLATTENED into a date-sorted DailyPoint[] (pre-fix it was silently dropped to [])", () => {
+    // The TYPED shape of StrategyAnalytics.daily_returns: a year-keyed nested
+    // record. Pre-fix Array.isArray(raw) was false → null → [] (real returns
+    // silently dropped). The normalizer flattens it.
+    const nested = {
+      "2026": {
+        "2026-04-02": 0.02,
+        "2026-04-01": 0.01,
+      },
+    };
+    render(
+      <ScenarioComposer
+        payload={makePayloadWithBookStrategy(nested)}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: BOOK_ID,
+      name: "Nested Book Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    // Flattened + date-sorted — and crucially NON-EMPTY (the regression the cast
+    // masked). Pre-fix this would be [].
+    expect(latestReturnsLookup()[BOOK_ID]).toEqual([
+      { date: "2026-04-01", value: 0.01 },
+      { date: "2026-04-02", value: 0.02 },
+    ]);
+  });
+
+  it("WR-05 a genuinely unexpected book shape warns (fail-loud) and degrades to [] (no crash)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    render(
+      <ScenarioComposer
+        payload={makePayloadWithBookStrategy("totally-wrong-shape")}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: BOOK_ID,
+      name: "Bad Shape Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    expect(latestReturnsLookup()[BOOK_ID]).toEqual([]);
+    expect(
+      warnSpy.mock.calls.some((c) =>
+        String(c[0]).includes("unexpected shape"),
+      ),
+    ).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  // -------------------------------------------------------------------------
+  // WR-04 (Phase 29 review) — opening a saved portfolio whose draft is not
+  //   JSON-safe (a BigInt throws in JSON.stringify) must route to the honest
+  //   "older format" reset notice rather than letting the TypeError escape (or
+  //   silently hydrating the default draft). NON-VACUOUS: asserts the notice
+  //   renders and the open did NOT throw.
+  // -------------------------------------------------------------------------
+  it("WR-04 opening a saved portfolio with a non-JSON-safe draft (BigInt) shows the honest reset notice, no throw", () => {
+    let registeredOpen: ((row: {
+      id: string;
+      name: string;
+      draft: unknown;
+    }) => void) | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          registeredOpen = open as typeof registeredOpen;
+        }}
+      />,
+    );
+    expect(registeredOpen).not.toBeNull();
+    // A BigInt in the draft makes JSON.stringify throw a TypeError. The open
+    // must catch it and show the honest reset notice (never let it escape).
+    expect(() => {
+      act(() => {
+        registeredOpen!({
+          id: "saved-bigint-row",
+          name: "BigInt Portfolio",
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          draft: { schema_version: 2, bad: BigInt(1) } as any,
+        });
+      });
+    }).not.toThrow();
+    expect(
+      screen.getByText(
+        /This saved portfolio uses an older format and can't be reopened\./i,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
   // T_C11 — Footer Commit disabled when diff_count = 0
   // -------------------------------------------------------------------------
   it("T_C11 Sticky footer Commit disabled when diff_count=0; enabled after adding one strategy", () => {

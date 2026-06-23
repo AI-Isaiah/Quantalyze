@@ -332,6 +332,70 @@ function formatUsd0(n: number): string {
     : "—";
 }
 
+/** A `{ date, value }` point with both fields the right runtime type. */
+function isDailyPoint(p: unknown): p is DailyPoint {
+  return (
+    typeof p === "object" &&
+    p !== null &&
+    typeof (p as { date?: unknown }).date === "string" &&
+    typeof (p as { value?: unknown }).value === "number"
+  );
+}
+
+/**
+ * WR-05 (Phase 29 review) — book-returns boundary normalizer.
+ *
+ * The upstream `StrategyAnalytics.daily_returns` field is TYPED as a year-keyed
+ * nested record (`Record<string, Record<string, number>>`) but the runtime
+ * payload from queries.ts SOMETIMES surfaces it as a flat `DailyPoint[]` on the
+ * scenario-sandbox path. The previous `raw as unknown as DailyPoint[]` double
+ * cast asserted the array shape over a known type mismatch: if the book path
+ * ever surfaced the year-keyed-record shape, `Array.isArray` was false → the
+ * code silently dropped a book strategy's REAL returns to `[]` (warm-up-gated
+ * out of the projection) with no signal. Per CLAUDE.md Rule 12 (fail loud), this
+ * normalizer explicitly handles BOTH shapes and warns on a genuinely unexpected
+ * one so a regression is observable instead of silently swallowed.
+ *
+ * Returns the normalized `DailyPoint[]`, or `null` when `raw` is absent/unusable
+ * (the caller then falls through to the lazily-fetched series or `[]`).
+ */
+function normalizeBookReturns(raw: unknown): DailyPoint[] | null {
+  if (raw == null) return null;
+  // Common runtime shape — a flat DailyPoint[]. Validate every element so a
+  // malformed array (a shape regression) is caught, not blindly trusted.
+  if (Array.isArray(raw)) {
+    return raw.every(isDailyPoint) ? raw : [];
+  }
+  // Typed shape — a year-keyed nested record `{ "2026": { "2026-01-01": r } }`.
+  // Flatten to a date-sorted DailyPoint[] so it still reaches the engine.
+  if (typeof raw === "object") {
+    const out: DailyPoint[] = [];
+    let sawNumber = false;
+    for (const year of Object.values(raw as Record<string, unknown>)) {
+      if (typeof year !== "object" || year === null) continue;
+      for (const [date, value] of Object.entries(
+        year as Record<string, unknown>,
+      )) {
+        if (typeof value === "number") {
+          out.push({ date, value });
+          sawNumber = true;
+        }
+      }
+    }
+    if (sawNumber) {
+      out.sort((a, b) => a.date.localeCompare(b.date));
+      return out;
+    }
+  }
+  // Neither a DailyPoint[] nor a year-keyed record of numbers — a genuine shape
+  // regression. Surface it (Rule 12) instead of silently dropping to [].
+  console.warn(
+    "[ScenarioComposer] book daily_returns has an unexpected shape; dropping to [] (WR-05)",
+    { rawType: typeof raw },
+  );
+  return [];
+}
+
 // ---------------------------------------------------------------------------
 // ScenarioComposer
 // ---------------------------------------------------------------------------
@@ -586,8 +650,10 @@ export function ScenarioComposer({
       next.add(id);
       return next;
     });
-    const settle = (series: DailyPoint[]) => {
-      setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
+    // Clear the in-flight bookkeeping (loading flag + abort ref) WITHOUT writing
+    // an `addedReturnsById` entry. Used on every failure path so the entry stays
+    // `undefined` — see WR-01 below.
+    const clearInflight = () => {
       setLoadingReturnsIds((prev) => {
         const next = new Set(prev);
         next.delete(id);
@@ -595,38 +661,55 @@ export function ScenarioComposer({
       });
       lazyAbortRef.current.delete(id);
     };
+    // Settle a GENUINE result (a 200 with a real DailyPoint[] body, possibly
+    // empty). Writes `addedReturnsById[id]` so the memo merges it and a re-add
+    // reuses it (idempotent) rather than re-fetching.
+    const settle = (series: DailyPoint[]) => {
+      setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
+      clearInflight();
+    };
     fetch(`/api/strategies/${encodeURIComponent(id)}/returns`, {
       signal: controller.signal,
     })
       .then((r) => {
         if (!r.ok) {
-          console.warn(
-            "[ScenarioComposer] /api/strategies/<id>/returns non-ok response",
-            { id, status: r.status },
-          );
-          return { daily_returns: [] };
+          // WR-01: a non-ok response (404 / 500 / transient) is a FAILURE, not a
+          // genuine "this strategy has no returns" empty. Do NOT settle([]) —
+          // that poisons `addedReturnsById[id]` with a permanent [] that blocks
+          // a retry on remove + re-add. Throw so the catch leaves the entry
+          // `undefined` (retryable).
+          throw new Error(`returns route responded ${r.status}`);
         }
         return r.json();
       })
       .then((d: { daily_returns?: unknown }) => {
-        const series = Array.isArray(d?.daily_returns)
-          ? (d.daily_returns as DailyPoint[])
-          : [];
-        settle(series);
+        // A 200 with a non-array body is a malformed/failed response, NOT a
+        // genuine empty series — treat it as a retryable failure (WR-01).
+        if (!Array.isArray(d?.daily_returns)) {
+          throw new Error("returns route body missing a daily_returns array");
+        }
+        // A genuine 200 with a real array (including an empty one) settles. An
+        // empty array here means the strategy legitimately has no published
+        // returns yet — distinct from a failure, so it is cached, not retried.
+        settle(d.daily_returns as DailyPoint[]);
       })
       .catch((err: unknown) => {
-        // An abort (reset/unmount) is benign — leave state untouched, the
-        // controller was already removed by the canceller. A real failure
-        // degrades to [] + a log (honest, no fabricated series).
+        // An abort (remove / reset / unmount) is benign — the canceller already
+        // owns the cleanup. Just drop the (possibly stale) abort ref and return.
         if (controller.signal.aborted) {
           lazyAbortRef.current.delete(id);
           return;
         }
+        // WR-01: a real failure (network throw, non-ok, non-array body) leaves
+        // `addedReturnsById[id]` UNDEFINED so the add seam's
+        // `addedReturnsById[s.id] === undefined` guard re-fires the fetch on a
+        // subsequent remove + re-add. Honest degrade: no fabricated series, the
+        // strategy stays warm-up-gated out until a retry succeeds.
         console.warn(
           "[ScenarioComposer] /api/strategies/<id>/returns fetch failed",
           { id, err },
         );
-        settle([]);
+        clearInflight();
       });
   }, []);
 
@@ -699,9 +782,41 @@ export function ScenarioComposer({
       const defaultDraft = defaultDraftFromHoldings(
         holdingsSummary as Parameters<typeof defaultDraftFromHoldings>[0],
       );
-      const decoded = scenarioDraftCodec(defaultDraft).decode(
-        JSON.stringify(row.draft),
-      );
+      // WR-04 (Phase 29 review): `row.draft` is `unknown`. The stringify→parse
+      // roundtrip re-serializes data that was already a parsed object; a value
+      // containing a BigInt throws a TypeError, and `JSON.stringify(undefined)`
+      // returns the JS value `undefined` (not a string). The pre-fix code let
+      // the TypeError escape and fed `undefined` into the codec's `string|null`
+      // param (which treats null as "absent" → silently hydrates the DEFAULT
+      // draft — masking the failure). Guard the serialization and route any
+      // failure to the SAME honest "older format" reset notice (Rule 12: fail
+      // loud, never a silent empty/default composer).
+      // WR-04 (Phase 29 review): `row.draft` is `unknown`. The stringify→parse
+      // roundtrip re-serializes data that was already a parsed object; a value
+      // containing a BigInt throws a TypeError, and `JSON.stringify(undefined)`
+      // returns the JS value `undefined` (not a string). The pre-fix code let
+      // the TypeError escape and fed `undefined` into the codec's `string|null`
+      // param (which treats null as "absent" → silently hydrates the DEFAULT
+      // draft — masking the failure). Guard the serialization and route any
+      // failure to the SAME honest "older format" reset notice (Rule 12: fail
+      // loud, never a silent empty/default composer).
+      let serializedDraft: string | undefined;
+      try {
+        serializedDraft = JSON.stringify(row.draft);
+      } catch (err) {
+        console.warn(
+          "[ScenarioComposer] saved portfolio draft could not be serialized (WR-04)",
+          err,
+        );
+        serializedDraft = undefined;
+      }
+      if (typeof serializedDraft !== "string") {
+        setOpenNotice(
+          "This saved portfolio uses an older format and can't be reopened.",
+        );
+        return;
+      }
+      const decoded = scenarioDraftCodec(defaultDraft).decode(serializedDraft);
 
       if (decoded.outcome === "reset") {
         // Older incompatible / corrupt format — honest notice, no hydrate.
@@ -945,11 +1060,12 @@ export function ScenarioComposer({
         const raw = found?.strategy.strategy_analytics?.daily_returns;
         // UNIFY-04 — payload (book) wins when present; otherwise the lazily-
         // fetched series fills the gap; otherwise [] (warm-up-gated out until a
-        // real series arrives — NEVER a fabricated flat series). Runtime
-        // defensiveness: only accept a DailyPoint[]-shaped array from the book.
-        const fromBook = Array.isArray(raw)
-          ? (raw as unknown as DailyPoint[])
-          : null;
+        // real series arrives — NEVER a fabricated flat series). WR-05: normalize
+        // the book series at this trust boundary (handles BOTH the runtime
+        // DailyPoint[] shape AND the typed year-keyed-record shape, warns on an
+        // unexpected one) instead of a `raw as unknown as DailyPoint[]` cast that
+        // silently dropped the year-keyed shape to [].
+        const fromBook = normalizeBookReturns(raw);
         map[a.id] = fromBook ?? addedReturnsById[a.id] ?? [];
       }
       return map;
@@ -982,6 +1098,37 @@ export function ScenarioComposer({
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [strategyById, addedReturnsById, fetchAddedReturns, scenario.addStrategyBrowse],
+  );
+
+  // WR-02 — the single remove seam for added strategies. `scenario.removeAddedStrategy`
+  // only mutates the draft; it does NOT touch the lazy-fetch bookkeeping. Wiring the
+  // raw mutator into CompositionList's onRemoveAdded left three leaks: (1) an
+  // in-flight fetch for the removed id was never aborted (only unmount aborted), so
+  // the request ran to completion and wrote into state for a strategy no longer in
+  // the draft; (2) `addedReturnsById` accumulated entries for removed ids across a
+  // multi-add session; (3) a stale entry fed WR-01's poisoning on re-add. This
+  // wrapper aborts the controller and purges all three structures for the id so a
+  // subsequent re-add starts clean (and re-fetches via the add seam's
+  // `addedReturnsById[s.id] === undefined` guard).
+  const handleRemoveAdded = useCallback(
+    (id: string) => {
+      scenario.removeAddedStrategy(id);
+      lazyAbortRef.current.get(id)?.abort();
+      lazyAbortRef.current.delete(id);
+      setLoadingReturnsIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      setAddedReturnsById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _drop, ...rest } = prev;
+        return rest;
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scenario.removeAddedStrategy],
   );
 
   const addedStrategyMetadataLookup = useMemo<
@@ -1977,7 +2124,7 @@ export function ScenarioComposer({
         onSetWeight={handleWeightChange}
         leverageByRef={leverageByRef}
         onSetLeverage={handleLeverageChange}
-        onRemoveAdded={scenario.removeAddedStrategy}
+        onRemoveAdded={handleRemoveAdded}
         onCompare={(scopeRef, candidateId) =>
           router.push(
             `/compare?ids=${encodeURIComponent(scopeRef)},${candidateId}`,
