@@ -439,6 +439,31 @@ export function ScenarioComposer({
   const [leverageByRef, setLeverageByRef] = useState<Record<string, number>>({});
 
   // -------------------------------------------------------------------------
+  // UNIFY-04 — lazy-returns plumbing (29-RESEARCH "SSR-LIFT vs LAZY-FETCH").
+  // -------------------------------------------------------------------------
+  // `payload.strategies` is BOOK-ONLY (the allocator's portfolio_strategies
+  // join). A strategy added from the Browse drawer — verified OR example — is
+  // not already in the book, so it has no daily_returns in the SSR payload and
+  // would contribute [] (warm-up-gated out → a no-op add, the H-0133 / example
+  // gap). On add we lazily fetch GET /api/strategies/<id>/returns (Plan 01's
+  // RLS-scoped, published-only route) and stash the series here keyed by id;
+  // `addedStrategyReturnsLookup` below merges it (payload wins when present —
+  // Open Question #1). The series flows through the UNCHANGED adapter + frozen
+  // engine; no second annualization path, no scenario.ts edit.
+  const [addedReturnsById, setAddedReturnsById] = useState<
+    Record<string, DailyPoint[]>
+  >({});
+  // Ids whose lazy fetch is in flight — drives the honest "loading returns…"
+  // affordance on the added row. While loading, the strategy contributes []
+  // (warm-up-gated), NEVER a fabricated flat/zero series (Pitfall 4).
+  const [loadingReturnsIds, setLoadingReturnsIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  // AbortControllers for in-flight lazy fetches, keyed by id, so reset/unmount
+  // can cancel them (mirrors the btc-effect cancelled-guard posture).
+  const lazyAbortRef = useRef<Map<string, AbortController>>(new Map());
+
+  // -------------------------------------------------------------------------
   // Phase 23 / PERSIST-02 — Save / Update / Save-as-new toolbar + reopen state.
   // -------------------------------------------------------------------------
   // The id of the saved scenario currently open in the composer (null = a fresh
@@ -539,6 +564,76 @@ export function ScenarioComposer({
     const clamped = Math.min(MAX_LEVERAGE, Math.max(0, leverage));
     setLeverageByRef((prev) => ({ ...prev, [scopeRef]: clamped }));
   }
+
+  // -------------------------------------------------------------------------
+  // UNIFY-04 — lazy-fetch an added strategy's daily_returns on add.
+  // -------------------------------------------------------------------------
+  // Mirrors the btc-effect's honest-degrade posture: a non-ok response, a
+  // non-array body, an abort, or a thrown fetch all leave the entry [] and log
+  // — never a fabricated series, never a wedge. The series is stashed in
+  // `addedReturnsById` keyed by id; the lookup memo merges it (payload wins).
+  const fetchAddedReturns = useCallback((id: string) => {
+    // Already resolved or in flight — don't refetch (idempotent multi-add).
+    if (lazyAbortRef.current.has(id)) return;
+    const controller = new AbortController();
+    lazyAbortRef.current.set(id, controller);
+    setLoadingReturnsIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+    const settle = (series: DailyPoint[]) => {
+      setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
+      setLoadingReturnsIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      lazyAbortRef.current.delete(id);
+    };
+    fetch(`/api/strategies/${encodeURIComponent(id)}/returns`, {
+      signal: controller.signal,
+    })
+      .then((r) => {
+        if (!r.ok) {
+          console.warn(
+            "[ScenarioComposer] /api/strategies/<id>/returns non-ok response",
+            { id, status: r.status },
+          );
+          return { daily_returns: [] };
+        }
+        return r.json();
+      })
+      .then((d: { daily_returns?: unknown }) => {
+        const series = Array.isArray(d?.daily_returns)
+          ? (d.daily_returns as DailyPoint[])
+          : [];
+        settle(series);
+      })
+      .catch((err: unknown) => {
+        // An abort (reset/unmount) is benign — leave state untouched, the
+        // controller was already removed by the canceller. A real failure
+        // degrades to [] + a log (honest, no fabricated series).
+        if (controller.signal.aborted) {
+          lazyAbortRef.current.delete(id);
+          return;
+        }
+        console.warn(
+          "[ScenarioComposer] /api/strategies/<id>/returns fetch failed",
+          { id, err },
+        );
+        settle([]);
+      });
+  }, []);
+
+  // Cancel any in-flight lazy fetches on unmount (no setState after unmount).
+  useEffect(() => {
+    const inflight = lazyAbortRef.current;
+    return () => {
+      for (const c of inflight.values()) c.abort();
+      inflight.clear();
+    };
+  }, []);
 
   // -------------------------------------------------------------------------
   // Phase 23 / PERSIST-02 — Save / Update / Save-as-new + codec-trichotomy Open.
@@ -844,13 +939,45 @@ export function ScenarioComposer({
       for (const a of scenario.draft.addedStrategies) {
         const found = strategyById.get(a.id);
         const raw = found?.strategy.strategy_analytics?.daily_returns;
-        // Runtime defensiveness: only accept a DailyPoint[]-shaped array.
-        const arr = Array.isArray(raw) ? (raw as unknown as DailyPoint[]) : [];
-        map[a.id] = arr;
+        // UNIFY-04 — payload (book) wins when present; otherwise the lazily-
+        // fetched series fills the gap; otherwise [] (warm-up-gated out until a
+        // real series arrives — NEVER a fabricated flat series). Runtime
+        // defensiveness: only accept a DailyPoint[]-shaped array from the book.
+        const fromBook = Array.isArray(raw)
+          ? (raw as unknown as DailyPoint[])
+          : null;
+        map[a.id] = fromBook ?? addedReturnsById[a.id] ?? [];
       }
       return map;
     },
-    [scenario.draft.addedStrategies, strategyById],
+    [scenario.draft.addedStrategies, strategyById, addedReturnsById],
+  );
+
+  // UNIFY-04 — the display names of added strategies whose lazy returns fetch
+  // is still in flight, for the honest "loading returns…" affordance. Derived
+  // from the loading-id set ∩ the current added strategies (an id that was
+  // removed mid-flight drops out of the message).
+  const loadingReturnsAddedNames = useMemo(() => {
+    if (loadingReturnsIds.size === 0) return [] as string[];
+    return scenario.draft.addedStrategies
+      .filter((a) => loadingReturnsIds.has(a.id))
+      .map((a) => a.name);
+  }, [loadingReturnsIds, scenario.draft.addedStrategies]);
+
+  // UNIFY-04 — the single add seam for catalog adds (empty-state drawer,
+  // main-body drawer, Bridge). Appends to the draft via the hook mutator, THEN
+  // — when the id is not already in the book (its series isn't in
+  // payload.strategies) and hasn't been fetched yet — fires the lazy returns
+  // fetch so the projection moves once it resolves.
+  const handleAddStrategy = useCallback(
+    (s: AddedStrategy) => {
+      scenario.addStrategyBrowse(s);
+      if (!strategyById.has(s.id) && addedReturnsById[s.id] === undefined) {
+        fetchAddedReturns(s.id);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [strategyById, addedReturnsById, fetchAddedReturns, scenario.addStrategyBrowse],
   );
 
   const addedStrategyMetadataLookup = useMemo<
@@ -1341,7 +1468,7 @@ export function ScenarioComposer({
           isOpen={browseOpen}
           onClose={() => setBrowseOpen(false)}
           onAdd={(s) =>
-            scenario.addStrategyBrowse({
+            handleAddStrategy({
               id: s.id as AddedStrategy["id"],
               name: s.name,
               markets: s.markets,
@@ -1820,6 +1947,23 @@ export function ScenarioComposer({
         </div>
       )}
 
+      {/* UNIFY-04 — honest in-flight affordance. While an added strategy's
+          daily_returns are still being fetched it contributes [] (warm-up-gated
+          out of the projection) — we say so plainly rather than render a
+          fabricated flat curve (Pitfall 4). role="status" + aria-live polite:
+          a non-blocking transition, never a red alert. */}
+      {loadingReturnsAddedNames.length > 0 && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="scenario-loading-returns"
+          className="mt-4 rounded-md border border-border bg-surface-subtle px-3 py-2 text-xs text-text-muted"
+        >
+          Loading returns… {loadingReturnsAddedNames.join(", ")} not yet in the
+          projection.
+        </div>
+      )}
+
       <CompositionList
         draft={scenario.draft}
         holdingsSummary={holdingsSummary}
@@ -1880,7 +2024,7 @@ export function ScenarioComposer({
         isOpen={browseOpen}
         onClose={() => setBrowseOpen(false)}
         onAdd={(s) =>
-          scenario.addStrategyBrowse({
+          handleAddStrategy({
             id: s.id as AddedStrategy["id"],
             name: s.name,
             markets: s.markets,
@@ -1895,12 +2039,18 @@ export function ScenarioComposer({
         flaggedHoldings={flaggedHoldings}
         matchDecisionsByHoldingRef={matchDecisionsByHoldingRef}
         onAddToScenario={(holdingScopeRef, candidate) => {
+          const id = candidate.id as AddedStrategy["id"];
           scenario.addStrategyBridge(holdingScopeRef, {
-            id: candidate.id as AddedStrategy["id"],
+            id,
             name: candidate.name,
             markets: candidate.markets,
             strategy_types: candidate.strategy_types,
           });
+          // UNIFY-04 — a Bridge candidate is also a catalog strategy not in the
+          // book; lazy-fetch its series so the projection moves on add.
+          if (!strategyById.has(id) && addedReturnsById[id] === undefined) {
+            fetchAddedReturns(id);
+          }
         }}
       />
 
