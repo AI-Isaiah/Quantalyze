@@ -702,7 +702,7 @@ export function ScenarioComposer({
       if (decoded.outcome === "reset") {
         // Older incompatible / corrupt format — honest notice, no hydrate.
         setOpenNotice(
-          "This saved scenario uses an older format and can't be reopened.",
+          "This saved portfolio uses an older format and can't be reopened.",
         );
         return;
       }
@@ -714,7 +714,7 @@ export function ScenarioComposer({
         setLoadedScenarioName(row.name);
         setLoadedReadonly(true);
         setOpenNotice(
-          "This scenario was saved by a newer version and is read-only here.",
+          "This portfolio was saved by a newer version and is read-only here.",
         );
         setNameInputOpen(false);
         return;
@@ -805,11 +805,11 @@ export function ScenarioComposer({
   function validateName(raw: string): string | null {
     const trimmed = raw.trim();
     if (trimmed.length < 1) {
-      setNameError("Enter a name to save this scenario.");
+      setNameError("Enter a name to save this portfolio.");
       return null;
     }
     if (trimmed.length > 120) {
-      setNameError("Scenario names are limited to 120 characters.");
+      setNameError("Portfolio names are limited to 120 characters.");
       return null;
     }
     setNameError(null);
@@ -829,7 +829,7 @@ export function ScenarioComposer({
       });
       if (!res.ok) {
         setSaveError(
-          "Couldn't save this scenario. Check your connection and try again.",
+          "Couldn't save this portfolio. Check your connection and try again.",
         );
         return;
       }
@@ -846,7 +846,7 @@ export function ScenarioComposer({
       onScenarioSaved?.();
     } catch {
       setSaveError(
-        "Couldn't save this scenario. Check your connection and try again.",
+        "Couldn't save this portfolio. Check your connection and try again.",
       );
     } finally {
       setSavePending(false);
@@ -873,7 +873,7 @@ export function ScenarioComposer({
       );
       if (!res.ok) {
         setSaveError(
-          "Couldn't save this scenario. Check your connection and try again.",
+          "Couldn't save this portfolio. Check your connection and try again.",
         );
       } else {
         // PERSIST-03 — let a host's saved-scenarios list refetch (name/order).
@@ -881,7 +881,7 @@ export function ScenarioComposer({
       }
     } catch {
       setSaveError(
-        "Couldn't save this scenario. Check your connection and try again.",
+        "Couldn't save this portfolio. Check your connection and try again.",
       );
     } finally {
       setSavePending(false);
@@ -1435,12 +1435,12 @@ export function ScenarioComposer({
             className="mb-2 text-2xl text-text-primary"
             style={{ fontFamily: "var(--font-serif)" }}
           >
-            Scenario builder needs holdings
+            Start a portfolio
           </h2>
           <p className="mx-auto max-w-md text-sm text-text-secondary">
             Connect a read-only exchange API key to project portfolio scenarios
-            — or browse strategies to start a hypothetical scenario from
-            scratch.
+            from your live book — or start from a blank slate and browse
+            strategies to compose one.
           </p>
           <div className="mt-6 flex items-center justify-center gap-3">
             <Link
@@ -1578,7 +1578,7 @@ export function ScenarioComposer({
                 setNameInputOpen(true);
               }}
             >
-              Save scenario
+              Save portfolio
             </Button>
           ) : (
             <>
@@ -1592,7 +1592,7 @@ export function ScenarioComposer({
                     void putUpdateScenario();
                   }}
                 >
-                  Update scenario
+                  Update portfolio
                 </Button>
               )}
               <Button
@@ -1605,7 +1605,7 @@ export function ScenarioComposer({
                   setNameInputOpen(true);
                 }}
               >
-                Save as new scenario
+                Save as new portfolio
               </Button>
             </>
           )}
@@ -1618,8 +1618,8 @@ export function ScenarioComposer({
             type="text"
             value={nameValue}
             onChange={(e) => setNameValue(e.target.value)}
-            placeholder="Name this scenario"
-            aria-label="Name this scenario"
+            placeholder="Name this portfolio"
+            aria-label="Name this portfolio"
             className="min-w-[220px] rounded-md border border-border px-3 py-2 text-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/50"
           />
           <Button

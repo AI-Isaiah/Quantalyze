@@ -377,7 +377,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
     expect(
-      screen.getByText("Scenario builder needs holdings"),
+      screen.getByText("Start a portfolio"),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: /Connect Exchange/i }),
@@ -1553,7 +1553,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     );
     // Initial: empty-state branch
     expect(
-      screen.getByText("Scenario builder needs holdings"),
+      screen.getByText("Start a portfolio"),
     ).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("button", { name: /Browse strategies/i }),
