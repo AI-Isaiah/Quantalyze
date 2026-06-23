@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.30.0.0] - 2026-06-23
+### Changed — graphs-lead composer layout + one allocator entry point (v1.2 Phases 31-32)
+
+The own-book Scenario composer now leads with its factsheet-grade graphs and has a single, discoverable home. Phase 31 makes the composition controls collapsible so the projection and distribution charts sit up top; Phase 32 retires the duplicate routes that pointed at the old standalone builder.
+
+- **Collapsible composition controls (Phase 31).** "Strategies & weights" is now a collapsible section, so an allocator can fold the weight/leverage controls and let the blended portfolio's graphs lead the surface. The panel hides without unmounting — every in-progress weight and leverage edit survives a collapse/expand — and the open/closed choice persists across reloads. The collapsible is now a shared UI primitive that also powers the strategy factsheet's six sections.
+- **One way into the composer (Phase 32).** `/scenarios` (the old example-universe "Strategy Sandbox") now redirects to the unified composer at `/allocations?tab=scenario`; the standalone Sandbox builder and its "Strategy Sandbox" sidebar entry are removed, and a self-referential link that looped the composer's blank slate back to itself is gone. Allocators see one composer entry; managers keep `/portfolios`. No database or schema change.
+
+### Fixed
+- **Composer collapse state no longer leaks across accounts on a shared device.** The new collapse preference is registered in the namespaced-storage purge, so signing out clears it before the next account loads.
+
+Reviewed: full frontend suite green (6578); typecheck + lint clean; the frozen scenario engine (`src/lib/scenario.ts`) is byte-for-byte unchanged (guard-enforced). A five-specialist fan-out + a fresh-context Claude red-team reviewed this ship: the security specialist confirmed the cross-account leak fix, and the red-team caught that a planned "attach back to this portfolio" param never reached its reader (the link landed on the strategy listing while the reader lived on the strategy detail page) — that dead plumbing was removed rather than shipped green-but-broken, leaving the existing manual add-to-portfolio flow intact. A simplify + comment-accuracy pass de-duplicated the factsheet section-toggle analytics and corrected references to the now-deleted Sandbox builder.
+
 ## [0.29.0.0] - 2026-06-23
 ### Added — one allocator composer: blank-slate / example / book entry + factsheet graphs on the blend (v1.2 Phases 29-30)
 
