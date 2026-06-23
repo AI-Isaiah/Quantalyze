@@ -1601,14 +1601,14 @@ export function ScenarioComposer({
           <div className="mt-6 flex items-center justify-center gap-3">
             <Link
               href="/profile?tab=exchanges"
-              className="inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90"
+              className="inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
             >
               Connect Exchange →
             </Link>
             <button
               type="button"
               onClick={() => setBrowseOpen(true)}
-              className="inline-flex items-center rounded-lg border border-border px-4 py-2 text-sm font-medium text-text-primary hover:border-accent"
+              className="inline-flex items-center rounded-lg border border-border px-4 py-2 text-sm font-medium text-text-primary hover:border-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
             >
               Browse strategies
             </button>
