@@ -78,6 +78,7 @@ import { RollingSortinoChart } from "@/components/charts/RollingSortinoChart";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { PartialDataBanner } from "@/components/strategy-v2/PartialDataBanner";
 import { Card } from "@/components/ui/Card";
+import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { Button } from "@/components/ui/Button";
 import {
@@ -1290,12 +1291,9 @@ export function ScenarioComposer({
     [portfolioDaily, rollingWindow],
   );
 
-  // CORR-01 — de-aliased axis labels for the CorrelationHeatmap, built like the
-  // `strategyNames` memo in ScenarioBuilder.tsx (the mount analog), BUT keyed on
-  // the de-aliased set (the sandbox keys on its raw marketplace `strategies`,
-  // which it never de-aliases). Keyed on the SAME de-aliased set computeScenario
-  // consumes, so the heatmap labels always match the matrix the engine produced
-  // (no stale alias surviving the collapse).
+  // CORR-01 — de-aliased axis labels for the CorrelationHeatmap. Keyed on the
+  // SAME de-aliased set computeScenario consumes, so the heatmap labels always
+  // match the matrix the engine produced (no stale alias surviving the collapse).
   const strategyNames = useMemo(() => {
     const out: Record<string, string> = {};
     for (const s of deAliased.strategies) out[s.id] = s.name;
@@ -1615,12 +1613,6 @@ export function ScenarioComposer({
               Browse strategies
             </button>
           </div>
-          <p className="mt-6 text-xs text-text-muted">
-            Want to compare strategies without your portfolio?{" "}
-            <Link href="/scenarios" className="text-accent underline">
-              Try the Strategy Sandbox →
-            </Link>
-          </p>
         </div>
         <StrategyBrowseDrawer
           isOpen={browseOpen}
@@ -1994,7 +1986,7 @@ export function ScenarioComposer({
           and read the β-propagated projected impact + historical VaR(95%)/CVaR with
           a mandatory inline disclosure, OR the honest empty state (degenerate
           scenario / BTC unavailable / below the Phase-22 sample floor). Own-book
-          composer ONLY — the example-universe Strategy Sandbox stress/VaR is
+          composer ONLY — stress/VaR over an arbitrary example universe is
           deferred. Every prop is already in scope; no new state/fetch/memo. */}
       <Card className="mt-6">
         <StressVarSection
@@ -2012,8 +2004,8 @@ export function ScenarioComposer({
           portfolio_daily_returns OFF THE MAIN THREAD (a Web Worker) into forward
           confidence bands with a mandatory method/paths/N disclosure, OR the
           honest empty/computing/error state (degenerate scenario / below the
-          Phase-22 sample floor / worker failure). Own-book composer ONLY — the
-          example-universe Strategy Sandbox bands are deferred. Every prop is
+          Phase-22 sample floor / worker failure). Own-book composer ONLY —
+          forward bands over an arbitrary example universe are deferred. Every prop is
           already in scope; the section owns the worker lifecycle internally. */}
       <Card className="mt-6">
         <MonteCarloSection
@@ -2046,8 +2038,7 @@ export function ScenarioComposer({
       </Card>
 
       {/* CORR-01 / CORR-03 — pairwise correlation heatmap on the own-book
-          scenario surface. Mirrors the ScenarioBuilder "Pairwise correlation"
-          card. The matrix + single-sourced Avg |ρ| come straight from
+          scenario surface. The matrix + single-sourced Avg |ρ| come straight from
           scenarioMetrics (the same value KpiStrip reads), and the axis labels
           are the de-aliased strategy names — the heatmap never computes its own
           average and the <2-strategy / <10-day cases delegate to its honest
@@ -2242,22 +2233,46 @@ export function ScenarioComposer({
         </div>
       )}
 
-      <CompositionList
-        draft={scenario.draft}
-        holdingsSummary={holdingsSummary}
-        flaggedHoldings={flaggedHoldings}
-        sharedSymbols={sharedSymbols}
-        onToggle={scenario.toggleHolding}
-        onSetWeight={handleWeightChange}
-        leverageByRef={leverageByRef}
-        onSetLeverage={handleLeverageChange}
-        onRemoveAdded={handleRemoveAdded}
-        onCompare={(scopeRef, candidateId) =>
-          router.push(
-            `/compare?ids=${encodeURIComponent(scopeRef)},${candidateId}`,
-          )
-        }
-      />
+      {/* LAYOUT-01 / LAYOUT-02 (Pitfall 5) — the composition controls
+          (toggle / weight / leverage) become the collapsible section so the
+          factsheet-grade graphs rendered ABOVE in DOM order lead the surface
+          when an allocator collapses to focus on the projection. The lifted
+          CollapsibleSection is a native <details>: CompositionList stays MOUNTED
+          when collapsed (the browser only HIDES it), and every in-progress edit
+          survives collapse→expand because the edit state (`leverageByRef`,
+          `scenario.draft.weightOverrides`) lives in THIS parent, ABOVE the
+          collapsible boundary — never moved down into CompositionList. The list
+          is an UNCONDITIONAL child: never gate it behind an open-flag conditional
+          (that would unmount it on collapse and wipe the edits — the
+          silent-failure surface the phase-31 guard enforces against).
+          Default-EXPANDED — an allocator composing needs the
+          controls visible; hiding to focus on the graphs is opt-in. Composer-
+          scoped storageKey (independent of the factsheet `factsheet-collapse:`
+          namespace) persists the choice across reloads. No onToggle — composer
+          collapse analytics are out of scope this phase. */}
+      <CollapsibleSection
+        id="composer-composition-controls"
+        title="Strategies & weights"
+        defaultOpen
+        storageKey="composer-collapse:controls"
+      >
+        <CompositionList
+          draft={scenario.draft}
+          holdingsSummary={holdingsSummary}
+          flaggedHoldings={flaggedHoldings}
+          sharedSymbols={sharedSymbols}
+          onToggle={scenario.toggleHolding}
+          onSetWeight={handleWeightChange}
+          leverageByRef={leverageByRef}
+          onSetLeverage={handleLeverageChange}
+          onRemoveAdded={handleRemoveAdded}
+          onCompare={(scopeRef, candidateId) =>
+            router.push(
+              `/compare?ids=${encodeURIComponent(scopeRef)},${candidateId}`,
+            )
+          }
+        />
+      </CollapsibleSection>
 
       <div className="mt-8 rounded-lg border border-border bg-surface p-4">
         <div className="text-base font-semibold text-text-primary">
@@ -2427,10 +2442,12 @@ function CompositionList({
   }, [holdingsSummary]);
 
   return (
-    <div className="mt-8 rounded-lg border border-border bg-surface p-4">
-      <div className="mb-3 text-base font-semibold text-text-primary">
-        Composition
-      </div>
+    <div className="rounded-lg border border-border bg-surface p-4">
+      {/* No inner "Composition" heading: the enclosing CollapsibleSection summary
+          ("Strategies & weights") is the single section label — a second synonym
+          here double-labels the same content. No top margin on the card either:
+          the list is the sole child inside the collapsible's <details> body, so
+          spacing comes from the summary's border + mb-4, not a sibling-era mt-8. */}
       <ul className="grid gap-2">
         {/* Read-only-tokens model: live holdings are FIXED context. They render
             read-only (symbol · venue · USD value) with no toggle / weight /

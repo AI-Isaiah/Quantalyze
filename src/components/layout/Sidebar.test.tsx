@@ -81,58 +81,41 @@ describe("Sidebar workspace — allocator view", () => {
 });
 
 /**
- * SURF-02 / SURF-03 (Phase 21) — Strategy Sandbox link.
- *
- * The Sandbox link points at /scenarios (the example-universe builder) and
- * is gated on `isAllocator` ONLY — NOT showsAllocatorWorkspace
- * (= isAllocator || isAdmin). Per the locked decision, managers AND
- * admin-only users must see NO Sandbox entry. The sidebar hide is
- * defense-in-depth; the real boundary is the server gate at
- * scenarios/page.tsx (pinned by page.role-gate.test.ts).
- *
- * A regression that re-gates the link on showsAllocatorWorkspace would leak
- * the entry to admin-only users and is caught by the admin-only case below.
+ * FLOW-03 (Phase 32) — the "Strategy Sandbox" nav item (→ /scenarios) is
+ * RETIRED. The standalone SURF-02/03 Sandbox entry was removed when the
+ * example-universe Sandbox was absorbed into the unified composer (Phase 29)
+ * and /scenarios was converted to a 307 redirect to /allocations?tab=scenario.
+ * The allocator now has ONE discoverable nav entry ("My Allocation" →
+ * /allocations). The retirement is pinned durably by
+ * src/__tests__/phase-32-frozen-spine-guards.test.ts (no "/scenarios" in
+ * Sidebar.tsx). This block asserts no role flavour resurrects the item.
  */
-describe("Sidebar Strategy Sandbox link RBAC gate (SURF-02/03)", () => {
-  it("allocators SEE the 'Strategy Sandbox' link pointing at /scenarios", () => {
+describe("Sidebar Strategy Sandbox nav item is retired (FLOW-03)", () => {
+  it("allocators do NOT see a 'Strategy Sandbox' link", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    const link = screen.getByText("Strategy Sandbox").closest("a");
-    expect(link).toHaveAttribute("href", "/scenarios");
+    expect(screen.queryByText("Strategy Sandbox")).toBeNull();
   });
 
-  it("places 'Strategy Sandbox' directly after 'My Allocation' in MY WORKSPACE", () => {
-    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    const myAllocation = screen.getByText("My Allocation");
-    const sandbox = screen.getByText("Strategy Sandbox");
-    expect(
-      myAllocation.compareDocumentPosition(sandbox) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-  });
-
-  it("manager-only users do NOT see the 'Strategy Sandbox' link", () => {
+  it("manager-only users do NOT see a 'Strategy Sandbox' link", () => {
     render(
       <Sidebar populatedSlugs={[]} isAllocator={false} isManager={true} />,
     );
     expect(screen.queryByText("Strategy Sandbox")).toBeNull();
   });
 
-  it("admin-only users do NOT see the 'Strategy Sandbox' link (isAllocator gate, NOT showsAllocatorWorkspace)", () => {
-    // The critical SURF-03 assertion: an admin-only user has
-    // showsAllocatorWorkspace=true (sees "My Allocation") but isAllocator
-    // is falsy, so the Sandbox link must be ABSENT. This is the regression
-    // guard against re-gating on showsAllocatorWorkspace.
+  it("admin-only users do NOT see a 'Strategy Sandbox' link", () => {
     render(<Sidebar populatedSlugs={[]} isAdmin={true} />);
     expect(screen.getByText("My Allocation")).toBeInTheDocument();
     expect(screen.queryByText("Strategy Sandbox")).toBeNull();
   });
 
-  it("a dual-role admin+allocator DOES see the Sandbox link (isAllocator is true)", () => {
+  it("a dual-role admin+allocator does NOT see a 'Strategy Sandbox' link", () => {
     render(<Sidebar populatedSlugs={[]} isAdmin={true} isAllocator={true} />);
-    expect(screen.getByText("Strategy Sandbox")).toBeInTheDocument();
+    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.queryByText("Strategy Sandbox")).toBeNull();
   });
 
-  it("users with no role flags do NOT see the 'Strategy Sandbox' link", () => {
+  it("users with no role flags do NOT see a 'Strategy Sandbox' link", () => {
     render(<Sidebar populatedSlugs={[]} />);
     expect(screen.queryByText("Strategy Sandbox")).toBeNull();
   });

@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
-import { CollapsibleSection, FACTSHEET_OPEN_ALL_EVENT } from "./CollapsibleSection";
+import { CollapsibleSection, COLLAPSIBLE_OPEN_ALL_EVENT } from "./CollapsibleSection";
 
 /**
- * B7c — CollapsibleSection open/closed persistence.
+ * B7c — CollapsibleSection open/closed persistence (lifted to src/components/ui).
  *
  * The migration onto `useCrossTabStorage` + a `defaultOpen`-aware
  * `rawStringCodec` must preserve the pre-B7 contract:
@@ -12,11 +12,13 @@ import { CollapsibleSection, FACTSHEET_OPEN_ALL_EVENT } from "./CollapsibleSecti
  *   - junk in storage → falls back to `defaultOpen` (the codec self-coerces).
  *   - a user toggle persists the new state at the raw `storageKey` (byte-compat
  *     "open"/"closed", no JSON envelope).
- *   - the FACTSHEET_OPEN_ALL_EVENT pops the section open AND persists it.
+ *   - the COLLAPSIBLE_OPEN_ALL_EVENT pops the section open AND persists it.
+ *   - analytics are decoupled: an injected `onToggle` callback fires ONLY on a
+ *     user-initiated toggle (after hydration, when state changed), NOT on the
+ *     mount-time default-vs-stored reconciliation.
  */
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
-vi.mock("./factsheet-analytics", () => ({ trackFactsheetEvent: vi.fn() }));
 
 const lsStore = new Map<string, string>();
 const localStorageMock = {
@@ -49,6 +51,7 @@ const KEY = "factsheet-collapse:strat-1:perf";
 function renderSection(props: {
   defaultOpen?: boolean;
   storageKey?: string;
+  onToggle?: (open: boolean) => void;
 } = {}) {
   return render(
     <CollapsibleSection
@@ -56,6 +59,7 @@ function renderSection(props: {
       title="Performance"
       storageKey={props.storageKey ?? KEY}
       defaultOpen={props.defaultOpen}
+      onToggle={props.onToggle}
     >
       <p>body</p>
     </CollapsibleSection>,
@@ -145,15 +149,59 @@ describe("CollapsibleSection — persist on toggle", () => {
   });
 });
 
+describe("CollapsibleSection — onToggle analytics callback", () => {
+  it("fires onToggle with the new open boolean on a user toggle, and NOT on mount-time hydration", async () => {
+    // Mount on top of a stored "closed" while defaultOpen=true: the mount-time
+    // reconciliation flips the rendered state from open→closed, but that is NOT
+    // a user toggle and MUST NOT fire onToggle.
+    lsStore.set(KEY, "closed");
+    const onToggle = vi.fn();
+    act(() => {
+      renderSection({ defaultOpen: true, onToggle });
+    });
+    // Wait for the deferred hydration to settle (open→closed adoption).
+    await waitFor(() => expect(detailsEl().open).toBe(false));
+    expect(onToggle).not.toHaveBeenCalled();
+
+    // Now a real user toggle: open the section.
+    act(() => {
+      detailsEl().open = true;
+      fireEvent(detailsEl(), new Event("toggle"));
+    });
+    expect(onToggle).toHaveBeenCalledTimes(1);
+    expect(onToggle).toHaveBeenCalledWith(true);
+
+    // And collapse it again.
+    act(() => {
+      detailsEl().open = false;
+      fireEvent(detailsEl(), new Event("toggle"));
+    });
+    expect(onToggle).toHaveBeenCalledTimes(2);
+    expect(onToggle).toHaveBeenLastCalledWith(false);
+  });
+
+  it("toggling still works and persists when no onToggle is provided", async () => {
+    act(() => {
+      renderSection({ defaultOpen: true });
+    });
+    act(() => {
+      detailsEl().open = false;
+      fireEvent(detailsEl(), new Event("toggle"));
+    });
+    await waitFor(() => expect(lsStore.get(KEY)).toBe("closed"));
+    expect(detailsEl().open).toBe(false);
+  });
+});
+
 describe("CollapsibleSection — open-all event", () => {
-  it("FACTSHEET_OPEN_ALL_EVENT pops a closed section open and persists it", async () => {
+  it("COLLAPSIBLE_OPEN_ALL_EVENT pops a closed section open and persists it", async () => {
     lsStore.set(KEY, "closed");
     act(() => {
       renderSection({ defaultOpen: true });
     });
     expect(detailsEl().open).toBe(false);
     act(() => {
-      window.dispatchEvent(new Event(FACTSHEET_OPEN_ALL_EVENT));
+      window.dispatchEvent(new Event(COLLAPSIBLE_OPEN_ALL_EVENT));
     });
     expect(detailsEl().open).toBe(true);
     await waitFor(() => expect(lsStore.get(KEY)).toBe("open"));

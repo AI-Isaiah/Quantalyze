@@ -64,20 +64,14 @@ function buildNavSections(
       badge: flaggedCount,
     });
   }
-  // SURF-02 / SURF-03 (Phase 21) — Strategy Sandbox link. Gated on
-  // `isAllocator` ONLY (NOT showsAllocatorWorkspace, which is
-  // `isAllocator || isAdmin`): per the locked decision, managers AND
-  // admin-only users see no Sandbox entry. This sidebar hide is
-  // defense-in-depth only — the real security boundary is the server gate
-  // at scenarios/page.tsx (role IN ('allocator','both') else redirect("/")),
-  // which is not modified here.
-  if (isAllocator) {
-    workspaceItems.push({
-      label: "Strategy Sandbox",
-      href: "/scenarios",
-      icon: BeakerIcon,
-    });
-  }
+  // FLOW-03 (Phase 32): the standalone "Strategy Sandbox" nav item (which
+  // pointed at the now-retired Sandbox route) is removed. The example-universe
+  // Sandbox was absorbed into the unified composer (Phase 29), and the legacy
+  // route now 307-redirects to /allocations?tab=scenario. A separate nav entry
+  // would loop the allocator back into the composer they already reach via
+  // "My Allocation" — so the allocator now has ONE discoverable entry point
+  // (/allocations, above). The phase-32 frozen-spine guard pins this: no
+  // Sandbox-route reference may reappear in this file.
   if (showsManagerWorkspace) {
     workspaceItems.push(
       { label: "Strategies", href: "/strategies", icon: BarChartIcon },
@@ -262,20 +256,6 @@ function BarChartIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
       <path d="M4 12V7M8 12V4M12 12V9" />
-    </svg>
-  );
-}
-
-// SURF-02 (Phase 21) — Strategy Sandbox link icon. A lab-flask/beaker
-// outline signals "sandbox / experiment". Follows the inline-SVG icon
-// factory convention (16px viewBox, 1.5px stroke, currentColor) — no icon
-// dependency.
-function BeakerIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M6 2v4.5L2.8 12.2A1.2 1.2 0 003.85 14h8.3a1.2 1.2 0 001.05-1.8L10 6.5V2" />
-      <path d="M5 2h6" />
-      <path d="M4.6 10h6.8" />
     </svg>
   );
 }

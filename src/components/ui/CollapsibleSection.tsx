@@ -4,26 +4,31 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useCrossTabStorage } from "@/lib/storage/cross-tab";
 import { rawStringCodec } from "@/lib/storage/codecs";
-import { trackFactsheetEvent } from "./factsheet-analytics";
 
 type OpenState = "open" | "closed";
 
 /**
  * Broadcast on `window` to ask every CollapsibleSection in the tree to
- * pop open. Used by the ControlBar's "Reset view" button — see
- * FactsheetView.ControlBar.
+ * pop open. Used by the factsheet ControlBar's "Reset view" button (see
+ * FactsheetView.ControlBar) and any other surface that wants a one-shot
+ * "expand everything" affordance.
  */
-export const FACTSHEET_OPEN_ALL_EVENT = "factsheet-v2:open-all";
+export const COLLAPSIBLE_OPEN_ALL_EVENT = "collapsible-section:open-all";
 
 /**
- * Collapsible section wrapper for the factsheet — native <details> at the
- * core so it's keyboard-accessible by default, works without JS, and prints
- * with the user's last open/closed state. Persists per (strategyId, sectionId)
- * via localStorage so a reload restores the user's chosen layout.
+ * Generalized collapsible section wrapper — native <details> at the core so
+ * it's keyboard-accessible by default, works without JS, and prints with the
+ * user's last open/closed state. Persists open/closed via an optional
+ * `storageKey` so a reload restores the user's chosen layout.
+ *
+ * Factsheet-agnostic: analytics are decoupled via the optional `onToggle`
+ * callback (the consumer wires its own tracking) rather than a hard import, so
+ * any surface (factsheet, scenario composer, ...) can reuse it without dragging
+ * in a sibling dependency.
  *
  * Panel-interactivity best practice: collapsing the heaviest below-fold
- * sections lets allocators focus on what matters for their thesis. Default
- * varies by section — heavy/optional content starts collapsed on mobile.
+ * sections lets users focus on what matters. Default varies by section — heavy/
+ * optional content can start collapsed.
  */
 export function CollapsibleSection({
   id,
@@ -31,6 +36,7 @@ export function CollapsibleSection({
   subtitle,
   defaultOpen = true,
   storageKey,
+  onToggle,
   children,
 }: {
   id: string;
@@ -38,6 +44,13 @@ export function CollapsibleSection({
   subtitle?: string;
   defaultOpen?: boolean;
   storageKey?: string;
+  /**
+   * Invoked with the new open boolean ONLY on a user-initiated toggle
+   * (after hydration, when the state actually changed). NOT called on the
+   * mount-time default-vs-stored reconciliation. Optional — toggling still
+   * works and persists when absent.
+   */
+  onToggle?: (open: boolean) => void;
   children: ReactNode;
 }) {
   // B7 — open/closed persistence routes through the cross-tab primitive
@@ -46,7 +59,9 @@ export function CollapsibleSection({
   // `rawStringCodec` that stores the literal "open"/"closed" string (no JSON
   // envelope) — byte-compatible with the pre-B7 `setItem(storageKey, "open")`
   // write, so existing stored section states survive. The key is the raw
-  // `storageKey` prop unchanged (e.g. `factsheet-collapse:${id}:perf`).
+  // `storageKey` prop unchanged (e.g. `factsheet-collapse:${id}:perf` or
+  // `composer-collapse:controls`) — it MUST live under a prefix registered in
+  // `storage-namespaces.ts` so the sign-out purge reaches it.
   //
   // The codec is built from `defaultOpen` via useMemo so an ABSENT key
   // (raw === null) yields the section's own default; only the literal "closed"
@@ -86,7 +101,7 @@ export function CollapsibleSection({
     setOpen(persistedOpen === "open");
   }, [hydrated, persistedOpen]);
 
-  // "Reset view" broadcasts FACTSHEET_OPEN_ALL_EVENT so every collapsed
+  // "Reset view" broadcasts COLLAPSIBLE_OPEN_ALL_EVENT so every collapsed
   // section pops back open. We listen here rather than in a parent so
   // sections that were rendered conditionally still register cleanly. Persist
   // the pop-open so the restored layout survives a reload.
@@ -96,8 +111,8 @@ export function CollapsibleSection({
       setOpen(true);
       setPersistedOpen("open");
     };
-    window.addEventListener(FACTSHEET_OPEN_ALL_EVENT, handler);
-    return () => window.removeEventListener(FACTSHEET_OPEN_ALL_EVENT, handler);
+    window.addEventListener(COLLAPSIBLE_OPEN_ALL_EVENT, handler);
+    return () => window.removeEventListener(COLLAPSIBLE_OPEN_ALL_EVENT, handler);
   }, [setPersistedOpen]);
 
   return (
@@ -109,7 +124,7 @@ export function CollapsibleSection({
         // Only fire analytics for user-initiated toggles (skip the initial
         // mount when we're matching the stored preference).
         if (hydrated && nextOpen !== open) {
-          trackFactsheetEvent("factsheet_v2_section_toggle", { section: id, open: nextOpen });
+          onToggle?.(nextOpen);
         }
         setOpen(nextOpen);
         // Persist the user's choice (no-op when disabled / readOnly inside the

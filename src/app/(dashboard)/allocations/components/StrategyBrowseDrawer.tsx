@@ -495,10 +495,9 @@ export function StrategyBrowseDrawer({
                           {s.name}
                         </span>
                         {/* Phase 29 (UNIFY-03 UI) — example-universe provenance
-                            tag. Neutral-outline pill recipe copied VERBATIM from
-                            ScenarioBuilder.tsx:288 (same family as the PROJECTED
-                            honesty pill). NEVER accent and NEVER a filled
-                            <Badge>: accent = verified/action; an example
+                            tag. Neutral-outline pill (same family as the
+                            PROJECTED honesty pill). NEVER accent and NEVER a
+                            filled <Badge>: accent = verified/action; an example
                             strategy is provenance metadata, not a status. */}
                         {s.is_example === true && (
                           <span

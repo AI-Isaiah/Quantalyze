@@ -413,6 +413,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     ).toBeInTheDocument();
     const browseBtn = screen.getByRole("button", { name: /Browse strategies/i });
     expect(browseBtn).toBeInTheDocument();
+    // FLOW-02 (landmine #2) — the blank slate must NOT link back to the retired
+    // /scenarios Sandbox: after retirement that link 307-loops the user from the
+    // composer's front door straight back into the composer. Non-vacuous: this
+    // FAILED before the ScenarioComposer.tsx L1619-1624 self-loop <p> deletion.
+    expect(
+      document.querySelector('a[href="/scenarios"]'),
+    ).toBeNull();
+    expect(screen.queryByText(/Strategy Sandbox/i)).toBeNull();
     fireEvent.click(browseBtn);
     expect(screen.getByTestId("browse-drawer-mock")).toBeInTheDocument();
   });
@@ -2975,7 +2983,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // suppresses — is pinned in src/lib/factsheet/audit-c20.test.ts.)
     expect(document.getElementById("factsheet-allocator")).toBeNull();
     expect(document.getElementById("factsheet-signatures")).toBeNull();
-    // IMPACT-02 — the ABSENT assertion for the peer badge keys on a UNIQUE
+    // IMPACT-02 — after FLOW-02 (Phase 32) retired the ScenarioBuilder Sandbox
+    // and its honesty test, THIS is the SOLE peer-rank-suppression coverage in
+    // the codebase. It is a verified superset of the deleted
+    // ScenarioBuilder.honesty.test.tsx guard (it runs with the Phase-30 blend
+    // panels mounted). Do not weaken it.
+    // The ABSENT assertion for the peer badge keys on a UNIQUE
     // render-only data-testid, NOT queryByText(/percentile/i) (which matched
     // NOTHING because "percentile" lives only in PercentileRankBadge's title=
     // attribute — a vacuous pass) and NOT a visible label like "Sharpe" (which
@@ -3521,5 +3534,128 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // LAYOUT-02 (Phase 31 / Pitfall 5) — collapsing the composition controls
+  // PRESERVES in-progress weight + leverage edits, and the projection behind
+  // the collapsed panel STILL reflects them. This is the load-bearing
+  // hide-don't-unmount gate: CompositionList is wrapped in the lifted
+  // CollapsibleSection (native <details id="composer-composition-controls">),
+  // so collapse HIDES it but never unmounts it, and the edit state lives in the
+  // parent ScenarioComposer (leverageByRef + scenario.draft.weightOverrides),
+  // ABOVE the collapsible boundary. A naive `{open && <CompositionList />}`
+  // would wipe the edits on collapse — this test fails on that regression.
+  //
+  // NON-VACUITY: a default-state collapse proves nothing (the inputs already
+  // hold their defaults). So we type a NON-DEFAULT weight (0.250 ≠ the 0.000
+  // default) AND a NON-DEFAULT leverage (2 ≠ the 1× default) FIRST, assert the
+  // projection MOVED off its pre-edit baseline (the edit is real), THEN collapse
+  // + expand and assert (a) both inputs still show the edited values and (b) the
+  // projection still reflects the edited composition (unchanged from the
+  // post-edit capture — never reverted to the default-weight projection).
+  // -------------------------------------------------------------------------
+  it("LAYOUT-02 collapsing the composition controls preserves in-progress weight + leverage edits and the projection still reflects them", () => {
+    mockHoldingPlusStrategy();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStratA();
+
+    // --- Baseline (default composition: weight 0.000, leverage 1×) -----------
+    const baselineMetrics = lastScenarioMetrics();
+    const baselineTwr = baselineMetrics?.twr;
+    const baselineVol = baselineMetrics?.volatility;
+
+    const weightInput = document.getElementById(
+      `weight-${STRAT_A}`,
+    ) as HTMLInputElement;
+    const leverageInput = document.getElementById(
+      `leverage-${STRAT_A}`,
+    ) as HTMLInputElement;
+    expect(weightInput).not.toBeNull();
+    expect(leverageInput).not.toBeNull();
+    // Capture the pre-edit input values so the edits below are provably
+    // NON-DEFAULT (the seeded adapter weight is 0.500 and leverage defaults to
+    // 1×; we edit to values distinct from both). Leverage starts at the 1×
+    // default (ephemeral leverageByRef has no entry for the added row yet).
+    const weightBefore = weightInput.value;
+    expect(leverageInput.value).toBe("1");
+
+    // --- Edit: a NON-DEFAULT weight AND a NON-DEFAULT leverage ---------------
+    act(() => {
+      fireEvent.change(weightInput, { target: { value: "0.25" } });
+    });
+    act(() => {
+      fireEvent.change(leverageInput, { target: { value: "2" } });
+    });
+    // The controlled inputs reflect the edits (weight rounds to 3dp), and both
+    // are genuinely NON-DEFAULT (distinct from the pre-edit values).
+    expect(weightInput.value).toBe("0.250");
+    expect(weightInput.value).not.toBe(weightBefore);
+    expect(leverageInput.value).toBe("2");
+
+    // Capture the post-edit projection signal and prove it MOVED off baseline
+    // (non-vacuity — the edits actually reached the blend, so "survives" means
+    // something). The weight reweight shifts the blend's TWR; the 2× leverage
+    // shifts its volatility.
+    const editedMetrics = lastScenarioMetrics();
+    const editedTwr = editedMetrics?.twr;
+    const editedVol = editedMetrics?.volatility;
+    expect(editedTwr).not.toBe(baselineTwr);
+    expect(editedVol).not.toBe(baselineVol);
+
+    // --- Collapse the controls (toggle the <details> closed) -----------------
+    const detailsEl = () =>
+      document.getElementById(
+        "composer-composition-controls",
+      ) as HTMLDetailsElement;
+    expect(detailsEl()).not.toBeNull();
+    // The wrapper is a native <details> (not a `{open && ...}` conditional), so
+    // the controls are still in the DOM while collapsed — the load-bearing
+    // hide-don't-unmount fact.
+    expect(detailsEl().tagName).toBe("DETAILS");
+    act(() => {
+      detailsEl().open = false;
+      fireEvent(detailsEl(), new Event("toggle"));
+    });
+    // CompositionList stays MOUNTED while collapsed — its inputs are still
+    // queryable (a conditional unmount would make these null).
+    expect(document.getElementById(`weight-${STRAT_A}`)).not.toBeNull();
+    expect(document.getElementById(`leverage-${STRAT_A}`)).not.toBeNull();
+
+    // While collapsed, the projection behind the hidden panel STILL reflects the
+    // edited composition (it never reverted to the default-weight projection).
+    const collapsedMetrics = lastScenarioMetrics();
+    expect(collapsedMetrics?.twr).toBe(editedTwr);
+    expect(collapsedMetrics?.volatility).toBe(editedVol);
+
+    // --- Re-expand the controls ----------------------------------------------
+    act(() => {
+      detailsEl().open = true;
+      fireEvent(detailsEl(), new Event("toggle"));
+    });
+
+    // SURVIVAL: after expand, the SAME inputs still show the non-default edits —
+    // no reset to defaults (the parent-held state survived collapse→expand).
+    const weightAfter = document.getElementById(
+      `weight-${STRAT_A}`,
+    ) as HTMLInputElement;
+    const leverageAfter = document.getElementById(
+      `leverage-${STRAT_A}`,
+    ) as HTMLInputElement;
+    expect(weightAfter.value).toBe("0.250");
+    expect(leverageAfter.value).toBe("2");
+
+    // And the projection STILL reflects the edited composition after expand
+    // (LAYOUT-02 — the blend behind the panel never lost the edits).
+    const afterMetrics = lastScenarioMetrics();
+    expect(afterMetrics?.twr).toBe(editedTwr);
+    expect(afterMetrics?.volatility).toBe(editedVol);
   });
 });

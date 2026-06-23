@@ -66,7 +66,6 @@ requires a new ADR or an amendment to this one.
 - Browser client: `src/lib/supabase/client.ts` (lines 1-8).
 - Server client: `src/lib/supabase/server.ts` (lines 1-27).
 - Admin client: `src/lib/supabase/admin.ts` (lines 1-12).
-- Admin client usage in scenarios: `src/app/(dashboard)/scenarios/page.tsx`.
 - Admin client in email: `src/lib/email.ts` (line 2).
 - Admin client in queries: `src/lib/queries.ts`.
 - `withAdminAuth` wrapper: `src/lib/api/withAdminAuth.ts` (lines 1-31).

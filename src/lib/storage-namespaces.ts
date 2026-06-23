@@ -27,6 +27,7 @@ export const APP_NAMESPACED_PREFIXES: readonly string[] = [
   "admin-compute-",
   "factsheet-v2:",
   "factsheet-collapse:",
+  "composer-collapse:",
 ] as const;
 
 /**
