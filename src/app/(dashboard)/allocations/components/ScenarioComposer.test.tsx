@@ -131,6 +131,28 @@ vi.mock("../lib/scenario-adapter", () => ({
   })),
 }));
 
+// Phase 30 — mock the five blend-graph LEAF charts to inert spies (same :70-127
+// precedent as EquityChart/DrawdownChart/KpiStrip). This keeps the unit-under-
+// test the composer's PANEL CHROME (Card / heading / disclosure / empty branch /
+// the prop wiring) rather than the recharts internals, and lets the histogram
+// prop be asserted via vi.mocked(ReturnHistogram).mock.calls[0][0]. The leaves
+// render a testid div so a present-panel assert can also read their mount.
+vi.mock("@/components/charts/ReturnHistogram", () => ({
+  ReturnHistogram: vi.fn(() => <div data-testid="return-histogram-mock" />),
+}));
+vi.mock("@/components/charts/ReturnQuantiles", () => ({
+  ReturnQuantiles: vi.fn(() => <div data-testid="return-quantiles-mock" />),
+}));
+vi.mock("@/components/charts/RollingMetrics", () => ({
+  RollingMetrics: vi.fn(() => <div data-testid="rolling-metrics-mock" />),
+}));
+vi.mock("@/components/charts/RollingVolatilityChart", () => ({
+  RollingVolatilityChart: vi.fn(() => <div data-testid="rolling-vol-mock" />),
+}));
+vi.mock("@/components/charts/RollingSortinoChart", () => ({
+  RollingSortinoChart: vi.fn(() => <div data-testid="rolling-sortino-mock" />),
+}));
+
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer } from "./ScenarioComposer";
@@ -145,6 +167,12 @@ import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
 // renders a genuine PercentileRankBadge in isolation, proving the testid query
 // that asserts ABSENCE on the projection is non-vacuous.
 import { PercentileRankBadge } from "@/components/strategy/PercentileRankBadge";
+// Phase 30 — imported (mocked above) so the histogram's CUMULATIVE-wealth input
+// contract is asserted via vi.mocked(ReturnHistogram).mock.calls[0][0].
+import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 // --- localStorage mock (vi.stubGlobal — Phase 08 / 06a precedent) --------
 
@@ -2924,6 +2952,18 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     );
     // Positive control: the projection DID render its KPI surface.
     expect(screen.getByTestId("kpi-strip-mock")).toBeInTheDocument();
+    // Phase 30 — the guard must run WITH the new blend-graph panels mounted, so
+    // a future regression that wires a peer/percentile panel ALONGSIDE them is
+    // still caught (not a vacuous pass on an unmounted surface). Assert both new
+    // Cards ARE present on the projection here.
+    expect(
+      document.querySelector('[data-panel="blend-returns-distribution"]'),
+      "the Returns-distribution Card must be mounted so the R3 guard runs with the new surface present",
+    ).not.toBeNull();
+    expect(
+      document.querySelector('[data-panel="blend-rolling"]'),
+      "the Rolling-metrics Card must be mounted so the R3 guard runs with the new surface present",
+    ).not.toBeNull();
     // The hazard: FactsheetBody's api-only panels (peer percentile, allocator
     // blends, returns signatures) peer-rank a blend that doesn't exist — a
     // no-invented-data violation. The composer builds from scenarioMetrics +
@@ -2950,6 +2990,170 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     cleanup();
     render(<PercentileRankBadge metric="sharpe" percentile={95} />);
     expect(screen.getByTestId("percentile-rank-badge")).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 30 (GRAPH-02/03/04) — blend-graph panel chrome on the composer.
+  // Drives the REAL computeScenario via the adapter mock (like H-0133 above)
+  // so the panels read genuine `portfolio_daily_returns`. The five leaf charts
+  // are inert-mocked at module scope, so these assert the host's PANEL CHROME
+  // (Card / heading / disclosure / honest empty branch / histogram prop), not
+  // recharts internals.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Mock the adapter to return a single blended strategy with `nDays`
+   * overlapping daily returns, so the engine emits a `portfolio_daily_returns`
+   * of length `nDays`. Deterministic (no Math.random) — a sign-varying series
+   * so the histogram + rolling-Sortino downside arms are non-degenerate.
+   */
+  function mockBlendSeries(nDays: number) {
+    const start = new Date(2024, 0, 1).getTime();
+    const series = Array.from({ length: nDays }, (_, i) => ({
+      date: new Date(start + i * 86_400_000).toISOString().slice(0, 10),
+      value: Math.sin(i / 7) * 0.01 + 0.0002,
+    }));
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [mkRealStrat(REF_BTC, series)],
+      state: {
+        selected: { [REF_BTC]: true },
+        weights: { [REF_BTC]: 1 },
+        startDates: {},
+      },
+    });
+  }
+
+  it("blend panel empty branch — below the sample floor both panels render a role=status PartialDataBanner and NEVER role=alert", () => {
+    // Default adapter mock returns zero strategies → portfolio_daily_returns is
+    // empty (length 0 < 10), so BOTH panels hit their honest empty branch.
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The Card chrome + headings stay (heading-matches-body, #509): each panel
+    // is present, and inside each the body is a role="status" banner.
+    const distCard = document.querySelector(
+      '[data-panel="blend-returns-distribution"]',
+    );
+    const rollCard = document.querySelector('[data-panel="blend-rolling"]');
+    expect(distCard).not.toBeNull();
+    expect(rollCard).not.toBeNull();
+    expect(
+      distCard!.querySelector('[role="status"]'),
+      "below floor, the distribution panel body must be a role=status PartialDataBanner",
+    ).not.toBeNull();
+    expect(
+      rollCard!.querySelector('[role="status"]'),
+      "below floor, the rolling panel body must be a role=status PartialDataBanner",
+    ).not.toBeNull();
+    // Heading stays present even on the empty branch.
+    expect(screen.getByText("Returns distribution")).toBeInTheDocument();
+    expect(screen.getByText("Rolling metrics")).toBeInTheDocument();
+    // The prescribed empty copy (UI-SPEC §Copywriting) is rendered.
+    expect(
+      screen.getByText(
+        /at least 10 overlapping daily returns to chart its distribution/i,
+      ),
+    ).toBeInTheDocument();
+    // CRITICAL honesty invariant: a derived-client panel has no fetch to fail,
+    // so absence below the floor is NEVER an error. No role=alert anywhere in
+    // either panel region. (Falsifiable: switching PartialDataBanner→a red
+    // role=alert error state fails this assert.)
+    expect(distCard!.querySelector('[role="alert"]')).toBeNull();
+    expect(rollCard!.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("blend panel disclosure — above floor each panel renders its own overlap-N + 'not a forecast' line, and the histogram is fed the CUMULATIVE-wealth series", () => {
+    // 252 overlapping days clears every window floor (63/126/252) AND the
+    // 10-point distribution floor, so both panels render their populated body.
+    mockBlendSeries(252);
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // GRAPH-04 — each panel owns its disclosure. The page-level PROJECTED badge
+    // is NOT sufficient. Both lines carry "overlapping" + "not a forecast".
+    const overlapDisclosures = screen.getAllByText(/overlapping/i);
+    expect(overlapDisclosures.length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText(/not a forecast/i).length).toBeGreaterThanOrEqual(
+      2,
+    );
+    expect(
+      screen.getByText(/historical realized · not a forecast/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/252-day annualized/i),
+    ).toBeInTheDocument();
+    // The leaf charts mounted (populated body, not the empty banner).
+    expect(screen.getByTestId("return-histogram-mock")).toBeInTheDocument();
+    expect(screen.getByTestId("return-quantiles-mock")).toBeInTheDocument();
+    expect(screen.getByTestId("rolling-metrics-mock")).toBeInTheDocument();
+    expect(screen.getByTestId("rolling-vol-mock")).toBeInTheDocument();
+    expect(screen.getByTestId("rolling-sortino-mock")).toBeInTheDocument();
+    // Pitfall 1 — ReturnHistogram derives daily returns internally from a
+    // CUMULATIVE series. Assert it received the cumprod-wealth series (first
+    // point ≈ 1 + r[0]), NOT the raw daily returns (which start near 0). If a
+    // future edit feeds raw daily returns, value[0] would be ~0.0002 and this
+    // fails loudly.
+    const histProps = vi.mocked(ReturnHistogram).mock.calls[0][0];
+    expect(histProps.returns.length).toBe(252);
+    const firstWealth = histProps.returns[0].value;
+    expect(firstWealth).toBeGreaterThan(0.9);
+    expect(firstWealth).toBeLessThan(1.1);
+    // bins contract held verbatim.
+    expect(histProps.bins).toBe(20);
+  });
+
+  it("blend rolling panel — selecting 12M when history is below 252 swaps the body to the role=status per-window empty banner (never role=alert)", () => {
+    // 126 days: the 6M (126) default renders, but 12M (252) is below floor.
+    // The 12M toggle option is disabled; the panel body for the default window
+    // renders. Assert the panel mounts with no role=alert regardless of window.
+    mockBlendSeries(126);
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const rollCard = document.querySelector('[data-panel="blend-rolling"]');
+    expect(rollCard).not.toBeNull();
+    // 6M (126) clears the floor → populated body, real disclosure.
+    expect(screen.getByTestId("rolling-metrics-mock")).toBeInTheDocument();
+    expect(screen.getByText(/126-day rolling window/i)).toBeInTheDocument();
+    // 12M is below the 252 floor → its toggle option is disabled (aria-disabled).
+    const twelveM = screen.getByText("12M").closest("button");
+    expect(twelveM).not.toBeNull();
+    expect(twelveM!.getAttribute("aria-disabled")).toBe("true");
+    // Honest-neutral: never role=alert in the rolling panel.
+    expect(rollCard!.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("no factsheet import on the blend path — ScenarioComposer source imports no FactsheetBody/MetricsColumn/payload-builder and contains no api-ingest literal (static guard, T-30-05)", () => {
+    // Non-vacuous: reads the REAL .tsx source off disk (not the bundled/mocked
+    // module). The forbidden api-only peer path would land structurally here, so
+    // the guard FAILS LOUD if any of these strings are reintroduced — even in a
+    // comment. (This is why the source comments avoid the literal token spelling.)
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(join(here, "ScenarioComposer.tsx"), "utf8");
+    // Positive control — prove the read is real (the file IS the composer).
+    expect(source).toMatch(/buildBlendPanels/);
+    expect(source).not.toMatch(
+      /FactsheetBody|MetricsColumn|buildAllocatorPortfolioFactsheetPayload/,
+    );
+    expect(source).not.toMatch(/ingestSource:\s*["']api["']/);
+    // Belt-and-suspenders: no per-strategy *Panel.tsx wrapper or PercentileRankBadge.
+    expect(source).not.toMatch(/PercentileRankBadge/);
+    expect(source).not.toMatch(/from\s+["']@\/components\/strategy-v2\/\w+Panel["']/);
   });
 
   it("H-0133 regression — toggling a REAL strategy OFF removes it from the active set (the explicit-toggle arm, isolated from weight rescaling)", () => {
