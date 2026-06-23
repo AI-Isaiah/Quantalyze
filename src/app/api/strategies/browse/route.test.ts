@@ -612,7 +612,18 @@ describe("GET /api/strategies/browse", () => {
     const body = await res.json();
     expect(body.strategies).toHaveLength(1);
 
-    const ALLOWED = ["id", "name", "codename", "markets", "strategy_types"].sort();
+    // Phase 29 / UNIFY-03 — `is_example` is the provenance tag added to the
+    // BrowseStrategyRow allow-list. The fence still holds exhaustively: any
+    // key NOT in this list (disclosure_tier / backtest_returns / user_id /
+    // any stray co-fetched column) must never reach the wire.
+    const ALLOWED = [
+      "id",
+      "name",
+      "codename",
+      "markets",
+      "strategy_types",
+      "is_example",
+    ].sort();
     expect(Object.keys(body.strategies[0]).sort()).toEqual(ALLOWED);
     // Explicit forbidden-key fence — disclosure_tier is fetched but must
     // never reach the wire.
