@@ -877,6 +877,156 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // T_C_MODE1 — entry-mode segmented control renders two accessible segments
+  //   (UNIFY-01/02). radiogroup + two radios; the live book defaults to
+  //   "From my book". Active segment carries the accent OUTLINE, never a fill
+  //   (accent = action/verified, a mode toggle is neither — 29-UI-SPEC §1).
+  // -------------------------------------------------------------------------
+  it("T_C_MODE1 entry-mode control renders an accessible radiogroup with 'From my book' (default) + 'Blank slate'; active = accent outline, NOT a fill", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const group = screen.getByRole("radiogroup", {
+      name: /Composition entry mode/i,
+    });
+    expect(group).toBeInTheDocument();
+    const book = screen.getByRole("radio", { name: /From my book/i });
+    const blank = screen.getByRole("radio", { name: /Blank slate/i });
+    // Live book present → "From my book" is the default selected segment.
+    expect(book).toHaveAttribute("aria-checked", "true");
+    expect(blank).toHaveAttribute("aria-checked", "false");
+    // Active segment uses the accent OUTLINE recipe, never a fill.
+    expect(book.className).toMatch(/border-accent/);
+    expect(book.className).toMatch(/text-accent/);
+    expect(book.className).not.toMatch(/bg-accent/);
+    expect(blank.className).not.toMatch(/bg-accent/);
+  });
+
+  // -------------------------------------------------------------------------
+  // T_C_MODE2 — no live book → "From my book" is NOT rendered as a dead
+  //   default; the composer defaults to Blank slate (29-UI-SPEC §1).
+  //   With nothing added, the no-book allocator sees the empty-state front
+  //   door; once a strategy is added the main body renders with the control.
+  // -------------------------------------------------------------------------
+  it("T_C_MODE2 no live book → defaults to Blank slate, never a dead 'From my book' segment", () => {
+    const payload = makePayload({
+      holdingsSummary: [],
+      holdingReturnsByScopeRef: {},
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // No-book + nothing added → empty-state front door (the blank-slate door).
+    expect(
+      screen.getByRole("link", { name: /Connect Exchange/i }),
+    ).toBeInTheDocument();
+    // Add a strategy → main body renders; the control shows Blank-slate-only
+    // (no dead "From my book" default for a no-book allocator).
+    addStrategy({
+      id: "strat-mode2",
+      name: "Mode2 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    const blank = screen.getByRole("radio", { name: /Blank slate/i });
+    expect(blank).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.queryByRole("radio", { name: /From my book/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // T_C_MODE3 — NON-VACUOUS (acceptance criterion): a mode switch with a DIRTY
+  //   draft (diffCount > 0) MUST open the existing ResetConfirmationModal and
+  //   must NOT change the active segment until the user confirms. On confirm
+  //   the mode applies and the draft is discarded. This test FAILS if the
+  //   onClick re-seeds / flips the mode directly (the silent-wipe regression,
+  //   Pitfall 5).
+  // -------------------------------------------------------------------------
+  it("T_C_MODE3 dirty-draft mode switch opens the reset confirmation and does NOT flip the mode until confirm (no silent wipe)", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Dirty the draft (an add is a diff) so the switch must route through the
+    // reset confirmation rather than apply silently.
+    addStrategy({
+      id: "strat-mode3",
+      name: "Mode3 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    const blank = screen.getByRole("radio", { name: /Blank slate/i });
+    const book = screen.getByRole("radio", { name: /From my book/i });
+    expect(book).toHaveAttribute("aria-checked", "true");
+
+    // Click the inactive "Blank slate" segment with a dirty draft.
+    fireEvent.click(blank);
+
+    // The reset confirmation modal opens (the SAME modal the footer Reset uses).
+    expect(
+      screen.getByText(/Discard your scenario draft\?/i),
+    ).toBeInTheDocument();
+    // CRITICAL non-vacuous assertion: the mode did NOT flip — "From my book" is
+    // still the active segment, and the added strategy is still present (the
+    // draft was NOT silently wiped). A naive onClick that calls setEntryMode /
+    // reset directly would already have flipped aria-checked here and this would
+    // fail.
+    expect(
+      screen.getByRole("radio", { name: /From my book/i }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.getByRole("radio", { name: /Blank slate/i }),
+    ).toHaveAttribute("aria-checked", "false");
+    expect(screen.getAllByText(/Mode3 Strat/i).length).toBeGreaterThan(0);
+
+    // Confirm → the discard happens AND the parked mode applies.
+    fireEvent.click(screen.getByRole("button", { name: /Discard draft/i }));
+    expect(
+      screen.queryByText(/Discard your scenario draft\?/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /Blank slate/i }),
+    ).toHaveAttribute("aria-checked", "true");
+  });
+
+  // -------------------------------------------------------------------------
+  // T_C_MODE4 — a CLEAN draft (diffCount === 0) switches immediately (nothing
+  //   to lose) — no confirmation modal.
+  // -------------------------------------------------------------------------
+  it("T_C_MODE4 clean-draft mode switch applies immediately without a confirmation modal", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // No edits → clean draft. Switching is lossless.
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(
+      screen.queryByText(/Discard your scenario draft\?/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /Blank slate/i }),
+    ).toHaveAttribute("aria-checked", "true");
+  });
+
+  // -------------------------------------------------------------------------
   // T_C15 — Fingerprint mismatch banner
   // -------------------------------------------------------------------------
   it("T_C15 fingerprintMismatch=true → banner visible with copy + 2 buttons; default-focus on Keep my draft", () => {

@@ -346,7 +346,7 @@ export function ScenarioComposer({
   onScenarioSaved,
 }: ScenarioComposerProps) {
   const {
-    holdingsSummary,
+    holdingsSummary: rawHoldingsSummary,
     flaggedHoldings,
     matchDecisionsByHoldingRef,
     existingOutcomesByHoldingRef,
@@ -363,10 +363,42 @@ export function ScenarioComposer({
   };
   const router = useRouter();
 
+  // UNIFY-01/02 — entry mode. One composer surface, two front doors:
+  //   "book"  — seed the working composition from the allocator's live holdings.
+  //   "blank" — start from an empty working composition (no live-book holdings
+  //             seeded); the allocator composes purely from catalog adds.
+  // A no-book allocator (rawHoldingsSummary empty) has only one sensible
+  // option — "blank" — so we default there and never render a dead "From my
+  // book" default (29-UI-SPEC §1). The mode is pure UI state: it chooses which
+  // initial draft renders by gating which holdings flow into the hook/adapter/
+  // composition below. The frozen adapter + engine path is untouched.
+  const hasLiveBook = rawHoldingsSummary.length > 0;
+  const [entryMode, setEntryMode] = useState<"book" | "blank">(
+    hasLiveBook ? "book" : "blank",
+  );
+
+  // The holdings the composer actually presents this render. In "blank" mode we
+  // feed [] so the draft seeds empty (only added strategies contribute) — every
+  // downstream `holdingsSummary` reference (hook, adapter, composition list,
+  // fingerprint, empty-state gate) flows through this single switch, so the
+  // mode is honored everywhere with no per-site change. The narrowed cast is
+  // re-applied so the array literal matches the destructured element type.
+  const holdingsSummary = useMemo(
+    () => (entryMode === "blank" ? [] : rawHoldingsSummary),
+    [entryMode, rawHoldingsSummary],
+  ) as typeof rawHoldingsSummary;
+
   const scenario = useScenarioState({
     holdingsSummary: holdingsSummary as { symbol: string; venue: string; holding_type: string; value_usd: number }[],
     allocatorId,
   });
+
+  // UNIFY-02 / Pitfall 5 — a mode switch that would DISCARD a dirty draft must
+  // route through the existing reset-confirmation discipline, never a silent
+  // wipe. `pendingMode` parks the target segment until the user confirms; the
+  // existing `ResetConfirmationModal` + `handleReset` apply it on confirm. A
+  // clean draft (diffCount === 0) switches immediately (nothing to lose).
+  const [pendingMode, setPendingMode] = useState<"book" | "blank" | null>(null);
 
   const [browseOpen, setBrowseOpen] = useState(false);
   const [bridgeOpen, setBridgeOpen] = useState(false);
@@ -524,8 +556,34 @@ export function ScenarioComposer({
     setOpenNotice(null);
     setNameInputOpen(false);
     setSaveError(null);
+    // UNIFY-02 — if a dirty-draft mode switch parked a pending segment, apply
+    // it now (on the SAME confirm that discards the draft). `reset()` re-inits
+    // the draft from `holdingsSummary`, which itself depends on `entryMode`, so
+    // flipping the mode here re-seeds against the newly-selected front door.
+    setPendingMode((pending) => {
+      if (pending !== null) setEntryMode(pending);
+      return null;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scenario.reset]);
+
+  // UNIFY-02 / Pitfall 5 — segment click. A clean draft switches immediately;
+  // a dirty draft (diffCount > 0) parks the target in `pendingMode` and opens
+  // the existing reset confirmation. We NEVER call `scenario.reset()` / re-seed
+  // directly here — the confirm path (`handleReset`) is the only mutator, so a
+  // mode switch can never silently wipe in-progress edits.
+  const handleEntryModeSelect = useCallback(
+    (mode: "book" | "blank") => {
+      if (mode === entryMode) return;
+      if (scenario.diffCount > 0) {
+        setPendingMode(mode);
+        setResetModalOpen(true);
+        return;
+      }
+      setEntryMode(mode);
+    },
+    [entryMode, scenario.diffCount],
+  );
 
   // Open a saved scenario. The row's persisted draft is decoded through the
   // SAME codec the hook uses on a localStorage read (M-0153: never a bare
@@ -747,9 +805,15 @@ export function ScenarioComposer({
   // the empty → "added a strategy" transition (otherwise the second
   // render would call MORE hooks than the first, triggering React's
   // "Rendered more hooks than during the previous render" guard).
+  //
+  // UNIFY-02 — gate on the RAW book (`hasLiveBook`), NOT the mode-narrowed
+  // `holdingsSummary`. The empty-state card is the front door for a genuinely
+  // no-book allocator. A book allocator who toggles to "blank" mode with
+  // nothing added yet must STILL reach the main body (so the entry-mode control
+  // stays on-screen and they can toggle back) — otherwise blank mode would trap
+  // them in the empty-state card with no way back to "From my book".
   const isEmptyState =
-    holdingsSummary.length === 0 &&
-    scenario.draft.addedStrategies.length === 0;
+    !hasLiveBook && scenario.draft.addedStrategies.length === 0;
 
   // -------------------------------------------------------------------------
   // B4 — Build lookup maps from payload.strategies (NO pre-casting at the
@@ -1310,6 +1374,62 @@ export function ScenarioComposer({
           PROJECTED — hypothetical, not your live book
         </span>
 
+        {/* UNIFY-01/02 — entry-mode segmented control (29-UI-SPEC §1). Two
+            segments: "From my book" (seed from live holdings) / "Blank slate"
+            (empty working composition). Active = border-accent text-accent (NO
+            accent FILL — accent = action/verified; a mode toggle is neither;
+            mirrors the drawer FilterPill recipe). Inactive = neutral. A
+            radiogroup with arrow-key navigation + a visible accent focus ring.
+            "From my book" is offered only when a live book exists (a no-book
+            allocator gets Blank-slate-only — never a dead default). A
+            dirty-draft switch routes through the reset confirmation
+            (handleEntryModeSelect), never a silent wipe. */}
+        <div
+          role="radiogroup"
+          aria-label="Composition entry mode"
+          data-testid="scenario-entry-mode"
+          className="inline-flex items-center gap-1 rounded-md border border-border p-0.5"
+          onKeyDown={(e) => {
+            if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+            if (!hasLiveBook) return; // only one option — nothing to arrow to
+            e.preventDefault();
+            handleEntryModeSelect(entryMode === "book" ? "blank" : "book");
+          }}
+        >
+          {hasLiveBook && (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={entryMode === "book"}
+              tabIndex={entryMode === "book" ? 0 : -1}
+              data-testid="scenario-entry-mode-book"
+              onClick={() => handleEntryModeSelect("book")}
+              className={`rounded-sm px-3 py-1 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
+                entryMode === "book"
+                  ? "border border-accent text-accent"
+                  : "border border-transparent text-text-secondary"
+              }`}
+            >
+              From my book
+            </button>
+          )}
+          <button
+            type="button"
+            role="radio"
+            aria-checked={entryMode === "blank"}
+            tabIndex={entryMode === "blank" || !hasLiveBook ? 0 : -1}
+            data-testid="scenario-entry-mode-blank"
+            onClick={() => handleEntryModeSelect("blank")}
+            className={`rounded-sm px-3 py-1 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
+              entryMode === "blank"
+                ? "border border-accent text-accent"
+                : "border border-transparent text-text-secondary"
+            }`}
+          >
+            Blank slate
+          </button>
+        </div>
+
         {/* Phase 23 / PERSIST-02 — Save / Update / Save-as-new toolbar. Lives
             in this same header row per UI-SPEC §Component Inventory 1. Inline
             name input (NOT a modal). The control set keys off loadedScenarioId:
@@ -1790,7 +1910,12 @@ export function ScenarioComposer({
             handleReset();
             setResetModalOpen(false);
           }}
-          onCancel={() => setResetModalOpen(false)}
+          onCancel={() => {
+            // UNIFY-02 — cancelling the confirmation abandons any parked mode
+            // switch so a later footer-Reset never silently flips the mode.
+            setPendingMode(null);
+            setResetModalOpen(false);
+          }}
         />
       )}
 
