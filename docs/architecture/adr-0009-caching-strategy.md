@@ -65,7 +65,6 @@ Adopting any of these features requires a new ADR that addresses:
 - CDN cache headers: `next.config.ts` (lines 4-23) -- `s-maxage=60,
   stale-while-revalidate=300` on `/demo/:path*` only.
 - `force-dynamic` exports:
-  - `src/app/(dashboard)/scenarios/page.tsx` (line 7)
   - `src/app/(dashboard)/discovery/layout.tsx` (line 9)
   - `src/app/(dashboard)/exchanges/page.tsx` (line 9)
   - `src/app/(dashboard)/recommendations/page.tsx` (line 13)
