@@ -395,10 +395,14 @@ export function ScenarioComposer({
 
   // UNIFY-02 / Pitfall 5 — a mode switch that would DISCARD a dirty draft must
   // route through the existing reset-confirmation discipline, never a silent
-  // wipe. `pendingMode` parks the target segment until the user confirms; the
-  // existing `ResetConfirmationModal` + `handleReset` apply it on confirm. A
+  // wipe. The parked target segment is only ever READ inside the `handleReset`
+  // functional updater (apply-on-confirm) — the rendered control derives its
+  // selected state from `entryMode`, never from the pending value — so the
+  // state value is intentionally unread here (only the setter is used). A
   // clean draft (diffCount === 0) switches immediately (nothing to lose).
-  const [pendingMode, setPendingMode] = useState<"book" | "blank" | null>(null);
+  const [_pendingMode, setPendingMode] = useState<"book" | "blank" | null>(
+    null,
+  );
 
   const [browseOpen, setBrowseOpen] = useState(false);
   const [bridgeOpen, setBridgeOpen] = useState(false);
