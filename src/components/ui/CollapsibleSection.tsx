@@ -59,7 +59,9 @@ export function CollapsibleSection({
   // `rawStringCodec` that stores the literal "open"/"closed" string (no JSON
   // envelope) — byte-compatible with the pre-B7 `setItem(storageKey, "open")`
   // write, so existing stored section states survive. The key is the raw
-  // `storageKey` prop unchanged (e.g. `factsheet-collapse:${id}:perf`).
+  // `storageKey` prop unchanged (e.g. `factsheet-collapse:${id}:perf` or
+  // `composer-collapse:controls`) — it MUST live under a prefix registered in
+  // `storage-namespaces.ts` so the sign-out purge reaches it.
   //
   // The codec is built from `defaultOpen` via useMemo so an ABSENT key
   // (raw === null) yields the section's own default; only the literal "closed"

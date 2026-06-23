@@ -220,8 +220,17 @@ describe("Phase 31 frozen-spine + hide-don't-unmount exit-gate guards", () => {
     // Tighter: between the opening <CollapsibleSection and the first
     // <CompositionList there must be NO </CollapsibleSection> close tag — i.e.
     // CompositionList is genuinely INSIDE the section, not a sibling after it.
-    const openIdx = COMPOSER_SRC.indexOf("<CollapsibleSection");
-    const compIdx = COMPOSER_SRC.indexOf("<CompositionList", openIdx);
+    // Anchor on the LAST <CollapsibleSection BEFORE the first <CompositionList
+    // (its genuine enclosing open tag), not the first <CollapsibleSection in the
+    // file — robust if a second, unrelated CollapsibleSection is ever added above
+    // the wrap (WR-02).
+    const compIdx = COMPOSER_SRC.indexOf("<CompositionList");
+    const openIdx = COMPOSER_SRC.lastIndexOf("<CollapsibleSection", compIdx);
+    expect(
+      openIdx,
+      "Phase 31 exit gate VIOLATED — no <CollapsibleSection> open tag precedes " +
+        "<CompositionList>; the wrap is missing.",
+    ).toBeGreaterThanOrEqual(0);
     const closeBetween = COMPOSER_SRC.slice(openIdx, compIdx).includes(
       "</CollapsibleSection>",
     );
@@ -241,28 +250,40 @@ describe("Phase 31 frozen-spine + hide-don't-unmount exit-gate guards", () => {
     // weight + leverage edits the moment the user hides the panel. The native
     // <details> wrapper instead HIDES a mounted child — that is the whole point.
     //
-    // We forbid ANY `&& <CompositionList` (covers `{open && <CompositionList`,
-    // `{isOpen && <CompositionList`, etc.) and any ternary that conditionally
-    // renders it. A regression introducing `{open && <CompositionList ...}`
-    // trips this assertion (verified by authoring).
-    const CONDITIONAL_AND = /&&\s*<CompositionList\b/;
+    // We forbid ANY conditional mount of CompositionList — both the `&&` form
+    // and the ternary form, INCLUDING the Prettier-idiomatic parenthesized /
+    // fragment-wrapped variants a multi-line JSX refactor produces. The optional
+    // `\(?` and `(?:<>\s*)?` cover `&& (\n <CompositionList`, `? (<CompositionList`,
+    // and `&& (<><CompositionList` — the forms the naive `&&\s*<CompositionList`
+    // missed (WR-01). `\s` spans newlines, so multi-line wraps are caught.
+    const CONDITIONAL_AND = /&&\s*\(?\s*(?:<>\s*)?<CompositionList\b/;
+    const CONDITIONAL_TERNARY = /[?:]\s*\(?\s*(?:<>\s*)?<CompositionList\b/;
+
+    // Non-vacuity self-pin: the gate's own sensitivity. If these regexes ever
+    // stop catching the parenthesized/fragment/inline forms, the gate is dead
+    // weight — assert it catches each synthetic violation it exists to block.
+    expect(CONDITIONAL_AND.test("{open && <CompositionList />}")).toBe(true);
+    expect(CONDITIONAL_AND.test("{open && (\n  <CompositionList />\n)}")).toBe(true);
+    expect(CONDITIONAL_AND.test("{open && (<><CompositionList /></>)}")).toBe(true);
+    expect(CONDITIONAL_TERNARY.test("{open ? <CompositionList /> : null}")).toBe(true);
+    expect(CONDITIONAL_TERNARY.test("{open ? (\n  <CompositionList />\n) : null}")).toBe(true);
+
     expect(
       CONDITIONAL_AND.test(COMPOSER_SRC),
       "Phase 31 exit gate VIOLATED — CompositionList is conditionally MOUNTED " +
-        "via a `&& <CompositionList` guard. This unmounts the controls on " +
-        "collapse and WIPES in-progress weight + leverage edits (Pitfall 5). " +
-        "CompositionList MUST be an unconditional child of <CollapsibleSection> " +
-        "so the native <details> hides (never unmounts) it.",
+        "via a `&& <CompositionList` guard (inline or parenthesized). This " +
+        "unmounts the controls on collapse and WIPES in-progress weight + " +
+        "leverage edits (Pitfall 5). CompositionList MUST be an unconditional " +
+        "child of <CollapsibleSection> so the native <details> hides (never " +
+        "unmounts) it.",
     ).toBe(false);
 
-    // Also forbid a ternary mount: `open ? <CompositionList` / `: <CompositionList`.
-    const CONDITIONAL_TERNARY = /[?:]\s*<CompositionList\b/;
     expect(
       CONDITIONAL_TERNARY.test(COMPOSER_SRC),
       "Phase 31 exit gate VIOLATED — CompositionList is conditionally MOUNTED " +
-        "via a ternary. Same hazard as the `&&` form: collapse would unmount " +
-        "the controls and wipe edits. Render it unconditionally inside " +
-        "<CollapsibleSection>.",
+        "via a ternary (inline or parenthesized). Same hazard as the `&&` form: " +
+        "collapse would unmount the controls and wipe edits. Render it " +
+        "unconditionally inside <CollapsibleSection>.",
     ).toBe(false);
   });
 });
