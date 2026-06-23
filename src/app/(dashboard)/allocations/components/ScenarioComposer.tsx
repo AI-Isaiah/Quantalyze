@@ -2121,7 +2121,14 @@ export function ScenarioComposer({
             Returns distribution
           </h2>
         </div>
-        {portfolioDaily.length < 10 ? (
+        {blendPanels.histogramSeries.length === 0 ? (
+          // WR-02 — gate on the ADAPTER's actual degenerate verdict, not a
+          // re-derived `portfolioDaily.length < 10`. The adapter collapses every
+          // series on a STRICTER condition (`hasNonFinite || length < MIN_USABLE
+          // || length < window`), so a ≥10-length series carrying a non-finite
+          // point (realistic at the 10x leverage ceiling) yields an empty
+          // histogramSeries. Keying the empty branch off that signal keeps the
+          // two predicates from ever diverging into a headed-but-empty panel.
           <PartialDataBanner
             heading="Awaiting more data"
             body="This portfolio needs at least 10 overlapping daily returns to chart its distribution."

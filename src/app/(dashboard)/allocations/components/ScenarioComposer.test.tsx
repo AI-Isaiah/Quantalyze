@@ -42,6 +42,7 @@ import {
   act,
   cleanup,
   waitFor,
+  within,
 } from "@testing-library/react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
@@ -3136,6 +3137,57 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(twelveM!.getAttribute("aria-disabled")).toBe("true");
     // Honest-neutral: never role=alert in the rolling panel.
     expect(rollCard!.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("WR-02 — distribution panel gates on the adapter's degenerate verdict, not a re-derived length<10: a ≥10-length series the adapter collapses shows the honest role=status banner, NOT a headed-but-empty body", () => {
+    // The composer's distribution gate USED to read `portfolioDaily.length < 10`,
+    // a heuristic that DIVERGES from the adapter's actual emptiness signal. The
+    // adapter (buildBlendPanels) collapses EVERY series — including
+    // histogramSeries/quantiles — on the STRICTER `hasNonFinite || length <
+    // MIN_USABLE || length < window`. So a series with length in [10, window)
+    // makes the adapter return histogramSeries=[] / quantiles={} while the old
+    // gate (10 ≤ length) took the POPULATED branch: two empty sub-headings + a
+    // "{n} overlapping daily returns" disclosure with NO "Awaiting more data"
+    // banner — the opposite of the honest-empty contract.
+    //
+    // 50 days clears the 10-point distribution floor but is BELOW the default
+    // 126-day (6M) rolling window, so buildBlendPanels collapses to []/{}. The
+    // distribution panel must still show the role=status banner (it keys off the
+    // adapter), not a broken populated body. Falsifiable: revert the gate back to
+    // `portfolioDaily.length < 10` and the populated branch renders (the
+    // sub-headings + leaf mocks appear, the banner does not) — this fails.
+    mockBlendSeries(50);
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const distCard = document.querySelector(
+      '[data-panel="blend-returns-distribution"]',
+    );
+    expect(distCard).not.toBeNull();
+    // Heading stays (heading-matches-body), but the BODY must be the honest banner.
+    expect(screen.getByText("Returns distribution")).toBeInTheDocument();
+    expect(
+      distCard!.querySelector('[role="status"]'),
+      "a ≥10-length series the adapter collapsed must render the role=status banner, not a populated body",
+    ).not.toBeNull();
+    expect(
+      screen.getByText(
+        /at least 10 overlapping daily returns to chart its distribution/i,
+      ),
+    ).toBeInTheDocument();
+    // The populated body MUST NOT render: no histogram/quantile leaf mounts and
+    // no "Return histogram" / "Return quantiles" sub-headings inside the card.
+    expect(distCard!.querySelector('[data-testid="return-histogram-mock"]')).toBeNull();
+    expect(distCard!.querySelector('[data-testid="return-quantiles-mock"]')).toBeNull();
+    expect(within(distCard as HTMLElement).queryByText("Return histogram")).toBeNull();
+    expect(within(distCard as HTMLElement).queryByText("Return quantiles")).toBeNull();
+    // Honest-neutral: a derived-client panel never errors on absence.
+    expect(distCard!.querySelector('[role="alert"]')).toBeNull();
   });
 
   it("no factsheet import on the blend path — ScenarioComposer source imports no FactsheetBody/MetricsColumn/payload-builder and contains no api-ingest literal (static guard, T-30-05)", () => {
