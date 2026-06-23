@@ -612,7 +612,18 @@ describe("GET /api/strategies/browse", () => {
     const body = await res.json();
     expect(body.strategies).toHaveLength(1);
 
-    const ALLOWED = ["id", "name", "codename", "markets", "strategy_types"].sort();
+    // Phase 29 / UNIFY-03 — `is_example` is the provenance tag added to the
+    // BrowseStrategyRow allow-list. The fence still holds exhaustively: any
+    // key NOT in this list (disclosure_tier / backtest_returns / user_id /
+    // any stray co-fetched column) must never reach the wire.
+    const ALLOWED = [
+      "id",
+      "name",
+      "codename",
+      "markets",
+      "strategy_types",
+      "is_example",
+    ].sort();
     expect(Object.keys(body.strategies[0]).sort()).toEqual(ALLOWED);
     // Explicit forbidden-key fence — disclosure_tier is fetched but must
     // never reach the wire.
@@ -647,5 +658,127 @@ describe("GET /api/strategies/browse", () => {
     // Whole-payload sweep — none of the sensitive values appear anywhere.
     expect(JSON.stringify(body)).not.toContain("secret-owner-uuid");
     expect(JSON.stringify(body)).not.toContain("0.34");
+  });
+
+  // ============================================================
+  // T-29-05/06/07 — Phase 29 / UNIFY-03: merged-catalog leak +
+  // pseudonymity (the LOCKED exit gate)
+  //
+  // The browse route now ALSO surfaces is_example=true rows in the
+  // SAME response as verified strategies. The merge MUST NOT widen the
+  // leak surface: example rows are just published rows that ALSO carry
+  // the flag, so (a) the published predicate stays enforced (an
+  // unpublished / cross-tenant row never reaches the response even with
+  // is_example in play), and (b) displayStrategyName still suppresses
+  // the raw name on example rows. RESEARCH Pitfall 2 warns this test
+  // goes VACUOUS if it only asserts example rows appear — so it asserts
+  // ABSENCE (whole-payload sweep, mirroring T12a) WITH a positive
+  // control proving the absence assertion can fail.
+  // ============================================================
+  it("T29-merge — example + verified rows surface together; raw example name is suppressed (pseudonymity survives the merge)", async () => {
+    // An exploratory-tier EXAMPLE row carrying a real (leak-worthy) name
+    // and a codename, alongside a published VERIFIED row. The harness
+    // models RLS the way the route receives data: rows the published
+    // predicate + RLS would NOT admit (unpublished / cross-tenant) are
+    // simply never in STATE.strategyRows. The non-vacuity guarantee is
+    // the published-predicate + SELECT-shape assertions below (a stray
+    // `.or(is_example.eq.true)` that bypassed published would change the
+    // observed status filter / select list) PLUS the positive control.
+    STATE.strategyRows = [
+      {
+        // EXAMPLE row — real name must NEVER reach the wire.
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        name: "Renaissance Medallion",
+        codename: "Sigma-7",
+        disclosure_tier: "exploratory",
+        markets: ["crypto"],
+        strategy_types: ["systematic"],
+        is_example: true,
+      },
+      {
+        // VERIFIED row — institutional, real name is the legitimate label.
+        id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        name: "Two Sigma Equity",
+        codename: null,
+        disclosure_tier: "institutional",
+        markets: ["equity"],
+        strategy_types: ["long-short"],
+        is_example: false,
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    // Both halves of the catalog are in the SAME response.
+    expect(body.strategies).toHaveLength(2);
+
+    // (a) The published predicate is STILL enforced even with is_example
+    //     co-fetched — a stray `.or(is_example.eq.true)` would have
+    //     bypassed `withPublishedOnly` and the observed status filter
+    //     would no longer be exactly "published".
+    expect(STATE.observedFilters.status).toBe("published");
+
+    // (b) is_example is co-fetched on the SAME RLS-scoped SELECT (NOT a
+    //     second published-bypassing query). T12e-style SELECT-shape pin.
+    const cols = STATE.observedFilters.selectCols ?? "";
+    expect(cols).toContain("is_example");
+    expect(cols).toContain("disclosure_tier"); // pseudonymity input still co-fetched
+
+    const example = body.strategies.find(
+      (s: { id: string }) => s.id === "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    );
+    const verified = body.strategies.find(
+      (s: { id: string }) => s.id === "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    );
+
+    // (c) The tag is wired AND discriminating: example row true, verified false.
+    expect(example.is_example).toBe(true);
+    expect(verified.is_example).toBe(false);
+
+    // (d) Pseudonymity on the example row: the response label is the
+    //     codename, NOT the raw strategy name. Mirrors T12a verbatim.
+    expect(example.name).toBe("Sigma-7");
+    expect(JSON.stringify(body)).not.toContain("Renaissance");
+    expect(JSON.stringify(body)).not.toContain("Medallion");
+
+    // Verified institutional row keeps its real (legitimate) label.
+    expect(verified.name).toBe("Two Sigma Equity");
+  });
+
+  it("T29-merge-control (non-vacuity) — the raw example name IS in the source row but ABSENT from the response", async () => {
+    // POSITIVE CONTROL: this proves the absence assertion above can FAIL.
+    // The raw name "Renaissance Medallion" is present in the seeded source
+    // row's `name` field (the route DOES receive it from the DB), yet it
+    // must be absent from the whole serialized response — because
+    // displayStrategyName suppresses it. If a future regression emitted the
+    // raw `name` (skipping displayStrategyName), this test FAILS loudly.
+    const RAW_EXAMPLE_NAME = "Renaissance Medallion";
+    STATE.strategyRows = [
+      {
+        id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        name: RAW_EXAMPLE_NAME,
+        codename: "Sigma-7",
+        disclosure_tier: "exploratory",
+        markets: ["crypto"],
+        strategy_types: ["systematic"],
+        is_example: true,
+      },
+    ];
+
+    // The raw name IS present in the source the route reads (control half).
+    expect(STATE.strategyRows[0].name).toBe(RAW_EXAMPLE_NAME);
+
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    // ...but ABSENT from the wire (the assertion that CAN fail).
+    expect(JSON.stringify(body)).not.toContain(RAW_EXAMPLE_NAME);
+    expect(JSON.stringify(body)).not.toContain("Renaissance");
+    expect(body.strategies[0].name).toBe("Sigma-7");
+    expect(body.strategies[0].is_example).toBe(true);
   });
 });

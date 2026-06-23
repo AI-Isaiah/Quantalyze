@@ -6,7 +6,7 @@
  * "Compare selected" CTA, and an honest EmptyStateCard when none exist.
  *
  * Honesty + UI-SPEC invariants pinned here:
- *   - Empty list → EmptyStateCard heading "No saved scenarios yet" matches the
+ *   - Empty list → EmptyStateCard heading "No saved portfolios yet" matches the
  *     UI-SPEC body (the #509 heading-matches-body lesson).
  *   - Rename → inline edit input (NOT a modal) → PATCH with the TRIMMED name;
  *     empty / >120 shows the validation copy and does NOT PATCH.
@@ -72,7 +72,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     render(
       <SavedScenariosList rows={[]} onOpen={vi.fn()} onCompare={vi.fn()} />,
     );
-    expect(screen.getByText("No saved scenarios yet")).toBeInTheDocument();
+    expect(screen.getByText("No saved portfolios yet")).toBeInTheDocument();
     expect(
       screen.getByText(/Compose a draft above, then choose/i),
     ).toBeInTheDocument();
@@ -96,6 +96,60 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     expect(screen.getAllByRole("button", { name: /^Open$/ })).toHaveLength(2);
     expect(screen.getAllByRole("button", { name: /^Rename$/ })).toHaveLength(2);
     expect(screen.getAllByRole("button", { name: /^Delete$/ })).toHaveLength(2);
+  });
+
+  // -------------------------------------------------------------------------
+  // WR-04 (Phase 29 review) — a malformed/empty timestamp must NOT render
+  // "Saved Invalid Date". The pre-fix `updated.getTime() > created.getTime()`
+  // compared NaN > NaN (false) and fell through to `Saved ${fmt(<Invalid
+  // Date>)}`, which renders the literal string "Invalid Date" to the user.
+  // NON-VACUOUS: this fails on the pre-fix code (the row text contains "Invalid
+  // Date") and passes once timestampLabel guards on Number.isFinite.
+  // -------------------------------------------------------------------------
+  it("WR-04 a row with a malformed timestamp renders 'Saved' (never 'Saved Invalid Date')", () => {
+    const badRow: SavedScenarioListRow = {
+      id: "33333333-3333-3333-3333-333333333333",
+      name: "Corrupt timestamp blend",
+      schema_version: 2,
+      created_at: "not-a-date",
+      updated_at: "",
+      draft: { schema_version: 2 },
+    };
+    render(
+      <SavedScenariosList rows={[badRow]} onOpen={vi.fn()} onCompare={vi.fn()} />,
+    );
+    const row = screen.getByText("Corrupt timestamp blend").closest("li");
+    expect(row).not.toBeNull();
+    const rowEl = row as HTMLElement;
+    // Honest fallback — a bare "Saved", and crucially NOT "Invalid Date".
+    expect(within(rowEl).getByText("Saved")).toBeInTheDocument();
+    expect(rowEl.textContent).not.toContain("Invalid Date");
+  });
+
+  // WR-04 — a row where created_at is malformed but updated_at is valid still
+  // renders a real "Saved <date>" off the finite timestamp (not "Invalid Date"
+  // and not silently dropping a usable date).
+  it("WR-04 a row with one finite timestamp renders 'Saved <date>' off the finite one", () => {
+    const halfBadRow: SavedScenarioListRow = {
+      id: "44444444-4444-4444-4444-444444444444",
+      name: "Half-corrupt blend",
+      schema_version: 2,
+      created_at: "garbage",
+      updated_at: "2026-06-10T10:00:00Z",
+      draft: { schema_version: 2 },
+    };
+    render(
+      <SavedScenariosList
+        rows={[halfBadRow]}
+        onOpen={vi.fn()}
+        onCompare={vi.fn()}
+      />,
+    );
+    const rowEl = screen
+      .getByText("Half-corrupt blend")
+      .closest("li") as HTMLElement;
+    expect(rowEl.textContent).not.toContain("Invalid Date");
+    expect(within(rowEl).getByText(/^Saved\s+\S/)).toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
@@ -123,7 +177,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     fireEvent.click(screen.getAllByRole("button", { name: /^Rename$/ })[0]);
     // Inline input, NOT a modal.
     expect(screen.queryByRole("dialog")).toBeNull();
-    const input = screen.getByLabelText(/rename scenario/i);
+    const input = screen.getByLabelText(/rename portfolio/i);
     fireEvent.change(input, { target: { value: "  Renamed blend  " } });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
 
@@ -146,13 +200,13 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
       <SavedScenariosList rows={ROWS} onOpen={vi.fn()} onCompare={vi.fn()} />,
     );
     fireEvent.click(screen.getAllByRole("button", { name: /^Rename$/ })[0]);
-    const input = screen.getByLabelText(/rename scenario/i);
+    const input = screen.getByLabelText(/rename portfolio/i);
 
     // Empty (whitespace) → validation copy, no PATCH.
     fireEvent.change(input, { target: { value: "   " } });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
     expect(
-      screen.getByText("Enter a name to save this scenario."),
+      screen.getByText("Enter a name to save this portfolio."),
     ).toBeInTheDocument();
     expect(mockFetch).not.toHaveBeenCalled();
 
@@ -160,7 +214,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     fireEvent.change(input, { target: { value: "x".repeat(121) } });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
     expect(
-      screen.getByText("Scenario names are limited to 120 characters."),
+      screen.getByText("Portfolio names are limited to 120 characters."),
     ).toBeInTheDocument();
     expect(mockFetch).not.toHaveBeenCalled();
   });
@@ -243,7 +297,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
 
     // Honest, visible failure (role=alert), with the rename-specific copy.
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Couldn't rename this scenario");
+    expect(alert.textContent).toContain("Couldn't rename this portfolio");
     // onMutated fires ONLY on success — it must NOT fire on a failed rename
     // (proves the optimistic setLocalRows after the !ok return never ran).
     expect(onMutated).not.toHaveBeenCalled();
@@ -275,7 +329,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     fireEvent.click(within(firstRow).getByRole("button", { name: /^Delete$/ }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Couldn't delete this scenario");
+    expect(alert.textContent).toContain("Couldn't delete this portfolio");
     // Row NOT optimistically removed on failure.
     expect(screen.getByText("Conservative blend")).toBeInTheDocument();
     expect(onMutated).not.toHaveBeenCalled();
@@ -319,7 +373,7 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     expect(compareCta).toBeDisabled();
     expect(
       screen.getByText(
-        "Select 2 or more scenarios (or the live book) to compare.",
+        "Select 2 or more portfolios (or the live book) to compare.",
       ),
     ).toBeInTheDocument();
 
@@ -406,10 +460,10 @@ describe("SavedScenariosList (Plan 23-05 Task 1)", () => {
     // Distinct error copy via the canonical role="alert" path.
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent(
-      "Couldn't load your saved scenarios. Try again.",
+      "Couldn't load your saved portfolios. Try again.",
     );
-    // The fabricated "no scenarios" empty state must NOT appear.
-    expect(screen.queryByText("No saved scenarios yet")).toBeNull();
+    // The fabricated "no portfolios" empty state must NOT appear.
+    expect(screen.queryByText("No saved portfolios yet")).toBeNull();
     expect(
       screen.queryByText(/Compose a draft above, then choose/i),
     ).toBeNull();
@@ -739,5 +793,70 @@ describe("SavedScenariosList — Share affordance (Plan 25-03)", () => {
     expect(
       screen.getByRole("button", { name: /^Copy link$/ }),
     ).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // WR-03 — "Copy link" must NOT silently rotate the share token.
+  //   (a) After generating this session, Copy link re-copies the SAME cached
+  //       URL with NO second POST to /share — so a recipient's link survives.
+  //   (b) On a share active only from row data (prior session / reload, no
+  //       cached URL), Copy link surfaces an explicit "replace" confirm and
+  //       does NOT mint until the user confirms — the rotation is never silent.
+  // -------------------------------------------------------------------------
+  const shareGenerateCalls = () =>
+    mockFetch.mock.calls.filter(
+      ([u]) => String(u).endsWith("/api/allocator/scenario/share"),
+    ).length;
+
+  it("WR-03a Copy link re-copies the same cached URL without a second /share POST", async () => {
+    const shareUrl = "https://share.example.com/scenario-share/tok-stable";
+    mockFetch.mockResolvedValueOnce(okJson({ url: shareUrl }));
+    render(
+      <SavedScenariosList rows={ROWS} onOpen={vi.fn()} onCompare={vi.fn()} />,
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: /^Share$/ })[0]);
+    await waitFor(() => expect(clipboardWrite).toHaveBeenCalledWith(shareUrl));
+    const copyBtn = await screen.findByRole("button", { name: /^Copy link$/ });
+    const generatesAfterShare = shareGenerateCalls();
+    expect(generatesAfterShare).toBe(1);
+
+    clipboardWrite.mockClear();
+    fireEvent.click(copyBtn);
+    // Same URL copied again...
+    await waitFor(() => expect(clipboardWrite).toHaveBeenCalledWith(shareUrl));
+    // ...and NO new mint: the generate route was not POSTed a second time, so
+    // the token was not rotated and the recipient's link still works.
+    expect(shareGenerateCalls()).toBe(generatesAfterShare);
+  });
+
+  it("WR-03b Copy link on a prior-session active share asks before replacing (no silent rotation)", async () => {
+    const rows: SavedScenarioListRow[] = [
+      { ...ROWS[0], has_active_share: true },
+    ];
+    render(
+      <SavedScenariosList rows={rows} onOpen={vi.fn()} onCompare={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Copy link$/ }));
+    // No mint — the explicit replace-confirm appears instead of a silent rotate.
+    expect(shareGenerateCalls()).toBe(0);
+    expect(
+      screen.getByText(/previous link will stop working/i),
+    ).toBeInTheDocument();
+
+    // "Keep current link" backs out with no mint.
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Keep current link$/ }),
+    );
+    expect(shareGenerateCalls()).toBe(0);
+
+    // Re-open the confirm and explicitly replace → exactly one mint.
+    fireEvent.click(screen.getByRole("button", { name: /^Copy link$/ }));
+    mockFetch.mockResolvedValueOnce(
+      okJson({ url: "https://share.example.com/scenario-share/tok-new" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Generate new link$/ }),
+    );
+    await waitFor(() => expect(shareGenerateCalls()).toBe(1));
   });
 });

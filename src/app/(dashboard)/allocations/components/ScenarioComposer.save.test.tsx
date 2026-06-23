@@ -4,11 +4,11 @@
  *
  * PERSIST-02. The composer gains:
  *   - a Save/Update toolbar in the existing header row (NO modal):
- *       · no scenario open (loadedScenarioId null) → primary "Save scenario"
- *         → reveals an inline "Name this scenario" input + confirm → POST →
+ *       · no scenario open (loadedScenarioId null) → primary "Save portfolio"
+ *         → reveals an inline "Name this portfolio" input + confirm → POST →
  *         on success set loadedScenarioId to the returned id;
  *       · a saved scenario open (loadedScenarioId set) → primary "Update
- *         scenario" (PUT that row) + secondary "Save as new scenario" (POST a
+ *         scenario" (PUT that row) + secondary "Save as new portfolio" (POST a
  *         new row → set the new id);
  *   - Open(savedRow): decode row.draft through scenarioDraftCodec —
  *       · ok → hydrateFromSaved + set loadedScenarioId;
@@ -293,25 +293,25 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
   });
 
   // -------------------------------------------------------------------------
-  // T_SAVE1 — no scenario open → "Save scenario"; inline name input (no modal)
+  // T_SAVE1 — no scenario open → "Save portfolio"; inline name input (no modal)
   // -------------------------------------------------------------------------
-  it("T_SAVE1 no scenario open → primary 'Save scenario'; click reveals an inline name input (no modal)", () => {
+  it("T_SAVE1 no scenario open → primary 'Save portfolio'; click reveals an inline name input (no modal)", () => {
     renderComposer();
 
-    const saveBtn = screen.getByRole("button", { name: /^Save scenario$/i });
+    const saveBtn = screen.getByRole("button", { name: /^Save portfolio$/i });
     expect(saveBtn).toBeInTheDocument();
     // Update / Save-as-new are NOT present yet (no scenario open).
     expect(
-      screen.queryByRole("button", { name: /Update scenario/i }),
+      screen.queryByRole("button", { name: /Update portfolio/i }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /Save as new scenario/i }),
+      screen.queryByRole("button", { name: /Save as new portfolio/i }),
     ).not.toBeInTheDocument();
 
     fireEvent.click(saveBtn);
     // Inline input appears (NOT a modal — no dialog role).
     expect(
-      screen.getByPlaceholderText(/Name this scenario/i),
+      screen.getByPlaceholderText(/Name this portfolio/i),
     ).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
@@ -328,16 +328,16 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     vi.stubGlobal("fetch", fetchMock);
 
     renderComposer();
-    fireEvent.click(screen.getByRole("button", { name: /^Save scenario$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
 
-    const input = screen.getByPlaceholderText(/Name this scenario/i);
+    const input = screen.getByPlaceholderText(/Name this portfolio/i);
     const confirm = screen.getByRole("button", { name: /^Save$/i });
 
     // Empty submit.
     fireEvent.change(input, { target: { value: "   " } });
     fireEvent.click(confirm);
     expect(
-      screen.getByText(/Enter a name to save this scenario\./i),
+      screen.getByText(/Enter a name to save this portfolio\./i),
     ).toBeInTheDocument();
     // No SAVE request fired (the benchmark GET is unrelated transport).
     expect(saveCalls(fetchMock)).toHaveLength(0);
@@ -346,7 +346,7 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     fireEvent.change(input, { target: { value: "x".repeat(121) } });
     fireEvent.click(confirm);
     expect(
-      screen.getByText(/Scenario names are limited to 120 characters\./i),
+      screen.getByText(/Portfolio names are limited to 120 characters\./i),
     ).toBeInTheDocument();
     expect(saveCalls(fetchMock)).toHaveLength(0);
   });
@@ -355,7 +355,7 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
   // T_SAVE3 — valid name → POST → on success loadedScenarioId set → toolbar
   //           flips to Update + Save-as-new
   // -------------------------------------------------------------------------
-  it("T_SAVE3 valid name → POST /api/allocator/scenario/saved → on success toolbar flips to 'Update scenario' + 'Save as new scenario'", async () => {
+  it("T_SAVE3 valid name → POST /api/allocator/scenario/saved → on success toolbar flips to 'Update portfolio' + 'Save as new portfolio'", async () => {
     const fetchMock = makeFetchMock(() => ({
       ok: true,
       status: 200,
@@ -364,8 +364,8 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     vi.stubGlobal("fetch", fetchMock);
 
     renderComposer();
-    fireEvent.click(screen.getByRole("button", { name: /^Save scenario$/i }));
-    fireEvent.change(screen.getByPlaceholderText(/Name this scenario/i), {
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
       target: { value: "My scenario" },
     });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
@@ -384,11 +384,11 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     // After success, loadedScenarioId is set → toolbar flips.
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: /Update scenario/i }),
+        screen.getByRole("button", { name: /Update portfolio/i }),
       ).toBeInTheDocument();
     });
     expect(
-      screen.getByRole("button", { name: /Save as new scenario/i }),
+      screen.getByRole("button", { name: /Save as new portfolio/i }),
     ).toBeInTheDocument();
   });
 
@@ -396,7 +396,7 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
   // T_SAVE4 — Open(ok row) → hydrate + loadedScenarioId set → Update visible;
   //           then Update → PUT that row's id
   // -------------------------------------------------------------------------
-  it("T_SAVE4 Open(ok row) → toolbar shows 'Update scenario'; Update → PUT /api/allocator/scenario/saved/{id}", async () => {
+  it("T_SAVE4 Open(ok row) → toolbar shows 'Update portfolio'; Update → PUT /api/allocator/scenario/saved/{id}", async () => {
     const fetchMock = makeFetchMock(() => ({
       ok: true,
       status: 200,
@@ -407,7 +407,7 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     renderComposer();
     openRow({ id: SAVED_ID, name: "Saved", draft: okDraft() });
 
-    const updateBtn = await screen.findByRole("button", { name: /Update scenario/i });
+    const updateBtn = await screen.findByRole("button", { name: /Update portfolio/i });
     expect(updateBtn).toBeInTheDocument();
 
     fireEvent.click(updateBtn);
@@ -422,7 +422,7 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
   // -------------------------------------------------------------------------
   // T_SAVE5 — Save as new (a scenario is open) → POST a NEW row → new id
   // -------------------------------------------------------------------------
-  it("T_SAVE5 with a scenario open, 'Save as new scenario' → POST (new row) and adopts the new id", async () => {
+  it("T_SAVE5 with a scenario open, 'Save as new portfolio' → POST (new row) and adopts the new id", async () => {
     const fetchMock = makeFetchMock(() => ({
       ok: true,
       status: 200,
@@ -433,10 +433,10 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     renderComposer();
     openRow({ id: SAVED_ID, name: "Saved", draft: okDraft() });
 
-    const saveAsNew = await screen.findByRole("button", { name: /Save as new scenario/i });
+    const saveAsNew = await screen.findByRole("button", { name: /Save as new portfolio/i });
     fireEvent.click(saveAsNew);
     // Inline name input for the new copy.
-    fireEvent.change(screen.getByPlaceholderText(/Name this scenario/i), {
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
       target: { value: "Copy" },
     });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
@@ -452,34 +452,50 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
   // -------------------------------------------------------------------------
   // T_SAVE6 — Open(reset/older row) → honest notice + NO hydrate (NOT empty)
   // -------------------------------------------------------------------------
-  it("T_SAVE6 Open(reset row, older incompatible schema) → renders the honest 'older format' notice and does NOT hydrate (never a silent empty composer)", () => {
+  it("T_SAVE6 Open(reset row, older incompatible schema) → renders the relabeled 'older format' notice and does NOT hydrate (codec trichotomy non-regression; never a silent empty composer)", () => {
     renderComposer();
 
     // schema_version below the current → codec returns "reset". A "reset" must
-    // NEVER silently load an empty composer.
+    // NEVER silently load the saved draft (no hydrate). We plant a DISTINCTIVE
+    // added strategy in the reset draft: if the reset branch wrongly hydrated,
+    // that strategy's name would render in the composition list. Its ABSENCE is
+    // the non-vacuous proof that hydrateFromSaved was NOT called on the reset
+    // branch (Task 3 acceptance: trichotomy preserved, reset does not hydrate).
     const olderRow: SavedScenarioRow = {
       id: SAVED_ID,
       name: "Ancient",
       draft: {
         ...okDraft(),
         schema_version: SCENARIO_SCHEMA_VERSION - 1,
+        addedStrategies: [
+          {
+            id: "reset-marker-strat",
+            name: "RESET_MARKER_STRATEGY",
+            markets: ["binance"],
+            strategy_types: ["momentum"],
+          },
+        ],
       } as unknown as ScenarioDraft,
     };
     openRow(olderRow);
 
+    // The relabeled 'older format' notice is shown.
     expect(
       screen.getByText(
-        /This saved scenario uses an older format and can't be reopened\./i,
+        /This saved portfolio uses an older format and can't be reopened\./i,
       ),
     ).toBeInTheDocument();
-    // NOT hydrated → loadedScenarioId stays null → still "Save scenario", NOT
-    // "Update scenario" (an empty composer silently adopting the id would be a
+    // NON-VACUOUS no-hydrate proof: the reset draft's distinctive added strategy
+    // is NOT in the composer (a hydrate would have rendered it).
+    expect(screen.queryByText(/RESET_MARKER_STRATEGY/i)).not.toBeInTheDocument();
+    // NOT hydrated → loadedScenarioId stays null → still "Save portfolio", NOT
+    // "Update portfolio" (an empty composer silently adopting the id would be a
     // dishonest default).
     expect(
-      screen.getByRole("button", { name: /^Save scenario$/i }),
+      screen.getByRole("button", { name: /^Save portfolio$/i }),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /Update scenario/i }),
+      screen.queryByRole("button", { name: /Update portfolio/i }),
     ).not.toBeInTheDocument();
   });
 
@@ -501,15 +517,15 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
 
     expect(
       screen.getByText(
-        /This scenario was saved by a newer version and is read-only here\./i,
+        /This portfolio was saved by a newer version and is read-only here\./i,
       ),
     ).toBeInTheDocument();
     // Hydrated read-only → loadedScenarioId IS set (the row is open), but edits
     // are blocked: the Update primary is not offered as an editable save (the
-    // read-only notice is shown instead). "Save as new scenario" remains so the
+    // read-only notice is shown instead). "Save as new portfolio" remains so the
     // user can fork it into an editable copy.
     expect(
-      screen.getByRole("button", { name: /Save as new scenario/i }),
+      screen.getByRole("button", { name: /Save as new portfolio/i }),
     ).toBeInTheDocument();
   });
 
@@ -534,32 +550,32 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
   // -------------------------------------------------------------------------
   // T_SAVE9 — hard save failure → canonical error copy
   // -------------------------------------------------------------------------
-  it("T_SAVE9 a hard save failure (500) routes the canonical 'Couldn't save this scenario' copy", async () => {
+  it("T_SAVE9 a hard save failure (500) routes the canonical 'Couldn't save this portfolio' copy", async () => {
     const fetchMock = vi.fn(async () => ({
       ok: false,
       status: 500,
       json: async () => ({
         error: "Save failed",
-        message: "Couldn't save this scenario. Check your connection and try again.",
+        message: "Couldn't save this portfolio. Check your connection and try again.",
       }),
     })) as unknown as typeof fetch;
     vi.stubGlobal("fetch", fetchMock);
 
     renderComposer();
-    fireEvent.click(screen.getByRole("button", { name: /^Save scenario$/i }));
-    fireEvent.change(screen.getByPlaceholderText(/Name this scenario/i), {
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
       target: { value: "Doomed" },
     });
     fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
 
     await waitFor(() => {
       expect(
-        screen.getByText(/Couldn't save this scenario\./i),
+        screen.getByText(/Couldn't save this portfolio\./i),
       ).toBeInTheDocument();
     });
-    // Failure → loadedScenarioId NOT adopted (still "Save scenario").
+    // Failure → loadedScenarioId NOT adopted (still "Save portfolio").
     expect(
-      screen.getByRole("button", { name: /^Save scenario$/i }),
+      screen.getByRole("button", { name: /^Save portfolio$/i }),
     ).toBeInTheDocument();
   });
 
@@ -575,7 +591,7 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
       json: async () => ({
         error: "Update failed",
         message:
-          "Couldn't save this scenario. Check your connection and try again.",
+          "Couldn't save this portfolio. Check your connection and try again.",
       }),
     }));
     vi.stubGlobal("fetch", fetchMock);
@@ -584,13 +600,13 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     openRow({ id: SAVED_ID, name: "Saved", draft: okDraft() });
 
     const updateBtn = await screen.findByRole("button", {
-      name: /Update scenario/i,
+      name: /Update portfolio/i,
     });
     fireEvent.click(updateBtn);
 
     await waitFor(() => {
       expect(
-        screen.getByText(/Couldn't save this scenario\./i),
+        screen.getByText(/Couldn't save this portfolio\./i),
       ).toBeInTheDocument();
     });
     // It was the PUT (Update) path, not a POST.
@@ -598,9 +614,9 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     expect(url).toBe(`/api/allocator/scenario/saved/${SAVED_ID}`);
     expect((init as RequestInit).method).toBe("PUT");
     // The row stays open — a failed update must not silently drop back to the
-    // unopened "Save scenario" state (that would imply the update succeeded).
+    // unopened "Save portfolio" state (that would imply the update succeeded).
     expect(
-      screen.getByRole("button", { name: /Update scenario/i }),
+      screen.getByRole("button", { name: /Update portfolio/i }),
     ).toBeInTheDocument();
   });
 });

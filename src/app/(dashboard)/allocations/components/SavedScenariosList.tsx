@@ -15,9 +15,15 @@ import { cn } from "@/lib/utils";
  * >= 2 selections (incl. the live book) and raises the selected rows +
  * includeLiveBook flag to the parent (which mounts ScenarioComparePanel).
  *
+ * Phase 29 (UNIFY-05) — the UI copy surfaces the noun "portfolio" while the
+ * persistence (the `scenarios` table + `/api/allocator/scenario/saved*` routes)
+ * and all code/route/state names stay "scenario". Copy-only relabel; the
+ * fetch URLs, the codec-trichotomy Open delegation, the Share affordance and
+ * the Compare gate are byte-identical.
+ *
  * Honesty + UI-SPEC invariants:
  *   - Empty list → EmptyStateCard whose heading MATCHES its body (the #509
- *     lesson) — "No saved scenarios yet".
+ *     lesson) — "No saved portfolios yet".
  *   - Rename / Delete are INLINE (no modal): Rename reveals a text input that
  *     PATCHes the trimmed name (1..120, else the validation copy + no PATCH);
  *     Delete reveals a small "Delete "{name}"?" danger confirm.
@@ -64,7 +70,7 @@ interface SavedScenariosListProps {
   /**
    * True when the list GET failed (non-2xx or threw) AND no prior rows are
    * cached. When set with an empty `rows`, the list renders an honest ERROR
-   * state ("Couldn't load…") instead of the "No saved scenarios yet" empty card
+   * state ("Couldn't load…") instead of the "No saved portfolios yet" empty card
    * — an unloaded list must never masquerade as an empty list (a fabricated
    * fact, the #509 lesson). If `rows` is non-empty (a prior load succeeded),
    * the cached rows stay rendered and this flag is ignored.
@@ -84,25 +90,36 @@ function timestampLabel(row: SavedScenarioListRow): string {
   // Updated time when it differs from created (a real edit), else "saved".
   const created = new Date(row.created_at);
   const updated = new Date(row.updated_at);
+  const c = created.getTime();
+  const u = updated.getTime();
   const fmt = (d: Date) =>
     d.toLocaleDateString(undefined, {
       year: "numeric",
       month: "short",
       day: "numeric",
     });
-  return updated.getTime() > created.getTime()
-    ? `Updated ${fmt(updated)}`
-    : `Saved ${fmt(created)}`;
+  // WR-04 (Phase 29 review): a malformed/empty timestamp column yields a NaN
+  // getTime(); `NaN > NaN` is false, so the pre-fix code silently fell through
+  // to `Saved <Invalid Date>` (fmt of an invalid Date renders the literal
+  // string "Invalid Date" to the user). Guard explicitly: if neither timestamp
+  // is finite, fall back to a bare "Saved" rather than printing "Invalid Date".
+  if (!Number.isFinite(c) && !Number.isFinite(u)) return "Saved";
+  // Prefer "Updated" only when BOTH are finite and updated is genuinely later;
+  // otherwise show "Saved" off whichever timestamp is finite.
+  if (Number.isFinite(u) && Number.isFinite(c) && u > c) {
+    return `Updated ${fmt(updated)}`;
+  }
+  return `Saved ${fmt(Number.isFinite(c) ? created : updated)}`;
 }
 
 function validateName(raw: string): { name: string | null; error: string | null } {
   const trimmed = raw.trim();
   if (trimmed.length < 1)
-    return { name: null, error: "Enter a name to save this scenario." };
+    return { name: null, error: "Enter a name to save this portfolio." };
   if (trimmed.length > 120)
     return {
       name: null,
-      error: "Scenario names are limited to 120 characters.",
+      error: "Portfolio names are limited to 120 characters.",
     };
   return { name: trimmed, error: null };
 }
@@ -166,6 +183,18 @@ export function SavedScenariosList({
   const [confirmingRevokeId, setConfirmingRevokeId] = useState<string | null>(
     null,
   );
+  // The row id awaiting the inline "replace link" confirmation (the cache-miss
+  // arm of Copy link — see copyExistingShare / WR-03).
+  const [confirmingReplaceId, setConfirmingReplaceId] = useState<string | null>(
+    null,
+  );
+  // Per-row cache of the raw share URL captured at generation (keyed by row id).
+  // The generate route externalises the raw token EXACTLY ONCE (only its hash is
+  // persisted, T-25-12), so the URL can never be re-fetched. Caching it for the
+  // session lets "Copy link" hand out the SAME link without re-minting — which
+  // would rotate the token and silently kill the recipient's existing link
+  // (WR-03). Empty after a reload / for a share generated in a prior session.
+  const [shareUrlById, setShareUrlById] = useState<Record<string, string>>({});
 
   // Whether a row currently has an active share: the local override wins, else
   // the row-data default. A row with no override and no row flag has none.
@@ -200,6 +229,24 @@ export function SavedScenariosList({
     return fallbackSucceeded;
   }, []);
 
+  // Copy a URL and fire the transient copied (role=status) / copy-failed
+  // (role=alert) badge for the row. The success badge fires ONLY on a real
+  // clipboard success (audit-#43). Shared by generate and Copy link.
+  const copyUrlWithBadge = useCallback(
+    async (rowId: string, url: string | undefined) => {
+      const copied = url ? await copyToClipboard(url) : false;
+      if (copied) {
+        setCopiedShareId(rowId);
+        setCopyFailedShareId(null);
+        setTimeout(() => setCopiedShareId(null), 2000);
+      } else {
+        setCopyFailedShareId(rowId);
+        setTimeout(() => setCopyFailedShareId(null), 4000);
+      }
+    },
+    [copyToClipboard],
+  );
+
   const generateShare = useCallback(
     async (row: SavedScenarioListRow) => {
       setMutationError(null);
@@ -220,16 +267,11 @@ export function SavedScenariosList({
         // The link is now generated → the row is active regardless of whether
         // the clipboard write lands (audit-#43: never block the link on copy).
         setShareActiveById((prev) => ({ ...prev, [row.id]: true }));
-        const copied = url ? await copyToClipboard(url) : false;
-        if (copied) {
-          setCopiedShareId(row.id);
-          setCopyFailedShareId(null);
-          setTimeout(() => setCopiedShareId(null), 2000);
-        } else {
-          // The success badge fires ONLY on a real clipboard success.
-          setCopyFailedShareId(row.id);
-          setTimeout(() => setCopyFailedShareId(null), 4000);
-        }
+        // Cache the raw URL for the session so a subsequent "Copy link" hands
+        // out THIS link without re-minting (WR-03). The token is only returned
+        // here once, so this is the only chance to capture it.
+        if (url) setShareUrlById((prev) => ({ ...prev, [row.id]: url }));
+        await copyUrlWithBadge(row.id, url);
         onMutated?.();
       } catch {
         setMutationError("Couldn't create a share link. Try again.");
@@ -237,19 +279,32 @@ export function SavedScenariosList({
         setGeneratingShareId(null);
       }
     },
-    [copyToClipboard, onMutated],
+    [copyUrlWithBadge, onMutated],
   );
 
   const copyExistingShare = useCallback(
     async (row: SavedScenarioListRow) => {
       setMutationError(null);
-      // Re-generate to obtain a fresh URL (the raw token is only ever returned
-      // by the generate route; the list never holds it). The route pre-revokes
-      // the prior active share and mints a new one, so "Copy link" always hands
-      // out a working link.
-      await generateShare(row);
+      const cachedUrl = shareUrlById[row.id];
+      if (cachedUrl) {
+        // Copy the SAME link generated this session — no re-mint, no token
+        // rotation, so a recipient's existing link keeps working (WR-03 fix).
+        setCopyFailedShareId(null);
+        await copyUrlWithBadge(row.id, cachedUrl);
+        return;
+      }
+      // Cache miss (active share from a prior session / after a reload): the raw
+      // token was externalised exactly once at generation and is never
+      // re-fetchable (hash-only storage, T-25-12), so the existing link cannot
+      // be reproduced. Minting a new one is the only way to hand out a working
+      // URL — but that revokes the old link, so it must be EXPLICIT, never
+      // silent. Surface the replace-confirm instead of regenerating.
+      setRenamingId(null);
+      setConfirmingDeleteId(null);
+      setConfirmingRevokeId(null);
+      setConfirmingReplaceId(row.id);
     },
-    [generateShare],
+    [shareUrlById, copyUrlWithBadge],
   );
 
   const confirmRevoke = useCallback(
@@ -278,6 +333,14 @@ export function SavedScenariosList({
           return;
         }
         setShareActiveById((prev) => ({ ...prev, [row.id]: false }));
+        // Drop the cached URL — the link is dead; a stale entry must never let
+        // "Copy link" hand out a revoked URL.
+        setShareUrlById((prev) => {
+          if (!(row.id in prev)) return prev;
+          const next = { ...prev };
+          delete next[row.id];
+          return next;
+        });
         setConfirmingRevokeId(null);
         onMutated?.();
       } catch {
@@ -319,7 +382,7 @@ export function SavedScenariosList({
           body: JSON.stringify({ name }),
         });
         if (!res.ok) {
-          setMutationError("Couldn't rename this scenario. Try again.");
+          setMutationError("Couldn't rename this portfolio. Try again.");
           return;
         }
         setLocalRows((prev) =>
@@ -329,7 +392,7 @@ export function SavedScenariosList({
         setRenameValue("");
         onMutated?.();
       } catch {
-        setMutationError("Couldn't rename this scenario. Try again.");
+        setMutationError("Couldn't rename this portfolio. Try again.");
       }
     },
     [renameValue, onMutated],
@@ -343,7 +406,7 @@ export function SavedScenariosList({
           method: "DELETE",
         });
         if (!res.ok) {
-          setMutationError("Couldn't delete this scenario. Try again.");
+          setMutationError("Couldn't delete this portfolio. Try again.");
           return;
         }
         setLocalRows((prev) => prev.filter((r) => r.id !== row.id));
@@ -355,7 +418,7 @@ export function SavedScenariosList({
         setConfirmingDeleteId(null);
         onMutated?.();
       } catch {
-        setMutationError("Couldn't delete this scenario. Try again.");
+        setMutationError("Couldn't delete this portfolio. Try again.");
       }
     },
     [onMutated],
@@ -373,31 +436,31 @@ export function SavedScenariosList({
   }, [compareEnabled, onCompare, selectedRows, includeLiveBook]);
 
   return (
-    <section className="space-y-3" aria-labelledby="saved-scenarios-heading">
+    <section className="space-y-3" aria-labelledby="saved-portfolios-heading">
       <h2
-        id="saved-scenarios-heading"
+        id="saved-portfolios-heading"
         className="text-base font-semibold text-text-primary"
       >
-        Saved scenarios
+        Saved portfolios
       </h2>
 
       {listLoadError && localRows.length === 0 ? (
         // Hard load failure with nothing cached → honest ERROR state (canonical
-        // error path, role="alert"), NOT the "No saved scenarios yet" empty card
-        // (which would fabricate "you have no scenarios" from a transport
+        // error path, role="alert"), NOT the "No saved portfolios yet" empty card
+        // (which would fabricate "you have no portfolios" from a transport
         // failure — the #509 heading/body honesty lesson).
         <div
           role="alert"
           className="rounded-md border border-negative/40 bg-surface px-4 py-3 text-sm text-negative"
         >
-          Couldn&apos;t load your saved scenarios. Try again.
+          Couldn&apos;t load your saved portfolios. Try again.
         </div>
       ) : localRows.length === 0 ? (
         <EmptyStateCard
-          heading="No saved scenarios yet"
+          heading="No saved portfolios yet"
           body={
-            'Compose a draft above, then choose "Save scenario" to keep it here. ' +
-            "Saved scenarios reopen into the composer and can be compared side-by-side."
+            'Compose a draft above, then choose "Save portfolio" to keep it here. ' +
+            "Saved portfolios reopen into the composer and can be compared side-by-side."
           }
         />
       ) : (
@@ -424,6 +487,7 @@ export function SavedScenariosList({
               const isRenaming = renamingId === row.id;
               const isConfirmingDelete = confirmingDeleteId === row.id;
               const isConfirmingRevoke = confirmingRevokeId === row.id;
+              const isConfirmingReplace = confirmingReplaceId === row.id;
               const rowShareActive = hasActiveShare(row);
               const isGenerating = generatingShareId === row.id;
               const isCopied = copiedShareId === row.id;
@@ -446,7 +510,7 @@ export function SavedScenariosList({
                       <div className="flex flex-col gap-1">
                         <input
                           type="text"
-                          aria-label={`Rename scenario ${row.name}`}
+                          aria-label={`Rename portfolio ${row.name}`}
                           value={renameValue}
                           onChange={(e) => {
                             setRenameValue(e.target.value);
@@ -533,6 +597,33 @@ export function SavedScenariosList({
                           onClick={() => setConfirmingRevokeId(null)}
                         >
                           Keep link
+                        </Button>
+                      </div>
+                    ) : isConfirmingReplace ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-text-secondary">
+                          This link&apos;s URL can&apos;t be shown again.
+                          Generate a new link? The previous link will stop
+                          working.
+                        </span>
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          autoFocus
+                          disabled={isGenerating}
+                          onClick={() => {
+                            setConfirmingReplaceId(null);
+                            generateShare(row);
+                          }}
+                        >
+                          {isGenerating ? "Generating…" : "Generate new link"}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setConfirmingReplaceId(null)}
+                        >
+                          Keep current link
                         </Button>
                       </div>
                     ) : (
@@ -673,7 +764,7 @@ export function SavedScenariosList({
             </Button>
             {!compareEnabled && (
               <p className={cn("text-xs text-text-muted")}>
-                Select 2 or more scenarios (or the live book) to compare.
+                Select 2 or more portfolios (or the live book) to compare.
               </p>
             )}
           </div>

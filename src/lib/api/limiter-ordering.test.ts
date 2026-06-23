@@ -117,6 +117,13 @@ const NO_INPUT = new Set([
   "me/audit-log/export/route.ts",
   "portfolio-pdf/[id]/route.ts",
   "strategies/browse/route.ts",
+  // Phase 29 / Plan 29-01 — scoped lazy-returns GET. Authenticated
+  // (withAllocatorAuth), per-user limiter (`returns:<user.id>`), but NO
+  // request body: the only input is the `[id]` URL param, validated (isUuid →
+  // 400) BEFORE auth/checkLimit. With no body to parse, the
+  // "burn-a-token-on-bad-body" bug cannot occur — same NO_INPUT shape as its
+  // sibling strategies/browse/route.ts above.
+  "strategies/[id]/returns/route.ts",
 ]);
 
 // limit-FIRST is intentional here (public/unauth scraper defense).

@@ -42,6 +42,7 @@ import {
   act,
   cleanup,
   waitFor,
+  within,
 } from "@testing-library/react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
@@ -131,6 +132,28 @@ vi.mock("../lib/scenario-adapter", () => ({
   })),
 }));
 
+// Phase 30 — mock the five blend-graph LEAF charts to inert spies (same :70-127
+// precedent as EquityChart/DrawdownChart/KpiStrip). This keeps the unit-under-
+// test the composer's PANEL CHROME (Card / heading / disclosure / empty branch /
+// the prop wiring) rather than the recharts internals, and lets the histogram
+// prop be asserted via vi.mocked(ReturnHistogram).mock.calls[0][0]. The leaves
+// render a testid div so a present-panel assert can also read their mount.
+vi.mock("@/components/charts/ReturnHistogram", () => ({
+  ReturnHistogram: vi.fn(() => <div data-testid="return-histogram-mock" />),
+}));
+vi.mock("@/components/charts/ReturnQuantiles", () => ({
+  ReturnQuantiles: vi.fn(() => <div data-testid="return-quantiles-mock" />),
+}));
+vi.mock("@/components/charts/RollingMetrics", () => ({
+  RollingMetrics: vi.fn(() => <div data-testid="rolling-metrics-mock" />),
+}));
+vi.mock("@/components/charts/RollingVolatilityChart", () => ({
+  RollingVolatilityChart: vi.fn(() => <div data-testid="rolling-vol-mock" />),
+}));
+vi.mock("@/components/charts/RollingSortinoChart", () => ({
+  RollingSortinoChart: vi.fn(() => <div data-testid="rolling-sortino-mock" />),
+}));
+
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer } from "./ScenarioComposer";
@@ -145,6 +168,12 @@ import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
 // renders a genuine PercentileRankBadge in isolation, proving the testid query
 // that asserts ABSENCE on the projection is non-vacuous.
 import { PercentileRankBadge } from "@/components/strategy/PercentileRankBadge";
+// Phase 30 — imported (mocked above) so the histogram's CUMULATIVE-wealth input
+// contract is asserted via vi.mocked(ReturnHistogram).mock.calls[0][0].
+import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 // --- localStorage mock (vi.stubGlobal — Phase 08 / 06a precedent) --------
 
@@ -377,7 +406,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
     expect(
-      screen.getByText("Scenario builder needs holdings"),
+      screen.getByText("Start a portfolio"),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: /Connect Exchange/i }),
@@ -765,6 +794,438 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // T_C_LAZY1 — UNIFY-04 (TDD): adding a catalog strategy NOT in the book
+  //   lazy-fetches /api/strategies/<id>/returns; once resolved, the series
+  //   passed to buildStrategyForBuilderSet's returns-lookup (arg index 4)
+  //   carries the non-empty daily_returns for the added id, so the projection
+  //   recomputes through the frozen engine. NON-VACUOUS: BEFORE the fetch
+  //   resolves the lookup is [] (warm-up-gated — no fabricated series); a
+  //   rejected fetch leaves it [] and degrades honestly.
+  // -------------------------------------------------------------------------
+  const LAZY_ID = "aaaaaaaa-1111-2222-3333-444444444444";
+  const LAZY_SERIES = [
+    { date: "2026-02-01", value: 0.01 },
+    { date: "2026-02-02", value: -0.005 },
+    { date: "2026-02-03", value: 0.02 },
+  ];
+
+  /** Latest returns-lookup (4th positional arg) the adapter was called with. */
+  function latestReturnsLookup(): Record<string, unknown[]> {
+    const calls = vi.mocked(buildStrategyForBuilderSet).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[calls.length - 1][4] as Record<string, unknown[]>;
+  }
+
+  it("T_C_LAZY1 add a catalog strategy → lazy GET /api/strategies/<id>/returns; once resolved the adapter's returns-lookup carries the non-empty series (and was [] before resolve)", async () => {
+    // A deferred fetch so we can observe the in-flight [] state, then resolve.
+    let resolveReturns: (v: unknown) => void = () => {};
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        return new Promise((resolve) => {
+          resolveReturns = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({ daily_returns: LAZY_SERIES }),
+            });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Add a catalog strategy that is NOT in the book (payload.strategies is []).
+    addStrategy({
+      id: LAZY_ID,
+      name: "Lazy Catalog Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // The lazy fetch fired for this id.
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some((c) =>
+          String(c[0]).includes(`/api/strategies/${LAZY_ID}/returns`),
+        ),
+      ).toBe(true);
+    });
+
+    // BEFORE resolve — the lookup for the added id is [] (warm-up-gated, NOT a
+    // fabricated flat series). This is the non-vacuous half of the assertion.
+    expect(latestReturnsLookup()[LAZY_ID]).toEqual([]);
+
+    // Resolve the lazy fetch.
+    await act(async () => {
+      resolveReturns(undefined);
+      await Promise.resolve();
+    });
+
+    // AFTER resolve — the lookup now carries the real series for the added id,
+    // so the adapter (and the frozen engine downstream) sees a non-empty series.
+    await waitFor(() => {
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual(LAZY_SERIES);
+    });
+  });
+
+  it("T_C_LAZY2 a rejected lazy fetch leaves the added strategy's lookup [] and degrades honestly (no fabricated series, no crash)", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        return Promise.reject(new Error("network down"));
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    addStrategy({
+      id: LAZY_ID,
+      name: "Doomed Catalog Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some((c) =>
+          String(c[0]).includes(`/api/strategies/${LAZY_ID}/returns`),
+        ),
+      ).toBe(true);
+    });
+
+    // The failed fetch settles; the lookup stays [] (honest degrade — the
+    // strategy is added but contributes nothing until a real series exists).
+    await waitFor(() => {
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual([]);
+    });
+    // The component did not crash — the composition list still shows the row.
+    expect(screen.getAllByText(/Doomed Catalog Strat/i).length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // WR-01 (Phase 29 review) — a FAILED lazy fetch must NOT poison the strategy's
+  //   series for the session. Pre-fix, the error path called `settle([])`, which
+  //   wrote `addedReturnsById[id] = []` (an array, not undefined). The add seam
+  //   guards re-fetch with `addedReturnsById[s.id] === undefined`, so a remove +
+  //   re-add of the SAME id never re-fetched — it reused the poisoned [] and the
+  //   strategy was warm-up-gated out of the projection forever. NON-VACUOUS:
+  //   asserts a SECOND fetch fires on re-add (fails on pre-fix code where the
+  //   re-add is a silent no-op), and that the retried (now-succeeding) fetch
+  //   lands the real series into the adapter's returns-lookup.
+  // -------------------------------------------------------------------------
+  it("WR-01 a failed lazy fetch leaves the id retryable: remove + re-add re-fetches and the retry's series reaches the projection", async () => {
+    let attempt = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        attempt += 1;
+        // First add → fail (network down). Second add (the retry) → succeed.
+        if (attempt === 1) return Promise.reject(new Error("network down"));
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ daily_returns: LAZY_SERIES }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const returnsCalls = () =>
+      fetchMock.mock.calls.filter((c) =>
+        String(c[0]).includes(`/api/strategies/${LAZY_ID}/returns`),
+      ).length;
+
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // First add → the fetch fires and FAILS.
+    addStrategy({
+      id: LAZY_ID,
+      name: "Retryable Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await waitFor(() => expect(returnsCalls()).toBe(1));
+    // The failed fetch settled to an honest [] in the lookup.
+    await waitFor(() => expect(latestReturnsLookup()[LAZY_ID]).toEqual([]));
+
+    // Remove the added strategy (the real CompositionList Remove button).
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Remove from scenario/i }),
+      );
+    });
+
+    // Re-add the SAME id. WR-01: because the failed fetch left the entry
+    // undefined (and WR-02 purged it on remove), the add seam MUST re-fetch.
+    addStrategy({
+      id: LAZY_ID,
+      name: "Retryable Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // The non-vacuous assertion: a SECOND fetch fired (pre-fix this stays 1).
+    await waitFor(() => expect(returnsCalls()).toBe(2));
+
+    // The retry succeeded, so the real series now reaches the adapter lookup —
+    // the projection is no longer permanently gated out by the transient fail.
+    await waitFor(() =>
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual(LAZY_SERIES),
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // WR-02 (Phase 29 review) — removing an added strategy mid-flight must ABORT
+  //   the in-flight fetch and PURGE the loading affordance. Pre-fix,
+  //   onRemoveAdded={scenario.removeAddedStrategy} only mutated the draft; the
+  //   AbortController was never aborted (only unmount aborted) and
+  //   loadingReturnsIds/addedReturnsById kept the removed id. NON-VACUOUS:
+  //   asserts the fetch's AbortSignal fired `abort` (fails on pre-fix code) and
+  //   the "Loading returns…" affordance disappears.
+  // -------------------------------------------------------------------------
+  it("WR-02 removing an added strategy mid-flight aborts the in-flight fetch and clears the loading affordance", async () => {
+    let capturedSignal: AbortSignal | null = null;
+    const fetchMock = vi.fn((url: string, init?: { signal?: AbortSignal }) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        capturedSignal = init?.signal ?? null;
+        // Never resolves — the fetch stays in flight so the remove must abort it.
+        return new Promise(() => {});
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    addStrategy({
+      id: LAZY_ID,
+      name: "In-flight Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // The in-flight fetch fired and handed an un-aborted signal to the request.
+    await waitFor(() => expect(capturedSignal).not.toBeNull());
+    expect(capturedSignal!.aborted).toBe(false);
+    // The honest in-flight affordance is showing while the fetch is pending.
+    await waitFor(() =>
+      expect(screen.getByTestId("scenario-loading-returns")).toBeInTheDocument(),
+    );
+
+    // Remove the strategy mid-flight.
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Remove from scenario/i }),
+      );
+    });
+
+    // WR-02: the in-flight request's signal was aborted (pre-fix: stays false).
+    await waitFor(() => expect(capturedSignal!.aborted).toBe(true));
+    // And the loading affordance is purged (the removed id dropped from state).
+    await waitFor(() =>
+      expect(screen.queryByTestId("scenario-loading-returns")).toBeNull(),
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // WR-05 (Phase 29 review) — the book-returns boundary must NOT silently drop a
+  //   correctly-shaped series, and must honestly normalize the year-keyed-record
+  //   shape rather than the pre-fix `raw as unknown as DailyPoint[]` cast (which
+  //   relied on Array.isArray and dropped the typed nested-record shape to []).
+  //   NON-VACUOUS: a year-keyed-record book series is FLATTENED into the
+  //   projection lookup (pre-fix it was dropped to []), and a DailyPoint[] book
+  //   series survives intact.
+  // -------------------------------------------------------------------------
+  const BOOK_ID = "bbbbbbbb-1111-2222-3333-444444444444";
+
+  function makePayloadWithBookStrategy(
+    dailyReturns: unknown,
+  ): MyAllocationDashboardPayload {
+    // A book strategy is one already in payload.strategies — no lazy fetch fires.
+    return makePayload({
+      strategies: [
+        {
+          // Minimal StrategyWithAnalytics-shaped row; only the fields the
+          // composer's returns/metadata lookups read are populated.
+          strategy: {
+            id: BOOK_ID,
+            disclosure_tier: "verified",
+            strategy_analytics: {
+              cagr: 0.1,
+              sharpe: 1.0,
+              daily_returns: dailyReturns,
+            },
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+      ],
+    });
+  }
+
+  it("WR-05 a correctly-shaped DailyPoint[] book series survives into the adapter returns-lookup (not silently dropped)", () => {
+    const series = [
+      { date: "2026-03-01", value: 0.01 },
+      { date: "2026-03-02", value: -0.004 },
+    ];
+    render(
+      <ScenarioComposer
+        payload={makePayloadWithBookStrategy(series)}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: BOOK_ID,
+      name: "Book Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    expect(latestReturnsLookup()[BOOK_ID]).toEqual(series);
+  });
+
+  it("WR-05 a year-keyed-record book series is FLATTENED into a date-sorted DailyPoint[] (pre-fix it was silently dropped to [])", () => {
+    // The TYPED shape of StrategyAnalytics.daily_returns: a year-keyed nested
+    // record. Pre-fix Array.isArray(raw) was false → null → [] (real returns
+    // silently dropped). The normalizer flattens it.
+    const nested = {
+      "2026": {
+        "2026-04-02": 0.02,
+        "2026-04-01": 0.01,
+      },
+    };
+    render(
+      <ScenarioComposer
+        payload={makePayloadWithBookStrategy(nested)}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: BOOK_ID,
+      name: "Nested Book Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    // Flattened + date-sorted — and crucially NON-EMPTY (the regression the cast
+    // masked). Pre-fix this would be [].
+    expect(latestReturnsLookup()[BOOK_ID]).toEqual([
+      { date: "2026-04-01", value: 0.01 },
+      { date: "2026-04-02", value: 0.02 },
+    ]);
+  });
+
+  it("WR-05 a genuinely unexpected book shape warns (fail-loud) and degrades to [] (no crash)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    render(
+      <ScenarioComposer
+        payload={makePayloadWithBookStrategy("totally-wrong-shape")}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: BOOK_ID,
+      name: "Bad Shape Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    expect(latestReturnsLookup()[BOOK_ID]).toEqual([]);
+    expect(
+      warnSpy.mock.calls.some((c) =>
+        String(c[0]).includes("unexpected shape"),
+      ),
+    ).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  // -------------------------------------------------------------------------
+  // WR-04 (Phase 29 review) — opening a saved portfolio whose draft is not
+  //   JSON-safe (a BigInt throws in JSON.stringify) must route to the honest
+  //   "older format" reset notice rather than letting the TypeError escape (or
+  //   silently hydrating the default draft). NON-VACUOUS: asserts the notice
+  //   renders and the open did NOT throw.
+  // -------------------------------------------------------------------------
+  it("WR-04 opening a saved portfolio with a non-JSON-safe draft (BigInt) shows the honest reset notice, no throw", () => {
+    let registeredOpen: ((row: {
+      id: string;
+      name: string;
+      draft: unknown;
+    }) => void) | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          registeredOpen = open as typeof registeredOpen;
+        }}
+      />,
+    );
+    expect(registeredOpen).not.toBeNull();
+    // A BigInt in the draft makes JSON.stringify throw a TypeError. The open
+    // must catch it and show the honest reset notice (never let it escape).
+    expect(() => {
+      act(() => {
+        registeredOpen!({
+          id: "saved-bigint-row",
+          name: "BigInt Portfolio",
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          draft: { schema_version: 2, bad: BigInt(1) } as any,
+        });
+      });
+    }).not.toThrow();
+    expect(
+      screen.getByText(
+        /This saved portfolio uses an older format and can't be reopened\./i,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
   // T_C11 — Footer Commit disabled when diff_count = 0
   // -------------------------------------------------------------------------
   it("T_C11 Sticky footer Commit disabled when diff_count=0; enabled after adding one strategy", () => {
@@ -874,6 +1335,156 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       (screen.getByTestId("scenario-footer-commit") as HTMLButtonElement)
         .disabled,
     ).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // T_C_MODE1 — entry-mode segmented control renders two accessible segments
+  //   (UNIFY-01/02). radiogroup + two radios; the live book defaults to
+  //   "From my book". Active segment carries the accent OUTLINE, never a fill
+  //   (accent = action/verified, a mode toggle is neither — 29-UI-SPEC §1).
+  // -------------------------------------------------------------------------
+  it("T_C_MODE1 entry-mode control renders an accessible radiogroup with 'From my book' (default) + 'Blank slate'; active = accent outline, NOT a fill", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const group = screen.getByRole("radiogroup", {
+      name: /Composition entry mode/i,
+    });
+    expect(group).toBeInTheDocument();
+    const book = screen.getByRole("radio", { name: /From my book/i });
+    const blank = screen.getByRole("radio", { name: /Blank slate/i });
+    // Live book present → "From my book" is the default selected segment.
+    expect(book).toHaveAttribute("aria-checked", "true");
+    expect(blank).toHaveAttribute("aria-checked", "false");
+    // Active segment uses the accent OUTLINE recipe, never a fill.
+    expect(book.className).toMatch(/border-accent/);
+    expect(book.className).toMatch(/text-accent/);
+    expect(book.className).not.toMatch(/bg-accent/);
+    expect(blank.className).not.toMatch(/bg-accent/);
+  });
+
+  // -------------------------------------------------------------------------
+  // T_C_MODE2 — no live book → "From my book" is NOT rendered as a dead
+  //   default; the composer defaults to Blank slate (29-UI-SPEC §1).
+  //   With nothing added, the no-book allocator sees the empty-state front
+  //   door; once a strategy is added the main body renders with the control.
+  // -------------------------------------------------------------------------
+  it("T_C_MODE2 no live book → defaults to Blank slate, never a dead 'From my book' segment", () => {
+    const payload = makePayload({
+      holdingsSummary: [],
+      holdingReturnsByScopeRef: {},
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // No-book + nothing added → empty-state front door (the blank-slate door).
+    expect(
+      screen.getByRole("link", { name: /Connect Exchange/i }),
+    ).toBeInTheDocument();
+    // Add a strategy → main body renders; the control shows Blank-slate-only
+    // (no dead "From my book" default for a no-book allocator).
+    addStrategy({
+      id: "strat-mode2",
+      name: "Mode2 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    const blank = screen.getByRole("radio", { name: /Blank slate/i });
+    expect(blank).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.queryByRole("radio", { name: /From my book/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // T_C_MODE3 — NON-VACUOUS (acceptance criterion): a mode switch with a DIRTY
+  //   draft (diffCount > 0) MUST open the existing ResetConfirmationModal and
+  //   must NOT change the active segment until the user confirms. On confirm
+  //   the mode applies and the draft is discarded. This test FAILS if the
+  //   onClick re-seeds / flips the mode directly (the silent-wipe regression,
+  //   Pitfall 5).
+  // -------------------------------------------------------------------------
+  it("T_C_MODE3 dirty-draft mode switch opens the reset confirmation and does NOT flip the mode until confirm (no silent wipe)", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Dirty the draft (an add is a diff) so the switch must route through the
+    // reset confirmation rather than apply silently.
+    addStrategy({
+      id: "strat-mode3",
+      name: "Mode3 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    const blank = screen.getByRole("radio", { name: /Blank slate/i });
+    const book = screen.getByRole("radio", { name: /From my book/i });
+    expect(book).toHaveAttribute("aria-checked", "true");
+
+    // Click the inactive "Blank slate" segment with a dirty draft.
+    fireEvent.click(blank);
+
+    // The reset confirmation modal opens (the SAME modal the footer Reset uses).
+    expect(
+      screen.getByText(/Discard your scenario draft\?/i),
+    ).toBeInTheDocument();
+    // CRITICAL non-vacuous assertion: the mode did NOT flip — "From my book" is
+    // still the active segment, and the added strategy is still present (the
+    // draft was NOT silently wiped). A naive onClick that calls setEntryMode /
+    // reset directly would already have flipped aria-checked here and this would
+    // fail.
+    expect(
+      screen.getByRole("radio", { name: /From my book/i }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.getByRole("radio", { name: /Blank slate/i }),
+    ).toHaveAttribute("aria-checked", "false");
+    expect(screen.getAllByText(/Mode3 Strat/i).length).toBeGreaterThan(0);
+
+    // Confirm → the discard happens AND the parked mode applies.
+    fireEvent.click(screen.getByRole("button", { name: /Discard draft/i }));
+    expect(
+      screen.queryByText(/Discard your scenario draft\?/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /Blank slate/i }),
+    ).toHaveAttribute("aria-checked", "true");
+  });
+
+  // -------------------------------------------------------------------------
+  // T_C_MODE4 — a CLEAN draft (diffCount === 0) switches immediately (nothing
+  //   to lose) — no confirmation modal.
+  // -------------------------------------------------------------------------
+  it("T_C_MODE4 clean-draft mode switch applies immediately without a confirmation modal", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // No edits → clean draft. Switching is lossless.
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(
+      screen.queryByText(/Discard your scenario draft\?/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /Blank slate/i }),
+    ).toHaveAttribute("aria-checked", "true");
   });
 
   // -------------------------------------------------------------------------
@@ -1269,7 +1880,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     );
     // Initial: empty-state branch
     expect(
-      screen.getByText("Scenario builder needs holdings"),
+      screen.getByText("Start a portfolio"),
     ).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("button", { name: /Browse strategies/i }),
@@ -2342,6 +2953,18 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     );
     // Positive control: the projection DID render its KPI surface.
     expect(screen.getByTestId("kpi-strip-mock")).toBeInTheDocument();
+    // Phase 30 — the guard must run WITH the new blend-graph panels mounted, so
+    // a future regression that wires a peer/percentile panel ALONGSIDE them is
+    // still caught (not a vacuous pass on an unmounted surface). Assert both new
+    // Cards ARE present on the projection here.
+    expect(
+      document.querySelector('[data-panel="blend-returns-distribution"]'),
+      "the Returns-distribution Card must be mounted so the R3 guard runs with the new surface present",
+    ).not.toBeNull();
+    expect(
+      document.querySelector('[data-panel="blend-rolling"]'),
+      "the Rolling-metrics Card must be mounted so the R3 guard runs with the new surface present",
+    ).not.toBeNull();
     // The hazard: FactsheetBody's api-only panels (peer percentile, allocator
     // blends, returns signatures) peer-rank a blend that doesn't exist — a
     // no-invented-data violation. The composer builds from scenarioMetrics +
@@ -2368,6 +2991,221 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     cleanup();
     render(<PercentileRankBadge metric="sharpe" percentile={95} />);
     expect(screen.getByTestId("percentile-rank-badge")).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 30 (GRAPH-02/03/04) — blend-graph panel chrome on the composer.
+  // Drives the REAL computeScenario via the adapter mock (like H-0133 above)
+  // so the panels read genuine `portfolio_daily_returns`. The five leaf charts
+  // are inert-mocked at module scope, so these assert the host's PANEL CHROME
+  // (Card / heading / disclosure / honest empty branch / histogram prop), not
+  // recharts internals.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Mock the adapter to return a single blended strategy with `nDays`
+   * overlapping daily returns, so the engine emits a `portfolio_daily_returns`
+   * of length `nDays`. Deterministic (no Math.random) — a sign-varying series
+   * so the histogram + rolling-Sortino downside arms are non-degenerate.
+   */
+  function mockBlendSeries(nDays: number) {
+    const start = new Date(2024, 0, 1).getTime();
+    const series = Array.from({ length: nDays }, (_, i) => ({
+      date: new Date(start + i * 86_400_000).toISOString().slice(0, 10),
+      value: Math.sin(i / 7) * 0.01 + 0.0002,
+    }));
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [mkRealStrat(REF_BTC, series)],
+      state: {
+        selected: { [REF_BTC]: true },
+        weights: { [REF_BTC]: 1 },
+        startDates: {},
+      },
+    });
+  }
+
+  it("blend panel empty branch — below the sample floor both panels render a role=status PartialDataBanner and NEVER role=alert", () => {
+    // Default adapter mock returns zero strategies → portfolio_daily_returns is
+    // empty (length 0 < 10), so BOTH panels hit their honest empty branch.
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The Card chrome + headings stay (heading-matches-body, #509): each panel
+    // is present, and inside each the body is a role="status" banner.
+    const distCard = document.querySelector(
+      '[data-panel="blend-returns-distribution"]',
+    );
+    const rollCard = document.querySelector('[data-panel="blend-rolling"]');
+    expect(distCard).not.toBeNull();
+    expect(rollCard).not.toBeNull();
+    expect(
+      distCard!.querySelector('[role="status"]'),
+      "below floor, the distribution panel body must be a role=status PartialDataBanner",
+    ).not.toBeNull();
+    expect(
+      rollCard!.querySelector('[role="status"]'),
+      "below floor, the rolling panel body must be a role=status PartialDataBanner",
+    ).not.toBeNull();
+    // Heading stays present even on the empty branch.
+    expect(screen.getByText("Returns distribution")).toBeInTheDocument();
+    expect(screen.getByText("Rolling metrics")).toBeInTheDocument();
+    // The prescribed empty copy (UI-SPEC §Copywriting) is rendered.
+    expect(
+      screen.getByText(
+        /at least 10 overlapping daily returns to chart its distribution/i,
+      ),
+    ).toBeInTheDocument();
+    // CRITICAL honesty invariant: a derived-client panel has no fetch to fail,
+    // so absence below the floor is NEVER an error. No role=alert anywhere in
+    // either panel region. (Falsifiable: switching PartialDataBanner→a red
+    // role=alert error state fails this assert.)
+    expect(distCard!.querySelector('[role="alert"]')).toBeNull();
+    expect(rollCard!.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("blend panel disclosure — above floor each panel renders its own overlap-N + 'not a forecast' line, and the histogram is fed the CUMULATIVE-wealth series", () => {
+    // 252 overlapping days clears every window floor (63/126/252) AND the
+    // 10-point distribution floor, so both panels render their populated body.
+    mockBlendSeries(252);
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // GRAPH-04 — each panel owns its disclosure. The page-level PROJECTED badge
+    // is NOT sufficient. Both lines carry "overlapping" + "not a forecast".
+    const overlapDisclosures = screen.getAllByText(/overlapping/i);
+    expect(overlapDisclosures.length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText(/not a forecast/i).length).toBeGreaterThanOrEqual(
+      2,
+    );
+    expect(
+      screen.getByText(/historical realized · not a forecast/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/252-day annualized/i),
+    ).toBeInTheDocument();
+    // The leaf charts mounted (populated body, not the empty banner).
+    expect(screen.getByTestId("return-histogram-mock")).toBeInTheDocument();
+    expect(screen.getByTestId("return-quantiles-mock")).toBeInTheDocument();
+    expect(screen.getByTestId("rolling-metrics-mock")).toBeInTheDocument();
+    expect(screen.getByTestId("rolling-vol-mock")).toBeInTheDocument();
+    expect(screen.getByTestId("rolling-sortino-mock")).toBeInTheDocument();
+    // Pitfall 1 — ReturnHistogram derives daily returns internally from a
+    // CUMULATIVE series. Assert it received the cumprod-wealth series (first
+    // point ≈ 1 + r[0]), NOT the raw daily returns (which start near 0). If a
+    // future edit feeds raw daily returns, value[0] would be ~0.0002 and this
+    // fails loudly.
+    const histProps = vi.mocked(ReturnHistogram).mock.calls[0][0];
+    expect(histProps.returns.length).toBe(252);
+    const firstWealth = histProps.returns[0].value;
+    expect(firstWealth).toBeGreaterThan(0.9);
+    expect(firstWealth).toBeLessThan(1.1);
+    // bins contract held verbatim.
+    expect(histProps.bins).toBe(20);
+  });
+
+  it("blend rolling panel — selecting 12M when history is below 252 swaps the body to the role=status per-window empty banner (never role=alert)", () => {
+    // 126 days: the 6M (126) default renders, but 12M (252) is below floor.
+    // The 12M toggle option is disabled; the panel body for the default window
+    // renders. Assert the panel mounts with no role=alert regardless of window.
+    mockBlendSeries(126);
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const rollCard = document.querySelector('[data-panel="blend-rolling"]');
+    expect(rollCard).not.toBeNull();
+    // 6M (126) clears the floor → populated body, real disclosure.
+    expect(screen.getByTestId("rolling-metrics-mock")).toBeInTheDocument();
+    expect(screen.getByText(/126-day rolling window/i)).toBeInTheDocument();
+    // 12M is below the 252 floor → its toggle option is disabled (aria-disabled).
+    const twelveM = screen.getByText("12M").closest("button");
+    expect(twelveM).not.toBeNull();
+    expect(twelveM!.getAttribute("aria-disabled")).toBe("true");
+    // Honest-neutral: never role=alert in the rolling panel.
+    expect(rollCard!.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("WR-02 — distribution panel gates on the adapter's degenerate verdict, not a re-derived length<10: a ≥10-length series the adapter collapses shows the honest role=status banner, NOT a headed-but-empty body", () => {
+    // The composer's distribution gate USED to read `portfolioDaily.length < 10`,
+    // a heuristic that DIVERGES from the adapter's actual emptiness signal. The
+    // adapter (buildBlendPanels) collapses EVERY series — including
+    // histogramSeries/quantiles — on the STRICTER `hasNonFinite || length <
+    // MIN_USABLE || length < window`. So a series with length in [10, window)
+    // makes the adapter return histogramSeries=[] / quantiles={} while the old
+    // gate (10 ≤ length) took the POPULATED branch: two empty sub-headings + a
+    // "{n} overlapping daily returns" disclosure with NO "Awaiting more data"
+    // banner — the opposite of the honest-empty contract.
+    //
+    // 50 days clears the 10-point distribution floor but is BELOW the default
+    // 126-day (6M) rolling window, so buildBlendPanels collapses to []/{}. The
+    // distribution panel must still show the role=status banner (it keys off the
+    // adapter), not a broken populated body. Falsifiable: revert the gate back to
+    // `portfolioDaily.length < 10` and the populated branch renders (the
+    // sub-headings + leaf mocks appear, the banner does not) — this fails.
+    mockBlendSeries(50);
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const distCard = document.querySelector(
+      '[data-panel="blend-returns-distribution"]',
+    );
+    expect(distCard).not.toBeNull();
+    // Heading stays (heading-matches-body), but the BODY must be the honest banner.
+    expect(screen.getByText("Returns distribution")).toBeInTheDocument();
+    expect(
+      distCard!.querySelector('[role="status"]'),
+      "a ≥10-length series the adapter collapsed must render the role=status banner, not a populated body",
+    ).not.toBeNull();
+    expect(
+      screen.getByText(
+        /at least 10 overlapping daily returns to chart its distribution/i,
+      ),
+    ).toBeInTheDocument();
+    // The populated body MUST NOT render: no histogram/quantile leaf mounts and
+    // no "Return histogram" / "Return quantiles" sub-headings inside the card.
+    expect(distCard!.querySelector('[data-testid="return-histogram-mock"]')).toBeNull();
+    expect(distCard!.querySelector('[data-testid="return-quantiles-mock"]')).toBeNull();
+    expect(within(distCard as HTMLElement).queryByText("Return histogram")).toBeNull();
+    expect(within(distCard as HTMLElement).queryByText("Return quantiles")).toBeNull();
+    // Honest-neutral: a derived-client panel never errors on absence.
+    expect(distCard!.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("no factsheet import on the blend path — ScenarioComposer source imports no FactsheetBody/MetricsColumn/payload-builder and contains no api-ingest literal (static guard, T-30-05)", () => {
+    // Non-vacuous: reads the REAL .tsx source off disk (not the bundled/mocked
+    // module). The forbidden api-only peer path would land structurally here, so
+    // the guard FAILS LOUD if any of these strings are reintroduced — even in a
+    // comment. (This is why the source comments avoid the literal token spelling.)
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(join(here, "ScenarioComposer.tsx"), "utf8");
+    // Positive control — prove the read is real (the file IS the composer).
+    expect(source).toMatch(/buildBlendPanels/);
+    expect(source).not.toMatch(
+      /FactsheetBody|MetricsColumn|buildAllocatorPortfolioFactsheetPayload/,
+    );
+    expect(source).not.toMatch(/ingestSource:\s*["']api["']/);
+    // Belt-and-suspenders: no per-strategy *Panel.tsx wrapper or PercentileRankBadge.
+    expect(source).not.toMatch(/PercentileRankBadge/);
+    expect(source).not.toMatch(/from\s+["']@\/components\/strategy-v2\/\w+Panel["']/);
   });
 
   it("H-0133 regression — toggling a REAL strategy OFF removes it from the active set (the explicit-toggle arm, isolated from weight rescaling)", () => {

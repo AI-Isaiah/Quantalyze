@@ -67,7 +67,16 @@ import {
   type StrategyForBuilder,
 } from "@/lib/scenario";
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
+import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import { buildBlendPanels } from "@/lib/scenario-blend-panels";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
+import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
+import { ReturnQuantiles } from "@/components/charts/ReturnQuantiles";
+import { RollingMetrics } from "@/components/charts/RollingMetrics";
+import { RollingVolatilityChart } from "@/components/charts/RollingVolatilityChart";
+import { RollingSortinoChart } from "@/components/charts/RollingSortinoChart";
+import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
+import { PartialDataBanner } from "@/components/strategy-v2/PartialDataBanner";
 import { Card } from "@/components/ui/Card";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { Button } from "@/components/ui/Button";
@@ -119,6 +128,20 @@ const SYNTHETIC_BASELINE_AUM = 1;
  * handler and the CompositionList input share a single source of truth.
  */
 const MAX_LEVERAGE = 10;
+
+/**
+ * GRAPH-03 — single source of truth for the rolling-window set: maps each
+ * trading-day window length (63/126/252) to its human label. Drives BOTH the
+ * SegmentedControl options and the below-floor empty-banner copy ("…for the
+ * {label} rolling window."), so the window set and its labels can never drift
+ * between the two. The window itself stays the trading-day count everywhere
+ * the math runs.
+ */
+const WINDOW_LABEL: Record<number, string> = {
+  63: "3M",
+  126: "6M",
+  252: "12M",
+};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -332,6 +355,41 @@ function formatUsd0(n: number): string {
     : "—";
 }
 
+/**
+ * WR-05 (Phase 29 review) — book-returns boundary normalizer.
+ *
+ * `StrategyAnalytics.daily_returns` is TYPED as a year-keyed nested record
+ * (`Record<string, Record<string, number>>`, types.ts:304) but the runtime
+ * payload from queries.ts SOMETIMES surfaces it as a flat `DailyPoint[]`. A bare
+ * `raw as unknown as DailyPoint[]` cast silently dropped the nested shape to
+ * `[]` (the book strategy's REAL returns warm-up-gated out of the projection,
+ * no signal). Delegate to the CANONICAL `normalizeDailyReturns` so this book
+ * trust boundary and the lazy `/api/strategies/[id]/returns` route boundary
+ * parse the column through ONE tested parser and cannot drift — it handles
+ * array + flat-dict + nested year-record (reconstructing `YYYY-MM-DD` from
+ * `MM-DD` inner keys, which a hand-rolled `Object.values` flatten dropped the
+ * year off of), validates every point, and date-sorts.
+ *
+ * Returns the normalized `DailyPoint[]`, or `null` ONLY when `raw` is absent —
+ * the caller's `?? lazy ?? []` chain depends on `null` (NOT `[]`, which would
+ * short-circuit `??`) to fall through to the lazily-fetched series.
+ */
+function normalizeBookReturns(raw: unknown): DailyPoint[] | null {
+  if (raw == null) return null;
+  const normalized = normalizeDailyReturns(raw);
+  // Fail-loud (Rule 12): a NON-array raw that yields zero usable points is a
+  // genuine shape regression (a primitive, or an object with no finite
+  // returns) — surface it instead of silently feeding [] into the projection.
+  // An empty/short array is a legitimate "no data yet", so it stays quiet.
+  if (normalized.length === 0 && !Array.isArray(raw)) {
+    console.warn(
+      "[ScenarioComposer] book daily_returns has an unexpected shape; degraded to [] (WR-05)",
+      { rawType: typeof raw },
+    );
+  }
+  return normalized;
+}
+
 // ---------------------------------------------------------------------------
 // ScenarioComposer
 // ---------------------------------------------------------------------------
@@ -346,7 +404,7 @@ export function ScenarioComposer({
   onScenarioSaved,
 }: ScenarioComposerProps) {
   const {
-    holdingsSummary,
+    holdingsSummary: rawHoldingsSummary,
     flaggedHoldings,
     matchDecisionsByHoldingRef,
     existingOutcomesByHoldingRef,
@@ -363,10 +421,46 @@ export function ScenarioComposer({
   };
   const router = useRouter();
 
+  // UNIFY-01/02 — entry mode. One composer surface, two front doors:
+  //   "book"  — seed the working composition from the allocator's live holdings.
+  //   "blank" — start from an empty working composition (no live-book holdings
+  //             seeded); the allocator composes purely from catalog adds.
+  // A no-book allocator (rawHoldingsSummary empty) has only one sensible
+  // option — "blank" — so we default there and never render a dead "From my
+  // book" default (29-UI-SPEC §1). The mode is pure UI state: it chooses which
+  // initial draft renders by gating which holdings flow into the hook/adapter/
+  // composition below. The frozen adapter + engine path is untouched.
+  const hasLiveBook = rawHoldingsSummary.length > 0;
+  const [entryMode, setEntryMode] = useState<"book" | "blank">(
+    hasLiveBook ? "book" : "blank",
+  );
+
+  // The holdings the composer actually presents this render. In "blank" mode we
+  // feed [] so the draft seeds empty (only added strategies contribute) — every
+  // downstream `holdingsSummary` reference (hook, adapter, composition list,
+  // fingerprint, empty-state gate) flows through this single switch, so the
+  // mode is honored everywhere with no per-site change. The narrowed cast is
+  // re-applied so the array literal matches the destructured element type.
+  const holdingsSummary = useMemo(
+    () => (entryMode === "blank" ? [] : rawHoldingsSummary),
+    [entryMode, rawHoldingsSummary],
+  ) as typeof rawHoldingsSummary;
+
   const scenario = useScenarioState({
     holdingsSummary: holdingsSummary as { symbol: string; venue: string; holding_type: string; value_usd: number }[],
     allocatorId,
   });
+
+  // UNIFY-02 / Pitfall 5 — a mode switch that would DISCARD a dirty draft must
+  // route through the existing reset-confirmation discipline, never a silent
+  // wipe. The parked target segment is only ever READ inside the `handleReset`
+  // functional updater (apply-on-confirm) — the rendered control derives its
+  // selected state from `entryMode`, never from the pending value — so the
+  // state value is intentionally unread here (only the setter is used). A
+  // clean draft (diffCount === 0) switches immediately (nothing to lose).
+  const [_pendingMode, setPendingMode] = useState<"book" | "blank" | null>(
+    null,
+  );
 
   const [browseOpen, setBrowseOpen] = useState(false);
   const [bridgeOpen, setBridgeOpen] = useState(false);
@@ -407,6 +501,31 @@ export function ScenarioComposer({
   const [leverageByRef, setLeverageByRef] = useState<Record<string, number>>({});
 
   // -------------------------------------------------------------------------
+  // UNIFY-04 — lazy-returns plumbing (29-RESEARCH "SSR-LIFT vs LAZY-FETCH").
+  // -------------------------------------------------------------------------
+  // `payload.strategies` is BOOK-ONLY (the allocator's portfolio_strategies
+  // join). A strategy added from the Browse drawer — verified OR example — is
+  // not already in the book, so it has no daily_returns in the SSR payload and
+  // would contribute [] (warm-up-gated out → a no-op add, the H-0133 / example
+  // gap). On add we lazily fetch GET /api/strategies/<id>/returns (Plan 01's
+  // RLS-scoped, published-only route) and stash the series here keyed by id;
+  // `addedStrategyReturnsLookup` below merges it (payload wins when present —
+  // Open Question #1). The series flows through the UNCHANGED adapter + frozen
+  // engine; no second annualization path, no scenario.ts edit.
+  const [addedReturnsById, setAddedReturnsById] = useState<
+    Record<string, DailyPoint[]>
+  >({});
+  // Ids whose lazy fetch is in flight — drives the honest "loading returns…"
+  // affordance on the added row. While loading, the strategy contributes []
+  // (warm-up-gated), NEVER a fabricated flat/zero series (Pitfall 4).
+  const [loadingReturnsIds, setLoadingReturnsIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  // AbortControllers for in-flight lazy fetches, keyed by id, so reset/unmount
+  // can cancel them (mirrors the btc-effect cancelled-guard posture).
+  const lazyAbortRef = useRef<Map<string, AbortController>>(new Map());
+
+  // -------------------------------------------------------------------------
   // Phase 23 / PERSIST-02 — Save / Update / Save-as-new toolbar + reopen state.
   // -------------------------------------------------------------------------
   // The id of the saved scenario currently open in the composer (null = a fresh
@@ -443,6 +562,11 @@ export function ScenarioComposer({
   const [btcAvailable, setBtcAvailable] = useState(false);
   // Overlay toggle, default ON per UI-SPEC §Component Inventory.
   const [showBenchmark, setShowBenchmark] = useState(true);
+
+  // GRAPH-03 — rolling-metrics window. 3M/6M/12M map to 63/126/252 trading-day
+  // windows (client-side, 252-annualization basis — NOT the per-strategy panel's
+  // 90/180/365 backend keys). Default 6M=126 per UI-SPEC §Component Inventory.
+  const [rollingWindow, setRollingWindow] = useState(126);
 
   function handleWeightChange(scopeRef: string, weight: number) {
     if (!Number.isFinite(weight)) {
@@ -509,6 +633,95 @@ export function ScenarioComposer({
   }
 
   // -------------------------------------------------------------------------
+  // UNIFY-04 — lazy-fetch an added strategy's daily_returns on add.
+  // -------------------------------------------------------------------------
+  // Mirrors the btc-effect's honest-degrade posture: a non-ok response, a
+  // non-array body, an abort, or a thrown fetch all leave the entry [] and log
+  // — never a fabricated series, never a wedge. The series is stashed in
+  // `addedReturnsById` keyed by id; the lookup memo merges it (payload wins).
+  const fetchAddedReturns = useCallback((id: string) => {
+    // Already resolved or in flight — don't refetch (idempotent multi-add).
+    if (lazyAbortRef.current.has(id)) return;
+    const controller = new AbortController();
+    lazyAbortRef.current.set(id, controller);
+    setLoadingReturnsIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+    // Clear the in-flight bookkeeping (loading flag + abort ref) WITHOUT writing
+    // an `addedReturnsById` entry. Used on every failure path so the entry stays
+    // `undefined` — see WR-01 below.
+    const clearInflight = () => {
+      setLoadingReturnsIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      lazyAbortRef.current.delete(id);
+    };
+    // Settle a GENUINE result (a 200 with a real DailyPoint[] body, possibly
+    // empty). Writes `addedReturnsById[id]` so the memo merges it and a re-add
+    // reuses it (idempotent) rather than re-fetching.
+    const settle = (series: DailyPoint[]) => {
+      setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
+      clearInflight();
+    };
+    fetch(`/api/strategies/${encodeURIComponent(id)}/returns`, {
+      signal: controller.signal,
+    })
+      .then((r) => {
+        if (!r.ok) {
+          // WR-01: a non-ok response (404 / 500 / transient) is a FAILURE, not a
+          // genuine "this strategy has no returns" empty. Do NOT settle([]) —
+          // that poisons `addedReturnsById[id]` with a permanent [] that blocks
+          // a retry on remove + re-add. Throw so the catch leaves the entry
+          // `undefined` (retryable).
+          throw new Error(`returns route responded ${r.status}`);
+        }
+        return r.json();
+      })
+      .then((d: { daily_returns?: unknown }) => {
+        // A 200 with a non-array body is a malformed/failed response, NOT a
+        // genuine empty series — treat it as a retryable failure (WR-01).
+        if (!Array.isArray(d?.daily_returns)) {
+          throw new Error("returns route body missing a daily_returns array");
+        }
+        // A genuine 200 with a real array (including an empty one) settles. An
+        // empty array here means the strategy legitimately has no published
+        // returns yet — distinct from a failure, so it is cached, not retried.
+        settle(d.daily_returns as DailyPoint[]);
+      })
+      .catch((err: unknown) => {
+        // An abort (remove / reset / unmount) is benign — the canceller already
+        // owns the cleanup. Just drop the (possibly stale) abort ref and return.
+        if (controller.signal.aborted) {
+          lazyAbortRef.current.delete(id);
+          return;
+        }
+        // WR-01: a real failure (network throw, non-ok, non-array body) leaves
+        // `addedReturnsById[id]` UNDEFINED so the add seam's
+        // `addedReturnsById[s.id] === undefined` guard re-fires the fetch on a
+        // subsequent remove + re-add. Honest degrade: no fabricated series, the
+        // strategy stays warm-up-gated out until a retry succeeds.
+        console.warn(
+          "[ScenarioComposer] /api/strategies/<id>/returns fetch failed",
+          { id, err },
+        );
+        clearInflight();
+      });
+  }, []);
+
+  // Cancel any in-flight lazy fetches on unmount (no setState after unmount).
+  useEffect(() => {
+    const inflight = lazyAbortRef.current;
+    return () => {
+      for (const c of inflight.values()) c.abort();
+      inflight.clear();
+    };
+  }, []);
+
+  // -------------------------------------------------------------------------
   // Phase 23 / PERSIST-02 — Save / Update / Save-as-new + codec-trichotomy Open.
   // -------------------------------------------------------------------------
 
@@ -524,8 +737,34 @@ export function ScenarioComposer({
     setOpenNotice(null);
     setNameInputOpen(false);
     setSaveError(null);
+    // UNIFY-02 — if a dirty-draft mode switch parked a pending segment, apply
+    // it now (on the SAME confirm that discards the draft). `reset()` re-inits
+    // the draft from `holdingsSummary`, which itself depends on `entryMode`, so
+    // flipping the mode here re-seeds against the newly-selected front door.
+    setPendingMode((pending) => {
+      if (pending !== null) setEntryMode(pending);
+      return null;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scenario.reset]);
+
+  // UNIFY-02 / Pitfall 5 — segment click. A clean draft switches immediately;
+  // a dirty draft (diffCount > 0) parks the target in `pendingMode` and opens
+  // the existing reset confirmation. We NEVER call `scenario.reset()` / re-seed
+  // directly here — the confirm path (`handleReset`) is the only mutator, so a
+  // mode switch can never silently wipe in-progress edits.
+  const handleEntryModeSelect = useCallback(
+    (mode: "book" | "blank") => {
+      if (mode === entryMode) return;
+      if (scenario.diffCount > 0) {
+        setPendingMode(mode);
+        setResetModalOpen(true);
+        return;
+      }
+      setEntryMode(mode);
+    },
+    [entryMode, scenario.diffCount],
+  );
 
   // Open a saved scenario. The row's persisted draft is decoded through the
   // SAME codec the hook uses on a localStorage read (M-0153: never a bare
@@ -542,14 +781,37 @@ export function ScenarioComposer({
       const defaultDraft = defaultDraftFromHoldings(
         holdingsSummary as Parameters<typeof defaultDraftFromHoldings>[0],
       );
-      const decoded = scenarioDraftCodec(defaultDraft).decode(
-        JSON.stringify(row.draft),
-      );
+      // WR-04 (Phase 29 review): `row.draft` is `unknown`. The stringify→parse
+      // roundtrip re-serializes data that was already a parsed object; a value
+      // containing a BigInt throws a TypeError, and `JSON.stringify(undefined)`
+      // returns the JS value `undefined` (not a string). The pre-fix code let
+      // the TypeError escape and fed `undefined` into the codec's `string|null`
+      // param (which treats null as "absent" → silently hydrates the DEFAULT
+      // draft — masking the failure). Guard the serialization and route any
+      // failure to the SAME honest "older format" reset notice (Rule 12: fail
+      // loud, never a silent empty/default composer).
+      let serializedDraft: string | undefined;
+      try {
+        serializedDraft = JSON.stringify(row.draft);
+      } catch (err) {
+        console.warn(
+          "[ScenarioComposer] saved portfolio draft could not be serialized (WR-04)",
+          err,
+        );
+        serializedDraft = undefined;
+      }
+      if (typeof serializedDraft !== "string") {
+        setOpenNotice(
+          "This saved portfolio uses an older format and can't be reopened.",
+        );
+        return;
+      }
+      const decoded = scenarioDraftCodec(defaultDraft).decode(serializedDraft);
 
       if (decoded.outcome === "reset") {
         // Older incompatible / corrupt format — honest notice, no hydrate.
         setOpenNotice(
-          "This saved scenario uses an older format and can't be reopened.",
+          "This saved portfolio uses an older format and can't be reopened.",
         );
         return;
       }
@@ -561,7 +823,7 @@ export function ScenarioComposer({
         setLoadedScenarioName(row.name);
         setLoadedReadonly(true);
         setOpenNotice(
-          "This scenario was saved by a newer version and is read-only here.",
+          "This portfolio was saved by a newer version and is read-only here.",
         );
         setNameInputOpen(false);
         return;
@@ -652,11 +914,11 @@ export function ScenarioComposer({
   function validateName(raw: string): string | null {
     const trimmed = raw.trim();
     if (trimmed.length < 1) {
-      setNameError("Enter a name to save this scenario.");
+      setNameError("Enter a name to save this portfolio.");
       return null;
     }
     if (trimmed.length > 120) {
-      setNameError("Scenario names are limited to 120 characters.");
+      setNameError("Portfolio names are limited to 120 characters.");
       return null;
     }
     setNameError(null);
@@ -676,7 +938,7 @@ export function ScenarioComposer({
       });
       if (!res.ok) {
         setSaveError(
-          "Couldn't save this scenario. Check your connection and try again.",
+          "Couldn't save this portfolio. Check your connection and try again.",
         );
         return;
       }
@@ -693,7 +955,7 @@ export function ScenarioComposer({
       onScenarioSaved?.();
     } catch {
       setSaveError(
-        "Couldn't save this scenario. Check your connection and try again.",
+        "Couldn't save this portfolio. Check your connection and try again.",
       );
     } finally {
       setSavePending(false);
@@ -720,7 +982,7 @@ export function ScenarioComposer({
       );
       if (!res.ok) {
         setSaveError(
-          "Couldn't save this scenario. Check your connection and try again.",
+          "Couldn't save this portfolio. Check your connection and try again.",
         );
       } else {
         // PERSIST-03 — let a host's saved-scenarios list refetch (name/order).
@@ -728,7 +990,7 @@ export function ScenarioComposer({
       }
     } catch {
       setSaveError(
-        "Couldn't save this scenario. Check your connection and try again.",
+        "Couldn't save this portfolio. Check your connection and try again.",
       );
     } finally {
       setSavePending(false);
@@ -747,9 +1009,15 @@ export function ScenarioComposer({
   // the empty → "added a strategy" transition (otherwise the second
   // render would call MORE hooks than the first, triggering React's
   // "Rendered more hooks than during the previous render" guard).
+  //
+  // UNIFY-02 — gate on the RAW book (`hasLiveBook`), NOT the mode-narrowed
+  // `holdingsSummary`. The empty-state card is the front door for a genuinely
+  // no-book allocator. A book allocator who toggles to "blank" mode with
+  // nothing added yet must STILL reach the main body (so the entry-mode control
+  // stays on-screen and they can toggle back) — otherwise blank mode would trap
+  // them in the empty-state card with no way back to "From my book".
   const isEmptyState =
-    holdingsSummary.length === 0 &&
-    scenario.draft.addedStrategies.length === 0;
+    !hasLiveBook && scenario.draft.addedStrategies.length === 0;
 
   // -------------------------------------------------------------------------
   // B4 — Build lookup maps from payload.strategies (NO pre-casting at the
@@ -780,13 +1048,78 @@ export function ScenarioComposer({
       for (const a of scenario.draft.addedStrategies) {
         const found = strategyById.get(a.id);
         const raw = found?.strategy.strategy_analytics?.daily_returns;
-        // Runtime defensiveness: only accept a DailyPoint[]-shaped array.
-        const arr = Array.isArray(raw) ? (raw as unknown as DailyPoint[]) : [];
-        map[a.id] = arr;
+        // UNIFY-04 — payload (book) wins when present; otherwise the lazily-
+        // fetched series fills the gap; otherwise [] (warm-up-gated out until a
+        // real series arrives — NEVER a fabricated flat series). WR-05: normalize
+        // the book series at this trust boundary via the canonical
+        // normalizeDailyReturns (shared with the lazy /api/strategies/[id]/returns
+        // route so the two boundaries can't drift) instead of a
+        // `raw as unknown as DailyPoint[]` cast that silently dropped the
+        // year-keyed shape to [].
+        const fromBook = normalizeBookReturns(raw);
+        map[a.id] = fromBook ?? addedReturnsById[a.id] ?? [];
       }
       return map;
     },
-    [scenario.draft.addedStrategies, strategyById],
+    [scenario.draft.addedStrategies, strategyById, addedReturnsById],
+  );
+
+  // UNIFY-04 — the display names of added strategies whose lazy returns fetch
+  // is still in flight, for the honest "loading returns…" affordance. Derived
+  // from the loading-id set ∩ the current added strategies (an id that was
+  // removed mid-flight drops out of the message).
+  const loadingReturnsAddedNames = useMemo(() => {
+    if (loadingReturnsIds.size === 0) return [] as string[];
+    return scenario.draft.addedStrategies
+      .filter((a) => loadingReturnsIds.has(a.id))
+      .map((a) => a.name);
+  }, [loadingReturnsIds, scenario.draft.addedStrategies]);
+
+  // UNIFY-04 — the single add seam for catalog adds (empty-state drawer,
+  // main-body drawer, Bridge). Appends to the draft via the hook mutator, THEN
+  // — when the id is not already in the book (its series isn't in
+  // payload.strategies) and hasn't been fetched yet — fires the lazy returns
+  // fetch so the projection moves once it resolves.
+  const handleAddStrategy = useCallback(
+    (s: AddedStrategy) => {
+      scenario.addStrategyBrowse(s);
+      if (!strategyById.has(s.id) && addedReturnsById[s.id] === undefined) {
+        fetchAddedReturns(s.id);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [strategyById, addedReturnsById, fetchAddedReturns, scenario.addStrategyBrowse],
+  );
+
+  // WR-02 — the single remove seam for added strategies. `scenario.removeAddedStrategy`
+  // only mutates the draft; it does NOT touch the lazy-fetch bookkeeping. Wiring the
+  // raw mutator into CompositionList's onRemoveAdded left three leaks: (1) an
+  // in-flight fetch for the removed id was never aborted (only unmount aborted), so
+  // the request ran to completion and wrote into state for a strategy no longer in
+  // the draft; (2) `addedReturnsById` accumulated entries for removed ids across a
+  // multi-add session; (3) a stale entry fed WR-01's poisoning on re-add. This
+  // wrapper aborts the controller and purges all three structures for the id so a
+  // subsequent re-add starts clean (and re-fetches via the add seam's
+  // `addedReturnsById[s.id] === undefined` guard).
+  const handleRemoveAdded = useCallback(
+    (id: string) => {
+      scenario.removeAddedStrategy(id);
+      lazyAbortRef.current.get(id)?.abort();
+      lazyAbortRef.current.delete(id);
+      setLoadingReturnsIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      setAddedReturnsById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _drop, ...rest } = prev;
+        return rest;
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scenario.removeAddedStrategy],
   );
 
   const addedStrategyMetadataLookup = useMemo<
@@ -939,6 +1272,22 @@ export function ScenarioComposer({
   const scenarioMetrics = useMemo(
     () => computeScenario(deAliased.strategies, deAliased.state, dateMapCache),
     [deAliased, dateMapCache],
+  );
+
+  // GRAPH-02 / GRAPH-03 — derive every blend-graph series from the SAME
+  // unrounded `portfolio_daily_returns` the benchmark / stress / MC sections
+  // read (never the rounded/downsampled `equity_curve`). `buildBlendPanels` is
+  // the single pure-TS adapter (Plan 30-01); the host stays props-only. Both
+  // memos key on the ENGINE output reference (`scenarioMetrics.portfolio_daily_returns`)
+  // — NOT a `?? []` expression that allocates a fresh array each render and would
+  // defeat the memoization (react-hooks/exhaustive-deps).
+  const portfolioDaily = useMemo(
+    () => scenarioMetrics.portfolio_daily_returns ?? [],
+    [scenarioMetrics.portfolio_daily_returns],
+  );
+  const blendPanels = useMemo(
+    () => buildBlendPanels(portfolioDaily, rollingWindow),
+    [portfolioDaily, rollingWindow],
   );
 
   // CORR-01 — de-aliased axis labels for the CorrelationHeatmap, built like the
@@ -1244,12 +1593,12 @@ export function ScenarioComposer({
             className="mb-2 text-2xl text-text-primary"
             style={{ fontFamily: "var(--font-serif)" }}
           >
-            Scenario builder needs holdings
+            Start a portfolio
           </h2>
           <p className="mx-auto max-w-md text-sm text-text-secondary">
             Connect a read-only exchange API key to project portfolio scenarios
-            — or browse strategies to start a hypothetical scenario from
-            scratch.
+            from your live book — or start from a blank slate and browse
+            strategies to compose one.
           </p>
           <div className="mt-6 flex items-center justify-center gap-3">
             <Link
@@ -1277,7 +1626,7 @@ export function ScenarioComposer({
           isOpen={browseOpen}
           onClose={() => setBrowseOpen(false)}
           onAdd={(s) =>
-            scenario.addStrategyBrowse({
+            handleAddStrategy({
               id: s.id as AddedStrategy["id"],
               name: s.name,
               markets: s.markets,
@@ -1302,13 +1651,69 @@ export function ScenarioComposer({
           filled <Badge> primitive. A projection is a hypothetical, not your
           live book — the badge says so unconditionally. */}
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-2xl font-semibold text-text-primary">Scenario</h2>
+        <h2 className="text-2xl font-semibold text-text-primary">Portfolio</h2>
         <span
           data-testid="scenario-projected-badge"
           className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-[10px] uppercase tracking-wide font-semibold text-text-muted"
         >
           PROJECTED — hypothetical, not your live book
         </span>
+
+        {/* UNIFY-01/02 — entry-mode segmented control (29-UI-SPEC §1). Two
+            segments: "From my book" (seed from live holdings) / "Blank slate"
+            (empty working composition). Active = border-accent text-accent (NO
+            accent FILL — accent = action/verified; a mode toggle is neither;
+            mirrors the drawer FilterPill recipe). Inactive = neutral. A
+            radiogroup with arrow-key navigation + a visible accent focus ring.
+            "From my book" is offered only when a live book exists (a no-book
+            allocator gets Blank-slate-only — never a dead default). A
+            dirty-draft switch routes through the reset confirmation
+            (handleEntryModeSelect), never a silent wipe. */}
+        <div
+          role="radiogroup"
+          aria-label="Composition entry mode"
+          data-testid="scenario-entry-mode"
+          className="inline-flex items-center gap-1 rounded-md border border-border p-0.5"
+          onKeyDown={(e) => {
+            if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+            if (!hasLiveBook) return; // only one option — nothing to arrow to
+            e.preventDefault();
+            handleEntryModeSelect(entryMode === "book" ? "blank" : "book");
+          }}
+        >
+          {hasLiveBook && (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={entryMode === "book"}
+              tabIndex={entryMode === "book" ? 0 : -1}
+              data-testid="scenario-entry-mode-book"
+              onClick={() => handleEntryModeSelect("book")}
+              className={`rounded-sm px-3 py-1 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
+                entryMode === "book"
+                  ? "border border-accent text-accent"
+                  : "border border-transparent text-text-secondary"
+              }`}
+            >
+              From my book
+            </button>
+          )}
+          <button
+            type="button"
+            role="radio"
+            aria-checked={entryMode === "blank"}
+            tabIndex={entryMode === "blank" || !hasLiveBook ? 0 : -1}
+            data-testid="scenario-entry-mode-blank"
+            onClick={() => handleEntryModeSelect("blank")}
+            className={`rounded-sm px-3 py-1 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
+              entryMode === "blank"
+                ? "border border-accent text-accent"
+                : "border border-transparent text-text-secondary"
+            }`}
+          >
+            Blank slate
+          </button>
+        </div>
 
         {/* Phase 23 / PERSIST-02 — Save / Update / Save-as-new toolbar. Lives
             in this same header row per UI-SPEC §Component Inventory 1. Inline
@@ -1331,7 +1736,7 @@ export function ScenarioComposer({
                 setNameInputOpen(true);
               }}
             >
-              Save scenario
+              Save portfolio
             </Button>
           ) : (
             <>
@@ -1345,7 +1750,7 @@ export function ScenarioComposer({
                     void putUpdateScenario();
                   }}
                 >
-                  Update scenario
+                  Update portfolio
                 </Button>
               )}
               <Button
@@ -1358,7 +1763,7 @@ export function ScenarioComposer({
                   setNameInputOpen(true);
                 }}
               >
-                Save as new scenario
+                Save as new portfolio
               </Button>
             </>
           )}
@@ -1371,8 +1776,8 @@ export function ScenarioComposer({
             type="text"
             value={nameValue}
             onChange={(e) => setNameValue(e.target.value)}
-            placeholder="Name this scenario"
-            aria-label="Name this scenario"
+            placeholder="Name this portfolio"
+            aria-label="Name this portfolio"
             className="min-w-[220px] rounded-md border border-border px-3 py-2 text-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/50"
           />
           <Button
@@ -1665,6 +2070,126 @@ export function ScenarioComposer({
         />
       </Card>
 
+      {/* GRAPH-02 — Returns distribution of the BLEND. Histogram (fed the
+          CUMULATIVE-wealth series the adapter builds — ReturnHistogram derives
+          daily internally) + 5-number quantile box, both off the same
+          `portfolio_daily_returns` the sections above read. Owns its own
+          method/overlap-N/horizon disclosure (the page PROJECTED badge is NOT
+          sufficient — GRAPH-04); below the 10-point floor the body swaps to a
+          neutral role="status" PartialDataBanner (never role="alert" — absence
+          on a derived-client panel is honest-neutral, not an error). LEAF charts
+          only — no per-strategy panel wrapper, no factsheet body / metrics
+          column / allocator-portfolio payload builder / percentile-rank badge,
+          no api-ingest literal (LOCKED honesty invariant — a what-if has no
+          verified track record to peer-rank). */}
+      <Card className="mt-6" data-panel="blend-returns-distribution" aria-label="Returns distribution">
+        <div className="mb-3">
+          <h2 className="text-base font-semibold text-text-primary">
+            Returns distribution
+          </h2>
+        </div>
+        {blendPanels.histogramSeries.length === 0 ? (
+          // WR-02 — gate on the ADAPTER's actual degenerate verdict, not a
+          // re-derived `portfolioDaily.length < 10`. The adapter collapses every
+          // series on a STRICTER condition (`hasNonFinite || length < MIN_USABLE
+          // || length < window`), so a ≥10-length series carrying a non-finite
+          // point (realistic at the 10x leverage ceiling) yields an empty
+          // histogramSeries. Keying the empty branch off that signal keeps the
+          // two predicates from ever diverging into a headed-but-empty panel.
+          <PartialDataBanner
+            heading="Awaiting more data"
+            body="This portfolio needs at least 10 overlapping daily returns to chart its distribution."
+          />
+        ) : (
+          <div className="space-y-6">
+            <div>
+              <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
+                Return histogram
+              </h3>
+              <ReturnHistogram returns={blendPanels.histogramSeries} bins={20} />
+            </div>
+            <div>
+              <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
+                Return quantiles
+              </h3>
+              <ReturnQuantiles data={blendPanels.quantiles} />
+            </div>
+            <p className="text-xs text-text-muted">
+              Distribution of {scenarioMetrics.n} overlapping daily returns ·
+              historical realized · not a forecast.
+            </p>
+          </div>
+        )}
+      </Card>
+
+      {/* GRAPH-03 — Rolling metrics of the BLEND. SegmentedControl (3M/6M/12M →
+          63/126/252-day windows, default 6M=126; an option is disabled when the
+          usable history is shorter than its window) + rolling Sharpe (keyed
+          sharpe_365d so RollingMetrics resolves the CHART_ACCENT stroke; we pass
+          daysOfHistory={usableN} so the avg reference line self-suppresses below
+          365 days rather than disabling the whole chart) + rolling volatility +
+          rolling Sortino, all from the same adapter. Owns its own
+          window/method/horizon disclosure (GRAPH-04); below the selected window's
+          floor the body swaps to the neutral role="status" PartialDataBanner —
+          never role="alert". */}
+      <Card className="mt-6" data-panel="blend-rolling" aria-label="Rolling metrics">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-base font-semibold text-text-primary">
+            Rolling metrics
+          </h2>
+          <SegmentedControl
+            ariaLabel="Rolling window"
+            activeId={String(rollingWindow)}
+            onChange={(id) => setRollingWindow(Number(id))}
+            options={Object.keys(WINDOW_LABEL).map((w) => ({
+              id: w,
+              label: WINDOW_LABEL[Number(w)],
+              disabled: blendPanels.usableN < Number(w),
+            }))}
+          />
+        </div>
+        {blendPanels.usableN < rollingWindow ? (
+          <PartialDataBanner
+            heading="Awaiting more data"
+            body={`This portfolio needs at least ${rollingWindow} overlapping daily returns for the ${WINDOW_LABEL[rollingWindow] ?? `${rollingWindow}-day`} rolling window.`}
+          />
+        ) : (
+          <div className="space-y-6">
+            <div>
+              <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
+                Rolling Sharpe
+              </h3>
+              <RollingMetrics
+                data={blendPanels.rollingSharpe}
+                daysOfHistory={blendPanels.usableN}
+                // WR-01 — the series is keyed `sharpe_365d` ONLY so RollingMetrics
+                // resolves the CHART_ACCENT stroke; that key's default LABELS text
+                // ("365d") would lie about the selected window. Override the visible
+                // legend/tooltip label with the true window count (matches the
+                // "{rollingWindow}-day rolling window" disclosure below).
+                seriesLabels={{ sharpe_365d: `${rollingWindow}d` }}
+              />
+            </div>
+            <div>
+              <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
+                Rolling volatility
+              </h3>
+              <RollingVolatilityChart data={blendPanels.rollingVol} />
+            </div>
+            <div>
+              <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
+                Rolling Sortino
+              </h3>
+              <RollingSortinoChart data={blendPanels.rollingSortino} />
+            </div>
+            <p className="text-xs text-text-muted">
+              {rollingWindow}-day rolling window · 252-day annualized ·{" "}
+              {scenarioMetrics.n} overlapping days · not a forecast.
+            </p>
+          </div>
+        )}
+      </Card>
+
       {flaggedHoldings.length > 0 && (
         <div className="mt-8 rounded-lg border border-border bg-surface p-4">
           <div className="text-base font-semibold text-text-primary">
@@ -1700,6 +2225,23 @@ export function ScenarioComposer({
         </div>
       )}
 
+      {/* UNIFY-04 — honest in-flight affordance. While an added strategy's
+          daily_returns are still being fetched it contributes [] (warm-up-gated
+          out of the projection) — we say so plainly rather than render a
+          fabricated flat curve (Pitfall 4). role="status" + aria-live polite:
+          a non-blocking transition, never a red alert. */}
+      {loadingReturnsAddedNames.length > 0 && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="scenario-loading-returns"
+          className="mt-4 rounded-md border border-border bg-surface-subtle px-3 py-2 text-xs text-text-muted"
+        >
+          Loading returns… {loadingReturnsAddedNames.join(", ")} not yet in the
+          projection.
+        </div>
+      )}
+
       <CompositionList
         draft={scenario.draft}
         holdingsSummary={holdingsSummary}
@@ -1709,7 +2251,7 @@ export function ScenarioComposer({
         onSetWeight={handleWeightChange}
         leverageByRef={leverageByRef}
         onSetLeverage={handleLeverageChange}
-        onRemoveAdded={scenario.removeAddedStrategy}
+        onRemoveAdded={handleRemoveAdded}
         onCompare={(scopeRef, candidateId) =>
           router.push(
             `/compare?ids=${encodeURIComponent(scopeRef)},${candidateId}`,
@@ -1760,7 +2302,7 @@ export function ScenarioComposer({
         isOpen={browseOpen}
         onClose={() => setBrowseOpen(false)}
         onAdd={(s) =>
-          scenario.addStrategyBrowse({
+          handleAddStrategy({
             id: s.id as AddedStrategy["id"],
             name: s.name,
             markets: s.markets,
@@ -1775,12 +2317,18 @@ export function ScenarioComposer({
         flaggedHoldings={flaggedHoldings}
         matchDecisionsByHoldingRef={matchDecisionsByHoldingRef}
         onAddToScenario={(holdingScopeRef, candidate) => {
+          const id = candidate.id as AddedStrategy["id"];
           scenario.addStrategyBridge(holdingScopeRef, {
-            id: candidate.id as AddedStrategy["id"],
+            id,
             name: candidate.name,
             markets: candidate.markets,
             strategy_types: candidate.strategy_types,
           });
+          // UNIFY-04 — a Bridge candidate is also a catalog strategy not in the
+          // book; lazy-fetch its series so the projection moves on add.
+          if (!strategyById.has(id) && addedReturnsById[id] === undefined) {
+            fetchAddedReturns(id);
+          }
         }}
       />
 
@@ -1790,7 +2338,12 @@ export function ScenarioComposer({
             handleReset();
             setResetModalOpen(false);
           }}
-          onCancel={() => setResetModalOpen(false)}
+          onCancel={() => {
+            // UNIFY-02 — cancelling the confirmation abandons any parked mode
+            // switch so a later footer-Reset never silently flips the mode.
+            setPendingMode(null);
+            setResetModalOpen(false);
+          }}
         />
       )}
 

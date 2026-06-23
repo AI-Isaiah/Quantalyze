@@ -14,7 +14,10 @@ import { fireEvent, render, screen, act } from "@testing-library/react";
  *   - Add button onAdd(strategy) callback assertion
  *   - "Added ✓" transient state then permanent dim
  *   - Drawer stays open on add (multi-add session — no onClose call)
- *   - Empty states: zero verified strategies / zero filtered matches
+ *   - Empty states: zero strategies / zero filtered matches
+ *   - Phase 29 (UNIFY-03 UI): the "Example" provenance tag renders only for
+ *     is_example rows (neutral-outline recipe, never accent); the drawer title
+ *     drops "verified" now that the catalog is merged.
  */
 
 import {
@@ -117,7 +120,7 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
     expect(screen.getByTestId("browse-drawer-backdrop")).toBeInTheDocument();
     const panel = screen.getByRole("dialog");
     expect(panel).toHaveAttribute("aria-modal", "true");
-    expect(panel).toHaveAttribute("aria-label", "Browse verified strategies");
+    expect(panel).toHaveAttribute("aria-label", "Browse strategies");
   });
 
   it("T3 — fetch is called once with /api/strategies/browse (default fetcher)", async () => {
@@ -288,11 +291,11 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("T13 — fetch resolves with [] → 'No verified strategies are live yet.' visible", async () => {
+  it("T13 — fetch resolves with [] → 'No strategies are live yet.' visible", async () => {
     renderDrawer({ fetchStrategies: async () => [] });
     await flush();
     expect(
-      screen.getByText("No verified strategies are live yet."),
+      screen.getByText("No strategies are live yet."),
     ).toBeInTheDocument();
   });
 
@@ -312,6 +315,54 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
     fireEvent.click(clearBtn);
     expect(screen.queryByText("No strategies match your filters.")).not.toBeInTheDocument();
     expect(screen.getByText("Momentum Alpha")).toBeInTheDocument();
+  });
+
+  it("T16 (UNIFY-03 UI) — the 'Example' tag renders ONLY for is_example rows, and uses the neutral-outline recipe (never accent)", async () => {
+    // Merged catalog: one example-universe row + one verified row. Plan 02
+    // emits is_example on the browse response; the drawer gates the provenance
+    // tag on it. Non-vacuous: the example row carries the tag, the verified row
+    // does NOT, and the tag is the neutral-outline pill — never accent (accent
+    // = verified/action; an example strategy is provenance metadata).
+    const mergedRows: StrategyBrowseRow[] = [
+      {
+        id: "s-example-1",
+        name: "Example Universe Strat",
+        codename: "EX-1",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+        is_example: true,
+      },
+      {
+        id: "s-verified-1",
+        name: "Verified Strat",
+        codename: "VER-1",
+        markets: ["okx"],
+        strategy_types: ["momentum"],
+        is_example: false,
+      },
+    ];
+    renderDrawer({ fetchStrategies: async () => mergedRows });
+    await flush();
+
+    // Both rows render in one interleaved list.
+    expect(screen.getByText("Example Universe Strat")).toBeInTheDocument();
+    expect(screen.getByText("Verified Strat")).toBeInTheDocument();
+
+    // The example row carries the "Example" provenance tag; the verified row
+    // does not (discriminating — gates on is_example, not on every row).
+    const exampleTag = screen.getByTestId("browse-example-tag-s-example-1");
+    expect(exampleTag).toHaveTextContent("Example");
+    expect(
+      screen.queryByTestId("browse-example-tag-s-verified-1"),
+    ).not.toBeInTheDocument();
+
+    // LOCKED honesty token: the tag is the neutral-outline pill (muted border +
+    // muted text), NOT accent and NOT a filled Badge. A regression that swapped
+    // to bg-accent / a filled status badge fails here.
+    expect(exampleTag.className).toContain("border-text-muted");
+    expect(exampleTag.className).toContain("text-text-muted");
+    expect(exampleTag.className).not.toContain("bg-accent");
+    expect(exampleTag.className).not.toContain("text-accent");
   });
 
   it("H-0115 — extra sensitive fields on a row (disclosure_tier / backtest_returns) are NOT rendered", async () => {
@@ -420,11 +471,11 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
     await flush();
 
     // The distinct error state must render — NOT the loading spinner and NOT
-    // the misleading "No verified strategies are live yet." empty state.
+    // the misleading "No strategies are live yet." empty state.
     expect(screen.getByRole("alert")).toBeInTheDocument();
     expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
     expect(
-      screen.queryByText("No verified strategies are live yet."),
+      screen.queryByText("No strategies are live yet."),
     ).not.toBeInTheDocument();
     // The swallowed failure is now observable.
     expect(consoleErr).toHaveBeenCalledWith(

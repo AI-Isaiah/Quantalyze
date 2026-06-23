@@ -14,6 +14,12 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import {
+  CHART_BORDER,
+  CHART_NEGATIVE,
+  CHART_TICK_STYLE,
+  CHART_TOOLTIP_STYLE,
+} from "@/components/charts/chart-tokens";
 
 /**
  * Phase 07 / 07-03 / VOICES-ACCEPTED f7 — parallel-prop extension to
@@ -152,7 +158,7 @@ export default function DrawdownChart({
   // Area. Without scenarioDailyPoints, the existing red drawdown rendering
   // is preserved verbatim — Phase 09.1 / Performance-tab visual contract
   // intact.
-  const liveStroke = hasScenario ? "var(--color-chart-benchmark)" : "#DC2626";
+  const liveStroke = hasScenario ? "var(--color-chart-benchmark)" : CHART_NEGATIVE;
   const liveFillId = hasScenario ? "dd-fill-live-slate" : "dd-fill";
   const scenarioStroke = "var(--color-chart-strategy)";
 
@@ -210,8 +216,8 @@ export default function DrawdownChart({
           <AreaChart accessibilityLayer={false} data={chartData} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
             <defs>
               <linearGradient id="dd-fill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#DC2626" stopOpacity={0.3} />
-                <stop offset="100%" stopColor="#DC2626" stopOpacity={0.02} />
+                <stop offset="0%" stopColor={CHART_NEGATIVE} stopOpacity={0.3} />
+                <stop offset="100%" stopColor={CHART_NEGATIVE} stopOpacity={0.02} />
               </linearGradient>
               <linearGradient id="dd-fill-live-slate" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor="var(--color-chart-benchmark)" stopOpacity={0.18} />
@@ -224,14 +230,14 @@ export default function DrawdownChart({
             </defs>
             <XAxis
               dataKey="date"
-              tick={{ fontSize: 11, fill: "#64748B" }}
+              tick={CHART_TICK_STYLE}
               tickLine={false}
-              axisLine={{ stroke: "#E2E8F0" }}
+              axisLine={{ stroke: CHART_BORDER }}
               tickFormatter={(d: string) => d.slice(5)}
               interval="preserveStartEnd"
             />
             <YAxis
-              tick={{ fontSize: 11, fill: "#64748B", fontFamily: "var(--font-geist-mono), monospace" }}
+              tick={CHART_TICK_STYLE}
               tickLine={false}
               axisLine={false}
               tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
@@ -239,7 +245,7 @@ export default function DrawdownChart({
             />
             <Tooltip
               formatter={(v) => [`${(Number(v) * 100).toFixed(2)}%`, "Drawdown"]}
-              contentStyle={{ fontSize: 12, borderColor: "#E2E8F0" }}
+              contentStyle={CHART_TOOLTIP_STYLE}
             />
             {visibilityMode !== "scenario" && liveDrawdownData.length > 0 && (
               <Area

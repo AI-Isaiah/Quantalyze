@@ -51,6 +51,16 @@ export interface BrowseStrategyRow {
   codename: string | null;
   markets: string[];
   strategy_types: string[];
+  /**
+   * Phase 29 / UNIFY-03 — provenance tag for the unified Browse drawer. `true`
+   * marks an example-universe row (`is_example=true AND status='published'`)
+   * so the drawer can render the neutral-outline "Example" pill. This is a
+   * co-fetched flag, NOT a published-bypass: example rows are just published
+   * rows that ALSO carry the flag — they still flow through `withPublishedOnly`
+   * (RLS + defence-in-depth) and `displayStrategyName` (pseudonymity) like any
+   * verified row. Verified rows carry `false`.
+   */
+  is_example: boolean;
 }
 
 /**
@@ -109,7 +119,15 @@ export const GET = withAllocatorAuth(
     const { data, error } = await withPublishedOnly(
       supabase
         .from("strategies")
-        .select("id, name, codename, disclosure_tier, markets, strategy_types"),
+        .select(
+          // Phase 29 / UNIFY-03 — co-fetch `is_example` so the response can
+          // TAG example-universe rows in the unified Browse drawer. This is
+          // NOT a `.or(is_example.eq.true)` that would bypass the published
+          // predicate: example rows are published rows that ALSO carry the
+          // flag, so `withPublishedOnly` + RLS still gate the SET, and the
+          // flag is only read to drive the client-side "Example" pill.
+          "id, name, codename, disclosure_tier, markets, strategy_types, is_example",
+        ),
     )
       .order("name", { ascending: true })
       // M-0343 (audit-2026-05-07 F5b): fetch one row past the cap so the
@@ -162,8 +180,13 @@ export const GET = withAllocatorAuth(
         disclosure_tier: DisclosureTier | null;
         markets: unknown;
         strategy_types: unknown;
+        is_example: unknown;
       };
       const tier: DisclosureTier = r.disclosure_tier ?? "exploratory";
+      // Phase 29 / UNIFY-03 — `displayStrategyName` runs on example rows too:
+      // the provenance tag must NOT reintroduce a raw-name leak. An example
+      // row whose tier is exploratory still surfaces its codename / synthetic
+      // label, never `strategies.name` (T12-class pseudonymity contract).
       const safeLabel = displayStrategyName({
         id: r.id,
         name: r.name,
@@ -178,6 +201,10 @@ export const GET = withAllocatorAuth(
         strategy_types: Array.isArray(r.strategy_types)
           ? (r.strategy_types as string[])
           : [],
+        // H-0300 fence: explicit named key (NOT a `...row` spread). Coerce to a
+        // strict boolean so a NULL/undefined source column never widens the
+        // wire shape beyond `boolean`.
+        is_example: r.is_example === true,
       };
     });
 

@@ -196,6 +196,14 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
+          # fetch-depth: 0 — the phase-29/30 frozen-spine guards
+          # (src/__tests__/phase-{29,30}-frozen-spine-guards.test.ts) resolve
+          # their diff baseline via `git merge-base origin/main HEAD` or a
+          # fallback branch-point sha. A shallow (depth-1) clone has neither, so
+          # the fail-loud guard (CLAUDE.md Rule 12) throws at module load and
+          # crashes the whole shard. Full history makes the baseline resolvable
+          # (same pattern as the analytics-deploy-verify checkout below).
+          fetch-depth: 0
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
           # this job pushes back to the repo; the cred is pure attack
@@ -267,6 +275,12 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
+          # fetch-depth: 0 — this job runs the full suite, including the
+          # phase-29/30 frozen-spine guards, which resolve a diff baseline from
+          # git history; a shallow clone makes the fail-loud guard throw at
+          # module load. Full history makes the baseline resolvable (matches the
+          # frontend-test shards above).
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:

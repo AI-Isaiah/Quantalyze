@@ -46,6 +46,13 @@ export interface StrategyBrowseRow {
   codename: string | null;
   markets: string[];
   strategy_types: string[];
+  /**
+   * Phase 29 (UNIFY-03 UI) — true for example-universe rows in the merged
+   * catalog (`is_example = true AND status = 'published'`). Plan 02 emits this
+   * from GET /api/strategies/browse; it gates the neutral-outline "Example"
+   * provenance tag rendered next to the row name. Optional + absent → no tag.
+   */
+  is_example?: boolean;
 }
 
 /**
@@ -370,7 +377,7 @@ export function StrategyBrowseDrawer({
       <div
         ref={drawerRef}
         role="dialog"
-        aria-label="Browse verified strategies"
+        aria-label="Browse strategies"
         aria-modal="true"
         style={{
           position: "fixed",
@@ -389,7 +396,7 @@ export function StrategyBrowseDrawer({
       >
         <div className="flex items-center justify-between">
           <div className="text-lg font-semibold text-text-primary">
-            Browse verified strategies
+            Browse strategies
           </div>
           <button
             type="button"
@@ -449,7 +456,7 @@ export function StrategyBrowseDrawer({
           )}
           {!loading && !error && strategies.length === 0 && (
             <div className="py-12 text-center text-sm text-text-muted">
-              No verified strategies are live yet.
+              No strategies are live yet.
               <div className="mt-1 text-xs">
                 Check back as strategy authors complete verification.
               </div>
@@ -483,8 +490,24 @@ export function StrategyBrowseDrawer({
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className="text-sm font-medium text-text-primary">
-                        {s.name}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-medium text-text-primary">
+                          {s.name}
+                        </span>
+                        {/* Phase 29 (UNIFY-03 UI) — example-universe provenance
+                            tag. Neutral-outline pill recipe copied VERBATIM from
+                            ScenarioBuilder.tsx:288 (same family as the PROJECTED
+                            honesty pill). NEVER accent and NEVER a filled
+                            <Badge>: accent = verified/action; an example
+                            strategy is provenance metadata, not a status. */}
+                        {s.is_example === true && (
+                          <span
+                            data-testid={`browse-example-tag-${s.id}`}
+                            className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-[10px] uppercase tracking-wide font-semibold text-text-muted"
+                          >
+                            Example
+                          </span>
+                        )}
                       </div>
                       <div className="mt-1 text-xs text-text-muted">
                         {s.codename ?? ""}
