@@ -765,6 +765,140 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // T_C_LAZY1 — UNIFY-04 (TDD): adding a catalog strategy NOT in the book
+  //   lazy-fetches /api/strategies/<id>/returns; once resolved, the series
+  //   passed to buildStrategyForBuilderSet's returns-lookup (arg index 4)
+  //   carries the non-empty daily_returns for the added id, so the projection
+  //   recomputes through the frozen engine. NON-VACUOUS: BEFORE the fetch
+  //   resolves the lookup is [] (warm-up-gated — no fabricated series); a
+  //   rejected fetch leaves it [] and degrades honestly.
+  // -------------------------------------------------------------------------
+  const LAZY_ID = "aaaaaaaa-1111-2222-3333-444444444444";
+  const LAZY_SERIES = [
+    { date: "2026-02-01", value: 0.01 },
+    { date: "2026-02-02", value: -0.005 },
+    { date: "2026-02-03", value: 0.02 },
+  ];
+
+  /** Latest returns-lookup (4th positional arg) the adapter was called with. */
+  function latestReturnsLookup(): Record<string, unknown[]> {
+    const calls = vi.mocked(buildStrategyForBuilderSet).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[calls.length - 1][4] as Record<string, unknown[]>;
+  }
+
+  it("T_C_LAZY1 add a catalog strategy → lazy GET /api/strategies/<id>/returns; once resolved the adapter's returns-lookup carries the non-empty series (and was [] before resolve)", async () => {
+    // A deferred fetch so we can observe the in-flight [] state, then resolve.
+    let resolveReturns: (v: unknown) => void = () => {};
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        return new Promise((resolve) => {
+          resolveReturns = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({ daily_returns: LAZY_SERIES }),
+            });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Add a catalog strategy that is NOT in the book (payload.strategies is []).
+    addStrategy({
+      id: LAZY_ID,
+      name: "Lazy Catalog Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // The lazy fetch fired for this id.
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some((c) =>
+          String(c[0]).includes(`/api/strategies/${LAZY_ID}/returns`),
+        ),
+      ).toBe(true);
+    });
+
+    // BEFORE resolve — the lookup for the added id is [] (warm-up-gated, NOT a
+    // fabricated flat series). This is the non-vacuous half of the assertion.
+    expect(latestReturnsLookup()[LAZY_ID]).toEqual([]);
+
+    // Resolve the lazy fetch.
+    await act(async () => {
+      resolveReturns(undefined);
+      await Promise.resolve();
+    });
+
+    // AFTER resolve — the lookup now carries the real series for the added id,
+    // so the adapter (and the frozen engine downstream) sees a non-empty series.
+    await waitFor(() => {
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual(LAZY_SERIES);
+    });
+  });
+
+  it("T_C_LAZY2 a rejected lazy fetch leaves the added strategy's lookup [] and degrades honestly (no fabricated series, no crash)", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        return Promise.reject(new Error("network down"));
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    addStrategy({
+      id: LAZY_ID,
+      name: "Doomed Catalog Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some((c) =>
+          String(c[0]).includes(`/api/strategies/${LAZY_ID}/returns`),
+        ),
+      ).toBe(true);
+    });
+
+    // The failed fetch settles; the lookup stays [] (honest degrade — the
+    // strategy is added but contributes nothing until a real series exists).
+    await waitFor(() => {
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual([]);
+    });
+    // The component did not crash — the composition list still shows the row.
+    expect(screen.getAllByText(/Doomed Catalog Strat/i).length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  // -------------------------------------------------------------------------
   // T_C11 — Footer Commit disabled when diff_count = 0
   // -------------------------------------------------------------------------
   it("T_C11 Sticky footer Commit disabled when diff_count=0; enabled after adding one strategy", () => {
