@@ -1291,12 +1291,9 @@ export function ScenarioComposer({
     [portfolioDaily, rollingWindow],
   );
 
-  // CORR-01 — de-aliased axis labels for the CorrelationHeatmap, built like the
-  // `strategyNames` memo in ScenarioBuilder.tsx (the mount analog), BUT keyed on
-  // the de-aliased set (the sandbox keys on its raw marketplace `strategies`,
-  // which it never de-aliases). Keyed on the SAME de-aliased set computeScenario
-  // consumes, so the heatmap labels always match the matrix the engine produced
-  // (no stale alias surviving the collapse).
+  // CORR-01 — de-aliased axis labels for the CorrelationHeatmap. Keyed on the
+  // SAME de-aliased set computeScenario consumes, so the heatmap labels always
+  // match the matrix the engine produced (no stale alias surviving the collapse).
   const strategyNames = useMemo(() => {
     const out: Record<string, string> = {};
     for (const s of deAliased.strategies) out[s.id] = s.name;
@@ -2041,8 +2038,7 @@ export function ScenarioComposer({
       </Card>
 
       {/* CORR-01 / CORR-03 — pairwise correlation heatmap on the own-book
-          scenario surface. Mirrors the ScenarioBuilder "Pairwise correlation"
-          card. The matrix + single-sourced Avg |ρ| come straight from
+          scenario surface. The matrix + single-sourced Avg |ρ| come straight from
           scenarioMetrics (the same value KpiStrip reads), and the axis labels
           are the de-aliased strategy names — the heatmap never computes its own
           average and the <2-strategy / <10-day cases delegate to its honest
@@ -2257,7 +2253,7 @@ export function ScenarioComposer({
       <CollapsibleSection
         id="composer-composition-controls"
         title="Strategies & weights"
-        defaultOpen={true}
+        defaultOpen
         storageKey="composer-collapse:controls"
       >
         <CompositionList
@@ -2446,10 +2442,12 @@ function CompositionList({
   }, [holdingsSummary]);
 
   return (
-    <div className="mt-8 rounded-lg border border-border bg-surface p-4">
-      <div className="mb-3 text-base font-semibold text-text-primary">
-        Composition
-      </div>
+    <div className="rounded-lg border border-border bg-surface p-4">
+      {/* No inner "Composition" heading: the enclosing CollapsibleSection summary
+          ("Strategies & weights") is the single section label — a second synonym
+          here double-labels the same content. No top margin on the card either:
+          the list is the sole child inside the collapsible's <details> body, so
+          spacing comes from the summary's border + mb-4, not a sibling-era mt-8. */}
       <ul className="grid gap-2">
         {/* Read-only-tokens model: live holdings are FIXED context. They render
             read-only (symbol · venue · USD value) with no toggle / weight /

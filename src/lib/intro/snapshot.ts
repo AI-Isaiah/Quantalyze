@@ -46,8 +46,8 @@ export type PortfolioSnapshotStrategy = z.infer<typeof STRATEGY_REF>;
 /**
  * Compute the snapshot for the given user's primary portfolio. The
  * "primary" portfolio is the most-recently-created REAL (`is_test=false`)
- * portfolio — scenario / what-if portfolios saved by the allocator on
- * /scenarios are excluded so the manager receiving the intro never
+ * portfolio — scenario / what-if portfolios saved by the allocator
+ * (is_test=true) are excluded so the manager receiving the intro never
  * reads a hypothetical book.
  *
  * Returns a Zod-validated object; throws if the shape is unexpectedly

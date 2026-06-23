@@ -70,6 +70,11 @@ import { CHART_CONFIGS } from "./chart-configs";
  * numeric. No decoration, no shadows, only hairline dividers carrying the
  * structure. Reference: FactSet quarterly factsheets.
  */
+// One section-toggle tracker — `section` is always the section's own id, so a
+// single helper avoids six near-identical inline closures (and id/section drift).
+const trackSectionToggle = (section: string) => (open: boolean) =>
+  trackFactsheetEvent("factsheet_v2_section_toggle", { section, open });
+
 export function FactsheetView({ payload }: { payload: FactsheetPayload }) {
   return (
     <FactsheetProvider payload={payload}>
@@ -193,9 +198,7 @@ export function FactsheetBody({
               title="Performance"
               storageKey={`factsheet-collapse:${payload.strategyId}:perf`}
               defaultOpen
-              onToggle={(open) =>
-                trackFactsheetEvent("factsheet_v2_section_toggle", { section: "factsheet-perf", open })
-              }
+              onToggle={trackSectionToggle("factsheet-perf")}
             >
               <PerformanceCharts />
             </CollapsibleSection>
@@ -204,9 +207,7 @@ export function FactsheetBody({
               title="Distribution"
               storageKey={`factsheet-collapse:${payload.strategyId}:dist`}
               defaultOpen
-              onToggle={(open) =>
-                trackFactsheetEvent("factsheet_v2_section_toggle", { section: "factsheet-dist", open })
-              }
+              onToggle={trackSectionToggle("factsheet-dist")}
             >
               <HistogramChart />
               <QuantileBoxPlotPanel />
@@ -217,9 +218,7 @@ export function FactsheetBody({
               title="Heatmaps"
               storageKey={`factsheet-collapse:${payload.strategyId}:heatmaps`}
               defaultOpen
-              onToggle={(open) =>
-                trackFactsheetEvent("factsheet_v2_section_toggle", { section: "factsheet-heatmaps", open })
-              }
+              onToggle={trackSectionToggle("factsheet-heatmaps")}
             >
               <MonthlyReturnsHeatmap />
               <DailyReturnsHeatmap />
@@ -229,9 +228,7 @@ export function FactsheetBody({
               title="Stress Windows"
               storageKey={`factsheet-collapse:${payload.strategyId}:stress`}
               defaultOpen
-              onToggle={(open) =>
-                trackFactsheetEvent("factsheet_v2_section_toggle", { section: "factsheet-stress", open })
-              }
+              onToggle={trackSectionToggle("factsheet-stress")}
             >
               <StressWindowsPanel />
             </CollapsibleSection>
@@ -248,9 +245,7 @@ export function FactsheetBody({
                 subtitle="event studies — heavy compute, defaults open"
                 storageKey={`factsheet-collapse:${payload.strategyId}:signatures`}
                 defaultOpen
-                onToggle={(open) =>
-                  trackFactsheetEvent("factsheet_v2_section_toggle", { section: "factsheet-signatures", open })
-                }
+                onToggle={trackSectionToggle("factsheet-signatures")}
               >
                 <LazyMount minHeight={500}>
                   <SignaturesSection />
@@ -265,9 +260,7 @@ export function FactsheetBody({
               title="Streaks"
               storageKey={`factsheet-collapse:${payload.strategyId}:streak`}
               defaultOpen
-              onToggle={(open) =>
-                trackFactsheetEvent("factsheet_v2_section_toggle", { section: "factsheet-streak", open })
-              }
+              onToggle={trackSectionToggle("factsheet-streak")}
             >
               <StreakDistributionPanel />
             </CollapsibleSection>
@@ -838,8 +831,8 @@ function ControlBar() {
     resetXRange();
     setComparator(payload.activeComparator);
     // "Reset view" means "show everything" — broadcast COLLAPSIBLE_OPEN_ALL_EVENT
-    // so every CollapsibleSection pops open. localStorage is left alone; the
-    // next user toggle will rewrite it.
+    // so every CollapsibleSection pops open. Each section persists its pop-open
+    // (see CollapsibleSection's open-all handler) so the restored layout survives a reload.
     if (typeof window !== "undefined") {
       window.dispatchEvent(new Event(COLLAPSIBLE_OPEN_ALL_EVENT));
     }

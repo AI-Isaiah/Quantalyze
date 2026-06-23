@@ -32,13 +32,13 @@
  *       the composer's blank slate back into the composer (/scenarios →
  *       /allocations?tab=scenario).
  *
- *   (6) PORTFOLIO ATTACH-BACK (FLOW-01). The 2 portfolio-context "+ Add Strategy"
+ *   (6) PORTFOLIO ADD LINKS (FLOW-01). The 2 portfolio-context "+ Add Strategy"
  *       links (`portfolios/[id]/manage/page.tsx`, `portfolios/[id]/page.tsx`)
- *       carry `?portfolio=` on a `/discovery/crypto-sma` href, AND there is NO
- *       bare `href="/discovery/crypto-sma"` (without `?portfolio=`) ANYWHERE
- *       under the portfolios tree — so the added strategy attaches back to THAT
- *       portfolio. The ~28 intentional default-landing redirects elsewhere are
- *       out of scope and NOT asserted here.
+ *       point at the valid `/discovery/crypto-sma` strategy-browse listing, AND
+ *       `AddToPortfolio.tsx` does NOT read a `?portfolio=` search param. The
+ *       research's ?portfolio= auto-attach was removed: the param cannot survive
+ *       the discovery listing→detail hop (the listing's StrategyTable links to
+ *       /factsheet, which never mounts AddToPortfolio), so it was dead code.
  *
  * HOW IT WORKS
  * ------------
@@ -72,8 +72,9 @@
  *     green.
  * (2)-(6) Each content gate reads the live file. Reintroducing the redirect's
  *     admin read, restoring ScenarioBuilder.tsx, adding a `/scenarios` nav item
- *     or composer self-link, or dropping `?portfolio=` from a portfolio link
- *     makes the corresponding assertion FAIL. Where a regex drives an assertion,
+ *     or composer self-link, repointing a portfolio add link away from
+ *     /discovery/crypto-sma, or re-adding the dead ?portfolio= reader to
+ *     AddToPortfolio makes the corresponding assertion FAIL. Where a regex drives an assertion,
  *     a self-pin proves the regex still matches a synthetic positive sample (so
  *     a future loosening that makes the regex inert is caught).
  *
@@ -293,60 +294,56 @@ describe("Phase 32 frozen-spine + route-retirement exit-gate guards", () => {
     ).not.toContain('href="/scenarios"');
   });
 
-  it("FLOW-01: the 2 portfolio-context add links carry ?portfolio= on the discovery href", () => {
-    // Each link must route to discovery carrying the portfolio context so the
-    // added strategy attaches back to THIS portfolio (AddToPortfolio reads the
-    // `portfolio` param and pre-selects the owned portfolio).
-    const ATTACH_BACK_RE = /\/discovery\/crypto-sma\?portfolio=/;
+  it("FLOW-01: both portfolio-context add links point at the valid /discovery/crypto-sma listing", () => {
+    // The 2 portfolio-context "+ Add Strategy" / "Add your first strategy" links
+    // route to the live strategy-browse listing. /discovery/crypto-sma is
+    // DEFAULT_AUTHENTICATED_ROUTE (proxy.ts) — a real route, never a 404 — so the
+    // links are valid; the user browses and attaches via AddToPortfolio's manual
+    // dropdown on the strategy-detail page. (The ?portfolio= auto-attach the
+    // phase-32 RESEARCH proposed was removed — see the next test for why.)
+    const LISTING_RE = /\/discovery\/crypto-sma/;
 
-    // Non-vacuity self-pins: the regex matches the real attach-back form and
-    // rejects the bare slug. If it ever stops discriminating, the gate is dead
-    // weight.
-    expect(
-      ATTACH_BACK_RE.test("`/discovery/crypto-sma?portfolio=${id}`"),
-    ).toBe(true);
-    expect(ATTACH_BACK_RE.test('"/discovery/crypto-sma"')).toBe(false);
+    // Non-vacuity self-pins.
+    expect(LISTING_RE.test('href="/discovery/crypto-sma"')).toBe(true);
+    expect(LISTING_RE.test('href="/portfolios"')).toBe(false);
 
     expect(
-      ATTACH_BACK_RE.test(MANAGE_PAGE_SRC),
+      LISTING_RE.test(MANAGE_PAGE_SRC),
       "Phase 32 exit gate VIOLATED — portfolios/[id]/manage/page.tsx's " +
-        '"+ Add Strategy" link no longer carries ?portfolio= on its ' +
-        "/discovery/crypto-sma href. Without it the added strategy is lost " +
-        "from THIS portfolio's context (FLOW-01 attach-back).",
+        '"+ Add Strategy" link no longer points at /discovery/crypto-sma (the ' +
+        "live strategy-browse listing).",
     ).toBe(true);
     expect(
-      ATTACH_BACK_RE.test(ID_PAGE_SRC),
+      LISTING_RE.test(ID_PAGE_SRC),
       "Phase 32 exit gate VIOLATED — portfolios/[id]/page.tsx's empty-state " +
-        '"Add your first strategy" link no longer carries ?portfolio= on its ' +
-        "/discovery/crypto-sma href. Without it the added strategy is lost " +
-        "from THIS portfolio's context (FLOW-01 attach-back).",
+        '"Add your first strategy" link no longer points at /discovery/crypto-sma.',
     ).toBe(true);
   });
 
-  it("FLOW-01: NO bare href=\"/discovery/crypto-sma\" (without ?portfolio=) anywhere under the portfolios tree", () => {
-    // A bare discovery link in the portfolios tree is the precise dead-link
-    // regression FLOW-01 closes — it would lose the portfolio you came from.
-    // The ~28 intentional default-landing redirects live OUTSIDE this tree and
-    // are not scanned. We forbid both the double-quoted and template-literal
-    // bare forms (slug immediately followed by a closing quote/backtick — i.e.
-    // NO `?portfolio=` query).
-    const BARE_RE = /\/discovery\/crypto-sma["`]/;
-
-    // Non-vacuity self-pins.
-    expect(BARE_RE.test('href="/discovery/crypto-sma"')).toBe(true);
-    expect(BARE_RE.test("href={`/discovery/crypto-sma`}")).toBe(true);
-    expect(BARE_RE.test("`/discovery/crypto-sma?portfolio=${id}`")).toBe(false);
-
-    const offenders = collectSourceFiles(PORTFOLIOS_DIR).filter((f) =>
-      BARE_RE.test(readFileSync(f, "utf8")),
+  it("FLOW-01: the dead ?portfolio= auto-attach plumbing stays removed (it never worked end-to-end)", () => {
+    // Red-team finding: a ?portfolio= param on the portfolio links could never
+    // reach AddToPortfolio. The discovery LISTING renders StrategyTable, whose
+    // strategy links go to /factsheet (which never mounts AddToPortfolio), so the
+    // param is dropped before the strategy-detail page where AddToPortfolio lives.
+    // The search-param reader was therefore dead code behind green unit tests.
+    // Guard it stays gone: re-adding it ships a silently-broken "attach-back".
+    const ADD_TO_PORTFOLIO_SRC = readFileSync(
+      join(CWD, "src/components/portfolio/AddToPortfolio.tsx"),
+      "utf8",
     );
+
+    // Non-vacuity self-pins: the regex catches both the import and the param read.
+    const DEAD_READER_RE = /useSearchParams|get\(["']portfolio["']\)/;
+    expect(DEAD_READER_RE.test('const sp = useSearchParams();')).toBe(true);
+    expect(DEAD_READER_RE.test('searchParams.get("portfolio")')).toBe(true);
+    expect(DEAD_READER_RE.test('searchParams.get("tab")')).toBe(false);
+
     expect(
-      offenders,
-      "Phase 32 exit gate VIOLATED — a bare /discovery/crypto-sma link " +
-        "(without ?portfolio=) reappeared under the portfolios tree: " +
-        `${offenders.join(", ")}. Portfolio-context add links MUST carry ` +
-        "?portfolio= so the strategy attaches back to THAT portfolio " +
-        "(FLOW-01). Re-add the portfolio query.",
-    ).toEqual([]);
+      ADD_TO_PORTFOLIO_SRC,
+      "Phase 32 exit gate VIOLATED — AddToPortfolio.tsx reads a `portfolio` " +
+        "search param again. That auto-attach is dead: the param cannot survive " +
+        "the discovery listing→detail navigation, so it silently never fires. " +
+        "Remove it, or first thread ?portfolio= through StrategyTable→detail.",
+    ).not.toMatch(DEAD_READER_RE);
   });
 });

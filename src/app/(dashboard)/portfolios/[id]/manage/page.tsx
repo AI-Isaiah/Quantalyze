@@ -53,7 +53,7 @@ export default async function ManagePortfolioPage({ params }: { params: Promise<
           <h2 className="text-base font-semibold text-text-primary">Strategies</h2>
           <div className="flex items-center gap-3">
             <MigrationWizardButton portfolioId={id} />
-            <Link href={`/discovery/crypto-sma?portfolio=${id}`} className="text-sm font-medium text-accent hover:text-accent-hover transition-colors">+ Add Strategy</Link>
+            <Link href="/discovery/crypto-sma" className="text-sm font-medium text-accent hover:text-accent-hover transition-colors">+ Add Strategy</Link>
           </div>
         </div>
         {strategies.length === 0 ? (

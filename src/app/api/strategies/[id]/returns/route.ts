@@ -26,10 +26,11 @@
  *   The `analytics_read` RLS policy already permits any caller to read
  *   `strategy_analytics` for a `status='published'` strategy (verified live:
  *   anon read 200). So `createClient()` reads the series without bypassing RLS.
- *   The `/scenarios` page's RLS-bypassing service-role client is the legacy
- *   anti-pattern this phase explicitly refuses to carry over — the
- *   service-role helper is intentionally NOT imported here (grep-asserted by
- *   the route test + the plan acceptance criteria).
+ *   The legacy /scenarios Strategy-Sandbox page (retired in Phase 32) read this
+ *   series via an RLS-bypassing service-role client — the anti-pattern this
+ *   route explicitly refuses to carry over. The service-role helper is
+ *   intentionally NOT imported here (grep-asserted by the route test + the plan
+ *   acceptance criteria).
  *
  * AGENTS.md / Next.js 16 async dynamic params: the `[id]` route param is a
  * Promise on the route context — `ctx.params` MUST be awaited (verified

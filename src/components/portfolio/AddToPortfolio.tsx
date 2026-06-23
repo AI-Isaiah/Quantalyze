@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 
@@ -17,15 +16,6 @@ export function AddToPortfolio({ strategyId }: { strategyId: string }) {
   const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
-
-  // FLOW-01 (phase 32): the portfolio-context "+ Add Strategy" controls
-  // navigate here as `/discovery/crypto-sma?portfolio=${id}` so the strategy
-  // attaches back to the portfolio the user came from. We read that id and,
-  // once the OWNED-portfolio fetch resolves, auto-attach if it matches.
-  const searchParams = useSearchParams();
-  const defaultPortfolioId = searchParams?.get("portfolio") ?? null;
-  // Guard so the one-gesture auto-attach fires at most once per mount.
-  const autoAttachedRef = useRef(false);
 
   useEffect(() => {
     if (!open) return;
@@ -42,30 +32,11 @@ export function AddToPortfolio({ strategyId }: { strategyId: string }) {
         .eq("user_id", user.id)
         .order("created_at", { ascending: false });
 
-      const owned = data ?? [];
-      setPortfolios(owned);
+      setPortfolios(data ?? []);
       setLoading(false);
-
-      // SECURITY (threat T-32-01): the default id is matched ONLY against this
-      // RLS-scoped `.eq("user_id", user.id)` owned set. A `?portfolio` id the
-      // user does not own never appears here, so it can never become an insert
-      // target — an unowned id is a silent no-op (the manual dropdown renders
-      // unchanged). When it DOES match, the attach is one gesture.
-      if (
-        defaultPortfolioId &&
-        !autoAttachedRef.current &&
-        owned.some((p) => p.id === defaultPortfolioId)
-      ) {
-        autoAttachedRef.current = true;
-        void handleAdd(defaultPortfolioId);
-      }
     }
     fetchPortfolios();
-    // handleAdd is a stable closure over strategyId; defaultPortfolioId is the
-    // only other input. Intentionally omit handleAdd to avoid re-fetching on
-    // each render (matches the existing open-driven fetch contract).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, defaultPortfolioId]);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;

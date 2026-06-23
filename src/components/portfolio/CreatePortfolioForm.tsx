@@ -15,7 +15,7 @@ import { useRouter } from "next/navigation";
  * /allocations flow (exchange-linked api_keys → portfolio_strategies),
  * NOT through this form. The /portfolios page docblock is explicit:
  * "Allocators no longer use this page directly… their real book lives
- * on /allocations, their what-if exploration lives on /scenarios."
+ * on /allocations, their what-if exploration lives in the scenario composer on /allocations."
  *
  * Migration 023 added a partial UNIQUE index `(user_id) WHERE
  * is_test=false`, so a user with one real portfolio cannot create a

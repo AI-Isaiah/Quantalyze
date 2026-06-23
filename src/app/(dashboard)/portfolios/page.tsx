@@ -12,7 +12,7 @@ import { redirect } from "next/navigation";
  * The v0.4.0 pivot dropped the "Test Portfolios" rename. Allocators no
  * longer use this page directly (it's removed from their sidebar —
  * their real book lives on /allocations, their what-if exploration
- * lives on /scenarios). The route is kept for managers and for any
+ * lives in the scenario composer on /allocations). The route is kept for managers and for any
  * deep links that still point here. CreatePortfolioForm is still
  * available for manual portfolio creation.
  */

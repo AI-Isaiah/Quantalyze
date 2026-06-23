@@ -2,32 +2,26 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 /**
- * FLOW-01 (phase 32) — portfolio-context attach-back.
+ * <AddToPortfolio> — the discovery-detail control that attaches a strategy to
+ * one of the user's portfolios.
  *
- * The two portfolio-context "+ Add Strategy" / "Add your first strategy"
- * controls now navigate to `/discovery/crypto-sma?portfolio=${id}`. On the
- * discovery strategy-detail page the already-mounted <AddToPortfolio> reads
- * that `?portfolio` search param (via next/navigation useSearchParams) and,
- * when the id matches one of the user's OWNED portfolios, pre-selects it so
- * adding the strategy is a single gesture into the existing
- * `portfolio_strategies.insert` path.
+ * Opening the dropdown fetches the user's OWNED portfolios (RLS-scoped via
+ * `.eq("user_id", user.id)`); clicking one inserts into `portfolio_strategies`.
+ * A PK collision (23505) surfaces "Already in portfolio" rather than an error,
+ * making the add idempotent from the user's perspective.
  *
- * Security contract (threat T-32-01): the default id is matched ONLY against
- * the RLS-scoped owned-portfolio fetch (`.eq("user_id", user.id)`). An id the
- * user does not own never appears in that set, so it can NEVER become the
- * `portfolio_id` of an insert. The unowned-id-is-a-no-op case below is the
- * non-vacuous pin for that guarantee — it fails if the pre-select wiring ever
- * matches against anything other than the owned set.
+ * (Phase 32 FLOW-01 explored a `?portfolio=` auto-attach that pre-selected the
+ * originating portfolio, but the param could not survive the discovery
+ * listing → strategy-detail navigation — the listing's StrategyTable links to
+ * /factsheet, which never mounts this component — so that dead plumbing was
+ * removed. The manual dropdown below is the real, working attach path.)
  */
 
-const { mockInsert, mockGetUser, mockOrder, currentSearchParams } = vi.hoisted(
-  () => ({
-    mockInsert: vi.fn(),
-    mockGetUser: vi.fn(),
-    mockOrder: vi.fn(),
-    currentSearchParams: { value: new URLSearchParams() },
-  }),
-);
+const { mockInsert, mockGetUser, mockOrder } = vi.hoisted(() => ({
+  mockInsert: vi.fn(),
+  mockGetUser: vi.fn(),
+  mockOrder: vi.fn(),
+}));
 
 // Table-aware supabase client mock: `portfolios` resolves the owned-portfolio
 // fetch (.select().eq().order()), `portfolio_strategies` exposes .insert().
@@ -50,17 +44,12 @@ vi.mock("@/lib/supabase/client", () => ({
   }),
 }));
 
-vi.mock("next/navigation", () => ({
-  useSearchParams: () => currentSearchParams.value,
-}));
-
 import { AddToPortfolio } from "./AddToPortfolio";
 
 const TEST_USER_ID = "00000000-0000-0000-0000-aaaaaaaaaaaa";
 const STRATEGY_ID = "11111111-1111-1111-1111-111111111111";
 const OWNED_PORTFOLIO_ID = "22222222-2222-2222-2222-222222222222";
 const OTHER_OWNED_ID = "33333333-3333-3333-3333-333333333333";
-const UNOWNED_PORTFOLIO_ID = "99999999-9999-9999-9999-999999999999";
 
 const OWNED_PORTFOLIOS = [
   { id: OWNED_PORTFOLIO_ID, name: "Aggressive blend" },
@@ -71,78 +60,63 @@ beforeEach(() => {
   mockInsert.mockReset();
   mockGetUser.mockReset();
   mockOrder.mockReset();
-  currentSearchParams.value = new URLSearchParams();
   mockGetUser.mockResolvedValue({ data: { user: { id: TEST_USER_ID } } });
   // The owned-portfolio fetch resolves to exactly the user's RLS-scoped set.
   mockOrder.mockResolvedValue({ data: OWNED_PORTFOLIOS, error: null });
   mockInsert.mockResolvedValue({ error: null });
 });
 
-describe("<AddToPortfolio> — FLOW-01 ?portfolio default-select", () => {
-  it("pre-selects the OWNED portfolio from ?portfolio and attaches in one gesture", async () => {
-    currentSearchParams.value = new URLSearchParams({
-      portfolio: OWNED_PORTFOLIO_ID,
-    });
-
+describe("<AddToPortfolio>", () => {
+  it("opens the dropdown, lists owned portfolios, and attaches on selection", async () => {
     render(<AddToPortfolio strategyId={STRATEGY_ID} />);
 
-    // ONE gesture: opening the dropdown is the only user action; the matching
-    // owned portfolio is attached automatically.
-    fireEvent.click(screen.getByRole("button", { name: /portfolio/i }));
-
-    await waitFor(() => expect(mockInsert).toHaveBeenCalledTimes(1));
-    expect(mockInsert).toHaveBeenCalledWith({
-      portfolio_id: OWNED_PORTFOLIO_ID,
-      strategy_id: STRATEGY_ID,
-    });
-  });
-
-  it("treats a ?portfolio id the user does NOT own as a no-op (never an insert target)", async () => {
-    currentSearchParams.value = new URLSearchParams({
-      portfolio: UNOWNED_PORTFOLIO_ID,
-    });
-
-    render(<AddToPortfolio strategyId={STRATEGY_ID} />);
-
-    fireEvent.click(screen.getByRole("button", { name: /portfolio/i }));
-
-    // The owned-portfolio fetch must have resolved (so the auto-attach path
-    // has had its chance to fire) — assert the dropdown rendered the owned
-    // options, proving the fetch completed before we check the no-op.
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Aggressive blend" }),
-      ).toBeInTheDocument(),
-    );
-
-    // No insert may target the unowned id...
-    const unownedInsert = mockInsert.mock.calls.find(
-      (c) => c[0]?.portfolio_id === UNOWNED_PORTFOLIO_ID,
-    );
-    expect(unownedInsert).toBeUndefined();
-    // ...and because the id matched no owned portfolio, no auto-attach fired
-    // at all — behavior degrades to the manual dropdown.
-    expect(mockInsert).not.toHaveBeenCalled();
-  });
-
-  it("is unchanged with no ?portfolio param — manual selection still works", async () => {
-    // No search param set (default URLSearchParams()).
-    render(<AddToPortfolio strategyId={STRATEGY_ID} />);
-
-    fireEvent.click(screen.getByRole("button", { name: /portfolio/i }));
-
-    const option = await screen.findByRole("button", {
-      name: "Aggressive blend",
-    });
-    // Nothing auto-attached on open.
+    // Nothing fetched or inserted until the dropdown is opened.
     expect(mockInsert).not.toHaveBeenCalled();
 
-    // Manual click still attaches via the existing handleAdd path.
+    fireEvent.click(screen.getByRole("button", { name: /portfolio/i }));
+
+    const option = await screen.findByRole("button", { name: "Aggressive blend" });
+    // Opening must not auto-attach anything — the user chooses.
+    expect(mockInsert).not.toHaveBeenCalled();
+
     fireEvent.click(option);
     await waitFor(() => expect(mockInsert).toHaveBeenCalledTimes(1));
     expect(mockInsert).toHaveBeenCalledWith({
       portfolio_id: OWNED_PORTFOLIO_ID,
       strategy_id: STRATEGY_ID,
     });
+    expect(await screen.findByText("Added!")).toBeInTheDocument();
+  });
+
+  it("treats a duplicate (PK 23505) as idempotent — 'Already in portfolio', not an error", async () => {
+    mockInsert.mockResolvedValue({ error: { code: "23505" } });
+
+    render(<AddToPortfolio strategyId={STRATEGY_ID} />);
+    fireEvent.click(screen.getByRole("button", { name: /portfolio/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Conservative" }));
+
+    await waitFor(() =>
+      expect(mockInsert).toHaveBeenCalledWith({
+        portfolio_id: OTHER_OWNED_ID,
+        strategy_id: STRATEGY_ID,
+      }),
+    );
+    expect(await screen.findByText("Already in portfolio")).toBeInTheDocument();
+    // The "Failed to add" error copy must NOT appear for a duplicate.
+    expect(screen.queryByText("Failed to add")).not.toBeInTheDocument();
+  });
+
+  it("shows the empty-state create link when the user owns no portfolios", async () => {
+    mockOrder.mockResolvedValue({ data: [], error: null });
+
+    render(<AddToPortfolio strategyId={STRATEGY_ID} />);
+    fireEvent.click(screen.getByRole("button", { name: /portfolio/i }));
+
+    expect(await screen.findByText(/No portfolios yet/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Create one/i })).toHaveAttribute(
+      "href",
+      "/portfolios",
+    );
+    expect(mockInsert).not.toHaveBeenCalled();
   });
 });

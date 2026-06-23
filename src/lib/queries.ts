@@ -1409,7 +1409,7 @@ export async function getAllocatorAggregates(userId: string) {
 // page reuses the scenario math library (src/lib/scenario.ts) to render
 // the composite curve, KPI strip, and per-strategy list from real
 // data. No Test Portfolios, no Favorites panel, no Save-as-Test. The
-// what-if exploration surface is /scenarios.
+// what-if exploration surface is the scenario composer (/allocations?tab=scenario).
 
 /**
  * Fetch the single real portfolio for the given user — the one row with
