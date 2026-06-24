@@ -34,9 +34,6 @@ vi.mock("@/components/portfolio/InsightStrip", () => ({
 vi.mock("./components/AlertBanner", () => ({
   AlertBanner: () => <div data-testid="mock-alert-banner" />,
 }));
-vi.mock("./components/KeyFilterPanel", () => ({
-  KeyFilterPanel: () => <div data-testid="mock-key-filter" />,
-}));
 vi.mock("./widgets/performance/EquityChart", () => ({
   default: () => <div data-testid="mock-equity-chart" />,
 }));
