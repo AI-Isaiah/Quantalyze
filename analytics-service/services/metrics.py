@@ -12,6 +12,18 @@ from .transforms import downsample_series, cap_data_points
 logger = logging.getLogger("quantalyze.analytics.metrics")
 
 
+# Phase 34 (ANNUAL-01/03): single source of truth for the annualization basis.
+# Every annualization site in this module (the four `qs.stats` scalar calls,
+# greeks/rolling_greeks alpha, the explicit `np.sqrt(...)` / `* ...` lines, and
+# the rolling helpers) resolves the periods-per-year factor from this constant
+# via `compute_all_metrics(..., periods_per_year=...)`. The default of 252 keeps
+# every displayed/ranking metric on the unified trading-day basis (comparability
+# over per-asset divergence — user decision 2026-06-24). The param exists so a
+# future per-asset divergence is a one-line call-site change, never a function
+# rewrite. Mirrors the existing `optimizer.py:TRADING_DAYS = 252` precedent.
+DEFAULT_PERIODS_PER_YEAR = 252
+
+
 # PR #181 take-2 red-team F16: when a fundamental qs.stats shape regression
 # trips multiple scalars at once (e.g., a future qs upgrade returns Series
 # instead of float), all 11 inline WARNINGs at compute_all_metrics fire with
@@ -333,6 +345,7 @@ def sanitize_metrics(data: dict[str, Any]) -> dict[str, Any]:
 def compute_all_metrics(
     returns: pd.Series,
     benchmark_returns: pd.Series | None = None,
+    periods_per_year: int = DEFAULT_PERIODS_PER_YEAR,
 ) -> MetricsResult:  # H-0729: in-module class, no forward-ref needed.
     """Compute all analytics from a daily returns series.
 
@@ -436,14 +449,14 @@ def compute_all_metrics(
     # the equity curve continuous; the ranking scalar must not use it.
     cumulative = (1 + returns_for_chart).cumprod()
     total_return = _safe_float((1 + returns.dropna()).prod() - 1)
-    cagr = _safe_float(qs.stats.cagr(returns))
-    volatility = _safe_float(qs.stats.volatility(returns))
-    sharpe = _safe_float(qs.stats.sharpe(returns))
+    cagr = _safe_float(qs.stats.cagr(returns, periods=periods_per_year))
+    volatility = _safe_float(qs.stats.volatility(returns, periods=periods_per_year))
+    sharpe = _safe_float(qs.stats.sharpe(returns, periods=periods_per_year))
     # Audit 2026-05-07 H-0725: pass `rf=MAR` explicitly so the scalar sortino
     # and `_rolling_sortino` share the SAME minimum acceptable return constant.
     # Relying on qs.stats.sortino's implicit `rf=0` default silently diverges
     # the moment MAR is ever tuned away from 0.
-    sortino = _safe_float(qs.stats.sortino(returns, rf=MAR))
+    sortino = _safe_float(qs.stats.sortino(returns, rf=MAR, periods=periods_per_year))
     calmar = _safe_float(qs.stats.calmar(returns))
     max_dd = _safe_float(qs.stats.max_drawdown(returns))
 
@@ -468,9 +481,9 @@ def compute_all_metrics(
 
     # Rolling metrics
     rolling = {
-        "sharpe_30d": _rolling_sharpe(returns, 30),
-        "sharpe_90d": _rolling_sharpe(returns, 90),
-        "sharpe_365d": _rolling_sharpe(returns, 365),
+        "sharpe_30d": _rolling_sharpe(returns, 30, periods_per_year=periods_per_year),
+        "sharpe_90d": _rolling_sharpe(returns, 90, periods_per_year=periods_per_year),
+        "sharpe_365d": _rolling_sharpe(returns, 365, periods_per_year=periods_per_year),
     }
 
     # Return quantiles — pass pre-computed monthly_rets to avoid double resample (NEW-C02-11)
@@ -804,14 +817,16 @@ def compute_all_metrics(
             aligned = returns.align(benchmark_returns, join="inner")
             aligned_returns, aligned_benchmark = aligned[0], aligned[1]
             if len(aligned_returns) > 1:
-                greeks = qs.stats.greeks(aligned_returns, aligned_benchmark)
+                greeks = qs.stats.greeks(
+                    aligned_returns, aligned_benchmark, periods=periods_per_year
+                )
                 metrics_json["alpha"] = _safe_float(greeks.get("alpha", 0))
                 metrics_json["beta"] = _safe_float(greeks.get("beta", 0))
                 metrics_json["correlation"] = _safe_float(aligned_returns.corr(aligned_benchmark))
                 excess = aligned_returns - aligned_benchmark
-                te = float(excess.std() * np.sqrt(252))
+                te = float(excess.std() * np.sqrt(periods_per_year))
                 if te > 0:
-                    metrics_json["info_ratio"] = _safe_float(excess.mean() * 252 / te)
+                    metrics_json["info_ratio"] = _safe_float(excess.mean() * periods_per_year / te)
                 beta = metrics_json.get("beta", 0)
                 if beta and beta != 0 and cagr is not None:
                     metrics_json["treynor"] = _safe_float(cagr / beta)
@@ -918,12 +933,18 @@ def compute_all_metrics(
     sortino_neg_sq = (returns.where(returns < MAR, 0.0)) ** 2
     sibling_kinds: dict[str, Any] = {
         "daily_returns_grid": _daily_returns_grid_from_series(returns),
-        "rolling_sortino_3m": _rolling_sortino_from_components(returns, sortino_neg_sq, 63),
-        "rolling_sortino_6m": _rolling_sortino_from_components(returns, sortino_neg_sq, 126),
-        "rolling_sortino_12m": _rolling_sortino_from_components(returns, sortino_neg_sq, 252),
-        "rolling_volatility_3m": _rolling_volatility(returns, 63),
-        "rolling_volatility_6m": _rolling_volatility(returns, 126),
-        "rolling_volatility_12m": _rolling_volatility(returns, 252),
+        "rolling_sortino_3m": _rolling_sortino_from_components(
+            returns, sortino_neg_sq, 63, periods_per_year=periods_per_year
+        ),
+        "rolling_sortino_6m": _rolling_sortino_from_components(
+            returns, sortino_neg_sq, 126, periods_per_year=periods_per_year
+        ),
+        "rolling_sortino_12m": _rolling_sortino_from_components(
+            returns, sortino_neg_sq, 252, periods_per_year=periods_per_year
+        ),
+        "rolling_volatility_3m": _rolling_volatility(returns, 63, periods_per_year=periods_per_year),
+        "rolling_volatility_6m": _rolling_volatility(returns, 126, periods_per_year=periods_per_year),
+        "rolling_volatility_12m": _rolling_volatility(returns, 252, periods_per_year=periods_per_year),
         "rolling_alpha": rolling_alpha_series,
         "rolling_beta": rolling_beta_series,
         "log_returns_series": _log_returns_series(returns),
@@ -1194,7 +1215,11 @@ def _finalize_rolling(series: pd.Series) -> list[SeriesPoint]:
     return cap_data_points(_format_series_points(cleaned, 4))
 
 
-def _rolling_sharpe(returns: pd.Series, window: int) -> list[SeriesPoint]:
+def _rolling_sharpe(
+    returns: pd.Series,
+    window: int,
+    periods_per_year: int = DEFAULT_PERIODS_PER_YEAR,
+) -> list[SeriesPoint]:
     """Compute rolling annualized Sharpe using vectorized pandas rolling.
 
     NEW-C02-02: mirror the zero-variance guard from `_rolling_sortino_from_components`.
@@ -1209,11 +1234,14 @@ def _rolling_sharpe(returns: pd.Series, window: int) -> list[SeriesPoint]:
     roll_std = returns.rolling(window).std()
     ratio = np.where(roll_std > 0, roll_mean / roll_std, np.nan)
     ratio_series = pd.Series(ratio, index=returns.index)
-    return _finalize_rolling(ratio_series * np.sqrt(252))
+    return _finalize_rolling(ratio_series * np.sqrt(periods_per_year))
 
 
 def _rolling_sortino_from_components(
-    returns: pd.Series, neg_sq: pd.Series, window: int
+    returns: pd.Series,
+    neg_sq: pd.Series,
+    window: int,
+    periods_per_year: int = DEFAULT_PERIODS_PER_YEAR,
 ) -> list[SeriesPoint]:
     """Window-parameterized inner for `_rolling_sortino`.
 
@@ -1291,10 +1319,15 @@ def _rolling_sortino_from_components(
             undefined_but_good,
         )
 
-    return _finalize_rolling(ratio_series * np.sqrt(252))
+    return _finalize_rolling(ratio_series * np.sqrt(periods_per_year))
 
 
-def _rolling_sortino(returns: pd.Series, window: int, mar: float = MAR) -> list[SeriesPoint]:
+def _rolling_sortino(
+    returns: pd.Series,
+    window: int,
+    mar: float = MAR,
+    periods_per_year: int = DEFAULT_PERIODS_PER_YEAR,
+) -> list[SeriesPoint]:
     """Compute rolling annualized Sortino using downside RMS (MAR-floored).
 
     Pitfall 11 single source of truth: this MUST mirror `qs.stats.sortino`'s
@@ -1321,18 +1354,24 @@ def _rolling_sortino(returns: pd.Series, window: int, mar: float = MAR) -> list[
         return []
     neg_sq = (returns.where(returns < mar, 0.0)) ** 2
     # _finalize_rolling scrubs NaN/Inf so the consumer never sees them.
-    return _rolling_sortino_from_components(returns, neg_sq, window)
+    return _rolling_sortino_from_components(
+        returns, neg_sq, window, periods_per_year=periods_per_year
+    )
 
 
-def _rolling_volatility(returns: pd.Series, window: int) -> list[SeriesPoint]:
-    """Annualized rolling volatility = std * sqrt(252).
+def _rolling_volatility(
+    returns: pd.Series,
+    window: int,
+    periods_per_year: int = DEFAULT_PERIODS_PER_YEAR,
+) -> list[SeriesPoint]:
+    """Annualized rolling volatility = std * sqrt(periods_per_year).
 
-    Mirrors `qs.stats.volatility` (which is `returns.std() * sqrt(252)`) on a
+    Mirrors `qs.stats.volatility` (which is `returns.std() * sqrt(periods)`) on a
     rolling window. Mirrors _rolling_sharpe at metrics.py for shape.
     """
     if len(returns) < window:
         return []
-    return _finalize_rolling(returns.rolling(window).std() * np.sqrt(252))
+    return _finalize_rolling(returns.rolling(window).std() * np.sqrt(periods_per_year))
 
 
 def _rolling_alpha_beta(
@@ -1365,6 +1404,15 @@ def _rolling_alpha_beta(
     if aligned_n < window:
         return [], []
     try:
+        # NOTE (Phase 34): quantstats 0.0.81 `rolling_greeks(returns, benchmark,
+        # periods=252)` uses `periods` as the ROLLING WINDOW length (the source
+        # comments "Calculate rolling alpha (not annualized for rolling version)"
+        # — there is NO annualization factor here to thread). `window` (90) is
+        # passed as that window arg. So `periods_per_year` deliberately does NOT
+        # apply to the rolling alpha/beta path: rolling alpha is unannualized,
+        # rolling beta is a unitless ratio. This corrects the RESEARCH claim that
+        # rolling_greeks annualizes alpha (that is only true for the SCALAR
+        # `greeks()` at site #5).
         greeks = qs.stats.rolling_greeks(aligned_returns, aligned_benchmark, window)
     except Exception as exc:  # noqa: BLE001
         # H-0726.3: surface qs-side rolling_greeks failures explicitly instead
@@ -1397,6 +1445,9 @@ def _rolling_alpha(returns: pd.Series, benchmark: pd.Series, window: int = 90) -
     OLS regression runs ONCE per analytics run, not twice (H-0711).
 
     Window default 90d trading per UC#6 BTC-only scope.
+
+    No `periods_per_year` here: rolling alpha is unannualized in quantstats
+    0.0.81 (see `_rolling_alpha_beta`).
     """
     alpha, _ = _rolling_alpha_beta(returns, benchmark, window)
     return alpha
@@ -1406,7 +1457,8 @@ def _rolling_beta(returns: pd.Series, benchmark: pd.Series, window: int = 90) ->
     """Rolling beta vs benchmark via qs.stats.rolling_greeks.
 
     Thin wrapper around `_rolling_alpha_beta` retained for backward compat.
-    See `_rolling_alpha` docstring for rationale.
+    See `_rolling_alpha` docstring for rationale. Beta is a unitless ratio, so
+    no `periods_per_year` applies.
     """
     _, beta = _rolling_alpha_beta(returns, benchmark, window)
     return beta
