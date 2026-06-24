@@ -64,22 +64,44 @@ factsheet.
 - **Closure test**: `analytics-service/tests/test_metrics.py` ::
   `test_streak_counters_symmetric_with_flats_and_nans`.
 
-## Rule 4 — Annualize over business days (B3 followup)
+## Rule 4 — Annualize on the unified 252 trading-day basis (Phase 34, ANNUAL-05)
 
-Annualized scalars (`cagr`, `volatility`, `sharpe`, `sortino`) must use
-`periods=252` only when the input series is at business-day frequency.
-Calendar-daily series (Saturdays / Sundays present) must either
-`resample("B")` or use `periods=365` — never `periods=252` against a
-calendar series.
+Every annualized scalar (`cagr`, `volatility`, `sharpe`, `sortino`,
+`calmar`) and every rolling annualization helper (rolling sharpe / sortino /
+volatility) resolves its periods-per-year factor from a single source of
+truth: `metrics.py::DEFAULT_PERIODS_PER_YEAR = 252`, threaded through
+`compute_all_metrics(..., periods_per_year=...)`. The default is **252**
+regardless of whether the input series is calendar-daily (24/7 crypto) or
+business-day — comparability across every displayed and ranking metric beats
+the per-asset calendar-density argument (user decision 2026-06-24). The
+`periods_per_year` param exists so a future per-asset divergence is a one-line
+call-site change, never a function rewrite.
 
-Pre-fix: a calendar-daily series annualized with `periods=252` inflated
-volatility by ~`sqrt(365/252)` ≈ 1.20×, deflating Sharpe / Sortino by
-the inverse. NEW-C01-15 closed this for the equity-reconstruction path
-(`analytics-service/services/equity_reconstruction.py`); future
-annualization sites must honor the same rule.
+The equity-reconstruction path (`equity_reconstruction.py::compute_sharpe`)
+now imports the same `DEFAULT_PERIODS_PER_YEAR` and defaults to 252 as well,
+so there is **no residual scale factor** between the equity-curve Sharpe and
+the product-wide KPI engine. This reverses the prior NEW-C01-15 252→365
+change: equity-curve row *density* stays calendar-daily (~365 rows/yr), but
+the annualization *multiplier* is 252 on both paths.
 
-- **Closure test**: `analytics-service/tests/test_equity_reconstruction.py` ::
-  `test_calendar_vs_business_day_annualization_matches_within_001`.
+One deliberate carve-out: rolling alpha/beta (`_rolling_alpha_beta` and its
+wrappers) are left UN-annualized — quantstats 0.0.81 returns a per-period
+regression intercept/slope series, not a periods-scaled quantity — so they do
+not thread `periods_per_year`. That is not a missed site.
+
+Pre-fix history: a calendar-daily series annualized with `periods=252`
+inflated volatility by ~`sqrt(365/252)` ≈ 1.20×, deflating Sharpe / Sortino
+by the inverse. NEW-C01-15 originally closed this by switching the
+equity-reconstruction path to `periods=365`; Phase 34 unwound it in favor of
+the unified 252 basis above.
+
+- **Closure tests**:
+  `analytics-service/tests/test_equity_curve_builder.py` ::
+  `test_no_residual_scale_factor` (proves the equity-reconstruction and
+  `compute_all_metrics` Sharpe agree with no 252-vs-365 rescale), and
+  `analytics-service/tests/test_metrics_parity.py` (asserts the scalar and
+  rolling sibling series rescale by `sqrt(365/252)` when `periods_per_year`
+  is overridden, so a threading hole in any helper turns the proof RED).
 
 ## Rule 5 — Window-coincident metric pairs
 
@@ -120,8 +142,9 @@ When adding a new metric or chart:
        If yes — does it use `min_count=1 + dropna`? (Rule 2)
 3. [ ] Does it count a streak / consecutive event? If yes — does it use
        a symmetric strict mask, not `>=` / `<=`? (Rule 3)
-4. [ ] Does it annualize? If yes — is the input series at business-day
-       frequency or calendar-daily? (Rule 4)
+4. [ ] Does it annualize? If yes — does it resolve the factor from
+       `DEFAULT_PERIODS_PER_YEAR` / `periods_per_year` rather than hard-coding
+       252 or 365? (Rule 4)
 5. [ ] Does it compare current-vs-proposed metrics? If yes — does it
        go through `align_current_and_proposed`? (Rule 5)
 6. [ ] Does it test a numeric field for presence? If yes — `is not None`
