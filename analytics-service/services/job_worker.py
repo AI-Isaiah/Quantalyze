@@ -1714,25 +1714,54 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
 
 
 async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
-    """Broker key full-history → daily-return series → standard CSV route.
+    """Broker key full-history → daily-return series → csv_daily_returns.
 
-    Downloads the API key's entire history (realized PnL bills + funding),
-    derives ONE daily-return series anchored to the account's current total
-    equity (NAV incl. unrealized), persists it to csv_daily_returns, and
-    enqueues compute_analytics_from_csv so the standard CSV pipeline compiles
-    the factsheet. Funding is INCLUDED because it is the dominant return driver
+    DUAL-MODE (Phase 35 / DAILIES-02):
+
+    - Strategy-mode (job carries strategy_id): byte-unchanged behaviour.
+      Downloads the API key's entire history (realized PnL bills + funding),
+      derives ONE daily-return series anchored to current total equity (NAV
+      incl. unrealized), upserts it keyed by (strategy_id, date), and enqueues
+      compute_analytics_from_csv so the standard CSV pipeline compiles the
+      factsheet.
+
+    - Key-mode (job carries api_key_id, no strategy): the SAME realized+funding
+      derivation, upserted keyed by (api_key_id, date) with the denormalized
+      allocator_id (= api_keys.user_id, read from the preflight — never from the
+      job payload). Key-mode does NOT enqueue compute_analytics_from_csv and does
+      NOT stamp strategy_analytics — those are strategy-keyed; per-key reads land
+      in Phase 36. The per-key series is "dark" (written, not yet read).
+
+    Funding is INCLUDED in both modes because it is the dominant return driver
     for perp strategies and fetch_daily_pnl excludes it by design — a
     realized-only series understates the true return by a large margin (see
     services.broker_dailies for the live-account reconciliation).
 
-    Pre-flight: same as sync_trades (strategy + api_key load, circuit breaker,
-    decrypt, exchange create). On 429, stamps last_429_at.
+    Pre-flight: strategy-mode loads strategy + api_key (_exchange_preflight);
+    key-mode loads the api_key directly (_allocator_key_preflight, no strategy
+    hop). Both run the per-exchange circuit breaker, decrypt, and create the
+    exchange. On 429, stamps last_429_at.
     """
-    ctx = await _exchange_preflight(job, "run_derive_broker_dailies_job")
+    is_key_mode = bool(job.get("api_key_id"))
+    if is_key_mode:
+        ctx = await _allocator_key_preflight(job, "run_derive_broker_dailies_job")
+    else:
+        ctx = await _exchange_preflight(job, "run_derive_broker_dailies_job")
     if isinstance(ctx, DispatchResult):
         return ctx
 
-    strategy_id = job["strategy_id"]
+    if is_key_mode:
+        # allocator_id is the AUTHORITATIVE owner from api_keys.user_id — NEVER
+        # trust a job-payload allocator_id (the owner-coherence trigger enforces
+        # this at write time; sourcing it here keeps the worker honest).
+        api_key_id: str = ctx.key_row["id"]
+        allocator_id: str = ctx.key_row["user_id"]
+        # The funding-fetch label is a log/match-key only (it never scopes the
+        # exchange call); api_key_id is a stable, key-unique label in key-mode.
+        funding_label = api_key_id
+    else:
+        strategy_id = job["strategy_id"]
+        funding_label = strategy_id
     venue = ctx.key_row["exchange"]
 
     from services.broker_dailies import combine_realized_and_funding
@@ -1752,11 +1781,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # bills, Binance inception, Bybit last 365 days).
         realized = await fetch_all_trades(ctx.exchange, since_ms=None)
         if venue == "binance":
-            funding = await fetch_funding_binance(ctx.exchange, strategy_id, None)
+            funding = await fetch_funding_binance(ctx.exchange, funding_label, None)
         elif venue == "okx":
-            funding = await fetch_funding_okx(ctx.exchange, strategy_id, None)
+            funding = await fetch_funding_okx(ctx.exchange, funding_label, None)
         elif venue == "bybit":
-            funding = await fetch_funding_bybit(ctx.exchange, strategy_id, None)
+            funding = await fetch_funding_bybit(ctx.exchange, funding_label, None)
         else:
             return DispatchResult(
                 outcome=DispatchOutcome.FAILED,
@@ -1777,11 +1806,23 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     )
     if len(returns) < 2:
         # Brand-new / inactive account: not enough history to compile a
-        # factsheet (compute_all_metrics needs >=2 days). Stamp a TERMINAL
-        # 'failed' status so the wizard's sync-preview poller reaches a gate
-        # instead of spinning forever on a never-arriving 'complete' — mirrors
-        # run_csv_strategy_analytics' own <2 branch and the legacy
-        # compute_analytics path. The next sync re-derives once history grows.
+        # factsheet (compute_all_metrics needs >=2 days).
+        if is_key_mode:
+            # Key-mode has no per-key analytics row to stamp (per-key reads are
+            # Phase 36) — log and return DONE without touching strategy_analytics.
+            logger.info(
+                "derive_broker_dailies: <2 daily-return days for api_key %s "
+                "(realized=%d funding=%d) — key-mode insufficient-history, "
+                "no strategy_analytics stamp",
+                api_key_id, len(realized), len(funding),
+            )
+            return DispatchResult(outcome=DispatchOutcome.DONE)
+
+        # Strategy-mode: stamp a TERMINAL 'failed' status so the wizard's
+        # sync-preview poller reaches a gate instead of spinning forever on a
+        # never-arriving 'complete' — mirrors run_csv_strategy_analytics' own
+        # <2 branch and the legacy compute_analytics path. The next sync
+        # re-derives once history grows.
         logger.info(
             "derive_broker_dailies: <2 daily-return days for strategy %s "
             "(realized=%d funding=%d) — marking insufficient-history",
@@ -1807,28 +1848,58 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 
     # Service-role upsert into csv_daily_returns. The worker has no auth.uid()
     # session so it cannot call persist_csv_daily_returns (auth-gated); it
-    # writes the table directly like it does for trades. PK (strategy_id, date)
-    # makes the re-derive idempotent. Chunked so a long-history account can't
-    # exceed PostgREST's request-size ceiling in a single upsert.
-    rows_payload = [
-        {
-            "strategy_id": strategy_id,
-            "date": ts.date().isoformat(),
-            "daily_return": float(val),
-        }
-        for ts, val in returns.items()
-    ]
+    # writes the table directly like it does for trades. The per-axis unique
+    # index (strategy_id,date) / (api_key_id,date) makes the re-derive
+    # idempotent. Chunked so a long-history account can't exceed PostgREST's
+    # request-size ceiling in a single upsert.
+    if is_key_mode:
+        rows_payload = [
+            {
+                "api_key_id": api_key_id,
+                "allocator_id": allocator_id,
+                "strategy_id": None,
+                "date": ts.date().isoformat(),
+                "daily_return": float(val),
+            }
+            for ts, val in returns.items()
+        ]
+        _conflict = "api_key_id,date"
+    else:
+        rows_payload = [
+            {
+                "strategy_id": strategy_id,
+                "date": ts.date().isoformat(),
+                "daily_return": float(val),
+            }
+            for ts, val in returns.items()
+        ]
+        _conflict = "strategy_id,date"
 
     _UPSERT_CHUNK = 1000
     for _start in range(0, len(rows_payload), _UPSERT_CHUNK):
         _batch = rows_payload[_start:_start + _UPSERT_CHUNK]
 
-        def _upsert_dailies(batch: list[dict[str, Any]] = _batch) -> None:
+        def _upsert_dailies(
+            batch: list[dict[str, Any]] = _batch, conflict: str = _conflict
+        ) -> None:
             ctx.supabase.table("csv_daily_returns").upsert(
-                batch, on_conflict="strategy_id,date",
+                batch, on_conflict=conflict,
             ).execute()
 
         await db_execute(_upsert_dailies)
+
+    if is_key_mode:
+        # Per-key series is "dark" until Phase 36 — no compute_analytics_from_csv
+        # enqueue (that path is strategy-keyed), no strategy_analytics stamp.
+        logger.info(
+            "derive_broker_dailies: upserted %d per-key daily-return rows for "
+            "api_key %s (allocator %s venue=%s realized=%d funding=%d "
+            "heuristic_capital=%s) — key-mode, no CSV-analytics enqueue",
+            len(rows_payload), api_key_id, allocator_id, venue,
+            len(realized), len(funding), meta.get("used_heuristic_capital"),
+        )
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
     logger.info(
         "derive_broker_dailies: upserted %d daily-return rows for strategy %s "
         "(venue=%s realized=%d funding=%d heuristic_capital=%s)",

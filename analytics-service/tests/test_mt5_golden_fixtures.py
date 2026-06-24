@@ -18,17 +18,25 @@ zero-fill rows anywhere in these fixtures (a zero-fill block would falsely
 deflate volatility). A gap test (T5) is a GENUINE missing span → fewer rows, not
 a zero-filled gap.
 
-ANNUALIZATION = the LIVE periods=252 (UNCHANGED)
-------------------------------------------------
-`compute_all_metrics` has NO `periods` parameter; its qs.stats calls use the
-quantstats 0.0.81 DEFAULT periods=252. This is the SAME constant every displayed
-strategy KPI uses — the crypto trades-path (analytics_runner.py:1584) AND the
-CSV/MT5 path (:2027). MT5 MUST use the identical path so Sharpe/vol/CAGR are
-apples-to-apples on the ranking page; plumbing periods=365 for MT5 alone would
-inflate its Sharpe ~x1.20 vs equivalent crypto strategies. The T1/T5 KPI oracles
-below assert exactly what `compute_all_metrics` ACTUALLY produces at 252, with
-the hand arithmetic shown in a comment (the verified facts:
-sqrt(252) = 15.8745078663877; quantstats uses SAMPLE std, ddof=1).
+ANNUALIZATION = the LIVE periods_per_year=252 (RESOLVED BASIS UNCHANGED)
+------------------------------------------------------------------------
+Phase 34 gave `compute_all_metrics` an EXPLICIT `periods_per_year: int = 252`
+parameter (backed by the `DEFAULT_PERIODS_PER_YEAR = 252` constant in
+services/metrics.py), threaded through every annualization site. The basis is now
+visible at the call site instead of hidden in the quantstats 0.0.81 defaults — but
+it still DEFAULTS to 252, so the resolved MT5 basis is UNCHANGED. Both production
+callers — the crypto trades-path (analytics_runner.py:1584) AND the CSV/MT5 path
+(:2027) — pass no `periods_per_year` arg and therefore inherit 252; the converged
+equity-reconstruction Sharpe (Phase 34, ANNUAL-05) resolves the SAME 252 basis.
+MT5 MUST stay on this shared path so Sharpe/vol/CAGR are apples-to-apples on the
+ranking page; plumbing `periods_per_year=365` for MT5 alone would inflate its
+Sharpe ~x1.20 vs equivalent crypto strategies. The param exists so a future
+per-asset divergence is a one-line call-site change, never a function rewrite —
+no caller diverges from 252 today (comparability over per-asset divergence, user
+decision 2026-06-24). The T1/T5 KPI oracles below assert exactly what
+`compute_all_metrics` ACTUALLY produces at 252, with the hand arithmetic shown in
+a comment (the verified facts: sqrt(252) = 15.8745078663877; quantstats uses
+SAMPLE std, ddof=1).
 
 ORACLE DISCIPLINE
 -----------------

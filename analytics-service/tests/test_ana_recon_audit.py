@@ -1030,10 +1030,12 @@ def test_c01_06_sharpe_excludes_terminal_unrealized_bar():
     # drop day-0 zero (C01-14 also applies)
     if len(all_returns) > 1 and all_returns.iloc[0] == 0.0:
         all_returns = all_returns.iloc[1:]
-    # include last bar (pre-fix behaviour)
+    # include last bar (pre-fix behaviour). Annualize at 252 to match the
+    # converged compute_sharpe basis (Phase 34, ANNUAL-05) so this comparison
+    # isolates the terminal-bar effect, not the annualization factor.
     excess_old = all_returns - 0.0
     std_old = excess_old.std()
-    sharpe_old = (float((excess_old.mean() / std_old) * (365 ** 0.5))
+    sharpe_old = (float((excess_old.mean() / std_old) * (252 ** 0.5))
                   if std_old > 0 and not math.isnan(std_old) else None)
 
     if sharpe_old is not None and sharpe_with_fix is not None:

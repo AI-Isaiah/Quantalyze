@@ -1003,10 +1003,12 @@ def test_rolling_sortino_single_neg_sq_in_compute_all_metrics(
     real_from_components = metrics_module._rolling_sortino_from_components
     seen_neg_sq_ids: set[int] = set()
 
-    def counting_from_components(returns, neg_sq, window):
+    def counting_from_components(returns, neg_sq, window, **kwargs):
+        # Phase 34: forward **kwargs so the new `periods_per_year` keyword
+        # threaded by compute_all_metrics reaches the real helper unchanged.
         call_count["n"] += 1
         seen_neg_sq_ids.add(id(neg_sq))
-        return real_from_components(returns, neg_sq, window)
+        return real_from_components(returns, neg_sq, window, **kwargs)
 
     monkeypatch.setattr(
         metrics_module, "_rolling_sortino_from_components", counting_from_components
