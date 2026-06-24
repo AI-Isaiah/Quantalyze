@@ -13,9 +13,10 @@ logger = logging.getLogger("quantalyze.analytics.metrics")
 
 
 # Phase 34 (ANNUAL-01/03): single source of truth for the annualization basis.
-# Every annualization site in this module (the four `qs.stats` scalar calls,
-# greeks/rolling_greeks alpha, the explicit `np.sqrt(...)` / `* ...` lines, and
-# the rolling helpers) resolves the periods-per-year factor from this constant
+# Every annualization site in this module (the five periods-bearing `qs.stats`
+# scalar calls — cagr/volatility/sharpe/sortino/calmar — scalar greeks alpha,
+# the explicit `np.sqrt(...)` / `* ...` lines, and the rolling helpers) resolves
+# the periods-per-year factor from this constant
 # via `compute_all_metrics(..., periods_per_year=...)`. The default of 252 keeps
 # every displayed/ranking metric on the unified trading-day basis (comparability
 # over per-asset divergence — user decision 2026-06-24). The param exists so a
@@ -457,7 +458,11 @@ def compute_all_metrics(
     # Relying on qs.stats.sortino's implicit `rf=0` default silently diverges
     # the moment MAR is ever tuned away from 0.
     sortino = _safe_float(qs.stats.sortino(returns, rf=MAR, periods=periods_per_year))
-    calmar = _safe_float(qs.stats.calmar(returns))
+    # calmar = CAGR / |max_drawdown|; quantstats computes the CAGR leg via
+    # `cagr(returns, periods=periods)`, so calmar is periods-dependent and MUST
+    # thread the same basis as cagr/sharpe/sortino/volatility — else a non-252
+    # caller gets a rescaled CAGR but a stale-252 Calmar (calmar != cagr/|maxdd|).
+    calmar = _safe_float(qs.stats.calmar(returns, periods=periods_per_year))
     max_dd = _safe_float(qs.stats.max_drawdown(returns))
 
     # Drawdown series — chart continuity per F3 (same fillna(0) rationale).

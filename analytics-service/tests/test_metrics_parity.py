@@ -1058,6 +1058,15 @@ def test_periods_param_rescales_365(golden_252d_input):
         base_mj["cagr"] * _SQRT_365_OVER_252, rel=1e-6
     ), "cagr matched the sqrt ratio — the geometric vs sqrt distinction is broken"
 
+    # calmar = CAGR / |max_drawdown|; max_drawdown is basis-invariant, so calmar
+    # rescales IDENTICALLY to CAGR. If `qs.stats.calmar` is left at a literal 252
+    # (the missed threading site — code-review C1), its internal CAGR leg stays
+    # 252 while this expected ratio tracks the threaded CAGR, turning this RED.
+    assert base_mj["calmar"] not in (None, 0), "golden calmar must be non-null for the proof"
+    assert p365_mj["calmar"] == pytest.approx(
+        base_mj["calmar"] * (p365_mj["cagr"] / base_mj["cagr"]), rel=1e-9
+    ), "calmar did not rescale with CAGR — qs.stats.calmar periods= not threaded (C1)"
+
     # --- synthetic aligned pair: prove the greeks-alpha (#5) + info_ratio (#7)
     # sites thread, which golden_252d (alpha/info_ratio null) cannot. The inner
     # benchmark metrics live under metrics_json["metrics_json"] (the nested
