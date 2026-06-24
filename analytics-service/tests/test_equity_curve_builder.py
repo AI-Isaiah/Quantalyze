@@ -132,10 +132,10 @@ def test_sharpe_within_tolerance(fixture_name):
     )
 
     # Cross-check against quantstats reference (BACKBONE-07: ±0.05 per source).
-    # NEW-C01-15: updated from periods=252 to periods=365. The equity curve is
-    # calendar-daily (24/7 crypto), so the correct annualization factor is 365.
-    # The ±0.05 tolerance holds for the same periods value; comparing periods=365
-    # builder output against periods=252 quantstats is an apples-to-oranges test.
+    # Phase 34 (ANNUAL-05): converged to periods=252 — the builder and this
+    # cross-check now share the unified 252 trading-day basis with
+    # compute_all_metrics (NEW-C01-15's 365 choice reversed for comparability).
+    # The ±0.05/0.10 tolerance holds because both sides use the SAME periods value.
     try:
         import quantstats as qs
     except ImportError:
@@ -156,19 +156,89 @@ def test_sharpe_within_tolerance(fixture_name):
     )
     if last_unrealized != 0.0:
         return  # divergence is expected — no cross-check needed
-    # Use periods=365 to match the updated compute_sharpe convention.
-    qs_sharpe = qs.stats.sharpe(df["daily_return"], periods=365)
+    # Use periods=252 to match the converged compute_sharpe convention (Phase 34).
+    qs_sharpe = qs.stats.sharpe(df["daily_return"], periods=252)
     if qs_sharpe != qs_sharpe:  # NaN guard
         pytest.skip(
             f"{fixture_name}: quantstats returned NaN (insufficient data)"
         )
-    # Tolerance widened from 0.05 to 0.10 after NEW-C01-14/15 changes:
+    # Tolerance widened from 0.05 to 0.10 after NEW-C01-14 changes:
     # - C01-14 drops the day-0 forced-zero return (quantstats includes it)
-    # - C01-15 uses periods=365 (quantstats may have slight rounding diffs)
-    # The parity claim is now "same convention, ±0.10" not the old ±0.05.
+    # - both sides now annualize at periods=252 (Phase 34, ANNUAL-05)
+    # The parity claim is "same convention, ±0.10" not the old ±0.05.
     assert abs(sharpe - float(qs_sharpe)) < 0.10, (
         f"{fixture_name}: builder sharpe {sharpe} vs quantstats "
-        f"{qs_sharpe} drift > 0.10 (NEW-C01-14/15 tolerance)"
+        f"{qs_sharpe} drift > 0.10 (NEW-C01-14 / Phase-34 tolerance)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 34 / ANNUAL-05 — no residual scale factor between the two Sharpe paths
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fixture_name", FIXTURES)
+def test_no_residual_scale_factor(fixture_name):
+    """ANNUAL-05 contract: EquityCurveBuilder.compute_sharpe (the equity-
+    reconstruction path) and services.metrics.compute_all_metrics (the
+    product-wide KPI engine) annualize on the SAME 252 basis — so they agree on
+    the SAME daily-return series with NO residual ×√(365/252)≈1.204 scale factor.
+
+    Before Phase 34 the builder annualized at 365 and compute_all_metrics at
+    252, leaving the two ×1.204 apart on identical input. This test would FAIL
+    if either default drifts (e.g. the builder reverts to a 365-day basis): the
+    two Sharpes would diverge by exactly the √(365/252) factor, far outside ±0.05.
+
+    The builder applies day-0/terminal-bar adjustments (C01-14/C01-06) to its
+    return series before annualizing; we reproduce those SAME adjustments and
+    feed the resulting series to compute_all_metrics, so the ONLY thing that
+    could make them differ is the annualization basis. Tolerance ±0.05 mirrors
+    the existing builder-vs-quantstats cross-check — the point is "no ×1.204
+    factor," not bit-equality.
+    """
+    import pandas as pd
+
+    from services.metrics import compute_all_metrics
+
+    gold = _load_fixture(fixture_name)
+    trades = [_trade_from_dict(t) for t in gold["trades"]]
+    builder = EquityCurveBuilder(
+        trades, mark_prices=gold.get("mark_prices") or {}
+    )
+    builder.attach_funding(gold.get("funding_rows") or [])
+
+    builder_sharpe = builder.compute_sharpe()
+    if builder_sharpe is None:
+        pytest.skip(f"{fixture_name}: insufficient data for Sharpe")
+
+    # Reproduce the EXACT return series compute_sharpe annualizes, applying the
+    # same C01-14 (drop seeded day-0 zero) + C01-06 (drop terminal unrealized
+    # lump) adjustments, preserving the calendar-date index that
+    # compute_all_metrics requires.
+    df = builder.to_equity_curve_daily()
+    series = pd.Series(
+        df["daily_return"].to_numpy(), index=pd.DatetimeIndex(df["date"])
+    )
+    if len(series) > 1 and series.iloc[0] == 0.0:
+        series = series.iloc[1:]
+    if "unrealized_pnl" in df.columns and len(df) > 0:
+        last_unrealized = float(df["unrealized_pnl"].iloc[-1])
+        if last_unrealized != 0.0 and len(series) > 1:
+            series = series.iloc[:-1]
+
+    cam_sharpe = compute_all_metrics(series).metrics_json.get("sharpe")
+    assert cam_sharpe is not None, (
+        f"{fixture_name}: compute_all_metrics produced no Sharpe"
+    )
+
+    # Both annualize at 252 → they agree (no residual ×1.204 factor). Guard
+    # against a silent regression: the OLD 365-vs-252 gap would be > 0.5 here.
+    residual = abs(builder_sharpe - float(cam_sharpe))
+    assert residual < 0.05, (
+        f"{fixture_name}: residual scale factor between builder Sharpe "
+        f"{builder_sharpe} and compute_all_metrics Sharpe {cam_sharpe} = "
+        f"{residual} > 0.05 — the two annualization paths have diverged "
+        f"(a 365-vs-252 default drift would put this ~×1.204 apart)"
     )
 
 

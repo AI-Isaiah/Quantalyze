@@ -616,7 +616,7 @@
   ],
   "expected_twr": 0.000296,
   "expected_ytd": 0.000296,
-  "expected_sharpe": 2.55693759,
-  "quantstats_sharpe_reference": 2.55693759,
+  "expected_sharpe": 2.5756202779670216,
+  "quantstats_sharpe_reference": 2.5756202779670216,
   "exchange": "csv"
 }
