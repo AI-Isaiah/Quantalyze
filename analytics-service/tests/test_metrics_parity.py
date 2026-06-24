@@ -24,6 +24,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from services.analytics_runner import (
@@ -987,3 +989,112 @@ def test_golden_252d_expected_conftest_fixture_matches_committed_file(
     )
     # And the fixture the parity tests consume satisfies the same schema gate.
     assert _REQUIRED_TOP_LEVEL_KEYS <= golden_252d_expected.keys()
+
+
+# --- Phase 34 (ANNUAL-04b): the periods_per_year=365 rescale proof ----------
+#
+# This is the REAL threading guard. `test_metrics_parity_full` proves the
+# default-252 output is byte-identical to today (the "unchanged at 252" half).
+# This test proves that passing `periods_per_year=365` ACTUALLY rescales the
+# output by the known annualization relationships — so a silent threading hole
+# (any annualization site accidentally left hardcoded at 252) turns this RED.
+#
+# Empirically-verified rescale relationships (quantstats 0.0.81, this session,
+# match < 1e-12) — the exact ratios are the load-bearing fact:
+#   sharpe / sortino / volatility / info_ratio : x sqrt(365/252) = x1.2035001863
+#   cagr (NONLINEAR — geometric on years=len/periods):
+#       cagr_365 == (1 + cagr_252) ** (365/252) - 1      (NOT x1.2035)
+#   alpha (scalar greeks: alpha *= periods)    : x (365/252) = x1.4484126984  (linear)
+#   beta                                       : invariant (unitless ratio)
+#
+# CORRECTION to 34-RESEARCH: the research claimed info_ratio rescales LINEARLY
+# (x365/252). It does NOT. info_ratio = excess.mean()*periods / te, where
+# te = excess.std()*sqrt(periods); the `periods` in the numerator cancels with
+# the sqrt(periods) in te down to sqrt(periods). So info_ratio is sqrt-scaled
+# exactly like sharpe/sortino/volatility (empirically 1.2035, verified below).
+# The research was also wrong that rolling_greeks annualizes alpha — in qs 0.0.81
+# its `periods` arg is the ROLLING WINDOW and rolling alpha is unannualized
+# ("not annualized for rolling version"); only the SCALAR greeks() annualizes
+# alpha. See the matching note in metrics.py `_rolling_alpha_beta`.
+
+_SQRT_365_OVER_252 = (365 / 252) ** 0.5  # 1.2035001862952488
+_LINEAR_365_OVER_252 = 365 / 252  # 1.4484126984126984
+
+
+def test_periods_param_rescales_365(golden_252d_input):
+    """ANNUAL-04b: periods_per_year=365 rescales by the known relationships.
+
+    Uses the SAME committed golden_252d input for the sqrt-class scalars + the
+    geometric CAGR (whose info_ratio/alpha are null in that fixture), then a
+    tiny aligned SYNTHETIC benchmark pair to exercise the greeks-alpha (#5) and
+    info_ratio (#7) sites that golden_252d cannot prove. Mutating any single
+    threaded site back to a literal 252 turns this RED (falsifiable both ways).
+    """
+    r = golden_252d_input["returns"]
+    b = golden_252d_input["benchmark"]
+
+    base = compute_all_metrics(r, b)  # 252 default
+    p365 = compute_all_metrics(r, b, periods_per_year=365)  # threaded
+
+    base_mj = base.metrics_json
+    p365_mj = p365.metrics_json
+
+    # sqrt-class top-level scalars: x sqrt(365/252) -- sites #1-3 (cagr/vol/sharpe)
+    # + #4 (sortino) + the rolling np.sqrt sites feed these classes.
+    for key in ("sharpe", "sortino", "volatility"):
+        assert p365_mj[key] == pytest.approx(
+            base_mj[key] * _SQRT_365_OVER_252, rel=1e-9
+        ), f"{key} did not rescale by sqrt(365/252) — a threading hole at the {key} site"
+
+    # CAGR is geometric, NOT sqrt-scaled (34-RESEARCH Pitfall 1). Asserting
+    # x1.2035 here MUST fail; the geometric form is the correct relationship.
+    assert p365_mj["cagr"] == pytest.approx(
+        (1 + base_mj["cagr"]) ** (365 / 252) - 1, rel=1e-9
+    ), "cagr did not rescale GEOMETRICALLY (periods changes the years exponent)"
+
+    # Falsifiable negative control: CAGR must NOT match the sqrt ratio (proves
+    # the geometric assertion above isn't accidentally satisfied by sqrt too).
+    assert p365_mj["cagr"] != pytest.approx(
+        base_mj["cagr"] * _SQRT_365_OVER_252, rel=1e-6
+    ), "cagr matched the sqrt ratio — the geometric vs sqrt distinction is broken"
+
+    # --- synthetic aligned pair: prove the greeks-alpha (#5) + info_ratio (#7)
+    # sites thread, which golden_252d (alpha/info_ratio null) cannot. The inner
+    # benchmark metrics live under metrics_json["metrics_json"] (the nested
+    # sub-dict the persisted JSONB carries).
+    idx = pd.date_range("2024-01-01", periods=60, freq="D")
+    rng = np.random.default_rng(42)
+    syn_returns = pd.Series(
+        rng.normal(0.001, 0.01, 60), index=idx, dtype="float64"
+    )
+    syn_benchmark = pd.Series(
+        rng.normal(0.0008, 0.008, 60), index=idx, dtype="float64"
+    )
+
+    syn_base = compute_all_metrics(syn_returns, syn_benchmark).metrics_json["metrics_json"]
+    syn_365 = compute_all_metrics(
+        syn_returns, syn_benchmark, periods_per_year=365
+    ).metrics_json["metrics_json"]
+
+    # Guard: the synthetic pair must actually produce non-null benchmark metrics,
+    # else this half silently proves nothing (Rule 12 fail-loud).
+    assert syn_base["alpha"] is not None and syn_base["alpha"] != 0
+    assert syn_base["info_ratio"] is not None and syn_base["info_ratio"] != 0
+
+    # alpha is annualized LINEARLY in scalar greeks (`alpha *= periods`) — #5.
+    assert syn_365["alpha"] == pytest.approx(
+        syn_base["alpha"] * _LINEAR_365_OVER_252, rel=1e-9
+    ), "alpha did not rescale LINEARLY (x365/252) — greeks periods= not threaded (#5)"
+
+    # info_ratio is sqrt-scaled (periods/sqrt(periods) = sqrt(periods)) — #6/#7.
+    # If EITHER the `* periods_per_year` (#7) or the `np.sqrt(periods_per_year)`
+    # (#6 te) site is left at 252, this ratio breaks.
+    assert syn_365["info_ratio"] == pytest.approx(
+        syn_base["info_ratio"] * _SQRT_365_OVER_252, rel=1e-9
+    ), "info_ratio did not rescale by sqrt(365/252) — TE (#6) or info_ratio (#7) hole"
+
+    # beta is a unitless regression slope — invariant across the basis. A
+    # nonzero rescale here would signal an erroneous basis leak into beta.
+    assert syn_365["beta"] == pytest.approx(syn_base["beta"], abs=1e-12), (
+        "beta changed with periods_per_year — it must be basis-invariant"
+    )
