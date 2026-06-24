@@ -635,11 +635,22 @@ class TestAnonRoleDeniedSelectOnCsvDailyReturns:
 
 
 class TestNoRedundantIndex:
-    """Test 8 — PR #272 anti-regression. The PK on (strategy_id, date) is
-    enough for the worker SELECT (ORDER BY date) + ON CONFLICT upsert; adding
-    a secondary `csv_daily_returns_strategy_date_idx` doubles write I/O for
-    zero planner benefit. The migration-reviewer caught it once — pin it here
-    so a future migration that re-adds it fails this test."""
+    """Test 8 — index-inventory pin. PR #272 dropped the redundant
+    ``csv_daily_returns_strategy_date_idx`` so the composite PK alone served the
+    worker SELECT + ON CONFLICT.
+
+    Phase 35 (migration 20260624120000) converted the table to dual-axis: the
+    composite ``(strategy_id, date)`` PK became a surrogate ``id`` PK, and the
+    ``(strategy_id, date)`` uniqueness was RECREATED as an explicit non-partial
+    unique index (so the existing on_conflict=strategy_id,date upsert + the
+    paginated reader's stable page boundaries survive) ALONGSIDE a new
+    ``(api_key_id, date)`` non-partial unique index for the per-key axis.
+
+    The "no redundant index" intent is preserved: the expected set is EXACTLY
+    the three indexes the dual-axis design needs — the surrogate PK and the two
+    per-axis unique arbiters — with no extra/duplicate index. A future migration
+    that re-adds a redundant secondary (e.g. a plain strategy_date_idx on top of
+    the unique one) makes this set unequal and fails the test."""
 
     def test_no_redundant_index(
         self, service_role_conn: psycopg.Connection
@@ -650,13 +661,20 @@ class TestNoRedundantIndex:
                 "WHERE schemaname = 'public' AND tablename = 'csv_daily_returns' "
                 "ORDER BY indexname"
             )
-            index_names = [r["indexname"] for r in cur.fetchall()]
-        assert index_names == ["csv_daily_returns_pkey"], (
-            f"Expected ONLY csv_daily_returns_pkey (PR #272 hardening — no "
-            f"redundant explicit index), got {index_names!r}. The redundant "
-            f"csv_daily_returns_strategy_date_idx was dropped in PR #272 "
-            f"because the PK B-tree already serves the worker SELECT + "
-            f"ON CONFLICT upsert."
+            index_names = sorted(r["indexname"] for r in cur.fetchall())
+        expected = sorted(
+            [
+                "csv_daily_returns_pkey",  # surrogate BIGINT id PK
+                "csv_daily_returns_strategy_date_key",  # recreated strategy uniqueness
+                "csv_daily_returns_api_key_date_key",  # per-key axis uniqueness
+            ]
+        )
+        assert index_names == expected, (
+            f"Expected EXACTLY the dual-axis index set {expected!r} (surrogate PK "
+            f"+ the two non-partial per-axis unique arbiters), got {index_names!r}. "
+            f"After Phase 35 the (strategy_id, date) uniqueness is an explicit "
+            f"unique index (not the PK); a redundant extra/duplicate index — or a "
+            f"missing per-axis arbiter — fails this pin."
         )
 
 
