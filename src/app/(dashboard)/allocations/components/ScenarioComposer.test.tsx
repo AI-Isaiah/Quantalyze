@@ -475,6 +475,44 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // T_C3b — Blank-slate live-data leak regression. `equityDailyPoints` is the
+  // live book's server-blended equity baseline, a payload field separate from
+  // holdingsSummary. In "Blank slate" mode the allocator started from nothing,
+  // so the live curve + its sync stamp must NOT render — only the (empty)
+  // scenario overlay. Non-vacuous: book mode still passes the real baseline +
+  // stamps; switching to blank must zero them. Without the gate this asserts
+  // RED (EquityChart would still receive the 2-point live baseline + stamps).
+  // -------------------------------------------------------------------------
+  it("T_C3b Blank slate gates the live equity baseline + sync stamps out of EquityChart", () => {
+    const payload = makePayload({
+      lastSyncAt: "2026-06-24T00:00:00.000Z",
+      allKeysStale: true,
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Book mode (default for an allocator with a live book): real baseline + stamps flow through.
+    const bookProps = vi.mocked(EquityChart).mock.calls[0][0];
+    expect(bookProps.equityDailyPoints).toHaveLength(2);
+    expect(bookProps.lastSyncAt).toBe("2026-06-24T00:00:00.000Z");
+    expect(bookProps.stale).toBe(true);
+
+    // Switch to Blank slate — the live baseline + stamps must be gated out.
+    fireEvent.click(screen.getByRole("radio", { name: /blank slate/i }));
+
+    const calls = vi.mocked(EquityChart).mock.calls;
+    const blankProps = calls[calls.length - 1][0];
+    expect(blankProps.equityDailyPoints).toEqual([]);
+    expect(blankProps.lastSyncAt).toBeNull();
+    expect(blankProps.stale).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
   // H-0487/H-0493 — guards the CLIENT call site of collapseAliasedHoldingStrategies.
   // Two same-symbol multi-venue BTC holdings (identical symbol-keyed series)
   // must be merged into ONE exposure BEFORE the (real) computeScenario, so it

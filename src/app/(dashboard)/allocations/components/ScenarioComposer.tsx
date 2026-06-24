@@ -447,6 +447,19 @@ export function ScenarioComposer({
     [entryMode, rawHoldingsSummary],
   ) as typeof rawHoldingsSummary;
 
+  // Bugfix — blank-slate live-data leak. `equityDailyPoints` is the live book's
+  // server-blended equity baseline: a SEPARATE payload field the entryMode
+  // switch above does not reach. In "blank" mode the allocator chose to start
+  // from nothing, so the live curve + its sync stamp must NOT render — only the
+  // (empty-until-added) scenario overlay. Gate the baseline + stamps the same
+  // single-switch way. A no-book allocator already renders with an empty
+  // baseline, so blank mode just reproduces that already-handled state.
+  const isBlankMode = entryMode === "blank";
+  const baselineEquityDailyPoints = useMemo(
+    () => (isBlankMode ? [] : equityDailyPoints),
+    [isBlankMode, equityDailyPoints],
+  ) as typeof equityDailyPoints;
+
   const scenario = useScenarioState({
     holdingsSummary: holdingsSummary as { symbol: string; venue: string; holding_type: string; value_usd: number }[],
     allocatorId,
@@ -1911,11 +1924,11 @@ export function ScenarioComposer({
               Pitfall 3). `btcWealth` is undefined when the toggle is off or the
               benchmark is unavailable, which hides the overlay. */}
           <EquityChart
-            equityDailyPoints={equityDailyPoints}
+            equityDailyPoints={baselineEquityDailyPoints}
             scenarioSeries={scenarioWealthSeries}
             benchmark={btcWealth}
-            stale={allKeysStale}
-            lastSyncAt={lastSyncAt}
+            stale={isBlankMode ? false : allKeysStale}
+            lastSyncAt={isBlankMode ? null : lastSyncAt}
           />
           {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted #94A3B8
               line swatch (UI-SPEC §Copywriting / §Color). Disabled when the
@@ -1946,7 +1959,7 @@ export function ScenarioComposer({
             timeframe="ALL"
             width={6}
             height={4}
-            equityDailyPoints={equityDailyPoints}
+            equityDailyPoints={baselineEquityDailyPoints}
             scenarioDailyPoints={scenarioDailyPointsForDrawdown}
           />
           {/* NEW-C18-14: when scenarioAum=0 the drawdown is scaled against a

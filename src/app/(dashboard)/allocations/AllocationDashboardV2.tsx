@@ -4,8 +4,6 @@ import { useMemo } from "react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
-import { KeyFilterPanel } from "./components/KeyFilterPanel";
-import { useExcludedKeyIds } from "./hooks/useExcludedKeyIds";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
 import EquityChartWidget from "./widgets/performance/EquityChart";
 import { buildAllocatorPortfolioFactsheetPayload } from "@/lib/factsheet/allocator-portfolio-payload";
@@ -40,8 +38,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     equityDailyPoints,
     activeVenues = [],
     snapshotCount,
-    apiKeys = [],
-    allocator_id: allocatorId,
     // NEW-C09-04 (B14, audit-2026-05-07): the payload already carries the
     // sync-freshness signal — `allKeysStale` is true when every active
     // api_key's `last_sync_at` is older than 24h, and `lastSyncAt` is the
@@ -62,28 +58,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     equityBaselineUnknown = false,
   } = props;
 
-  // Per-API-key include/exclude — display-time filter for Overview
-  // aggregates. Excluded keys still ingest server-side (the toggle does
-  // NOT pause sync); we just drop their holdingsSummary rows from the
-  // client-side projection so KPIs / holdings tiles reflect the
-  // user-curated subset. The equity curve + factsheet panels still read
-  // the pre-blended server snapshots — the KeyFilterPanel surfaces a
-  // caveat when this divergence is active (see KeyFilterPanel.tsx for
-  // the rationale + the gap-tracking comment).
-  const { excluded: excludedKeyIds, clear: clearExcludedKeys } = useExcludedKeyIds(allocatorId);
-
-  const filteredHoldingsSummary = useMemo(() => {
-    if (excludedKeyIds.size === 0) return holdingsSummary;
-    return holdingsSummary.filter((row) => !excludedKeyIds.has(row.api_key_id));
-  }, [holdingsSummary, excludedKeyIds]);
-
-  // NEW-C26-01: gate the empty-state early return on the UNFILTERED summary so
-  // a user who has excluded ALL keys client-side doesn't land in the
-  // "Connect Exchange" CTA (factually wrong — they have connected keys). The
-  // CTA also unmounts KeyFilterPanel, the only UI to re-include keys, making
-  // the state a sticky dead-end that persists across reloads.
   const holdingsEmpty = holdingsSummary.length === 0;
-  const allKeysFiltered = holdingsSummary.length > 0 && filteredHoldingsSummary.length === 0;
 
   const factsheetPayload = useMemo(
     () =>
@@ -117,40 +92,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             limit, not a missing connection. */}
         {equityBaselineUnknown && <BaselineUnknownBanner />}
         <EmptyState hasSyncing={false} />
-      </div>
-    );
-  }
-
-  // NEW-C26-01: all keys filtered client-side — don't drop into the "Connect
-  // Exchange" empty state (factually wrong). Render KeyFilterPanel so the
-  // user can re-include at least one key and escape the state.
-  if (allKeysFiltered) {
-    return (
-      <div data-ui-v2-shell="true" data-testid="overview-all-keys-filtered">
-        <KeyFilterPanel
-          allocatorId={allocatorId}
-          apiKeys={apiKeys}
-          holdingsSummary={holdingsSummary}
-        />
-        <div
-          role="status"
-          className="mx-auto mt-8 max-w-[1100px] py-12 text-center"
-        >
-          <p className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
-            No data visible
-          </p>
-          <p className="mt-3 text-sm text-text-secondary">
-            All API keys are currently excluded. Re-include at least one key
-            above to see your portfolio data.
-          </p>
-          <button
-            type="button"
-            onClick={clearExcludedKeys}
-            className="mt-4 inline-flex items-center rounded-lg border border-accent/40 bg-surface px-4 py-2 text-sm font-medium text-accent hover:border-accent hover:bg-accent/5 transition-colors"
-          >
-            Show all keys
-          </button>
-        </div>
       </div>
     );
   }
@@ -195,11 +136,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         portfolioId={portfolio?.id ?? null}
         flaggedCount={flaggedHoldings.length}
         className="mt-3 px-1"
-      />
-      <KeyFilterPanel
-        allocatorId={allocatorId}
-        apiKeys={apiKeys}
-        holdingsSummary={holdingsSummary}
       />
 
       {factsheetPayload ? (
