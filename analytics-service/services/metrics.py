@@ -15,9 +15,15 @@ logger = logging.getLogger("quantalyze.analytics.metrics")
 # Phase 34 (ANNUAL-01/03): single source of truth for the annualization basis.
 # Every annualization site in this module (the five periods-bearing `qs.stats`
 # scalar calls — cagr/volatility/sharpe/sortino/calmar — scalar greeks alpha,
-# the explicit `np.sqrt(...)` / `* ...` lines, and the rolling helpers) resolves
-# the periods-per-year factor from this constant
-# via `compute_all_metrics(..., periods_per_year=...)`. The default of 252 keeps
+# the explicit `np.sqrt(...)` / `* ...` lines, and the rolling
+# sharpe/sortino/volatility helpers) resolves the periods-per-year factor from
+# this constant via `compute_all_metrics(..., periods_per_year=...)`. The ONE
+# path it deliberately does NOT govern is the rolling-greeks helper
+# (`_rolling_alpha_beta` and its `_rolling_alpha`/`_rolling_beta` wrappers):
+# rolling alpha/beta are left UNannualized in quantstats 0.0.81 (a per-period
+# regression intercept/slope series, not a periods-scaled quantity), so they
+# intentionally do not thread `periods_per_year` — that is not a missed site.
+# The default of 252 keeps
 # every displayed/ranking metric on the unified trading-day basis (comparability
 # over per-asset divergence — user decision 2026-06-24). The param exists so a
 # future per-asset divergence is a one-line call-site change, never a function

@@ -53,6 +53,7 @@ DECLARE
   row_cnt  INTEGER;
   raised   BOOLEAN;
   err_state TEXT;
+  err_msg  TEXT;
 BEGIN
   -- ----- SEED (seeding/service-role context — bypasses RLS) ---------------
   -- Tenant A: auth.users -> profile(allocator) -> api_key -> per-key daily +
@@ -158,10 +159,17 @@ BEGIN
     INSERT INTO csv_daily_returns (api_key_id, allocator_id, date, daily_return)
     VALUES (key_a, uid_b, '2026-01-02', 0.01);  -- key_a owned by A, allocator_id=B
   EXCEPTION WHEN raise_exception THEN
-    raised := TRUE; err_state := SQLSTATE;
+    raised := TRUE; err_state := SQLSTATE; err_msg := SQLERRM;
   END;
   IF NOT raised THEN
     RAISE EXCEPTION 'TEST FAILED (Assertion 6): a per-key row with allocator_id != api_keys.user_id was ACCEPTED — owner-coherence trigger missing or loosened';
+  END IF;
+  -- Pin the OWNER-MISMATCH arm specifically. The trigger has two RAISE arms
+  -- (FK-missing + allocator-mismatch); key_a is a valid FK, so only the mismatch
+  -- arm can fire here. Asserting the message keeps the test honest if a future
+  -- refactor makes the trigger raise for the wrong reason.
+  IF err_msg NOT LIKE '%must match api_keys.user_id%' THEN
+    RAISE EXCEPTION 'TEST FAILED (Assertion 6): trigger raised the WRONG arm (expected owner-mismatch, got: %)', err_msg;
   END IF;
 
   -- ----- ASSERTION 7: source XOR rejects a both-set row -----------------

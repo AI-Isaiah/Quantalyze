@@ -1107,3 +1107,27 @@ def test_periods_param_rescales_365(golden_252d_input):
     assert syn_365["beta"] == pytest.approx(syn_base["beta"], abs=1e-12), (
         "beta changed with periods_per_year — it must be basis-invariant"
     )
+
+    # --- rolling sibling-kind series: prove the rolling helpers thread too.
+    # The scalar assertions above only exercise the top-level qs.stats sites;
+    # they would stay GREEN if a rolling helper (_rolling_sharpe/_rolling_sortino/
+    # _rolling_volatility) were left at a literal np.sqrt(252). rolling_volatility_3m
+    # annualizes by `* np.sqrt(periods_per_year)` (metrics.py:_rolling_volatility),
+    # so every surviving point must rescale by sqrt(365/252); a threading hole
+    # leaves the point unchanged (ratio 1.0 vs ~1.2035) and turns this RED.
+    # Points are rounded to 4 decimals (_finalize_rolling), so a 20% hole is
+    # ~200x the rounding noise — rel=1e-2 catches it while tolerating the round.
+    base_vol = {pt["date"]: pt["value"] for pt in base.sibling_kinds["rolling_volatility_3m"]}
+    p365_vol = {pt["date"]: pt["value"] for pt in p365.sibling_kinds["rolling_volatility_3m"]}
+    assert base_vol, "golden rolling_volatility_3m must be non-empty for the rolling proof"
+    assert base_vol.keys() == p365_vol.keys(), (
+        "rolling_volatility_3m date support changed with periods_per_year — "
+        "the annualization basis must not change which windows are valid"
+    )
+    for d, v in base_vol.items():
+        if v == 0:
+            continue
+        assert p365_vol[d] == pytest.approx(v * _SQRT_365_OVER_252, rel=1e-2), (
+            f"rolling_volatility_3m[{d}] did not rescale by sqrt(365/252) — "
+            "a threading hole in a rolling helper (np.sqrt(periods_per_year))"
+        )
