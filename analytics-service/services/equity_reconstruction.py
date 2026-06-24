@@ -50,6 +50,7 @@ from services.job_worker import (
     classify_exception,
 )
 from services.exchange import aclose_exchange
+from services.metrics import DEFAULT_PERIODS_PER_YEAR
 from services.redact import scrub_freeform_string
 
 if TYPE_CHECKING:
@@ -2739,9 +2740,12 @@ class EquityCurveBuilder:
       - services.exchange.fetch_mark_prices(instruments) (60s in-process
         cache)
 
-    Sharpe uses `periods=365` (calendar-daily crypto). Matches
-    `qs.stats.sharpe(returns, periods=365)` within ±0.10 (tolerance
-    widened from ±0.05 after C01-14/C01-15; see test_equity_curve_builder.py).
+    Sharpe annualizes on the unified `DEFAULT_PERIODS_PER_YEAR` (252) basis,
+    shared with `compute_all_metrics` (Phase 34, ANNUAL-05) — no residual scale
+    factor between the two paths. Matches
+    `qs.stats.sharpe(returns, periods=252)` within ±0.10 (tolerance widened
+    from ±0.05 after C01-14; see test_equity_curve_builder.py). The equity-curve
+    row density stays calendar-daily; only the annualization multiplier is 252.
     """
 
     # Synthetic starting NAV used when the caller does not supply one.
@@ -3039,15 +3043,20 @@ class EquityCurveBuilder:
         return float((1 + ytd_df["daily_return"]).prod() - 1)
 
     def compute_sharpe(
-        self, risk_free_rate: float = 0.0, periods: int = 365
+        self, risk_free_rate: float = 0.0, periods: int = DEFAULT_PERIODS_PER_YEAR
     ) -> float | None:
         """Annualized Sharpe ratio.
 
-        NEW-C01-15: default changed from 252 to 365. The equity curve is
-        calendar-daily (freq="D", ~365 rows/yr on crypto which trades 24/7).
-        Using periods=252 (business-day convention) under-scales by
-        √(252/365)≈0.83. Callers that explicitly pass periods=252 are
-        unaffected.
+        Phase 34 (ANNUAL-05): default is ``DEFAULT_PERIODS_PER_YEAR`` (252),
+        unified with ``compute_all_metrics`` — both paths now annualize on the
+        SAME 252 trading-day basis, so there is no residual scale factor between
+        the equity-reconstruction Sharpe and the product-wide KPI engine. This
+        reverses the prior NEW-C01-15 252→365 change: comparability across every
+        displayed/ranking metric (user decision 2026-06-24) takes priority over
+        the per-asset calendar-density argument. The equity curve's row DENSITY
+        stays calendar-daily (~365 rows/yr on 24/7 crypto); only the
+        annualization MULTIPLIER is 252. Callers may still pass an explicit
+        ``periods`` to override.
 
         NEW-C01-14: The forced day-0 zero return biases the ratio on sparse
         series. Dropped the first row's zero if it is the seeded day-0 entry
@@ -3055,8 +3064,9 @@ class EquityCurveBuilder:
         `.fillna(0.0)` seed). Calendar-gap filler zeros are intentionally
         KEPT here because dropping ALL zeros would reduce an exchange-halt
         month to zero observations, producing an infinite/NaN Sharpe — the
-        opposite distortion. The primary fix for filler-zero bias is
-        C01-15 (correct annualization factor) which reduces the gap.
+        opposite distortion. (The annualization basis is now 252, unified with
+        ``compute_all_metrics`` — Phase 34; the prior C01-15 365 rationale that
+        leaned on annualization to offset filler-zero bias is no longer in play.)
         """
         df = self.to_equity_curve_daily()
         if df.empty or len(df) < 2:
