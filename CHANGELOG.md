@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.30.1.0] - 2026-06-24
+### Fixed — blank slate no longer shows a live equity curve from the book it discarded
+
+Choosing "blank slate" in the own-book Scenario composer means "start from nothing." But the live book's server-blended equity baseline (`equityDailyPoints`) is a separate payload field the existing entry-mode switch never reached, so blank slate still drew the live +X% equity curve, the live drawdown, and a "last synced" stamp over an explicitly-empty composition. The baseline and its freshness stamps are now gated off in blank mode the same single-switch way the holdings summary already was, so blank slate shows only the (empty-until-you-add) scenario overlay. A non-vacuous regression test pins it: book mode still passes the real baseline + stamps; switching to blank zeroes them.
+
+### Removed — the Overview "Data sources" per-API-key filter
+
+The allocator Overview had a per-API-key include/exclude panel ("Data sources") that read as a what-if toggle but could not honestly be one. The equity curve, KPIs, and factsheet panels all render from the server's pre-blended `allocator_equity_snapshots`, which has no per-key decomposition, so the filter only ever fed its own holdings rollup and an empty-state gate — it never re-scoped a single rendered KPI or curve. Toggling all sources "off" left the equity curve unchanged, which read as a bug. The panel, its `useExcludedKeyIds` hook, and the client-side `filteredHoldingsSummary` / `allKeysFiltered` paths are removed; Overview now renders the honest, unfiltered server truth. Honest per-data-source what-if belongs in the Scenario composer once each API key computes its own dailies (a tracked follow-up) — a toggle that cannot move the math does not belong anywhere.
+
+Reviewed: full allocations suite green (1088 tests across 89 files); typecheck clean; the frozen scenario engine (`src/lib/scenario.ts`) is byte-for-byte unchanged. A four-specialist fan-out (logic, honest-data, test-integrity, design) plus the adversarial honest-data lens cleared the diff. Known follow-up the review surfaced: in blank mode, once a strategy is added, the scenario equity projection does not yet render (the shared `EquityChart` projection guard short-circuits on the empty baseline before it considers the scenario series) while the drawdown does — incomplete, not dishonest; tracked with the composer chart-parity work.
+
 ## [0.30.0.1] - 2026-06-23
 ### Changed — journey polish: Bridge→composer continuity, accessible blank slate, composer a11y gate (v1.2 Phase 33)
 
