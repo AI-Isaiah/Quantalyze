@@ -4,7 +4,7 @@ aiodns==4.0.4
     # via ccxt
 aiohappyeyeballs==2.6.2
     # via aiohttp
-aiohttp==3.13.5
+aiohttp==3.14.1
     # via
     #   -r requirements.in
     #   ccxt
@@ -41,12 +41,6 @@ charset-normalizer==3.4.7
     # via requests
 click==8.4.1
     # via uvicorn
-coincurve==21.0.0 ; python_full_version < '3.14'
-    # via ccxt
-colorama==0.4.6 ; sys_platform == 'win32'
-    # via
-    #   click
-    #   uvicorn
 contourpy==1.3.3
     # via matplotlib
 cryptography==49.0.0
@@ -85,7 +79,7 @@ httpcore==1.0.9
     # via httpx
 httptools==0.8.0
     # via uvicorn
-httpx==0.28.1
+httpx[http2]==0.28.1
     # via
     #   -r requirements.in
     #   gotrue
@@ -163,13 +157,13 @@ propcache==0.5.2
     #   yarl
 protobuf==7.35.1
     # via yfinance
-psycopg==3.2.10
+psycopg[binary]==3.2.10
     # via -r requirements.in
-psycopg-binary==3.2.10 ; implementation_name != 'pypy'
+psycopg-binary==3.2.10
     # via psycopg
 pycares==5.0.1
     # via aiodns
-pycparser==3.0 ; implementation_name != 'PyPy'
+pycparser==3.0
     # via cffi
 pydantic==2.11.3
     # via
@@ -221,10 +215,8 @@ scipy==1.18.0
     # via quantstats
 seaborn==0.13.2
     # via quantstats
-sentry-sdk==2.58.0
+sentry-sdk[fastapi]==2.58.0
     # via -r requirements.in
-setuptools==82.0.1
-    # via ccxt
 six==1.17.0
     # via python-dateutil
 slowapi==0.1.9
@@ -249,13 +241,10 @@ typeguard==4.5.2
     # via pandera
 typing-extensions==4.15.0
     # via
-    #   aiosignal
-    #   anyio
     #   beautifulsoup4
     #   ccxt
     #   fastapi
     #   limits
-    #   psycopg
     #   pydantic
     #   pydantic-core
     #   realtime
@@ -267,16 +256,14 @@ typing-inspect==0.9.0
 typing-inspection==0.4.2
     # via pydantic
 tzdata==2026.2
-    # via
-    #   pandas
-    #   psycopg
+    # via pandas
 urllib3==2.7.0
     # via
     #   requests
     #   sentry-sdk
-uvicorn==0.34.2
+uvicorn[standard]==0.34.2
     # via -r requirements.in
-uvloop==0.22.1 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'
+uvloop==0.22.1
     # via uvicorn
 vcrpy==8.1.1
     # via -r requirements.in
