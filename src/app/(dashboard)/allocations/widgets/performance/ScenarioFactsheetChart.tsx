@@ -94,15 +94,23 @@ function PeriodControl({ axisLength }: { axisLength: number }) {
     <div
       role="tablist"
       aria-label="Period"
-      className="flex flex-wrap items-center gap-0.5"
+      className="flex flex-wrap items-center gap-1"
     >
       {SCENARIO_PERIODS.map((p) => (
         <button
           key={p}
           type="button"
           role="tab"
+          // No period is persisted as the active selection — the brush / xRange
+          // is the source of truth (sticky state would desync the shared
+          // window), so every period tab reports aria-selected={false}. Required
+          // for the composer's WCAG-AA axe gate (a role="tab" must carry it).
+          aria-selected={false}
           onClick={() => selectPeriod(p)}
-          className="rounded-sm px-2.5 py-1 text-[12px] font-mono tracking-[0.04em] tabular-nums text-text-secondary hover:bg-surface-subtle hover:text-text-primary focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+          // Match the factsheet TimeSeriesChart tab recipe verbatim (the
+          // factsheet is the source of truth): text-[10px] uppercase font-mono
+          // tracking-wider on a surface-subtle bordered pill.
+          className="rounded-sm border border-border bg-surface-subtle px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider tabular-nums text-text-2 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
         >
           {p}
         </button>
