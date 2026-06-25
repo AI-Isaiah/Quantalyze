@@ -17,6 +17,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildStrategyForBuilderSet,
+  buildPerKeyStrategyForBuilderSet,
   type StrategyForBuilderId,
 } from "./scenario-adapter";
 import { buildHoldingRef } from "./holding-outcome-adapter";
@@ -649,5 +650,135 @@ describe("H5 brand — compile-time guards", () => {
     lookup[branded] = sentinel;
     expect((lookup as Record<string, DailyPoint[]>)[RAW]).toBe(sentinel);
     expect(Object.keys(lookup)).toEqual([RAW]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 37 Plan 02 (DSRC-01) — the SIBLING per-key builder. One
+// StrategyForBuilder per api_key_id (id === api_key_id), weight = each key's
+// RAW clamped equity share, default selected=true, empty-series keys skipped.
+// This is the data-source-keyed projection (per api_key, not per blended book).
+//
+// CRITICAL (Pitfall 1): weights are RAW equity-share USD — NOT renormalized to
+// sum-to-1. The frozen computeScenario engine renormalizes per-day over the
+// selected set (r / activeWeightSum, scenario.ts). The raw-weight assertion
+// below is the falsifiability guard: adding any sum-to-1 normalize to the
+// builder turns it red.
+//
+// The B4 buildStrategyForBuilderSet suite + the H-0132 oracle above run in the
+// SAME invocation — green there proves the sibling is isolated and did not
+// disturb the B4 positional signature.
+// ─────────────────────────────────────────────────────────────────────────
+describe("buildPerKeyStrategyForBuilderSet — per-key keying (DSRC-01)", () => {
+  it("PK1 empty inputs → empty strategies + empty state", () => {
+    const result = buildPerKeyStrategyForBuilderSet({}, {});
+    expect(result.strategies).toEqual([]);
+    expect(result.state).toEqual({ selected: {}, weights: {}, startDates: {} });
+  });
+
+  it("PK2 two keys with full series → id === api_key_id, both selected true, weights = clamped equity-share", () => {
+    const result = buildPerKeyStrategyForBuilderSet(
+      { "key-A": RETURNS_60D, "key-B": RETURNS_60D },
+      { "key-A": 70, "key-B": 30 },
+    );
+    expect(result.strategies.length).toBe(2);
+    // id keying: the strategy ids ARE the api_key_ids.
+    expect(result.strategies.map((s) => s.id).sort()).toEqual([
+      "key-A",
+      "key-B",
+    ]);
+    for (const s of result.strategies) {
+      expect(s.daily_returns.length).toBe(60);
+      expect(s.disclosure_tier).toBe("exploratory");
+    }
+    // default included
+    expect(result.state.selected["key-A"]).toBe(true);
+    expect(result.state.selected["key-B"]).toBe(true);
+    // weight = clamped equity-share for that key
+    expect(result.state.weights["key-A"]).toBe(70);
+    expect(result.state.weights["key-B"]).toBe(30);
+  });
+
+  it("PK3 RAW equity-share weights — NOT renormalized to sum-to-1 (Pitfall 1 guard)", () => {
+    // With equity { A: 70, B: 30 } the raw weights MUST be 70 and 30, NOT the
+    // 0.7 / 0.3 fractions a sum-to-1 normalize would produce. The frozen engine
+    // owns renormalization (r / activeWeightSum) — the builder must not.
+    const result = buildPerKeyStrategyForBuilderSet(
+      { A: RETURNS_60D, B: RETURNS_60D },
+      { A: 70, B: 30 },
+    );
+    expect(result.state.weights.A).toBe(70);
+    expect(result.state.weights.B).toBe(30);
+    // Mutation guard: a normalized builder would make these sum to 1.
+    expect(result.state.weights.A + result.state.weights.B).toBe(100);
+  });
+
+  it("PK4 a key whose series is [] is skipped entirely (not in strategies, not in state)", () => {
+    const result = buildPerKeyStrategyForBuilderSet(
+      { "key-A": RETURNS_60D, "key-empty": [] },
+      { "key-A": 70, "key-empty": 30 },
+    );
+    expect(result.strategies.map((s) => s.id)).toEqual(["key-A"]);
+    expect(result.state.selected["key-empty"]).toBeUndefined();
+    expect(result.state.weights["key-empty"]).toBeUndefined();
+    expect(result.state.startDates["key-empty"]).toBeUndefined();
+  });
+
+  it("PK5 a key with negative equity share → weight clamped to 0 (never negative)", () => {
+    const result = buildPerKeyStrategyForBuilderSet(
+      { "key-neg": RETURNS_60D },
+      { "key-neg": -500 },
+    );
+    expect(result.state.weights["key-neg"]).toBe(0);
+  });
+
+  it("PK6 a key absent from equityByApiKeyId → weight 0 (?? 0 default)", () => {
+    const result = buildPerKeyStrategyForBuilderSet(
+      { "key-A": RETURNS_60D },
+      {}, // no equity entry for key-A
+    );
+    expect(result.state.weights["key-A"]).toBe(0);
+    expect(result.state.selected["key-A"]).toBe(true);
+  });
+
+  it("PK7 startDates = returns[0].date when present", () => {
+    const result = buildPerKeyStrategyForBuilderSet(
+      { "key-A": RETURNS_60D },
+      { "key-A": 100 },
+    );
+    expect(result.state.startDates["key-A"]).toBe(RETURNS_60D[0].date);
+    expect(result.strategies[0].start_date).toBe(RETURNS_60D[0].date);
+  });
+
+  it("PK8 startDates falls back to '2022-01-01' when returns[0].date is absent", () => {
+    // A non-empty series whose first point carries no date (defensive) → the
+    // builder must fall back to the engine's "2022-01-01" sentinel, not undefined.
+    const noDateSeries = [{ value: 0.001 } as unknown as DailyPoint];
+    const result = buildPerKeyStrategyForBuilderSet(
+      { "key-A": noDateSeries },
+      { "key-A": 100 },
+    );
+    expect(result.state.startDates["key-A"]).toBe("2022-01-01");
+  });
+
+  it("PK9 does not touch the B4 buildStrategyForBuilderSet output (sibling isolation, sanity)", () => {
+    // The per-key builder takes a different signature entirely; a B4 call in the
+    // same test is byte-identical to T2 above.
+    const b4 = buildStrategyForBuilderSet(
+      HOLDINGS_2,
+      new Set<string>(),
+      [],
+      {
+        "holding:binance:BTC:spot": RETURNS_60D,
+        "holding:binance:ETH:spot": RETURNS_60D,
+      },
+      {},
+      {},
+    );
+    expect(b4.strategies.length).toBe(2);
+    // B4 holding ids are scope_refs, NEVER api_key_id-shaped here.
+    for (const s of b4.strategies) {
+      expect(s.id.startsWith("holding:")).toBe(true);
+    }
   });
 });
