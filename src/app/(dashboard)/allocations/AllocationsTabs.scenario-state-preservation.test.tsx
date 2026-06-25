@@ -123,18 +123,23 @@ vi.mock("./ScenarioFlaggedHoldingsList", () => ({
 
 // Pure scenario-adapter mocked to a deterministic empty projection so
 // computeScenario short-circuits — the composer's chart math is irrelevant to
-// the draft-preservation contract under test. Phase 37: keep the sibling
-// buildPerKeyStrategyForBuilderSet real via importOriginal (the composer imports
-// it; the per-key path is inactive here since perKeyDailiesGateSatisfied=false).
-vi.mock("./lib/scenario-adapter", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("./lib/scenario-adapter")>();
+// the draft-preservation contract under test. Phase 37: the per-key path is
+// inactive in this suite (perKeyDailiesGateSatisfied=false), so BOTH builders
+// are stubbed to the empty projection. We deliberately do NOT importOriginal:
+// loading the real adapter's transitive graph (frozen engine + scenario-state +
+// dealias) made the composer's first render heavier and flaked this suite under
+// full-suite worker contention (it passes in isolation — see the vitest.config
+// maxWorkers note). The composer's perKeyAdapterOutput memo still calls
+// buildPerKeyStrategyForBuilderSet on every render, so the stub must return a
+// valid { strategies, state } shape.
+vi.mock("./lib/scenario-adapter", () => {
+  const emptyProjection = () => ({
+    strategies: [],
+    state: { selected: {}, weights: {}, startDates: {} },
+  });
   return {
-    ...actual,
-    buildStrategyForBuilderSet: vi.fn(() => ({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    })),
+    buildStrategyForBuilderSet: vi.fn(emptyProjection),
+    buildPerKeyStrategyForBuilderSet: vi.fn(emptyProjection),
   };
 });
 

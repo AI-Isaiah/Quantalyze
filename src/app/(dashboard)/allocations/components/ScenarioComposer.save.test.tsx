@@ -83,18 +83,21 @@ vi.mock("./ScenarioCommitDrawer", () => ({
 vi.mock("../ScenarioFlaggedHoldingsList", () => ({
   ScenarioFlaggedHoldingsList: vi.fn(() => <div data-testid="flagged-list-mock" />),
 }));
-// Phase 37: keep the sibling buildPerKeyStrategyForBuilderSet real via
-// importOriginal (the composer imports it; the per-key path is inactive here
-// since perKeyDailiesGateSatisfied defaults false).
-vi.mock("../lib/scenario-adapter", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../lib/scenario-adapter")>();
+// Phase 37: the per-key path is inactive in this suite (perKeyDailiesGateSatisfied
+// defaults false), so BOTH builders are stubbed to the empty projection. We
+// deliberately do NOT importOriginal: loading the real adapter's transitive graph
+// (frozen engine + scenario-state + dealias) made the composer's first render
+// heavier and is a needless flake vector under full-suite worker contention. The
+// composer's perKeyAdapterOutput memo still calls buildPerKeyStrategyForBuilderSet
+// on every render, so the stub must return a valid { strategies, state } shape.
+vi.mock("../lib/scenario-adapter", () => {
+  const emptyProjection = () => ({
+    strategies: [],
+    state: { selected: {}, weights: {}, startDates: {} },
+  });
   return {
-    ...actual,
-    buildStrategyForBuilderSet: vi.fn(() => ({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    })),
+    buildStrategyForBuilderSet: vi.fn(emptyProjection),
+    buildPerKeyStrategyForBuilderSet: vi.fn(emptyProjection),
   };
 });
 
