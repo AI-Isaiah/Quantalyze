@@ -869,8 +869,10 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   // passthrough that DEFENSIVELY re-filters allocator_id === userId (no column
   // stripping — per-key rows carry only the subject's own data). NO or_filter:
   // the bare .eq(allocator_id) IS the exact predicate the projection enforces.
-  // getOrderColumn inherits "date" via the source_table lookup
-  // (ORDER_COLUMN_OVERRIDES['csv_daily_returns'] = 'date') — no change needed.
+  // getOrderColumn falls back to the surrogate `id` PK (csv_daily_returns is
+  // intentionally absent from ORDER_COLUMN_OVERRIDES since the Phase 35 migration
+  // gave it an `id BIGINT IDENTITY` PK), so both the strategy-indirect and this
+  // per-key-projected spec export ordered by `id` — total, deterministic.
   {
     kind: "projected",
     table: "csv_daily_returns_per_key",

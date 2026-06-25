@@ -2373,8 +2373,11 @@ export function allActiveKeysHavePerKeyDailies(
 /**
  * Phase 36 / D3 — a key is eligible to HAVE a per-key `csv_daily_returns`
  * series IFF it matches the SAME active-key predicate the backfill uses to
- * enqueue its derive job: `analytics-service/scripts/phase35_backfill_enqueue.py`
- * (lines 19-21, the canonical migration-075 worker-dispatch filter):
+ * enqueue its derive job — the active-key predicate documented in the module
+ * docstring of `analytics-service/scripts/phase35_backfill_enqueue.py` (the
+ * canonical migration-075 worker-dispatch filter), implemented there as the
+ * `is_active` / `sync_status` / `disconnected_at` PostgREST chain
+ * (`.eq("is_active", True).or_("sync_status.is.null,sync_status.neq.revoked").is_("disconnected_at", "null")`):
  *
  *   is_active = true AND sync_status IS DISTINCT FROM 'revoked' AND disconnected_at IS NULL
  *
@@ -2722,7 +2725,10 @@ export const getMyAllocationDashboard = cache(
       // count. User client + owner RLS gates the read (T-36-03-01).
       supabase
         .from("csv_daily_returns")
-        .select("api_key_id, allocator_id, date, daily_return")
+        // allocator_id is NOT selected: RLS + the .eq below already scope the
+        // read to this allocator, and buildPerKeyReturnsByApiKeyId only consumes
+        // api_key_id / date / daily_return (trims wire bytes per review).
+        .select("api_key_id, date, daily_return")
         .eq("allocator_id", userId)
         .gte(
           "date",

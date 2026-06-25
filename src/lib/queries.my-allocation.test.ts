@@ -1953,3 +1953,107 @@ describe("isPerKeyDailiesEligibleKey — Phase 36 D3 backfill-parity predicate",
     ).toBe(false);
   });
 });
+
+describe("liveBaselineMetricsFromPerKeyDailies — financial edge branches (Phase 36 D1/D2)", () => {
+  // 12 dates clears computeScenario's n>=10 floor.
+  const DATES = Array.from({ length: 12 }, (_, i) =>
+    `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const series = (vals: number[]) =>
+    DATES.map((date, i) => ({ date, value: vals[i % vals.length] }));
+
+  type Holding =
+    Awaited<ReturnType<typeof import("./queries")["getMyAllocationDashboard"]>>["holdingsSummary"][number];
+  const spot = (api_key_id: string, value_usd: number): Holding => ({
+    symbol: "BTC",
+    quantity: 1,
+    mark_price_usd: 50_000,
+    value_usd,
+    venue: "binance",
+    holding_type: "spot",
+    api_key_id,
+    side: "flat",
+    entry_price: null,
+    unrealized_pnl_usd: null,
+  });
+  const deriv = (api_key_id: string, pnl: number): Holding => ({
+    symbol: "BTC-PERP",
+    quantity: 1,
+    mark_price_usd: 50_000,
+    value_usd: 100_000, // notional — NOT the equity contribution for a derivative
+    venue: "binance",
+    holding_type: "derivative",
+    api_key_id,
+    side: "long",
+    entry_price: 50_000,
+    unrealized_pnl_usd: pnl, // THIS is the equity contribution
+  });
+
+  it("empty per-key map (or only empty series) → empty-default: AUM from holdings, all KPIs null, equity/drawdown []", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    const cases: Record<string, { date: string; value: number }[]>[] = [
+      {},
+      { "key-A": [] },
+    ];
+    for (const perKey of cases) {
+      const out = liveBaselineMetricsFromPerKeyDailies([spot("key-A", 50_000)], perKey);
+      expect(out.aum).toBe(50_000); // D2: AUM still summed from holdings
+      expect(out.ytdTwr).toBeNull();
+      expect(out.sharpe).toBeNull();
+      expect(out.maxDd).toBeNull();
+      expect(out.avgRho).toBeNull();
+      expect(out.equity).toEqual([]);
+      expect(out.drawdown).toEqual([]);
+    }
+  });
+
+  it("totalAum <= 0 (flat derivative book) → drawdown is [] even though a per-key series exists", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    // A derivative with unrealized_pnl_usd=0 → equity contribution 0 → totalAum 0.
+    const out = liveBaselineMetricsFromPerKeyDailies(
+      [deriv("key-A", 0)],
+      { "key-A": series([0.01, -0.01]) },
+    );
+    expect(out.aum).toBe(0);
+    // The `totalAum > 0 ? deriveSnapshotDrawdowns(...) : []` branch yields [].
+    expect(out.drawdown).toEqual([]);
+  });
+
+  it("negative-equity clamp: a key with negative equity (losing derivative) gets weight 0, never a sign-flipping negative weight", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    const up = series([0.02, 0.01, 0.02, 0.01]); // key-A rising
+    const down = series([-0.2, -0.3, -0.25, -0.2]); // key-B crashing
+    // key-A: +100k equity; key-B: -50k equity (clamped to 0). Same dates so the
+    // overlap window is identical and only the weight differs.
+    const twoKey = liveBaselineMetricsFromPerKeyDailies(
+      [spot("key-A", 100_000), deriv("key-B", -50_000)],
+      { "key-A": up, "key-B": down },
+    );
+    // key-B clamped to weight 0 → the WEIGHTED curve is key-A only. A broken
+    // clamp (negative weight) would invert/amplify key-B's crash and produce a
+    // different (likely sub-1.0) curve.
+    const keyAOnly = liveBaselineMetricsFromPerKeyDailies(
+      [spot("key-A", 100_000)],
+      { "key-A": up },
+    );
+    expect(twoKey.equity).toEqual(keyAOnly.equity);
+    // Sanity: key-A's rising series produces a final cumulative wealth > 1.
+    expect(twoKey.equity.at(-1)!.value).toBeGreaterThan(1);
+  });
+
+  it("avgRho is a finite number on a multi-key blend (single-key yields null) — the correlation field is populated", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    const out = liveBaselineMetricsFromPerKeyDailies(
+      [spot("key-A", 60_000), spot("key-B", 40_000)],
+      { "key-A": series([0.03, -0.02, 0.04, -0.01]), "key-B": series([-0.01, 0.02, -0.03, 0.02]) },
+    );
+    expect(typeof out.avgRho).toBe("number");
+    expect(Number.isFinite(out.avgRho)).toBe(true);
+    // Contrast: a single key has no pair to correlate → avgRho null.
+    const single = liveBaselineMetricsFromPerKeyDailies(
+      [spot("key-A", 60_000)],
+      { "key-A": series([0.03, -0.02, 0.04, -0.01]) },
+    );
+    expect(single.avgRho).toBeNull();
+  });
+});
