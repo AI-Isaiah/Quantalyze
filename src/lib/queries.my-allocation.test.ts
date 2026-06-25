@@ -1781,6 +1781,105 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
     expect(result.liveBaselineMetrics.equity).not.toEqual(perKeyOnly.equity);
   });
 
+  it("C1 regression: a revoked-but-active key (is_active=true, sync_status='revoked') does NOT block the per-key branch — the gate predicate matches the backfill's, not bare is_active", async () => {
+    // The allocator-protected path keeps a credential-revoked key is_active=true
+    // and sets sync_status='revoked' (rows persist for audit). The backfill
+    // NEVER derives a series for such a key, so a bare `is_active` gate would
+    // pin the WHOLE allocator to the snapshot fallback FOREVER. key-A is healthy
+    // with dailies; key-B is is_active=true but revoked with NO dailies.
+    state.apiKeys = [
+      {
+        id: "key-A",
+        user_id: "user-1",
+        exchange: "binance",
+        label: "Binance",
+        is_active: true,
+        sync_status: "synced",
+        last_sync_at: "2026-05-08T00:00:00Z",
+        account_balance_usdt: 30_000,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "key-B",
+        user_id: "user-1",
+        exchange: "okx",
+        label: "OKX (revoked)",
+        is_active: true,
+        sync_status: "revoked",
+        last_sync_at: "2026-05-01T00:00:00Z",
+        account_balance_usdt: 20_000,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ];
+    // Both keys carry holdings (so key-B is in AUM); snapshots for the fallback.
+    state.allocatorHoldings = [
+      {
+        allocator_id: "user-1",
+        symbol: "BTC",
+        quantity: 1,
+        mark_price: 53_500,
+        value_usd: 30_000,
+        venue: "binance",
+        holding_type: "spot",
+        asof: ASOF[ASOF.length - 1],
+        api_key_id: "key-A",
+      },
+      {
+        allocator_id: "user-1",
+        symbol: "ETH",
+        quantity: 10,
+        mark_price: 2_000,
+        value_usd: 20_000,
+        venue: "okx",
+        holding_type: "spot",
+        asof: ASOF[ASOF.length - 1],
+        api_key_id: "key-B",
+      },
+    ];
+    state.allocatorEquitySnapshots = ASOF.map((asof, i) => ({
+      allocator_id: "user-1",
+      asof,
+      value_usd: SNAP_BTC[i] + 20_000,
+      breakdown: { BTC: SNAP_BTC[i], ETH: 20_000 + i * 100 },
+      source: "exchange_primary" as const,
+      history_depth_months: 24,
+    }));
+    // Only key-A (the ELIGIBLE key) has per-key dailies. key-B is revoked.
+    seedPerKeyDailiesA();
+
+    const {
+      getMyAllocationDashboard,
+      liveBaselineMetricsFromPerKeyDailies,
+      liveBaselineMetricsFromHoldings,
+      reconstructHoldingReturnsByScopeRef,
+    } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // The gate's eligible set is {key-A} (key-B is revoked → excluded, matching
+    // the backfill), and key-A HAS a series → the PER-KEY branch activates.
+    const expectedPerKey = liveBaselineMetricsFromPerKeyDailies(
+      result.holdingsSummary,
+      { "key-A": ASOF.map((date, i) => ({ date, value: PERKEY_A[i] })) },
+    );
+    expect(result.liveBaselineMetrics.sharpe).toBe(expectedPerKey.sharpe);
+    expect(result.liveBaselineMetrics.equity).toEqual(expectedPerKey.equity);
+
+    // Falsifiable: the OLD bare-is_active gate counted key-B as active, found no
+    // series for it, and fell back to the snapshot reconstruction. Assert we did
+    // NOT take that path.
+    const snapMetrics = liveBaselineMetricsFromHoldings(
+      result.holdingsSummary,
+      reconstructHoldingReturnsByScopeRef(
+        state.allocatorEquitySnapshots,
+        result.holdingsSummary,
+      ),
+    );
+    expect(result.liveBaselineMetrics.sharpe).not.toBe(snapMetrics.sharpe);
+
+    // AUM still includes the revoked key's frozen holdings (D2 unchanged).
+    expect(result.liveBaselineMetrics.aum).toBe(50_000);
+  });
+
   it("AUM is unchanged on the per-key branch (D2): summed from holdings equity contribution", async () => {
     activeKeyA();
     seedHoldingsKeyA(42_000);
@@ -1831,5 +1930,26 @@ describe("buildPerKeyReturnsByApiKeyId — Phase 36 grouping", () => {
       { date: "2026-05-02", value: -0.02 },
     ]);
     expect(out["key-B"]).toEqual([{ date: "2026-05-01", value: 0.03 }]);
+  });
+});
+
+describe("isPerKeyDailiesEligibleKey — Phase 36 D3 backfill-parity predicate", () => {
+  it("mirrors the backfill: is_active AND sync_status != 'revoked' AND disconnected_at IS NULL", async () => {
+    const { isPerKeyDailiesEligibleKey } = await import("./queries");
+    const base = { is_active: true, sync_status: "synced", disconnected_at: null };
+    // healthy active key → eligible
+    expect(isPerKeyDailiesEligibleKey(base)).toBe(true);
+    // a NULL sync_status (never synced) is still eligible (IS DISTINCT FROM 'revoked')
+    expect(isPerKeyDailiesEligibleKey({ ...base, sync_status: null })).toBe(true);
+    // deactivated → NOT eligible
+    expect(isPerKeyDailiesEligibleKey({ ...base, is_active: false })).toBe(false);
+    // revoked (allocator-protected path keeps is_active=true) → NOT eligible
+    expect(isPerKeyDailiesEligibleKey({ ...base, sync_status: "revoked" })).toBe(
+      false,
+    );
+    // soft-disconnected → NOT eligible
+    expect(
+      isPerKeyDailiesEligibleKey({ ...base, disconnected_at: "2026-05-01T00:00:00Z" }),
+    ).toBe(false);
   });
 });

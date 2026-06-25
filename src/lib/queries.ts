@@ -2306,8 +2306,12 @@ export function liveBaselineMetricsFromPerKeyDailies(
     // Clamp negative equity (deeply-losing derivative) to 0 for the weight so
     // the composite curve isn't distorted by negative-weight slots — identical
     // to liveBaselineMetricsFromHoldings. A key with no holdings equity share
-    // (e.g. a connected key holding nothing) gets weight 0 and is renormalized
-    // out by computeScenario.
+    // (e.g. a connected key holding nothing) gets weight 0, so it contributes
+    // nothing to the WEIGHTED return / equity curve / Sharpe. (Note: a weight-0
+    // key is still `selected`, so its series still enters computeScenario's
+    // avg_pairwise_correlation → avgRho — avgRho is a correlation across all
+    // keys-with-a-series, not weight-filtered. Same behaviour as the holdings
+    // path's de-aliased strategies.)
     weights[apiKeyId] = Math.max(0, equityByApiKeyId.get(apiKeyId) ?? 0);
   }
   if (strategies.length === 0) return emptyDefault;
@@ -2364,6 +2368,37 @@ export function allActiveKeysHavePerKeyDailies(
     const series = perKeyReturnsByApiKeyId[id];
     return Array.isArray(series) && series.length > 0;
   });
+}
+
+/**
+ * Phase 36 / D3 — a key is eligible to HAVE a per-key `csv_daily_returns`
+ * series IFF it matches the SAME active-key predicate the backfill uses to
+ * enqueue its derive job: `analytics-service/scripts/phase35_backfill_enqueue.py`
+ * (lines 19-21, the canonical migration-075 worker-dispatch filter):
+ *
+ *   is_active = true AND sync_status IS DISTINCT FROM 'revoked' AND disconnected_at IS NULL
+ *
+ * This MUST stay byte-identical to that backfill predicate, because the
+ * all-or-nothing gate below requires EVERY eligible key to have a series. For
+ * ALLOCATORS specifically, a credential-revoked or soft-disconnected key keeps
+ * `is_active = true` (the allocator-protected path — rows persist for audit
+ * continuity; routers/cron.py sets `sync_status='revoked'` / `disconnected_at`
+ * WITHOUT deactivating). A bare `is_active` filter would therefore count such a
+ * key as "active" while the backfill NEVER derives a series for it →
+ * `allActiveKeysHavePerKeyDailies` would return false FOREVER and the whole
+ * allocator would be silently pinned to the snapshot fallback, defeating the
+ * repoint for anyone who has ever revoked or disconnected a key. Mirroring the
+ * predicate keeps the gate honest. (Cross-language SoT: the Python backfill is
+ * authoritative; this TS predicate is its mirror — keep them in lockstep.)
+ */
+export function isPerKeyDailiesEligibleKey(key: {
+  is_active: boolean;
+  sync_status: string | null;
+  disconnected_at: string | null;
+}): boolean {
+  return (
+    key.is_active && key.sync_status !== "revoked" && key.disconnected_at == null
+  );
 }
 
 /**
@@ -3038,9 +3073,15 @@ export const getMyAllocationDashboard = cache(
         daily_return: number;
       }>,
     );
-    const activeKeyIds = apiKeys.filter((k) => k.is_active).map((k) => k.id);
+    // D3 gate: the eligible-key predicate MUST match the backfill's (revoked /
+    // soft-disconnected allocator keys keep is_active=true but never get a
+    // series — counting them here would pin the allocator to the fallback
+    // forever). See isPerKeyDailiesEligibleKey.
+    const eligibleKeyIds = apiKeys
+      .filter(isPerKeyDailiesEligibleKey)
+      .map((k) => k.id);
     const liveBaselineMetrics =
-      allActiveKeysHavePerKeyDailies(activeKeyIds, perKeyReturnsByApiKeyId)
+      allActiveKeysHavePerKeyDailies(eligibleKeyIds, perKeyReturnsByApiKeyId)
         ? liveBaselineMetricsFromPerKeyDailies(
             phase07.holdingsSummary,
             perKeyReturnsByApiKeyId,
