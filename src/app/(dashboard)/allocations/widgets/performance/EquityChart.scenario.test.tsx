@@ -1,8 +1,35 @@
-import { render, fireEvent } from "@testing-library/react";
+import { render, fireEvent, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
 import { EquityChart, toWealth } from "./EquityChart";
+import { ScenarioFactsheetChart } from "./ScenarioFactsheetChart";
+
+// FactsheetProvider's persistence primitive touches localStorage + sentry on
+// mount (even at persist=false the hook still registers), so the new-path
+// (ScenarioFactsheetChart) blank-slate proof below stubs both. Mirrors
+// scenario-shared-window.test.tsx. Hoisted so the legacy-path describes (which
+// never mount the provider) are unaffected — they don't read these.
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+
+const lsStore = new Map<string, string>();
+const localStorageMock = {
+  getItem: vi.fn((k: string) => lsStore.get(k) ?? null),
+  setItem: vi.fn((k: string, v: string) => {
+    lsStore.set(k, v);
+  }),
+  removeItem: vi.fn((k: string) => {
+    lsStore.delete(k);
+  }),
+  clear: vi.fn(() => lsStore.clear()),
+  key: vi.fn(() => null),
+  length: 0,
+};
+vi.stubGlobal("localStorage", localStorageMock);
+Object.defineProperty(window, "localStorage", {
+  value: localStorageMock,
+  configurable: true,
+});
 
 // ---------------------------------------------------------------------------
 // Phase 10 / 10-04 Task 2 — EquityChart scenarioSeries overlay + 3-state
@@ -406,5 +433,164 @@ describe("toWealth — red-team M2: false-positive warn threshold", () => {
     );
     expect(tweaksWarns.length).toBeGreaterThanOrEqual(1);
     warnSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 38 / 38-05 — PARITY-03: blank-slate (empty baseline + scenario) renders
+// the scenario overlay on the FINAL composer render path (Plan 03's
+// ScenarioFactsheetChart).
+//
+// This is the LOAD-BEARING PARITY-03 proof. The bug was EquityChart.tsx:675
+// bailing on an empty baseline (`equityDailyPoints.length === 0`) BEFORE
+// `hasScenario` was considered — so a blank-slate scenario rendered nothing.
+// After Plan 03 the composer renders through the factsheet engine where the
+// data precondition (a non-empty `strategyEquity` synthesized from the scenario
+// ALONE — Plan 01's adapter) is satisfied even with an empty baseline. So the
+// load-bearing proof lives on the NEW path: with `equityDailyPoints={[]}` and a
+// present scenario, the scenario overlay must render — with NO synthetic
+// baseline, NO "Equity data warming up" copy, and the PROJECTED honesty framing
+// intact.
+//
+// Honesty contract (UI-SPEC §Blank-Slate / §Copywriting):
+//   - The scenario overlay (data-testid="equity-chart-scenario-overlay") renders
+//     and carries a REAL strategy line (a <path> with a non-empty `d`), not just
+//     an empty wrapper — so a degenerate-empty payload would FAIL this proof.
+//   - NO synthetic/fabricated live baseline line: the equity panel draws exactly
+//     ONE strategy line (the scenario), never a second baseline series. (T-38-05-01)
+//   - "Equity data warming up" copy is ABSENT (the new path renders the chart,
+//     not the legacy warm-up placeholder).
+//
+// Mutation-falsifiability (Rule 9): the new-path precondition is
+// buildScenarioFactsheetPayload's "non-degenerate when scenario is present" rule
+// (scenario-factsheet-payload.ts:199-204). Forcing that to collapse (e.g.
+// hard-coding `degenerate = true`, or gating it on the EMPTY baseline) empties
+// `strategyEquity`, so the strategy line's `d` becomes empty and the
+// non-empty-`d` assertion below turns RED. Equivalently, removing the legacy
+// guard's `&& !hasScenario` is mutation-proven in the legacy-path describe below.
+// ---------------------------------------------------------------------------
+
+function makeBlankSlateScenario(n = 90): DailyPoint[] {
+  // toWealth-normalized cumulative scenario (start ~1.0), exactly what the
+  // composer feeds ScenarioFactsheetChart. Drift up so the strategy line has a
+  // genuine, non-flat shape → a non-empty SVG path `d`.
+  return toWealth(makeWealthSeries(n, 1.0, 0.0025));
+}
+
+describe("PARITY-03 — blank-slate scenario renders the overlay on the NEW composer path", () => {
+  it("empty baseline + present scenario ⇒ scenario overlay renders a REAL strategy line (no synthetic baseline)", () => {
+    const { container } = render(
+      <ScenarioFactsheetChart
+        equityDailyPoints={[]}
+        scenarioSeries={makeBlankSlateScenario()}
+        benchmark={undefined}
+      />,
+    );
+
+    // The overlay wrapper is present (the Plan-03 test hook).
+    const overlay = container.querySelector(
+      '[data-testid="equity-chart-scenario-overlay"]',
+    ) as HTMLElement | null;
+    expect(overlay).not.toBeNull();
+
+    // The equity panel inside the overlay renders the REAL factsheet chart svg.
+    const equitySvg = overlay!.querySelector(
+      'svg[role="img"][tabindex="0"]',
+    ) as SVGSVGElement | null;
+    expect(equitySvg).not.toBeNull();
+
+    // Load-bearing: the scenario strategy line is actually DRAWN — at least one
+    // <path> with a non-empty `d`. A degenerate-empty payload (the failure mode
+    // the guard bug produced) would emit no line ⇒ this turns RED.
+    const drawnLines = Array.from(
+      equitySvg!.querySelectorAll("path"),
+    ).filter((p) => (p.getAttribute("d") ?? "").trim().length > 0);
+    expect(drawnLines.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("draws exactly ONE strategy line in blank mode — NO synthetic/fabricated baseline (honesty, T-38-05-01)", () => {
+    // No benchmark ⇒ the equity panel's ONLY series is the scenario strategy
+    // line. A fabricated flat live-book baseline would show up as a SECOND
+    // drawn line. There is no live book, so the render must be the scenario
+    // alone.
+    const { container } = render(
+      <ScenarioFactsheetChart
+        equityDailyPoints={[]}
+        scenarioSeries={makeBlankSlateScenario()}
+        benchmark={undefined}
+      />,
+    );
+    const overlay = container.querySelector(
+      '[data-testid="equity-chart-scenario-overlay"]',
+    ) as HTMLElement;
+    const equitySvg = overlay.querySelector(
+      'svg[role="img"][tabindex="0"]',
+    ) as SVGSVGElement;
+    const drawnLines = Array.from(equitySvg.querySelectorAll("path")).filter(
+      (p) => (p.getAttribute("d") ?? "").trim().length > 0,
+    );
+    // Exactly one drawn series — the scenario. No second (baseline) line.
+    expect(drawnLines.length).toBe(1);
+  });
+
+  it("blank-slate render does NOT show the 'Equity data warming up' copy", () => {
+    const { queryByText } = render(
+      <ScenarioFactsheetChart
+        equityDailyPoints={[]}
+        scenarioSeries={makeBlankSlateScenario()}
+        benchmark={undefined}
+      />,
+    );
+    expect(queryByText(/Equity data warming up/i)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 38 / 38-05 — legacy guard correctness (mirror DrawdownChart.tsx:147).
+//
+// The legacy EquityChart is STILL used out of the composer (the Overview
+// EquityChartWidget). The projection guard must mirror DrawdownChart's
+// `&& !hasScenario`: it short-circuits to the "Equity data warming up" empty
+// state ONLY when there is neither a baseline NOR a scenario — never bailing on
+// an empty baseline alone when a scenario is present.
+//
+// Mutation check (Rule 9): removing `&& !hasScenario` from the guard re-bails on
+// the empty-baseline-with-scenario case, re-rendering "Equity data warming up"
+// ⇒ the first assertion below turns RED. The non-regression assertions pin that
+// the Overview behavior (no scenario) is UNCHANGED — an empty chart with no
+// scenario still warms up, and a populated baseline still renders.
+// ---------------------------------------------------------------------------
+
+describe("PARITY-03 — legacy EquityChart projection guard mirrors DrawdownChart hasScenario", () => {
+  it("empty baseline + present scenario ⇒ does NOT show 'Equity data warming up' (guard no longer bails before hasScenario)", () => {
+    const { queryByText } = render(
+      <EquityChart
+        equityDailyPoints={[]}
+        scenarioSeries={toWealth(makeWealthSeries(60, 1.0, 0.002))}
+        initialPeriod="ALL"
+      />,
+    );
+    // Mutation target: with `&& !hasScenario` removed, the guard re-bails and
+    // this copy reappears ⇒ RED.
+    expect(queryByText(/Equity data warming up/i)).toBeNull();
+  });
+
+  it("empty baseline AND no scenario ⇒ STILL warms up (Overview behavior unchanged)", () => {
+    const { getByText } = render(
+      <EquityChart equityDailyPoints={[]} initialPeriod="ALL" />,
+    );
+    expect(getByText(/Equity data warming up/i)).toBeTruthy();
+  });
+
+  it("populated baseline, no scenario ⇒ renders the chart, no warm-up copy (Overview behavior unchanged)", () => {
+    const { queryByText, container } = render(
+      <EquityChart
+        equityDailyPoints={makeWealthSeries(60)}
+        initialPeriod="ALL"
+      />,
+    );
+    expect(queryByText(/Equity data warming up/i)).toBeNull();
+    // The chart svg renders (role="img", aria-label="Equity chart" on the well).
+    expect(within(container).getAllByLabelText("Equity chart").length).toBeGreaterThanOrEqual(1);
   });
 });

@@ -672,7 +672,18 @@ export function EquityChart({
     // chart well rather than a hard error). Null here drives the warm-up
     // placeholder render below so the grid cell collapses cleanly when
     // there's nothing to show.
-    if (equityDailyPoints.length === 0 || composite.length === 0) {
+    //
+    // Phase 38 / 38-05 PARITY-03: mirror DrawdownChart.tsx:147's
+    // `&& !hasScenario` — short-circuit ONLY when there is neither a baseline
+    // NOR a scenario. Previously this bailed on an empty baseline BEFORE
+    // hasScenario was considered, so a blank-slate scenario rendered the
+    // warm-up placeholder instead of the scenario. The Overview EquityChartWidget
+    // never supplies a scenario (hasScenario=false), so its behavior is
+    // unchanged. (The load-bearing blank-slate overlay render lives on the
+    // composer's factsheet-backed path — ScenarioFactsheetChart — where the
+    // scenario alone satisfies the data precondition.)
+    // `&& !hasScenario` kept on one line to mirror DrawdownChart.tsx:147 exactly.
+    if ((equityDailyPoints.length === 0 || composite.length === 0) && !hasScenario) {
       return null;
     }
 
@@ -1073,6 +1084,7 @@ export function EquityChart({
     // `equityDailyPoints`), so it transitively covers any content change;
     // `equityDailyPoints` + `composite` are listed for the empty-guard
     // reads and to satisfy exhaustive-deps / preserve-manual-memoization.
+    // `hasScenario` is read by the 38-05 PARITY-03 guard above.
   }, [
     equityDailyPoints,
     composite,
@@ -1080,6 +1092,7 @@ export function EquityChart({
     visibleBenchmark,
     overlaySeries,
     width,
+    hasScenario,
   ]);
 
   // Single warm-up early-return — covers BOTH the empty-series case and the
