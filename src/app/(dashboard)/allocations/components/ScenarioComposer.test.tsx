@@ -169,6 +169,9 @@ vi.mock("@/components/charts/RollingSortinoChart", () => ({
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer } from "./ScenarioComposer";
+// Real (un-mocked) — used to build a valid current-schema draft so the
+// onRegisterOpen handler decodes "ok" in the WR-02 regression test below.
+import { defaultDraftFromHoldings } from "../lib/scenario-state";
 import { EquityChart } from "../widgets/performance/EquityChart";
 import DrawdownChart from "../widgets/performance/DrawdownChart";
 import { KpiStrip } from "./KpiStrip";
@@ -4015,6 +4018,59 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
 
     // aria-checked reflects the exclusion (state visible, not silent).
     expect(switchB).toHaveAttribute("aria-checked", "false");
+  });
+
+  // -------------------------------------------------------------------------
+  // Review WR-02 — the ephemeral per-source include map must NOT survive a
+  // draft replacement. Excluding a source then opening a saved scenario must
+  // start the opened scenario with every source included again (the toggle is
+  // not persisted; a stale exclusion would silently omit a source the user
+  // never excluded for THIS scenario — a cosmetic-hide-by-leak regression).
+  // -------------------------------------------------------------------------
+  it("review WR-02 opening a saved scenario clears the ephemeral per-source exclusion (toggle resets to all-included)", () => {
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePerKeyPayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    // Exclude key-B.
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      }),
+    );
+    expect(
+      screen.getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      }),
+    ).toHaveAttribute("aria-checked", "false");
+
+    // Open a saved scenario — a valid current-schema draft decodes "ok".
+    const validDraft = defaultDraftFromHoldings([
+      PK_HOLDING_A,
+      PK_HOLDING_B,
+    ] as Parameters<typeof defaultDraftFromHoldings>[0]);
+    act(() => {
+      openSaved?.({ id: "saved-1", name: "Saved scenario", draft: validDraft });
+    });
+
+    // The exclusion must NOT carry over — every source included again. Without
+    // the WR-02 fix (setIncludeByApiKeyId({}) on open) this stays aria-checked
+    // "false" and the opened scenario silently omits key-B.
+    expect(
+      screen.getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      }),
+    ).toHaveAttribute("aria-checked", "true");
   });
 
   // -------------------------------------------------------------------------

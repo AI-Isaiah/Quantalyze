@@ -841,6 +841,12 @@ export function ScenarioComposer({
     setOpenNotice(null);
     setNameInputOpen(false);
     setSaveError(null);
+    // Review WR-02 — clear the ephemeral per-source include map on every reset /
+    // saved-scenario open. The toggle is NOT persisted to the draft, so a freshly
+    // opened scenario must start with every data source included; without this a
+    // prior exclusion would silently carry over and the loaded scenario's
+    // projection would omit a source the user never excluded for it.
+    setIncludeByApiKeyId({});
     // UNIFY-02 — if a dirty-draft mode switch parked a pending segment, apply
     // it now (on the SAME confirm that discards the draft). `reset()` re-inits
     // the draft from `holdingsSummary`, which itself depends on `entryMode`, so
@@ -923,6 +929,10 @@ export function ScenarioComposer({
       if (decoded.outcome === "readonly") {
         // Newer-version blob: hydrate the user's real data but block edits.
         scenario.hydrateFromSaved(decoded.value);
+        // Review WR-02 — opening a saved scenario replaces the draft, so clear
+        // the ephemeral per-source include map (it is not persisted) → the
+        // opened scenario starts with every data source included.
+        setIncludeByApiKeyId({});
         setLoadedScenarioId(row.id);
         setLoadedScenarioName(row.name);
         setLoadedReadonly(true);
@@ -937,6 +947,9 @@ export function ScenarioComposer({
       // fingerprint-mismatch banner (drift) derives automatically from the
       // hydrated draft's fingerprint vs current holdings — no special-casing.
       scenario.hydrateFromSaved(decoded.value);
+      // Review WR-02 — clear the ephemeral per-source include map on open (it is
+      // not persisted) → the opened scenario starts with every source included.
+      setIncludeByApiKeyId({});
       setLoadedScenarioId(row.id);
       setLoadedScenarioName(row.name);
       setLoadedReadonly(false);
@@ -1348,8 +1361,16 @@ export function ScenarioComposer({
   //   book mode + !gate      → render the calm InfoBanner fallback note.
   //   blank mode             → render nothing (no live book, no live keys).
   const showDataSources = usePerKeySources;
+  // The fallback note explains that per-source modeling needs per-key history —
+  // so it is only meaningful when the allocator actually HAS connected, eligible
+  // keys whose series are incomplete. A book allocator with zero eligible keys
+  // (e.g. keys removed but a holdings snapshot remains) has nothing to model per
+  // source, so suppress the note there rather than show the misleading
+  // "connected keys don't have a per-key series yet" copy (review WR-01).
   const showDataSourcesFallback =
-    entryMode === "book" && !payload.perKeyDailiesGateSatisfied;
+    entryMode === "book" &&
+    !payload.perKeyDailiesGateSatisfied &&
+    (payload.eligibleApiKeyIds ?? []).length > 0;
 
   // The connected exchange keys eligible for per-source toggling — payload
   // apiKeys filtered to the SSR-computed eligible-key id set (SoT mirror; the
