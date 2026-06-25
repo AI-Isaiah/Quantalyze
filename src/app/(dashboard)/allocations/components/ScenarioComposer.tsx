@@ -121,18 +121,6 @@ import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 // ---------------------------------------------------------------------------
 
 /**
- * Review-pass P2 fix. When the allocator opens the composer with zero
- * holdings AND has added at least one strategy, `scenarioAum` collapses to
- * 0 and the wealth-curve denominators (`scenarioWealthSeries.value *
- * scenarioAum`) collapse to a degenerate flat-zero series. Substitute a
- * symbolic 1 USD baseline so the chart renders the SHAPE of the projection
- * (relative wealth movement) instead of a flat line. The KPI strip + delta
- * pills remain unaffected — they read fractional metrics from the engine
- * directly, not USD-scaled values.
- */
-const SYNTHETIC_BASELINE_AUM = 1;
-
-/**
  * R4 — leverage v1 bounds. No shorting (L ≥ 0); a 10× ceiling keeps the
  * projection in a sane range. Module-scoped so the composer's fail-loud change
  * handler and the CompositionList input share a single source of truth.
@@ -1619,22 +1607,6 @@ export function ScenarioComposer({
     return sum;
   }, [scenario.draft.toggleByScopeRef, holdingByRef]);
 
-  // Review-pass P2 fix — when the allocator has added strategies but the
-  // live holdings list is empty (or all toggled off), `scenarioAum` is 0
-  // and the USD-scaled drawdown series degenerates to a flat zero. Fall
-  // back to a symbolic 1 USD so the curve renders the SHAPE of the
-  // projection. The KPI strip is sourced from fractional engine metrics
-  // and is unaffected by this substitution.
-  const effectiveScenarioAumForChart =
-    scenarioAum > 0 ? scenarioAum : SYNTHETIC_BASELINE_AUM;
-  const scenarioDailyPointsForDrawdown: DailyPoint[] = useMemo(
-    () =>
-      scenarioWealthSeries.map((p) => ({
-        date: p.date,
-        value: p.value * effectiveScenarioAumForChart,
-      })),
-    [scenarioWealthSeries, effectiveScenarioAumForChart],
-  );
 
   // -------------------------------------------------------------------------
   // Build delta summary for footer (top 3 above noise floor).
@@ -2233,7 +2205,6 @@ export function ScenarioComposer({
           equityDailyPoints={baselineEquityDailyPoints}
           scenarioSeries={scenarioWealthSeries}
           benchmark={btcWealth}
-          scenarioDailyPoints={scenarioDailyPointsForDrawdown}
         />
         {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted #94A3B8
             line swatch (UI-SPEC §Copywriting / §Color). Disabled when the
@@ -2250,15 +2221,15 @@ export function ScenarioComposer({
           <span
             aria-hidden="true"
             className="inline-block h-0.5 w-4"
-            style={{ backgroundColor: "#94A3B8" }}
+            style={{ backgroundColor: "var(--color-chart-benchmark)" }}
           />
           BTC Benchmark
         </label>
-        {/* NEW-C18-14: when scenarioAum=0 the drawdown is scaled against a
-            synthetic $1 baseline so the chart still renders the projected
-            SHAPE rather than a flat zero. Disclose this to the allocator so
-            they don't mistake an illustrative curve for one backed by real
-            capital. */}
+        {/* NEW-C18-14: the factsheet-backed chart renders the projected SHAPE
+            from the normalized scenario wealth (no live capital scaling). When
+            scenarioAum=0 there is no real book behind the curve, so disclose
+            that it is illustrative — allocators must not mistake the shape for
+            one backed by real capital. */}
         {scenarioAum <= 0 && (
           <div
             aria-live="polite"

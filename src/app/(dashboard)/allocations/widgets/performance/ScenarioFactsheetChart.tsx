@@ -67,13 +67,6 @@ export interface ScenarioFactsheetChartProps {
   scenarioSeries: DailyPoint[];
   /** Optional BTC benchmark overlay (cumulative-wealth form). Undefined hides it. */
   benchmark?: DailyPoint[];
-  /**
-   * Scenario daily points used to derive the drawdown series. Accepted for
-   * call-site symmetry; the synthesized payload derives drawdowns from the
-   * scenario itself (one canonical axis), so this is plumbed for parity with
-   * the legacy DrawdownChart signature.
-   */
-  scenarioDailyPoints?: DailyPoint[];
 }
 
 /**
@@ -122,7 +115,6 @@ export function ScenarioFactsheetChart({
   equityDailyPoints,
   scenarioSeries,
   benchmark,
-  scenarioDailyPoints,
 }: ScenarioFactsheetChartProps) {
   // Synthesize the minimal, valid FactsheetPayload (csv arm) the factsheet
   // TimeSeriesChart + MasterBrush consume verbatim. Index-aligned to ONE
@@ -137,11 +129,6 @@ export function ScenarioFactsheetChart({
       }),
     [scenarioSeries, equityDailyPoints, benchmark],
   );
-
-  // Reference scenarioDailyPoints so the call-site-symmetry prop is genuinely
-  // part of the data flow (drawdowns are derived inside the adapter from the
-  // scenario; this prop is the composer's USD-scaled mirror, kept for parity).
-  void scenarioDailyPoints;
 
   const axisLength = synthPayload.dates.length;
 

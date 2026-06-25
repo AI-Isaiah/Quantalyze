@@ -676,11 +676,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_C5 — ScenarioFactsheetChart receives scenarioDailyPoints (the drawdown
-  // panel's per-day source; the new component renders equity + drawdown stacked
-  // under one provider, so the single mount carries scenarioDailyPoints).
+  // T_C5 — ScenarioFactsheetChart receives the scenario wealth series. The
+  // factsheet-backed mount renders equity + drawdown (stacked under one
+  // provider) from the single scenario series — drawdowns are derived inside
+  // the adapter, so the scenario wealth IS the chart's source of truth.
   // -------------------------------------------------------------------------
-  it("T_C5 ScenarioFactsheetChart receives scenarioDailyPoints", () => {
+  it("T_C5 ScenarioFactsheetChart receives the scenario wealth series", () => {
     const payload = makePayload();
     render(
       <ScenarioComposer
@@ -691,7 +692,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     );
     expect(ScenarioFactsheetChart).toHaveBeenCalled();
     const props = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0];
-    expect(Array.isArray(props.scenarioDailyPoints)).toBe(true);
+    expect(Array.isArray(props.scenarioSeries)).toBe(true);
   });
 
   // -------------------------------------------------------------------------
