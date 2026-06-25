@@ -4,15 +4,18 @@
  * Phase 10 Plan 06b — full Scenario tab body assembly.
  *
  * Composes Plan 06a's `useScenarioState` hook + `ScenarioFooter` with
- * the Wave 2-5 component primitives (KpiStrip mode=scenario, EquityChart
- * scenarioSeries, DrawdownChart scenarioDailyPoints, StrategyBrowseDrawer,
- * BridgeDrawer onAddToScenario, ScenarioFlaggedHoldingsList).
+ * the Wave 2-5 component primitives (KpiStrip mode=scenario,
+ * ScenarioFactsheetChart fed the scenario wealth series, StrategyBrowseDrawer,
+ * BridgeDrawer onAddToScenario, ScenarioFlaggedHoldingsList). Phase 38-03
+ * swapped the legacy EquityChart + DrawdownChart render to the
+ * factsheet-backed ScenarioFactsheetChart (PARITY-01).
  *
  * Sections (top→bottom):
  *   1. Header — "Scenario" + subtitle
  *   2. Fingerprint-mismatch banner (when stored fingerprint != current)
  *   3. KpiStrip in mode="scenario" with scenarioMetrics + liveMetrics
- *   4. EquityChart + DrawdownChart with scenarioSeries / scenarioDailyPoints
+ *   4. ScenarioFactsheetChart (factsheet-engine equity + drawdown) fed the
+ *      scenario wealth series — Phase 38-03 (was EquityChart + DrawdownChart)
  *   5. Bridge inline card (only when flaggedHoldings.length > 0) embedding
  *      ScenarioFlaggedHoldingsList — RESEARCH §Architecture decision
  *   6. CompositionList — read-only-tokens model: live holdings are FIXED
@@ -33,8 +36,9 @@
  *
  * Pitfall 1 — `computeScenario().equity_curve` returns cumulative RETURN
  * (e.g. 0.18 = +18%). The composer converts to cumulative WEALTH (start
- * at 1.0) before passing to EquityChart, and scales by the scenario AUM
- * before passing to DrawdownChart (which expects USD-form values).
+ * at 1.0) via `toWealth` before passing it to ScenarioFactsheetChart, which
+ * derives the drawdown series internally from that wealth curve (the prior
+ * USD-scale-for-DrawdownChart step was dropped in Phase 38-03).
  *
  * M4 — live baseline read from `payload.liveBaselineMetrics` (SSR-lifted
  * in Plan 03). The composer does NOT re-derive the live baseline by
@@ -79,6 +83,8 @@ import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { PartialDataBanner } from "@/components/strategy-v2/PartialDataBanner";
 import { Card } from "@/components/ui/Card";
 import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
+import { InfoBanner } from "@/components/ui/InfoBanner";
+import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { Button } from "@/components/ui/Button";
 import {
@@ -87,14 +93,22 @@ import {
   type AddedStrategy,
 } from "../lib/scenario-state";
 import { useScenarioState } from "../hooks/useScenarioState";
-import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
+import {
+  buildStrategyForBuilderSet,
+  buildPerKeyStrategyForBuilderSet,
+} from "../lib/scenario-adapter";
 import {
   buildHoldingRef,
   type FlaggedHolding,
 } from "../lib/holding-outcome-adapter";
 import { KpiStrip } from "./KpiStrip";
-import { EquityChart, toWealth } from "../widgets/performance/EquityChart";
-import DrawdownChart from "../widgets/performance/DrawdownChart";
+// `toWealth` stays (the scenario wealth series builder, imported from
+// ../widgets/performance/EquityChart); EquityChart +
+// DrawdownChart are no longer rendered here — Phase 38-03 swaps the composer's
+// two chart call sites to the factsheet-backed ScenarioFactsheetChart (PARITY-01).
+// The Overview EquityChartWidget keeps the legacy EquityChart render (out of scope).
+import { toWealth } from "../widgets/performance/EquityChart";
+import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { BridgeDrawer } from "./BridgeDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
@@ -110,18 +124,6 @@ import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-/**
- * Review-pass P2 fix. When the allocator opens the composer with zero
- * holdings AND has added at least one strategy, `scenarioAum` collapses to
- * 0 and the wealth-curve denominators (`scenarioWealthSeries.value *
- * scenarioAum`) collapse to a degenerate flat-zero series. Substitute a
- * symbolic 1 USD baseline so the chart renders the SHAPE of the projection
- * (relative wealth movement) instead of a flat line. The KPI strip + delta
- * pills remain unaffected — they read fractional metrics from the engine
- * directly, not USD-scaled values.
- */
-const SYNTHETIC_BASELINE_AUM = 1;
 
 /**
  * R4 — leverage v1 bounds. No shorting (L ≥ 0); a 10× ceiling keeps the
@@ -391,6 +393,74 @@ function normalizeBookReturns(raw: unknown): DailyPoint[] | null {
   return normalized;
 }
 
+/**
+ * DSRC-02 (D2) — per-holding equity contribution, the per-key WEIGHT source.
+ *
+ * Mirrors the SSR `holdingEquityContribution` (queries.ts:2113) EXACTLY:
+ *   - derivative → `unrealized_pnl_usd` (the actual equity at stake; `value_usd`
+ *     is the leveraged NOTIONAL contract size, which would inflate the weight by
+ *     the leverage factor), null/non-finite → 0.
+ *   - spot       → `value_usd` (marked fair value = the equity contribution),
+ *     non-finite → 0.
+ *
+ * Duplicated locally rather than imported: `@/lib/queries` is `server-only`, so
+ * importing its export into this "use client" module crosses the client/server
+ * boundary (and the per-key adapter sibling already duplicates the per-key loop
+ * locally for the same reason — PATTERNS §"No Analog Found"). Keep this in
+ * lockstep with the SSR helper so the client weight matches the server's.
+ */
+function holdingEquityContributionLocal(
+  h: MyAllocationDashboardPayload["holdingsSummary"][number],
+): number {
+  if (h.holding_type === "derivative") {
+    const pnl = h.unrealized_pnl_usd ?? 0;
+    return Number.isFinite(pnl) ? pnl : 0;
+  }
+  return Number.isFinite(h.value_usd) ? h.value_usd : 0;
+}
+
+/**
+ * DSRC-02 — exchange display-name lookup for the Data-sources row labels.
+ *
+ * Copied locally from the SyncBadge recipe (SyncBadge.tsx:21-35): a lower-cased
+ * lookup with `?? exchange` fallback. The shared `EXCHANGE_DISPLAY`
+ * (closed-sets.ts) carries identical values but is typed
+ * `Record<SupportedExchange, string>` — a CLOSED key union — so it cannot be
+ * indexed by the arbitrary `string` exchange code without a cast that defeats
+ * its narrowing; the open-keyed `?? fallback` recipe stays local, matching the
+ * existing local copies in SyncBadge + VerificationForm + AllocatorSyncStatus
+ * rather than introducing a cast or a new shared module (surgical-change rule,
+ * PATTERNS §"No Analog Found").
+ */
+const EXCHANGE_LABELS: Record<string, string> = {
+  binance: "Binance",
+  okx: "OKX",
+  bybit: "Bybit",
+};
+
+/**
+ * DSRC-02 — resolve a connected exchange api_key to its row label
+ * `{Exchange} — {nickname}`, falling back to `{Exchange} — ••••{id.slice(-4)}`
+ * when the key has no nickname. The masked tail never reveals the full id and
+ * never any secret/ciphertext (T-37-03-01). Returns the structured parts so the
+ * caller can render the masked tail in font-mono per UI-SPEC.
+ */
+function dataSourceLabel(k: { exchange: string; label: string; id: string }): {
+  exchange: string;
+  /** nickname when present, else null (caller renders the masked tail). */
+  nickname: string | null;
+  /** masked id tail (last 4) — only meaningful when nickname is null. */
+  maskedTail: string;
+} {
+  const exchange = EXCHANGE_LABELS[k.exchange.toLowerCase()] ?? k.exchange;
+  const nick = k.label?.trim();
+  return {
+    exchange,
+    nickname: nick ? nick : null,
+    maskedTail: `••••${k.id.slice(-4)}`,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // ScenarioComposer
 // ---------------------------------------------------------------------------
@@ -414,7 +484,6 @@ export function ScenarioComposer({
     holdingReturnsByScopeRef,
     snapshotCount,
     allKeysStale,
-    lastSyncAt,
     minHistoryDepthMonths,
     activeVenues,
   } = payload as MyAllocationDashboardPayload & {
@@ -513,6 +582,27 @@ export function ScenarioComposer({
   // ponytail: ephemeral useState; promote to the persisted draft only if
   // allocators ask for leverage to survive a reload.
   const [leverageByRef, setLeverageByRef] = useState<Record<string, number>>({});
+
+  // DSRC-02/03 — per-data-source include/exclude map (api_key_id → included?).
+  // Ephemeral exploration state, modeled EXACTLY on R4 `leverageByRef` above:
+  // NOT persisted to scenario.draft, NOT routed through
+  // `scenario.draft.toggleByScopeRef`, NOT part of the commit diff, and resets on
+  // reload (Pitfall 5). `{}` = all included (default). A key resolves to included
+  // via `includeByApiKeyId[id] ?? true` wherever it is read. Threaded into the
+  // existing `projectionState.selected` channel keyed by api_key_id so the frozen
+  // engine honestly recomputes the curve + every KPI on exclusion (DSRC-03) —
+  // never a cosmetic hide.
+  const [includeByApiKeyId, setIncludeByApiKeyId] = useState<
+    Record<string, boolean>
+  >({});
+
+  // DSRC-02 — fail-loud, visible-state toggle handler. Mirrors
+  // handleLeverageChange's "state visible immediately, never silent" posture; a
+  // boolean toggle has no invalid value so it never clamps. The row's
+  // aria-checked reflects the change synchronously and the projection recomputes.
+  function handleDataSourceToggle(apiKeyId: string, include: boolean) {
+    setIncludeByApiKeyId((prev) => ({ ...prev, [apiKeyId]: include }));
+  }
 
   // -------------------------------------------------------------------------
   // UNIFY-04 — lazy-returns plumbing (29-RESEARCH "SSR-LIFT vs LAZY-FETCH").
@@ -751,6 +841,12 @@ export function ScenarioComposer({
     setOpenNotice(null);
     setNameInputOpen(false);
     setSaveError(null);
+    // Review WR-02 — clear the ephemeral per-source include map on every reset /
+    // saved-scenario open. The toggle is NOT persisted to the draft, so a freshly
+    // opened scenario must start with every data source included; without this a
+    // prior exclusion would silently carry over and the loaded scenario's
+    // projection would omit a source the user never excluded for it.
+    setIncludeByApiKeyId({});
     // UNIFY-02 — if a dirty-draft mode switch parked a pending segment, apply
     // it now (on the SAME confirm that discards the draft). `reset()` re-inits
     // the draft from `holdingsSummary`, which itself depends on `entryMode`, so
@@ -833,6 +929,10 @@ export function ScenarioComposer({
       if (decoded.outcome === "readonly") {
         // Newer-version blob: hydrate the user's real data but block edits.
         scenario.hydrateFromSaved(decoded.value);
+        // Review WR-02 — opening a saved scenario replaces the draft, so clear
+        // the ephemeral per-source include map (it is not persisted) → the
+        // opened scenario starts with every data source included.
+        setIncludeByApiKeyId({});
         setLoadedScenarioId(row.id);
         setLoadedScenarioName(row.name);
         setLoadedReadonly(true);
@@ -847,6 +947,9 @@ export function ScenarioComposer({
       // fingerprint-mismatch banner (drift) derives automatically from the
       // hydrated draft's fingerprint vs current holdings — no special-casing.
       scenario.hydrateFromSaved(decoded.value);
+      // Review WR-02 — clear the ephemeral per-source include map on open (it is
+      // not persisted) → the opened scenario starts with every source included.
+      setIncludeByApiKeyId({});
       setLoadedScenarioId(row.id);
       setLoadedScenarioName(row.name);
       setLoadedReadonly(false);
@@ -1202,9 +1305,106 @@ export function ScenarioComposer({
     ],
   );
 
+  // -------------------------------------------------------------------------
+  // DSRC-01/02/03 — per-data-source projection units (one per connected
+  // exchange api_key) built from Plan-01's payload via the Plan-02 sibling
+  // builder. This path is selected ONLY in book mode when the Phase-36 D3
+  // per-key-dailies gate is satisfied; otherwise the existing holdings
+  // `adapterOutput` path above is used unchanged (snapshot fallback — both
+  // paths coexist, RESEARCH §State-of-the-Art). The frozen
+  // collapse→computeScenario pipeline below is shared by both.
+  // -------------------------------------------------------------------------
+  // Per-key equity share (D2): Σ holdingEquityContribution grouped by
+  // api_key_id (mirror queries.ts:2303-2310). Uses the EXPORTED contribution
+  // helper — never re-derives equity from value_usd (derivative notional ≠
+  // equity). This is the RAW weight source; the engine renormalizes (Pitfall 1).
+  const equityByApiKeyId = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const h of rawHoldingsSummary) {
+      if (!h.api_key_id) continue;
+      out[h.api_key_id] =
+        (out[h.api_key_id] ?? 0) + holdingEquityContributionLocal(h);
+    }
+    return out;
+  }, [rawHoldingsSummary]);
+
+  // Per-key strategy set — wrapped in a useMemo on its inputs exactly like
+  // `adapterOutput`. One StrategyForBuilder per api_key_id (id === api_key_id),
+  // RAW equity-share weights, default selected=true.
+  const perKeyAdapterOutput = useMemo(() => {
+    // `?? {}` — fail safe if the payload omits the per-key channel (a partial/
+    // legacy payload). An empty map yields zero per-key units (the per-key path
+    // is also gated off via perKeyDailiesGateSatisfied in that case). The
+    // builder Object.entries its input, so it must never receive undefined.
+    const all = payload.perKeyReturnsByApiKeyId ?? {};
+    // DSRC-03 honesty fix (review RT1) — blend ONLY eligible keys, the SAME set
+    // that gets a toggle row (dataSourceKeys below). A soft-disconnected key
+    // keeps is_active=true and retains holdings + csv residue, so the
+    // allocator-scoped SSR read still carries its series even though it is NOT
+    // in eligibleApiKeyIds. Without this filter that key would ride the engine
+    // with no toggle row, letting "exclude all sources → honest empty" be
+    // falsely satisfied by an undisclosed, untoggleable source.
+    const eligible = new Set(payload.eligibleApiKeyIds ?? []);
+    const eligibleOnly = Object.fromEntries(
+      Object.entries(all).filter(([id]) => eligible.has(id)),
+    );
+    return buildPerKeyStrategyForBuilderSet(eligibleOnly, equityByApiKeyId);
+  }, [
+    payload.perKeyReturnsByApiKeyId,
+    payload.eligibleApiKeyIds,
+    equityByApiKeyId,
+  ]);
+
+  // The per-key path is active only in book mode + D3 gate satisfied. When
+  // active, the per-key strategy set feeds the projectionState/collapse/engine
+  // pipeline; otherwise the holdings `adapterOutput` set does.
+  const usePerKeySources =
+    entryMode === "book" && payload.perKeyDailiesGateSatisfied;
+
+  // The strategy set actually fed to the engine this render — the per-key units
+  // when the per-source path is active, else the holdings/added units.
+  const activeAdapterOutput = usePerKeySources
+    ? perKeyAdapterOutput
+    : adapterOutput;
+
+  // DSRC-02 — render-gating for the "Data sources" control:
+  //   showDataSources       → the per-key path is active → render the control.
+  //   book mode + !gate      → render the calm InfoBanner fallback note.
+  //   blank mode             → render nothing (no live book, no live keys).
+  const showDataSources = usePerKeySources;
+  // The fallback note explains that per-source modeling needs per-key history —
+  // so it is only meaningful when the allocator actually HAS connected, eligible
+  // keys whose series are incomplete. A book allocator with zero eligible keys
+  // (e.g. keys removed but a holdings snapshot remains) has nothing to model per
+  // source, so suppress the note there rather than show the misleading
+  // "connected keys don't have a per-key series yet" copy (review WR-01).
+  const showDataSourcesFallback =
+    entryMode === "book" &&
+    !payload.perKeyDailiesGateSatisfied &&
+    (payload.eligibleApiKeyIds ?? []).length > 0;
+
+  // The connected exchange keys eligible for per-source toggling — payload
+  // apiKeys filtered to the SSR-computed eligible-key id set (SoT mirror; the
+  // client never re-derives eligibility, RESEARCH §SoT-mirror). One row per key.
+  const dataSourceKeys = useMemo(() => {
+    const eligible = payload.eligibleApiKeyIds ?? [];
+    return (payload.apiKeys ?? []).filter((k) => eligible.includes(k.id));
+  }, [payload.apiKeys, payload.eligibleApiKeyIds]);
+
+  // All-excluded honest-empty trigger (DSRC-03): every eligible key toggled off.
+  // Derived from the ephemeral include map (default included), so re-including
+  // any source instantly flips this back to false and restores the projection.
+  const allDataSourcesExcluded =
+    showDataSources &&
+    dataSourceKeys.length > 0 &&
+    dataSourceKeys.every((k) => includeByApiKeyId[k.id] === false);
+
   // H-0487/H-0493 — map each holding scopeRef to its bare symbol so aliased
   // multi-venue/instrument holdings (identical symbol-keyed series) can be
   // collapsed before computeScenario, keeping avg_pairwise_correlation honest.
+  // ONLY holdings populate this map — per-key UUID unit ids are NOT in it, so
+  // they pass through collapseAliasedHoldingStrategies untouched (Pitfall 3),
+  // keeping avg-ρ across data sources honest.
   const symbolByHoldingId = useMemo(() => {
     const map = new Map<string, string>();
     for (const h of holdingsSummary as Array<{
@@ -1239,26 +1439,47 @@ export function ScenarioComposer({
     const selected: Record<string, boolean> = {};
     const weights: Record<string, number> = {};
     const leverage: Record<string, number> = {};
-    for (const s of adapterOutput.strategies) {
-      const toggle = scenario.draft.toggleByScopeRef[s.id];
-      selected[s.id] =
-        toggle === undefined ? (adapterOutput.state.selected[s.id] ?? true) : toggle;
+    for (const s of activeAdapterOutput.strategies) {
+      // DSRC-03 — the per-key path rides the SAME `selected` channel keyed by
+      // api_key_id: `includeByApiKeyId[s.id] ?? true` (absent → included). The
+      // ephemeral exclusion drops the key from the engine's activeStrategies and
+      // the per-day weight mass; the engine renormalizes over the remaining
+      // selected set (r / activeWeightSum) — an honest recompute, never a hide.
+      // The holdings path keeps its draft `toggleByScopeRef` semantics unchanged.
+      if (usePerKeySources) {
+        selected[s.id] = includeByApiKeyId[s.id] ?? true;
+      } else {
+        const toggle = scenario.draft.toggleByScopeRef[s.id];
+        selected[s.id] =
+          toggle === undefined
+            ? (activeAdapterOutput.state.selected[s.id] ?? true)
+            : toggle;
+      }
       // WR-04 (Phase 21 review): narrow with `typeof` instead of `Number.isFinite`
       // + `as number` so the compiler keeps protecting these reads against future
       // value-type drift (e.g. a `null` "cleared" sentinel) rather than the cast
       // silently swallowing it. Behavior is identical: an absent/NaN override
-      // falls back; an explicit finite 0 is honored.
+      // falls back; an explicit finite 0 is honored. Per-key weights stay RAW
+      // (no weightOverride entries exist for api_key_id units) so the engine
+      // renormalizes (Pitfall 1 — NO sum-to-1 here).
       const ov = scenario.draft.weightOverrides[s.id];
       weights[s.id] =
         typeof ov === "number" && Number.isFinite(ov)
           ? ov
-          : (adapterOutput.state.weights[s.id] ?? 0);
+          : (activeAdapterOutput.state.weights[s.id] ?? 0);
       const L = leverageByRef[s.id];
       leverage[s.id] = typeof L === "number" && Number.isFinite(L) ? L : 1;
     }
-    return { selected, weights, startDates: adapterOutput.state.startDates, leverage };
+    return {
+      selected,
+      weights,
+      startDates: activeAdapterOutput.state.startDates,
+      leverage,
+    };
   }, [
-    adapterOutput,
+    activeAdapterOutput,
+    usePerKeySources,
+    includeByApiKeyId,
     scenario.draft.toggleByScopeRef,
     scenario.draft.weightOverrides,
     leverageByRef,
@@ -1273,11 +1494,11 @@ export function ScenarioComposer({
   const deAliased = useMemo(
     () =>
       collapseAliasedHoldingStrategies(
-        adapterOutput.strategies,
+        activeAdapterOutput.strategies,
         projectionState,
         symbolByHoldingId,
       ),
-    [adapterOutput.strategies, projectionState, symbolByHoldingId],
+    [activeAdapterOutput.strategies, projectionState, symbolByHoldingId],
   );
   const dateMapCache = useMemo(
     () => buildDateMapCache(deAliased.strategies),
@@ -1406,22 +1627,6 @@ export function ScenarioComposer({
     return sum;
   }, [scenario.draft.toggleByScopeRef, holdingByRef]);
 
-  // Review-pass P2 fix — when the allocator has added strategies but the
-  // live holdings list is empty (or all toggled off), `scenarioAum` is 0
-  // and the USD-scaled drawdown series degenerates to a flat zero. Fall
-  // back to a symbolic 1 USD so the curve renders the SHAPE of the
-  // projection. The KPI strip is sourced from fractional engine metrics
-  // and is unaffected by this substitution.
-  const effectiveScenarioAumForChart =
-    scenarioAum > 0 ? scenarioAum : SYNTHETIC_BASELINE_AUM;
-  const scenarioDailyPointsForDrawdown: DailyPoint[] = useMemo(
-    () =>
-      scenarioWealthSeries.map((p) => ({
-        date: p.date,
-        value: p.value * effectiveScenarioAumForChart,
-      })),
-    [scenarioWealthSeries, effectiveScenarioAumForChart],
-  );
 
   // -------------------------------------------------------------------------
   // Build delta summary for footer (top 3 above noise floor).
@@ -1597,7 +1802,7 @@ export function ScenarioComposer({
     return (
       <div
         data-widget-id="scenario-composer"
-        className="mx-auto max-w-[1100px] py-12"
+        className="mx-auto max-w-[1440px] py-12"
       >
         <div className="rounded-lg border border-border bg-surface p-12 text-center">
           <h2
@@ -1647,7 +1852,7 @@ export function ScenarioComposer({
   return (
     <div
       data-widget-id="scenario-composer"
-      className="mx-auto flex max-w-[1100px] flex-col"
+      className="mx-auto flex max-w-[1440px] flex-col"
     >
       {/* IMPACT-01 — persistent PROJECTED honesty pill. Always rendered (NOT a
           tooltip/hover), plain text, NO role="alert". Neutral-outline token per
@@ -1883,6 +2088,83 @@ export function ScenarioComposer({
         </div>
       )}
 
+      {/* DSRC-02 — "Data sources" control. Book mode + D3 gate satisfied → one
+          include/exclude row per connected exchange api_key, each toggle
+          honestly re-blends the curve + every KPI via the frozen engine
+          (DSRC-03). Book mode + gate NOT satisfied → a calm InfoBanner honest
+          note (per-key history incomplete). Blank mode → nothing. Reuses the
+          entry-mode pill recipe + existing tokens only (no new design token).
+          The included state = accent outline (no fill); excluded = neutral
+          outline; never red (excluding a source is a normal modeling action). */}
+      {showDataSources && (
+        <div
+          role="group"
+          aria-label="Data sources"
+          data-testid="scenario-data-sources"
+          className="mt-4 flex flex-col gap-2"
+        >
+          <div className="text-[12px] font-semibold uppercase tracking-wide text-text-secondary">
+            Data sources
+          </div>
+          <p className="text-[12px] text-text-muted">
+            Toggle a source off to model the book without it. Resets on reload.
+          </p>
+          <div className="flex flex-col">
+            {dataSourceKeys.map((k) => {
+              const included = includeByApiKeyId[k.id] ?? true;
+              const { exchange, nickname, maskedTail } = dataSourceLabel(k);
+              const labelText = nickname ?? maskedTail;
+              return (
+                <div
+                  key={k.id}
+                  data-data-source-id={k.id}
+                  className="flex min-h-[44px] items-center gap-2 border-b border-border last:border-b-0"
+                >
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={included}
+                    aria-label={`Include ${exchange} — ${labelText} in projection`}
+                    onClick={() => handleDataSourceToggle(k.id, !included)}
+                    className={`rounded-sm px-3 py-1 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
+                      included
+                        ? "border border-accent text-accent"
+                        : "border border-border text-text-secondary"
+                    }`}
+                  >
+                    {included ? "Included" : "Excluded"}
+                  </button>
+                  <span className="text-sm text-text-secondary">
+                    {exchange}
+                    {" — "}
+                    {nickname ? (
+                      nickname
+                    ) : (
+                      <span className="font-mono text-text-muted">
+                        {maskedTail}
+                      </span>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {showDataSourcesFallback && (
+        <div className="mt-4" data-testid="scenario-data-sources-fallback">
+          <InfoBanner>
+            <span className="font-semibold text-text-primary">
+              Per-source modeling needs per-key history.
+            </span>{" "}
+            One or more connected keys don&apos;t have a per-key return series
+            yet, so this projection blends your whole book. Per-source toggles
+            appear once every key has its own history.
+          </InfoBanner>
+        </div>
+      )}
+
       <div className="mt-6">
         <KpiStrip
           mode="scenario"
@@ -1898,6 +2180,21 @@ export function ScenarioComposer({
         />
       </div>
 
+      {/* DSRC-03 — all-excluded honest empty. When every data source is toggled
+          off the engine returns null KPIs + an empty curve (KpiStrip above
+          falls to its degenerate "—" convention, never a stale number), and the
+          projection region renders this honest-absence card. Re-including any
+          source instantly restores the live projection. Neutral/calm, no
+          role="alert", no red (honesty-color rule, UI-SPEC §4). */}
+      {allDataSourcesExcluded && (
+        <div className="mt-4" data-testid="scenario-data-sources-empty">
+          <EmptyStateCard
+            heading="Select at least one data source"
+            body="Every data source is excluded — there's nothing to project. Re-include a source to see the curve and metrics."
+          />
+        </div>
+      )}
+
       {leverageApplied && (
         <p
           data-testid="scenario-leverage-caveat"
@@ -1911,71 +2208,57 @@ export function ScenarioComposer({
         </p>
       )}
 
-      <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {/* B14 / NEW-C09-04 (H-1226): the Scenario-tab chart renders the inner
-            header (no `hideHeader`), so plumb the real sync state. Without it
-            the header stamp showed "sync just now" / "no sync yet" to a synced
-            allocator — a lie. `stale`/`lastSyncAt` come from the live baseline
-            the scenario projects from. */}
-        <div>
-          {/* BENCH-01 — the BTC overlay rides the existing EquityChart SVG
-              widget's `benchmark` prop (cumulative-WEALTH form via `btcWealth`),
-              NOT the lightweight-charts equity-curve component (24-RESEARCH
-              Pitfall 3). `btcWealth` is undefined when the toggle is off or the
-              benchmark is unavailable, which hides the overlay. */}
-          <EquityChart
-            equityDailyPoints={baselineEquityDailyPoints}
-            scenarioSeries={scenarioWealthSeries}
-            benchmark={btcWealth}
-            stale={isBlankMode ? false : allKeysStale}
-            lastSyncAt={isBlankMode ? null : lastSyncAt}
+      {/* Phase 38-03 (PARITY-01): the scenario equity + drawdown now render
+          through the REAL factsheet TimeSeriesChart + MasterBrush under ONE
+          provider (ScenarioFactsheetChart) — "the scenario should look exactly
+          the same and use the same factsheet assets." The two panels share ONE
+          brush-zoom window (Q4); the SegmentedControl drives it (Q3). The mount
+          is persist=false so a scenario pan never rewrites the dashboard URL or
+          writes a factsheet-v2: localStorage blob. The Overview EquityChartWidget
+          stays on the legacy render (scope boundary). */}
+      <div className="relative mt-6">
+        {/* BENCH-01 — the BTC overlay rides the synth payload's `benchmark`
+            (cumulative-WEALTH form via `btcWealth`). `btcWealth` is undefined
+            when the toggle is off or the benchmark is unavailable, which hides
+            the overlay. */}
+        <ScenarioFactsheetChart
+          equityDailyPoints={baselineEquityDailyPoints}
+          scenarioSeries={scenarioWealthSeries}
+          benchmark={btcWealth}
+        />
+        {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted line
+            swatch via the `--color-chart-benchmark` token (UI-SPEC §Copywriting
+            / §Color). Disabled when the
+            benchmark series is unavailable so the control can't promise an
+            overlay there is no data for. Composer-owned chrome — NOT pushed
+            into the factsheet engine. */}
+        <label className="mt-2 flex items-center gap-1.5 text-xs text-text-muted">
+          <input
+            type="checkbox"
+            checked={showBenchmark}
+            disabled={!btcAvailable}
+            onChange={(e) => setShowBenchmark(e.target.checked)}
           />
-          {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted #94A3B8
-              line swatch (UI-SPEC §Copywriting / §Color). Disabled when the
-              benchmark series is unavailable so the control can't promise an
-              overlay there is no data for. */}
-          <label className="mt-2 flex items-center gap-1.5 text-xs text-text-muted">
-            <input
-              type="checkbox"
-              checked={showBenchmark}
-              disabled={!btcAvailable}
-              onChange={(e) => setShowBenchmark(e.target.checked)}
-            />
-            <span
-              aria-hidden="true"
-              className="inline-block h-0.5 w-4"
-              style={{ backgroundColor: "#94A3B8" }}
-            />
-            BTC Benchmark
-          </label>
-        </div>
-        <div className="h-[300px] relative">
-          {/* DrawdownChart extends WidgetProps (data + timeframe + width + height
-              required for the legacy widget-grid path). On the Scenario tab
-              we feed the f7 parallel-prop (`equityDailyPoints`) so the
-              widget-data fields default to empty / safe values. */}
-          <DrawdownChart
-            data={{}}
-            timeframe="ALL"
-            width={6}
-            height={4}
-            equityDailyPoints={baselineEquityDailyPoints}
-            scenarioDailyPoints={scenarioDailyPointsForDrawdown}
+          <span
+            aria-hidden="true"
+            className="inline-block h-0.5 w-4"
+            style={{ backgroundColor: "var(--color-chart-benchmark)" }}
           />
-          {/* NEW-C18-14: when scenarioAum=0 the drawdown is scaled against a
-              synthetic $1 baseline so the chart still renders the projected
-              SHAPE rather than a flat zero. Disclose this to the allocator so
-              they don't mistake an illustrative curve for one backed by real
-              capital. */}
-          {scenarioAum <= 0 && (
-            <div
-              aria-live="polite"
-              className="pointer-events-none absolute bottom-2 left-0 right-0 text-center text-[11px] text-text-muted"
-            >
-              Illustrative shape only — no live capital connected
-            </div>
-          )}
-        </div>
+          BTC Benchmark
+        </label>
+        {/* NEW-C18-14: the factsheet-backed chart renders the projected SHAPE
+            from the normalized scenario wealth (no live capital scaling). When
+            scenarioAum=0 there is no real book behind the curve, so disclose
+            that it is illustrative — allocators must not mistake the shape for
+            one backed by real capital. */}
+        {scenarioAum <= 0 && (
+          <div
+            aria-live="polite"
+            className="mt-2 text-center text-[11px] text-text-muted"
+          >
+            Illustrative shape only — no live capital connected
+          </div>
+        )}
       </div>
 
       {/* BENCH-01 — "vs BTC" active-return section. Reads the active scenario's

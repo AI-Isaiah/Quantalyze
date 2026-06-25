@@ -123,13 +123,25 @@ vi.mock("./ScenarioFlaggedHoldingsList", () => ({
 
 // Pure scenario-adapter mocked to a deterministic empty projection so
 // computeScenario short-circuits — the composer's chart math is irrelevant to
-// the draft-preservation contract under test.
-vi.mock("./lib/scenario-adapter", () => ({
-  buildStrategyForBuilderSet: vi.fn(() => ({
+// the draft-preservation contract under test. Phase 37: the per-key path is
+// inactive in this suite (perKeyDailiesGateSatisfied=false), so BOTH builders
+// are stubbed to the empty projection. We deliberately do NOT importOriginal:
+// loading the real adapter's transitive graph (frozen engine + scenario-state +
+// dealias) made the composer's first render heavier and flaked this suite under
+// full-suite worker contention (it passes in isolation — see the vitest.config
+// maxWorkers note). The composer's perKeyAdapterOutput memo still calls
+// buildPerKeyStrategyForBuilderSet on every render, so the stub must return a
+// valid { strategies, state } shape.
+vi.mock("./lib/scenario-adapter", () => {
+  const emptyProjection = () => ({
     strategies: [],
     state: { selected: {}, weights: {}, startDates: {} },
-  })),
-}));
+  });
+  return {
+    buildStrategyForBuilderSet: vi.fn(emptyProjection),
+    buildPerKeyStrategyForBuilderSet: vi.fn(emptyProjection),
+  };
+});
 
 // --- Import after mocks -----------------------------------------------------
 
@@ -195,6 +207,10 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
     equity: [],
     drawdown: [],
   },
+  // Phase 37 / DSRC-01 — per-key channel additive fields (no per-key seed).
+  perKeyReturnsByApiKeyId: {},
+  perKeyDailiesGateSatisfied: false,
+  eligibleApiKeyIds: [],
   apiKeysCount: 1,
   mandateIsSet: false,
 };

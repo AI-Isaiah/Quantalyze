@@ -1757,6 +1757,38 @@ export interface MyAllocationDashboardPayload {
     drawdown: DailyPoint[]; // pre-derived via deriveSnapshotDrawdowns()
   };
   // ─────────────────────────────────────────────────────────────────────
+  // Phase 37 / 37-01 (DSRC-01 — honest per-data-source toggle enabler)
+  // ─────────────────────────────────────────────────────────────────────
+  /**
+   * Phase 37 / DSRC-01. The allocator's own per-`api_key` daily-return series
+   * (realized + funding, unified-252 basis), keyed by `api_key_id`. ALREADY
+   * computed at SSR via `buildPerKeyReturnsByApiKeyId` (call site queries.ts:3107) to
+   * select the Phase-36 liveBaselineMetrics source; Phase 37 only EXPOSES it so
+   * the composer (Plans 02/03) can build one per-key projection unit and
+   * recompute the blend client-side on a data-source toggle.
+   *
+   * Allocator-scoped: derived ONLY from the existing `.eq("allocator_id",
+   * userId)` `csv_daily_returns` read — every key here is one of this
+   * allocator's own `apiKeys[].id` (no cross-tenant series, no secret/cipher
+   * material, only `(date, daily_return)` rows). `{}` when no per-key coverage.
+   */
+  perKeyReturnsByApiKeyId: Record<string, DailyPoint[]>;
+  /**
+   * Phase 37 / DSRC-01. The Phase-36 D3 all-or-nothing gate result — `true`
+   * only when EVERY eligible active key has a non-empty per-key series. The
+   * composer keys the toggle's visibility on this (gate satisfied → per-key
+   * control; otherwise the honest snapshot-fallback note). Read-only; the
+   * client must NEVER re-derive the eligibility predicate (the Python backfill
+   * is the source of truth — see `isPerKeyDailiesEligibleKey`).
+   */
+  perKeyDailiesGateSatisfied: boolean;
+  /**
+   * Phase 37 / DSRC-01. The ids of this allocator's active keys eligible for
+   * the per-key basis (the predicate that feeds the D3 gate above). Exposed
+   * read-only for the composer; a subset of `apiKeys[].id`.
+   */
+  eligibleApiKeyIds: string[];
+  // ─────────────────────────────────────────────────────────────────────
   // Phase 11 / 11-05 (onboarding & security readiness — D-02 + D-04)
   // ─────────────────────────────────────────────────────────────────────
   /**
@@ -3086,16 +3118,23 @@ export const getMyAllocationDashboard = cache(
     const eligibleKeyIds = apiKeys
       .filter(isPerKeyDailiesEligibleKey)
       .map((k) => k.id);
-    const liveBaselineMetrics =
-      allActiveKeysHavePerKeyDailies(eligibleKeyIds, perKeyReturnsByApiKeyId)
-        ? liveBaselineMetricsFromPerKeyDailies(
-            phase07.holdingsSummary,
-            perKeyReturnsByApiKeyId,
-          )
-        : liveBaselineMetricsFromHoldings(
-            phase07.holdingsSummary,
-            holdingReturnsByScopeRef,
-          );
+    // Phase 37 / DSRC-01 — hoist the D3 gate to a const so the SAME single call
+    // both SELECTS the liveBaselineMetrics source (below) AND rides the payload
+    // (perKeyDailiesGateSatisfied, on both return branches). No behavior change:
+    // the ternary still gates on this exact value.
+    const perKeyDailiesGateSatisfied = allActiveKeysHavePerKeyDailies(
+      eligibleKeyIds,
+      perKeyReturnsByApiKeyId,
+    );
+    const liveBaselineMetrics = perKeyDailiesGateSatisfied
+      ? liveBaselineMetricsFromPerKeyDailies(
+          phase07.holdingsSummary,
+          perKeyReturnsByApiKeyId,
+        )
+      : liveBaselineMetricsFromHoldings(
+          phase07.holdingsSummary,
+          holdingReturnsByScopeRef,
+        );
 
     // Phase 10 / H3 — Propagate the authenticated allocator's user.id so
     // consumers (Plan 06a localStorage scoping, Plan 07 ownership probe)
@@ -3132,6 +3171,11 @@ export const getMyAllocationDashboard = cache(
         holdingReturnsByScopeRef,
         allocator_id: allocator_id,
         liveBaselineMetrics,
+        // Phase 37 / DSRC-01 — per-key channel (additive; real values, computed
+        // before this !portfolio split). Fresh allocators carry {} / false / [].
+        perKeyReturnsByApiKeyId,
+        perKeyDailiesGateSatisfied,
+        eligibleApiKeyIds: eligibleKeyIds,
         // Phase 11 / D-02 + D-04 — onboarding visibility predicate inputs.
         apiKeysCount,
         mandateIsSet,
@@ -3437,6 +3481,12 @@ export const getMyAllocationDashboard = cache(
       holdingReturnsByScopeRef,
       allocator_id: allocator_id,
       liveBaselineMetrics,
+      // Phase 37 / DSRC-01 — per-key channel (additive; same values selected the
+      // liveBaselineMetrics source above). The composer recomputes the blend
+      // client-side on a data-source toggle.
+      perKeyReturnsByApiKeyId,
+      perKeyDailiesGateSatisfied,
+      eligibleApiKeyIds: eligibleKeyIds,
       // Phase 11 / D-02 + D-04 — onboarding visibility predicate inputs.
       apiKeysCount,
       mandateIsSet,

@@ -499,6 +499,21 @@ describe("getMyAllocationDashboard", () => {
     });
   });
 
+  // Phase 37 / 37-01 — the !portfolio (fresh-allocator) branch carries the
+  // three new per-key fields with empty/false defaults (no per-key coverage).
+  // Mirrors the M-0480 model: the real function — not a literal — must populate
+  // them so a branch that forgot the fields (Pitfall 2) fails loudly.
+  it("Phase 37: !portfolio branch exposes the per-key channel with empty/false defaults", async () => {
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result).toHaveProperty("perKeyReturnsByApiKeyId");
+    expect(result).toHaveProperty("perKeyDailiesGateSatisfied");
+    expect(result).toHaveProperty("eligibleApiKeyIds");
+    expect(result.perKeyReturnsByApiKeyId).toEqual({});
+    expect(result.perKeyDailiesGateSatisfied).toBe(false);
+    expect(result.eligibleApiKeyIds).toEqual([]);
+  });
+
   it("returns portfolio + analytics + apiKeys + empty arrays when everything else is absent", async () => {
     state.portfolios = [
       {
@@ -1890,6 +1905,93 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
     const result = await getMyAllocationDashboard("user-1");
     // AUM = Σ value_usd over the single spot holding, regardless of branch.
     expect(result.liveBaselineMetrics.aum).toBe(42_000);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Phase 37 / 37-01 (DSRC-01) — the per-key channel is now ON THE PAYLOAD.
+  // ───────────────────────────────────────────────────────────────────────
+
+  it("Phase 37: populated per-key fixture exposes the per-key channel on the payload (gate true, eligible ids + series present)", async () => {
+    activeKeyA();
+    seedHoldingsKeyA();
+    seedSnapshotsBTC();
+    seedPerKeyDailiesA();
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // The D3 gate is satisfied (the single active key has a non-empty series).
+    expect(result.perKeyDailiesGateSatisfied).toBe(true);
+    // The eligible-key id list carries the seeded active key.
+    expect(result.eligibleApiKeyIds).toContain("key-A");
+    // The per-key series is on the wire, keyed by api_key_id, byte-identical to
+    // the seeded csv_daily_returns (date + daily_return → value).
+    expect(Object.keys(result.perKeyReturnsByApiKeyId)).toEqual(["key-A"]);
+    expect(result.perKeyReturnsByApiKeyId["key-A"]).toEqual(
+      ASOF.map((date, i) => ({ date, value: PERKEY_A[i] })),
+    );
+  });
+
+  it("Phase 37: byte-identity — exposing the per-key channel does NOT alter liveBaselineMetrics or holdingReturnsByScopeRef (Pitfall 2)", async () => {
+    activeKeyA();
+    seedHoldingsKeyA();
+    seedSnapshotsBTC();
+    seedPerKeyDailiesA();
+
+    const { getMyAllocationDashboard, liveBaselineMetricsFromPerKeyDailies } =
+      await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // liveBaselineMetrics is STILL the per-key blend (Phase 36 invariant held):
+    // the additive fields ride the SAME perKeyReturnsByApiKeyId it derives from.
+    const expectedPerKey = liveBaselineMetricsFromPerKeyDailies(
+      result.holdingsSummary,
+      result.perKeyReturnsByApiKeyId,
+    );
+    expect(result.liveBaselineMetrics).toEqual(expectedPerKey);
+
+    // holdingReturnsByScopeRef is the Phase-36 snapshot reconstruction,
+    // untouched by the new channel — keyed by scope_ref, not api_key_id.
+    expect(Object.keys(result.holdingReturnsByScopeRef)).toEqual([
+      "holding:binance:BTC:spot",
+    ]);
+    // The two channels are DISJOINT key spaces (no repoint cross-contamination).
+    for (const k of Object.keys(result.holdingReturnsByScopeRef)) {
+      expect(result.perKeyReturnsByApiKeyId).not.toHaveProperty(k);
+    }
+  });
+
+  it("Phase 37: cross-tenant guard — perKeyReturnsByApiKeyId keys are a SUBSET of the allocator's own apiKeys[].id (T-37-01-01)", async () => {
+    activeKeyA();
+    seedHoldingsKeyA();
+    seedSnapshotsBTC();
+    seedPerKeyDailiesA();
+    // Adversarial: a foreign-tenant key's series is present in the raw table.
+    // The allocator-scoped read (.eq("allocator_id", userId)) must filter it out,
+    // so it can NEVER appear in the payload's per-key field.
+    state.csvDailyReturns = [
+      ...state.csvDailyReturns,
+      ...ASOF.map((date, i) => ({
+        api_key_id: "key-FOREIGN",
+        allocator_id: "user-2",
+        date,
+        daily_return: PERKEY_A[i],
+      })),
+    ];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    const ownKeyIds = new Set(result.apiKeys.map((k) => k.id));
+    for (const keyId of Object.keys(result.perKeyReturnsByApiKeyId)) {
+      expect(ownKeyIds.has(keyId)).toBe(true);
+    }
+    // Specifically: the foreign tenant's key never leaks onto the wire.
+    expect(result.perKeyReturnsByApiKeyId).not.toHaveProperty("key-FOREIGN");
+    // The eligible-id list is likewise own-keys-only.
+    for (const id of result.eligibleApiKeyIds) {
+      expect(ownKeyIds.has(id)).toBe(true);
+    }
   });
 });
 

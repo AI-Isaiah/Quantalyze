@@ -151,6 +151,11 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
     equity: [],
     drawdown: [],
   },
+  // Phase 37 / DSRC-01 — per-key channel additive fields (empty/false defaults
+  // for the !portfolio + no-per-key-coverage path).
+  perKeyReturnsByApiKeyId: {},
+  perKeyDailiesGateSatisfied: false,
+  eligibleApiKeyIds: [],
   // Phase 11 / 11-05 — onboarding visibility predicate inputs.
   apiKeysCount: 0,
   mandateIsSet: false,

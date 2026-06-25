@@ -85,6 +85,21 @@ vi.mock("../widgets/performance/DrawdownChart", () => {
   return { default: Mock, deriveSnapshotDrawdowns: vi.fn(() => []) };
 });
 
+// Phase 38-03 (PARITY-01): the composer's two chart call sites now render the
+// factsheet-backed ScenarioFactsheetChart (equity + drawdown stacked under ONE
+// provider) instead of the legacy EquityChart + DrawdownChart. Mocked here so
+// the composer's prop wiring (equityDailyPoints / scenarioSeries / benchmark /
+// scenarioDailyPoints) is the unit-under-test. The mock keeps the equity +
+// drawdown sub-testids so present-panel assertions still read the mount.
+vi.mock("../widgets/performance/ScenarioFactsheetChart", () => ({
+  ScenarioFactsheetChart: vi.fn(() => (
+    <div data-testid="scenario-factsheet-chart-mock">
+      <div data-testid="equity-chart-mock" />
+      <div data-testid="drawdown-chart-mock" />
+    </div>
+  )),
+}));
+
 vi.mock("./KpiStrip", () => ({
   KpiStrip: vi.fn(() => <div data-testid="kpi-strip-mock" />),
 }));
@@ -125,12 +140,24 @@ vi.mock("../ScenarioFlaggedHoldingsList", () => ({
 // The mock returns a deterministic { strategies: [], state } so computeScenario
 // short-circuits to the n=0 branch (returns empty equity_curve) — that's
 // fine for prop-spy assertions.
-vi.mock("../lib/scenario-adapter", () => ({
-  buildStrategyForBuilderSet: vi.fn(() => ({
-    strategies: [],
-    state: { selected: {}, weights: {}, startDates: {} },
-  })),
-}));
+//
+// Phase 37 / DSRC-03: ONLY `buildStrategyForBuilderSet` (the holdings path) is
+// spied. The sibling `buildPerKeyStrategyForBuilderSet` is kept REAL via
+// importOriginal so the per-source honesty tests drive the genuine per-key unit
+// construction → frozen `computeScenario` recompute (computeScenario itself is
+// never mocked). A spied per-key builder would defeat the load-bearing DSRC-03
+// assertion that the KPI/curve NUMBERS move on exclusion.
+vi.mock("../lib/scenario-adapter", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../lib/scenario-adapter")>();
+  return {
+    ...actual,
+    buildStrategyForBuilderSet: vi.fn(() => ({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    })),
+  };
+});
 
 // Phase 30 — mock the five blend-graph LEAF charts to inert spies (same :70-127
 // precedent as EquityChart/DrawdownChart/KpiStrip). This keeps the unit-under-
@@ -157,12 +184,24 @@ vi.mock("@/components/charts/RollingSortinoChart", () => ({
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer } from "./ScenarioComposer";
-import { EquityChart } from "../widgets/performance/EquityChart";
-import DrawdownChart from "../widgets/performance/DrawdownChart";
+// Real (un-mocked) — used to build a valid current-schema draft so the
+// onRegisterOpen handler decodes "ok" in the WR-02 regression test below.
+import { defaultDraftFromHoldings } from "../lib/scenario-state";
+import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { KpiStrip } from "./KpiStrip";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
+// Phase 37 / DSRC-03 — the REAL per-key builder + REAL engine for the independent
+// two→one recompute oracle. The adapter mock keeps buildPerKeyStrategyForBuilderSet
+// real via importOriginal, and @/lib/scenario + @/lib/scenario-dealias are never
+// mocked, so these are the genuine functions (the same ones the composer runs).
+import { buildPerKeyStrategyForBuilderSet } from "../lib/scenario-adapter";
+import {
+  computeScenario as realComputeScenario,
+  buildDateMapCache as realBuildDateMapCache,
+} from "@/lib/scenario";
+import { collapseAliasedHoldingStrategies as realCollapse } from "@/lib/scenario-dealias";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
 // IMPACT-02 — imported REAL (never mocked) so the R3 guard's positive control
 // renders a genuine PercentileRankBadge in isolation, proving the testid query
@@ -353,6 +392,11 @@ function makePayload(
         { date: "2026-01-02", value: 0 },
       ],
     },
+    // Phase 37 / DSRC-01 — per-key channel additive fields. Default to no
+    // per-key coverage (empty/false); per-key tests override these.
+    perKeyReturnsByApiKeyId: {},
+    perKeyDailiesGateSatisfied: false,
+    eligibleApiKeyIds: [],
     // Phase 11 / 11-05 — onboarding visibility predicate inputs. The
     // composer fixture assumes a connected allocator (synced holdings),
     // so apiKeysCount is non-zero (banner+card never render here).
@@ -478,12 +522,20 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // T_C3b — Blank-slate live-data leak regression. `equityDailyPoints` is the
   // live book's server-blended equity baseline, a payload field separate from
   // holdingsSummary. In "Blank slate" mode the allocator started from nothing,
-  // so the live curve + its sync stamp must NOT render — only the (empty)
-  // scenario overlay. Non-vacuous: book mode still passes the real baseline +
-  // stamps; switching to blank must zero them. Without the gate this asserts
-  // RED (EquityChart would still receive the 2-point live baseline + stamps).
+  // so the live curve must NOT render — only the (empty) scenario overlay.
+  // Non-vacuous: book mode still passes the real baseline; switching to blank
+  // must zero it. Without the gate this asserts RED (the chart would still
+  // receive the 2-point live baseline).
+  //
+  // 38-03 (PARITY-01): the composer now feeds ScenarioFactsheetChart. The
+  // `equityDailyPoints` blank-mode gate is preserved as a real prop on the new
+  // component. The old `stale`/`lastSyncAt` sync-stamp props no longer flow to
+  // the chart — the factsheet-backed mount renders NO sync stamp (the synth
+  // csv-arm payload has no `computedAt`), so the H-1226 "stamp lies in blank
+  // mode" failure mode is structurally impossible now (see the honesty test
+  // below). This test pins the surviving baseline-leak gate.
   // -------------------------------------------------------------------------
-  it("T_C3b Blank slate gates the live equity baseline + sync stamps out of EquityChart", () => {
+  it("T_C3b Blank slate gates the live equity baseline out of the scenario chart", () => {
     const payload = makePayload({
       lastSyncAt: "2026-06-24T00:00:00.000Z",
       allKeysStale: true,
@@ -496,20 +548,16 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
 
-    // Book mode (default for an allocator with a live book): real baseline + stamps flow through.
-    const bookProps = vi.mocked(EquityChart).mock.calls[0][0];
+    // Book mode (default for an allocator with a live book): real baseline flows through.
+    const bookProps = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0];
     expect(bookProps.equityDailyPoints).toHaveLength(2);
-    expect(bookProps.lastSyncAt).toBe("2026-06-24T00:00:00.000Z");
-    expect(bookProps.stale).toBe(true);
 
-    // Switch to Blank slate — the live baseline + stamps must be gated out.
+    // Switch to Blank slate — the live baseline must be gated out.
     fireEvent.click(screen.getByRole("radio", { name: /blank slate/i }));
 
-    const calls = vi.mocked(EquityChart).mock.calls;
+    const calls = vi.mocked(ScenarioFactsheetChart).mock.calls;
     const blankProps = calls[calls.length - 1][0];
     expect(blankProps.equityDailyPoints).toEqual([]);
-    expect(blankProps.lastSyncAt).toBeNull();
-    expect(blankProps.stale).toBe(false);
   });
 
   // -------------------------------------------------------------------------
@@ -577,9 +625,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_C4 — EquityChart receives scenarioSeries
+  // T_C4 — ScenarioFactsheetChart receives scenarioSeries
   // -------------------------------------------------------------------------
-  it("T_C4 EquityChart receives scenarioSeries (DailyPoint[])", () => {
+  it("T_C4 ScenarioFactsheetChart receives scenarioSeries (DailyPoint[])", () => {
     const payload = makePayload();
     render(
       <ScenarioComposer
@@ -588,19 +636,25 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    expect(EquityChart).toHaveBeenCalled();
-    const props = vi.mocked(EquityChart).mock.calls[0][0];
+    expect(ScenarioFactsheetChart).toHaveBeenCalled();
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0];
     expect(Array.isArray(props.scenarioSeries)).toBe(true);
   });
 
   // -------------------------------------------------------------------------
-  // B14 / NEW-C09-04 (H-1226) — the Scenario-tab EquityChart renders the inner
-  // header (no hideHeader), so the composer MUST plumb the live sync state.
-  // Before the fix it passed neither prop, so the header stamp showed
-  // "sync just now" / "no sync yet" to a synced allocator — a lie. This pins
-  // the wiring so a future refactor can't silently drop it and regress.
+  // B14 / NEW-C09-04 (H-1226) — the original lie: the legacy Scenario-tab
+  // EquityChart rendered an inner sync-stamp header, so a synced allocator saw
+  // "sync just now" / "no sync yet" unless the composer plumbed stale/lastSyncAt.
+  //
+  // 38-03 (PARITY-01) closes that failure mode STRUCTURALLY: the composer now
+  // renders ScenarioFactsheetChart, which mounts the factsheet TimeSeriesChart +
+  // MasterBrush off a synthesized csv-arm payload that carries NO sync stamp
+  // (`computedAt: ""`) and renders NO header. There is no sync-stamp surface to
+  // lie, so the composer no longer passes — and the chart no longer accepts —
+  // stale/lastSyncAt. This pins that honest contract: the scenario chart receives
+  // NEITHER sync prop, so a future refactor can't reintroduce a stamp lie.
   // -------------------------------------------------------------------------
-  it("EquityChart receives stale + lastSyncAt so the Scenario-tab sync stamp is honest (B14/H-1226)", () => {
+  it("ScenarioFactsheetChart receives NO sync-stamp props — the Scenario-tab stamp lie is structurally gone (B14/H-1226)", () => {
     const lastSync = "2026-02-01T00:00:00.000Z";
     const payload = makePayload({ allKeysStale: true, lastSyncAt: lastSync });
     render(
@@ -610,16 +664,24 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    expect(EquityChart).toHaveBeenCalled();
-    const props = vi.mocked(EquityChart).mock.calls[0][0];
-    expect(props.stale).toBe(true);
-    expect(props.lastSyncAt).toBe(lastSync);
+    expect(ScenarioFactsheetChart).toHaveBeenCalled();
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0] as unknown as Record<
+      string,
+      unknown
+    >;
+    // No sync-stamp surface ⇒ no sync-stamp props. The chart renders the brush +
+    // factsheet panels only; there is no header that could show a false stamp.
+    expect(props.stale).toBeUndefined();
+    expect(props.lastSyncAt).toBeUndefined();
   });
 
   // -------------------------------------------------------------------------
-  // T_C5 — DrawdownChart receives scenarioDailyPoints
+  // T_C5 — ScenarioFactsheetChart receives the scenario wealth series. The
+  // factsheet-backed mount renders equity + drawdown (stacked under one
+  // provider) from the single scenario series — drawdowns are derived inside
+  // the adapter, so the scenario wealth IS the chart's source of truth.
   // -------------------------------------------------------------------------
-  it("T_C5 DrawdownChart receives scenarioDailyPoints", () => {
+  it("T_C5 ScenarioFactsheetChart receives the scenario wealth series", () => {
     const payload = makePayload();
     render(
       <ScenarioComposer
@@ -628,9 +690,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    expect(DrawdownChart).toHaveBeenCalled();
-    const props = vi.mocked(DrawdownChart).mock.calls[0][0];
-    expect(Array.isArray(props.scenarioDailyPoints)).toBe(true);
+    expect(ScenarioFactsheetChart).toHaveBeenCalled();
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0];
+    expect(Array.isArray(props.scenarioSeries)).toBe(true);
   });
 
   // -------------------------------------------------------------------------
@@ -1779,7 +1841,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // -------------------------------------------------------------------------
   // T_C19 — Equity_curve +1 wealth conversion (Pitfall 1)
   // -------------------------------------------------------------------------
-  it("T_C19 EquityChart scenarioSeries values are wealth-form (>=0.95 — i.e. +1 conversion applied)", () => {
+  it("T_C19 ScenarioFactsheetChart scenarioSeries values are wealth-form (>=0.95 — i.e. +1 conversion applied)", () => {
     // The mocked adapter returns empty strategies so computeScenario yields
     // n=0 + equity_curve=[]. To exercise the +1 conversion path we feed a
     // synthetic equity_curve via override of the adapter return AND mock
@@ -1797,8 +1859,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    expect(EquityChart).toHaveBeenCalled();
-    const props = vi.mocked(EquityChart).mock.calls[0][0];
+    expect(ScenarioFactsheetChart).toHaveBeenCalled();
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0];
     const series = (props.scenarioSeries ?? []) as Array<{
       date: string;
       value: number;
@@ -1820,7 +1882,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // NON-EMPTY equity_curve, then fails loud if the precondition is unmet AND
   // pins that every scenarioSeries point is wealth-form (>= 0.95).
   // -------------------------------------------------------------------------
-  it("M-0096 EquityChart scenarioSeries is NON-EMPTY and wealth-form (+1 conversion genuinely exercised)", () => {
+  it("M-0096 ScenarioFactsheetChart scenarioSeries is NON-EMPTY and wealth-form (+1 conversion genuinely exercised)", () => {
     // 12 business days of small positive returns → cumulative wealth ~1.0, so
     // each equity_curve value (cumulative-1) is tiny and +1 → ~1.0 >= 0.95.
     const dates = [
@@ -1868,8 +1930,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    expect(EquityChart).toHaveBeenCalled();
-    const props = vi.mocked(EquityChart).mock.calls[0][0];
+    expect(ScenarioFactsheetChart).toHaveBeenCalled();
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0];
     const series = (props.scenarioSeries ?? []) as Array<{
       date: string;
       value: number;
@@ -3516,7 +3578,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // prop, in cumulative-WEALTH form (~1.0 base), via mock.calls — mirroring
   // the wealth-form assertion pattern in T_C19 / M-0096 above.
   // -------------------------------------------------------------------------
-  it("BENCH-01 EquityChart.benchmark is wired in cumulative-WEALTH form (~1.0 base) once the fetch resolves", async () => {
+  it("BENCH-01 ScenarioFactsheetChart.benchmark is wired in cumulative-WEALTH form (~1.0 base) once the fetch resolves", async () => {
     // Raw BTC daily returns the /api/benchmark/btc route would return. The
     // composer derives btcWealth = computeStrategyCurve(these) → ~1.0-base
     // wealth curve, and passes it as EquityChart.benchmark (showBenchmark
@@ -3542,18 +3604,18 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         />,
       );
 
-      // The benchmark fetch fires on mount; wait until EquityChart has been
-      // re-rendered with a defined `benchmark` prop (the post-resolve render).
+      // The benchmark fetch fires on mount; wait until the scenario chart has
+      // been re-rendered with a defined `benchmark` prop (the post-resolve render).
       await waitFor(() => {
         expect(fetchStub).toHaveBeenCalledWith("/api/benchmark/btc");
-        const calls = vi.mocked(EquityChart).mock.calls;
+        const calls = vi.mocked(ScenarioFactsheetChart).mock.calls;
         const withBenchmark = calls.find(
           (c) => (c[0] as { benchmark?: unknown }).benchmark !== undefined,
         );
         expect(withBenchmark).toBeTruthy();
       });
 
-      const calls = vi.mocked(EquityChart).mock.calls;
+      const calls = vi.mocked(ScenarioFactsheetChart).mock.calls;
       const last = calls[calls.length - 1][0] as {
         benchmark?: Array<{ date: string; value: number }>;
       };
@@ -3695,5 +3757,566 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const afterMetrics = lastScenarioMetrics();
     expect(afterMetrics?.twr).toBe(editedTwr);
     expect(afterMetrics?.volatility).toBe(editedVol);
+  });
+});
+
+// ===========================================================================
+// Phase 37 / DSRC-02 + DSRC-03 — honest per-data-source toggle
+// ===========================================================================
+//
+// The load-bearing suite. The "Data sources" control lets a book allocator
+// include/exclude each connected exchange api_key from the projection; toggling
+// a source off must HONESTLY recompute the curve + every KPI from the remaining
+// per-key series (DSRC-03), never a cosmetic hide. These tests drive the REAL
+// per-key builder + REAL frozen computeScenario (only buildStrategyForBuilderSet
+// and the leaf charts are mocked), so a cosmetic-hide regression — wiring the
+// toggle to only dim a row without threading projectionState.selected — turns
+// the honesty oracle RED.
+describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  // --- Per-key fixtures ----------------------------------------------------
+  // Two connected exchange keys with MATERIALLY different series over a shared
+  // window (≥10 points so the engine clears its n<10 floor):
+  //   key-A — steady small-positive (low vol, positive drift)
+  //   key-B — volatile, net-negative (high vol, negative drift)
+  // Their equity shares come from the holdings grouped by api_key_id, so the
+  // blend is genuinely weighted; excluding B must move the blend toward A.
+  const PK_DATES = Array.from({ length: 14 }, (_, i) =>
+    `2026-02-${String(i + 1).padStart(2, "0")}`,
+  );
+  const KEY_A_SERIES = PK_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const KEY_B_SERIES = PK_DATES.map((date, i) => ({
+    date,
+    value: [-0.03, 0.04, -0.05, 0.02, -0.01][i % 5],
+  }));
+
+  const PK_KEY_A = {
+    id: "key-A",
+    exchange: "binance",
+    label: "Main desk",
+    is_active: true,
+    sync_status: null,
+    last_sync_at: null,
+    account_balance_usdt: null,
+    created_at: "2026-01-01T00:00:00Z",
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
+  };
+  const PK_KEY_B = {
+    id: "key-B",
+    exchange: "okx",
+    label: "", // no nickname → masked-tail fallback exercises the mask path
+    is_active: true,
+    sync_status: null,
+    last_sync_at: null,
+    account_balance_usdt: null,
+    created_at: "2026-01-01T00:00:00Z",
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
+  };
+
+  // Holdings grouped by api_key_id supply the per-key equity weights (D2). Key A
+  // holds $70k spot, key B holds $30k spot → raw equity-share weights 70k / 30k
+  // (the engine renormalizes per-day over the selected set — Pitfall 1).
+  const PK_HOLDING_A = {
+    ...HOLDING_BTC,
+    symbol: "BTC",
+    venue: "binance",
+    value_usd: 70_000,
+    api_key_id: "key-A",
+  };
+  const PK_HOLDING_B = {
+    ...HOLDING_ETH,
+    symbol: "ETH",
+    venue: "okx",
+    value_usd: 30_000,
+    api_key_id: "key-B",
+  };
+
+  /** A book-mode payload with the D3 gate satisfied and two eligible per-key
+   *  sources (key-A, key-B). Per-key tests extend this. */
+  function makePerKeyPayload(
+    overrides: Partial<MyAllocationDashboardPayload> = {},
+  ): MyAllocationDashboardPayload {
+    return makePayload({
+      apiKeys: [PK_KEY_A, PK_KEY_B],
+      holdingsSummary: [PK_HOLDING_A, PK_HOLDING_B],
+      perKeyReturnsByApiKeyId: {
+        "key-A": KEY_A_SERIES,
+        "key-B": KEY_B_SERIES,
+      },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: ["key-A", "key-B"],
+      ...overrides,
+    });
+  }
+
+  function renderPerKey(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  /** The scenarioMetrics last handed to the (mocked) KpiStrip. */
+  function lastKpiScenarioMetrics() {
+    return vi.mocked(KpiStrip).mock.calls.at(-1)?.[0]?.scenarioMetrics;
+  }
+
+  /** Independent two→one recompute oracle: run the REAL per-key builder + REAL
+   *  collapse + REAL engine with the given set of INCLUDED keys, returning the
+   *  ComputedMetrics the composer should produce. Mirrors the composer's
+   *  pipeline exactly (raw equity-share weights, selected map, no symbol map for
+   *  per-key UUIDs). This is what makes the honesty assertion an oracle, not a
+   *  "something changed" check. */
+  function independentRecompute(includedKeyIds: string[]) {
+    const equityByApiKeyId: Record<string, number> = {
+      "key-A": 70_000,
+      "key-B": 30_000,
+    };
+    const built = buildPerKeyStrategyForBuilderSet(
+      { "key-A": KEY_A_SERIES, "key-B": KEY_B_SERIES },
+      equityByApiKeyId,
+    );
+    const selected: Record<string, boolean> = {};
+    const weights: Record<string, number> = {};
+    const leverage: Record<string, number> = {};
+    for (const s of built.strategies) {
+      selected[s.id] = includedKeyIds.includes(s.id);
+      weights[s.id] = built.state.weights[s.id] ?? 0;
+      leverage[s.id] = 1;
+    }
+    const state = {
+      selected,
+      weights,
+      startDates: built.state.startDates,
+      leverage,
+    };
+    // Per-key UUID units are NOT in any symbol map → pass through collapse.
+    const deAliased = realCollapse(built.strategies, state, new Map());
+    const cache = realBuildDateMapCache(deAliased.strategies);
+    return realComputeScenario(deAliased.strategies, deAliased.state, cache);
+  }
+
+  // -------------------------------------------------------------------------
+  // DSRC-02 — gating: present in book mode + gate satisfied
+  // -------------------------------------------------------------------------
+  it("DSRC-02 book mode + D3 gate satisfied → Data sources control renders one row per eligible key with the group accessible name", () => {
+    renderPerKey(makePerKeyPayload());
+    const group = screen.getByRole("group", { name: "Data sources" });
+    expect(group).toBeInTheDocument();
+    expect(group).toHaveAttribute("data-testid", "scenario-data-sources");
+    // One switch per eligible key, each with its per-row aria-label.
+    const switches = within(group).getAllByRole("switch");
+    expect(switches).toHaveLength(2);
+    expect(
+      screen.getByRole("switch", {
+        name: "Include Binance — Main desk in projection",
+      }),
+    ).toBeInTheDocument();
+    // key-B has no nickname → masked tail (last 4 of the id).
+    expect(
+      screen.getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      }),
+    ).toBeInTheDocument();
+    // No InfoBanner fallback when the control IS shown.
+    expect(
+      screen.queryByTestId("scenario-data-sources-fallback"),
+    ).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // DSRC-02 — gating: absent in blank mode
+  // -------------------------------------------------------------------------
+  it("DSRC-02 blank mode → no Data sources control, no InfoBanner, no EmptyStateCard for this control", () => {
+    // No live book → blank mode is forced (entry-mode book segment absent).
+    renderPerKey(
+      makePerKeyPayload({ holdingsSummary: [] }),
+    );
+    expect(
+      screen.queryByTestId("scenario-data-sources"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("scenario-data-sources-fallback"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("scenario-data-sources-empty"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "Data sources" }),
+    ).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // DSRC-02 — gating: gate NOT satisfied → control hidden, calm InfoBanner note
+  // -------------------------------------------------------------------------
+  it("DSRC-02 book mode + D3 gate NOT satisfied → control hidden, InfoBanner fallback note (NOT role=alert)", () => {
+    renderPerKey(
+      makePerKeyPayload({ perKeyDailiesGateSatisfied: false }),
+    );
+    expect(
+      screen.queryByTestId("scenario-data-sources"),
+    ).not.toBeInTheDocument();
+    const fallback = screen.getByTestId("scenario-data-sources-fallback");
+    expect(fallback).toBeInTheDocument();
+    expect(
+      screen.getByText(/Per-source modeling needs per-key history\./i),
+    ).toBeInTheDocument();
+    // Honest absence — NOT an error. No role="alert" inside the fallback.
+    expect(fallback.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // DSRC-03 — THE LOAD-BEARING HONESTY TEST. Toggling key B off must move the
+  // KPI/curve NUMBERS and match an independent two→one recompute. A cosmetic
+  // hide (dim the row, leave projectionState.selected intact) FAILS this.
+  // -------------------------------------------------------------------------
+  it("DSRC-03 toggling a source off honestly recomputes Sharpe/maxDD/return + curve endpoint, matching an independent two→one recompute", () => {
+    renderPerKey(makePerKeyPayload());
+
+    // Baseline (both included) — must equal the independent two-key blend.
+    const before = lastKpiScenarioMetrics();
+    const bothRecompute = independentRecompute(["key-A", "key-B"]);
+    expect(before?.sharpe).toBeCloseTo(bothRecompute.sharpe as number, 10);
+    expect(before?.max_drawdown).toBeCloseTo(
+      bothRecompute.max_drawdown as number,
+      10,
+    );
+    expect(before?.twr).toBeCloseTo(bothRecompute.twr as number, 10);
+
+    // Toggle key B OFF.
+    const switchB = screen.getByRole("switch", {
+      name: "Include OKX — ••••ey-B in projection",
+    });
+    fireEvent.click(switchB);
+
+    // After: the recomputed numbers must (a) DIFFER from the two-key blend and
+    // (b) MATCH the independent key-A-only recompute. This is the honesty core:
+    // a cosmetic hide would leave `after` equal to `before`.
+    const after = lastKpiScenarioMetrics();
+    const aOnlyRecompute = independentRecompute(["key-A"]);
+
+    // (a) numbers MOVED (mutation-falsifiable: a cosmetic hide leaves them equal)
+    expect(after?.sharpe).not.toBeCloseTo(before?.sharpe as number, 6);
+    expect(after?.twr).not.toBeCloseTo(before?.twr as number, 6);
+
+    // (b) numbers MATCH the honest single-key recompute (oracle, not "changed")
+    expect(after?.sharpe).toBeCloseTo(aOnlyRecompute.sharpe as number, 10);
+    expect(after?.max_drawdown).toBeCloseTo(
+      aOnlyRecompute.max_drawdown as number,
+      10,
+    );
+    expect(after?.twr).toBeCloseTo(aOnlyRecompute.twr as number, 10);
+
+    // Curve endpoint also moves and matches the key-A-only curve endpoint.
+    const afterCurve = after?.equity_curve ?? [];
+    const aOnlyCurve = aOnlyRecompute.equity_curve ?? [];
+    expect(afterCurve.length).toBeGreaterThan(0);
+    expect(afterCurve.at(-1)?.value).toBeCloseTo(
+      aOnlyCurve.at(-1)?.value as number,
+      10,
+    );
+    expect(afterCurve.at(-1)?.value).not.toBeCloseTo(
+      (before?.equity_curve ?? []).at(-1)?.value as number,
+      6,
+    );
+
+    // aria-checked reflects the exclusion (state visible, not silent).
+    expect(switchB).toHaveAttribute("aria-checked", "false");
+  });
+
+  // -------------------------------------------------------------------------
+  // Review WR-02 — the ephemeral per-source include map must NOT survive a
+  // draft replacement. Excluding a source then opening a saved scenario must
+  // start the opened scenario with every source included again (the toggle is
+  // not persisted; a stale exclusion would silently omit a source the user
+  // never excluded for THIS scenario — a cosmetic-hide-by-leak regression).
+  // -------------------------------------------------------------------------
+  it("review WR-02 opening a saved scenario clears the ephemeral per-source exclusion (toggle resets to all-included)", () => {
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePerKeyPayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    // Exclude key-B.
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      }),
+    );
+    expect(
+      screen.getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      }),
+    ).toHaveAttribute("aria-checked", "false");
+
+    // Open a saved scenario — a valid current-schema draft decodes "ok".
+    const validDraft = defaultDraftFromHoldings([
+      PK_HOLDING_A,
+      PK_HOLDING_B,
+    ] as Parameters<typeof defaultDraftFromHoldings>[0]);
+    act(() => {
+      openSaved?.({ id: "saved-1", name: "Saved scenario", draft: validDraft });
+    });
+
+    // The exclusion must NOT carry over — every source included again. Without
+    // the WR-02 fix (setIncludeByApiKeyId({}) on open) this stays aria-checked
+    // "false" and the opened scenario silently omits key-B.
+    expect(
+      screen.getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      }),
+    ).toHaveAttribute("aria-checked", "true");
+  });
+
+  // -------------------------------------------------------------------------
+  // DSRC-03 — all-excluded honest empty + re-include restores
+  // -------------------------------------------------------------------------
+  it("DSRC-03 excluding every source → EmptyStateCard + null KPIs (never stale); re-including restores the live projection", () => {
+    renderPerKey(makePerKeyPayload());
+
+    const liveBefore = lastKpiScenarioMetrics();
+    expect(liveBefore?.sharpe).not.toBeNull();
+
+    // Exclude BOTH sources.
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "Include Binance — Main desk in projection",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      }),
+    );
+
+    // Honest empty card renders with the exact copy.
+    const emptyCard = screen.getByTestId("scenario-data-sources-empty");
+    expect(emptyCard).toBeInTheDocument();
+    expect(
+      screen.getByText("Select at least one data source"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Every data source is excluded — there's nothing to project\./i,
+      ),
+    ).toBeInTheDocument();
+    // Honest absence — not an error.
+    expect(emptyCard.querySelector('[role="alert"]')).toBeNull();
+
+    // Engine returned the all-null / empty-curve degenerate result — KpiStrip
+    // gets null KPIs (its degenerate "—" path), NEVER the stale prior number.
+    const allOff = lastKpiScenarioMetrics();
+    expect(allOff?.sharpe).toBeNull();
+    expect(allOff?.twr).toBeNull();
+    expect(allOff?.max_drawdown).toBeNull();
+    expect(allOff?.equity_curve ?? []).toHaveLength(0);
+
+    // Re-include key A → empty card gone, live projection restored to A-only.
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "Include Binance — Main desk in projection",
+      }),
+    );
+    expect(
+      screen.queryByTestId("scenario-data-sources-empty"),
+    ).not.toBeInTheDocument();
+    const restored = lastKpiScenarioMetrics();
+    const aOnly = independentRecompute(["key-A"]);
+    expect(restored?.sharpe).toBeCloseTo(aOnly.sharpe as number, 10);
+  });
+
+  // -------------------------------------------------------------------------
+  // RT1 (review) — an INELIGIBLE key (soft-disconnected: disconnected_at set,
+  // is_active still true) keeps its holdings + csv_daily_returns residue, so the
+  // allocator-scoped SSR read still carries its series. It is NOT in
+  // eligibleApiKeyIds, so it gets no toggle row. The composer must NOT blend it
+  // (perKeyAdapterOutput is filtered to eligibleApiKeyIds): otherwise excluding
+  // every TOGGLEABLE source would leave an undisclosed, untoggleable key driving
+  // the projection — falsely breaking the "exclude all → honest empty" contract.
+  // -------------------------------------------------------------------------
+  it("RT1 a soft-disconnected ineligible key with holdings + csv residue gets no toggle row and never rides the blend (exclude-all stays honestly empty)", () => {
+    // key-C: disconnected_at set (soft-disconnected) → INELIGIBLE, but is_active
+    // still true and it retains a $50k holding + a csv-residue series.
+    const PK_KEY_C = {
+      ...PK_KEY_A,
+      id: "key-C",
+      exchange: "bybit",
+      label: "Disconnected desk",
+      disconnected_at: "2026-02-10T00:00:00Z",
+    };
+    const PK_HOLDING_C = {
+      ...PK_HOLDING_A,
+      symbol: "SOL",
+      venue: "bybit",
+      value_usd: 50_000,
+      api_key_id: "key-C",
+    };
+    renderPerKey(
+      makePerKeyPayload({
+        apiKeys: [PK_KEY_A, PK_KEY_B, PK_KEY_C],
+        holdingsSummary: [PK_HOLDING_A, PK_HOLDING_B, PK_HOLDING_C],
+        perKeyReturnsByApiKeyId: {
+          "key-A": KEY_A_SERIES,
+          "key-B": KEY_B_SERIES,
+          // Residual series for the soft-disconnected key — present in the
+          // allocator-scoped read, but key-C is NOT in eligibleApiKeyIds.
+          "key-C": KEY_A_SERIES,
+        },
+        perKeyDailiesGateSatisfied: true,
+        eligibleApiKeyIds: ["key-A", "key-B"],
+      }),
+    );
+
+    // Only the two ELIGIBLE keys get a toggle row — no row for key-C (Bybit).
+    const group = screen.getByRole("group", { name: "Data sources" });
+    expect(within(group).getAllByRole("switch")).toHaveLength(2);
+    expect(
+      within(group).queryByRole("switch", { name: /Bybit/i }),
+    ).toBeNull();
+
+    // Exclude BOTH toggleable (eligible) sources.
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "Include Binance — Main desk in projection",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      }),
+    );
+
+    // RT1: with key-C filtered out of the blend, excluding every toggleable
+    // source yields the honest-empty card + null KPIs. WITHOUT the
+    // eligibleApiKeyIds filter on perKeyAdapterOutput, key-C (weight $50k + csv
+    // residue) would keep driving a non-empty projection here — a silent honesty
+    // violation. This assertion fails loudly if that filter is ever removed.
+    expect(
+      screen.getByTestId("scenario-data-sources-empty"),
+    ).toBeInTheDocument();
+    const allOff = lastKpiScenarioMetrics();
+    expect(allOff?.sharpe).toBeNull();
+    expect(allOff?.twr).toBeNull();
+    expect(allOff?.equity_curve ?? []).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // DSRC-03 / Pitfall 5 — ephemeral: a toggle never changes diffCount / commit
+  // -------------------------------------------------------------------------
+  it("Pitfall 5 toggling a data source off does NOT change diffCount (ephemeral — never in the commit diff)", () => {
+    renderPerKey(makePerKeyPayload());
+
+    // Fresh draft seeded from the live book → no diff yet. The Commit button is
+    // disabled (diffCount === 0) and the footer reads "No changes yet" (the
+    // ScenarioFooter renders that copy in BOTH the count chip and the summary
+    // slot at rest, hence getAllByText).
+    const commit = screen.getByTestId(
+      "scenario-footer-commit",
+    ) as HTMLButtonElement;
+    expect(screen.getAllByText("No changes yet").length).toBeGreaterThan(0);
+    expect(commit.disabled).toBe(true);
+
+    // Toggle a source off — exclusion recomputes the projection but must NOT
+    // enter the draft / commit diff.
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      }),
+    );
+
+    // diffCount unchanged — still "No changes yet", Commit still disabled. If the
+    // toggle leaked into scenario.draft (e.g. via toggleByScopeRef) diffCount
+    // would increment and the button would enable — this asserts it does not.
+    expect(screen.getAllByText("No changes yet").length).toBeGreaterThan(0);
+    expect(commit.disabled).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // DSRC-03 / Pitfall 3 — two per-key units with the same underlying symbol are
+  // NOT collapsed (per-key UUIDs are not symbol-keyed); the unit count holds.
+  // -------------------------------------------------------------------------
+  it("Pitfall 3 two per-key units sharing an underlying symbol are NOT collapsed (count preserved; avg-ρ honest)", () => {
+    // Both keys' series are byte-identical AND both holdings are the same symbol
+    // (BTC) — a symbol-keyed collapse WOULD merge them. Per-key UUID ids are not
+    // in symbolByHoldingId, so they pass through: the engine sees 2 strategies.
+    const sharedSeries = PK_DATES.map((date, i) => ({
+      date,
+      value: [0.01, -0.02, 0.015][i % 3],
+    }));
+    renderPerKey(
+      makePerKeyPayload({
+        holdingsSummary: [
+          { ...PK_HOLDING_A, symbol: "BTC", venue: "binance" },
+          { ...PK_HOLDING_B, symbol: "BTC", venue: "okx" },
+        ],
+        perKeyReturnsByApiKeyId: {
+          "key-A": sharedSeries,
+          "key-B": sharedSeries,
+        },
+      }),
+    );
+    const sm = lastKpiScenarioMetrics();
+    // Two distinct per-key units survived the collapse → 2×2 correlation matrix.
+    expect(Object.keys(sm?.correlation_matrix ?? {})).toHaveLength(2);
+  });
+
+  // -------------------------------------------------------------------------
+  // DSRC-02 (a11y) — per-row aria-label + aria-checked state + group name
+  // -------------------------------------------------------------------------
+  it("DSRC-02 a11y each toggle carries aria-label + aria-checked, the group is named, and excluded flips aria-checked", () => {
+    renderPerKey(makePerKeyPayload());
+
+    const group = screen.getByRole("group", { name: "Data sources" });
+    const switchA = within(group).getByRole("switch", {
+      name: "Include Binance — Main desk in projection",
+    });
+    const switchB = within(group).getByRole("switch", {
+      name: "Include OKX — ••••ey-B in projection",
+    });
+    // Default included.
+    expect(switchA).toHaveAttribute("aria-checked", "true");
+    expect(switchB).toHaveAttribute("aria-checked", "true");
+
+    // Exclude A → its aria-checked flips, B stays included.
+    fireEvent.click(switchA);
+    expect(switchA).toHaveAttribute("aria-checked", "false");
+    expect(switchB).toHaveAttribute("aria-checked", "true");
   });
 });
