@@ -1320,8 +1320,12 @@ export function ScenarioComposer({
   // RAW equity-share weights, default selected=true.
   const perKeyAdapterOutput = useMemo(
     () =>
+      // `?? {}` — fail safe if the payload omits the per-key channel (a partial/
+      // legacy payload). An empty map yields zero per-key units (the per-key path
+      // is also gated off via perKeyDailiesGateSatisfied in that case). The
+      // builder Object.entries its input, so it must never receive undefined.
       buildPerKeyStrategyForBuilderSet(
-        payload.perKeyReturnsByApiKeyId,
+        payload.perKeyReturnsByApiKeyId ?? {},
         equityByApiKeyId,
       ),
     [payload.perKeyReturnsByApiKeyId, equityByApiKeyId],
@@ -1350,13 +1354,10 @@ export function ScenarioComposer({
   // The connected exchange keys eligible for per-source toggling — payload
   // apiKeys filtered to the SSR-computed eligible-key id set (SoT mirror; the
   // client never re-derives eligibility, RESEARCH §SoT-mirror). One row per key.
-  const dataSourceKeys = useMemo(
-    () =>
-      payload.apiKeys.filter((k) =>
-        payload.eligibleApiKeyIds.includes(k.id),
-      ),
-    [payload.apiKeys, payload.eligibleApiKeyIds],
-  );
+  const dataSourceKeys = useMemo(() => {
+    const eligible = payload.eligibleApiKeyIds ?? [];
+    return (payload.apiKeys ?? []).filter((k) => eligible.includes(k.id));
+  }, [payload.apiKeys, payload.eligibleApiKeyIds]);
 
   // All-excluded honest-empty trigger (DSRC-03): every eligible key toggled off.
   // Derived from the ephemeral include map (default included), so re-including

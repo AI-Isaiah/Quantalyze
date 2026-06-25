@@ -83,12 +83,20 @@ vi.mock("./ScenarioCommitDrawer", () => ({
 vi.mock("../ScenarioFlaggedHoldingsList", () => ({
   ScenarioFlaggedHoldingsList: vi.fn(() => <div data-testid="flagged-list-mock" />),
 }));
-vi.mock("../lib/scenario-adapter", () => ({
-  buildStrategyForBuilderSet: vi.fn(() => ({
-    strategies: [],
-    state: { selected: {}, weights: {}, startDates: {} },
-  })),
-}));
+// Phase 37: keep the sibling buildPerKeyStrategyForBuilderSet real via
+// importOriginal (the composer imports it; the per-key path is inactive here
+// since perKeyDailiesGateSatisfied defaults false).
+vi.mock("../lib/scenario-adapter", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../lib/scenario-adapter")>();
+  return {
+    ...actual,
+    buildStrategyForBuilderSet: vi.fn(() => ({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    })),
+  };
+});
 
 // --- Imports after mocks --------------------------------------------------
 
@@ -223,6 +231,11 @@ function makePayload(
         { date: "2026-01-02", value: 0 },
       ],
     },
+    // Phase 37 / DSRC-01 — per-key channel additive fields (no per-key coverage
+    // here; the per-source control stays hidden — gate false).
+    perKeyReturnsByApiKeyId: {},
+    perKeyDailiesGateSatisfied: false,
+    eligibleApiKeyIds: [],
     apiKeysCount: 1,
     mandateIsSet: false,
     ...overrides,

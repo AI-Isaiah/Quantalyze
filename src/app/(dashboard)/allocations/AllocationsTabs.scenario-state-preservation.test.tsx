@@ -123,13 +123,20 @@ vi.mock("./ScenarioFlaggedHoldingsList", () => ({
 
 // Pure scenario-adapter mocked to a deterministic empty projection so
 // computeScenario short-circuits — the composer's chart math is irrelevant to
-// the draft-preservation contract under test.
-vi.mock("./lib/scenario-adapter", () => ({
-  buildStrategyForBuilderSet: vi.fn(() => ({
-    strategies: [],
-    state: { selected: {}, weights: {}, startDates: {} },
-  })),
-}));
+// the draft-preservation contract under test. Phase 37: keep the sibling
+// buildPerKeyStrategyForBuilderSet real via importOriginal (the composer imports
+// it; the per-key path is inactive here since perKeyDailiesGateSatisfied=false).
+vi.mock("./lib/scenario-adapter", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("./lib/scenario-adapter")>();
+  return {
+    ...actual,
+    buildStrategyForBuilderSet: vi.fn(() => ({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    })),
+  };
+});
 
 // --- Import after mocks -----------------------------------------------------
 
