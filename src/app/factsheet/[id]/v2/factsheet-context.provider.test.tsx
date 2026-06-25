@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
-import { FactsheetProvider, useComparator, useXRange } from "./factsheet-context";
+import { FactsheetProvider, useComparator, useToggles, useXRange } from "./factsheet-context";
 
 /**
  * B7c — FactsheetProvider ⇄ localStorage integration.
@@ -101,9 +101,11 @@ function renderProvider() {
 function PersistHarness() {
   const { comparator } = useComparator();
   const { setXRange } = useXRange();
+  const { darkMode } = useToggles();
   return (
     <>
       <span data-testid="cmp">{comparator}</span>
+      <span data-testid="dark">{darkMode ? "dark" : "light"}</span>
       <button
         data-testid="pan"
         onClick={() => setXRange([10, 120] as const)}
@@ -217,18 +219,34 @@ describe("FactsheetProvider — persist opt-out (38-02)", () => {
     replaceSpy.mockRestore();
   });
 
-  it("persist={false} writes NEITHER the URL nor the localStorage blob after a pan", async () => {
+  it("persist={false} gates BOTH reads and writes: it never adopts the sibling tab's stored/URL view-state (RT2) nor rewrites the shared URL/localStorage after a pan", async () => {
     const replaceSpy = vi.spyOn(window.history, "replaceState");
+    // The sibling Overview factsheet shares the /allocations URL and a stored
+    // `factsheet-v2:` blob. Seed BOTH a stored comparator and URL params so an
+    // ungated read would bleed that view-state (cmp + dark) into the ephemeral
+    // scenario chart — the exact RT2 cross-tab leak.
     lsStore.set(KEY, JSON.stringify({ cmp: "spx" }));
+    window.history.replaceState(
+      null,
+      "",
+      "/factsheet/test-strategy/v2?cmp=none&dark=1",
+    );
     act(() => {
       renderPersist(false);
     });
-    // Hydration (the READ effect) is unaffected by persist — the stored cmp is
-    // still adopted, so we can wait on it and know the write effect would be
-    // armed if persistence were enabled.
-    await waitFor(() =>
-      expect(screen.getByTestId("cmp").textContent).toBe("spx"),
-    );
+    // Flush the deferred storage load + the hydration effect. `hydrated.current`
+    // latches regardless of persist (the gate is an early return AFTER the
+    // latch), so the write effect IS armed — any write suppression below is due
+    // to persist={false}, not an un-hydrated provider. We flush on a timer
+    // because, with the read now gated, the seeded cmp is NOT adopted, so there
+    // is no cmp flip to wait on.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 150));
+    });
+    // READ gate (RT2): neither the stored cmp ("spx") nor the URL cmp ("none") /
+    // dark ("1") was adopted — the ephemeral chart stays at the payload defaults.
+    expect(screen.getByTestId("cmp").textContent).toBe("btc");
+    expect(screen.getByTestId("dark").textContent).toBe("light");
     const searchBefore = window.location.search;
     replaceSpy.mockClear();
     act(() => {
@@ -236,12 +254,10 @@ describe("FactsheetProvider — persist opt-out (38-02)", () => {
     });
     // Give the 250ms debounce window ample time to fire if the gate were absent.
     await new Promise((r) => setTimeout(r, 400));
-    // URL half suppressed: location.search unchanged, no replaceState fired.
+    // WRITE gate: pan rewrote NEITHER the URL nor the seeded localStorage blob.
     expect(window.location.search).toBe(searchBefore);
     expect(window.location.search).not.toContain("range=");
     expect(replaceSpy).not.toHaveBeenCalled();
-    // localStorage half suppressed: the seeded blob never gains a `range` field
-    // (no setStoredView ran). The only key remains the seed { cmp: "spx" }.
     const raw = lsStore.get(KEY);
     expect(JSON.parse(raw as string)).toEqual({ cmp: "spx" });
     replaceSpy.mockRestore();

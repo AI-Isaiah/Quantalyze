@@ -4,15 +4,18 @@
  * Phase 10 Plan 06b — full Scenario tab body assembly.
  *
  * Composes Plan 06a's `useScenarioState` hook + `ScenarioFooter` with
- * the Wave 2-5 component primitives (KpiStrip mode=scenario, EquityChart
- * scenarioSeries, DrawdownChart scenarioDailyPoints, StrategyBrowseDrawer,
- * BridgeDrawer onAddToScenario, ScenarioFlaggedHoldingsList).
+ * the Wave 2-5 component primitives (KpiStrip mode=scenario,
+ * ScenarioFactsheetChart fed the scenario wealth series, StrategyBrowseDrawer,
+ * BridgeDrawer onAddToScenario, ScenarioFlaggedHoldingsList). Phase 38-03
+ * swapped the legacy EquityChart + DrawdownChart render to the
+ * factsheet-backed ScenarioFactsheetChart (PARITY-01).
  *
  * Sections (top→bottom):
  *   1. Header — "Scenario" + subtitle
  *   2. Fingerprint-mismatch banner (when stored fingerprint != current)
  *   3. KpiStrip in mode="scenario" with scenarioMetrics + liveMetrics
- *   4. EquityChart + DrawdownChart with scenarioSeries / scenarioDailyPoints
+ *   4. ScenarioFactsheetChart (factsheet-engine equity + drawdown) fed the
+ *      scenario wealth series — Phase 38-03 (was EquityChart + DrawdownChart)
  *   5. Bridge inline card (only when flaggedHoldings.length > 0) embedding
  *      ScenarioFlaggedHoldingsList — RESEARCH §Architecture decision
  *   6. CompositionList — read-only-tokens model: live holdings are FIXED
@@ -33,8 +36,9 @@
  *
  * Pitfall 1 — `computeScenario().equity_curve` returns cumulative RETURN
  * (e.g. 0.18 = +18%). The composer converts to cumulative WEALTH (start
- * at 1.0) before passing to EquityChart, and scales by the scenario AUM
- * before passing to DrawdownChart (which expects USD-form values).
+ * at 1.0) via `toWealth` before passing it to ScenarioFactsheetChart, which
+ * derives the drawdown series internally from that wealth curve (the prior
+ * USD-scale-for-DrawdownChart step was dropped in Phase 38-03).
  *
  * M4 — live baseline read from `payload.liveBaselineMetrics` (SSR-lifted
  * in Plan 03). The composer does NOT re-derive the live baseline by
@@ -98,7 +102,8 @@ import {
   type FlaggedHolding,
 } from "../lib/holding-outcome-adapter";
 import { KpiStrip } from "./KpiStrip";
-// `toWealth` stays (the scenario wealth series builder, :1567); EquityChart +
+// `toWealth` stays (the scenario wealth series builder, imported from
+// ../widgets/performance/EquityChart); EquityChart +
 // DrawdownChart are no longer rendered here — Phase 38-03 swaps the composer's
 // two chart call sites to the factsheet-backed ScenarioFactsheetChart (PARITY-01).
 // The Overview EquityChartWidget keeps the legacy EquityChart render (out of scope).
@@ -418,10 +423,14 @@ function holdingEquityContributionLocal(
  * DSRC-02 — exchange display-name lookup for the Data-sources row labels.
  *
  * Copied locally from the SyncBadge recipe (SyncBadge.tsx:21-35): a lower-cased
- * lookup with `?? exchange` fallback. There is NO shared EXCHANGE_LABELS export
- * (it is already duplicated in SyncBadge + VerificationForm); copying the recipe
- * here is consistent with that existing duplication rather than introducing a
- * new shared module (surgical-change rule, PATTERNS §"No Analog Found").
+ * lookup with `?? exchange` fallback. The shared `EXCHANGE_DISPLAY`
+ * (closed-sets.ts) carries identical values but is typed
+ * `Record<SupportedExchange, string>` — a CLOSED key union — so it cannot be
+ * indexed by the arbitrary `string` exchange code without a cast that defeats
+ * its narrowing; the open-keyed `?? fallback` recipe stays local, matching the
+ * existing local copies in SyncBadge + VerificationForm + AllocatorSyncStatus
+ * rather than introducing a cast or a new shared module (surgical-change rule,
+ * PATTERNS §"No Analog Found").
  */
 const EXCHANGE_LABELS: Record<string, string> = {
   binance: "Binance",
@@ -1306,7 +1315,7 @@ export function ScenarioComposer({
   // collapse→computeScenario pipeline below is shared by both.
   // -------------------------------------------------------------------------
   // Per-key equity share (D2): Σ holdingEquityContribution grouped by
-  // api_key_id (mirror queries.ts:2271-2279). Uses the EXPORTED contribution
+  // api_key_id (mirror queries.ts:2303-2310). Uses the EXPORTED contribution
   // helper — never re-derives equity from value_usd (derivative notional ≠
   // equity). This is the RAW weight source; the engine renormalizes (Pitfall 1).
   const equityByApiKeyId = useMemo(() => {
@@ -1322,18 +1331,29 @@ export function ScenarioComposer({
   // Per-key strategy set — wrapped in a useMemo on its inputs exactly like
   // `adapterOutput`. One StrategyForBuilder per api_key_id (id === api_key_id),
   // RAW equity-share weights, default selected=true.
-  const perKeyAdapterOutput = useMemo(
-    () =>
-      // `?? {}` — fail safe if the payload omits the per-key channel (a partial/
-      // legacy payload). An empty map yields zero per-key units (the per-key path
-      // is also gated off via perKeyDailiesGateSatisfied in that case). The
-      // builder Object.entries its input, so it must never receive undefined.
-      buildPerKeyStrategyForBuilderSet(
-        payload.perKeyReturnsByApiKeyId ?? {},
-        equityByApiKeyId,
-      ),
-    [payload.perKeyReturnsByApiKeyId, equityByApiKeyId],
-  );
+  const perKeyAdapterOutput = useMemo(() => {
+    // `?? {}` — fail safe if the payload omits the per-key channel (a partial/
+    // legacy payload). An empty map yields zero per-key units (the per-key path
+    // is also gated off via perKeyDailiesGateSatisfied in that case). The
+    // builder Object.entries its input, so it must never receive undefined.
+    const all = payload.perKeyReturnsByApiKeyId ?? {};
+    // DSRC-03 honesty fix (review RT1) — blend ONLY eligible keys, the SAME set
+    // that gets a toggle row (dataSourceKeys below). A soft-disconnected key
+    // keeps is_active=true and retains holdings + csv residue, so the
+    // allocator-scoped SSR read still carries its series even though it is NOT
+    // in eligibleApiKeyIds. Without this filter that key would ride the engine
+    // with no toggle row, letting "exclude all sources → honest empty" be
+    // falsely satisfied by an undisclosed, untoggleable source.
+    const eligible = new Set(payload.eligibleApiKeyIds ?? []);
+    const eligibleOnly = Object.fromEntries(
+      Object.entries(all).filter(([id]) => eligible.has(id)),
+    );
+    return buildPerKeyStrategyForBuilderSet(eligibleOnly, equityByApiKeyId);
+  }, [
+    payload.perKeyReturnsByApiKeyId,
+    payload.eligibleApiKeyIds,
+    equityByApiKeyId,
+  ]);
 
   // The per-key path is active only in book mode + D3 gate satisfied. When
   // active, the per-key strategy set feeds the projectionState/collapse/engine
@@ -2206,8 +2226,9 @@ export function ScenarioComposer({
           scenarioSeries={scenarioWealthSeries}
           benchmark={btcWealth}
         />
-        {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted #94A3B8
-            line swatch (UI-SPEC §Copywriting / §Color). Disabled when the
+        {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted line
+            swatch via the `--color-chart-benchmark` token (UI-SPEC §Copywriting
+            / §Color). Disabled when the
             benchmark series is unavailable so the control can't promise an
             overlay there is no data for. Composer-owned chrome — NOT pushed
             into the factsheet engine. */}

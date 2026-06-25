@@ -4163,6 +4163,81 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   });
 
   // -------------------------------------------------------------------------
+  // RT1 (review) — an INELIGIBLE key (soft-disconnected: disconnected_at set,
+  // is_active still true) keeps its holdings + csv_daily_returns residue, so the
+  // allocator-scoped SSR read still carries its series. It is NOT in
+  // eligibleApiKeyIds, so it gets no toggle row. The composer must NOT blend it
+  // (perKeyAdapterOutput is filtered to eligibleApiKeyIds): otherwise excluding
+  // every TOGGLEABLE source would leave an undisclosed, untoggleable key driving
+  // the projection — falsely breaking the "exclude all → honest empty" contract.
+  // -------------------------------------------------------------------------
+  it("RT1 a soft-disconnected ineligible key with holdings + csv residue gets no toggle row and never rides the blend (exclude-all stays honestly empty)", () => {
+    // key-C: disconnected_at set (soft-disconnected) → INELIGIBLE, but is_active
+    // still true and it retains a $50k holding + a csv-residue series.
+    const PK_KEY_C = {
+      ...PK_KEY_A,
+      id: "key-C",
+      exchange: "bybit",
+      label: "Disconnected desk",
+      disconnected_at: "2026-02-10T00:00:00Z",
+    };
+    const PK_HOLDING_C = {
+      ...PK_HOLDING_A,
+      symbol: "SOL",
+      venue: "bybit",
+      value_usd: 50_000,
+      api_key_id: "key-C",
+    };
+    renderPerKey(
+      makePerKeyPayload({
+        apiKeys: [PK_KEY_A, PK_KEY_B, PK_KEY_C],
+        holdingsSummary: [PK_HOLDING_A, PK_HOLDING_B, PK_HOLDING_C],
+        perKeyReturnsByApiKeyId: {
+          "key-A": KEY_A_SERIES,
+          "key-B": KEY_B_SERIES,
+          // Residual series for the soft-disconnected key — present in the
+          // allocator-scoped read, but key-C is NOT in eligibleApiKeyIds.
+          "key-C": KEY_A_SERIES,
+        },
+        perKeyDailiesGateSatisfied: true,
+        eligibleApiKeyIds: ["key-A", "key-B"],
+      }),
+    );
+
+    // Only the two ELIGIBLE keys get a toggle row — no row for key-C (Bybit).
+    const group = screen.getByRole("group", { name: "Data sources" });
+    expect(within(group).getAllByRole("switch")).toHaveLength(2);
+    expect(
+      within(group).queryByRole("switch", { name: /Bybit/i }),
+    ).toBeNull();
+
+    // Exclude BOTH toggleable (eligible) sources.
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "Include Binance — Main desk in projection",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      }),
+    );
+
+    // RT1: with key-C filtered out of the blend, excluding every toggleable
+    // source yields the honest-empty card + null KPIs. WITHOUT the
+    // eligibleApiKeyIds filter on perKeyAdapterOutput, key-C (weight $50k + csv
+    // residue) would keep driving a non-empty projection here — a silent honesty
+    // violation. This assertion fails loudly if that filter is ever removed.
+    expect(
+      screen.getByTestId("scenario-data-sources-empty"),
+    ).toBeInTheDocument();
+    const allOff = lastKpiScenarioMetrics();
+    expect(allOff?.sharpe).toBeNull();
+    expect(allOff?.twr).toBeNull();
+    expect(allOff?.equity_curve ?? []).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
   // DSRC-03 / Pitfall 5 — ephemeral: a toggle never changes diffCount / commit
   // -------------------------------------------------------------------------
   it("Pitfall 5 toggling a data source off does NOT change diffCount (ephemeral — never in the commit diff)", () => {

@@ -179,16 +179,18 @@ export function FactsheetProvider({
   payload: FactsheetPayload;
   children: ReactNode;
   /**
-   * Additive opt-out (default `true`) that gates the two view-state WRITE
-   * effects — the URL `history.replaceState` half AND the `setStoredView`
-   * localStorage half. The factsheet never passes it, so its link-sharing
-   * round-trip is byte-identical. The composer mount (Phase 38) passes
-   * `persist={false}` so a scenario pan on the dashboard tab never rewrites the
-   * allocator's dashboard URL (`?range=`) nor writes a `factsheet-v2:` blob.
-   * Hydration (the READ effect) is intentionally NOT gated — reading an empty
-   * composer URL/storage is harmless, and the hooks must keep firing
-   * unconditionally (Rules of Hooks); the gate is an early no-op INSIDE the
-   * write effect body.
+   * Additive opt-out (default `true`) that gates BOTH the view-state WRITE
+   * effects (the URL `history.replaceState` half AND the `setStoredView`
+   * localStorage half) AND the hydration READ effect. The factsheet never
+   * passes it, so its link-sharing round-trip is byte-identical. The composer
+   * mount (Phase 38) passes `persist={false}` so a scenario pan on the dashboard
+   * tab never rewrites the allocator's dashboard URL (`?range=`) nor writes a
+   * `factsheet-v2:` blob. The READ effect is ALSO gated (RT2 review fix): the
+   * scenario chart shares the `/allocations` URL with the Overview factsheet,
+   * which DOES write `?range/?cmp/?dark` there, so an ungated read would let
+   * that sibling-tab view-state bleed into the ephemeral scenario chart. The
+   * hooks still fire unconditionally (Rules of Hooks); the gate is an early
+   * no-op INSIDE each effect body, after `hydrated.current` is latched.
    */
   persist?: boolean;
 }) {
@@ -270,6 +272,14 @@ export function FactsheetProvider({
   useEffect(() => {
     if (typeof window === "undefined" || hydrated.current || !storageHydrated) return;
     hydrated.current = true;
+    // RT2 review fix — when persistence is OFF (the composer's ephemeral
+    // scenario chart), do NOT hydrate from the shared URL/localStorage. This
+    // chart lives on the /allocations route alongside the Overview factsheet,
+    // which DOES write ?range/?cmp/?dark to that SAME URL; adopting them would
+    // bleed the sibling tab's view-state (dark-mode, comparator, a foreign-axis
+    // range index) into the scenario chart. An ephemeral chart starts from its
+    // own defaults — there is nothing legitimate for it to hydrate.
+    if (!persist) return;
     const params = new URLSearchParams(window.location.search);
     const get = (k: keyof PersistedState) =>
       params.get(k) ?? storedView[k];
@@ -297,7 +307,7 @@ export function FactsheetProvider({
     }
     // Display defaults to "everything off" — no system-preference inference
     // for dark mode. The user opts in explicitly via the Display popover.
-  }, [payload.strategyId, payload.dates.length, storageHydrated, storedView]);
+  }, [payload.strategyId, payload.dates.length, storageHydrated, storedView, persist]);
 
   // Debounced write-back — only fires after hydration so we don't blow away
   // URL/stored state before we've read it. The URL half is a synchronous

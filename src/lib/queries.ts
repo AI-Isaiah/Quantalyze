@@ -1762,7 +1762,7 @@ export interface MyAllocationDashboardPayload {
   /**
    * Phase 37 / DSRC-01. The allocator's own per-`api_key` daily-return series
    * (realized + funding, unified-252 basis), keyed by `api_key_id`. ALREADY
-   * computed at SSR via `buildPerKeyReturnsByApiKeyId` (queries.ts:3075) to
+   * computed at SSR via `buildPerKeyReturnsByApiKeyId` (call site queries.ts:3107) to
    * select the Phase-36 liveBaselineMetrics source; Phase 37 only EXPOSES it so
    * the composer (Plans 02/03) can build one per-key projection unit and
    * recompute the blend client-side on a data-source toggle.
