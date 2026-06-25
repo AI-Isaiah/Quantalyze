@@ -1810,7 +1810,7 @@ export function ScenarioComposer({
     return (
       <div
         data-widget-id="scenario-composer"
-        className="mx-auto max-w-[1100px] py-12"
+        className="mx-auto max-w-[1440px] py-12"
       >
         <div className="rounded-lg border border-border bg-surface p-12 text-center">
           <h2
@@ -1860,7 +1860,7 @@ export function ScenarioComposer({
   return (
     <div
       data-widget-id="scenario-composer"
-      className="mx-auto flex max-w-[1100px] flex-col"
+      className="mx-auto flex max-w-[1440px] flex-col"
     >
       {/* IMPACT-01 — persistent PROJECTED honesty pill. Always rendered (NOT a
           tooltip/hover), plain text, NO role="alert". Neutral-outline token per

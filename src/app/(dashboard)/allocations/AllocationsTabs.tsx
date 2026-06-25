@@ -124,7 +124,7 @@ const ScenarioComposer = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="mx-auto max-w-[1100px] py-6">
+      <div className="mx-auto max-w-[1440px] py-6">
         {/* KpiStrip skeleton — 5 cells × ~40px */}
         <div className="grid grid-cols-5 gap-2">
           {Array.from({ length: 5 }).map((_, i) => (
