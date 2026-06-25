@@ -26,6 +26,7 @@ type Chain = {
   in: (c: string, v: unknown) => Chain;
   is: (c: string, v: unknown) => Chain;
   not: (c: string, op: string, v: unknown) => Chain;
+  gte: (c: string, v: unknown) => Chain;
   order: (c?: string, o?: { ascending?: boolean }) => Chain;
   limit: (n: number) => Chain;
   maybeSingle: () => Promise<{ data: unknown | null; error: null }>;
@@ -71,6 +72,7 @@ function makeChain(rows: Record<string, unknown[]>): (table: string) => Chain {
         if (op === "is") filters.push({ column: c, value: v, op: "not-is" });
         return chain;
       },
+      gte: () => chain,
       order: () => chain,
       limit: () => chain,
       maybeSingle: async () => {

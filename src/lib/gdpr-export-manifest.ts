@@ -550,6 +550,55 @@ export function redactApiKeysForUser(
 }
 
 /**
+ * Projection helper — csv_daily_returns PER-KEY axis (Phase 36 / D4,
+ * v1.2.1).
+ *
+ * After migration 20260624120000_csv_daily_returns_per_key_axis.sql,
+ * `csv_daily_returns` is owned via TWO axes:
+ *   - STRATEGY rows (`strategy_id` set, `allocator_id` NULL) — exported
+ *     via the EXISTING indirect entry (strategy_id → strategies.user_id).
+ *   - PER-KEY rows (`strategy_id` NULL, `api_key_id` + `allocator_id` set)
+ *     — exported via the projected entry this helper backs, on the
+ *     `allocator_id` axis.
+ *
+ * Why the indirect entry alone is NOT enough (the silent-omission gap D4
+ * closes): per-key rows have `strategy_id NULL`, so the indirect
+ * sub-select `strategy_id IN (...)` never matches them (`NULL IN (...)`
+ * is never true). The CI coverage hook stays GREEN regardless (the table
+ * NAME is already present), so this is a correctness/compliance gap the
+ * hook cannot catch — NOT a CI failure. Once the post-deploy backfill
+ * (D6) populates per-key rows, an Art.15/20 bundle would silently omit
+ * them without this second axis.
+ *
+ * This is an IDENTITY passthrough with a DEFENSE-IN-DEPTH re-filter: it
+ * keeps only rows whose `allocator_id === userId` and strips NO columns
+ * (per-key rows carry only the subject's own data — no cross-party
+ * identifiers, unlike contact_requests / match_decisions). The SELECT
+ * already scopes via `.eq(allocator_id, userId)`; the re-filter here
+ * guards against a future query change leaking another allocator's rows.
+ * Mirrors the re-filter pattern in `redactAllocatorMatchForUser` but
+ * without the column blanking.
+ *
+ * Exported for unit-test pinning (`gdpr-export-per-key-dailies.test.ts`).
+ */
+export function redactCsvDailyReturnsPerKeyForUser(
+  rows: unknown[],
+  userId: string,
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    const row = r as Record<string, unknown>;
+    // Defense-in-depth: the SQL .eq(allocator_id, userId) already scopes
+    // to the subject; re-checking here means a future query change cannot
+    // silently widen the export to another allocator's per-key series.
+    if (row.allocator_id !== userId) continue;
+    out.push({ ...row });
+  }
+  return out;
+}
+
+/**
  * Canonical list of every table that holds user-owned data.
  *
  * CI invariant: the hook in `scripts/check-gdpr-export-coverage.ts` reads
@@ -802,6 +851,35 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
     parent_table: "strategies",
     parent_user_column: "user_id",
   },
+  // Phase 36 / D4 (v1.2.1): SECOND ownership axis for csv_daily_returns —
+  // the PER-KEY axis. Migration 20260624120000_csv_daily_returns_per_key_axis
+  // made the table dual-shaped: strategy rows (strategy_id set, allocator_id
+  // NULL) are covered by the indirect entry above; per-key rows (strategy_id
+  // NULL, api_key_id + allocator_id set) are NOT — the indirect sub-select
+  // `strategy_id IN (...)` never matches a NULL strategy_id, so per-key rows
+  // were SILENTLY OMITTED from the Art.15/20 bundle. The CI coverage hook
+  // stays green regardless (the table NAME is already present via the
+  // indirect entry), so this is a correctness/compliance gap the hook cannot
+  // catch — it MUST land before the post-deploy backfill (D6) populates
+  // per-key rows. A `projected` kind is used (not a second `direct`/`indirect`)
+  // to avoid a bundle-key collision with the indirect csv_daily_returns entry:
+  // the bundle-facing name `csv_daily_returns_per_key` is distinct while the
+  // SELECT still hits `csv_daily_returns` filtered by `.eq(allocator_id,
+  // userId)` — exactly the per-key rows. The project fn is an identity
+  // passthrough that DEFENSIVELY re-filters allocator_id === userId (no column
+  // stripping — per-key rows carry only the subject's own data). NO or_filter:
+  // the bare .eq(allocator_id) IS the exact predicate the projection enforces.
+  // getOrderColumn falls back to the surrogate `id` PK (csv_daily_returns is
+  // intentionally absent from ORDER_COLUMN_OVERRIDES since the Phase 35 migration
+  // gave it an `id BIGINT IDENTITY` PK), so both the strategy-indirect and this
+  // per-key-projected spec export ordered by `id` — total, deterministic.
+  {
+    kind: "projected",
+    table: "csv_daily_returns_per_key",
+    source_table: "csv_daily_returns",
+    user_column: "allocator_id",
+    project: redactCsvDailyReturnsPerKeyForUser,
+  },
   // Portfolio-scoped data
   {
     kind: "indirect",
@@ -847,7 +925,7 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
  * NEW-C16-01 (audit 2026-05-26, CRITICAL): the previous
  * `getOrderColumn` returned `"id"` for every non-audit spec on the
  * stale assumption that "every user-owned table has an `id` UUID
- * column". Eight manifest tables have composite/natural PKs and NO `id`
+ * column". Seven manifest tables have composite/natural PKs and NO `id`
  * column — verified against `src/lib/database.types.ts`:
  *   - `user_app_roles`          PK (user_id, role)              — order by granted_at
  *   - `user_favorites`          PK (user_id, strategy_id)       — order by created_at
@@ -856,7 +934,10 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
  *   - `allocator_equity_snapshots` PK (allocator_id, asof)      — order by asof
  *   - `investor_attestations`   PK (user_id)                    — order by attested_at
  *   - `organization_members`    PK (organization_id, user_id)   — order by joined_at
- *   - `csv_daily_returns`       PK (strategy_id, date)          — order by date (NEW-C16-09)
+ * (`csv_daily_returns` USED to be here per NEW-C16-09, but the Phase 35
+ * per-key-axis migration 20260624120000 replaced its composite PK with a
+ * surrogate `id BIGINT GENERATED ALWAYS AS IDENTITY`, so it now has an `id`
+ * column and orders by it via the getOrderColumn fallback — no override.)
  * A `.order("id")` against any of them raised Postgres 42703
  * (`column "id" does not exist`), which `fetchRowsForSpec` surfaced as
  * a `fetch_error` → `partial: true` → the route returned HTTP 500
@@ -881,10 +962,12 @@ export const ORDER_COLUMN_OVERRIDES: Readonly<Record<string, string>> = {
   allocator_equity_snapshots: "asof",
   investor_attestations: "attested_at",
   organization_members: "joined_at",
-  // NEW-C16-09: csv_daily_returns has a composite PK (strategy_id, date) —
-  // no id column. `date` is the natural chronological sort key for a daily-
-  // return series; matches the RPC's upsert key and the worker's SELECT order.
-  csv_daily_returns: "date",
+  // csv_daily_returns is intentionally ABSENT: the Phase 35 per-key-axis
+  // migration (20260624120000) gave it a surrogate `id BIGINT IDENTITY` PK,
+  // so getOrderColumn's `id` fallback already provides a total, deterministic
+  // order. An override here would be unnecessary (and the schema test pins
+  // ORDER_COLUMN_OVERRIDES to id-LESS tables only). Both the strategy-indirect
+  // and per-key-projected specs order by `id`.
 };
 
 /**

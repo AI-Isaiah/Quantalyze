@@ -853,24 +853,33 @@ export type Database = {
       }
       csv_daily_returns: {
         Row: {
+          allocator_id: string | null
+          api_key_id: string | null
           created_at: string
           daily_return: number
           date: string
-          strategy_id: string
+          id: number
+          strategy_id: string | null
           updated_at: string
         }
         Insert: {
+          allocator_id?: string | null
+          api_key_id?: string | null
           created_at?: string
           daily_return: number
           date: string
-          strategy_id: string
+          id?: number
+          strategy_id?: string | null
           updated_at?: string
         }
         Update: {
+          allocator_id?: string | null
+          api_key_id?: string | null
           created_at?: string
           daily_return?: number
           date?: string
-          strategy_id?: string
+          id?: number
+          strategy_id?: string | null
           updated_at?: string
         }
         Relationships: [

@@ -370,6 +370,24 @@ export const SANITIZE_PARITY_ALLOWLIST: Record<
     reason:
       "Strategy-scoped CSV daily-return series (migration 20260522111839). ON DELETE CASCADE from strategies ensures erasure when the parent strategy is deleted during sanitize. No explicit sanitize_user matrix row needed; mirrors strategy_analytics policy.",
   },
+  // csv_daily_returns_per_key: Phase 36 / D4 (v1.2.1) — the PER-KEY
+  // ownership axis of csv_daily_returns (the projected bundle NAME, distinct
+  // from the indirect strategy entry). Per-key rows are allocator-owned
+  // (`strategy_id` NULL, `api_key_id` + `allocator_id` set). Migration
+  // 20260624120000_csv_daily_returns_per_key_axis.sql declares BOTH per-key
+  // FKs with ON DELETE CASCADE: `api_key_id → api_keys ON DELETE CASCADE` and
+  // `allocator_id → auth.users ON DELETE CASCADE`. So per-key rows are
+  // automatically erased when the owning API key is deleted OR the auth user
+  // is removed during sanitize — no explicit sanitize_user matrix row is
+  // needed (the sanitize_user migration pre-dates this axis). The
+  // projection-parity check requires the projected bundle name be covered
+  // when it differs from its source_table; the source `csv_daily_returns` is
+  // already allowlisted above, so only the bundle name is added here. Mirrors
+  // the csv_daily_returns CASCADE-erasure allowlist pattern.
+  csv_daily_returns_per_key: {
+    reason:
+      "Per-key (allocator_id) axis of csv_daily_returns (projected bundle name; migration 20260624120000). Erasure is the api_key_id → api_keys ON DELETE CASCADE + allocator_id → auth.users ON DELETE CASCADE the migration declares — per-key rows are removed when the API key is deleted or the auth user is sanitized. No explicit sanitize_user matrix row needed; mirrors the csv_daily_returns CASCADE-erasure allowlist.",
+  },
   // scenarios: Phase 23 (migration 20260621120000) — the allocator's own saved
   // ScenarioDraft config, user-owned via `allocator_id NOT NULL REFERENCES
   // profiles ON DELETE CASCADE`. The CASCADE FK erases every scenario row when

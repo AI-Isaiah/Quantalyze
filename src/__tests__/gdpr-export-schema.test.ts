@@ -136,8 +136,9 @@ describe("gdpr-export schema validation — NEW-C16-01 order columns exist", () 
       allocator_equity_snapshots: "asof",
       investor_attestations: "attested_at",
       organization_members: "joined_at",
-      // NEW-C16-09: csv_daily_returns has composite PK (strategy_id, date) — no id.
-      csv_daily_returns: "date",
+      // csv_daily_returns is NOT here: the Phase 35 per-key-axis migration
+      // (20260624120000) gave it a surrogate `id` PK, so it orders by `id`
+      // via the getOrderColumn fallback, not via an override.
     };
     expect(ORDER_COLUMN_OVERRIDES).toEqual(expected);
 

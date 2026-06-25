@@ -103,6 +103,17 @@ const state = vi.hoisted(() => ({
     venue: string;
     holding_type: "spot" | "derivative";
     asof: string;
+    // Phase 36 / 36-03 — api_key_id is the per-key WEIGHT source for the
+    // per-key blend (D1). Optional so existing seeds (which omit it) compile.
+    api_key_id?: string;
+  }>,
+  // Phase 36 / 36-03 — per-key csv_daily_returns rows read by
+  // getMyAllocationDashboard for the Overview-stats repoint (D1/D2/D3).
+  csvDailyReturns: [] as Array<{
+    api_key_id: string | null;
+    allocator_id: string | null;
+    date: string;
+    daily_return: number;
   }>,
 }));
 
@@ -117,6 +128,7 @@ function resetState() {
   state.bridgeDismissals = [];
   state.allocatorEquitySnapshots = [];
   state.allocatorHoldings = [];
+  state.csvDailyReturns = [];
   chainAudit.entries.length = 0;
 }
 
@@ -138,7 +150,7 @@ const chainAudit = vi.hoisted(() => ({
 type Filter = {
   column: string;
   value: unknown;
-  op: "eq" | "in" | "is" | "not-is";
+  op: "eq" | "in" | "is" | "not-is" | "gte";
 };
 
 /**
@@ -171,6 +183,14 @@ function buildChain(table: string) {
         if (f.op === "not-is") return (v ?? null) !== f.value;
         if (f.op === "in")
           return Array.isArray(f.value) && (f.value as unknown[]).includes(v);
+        // Phase 36 — `.gte("date", iso)` bounds the per-key csv_daily_returns
+        // fetch by a date window. Lexicographic compare matches ISO-date order.
+        if (f.op === "gte")
+          return (
+            typeof v === "string" &&
+            typeof f.value === "string" &&
+            v >= f.value
+          );
         return true;
       }),
     );
@@ -215,6 +235,10 @@ function buildChain(table: string) {
         return applyFilters(
           state.allocatorHoldings as Array<Record<string, unknown>>,
         );
+      case "csv_daily_returns":
+        return applyFilters(
+          state.csvDailyReturns as Array<Record<string, unknown>>,
+        );
       default:
         return [];
     }
@@ -258,6 +282,13 @@ function buildChain(table: string) {
     // The rowsFor() implementation handles the actual filtering; this
     // method just returns chain to allow chaining.
     gt: (_column: string, _value: unknown) => chain,
+    // Phase 36 — .gte("date", iso) bounds the per-key csv_daily_returns fetch
+    // by a 730-day date window. Registered as a real filter so the date-window
+    // bound is exercised by the test mock (not a no-op).
+    gte: (column: string, value: unknown) => {
+      filters.push({ column, value, op: "gte" });
+      return chain;
+    },
     order: (_column?: string, _opts?: { ascending?: boolean }) => chain,
     limit: (n: number) => {
       limitN = n;
@@ -1502,5 +1533,527 @@ describe("liveBaselineMetricsFromHoldings — multi-venue de-alias wiring (H-048
       },
     );
     expect(live.avgRho).toBe(reference.avgRho);
+  });
+});
+
+// =============================================================================
+// Phase 36 / 36-03 — Repoint Overview stats onto per-key csv_daily_returns
+// (UNIFY-01/02/03). The blend unit is per api_key_id (D1); AUM stays from
+// holdings (D2); the fallback is all-or-nothing per allocator (D3).
+//
+// These tests are FALSIFIABLE by construction:
+//   - the per-key-vs-fallback divergence test FAILS if the per-key fetch is
+//     ignored and the snapshot path is used unconditionally (a revert).
+//   - the mixed-population test FAILS if the gate is made per-key-partial
+//     (one key with dailies + one active key without must take the FALLBACK,
+//     never a half-per-key/half-snapshot blended curve).
+// =============================================================================
+describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () => {
+  beforeEach(resetState);
+
+  // A holdings fixture whose snapshot reconstruction (from breakdown pct-change)
+  // produces a DIFFERENT return series than the per-key csv_daily_returns,
+  // so the per-key branch and the snapshot fallback DISAGREE — making "is the
+  // per-key fetch actually used?" a falsifiable question. computeScenario
+  // requires n >= 10 common dates, so we seed >= 13 snapshots (→ >= 12
+  // reconstructed returns) and >= 12 per-key rows.
+  const ASOF = Array.from({ length: 13 }, (_, i) =>
+    `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  // Snapshot breakdown for a single BTC holding on key-A: a gently-rising USD
+  // series → small positive daily returns.
+  const SNAP_BTC = [
+    50_000, 50_500, 51_000, 51_500, 52_000, 52_500, 53_000, 53_500, 54_000,
+    54_500, 55_000, 55_500, 56_000,
+  ];
+  // Per-key csv_daily_returns for key-A: a DELIBERATELY different, larger-
+  // magnitude alternating series so the blended curve / Sharpe / maxDD diverge
+  // from the snapshot reconstruction. (One value per ASOF entry.)
+  const PERKEY_A = [
+    0.05, -0.03, 0.06, -0.02, 0.04, -0.01, 0.05, -0.02, 0.03, -0.04, 0.05,
+    -0.01, 0.04,
+  ];
+
+  function seedHoldingsKeyA(value_usd = 50_000) {
+    state.allocatorHoldings = [
+      {
+        allocator_id: "user-1",
+        symbol: "BTC",
+        quantity: 1,
+        mark_price: 53_500,
+        value_usd,
+        venue: "binance",
+        holding_type: "spot",
+        asof: ASOF[ASOF.length - 1],
+        api_key_id: "key-A",
+      },
+    ];
+  }
+
+  function seedSnapshotsBTC() {
+    state.allocatorEquitySnapshots = ASOF.map((asof, i) => ({
+      allocator_id: "user-1",
+      asof,
+      value_usd: SNAP_BTC[i],
+      breakdown: { BTC: SNAP_BTC[i] },
+      source: "exchange_primary" as const,
+      history_depth_months: 24,
+    }));
+  }
+
+  function seedPerKeyDailiesA() {
+    state.csvDailyReturns = ASOF.map((date, i) => ({
+      api_key_id: "key-A",
+      allocator_id: "user-1",
+      date,
+      daily_return: PERKEY_A[i],
+    }));
+  }
+
+  function activeKeyA() {
+    state.apiKeys = [
+      {
+        id: "key-A",
+        user_id: "user-1",
+        exchange: "binance",
+        label: "Binance",
+        is_active: true,
+        sync_status: "synced",
+        last_sync_at: "2026-05-08T00:00:00Z",
+        account_balance_usdt: 53_500,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ];
+  }
+
+  it("per-key branch: every active key has dailies → stats derive from the per-key blend (NOT the snapshot reconstruction)", async () => {
+    activeKeyA();
+    seedHoldingsKeyA();
+    seedSnapshotsBTC();
+    seedPerKeyDailiesA();
+
+    const { getMyAllocationDashboard, liveBaselineMetricsFromPerKeyDailies } =
+      await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // The per-key blend computed directly from the per-key series + holdings.
+    const expectedPerKey = liveBaselineMetricsFromPerKeyDailies(
+      result.holdingsSummary,
+      { "key-A": ASOF.map((date, i) => ({ date, value: PERKEY_A[i] })) },
+    );
+    // The dashboard's liveBaselineMetrics must equal the per-key blend.
+    expect(result.liveBaselineMetrics.sharpe).toBe(expectedPerKey.sharpe);
+    expect(result.liveBaselineMetrics.maxDd).toBe(expectedPerKey.maxDd);
+    expect(result.liveBaselineMetrics.ytdTwr).toBe(expectedPerKey.ytdTwr);
+    expect(result.liveBaselineMetrics.equity).toEqual(expectedPerKey.equity);
+
+    // Falsifiable: the per-key blend must DIFFER from the snapshot-fallback
+    // metrics for this divergent fixture. A revert to the unconditional
+    // snapshot path would make the dashboard equal the snapshot reconstruction
+    // and this assertion would fail.
+    const { liveBaselineMetricsFromHoldings, reconstructHoldingReturnsByScopeRef } =
+      await import("./queries");
+    const snapMetrics = liveBaselineMetricsFromHoldings(
+      result.holdingsSummary,
+      reconstructHoldingReturnsByScopeRef(
+        state.allocatorEquitySnapshots,
+        result.holdingsSummary,
+      ),
+    );
+    expect(result.liveBaselineMetrics.sharpe).not.toBe(snapMetrics.sharpe);
+  });
+
+  it("fallback branch: no per-key rows → stats derive from the snapshot reconstruction (existing behavior pinned)", async () => {
+    activeKeyA();
+    seedHoldingsKeyA();
+    seedSnapshotsBTC();
+    // No csvDailyReturns seeded → fallback.
+
+    const {
+      getMyAllocationDashboard,
+      liveBaselineMetricsFromHoldings,
+      reconstructHoldingReturnsByScopeRef,
+    } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    const snapMetrics = liveBaselineMetricsFromHoldings(
+      result.holdingsSummary,
+      reconstructHoldingReturnsByScopeRef(
+        state.allocatorEquitySnapshots,
+        result.holdingsSummary,
+      ),
+    );
+    expect(result.liveBaselineMetrics.sharpe).toBe(snapMetrics.sharpe);
+    expect(result.liveBaselineMetrics.equity).toEqual(snapMetrics.equity);
+    // Sanity: the fallback actually produced a real (non-empty) curve here.
+    expect(result.liveBaselineMetrics.equity.length).toBeGreaterThan(0);
+  });
+
+  it("mixed-population HONESTY guard (D3): one key with dailies + one active key WITHOUT → takes the FALLBACK (never a half-per-key/half-snapshot curve)", async () => {
+    // Two active keys: key-A has per-key dailies, key-B has NONE.
+    state.apiKeys = [
+      {
+        id: "key-A",
+        user_id: "user-1",
+        exchange: "binance",
+        label: "Binance",
+        is_active: true,
+        sync_status: "synced",
+        last_sync_at: "2026-05-08T00:00:00Z",
+        account_balance_usdt: 30_000,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "key-B",
+        user_id: "user-1",
+        exchange: "okx",
+        label: "OKX",
+        is_active: true,
+        sync_status: "synced",
+        last_sync_at: "2026-05-08T00:00:00Z",
+        account_balance_usdt: 20_000,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ];
+    // Holdings spread across both keys (so AUM + holdings path are realistic).
+    state.allocatorHoldings = [
+      {
+        allocator_id: "user-1",
+        symbol: "BTC",
+        quantity: 1,
+        mark_price: 53_500,
+        value_usd: 30_000,
+        venue: "binance",
+        holding_type: "spot",
+        asof: ASOF[ASOF.length - 1],
+        api_key_id: "key-A",
+      },
+      {
+        allocator_id: "user-1",
+        symbol: "ETH",
+        quantity: 10,
+        mark_price: 2_000,
+        value_usd: 20_000,
+        venue: "okx",
+        holding_type: "spot",
+        asof: ASOF[ASOF.length - 1],
+        api_key_id: "key-B",
+      },
+    ];
+    // Snapshots for BOTH symbols so the fallback reconstruction is non-empty.
+    state.allocatorEquitySnapshots = ASOF.map((asof, i) => ({
+      allocator_id: "user-1",
+      asof,
+      value_usd: SNAP_BTC[i] + 20_000,
+      breakdown: { BTC: SNAP_BTC[i], ETH: 20_000 + i * 100 },
+      source: "exchange_primary" as const,
+      history_depth_months: 24,
+    }));
+    // ONLY key-A has per-key dailies — key-B has none.
+    seedPerKeyDailiesA();
+
+    const {
+      getMyAllocationDashboard,
+      liveBaselineMetricsFromHoldings,
+      reconstructHoldingReturnsByScopeRef,
+      liveBaselineMetricsFromPerKeyDailies,
+    } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // Must equal the SNAPSHOT FALLBACK (key-B has no series → whole allocator
+    // falls back). Honesty: never a blended half-per-key/half-snapshot curve.
+    const snapMetrics = liveBaselineMetricsFromHoldings(
+      result.holdingsSummary,
+      reconstructHoldingReturnsByScopeRef(
+        state.allocatorEquitySnapshots,
+        result.holdingsSummary,
+      ),
+    );
+    expect(result.liveBaselineMetrics.sharpe).toBe(snapMetrics.sharpe);
+    expect(result.liveBaselineMetrics.equity).toEqual(snapMetrics.equity);
+
+    // Falsifiable: it must NOT equal the per-key-only blend (which a naive
+    // per-key-partial gate would have produced from key-A alone).
+    const perKeyOnly = liveBaselineMetricsFromPerKeyDailies(
+      result.holdingsSummary,
+      { "key-A": ASOF.map((date, i) => ({ date, value: PERKEY_A[i] })) },
+    );
+    expect(result.liveBaselineMetrics.equity).not.toEqual(perKeyOnly.equity);
+  });
+
+  it("C1 regression: a revoked-but-active key (is_active=true, sync_status='revoked') does NOT block the per-key branch — the gate predicate matches the backfill's, not bare is_active", async () => {
+    // The allocator-protected path keeps a credential-revoked key is_active=true
+    // and sets sync_status='revoked' (rows persist for audit). The backfill
+    // NEVER derives a series for such a key, so a bare `is_active` gate would
+    // pin the WHOLE allocator to the snapshot fallback FOREVER. key-A is healthy
+    // with dailies; key-B is is_active=true but revoked with NO dailies.
+    state.apiKeys = [
+      {
+        id: "key-A",
+        user_id: "user-1",
+        exchange: "binance",
+        label: "Binance",
+        is_active: true,
+        sync_status: "synced",
+        last_sync_at: "2026-05-08T00:00:00Z",
+        account_balance_usdt: 30_000,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "key-B",
+        user_id: "user-1",
+        exchange: "okx",
+        label: "OKX (revoked)",
+        is_active: true,
+        sync_status: "revoked",
+        last_sync_at: "2026-05-01T00:00:00Z",
+        account_balance_usdt: 20_000,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ];
+    // Both keys carry holdings (so key-B is in AUM); snapshots for the fallback.
+    state.allocatorHoldings = [
+      {
+        allocator_id: "user-1",
+        symbol: "BTC",
+        quantity: 1,
+        mark_price: 53_500,
+        value_usd: 30_000,
+        venue: "binance",
+        holding_type: "spot",
+        asof: ASOF[ASOF.length - 1],
+        api_key_id: "key-A",
+      },
+      {
+        allocator_id: "user-1",
+        symbol: "ETH",
+        quantity: 10,
+        mark_price: 2_000,
+        value_usd: 20_000,
+        venue: "okx",
+        holding_type: "spot",
+        asof: ASOF[ASOF.length - 1],
+        api_key_id: "key-B",
+      },
+    ];
+    state.allocatorEquitySnapshots = ASOF.map((asof, i) => ({
+      allocator_id: "user-1",
+      asof,
+      value_usd: SNAP_BTC[i] + 20_000,
+      breakdown: { BTC: SNAP_BTC[i], ETH: 20_000 + i * 100 },
+      source: "exchange_primary" as const,
+      history_depth_months: 24,
+    }));
+    // Only key-A (the ELIGIBLE key) has per-key dailies. key-B is revoked.
+    seedPerKeyDailiesA();
+
+    const {
+      getMyAllocationDashboard,
+      liveBaselineMetricsFromPerKeyDailies,
+      liveBaselineMetricsFromHoldings,
+      reconstructHoldingReturnsByScopeRef,
+    } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // The gate's eligible set is {key-A} (key-B is revoked → excluded, matching
+    // the backfill), and key-A HAS a series → the PER-KEY branch activates.
+    const expectedPerKey = liveBaselineMetricsFromPerKeyDailies(
+      result.holdingsSummary,
+      { "key-A": ASOF.map((date, i) => ({ date, value: PERKEY_A[i] })) },
+    );
+    expect(result.liveBaselineMetrics.sharpe).toBe(expectedPerKey.sharpe);
+    expect(result.liveBaselineMetrics.equity).toEqual(expectedPerKey.equity);
+
+    // Falsifiable: the OLD bare-is_active gate counted key-B as active, found no
+    // series for it, and fell back to the snapshot reconstruction. Assert we did
+    // NOT take that path.
+    const snapMetrics = liveBaselineMetricsFromHoldings(
+      result.holdingsSummary,
+      reconstructHoldingReturnsByScopeRef(
+        state.allocatorEquitySnapshots,
+        result.holdingsSummary,
+      ),
+    );
+    expect(result.liveBaselineMetrics.sharpe).not.toBe(snapMetrics.sharpe);
+
+    // AUM still includes the revoked key's frozen holdings (D2 unchanged).
+    expect(result.liveBaselineMetrics.aum).toBe(50_000);
+  });
+
+  it("AUM is unchanged on the per-key branch (D2): summed from holdings equity contribution", async () => {
+    activeKeyA();
+    seedHoldingsKeyA(42_000);
+    seedSnapshotsBTC();
+    seedPerKeyDailiesA();
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    // AUM = Σ value_usd over the single spot holding, regardless of branch.
+    expect(result.liveBaselineMetrics.aum).toBe(42_000);
+  });
+});
+
+// =============================================================================
+// Phase 36 / 36-03 — helper unit tests: the D3 predicate + the grouping +
+// per-key blend honesty. Direct calls (no Supabase round-trip).
+// =============================================================================
+describe("allActiveKeysHavePerKeyDailies — Phase 36 D3 predicate", () => {
+  it("true iff every active key id has a non-empty series", async () => {
+    const { allActiveKeysHavePerKeyDailies } = await import("./queries");
+    const series = { "key-A": [{ date: "2026-05-01", value: 0.01 }] };
+    expect(allActiveKeysHavePerKeyDailies(["key-A"], series)).toBe(true);
+    // missing key-B → false (mixed population falls back)
+    expect(allActiveKeysHavePerKeyDailies(["key-A", "key-B"], series)).toBe(false);
+    // empty active set → false (no per-key blend without active keys)
+    expect(allActiveKeysHavePerKeyDailies([], series)).toBe(false);
+    // key present but with an EMPTY series → false
+    expect(
+      allActiveKeysHavePerKeyDailies(["key-A"], { "key-A": [] }),
+    ).toBe(false);
+  });
+});
+
+describe("buildPerKeyReturnsByApiKeyId — Phase 36 grouping", () => {
+  it("groups by api_key_id, maps daily_return→value, drops null key + non-finite", async () => {
+    const { buildPerKeyReturnsByApiKeyId } = await import("./queries");
+    const out = buildPerKeyReturnsByApiKeyId([
+      { api_key_id: "key-A", date: "2026-05-01", daily_return: 0.01 },
+      { api_key_id: "key-A", date: "2026-05-02", daily_return: -0.02 },
+      { api_key_id: "key-B", date: "2026-05-01", daily_return: 0.03 },
+      // dropped: null key
+      { api_key_id: null, date: "2026-05-01", daily_return: 0.99 },
+      // dropped: non-finite return
+      { api_key_id: "key-A", date: "2026-05-03", daily_return: Number.NaN },
+    ]);
+    expect(out["key-A"]).toEqual([
+      { date: "2026-05-01", value: 0.01 },
+      { date: "2026-05-02", value: -0.02 },
+    ]);
+    expect(out["key-B"]).toEqual([{ date: "2026-05-01", value: 0.03 }]);
+  });
+});
+
+describe("isPerKeyDailiesEligibleKey — Phase 36 D3 backfill-parity predicate", () => {
+  it("mirrors the backfill: is_active AND sync_status != 'revoked' AND disconnected_at IS NULL", async () => {
+    const { isPerKeyDailiesEligibleKey } = await import("./queries");
+    const base = { is_active: true, sync_status: "synced", disconnected_at: null };
+    // healthy active key → eligible
+    expect(isPerKeyDailiesEligibleKey(base)).toBe(true);
+    // a NULL sync_status (never synced) is still eligible (IS DISTINCT FROM 'revoked')
+    expect(isPerKeyDailiesEligibleKey({ ...base, sync_status: null })).toBe(true);
+    // deactivated → NOT eligible
+    expect(isPerKeyDailiesEligibleKey({ ...base, is_active: false })).toBe(false);
+    // revoked (allocator-protected path keeps is_active=true) → NOT eligible
+    expect(isPerKeyDailiesEligibleKey({ ...base, sync_status: "revoked" })).toBe(
+      false,
+    );
+    // soft-disconnected → NOT eligible
+    expect(
+      isPerKeyDailiesEligibleKey({ ...base, disconnected_at: "2026-05-01T00:00:00Z" }),
+    ).toBe(false);
+  });
+});
+
+describe("liveBaselineMetricsFromPerKeyDailies — financial edge branches (Phase 36 D1/D2)", () => {
+  // 12 dates clears computeScenario's n>=10 floor.
+  const DATES = Array.from({ length: 12 }, (_, i) =>
+    `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const series = (vals: number[]) =>
+    DATES.map((date, i) => ({ date, value: vals[i % vals.length] }));
+
+  type Holding =
+    Awaited<ReturnType<typeof import("./queries")["getMyAllocationDashboard"]>>["holdingsSummary"][number];
+  const spot = (api_key_id: string, value_usd: number): Holding => ({
+    symbol: "BTC",
+    quantity: 1,
+    mark_price_usd: 50_000,
+    value_usd,
+    venue: "binance",
+    holding_type: "spot",
+    api_key_id,
+    side: "flat",
+    entry_price: null,
+    unrealized_pnl_usd: null,
+  });
+  const deriv = (api_key_id: string, pnl: number): Holding => ({
+    symbol: "BTC-PERP",
+    quantity: 1,
+    mark_price_usd: 50_000,
+    value_usd: 100_000, // notional — NOT the equity contribution for a derivative
+    venue: "binance",
+    holding_type: "derivative",
+    api_key_id,
+    side: "long",
+    entry_price: 50_000,
+    unrealized_pnl_usd: pnl, // THIS is the equity contribution
+  });
+
+  it("empty per-key map (or only empty series) → empty-default: AUM from holdings, all KPIs null, equity/drawdown []", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    const cases: Record<string, { date: string; value: number }[]>[] = [
+      {},
+      { "key-A": [] },
+    ];
+    for (const perKey of cases) {
+      const out = liveBaselineMetricsFromPerKeyDailies([spot("key-A", 50_000)], perKey);
+      expect(out.aum).toBe(50_000); // D2: AUM still summed from holdings
+      expect(out.ytdTwr).toBeNull();
+      expect(out.sharpe).toBeNull();
+      expect(out.maxDd).toBeNull();
+      expect(out.avgRho).toBeNull();
+      expect(out.equity).toEqual([]);
+      expect(out.drawdown).toEqual([]);
+    }
+  });
+
+  it("totalAum <= 0 (flat derivative book) → drawdown is [] even though a per-key series exists", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    // A derivative with unrealized_pnl_usd=0 → equity contribution 0 → totalAum 0.
+    const out = liveBaselineMetricsFromPerKeyDailies(
+      [deriv("key-A", 0)],
+      { "key-A": series([0.01, -0.01]) },
+    );
+    expect(out.aum).toBe(0);
+    // The `totalAum > 0 ? deriveSnapshotDrawdowns(...) : []` branch yields [].
+    expect(out.drawdown).toEqual([]);
+  });
+
+  it("negative-equity clamp: a key with negative equity (losing derivative) gets weight 0, never a sign-flipping negative weight", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    const up = series([0.02, 0.01, 0.02, 0.01]); // key-A rising
+    const down = series([-0.2, -0.3, -0.25, -0.2]); // key-B crashing
+    // key-A: +100k equity; key-B: -50k equity (clamped to 0). Same dates so the
+    // overlap window is identical and only the weight differs.
+    const twoKey = liveBaselineMetricsFromPerKeyDailies(
+      [spot("key-A", 100_000), deriv("key-B", -50_000)],
+      { "key-A": up, "key-B": down },
+    );
+    // key-B clamped to weight 0 → the WEIGHTED curve is key-A only. A broken
+    // clamp (negative weight) would invert/amplify key-B's crash and produce a
+    // different (likely sub-1.0) curve.
+    const keyAOnly = liveBaselineMetricsFromPerKeyDailies(
+      [spot("key-A", 100_000)],
+      { "key-A": up },
+    );
+    expect(twoKey.equity).toEqual(keyAOnly.equity);
+    // Sanity: key-A's rising series produces a final cumulative wealth > 1.
+    expect(twoKey.equity.at(-1)!.value).toBeGreaterThan(1);
+  });
+
+  it("avgRho is a finite number on a multi-key blend (single-key yields null) — the correlation field is populated", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    const out = liveBaselineMetricsFromPerKeyDailies(
+      [spot("key-A", 60_000), spot("key-B", 40_000)],
+      { "key-A": series([0.03, -0.02, 0.04, -0.01]), "key-B": series([-0.01, 0.02, -0.03, 0.02]) },
+    );
+    expect(typeof out.avgRho).toBe("number");
+    expect(Number.isFinite(out.avgRho)).toBe(true);
+    // Contrast: a single key has no pair to correlate → avgRho null.
+    const single = liveBaselineMetricsFromPerKeyDailies(
+      [spot("key-A", 60_000)],
+      { "key-A": series([0.03, -0.02, 0.04, -0.01]) },
+    );
+    expect(single.avgRho).toBeNull();
   });
 });
