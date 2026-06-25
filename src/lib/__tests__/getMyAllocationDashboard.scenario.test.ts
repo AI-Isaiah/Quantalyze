@@ -20,6 +20,8 @@ import {
   reconstructHoldingReturnsByScopeRef,
   holdingEquityContribution,
   partitionTrustworthyEquitySnapshots,
+  liveBaselineMetricsFromHoldings,
+  liveBaselineMetricsFromPerKeyDailies,
   type MyAllocationDashboardPayload,
 } from "../queries";
 
@@ -479,5 +481,103 @@ describe("partitionTrustworthyEquitySnapshots (CL9 / NEW-C01-11)", () => {
       partitionTrustworthyEquitySnapshots(rows);
     expect(baselineUnknown).toBe(false);
     expect(trustworthy.map((r) => r.asof)).toEqual(["2026-01-01", "2026-01-02"]);
+  });
+});
+
+/**
+ * Phase 36 / 36-03 — the liveBaselineMetrics OUTPUT contract must be
+ * byte-identical (same key set + value types) between the per-key branch and
+ * the snapshot fallback. The SSR payload + scenario composer baseline depend on
+ * it — only the SOURCE of the curve/KPIs is repointed, never the shape.
+ */
+describe("Phase 36 — liveBaselineMetrics shape-identity (per-key branch vs fallback)", () => {
+  type H = MyAllocationDashboardPayload["holdingsSummary"][number];
+  const DATES = Array.from({ length: 10 }, (_, i) =>
+    `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const RET_A = [0.02, -0.01, 0.03, -0.02, 0.01, 0.0, 0.015, -0.005, 0.02, -0.01];
+  const RET_B = [-0.01, 0.02, -0.015, 0.025, -0.005, 0.01, -0.02, 0.015, -0.01, 0.02];
+  const series = (vals: number[]) =>
+    vals.map((value, i) => ({ date: DATES[i], value }));
+
+  const holdings: H[] = [
+    {
+      symbol: "BTC",
+      venue: "binance",
+      holding_type: "spot",
+      value_usd: 60_000,
+      quantity: 1,
+      mark_price_usd: 60_000,
+      api_key_id: "key-A",
+      side: "flat",
+      entry_price: null,
+      unrealized_pnl_usd: null,
+    },
+    {
+      symbol: "ETH",
+      venue: "okx",
+      holding_type: "spot",
+      value_usd: 40_000,
+      quantity: 10,
+      mark_price_usd: 4_000,
+      api_key_id: "key-B",
+      side: "flat",
+      entry_price: null,
+      unrealized_pnl_usd: null,
+    },
+  ];
+
+  const EXPECTED_KEYS = [
+    "aum",
+    "ytdTwr",
+    "sharpe",
+    "maxDd",
+    "avgRho",
+    "equity",
+    "drawdown",
+  ].sort();
+
+  function assertShape(m: MyAllocationDashboardPayload["liveBaselineMetrics"]) {
+    expect(Object.keys(m).sort()).toEqual(EXPECTED_KEYS);
+    expect(typeof m.aum).toBe("number");
+    for (const f of ["ytdTwr", "sharpe", "maxDd", "avgRho"] as const) {
+      expect(m[f] === null || typeof m[f] === "number").toBe(true);
+    }
+    expect(Array.isArray(m.equity)).toBe(true);
+    expect(Array.isArray(m.drawdown)).toBe(true);
+  }
+
+  it("both branches produce the identical liveBaselineMetrics shape (non-empty curves)", () => {
+    const perKey = liveBaselineMetricsFromPerKeyDailies(holdings, {
+      "key-A": series(RET_A),
+      "key-B": series(RET_B),
+    });
+    const fallback = liveBaselineMetricsFromHoldings(holdings, {
+      "holding:binance:BTC:spot": series(RET_A),
+      "holding:okx:ETH:spot": series(RET_B),
+    });
+
+    assertShape(perKey);
+    assertShape(fallback);
+    expect(Object.keys(perKey).sort()).toEqual(Object.keys(fallback).sort());
+
+    // AUM is unchanged (D2): summed from holdings on both branches.
+    expect(perKey.aum).toBe(100_000);
+    expect(fallback.aum).toBe(100_000);
+    // Both branches produced a real curve.
+    expect(perKey.equity.length).toBeGreaterThan(0);
+    expect(fallback.equity.length).toBeGreaterThan(0);
+  });
+
+  it("empty-default shape is identical on both branches (no usable series)", () => {
+    const perKey = liveBaselineMetricsFromPerKeyDailies(holdings, {});
+    const fallback = liveBaselineMetricsFromHoldings(holdings, {});
+    assertShape(perKey);
+    assertShape(fallback);
+    expect(perKey).toEqual(fallback);
+    // AUM still summed from holdings; KPIs null; arrays empty.
+    expect(perKey.aum).toBe(100_000);
+    expect(perKey.sharpe).toBeNull();
+    expect(perKey.equity).toEqual([]);
   });
 });
