@@ -79,6 +79,8 @@ import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { PartialDataBanner } from "@/components/strategy-v2/PartialDataBanner";
 import { Card } from "@/components/ui/Card";
 import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
+import { InfoBanner } from "@/components/ui/InfoBanner";
+import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { Button } from "@/components/ui/Button";
 import {
@@ -418,6 +420,44 @@ function holdingEquityContributionLocal(
     return Number.isFinite(pnl) ? pnl : 0;
   }
   return Number.isFinite(h.value_usd) ? h.value_usd : 0;
+}
+
+/**
+ * DSRC-02 — exchange display-name lookup for the Data-sources row labels.
+ *
+ * Copied locally from the SyncBadge recipe (SyncBadge.tsx:21-35): a lower-cased
+ * lookup with `?? exchange` fallback. There is NO shared EXCHANGE_LABELS export
+ * (it is already duplicated in SyncBadge + VerificationForm); copying the recipe
+ * here is consistent with that existing duplication rather than introducing a
+ * new shared module (surgical-change rule, PATTERNS §"No Analog Found").
+ */
+const EXCHANGE_LABELS: Record<string, string> = {
+  binance: "Binance",
+  okx: "OKX",
+  bybit: "Bybit",
+};
+
+/**
+ * DSRC-02 — resolve a connected exchange api_key to its row label
+ * `{Exchange} — {nickname}`, falling back to `{Exchange} — ••••{id.slice(-4)}`
+ * when the key has no nickname. The masked tail never reveals the full id and
+ * never any secret/ciphertext (T-37-03-01). Returns the structured parts so the
+ * caller can render the masked tail in font-mono per UI-SPEC.
+ */
+function dataSourceLabel(k: { exchange: string; label: string; id: string }): {
+  exchange: string;
+  /** nickname when present, else null (caller renders the masked tail). */
+  nickname: string | null;
+  /** masked id tail (last 4) — only meaningful when nickname is null. */
+  maskedTail: string;
+} {
+  const exchange = EXCHANGE_LABELS[k.exchange.toLowerCase()] ?? k.exchange;
+  const nick = k.label?.trim();
+  return {
+    exchange,
+    nickname: nick ? nick : null,
+    maskedTail: `••••${k.id.slice(-4)}`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1299,6 +1339,33 @@ export function ScenarioComposer({
     ? perKeyAdapterOutput
     : adapterOutput;
 
+  // DSRC-02 — render-gating for the "Data sources" control:
+  //   showDataSources       → the per-key path is active → render the control.
+  //   book mode + !gate      → render the calm InfoBanner fallback note.
+  //   blank mode             → render nothing (no live book, no live keys).
+  const showDataSources = usePerKeySources;
+  const showDataSourcesFallback =
+    entryMode === "book" && !payload.perKeyDailiesGateSatisfied;
+
+  // The connected exchange keys eligible for per-source toggling — payload
+  // apiKeys filtered to the SSR-computed eligible-key id set (SoT mirror; the
+  // client never re-derives eligibility, RESEARCH §SoT-mirror). One row per key.
+  const dataSourceKeys = useMemo(
+    () =>
+      payload.apiKeys.filter((k) =>
+        payload.eligibleApiKeyIds.includes(k.id),
+      ),
+    [payload.apiKeys, payload.eligibleApiKeyIds],
+  );
+
+  // All-excluded honest-empty trigger (DSRC-03): every eligible key toggled off.
+  // Derived from the ephemeral include map (default included), so re-including
+  // any source instantly flips this back to false and restores the projection.
+  const allDataSourcesExcluded =
+    showDataSources &&
+    dataSourceKeys.length > 0 &&
+    dataSourceKeys.every((k) => includeByApiKeyId[k.id] === false);
+
   // H-0487/H-0493 — map each holding scopeRef to its bare symbol so aliased
   // multi-venue/instrument holdings (identical symbol-keyed series) can be
   // collapsed before computeScenario, keeping avg_pairwise_correlation honest.
@@ -2004,6 +2071,83 @@ export function ScenarioComposer({
         </div>
       )}
 
+      {/* DSRC-02 — "Data sources" control. Book mode + D3 gate satisfied → one
+          include/exclude row per connected exchange api_key, each toggle
+          honestly re-blends the curve + every KPI via the frozen engine
+          (DSRC-03). Book mode + gate NOT satisfied → a calm InfoBanner honest
+          note (per-key history incomplete). Blank mode → nothing. Reuses the
+          entry-mode pill recipe + existing tokens only (no new design token).
+          The included state = accent outline (no fill); excluded = neutral
+          outline; never red (excluding a source is a normal modeling action). */}
+      {showDataSources && (
+        <div
+          role="group"
+          aria-label="Data sources"
+          data-testid="scenario-data-sources"
+          className="mt-4 flex flex-col gap-2"
+        >
+          <div className="text-[12px] font-semibold uppercase tracking-wide text-text-secondary">
+            Data sources
+          </div>
+          <p className="text-[12px] text-text-muted">
+            Toggle a source off to model the book without it. Resets on reload.
+          </p>
+          <div className="flex flex-col">
+            {dataSourceKeys.map((k) => {
+              const included = includeByApiKeyId[k.id] ?? true;
+              const { exchange, nickname, maskedTail } = dataSourceLabel(k);
+              const labelText = nickname ?? maskedTail;
+              return (
+                <div
+                  key={k.id}
+                  data-data-source-id={k.id}
+                  className="flex min-h-[44px] items-center gap-2 border-b border-border last:border-b-0"
+                >
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={included}
+                    aria-label={`Include ${exchange} — ${labelText} in projection`}
+                    onClick={() => handleDataSourceToggle(k.id, !included)}
+                    className={`rounded-sm px-3 py-1 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
+                      included
+                        ? "border border-accent text-accent"
+                        : "border border-border text-text-secondary"
+                    }`}
+                  >
+                    {included ? "Included" : "Excluded"}
+                  </button>
+                  <span className="text-sm text-text-secondary">
+                    {exchange}
+                    {" — "}
+                    {nickname ? (
+                      nickname
+                    ) : (
+                      <span className="font-mono text-text-muted">
+                        {maskedTail}
+                      </span>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {showDataSourcesFallback && (
+        <div className="mt-4" data-testid="scenario-data-sources-fallback">
+          <InfoBanner>
+            <span className="font-semibold text-text-primary">
+              Per-source modeling needs per-key history.
+            </span>{" "}
+            One or more connected keys don&apos;t have a per-key return series
+            yet, so this projection blends your whole book. Per-source toggles
+            appear once every key has its own history.
+          </InfoBanner>
+        </div>
+      )}
+
       <div className="mt-6">
         <KpiStrip
           mode="scenario"
@@ -2018,6 +2162,21 @@ export function ScenarioComposer({
           activeVenues={activeVenues}
         />
       </div>
+
+      {/* DSRC-03 — all-excluded honest empty. When every data source is toggled
+          off the engine returns null KPIs + an empty curve (KpiStrip above
+          falls to its degenerate "—" convention, never a stale number), and the
+          projection region renders this honest-absence card. Re-including any
+          source instantly restores the live projection. Neutral/calm, no
+          role="alert", no red (honesty-color rule, UI-SPEC §4). */}
+      {allDataSourcesExcluded && (
+        <div className="mt-4" data-testid="scenario-data-sources-empty">
+          <EmptyStateCard
+            heading="Select at least one data source"
+            body="Every data source is excluded — there's nothing to project. Re-include a source to see the curve and metrics."
+          />
+        </div>
+      )}
 
       {leverageApplied && (
         <p
