@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
-import { FactsheetProvider, useComparator } from "./factsheet-context";
+import { FactsheetProvider, useComparator, useXRange } from "./factsheet-context";
 
 /**
  * B7c — FactsheetProvider ⇄ localStorage integration.
@@ -91,6 +91,29 @@ function renderProvider() {
   );
 }
 
+/**
+ * Harness for the persist opt-out cases (Phase 38-02). Exposes setXRange so a
+ * test can drive a pan, which is what fires the provider's debounced write
+ * effect (the URL `history.replaceState` half + the `setStoredView` localStorage
+ * half). A child read of comparator lets us deterministically wait for hydration
+ * to latch `hydrated.current` before mutating.
+ */
+function PersistHarness() {
+  const { comparator } = useComparator();
+  const { setXRange } = useXRange();
+  return (
+    <>
+      <span data-testid="cmp">{comparator}</span>
+      <button
+        data-testid="pan"
+        onClick={() => setXRange([10, 120] as const)}
+      >
+        pan
+      </button>
+    </>
+  );
+}
+
 beforeEach(() => {
   lsStore.clear();
   localStorageMock.getItem.mockClear();
@@ -145,5 +168,104 @@ describe("FactsheetProvider — storage integration (B7c)", () => {
       // The byte-compat invariant: NO version envelope was added.
       expect("version" in parsed).toBe(false);
     });
+  });
+});
+
+/**
+ * Phase 38-02 — the additive `persist?: boolean` opt-out.
+ *
+ * The factsheet itself never passes `persist`, so the default path (persist
+ * omitted ⇒ true) must round-trip view-state to the URL + localStorage exactly
+ * as before (the existing B7c suite above pins that path). These cases pin the
+ * SECOND direction the composer (Plan 03) relies on: `persist={false}` must
+ * suppress BOTH write halves so a scenario mount never rewrites the dashboard
+ * URL (`?range=`) nor writes a `factsheet-v2:` localStorage blob.
+ */
+function renderPersist(persist?: boolean) {
+  return render(
+    <FactsheetProvider payload={makePayload()} persist={persist}>
+      <PersistHarness />
+    </FactsheetProvider>,
+  );
+}
+
+describe("FactsheetProvider — persist opt-out (38-02)", () => {
+  it("default (persist omitted) writes BOTH the URL ?range= and the localStorage blob after a pan", async () => {
+    const replaceSpy = vi.spyOn(window.history, "replaceState");
+    // Seed a stored comparator so hydration latches deterministically (cmp →
+    // "spx"); the write effect is armed only after hydrated.current is true.
+    lsStore.set(KEY, JSON.stringify({ cmp: "spx" }));
+    act(() => {
+      renderPersist();
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("cmp").textContent).toBe("spx"),
+    );
+    replaceSpy.mockClear();
+    act(() => {
+      fireEvent.click(screen.getByTestId("pan"));
+    });
+    // URL half: the debounced effect calls history.replaceState with ?range=.
+    await waitFor(() => {
+      expect(window.location.search).toContain("range=10-120");
+    });
+    expect(replaceSpy).toHaveBeenCalled();
+    // localStorage half: the blob now carries the panned range.
+    const raw = lsStore.get(KEY);
+    expect(raw).toBeTruthy();
+    expect(JSON.parse(raw as string).range).toBe("10-120");
+    replaceSpy.mockRestore();
+  });
+
+  it("persist={false} writes NEITHER the URL nor the localStorage blob after a pan", async () => {
+    const replaceSpy = vi.spyOn(window.history, "replaceState");
+    lsStore.set(KEY, JSON.stringify({ cmp: "spx" }));
+    act(() => {
+      renderPersist(false);
+    });
+    // Hydration (the READ effect) is unaffected by persist — the stored cmp is
+    // still adopted, so we can wait on it and know the write effect would be
+    // armed if persistence were enabled.
+    await waitFor(() =>
+      expect(screen.getByTestId("cmp").textContent).toBe("spx"),
+    );
+    const searchBefore = window.location.search;
+    replaceSpy.mockClear();
+    act(() => {
+      fireEvent.click(screen.getByTestId("pan"));
+    });
+    // Give the 250ms debounce window ample time to fire if the gate were absent.
+    await new Promise((r) => setTimeout(r, 400));
+    // URL half suppressed: location.search unchanged, no replaceState fired.
+    expect(window.location.search).toBe(searchBefore);
+    expect(window.location.search).not.toContain("range=");
+    expect(replaceSpy).not.toHaveBeenCalled();
+    // localStorage half suppressed: the seeded blob never gains a `range` field
+    // (no setStoredView ran). The only key remains the seed { cmp: "spx" }.
+    const raw = lsStore.get(KEY);
+    expect(JSON.parse(raw as string)).toEqual({ cmp: "spx" });
+    replaceSpy.mockRestore();
+  });
+
+  it("persist={false} hydrates without throwing over an empty URL/storage (renders full range)", async () => {
+    lsStore.clear();
+    window.history.replaceState(null, "", "/factsheet/test-strategy/v2");
+    let threw = false;
+    try {
+      act(() => {
+        renderPersist(false);
+      });
+      // The comparator falls back to the payload default ("btc") — proves the
+      // read effect ran cleanly with no URL/storage and no throw.
+      await waitFor(() =>
+        expect(screen.getByTestId("cmp").textContent).toBe("btc"),
+      );
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(false);
+    // No write surface was created either.
+    expect(lsStore.get(KEY)).toBeUndefined();
+    expect(window.location.search).toBe("");
   });
 });

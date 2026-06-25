@@ -174,9 +174,23 @@ export const factsheetViewStateCodec: StorageCodec<PersistedState> = {
 export function FactsheetProvider({
   payload,
   children,
+  persist = true,
 }: {
   payload: FactsheetPayload;
   children: ReactNode;
+  /**
+   * Additive opt-out (default `true`) that gates the two view-state WRITE
+   * effects — the URL `history.replaceState` half AND the `setStoredView`
+   * localStorage half. The factsheet never passes it, so its link-sharing
+   * round-trip is byte-identical. The composer mount (Phase 38) passes
+   * `persist={false}` so a scenario pan on the dashboard tab never rewrites the
+   * allocator's dashboard URL (`?range=`) nor writes a `factsheet-v2:` blob.
+   * Hydration (the READ effect) is intentionally NOT gated — reading an empty
+   * composer URL/storage is harmless, and the hooks must keep firing
+   * unconditionally (Rules of Hooks); the gate is an early no-op INSIDE the
+   * write effect body.
+   */
+  persist?: boolean;
 }) {
   const fullRange = useMemo<readonly [number, number]>(
     () => [0, Math.max(0, payload.dates.length - 1)],
@@ -291,7 +305,10 @@ export function FactsheetProvider({
   // own debounced persist via `setStoredView`.
   const writeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (typeof window === "undefined" || !hydrated.current) return;
+    // `!persist` gates BOTH write halves (URL replaceState + setStoredView): the
+    // hook still registers (Rules of Hooks) but performs no write, so a composer
+    // mount (persist={false}) never touches the dashboard URL or localStorage.
+    if (typeof window === "undefined" || !hydrated.current || !persist) return;
     if (writeTimer.current) clearTimeout(writeTimer.current);
     writeTimer.current = setTimeout(() => {
       const state: PersistedState = {
@@ -320,7 +337,7 @@ export function FactsheetProvider({
     return () => {
       if (writeTimer.current) clearTimeout(writeTimer.current);
     };
-  }, [xRange, comparator, colorblind, regimes, darkMode, payload.strategyId, payload.dates.length, payload.activeComparator, setStoredView]);
+  }, [xRange, comparator, colorblind, regimes, darkMode, payload.strategyId, payload.dates.length, payload.activeComparator, setStoredView, persist]);
 
   // Identity-stable value objects so each context only re-emits when its
   // own slice changes. The lower-churn contexts can stay shallow-equal
