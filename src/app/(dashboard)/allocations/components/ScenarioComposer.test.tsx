@@ -85,6 +85,21 @@ vi.mock("../widgets/performance/DrawdownChart", () => {
   return { default: Mock, deriveSnapshotDrawdowns: vi.fn(() => []) };
 });
 
+// Phase 38-03 (PARITY-01): the composer's two chart call sites now render the
+// factsheet-backed ScenarioFactsheetChart (equity + drawdown stacked under ONE
+// provider) instead of the legacy EquityChart + DrawdownChart. Mocked here so
+// the composer's prop wiring (equityDailyPoints / scenarioSeries / benchmark /
+// scenarioDailyPoints) is the unit-under-test. The mock keeps the equity +
+// drawdown sub-testids so present-panel assertions still read the mount.
+vi.mock("../widgets/performance/ScenarioFactsheetChart", () => ({
+  ScenarioFactsheetChart: vi.fn(() => (
+    <div data-testid="scenario-factsheet-chart-mock">
+      <div data-testid="equity-chart-mock" />
+      <div data-testid="drawdown-chart-mock" />
+    </div>
+  )),
+}));
+
 vi.mock("./KpiStrip", () => ({
   KpiStrip: vi.fn(() => <div data-testid="kpi-strip-mock" />),
 }));
@@ -172,8 +187,7 @@ import { ScenarioComposer } from "./ScenarioComposer";
 // Real (un-mocked) — used to build a valid current-schema draft so the
 // onRegisterOpen handler decodes "ok" in the WR-02 regression test below.
 import { defaultDraftFromHoldings } from "../lib/scenario-state";
-import { EquityChart } from "../widgets/performance/EquityChart";
-import DrawdownChart from "../widgets/performance/DrawdownChart";
+import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { KpiStrip } from "./KpiStrip";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
@@ -508,12 +522,20 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // T_C3b — Blank-slate live-data leak regression. `equityDailyPoints` is the
   // live book's server-blended equity baseline, a payload field separate from
   // holdingsSummary. In "Blank slate" mode the allocator started from nothing,
-  // so the live curve + its sync stamp must NOT render — only the (empty)
-  // scenario overlay. Non-vacuous: book mode still passes the real baseline +
-  // stamps; switching to blank must zero them. Without the gate this asserts
-  // RED (EquityChart would still receive the 2-point live baseline + stamps).
+  // so the live curve must NOT render — only the (empty) scenario overlay.
+  // Non-vacuous: book mode still passes the real baseline; switching to blank
+  // must zero it. Without the gate this asserts RED (the chart would still
+  // receive the 2-point live baseline).
+  //
+  // 38-03 (PARITY-01): the composer now feeds ScenarioFactsheetChart. The
+  // `equityDailyPoints` blank-mode gate is preserved as a real prop on the new
+  // component. The old `stale`/`lastSyncAt` sync-stamp props no longer flow to
+  // the chart — the factsheet-backed mount renders NO sync stamp (the synth
+  // csv-arm payload has no `computedAt`), so the H-1226 "stamp lies in blank
+  // mode" failure mode is structurally impossible now (see the honesty test
+  // below). This test pins the surviving baseline-leak gate.
   // -------------------------------------------------------------------------
-  it("T_C3b Blank slate gates the live equity baseline + sync stamps out of EquityChart", () => {
+  it("T_C3b Blank slate gates the live equity baseline out of the scenario chart", () => {
     const payload = makePayload({
       lastSyncAt: "2026-06-24T00:00:00.000Z",
       allKeysStale: true,
@@ -526,20 +548,16 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
 
-    // Book mode (default for an allocator with a live book): real baseline + stamps flow through.
-    const bookProps = vi.mocked(EquityChart).mock.calls[0][0];
+    // Book mode (default for an allocator with a live book): real baseline flows through.
+    const bookProps = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0];
     expect(bookProps.equityDailyPoints).toHaveLength(2);
-    expect(bookProps.lastSyncAt).toBe("2026-06-24T00:00:00.000Z");
-    expect(bookProps.stale).toBe(true);
 
-    // Switch to Blank slate — the live baseline + stamps must be gated out.
+    // Switch to Blank slate — the live baseline must be gated out.
     fireEvent.click(screen.getByRole("radio", { name: /blank slate/i }));
 
-    const calls = vi.mocked(EquityChart).mock.calls;
+    const calls = vi.mocked(ScenarioFactsheetChart).mock.calls;
     const blankProps = calls[calls.length - 1][0];
     expect(blankProps.equityDailyPoints).toEqual([]);
-    expect(blankProps.lastSyncAt).toBeNull();
-    expect(blankProps.stale).toBe(false);
   });
 
   // -------------------------------------------------------------------------
@@ -607,9 +625,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_C4 — EquityChart receives scenarioSeries
+  // T_C4 — ScenarioFactsheetChart receives scenarioSeries
   // -------------------------------------------------------------------------
-  it("T_C4 EquityChart receives scenarioSeries (DailyPoint[])", () => {
+  it("T_C4 ScenarioFactsheetChart receives scenarioSeries (DailyPoint[])", () => {
     const payload = makePayload();
     render(
       <ScenarioComposer
@@ -618,19 +636,25 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    expect(EquityChart).toHaveBeenCalled();
-    const props = vi.mocked(EquityChart).mock.calls[0][0];
+    expect(ScenarioFactsheetChart).toHaveBeenCalled();
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0];
     expect(Array.isArray(props.scenarioSeries)).toBe(true);
   });
 
   // -------------------------------------------------------------------------
-  // B14 / NEW-C09-04 (H-1226) — the Scenario-tab EquityChart renders the inner
-  // header (no hideHeader), so the composer MUST plumb the live sync state.
-  // Before the fix it passed neither prop, so the header stamp showed
-  // "sync just now" / "no sync yet" to a synced allocator — a lie. This pins
-  // the wiring so a future refactor can't silently drop it and regress.
+  // B14 / NEW-C09-04 (H-1226) — the original lie: the legacy Scenario-tab
+  // EquityChart rendered an inner sync-stamp header, so a synced allocator saw
+  // "sync just now" / "no sync yet" unless the composer plumbed stale/lastSyncAt.
+  //
+  // 38-03 (PARITY-01) closes that failure mode STRUCTURALLY: the composer now
+  // renders ScenarioFactsheetChart, which mounts the factsheet TimeSeriesChart +
+  // MasterBrush off a synthesized csv-arm payload that carries NO sync stamp
+  // (`computedAt: ""`) and renders NO header. There is no sync-stamp surface to
+  // lie, so the composer no longer passes — and the chart no longer accepts —
+  // stale/lastSyncAt. This pins that honest contract: the scenario chart receives
+  // NEITHER sync prop, so a future refactor can't reintroduce a stamp lie.
   // -------------------------------------------------------------------------
-  it("EquityChart receives stale + lastSyncAt so the Scenario-tab sync stamp is honest (B14/H-1226)", () => {
+  it("ScenarioFactsheetChart receives NO sync-stamp props — the Scenario-tab stamp lie is structurally gone (B14/H-1226)", () => {
     const lastSync = "2026-02-01T00:00:00.000Z";
     const payload = makePayload({ allKeysStale: true, lastSyncAt: lastSync });
     render(
@@ -640,16 +664,23 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    expect(EquityChart).toHaveBeenCalled();
-    const props = vi.mocked(EquityChart).mock.calls[0][0];
-    expect(props.stale).toBe(true);
-    expect(props.lastSyncAt).toBe(lastSync);
+    expect(ScenarioFactsheetChart).toHaveBeenCalled();
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0] as unknown as Record<
+      string,
+      unknown
+    >;
+    // No sync-stamp surface ⇒ no sync-stamp props. The chart renders the brush +
+    // factsheet panels only; there is no header that could show a false stamp.
+    expect(props.stale).toBeUndefined();
+    expect(props.lastSyncAt).toBeUndefined();
   });
 
   // -------------------------------------------------------------------------
-  // T_C5 — DrawdownChart receives scenarioDailyPoints
+  // T_C5 — ScenarioFactsheetChart receives scenarioDailyPoints (the drawdown
+  // panel's per-day source; the new component renders equity + drawdown stacked
+  // under one provider, so the single mount carries scenarioDailyPoints).
   // -------------------------------------------------------------------------
-  it("T_C5 DrawdownChart receives scenarioDailyPoints", () => {
+  it("T_C5 ScenarioFactsheetChart receives scenarioDailyPoints", () => {
     const payload = makePayload();
     render(
       <ScenarioComposer
@@ -658,8 +689,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    expect(DrawdownChart).toHaveBeenCalled();
-    const props = vi.mocked(DrawdownChart).mock.calls[0][0];
+    expect(ScenarioFactsheetChart).toHaveBeenCalled();
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0];
     expect(Array.isArray(props.scenarioDailyPoints)).toBe(true);
   });
 
@@ -1809,7 +1840,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // -------------------------------------------------------------------------
   // T_C19 — Equity_curve +1 wealth conversion (Pitfall 1)
   // -------------------------------------------------------------------------
-  it("T_C19 EquityChart scenarioSeries values are wealth-form (>=0.95 — i.e. +1 conversion applied)", () => {
+  it("T_C19 ScenarioFactsheetChart scenarioSeries values are wealth-form (>=0.95 — i.e. +1 conversion applied)", () => {
     // The mocked adapter returns empty strategies so computeScenario yields
     // n=0 + equity_curve=[]. To exercise the +1 conversion path we feed a
     // synthetic equity_curve via override of the adapter return AND mock
@@ -1827,8 +1858,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    expect(EquityChart).toHaveBeenCalled();
-    const props = vi.mocked(EquityChart).mock.calls[0][0];
+    expect(ScenarioFactsheetChart).toHaveBeenCalled();
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0];
     const series = (props.scenarioSeries ?? []) as Array<{
       date: string;
       value: number;
@@ -1850,7 +1881,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // NON-EMPTY equity_curve, then fails loud if the precondition is unmet AND
   // pins that every scenarioSeries point is wealth-form (>= 0.95).
   // -------------------------------------------------------------------------
-  it("M-0096 EquityChart scenarioSeries is NON-EMPTY and wealth-form (+1 conversion genuinely exercised)", () => {
+  it("M-0096 ScenarioFactsheetChart scenarioSeries is NON-EMPTY and wealth-form (+1 conversion genuinely exercised)", () => {
     // 12 business days of small positive returns → cumulative wealth ~1.0, so
     // each equity_curve value (cumulative-1) is tiny and +1 → ~1.0 >= 0.95.
     const dates = [
@@ -1898,8 +1929,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    expect(EquityChart).toHaveBeenCalled();
-    const props = vi.mocked(EquityChart).mock.calls[0][0];
+    expect(ScenarioFactsheetChart).toHaveBeenCalled();
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0];
     const series = (props.scenarioSeries ?? []) as Array<{
       date: string;
       value: number;
@@ -3546,7 +3577,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // prop, in cumulative-WEALTH form (~1.0 base), via mock.calls — mirroring
   // the wealth-form assertion pattern in T_C19 / M-0096 above.
   // -------------------------------------------------------------------------
-  it("BENCH-01 EquityChart.benchmark is wired in cumulative-WEALTH form (~1.0 base) once the fetch resolves", async () => {
+  it("BENCH-01 ScenarioFactsheetChart.benchmark is wired in cumulative-WEALTH form (~1.0 base) once the fetch resolves", async () => {
     // Raw BTC daily returns the /api/benchmark/btc route would return. The
     // composer derives btcWealth = computeStrategyCurve(these) → ~1.0-base
     // wealth curve, and passes it as EquityChart.benchmark (showBenchmark
@@ -3572,18 +3603,18 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         />,
       );
 
-      // The benchmark fetch fires on mount; wait until EquityChart has been
-      // re-rendered with a defined `benchmark` prop (the post-resolve render).
+      // The benchmark fetch fires on mount; wait until the scenario chart has
+      // been re-rendered with a defined `benchmark` prop (the post-resolve render).
       await waitFor(() => {
         expect(fetchStub).toHaveBeenCalledWith("/api/benchmark/btc");
-        const calls = vi.mocked(EquityChart).mock.calls;
+        const calls = vi.mocked(ScenarioFactsheetChart).mock.calls;
         const withBenchmark = calls.find(
           (c) => (c[0] as { benchmark?: unknown }).benchmark !== undefined,
         );
         expect(withBenchmark).toBeTruthy();
       });
 
-      const calls = vi.mocked(EquityChart).mock.calls;
+      const calls = vi.mocked(ScenarioFactsheetChart).mock.calls;
       const last = calls[calls.length - 1][0] as {
         benchmark?: Array<{ date: string; value: number }>;
       };

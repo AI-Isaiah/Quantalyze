@@ -98,8 +98,12 @@ import {
   type FlaggedHolding,
 } from "../lib/holding-outcome-adapter";
 import { KpiStrip } from "./KpiStrip";
-import { EquityChart, toWealth } from "../widgets/performance/EquityChart";
-import DrawdownChart from "../widgets/performance/DrawdownChart";
+// `toWealth` stays (the scenario wealth series builder, :1567); EquityChart +
+// DrawdownChart are no longer rendered here — Phase 38-03 swaps the composer's
+// two chart call sites to the factsheet-backed ScenarioFactsheetChart (PARITY-01).
+// The Overview EquityChartWidget keeps the legacy EquityChart render (out of scope).
+import { toWealth } from "../widgets/performance/EquityChart";
+import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { BridgeDrawer } from "./BridgeDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
@@ -483,7 +487,6 @@ export function ScenarioComposer({
     holdingReturnsByScopeRef,
     snapshotCount,
     allKeysStale,
-    lastSyncAt,
     minHistoryDepthMonths,
     activeVenues,
   } = payload as MyAllocationDashboardPayload & {
@@ -2213,71 +2216,57 @@ export function ScenarioComposer({
         </p>
       )}
 
-      <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {/* B14 / NEW-C09-04 (H-1226): the Scenario-tab chart renders the inner
-            header (no `hideHeader`), so plumb the real sync state. Without it
-            the header stamp showed "sync just now" / "no sync yet" to a synced
-            allocator — a lie. `stale`/`lastSyncAt` come from the live baseline
-            the scenario projects from. */}
-        <div>
-          {/* BENCH-01 — the BTC overlay rides the existing EquityChart SVG
-              widget's `benchmark` prop (cumulative-WEALTH form via `btcWealth`),
-              NOT the lightweight-charts equity-curve component (24-RESEARCH
-              Pitfall 3). `btcWealth` is undefined when the toggle is off or the
-              benchmark is unavailable, which hides the overlay. */}
-          <EquityChart
-            equityDailyPoints={baselineEquityDailyPoints}
-            scenarioSeries={scenarioWealthSeries}
-            benchmark={btcWealth}
-            stale={isBlankMode ? false : allKeysStale}
-            lastSyncAt={isBlankMode ? null : lastSyncAt}
+      {/* Phase 38-03 (PARITY-01): the scenario equity + drawdown now render
+          through the REAL factsheet TimeSeriesChart + MasterBrush under ONE
+          provider (ScenarioFactsheetChart) — "the scenario should look exactly
+          the same and use the same factsheet assets." The two panels share ONE
+          brush-zoom window (Q4); the SegmentedControl drives it (Q3). The mount
+          is persist=false so a scenario pan never rewrites the dashboard URL or
+          writes a factsheet-v2: localStorage blob. The Overview EquityChartWidget
+          stays on the legacy render (scope boundary). */}
+      <div className="relative mt-6">
+        {/* BENCH-01 — the BTC overlay rides the synth payload's `benchmark`
+            (cumulative-WEALTH form via `btcWealth`). `btcWealth` is undefined
+            when the toggle is off or the benchmark is unavailable, which hides
+            the overlay. */}
+        <ScenarioFactsheetChart
+          equityDailyPoints={baselineEquityDailyPoints}
+          scenarioSeries={scenarioWealthSeries}
+          benchmark={btcWealth}
+          scenarioDailyPoints={scenarioDailyPointsForDrawdown}
+        />
+        {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted #94A3B8
+            line swatch (UI-SPEC §Copywriting / §Color). Disabled when the
+            benchmark series is unavailable so the control can't promise an
+            overlay there is no data for. Composer-owned chrome — NOT pushed
+            into the factsheet engine. */}
+        <label className="mt-2 flex items-center gap-1.5 text-xs text-text-muted">
+          <input
+            type="checkbox"
+            checked={showBenchmark}
+            disabled={!btcAvailable}
+            onChange={(e) => setShowBenchmark(e.target.checked)}
           />
-          {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted #94A3B8
-              line swatch (UI-SPEC §Copywriting / §Color). Disabled when the
-              benchmark series is unavailable so the control can't promise an
-              overlay there is no data for. */}
-          <label className="mt-2 flex items-center gap-1.5 text-xs text-text-muted">
-            <input
-              type="checkbox"
-              checked={showBenchmark}
-              disabled={!btcAvailable}
-              onChange={(e) => setShowBenchmark(e.target.checked)}
-            />
-            <span
-              aria-hidden="true"
-              className="inline-block h-0.5 w-4"
-              style={{ backgroundColor: "#94A3B8" }}
-            />
-            BTC Benchmark
-          </label>
-        </div>
-        <div className="h-[300px] relative">
-          {/* DrawdownChart extends WidgetProps (data + timeframe + width + height
-              required for the legacy widget-grid path). On the Scenario tab
-              we feed the f7 parallel-prop (`equityDailyPoints`) so the
-              widget-data fields default to empty / safe values. */}
-          <DrawdownChart
-            data={{}}
-            timeframe="ALL"
-            width={6}
-            height={4}
-            equityDailyPoints={baselineEquityDailyPoints}
-            scenarioDailyPoints={scenarioDailyPointsForDrawdown}
+          <span
+            aria-hidden="true"
+            className="inline-block h-0.5 w-4"
+            style={{ backgroundColor: "#94A3B8" }}
           />
-          {/* NEW-C18-14: when scenarioAum=0 the drawdown is scaled against a
-              synthetic $1 baseline so the chart still renders the projected
-              SHAPE rather than a flat zero. Disclose this to the allocator so
-              they don't mistake an illustrative curve for one backed by real
-              capital. */}
-          {scenarioAum <= 0 && (
-            <div
-              aria-live="polite"
-              className="pointer-events-none absolute bottom-2 left-0 right-0 text-center text-[11px] text-text-muted"
-            >
-              Illustrative shape only — no live capital connected
-            </div>
-          )}
-        </div>
+          BTC Benchmark
+        </label>
+        {/* NEW-C18-14: when scenarioAum=0 the drawdown is scaled against a
+            synthetic $1 baseline so the chart still renders the projected
+            SHAPE rather than a flat zero. Disclose this to the allocator so
+            they don't mistake an illustrative curve for one backed by real
+            capital. */}
+        {scenarioAum <= 0 && (
+          <div
+            aria-live="polite"
+            className="mt-2 text-center text-[11px] text-text-muted"
+          >
+            Illustrative shape only — no live capital connected
+          </div>
+        )}
       </div>
 
       {/* BENCH-01 — "vs BTC" active-return section. Reads the active scenario's
