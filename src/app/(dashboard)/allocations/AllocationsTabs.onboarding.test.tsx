@@ -120,6 +120,10 @@ function basePayload(
       equity: [],
       drawdown: [],
     },
+    // Phase 37 / DSRC-01 — per-key channel additive fields (empty/false defaults).
+    perKeyReturnsByApiKeyId: {},
+    perKeyDailiesGateSatisfied: false,
+    eligibleApiKeyIds: [],
     apiKeysCount: 0,
     mandateIsSet: false,
     ...overrides,

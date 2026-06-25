@@ -195,6 +195,10 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
     equity: [],
     drawdown: [],
   },
+  // Phase 37 / DSRC-01 — per-key channel additive fields (no per-key seed).
+  perKeyReturnsByApiKeyId: {},
+  perKeyDailiesGateSatisfied: false,
+  eligibleApiKeyIds: [],
   apiKeysCount: 1,
   mandateIsSet: false,
 };

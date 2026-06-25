@@ -242,6 +242,11 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
     equity: [{ date: "2026-01-01", value: 1.0 }],
     drawdown: [{ date: "2026-01-01", value: 0 }],
   },
+  // Phase 37 / DSRC-01 — per-key channel additive fields. This fixture seeds
+  // no per-key dailies, so the gate is not satisfied (empty/false defaults).
+  perKeyReturnsByApiKeyId: {},
+  perKeyDailiesGateSatisfied: false,
+  eligibleApiKeyIds: [],
   // Phase 11 / 11-05 — onboarding visibility predicate inputs.
   // ALLOCATOR_ID has at least one connected key in this fixture (the
   // composer assumes synced holdings), so the banner+card never render.
