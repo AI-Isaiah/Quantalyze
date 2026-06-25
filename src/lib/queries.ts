@@ -2208,6 +2208,186 @@ export function liveBaselineMetricsFromHoldings(
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 36 / 36-03 — Repoint Overview stats onto per-key csv_daily_returns
+// (UNIFY-01/02/03). The blend unit is per `api_key_id` (D1). AUM stays from
+// holdings (D2). The fallback is all-or-nothing per allocator (D3) so a
+// curve is never a mixed annualization basis.
+//
+//   D1 — one "strategy" per api_key_id from its csv_daily_returns (date,
+//        daily_return) series; weight = Σ holdingEquityContribution over the
+//        holdings carrying that api_key_id.
+//   D2 — AUM is unchanged: Σ holdingEquityContribution(all holdings). Only
+//        the equity-curve SHAPE + KPIs come from the per-key blend.
+//   D3 — the per-key blend is used IFF EVERY active key has a non-empty
+//        per-key series; otherwise the WHOLE allocator falls back to the
+//        snapshot reconstruction (liveBaselineMetricsFromHoldings). A mixed
+//        population (one key with dailies, one without) → fallback, never a
+//        half-per-key/half-snapshot curve.
+//
+// `liveBaselineMetricsFromPerKeyDailies` mirrors liveBaselineMetricsFromHoldings
+// EXACTLY (same computeScenario → wealth-conversion → deriveSnapshotDrawdowns
+// post-processing, same empty-default) so the liveBaselineMetrics OUTPUT
+// contract is byte-identical on both branches (the SSR payload + scenario
+// composer baseline depend on it). The frozen `computeScenario` engine
+// (SCENARIO-05) is reused, never forked. Per-key strategies are already
+// one-per-key, so there is no multi-venue alias to collapse (the de-alias
+// step that liveBaselineMetricsFromHoldings runs guards against a fabricated
+// rho=1.0 from symbol-keyed breakdown duplicates — that risk does not arise
+// here) — but avgRho is still sourced from computeScenario's
+// avg_pairwise_correlation so the contract field is populated.
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * @internal Exported for unit testing only (Phase 36 per-key blend +
+ * shape-identity regression). Builds the live-baseline metrics from a
+ * per-`api_key_id` blend of csv_daily_returns, weighted by each key's current
+ * equity share from holdings (D1/D2). Returns the SAME shape as
+ * liveBaselineMetricsFromHoldings — only the SOURCE of the curve/KPIs differs.
+ */
+export function liveBaselineMetricsFromPerKeyDailies(
+  holdingsSummary: MyAllocationDashboardPayload["holdingsSummary"],
+  perKeyReturnsByApiKeyId: Record<string, DailyPoint[]>,
+): MyAllocationDashboardPayload["liveBaselineMetrics"] {
+  // D2: AUM is unchanged — summed from holdings equity contribution, identical
+  // to liveBaselineMetricsFromHoldings.
+  const totalAum = holdingsSummary.reduce(
+    (s, h) => s + holdingEquityContribution(h),
+    0,
+  );
+  const emptyDefault: MyAllocationDashboardPayload["liveBaselineMetrics"] = {
+    aum: totalAum,
+    ytdTwr: null,
+    sharpe: null,
+    maxDd: null,
+    avgRho: null,
+    equity: [],
+    drawdown: [],
+  };
+
+  // D1: per-key WEIGHT = Σ holdingEquityContribution over holdings carrying
+  // that api_key_id. holdingsSummary already carries api_key_id (no new weight
+  // source — same grouping the dashboard already uses).
+  const equityByApiKeyId = new Map<string, number>();
+  for (const h of holdingsSummary) {
+    const keyId = h.api_key_id;
+    if (!keyId) continue;
+    equityByApiKeyId.set(
+      keyId,
+      (equityByApiKeyId.get(keyId) ?? 0) + holdingEquityContribution(h),
+    );
+  }
+
+  // Build one StrategyForBuilder per api_key_id whose daily_returns is that
+  // key's (date, daily_return) series. Keys with no per-key series cannot
+  // contribute to the live baseline (excluded). (In practice the D3 gate
+  // ensures every active key has a series before this helper is selected.)
+  const strategies: StrategyForBuilder[] = [];
+  const selected: Record<string, boolean> = {};
+  const weights: Record<string, number> = {};
+  const startDates: Record<string, string> = {};
+  for (const [apiKeyId, returns] of Object.entries(perKeyReturnsByApiKeyId)) {
+    if (!returns || returns.length === 0) continue;
+    strategies.push({
+      id: apiKeyId,
+      name: `key ${apiKeyId}`,
+      codename: null,
+      disclosure_tier: "exploratory",
+      strategy_types: [],
+      markets: [],
+      start_date: null,
+      daily_returns: returns,
+      cagr: null,
+      sharpe: null,
+      volatility: null,
+      max_drawdown: null,
+    });
+    selected[apiKeyId] = true;
+    // Clamp negative equity (deeply-losing derivative) to 0 for the weight so
+    // the composite curve isn't distorted by negative-weight slots — identical
+    // to liveBaselineMetricsFromHoldings. A key with no holdings equity share
+    // (e.g. a connected key holding nothing) gets weight 0 and is renormalized
+    // out by computeScenario.
+    weights[apiKeyId] = Math.max(0, equityByApiKeyId.get(apiKeyId) ?? 0);
+  }
+  if (strategies.length === 0) return emptyDefault;
+
+  // Per-key strategies are already one-per-key, so there is no symbol-keyed
+  // alias to collapse (unlike the holdings path). Run the frozen engine
+  // directly over the per-key strategies.
+  const state: ScenarioState = { selected, weights, startDates };
+  const cache = buildDateMapCache(strategies);
+  const liveCM = computeScenario(strategies, state, cache);
+
+  if (liveCM.n === 0 || liveCM.equity_curve.length === 0) return emptyDefault;
+
+  // Pitfall 1: scenario.ts emits cumulative RETURN values (0.18 = +18%).
+  // Convert to cumulative WEALTH (1.0 starting value) — identical to
+  // liveBaselineMetricsFromHoldings.
+  const equity: DailyPoint[] = liveCM.equity_curve.map((p) => ({
+    date: p.date,
+    value: p.value + 1,
+  }));
+  const drawdown = totalAum > 0
+    ? deriveSnapshotDrawdowns(
+        liveCM.equity_curve.map((p) => ({
+          date: p.date,
+          value: (p.value + 1) * totalAum,
+        })),
+      )
+    : [];
+
+  return {
+    aum: totalAum,
+    ytdTwr: liveCM.twr,
+    sharpe: liveCM.sharpe,
+    maxDd: liveCM.max_drawdown,
+    avgRho: liveCM.avg_pairwise_correlation,
+    equity,
+    drawdown,
+  };
+}
+
+/**
+ * @internal Exported for unit testing only (Phase 36 D3 honesty guard). The
+ * all-or-nothing predicate: returns true IFF EVERY active key id has a
+ * non-empty per-key series. Any active key with 0 per-key rows → false → the
+ * whole allocator falls back to the snapshot reconstruction (never a mixed
+ * annualization basis inside one curve).
+ */
+export function allActiveKeysHavePerKeyDailies(
+  activeKeyIds: ReadonlyArray<string>,
+  perKeyReturnsByApiKeyId: Record<string, DailyPoint[]>,
+): boolean {
+  if (activeKeyIds.length === 0) return false;
+  return activeKeyIds.every((id) => {
+    const series = perKeyReturnsByApiKeyId[id];
+    return Array.isArray(series) && series.length > 0;
+  });
+}
+
+/**
+ * @internal Exported for unit testing only (Phase 36). Group the raw
+ * csv_daily_returns per-key rows into a Record<api_key_id, DailyPoint[]>,
+ * mapping (date, daily_return) → { date, value } and dropping any row with a
+ * null api_key_id or a non-finite daily_return.
+ */
+export function buildPerKeyReturnsByApiKeyId(
+  rows: ReadonlyArray<{
+    api_key_id: string | null;
+    date: string;
+    daily_return: number;
+  }>,
+): Record<string, DailyPoint[]> {
+  const result: Record<string, DailyPoint[]> = {};
+  for (const r of rows) {
+    if (!r.api_key_id) continue;
+    if (!Number.isFinite(r.daily_return)) continue;
+    (result[r.api_key_id] ??= []).push({ date: r.date, value: r.daily_return });
+  }
+  return result;
+}
+
 /**
  * Phase 07 / 07-03: compute the Phase 07 payload derivations shared by
  * both branches (portfolio-exists and !portfolio). Kept internal — the
@@ -2429,6 +2609,12 @@ export const getMyAllocationDashboard = cache(
       // reviewer can't accidentally drop it). .limit(200) caps the result
       // set at the 200 most-recent outcomes per allocator (Voice-D5).
       outcomesFullRes,
+      // Phase 36 / 36-03 (UNIFY-01/02) — per-key csv_daily_returns rows for the
+      // Overview-stats repoint (D1). Uses the USER supabase client + owner RLS
+      // (`allocator_id = auth.uid()`); the admin client would bypass RLS, so we
+      // read under the tenant boundary (T-36-03-01). The .eq("allocator_id",
+      // userId) is the explicit ownership gate (defence-in-depth atop RLS).
+      phase36PerKeyDailiesRes,
     ] = await Promise.all([
       getRealPortfolio(userId),
       supabase
@@ -2488,6 +2674,29 @@ export const getMyAllocationDashboard = cache(
         .eq("allocator_id", userId)
         .order("created_at", { ascending: false })
         .limit(200),
+      // Phase 36 / 36-03 (D1, UNIFY-01/02) — per-key dailies for the Overview
+      // repoint. Bound by a DATE-WINDOW filter (`.gte("date", ...)`), NOT a
+      // bare ascending `.limit()`: the snapshot path caps at 730 rows because
+      // it is a single per-allocator series, but the per-key series spans K
+      // keys — a bare ascending `.limit(730)` over K keys would silently DROP
+      // the NEWEST rows (truncating the most recent ~730/K days), corrupting
+      // the curve. Filter by date instead so every key keeps its full 730-day
+      // window. `.limit(20000)` is a flat SAFETY CEILING (≈27 keys × 730d) so
+      // the payload cannot grow unbounded as csv_daily_returns accumulates
+      // (T-36-03-03), without truncating recent data for any realistic key
+      // count. User client + owner RLS gates the read (T-36-03-01).
+      supabase
+        .from("csv_daily_returns")
+        .select("api_key_id, allocator_id, date, daily_return")
+        .eq("allocator_id", userId)
+        .gte(
+          "date",
+          new Date(Date.now() - 730 * 24 * 60 * 60 * 1000)
+            .toISOString()
+            .slice(0, 10),
+        )
+        .order("date", { ascending: true })
+        .limit(20000),
     ]);
 
     // G-1 fix — normalize outcomes once, use in both !portfolio and
@@ -2626,6 +2835,7 @@ export const getMyAllocationDashboard = cache(
     assertOk(phase09MatchBatchRes, "match_batches");
     assertOk(phase09MatchDecisionsRes, "match_decisions");
     assertOk(outcomesFullRes, "bridge_outcomes");
+    assertOk(phase36PerKeyDailiesRes, "csv_daily_returns");
 
     // Phase 11 / D-02 — derive apiKeysCount from the already-fetched,
     // already-error-checked `apiKeys` array (getUserApiKeys throws on error).
@@ -2808,6 +3018,38 @@ export const getMyAllocationDashboard = cache(
       phase07.holdingsSummary,
     );
 
+    // ───────────────────────────────────────────────────────────────────────
+    // Phase 36 / 36-03 — D3 all-or-nothing repoint of the Overview liveBaseline
+    // metrics (UNIFY-01/02/03). When EVERY active key has a non-empty per-key
+    // csv_daily_returns series, derive the curve SHAPE + KPIs from the per-key
+    // blend through computeScenario (D1, the realized+funding / unified-252
+    // basis); otherwise fall back to the snapshot reconstruction for the WHOLE
+    // allocator (never a mixed annualization basis — honesty over coverage).
+    // AUM stays from holdings on BOTH branches (D2). The liveBaselineMetrics
+    // OUTPUT shape is byte-identical between branches (the SSR payload + the
+    // composer baseline depend on it). holdingReturnsByScopeRef (above) is a
+    // SEPARATE payload field consumed elsewhere and is left unchanged — only
+    // the liveBaselineMetrics SOURCE is repointed here. The holdings read
+    // (derivePhase07Fields) is untouched (UNIFY-03).
+    const perKeyReturnsByApiKeyId = buildPerKeyReturnsByApiKeyId(
+      (phase36PerKeyDailiesRes.data ?? []) as Array<{
+        api_key_id: string | null;
+        date: string;
+        daily_return: number;
+      }>,
+    );
+    const activeKeyIds = apiKeys.filter((k) => k.is_active).map((k) => k.id);
+    const liveBaselineMetrics =
+      allActiveKeysHavePerKeyDailies(activeKeyIds, perKeyReturnsByApiKeyId)
+        ? liveBaselineMetricsFromPerKeyDailies(
+            phase07.holdingsSummary,
+            perKeyReturnsByApiKeyId,
+          )
+        : liveBaselineMetricsFromHoldings(
+            phase07.holdingsSummary,
+            holdingReturnsByScopeRef,
+          );
+
     // Phase 10 / H3 — Propagate the authenticated allocator's user.id so
     // consumers (Plan 06a localStorage scoping, Plan 07 ownership probe)
     // can rely on it. Trust the `userId` argument: callers (the Server
@@ -2842,10 +3084,7 @@ export const getMyAllocationDashboard = cache(
         mandate,
         holdingReturnsByScopeRef,
         allocator_id: allocator_id,
-        liveBaselineMetrics: liveBaselineMetricsFromHoldings(
-          phase07.holdingsSummary,
-          holdingReturnsByScopeRef,
-        ),
+        liveBaselineMetrics,
         // Phase 11 / D-02 + D-04 — onboarding visibility predicate inputs.
         apiKeysCount,
         mandateIsSet,
@@ -3150,10 +3389,7 @@ export const getMyAllocationDashboard = cache(
       mandate,
       holdingReturnsByScopeRef,
       allocator_id: allocator_id,
-      liveBaselineMetrics: liveBaselineMetricsFromHoldings(
-        phase07.holdingsSummary,
-        holdingReturnsByScopeRef,
-      ),
+      liveBaselineMetrics,
       // Phase 11 / D-02 + D-04 — onboarding visibility predicate inputs.
       apiKeysCount,
       mandateIsSet,
