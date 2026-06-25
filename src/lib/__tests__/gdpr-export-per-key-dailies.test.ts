@@ -23,7 +23,8 @@
  *   (b) the strategy-scoped indirect axis is still present in the manifest;
  *   (c) a DIFFERENT allocator's per-key rows NEVER appear (the project fn
  *       re-filters allocator_id !== subject as defense-in-depth);
- *   (d) the projected spec orders by `date` (inherited via source_table).
+ *   (d) the projected spec orders by `id` (surrogate-PK fallback — the P35
+ *       migration replaced the composite PK with a BIGINT IDENTITY `id`).
  *
  * Mirrors the unit-pinning style of gdpr-export-redaction.test.ts.
  */
@@ -154,11 +155,16 @@ describe("USER_EXPORT_TABLES — csv_daily_returns owned via TWO axes (D4)", () 
     expect(kinds).toEqual(["indirect", "projected"]);
   });
 
-  it("getOrderColumn returns 'date' for the projected per-key spec (inherited via source_table)", () => {
+  it("getOrderColumn returns 'id' for the projected per-key spec (surrogate PK fallback)", () => {
+    // The Phase 35 per-key-axis migration (20260624120000) replaced
+    // csv_daily_returns' composite PK with a surrogate `id BIGINT IDENTITY`,
+    // so the table is no longer in ORDER_COLUMN_OVERRIDES — getOrderColumn
+    // falls back to the unique, NOT-NULL, total-order `id` (the schema test
+    // pins ORDER_COLUMN_OVERRIDES to id-LESS tables only).
     const projected = USER_EXPORT_TABLES.find(
       (t) => t.table === "csv_daily_returns_per_key",
     );
     expect(projected).toBeDefined();
-    expect(getOrderColumn(projected!)).toBe("date");
+    expect(getOrderColumn(projected!)).toBe("id");
   });
 });

@@ -923,7 +923,7 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
  * NEW-C16-01 (audit 2026-05-26, CRITICAL): the previous
  * `getOrderColumn` returned `"id"` for every non-audit spec on the
  * stale assumption that "every user-owned table has an `id` UUID
- * column". Eight manifest tables have composite/natural PKs and NO `id`
+ * column". Seven manifest tables have composite/natural PKs and NO `id`
  * column — verified against `src/lib/database.types.ts`:
  *   - `user_app_roles`          PK (user_id, role)              — order by granted_at
  *   - `user_favorites`          PK (user_id, strategy_id)       — order by created_at
@@ -932,7 +932,10 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
  *   - `allocator_equity_snapshots` PK (allocator_id, asof)      — order by asof
  *   - `investor_attestations`   PK (user_id)                    — order by attested_at
  *   - `organization_members`    PK (organization_id, user_id)   — order by joined_at
- *   - `csv_daily_returns`       PK (strategy_id, date)          — order by date (NEW-C16-09)
+ * (`csv_daily_returns` USED to be here per NEW-C16-09, but the Phase 35
+ * per-key-axis migration 20260624120000 replaced its composite PK with a
+ * surrogate `id BIGINT GENERATED ALWAYS AS IDENTITY`, so it now has an `id`
+ * column and orders by it via the getOrderColumn fallback — no override.)
  * A `.order("id")` against any of them raised Postgres 42703
  * (`column "id" does not exist`), which `fetchRowsForSpec` surfaced as
  * a `fetch_error` → `partial: true` → the route returned HTTP 500
@@ -957,10 +960,12 @@ export const ORDER_COLUMN_OVERRIDES: Readonly<Record<string, string>> = {
   allocator_equity_snapshots: "asof",
   investor_attestations: "attested_at",
   organization_members: "joined_at",
-  // NEW-C16-09: csv_daily_returns has a composite PK (strategy_id, date) —
-  // no id column. `date` is the natural chronological sort key for a daily-
-  // return series; matches the RPC's upsert key and the worker's SELECT order.
-  csv_daily_returns: "date",
+  // csv_daily_returns is intentionally ABSENT: the Phase 35 per-key-axis
+  // migration (20260624120000) gave it a surrogate `id BIGINT IDENTITY` PK,
+  // so getOrderColumn's `id` fallback already provides a total, deterministic
+  // order. An override here would be unnecessary (and the schema test pins
+  // ORDER_COLUMN_OVERRIDES to id-LESS tables only). Both the strategy-indirect
+  // and per-key-projected specs order by `id`.
 };
 
 /**

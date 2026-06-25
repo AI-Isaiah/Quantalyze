@@ -943,8 +943,9 @@ describe("collectUserExportBundle — H-0456 / NEW-C16-01 getOrderColumn per-tab
       allocator_equity_snapshots: "asof",
       investor_attestations: "attested_at",
       organization_members: "joined_at",
-      // NEW-C16-09: csv_daily_returns has composite PK (strategy_id, date) — no id.
-      csv_daily_returns: "date",
+      // csv_daily_returns is intentionally absent: the Phase 35 per-key-axis
+      // migration (20260624120000) gave it a surrogate `id` PK, so it now
+      // falls into the "every remaining table sorts by 'id'" assertion below.
     };
     for (const [table, expectedCol] of Object.entries(idLessOrderColumns)) {
       const calls = orderCalls.filter((c) => c.table === table);
