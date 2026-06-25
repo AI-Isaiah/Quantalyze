@@ -76,6 +76,7 @@ function chainFor(table: string) {
     is: () => chain,
     not: () => chain,
     gt: () => chain,
+    gte: () => chain,
     order: () => chain,
     limit: () => chain,
     maybeSingle: async () => {
