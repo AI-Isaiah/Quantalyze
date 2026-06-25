@@ -125,12 +125,24 @@ vi.mock("../ScenarioFlaggedHoldingsList", () => ({
 // The mock returns a deterministic { strategies: [], state } so computeScenario
 // short-circuits to the n=0 branch (returns empty equity_curve) — that's
 // fine for prop-spy assertions.
-vi.mock("../lib/scenario-adapter", () => ({
-  buildStrategyForBuilderSet: vi.fn(() => ({
-    strategies: [],
-    state: { selected: {}, weights: {}, startDates: {} },
-  })),
-}));
+//
+// Phase 37 / DSRC-03: ONLY `buildStrategyForBuilderSet` (the holdings path) is
+// spied. The sibling `buildPerKeyStrategyForBuilderSet` is kept REAL via
+// importOriginal so the per-source honesty tests drive the genuine per-key unit
+// construction → frozen `computeScenario` recompute (computeScenario itself is
+// never mocked). A spied per-key builder would defeat the load-bearing DSRC-03
+// assertion that the KPI/curve NUMBERS move on exclusion.
+vi.mock("../lib/scenario-adapter", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../lib/scenario-adapter")>();
+  return {
+    ...actual,
+    buildStrategyForBuilderSet: vi.fn(() => ({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    })),
+  };
+});
 
 // Phase 30 — mock the five blend-graph LEAF charts to inert spies (same :70-127
 // precedent as EquityChart/DrawdownChart/KpiStrip). This keeps the unit-under-

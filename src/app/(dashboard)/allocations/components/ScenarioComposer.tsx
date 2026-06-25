@@ -87,7 +87,10 @@ import {
   type AddedStrategy,
 } from "../lib/scenario-state";
 import { useScenarioState } from "../hooks/useScenarioState";
-import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
+import {
+  buildStrategyForBuilderSet,
+  buildPerKeyStrategyForBuilderSet,
+} from "../lib/scenario-adapter";
 import {
   buildHoldingRef,
   type FlaggedHolding,
@@ -391,6 +394,32 @@ function normalizeBookReturns(raw: unknown): DailyPoint[] | null {
   return normalized;
 }
 
+/**
+ * DSRC-02 (D2) — per-holding equity contribution, the per-key WEIGHT source.
+ *
+ * Mirrors the SSR `holdingEquityContribution` (queries.ts:2113) EXACTLY:
+ *   - derivative → `unrealized_pnl_usd` (the actual equity at stake; `value_usd`
+ *     is the leveraged NOTIONAL contract size, which would inflate the weight by
+ *     the leverage factor), null/non-finite → 0.
+ *   - spot       → `value_usd` (marked fair value = the equity contribution),
+ *     non-finite → 0.
+ *
+ * Duplicated locally rather than imported: `@/lib/queries` is `server-only`, so
+ * importing its export into this "use client" module crosses the client/server
+ * boundary (and the per-key adapter sibling already duplicates the per-key loop
+ * locally for the same reason — PATTERNS §"No Analog Found"). Keep this in
+ * lockstep with the SSR helper so the client weight matches the server's.
+ */
+function holdingEquityContributionLocal(
+  h: MyAllocationDashboardPayload["holdingsSummary"][number],
+): number {
+  if (h.holding_type === "derivative") {
+    const pnl = h.unrealized_pnl_usd ?? 0;
+    return Number.isFinite(pnl) ? pnl : 0;
+  }
+  return Number.isFinite(h.value_usd) ? h.value_usd : 0;
+}
+
 // ---------------------------------------------------------------------------
 // ScenarioComposer
 // ---------------------------------------------------------------------------
@@ -513,6 +542,27 @@ export function ScenarioComposer({
   // ponytail: ephemeral useState; promote to the persisted draft only if
   // allocators ask for leverage to survive a reload.
   const [leverageByRef, setLeverageByRef] = useState<Record<string, number>>({});
+
+  // DSRC-02/03 — per-data-source include/exclude map (api_key_id → included?).
+  // Ephemeral exploration state, modeled EXACTLY on R4 `leverageByRef` above:
+  // NOT persisted to scenario.draft, NOT routed through
+  // `scenario.draft.toggleByScopeRef`, NOT part of the commit diff, and resets on
+  // reload (Pitfall 5). `{}` = all included (default). A key resolves to included
+  // via `includeByApiKeyId[id] ?? true` wherever it is read. Threaded into the
+  // existing `projectionState.selected` channel keyed by api_key_id so the frozen
+  // engine honestly recomputes the curve + every KPI on exclusion (DSRC-03) —
+  // never a cosmetic hide.
+  const [includeByApiKeyId, setIncludeByApiKeyId] = useState<
+    Record<string, boolean>
+  >({});
+
+  // DSRC-02 — fail-loud, visible-state toggle handler. Mirrors
+  // handleLeverageChange's "state visible immediately, never silent" posture; a
+  // boolean toggle has no invalid value so it never clamps. The row's
+  // aria-checked reflects the change synchronously and the projection recomputes.
+  function handleDataSourceToggle(apiKeyId: string, include: boolean) {
+    setIncludeByApiKeyId((prev) => ({ ...prev, [apiKeyId]: include }));
+  }
 
   // -------------------------------------------------------------------------
   // UNIFY-04 — lazy-returns plumbing (29-RESEARCH "SSR-LIFT vs LAZY-FETCH").
@@ -1202,9 +1252,59 @@ export function ScenarioComposer({
     ],
   );
 
+  // -------------------------------------------------------------------------
+  // DSRC-01/02/03 — per-data-source projection units (one per connected
+  // exchange api_key) built from Plan-01's payload via the Plan-02 sibling
+  // builder. This path is selected ONLY in book mode when the Phase-36 D3
+  // per-key-dailies gate is satisfied; otherwise the existing holdings
+  // `adapterOutput` path above is used unchanged (snapshot fallback — both
+  // paths coexist, RESEARCH §State-of-the-Art). The frozen
+  // collapse→computeScenario pipeline below is shared by both.
+  // -------------------------------------------------------------------------
+  // Per-key equity share (D2): Σ holdingEquityContribution grouped by
+  // api_key_id (mirror queries.ts:2271-2279). Uses the EXPORTED contribution
+  // helper — never re-derives equity from value_usd (derivative notional ≠
+  // equity). This is the RAW weight source; the engine renormalizes (Pitfall 1).
+  const equityByApiKeyId = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const h of rawHoldingsSummary) {
+      if (!h.api_key_id) continue;
+      out[h.api_key_id] =
+        (out[h.api_key_id] ?? 0) + holdingEquityContributionLocal(h);
+    }
+    return out;
+  }, [rawHoldingsSummary]);
+
+  // Per-key strategy set — wrapped in a useMemo on its inputs exactly like
+  // `adapterOutput`. One StrategyForBuilder per api_key_id (id === api_key_id),
+  // RAW equity-share weights, default selected=true.
+  const perKeyAdapterOutput = useMemo(
+    () =>
+      buildPerKeyStrategyForBuilderSet(
+        payload.perKeyReturnsByApiKeyId,
+        equityByApiKeyId,
+      ),
+    [payload.perKeyReturnsByApiKeyId, equityByApiKeyId],
+  );
+
+  // The per-key path is active only in book mode + D3 gate satisfied. When
+  // active, the per-key strategy set feeds the projectionState/collapse/engine
+  // pipeline; otherwise the holdings `adapterOutput` set does.
+  const usePerKeySources =
+    entryMode === "book" && payload.perKeyDailiesGateSatisfied;
+
+  // The strategy set actually fed to the engine this render — the per-key units
+  // when the per-source path is active, else the holdings/added units.
+  const activeAdapterOutput = usePerKeySources
+    ? perKeyAdapterOutput
+    : adapterOutput;
+
   // H-0487/H-0493 — map each holding scopeRef to its bare symbol so aliased
   // multi-venue/instrument holdings (identical symbol-keyed series) can be
   // collapsed before computeScenario, keeping avg_pairwise_correlation honest.
+  // ONLY holdings populate this map — per-key UUID unit ids are NOT in it, so
+  // they pass through collapseAliasedHoldingStrategies untouched (Pitfall 3),
+  // keeping avg-ρ across data sources honest.
   const symbolByHoldingId = useMemo(() => {
     const map = new Map<string, string>();
     for (const h of holdingsSummary as Array<{
@@ -1239,26 +1339,47 @@ export function ScenarioComposer({
     const selected: Record<string, boolean> = {};
     const weights: Record<string, number> = {};
     const leverage: Record<string, number> = {};
-    for (const s of adapterOutput.strategies) {
-      const toggle = scenario.draft.toggleByScopeRef[s.id];
-      selected[s.id] =
-        toggle === undefined ? (adapterOutput.state.selected[s.id] ?? true) : toggle;
+    for (const s of activeAdapterOutput.strategies) {
+      // DSRC-03 — the per-key path rides the SAME `selected` channel keyed by
+      // api_key_id: `includeByApiKeyId[s.id] ?? true` (absent → included). The
+      // ephemeral exclusion drops the key from the engine's activeStrategies and
+      // the per-day weight mass; the engine renormalizes over the remaining
+      // selected set (r / activeWeightSum) — an honest recompute, never a hide.
+      // The holdings path keeps its draft `toggleByScopeRef` semantics unchanged.
+      if (usePerKeySources) {
+        selected[s.id] = includeByApiKeyId[s.id] ?? true;
+      } else {
+        const toggle = scenario.draft.toggleByScopeRef[s.id];
+        selected[s.id] =
+          toggle === undefined
+            ? (activeAdapterOutput.state.selected[s.id] ?? true)
+            : toggle;
+      }
       // WR-04 (Phase 21 review): narrow with `typeof` instead of `Number.isFinite`
       // + `as number` so the compiler keeps protecting these reads against future
       // value-type drift (e.g. a `null` "cleared" sentinel) rather than the cast
       // silently swallowing it. Behavior is identical: an absent/NaN override
-      // falls back; an explicit finite 0 is honored.
+      // falls back; an explicit finite 0 is honored. Per-key weights stay RAW
+      // (no weightOverride entries exist for api_key_id units) so the engine
+      // renormalizes (Pitfall 1 — NO sum-to-1 here).
       const ov = scenario.draft.weightOverrides[s.id];
       weights[s.id] =
         typeof ov === "number" && Number.isFinite(ov)
           ? ov
-          : (adapterOutput.state.weights[s.id] ?? 0);
+          : (activeAdapterOutput.state.weights[s.id] ?? 0);
       const L = leverageByRef[s.id];
       leverage[s.id] = typeof L === "number" && Number.isFinite(L) ? L : 1;
     }
-    return { selected, weights, startDates: adapterOutput.state.startDates, leverage };
+    return {
+      selected,
+      weights,
+      startDates: activeAdapterOutput.state.startDates,
+      leverage,
+    };
   }, [
-    adapterOutput,
+    activeAdapterOutput,
+    usePerKeySources,
+    includeByApiKeyId,
     scenario.draft.toggleByScopeRef,
     scenario.draft.weightOverrides,
     leverageByRef,
@@ -1273,11 +1394,11 @@ export function ScenarioComposer({
   const deAliased = useMemo(
     () =>
       collapseAliasedHoldingStrategies(
-        adapterOutput.strategies,
+        activeAdapterOutput.strategies,
         projectionState,
         symbolByHoldingId,
       ),
-    [adapterOutput.strategies, projectionState, symbolByHoldingId],
+    [activeAdapterOutput.strategies, projectionState, symbolByHoldingId],
   );
   const dateMapCache = useMemo(
     () => buildDateMapCache(deAliased.strategies),
