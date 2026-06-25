@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.32.0.0] - 2026-06-25
+### Changed — the allocator Overview now reads performance from each API key's own realized+funding dailies (v1.2.1 Phase 36)
+
+The Overview equity curve and its KPIs (Sharpe, return, drawdown, average correlation) used to be reconstructed from the server's pre-blended `allocator_equity_snapshots` — a per-symbol pct-change of a snapshot that annualizes differently than the factsheet and Scenario tabs. They now derive from a blend of each exchange API key's own `csv_daily_returns` series (the realized+funding dailies built in Phase 35) run through the same frozen `computeScenario` engine the factsheet uses, so the same book reports the same honest numbers on every surface. AUM stays sourced from live holdings (current position value, not a return series), and the live holdings / positions table is provably untouched — only the performance stats moved. Convergence is all-or-nothing per allocator: if every eligible key has a per-key series the Overview uses the per-key blend, otherwise the whole allocator falls back to the previous snapshot reconstruction, so a curve is never a dishonest half-per-key / half-snapshot mix. The repoint ships dormant — it shows the new basis only after the per-key backfill populates production rows, which is run as the post-deploy step.
+
+### Added — per-key daily-returns are now part of a user's GDPR export
+
+Closing the compliance gap held open from Phase 35: a user's Art. 15 / Art. 20 export now includes their per-API-key daily-return rows (`allocator_id`-owned, `strategy_id` NULL), which the existing strategy-scoped manifest entry could not see. A new projected `csv_daily_returns_per_key` export axis filters strictly to the requesting allocator (defense-in-depth re-filter on top of the SQL predicate), with the coverage gate updated to keep both axes honest, plus a `(allocator_id, date)` index so the new per-key Overview read is an index scan instead of a sequential scan over the whole append-only table.
+
+Reviewed: full frontend suite green (6583 passed); typecheck clean; the frozen scenario engine is unchanged; the holdings read path is untouched by diff. A four-specialist fan-out (testing, maintainability, security, performance) plus a fresh-context Claude adversarial red-team and the project migration-reviewer cleared the diff. The red-team caught a real correctness bug before merge: the all-or-nothing gate keyed "eligible key" on bare `is_active`, but a revoked or soft-disconnected allocator key keeps `is_active = true` and never gets a per-key series, which would have pinned the whole allocator to the snapshot fallback forever — fixed to mirror the backfill's exact predicate, with a falsifiable regression test. The performance pass caught the missing index (added above). Tenant isolation holds on both the Overview read (user client under owner RLS) and the GDPR export (service-role read re-filtered to the subject).
+
 ## [0.31.0.0] - 2026-06-24
 ### Changed — every performance stat now annualizes on the same 252 trading-day basis (v1.2.1 Phase 34)
 
