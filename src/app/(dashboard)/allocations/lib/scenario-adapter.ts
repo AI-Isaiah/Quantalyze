@@ -188,3 +188,75 @@ export function buildStrategyForBuilderSet(
     state: { selected, weights, startDates },
   };
 }
+
+/**
+ * Phase 37 Plan 02 (DSRC-01) — SIBLING per-key builder. Emits one
+ * `StrategyForBuilder` per `api_key_id` (the projection unit is the data source,
+ * i.e. the connected exchange `api_key`, NOT a holding or a blended book). This
+ * is the structural change that lets the composer (Plan 03) honestly
+ * include/exclude each data source: each unit's `daily_returns` is that key's
+ * own (date, daily_return) series, so excluding one re-blends the curve + every
+ * KPI from the remaining keys via the frozen engine.
+ *
+ * This is a SIBLING of `buildStrategyForBuilderSet` (NOT a branch inside it) so
+ * the B4 positional signature and the H-0132 commit-oracle tests stay
+ * byte-identical (RESEARCH §Alternatives A4). The unit-construction loop mirrors
+ * the verified SSR helper `liveBaselineMetricsFromPerKeyDailies`
+ * (queries.ts:2321–2348) — one unit per key, `disclosure_tier: "exploratory"`,
+ * null scalar metrics, weight = the key's clamped equity share. The literal
+ * shape is duplicated locally (not imported from queries.ts) to avoid a module
+ * cycle, consistent with the existing per-key duplication noted in PATTERNS
+ * §"No Analog Found".
+ *
+ * CRITICAL (Pitfall 1) — pass RAW equity-share weights. Do NOT renormalize them
+ * to sum-to-1 here. The frozen `computeScenario` engine renormalizes per-day
+ * over the SELECTED set (`r / activeWeightSum`, scenario.ts) and `normWeight`
+ * divides by the selected-set weight mass. Renormalizing here would
+ * double-normalize and skew the curve. The `weights.A === 70` test
+ * (scenario-adapter.test.ts) pins this: adding a sum-to-1 pass turns it red.
+ *
+ * @param perKeyReturnsByApiKeyId  api_key_id → that key's DailyPoint[] series
+ *   (already grouped at SSR by `buildPerKeyReturnsByApiKeyId`). Keys with an
+ *   empty/absent series are skipped entirely.
+ * @param equityByApiKeyId  api_key_id → that key's current equity share (Σ
+ *   `holdingEquityContribution` over the key's holdings, D2). Negative shares
+ *   are clamped to 0; a missing entry defaults to 0.
+ */
+export function buildPerKeyStrategyForBuilderSet(
+  perKeyReturnsByApiKeyId: Record<string, DailyPoint[]>,
+  equityByApiKeyId: Record<string, number>,
+): { strategies: StrategyForBuilder[]; state: ScenarioState } {
+  const strategies: StrategyForBuilder[] = [];
+  const selected: Record<string, boolean> = {};
+  const weights: Record<string, number> = {};
+  const startDates: Record<string, string> = {};
+
+  for (const [apiKeyId, returns] of Object.entries(perKeyReturnsByApiKeyId)) {
+    // Skip empty/absent series — a key with no per-key history cannot contribute
+    // (mirrors liveBaselineMetricsFromPerKeyDailies, queries.ts:2322).
+    if (!returns || returns.length === 0) continue;
+    strategies.push({
+      id: apiKeyId, // id === api_key_id (DSRC-01: keyed per data source)
+      name: `key ${apiKeyId}`,
+      codename: null,
+      disclosure_tier: "exploratory",
+      strategy_types: [],
+      markets: [],
+      start_date: returns[0]?.date ?? null,
+      daily_returns: returns,
+      cagr: null,
+      sharpe: null,
+      volatility: null,
+      max_drawdown: null,
+    });
+    selected[apiKeyId] = true; // default included (CONTEXT Area 1)
+    // RAW clamped equity-share USD — NOT a sum-to-1 fraction (Pitfall 1). The
+    // engine renormalizes over the selected set. Clamp negative equity to 0.
+    weights[apiKeyId] = Math.max(0, equityByApiKeyId[apiKeyId] ?? 0);
+    // Same "2022-01-01" sentinel the frozen engine uses (SCENARIO-05) when a
+    // series carries no leading date — never back-extrapolates a real series.
+    startDates[apiKeyId] = returns[0]?.date ?? "2022-01-01";
+  }
+
+  return { strategies, state: { selected, weights, startDates } };
+}
