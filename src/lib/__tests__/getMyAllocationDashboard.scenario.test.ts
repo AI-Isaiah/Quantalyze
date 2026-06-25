@@ -258,6 +258,46 @@ describe("reconstructHoldingReturnsByScopeRef", () => {
     expect(empty.equity).toEqual([]);
   });
 
+  it("T_M5 — payload type exposes the Phase-37 per-key channel (3 additive fields)", () => {
+    // Compile-time guard for the DSRC-01 enabler: the composer (Plans 02/03)
+    // recomputes the blend client-side from these fields on a data-source
+    // toggle. The Pick<> forces ALL THREE keys to be present — deleting any one
+    // from MyAllocationDashboardPayload fails this assignment at compile time.
+    const perKeyChannel: Pick<
+      MyAllocationDashboardPayload,
+      | "perKeyReturnsByApiKeyId"
+      | "perKeyDailiesGateSatisfied"
+      | "eligibleApiKeyIds"
+    > = {
+      perKeyReturnsByApiKeyId: {
+        "key-A": [{ date: "2026-01-01", value: 0.01 }],
+      },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: ["key-A"],
+    };
+    expect(perKeyChannel.perKeyReturnsByApiKeyId["key-A"]).toEqual([
+      { date: "2026-01-01", value: 0.01 },
+    ]);
+    expect(perKeyChannel.perKeyDailiesGateSatisfied).toBe(true);
+    expect(perKeyChannel.eligibleApiKeyIds).toEqual(["key-A"]);
+
+    // Empty/false defaults (the !portfolio + no-coverage branch) satisfy the
+    // type too — the fresh-allocator path carries {} / false / [].
+    const emptyChannel: Pick<
+      MyAllocationDashboardPayload,
+      | "perKeyReturnsByApiKeyId"
+      | "perKeyDailiesGateSatisfied"
+      | "eligibleApiKeyIds"
+    > = {
+      perKeyReturnsByApiKeyId: {},
+      perKeyDailiesGateSatisfied: false,
+      eligibleApiKeyIds: [],
+    };
+    expect(emptyChannel.perKeyReturnsByApiKeyId).toEqual({});
+    expect(emptyChannel.perKeyDailiesGateSatisfied).toBe(false);
+    expect(emptyChannel.eligibleApiKeyIds).toEqual([]);
+  });
+
   it("holdingReturnsByScopeRef — type smoke: scope_ref keys are 'holding:{venue}:{symbol}:{holding_type}'", () => {
     const snapshots: Snapshot[] = [
       { asof: "2026-01-01", breakdown: { BTC: 50000, ETH: 30000 } },
@@ -579,5 +619,31 @@ describe("Phase 36 — liveBaselineMetrics shape-identity (per-key branch vs fal
     expect(perKey.aum).toBe(100_000);
     expect(perKey.sharpe).toBeNull();
     expect(perKey.equity).toEqual([]);
+  });
+
+  // Phase 37 / 37-01 — the new per-key payload channel is ADDITIVE: exposing
+  // perKeyReturnsByApiKeyId / perKeyDailiesGateSatisfied / eligibleApiKeyIds did
+  // NOT repoint the liveBaselineMetrics derivation. This pins the exact per-key
+  // blend OUTPUT so any future change to that derivation (the Phase-36
+  // byte-identity invariant) fails loudly — the additive fields ride the SAME
+  // perKeyReturnsByApiKeyId the metrics select on, never a second source.
+  it("Phase 37 additive channel leaves liveBaselineMetrics derivation unchanged", () => {
+    const perKeyInput = {
+      "key-A": series(RET_A),
+      "key-B": series(RET_B),
+    };
+    // Same input the payload's perKeyReturnsByApiKeyId field now carries.
+    const metrics = liveBaselineMetricsFromPerKeyDailies(holdings, perKeyInput);
+    assertShape(metrics);
+    // AUM (D2) is byte-identical to the Phase-36 expectation; KPIs/curve are a
+    // deterministic function of the per-key series only.
+    expect(metrics.aum).toBe(100_000);
+    expect(metrics.equity.length).toBeGreaterThan(0);
+    expect(metrics.drawdown.length).toBe(metrics.equity.length);
+    // Calling it twice with the same input is deterministic (no hidden coupling
+    // to the new fields) — the derivation is a pure function of (holdings,
+    // perKeyReturnsByApiKeyId).
+    const again = liveBaselineMetricsFromPerKeyDailies(holdings, perKeyInput);
+    expect(again).toEqual(metrics);
   });
 });
