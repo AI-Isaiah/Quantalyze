@@ -4,17 +4,24 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { ScenarioFactsheetChart } from "./ScenarioFactsheetChart";
 
 /**
- * 38-03 Q4 proof — the composer's equity + drawdown panels mount under ONE
- * FactsheetProvider, so they share a SINGLE xRange (brush-zoom window). A
- * pan/zoom on the timeline moves BOTH panels because there is exactly one
- * XRangeContext, not a parallel range lifted per chart.
+ * 38-03 Q4 / 40-02 BODY-01 proof — the composer mounts the REAL FactsheetBody
+ * under ONE FactsheetProvider, so the body's MasterBrush + every PerformanceCharts
+ * SVG + the composer's topSlot PeriodControl all share a SINGLE xRange (brush-zoom
+ * window). A pan/zoom on the timeline moves every panel because there is exactly
+ * one XRangeContext, not a parallel range lifted per chart.
  *
- * The load-bearing assertions:
- *   1. The REAL factsheet assets are mounted (MasterBrush + TWO TimeSeriesChart
- *      SVGs), not a lookalike — reuse, not fork.
- *   2. Driving the window (via the MasterBrush, the shared source of truth)
- *      re-renders the brush window edges AND both chart panels stay co-mounted
- *      under the one provider — proving a single shared XRangeContext.
+ * Phase 40 swapped the Phase-38 two-chart subset for the full body, so the body
+ * now renders MANY chart SVGs (cumulative + daily + rolling + underwater + …),
+ * not exactly two. The load-bearing assertions are unchanged in INTENT, relaxed
+ * in count:
+ *   1. The REAL factsheet assets are mounted (MasterBrush + ≥1 TimeSeriesChart
+ *      SVG), not a lookalike — reuse, not fork. The equity-chart-scenario-overlay
+ *      testid now lives on the topSlot wrapper (PeriodControl), the body's own
+ *      window control.
+ *   2. Driving the window (via the body's equity chart keyboard nav, the shared
+ *      source of truth) re-renders the brush window edges AND the chart panels
+ *      stay co-mounted under the one provider — proving a single shared
+ *      XRangeContext.
  *
  * localStorage + sentry are stubbed because FactsheetProvider's persistence
  * primitive touches them on mount (even though this mount is persist=false,
@@ -72,7 +79,7 @@ function makeReturnsSeries(n: number, drift = 0.002): DailyPoint[] {
 }
 
 describe("ScenarioFactsheetChart — equity + drawdown share ONE window (38-03 Q4)", () => {
-  it("mounts the real factsheet assets: MasterBrush + two TimeSeriesChart SVGs", () => {
+  it("mounts the real factsheet assets: MasterBrush + the body's chart SVGs", () => {
     const { container, getByLabelText } = render(
       <ScenarioFactsheetChart
         equityDailyPoints={[]}
@@ -92,11 +99,14 @@ describe("ScenarioFactsheetChart — equity + drawdown share ONE window (38-03 Q
       ),
     ).toBeTruthy();
 
-    // Two chart SVGs (role="img", tabIndex=0) — the equity + drawdown panels.
+    // The real body renders MANY chart SVGs (role="img", tabIndex=0) — the
+    // PerformanceCharts cumulative + daily + rolling + underwater panels. Phase 40
+    // mounts the full body, so this is ≥1 (the Phase-38 exactly-2 is obsolete).
     const chartSvgs = container.querySelectorAll('svg[role="img"][tabindex="0"]');
-    expect(chartSvgs.length).toBe(2);
+    expect(chartSvgs.length).toBeGreaterThanOrEqual(1);
 
-    // The scenario strategy line carries the stable test hook (Plan 05 asserts it).
+    // The composer's window control (PeriodControl) carries the stable test hook,
+    // relocated onto the topSlot wrapper in Phase 40.
     expect(
       container.querySelector('[data-testid="equity-chart-scenario-overlay"]'),
     ).toBeTruthy();
@@ -119,14 +129,16 @@ describe("ScenarioFactsheetChart — equity + drawdown share ONE window (38-03 Q
     expect(fullRangeLabel).toContain("2024-01-01"); // first scenario date
     expect(fullRangeLabel).toContain("2024-04-29"); // last (index 119) scenario date
 
-    // Drive the window from the EQUITY chart's keyboard nav (zoom in around the
-    // center). Keyboard nav calls setXRange in the ONE shared XRangeContext — no
+    // Drive the window from the body's FIRST chart (the cumulative equity panel)
+    // keyboard nav (zoom in around the center). Phase 40 relocated the
+    // equity-chart-scenario-overlay testid onto the topSlot PeriodControl, so the
+    // equity chart is now the first body chart SVG, not inside that testid.
+    // Keyboard nav calls setXRange in the ONE shared XRangeContext — no
     // pointer-capture needed (jsdom lacks setPointerCapture). The brush (which
     // reads the SAME xRange) must re-render its edge labels, proving a single
     // shared context drives every panel + the brush.
-    const equityChart = container.querySelector(
-      '[data-testid="equity-chart-scenario-overlay"] svg[role="img"][tabindex="0"]',
-    ) as unknown as SVGSVGElement;
+    const chartSvgsBefore = container.querySelectorAll('svg[role="img"][tabindex="0"]');
+    const equityChart = chartSvgsBefore[0] as unknown as SVGSVGElement;
     expect(equityChart).toBeTruthy();
     act(() => {
       fireEvent.keyDown(equityChart, { key: "+" }); // zoom in around center
@@ -137,10 +149,10 @@ describe("ScenarioFactsheetChart — equity + drawdown share ONE window (38-03 Q
     const afterLabel = brushSection.textContent ?? "";
     expect(afterLabel).not.toBe(fullRangeLabel);
 
-    // Both chart panels are still co-mounted under the single provider after the
-    // window change (no crash, no second provider) — two SVGs, one shared range.
+    // The chart panels are still co-mounted under the single provider after the
+    // window change (no crash, no second provider) — ≥1 SVG, one shared range.
     const chartSvgsAfter = container.querySelectorAll('svg[role="img"][tabindex="0"]');
-    expect(chartSvgsAfter.length).toBe(2);
+    expect(chartSvgsAfter.length).toBeGreaterThanOrEqual(1);
   });
 
   it("the SegmentedControl drives the shared window (Q3, not sliceByPeriod)", () => {
