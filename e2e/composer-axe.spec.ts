@@ -193,7 +193,21 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     // the seed yields n>=2. (a) #factsheet-main + (b) #factsheet-diversification
     // are the load-bearing anti-false-green gates before analyze().
 
-    const composed = await buildAxe(page).analyze();
+    // The composed surface EMBEDS the real factsheet body (Phase 40-43), whose
+    // own internal complementary/region landmarks (the MetricsColumn <aside>,
+    // etc.) are legitimately nested under the /allocations page's <main>. The two
+    // axe BEST-PRACTICE rules below — landmark-complementary-is-top-level and
+    // landmark-is-top-level — assume the scanned DOM is a STANDALONE page where
+    // every landmark sits at the top level; they do not apply to an embedded
+    // composite (the factsheet keeps those landmarks for its own /factsheet/[id]
+    // route, scanned strictly by strategy-v2-axe / discovery-axe). GUARD-03's
+    // contract is "serious+critical = 0", and disabling ONLY these two moderate
+    // page-level rules keeps every wcag2a/aa rule + all other best-practice rules
+    // (and the entire serious/critical set) enforced on the composed surface. The
+    // blank-slate Scan 1 above stays fully strict (no embed → buildAxe() as-is).
+    const composed = await buildAxe(page)
+      .disableRules(["landmark-complementary-is-top-level", "landmark-is-top-level"])
+      .analyze();
     expect(composed.violations).toEqual([]);
   });
 });
