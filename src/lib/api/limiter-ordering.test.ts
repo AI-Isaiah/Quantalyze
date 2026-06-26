@@ -74,6 +74,11 @@ const CANONICAL = new Set([
   // shape + non-finite + payload caps) BEFORE checkLimit, so a 400 never burns a
   // token (B15 validate-then-limit).
   "scenario/optimize/route.ts",
+  // Phase 42 / PEER-03 peer-rank — parses + validates the body (finite
+  // sharpe/sortino/maxDD/n) BEFORE checkLimit(scenarioPeerLimiter), so a 400
+  // never burns a token (B15 validate-then-limit). The limiter here is also a
+  // load-bearing probe-resistance control (see route + ratelimit.ts comments).
+  "scenario/peer-rank/route.ts",
   "portfolio-strategies/alias/route.ts",
   "preferences/route.ts",
   "simulator/route.ts",

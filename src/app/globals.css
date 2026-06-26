@@ -17,6 +17,28 @@
      blesses for chart axis ticks (4.85:1 on white, AA pass). */
   --color-text-muted: #64748B;
 
+  /* GUARD-01 (43-01) — formalize the factsheet-shell `border-text` /
+     `text-text-2` utilities for LIGHT mode. They previously had ONLY dark-mode
+     overrides (globals.css `.factsheet-v2-shell[data-theme="dark"]` at the
+     bottom of this file: `.text-text-2` #BAC2D8, `.border-text` #3D4661), so
+     under Tailwind v4 the bare `--color-text` / `--color-text-2` tokens were
+     UNDEFINED in light mode and resolved to `currentColor` (near-black) — the
+     P40-NIT footer/header divider complaint. Adding the light-mode tokens fixes
+     resolution WITHOUT repointing any live factsheet class string (byte-identity
+     preserved; GUARD-02 pins the real route).
+       --color-text   = the editorial divider rule (border-text on the factsheet
+                        header/footer). One step stronger than the standard
+                        `--color-border` #E2E8F0 hairline (slate-300 vs slate-200),
+                        mirroring how the dark override #3D4661 sits one stop above
+                        `border-border` #2A3144 — a deliberate FactSet-style rule,
+                        not near-black.
+       --color-text-2 = secondary text (the italic editorial subtitle + ControlBar
+                        button text). Maps to `--color-text-secondary` #4A5568 —
+                        the dark override #BAC2D8 is identical to the dark
+                        `text-text-secondary`, so the light value mirrors it. */
+  --color-text: #CBD5E1;
+  --color-text-2: #4A5568;
+
   --color-accent: #1B6B5A;
   --color-accent-hover: #155A4B;
   /* WCAG 2 AA: was #16A34A (3.12:1 on bg-page — fails for 12px small text

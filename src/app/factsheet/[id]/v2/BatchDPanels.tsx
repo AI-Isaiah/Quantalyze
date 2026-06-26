@@ -77,18 +77,23 @@ export function StyleDriftPanel() {
 
 export function PeerPercentilePanel() {
   const payload = usePayload();
-  // B6 — the synthesized panels live only on the "api" arm of the discriminated
-  // FactsheetPayload; narrowing ingestSource unlocks peerPercentile (and a csv
-  // read is a compile error). The parent already gates this component on
-  // ingestSource === "api", so this is type-safety, not a runtime branch. (RED-TEAM-M2)
-  if (payload.ingestSource !== "api") return null;
-  const p = payload.peerPercentile;
+  // Dual-read (Phase 42, PEER-01, ADR-0025): the peer rank lives on the api arm
+  // (`peerPercentile`, demo cohort) OR — for the scenario BLEND — on the csv arm
+  // (`scenarioPeer`, ranked vs the REAL verified universe). The explicit
+  // ingestSource narrow before each field access is required by the B6
+  // discriminated union (a csv read of an api-only field, or vice-versa, is a
+  // compile error). The parent (MetricsColumn) gates which arm reaches here.
+  const isScenario = payload.ingestSource === "csv";
+  const p =
+    payload.ingestSource === "api"
+      ? payload.peerPercentile
+      : (payload.scenarioPeer ?? null);
   if (!p) return null;
   return (
     <section>
       <header className="mb-2 flex items-baseline justify-between border-b border-text pb-1">
         <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary">
-          Peer Percentile <DemoBadge>Demo cohort</DemoBadge>
+          Peer Percentile {!isScenario && <DemoBadge>Demo cohort</DemoBadge>}
         </h3>
         <span className="text-[9px] font-mono uppercase tracking-wider text-text-muted">
           N={p.cohortSize}
@@ -99,11 +104,128 @@ export function PeerPercentilePanel() {
         <PercentileBar label="Sortino" pct={p.sortino} />
         <PercentileBar label="Max DD (shallower = better)" pct={p.max_dd} />
       </div>
+      {/* Disclosure copy (PEER-02). The api/demo-cohort path keeps its existing
+          ITALIC synthesized-cohort footnote byte-identical. The scenario BLEND
+          path shows the hypothetical disclosure — PLAIN 10px muted (not italic),
+          U+00B7 middle-dot separators — that the blend is ranked vs the REAL
+          verified universe on the engine's sample/252 basis (42-UI-SPEC §1). */}
+      {isScenario ? (
+        <p className="mt-2 text-[10px] text-text-muted">
+          hypothetical blend · ranked vs verified strategies · sample/252 basis
+        </p>
+      ) : (
+        <p className="mt-2 text-[10px] italic text-text-muted">
+          Synthesized peer cohort (deterministic seed). Production: replace with platform strategy DB.
+        </p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * OwnBookDeltaPanel (Phase 42, PEER-05) — the scenario blend's head-to-head delta
+ * vs the allocator's LIVE book.
+ *
+ * Renders ONLY for the scenario blend: it reads the csv-only `scenarioOwnBookDelta`
+ * carve-out (narrowed on `ingestSource === "csv"`) and returns null on every
+ * non-scenario factsheet (real route byte-identical). When the allocator has no
+ * live book the carve-out is absent → the panel is SILENTLY ABSENT (no zeroed
+ * deltas, no "add your book" CTA — a conversion action is out of scope here).
+ *
+ * Each value is a SIGNED delta on the SAME sample/252 basis as the peer rank
+ * (T-42-15): blend − book. The sign is ALWAYS carried in TEXT ("+"/U+2212), never
+ * color-only (WCAG 1.4.1):
+ *   - Sharpe / Sortino: positive delta → --color-positive (blend > book is better);
+ *     negative → --color-negative.
+ *   - Max DD: the color mapping is INVERTED — a positive delta means the blend's
+ *     max_dd is LESS negative (shallower = better) → --color-positive; rendered in
+ *     percentage-points (pp).
+ * A null single-ratio delta renders "—" (insufficient data) without crashing.
+ *
+ * The basis note discloses BOTH observation counts (blend_n · book_n). The two
+ * legs share the sample/252 FORMULA but generally span DIFFERENT calendar windows
+ * (the blend's constituent-overlap window vs the allocator's full live-book
+ * history), so showing both counts keeps the "vs Your Book" framing honest about
+ * the window mismatch instead of implying full comparability (WR-02).
+ */
+export function OwnBookDeltaPanel() {
+  const payload = usePayload();
+  const delta =
+    payload.ingestSource === "csv" ? (payload.scenarioOwnBookDelta ?? null) : null;
+  if (!delta) return null;
+  return (
+    <section>
+      <header className="mb-2 border-b border-text pb-1">
+        <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary">
+          vs Your Book
+        </h3>
+      </header>
+      <table className="w-full text-[12px]">
+        <tbody>
+          <DeltaRow label="Sharpe" value={delta.sharpe} kind="ratio" />
+          <DeltaRow label="Sortino" value={delta.sortino} kind="ratio" />
+          <DeltaRow label="Max DD (blend vs book)" value={delta.max_dd} kind="maxdd" />
+        </tbody>
+      </table>
       <p className="mt-2 text-[10px] italic text-text-muted">
-        Synthesized peer cohort (deterministic seed). Production: replace with platform strategy DB.
+        Delta = blend minus your live book · sample/252 basis · over each series&rsquo; own window
+        ({delta.blend_n.toLocaleString()} obs blend · {delta.book_n.toLocaleString()} obs book)
       </p>
     </section>
   );
+}
+
+/**
+ * One own-book delta row. The sign is in the TEXT ("+"/U+2212 minus), never
+ * color-only. `ratio` rows color by sign; `maxdd` rows INVERT the color mapping
+ * (a positive delta = shallower = good = positive token) and render in pp. A null
+ * delta renders "—" (insufficient data) with no color.
+ */
+function DeltaRow({
+  label,
+  value,
+  kind,
+}: {
+  label: string;
+  value: number | null;
+  kind: "ratio" | "maxdd";
+}) {
+  const display =
+    value == null || !Number.isFinite(value)
+      ? "—"
+      : kind === "maxdd"
+        ? `${signGlyph(value)}${Math.abs(value * 100).toFixed(1)}pp`
+        : `${signGlyph(value)}${Math.abs(value).toFixed(2)}`;
+  // Color follows FAVORABILITY, not the raw sign. For ratios, higher (positive
+  // delta) is better. For max_dd the delta is `blend.max_dd − book.max_dd` on
+  // negative drawdown values, so a POSITIVE delta = blend's max_dd is LESS
+  // negative = shallower = better — favorable. Both kinds therefore map
+  // positive→positive here; the UI-SPEC "inversion" is relative to the naive
+  // reading that a positive change in a drawdown (loss) field is bad, which it
+  // is NOT once the delta is taken on the signed (negative) drawdown values.
+  let color: string | undefined;
+  if (value != null && Number.isFinite(value) && value !== 0) {
+    const favorable = value > 0;
+    color = favorable ? "var(--color-positive)" : "var(--color-negative)";
+  }
+  return (
+    <tr className="border-b border-border/30 last:border-0">
+      <td className="py-1.5 pr-2 text-text-2">{label}</td>
+      <td
+        className="py-1.5 pl-2 text-right font-mono tabular-nums text-text-primary"
+        style={color ? { color } : undefined}
+      >
+        {display}
+      </td>
+    </tr>
+  );
+}
+
+/** Sign glyph carried in TEXT (WCAG non-color-only): "+" or U+2212 minus. "" for 0. */
+function signGlyph(v: number): string {
+  if (v > 0) return "+";
+  if (v < 0) return "−";
+  return "";
 }
 
 function PercentileBar({ label, pct }: { label: string; pct: number }) {

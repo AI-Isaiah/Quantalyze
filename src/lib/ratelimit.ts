@@ -165,6 +165,22 @@ export const notesUpsertLimiter = makeLimiter(30, "60 s");
 // higher than the write limiter since reads are cheaper and idempotent.
 export const preferencesReadLimiter = makeLimiter(60, "60 s");
 
+// 60/minute per authenticated user — Phase 42 / PEER-03 scenario peer-rank.
+// POST /api/scenario/peer-rank ranks the composer's hypothetical blend against
+// the verified-strategy cohort via the get_verified_cohort_rank SECURITY
+// DEFINER RPC. This limiter is a LOAD-BEARING PROBE-RESISTANCE SECURITY CONTROL
+// (rls-audit, not just UX): the RPC's three returned percentiles are continuous
+// in the caller's three metric inputs, so an authed allocator scripting
+// unbounded rank calls could binary-search an individual peer's metric across
+// repeated probes (egress amplification + a per-peer inference oracle). The
+// migration's decile-quantization and THIS rate-limit are the two documented
+// load-bearing controls against that probe oracle. 60/min sits above any
+// legitimate cadence — the panel fires one rank per blend recompute, and reads
+// are idempotent + cheap (mirrors preferencesReadLimiter's rationale) — while
+// capping a scripted probe at a low ceiling. Kept as a distinct named bucket so
+// the security cap is independent of the preferences read budget.
+export const scenarioPeerLimiter = makeLimiter(60, "60 s");
+
 // 20/minute per authenticated user — Phase 15 / CSV-01..CSV-02 (WR-02).
 // CSV iteration realistically spends 3-5 validations per minute as the
 // user fixes monotonic_dates / nav_non_zero errors and re-uploads. The

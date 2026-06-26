@@ -2,39 +2,44 @@
 
 import { useMemo } from "react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import type {
+  OwnBookDeltaPayload,
+  PeerPercentilePayload,
+  ScenarioMandatePayload,
+} from "@/lib/factsheet/types";
 import { FactsheetProvider, useXRange } from "@/app/factsheet/[id]/v2/factsheet-context";
-import { TimeSeriesChart } from "@/app/factsheet/[id]/v2/TimeSeriesChart";
-import { MasterBrush } from "@/app/factsheet/[id]/v2/MasterBrush";
-import {
-  buildScenarioFactsheetPayload,
-  SCENARIO_EQUITY_CONFIG,
-  SCENARIO_DRAWDOWN_CONFIG,
-} from "./scenario-factsheet-payload";
+import { FactsheetBody } from "@/app/factsheet/[id]/v2/FactsheetView";
+import { buildScenarioFactsheetPayload } from "./scenario-factsheet-payload";
 
 /**
- * ScenarioFactsheetChart — the composer-side mount that renders the scenario's
- * equity + drawdown through the REAL factsheet `TimeSeriesChart` + `MasterBrush`
- * engine (Phase 38, PARITY-01). This is the "factsheet component identity" half
- * of the convergence the governing principle demands: the scenario chart doesn't
- * just LOOK like the factsheet, it IS the factsheet engine fed a synthesized
- * scenario payload.
+ * ScenarioFactsheetChart — the composer-side mount that renders the scenario
+ * blend through the REAL `FactsheetBody` (Phase 40, BODY-01). This is the "mount
+ * the complete factsheet" goal: the scenario tab doesn't just LOOK like the
+ * factsheet, it IS the real factsheet body fed a synthesized scenario payload,
+ * so the blend gets every factsheet panel for free — parity-by-construction.
  *
  * Design contract:
- *   - Q1 (engine reuse): the synth payload from `buildScenarioFactsheetPayload`
- *     is mounted under the factsheet's own provider + charts. Wheel-zoom, drag-
- *     pan, brush, and keyboard navigation are inherited verbatim — nothing is
+ *   - BODY-01 (engine reuse): the synth payload from `buildScenarioFactsheetPayload`
+ *     is mounted under the factsheet's own provider + the real `FactsheetBody`
+ *     subtree (which itself renders MasterBrush + PerformanceCharts equity/drawdown
+ *     via the real `chart-configs.ts` configs + every other panel). Wheel-zoom,
+ *     drag-pan, brush, and keyboard navigation are inherited verbatim — nothing is
  *     reimplemented here.
- *   - Q4 (shared window): equity + drawdown mount under ONE `FactsheetProvider`,
- *     so they read the SAME `XRangeContext`. A pan/zoom on either panel (or the
- *     brush) moves both. There is NO parallel xRange lifted in this wrapper —
- *     the single provider IS the shared-window mechanism.
- *   - Q2 (color): scenario = accent strategy line, benchmark = muted comparator.
- *     Color flows through `resolveSeries` via the two exported ChartConfigs;
- *     this file inlines NO strokes or colors.
+ *   - Shared window: the body renders under ONE `FactsheetProvider`, so the
+ *     MasterBrush, the ControlBar reset, and the composer's `PeriodControl` (in
+ *     `topSlot`) all read the SAME `XRangeContext`. There is NO parallel xRange
+ *     lifted in this wrapper — the single provider IS the shared-window mechanism.
+ *   - scenarioMode (BODY-02): passed `true` so the ControlBar suppresses the
+ *     Share-link + Compare-strategies actions (a hypothetical blend is not a
+ *     shareable/comparable real strategy) and the MetricsColumn seam is threaded
+ *     for the Phase-42 peer carve-out. The api-only panels (allocator / signatures
+ *     / peer) stay absent by construction (ingestSource "csv"); `hideHeader` (the
+ *     composer owns the title) and `hideAllocatorSection` (belt-and-suspenders) are
+ *     passed; `hideFooter={false}` SHOWS the footer (USER OVERRIDE).
  *   - Q3 (period control): the 3M/6M/12M/ALL SegmentedControl is kept and drives
  *     the shared `xRange` via `setXRange` over the scenario date axis (NOT the
- *     legacy `sliceByPeriod`). It must live INSIDE the provider to call
- *     `useXRange`, so it's a small child rendered alongside the brush.
+ *     legacy `sliceByPeriod`). It lives in the body's `topSlot` so it stays a
+ *     provider descendant and `useXRange` resolves.
  *   - persist=false (T-38-03-01): a scenario pan on the dashboard tab never
  *     rewrites the allocator's URL (`?range=`) nor writes a `factsheet-v2:`
  *     localStorage blob. The factsheet never passes persist; only this mount does.
@@ -42,6 +47,12 @@ import {
  * The "PROJECTED — hypothetical" honesty pill and the "BTC Benchmark" toggle are
  * composer-owned chrome rendered by the call site AROUND this component — they
  * are NOT pushed into the factsheet engine.
+ *
+ * ⛔ The `FactsheetBody` mount lives EXCLUSIVELY in THIS file (which
+ * ScenarioComposer.test.tsx mocks); `ScenarioComposer.tsx` must contain the
+ * literal `FactsheetBody` ZERO times (static source guard: the
+ * "no factsheet import on the blend path … (static guard, T-30-05)" test in
+ * ScenarioComposer.test.tsx). Do NOT inline this mount into the composer.
  */
 
 /** Window periods the SegmentedControl offers (Q3). "ALL" resets to full range. */
@@ -57,16 +68,57 @@ const PERIOD_TRADING_DAYS: Record<Exclude<ScenarioPeriod, "ALL">, number> = {
 
 export interface ScenarioFactsheetChartProps {
   /**
-   * Live baseline series. Accepted for call-site symmetry with the composer
-   * (blank mode passes []). A hypothetical scenario has no live baseline to
-   * merge, so the strategy line is ALWAYS the scenario — this documents the
-   * blank-slate contract (PARITY-03) and flows through the adapter unchanged.
+   * @deprecated Live baseline series. No longer fed to the adapter (WR-01): the
+   * synthesized payload is now SINGLE-AXIS off `portfolioDaily`, so a hypothetical
+   * blend carries no live-baseline line. Accepted for call-site symmetry with the
+   * composer (blank mode passes []) and documents the blank-slate contract
+   * (PARITY-03); it does not affect the rendered chart.
    */
   equityDailyPoints: DailyPoint[];
-  /** Scenario wealth series (toWealth-normalized, cumulative, start ~1.0). */
+  /**
+   * @deprecated Scenario wealth series (toWealth-normalized, cumulative, ~1.0).
+   * No longer the chart-line source (WR-01): the equity line is now
+   * `cumEq(portfolioDaily)` — the same curve `equity_curve` downsamples, full-res
+   * and unrounded — so `dates` indexes every returns/rolling panel by construction.
+   * Accepted for call-site symmetry only.
+   */
   scenarioSeries: DailyPoint[];
   /** Optional BTC benchmark overlay (cumulative-wealth form). Undefined hides it. */
   benchmark?: DailyPoint[];
+  /**
+   * The engine's `portfolio_daily_returns` — daily RETURN form (decimal). The
+   * SINGLE input the adapter feeds to `compute()`/`cumEq` for the entire payload:
+   * the `dates` axis, the chart line, the full scalar set, and every panel array
+   * (WR-01, parity with `build-payload.ts`). Optional + defaults to [] →
+   * safe-empty body (empty chart). When present (production always passes it),
+   * the chart renders the full-resolution scenario line.
+   */
+  portfolioDaily?: DailyPoint[];
+  /**
+   * Phase 42 (PEER-01, ADR-0025) — the blend's live peer rank vs the REAL
+   * verified universe, on the engine's sample/252 basis. The ONLY carve-out
+   * field that flows onto the synthesized csv payload (it never flips
+   * `ingestSource`; the three genuinely-synthetic api panels stay absent).
+   * Optional + additive: omitted → `buildScenarioFactsheetPayload` produces a
+   * byte-identical payload (the key is OMITTED, not undefined), so the peer
+   * panel is absent. The composer supplies it only when the blend has
+   * n>=252 obs AND the route returned a non-null rank (>= min-N cohort).
+   */
+  scenarioPeer?: PeerPercentilePayload;
+  /**
+   * Phase 42 (PEER-04, ADR-0025) — per-constituent mandate chips for the blend
+   * (strategy_types + markets + per-constituent leverage), flowed onto the synth
+   * csv payload. Additive + optional: omitted → byte-identical payload (the
+   * ConstituentMandatePanel renders nothing). Composer-supplied from
+   * `deAliased.strategies` + `deAliased.state.leverage`.
+   */
+  scenarioMandate?: ScenarioMandatePayload;
+  /**
+   * Phase 42 (PEER-05, ADR-0025) — the blend-vs-live-book signed delta on the
+   * sample/252 basis. Additive + optional: omitted (no live book / blank mode) →
+   * the OwnBookDeltaPanel is silently absent.
+   */
+  scenarioOwnBookDelta?: OwnBookDeltaPayload;
 }
 
 /**
@@ -126,51 +178,73 @@ function PeriodControl({ axisLength }: { axisLength: number }) {
 }
 
 export function ScenarioFactsheetChart({
-  equityDailyPoints,
-  scenarioSeries,
+  // `equityDailyPoints` / `scenarioSeries` are accepted (call-site symmetry) but
+  // no longer feed the adapter — the payload is SINGLE-AXIS off `portfolioDaily`
+  // (WR-01). They are intentionally not destructured here.
   benchmark,
+  portfolioDaily = [],
+  scenarioPeer,
+  scenarioMandate,
+  scenarioOwnBookDelta,
 }: ScenarioFactsheetChartProps) {
   // Synthesize the minimal, valid FactsheetPayload (csv arm) the factsheet
-  // TimeSeriesChart + MasterBrush consume verbatim. Index-aligned to ONE
-  // canonical `dates[]` axis (the scenario's own dates). Memoized so a pan
-  // (which only churns xRange in context) doesn't rebuild the payload.
+  // TimeSeriesChart + MasterBrush consume verbatim. SINGLE full-res returns axis
+  // (WR-01): `dates`/equity/drawdowns/returns/panels all derive from
+  // `portfolioDaily`. Memoized so a pan (which only churns xRange in context)
+  // doesn't rebuild the payload.
+  //
+  // PEER-01: `scenarioPeer` is the ONLY carve-out field flowing onto the synth
+  // csv payload — `buildScenarioFactsheetPayload` conditionally spreads it, so
+  // an absent prop yields a byte-identical payload (no scenarioPeer key) and the
+  // peer panel stays absent.
   const synthPayload = useMemo(
     () =>
       buildScenarioFactsheetPayload({
-        scenario: scenarioSeries,
-        baseline: equityDailyPoints,
         benchmark: benchmark ?? null,
+        portfolioDaily,
+        scenarioPeer,
+        scenarioMandate,
+        scenarioOwnBookDelta,
       }),
-    [scenarioSeries, equityDailyPoints, benchmark],
+    [benchmark, portfolioDaily, scenarioPeer, scenarioMandate, scenarioOwnBookDelta],
   );
 
   const axisLength = synthPayload.dates.length;
 
   return (
     // persist={false}: a scenario pan never rewrites the dashboard URL nor
-    // writes a factsheet-v2: localStorage blob (T-38-03-01).
+    // writes a factsheet-v2: localStorage blob (T-38-03-01). ONE provider — the
+    // body's MasterBrush + ControlBar + the topSlot PeriodControl all share it.
     <FactsheetProvider payload={synthPayload} persist={false}>
-      {/* Q3: SegmentedControl drives the SHARED xRange via setXRange. */}
-      <div className="mb-1 flex items-center justify-end">
-        <PeriodControl axisLength={axisLength} />
-      </div>
-
-      {/* MasterBrush draws the scenario equity sparkline + the draggable window
-          over the shared xRange — the real factsheet brush, not a lookalike. */}
-      <MasterBrush />
-
-      {/* Equity panel — scenario (accent strategy line) + benchmark (muted
-          comparator), colored by resolveSeries via SCENARIO_EQUITY_CONFIG.
-          The stable test hook lets Plan 05 assert overlay presence. */}
-      <div data-testid="equity-chart-scenario-overlay" className="mt-4">
-        <TimeSeriesChart config={SCENARIO_EQUITY_CONFIG} />
-      </div>
-
-      {/* Drawdown panel — SAME provider ⇒ shares the equity panel's xRange (Q4).
-          Renders the underwater fill off the scenario's strategyDrawdowns. */}
-      <div className="mt-4">
-        <TimeSeriesChart config={SCENARIO_DRAWDOWN_CONFIG} />
-      </div>
+      {/* BODY-01: the REAL FactsheetBody replaces the Phase-38 two-chart subset.
+          It renders MasterBrush + equity/drawdown (via the real chart-configs
+          cumulative + underwaterAcc) + every other factsheet panel through the
+          synthesized csv payload. scenarioMode suppresses the ControlBar
+          Share-link + Compare-strategies actions and threads the MetricsColumn
+          peer seam; hideHeader (composer owns the title), hideAllocatorSection
+          (api-gated anyway), hideFooter={false} (SHOW the footer — USER OVERRIDE).
+          The api-only panels (allocator / signatures / peer) stay absent by
+          construction because the synth payload is ingestSource "csv". */}
+      <FactsheetBody
+        payload={synthPayload}
+        scenarioMode
+        hideHeader
+        hideAllocatorSection
+        hideFooter={false}
+        topSlot={
+          // Q3: the SegmentedControl drives the SHARED xRange via setXRange.
+          // It lives in topSlot so it renders inside the <article> under the
+          // provider — useXRange resolves. The data-testid hook (relocated here
+          // from the old equity-chart wrapper) lets the shared-window + PARITY-03
+          // tests find the composer's window control.
+          <div
+            data-testid="equity-chart-scenario-overlay"
+            className="mb-1 flex items-center justify-end"
+          >
+            <PeriodControl axisLength={axisLength} />
+          </div>
+        }
+      />
     </FactsheetProvider>
   );
 }

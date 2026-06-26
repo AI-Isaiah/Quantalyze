@@ -1946,6 +1946,77 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // Phase 39 (PAYLOAD-01) — ScenarioFactsheetChart receives portfolioDaily in
+  // daily-RETURN form (the engine's portfolio_daily_returns), the input the
+  // adapter feeds to compute(). This is DISTINCT from scenarioSeries (wealth,
+  // ~1.0). A rewire that accidentally passed the wealth series instead would
+  // make the metrics garbage (~+100%/day) — pin it: portfolioDaily values are
+  // returns-form (near 0, both signs), NOT wealth-form (>= 0.5).
+  // -------------------------------------------------------------------------
+  it("ScenarioFactsheetChart receives portfolioDaily = the engine's portfolio_daily_returns (daily-RETURN form, not wealth)", () => {
+    // A sign-varying return series → the engine emits portfolio_daily_returns
+    // with both positive and negative decimals (≈0), unambiguously distinct
+    // from the cumulative-wealth scenarioSeries (≈1.0).
+    const dates = Array.from({ length: 12 }, (_, i) =>
+      new Date(Date.UTC(2026, 0, i + 1)).toISOString().slice(0, 10),
+    );
+    const strat = {
+      id: "strat-real-rets",
+      name: "Real Strategy",
+      codename: null,
+      disclosure_tier: "verified",
+      strategy_types: ["momentum"],
+      markets: ["binance"],
+      start_date: "2026-01-01",
+      daily_returns: dates.map((date, i) => ({
+        date,
+        value: i % 2 === 0 ? 0.01 : -0.006,
+      })),
+      cagr: 0.1,
+      sharpe: 1.0,
+      volatility: 0.1,
+      max_drawdown: -0.02,
+    };
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [strat],
+      state: {
+        selected: { "strat-real-rets": true },
+        weights: { "strat-real-rets": 1 },
+        startDates: {},
+      },
+    });
+
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(ScenarioFactsheetChart).toHaveBeenCalled();
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0] as {
+      portfolioDaily?: Array<{ date: string; value: number }>;
+      scenarioSeries?: Array<{ date: string; value: number }>;
+    };
+    const daily = props.portfolioDaily ?? [];
+    // Fail loud: a vacuous pass (empty array) would hide a broken wiring.
+    expect(daily.length).toBeGreaterThan(0);
+    // Returns-form: values are decimals near 0 with BOTH signs (the engine
+    // blended a sign-varying series). NOT wealth-form (every value >= 0.5).
+    for (const p of daily) {
+      expect(Math.abs(p.value)).toBeLessThan(0.5);
+    }
+    expect(daily.some((p) => p.value > 0)).toBe(true);
+    expect(daily.some((p) => p.value < 0)).toBe(true);
+    // Cross-check the sibling wealth series IS wealth-form (~1.0), proving the
+    // two props carry genuinely different data models (no wealth/returns mixup).
+    const wealth = props.scenarioSeries ?? [];
+    expect(wealth.length).toBeGreaterThan(0);
+    for (const p of wealth) expect(p.value).toBeGreaterThan(0.5);
+  });
+
+  // -------------------------------------------------------------------------
   // T_C20 — data-widget-id="scenario-composer" attribute
   // -------------------------------------------------------------------------
   it("T_C20 outer container has data-widget-id='scenario-composer' for PostHog widget_viewed hook", () => {
@@ -3449,11 +3520,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(typeof lastScenarioMetrics()?.avg_pairwise_correlation).toBe("number");
   });
 
-  it("CORR-02 — with <2 active strategies the composer heatmap renders the honest empty state, never a 1×1 grid", () => {
-    // Default adapter mock returns ZERO strategies → scenarioMetrics.correlation_matrix
-    // is null → the heatmap delegates to its reason-routed empty state. With <2
-    // strategies the honest heading names the STRATEGY-COUNT reason, not overlap
-    // (v0.24.15.139 fix: the heading must match its body, not contradict it).
+  it("CORR-02/03 — with <2 active strategies the Diversification section renders the honest 'add a second strategy' empty state, never a 1×1 grid", () => {
+    // Default adapter mock returns ZERO strategies → diversification.clusterOrderIds
+    // .length < 2 → the new CollapsibleSection body collapses to the EmptyStateCard
+    // (Phase 41 CORR-03: the 0/1-constituent case is routed to "add a second
+    // strategy" at the SECTION level, BEFORE the heatmap's own reason-routing —
+    // this is the wrapped-in-place behavior, supersedes the prior heatmap-empty
+    // assertion). The heatmap's strategy-count empty is now reachable only via the
+    // n<10 path (covered by the CORR-03 short-overlap test below).
     const payload = makePayload();
     render(
       <ScenarioComposer
@@ -3463,7 +3537,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
     expect(
-      screen.getByText("Not enough strategies to correlate"),
+      screen.getByText("Add a second strategy to see diversification"),
     ).toBeInTheDocument();
     // No degenerate grid: the figure (which only renders for ≥2 strategies) is absent.
     expect(screen.queryByRole("figure", { name: /Pairwise correlation heatmap/i }))
@@ -3490,6 +3564,385 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(caption?.textContent?.replace(/\s+/g, " ")).toContain(
       `Avg |ρ| ${expected}`,
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 41 CORR-01..06 — the "Diversification" CollapsibleSection enhances the
+  // own-book heatmap IN PLACE: a ρ≥0.85 too-similar badge, the cluster-reordered
+  // matrix (de-aliased labels), the DR + ENB headline (formula disclosed), and the
+  // descending per-constituent PCR list, with honest empties for 0/1-constituent
+  // and n<10. The real diversification lib + CorrelationHeatmap are NOT mocked, so
+  // these exercise the genuine end-to-end math (mirroring the un-mocked CORR-01
+  // test above).
+  // -------------------------------------------------------------------------
+
+  // Three active de-aliased strategies sharing 12 overlapping days: BTC and ETH
+  // move together (ρ≥0.85 → too-similar pair + adjacent in the cluster order),
+  // SOL is near-orthogonal (the cluster outlier). Drives the REAL engine matrix.
+  function mockThreeStrategies() {
+    const dates = Array.from({ length: 12 }, (_, i) =>
+      `2026-01-${String(i + 1).padStart(2, "0")}`,
+    );
+    // BTC and ETH: ETH = BTC scaled + tiny jitter → strongly correlated (ρ≈1).
+    const base = [0.02, -0.01, 0.03, -0.02, 0.015, -0.025, 0.01, -0.005, 0.02, -0.018, 0.012, -0.022];
+    const btc = dates.map((date, i) => ({ date, value: base[i] }));
+    const eth = dates.map((date, i) => ({ date, value: base[i] * 0.9 + 0.0005 }));
+    // SOL: an independent zig-zag uncorrelated with `base`.
+    const solSeries = [-0.01, 0.02, 0.005, -0.015, -0.02, 0.018, 0.022, -0.008, -0.012, 0.025, -0.004, 0.016];
+    const sol = dates.map((date, i) => ({ date, value: solSeries[i] }));
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkRealStrat(REF_BTC, btc),
+        mkRealStrat(REF_ETH, eth),
+        mkRealStrat(REF_SOL, sol),
+      ],
+      state: {
+        selected: { [REF_BTC]: true, [REF_ETH]: true, [REF_SOL]: true },
+        weights: { [REF_BTC]: 0.4, [REF_ETH]: 0.3, [REF_SOL]: 0.3 },
+        startDates: {},
+      },
+    });
+  }
+
+  it("CORR-02 — the DR + Effective-Bets headline renders real values (not 0.00) with the ENB formula disclosed", () => {
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The headline labels + the disclosed formula are present.
+    expect(screen.getByText("Diversification Ratio")).toBeInTheDocument();
+    expect(screen.getByText("Effective Bets")).toBeInTheDocument();
+    expect(screen.getByText("ENB = 1 / Σ PCRᵢ²")).toBeInTheDocument();
+    // The interpretation line names the live constituent count (2) — proving the
+    // values are computed from the real blend, not a placeholder.
+    expect(
+      screen.getByText(/effective bets? across 2 constituents/i),
+    ).toBeInTheDocument();
+  });
+
+  it("CORR-02 — the ρ≥0.85 'too similar' badge renders when a pair crosses the threshold", () => {
+    mockThreeStrategies();
+    const payload = makePayload({
+      holdingsSummary: [HOLDING_BTC, HOLDING_ETH, HOLDING_SOL],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // BTC≈ETH → exactly one pair ≥0.85 → the aggregate amber badge appears.
+    const badge = screen.getByText(/above the 0.85 similarity threshold/i);
+    expect(badge).toBeInTheDocument();
+    // Singular/plural is correct for one pair.
+    expect(badge.textContent).toMatch(/^\s*1 pair above the 0.85 similarity threshold\s*$/);
+    // Amber chip, NOT red (DESIGN.md: high-ρ is concentration-risk, not an error).
+    expect(badge.className).toContain("text-warning");
+    expect(badge.className).not.toMatch(/text-negative|bg-negative/);
+  });
+
+  it("CORR-02 — no too-similar badge when no pair reaches ρ≥0.85 (absence is the signal)", () => {
+    // mockTwoStrategies: BTC vs ETH series are weakly/negatively correlated, far
+    // below 0.85 → the badge must be ABSENT (no 'all clear' affirmative).
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.queryByText(/above the 0.85 similarity threshold/i),
+    ).toBeNull();
+  });
+
+  it("CORR-05 — the PCR list renders one role=listitem per constituent, de-aliased, sorted descending", () => {
+    mockThreeStrategies();
+    const payload = makePayload({
+      holdingsSummary: [HOLDING_BTC, HOLDING_ETH, HOLDING_SOL],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.getByText("Risk contribution per constituent (% of total)"),
+    ).toBeInTheDocument();
+    const list = screen
+      .getByText("Risk contribution per constituent (% of total)")
+      .closest("div")
+      ?.querySelector('ul[role="list"]') as HTMLElement;
+    expect(list).not.toBeNull();
+    const items = within(list).getAllByRole("listitem");
+    // One row per active constituent (de-aliased names, not UUIDs).
+    expect(items.length).toBe(3);
+    for (const ref of [REF_BTC, REF_ETH, REF_SOL]) {
+      expect(within(list).getAllByText(ref).length).toBeGreaterThanOrEqual(1);
+    }
+    // Descending sort: each row's signed % is ≥ the next row's %.
+    const pcts = items.map((li) => {
+      const m = li.textContent?.match(/(-?\d+\.\d)%/);
+      return m ? parseFloat(m[1]) : NaN;
+    });
+    for (let i = 1; i < pcts.length; i++) {
+      expect(pcts[i - 1]).toBeGreaterThanOrEqual(pcts[i]);
+    }
+  });
+
+  // WR-02/WR-03/IN-01 — a HEDGE blend: ETH is strongly NEGATIVELY correlated to
+  // BTC (ρ≈−1) and lightly weighted, so signed PCRs put BTC > 100% and ETH < 0
+  // (the lib's own hedge test pins exactly this shape), and Σ PCRᵢ² > 1 → ENB < 1.
+  // This is the reachable case the three findings are about (a negatively-
+  // correlated leg is precisely what this panel exists to surface).
+  function mockHedgeBlend() {
+    const dates = Array.from({ length: 12 }, (_, i) =>
+      `2026-01-${String(i + 1).padStart(2, "0")}`,
+    );
+    const base = [0.02, -0.01, 0.03, -0.02, 0.015, -0.025, 0.01, -0.005, 0.02, -0.018, 0.012, -0.022];
+    const btc = dates.map((date, i) => ({ date, value: base[i] }));
+    // ETH = −1.1 × BTC → ρ ≈ −1 (a hedge).
+    const eth = dates.map((date, i) => ({ date, value: -1.1 * base[i] }));
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [mkRealStrat(REF_BTC, btc), mkRealStrat(REF_ETH, eth)],
+      state: {
+        selected: { [REF_BTC]: true, [REF_ETH]: true },
+        weights: { [REF_BTC]: 0.7, [REF_ETH]: 0.3 }, // BTC heavy, ETH light
+        startDates: {},
+      },
+    });
+  }
+
+  it("WR-02 — the PCR bar track is overflow-hidden and the >100% fill is clamped to 100%", () => {
+    mockHedgeBlend();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const list = screen
+      .getByText("Risk contribution per constituent (% of total)")
+      .closest("div")
+      ?.querySelector('ul[role="list"]') as HTMLElement;
+    const items = within(list).getAllByRole("listitem");
+    // BTC's signed PCR exceeds 100% (the hedge forces it past 1.0).
+    const btcRow = items.find((li) => (li.textContent ?? "").includes(REF_BTC))!;
+    const btcPct = parseFloat(btcRow.textContent!.match(/(-?\d+\.\d)%/)![1]);
+    expect(btcPct).toBeGreaterThan(100);
+    // Every bar track clamps overflow so a >100% fill can never bleed out.
+    for (const li of items) {
+      const track = li.querySelector("div[aria-hidden]") as HTMLElement;
+      expect(track.className).toContain("overflow-hidden");
+      const fill = track.firstElementChild as HTMLElement;
+      const w = parseFloat((fill.style.width || "0").replace("%", ""));
+      // Decorative bar magnitude is clamped to [0,100]% regardless of sign/size.
+      expect(w).toBeLessThanOrEqual(100);
+      expect(w).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("WR-03 — a negative-PCR (hedge) leg renders a 'risk-reducing' affordance, not a broken empty bar", () => {
+    mockHedgeBlend();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const list = screen
+      .getByText("Risk contribution per constituent (% of total)")
+      .closest("div")
+      ?.querySelector('ul[role="list"]') as HTMLElement;
+    // The hedge leg (ETH) carries a negative % AND the risk-reducing tag.
+    const ethRow = within(list)
+      .getAllByRole("listitem")
+      .find((li) => (li.textContent ?? "").includes(REF_ETH))!;
+    expect(ethRow.textContent).toMatch(/-\d+\.\d%/); // signed % preserved
+    const tag = within(ethRow).getByTestId("pcr-risk-reducing-tag");
+    expect(tag).toBeInTheDocument();
+    expect(tag.textContent).toMatch(/risk-reducing/i);
+    // GUARD-01 (43-01) — the tag uses the NEUTRAL accent (muted teal) token,
+    // NOT the P&L-positive green: "risk-reducing" is a structural attribute of
+    // the leg, not a good/bad P&L outcome. Never an error/negative red either.
+    expect(tag.className).toContain("text-accent");
+    expect(tag.className).not.toMatch(/text-positive|text-negative|text-warning/);
+    // The hedge bar is the positive token and has NON-zero width (|PCR| scaled),
+    // i.e. it is no longer a 0-width "broken" bar.
+    const fill = ethRow.querySelector(
+      "div[aria-hidden] > div",
+    ) as HTMLElement;
+    expect(fill.className).toContain("bg-positive");
+    expect(parseFloat((fill.style.width || "0").replace("%", ""))).toBeGreaterThan(0);
+  });
+
+  it("IN-01 — ENB < 1 surfaces the 'below 1 — a hedge offsets risk' disclosure", () => {
+    mockHedgeBlend();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The hedge pushes Σ PCRᵢ² > 1 → ENB < 1; the disclosure caption appears.
+    const disclosure = screen.getByTestId("enb-below-one-disclosure");
+    expect(disclosure).toBeInTheDocument();
+    expect(disclosure.textContent).toMatch(/below 1/i);
+    expect(disclosure.textContent).toMatch(/hedge offsets risk/i);
+  });
+
+  it("IN-01 — a non-hedged blend (ENB ≥ 1) does NOT render the sub-1 disclosure", () => {
+    // Two mildly-positively-correlated legs (ρ≈0.2) → both PCR ≥ 0, ENB ≈ 1.68.
+    mockTwoStrategies();
+    const payload = makePayload({
+      holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.queryByTestId("enb-below-one-disclosure")).toBeNull();
+    // And no row carries the risk-reducing tag (no negative PCR).
+    expect(screen.queryByTestId("pcr-risk-reducing-tag")).toBeNull();
+  });
+
+  it("CORR-06 — the heatmap axis labels follow the cluster order (correlated legs adjacent, outlier separated)", () => {
+    mockThreeStrategies();
+    const payload = makePayload({
+      holdingsSummary: [HOLDING_BTC, HOLDING_ETH, HOLDING_SOL],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Read the heatmap COLUMN-HEADER order (keys `ch-${id}` render in matrix order,
+    // which the composer reordered to the cluster order before passing the matrix).
+    const figure = screen.getByRole("figure", {
+      name: /Pairwise correlation heatmap/i,
+    });
+    const order = Array.from(
+      figure.querySelectorAll<HTMLElement>('[class*="text-center"]'),
+    )
+      .map((el) => el.textContent?.trim() ?? "")
+      .filter((t) => t === REF_BTC || t === REF_ETH || t === REF_SOL);
+    expect(order.length).toBe(3);
+    // The two correlated legs (BTC, ETH) must be ADJACENT; SOL is the outlier
+    // (either end), never wedged between them.
+    const btcIdx = order.indexOf(REF_BTC);
+    const ethIdx = order.indexOf(REF_ETH);
+    expect(Math.abs(btcIdx - ethIdx)).toBe(1);
+  });
+
+  it("CORR-03 — a single-constituent blend renders the 'add a second strategy' empty state and NO DR/ENB headline", () => {
+    // One active strategy → diversification.clusterOrderIds.length < 2 → the
+    // CollapsibleSection body collapses to the honest EmptyStateCard.
+    function mockOneStrategy() {
+      const dates = Array.from({ length: 12 }, (_, i) =>
+        `2026-01-${String(i + 1).padStart(2, "0")}`,
+      );
+      const btc = dates.map((date, i) => ({
+        date,
+        value: [0.02, -0.01, 0.03][i % 3],
+      }));
+      vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+        strategies: [mkRealStrat(REF_BTC, btc)],
+        state: {
+          selected: { [REF_BTC]: true },
+          weights: { [REF_BTC]: 1 },
+          startDates: {},
+        },
+      });
+    }
+    mockOneStrategy();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.getByText("Add a second strategy to see diversification"),
+    ).toBeInTheDocument();
+    // The DR/ENB headline and PCR list are absent (the single-constituent guard).
+    expect(screen.queryByText("Diversification Ratio")).toBeNull();
+    expect(screen.queryByText("ENB = 1 / Σ PCRᵢ²")).toBeNull();
+    expect(
+      screen.queryByText("Risk contribution per constituent (% of total)"),
+    ).toBeNull();
+  });
+
+  it("CORR-03 — an n<10 blend routes to the heatmap's own empty (NO DR/ENB headline, no 'add a second strategy')", () => {
+    // Two active strategies but only 6 shared days → the engine nulls the matrix
+    // (n<10) → computeDiversification returns all-null → the section shows the
+    // heatmap's reason-routed empty, and the DR/ENB headline + PCR are hidden.
+    function mockShortOverlap() {
+      const dates = Array.from({ length: 6 }, (_, i) =>
+        `2026-01-${String(i + 1).padStart(2, "0")}`,
+      );
+      const btc = dates.map((date, i) => ({
+        date,
+        value: [0.02, -0.01, 0.03][i % 3],
+      }));
+      const eth = dates.map((date, i) => ({
+        date,
+        value: [-0.01, 0.005, -0.02][i % 3],
+      }));
+      vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+        strategies: [mkRealStrat(REF_BTC, btc), mkRealStrat(REF_ETH, eth)],
+        state: {
+          selected: { [REF_BTC]: true, [REF_ETH]: true },
+          weights: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
+          startDates: {},
+        },
+      });
+    }
+    mockShortOverlap();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The heatmap's reason-routed "few overlapping days" empty state shows.
+    expect(
+      screen.getByText("Not enough overlap to correlate"),
+    ).toBeInTheDocument();
+    // The 0/1-constituent EmptyStateCard is NOT used (≥2 constituents exist).
+    expect(
+      screen.queryByText("Add a second strategy to see diversification"),
+    ).toBeNull();
+    // The DR/ENB headline + PCR list are hidden (the lib returned all-null).
+    expect(screen.queryByText("Diversification Ratio")).toBeNull();
+    expect(screen.queryByText("ENB = 1 / Σ PCRᵢ²")).toBeNull();
+    expect(
+      screen.queryByText("Risk contribution per constituent (% of total)"),
+    ).toBeNull();
   });
 
   // -------------------------------------------------------------------------
@@ -4318,5 +4771,257 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
     fireEvent.click(switchA);
     expect(switchA).toHaveAttribute("aria-checked", "false");
     expect(switchB).toHaveAttribute("aria-checked", "true");
+  });
+});
+
+// ===========================================================================
+// Phase 43 / GUARD-01 (milestone v1.2.2 close) — PERMANENT static guard +
+// assembled-surface degenerate-matrix cross-check.
+// ===========================================================================
+//
+// Two closing gates. (1) A PERMANENT static-source guard that the composer
+// source contains the literal "FactsheetBody" ZERO times — the body mount must
+// stay EXCLUSIVELY in ScenarioFactsheetChart.tsx (the only file allowed the
+// literal). This mirrors the composer-width.test.tsx static-source-scan pattern
+// (readFileSync + literal-count; render-engine-independent and permanent). It
+// is intentionally distinct from the broader Phase-30 T-30-05 "no factsheet
+// import" guard above: this one is the explicit milestone-closing GUARD-01
+// separation gate (do NOT delete at milestone close) and pins the EXACT count.
+//
+// (2) An assembled-surface degenerate-matrix cross-check. The per-phase panel
+// tests already prove each panel HONEST in isolation (Diversification 0/1
+// constituent, blend-panel n<10/n<252 banners, MandatePanels no-metadata,
+// OwnBookDelta no-book). The one genuine GUARD-01 gap research identified is
+// proving they ALL render their honest empty/safe states SIMULTANEOUSLY on the
+// ONE folded surface — that no degenerate axis fabricates a value, leaks a
+// NaN/Inf, or shows a stale/dishonest body while a sibling section is empty.
+// ScenarioFactsheetChart is mocked here, so the Peer / Mandate / OwnBookDelta
+// payloads are asserted via the props the composer threads INTO that mount
+// (the honest null/undefined degradation), while the Diversification +
+// blend-panel honest-empty bodies are asserted directly in the composed DOM.
+describe("ScenarioComposer — Phase 43 GUARD-01 static guard + assembled degenerate matrix", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    // Default adapter mock → ZERO strategies → 0-constituent degenerate blend
+    // (computeScenario short-circuits to its n=0 branch: empty equity_curve,
+    // null scalars). This IS the most degenerate axis of the matrix.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  // The props the composer threads into the (mocked) ScenarioFactsheetChart on
+  // the FIRST render — the seam where Peer / Mandate / OwnBookDelta honesty
+  // degrades. A non-degenerate matrix would carry a fabricated peer rank, a
+  // phantom mandate panel, or a NaN-laden own-book delta here.
+  type ChartProps = {
+    portfolioDaily?: Array<{ date: string; value: number }>;
+    scenarioSeries?: Array<{ date: string; value: number }>;
+    scenarioPeer?: unknown;
+    scenarioMandate?: unknown;
+    scenarioOwnBookDelta?: unknown;
+  };
+  const lastChartProps = (): ChartProps =>
+    vi.mocked(ScenarioFactsheetChart).mock.calls.at(-1)![0] as ChartProps;
+
+  // The scenarioMetrics the composer fed the (mocked) KpiStrip on the latest
+  // render — the single source of truth for the blend's KPIs. Local to this
+  // block (the first describe's same-named helper is out of scope here).
+  const lastScenarioMetrics = () => {
+    const calls = vi.mocked(KpiStrip).mock.calls;
+    return calls.at(-1)?.[0].scenarioMetrics;
+  };
+
+  it("GUARD-01 static guard — ScenarioComposer.tsx contains the literal 'FactsheetBody' EXACTLY zero times (the body mount stays in ScenarioFactsheetChart.tsx) [PERMANENT]", () => {
+    // PERMANENT milestone-closing separation gate — do NOT delete at close.
+    // Reads the REAL .tsx source off disk (not the bundled/mocked module) so a
+    // re-introduced `FactsheetBody` import OR even a code-comment literal fails
+    // LOUD. The mount must live EXCLUSIVELY in ScenarioFactsheetChart.tsx; the
+    // composer threads scenario state to that island, never imports the body.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(join(here, "ScenarioComposer.tsx"), "utf8");
+    // Positive control — prove the read is real (this IS the composer source).
+    expect(source).toMatch(/ScenarioFactsheetChart/);
+    // The load-bearing assertion: the count is EXACTLY zero (a literal anywhere
+    // — import, JSX, or comment — flips this RED).
+    expect(source.match(/FactsheetBody/g)?.length ?? 0).toBe(0);
+  });
+
+  it("assembled folded surface — own-book degenerate blend (0 constituents): Diversification honest-empty, blend panels honest banners, Data-sources fold absent, and the chart-bound Peer/Mandate/OwnBookDelta props degrade honestly — ALL co-exist, no NaN/Inf, no fabricated values", () => {
+    // The default payload: a connected book allocator (hasLiveBook → composed
+    // branch, NOT the empty-state) but ZERO blend constituents (default adapter
+    // returns strategies:[]). perKeyDailiesGateSatisfied=false +
+    // eligibleApiKeyIds=[] → the Data-sources fold honestly DISAPPEARS. This
+    // single render exercises the degenerate axes 0-constituent / n<10 / n<252 /
+    // no-mandate simultaneously on the assembled folded surface.
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // (A) Diversification section: the honest 0/1-constituent empty state, never
+    // a 1×1 grid (CORR-03). This is the visible proof the folded surface
+    // rendered its degenerate state, not a blank gap.
+    expect(
+      screen.getByText("Add a second strategy to see diversification"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("figure", { name: /Pairwise correlation heatmap/i }),
+    ).toBeNull();
+
+    // (B) Blend panels: BOTH render their honest role=status banner (below the
+    // sample floor) and NEVER a role=alert (a derived-client panel has no fetch
+    // to fail) — and NEVER a populated-but-empty body.
+    const distCard = document.querySelector(
+      '[data-panel="blend-returns-distribution"]',
+    );
+    const rollCard = document.querySelector('[data-panel="blend-rolling"]');
+    expect(distCard).not.toBeNull();
+    expect(rollCard).not.toBeNull();
+    expect(distCard!.querySelector('[role="status"]')).not.toBeNull();
+    expect(rollCard!.querySelector('[role="status"]')).not.toBeNull();
+    expect(distCard!.querySelector('[role="alert"]')).toBeNull();
+    expect(rollCard!.querySelector('[role="alert"]')).toBeNull();
+    // No fabricated leaf charts on the degenerate blend.
+    expect(distCard!.querySelector('[data-testid="return-histogram-mock"]')).toBeNull();
+    expect(rollCard!.querySelector('[data-testid="rolling-metrics-mock"]')).toBeNull();
+
+    // (C) Data-sources fold honestly DISAPPEARS (showDataSources false: book
+    // mode but the D3 per-key gate is unsatisfied AND there are zero eligible
+    // keys, so neither the control nor the fallback InfoBanner renders).
+    expect(
+      screen.queryByRole("group", { name: "Data sources" }),
+    ).toBeNull();
+
+    // (D) The chart-bound Peer / Mandate / OwnBookDelta props degrade HONESTLY:
+    // a 0-constituent degenerate blend yields no peer rank (below floor → null),
+    // no mandate panel (no constituents → undefined), and the own-book delta is
+    // undefined because the default book equity (2 points) gives <2 derivable
+    // returns. None is a fabricated zero/NaN — they are the honest absence.
+    const props = lastChartProps();
+    expect(props.scenarioPeer ?? null).toBeNull();
+    expect(props.scenarioMandate ?? null).toBeNull();
+    expect(props.scenarioOwnBookDelta ?? null).toBeNull();
+
+    // (E) HONESTY across the whole surface: every numeric the composer threaded
+    // to the chart is finite — no NaN/Inf leaked onto the degenerate blend. The
+    // portfolioDaily/scenarioSeries are honest-empty (length 0), never a
+    // fabricated curve.
+    for (const p of props.portfolioDaily ?? []) {
+      expect(Number.isFinite(p.value)).toBe(true);
+    }
+    for (const p of props.scenarioSeries ?? []) {
+      expect(Number.isFinite(p.value)).toBe(true);
+    }
+    // The degenerate blend's KPIs are honest null (engine n=0 path), never a
+    // fabricated zero presented as a real metric.
+    const sm = lastScenarioMetrics();
+    expect(sm?.avg_pairwise_correlation ?? null).toBeNull();
+  });
+
+  it("assembled folded surface — NO own-book (blank mode) + single added constituent: own-book delta degrades to undefined, Diversification still honest-empty (n<2), no NaN/Inf — the no-own-book and single-constituent honest states co-exist", () => {
+    // Blank mode (zero holdings → baselineEquityDailyPoints=[] → no own book) +
+    // ONE added strategy. This drives the composed branch WITHOUT a live book,
+    // so the OwnBookDelta axis degrades (undefined) on the SAME render where the
+    // single-constituent Diversification axis is honest-empty (n<2). The
+    // assembled surface must present BOTH honest states at once.
+    const single = Array.from({ length: 12 }, (_, i) => ({
+      date: `2026-01-${String(i + 1).padStart(2, "0")}`,
+      value: [-0.01, 0.005, -0.02][i % 3],
+    }));
+    // The adapter returns the single added strategy as the only constituent.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        {
+          id: "strat-solo",
+          name: "strat-solo",
+          codename: null,
+          disclosure_tier: "public",
+          strategy_types: [] as string[],
+          markets: [] as string[],
+          start_date: single[0].date,
+          daily_returns: single,
+          cagr: null,
+          sharpe: null,
+          volatility: null,
+          max_drawdown: null,
+        },
+      ],
+      state: {
+        selected: { "strat-solo": true },
+        weights: { "strat-solo": 1 },
+        startDates: {},
+      },
+    });
+    const payload = makePayload({
+      // No live book: zero holdings + empty baseline equity. The own-book delta
+      // keys off `equityDailyPoints` (→ baselineEquityDailyPoints) being empty;
+      // liveBaselineMetrics is a separate field, set to its honest empty form
+      // (zero AUM, no equity) rather than removed (the field is required).
+      holdingsSummary: [],
+      holdingReturnsByScopeRef: {},
+      equityDailyPoints: [],
+      liveBaselineMetrics: {
+        aum: 0,
+        ytdTwr: null,
+        sharpe: null,
+        maxDd: null,
+        avgRho: null,
+        equity: [],
+        drawdown: [],
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Reach the composed branch (no live book → must add a strategy).
+    addStrategy({
+      id: "strat-solo",
+      name: "strat-solo",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // (A) Single-constituent Diversification: still the honest "add a second
+    // strategy" empty state (n<2), never a 1×1 grid.
+    expect(
+      screen.getByText("Add a second strategy to see diversification"),
+    ).toBeInTheDocument();
+
+    // (B) NO own-book → the own-book delta prop degrades to undefined (honest
+    // silent absence, NOT a zero/NaN delta). This is the co-existing axis.
+    const props = lastChartProps();
+    expect(props.scenarioOwnBookDelta ?? null).toBeNull();
+
+    // (C) HONESTY: any threaded numeric is finite — no NaN/Inf on the no-book +
+    // single-constituent assembled surface.
+    for (const p of props.portfolioDaily ?? []) {
+      expect(Number.isFinite(p.value)).toBe(true);
+    }
+    for (const p of props.scenarioSeries ?? []) {
+      expect(Number.isFinite(p.value)).toBe(true);
+    }
+    // No role=alert anywhere on the folded surface (derived-client honesty).
+    expect(document.querySelector('[role="alert"]')).toBeNull();
   });
 });

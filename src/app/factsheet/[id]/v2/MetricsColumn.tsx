@@ -4,8 +4,8 @@ import type { ReactNode } from "react";
 import type { JointMetrics } from "@/lib/factsheet/types";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import { CalmarByYearPanel, BootstrapCIPanel } from "./AnalyticalPanels";
-import { StyleDriftPanel, PeerPercentilePanel } from "./BatchDPanels";
-import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel } from "./MandatePanels";
+import { StyleDriftPanel, PeerPercentilePanel, OwnBookDeltaPanel } from "./BatchDPanels";
+import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentMandatePanel } from "./MandatePanels";
 
 /**
  * Editorial right-column metrics. Four named sections — Performance, Risk,
@@ -16,7 +16,11 @@ import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel } from "./Mandate
  * structure, matching DESIGN.md's "data density > card density" rule and
  * the FactSet quarterly-factsheet reference.
  */
-export function MetricsColumn() {
+export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean }) {
+  // Phase 42 (PEER-01, ADR-0025): scenarioMode now gates the additive
+  // scenarioPeer carve-out below. It is false on every existing call site (the
+  // real route, Discovery, Overview), so the api peer path is provably
+  // unchanged; only the composer passes scenarioMode={true}.
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
   const m = payload.strategyMetrics;
@@ -110,13 +114,34 @@ export function MetricsColumn() {
 
       <EditorialSection label="III" name="Style">
         <StyleDriftPanel />
-        {/* PeerPercentile uses a demo/synthesized cohort — not derivable from
-            a CSV daily-return series. Only show for api_verified (live-ingested)
-            strategies per the no-invented-data contract. (NEW-C20-01) */}
-        {payload.ingestSource === "api" && <PeerPercentilePanel />}
+        {/* PeerPercentile renders for api strategies (demo/synthesized cohort)
+            OR — Phase 42 (PEER-01, ADR-0025) — for the scenario BLEND, which
+            carries an additive `scenarioPeer` ranked vs the REAL verified
+            universe (never an ingestSource flip; the three genuinely-synthetic
+            panels stay structurally absent). The explicit `ingestSource ===
+            "csv"` narrow is required before reading the csv-only `scenarioPeer`
+            field (Pitfall 3 — mirrors the B6 narrowing discipline). With
+            scenarioMode=false (every existing call site) the second disjunct is
+            dead and the api path is byte-identical. (NEW-C20-01) */}
+        {(payload.ingestSource === "api" ||
+          (scenarioMode &&
+            payload.ingestSource === "csv" &&
+            payload.scenarioPeer != null)) && <PeerPercentilePanel />}
+        {/* Phase 42 (PEER-05): the blend-vs-live-book signed delta, AFTER the
+            peer panel (UI-SPEC §III). scenarioMode-gated here — the panel ALSO
+            null-guards on its csv-only `scenarioOwnBookDelta` carve-out (silently
+            absent without a live book), so non-scenario factsheets are
+            byte-identical. */}
+        {scenarioMode && <OwnBookDeltaPanel />}
       </EditorialSection>
 
       <EditorialSection label="V" name="Terms">
+        {/* Phase 42 (PEER-04): per-constituent mandate chips for the scenario
+            BLEND, BEFORE TermsPanel (UI-SPEC §V). scenarioMode-gated here — the
+            panel ALSO null-guards on its csv-only `scenarioMandate` carve-out, so
+            on every existing (non-scenario) call site it renders nothing and §V
+            stays byte-identical. */}
+        {scenarioMode && <ConstituentMandatePanel />}
         <LeverageProfilePanel />
         <TermsPanel />
       </EditorialSection>

@@ -477,26 +477,56 @@ function makeBlankSlateScenario(n = 90): DailyPoint[] {
   return toWealth(makeWealthSeries(n, 1.0, 0.0025));
 }
 
+// WR-01: ScenarioFactsheetChart now draws its line from the engine's
+// `portfolio_daily_returns` (daily RETURN form), full-resolution — NOT the
+// (deprecated) `scenarioSeries` wealth prop. A blank-slate render must feed a
+// non-degenerate returns series for the chart to draw. Same calendar axis as
+// makeWealthSeries (UTC consecutive days from 2024-01-01).
+function makeBlankSlateReturns(n = 90): DailyPoint[] {
+  const pts: DailyPoint[] = [];
+  const d = new Date(Date.UTC(2024, 0, 1));
+  for (let i = 0; i < n; i++) {
+    pts.push({
+      date: d.toISOString().slice(0, 10),
+      value: 0.0025 + Math.sin(i * 0.3) * 0.005,
+    });
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return pts;
+}
+
 describe("PARITY-03 — blank-slate scenario renders the overlay on the NEW composer path", () => {
-  it("empty baseline + present scenario ⇒ scenario overlay renders a REAL strategy line (no synthetic baseline)", () => {
+  // Phase 40 swapped the two-chart subset for the full FactsheetBody. The
+  // equity-chart-scenario-overlay testid now wraps the topSlot PeriodControl, NOT
+  // the equity chart — so the equity panel is selected by its own SVG accessible
+  // name. The body's cumulative equity chart is a TimeSeriesChart with
+  // aria-label="Cumulative Returns: <strategyName>" (no comparator on a blank
+  // blend), built by ariaLabel() in TimeSeriesChart.tsx. The honesty intent is
+  // unchanged: the scenario line is DRAWN (≥1 non-empty <path>) and there is
+  // exactly ONE strategy line (no fabricated live-book baseline).
+  const equityChartOf = (container: HTMLElement): SVGSVGElement | null =>
+    container.querySelector(
+      'svg[role="img"][tabindex="0"][aria-label^="Cumulative Returns:"]',
+    ) as SVGSVGElement | null;
+
+  it("empty baseline + present scenario ⇒ scenario equity panel renders a REAL strategy line (no synthetic baseline)", () => {
     const { container } = render(
       <ScenarioFactsheetChart
         equityDailyPoints={[]}
         scenarioSeries={makeBlankSlateScenario()}
         benchmark={undefined}
+        portfolioDaily={makeBlankSlateReturns()}
       />,
     );
 
-    // The overlay wrapper is present (the Plan-03 test hook).
+    // The composer's window-control hook is still present (relocated to topSlot).
     const overlay = container.querySelector(
       '[data-testid="equity-chart-scenario-overlay"]',
     ) as HTMLElement | null;
     expect(overlay).not.toBeNull();
 
-    // The equity panel inside the overlay renders the REAL factsheet chart svg.
-    const equitySvg = overlay!.querySelector(
-      'svg[role="img"][tabindex="0"]',
-    ) as SVGSVGElement | null;
+    // The body's cumulative equity panel renders the REAL factsheet chart svg.
+    const equitySvg = equityChartOf(container);
     expect(equitySvg).not.toBeNull();
 
     // Load-bearing: the scenario strategy line is actually DRAWN — at least one
@@ -518,15 +548,12 @@ describe("PARITY-03 — blank-slate scenario renders the overlay on the NEW comp
         equityDailyPoints={[]}
         scenarioSeries={makeBlankSlateScenario()}
         benchmark={undefined}
+        portfolioDaily={makeBlankSlateReturns()}
       />,
     );
-    const overlay = container.querySelector(
-      '[data-testid="equity-chart-scenario-overlay"]',
-    ) as HTMLElement;
-    const equitySvg = overlay.querySelector(
-      'svg[role="img"][tabindex="0"]',
-    ) as SVGSVGElement;
-    const drawnLines = Array.from(equitySvg.querySelectorAll("path")).filter(
+    const equitySvg = equityChartOf(container);
+    expect(equitySvg).not.toBeNull();
+    const drawnLines = Array.from(equitySvg!.querySelectorAll("path")).filter(
       (p) => (p.getAttribute("d") ?? "").trim().length > 0,
     );
     // Exactly one drawn series — the scenario. No second (baseline) line.
@@ -539,6 +566,7 @@ describe("PARITY-03 — blank-slate scenario renders the overlay on the NEW comp
         equityDailyPoints={[]}
         scenarioSeries={makeBlankSlateScenario()}
         benchmark={undefined}
+        portfolioDaily={makeBlankSlateReturns()}
       />,
     );
     expect(queryByText(/Equity data warming up/i)).toBeNull();

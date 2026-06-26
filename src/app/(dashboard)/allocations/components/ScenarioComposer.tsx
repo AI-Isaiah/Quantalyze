@@ -71,8 +71,20 @@ import {
   type StrategyForBuilder,
 } from "@/lib/scenario";
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
+import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
+import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
+import type {
+  OwnBookDeltaPayload,
+  PeerPercentilePayload,
+  ScenarioMandatePayload,
+} from "@/lib/factsheet/types";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import { buildBlendPanels } from "@/lib/scenario-blend-panels";
+import {
+  computeDiversification,
+  alignConstituentReturns,
+  TOO_SIMILAR_THRESHOLD,
+} from "@/lib/diversification";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
 import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
 import { ReturnQuantiles } from "@/components/charts/ReturnQuantiles";
@@ -131,6 +143,16 @@ import type { AllocatorMandateForFit } from "../lib/mandate-fit";
  * handler and the CompositionList input share a single source of truth.
  */
 const MAX_LEVERAGE = 10;
+
+/**
+ * WR-01 — debounce window (ms) for the peer-rank fetch effect. Rapid weight /
+ * leverage edits each shift the rounded engine-metric triple; coalescing them
+ * over this window means only the SETTLED blend issues a `POST
+ * /api/scenario/peer-rank`, capping egress and preserving the probe-resistance
+ * budget the 60/min `scenarioPeerLimiter` is sized for. 350ms is below the
+ * perceptible-lag threshold for a derived read-only panel.
+ */
+const PEER_RANK_DEBOUNCE_MS = 350;
 
 /**
  * GRAPH-03 — single source of truth for the rolling-window set: maps each
@@ -1509,6 +1531,93 @@ export function ScenarioComposer({
     [deAliased, dateMapCache],
   );
 
+  // PEER-01/02/03 (Phase 42) — the blend's live peer rank vs the REAL verified
+  // universe. Fetched from POST /api/scenario/peer-rank, feeding the ENGINE's
+  // sample/252-basis sharpe/sortino/max_drawdown (scenario.ts:454-456 — NOT the
+  // population headline), and threaded into the synth factsheet payload via the
+  // ScenarioFactsheetChart `scenarioPeer` prop. Null when the blend is below the
+  // 252-obs sample floor, when a ranking metric is non-finite, or when the route
+  // returns { peer: null } (cohort below the RPC's min-N) → the peer panel is
+  // silently absent. No cohort distribution ever reaches the client — only the
+  // 3-percentile + count rank (T-42-13).
+  const [scenarioPeer, setScenarioPeer] = useState<PeerPercentilePayload | null>(null);
+
+  // Fetch effect keyed on the engine metrics triple + n, so the SAME blend
+  // produces the SAME request (reload-stable) and a changed blend re-fetches.
+  // The `buildScenarioPeerRankRequest` gate owns the n>=252 + finite suppression
+  // (PEER-03); below the floor it returns null → no fetch, scenarioPeer reset to
+  // null.
+  //
+  // DEBOUNCE (WR-01) — every distinct weight/leverage edit changes the rounded
+  // metric triple and would otherwise fire one POST per edit, capped only by the
+  // 60/min `scenarioPeerLimiter`. A user scrubbing several constituents in quick
+  // succession issues a probe burst that amplifies egress and erodes the
+  // probe-resistance budget the limiter is sized for. We coalesce rapid edits via
+  // a PEER_RANK_DEBOUNCE_MS timer so only the SETTLED blend fetches.
+  //
+  // NO-STALE (intact) — the cleanup aborts both the pending timer AND the
+  // in-flight request via an AbortController, so a superseded response can neither
+  // resolve into `setScenarioPeer` nor complete server-side (also frees the
+  // limiter token a `cancelled` boolean alone would still burn). The n>=252 gate
+  // is unchanged: a sub-floor / non-finite blend returns a null body → no timer,
+  // no fetch, scenarioPeer reset to null synchronously.
+  const peerSharpe = scenarioMetrics.sharpe;
+  const peerSortino = scenarioMetrics.sortino;
+  const peerMaxDD = scenarioMetrics.max_drawdown;
+  const peerN = scenarioMetrics.n;
+  useEffect(() => {
+    const body = buildScenarioPeerRankRequest({
+      sharpe: peerSharpe,
+      sortino: peerSortino,
+      max_drawdown: peerMaxDD,
+      n: peerN,
+    });
+    if (!body) {
+      // Below the sample floor / non-finite metrics — suppress (no fetch).
+      setScenarioPeer(null);
+      return;
+    }
+    // A NEW qualifying blend (the rounded metric triple changed, hence this
+    // re-run) invalidates the previous blend's rank: clear it NOW, before the
+    // debounce+fetch window. Otherwise the "Peer Percentile" panel would keep
+    // rendering the PREVIOUS blend's real decile rank — presented as the current
+    // blend's — while the rest of the factsheet has already moved on. The panel
+    // honestly disappears until the fresh rank resolves (never a stale "real"
+    // number). [red-team adversarial review]
+    setScenarioPeer(null);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      fetch("/api/scenario/peer-rank", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (ctrl.signal.aborted) return;
+          // The route returns { peer: PeerPercentilePayload | null }; any non-200
+          // (d === null), a malformed body, or a null peer → suppress honestly.
+          const peer =
+            d && typeof d === "object" && "peer" in d
+              ? (d as { peer: PeerPercentilePayload | null }).peer
+              : null;
+          setScenarioPeer(peer ?? null);
+        })
+        .catch(() => {
+          if (ctrl.signal.aborted) return;
+          // Network / JSON-parse failure → honest absence (panel hidden). An
+          // abort throws here too but is filtered by the `aborted` guard above.
+          setScenarioPeer(null);
+        });
+    }, PEER_RANK_DEBOUNCE_MS);
+    return () => {
+      ctrl.abort();
+      clearTimeout(timer);
+    };
+  }, [peerSharpe, peerSortino, peerMaxDD, peerN]);
+
   // GRAPH-02 / GRAPH-03 — derive every blend-graph series from the SAME
   // unrounded `portfolio_daily_returns` the benchmark / stress / MC sections
   // read (never the rounded/downsampled `equity_curve`). `buildBlendPanels` is
@@ -1525,6 +1634,78 @@ export function ScenarioComposer({
     [portfolioDaily, rollingWindow],
   );
 
+  // PEER-04 (Phase 42) — per-constituent mandate chips for the blend. Built ONLY
+  // from genuinely-available `StrategyForBuilder` fields (`strategy_types`,
+  // `markets`) + the per-constituent leverage from `deAliased.state.leverage`
+  // (id → L; default 1.0). NO fabricated aggregate; NOT leverage_range/description
+  // (not on this type / free-text — out of v1.2.2 chip scope per CONTEXT D-07).
+  // Honest-empty per constituent is the panel's job. Keyed on `deAliased` so a
+  // weight/leverage scrub or a constituent add re-derives. Always non-empty when
+  // the blend has constituents (the panel handles the all-empty-metadata case).
+  const scenarioMandate = useMemo<ScenarioMandatePayload | undefined>(() => {
+    const constituents = deAliased.strategies.map((s) => ({
+      name: s.name,
+      strategy_types: s.strategy_types ?? [],
+      markets: s.markets ?? [],
+      leverage: deAliased.state.leverage?.[s.id] ?? 1.0,
+    }));
+    return constituents.length > 0 ? { constituents } : undefined;
+  }, [deAliased]);
+
+  // PEER-05 (Phase 42) — the blend-vs-live-book signed delta on the SAME
+  // sample/252 basis as the peer rank (T-42-15). The own-book leg recomputes the
+  // live book's Sharpe/Sortino/maxDD via `sampleBasisRatios` on the OWN-BOOK
+  // DAILY RETURNS — derived here from `baselineEquityDailyPoints` (absolute-USD
+  // equity LEVELS: value[i]/value[i-1] − 1), NOT `liveBaselineMetrics` (a
+  // different/population basis). The blend leg uses `scenarioMetrics`
+  // (already the engine's sample/252 output). Each delta = blend − book; null
+  // when a leg is null. `null` (→ undefined) when there is no live book series
+  // (blank mode or a no-book allocator) so the panel is silently absent. Keyed on
+  // the engine output + the own-book series.
+  const scenarioOwnBookDelta = useMemo<OwnBookDeltaPayload | undefined>(() => {
+    const levels = baselineEquityDailyPoints;
+    // Need ≥ 2 dated levels to derive at least one daily return. No book → absent.
+    if (!levels || levels.length < 2) return undefined;
+    const bookReturns: number[] = [];
+    for (let i = 1; i < levels.length; i++) {
+      const prev = levels[i - 1].value;
+      const cur = levels[i].value;
+      if (prev > 0 && Number.isFinite(prev) && Number.isFinite(cur)) {
+        bookReturns.push(cur / prev - 1);
+      }
+    }
+    if (bookReturns.length < 2) return undefined;
+    const book = sampleBasisRatios(bookReturns);
+    // Blend ratios are the engine's already-rounded sample/252 output — the SAME
+    // FORMULA as `book` (which `sampleBasisRatios` rounds identically), so the
+    // subtraction is like-for-like in BASIS. The two legs do NOT necessarily span
+    // the SAME calendar window, though: the blend leg is the engine's overlap
+    // window (`scenarioMetrics.n` obs from the constituents' include-from dates),
+    // while the book leg is the allocator's full live-book equity history
+    // (`bookReturns.length` obs), generally a different/longer range. We therefore
+    // disclose BOTH counts (blend_n + book_n) so the reader sees the window
+    // difference rather than inferring full comparability from the shared formula
+    // (WR-02 honesty fix).
+    const blendSharpe = scenarioMetrics.sharpe;
+    const blendSortino = scenarioMetrics.sortino;
+    const blendMaxDD = scenarioMetrics.max_drawdown;
+    const sub = (a: number | null, b: number | null): number | null =>
+      a != null && b != null ? a - b : null;
+    return {
+      sharpe: sub(blendSharpe, book.sharpe),
+      sortino: sub(blendSortino, book.sortino),
+      max_dd: sub(blendMaxDD, book.max_drawdown),
+      blend_n: scenarioMetrics.n,
+      book_n: bookReturns.length,
+    };
+  }, [
+    baselineEquityDailyPoints,
+    scenarioMetrics.n,
+    scenarioMetrics.sharpe,
+    scenarioMetrics.sortino,
+    scenarioMetrics.max_drawdown,
+  ]);
+
   // CORR-01 — de-aliased axis labels for the CorrelationHeatmap. Keyed on the
   // SAME de-aliased set computeScenario consumes, so the heatmap labels always
   // match the matrix the engine produced (no stale alias surviving the collapse).
@@ -1533,6 +1714,74 @@ export function ScenarioComposer({
     for (const s of deAliased.strategies) out[s.id] = s.name;
     return out;
   }, [deAliased]);
+
+  // CORR-02/05/06 — the constituent diversification result (Plan 41-01 lib).
+  // Re-aligns the de-aliased per-constituent returns the FROZEN engine discards
+  // (mirroring scenario.ts:199-236 inside `alignConstituentReturns`), normalizes
+  // the ACTIVE weights to sum→1 (mirroring the engine's per-day renormalization
+  // at scenario.ts:243-254), and feeds the engine's READ-ONLY `correlation_matrix`
+  // / `n` / `portfolio_daily_returns` into `computeDiversification`. The lib owns
+  // the global gate (ids<2 / n<10 / null matrix → all-null), so a degenerate or
+  // zero-sum-weight blend returns a null DR/ENB/PCR and the section renders its
+  // honest empty state, never NaN. Keyed on the de-aliased set + the engine output.
+  const diversification = useMemo(() => {
+    const aligned = alignConstituentReturns(
+      deAliased.strategies,
+      deAliased.state,
+    );
+    // Normalize the active weights to sum→1 (engine renormalizes by the active
+    // weight mass; a zero/negative total yields all-zero weights → the lib's PCR
+    // guard nulls the result → honest empty).
+    const rawWeights: Record<string, number> = {};
+    let weightSum = 0;
+    for (const id of aligned.ids) {
+      const w = deAliased.state.weights[id] ?? 0;
+      rawWeights[id] = w;
+      weightSum += w;
+    }
+    const weights: Record<string, number> = {};
+    for (const id of aligned.ids) {
+      weights[id] = weightSum > 0 ? rawWeights[id] / weightSum : 0;
+    }
+    return computeDiversification({
+      ids: aligned.ids,
+      returnsById: aligned.returnsById,
+      weights,
+      // CR-01/WR-01 — thread the de-aliased per-constituent leverage (Lᵢ,
+      // default 1) so DR/PCR are computed on the SAME levered basis as the
+      // engine's `portfolio_daily_returns` (`Σ ŵᵢ·Lᵢ·rᵢ`). Absent → all-1, i.e.
+      // a correct un-levered computation. The ρ matrix stays leverage-invariant.
+      leverage: deAliased.state.leverage,
+      portfolioDailyReturns: (
+        scenarioMetrics.portfolio_daily_returns ?? []
+      ).map((p) => p.value),
+      correlationMatrix: scenarioMetrics.correlation_matrix,
+      n: scenarioMetrics.n,
+    });
+  }, [deAliased, scenarioMetrics]);
+
+  // CORR-06 — the cluster-reordered matrix the (UNCHANGED) CorrelationHeatmap
+  // receives. The heatmap renders axis/cell order from `Object.keys(matrix)` and
+  // has NO custom-order prop, so the reorder happens HERE: rebuild the
+  // Record<id, Record<id, number>> with insertion order = `clusterOrderIds`,
+  // copying cells from the engine matrix. When the engine matrix is null or there
+  // are <2 ids, pass it through unchanged so the heatmap's own reason-routed empty
+  // state fires. `strategyNames` is keyed by id (order-independent) — unchanged.
+  const reorderedMatrix = useMemo(() => {
+    const matrix = scenarioMetrics.correlation_matrix;
+    const order = diversification.clusterOrderIds;
+    if (!matrix || order.length < 2) return matrix;
+    const out: Record<string, Record<string, number>> = {};
+    for (const rowId of order) {
+      const row: Record<string, number> = {};
+      for (const colId of order) {
+        const v = matrix[rowId]?.[colId];
+        if (v != null) row[colId] = v;
+      }
+      out[rowId] = row;
+    }
+    return out;
+  }, [scenarioMetrics.correlation_matrix, diversification.clusterOrderIds]);
 
   // IMPACT-01 — the shortest-history strategy name for the coverage caveat.
   // Pure helper (unit-tested in scenario-history.test.ts); reads only the
@@ -2096,20 +2345,30 @@ export function ScenarioComposer({
           entry-mode pill recipe + existing tokens only (no new design token).
           The included state = accent outline (no fill); excluded = neutral
           outline; never red (excluding a source is a normal modeling action). */}
+      {/* GUARD-01 (43-01) — the Phase-37 Data-sources include/exclude control
+          is folded into a factsheet-shaped CollapsibleSection so it reads as a
+          sibling editorial section with Diversification (:2601) and
+          Strategies-&-weights (:2962) — compose + read on one surface. The
+          per-key role="switch" rows are REPOSITIONED verbatim (same handlers,
+          no redesign); only the wrapping container changed. `storageKey` is
+          OMITTED on purpose (mirrors Diversification's deliberate omission —
+          GUARD-04 asserts no new persisted key on the composer surface). The
+          old inline header/subtitle <p> are absorbed by the CollapsibleSection
+          title + subtitle. */}
       {showDataSources && (
-        <div
-          role="group"
-          aria-label="Data sources"
-          data-testid="scenario-data-sources"
-          className="mt-4 flex flex-col gap-2"
-        >
-          <div className="text-[12px] font-semibold uppercase tracking-wide text-text-secondary">
-            Data sources
-          </div>
-          <p className="text-[12px] text-text-muted">
-            Toggle a source off to model the book without it. Resets on reload.
-          </p>
-          <div className="flex flex-col">
+        <Card className="mt-6">
+          <CollapsibleSection
+            id="factsheet-data-sources"
+            title="Data sources"
+            subtitle="Toggle a source off to model the book without it. Resets on reload."
+            defaultOpen
+          >
+            <div
+              role="group"
+              aria-label="Data sources"
+              data-testid="scenario-data-sources"
+              className="flex flex-col"
+            >
             {dataSourceKeys.map((k) => {
               const included = includeByApiKeyId[k.id] ?? true;
               const { exchange, nickname, maskedTail } = dataSourceLabel(k);
@@ -2148,8 +2407,9 @@ export function ScenarioComposer({
                 </div>
               );
             })}
-          </div>
-        </div>
+            </div>
+          </CollapsibleSection>
+        </Card>
       )}
 
       {showDataSourcesFallback && (
@@ -2216,7 +2476,14 @@ export function ScenarioComposer({
           is persist=false so a scenario pan never rewrites the dashboard URL or
           writes a factsheet-v2: localStorage blob. The Overview EquityChartWidget
           stays on the legacy render (scope boundary). */}
-      <div className="relative mt-6">
+      {/* GUARD-01 / P40-W2 (43-01) — mount-seam padding compensated on the
+          COMPOSER side only. The mounted factsheet <article> carries its own
+          responsive top padding (`py-6 sm:py-10 lg:py-12`, FactsheetView.tsx:192);
+          the previous `mt-6` on this wrapper stacked ON TOP of that, double-padding
+          the seam. Drop the wrapper margin to 0 so the article's own top padding is
+          the SINGLE seam gap. The factsheet article class is NOT touched
+          (byte-identity preserved). */}
+      <div className="relative mt-0">
         {/* BENCH-01 — the BTC overlay rides the synth payload's `benchmark`
             (cumulative-WEALTH form via `btcWealth`). `btcWealth` is undefined
             when the toggle is off or the benchmark is unavailable, which hides
@@ -2225,6 +2492,16 @@ export function ScenarioComposer({
           equityDailyPoints={baselineEquityDailyPoints}
           scenarioSeries={scenarioWealthSeries}
           benchmark={btcWealth}
+          portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
+          // PEER-01: the live peer rank (or null below the sample floor / min-N)
+          // flows onto the synth csv payload's scenarioPeer carve-out.
+          scenarioPeer={scenarioPeer ?? undefined}
+          // PEER-04: per-constituent mandate chips (strategy_types / markets /
+          // leverage); undefined when the blend has no constituents.
+          scenarioMandate={scenarioMandate}
+          // PEER-05: blend-vs-live-book sample/252 delta; undefined (silently
+          // absent) when there is no live book series.
+          scenarioOwnBookDelta={scenarioOwnBookDelta}
         />
         {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted line
             swatch via the `--color-chart-benchmark` token (UI-SPEC §Copywriting
@@ -2333,28 +2610,191 @@ export function ScenarioComposer({
         />
       </Card>
 
-      {/* CORR-01 / CORR-03 — pairwise correlation heatmap on the own-book
-          scenario surface. The matrix + single-sourced Avg |ρ| come straight from
-          scenarioMetrics (the same value KpiStrip reads), and the axis labels
-          are the de-aliased strategy names — the heatmap never computes its own
-          average and the <2-strategy / <10-day cases delegate to its honest
-          reason-routed empty state (never a 1×1 grid). */}
+      {/* CORR-01..06 — the factsheet-shaped "Diversification" section on the
+          own-book scenario surface. ENHANCED IN PLACE (41-CONTEXT refined
+          decision): the existing CorrelationHeatmap is wrapped in a NEW
+          CollapsibleSection and the new elements are added around it — a ρ≥0.85
+          "too similar" warning badge, the Choueifaty Diversification Ratio +
+          risk-based Effective-Number-of-Bets headline (formula disclosed), and a
+          descending per-constituent percent-contribution-to-risk list — all driven
+          by the `diversification` memo (Plan 41-01 lib). The matrix is cluster-
+          reordered (CORR-06) BEFORE the heatmap (which has no custom-order prop);
+          the heatmap stays UNCHANGED. `storageKey` is OMITTED on purpose (locked
+          decision: avoid the Phase-38 RT2 cross-tab-bleed class on the shared
+          /allocations URL). The subtitle reaffirms leverage-invariance. The
+          0/1-constituent case renders an honest EmptyStateCard; n<10 / engine-null
+          delegate to the heatmap's own reason-routed empty (never a 1×1 grid). */}
       <Card className="mt-6">
-        <div className="mb-3">
-          <h2 className="text-sm font-semibold text-text-primary">
-            Pairwise correlation
-          </h2>
-          <p className="text-xs text-text-muted mt-0.5">
-            Live-computed from the scenario&apos;s daily returns. Teal =
-            diversifying, orange = concentrated.
-          </p>
-        </div>
-        <CorrelationHeatmap
-          correlationMatrix={scenarioMetrics.correlation_matrix}
-          strategyNames={strategyNames}
-          overlappingDays={scenarioMetrics.n}
-          avgAbsCorrelation={scenarioMetrics.avg_pairwise_correlation}
-        />
+        <CollapsibleSection
+          id="factsheet-diversification"
+          title="Diversification"
+          subtitle="Correlation does not shift with per-strategy leverage"
+          defaultOpen
+        >
+          {diversification.clusterOrderIds.length < 2 ? (
+            <EmptyStateCard
+              heading="Add a second strategy to see diversification"
+              body="Select at least 2 strategies to compare their pairwise correlation and see how diversified the blend is."
+            />
+          ) : (
+            <>
+              {/* CORR-02 — aggregate "too similar" warning badge. Renders ONLY
+                  when ≥1 pair reaches ρ≥0.85 (absence is the signal — no
+                  "all clear" affirmative). Amber per DESIGN.md warning chip
+                  (NO red, NO icon). */}
+              {diversification.tooSimilarPairs.length > 0 && (
+                <div>
+                  <span className="inline-flex items-center gap-1.5 rounded-sm border bg-warning-bg border-warning-border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-warning">
+                    {diversification.tooSimilarPairs.length}{" "}
+                    {diversification.tooSimilarPairs.length === 1
+                      ? "pair"
+                      : "pairs"}{" "}
+                    above the {TOO_SIMILAR_THRESHOLD} similarity threshold
+                  </span>
+                </div>
+              )}
+
+              {/* CORR-01/06 — the cluster-reordered heatmap (de-aliased labels).
+                  The heatmap's reason-routed empties (n<10 / non-finite), its
+                  missing-cell "—", and its single-sourced Avg |ρ| caption are ALL
+                  inherited; do NOT duplicate empty logic or recompute the average. */}
+              <div>
+                <CorrelationHeatmap
+                  correlationMatrix={reorderedMatrix}
+                  strategyNames={strategyNames}
+                  overlappingDays={scenarioMetrics.n}
+                  avgAbsCorrelation={scenarioMetrics.avg_pairwise_correlation}
+                />
+                {scenarioMetrics.correlation_matrix && (
+                  <p className="text-[11px] text-text-muted mt-2">
+                    Burnt orange = positive correlation (concentration risk).
+                    Pairs ≥ {TOO_SIMILAR_THRESHOLD} are flagged above.
+                  </p>
+                )}
+              </div>
+
+              {/* DR + ENB headline. Hidden entirely when both are null (never
+                  render "0.00"/"NaN"); each value renders only when non-null. */}
+              {(diversification.diversificationRatio != null ||
+                diversification.effectiveNumberOfBets != null) && (
+                <div className="flex flex-wrap gap-8 items-start">
+                  {diversification.diversificationRatio != null && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[12px] text-text-muted">
+                        Diversification Ratio
+                      </span>
+                      <span className="text-[18px] font-metric font-semibold tabular-nums text-text-primary">
+                        {diversification.diversificationRatio.toFixed(2)}
+                      </span>
+                    </div>
+                  )}
+                  {diversification.effectiveNumberOfBets != null && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[12px] text-text-muted">
+                        Effective Bets
+                      </span>
+                      <span className="text-[18px] font-metric font-semibold tabular-nums text-text-primary">
+                        {diversification.effectiveNumberOfBets.toFixed(1)}
+                      </span>
+                      <span className="text-[11px] text-text-muted">
+                        ENB = 1 / Σ PCRᵢ²
+                      </span>
+                      <span className="text-[12px] text-text-secondary">
+                        {diversification.effectiveNumberOfBets.toFixed(1)}{" "}
+                        effective{" "}
+                        {diversification.effectiveNumberOfBets < 1.5
+                          ? "bet"
+                          : "bets"}{" "}
+                        across {diversification.clusterOrderIds.length}{" "}
+                        {diversification.clusterOrderIds.length === 1
+                          ? "constituent"
+                          : "constituents"}
+                      </span>
+                      {/* IN-01 — surface the sub-1 disclosure the lib promises
+                          (diversification.ts: "honest, do NOT clamp … DISCLOSED
+                          on the panel"). With a hedge, Σ PCRᵢ² can exceed 1 →
+                          ENB < 1; an unexplained "0.4 effective bets" reads as
+                          nonsense, so caption WHY. */}
+                      {diversification.effectiveNumberOfBets < 1 && (
+                        <span
+                          data-testid="enb-below-one-disclosure"
+                          className="text-[11px] text-text-muted"
+                        >
+                          Below 1 — a hedge offsets risk, so the blend behaves
+                          like less than one independent bet.
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* CORR-05 — per-constituent risk contribution, sorted DESCENDING.
+                  The bar is decorative (aria-hidden); the % text carries the
+                  accessible value. PCR is signed:
+                  • WR-02 — the bar width is clamped to [0,100]% AND the track is
+                    `overflow-hidden`, so a hedge that pushes another leg's PCR
+                    above 100% can never bleed the fill out of its track.
+                  • WR-03 — a NEGATIVE (risk-reducing) leg gets a positive-token
+                    "risk-reducing" tag + a teal/positive mini-bar (scaled by
+                    |PCR|, clamped) instead of an empty 0-width bar that reads as
+                    "broken". The signed % text is preserved either way. */}
+              {diversification.pcr != null && (
+                <div>
+                  <p className="text-[12px] text-text-muted mb-2">
+                    Risk contribution per constituent (% of total)
+                  </p>
+                  <ul role="list" className="divide-y divide-border">
+                    {Object.entries(diversification.pcr)
+                      .sort(([, a], [, b]) => b - a)
+                      .map(([id, pcr]) => {
+                        const isHedge = pcr < 0;
+                        // Bar magnitude clamped to [0,100]% (decorative). The
+                        // signed % text below carries the true value.
+                        const barWidth = Math.min(
+                          100,
+                          Math.abs(pcr) * 100,
+                        ).toFixed(1);
+                        return (
+                          <li
+                            key={id}
+                            role="listitem"
+                            className="flex items-center gap-2 py-2"
+                          >
+                            <span className="text-[12px] text-text-primary truncate max-w-[160px]">
+                              {strategyNames[id] ?? id.slice(0, 8)}
+                            </span>
+                            {isHedge && (
+                              <span
+                                data-testid="pcr-risk-reducing-tag"
+                                className="inline-flex items-center rounded-sm bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-accent"
+                              >
+                                risk-reducing
+                              </span>
+                            )}
+                            <div
+                              className="flex-1 min-w-[60px] h-1.5 rounded-full bg-border overflow-hidden"
+                              aria-hidden
+                            >
+                              <div
+                                className={`h-full rounded-full ${
+                                  isHedge ? "bg-positive" : "bg-accent"
+                                }`}
+                                style={{ width: `${barWidth}%` }}
+                              />
+                            </div>
+                            <span className="text-[12px] font-metric tabular-nums text-text-primary w-[48px] text-right">
+                              {(pcr * 100).toFixed(1)}%
+                            </span>
+                          </li>
+                        );
+                      })}
+                  </ul>
+                </div>
+              )}
+            </>
+          )}
+        </CollapsibleSection>
       </Card>
 
       {/* GRAPH-02 — Returns distribution of the BLEND. Histogram (fed the

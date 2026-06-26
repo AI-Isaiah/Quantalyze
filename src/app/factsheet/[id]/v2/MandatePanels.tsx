@@ -124,6 +124,114 @@ export function TermsPanel() {
   );
 }
 
+/**
+ * ConstituentMandatePanel (Phase 42, PEER-04) — per-constituent mandate chips
+ * for the scenario BLEND.
+ *
+ * Renders ONLY for the scenario blend: it reads the csv-only `scenarioMandate`
+ * carve-out (narrowed on `ingestSource === "csv"`, mirroring the B6 discriminated-
+ * union discipline) and returns null on every non-scenario factsheet (the real
+ * route is byte-identical — the carve-out key is omitted there). One sub-block
+ * per constituent with chips for the genuinely-available `strategy_types` +
+ * `markets` + the per-constituent `leverage`. NO fabricated aggregate mandate.
+ *
+ * HONEST-EMPTY (PEER-04):
+ *   - Per constituent: when a constituent has NO strategy_types AND NO markets,
+ *     its sub-block reads "no mandate metadata" (the leverage chip alone is not
+ *     "metadata" — it always exists at ≥ 1.0, so a types+markets-empty constituent
+ *     is treated as empty per the UI-SPEC honest-empty rule).
+ *   - Whole panel: when NO constituent has any types/markets, the panel body reads
+ *     "No mandate metadata available for this blend's constituents." — the "Mandate"
+ *     title still renders (the absence is itself informative).
+ *
+ * The interactive `MandateChipGroup` is deliberately NOT reused — it is a
+ * role=checkbox control (wrong a11y for a read-only display). `Chip` here is a
+ * local static span.
+ */
+export function ConstituentMandatePanel() {
+  const payload = usePayload();
+  // Scenario-only narrow: the mandate carve-out lives on the csv arm.
+  const mandate =
+    payload.ingestSource === "csv" ? (payload.scenarioMandate ?? null) : null;
+  if (!mandate) return null;
+
+  // Whole-panel honest-empty: no constituent carries any types OR markets.
+  const anyMetadata = mandate.constituents.some(
+    (c) => c.strategy_types.length > 0 || c.markets.length > 0,
+  );
+
+  return (
+    <section>
+      <header className="mb-2 border-b border-text pb-1">
+        <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary">Mandate</h3>
+      </header>
+      {anyMetadata ? (
+        <div>
+          {mandate.constituents.map((c, i) => {
+            const hasMeta = c.strategy_types.length > 0 || c.markets.length > 0;
+            return (
+              <div key={`${c.name}-${i}`} className="py-2 border-b border-border/40 last:border-0">
+                <p className="text-[11px] font-semibold text-text-primary mb-1">{c.name}</p>
+                {hasMeta ? (
+                  <div className="flex flex-col gap-1">
+                    {c.strategy_types.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {c.strategy_types.map((t) => (
+                          <Chip key={`t-${t}`}>{t}</Chip>
+                        ))}
+                      </div>
+                    )}
+                    {c.markets.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {c.markets.map((mk) => (
+                          <Chip key={`m-${mk}`}>{mk}</Chip>
+                        ))}
+                      </div>
+                    )}
+                    {/* GUARD-01 (43-01) — leverage-alone is not metadata; a
+                        bare "1×" chip is noise. Suppress ONLY at exactly 1×; any
+                        other value — deleveraged (<1×) or levered (>1×) — is a
+                        meaningful mandate signal and still renders. */}
+                    {c.leverage !== 1 && (
+                      <div className="flex flex-wrap gap-1">
+                        <Chip>{formatLeverage(c.leverage)}×</Chip>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-[11px] italic text-text-muted">no mandate metadata</p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="text-[11px] italic text-text-muted">
+          No mandate metadata available for this blend&apos;s constituents.
+        </p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Read-only neutral-outline mandate chip (DESIGN.md badge ladder; UI-SPEC §2
+ * verbatim). A static span — NOT the interactive MandateChipGroup.
+ */
+function Chip({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center rounded-sm border border-border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-text-secondary">
+      {children}
+    </span>
+  );
+}
+
+/** Compact leverage label: integers as "2", fractions trimmed to ≤2 dp ("1.5"). */
+function formatLeverage(l: number): string {
+  if (!Number.isFinite(l)) return "1";
+  return Number.isInteger(l) ? String(l) : String(Number(l.toFixed(2)));
+}
+
 function Term({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <>
