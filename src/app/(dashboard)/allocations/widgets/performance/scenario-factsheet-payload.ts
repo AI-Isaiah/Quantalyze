@@ -37,6 +37,21 @@
  */
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { deriveSnapshotDrawdowns } from "@/app/(dashboard)/allocations/lib/drawdown";
+import { compute, worstDrawdowns } from "@/lib/factsheet/compute";
+import {
+  rollingVol,
+  rollingSharpe,
+  rollingSortino,
+  pickRollingWindow,
+  ROLL_WINDOW_90D,
+  ROLL_WINDOW_30D,
+} from "@/lib/factsheet/rolling";
+import { streakLengths, streakHistogram } from "@/lib/factsheet/streak";
+import { calmarByYear } from "@/lib/factsheet/calmar-by-year";
+import { bootstrapCI } from "@/lib/factsheet/bootstrap";
+import { monthlyReturnsMatrix, dailyReturnsByYear } from "@/lib/factsheet/period-buckets";
+import { computeStressWindows } from "@/lib/factsheet/stress-windows";
+import { quantileSummary } from "@/lib/factsheet/quantiles";
 import type {
   ChartConfig,
 } from "@/app/factsheet/[id]/v2/chart-configs";
@@ -190,17 +205,183 @@ function notEnoughWindow(): RollWindowPick {
   return { window: 0, label: "", enough: false };
 }
 
+/** Safe-empty streaks block — the degenerate-path default (no win/loss runs). */
+function emptyStreaks(): FactsheetCsvPayload["streaks"] {
+  return {
+    winsByLength: [],
+    lossesByLength: [],
+    totalWins: 0,
+    totalLosses: 0,
+    longestWin: 0,
+    longestLoss: 0,
+    maxLen: 0,
+  };
+}
+
+/** Safe-empty bootstrap-CI block — zeroed point/lo/hi + empty histograms. */
+function emptyBootstrapCI(): FactsheetCsvPayload["bootstrapCI"] {
+  return {
+    sharpe: { point: 0, lo: 0, hi: 0, hist: { lo: 0, hi: 0, bins: [] } },
+    sortino: { point: 0, lo: 0, hi: 0, hist: { lo: 0, hi: 0, bins: [] } },
+    max_dd: { point: 0, lo: 0, hi: 0, hist: { lo: 0, hi: 0, bins: [] } },
+    n_resamples: 0,
+    block_len: 0,
+  };
+}
+
+/** Safe-empty stress-window block — no windows, empty benchName. */
+function emptyStressWindows(): FactsheetCsvPayload["stressWindows"] {
+  return {
+    windows: [],
+    benchName: "",
+    totalCatalogued: 0,
+    droppedOutOfRange: 0,
+    droppedPartial: 0,
+  };
+}
+
+/** Safe-empty quantile summary — every percentile zero. */
+function emptyQuantiles(): FactsheetCsvPayload["quantiles"] {
+  return { p05: 0, p25: 0, p50: 0, p75: 0, p95: 0, min: 0, max: 0, mean: 0 };
+}
+
 /**
- * Build a minimal, valid `FactsheetPayload` (csv arm) from the composer's
- * date-keyed scenario + optional benchmark. Index-aligns everything to ONE
- * canonical `dates[]` axis (the scenario's own dates). Returns a safe empty
- * payload when the scenario is empty or carries any non-finite value.
+ * Daily-return-derived body fields: the full scalar metric set + every panel
+ * array, synthesized from the blend's `portfolio_daily_returns` (daily RETURN
+ * form) via the population-convention `compute.ts`/`rolling.ts` helper family —
+ * mirroring `build-payload.ts`'s csv-arm assembly field-for-field (PAYLOAD-01/02/
+ * 03/04). Returns the safe-empty defaults when `portfolioDaily` is degenerate
+ * (empty / any non-finite return / < 2 dated points) WITHOUT calling `compute()`
+ * (which throws on empty) — never NaN/Inf, never fabricated zeros presented as
+ * real metrics (PAYLOAD-05). `strategyMetrics.n` flows from `rets.length` (the
+ * true overlapping-observation count), driving the unchanged n<252 caveat.
+ *
+ * NOTE: this is DISTINCT from the equity/drawdown chart LINE, which keeps its
+ * existing WEALTH-series source (D-2 Option a) so the Phase-38 chart-parity pins
+ * stay byte-identical. The returns axis (`datesR`) is the metric/panel axis; the
+ * chart line reads the scenario `dates`/`scenario` axis.
+ */
+type ReturnsBody = {
+  strategyReturns: FactsheetCsvPayload["strategyReturns"];
+  strategyRollingVol: FactsheetCsvPayload["strategyRollingVol"];
+  strategyRollingSharpe: FactsheetCsvPayload["strategyRollingSharpe"];
+  strategyRollingSortino: FactsheetCsvPayload["strategyRollingSortino"];
+  rollingWindow: FactsheetCsvPayload["rollingWindow"];
+  rollingBetaWindow: FactsheetCsvPayload["rollingBetaWindow"];
+  strategyWorst10: FactsheetCsvPayload["strategyWorst10"];
+  strategyMetrics: ComputeSummary;
+  streaks: FactsheetCsvPayload["streaks"];
+  calmarByYear: FactsheetCsvPayload["calmarByYear"];
+  bootstrapCI: FactsheetCsvPayload["bootstrapCI"];
+  monthlyReturns: FactsheetCsvPayload["monthlyReturns"];
+  dailyHeatmap: FactsheetCsvPayload["dailyHeatmap"];
+  stressWindows: FactsheetCsvPayload["stressWindows"];
+  quantiles: FactsheetCsvPayload["quantiles"];
+};
+
+function buildReturnsBody(portfolioDaily: DailyPoint[]): ReturnsBody {
+  const rets = portfolioDaily.map((p) => p.value);
+  const datesR = portfolioDaily.map((p) => p.date);
+
+  // Returns-degenerate gate — evaluated BEFORE any compute() call (compute()
+  // throws on empty). Empty / any non-finite return / a single dated point all
+  // collapse to the safe-empty body (PAYLOAD-05). The frozen engine already
+  // pre-collapses to [] below n<10, so realistically this sees [] or n>=10.
+  const degenerate =
+    portfolioDaily.length === 0 ||
+    rets.some((v) => !Number.isFinite(v)) ||
+    datesR.length < 2;
+
+  if (degenerate) {
+    return {
+      strategyReturns: [],
+      strategyRollingVol: [],
+      strategyRollingSharpe: [],
+      strategyRollingSortino: [],
+      rollingWindow: notEnoughWindow(),
+      rollingBetaWindow: notEnoughWindow(),
+      strategyWorst10: [],
+      strategyMetrics: zeroedComputeSummary(),
+      streaks: emptyStreaks(),
+      calmarByYear: [],
+      bootstrapCI: emptyBootstrapCI(),
+      monthlyReturns: [],
+      dailyHeatmap: [],
+      stressWindows: emptyStressWindows(),
+      quantiles: emptyQuantiles(),
+    };
+  }
+
+  // Populated path — mirror build-payload.ts:123-231 (csv arm), population
+  // convention (252 vol/Sharpe, 365.25 CAGR). compute() sets n = rets.length →
+  // PAYLOAD-04 automatic. Strip the heavy eq/dd arrays (the chart LINE carries
+  // its own wealth-derived equity/drawdowns).
+  const rollWindow = pickRollingWindow(rets.length);
+  const rollBetaWindow = pickRollingWindow(rets.length, [
+    { window: ROLL_WINDOW_90D, label: "90d" },
+    { window: ROLL_WINDOW_30D, label: "30d" },
+  ]);
+  const { eq: _eq, dd, ...strategyMetrics } = compute(rets, datesR);
+  const { wins, losses } = streakLengths(rets);
+  const MAX_LEN = 14;
+
+  return {
+    strategyReturns: rets,
+    strategyRollingVol: rollingVol(rets, rollWindow.window),
+    strategyRollingSharpe: rollingSharpe(rets, rollWindow.window),
+    strategyRollingSortino: rollingSortino(rets, rollWindow.window),
+    rollingWindow: rollWindow,
+    rollingBetaWindow: rollBetaWindow,
+    strategyWorst10: worstDrawdowns(dd, 10),
+    strategyMetrics,
+    streaks: {
+      winsByLength: streakHistogram(wins, MAX_LEN),
+      lossesByLength: streakHistogram(losses, MAX_LEN),
+      totalWins: wins.length,
+      totalLosses: losses.length,
+      longestWin: wins.length > 0 ? Math.max(...wins) : 0,
+      longestLoss: losses.length > 0 ? Math.max(...losses) : 0,
+      maxLen: MAX_LEN,
+    },
+    calmarByYear: calmarByYear(rets, datesR),
+    bootstrapCI: bootstrapCI(rets),
+    monthlyReturns: monthlyReturnsMatrix(rets, datesR),
+    dailyHeatmap: dailyReturnsByYear(rets, datesR),
+    // D-4 / Pitfall 5: the blend has no separate benchmark daily series, so pass
+    // the strat's own returns as benchRet + an empty benchName (honest — the
+    // window's bench column mirrors the strategy). markets=[] → full catalogue.
+    stressWindows: computeStressWindows(datesR, rets, rets, "", []),
+    quantiles: quantileSummary(rets),
+  };
+}
+
+/**
+ * Build a COMPLETE, valid `FactsheetPayload` (csv arm) from the composer's
+ * date-keyed scenario + optional benchmark + the engine's daily-RETURN series.
+ *
+ * Two independent axes feed this payload, by design (D-2 Option a):
+ *   - The chart LINE (`dates` / `strategyEquity` / `strategyDrawdowns`) reads
+ *     the scenario WEALTH series, index-aligned to ONE canonical `dates[]` axis
+ *     (the scenario's own dates) — preserving the Phase-38 chart-parity pins.
+ *   - The full scalar metric set + every panel array (`strategyMetrics`,
+ *     rolling*, streaks, calmar, bootstrap, monthly/heatmap, quantiles, stress)
+ *     are synthesized from `portfolioDaily` (daily RETURN form) via the
+ *     population-convention `compute.ts`/`rolling.ts` family — see
+ *     `buildReturnsBody`. The blend never hits the Python compute.
+ *
+ * Both axes degenerate-collapse independently: a poisoned/empty WEALTH series →
+ * empty chart line; a poisoned/empty/sub-2-date RETURNS series → safe-empty
+ * metrics/panels (BEFORE any compute() call). Neither ever emits NaN/Inf.
  */
 export function buildScenarioFactsheetPayload(
   args: ScenarioFactsheetPayloadArgs,
 ): FactsheetCsvPayload {
-  const { scenario, benchmark, strategyId } = args;
+  const { scenario, benchmark, portfolioDaily, strategyId } = args;
   const id = strategyId ?? DEFAULT_SCENARIO_ID;
+
+  // Returns-derived body (full scalars + panel arrays). Self-guards its own
+  // returns-degenerate gate before calling compute() (PAYLOAD-01..05).
+  const body = buildReturnsBody(portfolioDaily ?? []);
 
   // Degenerate-collapse: empty, or ANY non-finite scenario value → safe empty
   // payload (no NaN propagation into the chart). Mirrors the analog's rule.
@@ -253,51 +434,40 @@ export function buildScenarioFactsheetPayload(
     startDate: null,
     benchmark: null,
     dates,
-    strategyReturns: [],
+    // ── Returns-derived body (full scalars + panel arrays, PAYLOAD-01/02/03/04/05) ──
+    strategyReturns: body.strategyReturns,
+    // strategyEquity / strategyDrawdowns stay on the WEALTH-series source (D-2
+    // Option a) — the chart LINE keeps Phase-38 byte-parity; only the metrics
+    // and panels above read the returns axis.
     strategyEquity,
-    strategyRollingVol: [],
-    strategyRollingSharpe: [],
-    strategyRollingSortino: [],
-    rollingWindow: notEnoughWindow(),
-    rollingBetaWindow: notEnoughWindow(),
+    strategyRollingVol: body.strategyRollingVol,
+    strategyRollingSharpe: body.strategyRollingSharpe,
+    strategyRollingSortino: body.strategyRollingSortino,
+    rollingWindow: body.rollingWindow,
+    rollingBetaWindow: body.rollingBetaWindow,
     strategyDrawdowns,
-    strategyWorst10: [],
-    strategyMetrics: zeroedComputeSummary(),
+    strategyWorst10: body.strategyWorst10,
+    strategyMetrics: body.strategyMetrics,
     activeComparator: hasBenchmark ? "btc" : "none",
     comparators: {
       btc,
       spx: inertComparatorBlock("S&P 500", "SPX"),
       none: inertComparatorBlock("None", "None"),
     },
+    // D-5: style-drift panel DEFERRED to v2 (CONTEXT wins over PAYLOAD-02's
+    // mention — Rule 7). Phase 39 holds it null rather than fabricate it.
     styleDrift: null,
-    streaks: {
-      winsByLength: [],
-      lossesByLength: [],
-      totalWins: 0,
-      totalLosses: 0,
-      longestWin: 0,
-      longestLoss: 0,
-      maxLen: 0,
-    },
-    calmarByYear: [],
-    bootstrapCI: {
-      sharpe: { point: 0, lo: 0, hi: 0, hist: { lo: 0, hi: 0, bins: [] } },
-      sortino: { point: 0, lo: 0, hi: 0, hist: { lo: 0, hi: 0, bins: [] } },
-      max_dd: { point: 0, lo: 0, hi: 0, hist: { lo: 0, hi: 0, bins: [] } },
-      n_resamples: 0,
-      block_len: 0,
-    },
-    monthlyReturns: [],
-    dailyHeatmap: [],
+    streaks: body.streaks,
+    calmarByYear: body.calmarByYear,
+    bootstrapCI: body.bootstrapCI,
+    monthlyReturns: body.monthlyReturns,
+    dailyHeatmap: body.dailyHeatmap,
+    // D-6: market correlations stay HONEST-EMPTY — there is no aligned benchmark
+    // daily series to correlate against, and the CONSTITUENT-correlation matrix
+    // is Phase 41's job. Never fabricate a self-correlation here.
     correlations: [],
     correlationMatrix: { labels: [], matrix: [] },
-    stressWindows: {
-      windows: [],
-      benchName: "",
-      totalCatalogued: 0,
-      droppedOutOfRange: 0,
-      droppedPartial: 0,
-    },
-    quantiles: { p05: 0, p25: 0, p50: 0, p75: 0, p95: 0, min: 0, max: 0, mean: 0 },
+    stressWindows: body.stressWindows,
+    quantiles: body.quantiles,
   };
 }

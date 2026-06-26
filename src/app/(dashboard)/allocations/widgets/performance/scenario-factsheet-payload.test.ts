@@ -263,7 +263,14 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
     expect(p.dailyHeatmap.length).toBeGreaterThan(0);
     expect(p.strategyReturns).toEqual(rets);
     expect(p.streaks.totalWins + p.streaks.totalLosses).toBeGreaterThan(0);
-    expect(p.strategyWorst10.length).toBeGreaterThan(0);
+    // strategyWorst10 is exercised on BLEND_30, which has down days (a
+    // monotone-non-decreasing series like BLEND_252 genuinely has NO drawdown).
+    const pDip = buildScenarioFactsheetPayload({
+      scenario: wealthFor(BLEND_30),
+      portfolioDaily: BLEND_30,
+    });
+    expect(pDip.strategyWorst10.length).toBeGreaterThan(0);
+    expect(pDip.strategyWorst10[0].depth).toBeLessThan(0);
     // Rolling series populated for a 252-day blend (post-warmup values exist).
     expect(p.strategyRollingVol.some((v) => v != null)).toBe(true);
     expect(p.strategyRollingSharpe.some((v) => v != null)).toBe(true);
