@@ -2336,20 +2336,30 @@ export function ScenarioComposer({
           entry-mode pill recipe + existing tokens only (no new design token).
           The included state = accent outline (no fill); excluded = neutral
           outline; never red (excluding a source is a normal modeling action). */}
+      {/* GUARD-01 (43-01) — the Phase-37 Data-sources include/exclude control
+          is folded into a factsheet-shaped CollapsibleSection so it reads as a
+          sibling editorial section with Diversification (:2601) and
+          Strategies-&-weights (:2962) — compose + read on one surface. The
+          per-key role="switch" rows are REPOSITIONED verbatim (same handlers,
+          no redesign); only the wrapping container changed. `storageKey` is
+          OMITTED on purpose (mirrors Diversification's deliberate omission —
+          GUARD-04 asserts no new persisted key on the composer surface). The
+          old inline header/subtitle <p> are absorbed by the CollapsibleSection
+          title + subtitle. */}
       {showDataSources && (
-        <div
-          role="group"
-          aria-label="Data sources"
-          data-testid="scenario-data-sources"
-          className="mt-4 flex flex-col gap-2"
-        >
-          <div className="text-[12px] font-semibold uppercase tracking-wide text-text-secondary">
-            Data sources
-          </div>
-          <p className="text-[12px] text-text-muted">
-            Toggle a source off to model the book without it. Resets on reload.
-          </p>
-          <div className="flex flex-col">
+        <Card className="mt-6">
+          <CollapsibleSection
+            id="factsheet-data-sources"
+            title="Data sources"
+            subtitle="Toggle a source off to model the book without it. Resets on reload."
+            defaultOpen
+          >
+            <div
+              role="group"
+              aria-label="Data sources"
+              data-testid="scenario-data-sources"
+              className="flex flex-col"
+            >
             {dataSourceKeys.map((k) => {
               const included = includeByApiKeyId[k.id] ?? true;
               const { exchange, nickname, maskedTail } = dataSourceLabel(k);
@@ -2388,8 +2398,9 @@ export function ScenarioComposer({
                 </div>
               );
             })}
-          </div>
-        </div>
+            </div>
+          </CollapsibleSection>
+        </Card>
       )}
 
       {showDataSourcesFallback && (
