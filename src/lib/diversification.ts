@@ -90,7 +90,10 @@ export interface DiversificationInput {
    *  levered basis as `portfolioDailyReturns` (CR-01/WR-01). An all-1 map is
    *  byte-identical to a correct un-levered computation. */
   leverage?: Record<string, number>;
-  /** Engine `portfolio_daily_returns` values (LEVERED). */
+  /** Engine `portfolio_daily_returns` values (LEVERED). NOTE: the DR denominator
+   *  σ_p is NO LONGER derived from this (QA-DR01) — it is the quadratic form of
+   *  the shared levered covariance (`portfolioVarianceFromCov`) so the Choueifaty
+   *  bound holds on staggered-inception blends. Retained for reference/telemetry. */
   portfolioDailyReturns: number[];
   /** Engine ρ (read-only). */
   correlationMatrix: Record<string, Record<string, number>> | null;
@@ -260,15 +263,47 @@ export function constituentVols(
 }
 
 /**
+ * Levered portfolio variance ŵᵀΣ_levŵ from the levered covariance — the SAME
+ * quadratic form `percentContributionToRisk` computes for its denominator. The
+ * DR denominator σ_p is derived from THIS (σ_p = √(ŵᵀΣŵ)), NOT from a separately
+ * estimated realized std, so the DR numerator (σ_levᵢ = √Σᵢᵢ) and denominator
+ * share ONE covariance. That shared-Σ basis is what makes the Choueifaty bound
+ * DR ≥ 1 hold for ANY long-only blend at ANY window — including a STAGGERED-
+ * inception blend where the engine's renormalized realized σ_p would sit on a
+ * DIFFERENT basis than the zero-filled per-constituent σᵢ (QA-DR01: that basis
+ * split rendered DR = 0.96 live). Returns 0 for a degenerate (≤0) variance so the
+ * caller renders "—" rather than dividing by 0.
+ */
+export function portfolioVarianceFromCov(
+  ids: string[],
+  weights: Record<string, number>,
+  cov: number[][],
+): number {
+  const w = ids.map((id) => weights[id] ?? 0);
+  let v = 0;
+  for (let i = 0; i < ids.length; i++) {
+    let row = 0;
+    for (let j = 0; j < ids.length; j++) row += cov[i][j] * w[j];
+    v += w[i] * row;
+  }
+  return v > 0 ? v : 0;
+}
+
+/**
  * Choueifaty Diversification Ratio: DR = (Σᵢ ŵᵢ·σ_levᵢ) / σ_p.
  *
  * ── LEVERED-CONSISTENT BASIS (CR-01 fix) ────────────────────────────────────
- * Both the numerator and the denominator describe the SAME (levered) portfolio
- * the allocator is actually looking at. The denominator σ_p is the realized
- * LEVERED portfolio σ — `stdDev(portfolioDailyReturns, true)`, the same SAMPLE
- * std the engine reports as `volatility`, and `portfolio_daily_returns` already
- * bakes in per-strategy leverage (`Σ ŵᵢ·Lᵢ·rᵢ`, scenario.ts:251). The numerator
- * MUST therefore lever each constituent's σ too: treat each leg's asset as its
+ * Both the numerator and the denominator are derived from ONE shared levered
+ * covariance Σ_lev. The denominator σ_p = √(ŵᵀΣ_levŵ) (`portfolioVarianceFromCov`)
+ * — the quadratic form of the same Σ_lev whose diagonal gives the numerator's
+ * σ_levᵢ = √Σᵢᵢ. Sharing one Σ is what makes the Choueifaty bound (Cauchy-
+ * Schwarz) hold at ANY window. (QA-DR01: a prior basis used the engine's realized
+ * `stdDev(portfolioDailyReturns)` as σ_p; for a fully-overlapping window that
+ * EQUALS √(ŵᵀΣŵ), but for a STAGGERED-inception blend the realized σ_p is
+ * renormalized over the started subset while the per-constituent σᵢ are zero-
+ * filled/deflated — the two bases diverged and DR fell to 0.96 live. Deriving σ_p
+ * from the shared zero-filled Σ removes the split.) The numerator levers each
+ * constituent's σ too: treat each leg's asset as its
  * levered series `xᵢ = Lᵢ·rᵢ`, so `σ_levᵢ = std(xᵢ) = Lᵢ·σᵢ`. `vols` here are
  * the per-constituent LEVERED σ (computed by the orchestrator from the levered
  * aligned series), and `weights` are the NORMALIZED UN-levered weights ŵᵢ
@@ -458,8 +493,9 @@ export function tooSimilarPairs(
  * consistent with the engine's levered `portfolio_daily_returns` (CR-01/WR-01).
  * The ρ path is untouched (leverage-invariant — it comes from the engine, and
  * the consistency pin rebuilds it from the UN-levered series). Every division is
- * guarded; no NaN/Inf escapes. σ_p is the SAMPLE std of the LEVERED
- * `portfolioDailyReturns` — the same statistic the engine reports as `volatility`.
+ * guarded; no NaN/Inf escapes. σ_p is √(ŵᵀΣ_levŵ) — the quadratic form of the
+ * SAME levered Σ as the numerator/PCR (QA-DR01), NOT the realized
+ * `portfolioDailyReturns` std, so the Choueifaty bound DR ≥ 1 holds at any window.
  */
 export function computeDiversification(
   input: DiversificationInput,
@@ -496,7 +532,16 @@ export function computeDiversification(
   const vols = constituentVols(input.returnsById, input.ids);
   if (!cov || !leveredVols || !vols) return empty;
 
-  const sigmaP = stdDev(input.portfolioDailyReturns, true); // SAMPLE, levered
+  // σ_p for the Choueifaty DR is the quadratic form √(ŵᵀΣ_levŵ) of the SAME
+  // levered covariance the numerator vols and PCR use — NOT the engine's
+  // separately-estimated realized std. Sharing one Σ guarantees DR ≥ 1 for any
+  // long-only blend at any window (QA-DR01: the realized-std basis rendered DR =
+  // 0.96 on a staggered-inception blend). Under uniform leverage cov scales by L²
+  // so σ_p scales by L, matching the L·σ_levᵢ numerator → the ratio stays
+  // leverage-invariant (CR-01).
+  const sigmaP = Math.sqrt(
+    portfolioVarianceFromCov(input.ids, input.weights, cov),
+  );
   const diversificationRatioValue = diversificationRatio(
     input.weights,
     leveredVols,
