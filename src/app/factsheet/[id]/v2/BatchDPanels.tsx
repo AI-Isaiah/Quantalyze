@@ -104,11 +104,16 @@ export function PeerPercentilePanel() {
         <PercentileBar label="Sortino" pct={p.sortino} />
         <PercentileBar label="Max DD (shallower = better)" pct={p.max_dd} />
       </div>
-      {/* Disclosure copy: the api/demo-cohort footnote stays here; the scenario
-          (hypothetical · vs verified strategies) disclosure render lands in
-          plan 04. This plan only wires the read path + suppresses the "Demo
-          cohort" badge for the scenario case. */}
-      {!isScenario && (
+      {/* Disclosure copy (PEER-02). The api/demo-cohort path keeps its existing
+          ITALIC synthesized-cohort footnote byte-identical. The scenario BLEND
+          path shows the hypothetical disclosure — PLAIN 10px muted (not italic),
+          U+00B7 middle-dot separators — that the blend is ranked vs the REAL
+          verified universe on the engine's sample/252 basis (42-UI-SPEC §1). */}
+      {isScenario ? (
+        <p className="mt-2 text-[10px] text-text-muted">
+          hypothetical blend · ranked vs verified strategies · sample/252 basis
+        </p>
+      ) : (
         <p className="mt-2 text-[10px] italic text-text-muted">
           Synthesized peer cohort (deterministic seed). Production: replace with platform strategy DB.
         </p>
