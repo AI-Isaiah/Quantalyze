@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import type { PeerPercentilePayload } from "@/lib/factsheet/types";
 import { FactsheetProvider, useXRange } from "@/app/factsheet/[id]/v2/factsheet-context";
 import { FactsheetBody } from "@/app/factsheet/[id]/v2/FactsheetView";
 import { buildScenarioFactsheetPayload } from "./scenario-factsheet-payload";
@@ -89,6 +90,17 @@ export interface ScenarioFactsheetChartProps {
    * the chart renders the full-resolution scenario line.
    */
   portfolioDaily?: DailyPoint[];
+  /**
+   * Phase 42 (PEER-01, ADR-0025) — the blend's live peer rank vs the REAL
+   * verified universe, on the engine's sample/252 basis. The ONLY carve-out
+   * field that flows onto the synthesized csv payload (it never flips
+   * `ingestSource`; the three genuinely-synthetic api panels stay absent).
+   * Optional + additive: omitted → `buildScenarioFactsheetPayload` produces a
+   * byte-identical payload (the key is OMITTED, not undefined), so the peer
+   * panel is absent. The composer supplies it only when the blend has
+   * n>=252 obs AND the route returned a non-null rank (>= min-N cohort).
+   */
+  scenarioPeer?: PeerPercentilePayload;
 }
 
 /**
@@ -153,19 +165,26 @@ export function ScenarioFactsheetChart({
   // (WR-01). They are intentionally not destructured here.
   benchmark,
   portfolioDaily = [],
+  scenarioPeer,
 }: ScenarioFactsheetChartProps) {
   // Synthesize the minimal, valid FactsheetPayload (csv arm) the factsheet
   // TimeSeriesChart + MasterBrush consume verbatim. SINGLE full-res returns axis
   // (WR-01): `dates`/equity/drawdowns/returns/panels all derive from
   // `portfolioDaily`. Memoized so a pan (which only churns xRange in context)
   // doesn't rebuild the payload.
+  //
+  // PEER-01: `scenarioPeer` is the ONLY carve-out field flowing onto the synth
+  // csv payload — `buildScenarioFactsheetPayload` conditionally spreads it, so
+  // an absent prop yields a byte-identical payload (no scenarioPeer key) and the
+  // peer panel stays absent.
   const synthPayload = useMemo(
     () =>
       buildScenarioFactsheetPayload({
         benchmark: benchmark ?? null,
         portfolioDaily,
+        scenarioPeer,
       }),
-    [benchmark, portfolioDaily],
+    [benchmark, portfolioDaily, scenarioPeer],
   );
 
   const axisLength = synthPayload.dates.length;
