@@ -5,7 +5,7 @@ import type { JointMetrics } from "@/lib/factsheet/types";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import { CalmarByYearPanel, BootstrapCIPanel } from "./AnalyticalPanels";
 import { StyleDriftPanel, PeerPercentilePanel } from "./BatchDPanels";
-import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel } from "./MandatePanels";
+import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentMandatePanel } from "./MandatePanels";
 
 /**
  * Editorial right-column metrics. Four named sections — Performance, Risk,
@@ -130,6 +130,12 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
       </EditorialSection>
 
       <EditorialSection label="V" name="Terms">
+        {/* Phase 42 (PEER-04): per-constituent mandate chips for the scenario
+            BLEND, BEFORE TermsPanel (UI-SPEC §V). scenarioMode-gated here — the
+            panel ALSO null-guards on its csv-only `scenarioMandate` carve-out, so
+            on every existing (non-scenario) call site it renders nothing and §V
+            stays byte-identical. */}
+        {scenarioMode && <ConstituentMandatePanel />}
         <LeverageProfilePanel />
         <TermsPanel />
       </EditorialSection>
