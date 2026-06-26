@@ -2467,7 +2467,14 @@ export function ScenarioComposer({
           is persist=false so a scenario pan never rewrites the dashboard URL or
           writes a factsheet-v2: localStorage blob. The Overview EquityChartWidget
           stays on the legacy render (scope boundary). */}
-      <div className="relative mt-6">
+      {/* GUARD-01 / P40-W2 (43-01) — mount-seam padding compensated on the
+          COMPOSER side only. The mounted factsheet <article> carries its own
+          responsive top padding (`py-6 sm:py-10 lg:py-12`, FactsheetView.tsx:192);
+          the previous `mt-6` on this wrapper stacked ON TOP of that, double-padding
+          the seam. Drop the wrapper margin to 0 so the article's own top padding is
+          the SINGLE seam gap. The factsheet article class is NOT touched
+          (byte-identity preserved). */}
+      <div className="relative mt-0">
         {/* BENCH-01 — the BTC overlay rides the synth payload's `benchmark`
             (cumulative-WEALTH form via `btcWealth`). `btcWealth` is undefined
             when the toggle is off or the benchmark is unavailable, which hides
@@ -2628,7 +2635,7 @@ export function ScenarioComposer({
                   (NO red, NO icon). */}
               {diversification.tooSimilarPairs.length > 0 && (
                 <div>
-                  <span className="inline-flex items-center gap-1.5 rounded-sm border bg-[#FEF3C7] border-[#FDE68A] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-warning">
+                  <span className="inline-flex items-center gap-1.5 rounded-sm border bg-warning-bg border-warning-border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-warning">
                     {diversification.tooSimilarPairs.length}{" "}
                     {diversification.tooSimilarPairs.length === 1
                       ? "pair"
@@ -2751,7 +2758,7 @@ export function ScenarioComposer({
                             {isHedge && (
                               <span
                                 data-testid="pcr-risk-reducing-tag"
-                                className="inline-flex items-center rounded-sm bg-positive/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-positive"
+                                className="inline-flex items-center rounded-sm bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-accent"
                               >
                                 risk-reducing
                               </span>

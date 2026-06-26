@@ -3776,9 +3776,11 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const tag = within(ethRow).getByTestId("pcr-risk-reducing-tag");
     expect(tag).toBeInTheDocument();
     expect(tag.textContent).toMatch(/risk-reducing/i);
-    // Positive (teal) token, NOT an error/negative red — risk reduction is good.
-    expect(tag.className).toContain("text-positive");
-    expect(tag.className).not.toMatch(/text-negative|text-warning/);
+    // GUARD-01 (43-01) — the tag uses the NEUTRAL accent (muted teal) token,
+    // NOT the P&L-positive green: "risk-reducing" is a structural attribute of
+    // the leg, not a good/bad P&L outcome. Never an error/negative red either.
+    expect(tag.className).toContain("text-accent");
+    expect(tag.className).not.toMatch(/text-positive|text-negative|text-warning/);
     // The hedge bar is the positive token and has NON-zero width (|PCR| scaled),
     // i.e. it is no longer a 0-width "broken" bar.
     const fill = ethRow.querySelector(

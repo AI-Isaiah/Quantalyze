@@ -121,6 +121,32 @@ describe("ConstituentMandatePanel — per-constituent chips (PEER-04)", () => {
     expect(getAllByText("no mandate metadata").length).toBe(1);
   });
 
+  it("GUARD-01: a populated constituent at exactly 1× suppresses the leverage chip; >1× still renders it", () => {
+    // Leverage-alone is not mandate metadata: a bare "1×" chip is noise. The
+    // guard `c.leverage > 1` (MandatePanels.tsx) suppresses it at exactly 1×
+    // while keeping the type/market chips. A >1× constituent keeps its chip.
+    const mandate: ScenarioMandatePayload = {
+      constituents: [
+        // Populated (types+markets) BUT 1× → chip suppressed, constituent NOT empty.
+        { name: "Flat Lever", strategy_types: ["market-neutral"], markets: ["BTC"], leverage: 1 },
+        // Populated AND >1× → chip renders.
+        { name: "Levered", strategy_types: ["trend-following"], markets: ["ETH"], leverage: 3 },
+      ],
+    };
+    const { getByText, queryByText } = renderPanel(csvPayload(mandate));
+
+    // The 1× constituent is genuinely populated (its type + market chips render),
+    // so it is NOT honest-empty — yet it carries no leverage chip.
+    expect(getByText("Flat Lever")).toBeTruthy();
+    expect(getByText("market-neutral")).toBeTruthy();
+    expect(getByText("BTC")).toBeTruthy();
+    expect(queryByText("1×")).toBeNull(); // the falsifiable guard
+
+    // The >1× constituent keeps its leverage chip.
+    expect(getByText("Levered")).toBeTruthy();
+    expect(getByText("3×")).toBeTruthy();
+  });
+
   it("all-empty constituents: whole-panel honest-empty copy renders AND the 'Mandate' title still renders", () => {
     const mandate: ScenarioMandatePayload = {
       constituents: [
