@@ -2225,6 +2225,7 @@ export function ScenarioComposer({
           equityDailyPoints={baselineEquityDailyPoints}
           scenarioSeries={scenarioWealthSeries}
           benchmark={btcWealth}
+          portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
         />
         {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted line
             swatch via the `--color-chart-benchmark` token (UI-SPEC §Copywriting

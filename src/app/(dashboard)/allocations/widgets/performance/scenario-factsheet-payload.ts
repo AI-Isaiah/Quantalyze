@@ -103,6 +103,14 @@ export interface ScenarioFactsheetPayloadArgs {
   baseline?: DailyPoint[] | null;
   /** Optional benchmark overlay (cumulative wealth form), date-keyed. */
   benchmark?: DailyPoint[] | null;
+  /**
+   * The engine's `portfolio_daily_returns` — daily RETURN form (decimal, e.g.
+   * 0.012), the input `compute()` consumes; distinct from `scenario` which is
+   * cumulative WEALTH (~1.0). This is the parity-by-construction source for the
+   * full scalar metric set + every panel array (Phase 39). Empty/absent →
+   * safe-empty body (the engine already pre-collapses to [] below n<10).
+   */
+  portfolioDaily?: DailyPoint[];
   /** Scenario-scoped synthetic strategy id (storage-key scoping). */
   strategyId?: string;
 }

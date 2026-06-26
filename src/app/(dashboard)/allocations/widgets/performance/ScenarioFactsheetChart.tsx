@@ -67,6 +67,14 @@ export interface ScenarioFactsheetChartProps {
   scenarioSeries: DailyPoint[];
   /** Optional BTC benchmark overlay (cumulative-wealth form). Undefined hides it. */
   benchmark?: DailyPoint[];
+  /**
+   * The engine's `portfolio_daily_returns` — daily RETURN form (decimal). The
+   * input the adapter feeds to `compute()` for the full scalar/panel body
+   * (Phase 39). Distinct from `scenarioSeries` (cumulative wealth, the chart
+   * line). Optional + defaults to [] → safe-empty body, so existing mounts that
+   * predate the metric body stay green.
+   */
+  portfolioDaily?: DailyPoint[];
 }
 
 /**
@@ -129,6 +137,7 @@ export function ScenarioFactsheetChart({
   equityDailyPoints,
   scenarioSeries,
   benchmark,
+  portfolioDaily = [],
 }: ScenarioFactsheetChartProps) {
   // Synthesize the minimal, valid FactsheetPayload (csv arm) the factsheet
   // TimeSeriesChart + MasterBrush consume verbatim. Index-aligned to ONE
@@ -140,8 +149,9 @@ export function ScenarioFactsheetChart({
         scenario: scenarioSeries,
         baseline: equityDailyPoints,
         benchmark: benchmark ?? null,
+        portfolioDaily,
       }),
-    [scenarioSeries, equityDailyPoints, benchmark],
+    [scenarioSeries, equityDailyPoints, benchmark, portfolioDaily],
   );
 
   const axisLength = synthPayload.dates.length;
