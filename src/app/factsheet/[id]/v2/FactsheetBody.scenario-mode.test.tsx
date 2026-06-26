@@ -109,4 +109,27 @@ describe("FactsheetBody — scenarioMode prop (BODY-02)", () => {
     expect(composer.getByText(/Reset view/i)).toBeTruthy();
     expect(composer.getByText(/^Display$/)).toBeTruthy();
   });
+
+  // GUARD-01 (43-01) — the footer "Page 1 / 1" print-stamp is a print-only
+  // artifact that leaks onto the on-screen composer mount. scenarioMode gates
+  // ONLY that stamp <p>; the disclaimer <p> stays unconditional in both modes.
+  // The byte-identity test above (default ≡ scenarioMode={false}) already
+  // proves the stamp is PRESENT at the default/false — GUARD-02 (43-02) pins
+  // the real route. Here we prove the additive suppression at scenarioMode={true}.
+  it("scenarioMode={true} hides the 'Page 1 / 1' footer stamp; the disclaimer stays", () => {
+    const composer = renderBody(true);
+    expect(composer.queryByText(/Page 1 \/ 1/i)).toBeNull();
+    // The legal disclaimer survives in both modes.
+    expect(
+      composer.queryByText(/Past performance is not indicative of future results/i),
+    ).not.toBeNull();
+  });
+
+  it("scenarioMode={false} keeps the 'Page 1 / 1' footer stamp (real-route byte-identity)", () => {
+    const real = renderBody(false);
+    expect(real.queryByText(/Page 1 \/ 1/i)).not.toBeNull();
+    expect(
+      real.queryByText(/Past performance is not indicative of future results/i),
+    ).not.toBeNull();
+  });
 });
