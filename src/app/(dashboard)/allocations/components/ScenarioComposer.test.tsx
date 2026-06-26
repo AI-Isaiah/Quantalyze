@@ -1946,6 +1946,77 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // Phase 39 (PAYLOAD-01) — ScenarioFactsheetChart receives portfolioDaily in
+  // daily-RETURN form (the engine's portfolio_daily_returns), the input the
+  // adapter feeds to compute(). This is DISTINCT from scenarioSeries (wealth,
+  // ~1.0). A rewire that accidentally passed the wealth series instead would
+  // make the metrics garbage (~+100%/day) — pin it: portfolioDaily values are
+  // returns-form (near 0, both signs), NOT wealth-form (>= 0.5).
+  // -------------------------------------------------------------------------
+  it("ScenarioFactsheetChart receives portfolioDaily = the engine's portfolio_daily_returns (daily-RETURN form, not wealth)", () => {
+    // A sign-varying return series → the engine emits portfolio_daily_returns
+    // with both positive and negative decimals (≈0), unambiguously distinct
+    // from the cumulative-wealth scenarioSeries (≈1.0).
+    const dates = Array.from({ length: 12 }, (_, i) =>
+      new Date(Date.UTC(2026, 0, i + 1)).toISOString().slice(0, 10),
+    );
+    const strat = {
+      id: "strat-real-rets",
+      name: "Real Strategy",
+      codename: null,
+      disclosure_tier: "verified",
+      strategy_types: ["momentum"],
+      markets: ["binance"],
+      start_date: "2026-01-01",
+      daily_returns: dates.map((date, i) => ({
+        date,
+        value: i % 2 === 0 ? 0.01 : -0.006,
+      })),
+      cagr: 0.1,
+      sharpe: 1.0,
+      volatility: 0.1,
+      max_drawdown: -0.02,
+    };
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [strat],
+      state: {
+        selected: { "strat-real-rets": true },
+        weights: { "strat-real-rets": 1 },
+        startDates: {},
+      },
+    });
+
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(ScenarioFactsheetChart).toHaveBeenCalled();
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls[0][0] as {
+      portfolioDaily?: Array<{ date: string; value: number }>;
+      scenarioSeries?: Array<{ date: string; value: number }>;
+    };
+    const daily = props.portfolioDaily ?? [];
+    // Fail loud: a vacuous pass (empty array) would hide a broken wiring.
+    expect(daily.length).toBeGreaterThan(0);
+    // Returns-form: values are decimals near 0 with BOTH signs (the engine
+    // blended a sign-varying series). NOT wealth-form (every value >= 0.5).
+    for (const p of daily) {
+      expect(Math.abs(p.value)).toBeLessThan(0.5);
+    }
+    expect(daily.some((p) => p.value > 0)).toBe(true);
+    expect(daily.some((p) => p.value < 0)).toBe(true);
+    // Cross-check the sibling wealth series IS wealth-form (~1.0), proving the
+    // two props carry genuinely different data models (no wealth/returns mixup).
+    const wealth = props.scenarioSeries ?? [];
+    expect(wealth.length).toBeGreaterThan(0);
+    for (const p of wealth) expect(p.value).toBeGreaterThan(0.5);
+  });
+
+  // -------------------------------------------------------------------------
   // T_C20 — data-widget-id="scenario-composer" attribute
   // -------------------------------------------------------------------------
   it("T_C20 outer container has data-widget-id='scenario-composer' for PostHog widget_viewed hook", () => {
