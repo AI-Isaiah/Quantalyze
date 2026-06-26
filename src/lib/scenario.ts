@@ -46,15 +46,6 @@
 import type { DailyPoint } from "./portfolio-math-utils";
 export type { DailyPoint } from "./portfolio-math-utils";
 
-/**
- * Default include-from when a strategy has neither a per-strategy override
- * (`state.startDates[id]`) nor its own `start_date`. This engine is the SINGLE
- * SOURCE OF TRUTH for the literal — the diversification lib imports it (IN-02)
- * rather than duplicating the string, so the lib's re-alignment can never
- * silently diverge from the engine's window.
- */
-export const DEFAULT_INCLUDE_FROM = "2022-01-01";
-
 export interface StrategyForBuilder {
   id: string;
   name: string;
@@ -201,8 +192,7 @@ export function computeScenario(
 
   const strategyStart = new Map<string, string>();
   for (const s of activeStrategies) {
-    const chosen =
-      state.startDates[s.id] ?? s.start_date ?? DEFAULT_INCLUDE_FROM;
+    const chosen = state.startDates[s.id] ?? s.start_date ?? "2022-01-01";
     strategyStart.set(s.id, chosen);
   }
 

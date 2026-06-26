@@ -34,11 +34,20 @@
  */
 import { mean, stdDev } from "@/lib/portfolio-math-utils";
 import {
-  DEFAULT_INCLUDE_FROM,
   type DailyPoint,
   type ScenarioState,
   type StrategyForBuilder,
 } from "@/lib/scenario";
+
+/**
+ * The engine's fallback include-from literal, mirrored here as a local const.
+ * scenario.ts is FROZEN (SCENARIO-05) and the frozen-spine guards forbid adding
+ * an export to it, so we cannot import this from the engine — this value MUST
+ * match scenario.ts's inline "2022-01-01" fallback. The WR-04 staggered
+ * consistency pin (rebuilt ρ ≡ engine correlation_matrix to 3dp) catches any
+ * drift between this mirror and the engine's window.
+ */
+const DEFAULT_INCLUDE_FROM = "2022-01-01";
 
 /** Mirror the engine's n<10 null gate (scenario.ts:210). */
 export const MIN_USABLE = 10;
@@ -46,11 +55,11 @@ export const MIN_USABLE = 10;
 /** The "too similar" correlation threshold (CORR-02, locked). */
 export const TOO_SIMILAR_THRESHOLD = 0.85;
 
-// IN-02 — the fallback include-from is the ENGINE's, imported from scenario.ts
-// (`DEFAULT_INCLUDE_FROM`) so the re-alignment can NEVER silently diverge from
-// the engine's literal. scenario.ts is the single source of truth; if it ever
-// changes its fallback, this lib follows automatically (and the WR-04 staggered
-// consistency pin would catch any residual drift).
+// The fallback include-from mirrors the ENGINE's inline "2022-01-01" literal as
+// a LOCAL const (above). scenario.ts is FROZEN (SCENARIO-05; frozen-spine guards
+// forbid an added export), so this lib cannot import it — the values must stay in
+// sync by hand, and the WR-04 staggered consistency pin (rebuilt ρ ≡ engine
+// correlation_matrix to 3dp) catches any drift between this mirror and the engine.
 
 /**
  * Per-constituent leverage Lᵢ (default 1.0; a non-finite or negative value →
