@@ -83,6 +83,7 @@ import { buildBlendPanels } from "@/lib/scenario-blend-panels";
 import {
   computeDiversification,
   alignConstituentReturns,
+  TOO_SIMILAR_THRESHOLD,
 } from "@/lib/diversification";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
 import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
@@ -2640,7 +2641,7 @@ export function ScenarioComposer({
                     {diversification.tooSimilarPairs.length === 1
                       ? "pair"
                       : "pairs"}{" "}
-                    above the 0.85 similarity threshold
+                    above the {TOO_SIMILAR_THRESHOLD} similarity threshold
                   </span>
                 </div>
               )}
@@ -2659,7 +2660,7 @@ export function ScenarioComposer({
                 {scenarioMetrics.correlation_matrix && (
                   <p className="text-[11px] text-text-muted mt-2">
                     Burnt orange = positive correlation (concentration risk).
-                    Pairs ≥ 0.85 are flagged above.
+                    Pairs ≥ {TOO_SIMILAR_THRESHOLD} are flagged above.
                   </p>
                 )}
               </div>

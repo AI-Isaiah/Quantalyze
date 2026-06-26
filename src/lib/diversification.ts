@@ -55,12 +55,6 @@ export const MIN_USABLE = 10;
 /** The "too similar" correlation threshold (CORR-02, locked). */
 export const TOO_SIMILAR_THRESHOLD = 0.85;
 
-// The fallback include-from mirrors the ENGINE's inline "2022-01-01" literal as
-// a LOCAL const (above). scenario.ts is FROZEN (SCENARIO-05; frozen-spine guards
-// forbid an added export), so this lib cannot import it — the values must stay in
-// sync by hand, and the WR-04 staggered consistency pin (rebuilt ρ ≡ engine
-// correlation_matrix to 3dp) catches any drift between this mirror and the engine.
-
 /**
  * Per-constituent leverage Lᵢ (default 1.0; a non-finite or negative value →
  * 1.0, mirroring the engine's defensive `lev()` at scenario.ts:188-191). This

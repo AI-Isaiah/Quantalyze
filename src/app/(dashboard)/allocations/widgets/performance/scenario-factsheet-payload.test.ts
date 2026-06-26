@@ -3,11 +3,7 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { compute, cumEq, drawdowns } from "@/lib/factsheet/compute";
 import { bootstrapCI } from "@/lib/factsheet/bootstrap";
 import { quantileSummary } from "@/lib/factsheet/quantiles";
-import {
-  buildScenarioFactsheetPayload,
-  SCENARIO_EQUITY_CONFIG,
-  SCENARIO_DRAWDOWN_CONFIG,
-} from "./scenario-factsheet-payload";
+import { buildScenarioFactsheetPayload } from "./scenario-factsheet-payload";
 
 // ── Deterministic fixtures (no Math.random) ──────────────────────────
 // The payload is SINGLE-AXIS off the engine's `portfolio_daily_returns` (daily
@@ -156,22 +152,6 @@ describe("buildScenarioFactsheetPayload — convention pins", () => {
     expect(p.strategyId).toBe("scenario:abc");
   });
 
-  // ── 8. exported ChartConfig constants match the factsheet field contract ──
-  it("SCENARIO_EQUITY_CONFIG maps the strategy line to scenario and the comparator to the benchmark", () => {
-    expect(SCENARIO_EQUITY_CONFIG.stratField).toBe("strategyEquity");
-    expect(SCENARIO_EQUITY_CONFIG.comparatorField).toBe("cumulative");
-    expect(SCENARIO_EQUITY_CONFIG.valueFormat).toBe("growth");
-    expect(SCENARIO_EQUITY_CONFIG.baseline).toBe(1);
-    expect(SCENARIO_EQUITY_CONFIG.rebaseOnZoom).toBe(true);
-  });
-
-  it("SCENARIO_DRAWDOWN_CONFIG renders the underwater fill off strategyDrawdowns with no comparator", () => {
-    expect(SCENARIO_DRAWDOWN_CONFIG.stratField).toBe("strategyDrawdowns");
-    expect(SCENARIO_DRAWDOWN_CONFIG.comparatorField).toBeNull();
-    expect(SCENARIO_DRAWDOWN_CONFIG.fill).toBe(true);
-    expect(SCENARIO_DRAWDOWN_CONFIG.valueFormat).toBe("percent");
-    expect(SCENARIO_DRAWDOWN_CONFIG.baseline).toBe(0);
-  });
 });
 
 // ── Phase 39: complete-payload parity (PAYLOAD-01..05) ────────────────

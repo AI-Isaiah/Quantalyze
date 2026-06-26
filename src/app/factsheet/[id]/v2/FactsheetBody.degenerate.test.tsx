@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeAll } from "vitest";
 import { render, waitFor } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import type {
+  PeerPercentilePayload,
+  ScenarioMandatePayload,
+  OwnBookDeltaPayload,
+} from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
@@ -217,4 +222,75 @@ describe("FactsheetBody — api-only panels absent on the csv blend (BODY-04)", 
       expect(container.textContent ?? "").not.toMatch(/Peer Percentile/i);
     });
   }
+});
+
+// ── Affirmative scenarioMode gate (code-review WR — Testing) ──────────
+// GUARD-02 (byte-identity) + the degenerate matrix above prove the
+// scenarioMode={false} path and the null-carve-out path. NEITHER exercises the
+// AFFIRMATIVE branch: scenarioMode={true} WITH populated carve-outs, where the
+// MetricsColumn gates must MOUNT the Peer / Own-Book / Mandate panels onto the
+// REAL body. Without this, a regression that dropped the scenarioMode wiring or
+// inverted a gate would let all three silently never render on the composer
+// while CI stayed green (the isolated panel tests render each panel directly via
+// context, bypassing the MetricsColumn gate entirely).
+const SCENARIO_PEER: PeerPercentilePayload = {
+  cohortSize: 42,
+  sharpe: 71,
+  sortino: 64,
+  max_dd: 58,
+};
+const SCENARIO_MANDATE: ScenarioMandatePayload = {
+  constituents: [
+    { name: "Trend Alpha", strategy_types: ["trend-following"], markets: ["BTC", "ETH"], leverage: 2 },
+  ],
+};
+const OWN_BOOK_DELTA: OwnBookDeltaPayload = {
+  sharpe: 0.24,
+  sortino: -0.18,
+  max_dd: 0.018,
+  blend_n: 287,
+  book_n: 412,
+};
+
+// A healthy (n=300) csv blend payload carrying all three scenario carve-outs.
+// The payload goes to BOTH the provider (panels read carve-outs from context)
+// and the body prop (MetricsColumn reads the gate off the prop).
+function renderWithCarveouts(scenarioMode: boolean) {
+  const base = buildScenarioFactsheetPayload({
+    portfolioDaily: makeReturnsSeries(300),
+    benchmark: null,
+  });
+  const payload = {
+    ...base,
+    scenarioPeer: SCENARIO_PEER,
+    scenarioMandate: SCENARIO_MANDATE,
+    scenarioOwnBookDelta: OWN_BOOK_DELTA,
+  };
+  return render(
+    <FactsheetProvider payload={payload} persist={false}>
+      <FactsheetBody
+        payload={payload}
+        scenarioMode={scenarioMode}
+        hideHeader
+        hideAllocatorSection
+        hideFooter={false}
+      />
+    </FactsheetProvider>,
+  );
+}
+
+describe("FactsheetBody — affirmative scenarioMode gate mounts the carve-out panels (PEER-01/04/05 wiring)", () => {
+  it("scenarioMode + populated carve-outs: Peer Percentile, Mandate constituent, and vs-Your-Book all render", () => {
+    const text = renderWithCarveouts(true).container.textContent ?? "";
+    expect(text).toMatch(/Peer Percentile/); // PEER-01 gate
+    expect(text).toMatch(/Trend Alpha/); // PEER-04 mandate constituent chip
+    expect(text).toMatch(/vs Your Book/); // PEER-05 own-book delta
+  });
+
+  it("scenarioMode=false with the SAME populated carve-outs: all three stay absent (the scenarioMode disjunct is load-bearing — falsifiable proof the gate isn't a no-op)", () => {
+    const text = renderWithCarveouts(false).container.textContent ?? "";
+    expect(text).not.toMatch(/Peer Percentile/);
+    expect(text).not.toMatch(/Trend Alpha/);
+    expect(text).not.toMatch(/vs Your Book/);
+  });
 });

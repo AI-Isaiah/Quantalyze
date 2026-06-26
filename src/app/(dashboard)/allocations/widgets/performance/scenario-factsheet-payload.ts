@@ -46,9 +46,9 @@
  * Convention pins (LOCKED — see scenario-factsheet-payload.test.ts):
  *   - ONE canonical `dates[]` axis = the returns dates; the benchmark is
  *     projected onto it via a date→value Map (mirrors EquityChart.tsx:593-595).
- *   - Color/width is NEVER inlined here: `resolveSeries` (chart-configs.ts)
- *     owns the scenario→accent / benchmark→muted contract via the exported
- *     ChartConfig constants below. No `stroke`/`color:` in this module.
+ *   - Color/width is NEVER inlined here: this module emits a pure data payload;
+ *     the mounted FactsheetBody (chart-configs.ts `resolveSeries`) owns the
+ *     scenario→accent / benchmark→muted contract. No `stroke`/`color:` here.
  *   - ONE degenerate gate governs everything: when `portfolioDaily` is degenerate
  *     (empty / ANY non-finite return / < 2 dated points) the WHOLE payload is
  *     safe-empty (dates [], equity [], drawdowns [], all panels empty, comparator
@@ -57,7 +57,7 @@
  *     physically cannot carry peer-rank / portfolio panels (no-invented-data).
  */
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
-import { compute, cumEq, drawdowns, worstDrawdowns } from "@/lib/factsheet/compute";
+import { compute, worstDrawdowns } from "@/lib/factsheet/compute";
 import {
   rollingVol,
   rollingSharpe,
@@ -73,9 +73,6 @@ import { monthlyReturnsMatrix, dailyReturnsByYear } from "@/lib/factsheet/period
 import { computeStressWindows } from "@/lib/factsheet/stress-windows";
 import { quantileSummary } from "@/lib/factsheet/quantiles";
 import type {
-  ChartConfig,
-} from "@/app/factsheet/[id]/v2/chart-configs";
-import type {
   ComparatorBlock,
   ComputeSummary,
   FactsheetCsvPayload,
@@ -89,44 +86,6 @@ import type {
 const SCENARIO_NAME = "Scenario";
 /** Stable scenario-scoped synthetic id (Plan 02 reads this for the storage key). */
 const DEFAULT_SCENARIO_ID = "scenario";
-
-/**
- * Equity chart config — mirrors chart-configs.ts `cumulative` (:82-95). The
- * scenario wealth resolves into the accent strategy line (`strategyEquity`);
- * the benchmark resolves into the muted comparator line (`cumulative`).
- * `baseline:1` + `rebaseOnZoom:true` make the growth-format reading match the
- * composer's "+X% since window start" semantics.
- */
-export const SCENARIO_EQUITY_CONFIG: ChartConfig = {
-  key: "scenario-equity",
-  title: "Cumulative Returns",
-  valueFormat: "growth",
-  scalable: true,
-  defaultScale: "log",
-  baseline: 1,
-  stratField: "strategyEquity",
-  comparatorField: "cumulative",
-  rebaseOnZoom: true,
-};
-
-/**
- * Drawdown chart config — mirrors chart-configs.ts `underwaterAcc` (:206-218).
- * Renders the underwater fill off the scenario's `strategyDrawdowns`; no
- * comparator line on the underwater panel.
- */
-export const SCENARIO_DRAWDOWN_CONFIG: ChartConfig = {
-  key: "scenario-underwater",
-  title: "Underwater Chart for Accumulated Capital",
-  subtitle: "drawdown from running peak",
-  valueFormat: "percent",
-  scalable: false,
-  defaultScale: "linear",
-  baseline: 0,
-  height: 160,
-  stratField: "strategyDrawdowns",
-  comparatorField: null,
-  fill: true,
-};
 
 export interface ScenarioFactsheetPayloadArgs {
   /**
@@ -366,18 +325,18 @@ function buildReturnsBody(portfolioDaily: DailyPoint[]): ReturnsBody {
   ]);
   // The chart line is full-res (WR-01): `strategyEquity = cumEq(rets)` (the same
   // curve `equity_curve` downsamples, just full-res/unrounded), and the
-  // underwater line = `drawdowns(eq)`. compute()'s own `dd` IS `drawdowns(cumEq
-  // (rets))` (compute.ts:21-22), so `strategyDrawdowns` and the Worst-10 table
-  // (built off `dd`) are the SAME peak-anchored series by construction.
-  const { eq: _eq, dd, ...strategyMetrics } = compute(rets, datesR);
-  const eq = cumEq(rets);
+  // underwater line = `drawdowns(cumEq(rets))`. compute() already builds exactly
+  // those (`eq = cumEq(rets)`, `dd = drawdowns(eq)`, compute.ts:21-22), so we
+  // reuse its `eq`/`dd` directly (no redundant second pass) — strategyDrawdowns
+  // and the Worst-10 table (also off `dd`) are the SAME series by construction.
+  const { eq, dd, ...strategyMetrics } = compute(rets, datesR);
   const { wins, losses } = streakLengths(rets);
   const MAX_LEN = 14;
 
   return {
     dates: datesR,
     strategyEquity: eq,
-    strategyDrawdowns: drawdowns(eq),
+    strategyDrawdowns: dd,
     strategyReturns: rets,
     strategyRollingVol: rollingVol(rets, rollWindow.window),
     strategyRollingSharpe: rollingSharpe(rets, rollWindow.window),
