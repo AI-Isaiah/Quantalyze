@@ -1577,6 +1577,14 @@ export function ScenarioComposer({
       setScenarioPeer(null);
       return;
     }
+    // A NEW qualifying blend (the rounded metric triple changed, hence this
+    // re-run) invalidates the previous blend's rank: clear it NOW, before the
+    // debounce+fetch window. Otherwise the "Peer Percentile" panel would keep
+    // rendering the PREVIOUS blend's real decile rank — presented as the current
+    // blend's — while the rest of the factsheet has already moved on. The panel
+    // honestly disappears until the fresh rank resolves (never a stale "real"
+    // number). [red-team adversarial review]
+    setScenarioPeer(null);
     const ctrl = new AbortController();
     const timer = setTimeout(() => {
       fetch("/api/scenario/peer-rank", {
