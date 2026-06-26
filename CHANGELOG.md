@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.34.0.2] - 2026-06-26
+### Fixed — applying optimizer-suggested weights on a multi-venue book committed a different blend than was suggested
+
+On the Scenario composer, "Apply suggested weights" could land an allocation that differs from what the optimizer proposed — but only for an allocator who holds the same symbol on more than one venue (e.g. BTC on Binance and OKX, or a spot + perp of one symbol). The optimizer deliberately runs over the DE-ALIASED universe (one slot per bare symbol — feeding it two byte-identical venue series would be a degenerate ρ=1 pair the min-variance solver can split arbitrarily), so its suggested vector is keyed by each aliased group's representative ref. But the draft stores weights on the RAW per-venue refs and the apply renormalizes over the raw enabled set, so the collapsed-away venue duplicate kept its STALE draft weight and the single renormalize folded it back in — the committed blend drifted off the suggestion, and the more weight sat on aliased venues the larger the drift (a 0.4/0.4 BTC split landed ~0.5 exposure where the optimizer asked for 0.3). The fix maps the suggested vector back onto the raw selected basis before applying (`mapDeAliasedWeightsToRawBasis`): each symbol-group's whole suggested share is assigned to one of its selected raw venues and the rest zeroed, so the applied vector covers the full renormalize basis and reproduces the optimizer exactly. The share is routed by SYMBOL, not blindly onto the representative id, so it lands correctly even when the representative venue is itself toggled off while another venue of the same symbol stays on. A one-venue-per-symbol book has no aliased duplicates, so the mapping is the identity and those books are byte-unchanged. Regression tests reproduce the live drift and pin the corrected apply.
+
 ## [0.34.0.1] - 2026-06-26
 ### Fixed — the Scenario blend's Diversification Ratio could render below 1.0 (mathematically impossible)
 
