@@ -17,11 +17,10 @@ import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel } from "./Mandate
  * the FactSet quarterly-factsheet reference.
  */
 export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean }) {
-  // Phase-40 inert seam: scenarioMode is threaded in now but gates nothing in
-  // MetricsColumn this phase. Phase 42 (PEER-01) consumes it for the additive
-  // scenarioPeer carve-out. The no-op reference below keeps the prop accepted
-  // without tripping @typescript-eslint/no-unused-vars.
-  void scenarioMode;
+  // Phase 42 (PEER-01, ADR-0025): scenarioMode now gates the additive
+  // scenarioPeer carve-out below. It is false on every existing call site (the
+  // real route, Discovery, Overview), so the api peer path is provably
+  // unchanged; only the composer passes scenarioMode={true}.
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
   const m = payload.strategyMetrics;
@@ -115,10 +114,19 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
 
       <EditorialSection label="III" name="Style">
         <StyleDriftPanel />
-        {/* PeerPercentile uses a demo/synthesized cohort — not derivable from
-            a CSV daily-return series. Only show for api_verified (live-ingested)
-            strategies per the no-invented-data contract. (NEW-C20-01) */}
-        {payload.ingestSource === "api" && <PeerPercentilePanel />}
+        {/* PeerPercentile renders for api strategies (demo/synthesized cohort)
+            OR — Phase 42 (PEER-01, ADR-0025) — for the scenario BLEND, which
+            carries an additive `scenarioPeer` ranked vs the REAL verified
+            universe (never an ingestSource flip; the three genuinely-synthetic
+            panels stay structurally absent). The explicit `ingestSource ===
+            "csv"` narrow is required before reading the csv-only `scenarioPeer`
+            field (Pitfall 3 — mirrors the B6 narrowing discipline). With
+            scenarioMode=false (every existing call site) the second disjunct is
+            dead and the api path is byte-identical. (NEW-C20-01) */}
+        {(payload.ingestSource === "api" ||
+          (scenarioMode &&
+            payload.ingestSource === "csv" &&
+            payload.scenarioPeer != null)) && <PeerPercentilePanel />}
       </EditorialSection>
 
       <EditorialSection label="V" name="Terms">

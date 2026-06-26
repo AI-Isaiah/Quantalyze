@@ -77,18 +77,23 @@ export function StyleDriftPanel() {
 
 export function PeerPercentilePanel() {
   const payload = usePayload();
-  // B6 — the synthesized panels live only on the "api" arm of the discriminated
-  // FactsheetPayload; narrowing ingestSource unlocks peerPercentile (and a csv
-  // read is a compile error). The parent already gates this component on
-  // ingestSource === "api", so this is type-safety, not a runtime branch. (RED-TEAM-M2)
-  if (payload.ingestSource !== "api") return null;
-  const p = payload.peerPercentile;
+  // Dual-read (Phase 42, PEER-01, ADR-0025): the peer rank lives on the api arm
+  // (`peerPercentile`, demo cohort) OR — for the scenario BLEND — on the csv arm
+  // (`scenarioPeer`, ranked vs the REAL verified universe). The explicit
+  // ingestSource narrow before each field access is required by the B6
+  // discriminated union (a csv read of an api-only field, or vice-versa, is a
+  // compile error). The parent (MetricsColumn) gates which arm reaches here.
+  const isScenario = payload.ingestSource === "csv";
+  const p =
+    payload.ingestSource === "api"
+      ? payload.peerPercentile
+      : (payload.scenarioPeer ?? null);
   if (!p) return null;
   return (
     <section>
       <header className="mb-2 flex items-baseline justify-between border-b border-text pb-1">
         <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary">
-          Peer Percentile <DemoBadge>Demo cohort</DemoBadge>
+          Peer Percentile {!isScenario && <DemoBadge>Demo cohort</DemoBadge>}
         </h3>
         <span className="text-[9px] font-mono uppercase tracking-wider text-text-muted">
           N={p.cohortSize}
@@ -99,9 +104,15 @@ export function PeerPercentilePanel() {
         <PercentileBar label="Sortino" pct={p.sortino} />
         <PercentileBar label="Max DD (shallower = better)" pct={p.max_dd} />
       </div>
-      <p className="mt-2 text-[10px] italic text-text-muted">
-        Synthesized peer cohort (deterministic seed). Production: replace with platform strategy DB.
-      </p>
+      {/* Disclosure copy: the api/demo-cohort footnote stays here; the scenario
+          (hypothetical · vs verified strategies) disclosure render lands in
+          plan 04. This plan only wires the read path + suppresses the "Demo
+          cohort" badge for the scenario case. */}
+      {!isScenario && (
+        <p className="mt-2 text-[10px] italic text-text-muted">
+          Synthesized peer cohort (deterministic seed). Production: replace with platform strategy DB.
+        </p>
+      )}
     </section>
   );
 }

@@ -435,6 +435,22 @@ export type FactsheetApiPayload = FactsheetCommon & {
  */
 export type FactsheetCsvPayload = FactsheetCommon & {
   ingestSource: "csv";
+  /**
+   * Phase 42 (PEER-01, ADR-0025) — blend-only peer rank vs the REAL verified
+   * strategy universe, computed on the cohort's SAMPLE / 252 basis (the Python
+   * `strategy_analytics` quantstats convention), NOT the population headline.
+   *
+   * Additive + optional: absent on every existing csv call site (the real
+   * factsheet route, Discovery, Overview, and the Phase-39 scenario synth
+   * payload), so the api path + the three genuinely-synthetic panels'
+   * structural absence are provably unchanged. This is a DIFFERENT field name
+   * from the api arm's `peerPercentile`, so the type-field invariant (the four
+   * api-only fields never on the csv arm) is preserved.
+   *
+   * Blend-scoped by design — NOT promoted to {@link FactsheetCommon} (ADR §6):
+   * peer-on-all-csv is out of scope for v1.2.2.
+   */
+  scenarioPeer?: PeerPercentilePayload;
 };
 
 /**

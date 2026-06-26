@@ -79,6 +79,7 @@ import type {
   ComparatorBlock,
   ComputeSummary,
   FactsheetCsvPayload,
+  PeerPercentilePayload,
   RollWindowPick,
 } from "@/lib/factsheet/types";
 
@@ -140,6 +141,15 @@ export interface ScenarioFactsheetPayloadArgs {
   benchmark?: DailyPoint[] | null;
   /** Scenario-scoped synthetic strategy id (storage-key scoping). */
   strategyId?: string;
+  /**
+   * Phase 42 (PEER-01, ADR-0025) — the blend's peer rank vs the REAL verified
+   * universe, on the cohort's sample/252 basis. Additive + optional: every
+   * existing call site omits it, so the returned csv payload stays
+   * byte-identical (the key is OMITTED, not set to undefined, when absent —
+   * see the conditional spread in the return below). The carve-out NEVER flips
+   * `ingestSource` — the three genuinely-synthetic api panels stay absent.
+   */
+  scenarioPeer?: PeerPercentilePayload;
 }
 
 /** Zeroed scalar metrics — no KpiStrip mounts in the composer, so the two
@@ -401,7 +411,7 @@ function buildReturnsBody(portfolioDaily: DailyPoint[]): ReturnsBody {
 export function buildScenarioFactsheetPayload(
   args: ScenarioFactsheetPayloadArgs,
 ): FactsheetCsvPayload {
-  const { benchmark, portfolioDaily, strategyId } = args;
+  const { benchmark, portfolioDaily, strategyId, scenarioPeer } = args;
   const id = strategyId ?? DEFAULT_SCENARIO_ID;
 
   // The single returns-derived body — chart line + scalars + panel arrays, all
@@ -434,6 +444,12 @@ export function buildScenarioFactsheetPayload(
 
   return {
     ingestSource: "csv",
+    // PEER-01 (ADR-0025): conditionally spread scenarioPeer so the key is
+    // OMITTED (not undefined) when the arg is absent — every existing call site
+    // produces a byte-identical payload, and the type-field invariant holds
+    // (scenarioPeer is a csv-only additive field; the three synthetic api
+    // panels stay structurally absent).
+    ...(scenarioPeer ? { scenarioPeer } : {}),
     strategyId: id,
     strategyName: SCENARIO_NAME,
     strategyTypes: [],
