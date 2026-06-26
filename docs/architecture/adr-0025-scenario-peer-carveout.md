@@ -59,13 +59,15 @@ Two facts shape the decision:
 
 3. **Same-path computation, real cohort.** The blend's rank reuses the existing
    `computePeerPercentile` over the blend's daily-returns-derived Sharpe / Sortino /
-   max-DD, ranked against the **real verified-strategy universe** (strategies with a
-   `strategy_verifications.trust_tier`), fetched via an aggregated, RLS-respecting,
-   identity-stripped server read (built on the `getPercentiles` pattern; a minimal
-   `SECURITY DEFINER` RPC only if the verifications join requires it). The server
-   returns only the aggregated distribution / the computed rank — never per-strategy
-   identity, returns, or PII. A **min-N ≈ 20** floor suppresses the panel (honest
-   empty) rather than rank against a thin set.
+   max-DD, ranked against the **real verified-strategy universe** (published strategies
+   with a `strategy_verifications` row), fetched via an aggregated, RLS-respecting,
+   identity-stripped server read. As shipped this is the
+   `get_verified_cohort_rank` `SECURITY DEFINER` RPC (migration
+   `20260626120000_get_verified_cohort_rank.sql`), reached through
+   `POST /api/scenario/peer-rank`. The function returns only a cohort count plus three
+   decile-quantized percentiles — never per-strategy identity, returns, metric, or PII.
+   A **min-N = 20** floor suppresses the panel (honest empty, NULL rank) rather than
+   rank against a thin set.
 
 4. **Convention reconciliation.** The blend's *ranking* metrics are computed on the
    cohort's **sample / 252** basis (matching the Python `strategy_analytics`), NOT
@@ -101,9 +103,11 @@ Two facts shape the decision:
 - Two conventions remain in the codebase; the rank must be computed on the cohort's
   sample basis. A future drift in the Python convention would desync the rank — the
   ranking-basis choice is pinned by a test.
-- A new cross-tenant aggregated read is a security surface; it is gated by
-  `withAuth` + approval + rate-limit + `NO_STORE`, returns aggregates only, and is
-  covered by an RLS test and the migration/RLS auditors.
+- A new cross-tenant aggregated read is a security surface; the route inlines
+  same-origin (`assertSameOrigin`) + authenticated-user (`auth.getUser`) +
+  approval (`assertProfileApproved`) + a fail-closed rate-limit (`checkLimit`) +
+  `NO_STORE`, returns aggregates only, and is covered by an RLS test and the
+  migration/RLS auditors.
 
 ## Alternatives considered
 
