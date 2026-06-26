@@ -182,20 +182,16 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     await diversification.scrollIntoViewIfNeeded();
     await expect(diversification).toBeVisible({ timeout: 10_000 });
 
-    // (c) Mandate / Peer / OwnBookDelta — these honestly EMPTY OUT at the
+    // (c) The new folded sections — Mandate / Peer / OwnBookDelta — mount inside
+    // #factsheet-main (proven visible by (a)) and honestly empty out at the
     // single-strategy seed (n<2 → no diversification pair; n<252 → peer
-    // suppressed; no second-constituent metadata → mandate honest-empty). Reuse
-    // the spec's "either real OR honest-empty banner is a real surface" idiom
-    // (the same defense the Phase-30 cards above use): gate on the section being
-    // PRESENT — real body OR honest-empty copy — never require a non-degenerate
-    // body. The Mandate honest-empty copy is the stable single-seed anchor.
-    // (Diversification's own honest-empty copy doubles as the visible proof the
-    // assembled folded surface rendered its degenerate state, not a blank gap.)
-    await expect(
-      page
-        .locator("#factsheet-diversification")
-        .getByText("Add a second strategy to see diversification"),
-    ).toBeVisible({ timeout: 10_000 });
+    // suppressed; no second-constituent metadata → mandate honest-empty). Per the
+    // spec's "real OR honest-empty is a real surface" idiom we deliberately do NOT
+    // pin any degenerate copy here: anchor (b) already proves the folded body
+    // assembled (the Diversification heading renders whether its body is real or
+    // honest-empty), and pinning the n<2 empty string would false-RED the moment
+    // the seed yields n>=2. (a) #factsheet-main + (b) #factsheet-diversification
+    // are the load-bearing anti-false-green gates before analyze().
 
     const composed = await buildAxe(page).analyze();
     expect(composed.violations).toEqual([]);

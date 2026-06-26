@@ -121,16 +121,20 @@ describe("ConstituentMandatePanel — per-constituent chips (PEER-04)", () => {
     expect(getAllByText("no mandate metadata").length).toBe(1);
   });
 
-  it("GUARD-01: a populated constituent at exactly 1× suppresses the leverage chip; >1× still renders it", () => {
+  it("GUARD-01: a populated constituent at exactly 1× suppresses the leverage chip; any other value (<1× or >1×) renders it", () => {
     // Leverage-alone is not mandate metadata: a bare "1×" chip is noise. The
-    // guard `c.leverage > 1` (MandatePanels.tsx) suppresses it at exactly 1×
-    // while keeping the type/market chips. A >1× constituent keeps its chip.
+    // guard `c.leverage !== 1` (MandatePanels.tsx) suppresses ONLY the exact-1×
+    // chip while keeping the type/market chips. A deleveraged (<1×) or levered
+    // (>1×) constituent keeps its chip — both are meaningful mandate signals.
     const mandate: ScenarioMandatePayload = {
       constituents: [
         // Populated (types+markets) BUT 1× → chip suppressed, constituent NOT empty.
         { name: "Flat Lever", strategy_types: ["market-neutral"], markets: ["BTC"], leverage: 1 },
         // Populated AND >1× → chip renders.
         { name: "Levered", strategy_types: ["trend-following"], markets: ["ETH"], leverage: 3 },
+        // Populated AND <1× (deleveraged) → chip renders (WR-01 regression guard:
+        // the prior `> 1` predicate wrongly suppressed this real mandate signal).
+        { name: "Deleveraged", strategy_types: ["mean-reversion"], markets: ["SOL"], leverage: 0.5 },
       ],
     };
     const { getByText, queryByText } = renderPanel(csvPayload(mandate));
@@ -145,6 +149,10 @@ describe("ConstituentMandatePanel — per-constituent chips (PEER-04)", () => {
     // The >1× constituent keeps its leverage chip.
     expect(getByText("Levered")).toBeTruthy();
     expect(getByText("3×")).toBeTruthy();
+
+    // The <1× deleveraged constituent ALSO keeps its chip — the WR-01 fix.
+    expect(getByText("Deleveraged")).toBeTruthy();
+    expect(getByText("0.5×")).toBeTruthy();
   });
 
   it("all-empty constituents: whole-panel honest-empty copy renders AND the 'Mandate' title still renders", () => {

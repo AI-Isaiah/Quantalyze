@@ -189,9 +189,10 @@ export function ConstituentMandatePanel() {
                       </div>
                     )}
                     {/* GUARD-01 (43-01) — leverage-alone is not metadata; a
-                        bare "1×" chip is noise. Suppress at exactly 1×; >1×
-                        still renders as a meaningful mandate signal. */}
-                    {c.leverage > 1 && (
+                        bare "1×" chip is noise. Suppress ONLY at exactly 1×; any
+                        other value — deleveraged (<1×) or levered (>1×) — is a
+                        meaningful mandate signal and still renders. */}
+                    {c.leverage !== 1 && (
                       <div className="flex flex-wrap gap-1">
                         <Chip>{formatLeverage(c.leverage)}×</Chip>
                       </div>
