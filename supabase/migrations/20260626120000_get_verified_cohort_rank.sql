@@ -29,16 +29,37 @@
 --
 -- Cohort definition (D-02 locked)
 -- -------------------------------
--- Verified AND published strategies:
+-- Verified AND published strategies, restricted to rows whose three rankable
+-- metrics are all non-null:
 --   FROM strategies s JOIN strategy_analytics a ON a.strategy_id = s.id
 --   WHERE s.status = 'published'                       -- defense-in-depth
+--     AND a.sharpe IS NOT NULL
+--     AND a.sortino IS NOT NULL
+--     AND a.max_drawdown IS NOT NULL
 --     AND EXISTS (SELECT 1 FROM strategy_verifications v
---                 WHERE v.strategy_id = s.id AND v.trust_tier IS NOT NULL)
+--                 WHERE v.strategy_id = s.id AND v.status = 'published')
 -- The explicit s.status = 'published' predicate is defense-in-depth: it
 -- excludes the caller's own drafts/pending_review rows (the DEFINER fn runs as
 -- owner and bypasses RLS, so without this the caller's unpublished strategies
--- could pollute the cohort). "Verified" = any strategy_verifications.trust_tier
--- present (any tier — api_verified / csv_uploaded / self_reported).
+-- could pollute the cohort).
+--
+-- "Verified" = a strategy_verifications row at status='published' (the
+-- verification state machine reached its terminal published state). NOTE: an
+-- earlier draft of this migration used `v.trust_tier IS NOT NULL`, which is a
+-- TAUTOLOGY — strategy_verifications.trust_tier is NOT NULL (CHECK constraint,
+-- migration 093 / 20260501055202 line 85), so that predicate matched EVERY
+-- verification row including drafts. The honest predicate is the explicit
+-- terminal status: status='published' (status CHECK admits
+-- draft/validated/metrics_captured/encrypted/report_queued/published — only
+-- the last means the verification actually completed).
+--
+-- Nullable-metric exclusion (auditor MEDIUM, line 124/154 fix): sharpe / sortino
+-- / max_drawdown are nullable DECIMAL. A NULL-metric row would be counted in the
+-- v_n denominator yet excluded from every count(*) FILTER (NULL <= x is UNKNOWN,
+-- not TRUE) — understating the rank AND under-enforcing the min-N floor (v_n>=20
+-- while the non-null rankable population is <20). Excluding NULL-metric rows from
+-- BOTH the count and the rank query makes the denominator == the numerator
+-- population (one shared cohort definition) so min-N counts only rankable rows.
 --
 -- Min-N floor (T-42-02 — cell-size inference)
 -- -------------------------------------------
@@ -48,17 +69,40 @@
 -- near-identifies a strategy). The floor means no single strategy's metric is
 -- recoverable from the returned rank.
 --
--- Ranking convention
--- ------------------
+-- Ranking convention (parity-by-construction with getPercentiles)
+-- ---------------------------------------------------------------
 -- strategy_analytics.sharpe / sortino are higher=better → percentile = % of
 -- cohort whose stored value is <= the blend's. max_drawdown is stored NEGATIVE
 -- (quantstats convention: -0.30 = 30% drop; queries.ts getPercentiles takes
--- Math.abs at :162-168). "shallower drawdown = better"; the caller passes
--- p_max_dd as the MAGNITUDE (abs) of the blend's max_dd, and the RPC counts
--- cohort strategies whose magnitude abs(a.max_drawdown) >= p_max_dd (i.e. that
--- drew down at least as deep) — a higher percentile means the blend is
--- shallower than more of the cohort. This matches getPercentiles' Math.abs +
--- LOWER_IS_BETTER inversion direction.
+-- Math.abs at :162-168). The caller passes p_max_dd as the MAGNITUDE (abs) of
+-- the blend's max_dd.
+--
+-- max_dd direction (auditor MEDIUM, line 156 fix): getPercentiles
+-- (queries.ts:175-186) counts cohort strategies whose magnitude is <= the
+-- blend's (`abs(val) <= entry.val`) then INVERTS for LOWER_IS_BETTER via
+-- `100 - percentile`. The RPC mirrors that EXACTLY: count
+-- `abs(a.max_drawdown) <= p_max_dd`, take `100 - that`. (An earlier draft
+-- counted `>= p_max_dd` directly, which diverges at ties/boundary because
+-- `>=` and `100 - (<=)` disagree on the equality mass — the milestone wants
+-- the RPC and the client factsheet to agree by construction.) A shallower
+-- blend still earns a higher percentile; only the tie handling now matches.
+--
+-- Probe-resistance (auditor HIGH, line 154 fix — decile quantization):
+-- the three percentiles are continuous in the caller's inputs, so without a
+-- coarsening step an authed caller could binary-search an individual peer's
+-- exact metric across repeated calls — the location of the percentile STEP
+-- reveals where a single peer's value sits (the min-N floor hides only the
+-- aggregate cohort size, not the per-peer step location). DEFENCE-IN-DEPTH:
+-- the returned percentiles are QUANTIZED to the nearest 10 (deciles) —
+-- round(raw_pct / 10) * 10 — so adjacent probe inputs collide into the same
+-- decile bucket and a single step reveals only a 10-point bucket, never an
+-- individual value. The k-anonymity of a bucket grows with cohort size. The
+-- LOAD-BEARING probe-resistance controls are: (1) this decile quantization,
+-- and (2) the strict route-layer rate-limit added in plan 42-02 (withAuth +
+-- assertProfileApproved + checkLimit). The cohort is published strategies
+-- whose aggregate metrics already feed getPercentiles, so the marginal leak
+-- past those two controls is bounded. The min-N early-return path still
+-- returns NULL percentiles (no rank at all below the floor).
 --
 -- Hardening (T-42-03 — elevation of privilege)
 -- --------------------------------------------
@@ -117,17 +161,26 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  -- Cohort size = verified AND published strategies. The explicit
-  -- status='published' predicate is defense-in-depth (D-02): the DEFINER fn
-  -- bypasses RLS, so without it the caller's own drafts/pending_review rows
-  -- could pollute the cohort. "Verified" = any trust_tier present.
+  -- Cohort size = verified AND published strategies whose three rankable
+  -- metrics are all non-null. The explicit status='published' predicate is
+  -- defense-in-depth (D-02): the DEFINER fn bypasses RLS, so without it the
+  -- caller's own drafts/pending_review rows could pollute the cohort.
+  -- "Verified" = a strategy_verifications row at status='published' (terminal
+  -- state). NOT `trust_tier IS NOT NULL` — that column is NOT NULL (migration
+  -- 093 CHECK) so the IS NOT NULL form is a tautology matching every draft.
+  -- The three `a.<metric> IS NOT NULL` predicates make this denominator equal
+  -- the rank query's numerator population, so min-N counts only rankable rows
+  -- (a NULL-metric row excluded from the FILTER must not inflate v_n).
   SELECT count(*) INTO v_n
   FROM strategies s
   JOIN strategy_analytics a ON a.strategy_id = s.id
   WHERE s.status = 'published'
+    AND a.sharpe IS NOT NULL
+    AND a.sortino IS NOT NULL
+    AND a.max_drawdown IS NOT NULL
     AND EXISTS (
       SELECT 1 FROM strategy_verifications v
-      WHERE v.strategy_id = s.id AND v.trust_tier IS NOT NULL
+      WHERE v.strategy_id = s.id AND v.status = 'published'
     );
 
   -- Min-N gate (T-42-02): below the floor, return a single honest-empty row
@@ -139,10 +192,18 @@ BEGIN
   END IF;
 
   -- Rank = % of cohort whose value is <= the blend's, for sharpe/sortino
-  -- (higher=better). For max_dd use magnitude inversion: count cohort
-  -- strategies that drew down at least as deep (abs(a.max_drawdown) >=
-  -- p_max_dd) so a SHALLOWER blend earns a HIGHER percentile — matching
-  -- getPercentiles' Math.abs + LOWER_IS_BETTER direction (queries.ts:162-181).
+  -- (higher=better). For max_dd MIRROR getPercentiles EXACTLY: count cohort
+  -- strategies whose magnitude is <= the blend's (abs(a.max_drawdown) <=
+  -- p_max_dd) then invert via `100 - that` (queries.ts:175-186 takes Math.abs,
+  -- counts `<=`, then `100 - percentile` for LOWER_IS_BETTER). This is
+  -- parity-by-construction at ties/boundary, unlike a direct `>=` count.
+  --
+  -- DECILE QUANTIZATION (probe-resistance, auditor HIGH): each raw percentile
+  -- is coarsened to the nearest 10 — round(raw_pct / 10) * 10 — applied AFTER
+  -- the max_dd `100 - (<=)` inversion. Adjacent probe inputs collide into one
+  -- decile bucket, so a single percentile step reveals only a 10-point bucket,
+  -- never an individual peer's value. This + the plan 42-02 route rate-limit
+  -- are the load-bearing probe-resistance controls (see header).
   --
   -- IDENTITY STRIP (T-42-01): every projected expression below is an
   -- aggregate (v_n is the count from above; the three columns are
@@ -151,15 +212,18 @@ BEGIN
   RETURN QUERY
   SELECT
     v_n,
-    round(100.0 * count(*) FILTER (WHERE a.sharpe  <= p_sharpe)  / v_n)::INT,
-    round(100.0 * count(*) FILTER (WHERE a.sortino <= p_sortino) / v_n)::INT,
-    round(100.0 * count(*) FILTER (WHERE abs(a.max_drawdown) >= p_max_dd) / v_n)::INT
+    (round( round(100.0 * count(*) FILTER (WHERE a.sharpe  <= p_sharpe)  / v_n) / 10.0 ) * 10)::INT,
+    (round( round(100.0 * count(*) FILTER (WHERE a.sortino <= p_sortino) / v_n) / 10.0 ) * 10)::INT,
+    (round( (100 - round(100.0 * count(*) FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n)) / 10.0 ) * 10)::INT
   FROM strategies s
   JOIN strategy_analytics a ON a.strategy_id = s.id
   WHERE s.status = 'published'
+    AND a.sharpe IS NOT NULL
+    AND a.sortino IS NOT NULL
+    AND a.max_drawdown IS NOT NULL
     AND EXISTS (
       SELECT 1 FROM strategy_verifications v
-      WHERE v.strategy_id = s.id AND v.trust_tier IS NOT NULL
+      WHERE v.strategy_id = s.id AND v.status = 'published'
     );
 END;
 $$;
@@ -175,7 +239,7 @@ GRANT EXECUTE ON FUNCTION public.get_verified_cohort_rank(DOUBLE PRECISION, DOUB
 GRANT EXECUTE ON FUNCTION public.get_verified_cohort_rank(DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION) TO service_role;
 
 COMMENT ON FUNCTION public.get_verified_cohort_rank IS
-  'Phase 42 / PEER-03 (v1.2.2): aggregate-only rank of a hypothetical blend''s Sharpe/Sortino/max_dd against the REAL verified+published strategy universe (strategy_verifications.trust_tier present AND strategies.status=''published''). Returns ONLY (cohort_n, sharpe_pct, sortino_pct, max_dd_pct) — never any per-strategy id/name/returns/PII. Suppressed below min-N=20 (returns the cohort_n with NULL percentiles) to prevent cell-size inference. SECURITY DEFINER because strategy_verifications RLS (migration 093) forbids the cross-tenant verified read from an authed client. p_max_dd is the MAGNITUDE (abs) of the blend''s max_dd; max_drawdown is stored negative.';
+  'Phase 42 / PEER-03 (v1.2.2): aggregate-only rank of a hypothetical blend''s Sharpe/Sortino/max_dd against the REAL verified+published strategy universe. Cohort = strategies.status=''published'' AND a strategy_verifications row at status=''published'' (the terminal verified state — NOT trust_tier IS NOT NULL, which is a tautology since trust_tier is NOT NULL) AND all three rankable metrics non-null (so the denominator equals the rankable population and min-N counts only rankable rows). Returns ONLY (cohort_n, sharpe_pct, sortino_pct, max_dd_pct) — never any per-strategy id/name/returns/PII. Percentiles are DECILE-QUANTIZED (nearest 10) for probe-resistance — that quantization plus the plan 42-02 route rate-limit are the load-bearing controls against a per-peer binary-search probe oracle. Suppressed below min-N=20 (returns the cohort_n with NULL percentiles) to prevent cell-size inference. max_dd mirrors getPercentiles'' direction exactly (count abs<=p_max_dd then 100-that, before quantization) for parity-by-construction. SECURITY DEFINER because strategy_verifications RLS (migration 093) forbids the cross-tenant verified read from an authed client. p_max_dd is the MAGNITUDE (abs) of the blend''s max_dd; max_drawdown is stored negative.';
 
 -- ==========================================================================
 -- STEP 3: Self-verifying DO block (mirror migration 093 STEP 7)
@@ -235,7 +299,9 @@ COMMIT;
 -- ==========================================================================
 -- Summary (one-line per step):
 --   Step 1 — get_verified_cohort_rank SECURITY DEFINER RPC (aggregate-only
---            rank vs verified+published cohort; min-N=20 floor; identity-strip)
+--            rank vs verified[status='published']+published+all-metrics-non-null
+--            cohort; min-N=20 floor; decile-quantized percentiles;
+--            max_dd direction mirrors getPercentiles; identity-strip)
 --   Step 2 — REVOKE ALL FROM PUBLIC, anon; GRANT EXECUTE TO authenticated,
 --            service_role; COMMENT ON FUNCTION
 --   Step 3 — self-verifying DO block: fn registered, SECURITY DEFINER,

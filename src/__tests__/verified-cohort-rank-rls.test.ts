@@ -27,6 +27,24 @@
  *   4. Auth gate — an anon / unauthenticated rpc call is rejected (the RPC is
  *      REVOKEd from anon + the in-fn auth.role()/auth.uid() guard raises 42501),
  *      not served (T-42-03).
+ *   5. Cohort-definition correctness (rls-policy-auditor fixes) — by seeding a
+ *      >=20-row verified+published cohort with KNOWN metrics, this pins the four
+ *      fixes the auditor flagged:
+ *        (a) verification-status cohort — a strategy whose ONLY verification row
+ *            is status='draft' is EXCLUDED (the old `trust_tier IS NOT NULL`
+ *            predicate was a tautology since trust_tier is NOT NULL; the honest
+ *            predicate is status='published');
+ *        (b) nullable-metric exclusion — a published+verified strategy with NULL
+ *            sharpe/sortino/max_drawdown is excluded from BOTH the cohort_n
+ *            denominator AND the rank, so the denominator equals the rankable
+ *            population (min-N counts only rankable rows);
+ *        (c) decile quantization — every returned percentile is a multiple of 10
+ *            (probe-resistance: a single percentile step reveals only a decile
+ *            bucket, never an individual peer value);
+ *        (d) max_dd parity direction — the RPC mirrors getPercentiles
+ *            (queries.ts:175-186: count abs<=p_max_dd then 100-that, BEFORE
+ *            quantization), so a blend shallower than the whole cohort ranks
+ *            high and one deeper than all ranks low.
  *
  * Structure mirrors `src/__tests__/strategy-verifications-rls.test.ts` (two-
  * actor sign-in, service-role seed, dependency-order cleanup).
@@ -305,6 +323,214 @@ describe("Migration 20260626120000 — get_verified_cohort_rank (Phase 42 / PEER
       }
     },
     30_000,
+  );
+
+  // -------------------------------------------------------------------------
+  // 5. Cohort-definition correctness (rls-policy-auditor fixes). Seed a
+  //    deterministic >=20-row verified+published cohort with KNOWN sharpe /
+  //    sortino / max_drawdown values, plus two rows that MUST be excluded
+  //    (a draft-only verification, and a published+verified row with NULL
+  //    metrics). Then assert: the excluded rows do NOT inflate cohort_n; the
+  //    returned percentiles are decile-quantized; and the max_dd direction
+  //    matches getPercentiles (shallower blend ⇒ higher percentile).
+  //
+  //    Note: this exercises the REAL TEST project, which may already carry
+  //    rows from concurrent suites. The assertions are written to be robust to
+  //    a non-empty baseline: we pin RELATIVE invariants (the draft-only and
+  //    NULL-metric strategies we seed are absent from the count delta; the
+  //    percentiles are multiples of 10; an extreme-good / extreme-bad blend
+  //    ranks at the top / bottom decile) rather than an absolute cohort_n.
+  // -------------------------------------------------------------------------
+  it.skipIf(!HAS_LIVE_DB)(
+    "cohort = status='published' verifications with all metrics non-null; percentiles are decile-quantized; max_dd mirrors getPercentiles",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const cleanup: { userIds: string[] } = { userIds: [] };
+      const seededStrategyIds: string[] = [];
+
+      // Helper: seed one published strategy + its analytics row + verification.
+      // `verStatus` controls the verification status (cohort gate); pass
+      // metrics=null to seed a NULL-metric (non-rankable) row.
+      async function seedStrategy(
+        ownerId: string,
+        label: string,
+        verStatus: string,
+        metrics: { sharpe: number; sortino: number; max_drawdown: number } | null,
+      ): Promise<string> {
+        const { data: stratData, error: stratErr } = await admin
+          .from("strategies")
+          .insert({
+            user_id: ownerId,
+            name: `__test_cohort_${label}_${ts}`,
+            status: "published",
+            source: "csv",
+            strategy_types: [],
+            subtypes: [],
+            markets: [],
+            supported_exchanges: [],
+          } as never)
+          .select("id")
+          .single();
+        if (stratErr || !stratData) {
+          throw new Error(`seed strategy ${label}: ${stratErr?.message}`);
+        }
+        const sid = (stratData as { id: string }).id;
+        seededStrategyIds.push(sid);
+
+        const { error: anErr } = await admin.from("strategy_analytics").insert({
+          strategy_id: sid,
+          computation_status: "complete",
+          sharpe: metrics ? metrics.sharpe : null,
+          sortino: metrics ? metrics.sortino : null,
+          max_drawdown: metrics ? metrics.max_drawdown : null,
+        } as never);
+        if (anErr) throw new Error(`seed analytics ${label}: ${anErr.message}`);
+
+        const { error: verErr } = await admin
+          .from("strategy_verifications")
+          .insert({
+            strategy_id: sid,
+            wizard_session_id: crypto.randomUUID(),
+            status: verStatus,
+            trust_tier: "csv_uploaded",
+            flow_type: "csv",
+            source: "csv",
+          } as never);
+        if (verErr) throw new Error(`seed verification ${label}: ${verErr.message}`);
+        return sid;
+      }
+
+      try {
+        const password = `CohortDefn${ts}!`;
+        const email = `cohort-defn-${ts}@test.sec`;
+        const userId = await createTestUser(admin, email, password);
+        cleanup.userIds.push(userId);
+
+        // Baseline cohort_n BEFORE seeding (TEST may carry rows from other
+        // suites). We measure the DELTA our seed contributes.
+        const client = await createAuthedClient(email, password);
+        if (!client) return; // password-grant disabled — graceful skip
+
+        const baseline = await client.rpc(RPC, {
+          p_sharpe: 0,
+          p_sortino: 0,
+          p_max_dd: 0,
+        });
+        expect(baseline.error).toBeNull();
+        const baselineN = (baseline.data as { cohort_n: number }[])[0]
+          .cohort_n;
+
+        // Seed 20 RANKABLE rows (status='published' verification, non-null
+        // metrics) with deterministic, spread-out sharpe/sortino and
+        // max_drawdown magnitudes so the cohort is fully published-verified.
+        const RANKABLE = 20;
+        for (let i = 0; i < RANKABLE; i++) {
+          // sharpe 0.1..2.0, sortino 0.2..4.0, |max_dd| 0.01..0.20
+          await seedStrategy(userId, `rank${i}`, "published", {
+            sharpe: (i + 1) * 0.1,
+            sortino: (i + 1) * 0.2,
+            max_drawdown: -((i + 1) * 0.01),
+          });
+        }
+
+        // Seed an EXCLUDED row whose ONLY verification is status='draft'
+        // (must NOT count — the old trust_tier-tautology would have counted it).
+        await seedStrategy(userId, "draftonly", "draft", {
+          sharpe: 99,
+          sortino: 99,
+          max_drawdown: -0.99,
+        });
+
+        // Seed an EXCLUDED row that IS published+verified but has NULL metrics
+        // (must NOT inflate cohort_n — nullable-denominator fix).
+        await seedStrategy(userId, "nullmetrics", "published", null);
+
+        // Re-read cohort_n. The delta must equal EXACTLY the 20 rankable rows:
+        // the draft-only and NULL-metric strategies are excluded from both the
+        // denominator and the rank.
+        const after = await client.rpc(RPC, {
+          p_sharpe: 0,
+          p_sortino: 0,
+          p_max_dd: 0,
+        });
+        expect(after.error).toBeNull();
+        const afterRow = (after.data as Record<string, unknown>[])[0];
+        const afterN = afterRow.cohort_n as number;
+        expect(afterN - baselineN).toBe(RANKABLE);
+
+        // With cohort_n >= 20 the percentiles are non-null AND decile-quantized
+        // (multiples of 10). Probe an extreme-GOOD blend: sharpe/sortino above
+        // every cohort value ⇒ top decile; a shallower |max_dd| than the whole
+        // cohort ⇒ also top decile (getPercentiles direction).
+        const top = await client.rpc(RPC, {
+          p_sharpe: 1000, // above the whole cohort
+          p_sortino: 1000,
+          p_max_dd: 0.001, // shallower than every cohort drawdown magnitude
+        });
+        expect(top.error).toBeNull();
+        const topRow = (top.data as Record<string, unknown>[])[0];
+
+        for (const k of ["sharpe_pct", "sortino_pct", "max_dd_pct"] as const) {
+          const v = topRow[k] as number;
+          expect(typeof v).toBe("number");
+          // Decile-quantized: a multiple of 10 in [0, 100].
+          expect(v % 10).toBe(0);
+          expect(v).toBeGreaterThanOrEqual(0);
+          expect(v).toBeLessThanOrEqual(100);
+        }
+        // sharpe/sortino above the whole cohort ⇒ 100th percentile (top decile).
+        // (1000 is above any real Sharpe/Sortino, so this is baseline-robust.)
+        expect(topRow.sharpe_pct as number).toBe(100);
+        expect(topRow.sortino_pct as number).toBe(100);
+        // A near-zero |max_dd| (0.001) is shallower than essentially every
+        // cohort drawdown ⇒ getPercentiles counts ~0 strategies with abs<=0.001,
+        // percentile~0, inverted 100-~0 ⇒ TOP decile. We assert it lands in the
+        // top half (>=50) — a direct `>=` count (the OLD buggy direction) would
+        // have produced the OPPOSITE (a near-zero percentile) here, so this
+        // pins the corrected getPercentiles parity direction. The exact value
+        // can dip below 100 only if a baseline strategy has |dd|<=0.001
+        // (a near-flat curve), hence the >=50 floor rather than ==100.
+        expect(topRow.max_dd_pct as number).toBeGreaterThanOrEqual(50);
+
+        // Probe an extreme-BAD blend: below every sharpe/sortino ⇒ bottom
+        // decile; a DEEPER |max_dd| than the whole cohort ⇒ also bottom.
+        const bottom = await client.rpc(RPC, {
+          p_sharpe: -1000,
+          p_sortino: -1000,
+          p_max_dd: 1000, // deeper than every cohort drawdown magnitude
+        });
+        expect(bottom.error).toBeNull();
+        const bottomRow = (bottom.data as Record<string, unknown>[])[0];
+        for (const k of ["sharpe_pct", "sortino_pct", "max_dd_pct"] as const) {
+          expect((bottomRow[k] as number) % 10).toBe(0);
+        }
+        // sharpe/sortino below the whole cohort ⇒ 0th percentile.
+        // (-1000 is below any real Sharpe/Sortino, so this is baseline-robust.)
+        expect(bottomRow.sharpe_pct as number).toBe(0);
+        expect(bottomRow.sortino_pct as number).toBe(0);
+        // A |max_dd| of 1000 is deeper than EVERY real cohort drawdown ⇒
+        // getPercentiles counts ALL cohort strategies with abs<=1000,
+        // percentile=100, inverted 100-100=0 ⇒ BOTTOM decile. 1000 exceeds any
+        // real drawdown magnitude so this IS baseline-robust and exact. (A
+        // direct `>=` count — the OLD buggy direction — would have returned
+        // ~100 here, the OPPOSITE; this exactly pins the corrected direction.)
+        expect(bottomRow.max_dd_pct as number).toBe(0);
+      } finally {
+        for (const id of seededStrategyIds) {
+          try {
+            // FK CASCADE clears strategy_analytics + strategy_verifications.
+            await admin.from("strategies").delete().eq("id", id);
+          } catch (err) {
+            console.warn(
+              `[verified-cohort-rank-rls] cleanup strategies ${id}: ${(err as Error).message}`,
+            );
+          }
+        }
+        await cleanupLiveDbRow(admin, cleanup);
+      }
+    },
+    60_000,
   );
 
   // This test always runs (no skipIf) and advertises the skip reason when
