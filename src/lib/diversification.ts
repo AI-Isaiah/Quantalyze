@@ -33,10 +33,11 @@
  * is imported type-only — never called from this lib.
  */
 import { mean, stdDev } from "@/lib/portfolio-math-utils";
-import type {
-  DailyPoint,
-  ScenarioState,
-  StrategyForBuilder,
+import {
+  DEFAULT_INCLUDE_FROM,
+  type DailyPoint,
+  type ScenarioState,
+  type StrategyForBuilder,
 } from "@/lib/scenario";
 
 /** Mirror the engine's n<10 null gate (scenario.ts:210). */
@@ -45,8 +46,22 @@ export const MIN_USABLE = 10;
 /** The "too similar" correlation threshold (CORR-02, locked). */
 export const TOO_SIMILAR_THRESHOLD = 0.85;
 
-/** Default include-from when a strategy has neither an override nor a start_date. */
-const DEFAULT_INCLUDE_FROM = "2022-01-01";
+// IN-02 — the fallback include-from is the ENGINE's, imported from scenario.ts
+// (`DEFAULT_INCLUDE_FROM`) so the re-alignment can NEVER silently diverge from
+// the engine's literal. scenario.ts is the single source of truth; if it ever
+// changes its fallback, this lib follows automatically (and the WR-04 staggered
+// consistency pin would catch any residual drift).
+
+/**
+ * Per-constituent leverage Lᵢ (default 1.0; a non-finite or negative value →
+ * 1.0, mirroring the engine's defensive `lev()` at scenario.ts:188-191). This
+ * is the exact clamp the engine applies, so the lib's levered basis matches the
+ * `portfolio_daily_returns` σ_p it is divided against.
+ */
+function levOf(leverage: Record<string, number> | undefined, id: string): number {
+  const L = leverage?.[id];
+  return Number.isFinite(L) && (L as number) >= 0 ? (L as number) : 1;
+}
 
 export interface AlignedConstituents {
   /** Active constituent ids, in the order the active strategies appear. */
@@ -62,10 +77,16 @@ export interface DiversificationInput {
   /** De-aliased constituent ids, ACTIVE only. */
   ids: string[];
   /** ALIGNED on the engine's commonDates axis (built upstream via
-   *  `alignConstituentReturns`). All arrays equal length. */
+   *  `alignConstituentReturns`). RAW (un-levered) — leverage is applied inside
+   *  the orchestrator for DR/PCR. All arrays equal length. */
   returnsById: Record<string, number[]>;
-  /** Normalized (sum→1) over the active set. */
+  /** Normalized (sum→1) over the active set. UN-levered weights ŵᵢ. */
   weights: Record<string, number>;
+  /** Per-constituent leverage Lᵢ (default 1 when absent). Threaded from the
+   *  composer's `deAliased.state.leverage` so DR/PCR are computed on the SAME
+   *  levered basis as `portfolioDailyReturns` (CR-01/WR-01). An all-1 map is
+   *  byte-identical to a correct un-levered computation. */
+  leverage?: Record<string, number>;
   /** Engine `portfolio_daily_returns` values (LEVERED). */
   portfolioDailyReturns: number[];
   /** Engine ρ (read-only). */
@@ -142,6 +163,36 @@ export function alignConstituentReturns(
 }
 
 /**
+ * Scale each aligned constituent series by its leverage Lᵢ → the LEVERED asset
+ * series `xᵢ = Lᵢ·rᵢ` (CR-01/WR-01). σ and covariance built from `xᵢ` are the
+ * levered-basis statistics DR and PCR need to be consistent with the engine's
+ * levered `portfolio_daily_returns` (`Σ ŵᵢ·Lᵢ·rᵢ`, scenario.ts:251).
+ *
+ * Leverage is a pure SCALE transform, so:
+ *   • corr(Lᵢrᵢ, Lⱼrⱼ) = corr(rᵢ, rⱼ) — the correlation matrix is UNCHANGED
+ *     (the ρ consistency pin still rebuilds from the UN-levered series and the
+ *     engine's ρ is leverage-invariant). NEVER feed levered series to the ρ path.
+ *   • under UNIFORM L, every σ and σ_p scales by L, so DR's ratio is invariant.
+ *
+ * A non-finite/negative Lᵢ → 1 (engine-identical clamp). Returns a NEW map; the
+ * input is not mutated. An all-default (or absent) leverage map returns a
+ * value-identical copy.
+ */
+export function applyLeverage(
+  returnsById: Record<string, number[]>,
+  ids: string[],
+  leverage: Record<string, number> | undefined,
+): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  for (const id of ids) {
+    const L = levOf(leverage, id);
+    const series = returnsById[id] ?? [];
+    out[id] = L === 1 ? series.slice() : series.map((v) => L * v);
+  }
+  return out;
+}
+
+/**
  * SAMPLE covariance matrix Σ[i][j] = Σₖ(rᵢₖ−r̄ᵢ)(rⱼₖ−r̄ⱼ)/(T−1).
  *
  * Two-pass demeaned (compute means first, then demeaned products) — mirroring
@@ -206,22 +257,31 @@ export function constituentVols(
 }
 
 /**
- * Choueifaty Diversification Ratio: DR = (Σᵢ wᵢ·σᵢ) / σ_p.
+ * Choueifaty Diversification Ratio: DR = (Σᵢ ŵᵢ·σ_levᵢ) / σ_p.
  *
- * ── INTENDED LEVERAGE ASYMMETRY (A1) ────────────────────────────────────────
- * The numerator σᵢ are standalone UN-levered per-constituent volatilities
- * (built from the RAW return series, exactly as the engine builds its un-levered
- * correlation matrix). The denominator σ_p is the REALIZED LEVERED portfolio σ
- * — the orchestrator computes it as `stdDev(portfolioDailyReturns, true)`, the
- * SAME SAMPLE std the engine uses for `volatility` (scenario.ts:338-340), and
- * `portfolio_daily_returns` already has per-strategy leverage baked in
- * (scenario.ts:251). This is the Choueifaty DR's correct form: it is internally
- * consistent because the covariance/correlation the panel displays is also
- * un-levered. As a corollary, DR is LEVERAGE-INVARIANT — scaling every leg's
- * leverage scales σ_p but the ratio holds (correlation is leverage-invariant,
- * ScenarioComposer.tsx:2204).
+ * ── LEVERED-CONSISTENT BASIS (CR-01 fix) ────────────────────────────────────
+ * Both the numerator and the denominator describe the SAME (levered) portfolio
+ * the allocator is actually looking at. The denominator σ_p is the realized
+ * LEVERED portfolio σ — `stdDev(portfolioDailyReturns, true)`, the same SAMPLE
+ * std the engine reports as `volatility`, and `portfolio_daily_returns` already
+ * bakes in per-strategy leverage (`Σ ŵᵢ·Lᵢ·rᵢ`, scenario.ts:251). The numerator
+ * MUST therefore lever each constituent's σ too: treat each leg's asset as its
+ * levered series `xᵢ = Lᵢ·rᵢ`, so `σ_levᵢ = std(xᵢ) = Lᵢ·σᵢ`. `vols` here are
+ * the per-constituent LEVERED σ (computed by the orchestrator from the levered
+ * aligned series), and `weights` are the NORMALIZED UN-levered weights ŵᵢ
+ * (= wᵢ/Σwⱼ), matching the engine's per-day renormalization by the un-levered
+ * weight mass.
  *
- * σᵢ and σ_p are both daily (un-annualized) — the √252 cancels in the ratio.
+ * Consequences (the three artifacts CR-01 demanded):
+ *   • Under UNIFORM leverage L the ratio is INVARIANT — the numerator becomes
+ *     L·Σŵᵢσᵢ and σ_p becomes L·σ_p(unlev), so L cancels (correlation, the only
+ *     genuine diversification driver, is itself leverage-invariant).
+ *   • DR ≥ 1 for long-only, non-perfect ρ (the Choueifaty bound) holds at ANY
+ *     leverage — the basis is now consistent.
+ *   • Under NON-uniform leverage the ratio correctly reflects the levered
+ *     exposures rather than a spurious scale factor.
+ *
+ * σ_levᵢ and σ_p are both daily (un-annualized) — the √252 cancels in the ratio.
  * Returns null when σ_p ≤ 0 (all-flat blend) so the UI renders "—" instead of
  * dividing by zero.
  */
@@ -233,15 +293,26 @@ export function diversificationRatio(
   if (!(sigmaP > 0)) return null; // σ_p=0 → "—" (never divide by 0)
   let weightedSigma = 0;
   for (const id of Object.keys(weights)) {
-    weightedSigma += weights[id] * (vols[id] ?? 0);
+    weightedSigma += weights[id] * (vols[id] ?? 0); // ŵᵢ·σ_levᵢ
   }
   return weightedSigma / sigmaP; // Choueifaty DR (≥1 for long-only, non-perfect ρ)
 }
 
 /**
  * Per-constituent percent-contribution-to-risk (Euler decomposition of variance):
- *   PCRᵢ = wᵢ·(Σw)ᵢ / (wᵀΣw),  where (Σw)ᵢ = Σⱼ Σ[i][j]·wⱼ.
+ *   PCRᵢ = ŵᵢ·(Σ_lev·ŵ)ᵢ / (ŵᵀΣ_levŵ),  where (Σ_lev·ŵ)ᵢ = Σⱼ Σ_lev[i][j]·ŵⱼ.
  * The array sums to 1 over the active ids.
+ *
+ * ── LEVERED-CONSISTENT BASIS (WR-01 fix) ────────────────────────────────────
+ * `cov` here is the LEVERED covariance Σ_lev = cov(Lᵢrᵢ, Lⱼrⱼ) and `weights`
+ * are the NORMALIZED UN-levered weights ŵ. Because Σ_lev[i][j] = Lᵢ·Lⱼ·cov(rᵢ,rⱼ),
+ * the term ŵᵢ·(Σ_lev·ŵ)ᵢ = (ŵᵢLᵢ)·Σⱼ cov(rᵢ,rⱼ)(ŵⱼLⱼ) — i.e. the Euler
+ * decomposition of the LEVERED portfolio variance over the levered exposure
+ * vector eᵢ = ŵᵢ·Lᵢ. This is exactly the portfolio whose σ_p feeds the DR
+ * denominator and whose curve the allocator sees. Under UNIFORM leverage the L
+ * factors cancel in the self-normalized ratio (equal-L books are unchanged);
+ * under NON-uniform leverage the heavy-levered leg correctly carries a larger
+ * risk share and the descending list re-sorts to name the true dominant driver.
  *
  * ── SIGNED HEDGES (A3) ──────────────────────────────────────────────────────
  * A strongly-negatively-correlated leg can have a NEGATIVE PCR — it REDUCES
@@ -378,8 +449,13 @@ export function tooSimilarPairs(
  * all-null result with `clusterOrderIds = [...ids]`), else computes
  * cov → vols → σ_p → DR → PCR → ENB → clusterOrder → tooSimilarPairs.
  *
- * `returnsById` is already ALIGNED upstream (`alignConstituentReturns`). Every
- * division is guarded; no NaN/Inf escapes. σ_p is the SAMPLE std of the LEVERED
+ * `returnsById` is already ALIGNED upstream (`alignConstituentReturns`) and RAW
+ * (un-levered). DR and PCR are computed on the LEVERED basis: the orchestrator
+ * scales each series by Lᵢ (`applyLeverage`) BEFORE cov/σ, so they are
+ * consistent with the engine's levered `portfolio_daily_returns` (CR-01/WR-01).
+ * The ρ path is untouched (leverage-invariant — it comes from the engine, and
+ * the consistency pin rebuilds it from the UN-levered series). Every division is
+ * guarded; no NaN/Inf escapes. σ_p is the SAMPLE std of the LEVERED
  * `portfolioDailyReturns` — the same statistic the engine reports as `volatility`.
  */
 export function computeDiversification(
@@ -402,14 +478,25 @@ export function computeDiversification(
     return empty;
   }
 
-  const cov = covarianceMatrix(input.returnsById, input.ids);
+  // LEVERED basis for DR/PCR (CR-01/WR-01): xᵢ = Lᵢ·rᵢ. cov/σ are built from
+  // the levered series so they match the engine's levered portfolio σ_p. The ρ
+  // matrix (consumed read-only below) is leverage-invariant and stays un-levered.
+  const leveredReturns = applyLeverage(
+    input.returnsById,
+    input.ids,
+    input.leverage,
+  );
+  const cov = covarianceMatrix(leveredReturns, input.ids);
+  const leveredVols = constituentVols(leveredReturns, input.ids);
+  // UN-levered per-constituent σ for display (the lib's `vols` contract is the
+  // standalone daily σ, leverage-independent — matches the displayed matrix).
   const vols = constituentVols(input.returnsById, input.ids);
-  if (!cov || !vols) return empty;
+  if (!cov || !leveredVols || !vols) return empty;
 
   const sigmaP = stdDev(input.portfolioDailyReturns, true); // SAMPLE, levered
   const diversificationRatioValue = diversificationRatio(
     input.weights,
-    vols,
+    leveredVols,
     sigmaP,
   );
   const pcr = percentContributionToRisk(input.ids, input.weights, cov);

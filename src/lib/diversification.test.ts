@@ -229,6 +229,43 @@ describe("consistency pin — rebuilt ρ matches the engine correlation_matrix",
       }
     }
   });
+
+  // WR-04 — the riskiest re-alignment path is STAGGERED inception (a constituent
+  // starting mid-window, zero-filled before its include-from). The plain pin
+  // above runs only on a fully-overlapping window, so it never exercises the
+  // `d >= from` boundary / union-vs-intersection logic against the ENGINE. This
+  // case runs `computeScenario` on a staggered fixture (B from 2024-01-05) and
+  // asserts the rebuilt ρ STILL equals the engine `correlation_matrix` to 3dp —
+  // closing the gap the standalone alignment test only half-covered.
+  it("rebuilt ρ == engine correlation_matrix to 3dp on a STAGGERED-inception blend (WR-04)", () => {
+    const staggered: ScenarioState = {
+      selected: { A: true, B: true, C: true },
+      weights: { A: 1, B: 1, C: 1 },
+      startDates: { B: "2024-01-05" }, // B zero-filled before 2024-01-05
+    };
+    const dateMapCache = buildDateMapCache(STRATS_3);
+    const metrics = computeScenario(STRATS_3, staggered, dateMapCache);
+    expect(metrics.correlation_matrix).not.toBeNull();
+    const engine = metrics.correlation_matrix!;
+
+    const { ids, returnsById } = alignConstituentReturns(STRATS_3, staggered);
+    // Confirm the re-alignment actually staggered B (else the pin is vacuous).
+    expect(returnsById.B.slice(0, 4)).toEqual([0, 0, 0, 0]);
+    const cov = covarianceMatrix(returnsById, ids)!;
+    const vols = constituentVols(returnsById, ids)!;
+
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = 0; j < ids.length; j++) {
+        if (i === j) continue;
+        const sa = vols[ids[i]];
+        const sb = vols[ids[j]];
+        const rhoLib =
+          sa > 0 && sb > 0 ? Number((cov[i][j] / (sa * sb)).toFixed(3)) : 0;
+        const rhoEngine = engine[ids[i]][ids[j]];
+        expect(rhoLib).toBeCloseTo(rhoEngine, 3);
+      }
+    }
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -258,42 +295,144 @@ describe("diversificationRatio (Choueifaty)", () => {
     expect(diversificationRatio(W3, vols3, 0)).toBeNull();
   });
 
-  it("encodes the A1 leverage asymmetry: un-levered σᵢ + matrix are invariant, levered σ_p scales DR", () => {
-    // A1 (41-RESEARCH Assumptions Log): the DR numerator uses standalone
-    // UN-levered σᵢ; the denominator uses the REALIZED LEVERED σ_p. So the
-    // genuinely leverage-INVARIANT quantities are the per-constituent σᵢ and the
-    // correlation matrix (correlation is leverage-invariant — leverage is a
-    // scale transform that cancels in Pearson normalization), NOT the DR
-    // magnitude. Pinning DR-magnitude equality would WRONGLY assert both sides
-    // levered (then DR≈1 always) — this test pins the A1 split instead.
+  it("is LEVERAGE-INVARIANT under UNIFORM leverage (CR-01 fix; restores 41-01-PLAN.md:152)", () => {
+    // A true Choueifaty DR is leverage-invariant: scaling every leg's leverage
+    // by L scales both the levered numerator (Σ ŵᵢ·Lσᵢ = L·Σŵᵢσᵢ) and the
+    // levered denominator (σ_p = L·σ_p(unlev)) by the SAME L, which cancels.
+    // The prior shipped impl (un-levered numerator) WRONGLY HALVED DR under 2×
+    // leverage — the review's CR-01 — and a rewritten test blessed it. This pin
+    // restores the plan/research intent: DR must NOT move under uniform leverage.
     const sigmaPlain = stdDevSample(portReturns3);
-    const drPlain = diversificationRatio(W3, vols3, sigmaPlain)!;
+    const drPlain = computeDiversification({
+      ids: ["A", "B", "C"],
+      returnsById: aligned3.returnsById,
+      weights: W3,
+      portfolioDailyReturns: portReturns3,
+      correlationMatrix: metrics3.correlation_matrix,
+      n: metrics3.n,
+    }).diversificationRatio!;
+    expect(drPlain).toBeCloseTo(1.662551, 5);
 
-    // Apply a 2x leverage to every leg.
+    // Apply a UNIFORM 2× leverage to every leg.
     const levState: ScenarioState = {
       ...STATE_3,
       leverage: { A: 2, B: 2, C: 2 },
     };
     const levMetrics = computeScenario(STRATS_3, levState, dateMapCache3);
 
-    // INVARIANT 1: the engine's correlation matrix is byte-identical under leverage.
+    // The engine's correlation matrix is byte-identical under leverage
+    // (correlation is leverage-invariant — a scale transform cancels in Pearson
+    // normalization). This is what keeps the ρ consistency pin valid.
     expect(levMetrics.correlation_matrix).toEqual(metrics3.correlation_matrix);
 
-    // INVARIANT 2: the re-aligned per-constituent σᵢ are leverage-independent
-    // (the lib never levers the per-constituent series — Pitfall 4).
-    const levAligned = alignConstituentReturns(STRATS_3, levState);
-    const levVols = constituentVols(levAligned.returnsById, levAligned.ids)!;
-    expect(levVols).toEqual(vols3);
-
-    // ASYMMETRY: σ_p doubles → DR halves (the numerator stayed un-levered). This
-    // is the documented Choueifaty form, not a bug.
+    // σ_p doubles (the engine levers `portfolio_daily_returns`).
     const levPort = (levMetrics.portfolio_daily_returns ?? []).map(
       (p) => p.value,
     );
-    const sigmaLev = stdDevSample(levPort);
-    expect(sigmaLev).toBeCloseTo(2 * sigmaPlain, 9);
-    const drLev = diversificationRatio(W3, levVols, sigmaLev)!;
-    expect(drLev).toBeCloseTo(drPlain / 2, 9);
+    expect(stdDevSample(levPort)).toBeCloseTo(2 * sigmaPlain, 9);
+
+    // INVARIANCE: DR through the orchestrator (which now levers σᵢ too) is
+    // UNCHANGED vs the no-leverage DR — the L cancels. This is the test the
+    // 41-01 executor wrongly inverted; it is restored to assert EQUALITY.
+    const levAligned = alignConstituentReturns(STRATS_3, levState);
+    const levResult = computeDiversification({
+      ids: levAligned.ids,
+      returnsById: levAligned.returnsById,
+      weights: W3,
+      leverage: levState.leverage,
+      portfolioDailyReturns: levPort,
+      correlationMatrix: levMetrics.correlation_matrix,
+      n: levMetrics.n,
+    });
+    expect(levResult.diversificationRatio!).toBeCloseTo(drPlain, 9);
+    // …and the genuine Choueifaty bound holds at leverage ≠ 1.
+    expect(levResult.diversificationRatio!).toBeGreaterThan(1);
+
+    // PCR and ENB are ALSO invariant under uniform leverage (the L factors
+    // cancel in the self-normalized Euler ratio).
+    const plainResult = computeDiversification({
+      ids: ["A", "B", "C"],
+      returnsById: aligned3.returnsById,
+      weights: W3,
+      portfolioDailyReturns: portReturns3,
+      correlationMatrix: metrics3.correlation_matrix,
+      n: metrics3.n,
+    });
+    for (const id of ["A", "B", "C"]) {
+      expect(levResult.pcr![id]).toBeCloseTo(plainResult.pcr![id], 9);
+    }
+    expect(levResult.effectiveNumberOfBets!).toBeCloseTo(
+      plainResult.effectiveNumberOfBets!,
+      9,
+    );
+  });
+
+  it("shifts the risk driver under NON-UNIFORM leverage (WR-01: heavy-levered leg's PCR rises)", () => {
+    // Equal-weight A,B,C. Baseline PCR (all L=1). Then lever ONLY C up to 3×.
+    // The levered exposure eᵢ = ŵᵢ·Lᵢ makes C's risk share rise and the others'
+    // fall — the descending list must re-sort to surface C as the dominant
+    // driver. Under the BUGGY un-levered PCR this would not move at all.
+    const baseline = computeDiversification({
+      ids: ["A", "B", "C"],
+      returnsById: aligned3.returnsById,
+      weights: W3,
+      portfolioDailyReturns: portReturns3,
+      correlationMatrix: metrics3.correlation_matrix,
+      n: metrics3.n,
+    });
+
+    const levCState: ScenarioState = {
+      ...STATE_3,
+      leverage: { A: 1, B: 1, C: 3 },
+    };
+    const levCMetrics = computeScenario(STRATS_3, levCState, dateMapCache3);
+    const levCAligned = alignConstituentReturns(STRATS_3, levCState);
+    const levCPort = (levCMetrics.portfolio_daily_returns ?? []).map(
+      (p) => p.value,
+    );
+    const levered = computeDiversification({
+      ids: levCAligned.ids,
+      returnsById: levCAligned.returnsById,
+      weights: W3,
+      leverage: levCState.leverage,
+      portfolioDailyReturns: levCPort,
+      correlationMatrix: levCMetrics.correlation_matrix,
+      n: levCMetrics.n,
+    });
+
+    // C is the near-orthogonal, highest-σ leg; levered 3× it dominates risk.
+    expect(levered.pcr!.C).toBeGreaterThan(baseline.pcr!.C);
+    expect(levered.pcr!.A).toBeLessThan(baseline.pcr!.A);
+    expect(levered.pcr!.B).toBeLessThan(baseline.pcr!.B);
+    // Re-sorted descending, C is now the top risk driver.
+    const sorted = Object.entries(levered.pcr!).sort(([, a], [, b]) => b - a);
+    expect(sorted[0][0]).toBe("C");
+    // Still self-normalized (signed sum → 1).
+    expect(
+      Object.values(levered.pcr!).reduce((a, b) => a + b, 0),
+    ).toBeCloseTo(1, 9);
+  });
+
+  it("keeps DR ≥ 1 for a long-only blend at non-uniform leverage (Choueifaty bound)", () => {
+    const levState: ScenarioState = {
+      ...STATE_3,
+      leverage: { A: 1.5, B: 0.5, C: 4 },
+    };
+    const levMetrics = computeScenario(STRATS_3, levState, dateMapCache3);
+    const levAligned = alignConstituentReturns(STRATS_3, levState);
+    const levPort = (levMetrics.portfolio_daily_returns ?? []).map(
+      (p) => p.value,
+    );
+    const result = computeDiversification({
+      ids: levAligned.ids,
+      returnsById: levAligned.returnsById,
+      weights: W3,
+      leverage: levState.leverage,
+      portfolioDailyReturns: levPort,
+      correlationMatrix: levMetrics.correlation_matrix,
+      n: levMetrics.n,
+    });
+    expect(result.diversificationRatio!).toBeGreaterThanOrEqual(1);
   });
 });
 

@@ -3700,6 +3700,129 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     }
   });
 
+  // WR-02/WR-03/IN-01 — a HEDGE blend: ETH is strongly NEGATIVELY correlated to
+  // BTC (ρ≈−1) and lightly weighted, so signed PCRs put BTC > 100% and ETH < 0
+  // (the lib's own hedge test pins exactly this shape), and Σ PCRᵢ² > 1 → ENB < 1.
+  // This is the reachable case the three findings are about (a negatively-
+  // correlated leg is precisely what this panel exists to surface).
+  function mockHedgeBlend() {
+    const dates = Array.from({ length: 12 }, (_, i) =>
+      `2026-01-${String(i + 1).padStart(2, "0")}`,
+    );
+    const base = [0.02, -0.01, 0.03, -0.02, 0.015, -0.025, 0.01, -0.005, 0.02, -0.018, 0.012, -0.022];
+    const btc = dates.map((date, i) => ({ date, value: base[i] }));
+    // ETH = −1.1 × BTC → ρ ≈ −1 (a hedge).
+    const eth = dates.map((date, i) => ({ date, value: -1.1 * base[i] }));
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [mkRealStrat(REF_BTC, btc), mkRealStrat(REF_ETH, eth)],
+      state: {
+        selected: { [REF_BTC]: true, [REF_ETH]: true },
+        weights: { [REF_BTC]: 0.7, [REF_ETH]: 0.3 }, // BTC heavy, ETH light
+        startDates: {},
+      },
+    });
+  }
+
+  it("WR-02 — the PCR bar track is overflow-hidden and the >100% fill is clamped to 100%", () => {
+    mockHedgeBlend();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const list = screen
+      .getByText("Risk contribution per constituent (% of total)")
+      .closest("div")
+      ?.querySelector('ul[role="list"]') as HTMLElement;
+    const items = within(list).getAllByRole("listitem");
+    // BTC's signed PCR exceeds 100% (the hedge forces it past 1.0).
+    const btcRow = items.find((li) => (li.textContent ?? "").includes(REF_BTC))!;
+    const btcPct = parseFloat(btcRow.textContent!.match(/(-?\d+\.\d)%/)![1]);
+    expect(btcPct).toBeGreaterThan(100);
+    // Every bar track clamps overflow so a >100% fill can never bleed out.
+    for (const li of items) {
+      const track = li.querySelector("div[aria-hidden]") as HTMLElement;
+      expect(track.className).toContain("overflow-hidden");
+      const fill = track.firstElementChild as HTMLElement;
+      const w = parseFloat((fill.style.width || "0").replace("%", ""));
+      // Decorative bar magnitude is clamped to [0,100]% regardless of sign/size.
+      expect(w).toBeLessThanOrEqual(100);
+      expect(w).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("WR-03 — a negative-PCR (hedge) leg renders a 'risk-reducing' affordance, not a broken empty bar", () => {
+    mockHedgeBlend();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const list = screen
+      .getByText("Risk contribution per constituent (% of total)")
+      .closest("div")
+      ?.querySelector('ul[role="list"]') as HTMLElement;
+    // The hedge leg (ETH) carries a negative % AND the risk-reducing tag.
+    const ethRow = within(list)
+      .getAllByRole("listitem")
+      .find((li) => (li.textContent ?? "").includes(REF_ETH))!;
+    expect(ethRow.textContent).toMatch(/-\d+\.\d%/); // signed % preserved
+    const tag = within(ethRow).getByTestId("pcr-risk-reducing-tag");
+    expect(tag).toBeInTheDocument();
+    expect(tag.textContent).toMatch(/risk-reducing/i);
+    // Positive (teal) token, NOT an error/negative red — risk reduction is good.
+    expect(tag.className).toContain("text-positive");
+    expect(tag.className).not.toMatch(/text-negative|text-warning/);
+    // The hedge bar is the positive token and has NON-zero width (|PCR| scaled),
+    // i.e. it is no longer a 0-width "broken" bar.
+    const fill = ethRow.querySelector(
+      "div[aria-hidden] > div",
+    ) as HTMLElement;
+    expect(fill.className).toContain("bg-positive");
+    expect(parseFloat((fill.style.width || "0").replace("%", ""))).toBeGreaterThan(0);
+  });
+
+  it("IN-01 — ENB < 1 surfaces the 'below 1 — a hedge offsets risk' disclosure", () => {
+    mockHedgeBlend();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The hedge pushes Σ PCRᵢ² > 1 → ENB < 1; the disclosure caption appears.
+    const disclosure = screen.getByTestId("enb-below-one-disclosure");
+    expect(disclosure).toBeInTheDocument();
+    expect(disclosure.textContent).toMatch(/below 1/i);
+    expect(disclosure.textContent).toMatch(/hedge offsets risk/i);
+  });
+
+  it("IN-01 — a non-hedged blend (ENB ≥ 1) does NOT render the sub-1 disclosure", () => {
+    // Two mildly-positively-correlated legs (ρ≈0.2) → both PCR ≥ 0, ENB ≈ 1.68.
+    mockTwoStrategies();
+    const payload = makePayload({
+      holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.queryByTestId("enb-below-one-disclosure")).toBeNull();
+    // And no row carries the risk-reducing tag (no negative PCR).
+    expect(screen.queryByTestId("pcr-risk-reducing-tag")).toBeNull();
+  });
+
   it("CORR-06 — the heatmap axis labels follow the cluster order (correlated legs adjacent, outlier separated)", () => {
     mockThreeStrategies();
     const payload = makePayload({

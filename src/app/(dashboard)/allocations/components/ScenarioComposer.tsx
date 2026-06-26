@@ -1570,6 +1570,11 @@ export function ScenarioComposer({
       ids: aligned.ids,
       returnsById: aligned.returnsById,
       weights,
+      // CR-01/WR-01 — thread the de-aliased per-constituent leverage (Lᵢ,
+      // default 1) so DR/PCR are computed on the SAME levered basis as the
+      // engine's `portfolio_daily_returns` (`Σ ŵᵢ·Lᵢ·rᵢ`). Absent → all-1, i.e.
+      // a correct un-levered computation. The ρ matrix stays leverage-invariant.
+      leverage: deAliased.state.leverage,
       portfolioDailyReturns: (
         scenarioMetrics.portfolio_daily_returns ?? []
       ).map((p) => p.value),
@@ -2501,6 +2506,20 @@ export function ScenarioComposer({
                           ? "constituent"
                           : "constituents"}
                       </span>
+                      {/* IN-01 — surface the sub-1 disclosure the lib promises
+                          (diversification.ts: "honest, do NOT clamp … DISCLOSED
+                          on the panel"). With a hedge, Σ PCRᵢ² can exceed 1 →
+                          ENB < 1; an unexplained "0.4 effective bets" reads as
+                          nonsense, so caption WHY. */}
+                      {diversification.effectiveNumberOfBets < 1 && (
+                        <span
+                          data-testid="enb-below-one-disclosure"
+                          className="text-[11px] text-text-muted"
+                        >
+                          Below 1 — a hedge offsets risk, so the blend behaves
+                          like less than one independent bet.
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2508,8 +2527,14 @@ export function ScenarioComposer({
 
               {/* CORR-05 — per-constituent risk contribution, sorted DESCENDING.
                   The bar is decorative (aria-hidden); the % text carries the
-                  accessible value. PCR is signed — clamp the bar width to ≥0 (a
-                  negative hedge renders a 0-width bar) but keep its signed % text. */}
+                  accessible value. PCR is signed:
+                  • WR-02 — the bar width is clamped to [0,100]% AND the track is
+                    `overflow-hidden`, so a hedge that pushes another leg's PCR
+                    above 100% can never bleed the fill out of its track.
+                  • WR-03 — a NEGATIVE (risk-reducing) leg gets a positive-token
+                    "risk-reducing" tag + a teal/positive mini-bar (scaled by
+                    |PCR|, clamped) instead of an empty 0-width bar that reads as
+                    "broken". The signed % text is preserved either way. */}
               {diversification.pcr != null && (
                 <div>
                   <p className="text-[12px] text-text-muted mb-2">
@@ -2518,31 +2543,48 @@ export function ScenarioComposer({
                   <ul role="list" className="divide-y divide-border">
                     {Object.entries(diversification.pcr)
                       .sort(([, a], [, b]) => b - a)
-                      .map(([id, pcr]) => (
-                        <li
-                          key={id}
-                          role="listitem"
-                          className="flex items-center gap-2 py-2"
-                        >
-                          <span className="text-[12px] text-text-primary truncate max-w-[160px]">
-                            {strategyNames[id] ?? id.slice(0, 8)}
-                          </span>
-                          <div
-                            className="flex-1 min-w-[60px] h-1.5 rounded-full bg-border"
-                            aria-hidden
+                      .map(([id, pcr]) => {
+                        const isHedge = pcr < 0;
+                        // Bar magnitude clamped to [0,100]% (decorative). The
+                        // signed % text below carries the true value.
+                        const barWidth = Math.min(
+                          100,
+                          Math.abs(pcr) * 100,
+                        ).toFixed(1);
+                        return (
+                          <li
+                            key={id}
+                            role="listitem"
+                            className="flex items-center gap-2 py-2"
                           >
+                            <span className="text-[12px] text-text-primary truncate max-w-[160px]">
+                              {strategyNames[id] ?? id.slice(0, 8)}
+                            </span>
+                            {isHedge && (
+                              <span
+                                data-testid="pcr-risk-reducing-tag"
+                                className="inline-flex items-center rounded-sm bg-positive/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-positive"
+                              >
+                                risk-reducing
+                              </span>
+                            )}
                             <div
-                              className="h-full rounded-full bg-accent"
-                              style={{
-                                width: `${Math.max(0, pcr * 100).toFixed(1)}%`,
-                              }}
-                            />
-                          </div>
-                          <span className="text-[12px] font-metric tabular-nums text-text-primary w-[48px] text-right">
-                            {(pcr * 100).toFixed(1)}%
-                          </span>
-                        </li>
-                      ))}
+                              className="flex-1 min-w-[60px] h-1.5 rounded-full bg-border overflow-hidden"
+                              aria-hidden
+                            >
+                              <div
+                                className={`h-full rounded-full ${
+                                  isHedge ? "bg-positive" : "bg-accent"
+                                }`}
+                                style={{ width: `${barWidth}%` }}
+                              />
+                            </div>
+                            <span className="text-[12px] font-metric tabular-nums text-text-primary w-[48px] text-right">
+                              {(pcr * 100).toFixed(1)}%
+                            </span>
+                          </li>
+                        );
+                      })}
                   </ul>
                 </div>
               )}
