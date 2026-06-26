@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.34.0.1] - 2026-06-26
+### Fixed — the Scenario blend's Diversification Ratio could render below 1.0 (mathematically impossible)
+
+The constituent Diversification panel could show a Choueifaty Diversification Ratio below 1.0, which is impossible for a long-only blend: the ratio is `Σŵᵢσᵢ / √(ŵᵀΣŵ)`, bounded at or above 1 by Cauchy-Schwarz. It broke whenever the blend mixed constituents with staggered inception dates and the dominant weight sat on a shorter-history leg. Found live during QA: a min-volatility apply concentrated weight on a low-vol, short-history strategy and the ratio rendered 0.96, contradicting the Effective-Number-of-Bets shown right beside it. Root cause was a basis mismatch — the numerator's per-constituent volatilities were computed on the zero-filled, union-axis aligned series (which deflates the std of a constituent that started mid-window), while the denominator σ_p was the engine's renormalized realized portfolio volatility on a different basis (started-subset, no zero-fill). Numerator and denominator sat on two different covariances, so the bound could break. The fix derives σ_p from the SAME levered covariance the numerator and the per-constituent risk-contribution already use (`σ_p = √(ŵᵀΣ_levŵ)` via a new `portfolioVarianceFromCov`), so the ratio is one covariance divided against itself and DR ≥ 1 holds at any inception window. On a fully-overlapping blend the new σ_p equals the old realized one exactly, so equal-history blends are byte-unchanged; only the staggered-inception case is corrected. Leverage-invariance under uniform leverage is preserved. A regression test reproduces the live failure (a staggered blend with 90% weight on the short-history leg rendered DR 0.65) and pins the bound.
+
 ## [0.34.0.0] - 2026-06-26
 ### Added — the Scenario composer renders the real factsheet on a hypothetical blend (v1.2.2)
 

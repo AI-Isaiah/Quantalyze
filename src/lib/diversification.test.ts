@@ -434,6 +434,50 @@ describe("diversificationRatio (Choueifaty)", () => {
     });
     expect(result.diversificationRatio!).toBeGreaterThanOrEqual(1);
   });
+
+  // ── REGRESSION (QA-DR01) ──────────────────────────────────────────────────
+  // The Choueifaty bound DR ≥ 1 must hold on a STAGGERED-inception blend whose
+  // engine `portfolio_daily_returns` is the RENORMALIZED real portfolio (active
+  // subset only, NOT zero-filled), even when the dominant weight sits on the
+  // short-history (zero-filled, vol-DEFLATED) leg.
+  //
+  // Found LIVE on prod: a min-vol apply concentrated weight on a short-history,
+  // low-vol leg and DR rendered 0.96 — mathematically impossible for a long-only
+  // blend. Root cause: the numerator per-leg σ came from the zero-filled aligned
+  // series (deflated by the pre-inception zeros) while the denominator σ_p came
+  // from the engine's renormalized series — two DIFFERENT bases, so the ratio
+  // could fall below 1. The fix sources σ_p from the SAME (levered) covariance
+  // the numerator and PCR use (σ_p = √(ŵᵀΣŵ)), so numerator and denominator share
+  // one Σ and the Cauchy-Schwarz bound DR ≥ 1 is restored for ANY window.
+  it("keeps DR ≥ 1 on a STAGGERED-inception blend with the dominant weight on the short-history leg (QA-DR01)", () => {
+    const staggered: ScenarioState = {
+      // B starts late (2024-01-09) → its first 8 obs are zero-filled, deflating
+      // σ_B. Give B the dominant weight so the deflated σ_B drags the numerator
+      // while the engine's renormalized σ_p reflects the real (A,C-only) early
+      // window — the exact basis split that produced the live 0.96.
+      selected: { A: true, B: true, C: true },
+      weights: { A: 0.05, B: 0.9, C: 0.05 },
+      startDates: { B: "2024-01-09" },
+    };
+    const metrics = computeScenario(STRATS_3, staggered, dateMapCache3);
+    const aligned = alignConstituentReturns(STRATS_3, staggered);
+    // Guard: confirm the stagger actually zero-filled B (else this is vacuous).
+    expect(aligned.returnsById.B.slice(0, 8)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+    const port = (metrics.portfolio_daily_returns ?? []).map((p) => p.value);
+
+    const dr = computeDiversification({
+      ids: aligned.ids,
+      returnsById: aligned.returnsById,
+      weights: { A: 0.05, B: 0.9, C: 0.05 },
+      portfolioDailyReturns: port,
+      correlationMatrix: metrics.correlation_matrix,
+      n: metrics.n,
+    }).diversificationRatio;
+
+    expect(dr).not.toBeNull();
+    // DR < 1 is impossible for a long-only blend; the live bug rendered 0.96.
+    expect(dr!).toBeGreaterThanOrEqual(1);
+  });
 });
 
 describe("percentContributionToRisk (Euler decomposition)", () => {
