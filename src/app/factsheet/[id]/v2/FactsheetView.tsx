@@ -288,7 +288,7 @@ export function FactsheetBody({
           </div>
         )}
 
-        {!hideFooter && <FactsheetFooter payload={payload} />}
+        {!hideFooter && <FactsheetFooter payload={payload} scenarioMode={scenarioMode} />}
       </article>
     </>
   );
@@ -965,7 +965,16 @@ function DisplayItem({
 }
 
 
-function FactsheetFooter({ payload }: { payload: FactsheetPayload }) {
+function FactsheetFooter({
+  payload,
+  scenarioMode = false,
+}: {
+  payload: FactsheetPayload;
+  // GUARD-01 (43-01) — additive, default false → byte-identical on the real
+  // /factsheet/[id]/v2 route (page.tsx / Discovery / Overview pass nothing).
+  // GUARD-02 (43-02) pins the default-false equality permanently.
+  scenarioMode?: boolean;
+}) {
   const stamp = `QSF · ${payload.strategyId.slice(0, 8).toUpperCase()} · ${isoToYmd(payload.computedAt)}`;
   return (
     <footer className="mt-16 border-t border-text pt-6 flex flex-wrap items-start justify-between gap-6">
@@ -978,9 +987,14 @@ function FactsheetFooter({ payload }: { payload: FactsheetPayload }) {
       </p>
       <div className="text-right">
         <p className="font-mono text-[10px] tracking-[0.18em] text-text-primary">{stamp}</p>
-        <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.18em] text-text-muted">
-          Page 1 / 1
-        </p>
+        {/* The "Page 1 / 1" stamp is a print-only artifact; suppress it on the
+            on-screen composer mount (scenarioMode) while keeping the disclaimer
+            above unconditional. */}
+        {!scenarioMode && (
+          <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.18em] text-text-muted">
+            Page 1 / 1
+          </p>
+        )}
       </div>
     </footer>
   );
