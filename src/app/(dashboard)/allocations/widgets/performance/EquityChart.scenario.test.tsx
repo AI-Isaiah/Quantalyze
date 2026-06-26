@@ -477,6 +477,24 @@ function makeBlankSlateScenario(n = 90): DailyPoint[] {
   return toWealth(makeWealthSeries(n, 1.0, 0.0025));
 }
 
+// WR-01: ScenarioFactsheetChart now draws its line from the engine's
+// `portfolio_daily_returns` (daily RETURN form), full-resolution — NOT the
+// (deprecated) `scenarioSeries` wealth prop. A blank-slate render must feed a
+// non-degenerate returns series for the chart to draw. Same calendar axis as
+// makeWealthSeries (UTC consecutive days from 2024-01-01).
+function makeBlankSlateReturns(n = 90): DailyPoint[] {
+  const pts: DailyPoint[] = [];
+  const d = new Date(Date.UTC(2024, 0, 1));
+  for (let i = 0; i < n; i++) {
+    pts.push({
+      date: d.toISOString().slice(0, 10),
+      value: 0.0025 + Math.sin(i * 0.3) * 0.005,
+    });
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return pts;
+}
+
 describe("PARITY-03 — blank-slate scenario renders the overlay on the NEW composer path", () => {
   it("empty baseline + present scenario ⇒ scenario overlay renders a REAL strategy line (no synthetic baseline)", () => {
     const { container } = render(
@@ -484,6 +502,7 @@ describe("PARITY-03 — blank-slate scenario renders the overlay on the NEW comp
         equityDailyPoints={[]}
         scenarioSeries={makeBlankSlateScenario()}
         benchmark={undefined}
+        portfolioDaily={makeBlankSlateReturns()}
       />,
     );
 
@@ -518,6 +537,7 @@ describe("PARITY-03 — blank-slate scenario renders the overlay on the NEW comp
         equityDailyPoints={[]}
         scenarioSeries={makeBlankSlateScenario()}
         benchmark={undefined}
+        portfolioDaily={makeBlankSlateReturns()}
       />,
     );
     const overlay = container.querySelector(
@@ -539,6 +559,7 @@ describe("PARITY-03 — blank-slate scenario renders the overlay on the NEW comp
         equityDailyPoints={[]}
         scenarioSeries={makeBlankSlateScenario()}
         benchmark={undefined}
+        portfolioDaily={makeBlankSlateReturns()}
       />,
     );
     expect(queryByText(/Equity data warming up/i)).toBeNull();

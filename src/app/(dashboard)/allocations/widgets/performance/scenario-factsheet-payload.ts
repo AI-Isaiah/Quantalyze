@@ -1,43 +1,63 @@
 /**
  * Scenario → FactsheetPayload adapter — the single source of truth for the
- * date-keyed → index-aligned bridge that lets the composer's hypothetical
- * scenario blend render through the SAME factsheet `TimeSeriesChart` +
- * `MasterBrush` engine (Phase 38, PARITY-01). The factsheet is the truth: a
- * scenario blend is "just another strategy," so we synthesize a minimal,
- * VALID `FactsheetPayload` (the `csv` arm) rather than fork or reimplement the
- * chart engine. Synthesizing keeps every factsheet file byte-identical — their
- * tests cannot break.
+ * full-resolution returns axis that lets the composer's hypothetical scenario
+ * blend render through the SAME factsheet `TimeSeriesChart` + `MasterBrush`
+ * engine (Phase 38, PARITY-01). The factsheet is the truth: a scenario blend is
+ * "just another strategy," so we synthesize a minimal, VALID `FactsheetPayload`
+ * (the `csv` arm) rather than fork or reimplement the chart engine. Synthesizing
+ * keeps every factsheet file byte-identical — their tests cannot break.
  *
- * Pure TS, zero dependencies, no fetch / DOM / time. Consumes the composer's
- * toWealth-normalized scenario series (cumulative wealth, start ~1.0) plus an
- * optional benchmark, and emits the shape the two charts ACTUALLY read:
- *   - dates            : the scenario's own date axis (the canonical x-model;
- *                        index = position in `dates` for `TimeSeriesChart`,
+ * SINGLE-AXIS BY CONSTRUCTION (WR-01 fix). A valid `FactsheetPayload` has ONE
+ * date axis: `dates[i] ↔ strategyReturns[i] ↔ strategyEquity[i] ↔
+ * strategyDrawdowns[i] ↔ every rolling/panel array`. We therefore build the
+ * WHOLE payload — chart line AND metric/panel body — off the engine's
+ * full-resolution `portfolio_daily_returns` (daily RETURN form), exactly the
+ * way the real `build-payload.ts` does (parity-by-construction). This mirrors
+ * `build-payload.ts`: `dates = returnDates`, `strategyEquity = cumEq(rets)`,
+ * `strategyDrawdowns = drawdowns(cumEq(rets))`, `strategyReturns = rets`.
+ *
+ * The earlier two-axis design (D-2 "Option a") sourced the chart LINE from the
+ * composer's `equity_curve` wealth series — but `equity_curve` is downsampled
+ * every 5 business days + 5-decimal-rounded (scenario.ts:435-447), length ≈ n/5,
+ * while `portfolio_daily_returns` is full-resolution, length n. That made
+ * `dates.length ≈ n/5` but `strategyReturns.length === n`: the returns/rolling
+ * panels desynced ~5x against the shared `dates` axis (WR-01). D-2's premise that
+ * `dates === datesR` was FALSE. A complete payload can have only ONE axis, and it
+ * must be the full-res returns axis so the returns panels are honest. The line is
+ * now `cumEq(rets)` — the same curve `equity_curve` downsamples, just full-res and
+ * unrounded.
+ *
+ * Pure TS, zero dependencies, no fetch / DOM / time. Consumes the engine's
+ * `portfolio_daily_returns` plus an optional benchmark, and emits the shape the
+ * two charts ACTUALLY read:
+ *   - dates            : the returns date axis (the canonical x-model; index =
+ *                        position in `dates` for `TimeSeriesChart`,
  *                        `MasterBrush`, and the `setXRange` clamp).
- *   - strategyEquity   : scenario wealth index-aligned over `dates` — the
- *                        accent strategy line AND the MasterBrush sparkline.
- *   - strategyDrawdowns: deriveSnapshotDrawdowns(scenario) — the underwater
- *                        config's series (REUSED helper; identical peak-anchoring).
+ *   - strategyEquity   : cumEq(rets) — full-res cumulative wealth (base 1.0),
+ *                        index-aligned over `dates`. The accent strategy line AND
+ *                        the MasterBrush sparkline.
+ *   - strategyDrawdowns: drawdowns(cumEq(rets)) — the underwater config's series
+ *                        (shared factsheet helpers; identical peak-anchoring).
  *   - comparators.btc.cumulative : benchmark index-aligned over `dates`
  *                        (missing day → null, dropped by TimeSeriesChart's path
  *                        builder); every other comparator field is null.
  *   - activeComparator : "btc" when a benchmark is present, else "none".
  *
  * Convention pins (LOCKED — see scenario-factsheet-payload.test.ts):
- *   - ONE canonical `dates[]` axis = the scenario's dates; the benchmark is
+ *   - ONE canonical `dates[]` axis = the returns dates; the benchmark is
  *     projected onto it via a date→value Map (mirrors EquityChart.tsx:593-595).
  *   - Color/width is NEVER inlined here: `resolveSeries` (chart-configs.ts)
  *     owns the scenario→accent / benchmark→muted contract via the exported
  *     ChartConfig constants below. No `stroke`/`color:` in this module.
- *   - Degenerate input (empty scenario, or ANY non-finite scenario value)
- *     collapses to a safe empty payload (dates [], strategyEquity [],
- *     comparator cumulative null) and NEVER throws — no NaN reaches the chart.
+ *   - ONE degenerate gate governs everything: when `portfolioDaily` is degenerate
+ *     (empty / ANY non-finite return / < 2 dated points) the WHOLE payload is
+ *     safe-empty (dates [], equity [], drawdowns [], all panels empty, comparator
+ *     null) and NEVER throws — no NaN/Inf reaches the chart.
  *   - The `csv` arm is correct by construction: a hypothetical scenario
  *     physically cannot carry peer-rank / portfolio panels (no-invented-data).
  */
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
-import { deriveSnapshotDrawdowns } from "@/app/(dashboard)/allocations/lib/drawdown";
-import { compute, worstDrawdowns } from "@/lib/factsheet/compute";
+import { compute, cumEq, drawdowns, worstDrawdowns } from "@/lib/factsheet/compute";
 import {
   rollingVol,
   rollingSharpe,
@@ -106,26 +126,18 @@ export const SCENARIO_DRAWDOWN_CONFIG: ChartConfig = {
 };
 
 export interface ScenarioFactsheetPayloadArgs {
-  /** Scenario wealth series (toWealth-normalized; cumulative, start ~1.0). */
-  scenario: DailyPoint[];
-  /**
-   * Live baseline series. Accepted for call-site symmetry with the composer
-   * (blank mode passes []/null). The synthesized payload's strategy line is
-   * ALWAYS the scenario — a hypothetical has no live baseline to merge — so
-   * this is not folded into `strategyEquity`. Its presence does not change the
-   * output; it documents the blank-slate contract (PARITY-03).
-   */
-  baseline?: DailyPoint[] | null;
-  /** Optional benchmark overlay (cumulative wealth form), date-keyed. */
-  benchmark?: DailyPoint[] | null;
   /**
    * The engine's `portfolio_daily_returns` — daily RETURN form (decimal, e.g.
-   * 0.012), the input `compute()` consumes; distinct from `scenario` which is
-   * cumulative WEALTH (~1.0). This is the parity-by-construction source for the
-   * full scalar metric set + every panel array (Phase 39). Empty/absent →
-   * safe-empty body (the engine already pre-collapses to [] below n<10).
+   * 0.012), the input `compute()` consumes. The SINGLE source for the entire
+   * payload (WR-01): the `dates` axis, the chart line (`strategyEquity =
+   * cumEq(rets)`, `strategyDrawdowns = drawdowns(cumEq(rets))`), the full scalar
+   * metric set, AND every panel array — all index-aligned on this one axis
+   * (parity-by-construction with `build-payload.ts`). Empty/absent → safe-empty
+   * payload (the engine already pre-collapses to [] below n<10).
    */
   portfolioDaily?: DailyPoint[];
+  /** Optional benchmark overlay (cumulative wealth form), date-keyed. */
+  benchmark?: DailyPoint[] | null;
   /** Scenario-scoped synthetic strategy id (storage-key scoping). */
   strategyId?: string;
 }
@@ -246,22 +258,25 @@ function emptyQuantiles(): FactsheetCsvPayload["quantiles"] {
 }
 
 /**
- * Daily-return-derived body fields: the full scalar metric set + every panel
- * array, synthesized from the blend's `portfolio_daily_returns` (daily RETURN
- * form) via the population-convention `compute.ts`/`rolling.ts` helper family —
+ * The ENTIRE returns-derived payload body, synthesized from the blend's
+ * `portfolio_daily_returns` (daily RETURN form) on ONE full-resolution axis
+ * (WR-01) via the population-convention `compute.ts`/`rolling.ts` helper family —
  * mirroring `build-payload.ts`'s csv-arm assembly field-for-field (PAYLOAD-01/02/
- * 03/04). Returns the safe-empty defaults when `portfolioDaily` is degenerate
- * (empty / any non-finite return / < 2 dated points) WITHOUT calling `compute()`
- * (which throws on empty) — never NaN/Inf, never fabricated zeros presented as
- * real metrics (PAYLOAD-05). `strategyMetrics.n` flows from `rets.length` (the
- * true overlapping-observation count), driving the unchanged n<252 caveat.
+ * 03/04). This covers BOTH the chart line (`dates`, `strategyEquity = cumEq(rets)`,
+ * `strategyDrawdowns = drawdowns(cumEq(rets))`) AND the full scalar metric set +
+ * every panel array — all index-aligned on the single returns axis so
+ * `dates[i] ↔ strategyReturns[i] ↔ strategyEquity[i] ↔ …` holds by construction.
  *
- * NOTE: this is DISTINCT from the equity/drawdown chart LINE, which keeps its
- * existing WEALTH-series source (D-2 Option a) so the Phase-38 chart-parity pins
- * stay byte-identical. The returns axis (`datesR`) is the metric/panel axis; the
- * chart line reads the scenario `dates`/`scenario` axis.
+ * Returns the safe-empty defaults when `portfolioDaily` is degenerate (empty /
+ * any non-finite return / < 2 dated points) WITHOUT calling `compute()` (which
+ * throws on empty) — never NaN/Inf, never fabricated zeros presented as real
+ * metrics (PAYLOAD-05). `strategyMetrics.n` flows from `rets.length` (the true
+ * overlapping-observation count), driving the unchanged n<252 caveat.
  */
 type ReturnsBody = {
+  dates: FactsheetCsvPayload["dates"];
+  strategyEquity: FactsheetCsvPayload["strategyEquity"];
+  strategyDrawdowns: FactsheetCsvPayload["strategyDrawdowns"];
   strategyReturns: FactsheetCsvPayload["strategyReturns"];
   strategyRollingVol: FactsheetCsvPayload["strategyRollingVol"];
   strategyRollingSharpe: FactsheetCsvPayload["strategyRollingSharpe"];
@@ -294,6 +309,9 @@ function buildReturnsBody(portfolioDaily: DailyPoint[]): ReturnsBody {
 
   if (degenerate) {
     return {
+      dates: [],
+      strategyEquity: [],
+      strategyDrawdowns: [],
       strategyReturns: [],
       strategyRollingVol: [],
       strategyRollingSharpe: [],
@@ -314,18 +332,28 @@ function buildReturnsBody(portfolioDaily: DailyPoint[]): ReturnsBody {
 
   // Populated path — mirror build-payload.ts:123-231 (csv arm), population
   // convention (252 vol/Sharpe, 365.25 CAGR). compute() sets n = rets.length →
-  // PAYLOAD-04 automatic. Strip the heavy eq/dd arrays (the chart LINE carries
-  // its own wealth-derived equity/drawdowns).
+  // PAYLOAD-04 automatic. The chart LINE is now full-res too (WR-01): the equity
+  // line is `cumEq(rets)` — the same curve `equity_curve` downsamples, just
+  // full-res/unrounded — and the underwater line is `drawdowns(cumEq(rets))`.
   const rollWindow = pickRollingWindow(rets.length);
   const rollBetaWindow = pickRollingWindow(rets.length, [
     { window: ROLL_WINDOW_90D, label: "90d" },
     { window: ROLL_WINDOW_30D, label: "30d" },
   ]);
+  // The chart line is full-res (WR-01): `strategyEquity = cumEq(rets)` (the same
+  // curve `equity_curve` downsamples, just full-res/unrounded), and the
+  // underwater line = `drawdowns(eq)`. compute()'s own `dd` IS `drawdowns(cumEq
+  // (rets))` (compute.ts:21-22), so `strategyDrawdowns` and the Worst-10 table
+  // (built off `dd`) are the SAME peak-anchored series by construction.
   const { eq: _eq, dd, ...strategyMetrics } = compute(rets, datesR);
+  const eq = cumEq(rets);
   const { wins, losses } = streakLengths(rets);
   const MAX_LEN = 14;
 
   return {
+    dates: datesR,
+    strategyEquity: eq,
+    strategyDrawdowns: drawdowns(eq),
     strategyReturns: rets,
     strategyRollingVol: rollingVol(rets, rollWindow.window),
     strategyRollingSharpe: rollingSharpe(rets, rollWindow.window),
@@ -356,53 +384,41 @@ function buildReturnsBody(portfolioDaily: DailyPoint[]): ReturnsBody {
 }
 
 /**
- * Build a COMPLETE, valid `FactsheetPayload` (csv arm) from the composer's
- * date-keyed scenario + optional benchmark + the engine's daily-RETURN series.
+ * Build a COMPLETE, valid `FactsheetPayload` (csv arm) from the engine's
+ * daily-RETURN series + an optional benchmark — on ONE full-resolution axis.
  *
- * Two independent axes feed this payload, by design (D-2 Option a):
- *   - The chart LINE (`dates` / `strategyEquity` / `strategyDrawdowns`) reads
- *     the scenario WEALTH series, index-aligned to ONE canonical `dates[]` axis
- *     (the scenario's own dates) — preserving the Phase-38 chart-parity pins.
- *   - The full scalar metric set + every panel array (`strategyMetrics`,
- *     rolling*, streaks, calmar, bootstrap, monthly/heatmap, quantiles, stress)
- *     are synthesized from `portfolioDaily` (daily RETURN form) via the
- *     population-convention `compute.ts`/`rolling.ts` family — see
- *     `buildReturnsBody`. The blend never hits the Python compute.
+ * SINGLE-AXIS (WR-01). The whole payload is synthesized from `portfolioDaily`
+ * (daily RETURN form) via `buildReturnsBody`: the `dates` axis, the chart LINE
+ * (`strategyEquity = cumEq(rets)`, `strategyDrawdowns = drawdowns(cumEq(rets))`),
+ * the full scalar metric set, and every panel array — all index-aligned so
+ * `dates[i] ↔ strategyReturns[i] ↔ strategyEquity[i] ↔ …` holds by construction
+ * (parity with `build-payload.ts`). The blend never hits the Python compute.
  *
- * Both axes degenerate-collapse independently: a poisoned/empty WEALTH series →
- * empty chart line; a poisoned/empty/sub-2-date RETURNS series → safe-empty
- * metrics/panels (BEFORE any compute() call). Neither ever emits NaN/Inf.
+ * ONE degenerate gate: a poisoned/empty/sub-2-date RETURNS series collapses the
+ * ENTIRE payload to safe-empty (dates [], equity [], drawdowns [], all panels
+ * empty, comparator null) BEFORE any compute() call. Never NaN/Inf.
  */
 export function buildScenarioFactsheetPayload(
   args: ScenarioFactsheetPayloadArgs,
 ): FactsheetCsvPayload {
-  const { scenario, benchmark, portfolioDaily, strategyId } = args;
+  const { benchmark, portfolioDaily, strategyId } = args;
   const id = strategyId ?? DEFAULT_SCENARIO_ID;
 
-  // Returns-derived body (full scalars + panel arrays). Self-guards its own
-  // returns-degenerate gate before calling compute() (PAYLOAD-01..05).
+  // The single returns-derived body — chart line + scalars + panel arrays, all
+  // on one full-res axis. Self-guards its returns-degenerate gate before any
+  // compute() call (PAYLOAD-01..05, WR-01). Degenerate → every field safe-empty.
   const body = buildReturnsBody(portfolioDaily ?? []);
+  const { dates, strategyEquity, strategyDrawdowns } = body;
+  const degenerate = dates.length === 0;
 
-  // Degenerate-collapse: empty, or ANY non-finite scenario value → safe empty
-  // payload (no NaN propagation into the chart). Mirrors the analog's rule.
-  const degenerate =
-    scenario.length === 0 ||
-    scenario.some((p) => !Number.isFinite(p.value));
-
-  const dates = degenerate ? [] : scenario.map((p) => p.date);
-  const strategyEquity = degenerate ? [] : scenario.map((p) => p.value);
-  const strategyDrawdowns = degenerate
-    ? []
-    : deriveSnapshotDrawdowns(scenario).map((d) => d.value);
-
-  // Benchmark → comparators.btc.cumulative, index-aligned over `dates`.
-  // Missing day → null (dropped by TimeSeriesChart's buildPath / Y-domain
-  // scan, both of which `continue` on `v == null`). Mirrors the existing
-  // benchmark date→value map at EquityChart.tsx:593-595. `ComparatorBlock.
-  // cumulative` is typed `number[] | null` because the factsheet pre-aligns
-  // the benchmark to a DENSE series upstream (comparator-block.ts:61); the
-  // composer's benchmark is genuinely sparse against the scenario axis, so we
-  // assign through the runtime-tolerated nullable shape at this one boundary.
+  // Benchmark → comparators.btc.cumulative, index-aligned over the returns axis
+  // `dates`. Missing day → null (dropped by TimeSeriesChart's buildPath /
+  // Y-domain scan, both of which `continue` on `v == null`). Mirrors the
+  // existing benchmark date→value map at EquityChart.tsx:593-595. `ComparatorBlock.
+  // cumulative` is typed `number[] | null` because the factsheet pre-aligns the
+  // benchmark to a DENSE series upstream (comparator-block.ts:61); the composer's
+  // benchmark is genuinely sparse against the returns axis, so we assign through
+  // the runtime-tolerated nullable shape at this one boundary.
   const hasBenchmark = !degenerate && !!benchmark && benchmark.length > 0;
   let benchAligned: (number | null)[] | null = null;
   if (hasBenchmark) {
@@ -433,12 +449,10 @@ export function buildScenarioFactsheetPayload(
     avgDailyTurnover: null,
     startDate: null,
     benchmark: null,
+    // ── Single full-res returns axis (WR-01): chart line + scalars + panels
+    //    all index-aligned on `body.dates` (PAYLOAD-01/02/03/04/05) ──
     dates,
-    // ── Returns-derived body (full scalars + panel arrays, PAYLOAD-01/02/03/04/05) ──
     strategyReturns: body.strategyReturns,
-    // strategyEquity / strategyDrawdowns stay on the WEALTH-series source (D-2
-    // Option a) — the chart LINE keeps Phase-38 byte-parity; only the metrics
-    // and panels above read the returns axis.
     strategyEquity,
     strategyRollingVol: body.strategyRollingVol,
     strategyRollingSharpe: body.strategyRollingSharpe,

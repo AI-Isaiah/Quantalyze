@@ -57,22 +57,30 @@ const PERIOD_TRADING_DAYS: Record<Exclude<ScenarioPeriod, "ALL">, number> = {
 
 export interface ScenarioFactsheetChartProps {
   /**
-   * Live baseline series. Accepted for call-site symmetry with the composer
-   * (blank mode passes []). A hypothetical scenario has no live baseline to
-   * merge, so the strategy line is ALWAYS the scenario — this documents the
-   * blank-slate contract (PARITY-03) and flows through the adapter unchanged.
+   * @deprecated Live baseline series. No longer fed to the adapter (WR-01): the
+   * synthesized payload is now SINGLE-AXIS off `portfolioDaily`, so a hypothetical
+   * blend carries no live-baseline line. Accepted for call-site symmetry with the
+   * composer (blank mode passes []) and documents the blank-slate contract
+   * (PARITY-03); it does not affect the rendered chart.
    */
   equityDailyPoints: DailyPoint[];
-  /** Scenario wealth series (toWealth-normalized, cumulative, start ~1.0). */
+  /**
+   * @deprecated Scenario wealth series (toWealth-normalized, cumulative, ~1.0).
+   * No longer the chart-line source (WR-01): the equity line is now
+   * `cumEq(portfolioDaily)` — the same curve `equity_curve` downsamples, full-res
+   * and unrounded — so `dates` indexes every returns/rolling panel by construction.
+   * Accepted for call-site symmetry only.
+   */
   scenarioSeries: DailyPoint[];
   /** Optional BTC benchmark overlay (cumulative-wealth form). Undefined hides it. */
   benchmark?: DailyPoint[];
   /**
    * The engine's `portfolio_daily_returns` — daily RETURN form (decimal). The
-   * input the adapter feeds to `compute()` for the full scalar/panel body
-   * (Phase 39). Distinct from `scenarioSeries` (cumulative wealth, the chart
-   * line). Optional + defaults to [] → safe-empty body, so existing mounts that
-   * predate the metric body stay green.
+   * SINGLE input the adapter feeds to `compute()`/`cumEq` for the entire payload:
+   * the `dates` axis, the chart line, the full scalar set, and every panel array
+   * (WR-01, parity with `build-payload.ts`). Optional + defaults to [] →
+   * safe-empty body (empty chart). When present (production always passes it),
+   * the chart renders the full-resolution scenario line.
    */
   portfolioDaily?: DailyPoint[];
 }
@@ -134,24 +142,24 @@ function PeriodControl({ axisLength }: { axisLength: number }) {
 }
 
 export function ScenarioFactsheetChart({
-  equityDailyPoints,
-  scenarioSeries,
+  // `equityDailyPoints` / `scenarioSeries` are accepted (call-site symmetry) but
+  // no longer feed the adapter — the payload is SINGLE-AXIS off `portfolioDaily`
+  // (WR-01). They are intentionally not destructured here.
   benchmark,
   portfolioDaily = [],
 }: ScenarioFactsheetChartProps) {
   // Synthesize the minimal, valid FactsheetPayload (csv arm) the factsheet
-  // TimeSeriesChart + MasterBrush consume verbatim. Index-aligned to ONE
-  // canonical `dates[]` axis (the scenario's own dates). Memoized so a pan
-  // (which only churns xRange in context) doesn't rebuild the payload.
+  // TimeSeriesChart + MasterBrush consume verbatim. SINGLE full-res returns axis
+  // (WR-01): `dates`/equity/drawdowns/returns/panels all derive from
+  // `portfolioDaily`. Memoized so a pan (which only churns xRange in context)
+  // doesn't rebuild the payload.
   const synthPayload = useMemo(
     () =>
       buildScenarioFactsheetPayload({
-        scenario: scenarioSeries,
-        baseline: equityDailyPoints,
         benchmark: benchmark ?? null,
         portfolioDaily,
       }),
-    [scenarioSeries, equityDailyPoints, benchmark, portfolioDaily],
+    [benchmark, portfolioDaily],
   );
 
   const axisLength = synthPayload.dates.length;

@@ -54,6 +54,23 @@ function makeWealthSeries(n: number, start = 1.0, drift = 0.002): DailyPoint[] {
   return pts;
 }
 
+// WR-01: the chart axis is now the engine's `portfolio_daily_returns` (daily
+// RETURN form), full-resolution. The payload's `dates`/equity/drawdowns all
+// derive from this, so the brush + period control read THIS axis. Same calendar
+// dates as makeWealthSeries (UTC consecutive days from 2024-01-01).
+function makeReturnsSeries(n: number, drift = 0.002): DailyPoint[] {
+  const pts: DailyPoint[] = [];
+  const d = new Date(Date.UTC(2024, 0, 1));
+  for (let i = 0; i < n; i++) {
+    pts.push({
+      date: d.toISOString().slice(0, 10),
+      value: drift + Math.sin(i * 0.3) * 0.004,
+    });
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return pts;
+}
+
 describe("ScenarioFactsheetChart — equity + drawdown share ONE window (38-03 Q4)", () => {
   it("mounts the real factsheet assets: MasterBrush + two TimeSeriesChart SVGs", () => {
     const { container, getByLabelText } = render(
@@ -61,6 +78,7 @@ describe("ScenarioFactsheetChart — equity + drawdown share ONE window (38-03 Q
         equityDailyPoints={[]}
         scenarioSeries={makeWealthSeries(120)}
         benchmark={makeWealthSeries(120, 1.0, 0.001)}
+        portfolioDaily={makeReturnsSeries(120)}
       />,
     );
 
@@ -90,6 +108,7 @@ describe("ScenarioFactsheetChart — equity + drawdown share ONE window (38-03 Q
         equityDailyPoints={[]}
         scenarioSeries={makeWealthSeries(120)}
         benchmark={makeWealthSeries(120, 1.0, 0.001)}
+        portfolioDaily={makeReturnsSeries(120)}
       />,
     );
 
@@ -130,6 +149,7 @@ describe("ScenarioFactsheetChart — equity + drawdown share ONE window (38-03 Q
         equityDailyPoints={[]}
         scenarioSeries={makeWealthSeries(252)}
         benchmark={undefined}
+        portfolioDaily={makeReturnsSeries(252)}
       />,
     );
 

@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
-import { deriveSnapshotDrawdowns } from "@/app/(dashboard)/allocations/lib/drawdown";
-import { compute, cumEq } from "@/lib/factsheet/compute";
+import { compute, cumEq, drawdowns } from "@/lib/factsheet/compute";
 import { bootstrapCI } from "@/lib/factsheet/bootstrap";
 import { quantileSummary } from "@/lib/factsheet/quantiles";
 import {
@@ -11,45 +10,50 @@ import {
 } from "./scenario-factsheet-payload";
 
 // ── Deterministic fixtures (no Math.random) ──────────────────────────
-// A scenario WEALTH series (toWealth-normalized: starts ~1.0, cumulative).
-// `value` is a cumulative wealth multiplier, NOT a daily return.
-const ymd = (i: number) => new Date(2025, 0, 2 + i).toISOString().slice(0, 10);
+// The payload is SINGLE-AXIS off the engine's `portfolio_daily_returns` (daily
+// RETURN form, decimal) — WR-01. `value` here is a daily return, NOT cumulative
+// wealth. UTC ISO dates so compute()'s 365.25-CAGR axis is reproducible.
+const ymd = (i: number) =>
+  new Date(Date.UTC(2025, 0, i + 1)).toISOString().slice(0, 10);
 
-const SCENARIO: DailyPoint[] = Array.from({ length: 30 }, (_, i) => ({
+// A 30-day returns blend with a run of negative days (10..14) so the equity
+// curve dips and a drawdown is observable.
+const RETS: DailyPoint[] = Array.from({ length: 30 }, (_, i) => ({
   date: ymd(i),
-  // Monotone-ish wealth with one dip so a drawdown is observable.
-  value: 1 + i * 0.01 - (i >= 10 && i < 15 ? 0.05 : 0),
+  value: i >= 10 && i < 15 ? -0.01 : 0.005,
 }));
 
-// A benchmark whose dates are a SUBSET of the scenario axis (skips even days
+// A benchmark whose dates are a SUBSET of the returns axis (skips even days
 // past index 4, and ends two days short) so the missing-day → null path is
 // exercised on both interior gaps and a trailing gap.
-const BENCH: DailyPoint[] = SCENARIO.filter(
+const BENCH: DailyPoint[] = RETS.filter(
   (_, i) => i < 28 && (i < 5 || i % 2 === 0),
-).map((p) => ({ date: p.date, value: p.value * 0.9 }));
+).map((p) => ({ date: p.date, value: 0.9 }));
 
 describe("buildScenarioFactsheetPayload — convention pins", () => {
-  // ── 1. canonical dates axis + index-aligned strategyEquity ──────────
-  it("dates is the scenario axis and strategyEquity[i] === scenario wealth at dates[i]", () => {
-    const p = buildScenarioFactsheetPayload({ scenario: SCENARIO });
-    expect(p.dates).toEqual(SCENARIO.map((d) => d.date));
-    expect(p.strategyEquity.length).toBe(SCENARIO.length);
-    for (let i = 0; i < SCENARIO.length; i++) {
-      expect(p.strategyEquity[i]).toBe(SCENARIO[i].value);
+  // ── 1. canonical dates axis = the FULL-RES returns axis; equity = cumEq(rets) (WR-01) ──
+  it("dates is the returns axis and strategyEquity === cumEq(rets) full-res", () => {
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: RETS });
+    const rets = RETS.map((d) => d.value);
+    expect(p.dates).toEqual(RETS.map((d) => d.date));
+    expect(p.strategyEquity.length).toBe(RETS.length);
+    const eq = cumEq(rets);
+    for (let i = 0; i < RETS.length; i++) {
+      expect(p.strategyEquity[i]).toBeCloseTo(eq[i], 12);
     }
   });
 
   // ── 2. benchmark index-aligned into comparators.btc.cumulative, missing → null ──
   it("benchmark aligns to dates with missing days as null (interior + trailing gaps)", () => {
-    const p = buildScenarioFactsheetPayload({ scenario: SCENARIO, benchmark: BENCH });
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: RETS, benchmark: BENCH });
     const cum = p.comparators.btc.cumulative;
     expect(cum).not.toBeNull();
-    expect(cum!.length).toBe(SCENARIO.length);
+    expect(cum!.length).toBe(RETS.length);
 
     const benchByDate = new Map(BENCH.map((b) => [b.date, b.value]));
-    for (let i = 0; i < SCENARIO.length; i++) {
-      const expected = benchByDate.has(SCENARIO[i].date)
-        ? benchByDate.get(SCENARIO[i].date)!
+    for (let i = 0; i < RETS.length; i++) {
+      const expected = benchByDate.has(RETS[i].date)
+        ? benchByDate.get(RETS[i].date)!
         : null;
       expect(cum![i]).toBe(expected);
     }
@@ -60,70 +64,77 @@ describe("buildScenarioFactsheetPayload — convention pins", () => {
 
   // ── 3. activeComparator switching by benchmark presence ─────────────
   it('activeComparator is "btc" with a benchmark, "none" without (cumulative null)', () => {
-    const withBench = buildScenarioFactsheetPayload({ scenario: SCENARIO, benchmark: BENCH });
+    const withBench = buildScenarioFactsheetPayload({ portfolioDaily: RETS, benchmark: BENCH });
     expect(withBench.activeComparator).toBe("btc");
 
-    const noBench = buildScenarioFactsheetPayload({ scenario: SCENARIO });
+    const noBench = buildScenarioFactsheetPayload({ portfolioDaily: RETS });
     expect(noBench.activeComparator).toBe("none");
     expect(noBench.comparators.btc.cumulative).toBeNull();
 
-    const emptyBench = buildScenarioFactsheetPayload({ scenario: SCENARIO, benchmark: [] });
+    const emptyBench = buildScenarioFactsheetPayload({ portfolioDaily: RETS, benchmark: [] });
     expect(emptyBench.activeComparator).toBe("none");
     expect(emptyBench.comparators.btc.cumulative).toBeNull();
   });
 
-  // ── 4. drawdowns derive from the shared helper (not a hand-rolled loop) ──
-  it("strategyDrawdowns equals deriveSnapshotDrawdowns(scenario) point-for-point", () => {
-    const p = buildScenarioFactsheetPayload({ scenario: SCENARIO });
-    const ref = deriveSnapshotDrawdowns(SCENARIO).map((d) => d.value);
-    expect(p.strategyDrawdowns).toEqual(ref);
-    expect(p.strategyDrawdowns.length).toBe(SCENARIO.length);
-    // Non-vacuity: the dip produced an actual negative drawdown.
+  // ── 4. drawdowns derive from the shared full-res helper (WR-01) ──
+  it("strategyDrawdowns equals drawdowns(cumEq(rets)) point-for-point", () => {
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: RETS });
+    const rets = RETS.map((d) => d.value);
+    const ref = drawdowns(cumEq(rets));
+    expect(p.strategyDrawdowns.length).toBe(RETS.length);
+    for (let i = 0; i < ref.length; i++) {
+      expect(p.strategyDrawdowns[i]).toBeCloseTo(ref[i], 12);
+    }
+    // Non-vacuity: the negative run produced an actual negative drawdown.
     expect(p.strategyDrawdowns.some((v) => v < 0)).toBe(true);
   });
 
-  // ── 5. blank-slate (no baseline, scenario present) renders (PARITY-03 precondition) ──
-  it("blank-slate: scenario present with no baseline yields non-empty equity + dates", () => {
-    const p = buildScenarioFactsheetPayload({ scenario: SCENARIO, baseline: null });
+  // ── 5. blank-slate (scenario present via portfolioDaily) renders (PARITY-03 precondition) ──
+  it("blank-slate: a present returns series yields non-empty equity + dates", () => {
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: RETS });
     expect(p.strategyEquity.length).toBeGreaterThan(0);
     expect(p.dates.length).toBeGreaterThan(0);
   });
 
   // ── 6. degenerate input collapses safely (never throws) ─────────────
-  it("empty scenario collapses to a safe empty payload", () => {
-    const p = buildScenarioFactsheetPayload({ scenario: [] });
+  it("absent/empty portfolioDaily collapses to a safe empty payload", () => {
+    const p = buildScenarioFactsheetPayload({});
     expect(p.dates).toEqual([]);
     expect(p.strategyEquity).toEqual([]);
     expect(p.strategyDrawdowns).toEqual([]);
     expect(p.comparators.btc.cumulative).toBeNull();
     expect(p.activeComparator).toBe("none");
+
+    const pEmpty = buildScenarioFactsheetPayload({ portfolioDaily: [] });
+    expect(pEmpty.dates).toEqual([]);
+    expect(pEmpty.strategyEquity).toEqual([]);
   });
 
-  it("a non-finite scenario value collapses to a safe empty payload (no NaN propagation)", () => {
+  it("a non-finite return collapses to a safe empty payload (no NaN propagation)", () => {
     const poisoned: DailyPoint[] = [
-      { date: ymd(0), value: 1.0 },
+      { date: ymd(0), value: 0.01 },
       { date: ymd(1), value: Number.NaN },
-      { date: ymd(2), value: 1.02 },
+      { date: ymd(2), value: 0.02 },
     ];
-    expect(() => buildScenarioFactsheetPayload({ scenario: poisoned })).not.toThrow();
-    const p = buildScenarioFactsheetPayload({ scenario: poisoned });
+    expect(() => buildScenarioFactsheetPayload({ portfolioDaily: poisoned })).not.toThrow();
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: poisoned });
     expect(p.dates).toEqual([]);
     expect(p.strategyEquity).toEqual([]);
   });
 
-  it("an Infinity scenario value collapses to a safe empty payload", () => {
+  it("an Infinity return collapses to a safe empty payload", () => {
     const poisoned: DailyPoint[] = [
-      { date: ymd(0), value: 1.0 },
+      { date: ymd(0), value: 0.01 },
       { date: ymd(1), value: Number.POSITIVE_INFINITY },
     ];
-    const p = buildScenarioFactsheetPayload({ scenario: poisoned });
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: poisoned });
     expect(p.dates).toEqual([]);
     expect(p.strategyEquity).toEqual([]);
   });
 
   // ── 7. safe defaults for the unused FactsheetCommon fields ──────────
-  it("safe-defaults the unused fields and uses the csv arm", () => {
-    const p = buildScenarioFactsheetPayload({ scenario: SCENARIO });
+  it("safe-defaults the unused fields and uses the csv arm (degenerate body)", () => {
+    const p = buildScenarioFactsheetPayload({});
     expect(p.ingestSource).toBe("csv");
     expect(p.strategyName).toBe("Scenario");
     expect(p.strategyId).toBe("scenario");
@@ -141,7 +152,7 @@ describe("buildScenarioFactsheetPayload — convention pins", () => {
   });
 
   it("a custom strategyId flows through to the payload (storage-key scoping)", () => {
-    const p = buildScenarioFactsheetPayload({ scenario: SCENARIO, strategyId: "scenario:abc" });
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: RETS, strategyId: "scenario:abc" });
     expect(p.strategyId).toBe("scenario:abc");
   });
 
@@ -183,13 +194,6 @@ const BLEND_252: DailyPoint[] = Array.from({ length: 252 }, (_, i) => ({
   value: i % 2 === 0 ? 0.002 : 0,
 }));
 
-/** Build the matching cumulative-WEALTH series the chart line consumes, so the
- *  wealth-degenerate gate passes and the populated returns body path is reached. */
-const wealthFor = (blend: DailyPoint[]): DailyPoint[] => {
-  const eq = cumEq(blend.map((p) => p.value));
-  return blend.map((p, i) => ({ date: p.date, value: eq[i] }));
-};
-
 describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)", () => {
   // ── PAYLOAD-01 / PAYLOAD-03: field-by-field parity vs compute(rets,dates) ──
   it("strategyMetrics equals compute(rets,dates) field-by-field at 1e-6 (no zeroed summary)", () => {
@@ -197,7 +201,6 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
     const dates = BLEND_30.map((p) => p.date);
     const ref = compute(rets, dates);
     const p = buildScenarioFactsheetPayload({
-      scenario: wealthFor(BLEND_30),
       portfolioDaily: BLEND_30,
     });
     // Every numeric scalar of compute() (excluding the heavy eq/dd arrays and
@@ -228,23 +231,20 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
   // that is the whole point of pinning the population value here.
   it("ann_vol is the POPULATION-std value 0.0075·√252 — a sample-std bleed fails", () => {
     const p = buildScenarioFactsheetPayload({
-      scenario: wealthFor(BLEND_30),
       portfolioDaily: BLEND_30,
     });
     expect(p.strategyMetrics.ann_vol).toBeCloseTo(0.0075 * Math.sqrt(252), 6);
   });
 
-  // ── PAYLOAD-04: n = true overlap count (= portfolioDaily.length), not dates.length ──
+  // ── PAYLOAD-04: n = true overlap count (= portfolioDaily.length) ──
   it("strategyMetrics.n === portfolioDaily.length: caveat ON at 30, OFF at exactly 252", () => {
     const p30 = buildScenarioFactsheetPayload({
-      scenario: wealthFor(BLEND_30),
       portfolioDaily: BLEND_30,
     });
     expect(p30.strategyMetrics.n).toBe(30);
     expect(p30.strategyMetrics.n < 252).toBe(true); // low-sample caveat fires
 
     const p252 = buildScenarioFactsheetPayload({
-      scenario: wealthFor(BLEND_252),
       portfolioDaily: BLEND_252,
     });
     expect(p252.strategyMetrics.n).toBe(252);
@@ -255,7 +255,6 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
   it("panel arrays are populated from compute()/helpers (not empty), bootstrapCI deterministic", () => {
     const rets = BLEND_252.map((p) => p.value);
     const p = buildScenarioFactsheetPayload({
-      scenario: wealthFor(BLEND_252),
       portfolioDaily: BLEND_252,
     });
     expect(p.calmarByYear.length).toBeGreaterThan(0);
@@ -266,7 +265,6 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
     // strategyWorst10 is exercised on BLEND_30, which has down days (a
     // monotone-non-decreasing series like BLEND_252 genuinely has NO drawdown).
     const pDip = buildScenarioFactsheetPayload({
-      scenario: wealthFor(BLEND_30),
       portfolioDaily: BLEND_30,
     });
     expect(pDip.strategyWorst10.length).toBeGreaterThan(0);
@@ -286,7 +284,6 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
   // ── Honesty invariants (D-5/D-6/D-7) ─────────────────────────────────────
   it("styleDrift null, correlations honest-empty, ingestSource csv, 4 synth panels absent", () => {
     const p = buildScenarioFactsheetPayload({
-      scenario: wealthFor(BLEND_30),
       portfolioDaily: BLEND_30,
     });
     expect(p.styleDrift).toBeNull();
@@ -310,12 +307,10 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
   it("empty portfolioDaily → safe-empty metrics/panels, never throws (compute not called)", () => {
     expect(() =>
       buildScenarioFactsheetPayload({
-        scenario: wealthFor(BLEND_30),
         portfolioDaily: [],
       }),
     ).not.toThrow();
     const p = buildScenarioFactsheetPayload({
-      scenario: wealthFor(BLEND_30),
       portfolioDaily: [],
     });
     expect(p.strategyMetrics.cum_ret).toBe(0);
@@ -335,7 +330,6 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
       { date: ymdUTC(2), value: 0.02 },
     ];
     const p = buildScenarioFactsheetPayload({
-      scenario: wealthFor(BLEND_30),
       portfolioDaily: poisoned,
     });
     expect(p.strategyMetrics.n).toBe(0);
@@ -357,26 +351,56 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
   it("a single dated return (<2 points) → safe-empty body (compute's period math needs ≥2)", () => {
     const single: DailyPoint[] = [{ date: ymdUTC(0), value: 0.01 }];
     const p = buildScenarioFactsheetPayload({
-      scenario: wealthFor(BLEND_30),
       portfolioDaily: single,
     });
     expect(p.strategyMetrics.n).toBe(0);
     expect(p.strategyReturns).toEqual([]);
   });
 
-  // The equity/drawdown LINE stays on the wealth-series source (D-2 Option a):
-  // Phase-38 exact-equality pins must remain intact even with the returns body.
-  it("strategyEquity/strategyDrawdowns still track the WEALTH series, not cumEq(rets) (Phase-38 pins)", () => {
-    const wealth = wealthFor(BLEND_30);
+  // WR-01 fix: the equity/drawdown LINE is now the FULL-RES returns axis —
+  // `strategyEquity === cumEq(rets)` and `strategyDrawdowns === drawdowns(cumEq
+  // (rets))` exactly. (Inverts the old Phase-38 two-axis pin, which tracked the
+  // downsampled wealth series.)
+  it("strategyEquity/strategyDrawdowns track cumEq(rets)/drawdowns(cumEq(rets)) (WR-01 single-axis)", () => {
+    const rets = BLEND_30.map((p) => p.value);
     const p = buildScenarioFactsheetPayload({
-      scenario: wealth,
       portfolioDaily: BLEND_30,
     });
-    for (let i = 0; i < wealth.length; i++) {
-      expect(p.strategyEquity[i]).toBe(wealth[i].value);
+    const eqRef = cumEq(rets);
+    const ddRef = drawdowns(eqRef);
+    expect(p.strategyEquity.length).toBe(rets.length);
+    expect(p.strategyDrawdowns.length).toBe(rets.length);
+    for (let i = 0; i < rets.length; i++) {
+      expect(p.strategyEquity[i]).toBeCloseTo(eqRef[i], 12);
+      expect(p.strategyDrawdowns[i]).toBeCloseTo(ddRef[i], 12);
     }
-    expect(p.strategyDrawdowns).toEqual(
-      deriveSnapshotDrawdowns(wealth).map((d) => d.value),
-    );
+  });
+
+  // ── WR-01 PERMANENT REGRESSION: single-axis length invariant ──────────────
+  // WHY THIS MATTERS (CLAUDE.md Rule 9): a valid FactsheetPayload has ONE date
+  // axis — `dates[i] ↔ strategyReturns[i] ↔ strategyEquity[i] ↔
+  // strategyDrawdowns[i]`. The pre-fix two-axis adapter sourced `dates`/equity
+  // from the DOWNSAMPLED wealth series (length ≈ n/5) while the returns panels
+  // were full-resolution (length n), so this assertion would FAIL on it — that
+  // is its purpose. The factsheet's TimeSeriesChart indexes every returns/rolling
+  // panel against `payload.dates[i]`; a length desync silently misaligns
+  // tooltips, CSV rows, and warmup overlays (the Phase-40 footgun WR-01 names).
+  it("dates/returns/equity/drawdowns share ONE length for a healthy blend (WR-01)", () => {
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: BLEND_252 });
+    const n = BLEND_252.length;
+    expect(p.dates.length).toBe(n);
+    expect(p.strategyReturns.length).toBe(n);
+    expect(p.strategyEquity.length).toBe(n);
+    expect(p.strategyDrawdowns.length).toBe(n);
+    // All-equal in one shot (the load-bearing invariant).
+    expect(
+      p.dates.length === p.strategyReturns.length &&
+        p.dates.length === p.strategyEquity.length &&
+        p.dates.length === p.strategyDrawdowns.length,
+    ).toBe(true);
+    // And the rolling panels index the same axis (full-res too).
+    expect(p.strategyRollingVol.length).toBe(n);
+    expect(p.strategyRollingSharpe.length).toBe(n);
+    expect(p.strategyRollingSortino.length).toBe(n);
   });
 });
