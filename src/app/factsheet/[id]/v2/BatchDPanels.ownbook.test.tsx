@@ -13,7 +13,8 @@ import { OwnBookDeltaPanel } from "./BatchDPanels";
  *   1. SCENARIO + delta: a "vs Your Book" panel with 3 signed rows; the sign is in
  *      the TEXT (U+2212 for negative), never color-only; Sharpe/Sortino color
  *      follows sign; Max DD color is INVERTED (a positive maxDD-delta = shallower
- *      = positive token) and shows pp; the basis note shows the book_n.
+ *      = positive token) and shows pp; the basis note discloses BOTH observation
+ *      counts (blend_n · book_n) so the window mismatch is honest (WR-02).
  *   2. NO LIVE BOOK (null/absent carve-out): the panel renders nothing (silently
  *      absent — no zeroed deltas, no CTA).
  *   3. NON-SCENARIO: null (real route byte-identical).
@@ -85,12 +86,14 @@ function valueCellFor(container: HTMLElement, label: string): HTMLElement {
 }
 
 describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
-  it("scenario + delta: 'vs Your Book' with signs in text, U+2212 for negative, inverted maxDD color, basis note", () => {
+  it("scenario + delta: 'vs Your Book' with signs in text, U+2212 for negative, inverted maxDD color, dual-count basis note", () => {
     // positive Sharpe, negative Sortino, positive maxDD-delta (blend shallower).
+    // blend_n != book_n so the disclosure must surface BOTH (the window mismatch).
     const delta: OwnBookDeltaPayload = {
       sharpe: 0.24,
       sortino: -0.18,
       max_dd: 0.018, // +1.8pp shallower
+      blend_n: 287,
       book_n: 412,
     };
     const { getByText, container } = renderPanel(csvPayload(delta));
@@ -113,10 +116,13 @@ describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
     expect(maxddCell.textContent).toBe("+1.8pp");
     expect(maxddCell.getAttribute("style")).toContain("var(--color-positive)");
 
-    // Basis note with the book_n (toLocaleString).
+    // Basis note discloses BOTH counts (blend_n · book_n) so the reader sees the
+    // two legs span different windows — the delta shares the sample/252 FORMULA,
+    // not necessarily the same calendar window (WR-02 honesty fix). U+2019 is the
+    // rendered &rsquo; apostrophe.
     expect(
       getByText(
-        `Delta = blend minus your live book · sample/252 basis · ${(412).toLocaleString()} book observations`,
+        `Delta = blend minus your live book · sample/252 basis · over each series’ own window (${(287).toLocaleString()} obs blend · ${(412).toLocaleString()} obs book)`,
       ),
     ).toBeTruthy();
   });
@@ -126,6 +132,7 @@ describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
       sharpe: 0,
       sortino: 0,
       max_dd: -0.023, // blend's max_dd more negative = deeper = worse
+      blend_n: 260,
       book_n: 90,
     };
     const { container } = renderPanel(csvPayload(delta));
@@ -139,6 +146,7 @@ describe("OwnBookDeltaPanel — signed sample-basis deltas (PEER-05)", () => {
       sharpe: null,
       sortino: 0.1,
       max_dd: 0.005,
+      blend_n: 252,
       book_n: 30,
     };
     const { container } = renderPanel(csvPayload(delta));

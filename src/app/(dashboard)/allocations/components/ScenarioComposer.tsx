@@ -144,6 +144,16 @@ import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 const MAX_LEVERAGE = 10;
 
 /**
+ * WR-01 — debounce window (ms) for the peer-rank fetch effect. Rapid weight /
+ * leverage edits each shift the rounded engine-metric triple; coalescing them
+ * over this window means only the SETTLED blend issues a `POST
+ * /api/scenario/peer-rank`, capping egress and preserving the probe-resistance
+ * budget the 60/min `scenarioPeerLimiter` is sized for. 350ms is below the
+ * perceptible-lag threshold for a derived read-only panel.
+ */
+const PEER_RANK_DEBOUNCE_MS = 350;
+
+/**
  * GRAPH-03 — single source of truth for the rolling-window set: maps each
  * trading-day window length (63/126/252) to its human label. Drives BOTH the
  * SegmentedControl options and the below-floor empty-banner copy ("…for the
@@ -1535,8 +1545,21 @@ export function ScenarioComposer({
   // produces the SAME request (reload-stable) and a changed blend re-fetches.
   // The `buildScenarioPeerRankRequest` gate owns the n>=252 + finite suppression
   // (PEER-03); below the floor it returns null → no fetch, scenarioPeer reset to
-  // null. A `cancelled` cleanup flag (the composer's btc-effect posture) guards
-  // against an out-of-order resolve overwriting a newer blend's rank (no-stale).
+  // null.
+  //
+  // DEBOUNCE (WR-01) — every distinct weight/leverage edit changes the rounded
+  // metric triple and would otherwise fire one POST per edit, capped only by the
+  // 60/min `scenarioPeerLimiter`. A user scrubbing several constituents in quick
+  // succession issues a probe burst that amplifies egress and erodes the
+  // probe-resistance budget the limiter is sized for. We coalesce rapid edits via
+  // a PEER_RANK_DEBOUNCE_MS timer so only the SETTLED blend fetches.
+  //
+  // NO-STALE (intact) — the cleanup aborts both the pending timer AND the
+  // in-flight request via an AbortController, so a superseded response can neither
+  // resolve into `setScenarioPeer` nor complete server-side (also frees the
+  // limiter token a `cancelled` boolean alone would still burn). The n>=252 gate
+  // is unchanged: a sub-floor / non-finite blend returns a null body → no timer,
+  // no fetch, scenarioPeer reset to null synchronously.
   const peerSharpe = scenarioMetrics.sharpe;
   const peerSortino = scenarioMetrics.sortino;
   const peerMaxDD = scenarioMetrics.max_drawdown;
@@ -1553,31 +1576,36 @@ export function ScenarioComposer({
       setScenarioPeer(null);
       return;
     }
-    let cancelled = false;
-    fetch("/api/scenario/peer-rank", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (cancelled) return;
-        // The route returns { peer: PeerPercentilePayload | null }; any non-200
-        // (d === null), a malformed body, or a null peer → suppress honestly.
-        const peer =
-          d && typeof d === "object" && "peer" in d
-            ? (d as { peer: PeerPercentilePayload | null }).peer
-            : null;
-        setScenarioPeer(peer ?? null);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      fetch("/api/scenario/peer-rank", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
       })
-      .catch(() => {
-        if (cancelled) return;
-        // Network / abort / JSON-parse failure → honest absence (panel hidden).
-        setScenarioPeer(null);
-      });
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (ctrl.signal.aborted) return;
+          // The route returns { peer: PeerPercentilePayload | null }; any non-200
+          // (d === null), a malformed body, or a null peer → suppress honestly.
+          const peer =
+            d && typeof d === "object" && "peer" in d
+              ? (d as { peer: PeerPercentilePayload | null }).peer
+              : null;
+          setScenarioPeer(peer ?? null);
+        })
+        .catch(() => {
+          if (ctrl.signal.aborted) return;
+          // Network / JSON-parse failure → honest absence (panel hidden). An
+          // abort throws here too but is filtered by the `aborted` guard above.
+          setScenarioPeer(null);
+        });
+    }, PEER_RANK_DEBOUNCE_MS);
     return () => {
-      cancelled = true;
+      ctrl.abort();
+      clearTimeout(timer);
     };
   }, [peerSharpe, peerSortino, peerMaxDD, peerN]);
 
@@ -1640,8 +1668,15 @@ export function ScenarioComposer({
     if (bookReturns.length < 2) return undefined;
     const book = sampleBasisRatios(bookReturns);
     // Blend ratios are the engine's already-rounded sample/252 output — the SAME
-    // basis as `book` (which `sampleBasisRatios` rounds identically), so the
-    // subtraction is like-for-like.
+    // FORMULA as `book` (which `sampleBasisRatios` rounds identically), so the
+    // subtraction is like-for-like in BASIS. The two legs do NOT necessarily span
+    // the SAME calendar window, though: the blend leg is the engine's overlap
+    // window (`scenarioMetrics.n` obs from the constituents' include-from dates),
+    // while the book leg is the allocator's full live-book equity history
+    // (`bookReturns.length` obs), generally a different/longer range. We therefore
+    // disclose BOTH counts (blend_n + book_n) so the reader sees the window
+    // difference rather than inferring full comparability from the shared formula
+    // (WR-02 honesty fix).
     const blendSharpe = scenarioMetrics.sharpe;
     const blendSortino = scenarioMetrics.sortino;
     const blendMaxDD = scenarioMetrics.max_drawdown;
@@ -1651,10 +1686,12 @@ export function ScenarioComposer({
       sharpe: sub(blendSharpe, book.sharpe),
       sortino: sub(blendSortino, book.sortino),
       max_dd: sub(blendMaxDD, book.max_drawdown),
+      blend_n: scenarioMetrics.n,
       book_n: bookReturns.length,
     };
   }, [
     baselineEquityDailyPoints,
+    scenarioMetrics.n,
     scenarioMetrics.sharpe,
     scenarioMetrics.sortino,
     scenarioMetrics.max_drawdown,

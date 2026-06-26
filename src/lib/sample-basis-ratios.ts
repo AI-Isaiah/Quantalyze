@@ -9,7 +9,7 @@
  * refactor that "extracts" the math, fails CI. So this module REPLICATES the
  * engine's Sharpe / Sortino / max-drawdown math rather than importing a shared
  * helper out of the engine. The replica is pinned to the engine by a
- * PARITY golden test (`sample-basis-ratios.test.ts`): for the same daily-return
+ * PARITY golden test (`scenario-sample-ratios.test.ts`): for the same daily-return
  * series this function's output must EQUAL `computeScenario`'s rounded
  * sharpe/sortino/max_drawdown (parity-by-construction). A drift in either the
  * engine OR this replica fails that test.

@@ -39,9 +39,12 @@ import type { PeerPercentilePayload } from "@/lib/factsheet/types";
 
 // The min-N floor the RPC enforces (mirrors v_min_n in migration 20260626120000).
 // Below it the RPC returns the honest cohort_n with NULL percentiles; the route
-// maps that NULL-rank row to { peer: null }. Kept as a documented constant; the
-// route never branches on it directly (a NULL sharpe_pct is the authoritative
-// "suppressed" signal), but it names the contract for the reader.
+// maps that NULL-rank row to { peer: null }. The authoritative "suppressed"
+// signal is a NULL sharpe_pct (the RPC already NULLs the percentiles below the
+// floor), so the NULL-pct disjuncts at :200-202 short-circuit first. The route
+// ALSO belt-and-suspenders re-checks the floor at :203 (`cohort_n < MIN_COHORT_N`)
+// so a future RPC change that returned a non-NULL pct with a thin cohort would
+// still be suppressed here.
 const MIN_COHORT_N = 20;
 
 /** The RPC's RETURNS TABLE row (migration 20260626120000): four aggregate

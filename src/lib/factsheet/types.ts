@@ -215,6 +215,13 @@ export type OwnBookDeltaPayload = {
   sortino: number | null;
   /** blend_max_dd − book_max_dd. Positive = blend shallower = better (sign INVERTED for color). */
   max_dd: number | null;
+  /**
+   * Observation count of the BLEND leg (the engine's overlap-window n). Disclosed
+   * alongside `book_n` so the reader sees the two legs cover DIFFERENT windows —
+   * the delta shares the sample/252 FORMULA but NOT necessarily the same calendar
+   * window (WR-02 honesty fix). A larger gap = a coarser like-for-like.
+   */
+  blend_n: number;
   /** Observation count of the live book (for the basis note). */
   book_n: number;
 };

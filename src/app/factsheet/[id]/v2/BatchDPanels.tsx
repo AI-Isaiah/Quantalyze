@@ -141,6 +141,12 @@ export function PeerPercentilePanel() {
  *     max_dd is LESS negative (shallower = better) → --color-positive; rendered in
  *     percentage-points (pp).
  * A null single-ratio delta renders "—" (insufficient data) without crashing.
+ *
+ * The basis note discloses BOTH observation counts (blend_n · book_n). The two
+ * legs share the sample/252 FORMULA but generally span DIFFERENT calendar windows
+ * (the blend's constituent-overlap window vs the allocator's full live-book
+ * history), so showing both counts keeps the "vs Your Book" framing honest about
+ * the window mismatch instead of implying full comparability (WR-02).
  */
 export function OwnBookDeltaPanel() {
   const payload = usePayload();
@@ -162,8 +168,8 @@ export function OwnBookDeltaPanel() {
         </tbody>
       </table>
       <p className="mt-2 text-[10px] italic text-text-muted">
-        Delta = blend minus your live book · sample/252 basis · {delta.book_n.toLocaleString()} book
-        observations
+        Delta = blend minus your live book · sample/252 basis · over each series&rsquo; own window
+        ({delta.blend_n.toLocaleString()} obs blend · {delta.book_n.toLocaleString()} obs book)
       </p>
     </section>
   );
