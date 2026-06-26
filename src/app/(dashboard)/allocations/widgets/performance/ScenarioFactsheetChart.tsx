@@ -45,8 +45,9 @@ import { buildScenarioFactsheetPayload } from "./scenario-factsheet-payload";
  *
  * ⛔ The `FactsheetBody` mount lives EXCLUSIVELY in THIS file (which
  * ScenarioComposer.test.tsx mocks); `ScenarioComposer.tsx` must contain the
- * literal `FactsheetBody` ZERO times (static source guard at
- * ScenarioComposer.test.tsx:3377). Do NOT inline this mount into the composer.
+ * literal `FactsheetBody` ZERO times (static source guard: the
+ * "no factsheet import on the blend path … (static guard, T-30-05)" test in
+ * ScenarioComposer.test.tsx). Do NOT inline this mount into the composer.
  */
 
 /** Window periods the SegmentedControl offers (Q3). "ALL" resets to full range. */

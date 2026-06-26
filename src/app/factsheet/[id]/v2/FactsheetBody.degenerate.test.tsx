@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
-import { render } from "@testing-library/react";
+import { describe, it, expect, vi, beforeAll } from "vitest";
+import { render, waitFor } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider } from "./factsheet-context";
@@ -10,7 +10,7 @@ import { FactsheetBody } from "./FactsheetView";
  * the full degenerate blend matrix, and the api-only synthetic panels stay
  * absent on the csv blend by construction.
  *
- * This is the only render-level coverage of the real body subtree (the
+ * This is the render-level coverage of the real body subtree (the
  * AllocationDashboardV2 tests MOCK FactsheetBody; the BODY-02 test uses a single
  * healthy payload). It exercises the composer mount shape (scenarioMode,
  * hideHeader, hideAllocatorSection, hideFooter={false}) against EVERY blend the
@@ -23,13 +23,36 @@ import { FactsheetBody } from "./FactsheetView";
  *                    collapses it to safe-empty BEFORE compute() — the body never
  *                    sees NaN/Inf (PAYLOAD-05)
  *
- * Two load-bearing assertions per case:
- *   1. The real body MOUNTS without throwing (every panel either early-returns on
- *      its empty array or formats non-finite to "—" — no panel needs a new guard;
- *      RESEARCH audited all ~24 panels).
- *   2. The serialized container.innerHTML contains NEITHER "NaN" NOR "Infinity"
- *      (the StreakHist barW=Infinity tripwire — unconsumed in the empty case — and
- *      a format-drift guard against any future regression).
+ * Dynamic-panel coverage (WR-01 fix). The two Heatmaps panels
+ * (MonthlyReturnsHeatmap / DailyReturnsHeatmap) are loaded via
+ * `next/dynamic(..., { ssr:false, loading: () => <PanelSkeleton/> })`
+ * (FactsheetView.tsx). They are NOT api-gated and NOT behind LazyMount, so they
+ * DO render on the csv blend — but the dynamic loader paints a `PanelSkeleton`
+ * placeholder on first paint and only swaps in the REAL component once its async
+ * `import()` settles. So each case here is async: it pre-imports the chunk
+ * (beforeAll), renders once, then `await`s until the heatmaps section
+ * (#factsheet-heatmaps) holds NO `.animate-pulse` skeleton — i.e. both dynamic
+ * imports have resolved and the real MonthlyReturnsHeatmap / DailyReturnsHeatmap
+ * functions have run. On the populated blends those functions render their
+ * `<h3>Monthly Returns</h3>` / `<h3>Daily Returns Calendar</h3>` headings (asserted
+ * below); on the empty/degenerate blends they hit their `rows.length === 0` /
+ * `years.length === 0` early-return and render null (an honest empty state).
+ *
+ * NB (out of scope): the LazyMount-gated panels (SignaturesSection,
+ * CrossSignaturesSection, AllocatorSection) stay UNMOUNTED — jsdom's
+ * IntersectionObserver stub (src/test-setup.ts) never fires `isIntersecting`. But
+ * all three are also api-gated (ingestSource === "api"), so they are
+ * double-excluded on the csv blend and render nothing here regardless.
+ *
+ * Two load-bearing assertions per case, against ONE mounted tree:
+ *   1. The real body MOUNTS without throwing — render() itself would reject if any
+ *      panel threw on the empty/degenerate payload — AND the awaited dynamic
+ *      heatmaps mount without throwing (every panel either early-returns on its
+ *      empty array or formats non-finite to "—").
+ *   2. The serialized container.innerHTML — NOW INCLUDING the resolved real
+ *      heatmap DOM — contains NEITHER "NaN" NOR "Infinity" (the StreakHist
+ *      barW=Infinity tripwire — unconsumed in the empty case — and a format-drift
+ *      guard against any future regression).
  *
  * BODY-04 render-absence (csv blend): getElementById("factsheet-allocator") and
  * "factsheet-signatures" are null, and the PeerPercentile panel is absent — all
@@ -59,6 +82,15 @@ vi.stubGlobal("localStorage", localStorageMock);
 Object.defineProperty(window, "localStorage", {
   value: localStorageMock,
   configurable: true,
+});
+
+// Pre-resolve the dynamic Heatmaps chunk so next/dynamic's loader promise settles
+// deterministically across EVERY blend — including the empty blend, where the
+// resolved heatmap components render null (their length===0 guard) and leave no
+// DOM heading to wait on. Without this the import resolution would be racy and the
+// "skeleton gone" wait could pass before the real component function ever ran.
+beforeAll(async () => {
+  await import("./HeatmapPanels");
 });
 
 // Daily-RETURN series (decimal). The single adapter input — `dates`/equity/
@@ -113,19 +145,44 @@ function renderBlend(portfolioDaily: DailyPoint[]) {
 
 describe("FactsheetBody — degenerate render matrix (BODY-03)", () => {
   for (const blend of BLENDS) {
-    it(`mounts the real body without throwing on the ${blend.name} blend`, () => {
-      // The render itself is the no-throw assertion — if any panel threw on the
-      // empty/degenerate payload, render() would reject and fail the test.
-      expect(() => renderBlend(blend.portfolioDaily)).not.toThrow();
-    });
+    it(`mounts the real body (incl. the dynamic heatmaps) and emits no NaN/Infinity on the ${blend.name} blend`, async () => {
+      // The render itself is the no-throw assertion for the synchronous body — if
+      // any panel threw on the empty/degenerate payload, render() would reject and
+      // fail the test. ONE mounted tree carries both assertions below (no
+      // double-render).
+      const { payload, container } = renderBlend(blend.portfolioDaily);
+      const heatmaps = container.querySelector("#factsheet-heatmaps");
+      expect(heatmaps).not.toBeNull();
 
-    it(`emits no "NaN" and no "Infinity" in the serialized SVG for the ${blend.name} blend`, () => {
-      const { container } = renderBlend(blend.portfolioDaily);
-      const html = container.innerHTML;
+      // Flush the next/dynamic(ssr:false) loaders so the REAL MonthlyReturnsHeatmap
+      // / DailyReturnsHeatmap mount (not just their PanelSkeleton). The skeleton
+      // carries the `.animate-pulse` class and is the dynamic loader's `loading`
+      // placeholder; once both imports resolve, every skeleton inside the heatmaps
+      // section is replaced by the real component DOM (populated blend) or by null
+      // (empty/degenerate blend, via the length===0 guard). Waiting for zero
+      // skeletons proves both real heatmap functions actually RAN.
+      await waitFor(() => {
+        expect(heatmaps!.querySelectorAll(".animate-pulse").length).toBe(0);
+      });
+
+      // On the populated blends the real heatmaps render their section headings —
+      // assert them so the awaited DOM is provably the REAL component, not an
+      // empty section. (On the empty/degenerate blends both components hit their
+      // length===0 early-return and render null, which is the honest empty state
+      // — there is no heading to assert.)
+      if (payload.monthlyReturns.length > 0) {
+        expect(heatmaps!.textContent ?? "").toContain("Monthly Returns");
+      }
+      if (payload.dailyHeatmap.length > 0) {
+        expect(heatmaps!.textContent ?? "").toContain("Daily Returns Calendar");
+      }
+
+      // Now re-read the fully-resolved tree (the real heatmap DOM is included).
       // The StreakHist barW=Infinity tripwire (unconsumed when maxLen=0) + a
       // format-drift guard: a non-finite value reaching any attribute would
-      // serialize as "NaN"/"Infinity". The adapter's "—" formatting + each
-      // panel's empty early-return must keep both substrings out of the DOM.
+      // serialize as "NaN"/"Infinity". The adapter's "—" formatting + each panel's
+      // empty early-return must keep both substrings out of the DOM.
+      const html = container.innerHTML;
       expect(html).not.toContain("NaN");
       expect(html).not.toContain("Infinity");
     });
