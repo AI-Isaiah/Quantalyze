@@ -4773,3 +4773,255 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
     expect(switchB).toHaveAttribute("aria-checked", "true");
   });
 });
+
+// ===========================================================================
+// Phase 43 / GUARD-01 (milestone v1.2.2 close) — PERMANENT static guard +
+// assembled-surface degenerate-matrix cross-check.
+// ===========================================================================
+//
+// Two closing gates. (1) A PERMANENT static-source guard that the composer
+// source contains the literal "FactsheetBody" ZERO times — the body mount must
+// stay EXCLUSIVELY in ScenarioFactsheetChart.tsx (the only file allowed the
+// literal). This mirrors the composer-width.test.tsx static-source-scan pattern
+// (readFileSync + literal-count; render-engine-independent and permanent). It
+// is intentionally distinct from the broader Phase-30 T-30-05 "no factsheet
+// import" guard above: this one is the explicit milestone-closing GUARD-01
+// separation gate (do NOT delete at milestone close) and pins the EXACT count.
+//
+// (2) An assembled-surface degenerate-matrix cross-check. The per-phase panel
+// tests already prove each panel HONEST in isolation (Diversification 0/1
+// constituent, blend-panel n<10/n<252 banners, MandatePanels no-metadata,
+// OwnBookDelta no-book). The one genuine GUARD-01 gap research identified is
+// proving they ALL render their honest empty/safe states SIMULTANEOUSLY on the
+// ONE folded surface — that no degenerate axis fabricates a value, leaks a
+// NaN/Inf, or shows a stale/dishonest body while a sibling section is empty.
+// ScenarioFactsheetChart is mocked here, so the Peer / Mandate / OwnBookDelta
+// payloads are asserted via the props the composer threads INTO that mount
+// (the honest null/undefined degradation), while the Diversification +
+// blend-panel honest-empty bodies are asserted directly in the composed DOM.
+describe("ScenarioComposer — Phase 43 GUARD-01 static guard + assembled degenerate matrix", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    // Default adapter mock → ZERO strategies → 0-constituent degenerate blend
+    // (computeScenario short-circuits to its n=0 branch: empty equity_curve,
+    // null scalars). This IS the most degenerate axis of the matrix.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  // The props the composer threads into the (mocked) ScenarioFactsheetChart on
+  // the FIRST render — the seam where Peer / Mandate / OwnBookDelta honesty
+  // degrades. A non-degenerate matrix would carry a fabricated peer rank, a
+  // phantom mandate panel, or a NaN-laden own-book delta here.
+  type ChartProps = {
+    portfolioDaily?: Array<{ date: string; value: number }>;
+    scenarioSeries?: Array<{ date: string; value: number }>;
+    scenarioPeer?: unknown;
+    scenarioMandate?: unknown;
+    scenarioOwnBookDelta?: unknown;
+  };
+  const lastChartProps = (): ChartProps =>
+    vi.mocked(ScenarioFactsheetChart).mock.calls.at(-1)![0] as ChartProps;
+
+  // The scenarioMetrics the composer fed the (mocked) KpiStrip on the latest
+  // render — the single source of truth for the blend's KPIs. Local to this
+  // block (the first describe's same-named helper is out of scope here).
+  const lastScenarioMetrics = () => {
+    const calls = vi.mocked(KpiStrip).mock.calls;
+    return calls.at(-1)?.[0].scenarioMetrics;
+  };
+
+  it("GUARD-01 static guard — ScenarioComposer.tsx contains the literal 'FactsheetBody' EXACTLY zero times (the body mount stays in ScenarioFactsheetChart.tsx) [PERMANENT]", () => {
+    // PERMANENT milestone-closing separation gate — do NOT delete at close.
+    // Reads the REAL .tsx source off disk (not the bundled/mocked module) so a
+    // re-introduced `FactsheetBody` import OR even a code-comment literal fails
+    // LOUD. The mount must live EXCLUSIVELY in ScenarioFactsheetChart.tsx; the
+    // composer threads scenario state to that island, never imports the body.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(join(here, "ScenarioComposer.tsx"), "utf8");
+    // Positive control — prove the read is real (this IS the composer source).
+    expect(source).toMatch(/ScenarioFactsheetChart/);
+    // The load-bearing assertion: the count is EXACTLY zero (a literal anywhere
+    // — import, JSX, or comment — flips this RED).
+    expect(source.match(/FactsheetBody/g)?.length ?? 0).toBe(0);
+  });
+
+  it("assembled folded surface — own-book degenerate blend (0 constituents): Diversification honest-empty, blend panels honest banners, Data-sources fold absent, and the chart-bound Peer/Mandate/OwnBookDelta props degrade honestly — ALL co-exist, no NaN/Inf, no fabricated values", () => {
+    // The default payload: a connected book allocator (hasLiveBook → composed
+    // branch, NOT the empty-state) but ZERO blend constituents (default adapter
+    // returns strategies:[]). perKeyDailiesGateSatisfied=false +
+    // eligibleApiKeyIds=[] → the Data-sources fold honestly DISAPPEARS. This
+    // single render exercises the degenerate axes 0-constituent / n<10 / n<252 /
+    // no-mandate simultaneously on the assembled folded surface.
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // (A) Diversification section: the honest 0/1-constituent empty state, never
+    // a 1×1 grid (CORR-03). This is the visible proof the folded surface
+    // rendered its degenerate state, not a blank gap.
+    expect(
+      screen.getByText("Add a second strategy to see diversification"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("figure", { name: /Pairwise correlation heatmap/i }),
+    ).toBeNull();
+
+    // (B) Blend panels: BOTH render their honest role=status banner (below the
+    // sample floor) and NEVER a role=alert (a derived-client panel has no fetch
+    // to fail) — and NEVER a populated-but-empty body.
+    const distCard = document.querySelector(
+      '[data-panel="blend-returns-distribution"]',
+    );
+    const rollCard = document.querySelector('[data-panel="blend-rolling"]');
+    expect(distCard).not.toBeNull();
+    expect(rollCard).not.toBeNull();
+    expect(distCard!.querySelector('[role="status"]')).not.toBeNull();
+    expect(rollCard!.querySelector('[role="status"]')).not.toBeNull();
+    expect(distCard!.querySelector('[role="alert"]')).toBeNull();
+    expect(rollCard!.querySelector('[role="alert"]')).toBeNull();
+    // No fabricated leaf charts on the degenerate blend.
+    expect(distCard!.querySelector('[data-testid="return-histogram-mock"]')).toBeNull();
+    expect(rollCard!.querySelector('[data-testid="rolling-metrics-mock"]')).toBeNull();
+
+    // (C) Data-sources fold honestly DISAPPEARS (showDataSources false: book
+    // mode but the D3 per-key gate is unsatisfied AND there are zero eligible
+    // keys, so neither the control nor the fallback InfoBanner renders).
+    expect(
+      screen.queryByRole("group", { name: "Data sources" }),
+    ).toBeNull();
+
+    // (D) The chart-bound Peer / Mandate / OwnBookDelta props degrade HONESTLY:
+    // a 0-constituent degenerate blend yields no peer rank (below floor → null),
+    // no mandate panel (no constituents → undefined), and the own-book delta is
+    // undefined because the default book equity (2 points) gives <2 derivable
+    // returns. None is a fabricated zero/NaN — they are the honest absence.
+    const props = lastChartProps();
+    expect(props.scenarioPeer ?? null).toBeNull();
+    expect(props.scenarioMandate ?? null).toBeNull();
+    expect(props.scenarioOwnBookDelta ?? null).toBeNull();
+
+    // (E) HONESTY across the whole surface: every numeric the composer threaded
+    // to the chart is finite — no NaN/Inf leaked onto the degenerate blend. The
+    // portfolioDaily/scenarioSeries are honest-empty (length 0), never a
+    // fabricated curve.
+    for (const p of props.portfolioDaily ?? []) {
+      expect(Number.isFinite(p.value)).toBe(true);
+    }
+    for (const p of props.scenarioSeries ?? []) {
+      expect(Number.isFinite(p.value)).toBe(true);
+    }
+    // The degenerate blend's KPIs are honest null (engine n=0 path), never a
+    // fabricated zero presented as a real metric.
+    const sm = lastScenarioMetrics();
+    expect(sm?.avg_pairwise_correlation ?? null).toBeNull();
+  });
+
+  it("assembled folded surface — NO own-book (blank mode) + single added constituent: own-book delta degrades to undefined, Diversification still honest-empty (n<2), no NaN/Inf — the no-own-book and single-constituent honest states co-exist", () => {
+    // Blank mode (zero holdings → baselineEquityDailyPoints=[] → no own book) +
+    // ONE added strategy. This drives the composed branch WITHOUT a live book,
+    // so the OwnBookDelta axis degrades (undefined) on the SAME render where the
+    // single-constituent Diversification axis is honest-empty (n<2). The
+    // assembled surface must present BOTH honest states at once.
+    const single = Array.from({ length: 12 }, (_, i) => ({
+      date: `2026-01-${String(i + 1).padStart(2, "0")}`,
+      value: [-0.01, 0.005, -0.02][i % 3],
+    }));
+    // The adapter returns the single added strategy as the only constituent.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        {
+          id: "strat-solo",
+          name: "strat-solo",
+          codename: null,
+          disclosure_tier: "public",
+          strategy_types: [] as string[],
+          markets: [] as string[],
+          start_date: single[0].date,
+          daily_returns: single,
+          cagr: null,
+          sharpe: null,
+          volatility: null,
+          max_drawdown: null,
+        },
+      ],
+      state: {
+        selected: { "strat-solo": true },
+        weights: { "strat-solo": 1 },
+        startDates: {},
+      },
+    });
+    const payload = makePayload({
+      // No live book: zero holdings + empty baseline equity. The own-book delta
+      // keys off `equityDailyPoints` (→ baselineEquityDailyPoints) being empty;
+      // liveBaselineMetrics is a separate field, set to its honest empty form
+      // (zero AUM, no equity) rather than removed (the field is required).
+      holdingsSummary: [],
+      holdingReturnsByScopeRef: {},
+      equityDailyPoints: [],
+      liveBaselineMetrics: {
+        aum: 0,
+        ytdTwr: null,
+        sharpe: null,
+        maxDd: null,
+        avgRho: null,
+        equity: [],
+        drawdown: [],
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Reach the composed branch (no live book → must add a strategy).
+    addStrategy({
+      id: "strat-solo",
+      name: "strat-solo",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // (A) Single-constituent Diversification: still the honest "add a second
+    // strategy" empty state (n<2), never a 1×1 grid.
+    expect(
+      screen.getByText("Add a second strategy to see diversification"),
+    ).toBeInTheDocument();
+
+    // (B) NO own-book → the own-book delta prop degrades to undefined (honest
+    // silent absence, NOT a zero/NaN delta). This is the co-existing axis.
+    const props = lastChartProps();
+    expect(props.scenarioOwnBookDelta ?? null).toBeNull();
+
+    // (C) HONESTY: any threaded numeric is finite — no NaN/Inf on the no-book +
+    // single-constituent assembled surface.
+    for (const p of props.portfolioDaily ?? []) {
+      expect(Number.isFinite(p.value)).toBe(true);
+    }
+    for (const p of props.scenarioSeries ?? []) {
+      expect(Number.isFinite(p.value)).toBe(true);
+    }
+    // No role=alert anywhere on the folded surface (derived-client honesty).
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+});
