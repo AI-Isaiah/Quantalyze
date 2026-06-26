@@ -175,6 +175,50 @@ export type PeerPercentilePayload = {
   max_dd: number;
 };
 
+/**
+ * Phase 42 (PEER-04, ADR-0025) — per-constituent mandate metadata for the
+ * scenario BLEND. Built ONLY from genuinely-available `StrategyForBuilder`
+ * fields (`strategy_types`, `markets`) + the per-constituent leverage from the
+ * composer's `ScenarioState.leverage` (id → L; default 1.0). NO fabricated
+ * aggregate single-strategy mandate, and NOT `leverage_range`/`description`
+ * (those live on `FactsheetCommon`, free-text — out of v1.2.2 chip scope per
+ * 42-UI-SPEC §2 / CONTEXT D-07). Honest-empty per constituent is the consumer's
+ * job: a constituent with empty `strategy_types` AND `markets` renders
+ * "no mandate metadata". Blend-only (a csv-arm carve-out, NOT FactsheetCommon).
+ */
+export type ScenarioMandatePayload = {
+  constituents: Array<{
+    name: string;
+    /** Genuinely-available strategy classification chips (may be empty). */
+    strategy_types: string[];
+    /** Genuinely-available market chips (may be empty). */
+    markets: string[];
+    /** Per-constituent leverage multiplier (ScenarioState.leverage[id] ?? 1.0). */
+    leverage: number;
+  }>;
+};
+
+/**
+ * Phase 42 (PEER-05, ADR-0025) — the scenario blend's head-to-head delta vs the
+ * allocator's LIVE book. Each field is the blend's core ratio MINUS the live
+ * book's ratio, BOTH computed on the SAME sample/252 basis (via
+ * `sampleBasisRatios` on each leg's daily returns) so the comparison is
+ * basis-consistent with the blend's ranking metrics and the peer cohort
+ * (T-42-15). A signed difference is NOT P&L. Each ratio is null when its leg is
+ * insufficient (e.g. a sub-2-obs book, or no down days for Sortino). Blend-only
+ * (a csv-arm carve-out, NOT FactsheetCommon).
+ */
+export type OwnBookDeltaPayload = {
+  /** blend_sharpe − book_sharpe (sample/252). null when either leg is null. */
+  sharpe: number | null;
+  /** blend_sortino − book_sortino (sample/252). null when either leg is null. */
+  sortino: number | null;
+  /** blend_max_dd − book_max_dd. Positive = blend shallower = better (sign INVERTED for color). */
+  max_dd: number | null;
+  /** Observation count of the live book (for the basis note). */
+  book_n: number;
+};
+
 /** Single demo allocator portfolio with precomputed sleeve + tail metrics. */
 export type AllocatorPortfolioPayload = {
   key: string;
@@ -451,6 +495,21 @@ export type FactsheetCsvPayload = FactsheetCommon & {
    * peer-on-all-csv is out of scope for v1.2.2.
    */
   scenarioPeer?: PeerPercentilePayload;
+  /**
+   * Phase 42 (PEER-04, ADR-0025) — per-constituent mandate chips for the blend
+   * (strategy_types + markets + per-constituent leverage). Additive + optional:
+   * absent on every existing csv call site (the key is OMITTED, not undefined),
+   * so the payload stays byte-identical and the api arm + the type-field
+   * invariant (the four api-only fields never on csv) are unchanged. Blend-only.
+   */
+  scenarioMandate?: ScenarioMandatePayload;
+  /**
+   * Phase 42 (PEER-05, ADR-0025) — the blend-vs-live-book signed delta on the
+   * SAME sample/252 basis as the peer rank. Additive + optional: omitted on
+   * every existing csv call site (byte-identical payload) AND silently absent
+   * when the allocator has no live book. Blend-only.
+   */
+  scenarioOwnBookDelta?: OwnBookDeltaPayload;
 };
 
 /**

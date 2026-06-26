@@ -72,7 +72,12 @@ import {
 } from "@/lib/scenario";
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
 import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
-import type { PeerPercentilePayload } from "@/lib/factsheet/types";
+import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
+import type {
+  OwnBookDeltaPayload,
+  PeerPercentilePayload,
+  ScenarioMandatePayload,
+} from "@/lib/factsheet/types";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import { buildBlendPanels } from "@/lib/scenario-blend-panels";
 import {
@@ -1592,6 +1597,69 @@ export function ScenarioComposer({
     [portfolioDaily, rollingWindow],
   );
 
+  // PEER-04 (Phase 42) — per-constituent mandate chips for the blend. Built ONLY
+  // from genuinely-available `StrategyForBuilder` fields (`strategy_types`,
+  // `markets`) + the per-constituent leverage from `deAliased.state.leverage`
+  // (id → L; default 1.0). NO fabricated aggregate; NOT leverage_range/description
+  // (not on this type / free-text — out of v1.2.2 chip scope per CONTEXT D-07).
+  // Honest-empty per constituent is the panel's job. Keyed on `deAliased` so a
+  // weight/leverage scrub or a constituent add re-derives. Always non-empty when
+  // the blend has constituents (the panel handles the all-empty-metadata case).
+  const scenarioMandate = useMemo<ScenarioMandatePayload | undefined>(() => {
+    const constituents = deAliased.strategies.map((s) => ({
+      name: s.name,
+      strategy_types: s.strategy_types ?? [],
+      markets: s.markets ?? [],
+      leverage: deAliased.state.leverage?.[s.id] ?? 1.0,
+    }));
+    return constituents.length > 0 ? { constituents } : undefined;
+  }, [deAliased]);
+
+  // PEER-05 (Phase 42) — the blend-vs-live-book signed delta on the SAME
+  // sample/252 basis as the peer rank (T-42-15). The own-book leg recomputes the
+  // live book's Sharpe/Sortino/maxDD via `sampleBasisRatios` on the OWN-BOOK
+  // DAILY RETURNS — derived here from `baselineEquityDailyPoints` (absolute-USD
+  // equity LEVELS: value[i]/value[i-1] − 1), NOT `liveBaselineMetrics` (a
+  // different/population basis). The blend leg uses `scenarioMetrics`
+  // (already the engine's sample/252 output). Each delta = blend − book; null
+  // when a leg is null. `null` (→ undefined) when there is no live book series
+  // (blank mode or a no-book allocator) so the panel is silently absent. Keyed on
+  // the engine output + the own-book series.
+  const scenarioOwnBookDelta = useMemo<OwnBookDeltaPayload | undefined>(() => {
+    const levels = baselineEquityDailyPoints;
+    // Need ≥ 2 dated levels to derive at least one daily return. No book → absent.
+    if (!levels || levels.length < 2) return undefined;
+    const bookReturns: number[] = [];
+    for (let i = 1; i < levels.length; i++) {
+      const prev = levels[i - 1].value;
+      const cur = levels[i].value;
+      if (prev > 0 && Number.isFinite(prev) && Number.isFinite(cur)) {
+        bookReturns.push(cur / prev - 1);
+      }
+    }
+    if (bookReturns.length < 2) return undefined;
+    const book = sampleBasisRatios(bookReturns);
+    // Blend ratios are the engine's already-rounded sample/252 output — the SAME
+    // basis as `book` (which `sampleBasisRatios` rounds identically), so the
+    // subtraction is like-for-like.
+    const blendSharpe = scenarioMetrics.sharpe;
+    const blendSortino = scenarioMetrics.sortino;
+    const blendMaxDD = scenarioMetrics.max_drawdown;
+    const sub = (a: number | null, b: number | null): number | null =>
+      a != null && b != null ? a - b : null;
+    return {
+      sharpe: sub(blendSharpe, book.sharpe),
+      sortino: sub(blendSortino, book.sortino),
+      max_dd: sub(blendMaxDD, book.max_drawdown),
+      book_n: bookReturns.length,
+    };
+  }, [
+    baselineEquityDailyPoints,
+    scenarioMetrics.sharpe,
+    scenarioMetrics.sortino,
+    scenarioMetrics.max_drawdown,
+  ]);
+
   // CORR-01 — de-aliased axis labels for the CorrelationHeatmap. Keyed on the
   // SAME de-aliased set computeScenario consumes, so the heatmap labels always
   // match the matrix the engine produced (no stale alias surviving the collapse).
@@ -2364,6 +2432,12 @@ export function ScenarioComposer({
           // PEER-01: the live peer rank (or null below the sample floor / min-N)
           // flows onto the synth csv payload's scenarioPeer carve-out.
           scenarioPeer={scenarioPeer ?? undefined}
+          // PEER-04: per-constituent mandate chips (strategy_types / markets /
+          // leverage); undefined when the blend has no constituents.
+          scenarioMandate={scenarioMandate}
+          // PEER-05: blend-vs-live-book sample/252 delta; undefined (silently
+          // absent) when there is no live book series.
+          scenarioOwnBookDelta={scenarioOwnBookDelta}
         />
         {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted line
             swatch via the `--color-chart-benchmark` token (UI-SPEC §Copywriting

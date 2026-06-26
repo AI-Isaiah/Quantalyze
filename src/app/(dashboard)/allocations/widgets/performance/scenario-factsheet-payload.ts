@@ -79,8 +79,10 @@ import type {
   ComparatorBlock,
   ComputeSummary,
   FactsheetCsvPayload,
+  OwnBookDeltaPayload,
   PeerPercentilePayload,
   RollWindowPick,
+  ScenarioMandatePayload,
 } from "@/lib/factsheet/types";
 
 /** Default x-model legend label for the scenario blend (the strategy line). */
@@ -150,6 +152,18 @@ export interface ScenarioFactsheetPayloadArgs {
    * `ingestSource` — the three genuinely-synthetic api panels stay absent.
    */
   scenarioPeer?: PeerPercentilePayload;
+  /**
+   * Phase 42 (PEER-04, ADR-0025) — per-constituent mandate chips for the blend.
+   * Additive + optional: every existing call site omits it, so the returned csv
+   * payload stays byte-identical (the key is OMITTED, not set to undefined).
+   * Blend-only — never flips `ingestSource`.
+   */
+  scenarioMandate?: ScenarioMandatePayload;
+  /**
+   * Phase 42 (PEER-05, ADR-0025) — the blend-vs-live-book signed delta on the
+   * sample/252 basis. Additive + optional + silently absent without a live book.
+   */
+  scenarioOwnBookDelta?: OwnBookDeltaPayload;
 }
 
 /** Zeroed scalar metrics — no KpiStrip mounts in the composer, so the two
@@ -411,7 +425,14 @@ function buildReturnsBody(portfolioDaily: DailyPoint[]): ReturnsBody {
 export function buildScenarioFactsheetPayload(
   args: ScenarioFactsheetPayloadArgs,
 ): FactsheetCsvPayload {
-  const { benchmark, portfolioDaily, strategyId, scenarioPeer } = args;
+  const {
+    benchmark,
+    portfolioDaily,
+    strategyId,
+    scenarioPeer,
+    scenarioMandate,
+    scenarioOwnBookDelta,
+  } = args;
   const id = strategyId ?? DEFAULT_SCENARIO_ID;
 
   // The single returns-derived body — chart line + scalars + panel arrays, all
@@ -450,6 +471,11 @@ export function buildScenarioFactsheetPayload(
     // (scenarioPeer is a csv-only additive field; the three synthetic api
     // panels stay structurally absent).
     ...(scenarioPeer ? { scenarioPeer } : {}),
+    // PEER-04 / PEER-05 (ADR-0025): same conditional-spread discipline — each key
+    // is OMITTED (not undefined) when its arg is absent, so the bare-blend / real
+    // factsheet call sites stay byte-identical and the carve-outs are blend-only.
+    ...(scenarioMandate ? { scenarioMandate } : {}),
+    ...(scenarioOwnBookDelta ? { scenarioOwnBookDelta } : {}),
     strategyId: id,
     strategyName: SCENARIO_NAME,
     strategyTypes: [],

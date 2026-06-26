@@ -2,7 +2,11 @@
 
 import { useMemo } from "react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
-import type { PeerPercentilePayload } from "@/lib/factsheet/types";
+import type {
+  OwnBookDeltaPayload,
+  PeerPercentilePayload,
+  ScenarioMandatePayload,
+} from "@/lib/factsheet/types";
 import { FactsheetProvider, useXRange } from "@/app/factsheet/[id]/v2/factsheet-context";
 import { FactsheetBody } from "@/app/factsheet/[id]/v2/FactsheetView";
 import { buildScenarioFactsheetPayload } from "./scenario-factsheet-payload";
@@ -101,6 +105,20 @@ export interface ScenarioFactsheetChartProps {
    * n>=252 obs AND the route returned a non-null rank (>= min-N cohort).
    */
   scenarioPeer?: PeerPercentilePayload;
+  /**
+   * Phase 42 (PEER-04, ADR-0025) — per-constituent mandate chips for the blend
+   * (strategy_types + markets + per-constituent leverage), flowed onto the synth
+   * csv payload. Additive + optional: omitted → byte-identical payload (the
+   * ConstituentMandatePanel renders nothing). Composer-supplied from
+   * `deAliased.strategies` + `deAliased.state.leverage`.
+   */
+  scenarioMandate?: ScenarioMandatePayload;
+  /**
+   * Phase 42 (PEER-05, ADR-0025) — the blend-vs-live-book signed delta on the
+   * sample/252 basis. Additive + optional: omitted (no live book / blank mode) →
+   * the OwnBookDeltaPanel is silently absent.
+   */
+  scenarioOwnBookDelta?: OwnBookDeltaPayload;
 }
 
 /**
@@ -166,6 +184,8 @@ export function ScenarioFactsheetChart({
   benchmark,
   portfolioDaily = [],
   scenarioPeer,
+  scenarioMandate,
+  scenarioOwnBookDelta,
 }: ScenarioFactsheetChartProps) {
   // Synthesize the minimal, valid FactsheetPayload (csv arm) the factsheet
   // TimeSeriesChart + MasterBrush consume verbatim. SINGLE full-res returns axis
@@ -183,8 +203,10 @@ export function ScenarioFactsheetChart({
         benchmark: benchmark ?? null,
         portfolioDaily,
         scenarioPeer,
+        scenarioMandate,
+        scenarioOwnBookDelta,
       }),
-    [benchmark, portfolioDaily, scenarioPeer],
+    [benchmark, portfolioDaily, scenarioPeer, scenarioMandate, scenarioOwnBookDelta],
   );
 
   const axisLength = synthPayload.dates.length;
