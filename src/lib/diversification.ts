@@ -204,3 +204,225 @@ export function constituentVols(
   }
   return out;
 }
+
+/**
+ * Choueifaty Diversification Ratio: DR = (Σᵢ wᵢ·σᵢ) / σ_p.
+ *
+ * ── INTENDED LEVERAGE ASYMMETRY (A1) ────────────────────────────────────────
+ * The numerator σᵢ are standalone UN-levered per-constituent volatilities
+ * (built from the RAW return series, exactly as the engine builds its un-levered
+ * correlation matrix). The denominator σ_p is the REALIZED LEVERED portfolio σ
+ * — the orchestrator computes it as `stdDev(portfolioDailyReturns, true)`, the
+ * SAME SAMPLE std the engine uses for `volatility` (scenario.ts:338-340), and
+ * `portfolio_daily_returns` already has per-strategy leverage baked in
+ * (scenario.ts:251). This is the Choueifaty DR's correct form: it is internally
+ * consistent because the covariance/correlation the panel displays is also
+ * un-levered. As a corollary, DR is LEVERAGE-INVARIANT — scaling every leg's
+ * leverage scales σ_p but the ratio holds (correlation is leverage-invariant,
+ * ScenarioComposer.tsx:2204).
+ *
+ * σᵢ and σ_p are both daily (un-annualized) — the √252 cancels in the ratio.
+ * Returns null when σ_p ≤ 0 (all-flat blend) so the UI renders "—" instead of
+ * dividing by zero.
+ */
+export function diversificationRatio(
+  weights: Record<string, number>,
+  vols: Record<string, number>,
+  sigmaP: number,
+): number | null {
+  if (!(sigmaP > 0)) return null; // σ_p=0 → "—" (never divide by 0)
+  let weightedSigma = 0;
+  for (const id of Object.keys(weights)) {
+    weightedSigma += weights[id] * (vols[id] ?? 0);
+  }
+  return weightedSigma / sigmaP; // Choueifaty DR (≥1 for long-only, non-perfect ρ)
+}
+
+/**
+ * Per-constituent percent-contribution-to-risk (Euler decomposition of variance):
+ *   PCRᵢ = wᵢ·(Σw)ᵢ / (wᵀΣw),  where (Σw)ᵢ = Σⱼ Σ[i][j]·wⱼ.
+ * The array sums to 1 over the active ids.
+ *
+ * ── SIGNED HEDGES (A3) ──────────────────────────────────────────────────────
+ * A strongly-negatively-correlated leg can have a NEGATIVE PCR — it REDUCES
+ * portfolio risk. Keep the signed value: it is honest (a hedge has negative risk
+ * contribution), the ENB formula squares it so the sign doesn't break ENB, and
+ * clamping negatives to 0 would break the sum-to-1 invariant. The panel can
+ * render negative % with a "risk-reducing" note.
+ *
+ * ── DEGENERATE PORTFOLIO VARIANCE (Pitfall 3) ───────────────────────────────
+ * wᵀΣw is exactly the portfolio variance. If it is ≤ 0 (all-flat or perfectly-
+ * offsetting blend, or a tiny negative from float error) the contributions are
+ * UNDEFINED — return null (UI "—"), NOT 0/0 = NaN. Guarded with an epsilon.
+ */
+export function percentContributionToRisk(
+  ids: string[],
+  weights: Record<string, number>,
+  cov: number[][],
+): Record<string, number> | null {
+  const w = ids.map((id) => weights[id] ?? 0);
+  const sigmaW = ids.map((_, i) =>
+    w.reduce((acc, wj, j) => acc + cov[i][j] * wj, 0),
+  );
+  const portVar = w.reduce((acc, wi, i) => acc + wi * sigmaW[i], 0); // wᵀΣw
+  if (!(portVar > 1e-15)) return null; // degenerate variance → "—" (no NaN/Inf)
+  const out: Record<string, number> = {};
+  ids.forEach((id, i) => {
+    out[id] = (w[i] * sigmaW[i]) / portVar; // signed; Σ = 1
+  });
+  return out;
+}
+
+/**
+ * Risk-based Effective Number of Bets (Meucci): ENB = 1 / Σᵢ PCRᵢ².
+ *
+ * Correlation-aware — counts INDEPENDENT bets, NOT the naive weight-HHI 1/Σwᵢ².
+ * A 2-leg book of perfectly-correlated strategies has ENB≈1 (honest); the naive
+ * HHI would lie ENB=2. Range 1 ≤ ENB ≤ k for long-only; with negative PCR
+ * (hedges) Σpcr² can exceed 1, pushing ENB < 1 — honest, do NOT clamp. DISCLOSED
+ * on the panel. Returns null on null/empty pcr or a non-positive denominator.
+ */
+export function effectiveNumberOfBets(
+  pcr: Record<string, number> | null,
+): number | null {
+  if (!pcr) return null;
+  const denom = Object.values(pcr).reduce((a, p) => a + p * p, 0);
+  return denom > 0 ? 1 / denom : null; // 1/Σpcrᵢ² (risk-based, Meucci)
+}
+
+/**
+ * Average-linkage agglomerative cluster order on distance d(i,j)=½(1−ρᵢⱼ).
+ *
+ * Groups correlated legs adjacently (CORR-06). Algorithm (41-RESEARCH Pattern 3):
+ *   1. D[i][j] = ½(1−ρ); a missing/null/non-finite ρ → distance 1 (max), so a
+ *      flat-window pair never collapses the tree or injects NaN. Self-distance 0.
+ *   2. Start with n singleton clusters (leaf list = [id]).
+ *   3. Repeat: merge the two clusters with the smallest AVERAGE inter-cluster
+ *      distance (mean of D over all member pairs); concatenate leaf lists on
+ *      merge so correlated members stay adjacent.
+ *   4. Output the final cluster's leaf id order.
+ * Edge n≤2: identity `[...ids]` (clustering is a no-op; 2 ids are trivially
+ * adjacent). O(n²·log n) — fine for the small-n constituent sets (<30).
+ */
+export function clusterOrder(
+  corr: Record<string, Record<string, number>> | null,
+  ids: string[],
+): string[] {
+  if (!corr || ids.length <= 2) return [...ids]; // identity for n≤2
+
+  const D = ids.map((a) =>
+    ids.map((b) => {
+      if (a === b) return 0;
+      const r = corr[a]?.[b];
+      return r == null || !Number.isFinite(r) ? 1 : 0.5 * (1 - r);
+    }),
+  );
+
+  let clusters = ids.map((id, i) => ({ leaves: [id], members: [i] }));
+  while (clusters.length > 1) {
+    let best = Infinity;
+    let bi = 0;
+    let bj = 1;
+    for (let i = 0; i < clusters.length; i++) {
+      for (let j = i + 1; j < clusters.length; j++) {
+        let sum = 0;
+        let cnt = 0;
+        for (const a of clusters[i].members) {
+          for (const b of clusters[j].members) {
+            sum += D[a][b];
+            cnt++;
+          }
+        }
+        const avg = sum / cnt; // AVERAGE linkage
+        if (avg < best) {
+          best = avg;
+          bi = i;
+          bj = j;
+        }
+      }
+    }
+    const merged = {
+      leaves: [...clusters[bi].leaves, ...clusters[bj].leaves],
+      members: [...clusters[bi].members, ...clusters[bj].members],
+    };
+    clusters = clusters.filter((_, k) => k !== bi && k !== bj);
+    clusters.push(merged);
+  }
+  return clusters[0].leaves;
+}
+
+/**
+ * Off-diagonal (j>i) pairs with ρ ≥ threshold (default 0.85, CORR-02). Returns
+ * [] on a null matrix.
+ */
+export function tooSimilarPairs(
+  corr: Record<string, Record<string, number>> | null,
+  ids: string[],
+  threshold: number = TOO_SIMILAR_THRESHOLD,
+): Array<[string, string, number]> {
+  if (!corr) return [];
+  const out: Array<[string, string, number]> = [];
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      const r = corr[ids[i]]?.[ids[j]];
+      if (r != null && Number.isFinite(r) && r >= threshold) {
+        out.push([ids[i], ids[j], r]);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Orchestrator. Applies the GLOBAL gate (ids<2 OR n<MIN_USABLE OR null matrix →
+ * all-null result with `clusterOrderIds = [...ids]`), else computes
+ * cov → vols → σ_p → DR → PCR → ENB → clusterOrder → tooSimilarPairs.
+ *
+ * `returnsById` is already ALIGNED upstream (`alignConstituentReturns`). Every
+ * division is guarded; no NaN/Inf escapes. σ_p is the SAMPLE std of the LEVERED
+ * `portfolioDailyReturns` — the same statistic the engine reports as `volatility`.
+ */
+export function computeDiversification(
+  input: DiversificationInput,
+): DiversificationResult {
+  const empty: DiversificationResult = {
+    diversificationRatio: null,
+    effectiveNumberOfBets: null,
+    pcr: null,
+    clusterOrderIds: [...input.ids],
+    tooSimilarPairs: [],
+    vols: null,
+  };
+
+  if (
+    input.ids.length < 2 ||
+    input.n < MIN_USABLE ||
+    !input.correlationMatrix
+  ) {
+    return empty;
+  }
+
+  const cov = covarianceMatrix(input.returnsById, input.ids);
+  const vols = constituentVols(input.returnsById, input.ids);
+  if (!cov || !vols) return empty;
+
+  const sigmaP = stdDev(input.portfolioDailyReturns, true); // SAMPLE, levered
+  const diversificationRatioValue = diversificationRatio(
+    input.weights,
+    vols,
+    sigmaP,
+  );
+  const pcr = percentContributionToRisk(input.ids, input.weights, cov);
+  const enb = effectiveNumberOfBets(pcr);
+  const clusterOrderIds = clusterOrder(input.correlationMatrix, input.ids);
+  const tooSimilar = tooSimilarPairs(input.correlationMatrix, input.ids);
+
+  return {
+    diversificationRatio: diversificationRatioValue,
+    effectiveNumberOfBets: enb,
+    pcr,
+    clusterOrderIds,
+    tooSimilarPairs: tooSimilar,
+    vols,
+  };
+}

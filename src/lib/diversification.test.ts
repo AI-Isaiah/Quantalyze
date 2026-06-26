@@ -7,8 +7,15 @@ import {
 } from "@/lib/scenario";
 import {
   alignConstituentReturns,
+  clusterOrder,
+  computeDiversification,
   constituentVols,
   covarianceMatrix,
+  diversificationRatio,
+  effectiveNumberOfBets,
+  percentContributionToRisk,
+  tooSimilarPairs,
+  type DiversificationInput,
 } from "@/lib/diversification";
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -41,6 +48,15 @@ const C_VALUES = [
 
 function series(values: number[]) {
   return DATES.map((date, i) => ({ date, value: values[i] }));
+}
+
+/** Local SAMPLE std (÷n−1) — mirrors stdDev(x, true); used to compute σ_p in tests. */
+function stdDevSample(values: number[]): number {
+  const n = values.length;
+  if (n < 2) return 0;
+  const m = values.reduce((s, v) => s + v, 0) / n;
+  const sumSq = values.reduce((s, v) => s + (v - m) * (v - m), 0);
+  return Math.sqrt(sumSq / (n - 1));
 }
 
 function strat(
@@ -211,6 +227,247 @@ describe("consistency pin — rebuilt ρ matches the engine correlation_matrix",
         // 3dp tolerance: both are rounded to 3 decimals.
         expect(rhoLib).toBeCloseTo(rhoEngine, 3);
       }
+    }
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Task 2 — DR, PCR, ENB, cluster order, too-similar, orchestrator.
+// ──────────────────────────────────────────────────────────────────────────
+
+// Shared engine-derived inputs for the equal-weight 3-constituent blend.
+const dateMapCache3 = buildDateMapCache(STRATS_3);
+const metrics3 = computeScenario(STRATS_3, STATE_3, dateMapCache3);
+const aligned3 = alignConstituentReturns(STRATS_3, STATE_3);
+const cov3 = covarianceMatrix(aligned3.returnsById, aligned3.ids)!;
+const vols3 = constituentVols(aligned3.returnsById, aligned3.ids)!;
+const portReturns3 = (metrics3.portfolio_daily_returns ?? []).map((p) => p.value);
+// Equal normalized weights.
+const W3 = { A: 1 / 3, B: 1 / 3, C: 1 / 3 };
+
+describe("diversificationRatio (Choueifaty)", () => {
+  it("= (Σwᵢσᵢ)/σ_p, hand-verified > 1 on the fixture", () => {
+    const sigmaP = stdDevSample(portReturns3);
+    const dr = diversificationRatio(W3, vols3, sigmaP);
+    expect(dr).not.toBeNull();
+    expect(dr!).toBeCloseTo(1.662551, 5);
+    expect(dr!).toBeGreaterThan(1);
+  });
+
+  it("returns null when σ_p = 0", () => {
+    expect(diversificationRatio(W3, vols3, 0)).toBeNull();
+  });
+
+  it("encodes the A1 leverage asymmetry: un-levered σᵢ + matrix are invariant, levered σ_p scales DR", () => {
+    // A1 (41-RESEARCH Assumptions Log): the DR numerator uses standalone
+    // UN-levered σᵢ; the denominator uses the REALIZED LEVERED σ_p. So the
+    // genuinely leverage-INVARIANT quantities are the per-constituent σᵢ and the
+    // correlation matrix (correlation is leverage-invariant — leverage is a
+    // scale transform that cancels in Pearson normalization), NOT the DR
+    // magnitude. Pinning DR-magnitude equality would WRONGLY assert both sides
+    // levered (then DR≈1 always) — this test pins the A1 split instead.
+    const sigmaPlain = stdDevSample(portReturns3);
+    const drPlain = diversificationRatio(W3, vols3, sigmaPlain)!;
+
+    // Apply a 2x leverage to every leg.
+    const levState: ScenarioState = {
+      ...STATE_3,
+      leverage: { A: 2, B: 2, C: 2 },
+    };
+    const levMetrics = computeScenario(STRATS_3, levState, dateMapCache3);
+
+    // INVARIANT 1: the engine's correlation matrix is byte-identical under leverage.
+    expect(levMetrics.correlation_matrix).toEqual(metrics3.correlation_matrix);
+
+    // INVARIANT 2: the re-aligned per-constituent σᵢ are leverage-independent
+    // (the lib never levers the per-constituent series — Pitfall 4).
+    const levAligned = alignConstituentReturns(STRATS_3, levState);
+    const levVols = constituentVols(levAligned.returnsById, levAligned.ids)!;
+    expect(levVols).toEqual(vols3);
+
+    // ASYMMETRY: σ_p doubles → DR halves (the numerator stayed un-levered). This
+    // is the documented Choueifaty form, not a bug.
+    const levPort = (levMetrics.portfolio_daily_returns ?? []).map(
+      (p) => p.value,
+    );
+    const sigmaLev = stdDevSample(levPort);
+    expect(sigmaLev).toBeCloseTo(2 * sigmaPlain, 9);
+    const drLev = diversificationRatio(W3, levVols, sigmaLev)!;
+    expect(drLev).toBeCloseTo(drPlain / 2, 9);
+  });
+});
+
+describe("percentContributionToRisk (Euler decomposition)", () => {
+  it("sums to 1 (±1e-9) and hand-verifies an entry", () => {
+    const pcr = percentContributionToRisk(["A", "B", "C"], W3, cov3)!;
+    expect(pcr).not.toBeNull();
+    const sum = Object.values(pcr).reduce((a, b) => a + b, 0);
+    expect(sum).toBeCloseTo(1, 9);
+    expect(pcr.A).toBeCloseTo(0.333324, 5);
+    expect(pcr.B).toBeCloseTo(0.297104, 5);
+    expect(pcr.C).toBeCloseTo(0.369572, 5);
+  });
+
+  it("keeps a hedge leg's PCR signed (negative) and still sums to 1", () => {
+    // D = perfectly NEGATIVELY correlated to A (ρ=−1); weight A heavy, D light.
+    const D_VALUES = A_VALUES.map((x) => -1.1 * x);
+    const idsAD = ["A", "D"];
+    const returnsAD = { A: A_VALUES, D: D_VALUES };
+    const covAD = covarianceMatrix(returnsAD, idsAD)!;
+    const wAD = { A: 0.7, D: 0.3 };
+    const pcr = percentContributionToRisk(idsAD, wAD, covAD)!;
+    expect(pcr.D).toBeLessThan(0); // hedge → negative risk contribution
+    expect(pcr.D).toBeCloseTo(-0.891892, 5);
+    expect(pcr.A).toBeCloseTo(1.891892, 5);
+    // STILL sums to 1 (not clamped).
+    expect(pcr.A + pcr.D).toBeCloseTo(1, 9);
+  });
+
+  it("returns null when wᵀΣw ≤ 1e-15 (all-flat blend)", () => {
+    // Flat constituents → zero covariance everywhere → portVar = 0.
+    const flat = { X: [0, 0, 0, 0, 0], Y: [0, 0, 0, 0, 0] };
+    const covFlat = covarianceMatrix(flat, ["X", "Y"])!;
+    expect(
+      percentContributionToRisk(["X", "Y"], { X: 0.5, Y: 0.5 }, covFlat),
+    ).toBeNull();
+  });
+});
+
+describe("effectiveNumberOfBets (risk-based, Meucci)", () => {
+  it("= 1/Σ PCRᵢ²; equal-PCR k legs → ENB = k", () => {
+    expect(effectiveNumberOfBets({ A: 1 / 3, B: 1 / 3, C: 1 / 3 })).toBeCloseTo(
+      3,
+      9,
+    );
+    expect(effectiveNumberOfBets({ A: 0.5, B: 0.5 })).toBeCloseTo(2, 9);
+  });
+
+  it("one leg owning all risk → ENB → 1", () => {
+    expect(effectiveNumberOfBets({ A: 1, B: 0 })).toBeCloseTo(1, 9);
+  });
+
+  it("matches the hand-computed fixture ENB", () => {
+    const pcr = percentContributionToRisk(["A", "B", "C"], W3, cov3)!;
+    expect(effectiveNumberOfBets(pcr)).toBeCloseTo(2.976552, 5);
+  });
+
+  it("returns null on null pcr", () => {
+    expect(effectiveNumberOfBets(null)).toBeNull();
+  });
+});
+
+describe("clusterOrder (average-linkage on ½(1−ρ))", () => {
+  it("places ρ≈0.998 legs A,B adjacent on the 3-leg fixture", () => {
+    const order = clusterOrder(metrics3.correlation_matrix, ["A", "B", "C"]);
+    expect(order).toHaveLength(3);
+    const ia = order.indexOf("A");
+    const ib = order.indexOf("B");
+    // A and B are correlated (ρ≈0.998) so they must be adjacent; C is the outlier.
+    expect(Math.abs(ia - ib)).toBe(1);
+  });
+
+  it("returns identity for ≤2 ids", () => {
+    expect(clusterOrder(metrics3.correlation_matrix, [])).toEqual([]);
+    expect(clusterOrder(metrics3.correlation_matrix, ["A"])).toEqual(["A"]);
+    expect(clusterOrder(metrics3.correlation_matrix, ["A", "B"])).toEqual([
+      "A",
+      "B",
+    ]);
+  });
+
+  it("treats a null/missing ρ as max distance (no NaN)", () => {
+    const partial = {
+      A: { A: 1, B: 0.9 },
+      B: { A: 0.9, B: 1 },
+      C: { C: 1 }, // C has no ρ to A/B → distance 1
+    } as Record<string, Record<string, number>>;
+    const order = clusterOrder(partial, ["A", "B", "C"]);
+    expect(order).toHaveLength(3);
+    expect(new Set(order)).toEqual(new Set(["A", "B", "C"]));
+    // A,B (the only finite-ρ pair) cluster first.
+    expect(Math.abs(order.indexOf("A") - order.indexOf("B"))).toBe(1);
+  });
+});
+
+describe("tooSimilarPairs", () => {
+  it("flags off-diagonal pairs with ρ ≥ 0.85", () => {
+    const pairs = tooSimilarPairs(
+      metrics3.correlation_matrix,
+      ["A", "B", "C"],
+    );
+    // Only A,B (ρ≈0.998) exceed 0.85; A,C and B,C are ~−0.29.
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0][0]).toBe("A");
+    expect(pairs[0][1]).toBe("B");
+    expect(pairs[0][2]).toBeGreaterThanOrEqual(0.85);
+  });
+
+  it("returns [] on a null matrix", () => {
+    expect(tooSimilarPairs(null, ["A", "B"])).toEqual([]);
+  });
+});
+
+describe("computeDiversification (orchestrator gate)", () => {
+  function baseInput(): DiversificationInput {
+    return {
+      ids: ["A", "B", "C"],
+      returnsById: aligned3.returnsById,
+      weights: W3,
+      portfolioDailyReturns: portReturns3,
+      correlationMatrix: metrics3.correlation_matrix,
+      n: metrics3.n,
+    };
+  }
+
+  it("fully populates a result on healthy input", () => {
+    const result = computeDiversification(baseInput());
+    expect(result.diversificationRatio).toBeCloseTo(1.662551, 5);
+    expect(result.effectiveNumberOfBets).toBeCloseTo(2.976552, 5);
+    expect(result.pcr).not.toBeNull();
+    expect(
+      Object.values(result.pcr!).reduce((a, b) => a + b, 0),
+    ).toBeCloseTo(1, 9);
+    expect(result.clusterOrderIds).toHaveLength(3);
+    expect(result.tooSimilarPairs).toHaveLength(1);
+    expect(result.vols).not.toBeNull();
+  });
+
+  it("returns all-null with identity clusterOrderIds when ids.length < 2", () => {
+    const result = computeDiversification({ ...baseInput(), ids: ["A"] });
+    expect(result.diversificationRatio).toBeNull();
+    expect(result.effectiveNumberOfBets).toBeNull();
+    expect(result.pcr).toBeNull();
+    expect(result.vols).toBeNull();
+    expect(result.clusterOrderIds).toEqual(["A"]);
+    expect(result.tooSimilarPairs).toEqual([]);
+  });
+
+  it("returns all-null when n < MIN_USABLE", () => {
+    const result = computeDiversification({ ...baseInput(), n: 9 });
+    expect(result.diversificationRatio).toBeNull();
+    expect(result.clusterOrderIds).toEqual(["A", "B", "C"]);
+  });
+
+  it("returns all-null when the correlation matrix is null", () => {
+    const result = computeDiversification({
+      ...baseInput(),
+      correlationMatrix: null,
+    });
+    expect(result.diversificationRatio).toBeNull();
+    expect(result.pcr).toBeNull();
+  });
+
+  it("never emits NaN/Inf — all degenerate paths return null/finite", () => {
+    const result = computeDiversification(baseInput());
+    const finiteOrNull = (x: number | null) =>
+      x === null || Number.isFinite(x);
+    expect(finiteOrNull(result.diversificationRatio)).toBe(true);
+    expect(finiteOrNull(result.effectiveNumberOfBets)).toBe(true);
+    for (const v of Object.values(result.pcr ?? {})) {
+      expect(Number.isFinite(v)).toBe(true);
+    }
+    for (const v of Object.values(result.vols ?? {})) {
+      expect(Number.isFinite(v)).toBe(true);
     }
   });
 });
