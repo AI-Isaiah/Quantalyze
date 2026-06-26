@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.34.0.3] - 2026-06-26
+### Fixed — the Scenario composer's live-book baseline included a revoked exchange key the blend excluded
+
+In the Scenario composer, the "your current live book" baseline (the reference an allocator compares a hypothetical blend against) could include an exchange key the allocator had already revoked or disconnected — while the composer's hypothetical-blend leg correctly excluded it. The two sides of the comparison were drawn from different key sets, so the baseline KPIs (TWR, Sharpe, max drawdown, average pairwise correlation, equity curve) reflected a key that is no longer connected. The cause: the per-key daily-returns map that feeds the baseline is read by `allocator_id` only, and a soft-disconnected key keeps `is_active = true` with its `csv_daily_returns` rows persisted for audit continuity, so its stale series stayed in the map even though it is not in the eligible-key set. The baseline blend looped the whole map (a revoked key with holdings still carries weight, and even at weight 0 its series still enters the correlation average), whereas the composer's blend leg already filtered to `eligibleApiKeyIds` (the Phase 37 DSRC-03/RT1 fix) — that filter had never been mirrored onto the baseline source. The fix applies the same eligible-key filter at the baseline source so both legs of the comparison share one key set; the all-or-nothing per-key gate still inspects the full map (it only asks whether every eligible key has a series), and the payload still carries the full map (the composer applies its own filter), so an ordinary all-eligible book is byte-unchanged. A regression test reproduces the divergence (a revoked key with stale dailies inflated the baseline Sharpe ~2.6×) and pins the eligible-only result. The actual allocator Overview tab is unaffected — it renders from the equity-snapshot series, a separate source.
+
 ## [0.34.0.2] - 2026-06-26
 ### Fixed — applying optimizer-suggested weights on a multi-venue book committed a different blend than was suggested
 
