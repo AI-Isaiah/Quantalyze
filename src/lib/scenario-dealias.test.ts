@@ -6,9 +6,16 @@ import {
   type ScenarioState,
   type StrategyForBuilder,
 } from "@/lib/scenario";
-import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
+import {
+  collapseAliasedHoldingStrategies,
+  mapDeAliasedWeightsToRawBasis,
+} from "@/lib/scenario-dealias";
 import { buildStrategyForBuilderSet } from "@/app/(dashboard)/allocations/lib/scenario-adapter";
 import { buildHoldingRef } from "@/app/(dashboard)/allocations/lib/holding-outcome-adapter";
+import {
+  applyWeightOverrides,
+  type ScenarioDraft,
+} from "@/app/(dashboard)/allocations/lib/scenario-state";
 
 // computeScenario requires n >= 10 common dates or it returns null KPIs.
 const DATES = [
@@ -324,6 +331,182 @@ describe("production adapter id ↔ symbol-map key alignment (H-0487/H-0493)", (
     expect(deAliased.strategies).toHaveLength(2);
     expect(fixed.avg_pairwise_correlation).not.toBe(buggy.avg_pairwise_correlation);
     expect(fixed.avg_pairwise_correlation).not.toBe(1);
+  });
+});
+
+describe("mapDeAliasedWeightsToRawBasis — optimizer apply on multi-venue books", () => {
+  // The composer feeds the optimizer the DE-ALIASED universe, so its suggested
+  // vector is keyed by each aliased symbol-group's representative. The draft
+  // stores weights on the RAW per-venue refs and applyWeightOverrides
+  // renormalizes over the raw enabled set — so applying the rep-keyed vector
+  // directly leaves the collapsed-away venue duplicate carrying its STALE weight,
+  // which the renormalize folds back in. This is the QA-found drift.
+  const symbolMap = new Map([
+    [BTC_BINANCE, "BTC"],
+    [BTC_OKX, "BTC"],
+    [ETH_BINANCE, "ETH"],
+  ]);
+
+  function draft(
+    weightOverrides: Record<string, number>,
+    toggles: Record<string, boolean>,
+  ): ScenarioDraft {
+    return {
+      schema_version: 2,
+      init_holdings_fingerprint: "fp",
+      toggleByScopeRef: toggles,
+      addedStrategies: [],
+      weightOverrides,
+      lastEditedAt: "2024-01-01T00:00:00.000Z",
+    };
+  }
+
+  // The DE-ALIASED effective weight `computeScenario` actually consumes: the
+  // collapse SUMS an aliased group's selected raw members into the rep slot.
+  function effectiveBtc(d: ScenarioDraft): number {
+    return (
+      (d.weightOverrides[BTC_BINANCE] ?? 0) + (d.weightOverrides[BTC_OKX] ?? 0)
+    );
+  }
+
+  // Optimizer's suggestion over the de-aliased universe (one BTC slot + ETH),
+  // keyed by the representative (the first BTC venue).
+  const SUGGESTED = { [BTC_BINANCE]: 0.3, [ETH_BINANCE]: 0.7 };
+
+  it("THE BUG: applying the rep-keyed vector directly drifts off the suggestion", () => {
+    // binance+okx each 0.4 (BTC exposure 0.8), eth 0.2.
+    const base = draft(
+      { [BTC_BINANCE]: 0.4, [BTC_OKX]: 0.4, [ETH_BINANCE]: 0.2 },
+      { [BTC_BINANCE]: true, [BTC_OKX]: true, [ETH_BINANCE]: true },
+    );
+    const buggy = applyWeightOverrides(base, SUGGESTED);
+    // okx kept its stale 0.4 and entered the renormalize (sum 1.4), so the BTC
+    // exposure lands at ~0.5 instead of the suggested 0.3 — a real drift.
+    expect(effectiveBtc(buggy)).toBeGreaterThan(0.4);
+    expect(Math.abs(effectiveBtc(buggy) - 0.3)).toBeGreaterThan(0.1);
+  });
+
+  it("THE FIX: mapping back onto the raw basis reproduces the suggestion exactly", () => {
+    const base = draft(
+      { [BTC_BINANCE]: 0.4, [BTC_OKX]: 0.4, [ETH_BINANCE]: 0.2 },
+      { [BTC_BINANCE]: true, [BTC_OKX]: true, [ETH_BINANCE]: true },
+    );
+    const rawState: ScenarioState = {
+      selected: { [BTC_BINANCE]: true, [BTC_OKX]: true, [ETH_BINANCE]: true },
+      weights: { [BTC_BINANCE]: 0.4, [BTC_OKX]: 0.4, [ETH_BINANCE]: 0.2 },
+      startDates: {},
+    };
+    const mapped = mapDeAliasedWeightsToRawBasis(SUGGESTED, rawState, symbolMap);
+    const fixed = applyWeightOverrides(base, mapped);
+    // The de-aliased exposures now ARE the optimizer's vector.
+    expect(effectiveBtc(fixed)).toBeCloseTo(0.3, 9);
+    expect(fixed.weightOverrides[ETH_BINANCE]).toBeCloseTo(0.7, 9);
+  });
+
+  it("routes the share by SYMBOL when the representative venue is itself toggled off", () => {
+    // binance (the rep id the optimizer keyed) is OFF; okx carries the exposure.
+    const base = draft(
+      { [BTC_OKX]: 0.4, [ETH_BINANCE]: 0.2 },
+      { [BTC_BINANCE]: false, [BTC_OKX]: true, [ETH_BINANCE]: true },
+    );
+    const rawState: ScenarioState = {
+      selected: { [BTC_BINANCE]: false, [BTC_OKX]: true, [ETH_BINANCE]: true },
+      weights: { [BTC_OKX]: 0.4, [ETH_BINANCE]: 0.2 },
+      startDates: {},
+    };
+    const mapped = mapDeAliasedWeightsToRawBasis(SUGGESTED, rawState, symbolMap);
+    // The BTC share landed on okx (the SELECTED venue), not the off rep id.
+    expect(mapped[BTC_OKX]).toBeCloseTo(0.3, 9);
+    expect(BTC_BINANCE in mapped).toBe(false);
+    const fixed = applyWeightOverrides(base, mapped);
+    expect(fixed.weightOverrides[BTC_OKX]).toBeCloseTo(0.3, 9);
+    expect(fixed.weightOverrides[ETH_BINANCE]).toBeCloseTo(0.7, 9);
+  });
+
+  it("is the identity on a one-venue-per-symbol book (no aliasing ⇒ no change)", () => {
+    const rawState: ScenarioState = {
+      selected: { [BTC_BINANCE]: true, [ETH_BINANCE]: true },
+      weights: { [BTC_BINANCE]: 0.5, [ETH_BINANCE]: 0.5 },
+      startDates: {},
+    };
+    const mapped = mapDeAliasedWeightsToRawBasis(
+      { [BTC_BINANCE]: 0.6, [ETH_BINANCE]: 0.4 },
+      rawState,
+      new Map([
+        [BTC_BINANCE, "BTC"],
+        [ETH_BINANCE, "ETH"],
+      ]),
+    );
+    expect(mapped).toEqual({ [BTC_BINANCE]: 0.6, [ETH_BINANCE]: 0.4 });
+  });
+
+  it("passes added (non-holding) strategy weights through by id", () => {
+    const rawState: ScenarioState = {
+      selected: { "added:abc": true, [BTC_BINANCE]: true },
+      weights: { "added:abc": 0.5, [BTC_BINANCE]: 0.5 },
+      startDates: {},
+    };
+    const mapped = mapDeAliasedWeightsToRawBasis(
+      { "added:abc": 0.45, [BTC_BINANCE]: 0.55 },
+      rawState,
+      new Map([[BTC_BINANCE, "BTC"]]), // added:abc is NOT a holding
+    );
+    expect(mapped["added:abc"]).toBeCloseTo(0.45, 9);
+    expect(mapped[BTC_BINANCE]).toBeCloseTo(0.55, 9);
+  });
+
+  it("zeroes the collapsed-away venue IN THE HELPER OUTPUT (not laundered by the downstream renormalize)", () => {
+    // Assert the raw helper output directly: the whole BTC share sits on the
+    // first selected venue and the sibling is EXPLICITLY 0. That zeroing is the
+    // mechanism that makes applyWeightOverrides' single renormalize inert — if it
+    // regressed (sibling left at its stale weight), the downstream renormalize
+    // could rescale and mask it in `effectiveBtc`, so it must be pinned here.
+    const rawState: ScenarioState = {
+      selected: { [BTC_BINANCE]: true, [BTC_OKX]: true, [ETH_BINANCE]: true },
+      weights: { [BTC_BINANCE]: 0.4, [BTC_OKX]: 0.4, [ETH_BINANCE]: 0.2 },
+      startDates: {},
+    };
+    const mapped = mapDeAliasedWeightsToRawBasis(SUGGESTED, rawState, symbolMap);
+    expect(mapped[BTC_BINANCE]).toBeCloseTo(0.3, 9);
+    expect(mapped[BTC_OKX]).toBe(0);
+    expect(mapped[ETH_BINANCE]).toBeCloseTo(0.7, 9);
+  });
+
+  it("drops a rep's share when its symbol-group has NO selected raw member (documented precondition contract)", () => {
+    // Pathological input the real call site never produces (it filters the
+    // optimizer's universe to selected slots): a BTC rep weight while no BTC
+    // venue is selected. Contract: drop the share — never crash, never
+    // redistribute it onto an unrelated ref.
+    const rawState: ScenarioState = {
+      selected: { [ETH_BINANCE]: true },
+      weights: { [ETH_BINANCE]: 1 },
+      startDates: {},
+    };
+    const mapped = mapDeAliasedWeightsToRawBasis(SUGGESTED, rawState, symbolMap);
+    expect(BTC_BINANCE in mapped).toBe(false);
+    expect(BTC_OKX in mapped).toBe(false);
+    expect(mapped[ETH_BINANCE]).toBeCloseTo(0.7, 9);
+  });
+
+  it("empty vector zeroes the whole selected basis; a non-selected passthrough key is dropped", () => {
+    const rawState: ScenarioState = {
+      selected: { [BTC_BINANCE]: true, [ETH_BINANCE]: true },
+      weights: { [BTC_BINANCE]: 0.5, [ETH_BINANCE]: 0.5 },
+      startDates: {},
+    };
+    // Empty optimizer vector → every selected raw ref zeroed (full-cover invariant).
+    expect(mapDeAliasedWeightsToRawBasis({}, rawState, symbolMap)).toEqual({
+      [BTC_BINANCE]: 0,
+      [ETH_BINANCE]: 0,
+    });
+    // A rep key absent from the selected set is dropped, not emitted.
+    const mapped = mapDeAliasedWeightsToRawBasis(
+      { "added:gone": 0.5, [ETH_BINANCE]: 0.5 },
+      rawState,
+      symbolMap,
+    );
+    expect("added:gone" in mapped).toBe(false);
+    expect(mapped[ETH_BINANCE]).toBeCloseTo(0.5, 9);
   });
 });
 

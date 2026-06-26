@@ -70,7 +70,10 @@ import {
   type DailyPoint,
   type StrategyForBuilder,
 } from "@/lib/scenario";
-import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
+import {
+  collapseAliasedHoldingStrategies,
+  mapDeAliasedWeightsToRawBasis,
+} from "@/lib/scenario-dealias";
 import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
 import type {
@@ -2602,10 +2605,22 @@ export function ScenarioComposer({
             .filter((s) => deAliased.state.selected[s.id])
             .map((s) => ({ id: s.id, name: s.name, dailyReturns: s.daily_returns }))}
           onApply={(weights) => {
+            // The optimizer saw the DE-ALIASED universe, so `weights` is keyed
+            // by each aliased symbol-group's representative. Map it back onto the
+            // raw per-venue basis BEFORE applying, else applyWeightOverrides
+            // renormalizes a collapsed-away venue duplicate's stale weight back
+            // in and the committed blend drifts off the suggestion (multi-venue
+            // books only; identity for one-venue-per-symbol). See
+            // mapDeAliasedWeightsToRawBasis.
+            const rawBasis = mapDeAliasedWeightsToRawBasis(
+              weights,
+              projectionState,
+              symbolByHoldingId,
+            );
             // Atomic full-vector apply — NOT a loop of setWeightOverride (which
             // renormalizes the others on each call and would land a different
             // allocation than the optimizer suggested).
-            scenario.applyWeightOverrides(weights);
+            scenario.applyWeightOverrides(rawBasis);
           }}
         />
       </Card>
