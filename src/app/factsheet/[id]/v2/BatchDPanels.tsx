@@ -122,6 +122,106 @@ export function PeerPercentilePanel() {
   );
 }
 
+/**
+ * OwnBookDeltaPanel (Phase 42, PEER-05) — the scenario blend's head-to-head delta
+ * vs the allocator's LIVE book.
+ *
+ * Renders ONLY for the scenario blend: it reads the csv-only `scenarioOwnBookDelta`
+ * carve-out (narrowed on `ingestSource === "csv"`) and returns null on every
+ * non-scenario factsheet (real route byte-identical). When the allocator has no
+ * live book the carve-out is absent → the panel is SILENTLY ABSENT (no zeroed
+ * deltas, no "add your book" CTA — a conversion action is out of scope here).
+ *
+ * Each value is a SIGNED delta on the SAME sample/252 basis as the peer rank
+ * (T-42-15): blend − book. The sign is ALWAYS carried in TEXT ("+"/U+2212), never
+ * color-only (WCAG 1.4.1):
+ *   - Sharpe / Sortino: positive delta → --color-positive (blend > book is better);
+ *     negative → --color-negative.
+ *   - Max DD: the color mapping is INVERTED — a positive delta means the blend's
+ *     max_dd is LESS negative (shallower = better) → --color-positive; rendered in
+ *     percentage-points (pp).
+ * A null single-ratio delta renders "—" (insufficient data) without crashing.
+ */
+export function OwnBookDeltaPanel() {
+  const payload = usePayload();
+  const delta =
+    payload.ingestSource === "csv" ? (payload.scenarioOwnBookDelta ?? null) : null;
+  if (!delta) return null;
+  return (
+    <section>
+      <header className="mb-2 border-b border-text pb-1">
+        <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary">
+          vs Your Book
+        </h3>
+      </header>
+      <table className="w-full text-[12px]">
+        <tbody>
+          <DeltaRow label="Sharpe" value={delta.sharpe} kind="ratio" />
+          <DeltaRow label="Sortino" value={delta.sortino} kind="ratio" />
+          <DeltaRow label="Max DD (blend vs book)" value={delta.max_dd} kind="maxdd" />
+        </tbody>
+      </table>
+      <p className="mt-2 text-[10px] italic text-text-muted">
+        Delta = blend minus your live book · sample/252 basis · {delta.book_n.toLocaleString()} book
+        observations
+      </p>
+    </section>
+  );
+}
+
+/**
+ * One own-book delta row. The sign is in the TEXT ("+"/U+2212 minus), never
+ * color-only. `ratio` rows color by sign; `maxdd` rows INVERT the color mapping
+ * (a positive delta = shallower = good = positive token) and render in pp. A null
+ * delta renders "—" (insufficient data) with no color.
+ */
+function DeltaRow({
+  label,
+  value,
+  kind,
+}: {
+  label: string;
+  value: number | null;
+  kind: "ratio" | "maxdd";
+}) {
+  const display =
+    value == null || !Number.isFinite(value)
+      ? "—"
+      : kind === "maxdd"
+        ? `${signGlyph(value)}${Math.abs(value * 100).toFixed(1)}pp`
+        : `${signGlyph(value)}${Math.abs(value).toFixed(2)}`;
+  // Color follows FAVORABILITY, not the raw sign. For ratios, higher (positive
+  // delta) is better. For max_dd the delta is `blend.max_dd − book.max_dd` on
+  // negative drawdown values, so a POSITIVE delta = blend's max_dd is LESS
+  // negative = shallower = better — favorable. Both kinds therefore map
+  // positive→positive here; the UI-SPEC "inversion" is relative to the naive
+  // reading that a positive change in a drawdown (loss) field is bad, which it
+  // is NOT once the delta is taken on the signed (negative) drawdown values.
+  let color: string | undefined;
+  if (value != null && Number.isFinite(value) && value !== 0) {
+    const favorable = value > 0;
+    color = favorable ? "var(--color-positive)" : "var(--color-negative)";
+  }
+  return (
+    <tr className="border-b border-border/30 last:border-0">
+      <td className="py-1.5 pr-2 text-text-2">{label}</td>
+      <td
+        className="py-1.5 pl-2 text-right font-mono tabular-nums text-text-primary"
+        style={color ? { color } : undefined}
+      >
+        {display}
+      </td>
+    </tr>
+  );
+}
+
+/** Sign glyph carried in TEXT (WCAG non-color-only): "+" or U+2212 minus. "" for 0. */
+function signGlyph(v: number): string {
+  if (v > 0) return "+";
+  if (v < 0) return "−";
+  return "";
+}
+
 function PercentileBar({ label, pct }: { label: string; pct: number }) {
   return (
     <div className="grid grid-cols-[110px_1fr_48px] items-center gap-2 text-[11px]">

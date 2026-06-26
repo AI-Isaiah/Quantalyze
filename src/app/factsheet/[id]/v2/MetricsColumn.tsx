@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import type { JointMetrics } from "@/lib/factsheet/types";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import { CalmarByYearPanel, BootstrapCIPanel } from "./AnalyticalPanels";
-import { StyleDriftPanel, PeerPercentilePanel } from "./BatchDPanels";
+import { StyleDriftPanel, PeerPercentilePanel, OwnBookDeltaPanel } from "./BatchDPanels";
 import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentMandatePanel } from "./MandatePanels";
 
 /**
@@ -127,6 +127,12 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
           (scenarioMode &&
             payload.ingestSource === "csv" &&
             payload.scenarioPeer != null)) && <PeerPercentilePanel />}
+        {/* Phase 42 (PEER-05): the blend-vs-live-book signed delta, AFTER the
+            peer panel (UI-SPEC §III). scenarioMode-gated here — the panel ALSO
+            null-guards on its csv-only `scenarioOwnBookDelta` carve-out (silently
+            absent without a live book), so non-scenario factsheets are
+            byte-identical. */}
+        {scenarioMode && <OwnBookDeltaPanel />}
       </EditorialSection>
 
       <EditorialSection label="V" name="Terms">
