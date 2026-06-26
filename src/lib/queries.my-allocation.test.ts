@@ -44,6 +44,9 @@ const state = vi.hoisted(() => ({
     last_sync_at: string | null;
     account_balance_usdt: number | null;
     created_at: string;
+    // Prod selects this for isPerKeyDailiesEligibleKey; optional so fixtures that
+    // don't set it (→ eligible on the disconnect axis) keep compiling.
+    disconnected_at?: string | null;
   }>,
   alerts: [] as Array<{
     id: string;
@@ -1702,6 +1705,197 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
     expect(result.liveBaselineMetrics.equity).toEqual(snapMetrics.equity);
     // Sanity: the fallback actually produced a real (non-empty) curve here.
     expect(result.liveBaselineMetrics.equity.length).toBeGreaterThan(0);
+  });
+
+  it("RT1 parity: a revoked key with STALE per-key dailies + holdings is EXCLUDED from the live-book baseline blend (composer baseline-vs-blend eligibility parity)", async () => {
+    // key-A is eligible (synced). key-B is soft-disconnected: sync_status =
+    // 'revoked' but is_active stays true (audit continuity), so the
+    // allocator-scoped csv_daily_returns read still carries its STALE series even
+    // though it is NOT in eligibleApiKeyIds. liveBaselineMetrics (the composer's
+    // "your current live book" reference) must blend ONLY key-A. Pre-fix, the
+    // unfiltered map blended the revoked key-B too — so the composer compared a
+    // hypothetical blend (eligible-filtered, DSRC-03/RT1) against a baseline that
+    // included a key the allocator disconnected.
+    state.apiKeys = [
+      {
+        id: "key-A", user_id: "user-1", exchange: "binance", label: "Binance",
+        is_active: true, sync_status: "synced", last_sync_at: "2026-05-08T00:00:00Z",
+        account_balance_usdt: 30_000, created_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "key-B", user_id: "user-1", exchange: "okx", label: "OKX",
+        is_active: true, sync_status: "revoked", last_sync_at: "2026-05-08T00:00:00Z",
+        account_balance_usdt: 20_000, created_at: "2026-01-01T00:00:00Z",
+      },
+    ];
+    // Both keys carry holdings, so the revoked key-B would have real equity WEIGHT
+    // (not just an avgRho contribution) if it leaked into the blend.
+    state.allocatorHoldings = [
+      {
+        allocator_id: "user-1", symbol: "BTC", quantity: 1, mark_price: 53_500,
+        value_usd: 30_000, venue: "binance", holding_type: "spot",
+        asof: ASOF[ASOF.length - 1], api_key_id: "key-A",
+      },
+      {
+        allocator_id: "user-1", symbol: "ETH", quantity: 10, mark_price: 2_000,
+        value_usd: 20_000, venue: "okx", holding_type: "spot",
+        asof: ASOF[ASOF.length - 1], api_key_id: "key-B",
+      },
+    ];
+    seedSnapshotsBTC();
+    // A distinct series for the revoked key-B so a leaked blend visibly diverges.
+    const PERKEY_B = [
+      -0.04, 0.05, -0.03, 0.04, -0.05, 0.03, -0.04, 0.05, -0.02, 0.04, -0.05,
+      0.03, -0.04,
+    ];
+    state.csvDailyReturns = [
+      ...ASOF.map((date, i) => ({
+        api_key_id: "key-A", allocator_id: "user-1", date, daily_return: PERKEY_A[i],
+      })),
+      ...ASOF.map((date, i) => ({
+        api_key_id: "key-B", allocator_id: "user-1", date, daily_return: PERKEY_B[i],
+      })),
+    ];
+
+    const { getMyAllocationDashboard, liveBaselineMetricsFromPerKeyDailies } =
+      await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // The eligible-only (key-A) blend — what the Overview MUST equal post-fix.
+    const aOnly = liveBaselineMetricsFromPerKeyDailies(result.holdingsSummary, {
+      "key-A": ASOF.map((date, i) => ({ date, value: PERKEY_A[i] })),
+    });
+    // The buggy blend that folds in the revoked key-B.
+    const aPlusB = liveBaselineMetricsFromPerKeyDailies(result.holdingsSummary, {
+      "key-A": ASOF.map((date, i) => ({ date, value: PERKEY_A[i] })),
+      "key-B": ASOF.map((date, i) => ({ date, value: PERKEY_B[i] })),
+    });
+
+    // Post-fix: the dashboard equals the eligible-only blend.
+    expect(result.liveBaselineMetrics.sharpe).toBe(aOnly.sharpe);
+    expect(result.liveBaselineMetrics.equity).toEqual(aOnly.equity);
+    expect(result.liveBaselineMetrics.avgRho).toBe(aOnly.avgRho);
+    // Falsifiable both ways: the two blends genuinely diverge for this fixture
+    // (so the test CAN fail), and the dashboard must not equal the leaked blend.
+    expect(aOnly.sharpe).not.toBe(aPlusB.sharpe);
+    expect(result.liveBaselineMetrics.sharpe).not.toBe(aPlusB.sharpe);
+  });
+
+  it("RT1 parity, avgRho axis: a revoked key holding NOTHING (weight 0) still leaks into the baseline correlation unless filtered", async () => {
+    // The weight-0 case the fix comment singles out: key-B is revoked AND holds
+    // nothing, so it contributes ZERO to the weighted return/equity/Sharpe — but
+    // (pre-fix) its series is still `selected=true`, so it enters the engine's
+    // avg_pairwise_correlation. Here Sharpe is identical with or without key-B; the
+    // ONLY observable leak is avgRho (null with one eligible key, non-null once the
+    // revoked key's series joins). This isolates the avgRho axis the weighted case
+    // above can't.
+    state.apiKeys = [
+      {
+        id: "key-A", user_id: "user-1", exchange: "binance", label: "Binance",
+        is_active: true, sync_status: "synced", last_sync_at: "2026-05-08T00:00:00Z",
+        account_balance_usdt: 50_000, created_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "key-B", user_id: "user-1", exchange: "okx", label: "OKX",
+        is_active: true, sync_status: "revoked", last_sync_at: "2026-05-08T00:00:00Z",
+        account_balance_usdt: 0, created_at: "2026-01-01T00:00:00Z",
+      },
+    ];
+    // ONLY key-A holds anything → key-B's blend weight is 0.
+    seedHoldingsKeyA();
+    seedSnapshotsBTC();
+    const PERKEY_B = [
+      -0.04, 0.05, -0.03, 0.04, -0.05, 0.03, -0.04, 0.05, -0.02, 0.04, -0.05,
+      0.03, -0.04,
+    ];
+    state.csvDailyReturns = [
+      ...ASOF.map((date, i) => ({
+        api_key_id: "key-A", allocator_id: "user-1", date, daily_return: PERKEY_A[i],
+      })),
+      ...ASOF.map((date, i) => ({
+        api_key_id: "key-B", allocator_id: "user-1", date, daily_return: PERKEY_B[i],
+      })),
+    ];
+
+    const { getMyAllocationDashboard, liveBaselineMetricsFromPerKeyDailies } =
+      await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    const aOnly = liveBaselineMetricsFromPerKeyDailies(result.holdingsSummary, {
+      "key-A": ASOF.map((date, i) => ({ date, value: PERKEY_A[i] })),
+    });
+    const aPlusB = liveBaselineMetricsFromPerKeyDailies(result.holdingsSummary, {
+      "key-A": ASOF.map((date, i) => ({ date, value: PERKEY_A[i] })),
+      "key-B": ASOF.map((date, i) => ({ date, value: PERKEY_B[i] })),
+    });
+
+    // The weight-0 leak is INVISIBLE to Sharpe — so a Sharpe-only guard would miss
+    // it. avgRho is the discriminating axis: null (one eligible key) vs a real
+    // pairwise value once the revoked key's series joins.
+    expect(aOnly.sharpe).toBe(aPlusB.sharpe); // weight-0 ⇒ Sharpe identical
+    expect(aOnly.avgRho).toBeNull(); // single eligible key ⇒ no pairs
+    expect(aPlusB.avgRho).not.toBeNull(); // leaked blend has a real correlation
+    // Post-fix the dashboard tracks the eligible-only (null) avgRho, NOT the leak.
+    expect(result.liveBaselineMetrics.avgRho).toBeNull();
+    expect(result.liveBaselineMetrics.avgRho).not.toBe(aPlusB.avgRho);
+  });
+
+  it("RT1 parity, disconnected_at axis: a soft-disconnected key (disconnected_at set, is_active=true) is also excluded from the baseline", async () => {
+    // Proves the baseline filter is keyed on the FULL eligible predicate, not just
+    // sync_status. key-B is synced but carries disconnected_at → ineligible.
+    state.apiKeys = [
+      {
+        id: "key-A", user_id: "user-1", exchange: "binance", label: "Binance",
+        is_active: true, sync_status: "synced", last_sync_at: "2026-05-08T00:00:00Z",
+        disconnected_at: null, account_balance_usdt: 30_000, created_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "key-B", user_id: "user-1", exchange: "okx", label: "OKX",
+        is_active: true, sync_status: "synced", last_sync_at: "2026-05-08T00:00:00Z",
+        disconnected_at: "2026-05-10T00:00:00Z", account_balance_usdt: 20_000,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ];
+    state.allocatorHoldings = [
+      {
+        allocator_id: "user-1", symbol: "BTC", quantity: 1, mark_price: 53_500,
+        value_usd: 30_000, venue: "binance", holding_type: "spot",
+        asof: ASOF[ASOF.length - 1], api_key_id: "key-A",
+      },
+      {
+        allocator_id: "user-1", symbol: "ETH", quantity: 10, mark_price: 2_000,
+        value_usd: 20_000, venue: "okx", holding_type: "spot",
+        asof: ASOF[ASOF.length - 1], api_key_id: "key-B",
+      },
+    ];
+    seedSnapshotsBTC();
+    const PERKEY_B = [
+      -0.04, 0.05, -0.03, 0.04, -0.05, 0.03, -0.04, 0.05, -0.02, 0.04, -0.05,
+      0.03, -0.04,
+    ];
+    state.csvDailyReturns = [
+      ...ASOF.map((date, i) => ({
+        api_key_id: "key-A", allocator_id: "user-1", date, daily_return: PERKEY_A[i],
+      })),
+      ...ASOF.map((date, i) => ({
+        api_key_id: "key-B", allocator_id: "user-1", date, daily_return: PERKEY_B[i],
+      })),
+    ];
+
+    const { getMyAllocationDashboard, liveBaselineMetricsFromPerKeyDailies } =
+      await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    const aOnly = liveBaselineMetricsFromPerKeyDailies(result.holdingsSummary, {
+      "key-A": ASOF.map((date, i) => ({ date, value: PERKEY_A[i] })),
+    });
+    const aPlusB = liveBaselineMetricsFromPerKeyDailies(result.holdingsSummary, {
+      "key-A": ASOF.map((date, i) => ({ date, value: PERKEY_A[i] })),
+      "key-B": ASOF.map((date, i) => ({ date, value: PERKEY_B[i] })),
+    });
+    expect(result.liveBaselineMetrics.sharpe).toBe(aOnly.sharpe);
+    expect(aOnly.sharpe).not.toBe(aPlusB.sharpe);
+    expect(result.liveBaselineMetrics.sharpe).not.toBe(aPlusB.sharpe);
   });
 
   it("mixed-population HONESTY guard (D3): one key with dailies + one active key WITHOUT → takes the FALLBACK (never a half-per-key/half-snapshot curve)", async () => {
