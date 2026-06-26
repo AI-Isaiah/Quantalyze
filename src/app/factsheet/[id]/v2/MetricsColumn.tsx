@@ -16,7 +16,12 @@ import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel } from "./Mandate
  * structure, matching DESIGN.md's "data density > card density" rule and
  * the FactSet quarterly-factsheet reference.
  */
-export function MetricsColumn() {
+export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean }) {
+  // Phase-40 inert seam: scenarioMode is threaded in now but gates nothing in
+  // MetricsColumn this phase. Phase 42 (PEER-01) consumes it for the additive
+  // scenarioPeer carve-out. The no-op reference below keeps the prop accepted
+  // without tripping @typescript-eslint/no-unused-vars.
+  void scenarioMode;
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
   const m = payload.strategyMetrics;

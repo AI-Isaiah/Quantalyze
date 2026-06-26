@@ -143,6 +143,13 @@ export interface FactsheetBodyOptions {
    *  equity curve at the top of the allocator's Overview without
    *  reordering the rest of the factsheet body. */
   topSlot?: ReactNode;
+  /** Composer-mount flag (default false). When true, suppresses the ControlBar
+   *  Share-link + Compare-strategies actions (a hypothetical scenario blend is
+   *  not a shareable/comparable real strategy) and threads to MetricsColumn as
+   *  the Phase-42 peer-carve-out seam. Default false keeps every existing call
+   *  site (page.tsx, the Discovery detail page, the Overview EquityChartWidget)
+   *  byte-identical. */
+  scenarioMode?: boolean;
 }
 
 /**
@@ -159,6 +166,7 @@ export function FactsheetBody({
   hideAllocatorSection = false,
   hideFooter = false,
   topSlot,
+  scenarioMode = false,
 }: { payload: FactsheetPayload } & FactsheetBodyOptions) {
   const { colorblind, darkMode } = useDisplay();
   // Centralised palette — resolve once, apply as CSS custom properties on
@@ -188,7 +196,7 @@ export function FactsheetBody({
         {topSlot}
         <KpiStrip />
         <SectionNav />
-        <ControlBar />
+        <ControlBar scenarioMode={scenarioMode} />
 
         <div className="mt-6 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-x-12 gap-y-10">
           <section className="flex flex-col gap-10 min-w-0">
@@ -266,7 +274,7 @@ export function FactsheetBody({
             </CollapsibleSection>
           </section>
           <div id="factsheet-metrics" className="contents" />
-          <MetricsColumn />
+          <MetricsColumn scenarioMode={scenarioMode} />
         </div>
 
         {/* AllocatorSection uses demo blended portfolios — derivable data only
@@ -822,7 +830,7 @@ function ShareLinkButton({ strategyId }: { strategyId: string }) {
   );
 }
 
-function ControlBar() {
+function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   const payload = usePayload();
   const { resetXRange } = useXRange();
   const { setComparator } = useComparator();
@@ -849,8 +857,8 @@ function ControlBar() {
       >
         Reset view
       </button>
-      <ShareLinkButton strategyId={payload.strategyId} />
-      {!shareMode && (
+      {!scenarioMode && <ShareLinkButton strategyId={payload.strategyId} />}
+      {!scenarioMode && !shareMode && (
         <a
           href={`/compare?ids=${payload.strategyId}`}
           onClick={() => trackFactsheetEvent("factsheet_v2_compare_click", { strategy_id: payload.strategyId })}
