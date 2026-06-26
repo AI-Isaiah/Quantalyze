@@ -6,6 +6,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { buildFactsheetPayload, deriveIngestSource } from "./build-payload";
+import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 
 /** Minimal 40-day daily-return series for tests that don't need statistical depth. */
 function makeReturns(n = 40): Array<{ date: string; value: number }> {
@@ -323,27 +324,62 @@ describe("FINDING-6: buildAllocatorPortfolioFactsheetPayload produces ingestSour
 });
 
 // ---------------------------------------------------------------------------
-// IMPORTANT-2 (b06-codereview) — ingestSource contract at the payload level
-// Verifies that a CSV-tagged payload has ingestSource="csv" (the render-gate
-// key for PeerPercentile and AllocatorSection suppression). A component-level
-// test would require heavy mocking; the payload contract is the source of truth
-// that the JSX gates read — testing it here covers the full chain.
+// IMPORTANT-2 (b06-codereview) — ingestSource contract at the payload level.
+//
+// Phase 42 (PEER-01, ADR-0025) REPLACES the old behavioral pin. Previously this
+// block asserted "csv arm → PeerPercentile gate suppresses" (peer NEVER renders
+// for a csv payload, because MetricsColumn gated purely on ingestSource==='api').
+// The user override (2026-06-25) surfaces the peer rank on the hypothetical
+// scenario BLEND via an additive `scenarioPeer` carve-out — WITHOUT flipping
+// ingestSource. The MetricsColumn gate is now:
+//   ingestSource==='api'  OR  (scenarioMode && ingestSource==='csv' && scenarioPeer!=null)
+//
+// So the NEW behavioral invariant is: a csv payload built WITH scenarioPeer set
+// carries the peer carve-out (the gate's csv disjunct activates) WHILE the four
+// genuinely-synthetic api-only fields stay STRUCTURALLY ABSENT and ingestSource
+// stays "csv". The render gate is exercised by the MetricsColumn render test
+// (plan 04); here we pin the payload-shape contract the gate reads — the source
+// of truth. The type-field invariant (the four api-only fields never on csv) is
+// PRESERVED in the RED-TEAM-M2/M3 + B6 blocks below (scenarioPeer is a DIFFERENT
+// field name, so those absence assertions still hold).
 // ---------------------------------------------------------------------------
-describe("IMPORTANT-2: ingestSource='csv' payload contract for panel suppression", () => {
-  it("CSV payload ingestSource='csv' — PeerPercentile and Allocator gates will suppress", () => {
-    const payload = buildFactsheetPayload(
-      makeStrategy({ ingestSource: "csv" }),
-      makeReturns(),
-    );
-    expect(payload!.ingestSource).toBe("csv");
-    // The JSX gates check payload.ingestSource === "api":
-    // MetricsColumn: payload.ingestSource === "api" → show PeerPercentile
-    // FactsheetBody: !hideAllocatorSection && payload.ingestSource === "api" → show Allocator
-    // Both are false for csv — panels are suppressed.
-    expect(payload!.ingestSource === "api").toBe(false);
+describe("IMPORTANT-2 / PEER-01: csv carve-out — scenarioPeer renders peer, synth panels stay absent", () => {
+  it("csv + scenarioPeer: peer carve-out present, 4 synth panels absent, ingestSource stays 'csv'", () => {
+    const payload = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturns(40),
+      scenarioPeer: { cohortSize: 42, sharpe: 70, sortino: 65, max_dd: 55 },
+    });
+    // ingestSource is NEVER flipped — the carve-out is additive on the csv arm.
+    expect(payload.ingestSource).toBe("csv");
+    // The carve-out is present + non-null → MetricsColumn's csv disjunct
+    // (scenarioMode && ingestSource==='csv' && scenarioPeer!=null) activates.
+    expect(payload.scenarioPeer).not.toBeNull();
+    expect(payload.scenarioPeer).toEqual({
+      cohortSize: 42,
+      sharpe: 70,
+      sortino: 65,
+      max_dd: 55,
+    });
+    // The four GENUINELY-synthetic api-only fields stay structurally ABSENT —
+    // `scenarioPeer` does NOT unlock them (it is a different field name on a
+    // payload whose ingestSource is still "csv").
+    for (const f of SYNTH_FIELDS) {
+      expect(f in payload, `${f} must be absent on a csv+scenarioPeer payload`).toBe(false);
+    }
   });
 
-  it("API payload ingestSource='api' — PeerPercentile and Allocator gates will show panels", () => {
+  it("csv WITHOUT scenarioPeer: byte-identical to before — no scenarioPeer key, peer gate inert", () => {
+    // Every existing csv call site omits scenarioPeer → the key is OMITTED (not
+    // undefined): MetricsColumn's csv disjunct is dead and the panel suppresses.
+    const payload = buildScenarioFactsheetPayload({ portfolioDaily: makeReturns(40) });
+    expect(payload.ingestSource).toBe("csv");
+    expect("scenarioPeer" in payload).toBe(false);
+    for (const f of SYNTH_FIELDS) {
+      expect(f in payload, `${f} must be absent on a bare csv payload`).toBe(false);
+    }
+  });
+
+  it("API payload ingestSource='api' — PeerPercentile gate's api disjunct shows the panel", () => {
     const payload = buildFactsheetPayload(
       makeStrategy({ ingestSource: "api" }),
       makeReturns(),
