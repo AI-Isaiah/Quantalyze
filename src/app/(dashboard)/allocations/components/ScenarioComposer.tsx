@@ -71,6 +71,8 @@ import {
   type StrategyForBuilder,
 } from "@/lib/scenario";
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
+import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
+import type { PeerPercentilePayload } from "@/lib/factsheet/types";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import { buildBlendPanels } from "@/lib/scenario-blend-panels";
 import {
@@ -1513,6 +1515,67 @@ export function ScenarioComposer({
     [deAliased, dateMapCache],
   );
 
+  // PEER-01/02/03 (Phase 42) — the blend's live peer rank vs the REAL verified
+  // universe. Fetched from POST /api/scenario/peer-rank, feeding the ENGINE's
+  // sample/252-basis sharpe/sortino/max_drawdown (scenario.ts:454-456 — NOT the
+  // population headline), and threaded into the synth factsheet payload via the
+  // ScenarioFactsheetChart `scenarioPeer` prop. Null when the blend is below the
+  // 252-obs sample floor, when a ranking metric is non-finite, or when the route
+  // returns { peer: null } (cohort below the RPC's min-N) → the peer panel is
+  // silently absent. No cohort distribution ever reaches the client — only the
+  // 3-percentile + count rank (T-42-13).
+  const [scenarioPeer, setScenarioPeer] = useState<PeerPercentilePayload | null>(null);
+
+  // Fetch effect keyed on the engine metrics triple + n, so the SAME blend
+  // produces the SAME request (reload-stable) and a changed blend re-fetches.
+  // The `buildScenarioPeerRankRequest` gate owns the n>=252 + finite suppression
+  // (PEER-03); below the floor it returns null → no fetch, scenarioPeer reset to
+  // null. A `cancelled` cleanup flag (the composer's btc-effect posture) guards
+  // against an out-of-order resolve overwriting a newer blend's rank (no-stale).
+  const peerSharpe = scenarioMetrics.sharpe;
+  const peerSortino = scenarioMetrics.sortino;
+  const peerMaxDD = scenarioMetrics.max_drawdown;
+  const peerN = scenarioMetrics.n;
+  useEffect(() => {
+    const body = buildScenarioPeerRankRequest({
+      sharpe: peerSharpe,
+      sortino: peerSortino,
+      max_drawdown: peerMaxDD,
+      n: peerN,
+    });
+    if (!body) {
+      // Below the sample floor / non-finite metrics — suppress (no fetch).
+      setScenarioPeer(null);
+      return;
+    }
+    let cancelled = false;
+    fetch("/api/scenario/peer-rank", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled) return;
+        // The route returns { peer: PeerPercentilePayload | null }; any non-200
+        // (d === null), a malformed body, or a null peer → suppress honestly.
+        const peer =
+          d && typeof d === "object" && "peer" in d
+            ? (d as { peer: PeerPercentilePayload | null }).peer
+            : null;
+        setScenarioPeer(peer ?? null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Network / abort / JSON-parse failure → honest absence (panel hidden).
+        setScenarioPeer(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [peerSharpe, peerSortino, peerMaxDD, peerN]);
+
   // GRAPH-02 / GRAPH-03 — derive every blend-graph series from the SAME
   // unrounded `portfolio_daily_returns` the benchmark / stress / MC sections
   // read (never the rounded/downsampled `equity_curve`). `buildBlendPanels` is
@@ -2298,6 +2361,9 @@ export function ScenarioComposer({
           scenarioSeries={scenarioWealthSeries}
           benchmark={btcWealth}
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
+          // PEER-01: the live peer rank (or null below the sample floor / min-N)
+          // flows onto the synth csv payload's scenarioPeer carve-out.
+          scenarioPeer={scenarioPeer ?? undefined}
         />
         {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted line
             swatch via the `--color-chart-benchmark` token (UI-SPEC §Copywriting
