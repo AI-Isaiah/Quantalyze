@@ -3126,10 +3126,32 @@ export const getMyAllocationDashboard = cache(
       eligibleKeyIds,
       perKeyReturnsByApiKeyId,
     );
+    // RT1 (Phase 37 DSRC-03) parity for the live-book BASELINE source.
+    // `liveBaselineMetrics` is the "your current live book" reference the Scenario
+    // composer lifts (liveBaselineToComputedMetrics) to compare a hypothetical
+    // blend against. The phase36PerKeyDailiesRes read above fetches
+    // csv_daily_returns by allocator_id, so it carries STALE per-key series for
+    // revoked / soft-disconnected keys — those keep is_active=true and their rows
+    // persist for audit continuity, so they are NOT in eligibleKeyIds yet still
+    // appear in the map. Blending the unfiltered map folds a key the allocator
+    // disconnected into this baseline (its own holdings give it weight, and even
+    // at weight 0 its series still enters avgRho) — while the composer's per-key
+    // BLEND leg already filters to eligibleApiKeyIds (ScenarioComposer DSRC-03/
+    // RT1). So the composer compared an eligible-filtered blend against a baseline
+    // that included an ineligible key. Mirror the eligible filter HERE so both
+    // legs share the same source set. The GATE above deliberately still reads the
+    // FULL map — it only asks whether every ELIGIBLE key has a series — and the
+    // payload below keeps the full map (the composer does its own eligible filter).
+    const eligibleKeyIdSet = new Set(eligibleKeyIds);
+    const eligiblePerKeyReturns = Object.fromEntries(
+      Object.entries(perKeyReturnsByApiKeyId).filter(([id]) =>
+        eligibleKeyIdSet.has(id),
+      ),
+    );
     const liveBaselineMetrics = perKeyDailiesGateSatisfied
       ? liveBaselineMetricsFromPerKeyDailies(
           phase07.holdingsSummary,
-          perKeyReturnsByApiKeyId,
+          eligiblePerKeyReturns,
         )
       : liveBaselineMetricsFromHoldings(
           phase07.holdingsSummary,
@@ -3481,9 +3503,12 @@ export const getMyAllocationDashboard = cache(
       holdingReturnsByScopeRef,
       allocator_id: allocator_id,
       liveBaselineMetrics,
-      // Phase 37 / DSRC-01 — per-key channel (additive; same values selected the
-      // liveBaselineMetrics source above). The composer recomputes the blend
-      // client-side on a data-source toggle.
+      // Phase 37 / DSRC-01 — per-key channel (additive). This is the FULL
+      // unfiltered per-key map; the composer applies its OWN eligibleApiKeyIds
+      // filter client-side when it recomputes the blend on a data-source toggle.
+      // (The liveBaselineMetrics source above is eligible-filtered — RT1 — so the
+      // two deliberately differ for a revoked / soft-disconnected key whose stale
+      // series persists in this map.)
       perKeyReturnsByApiKeyId,
       perKeyDailiesGateSatisfied,
       eligibleApiKeyIds: eligibleKeyIds,
