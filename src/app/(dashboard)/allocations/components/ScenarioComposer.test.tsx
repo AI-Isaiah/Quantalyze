@@ -3520,11 +3520,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(typeof lastScenarioMetrics()?.avg_pairwise_correlation).toBe("number");
   });
 
-  it("CORR-02 — with <2 active strategies the composer heatmap renders the honest empty state, never a 1×1 grid", () => {
-    // Default adapter mock returns ZERO strategies → scenarioMetrics.correlation_matrix
-    // is null → the heatmap delegates to its reason-routed empty state. With <2
-    // strategies the honest heading names the STRATEGY-COUNT reason, not overlap
-    // (v0.24.15.139 fix: the heading must match its body, not contradict it).
+  it("CORR-02/03 — with <2 active strategies the Diversification section renders the honest 'add a second strategy' empty state, never a 1×1 grid", () => {
+    // Default adapter mock returns ZERO strategies → diversification.clusterOrderIds
+    // .length < 2 → the new CollapsibleSection body collapses to the EmptyStateCard
+    // (Phase 41 CORR-03: the 0/1-constituent case is routed to "add a second
+    // strategy" at the SECTION level, BEFORE the heatmap's own reason-routing —
+    // this is the wrapped-in-place behavior, supersedes the prior heatmap-empty
+    // assertion). The heatmap's strategy-count empty is now reachable only via the
+    // n<10 path (covered by the CORR-03 short-overlap test below).
     const payload = makePayload();
     render(
       <ScenarioComposer
@@ -3534,7 +3537,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
     expect(
-      screen.getByText("Not enough strategies to correlate"),
+      screen.getByText("Add a second strategy to see diversification"),
     ).toBeInTheDocument();
     // No degenerate grid: the figure (which only renders for ≥2 strategies) is absent.
     expect(screen.queryByRole("figure", { name: /Pairwise correlation heatmap/i }))
@@ -3561,6 +3564,260 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(caption?.textContent?.replace(/\s+/g, " ")).toContain(
       `Avg |ρ| ${expected}`,
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 41 CORR-01..06 — the "Diversification" CollapsibleSection enhances the
+  // own-book heatmap IN PLACE: a ρ≥0.85 too-similar badge, the cluster-reordered
+  // matrix (de-aliased labels), the DR + ENB headline (formula disclosed), and the
+  // descending per-constituent PCR list, with honest empties for 0/1-constituent
+  // and n<10. The real diversification lib + CorrelationHeatmap are NOT mocked, so
+  // these exercise the genuine end-to-end math (mirroring the un-mocked CORR-01
+  // test above).
+  // -------------------------------------------------------------------------
+
+  // Three active de-aliased strategies sharing 12 overlapping days: BTC and ETH
+  // move together (ρ≥0.85 → too-similar pair + adjacent in the cluster order),
+  // SOL is near-orthogonal (the cluster outlier). Drives the REAL engine matrix.
+  function mockThreeStrategies() {
+    const dates = Array.from({ length: 12 }, (_, i) =>
+      `2026-01-${String(i + 1).padStart(2, "0")}`,
+    );
+    // BTC and ETH: ETH = BTC scaled + tiny jitter → strongly correlated (ρ≈1).
+    const base = [0.02, -0.01, 0.03, -0.02, 0.015, -0.025, 0.01, -0.005, 0.02, -0.018, 0.012, -0.022];
+    const btc = dates.map((date, i) => ({ date, value: base[i] }));
+    const eth = dates.map((date, i) => ({ date, value: base[i] * 0.9 + 0.0005 }));
+    // SOL: an independent zig-zag uncorrelated with `base`.
+    const solSeries = [-0.01, 0.02, 0.005, -0.015, -0.02, 0.018, 0.022, -0.008, -0.012, 0.025, -0.004, 0.016];
+    const sol = dates.map((date, i) => ({ date, value: solSeries[i] }));
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkRealStrat(REF_BTC, btc),
+        mkRealStrat(REF_ETH, eth),
+        mkRealStrat(REF_SOL, sol),
+      ],
+      state: {
+        selected: { [REF_BTC]: true, [REF_ETH]: true, [REF_SOL]: true },
+        weights: { [REF_BTC]: 0.4, [REF_ETH]: 0.3, [REF_SOL]: 0.3 },
+        startDates: {},
+      },
+    });
+  }
+
+  it("CORR-02 — the DR + Effective-Bets headline renders real values (not 0.00) with the ENB formula disclosed", () => {
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The headline labels + the disclosed formula are present.
+    expect(screen.getByText("Diversification Ratio")).toBeInTheDocument();
+    expect(screen.getByText("Effective Bets")).toBeInTheDocument();
+    expect(screen.getByText("ENB = 1 / Σ PCRᵢ²")).toBeInTheDocument();
+    // The interpretation line names the live constituent count (2) — proving the
+    // values are computed from the real blend, not a placeholder.
+    expect(
+      screen.getByText(/effective bets? across 2 constituents/i),
+    ).toBeInTheDocument();
+  });
+
+  it("CORR-02 — the ρ≥0.85 'too similar' badge renders when a pair crosses the threshold", () => {
+    mockThreeStrategies();
+    const payload = makePayload({
+      holdingsSummary: [HOLDING_BTC, HOLDING_ETH, HOLDING_SOL],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // BTC≈ETH → exactly one pair ≥0.85 → the aggregate amber badge appears.
+    const badge = screen.getByText(/above the 0.85 similarity threshold/i);
+    expect(badge).toBeInTheDocument();
+    // Singular/plural is correct for one pair.
+    expect(badge.textContent).toMatch(/^\s*1 pair above the 0.85 similarity threshold\s*$/);
+    // Amber chip, NOT red (DESIGN.md: high-ρ is concentration-risk, not an error).
+    expect(badge.className).toContain("text-warning");
+    expect(badge.className).not.toMatch(/text-negative|bg-negative/);
+  });
+
+  it("CORR-02 — no too-similar badge when no pair reaches ρ≥0.85 (absence is the signal)", () => {
+    // mockTwoStrategies: BTC vs ETH series are weakly/negatively correlated, far
+    // below 0.85 → the badge must be ABSENT (no 'all clear' affirmative).
+    mockTwoStrategies();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.queryByText(/above the 0.85 similarity threshold/i),
+    ).toBeNull();
+  });
+
+  it("CORR-05 — the PCR list renders one role=listitem per constituent, de-aliased, sorted descending", () => {
+    mockThreeStrategies();
+    const payload = makePayload({
+      holdingsSummary: [HOLDING_BTC, HOLDING_ETH, HOLDING_SOL],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.getByText("Risk contribution per constituent (% of total)"),
+    ).toBeInTheDocument();
+    const list = screen
+      .getByText("Risk contribution per constituent (% of total)")
+      .closest("div")
+      ?.querySelector('ul[role="list"]') as HTMLElement;
+    expect(list).not.toBeNull();
+    const items = within(list).getAllByRole("listitem");
+    // One row per active constituent (de-aliased names, not UUIDs).
+    expect(items.length).toBe(3);
+    for (const ref of [REF_BTC, REF_ETH, REF_SOL]) {
+      expect(within(list).getAllByText(ref).length).toBeGreaterThanOrEqual(1);
+    }
+    // Descending sort: each row's signed % is ≥ the next row's %.
+    const pcts = items.map((li) => {
+      const m = li.textContent?.match(/(-?\d+\.\d)%/);
+      return m ? parseFloat(m[1]) : NaN;
+    });
+    for (let i = 1; i < pcts.length; i++) {
+      expect(pcts[i - 1]).toBeGreaterThanOrEqual(pcts[i]);
+    }
+  });
+
+  it("CORR-06 — the heatmap axis labels follow the cluster order (correlated legs adjacent, outlier separated)", () => {
+    mockThreeStrategies();
+    const payload = makePayload({
+      holdingsSummary: [HOLDING_BTC, HOLDING_ETH, HOLDING_SOL],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Read the heatmap COLUMN-HEADER order (keys `ch-${id}` render in matrix order,
+    // which the composer reordered to the cluster order before passing the matrix).
+    const figure = screen.getByRole("figure", {
+      name: /Pairwise correlation heatmap/i,
+    });
+    const order = Array.from(
+      figure.querySelectorAll<HTMLElement>('[class*="text-center"]'),
+    )
+      .map((el) => el.textContent?.trim() ?? "")
+      .filter((t) => t === REF_BTC || t === REF_ETH || t === REF_SOL);
+    expect(order.length).toBe(3);
+    // The two correlated legs (BTC, ETH) must be ADJACENT; SOL is the outlier
+    // (either end), never wedged between them.
+    const btcIdx = order.indexOf(REF_BTC);
+    const ethIdx = order.indexOf(REF_ETH);
+    expect(Math.abs(btcIdx - ethIdx)).toBe(1);
+  });
+
+  it("CORR-03 — a single-constituent blend renders the 'add a second strategy' empty state and NO DR/ENB headline", () => {
+    // One active strategy → diversification.clusterOrderIds.length < 2 → the
+    // CollapsibleSection body collapses to the honest EmptyStateCard.
+    function mockOneStrategy() {
+      const dates = Array.from({ length: 12 }, (_, i) =>
+        `2026-01-${String(i + 1).padStart(2, "0")}`,
+      );
+      const btc = dates.map((date, i) => ({
+        date,
+        value: [0.02, -0.01, 0.03][i % 3],
+      }));
+      vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+        strategies: [mkRealStrat(REF_BTC, btc)],
+        state: {
+          selected: { [REF_BTC]: true },
+          weights: { [REF_BTC]: 1 },
+          startDates: {},
+        },
+      });
+    }
+    mockOneStrategy();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.getByText("Add a second strategy to see diversification"),
+    ).toBeInTheDocument();
+    // The DR/ENB headline and PCR list are absent (the single-constituent guard).
+    expect(screen.queryByText("Diversification Ratio")).toBeNull();
+    expect(screen.queryByText("ENB = 1 / Σ PCRᵢ²")).toBeNull();
+    expect(
+      screen.queryByText("Risk contribution per constituent (% of total)"),
+    ).toBeNull();
+  });
+
+  it("CORR-03 — an n<10 blend routes to the heatmap's own empty (NO DR/ENB headline, no 'add a second strategy')", () => {
+    // Two active strategies but only 6 shared days → the engine nulls the matrix
+    // (n<10) → computeDiversification returns all-null → the section shows the
+    // heatmap's reason-routed empty, and the DR/ENB headline + PCR are hidden.
+    function mockShortOverlap() {
+      const dates = Array.from({ length: 6 }, (_, i) =>
+        `2026-01-${String(i + 1).padStart(2, "0")}`,
+      );
+      const btc = dates.map((date, i) => ({
+        date,
+        value: [0.02, -0.01, 0.03][i % 3],
+      }));
+      const eth = dates.map((date, i) => ({
+        date,
+        value: [-0.01, 0.005, -0.02][i % 3],
+      }));
+      vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+        strategies: [mkRealStrat(REF_BTC, btc), mkRealStrat(REF_ETH, eth)],
+        state: {
+          selected: { [REF_BTC]: true, [REF_ETH]: true },
+          weights: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
+          startDates: {},
+        },
+      });
+    }
+    mockShortOverlap();
+    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The heatmap's reason-routed "few overlapping days" empty state shows.
+    expect(
+      screen.getByText("Not enough overlap to correlate"),
+    ).toBeInTheDocument();
+    // The 0/1-constituent EmptyStateCard is NOT used (≥2 constituents exist).
+    expect(
+      screen.queryByText("Add a second strategy to see diversification"),
+    ).toBeNull();
+    // The DR/ENB headline + PCR list are hidden (the lib returned all-null).
+    expect(screen.queryByText("Diversification Ratio")).toBeNull();
+    expect(screen.queryByText("ENB = 1 / Σ PCRᵢ²")).toBeNull();
+    expect(
+      screen.queryByText("Risk contribution per constituent (% of total)"),
+    ).toBeNull();
   });
 
   // -------------------------------------------------------------------------

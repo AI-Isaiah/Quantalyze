@@ -73,6 +73,10 @@ import {
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import { buildBlendPanels } from "@/lib/scenario-blend-panels";
+import {
+  computeDiversification,
+  alignConstituentReturns,
+} from "@/lib/diversification";
 import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
 import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
 import { ReturnQuantiles } from "@/components/charts/ReturnQuantiles";
@@ -1534,6 +1538,69 @@ export function ScenarioComposer({
     return out;
   }, [deAliased]);
 
+  // CORR-02/05/06 — the constituent diversification result (Plan 41-01 lib).
+  // Re-aligns the de-aliased per-constituent returns the FROZEN engine discards
+  // (mirroring scenario.ts:199-236 inside `alignConstituentReturns`), normalizes
+  // the ACTIVE weights to sum→1 (mirroring the engine's per-day renormalization
+  // at scenario.ts:243-254), and feeds the engine's READ-ONLY `correlation_matrix`
+  // / `n` / `portfolio_daily_returns` into `computeDiversification`. The lib owns
+  // the global gate (ids<2 / n<10 / null matrix → all-null), so a degenerate or
+  // zero-sum-weight blend returns a null DR/ENB/PCR and the section renders its
+  // honest empty state, never NaN. Keyed on the de-aliased set + the engine output.
+  const diversification = useMemo(() => {
+    const aligned = alignConstituentReturns(
+      deAliased.strategies,
+      deAliased.state,
+    );
+    // Normalize the active weights to sum→1 (engine renormalizes by the active
+    // weight mass; a zero/negative total yields all-zero weights → the lib's PCR
+    // guard nulls the result → honest empty).
+    const rawWeights: Record<string, number> = {};
+    let weightSum = 0;
+    for (const id of aligned.ids) {
+      const w = deAliased.state.weights[id] ?? 0;
+      rawWeights[id] = w;
+      weightSum += w;
+    }
+    const weights: Record<string, number> = {};
+    for (const id of aligned.ids) {
+      weights[id] = weightSum > 0 ? rawWeights[id] / weightSum : 0;
+    }
+    return computeDiversification({
+      ids: aligned.ids,
+      returnsById: aligned.returnsById,
+      weights,
+      portfolioDailyReturns: (
+        scenarioMetrics.portfolio_daily_returns ?? []
+      ).map((p) => p.value),
+      correlationMatrix: scenarioMetrics.correlation_matrix,
+      n: scenarioMetrics.n,
+    });
+  }, [deAliased, scenarioMetrics]);
+
+  // CORR-06 — the cluster-reordered matrix the (UNCHANGED) CorrelationHeatmap
+  // receives. The heatmap renders axis/cell order from `Object.keys(matrix)` and
+  // has NO custom-order prop, so the reorder happens HERE: rebuild the
+  // Record<id, Record<id, number>> with insertion order = `clusterOrderIds`,
+  // copying cells from the engine matrix. When the engine matrix is null or there
+  // are <2 ids, pass it through unchanged so the heatmap's own reason-routed empty
+  // state fires. `strategyNames` is keyed by id (order-independent) — unchanged.
+  const reorderedMatrix = useMemo(() => {
+    const matrix = scenarioMetrics.correlation_matrix;
+    const order = diversification.clusterOrderIds;
+    if (!matrix || order.length < 2) return matrix;
+    const out: Record<string, Record<string, number>> = {};
+    for (const rowId of order) {
+      const row: Record<string, number> = {};
+      for (const colId of order) {
+        const v = matrix[rowId]?.[colId];
+        if (v != null) row[colId] = v;
+      }
+      out[rowId] = row;
+    }
+    return out;
+  }, [scenarioMetrics.correlation_matrix, diversification.clusterOrderIds]);
+
   // IMPACT-01 — the shortest-history strategy name for the coverage caveat.
   // Pure helper (unit-tested in scenario-history.test.ts); reads only the
   // de-aliased set the composer already holds. null when the set is empty.
@@ -2334,28 +2401,154 @@ export function ScenarioComposer({
         />
       </Card>
 
-      {/* CORR-01 / CORR-03 — pairwise correlation heatmap on the own-book
-          scenario surface. The matrix + single-sourced Avg |ρ| come straight from
-          scenarioMetrics (the same value KpiStrip reads), and the axis labels
-          are the de-aliased strategy names — the heatmap never computes its own
-          average and the <2-strategy / <10-day cases delegate to its honest
-          reason-routed empty state (never a 1×1 grid). */}
+      {/* CORR-01..06 — the factsheet-shaped "Diversification" section on the
+          own-book scenario surface. ENHANCED IN PLACE (41-CONTEXT refined
+          decision): the existing CorrelationHeatmap is wrapped in a NEW
+          CollapsibleSection and the new elements are added around it — a ρ≥0.85
+          "too similar" warning badge, the Choueifaty Diversification Ratio +
+          risk-based Effective-Number-of-Bets headline (formula disclosed), and a
+          descending per-constituent percent-contribution-to-risk list — all driven
+          by the `diversification` memo (Plan 41-01 lib). The matrix is cluster-
+          reordered (CORR-06) BEFORE the heatmap (which has no custom-order prop);
+          the heatmap stays UNCHANGED. `storageKey` is OMITTED on purpose (locked
+          decision: avoid the Phase-38 RT2 cross-tab-bleed class on the shared
+          /allocations URL). The subtitle reaffirms leverage-invariance. The
+          0/1-constituent case renders an honest EmptyStateCard; n<10 / engine-null
+          delegate to the heatmap's own reason-routed empty (never a 1×1 grid). */}
       <Card className="mt-6">
-        <div className="mb-3">
-          <h2 className="text-sm font-semibold text-text-primary">
-            Pairwise correlation
-          </h2>
-          <p className="text-xs text-text-muted mt-0.5">
-            Live-computed from the scenario&apos;s daily returns. Teal =
-            diversifying, orange = concentrated.
-          </p>
-        </div>
-        <CorrelationHeatmap
-          correlationMatrix={scenarioMetrics.correlation_matrix}
-          strategyNames={strategyNames}
-          overlappingDays={scenarioMetrics.n}
-          avgAbsCorrelation={scenarioMetrics.avg_pairwise_correlation}
-        />
+        <CollapsibleSection
+          id="factsheet-diversification"
+          title="Diversification"
+          subtitle="Correlation does not shift with per-strategy leverage"
+          defaultOpen
+        >
+          {diversification.clusterOrderIds.length < 2 ? (
+            <EmptyStateCard
+              heading="Add a second strategy to see diversification"
+              body="Select at least 2 strategies to compare their pairwise correlation and see how diversified the blend is."
+            />
+          ) : (
+            <>
+              {/* CORR-02 — aggregate "too similar" warning badge. Renders ONLY
+                  when ≥1 pair reaches ρ≥0.85 (absence is the signal — no
+                  "all clear" affirmative). Amber per DESIGN.md warning chip
+                  (NO red, NO icon). */}
+              {diversification.tooSimilarPairs.length > 0 && (
+                <div>
+                  <span className="inline-flex items-center gap-1.5 rounded-sm border bg-[#FEF3C7] border-[#FDE68A] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-warning">
+                    {diversification.tooSimilarPairs.length}{" "}
+                    {diversification.tooSimilarPairs.length === 1
+                      ? "pair"
+                      : "pairs"}{" "}
+                    above the 0.85 similarity threshold
+                  </span>
+                </div>
+              )}
+
+              {/* CORR-01/06 — the cluster-reordered heatmap (de-aliased labels).
+                  The heatmap's reason-routed empties (n<10 / non-finite), its
+                  missing-cell "—", and its single-sourced Avg |ρ| caption are ALL
+                  inherited; do NOT duplicate empty logic or recompute the average. */}
+              <div>
+                <CorrelationHeatmap
+                  correlationMatrix={reorderedMatrix}
+                  strategyNames={strategyNames}
+                  overlappingDays={scenarioMetrics.n}
+                  avgAbsCorrelation={scenarioMetrics.avg_pairwise_correlation}
+                />
+                {scenarioMetrics.correlation_matrix && (
+                  <p className="text-[11px] text-text-muted mt-2">
+                    Burnt orange = positive correlation (concentration risk).
+                    Pairs ≥ 0.85 are flagged above.
+                  </p>
+                )}
+              </div>
+
+              {/* DR + ENB headline. Hidden entirely when both are null (never
+                  render "0.00"/"NaN"); each value renders only when non-null. */}
+              {(diversification.diversificationRatio != null ||
+                diversification.effectiveNumberOfBets != null) && (
+                <div className="flex flex-wrap gap-8 items-start">
+                  {diversification.diversificationRatio != null && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[12px] text-text-muted">
+                        Diversification Ratio
+                      </span>
+                      <span className="text-[18px] font-metric font-semibold tabular-nums text-text-primary">
+                        {diversification.diversificationRatio.toFixed(2)}
+                      </span>
+                    </div>
+                  )}
+                  {diversification.effectiveNumberOfBets != null && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[12px] text-text-muted">
+                        Effective Bets
+                      </span>
+                      <span className="text-[18px] font-metric font-semibold tabular-nums text-text-primary">
+                        {diversification.effectiveNumberOfBets.toFixed(1)}
+                      </span>
+                      <span className="text-[11px] text-text-muted">
+                        ENB = 1 / Σ PCRᵢ²
+                      </span>
+                      <span className="text-[12px] text-text-secondary">
+                        {diversification.effectiveNumberOfBets.toFixed(1)}{" "}
+                        effective{" "}
+                        {diversification.effectiveNumberOfBets < 1.5
+                          ? "bet"
+                          : "bets"}{" "}
+                        across {diversification.clusterOrderIds.length}{" "}
+                        {diversification.clusterOrderIds.length === 1
+                          ? "constituent"
+                          : "constituents"}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* CORR-05 — per-constituent risk contribution, sorted DESCENDING.
+                  The bar is decorative (aria-hidden); the % text carries the
+                  accessible value. PCR is signed — clamp the bar width to ≥0 (a
+                  negative hedge renders a 0-width bar) but keep its signed % text. */}
+              {diversification.pcr != null && (
+                <div>
+                  <p className="text-[12px] text-text-muted mb-2">
+                    Risk contribution per constituent (% of total)
+                  </p>
+                  <ul role="list" className="divide-y divide-border">
+                    {Object.entries(diversification.pcr)
+                      .sort(([, a], [, b]) => b - a)
+                      .map(([id, pcr]) => (
+                        <li
+                          key={id}
+                          role="listitem"
+                          className="flex items-center gap-2 py-2"
+                        >
+                          <span className="text-[12px] text-text-primary truncate max-w-[160px]">
+                            {strategyNames[id] ?? id.slice(0, 8)}
+                          </span>
+                          <div
+                            className="flex-1 min-w-[60px] h-1.5 rounded-full bg-border"
+                            aria-hidden
+                          >
+                            <div
+                              className="h-full rounded-full bg-accent"
+                              style={{
+                                width: `${Math.max(0, pcr * 100).toFixed(1)}%`,
+                              }}
+                            />
+                          </div>
+                          <span className="text-[12px] font-metric tabular-nums text-text-primary w-[48px] text-right">
+                            {(pcr * 100).toFixed(1)}%
+                          </span>
+                        </li>
+                      ))}
+                  </ul>
+                </div>
+              )}
+            </>
+          )}
+        </CollapsibleSection>
       </Card>
 
       {/* GRAPH-02 — Returns distribution of the BLEND. Histogram (fed the
