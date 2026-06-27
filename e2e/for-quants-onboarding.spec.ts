@@ -142,7 +142,7 @@ test.describe("/strategies/new/wizard", () => {
     ).toHaveAttribute("href", "/security#readonly-key");
   });
 
-  test("desktop gate shows save-my-progress form on narrow viewports", async ({
+  test("wizard renders directly on narrow viewports (DesktopGate removed, WIZARD-01)", async ({
     browser,
   }) => {
     const context = await browser.newContext({ viewport: { width: 400, height: 900 } });
@@ -158,10 +158,14 @@ test.describe("/strategies/new/wizard", () => {
       timeout: 10_000,
     });
     await page.goto("/strategies/new/wizard");
+    // Phase 46 / WIZARD-01: the 640px DesktopGate hard-block (which showed a
+    // save-my-progress email form to phone visitors) is removed. The wizard now
+    // renders directly at narrow widths — the connect-key step heading is
+    // visible and the old gate is absent.
+    await expect(page.locator("#wizard-connect-key-heading")).toBeVisible();
     await expect(
       page.locator('[data-testid="wizard-desktop-gate"]'),
-    ).toBeVisible();
-    await expect(page.locator("text=Continue on desktop")).toBeVisible();
+    ).toHaveCount(0);
     await context.close();
   });
 });
