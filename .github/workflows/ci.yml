@@ -1261,7 +1261,19 @@ jobs:
             e2e/composer-axe.spec.ts \
             e2e/mobile-drawer-keyboard.spec.ts \
             e2e/reflow-sweep-authed.spec.ts \
+            e2e/svg-chart-parity.spec.ts \
+            e2e/target-size.spec.ts \
             --timeout 60000
+          # Phase 47-05 / FLOW-01 (place 1 of 2): the fresh
+          # e2e/svg-chart-parity.spec.ts (desktop goldens + 320px portrait)
+          # is added here so it runs SEEDED. The dead
+          # e2e/strategy-v2-chart-parity.spec.ts above is intentionally LEFT
+          # in place (it self-skips via test.skip(true); Phase-48 concern) —
+          # do NOT remove it. e2e/target-size.spec.ts is ALSO listed here (in
+          # addition to its unseeded entry at the line ~1059 list) so its new
+          # SEEDED chart-tap-rect cases (which self-skip in the unseeded run)
+          # actually execute; its unseeded /security case keeps running in the
+          # unseeded list. Both new gates are HAS_SEED_ENV-guarded (place 2).
           # Same kill+wait+nuke pattern as the unconditional step above so any
           # follow-up runner work (artifact upload) doesn't race on resources.
           kill $SERVER_PID 2>/dev/null || true
