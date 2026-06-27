@@ -5,8 +5,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 
-type IconComponent = ({ className }: { className?: string }) => React.JSX.Element;
-interface NavItem {
+export type IconComponent = ({ className }: { className?: string }) => React.JSX.Element;
+export interface NavItem {
   label: string;
   href: string;
   icon: IconComponent;
@@ -111,6 +111,76 @@ function buildNavSections(
       items: [{ label: "Profile", href: "/profile", icon: UserIcon }],
     },
   ];
+}
+
+/**
+ * Phase 45 Plan 01 (NAV-01) — the SINGLE source for the mobile bottom nav's
+ * role-aware primary item set. Co-located here (Option A per D-NAV01) so it
+ * reuses the SAME icon components, labels, and role OR-logic constants that
+ * `buildNavSections` above uses — the two navs therefore never drift (DRY /
+ * project Rule 6). `MobileNav` imports this; there is NO second hardcoded list.
+ *
+ * Why not derive directly from `buildNavSections`? Two of the three SC#1
+ * allocator destinations (Risk, Bridge) are NOT routes in `buildNavSections`:
+ * Risk is the `/allocations?tab=risk` tab and Bridge is the `BridgeWidget` that
+ * lives on that Risk tab (there is no `/bridge` route — verified 45-RESEARCH
+ * Pitfall 1). So we represent them as tab deep-links with DISTINCT hrefs:
+ *   - My Allocation → `/allocations`
+ *   - Risk         → `/allocations?tab=risk`
+ *   - Bridge       → `/allocations?tab=risk#bridge`  (anchors the BridgeWidget)
+ * No two items resolve to the identical URL, satisfying SC#1's "labeled,
+ * reachable entries with distinct hrefs".
+ *
+ * The list is capped at <=5 (the hamburger drawer remains the full nav). Role
+ * gating mirrors the SAME `showsAllocatorWorkspace`/`showsManagerWorkspace`
+ * OR-logic so an allocator never surfaces a manager/admin-only destination and
+ * role "both" lights the allocator set (T-45-01 info-disclosure mitigation).
+ */
+export function buildPrimaryMobileNav(p: {
+  isAllocator?: boolean;
+  isManager?: boolean;
+  isAdmin?: boolean;
+  flaggedCount?: number;
+}): NavItem[] {
+  // Mirror buildNavSections' role OR-logic EXACTLY (Sidebar.tsx:34-36) so the
+  // two navs share one source of truth and "both" lights the allocator set.
+  const showsAllocatorWorkspace = p.isAllocator || p.isAdmin;
+  const showsManagerWorkspace = p.isManager || p.isAdmin;
+
+  // Profile is ACCOUNT — always present (mirrors buildNavSections' trailing
+  // Profile item). Held aside so it survives the <=5 cap even when both the
+  // allocator and manager families are active (admin), where the discretionary
+  // filler items are what get trimmed instead.
+  const profile: NavItem = { label: "Profile", href: "/profile", icon: UserIcon };
+
+  const primary: NavItem[] = [];
+  const fillers: NavItem[] = [];
+  if (showsAllocatorWorkspace) {
+    // SC#1 trio leads the allocator set, in order, with distinct hrefs.
+    primary.push(
+      { label: "My Allocation", href: "/allocations", icon: PortfolioIcon, badge: p.flaggedCount },
+      { label: "Risk", href: "/allocations?tab=risk", icon: ShieldIcon },
+      { label: "Bridge", href: "/allocations?tab=risk#bridge", icon: BridgeIcon },
+    );
+    // Discovery is a discretionary filler (allocator browse surface) — trimmed
+    // first when the cap binds (admin keeps the SC trio + a manager destination).
+    fillers.push({ label: "Discovery", href: "/discovery", icon: SearchIcon });
+  }
+  if (showsManagerWorkspace) {
+    primary.push(
+      { label: "Strategies", href: "/strategies", icon: BarChartIcon },
+      { label: "Portfolios", href: "/portfolios", icon: PieChartIcon },
+    );
+  }
+
+  // Reserve one slot for Profile so it is never trimmed; fill the remaining
+  // budget with primary destinations first, then discretionary fillers. Cap is
+  // <=5 per CONTEXT (the hamburger drawer remains the full nav).
+  const CAP = 5;
+  const budget = CAP - 1; // one slot reserved for the always-present Profile
+  const items = [...primary, ...fillers].slice(0, budget);
+  items.push(profile);
+  return items;
 }
 
 export function Sidebar({
@@ -319,6 +389,26 @@ function ShieldIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M8 1.5l5 2v4.5c0 3-2 5.5-5 6.5-3-1-5-3.5-5-6.5V3.5l5-2z" />
+    </svg>
+  );
+}
+
+// Phase 45 Plan 01 (NAV-01) — a suspension-bridge glyph for the allocator
+// bottom nav's "Bridge" deep-link. Matches the established 16x16 / stroke-1.5
+// house style of the icons above. NOT cream-tinted (DESIGN.md Bridge cream
+// identity is for the Bridge surfaces themselves; the bottom nav uses the
+// standard accent/muted active/inactive treatment for visual consistency).
+function BridgeIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      {/* deck */}
+      <path d="M2 10h12" />
+      {/* towers */}
+      <path d="M4 10V4M12 10V4" />
+      {/* main cable spanning the towers */}
+      <path d="M4 4c2 3 6 3 8 0" />
+      {/* hangers */}
+      <path d="M6.5 6.5V10M9.5 6.5V10" />
     </svg>
   );
 }
