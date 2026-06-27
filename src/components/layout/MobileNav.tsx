@@ -28,11 +28,21 @@ export function MobileNav({
   isManager,
   isAdmin,
   flaggedCount,
+  inert,
 }: {
   isAllocator?: boolean;
   isManager?: boolean;
   isAdmin?: boolean;
   flaggedCount?: number;
+  /**
+   * NAV-03: when the mobile drawer is open, DashboardChrome passes
+   * `inert={true}` so the bottom nav (a SIBLING of the inert `<main>`, not
+   * covered by it) is also removed from the tab order + AT tree. Without this
+   * the bottom-nav links stay focusable behind the backdrop and focus
+   * containment would rest solely on the drawer's manual Tab trap. React 19
+   * native boolean prop; absent when false.
+   */
+  inert?: boolean;
 } = {}) {
   const pathname = usePathname();
   const items = buildPrimaryMobileNav({ isAllocator, isManager, isAdmin, flaggedCount });
@@ -40,6 +50,7 @@ export function MobileNav({
   return (
     <nav
       aria-label="Primary mobile"
+      inert={inert}
       className="fixed bottom-0 left-0 right-0 z-30 border-t border-border bg-surface md:hidden"
     >
       <div className="flex">

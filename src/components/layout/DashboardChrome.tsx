@@ -65,15 +65,21 @@ export function DashboardChrome({
     return (
       <div className="flex h-full">
         {/* NAV-03 app-shell skip-link — FIRST focusable element. Targets the
-            <main id="main-content" tabIndex={-1}> below. */}
-        <a href="#main-content" className="app-skip-link">
+            <main id="main-content" tabIndex={-1}> below. inert while the drawer
+            is open so the background skip-link can't be tabbed to behind the
+            modal (it's a SIBLING of <main>, not covered by <main>'s inert). */}
+        <a href="#main-content" className="app-skip-link" inert={menuOpen}>
           Skip to main content
         </a>
         {/* NAV-03: inert the background <main> while the drawer is open so focus
             cannot leak behind the backdrop. Scoped to <main> (the drawer's
             SIBLING) — NEVER the `flex h-full` wrapper, which also contains the
             drawer (that would inert the drawer too). React 19 native boolean
-            prop; SSR-safe since menuOpen starts false. */}
+            prop; SSR-safe since menuOpen starts false. MobileTopBar stays INSIDE
+            <main> on purpose: the open drawer's z-40 backdrop fully occludes the
+            sticky z-20 top bar (close happens via backdrop/Escape), and keeping
+            the hamburger inside the inert region keeps focus contained — moving
+            it out would make it tabbable outside the drawer. */}
         <main
           id="main-content"
           tabIndex={-1}
@@ -96,6 +102,7 @@ export function DashboardChrome({
           isAllocator={isAllocator}
           isManager={isManager}
           flaggedCount={flaggedCount}
+          inert={menuOpen}
         />
         <MobileSidebarDrawer
           open={menuOpen}
@@ -114,8 +121,9 @@ export function DashboardChrome({
   return (
     <div className="flex h-full">
       {/* NAV-03 app-shell skip-link — FIRST focusable element, before the
-          desktop sidebar. Targets the <main id="main-content" tabIndex={-1}>. */}
-      <a href="#main-content" className="app-skip-link">
+          desktop sidebar. Targets the <main id="main-content" tabIndex={-1}>.
+          inert while the drawer is open (sibling of <main>, not covered by it). */}
+      <a href="#main-content" className="app-skip-link" inert={menuOpen}>
         Skip to main content
       </a>
       {/* Desktop sidebar */}
@@ -151,12 +159,15 @@ export function DashboardChrome({
         </div>
         <LegalFooter />
       </main>
-      {/* Mobile bottom nav */}
+      {/* Mobile bottom nav — inert while the drawer is open so its links (a
+          SIBLING of the inert <main>) are removed from the tab order behind the
+          backdrop; the drawer's manual Tab trap remains as defence-in-depth. */}
       <MobileNav
         isAdmin={isAdmin}
         isAllocator={isAllocator}
         isManager={isManager}
         flaggedCount={flaggedCount}
+        inert={menuOpen}
       />
       {/* Mobile sidebar drawer — opens from the top bar hamburger.
           The desktop Sidebar above is <div className="hidden md:block">

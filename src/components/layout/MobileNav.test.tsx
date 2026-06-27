@@ -77,28 +77,43 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     expect(hrefs).not.toContain("/allocations?tab=risk#bridge");
   });
 
-  it("admin: includes BOTH allocator and manager families plus Profile, <=5", () => {
+  it("admin: EXACT <=5 set — SC#1 trio + one manager dest + Profile; Portfolios/Discovery trimmed to the drawer", () => {
     const items = buildPrimaryMobileNav({ isAdmin: true });
     const hrefs = items.map((i) => i.href);
-    expect(items.length).toBeLessThanOrEqual(5);
-    // showsAllocatorWorkspace = isAllocator || isAdmin → allocator family present.
-    expect(hrefs).toContain("/allocations");
-    // showsManagerWorkspace = isManager || isAdmin → manager family present.
-    expect(hrefs).toContain("/strategies");
-    // Profile always present.
-    expect(hrefs).toContain("/profile");
+    // Pin the EXACT set + ORDER so a reorder of the priority array can't
+    // silently change which destination is dropped at the <=5 cap (WR-02).
+    // budget = CAP(5) - 1 reserved for Profile = 4 → [My Allocation, Risk,
+    // Bridge, Strategies] then Profile; Portfolios + Discovery overflow to the
+    // hamburger drawer (the full nav) by design.
+    expect(hrefs).toEqual([
+      "/allocations",
+      "/allocations?tab=risk",
+      "/allocations?tab=risk#bridge",
+      "/strategies",
+      "/profile",
+    ]);
+    // Portfolios + Discovery are INTENTIONALLY absent from the bottom nav
+    // (reachable via the drawer) — assert the drop so it stays deliberate.
+    expect(hrefs).not.toContain("/portfolios");
+    expect(hrefs).not.toContain("/discovery");
     // Distinct hrefs even when both families are present.
     expect(new Set(hrefs).size).toBe(hrefs.length);
   });
 
-  it('role "both" (isAllocator && isManager): lights the allocator set', () => {
+  it('role "both" (isAllocator && isManager): EXACT set equals admin — allocator set lit, Portfolios trimmed', () => {
     const items = buildPrimaryMobileNav({ isAllocator: true, isManager: true });
     const hrefs = items.map((i) => i.href);
-    // The allocator head lights (NOT the pre-fix !isAllocator short-circuit).
-    expect(hrefs).toContain("/allocations");
-    expect(hrefs).toContain("/allocations?tab=risk");
-    expect(hrefs).toContain("/allocations?tab=risk#bridge");
-    expect(items.length).toBeLessThanOrEqual(5);
+    // The allocator head lights (NOT the pre-fix !isAllocator short-circuit),
+    // and the resolved set is identical to admin (same OR-logic). Pinned so a
+    // priority reorder that silently dropped a different item is caught (WR-02).
+    expect(hrefs).toEqual([
+      "/allocations",
+      "/allocations?tab=risk",
+      "/allocations?tab=risk#bridge",
+      "/strategies",
+      "/profile",
+    ]);
+    expect(hrefs).not.toContain("/portfolios");
   });
 
   it("no roles: only the always-present Profile item", () => {
@@ -165,5 +180,18 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     pathnameMock.mockReturnValue("/allocations");
     render(<MobileNav isAllocator flaggedCount={2} />);
     expect(screen.getByLabelText("2 flagged holdings")).toBeInTheDocument();
+  });
+
+  it("applies inert to the nav when the drawer is open (NAV-03 background containment)", () => {
+    pathnameMock.mockReturnValue("/allocations");
+    // inert={true}: the bottom nav (a sibling of the inert <main>) is removed
+    // from the tab order + AT tree behind the open-drawer backdrop.
+    const { rerender } = render(<MobileNav isAllocator inert />);
+    let nav = screen.getByRole("navigation", { name: "Primary mobile" });
+    expect(nav).toHaveAttribute("inert");
+    // inert={false}: normal interactive bottom nav when the drawer is closed.
+    rerender(<MobileNav isAllocator inert={false} />);
+    nav = screen.getByRole("navigation", { name: "Primary mobile" });
+    expect(nav).not.toHaveAttribute("inert");
   });
 });
