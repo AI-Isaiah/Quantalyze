@@ -3,12 +3,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WheelEvent as ReactWheelEvent } from "react";
 import { usePayload, useXRange, useActiveComparator } from "./factsheet-context";
+import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
+import { useBreakpoint } from "@/hooks/useBreakpoint";
 
 const VB_W = 880;
-const VB_H = 200;
+// Desktop viewBox height = today's literal (200). CHART-03 portrait: a taller
+// mobile viewBox is selected per-render so the desktop SSR render stays
+// byte-identical. PLOT_H is derived per-render from the selected VB_H.
+const VB_H_DESKTOP = 200;
+const VB_H_MOBILE = 280;
 const PAD = { top: 20, right: 30, bottom: 32, left: 50 };
 const PLOT_W = VB_W - PAD.left - PAD.right;
-const PLOT_H = VB_H - PAD.top - PAD.bottom;
 const DEFAULT_BIN_COUNT = 40;
 const MIN_SPAN = 0.0005; // 5bps — finest meaningful daily-return bin
 /** Quantile of the STRATEGY's |daily return| used as the default visible range.
@@ -35,8 +40,15 @@ export function HistogramChart() {
   const payload = usePayload();
   const { xRange } = useXRange();
   const { block: cmp } = useActiveComparator();
+  const isMobile = useBreakpoint() === "mobile";
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [zoom, setZoom] = useState<{ lo: number; hi: number } | null>(null);
+
+  // Desktop arms = today's literals (VB_H 200, fontSize 10). Mobile: taller
+  // viewBox + bigger axis font. PLOT_H derives from the selected VB_H.
+  const VB_H = isMobile ? VB_H_MOBILE : VB_H_DESKTOP;
+  const PLOT_H = VB_H - PAD.top - PAD.bottom;
+  const xTickFont = isMobile ? 16 : 10;
 
   const [xStart, xEnd] = xRange;
 
@@ -230,14 +242,14 @@ export function HistogramChart() {
         </span>
       </div>
 
-      <svg
+      <ResponsiveChartFrame
         ref={svgRef}
-        viewBox={`0 0 ${VB_W} ${VB_H}`}
-        preserveAspectRatio="xMidYMid meet"
+        width={VB_W}
+        height={VB_H}
         role="img"
         aria-label={`Distribution of daily returns: ${payload.strategyName}${bench ? ` overlaid with ${cmp.name}` : ""}`}
-        className="block w-full select-none"
-        style={{ aspectRatio: `${VB_W} / ${VB_H}`, maxHeight: VB_H, width: "100%", height: "auto", cursor: zoom ? "zoom-out" : "zoom-in" }}
+        className="select-none"
+        style={{ cursor: zoom ? "zoom-out" : "zoom-in" }}
         onWheel={onWheel}
         onDoubleClick={onDoubleClick}
       >
@@ -277,7 +289,7 @@ export function HistogramChart() {
               x={xPos(t.value)}
               y={PAD.top + PLOT_H + 18}
               textAnchor="middle"
-              fontSize={10}
+              fontSize={xTickFont}
               fontFamily="var(--font-mono)"
               fill="var(--color-text-muted)"
             >
@@ -319,7 +331,7 @@ export function HistogramChart() {
             />
           );
         })}
-      </svg>
+      </ResponsiveChartFrame>
     </figure>
   );
 }
