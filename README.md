@@ -54,7 +54,7 @@ quantalyze/
         demo/         # Public demo endpoints (signed-token portfolio-pdf)
         # plus: verify-strategy, portfolio-*, alert-digest, admin/match/*, preferences, factsheet/[id]/pdf
     components/       # React components (ui/, layout/, charts/, strategy/, portfolio/, admin/, preferences/, landing/, auth/)
-    hooks/            # Reusable React hooks (useKeyboardShortcuts)
+    hooks/            # Reusable React hooks (useKeyboardShortcuts, useBreakpoint SSR-safe viewport class, useMediaQuery)
     lib/              # Utilities, types, Supabase clients, queries, preferences, personas, portfolio-insights
   analytics-service/  # FastAPI backend (Python) — strategy + portfolio + match analytics
     services/         # metrics, portfolio_metrics, portfolio_risk, portfolio_optimizer, match_engine, match_eval
