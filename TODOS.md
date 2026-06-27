@@ -35,6 +35,41 @@ layout. Cap the displayed value to `99+`.
 
 ---
 
+## v1.3 phase 46 reflow follow-ups (deferred from /ship review, 2026-06-27)
+
+### P3: sortable-header focus ring clipped by the new table `overflow-x-auto` regions
+Same WCAG 2.4.7 class as the tab-strip P3 above, now extended to the tables Phase 46
+newly wrapped in `ResponsiveTable`: HoldingsTable's `SortableHeader` / `StrategySortableHeader`
+buttons and OpenPositionsTable sit inside the `overflow-x-auto` region, so the outset
+`focus-visible` ring on the edge columns clips at the scroll boundary (axe can't detect it).
+The pre-wrapped tables (Scenario/Correlation/ComputeJobs) already had overflow wrappers, so
+no new clip there. Fix with the same inset-ring / scroll-padding remedy chosen for the tab strip.
+
+### P3: stale `DesktopGate` references in `for-quants-lead/route.ts` comments
+Phase 46 deleted `DesktopGate.tsx`, orphaning the `"desktop-gate"` `wizard_session_id` token
+documented in `src/app/api/for-quants-lead/route.ts` (comments around lines 167/182/391). The
+Zod schema still ACCEPTS the token (harmless back-compat for any old draft/analytics rows), so
+this is doc rot only — left out of the phase-46 diff to keep it surgical. Drop the DesktopGate
+mentions from those comments (and decide whether the back-compat token value is still worth keeping).
+
+### P3: expand wizard 320px reflow coverage past the entry step
+`reflow-sweep-authed.spec.ts` now proves BOTH wizard branch entries reflow at 320px (API
+`#wizard-connect-key-heading` + CSV `#wizard-csv-upload-heading`), which is the de-block proof.
+The later steps (`sync_preview` / `metadata` / `submit`; CSV `preview` / `submit`) use stacking
+`md:` grids and overflow-wrapped tables so they're likely fine, but they're not measured at 320px.
+Add cases that advance past the entry step (needs seeded draft state or step-state injection) so
+"phone users complete onboarding" is proven end-to-end, not just at the funnel entrance.
+
+### P3: migrate the remaining `overflow-x-auto`-wrapped tables onto `ResponsiveTable`
+Phase 46 migrated 5 table groups to `ResponsiveTable` (the canonical scroll-affordance idiom),
+but sibling tables still use the bare `<div className="overflow-x-auto"><table>` pattern
+(e.g. `strategy/CompareTable`, `strategy/StrategyTable`, `portfolio/StrategyBreakdownTable`,
+`strategy/CompareCorrelationMatrix`, plus factsheet/admin tables) and so lack the SR scroll
+region + unique landmark name. Migrate them (or document the exemption) so there's one idiom,
+passing a distinct `label` per table to preserve `landmark-unique`.
+
+---
+
 ## Phase 19.1 follow-ups — CSV → analytics pipeline post-deploy work
 
 ### P1 — Plans 07-10 (remaining phase work, blocked on PR merge + Railway deploy)
