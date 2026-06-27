@@ -1056,7 +1056,7 @@ jobs:
             fi
             sleep 1
           done
-          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts
+          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts
           # v0.17.1.18: belt + suspenders + nuclear port-3000 cleanup.
           # The v0.17.1.15 attempt (lsof + 5s poll) was insufficient — CI
           # confirmed (PR #98 run #320) that the next-server grandchild
@@ -1260,6 +1260,7 @@ jobs:
             e2e/strategy-v2-axe.spec.ts \
             e2e/composer-axe.spec.ts \
             e2e/mobile-drawer-keyboard.spec.ts \
+            e2e/reflow-sweep-authed.spec.ts \
             --timeout 60000
           # Same kill+wait+nuke pattern as the unconditional step above so any
           # follow-up runner work (artifact upload) doesn't race on resources.

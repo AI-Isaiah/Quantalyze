@@ -126,17 +126,16 @@ function buildNavSections(
  * them as tab deep-links with DISTINCT hrefs:
  *   - My Allocation → `/allocations`
  *   - Risk         → `/allocations?tab=risk`
- *   - Bridge       → `/allocations?tab=risk#bridge`
+ *   - Bridge       → `/allocations?tab=scenario`
  * No two items resolve to the identical URL, satisfying SC#1's "labeled,
  * reachable entries with distinct hrefs".
  *
- * KNOWN GAP (flagged for product follow-up, not yet wired): the `#bridge`
- * fragment currently anchors nothing — there is no `id="bridge"` element, and
- * the `BridgeWidget` is not rendered on the Risk tab (the live bridge browse,
- * `BridgeDrawer`, is reached from the ScenarioComposer on the Scenario tab). So
- * tapping Bridge today lands on the Risk tab and the `#bridge` hash is inert; it
- * serves only to keep the href distinct from Risk's. Where Bridge SHOULD land
- * once the surface is wired is a deliberate product decision — see the PR/TODO.
+ * Bridge lands on the Scenario tab because that is where the live bridge flow
+ * actually is: the ScenarioComposer renders the "Open Bridge" card → BridgeDrawer
+ * (the per-holding cross-strategy browse). The earlier `/allocations?tab=risk#bridge`
+ * target was wrong — the Risk tab has no bridge surface and `BridgeWidget` is
+ * mounted nowhere, so the `#bridge` hash anchored nothing (product decision
+ * 2026-06-27; the new tab=scenario href is naturally distinct from Risk's).
  *
  * The list is capped at <=5 (the hamburger drawer remains the full nav). Role
  * gating mirrors the SAME `showsAllocatorWorkspace`/`showsManagerWorkspace`
@@ -168,7 +167,7 @@ export function buildPrimaryMobileNav(p: {
     primary.push(
       { label: "My Allocation", href: "/allocations", icon: PortfolioIcon, badge: p.flaggedCount },
       { label: "Risk", href: "/allocations?tab=risk", icon: ShieldIcon },
-      { label: "Bridge", href: "/allocations?tab=risk#bridge", icon: BridgeIcon },
+      { label: "Bridge", href: "/allocations?tab=scenario", icon: BridgeIcon },
     );
     // Discovery is a discretionary filler (allocator browse surface) — trimmed
     // first when the cap binds (admin keeps the SC trio + a manager destination).

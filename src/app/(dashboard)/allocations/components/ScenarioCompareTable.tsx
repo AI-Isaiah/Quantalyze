@@ -1,5 +1,6 @@
 "use client";
 
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { formatPercent, formatNumber, cn } from "@/lib/utils";
 import type { ComputedMetrics } from "@/lib/scenario";
 import { methodologyLine } from "@/lib/scenario-history";
@@ -182,7 +183,7 @@ export function ScenarioCompareTable({
         </p>
       )}
 
-      <div className="overflow-x-auto">
+      <ResponsiveTable label="Scenario comparison">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border">
@@ -279,7 +280,7 @@ export function ScenarioCompareTable({
             </tr>
           </tfoot>
         </table>
-      </div>
+      </ResponsiveTable>
     </div>
   );
 }

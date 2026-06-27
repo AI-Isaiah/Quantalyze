@@ -212,10 +212,20 @@ describe("FactsheetProvider — persist opt-out (38-02)", () => {
       expect(window.location.search).toContain("range=10-120");
     });
     expect(replaceSpy).toHaveBeenCalled();
-    // localStorage half: the blob now carries the panned range.
-    const raw = lsStore.get(KEY);
-    expect(raw).toBeTruthy();
-    expect(JSON.parse(raw as string).range).toBe("10-120");
+    // localStorage half: the blob now carries the panned range. Wrapped in
+    // waitFor (matching the sibling test above) because the URL and localStorage
+    // writes share ONE debounced effect but land at different times within it:
+    // replaceState runs synchronously, while setStoredView routes through
+    // useCrossTabStorage (debounceMs:0) whose actual localStorage write is
+    // deferred to a follow-up commit-time effect. So the URL waitFor above can
+    // pass a tick before the blob is written, and a synchronous read here raced
+    // it (flake: "expected undefined to be '10-120'", frontend-test shard 1 on
+    // PR #531).
+    await waitFor(() => {
+      const raw = lsStore.get(KEY);
+      expect(raw).toBeTruthy();
+      expect(JSON.parse(raw as string).range).toBe("10-120");
+    });
     replaceSpy.mockRestore();
   });
 

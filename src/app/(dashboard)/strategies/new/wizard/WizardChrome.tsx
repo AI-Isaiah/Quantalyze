@@ -78,7 +78,14 @@ export function WizardChrome({
   const activeSteps = steps ?? DEFAULT_STEPS;
   const totalCount = activeSteps.length;
   const totalLabel = String(totalCount).padStart(2, "0");
-  const gridColsClass = totalCount === 3 ? "grid-cols-3" : "grid-cols-4";
+  // Phase 46 / WIZARD-01 reflow: the stepper rail is a fixed N-column grid on
+  // ≥sm (640px) but stacks to a single column below it. With a bare
+  // grid-cols-3/4 the four step cells (each holding "03 / 04" + a label like
+  // "Strategy profile") force horizontal page overflow at 320px. Stacking
+  // them keeps every step label fully visible — no truncation, no scroll —
+  // and the existing top/bottom hairline borders read as a vertical list.
+  const gridColsClass =
+    totalCount === 3 ? "grid-cols-1 sm:grid-cols-3" : "grid-cols-1 sm:grid-cols-4";
   const isCsv = source === "csv";
   const [showToast, setShowToast] = useState(false);
 

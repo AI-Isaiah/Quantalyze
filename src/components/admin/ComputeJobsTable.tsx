@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { formatRelativeTime } from "@/lib/utils";
 import { useCrossTabStorage } from "@/lib/storage/cross-tab";
 import { rawStringCodec } from "@/lib/storage/codecs";
@@ -192,7 +193,7 @@ export function ComputeJobsTable() {
       )}
 
       {/* Table */}
-      <div className="overflow-x-auto">
+      <ResponsiveTable label="Compute jobs">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b" style={{ borderColor: "#E2E8F0" }}>
@@ -276,7 +277,7 @@ export function ComputeJobsTable() {
             )}
           </tbody>
         </table>
-      </div>
+      </ResponsiveTable>
 
       {/* Load more */}
       {hasMore && jobs.length > 0 && (

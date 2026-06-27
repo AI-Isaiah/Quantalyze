@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.35.0.1] - 2026-06-27
+### Added — every dense table reflows on a phone, and onboarding works without a desktop (v1.3 phase 46)
+
+The mobile/adaptive milestone moves from foundation to surfaces. Six dense data tables — the allocator's Strategies and Holdings tables, the Open Positions (derivatives) table, the Scenario comparison table, the constituent Correlation matrix, and the admin Compute Jobs table — now scroll horizontally inside a focusable region at narrow widths instead of forcing the whole page sideways, and every column stays reachable: the reshape scrolls columns, it never drops them. New fail-loud guard tests pin the full column set of the four densest financial tables (Holdings in both legacy and design modes, Open positions, Scenario comparison, and the Correlation matrix), so a future "hide this column on mobile" edit fails CI rather than silently shrinking the truth on a phone. Each scrollable table now carries its own screen-reader name (Strategies / Holdings / Open positions / Scenario comparison / Correlation matrix / Compute jobs), so a tab that stacks several tables no longer reads as a row of identical "table scrolls horizontally" landmarks in a screen reader's rotor.
+
+The "Connect Your Strategy" onboarding wizard is no longer blocked below 640px. The old desktop-only gate — which showed a save-my-progress email form to phone visitors instead of the wizard — is removed; the wizard now renders directly and reflows CSS-first, with its step rail stacking to a single column on narrow screens. A founder who arrives on a phone with a track-record CSV, or with an exchange key, can complete onboarding instead of hitting a wall. Two 320px reflow e2e sweeps lock this in: a public sweep over the marketing and security routes, and a seeded authenticated sweep over the allocations page and all six tabs, the de-blocked wizard (both the API and CSV branch entries), the security page, and a freshly-seeded honest-empty allocations state — each asserting no horizontal page overflow at the 320px width (the 400%-zoom reflow equivalent).
+
+### Fixed
+- The mobile navigation's "Bridge" item pointed at the Risk tab plus an inert `#bridge` anchor that scrolled to nothing — the Risk tab has no bridge surface. It now lands on the Scenario tab, where the live bridge flow (the Scenario composer's "Open Bridge" card → bridge drawer) actually lives.
+- A factsheet provider test that read localStorage immediately after the URL updated could flake under CI load: the URL and localStorage writes share one debounced effect, but the localStorage half commits a render tick later, so the synchronous read raced it. The test now waits for the write to land.
+
+### Changed
+- DESIGN.md's DESIGN-04 decision (ship the 640px desktop-only wizard gate; defer mobile to v2) is marked superseded — the wizard now reflows CSS-first at all widths — and the design Decisions Log records the v1.3 phase-46 reversal so the authoritative design doc matches shipped behavior.
+
 ## [0.35.0.0] - 2026-06-27
 ### Added — mobile-adaptive UI: responsive foundation + a complete navigation shell (v1.3 phases 44–45)
 
