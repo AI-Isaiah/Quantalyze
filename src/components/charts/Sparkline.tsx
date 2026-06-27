@@ -15,6 +15,13 @@ interface SparklineProps {
   "data-testid"?: string;
 }
 
+// Phase 47: legibility/portrait N/A — 120×32 decorative inline sparkline, no
+// text/axis/labels and no hover (RESEARCH Open Question 2, resolved NO-OP). It
+// carries zero axis text to downscale below the 320px legibility floor and no
+// desktop value-reveal to add a tap-pin for, so it is intentionally left
+// functionally unchanged: no ResponsiveChartFrame, no useBreakpoint, no
+// isMobile conditional (→ no new branch → no test needed). It already renders
+// at intrinsic CSS px (no viewBox-downscale trap) in the discovery-list rows.
 export function Sparkline({
   data,
   width = 120,
