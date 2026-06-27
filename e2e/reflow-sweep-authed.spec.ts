@@ -84,7 +84,13 @@ const AUTHED_ROUTES: {
   // De-blocked onboarding wizard (WIZARD-01) — the default ?source=api flow
   // renders ConnectKeyStep's "Connect your exchange" <h2 id=…>. Proving this
   // reflows at 320px is the phone-usable-wizard proof.
-  { path: "/strategies/new/wizard", anchor: "#wizard-connect-key-heading", label: "onboarding wizard (de-blocked)" },
+  { path: "/strategies/new/wizard", anchor: "#wizard-connect-key-heading", label: "onboarding wizard API entry (de-blocked)" },
+  // The CSV branch (?source=csv) initializes WizardClient to the csv_upload step
+  // (WizardClient.tsx step-init), rendering CsvUploadStep's
+  // <h2 id="wizard-csv-upload-heading">. The founder-with-a-track-record-CSV
+  // path is the whole reason the gate was removed, so its entry must also reflow
+  // at 320px — without this the sweep only proved the API branch entry.
+  { path: "/strategies/new/wizard?source=csv", anchor: "#wizard-csv-upload-heading", label: "onboarding wizard CSV entry (de-blocked)" },
   // Authed /security — same <main h1> ("Security practices") as the public
   // page, exercised inside the authed session.
   { path: "/security", anchor: "main h1", label: "security (authed)" },

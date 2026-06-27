@@ -183,7 +183,7 @@ export function ScenarioCompareTable({
         </p>
       )}
 
-      <ResponsiveTable>
+      <ResponsiveTable label="Scenario comparison">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border">

@@ -8,14 +8,18 @@
  * affordance — it does NOT restyle the wrapped table (column reshape is phase
  * 46 / TABLE-01).
  *
- * Test plan (covers both `hint ?? default` branches so the ratchet holds):
- *  1. Default hint — no `hint` prop → the static default string is the region's
- *     aria-label; the container carries `overflow-x-auto`, `role="region"`, is
- *     focusable, and emits NO redundant `sr-only` node (the double-announce
- *     a11y regression guard).
+ * Test plan (covers all three accessible-name branches — `hint` override /
+ * `label` prefix / bare default — so the ratchet holds):
+ *  1. Default hint — no `hint`/`label` props → the static default string is the
+ *     region's aria-label; the container carries `overflow-x-auto`,
+ *     `role="region"`, is focusable, and emits NO redundant `sr-only` node (the
+ *     double-announce a11y regression guard).
  *  2. Provided hint — a custom `hint` prop overrides the aria-label; assert it
- *     DIFFERS from the default branch (proves both branches execute).
- *  3. Children render inside the overflow container.
+ *     DIFFERS from the default branch (proves that branch executes).
+ *  3. Provided label — `label` prefixes the default hint, yielding a UNIQUE
+ *     accessible name per table (the landmark-unique guard: two ResponsiveTables
+ *     on one page must not share a region name).
+ *  4. Children render inside the overflow container.
  */
 import { describe, it, expect } from "vitest";
 import { render, screen, within } from "@testing-library/react";
@@ -72,6 +76,37 @@ describe("[A11Y-02] ResponsiveTable — overflow wrapper + scroll hint", () => {
     expect(region.querySelector(".sr-only")).toBeNull();
     // Proves the provided-hint branch diverges from the default branch.
     expect(region.getAttribute("aria-label")).not.toBe(DEFAULT_HINT);
+  });
+
+  it("prefixes a provided label onto the default hint and yields a UNIQUE accessible name", () => {
+    // Two tables on one page MUST have distinct region names (axe landmark-unique
+    // + SR rotor). Render both and assert their aria-labels differ and each
+    // carries its own label prefix + the scroll affordance.
+    render(
+      <>
+        <ResponsiveTable label="Holdings">
+          <table>
+            <tbody><tr><td>h</td></tr></tbody>
+          </table>
+        </ResponsiveTable>
+        <ResponsiveTable label="Open positions">
+          <table>
+            <tbody><tr><td>p</td></tr></tbody>
+          </table>
+        </ResponsiveTable>
+      </>,
+    );
+
+    const holdings = screen.getByRole("region", { name: `Holdings: ${DEFAULT_HINT}` });
+    const positions = screen.getByRole("region", { name: `Open positions: ${DEFAULT_HINT}` });
+    // Distinct names — the regression guard for duplicate landmarks.
+    expect(holdings.getAttribute("aria-label")).not.toBe(
+      positions.getAttribute("aria-label"),
+    );
+    // The label branch still carries the scroll affordance (not a bare label).
+    expect(holdings.getAttribute("aria-label")).toContain("scroll");
+    // Neither falls back to the bare default.
+    expect(holdings.getAttribute("aria-label")).not.toBe(DEFAULT_HINT);
   });
 
   it("renders children inside the overflow container", () => {

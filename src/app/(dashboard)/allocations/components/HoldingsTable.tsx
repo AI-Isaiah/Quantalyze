@@ -258,7 +258,7 @@ function StrategyRowsTable({ rows }: { rows: StrategyRow[] }) {
           No strategies onboarded yet.
         </p>
       ) : (
-        <ResponsiveTable>
+        <ResponsiveTable label="Strategies">
         <table className="w-full text-sm" data-table="strategies">
           <thead>
             <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-muted">
@@ -399,7 +399,7 @@ function LegacyHoldingsTable({
           No holdings to display.
         </p>
       ) : (
-        <ResponsiveTable>
+        <ResponsiveTable label="Holdings">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-muted">
@@ -622,7 +622,7 @@ function DesignHoldingsTable({
           No holdings to display.
         </p>
       ) : (
-        <ResponsiveTable>
+        <ResponsiveTable label="Holdings">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-muted">

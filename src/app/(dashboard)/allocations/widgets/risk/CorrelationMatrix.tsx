@@ -171,7 +171,7 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
 
   return (
     <div className="flex flex-col gap-3" data-testid="correlation-matrix">
-      <ResponsiveTable>
+      <ResponsiveTable label="Correlation matrix">
         <table className="w-full border-collapse text-center" style={{ fontSize: 11 }}>
           <thead>
             <tr>

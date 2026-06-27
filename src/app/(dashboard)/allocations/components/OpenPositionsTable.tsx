@@ -125,7 +125,7 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
           No open derivative positions.
         </p>
       ) : (
-        <ResponsiveTable>
+        <ResponsiveTable label="Open positions">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-muted">

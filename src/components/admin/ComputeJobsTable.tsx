@@ -193,7 +193,7 @@ export function ComputeJobsTable() {
       )}
 
       {/* Table */}
-      <ResponsiveTable>
+      <ResponsiveTable label="Compute jobs">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b" style={{ borderColor: "#E2E8F0" }}>

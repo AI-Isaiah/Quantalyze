@@ -17,19 +17,28 @@ const DEFAULT_HINT =
  * `role="status"` / `aria-live` region (it describes a persistent affordance,
  * not a state change) and NOT a separate `sr-only` node — pairing aria-label
  * with an identical visually-hidden child double-announces the hint (once as the
- * region name, once as in-region content). When `hint` is provided it overrides
- * the label; otherwise {@link DEFAULT_HINT} is used.
+ * region name, once as in-region content).
+ *
+ * Accessible-name precedence: an explicit `hint` (full override) wins; otherwise
+ * `label` (the table's name) prefixes {@link DEFAULT_HINT}; otherwise the bare
+ * default is used. A page that renders more than one ResponsiveTable MUST pass a
+ * distinct `label` so the region landmarks have UNIQUE accessible names — axe
+ * `landmark-unique`, and, more importantly, so a screen-reader's landmark rotor
+ * does not show N indistinguishable "Table scrolls horizontally…" regions (the
+ * /allocations holdings tab co-renders Strategies + Holdings + Open positions).
  */
 export function ResponsiveTable({
   children,
   hint,
+  label,
 }: {
   children: ReactNode;
   hint?: string;
+  label?: string;
 }) {
-  const label = hint ?? DEFAULT_HINT;
+  const accessibleName = hint ?? (label ? `${label}: ${DEFAULT_HINT}` : DEFAULT_HINT);
   return (
-    <div className="overflow-x-auto" role="region" aria-label={label} tabIndex={0}>
+    <div className="overflow-x-auto" role="region" aria-label={accessibleName} tabIndex={0}>
       {children}
     </div>
   );
