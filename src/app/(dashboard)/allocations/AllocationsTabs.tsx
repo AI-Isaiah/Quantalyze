@@ -470,6 +470,29 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     }
   };
 
+  // NAV-02 (Phase 45) — keep the active tab in view inside the <sm
+  // horizontally-scrollable strip. A keyboard arrow-nav or a programmatic
+  // tab change can leave the selected tab clipped off-screen; scroll it back
+  // into view on every activeTab change. Honor prefers-reduced-motion: an
+  // instant (behavior:"auto") scroll for reduce, smooth otherwise — never
+  // animate a forced scroll for reduced-motion users (UI-SPEC States row).
+  // The `typeof ... === "function"` guard keeps this safe in environments
+  // that don't implement Element.scrollIntoView / matchMedia (jsdom, older
+  // browsers) — the effect no-ops there instead of throwing.
+  useEffect(() => {
+    const el = tabRefs.current[activeTab];
+    if (!el || typeof el.scrollIntoView !== "function") return;
+    const prefersReducedMotion =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    el.scrollIntoView({
+      inline: "nearest",
+      block: "nearest",
+      behavior: prefersReducedMotion ? "auto" : "smooth",
+    });
+  }, [activeTab]);
+
   // PR3 (dashboard parity) — count badges on Holdings + Outcomes tabs
   // matching the truth screenshot ("Holdings 8", "Outcomes 4"). Counts
   // come straight from the payload arrays already on `props`; no new
@@ -563,10 +586,26 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
             tablist wraps just the tabs; the actions are siblings in the same
             flex row. */}
         <div className="ml-auto flex items-center gap-1">
+          {/* NAV-02 (Phase 45) — CSS-first horizontally-scrollable tab strip at
+              <sm so all six surfaces stay reachable on a phone (no tab dropped).
+              JOURNEY-03 is preserved: this is the SAME element with the SAME
+              role="tablist" and the SAME direct role="tab" children — no role is
+              added to any wrapper and the tabs are NOT re-nested (re-nesting would
+              re-introduce the critical axe aria-required-children violation the
+              comment above warns about; the seeded composer-axe.spec.ts gate
+              catches a regression). `flex-nowrap overflow-x-auto` keeps the tabs on
+              one scrollable line at <sm; `sm:flex-wrap sm:overflow-x-visible`
+              restores the original wrap-on-one-row layout at >=sm. The native
+              scrollbar is hidden ([scrollbar-width:none]) and iOS momentum-scrolls
+              ([-webkit-overflow-scrolling:touch]); the cut-off tab peeking past the
+              right edge IS the scroll affordance — no edge-fade overlay is
+              added (DESIGN.md hairline-clean rule). `snap-x` + per-tab `snap-start shrink-0`
+              (appended to the parity-pinned TAB_BUTTON_* consts below) snap each
+              tab cleanly without compressing labels. */}
           <div
             role="tablist"
             aria-label="Allocation surfaces"
-            className="flex items-center gap-1"
+            className="flex flex-nowrap items-center gap-1 overflow-x-auto sm:flex-wrap sm:overflow-x-visible snap-x [scrollbar-width:none] [-webkit-overflow-scrolling:touch]"
           >
           {VISIBLE_TAB_KEYS.map((key) => {
             const isActive = activeTab === key;
@@ -587,7 +626,13 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
                 tabIndex={isActive ? 0 : -1}
                 onClick={() => changeTab(key)}
                 onKeyDown={(e) => handleTabKeyDown(e, key)}
-                className={isActive ? TAB_BUTTON_ACTIVE : TAB_BUTTON_INACTIVE}
+                // NAV-02 (Phase 45) — the parity-pinned TAB_BUTTON_* consts stay
+                // byte-identical; the scroll-snap classes are APPENDED here (not
+                // reordered into the consts) so the dashboard-parity Tailwind class
+                // order is untouched. `snap-start` aligns each tab to the strip
+                // start; `shrink-0` keeps labels from compressing in the
+                // flex-nowrap scroll container.
+                className={`${isActive ? TAB_BUTTON_ACTIVE : TAB_BUTTON_INACTIVE} snap-start shrink-0`}
               >
                 {label}
                 {typeof count === "number" && count > 0 ? (
