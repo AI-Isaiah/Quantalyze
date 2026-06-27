@@ -12,6 +12,32 @@
 
 ---
 
+## v1.3 phase 45 nav follow-ups (deferred from /ship pre-landing review, 2026-06-27)
+
+### P2: "Bridge" mobile-nav item lands on a tab with no bridge surface
+The mobile bottom nav's "Bridge" item deep-links `/allocations?tab=risk#bridge`. It
+is reachable and has a distinct href (satisfying SC#1), but it opens the **Risk**
+tab, which renders no bridge surface — the `BridgeWidget` is not mounted anywhere in
+the live UI, and the actual bridge browse (`BridgeDrawer`) is reached from the
+ScenarioComposer on the **Scenario** tab. The `#bridge` fragment also anchors nothing
+(no `id="bridge"` element). Decide deliberately where "Bridge" should land (likely the
+Scenario tab, or wire a real bridge anchor on the Risk tab) and update the href.
+Comments in `Sidebar.tsx`/`MobileNav.tsx` now flag this honestly.
+
+### P3: tab-strip edge-tab focus ring clipped by `overflow-x-auto`
+Converting the allocation tablist to a horizontal scroll container clips the outer 2px
+of the outset `focus-visible` outline on the first/last tabs at the scroll boundary
+(WCAG 2.4.7 degradation the axe gate can't detect). Add horizontal scroll padding or
+switch the tab focus style to an inset ring — but verify it doesn't disturb the pinned
+dashboard-parity Tailwind class order on `TAB_BUTTON_*`.
+
+### P3: flagged-count badge can overflow its cell when > 99
+The flagged-holdings badge on the bottom nav (and desktop sidebar) is unbounded; a
+count > 99 widens the badge enough to overlap the adjacent cell on a 320px 5-item admin
+layout. Cap the displayed value to `99+`.
+
+---
+
 ## Phase 19.1 follow-ups — CSV → analytics pipeline post-deploy work
 
 ### P1 — Plans 07-10 (remaining phase work, blocked on PR merge + Railway deploy)
