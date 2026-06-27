@@ -98,7 +98,10 @@ export async function assertNoReflow(
           `offender=${o.offender ?? "<unknown>"}`,
       );
     }
-  }).toPass({ timeout: 5000, intervals: [200, 500, 1000] });
+    // Window >= the networkidle settle above so a late-appearing wide element
+    // on a slow/analytics-heavy route (phases 46-48) is still caught by a
+    // re-measure rather than missed by an early pass or flaking red.
+  }).toPass({ timeout: 10_000, intervals: [200, 500, 1000, 2000] });
 }
 
 /**

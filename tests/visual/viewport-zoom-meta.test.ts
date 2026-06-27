@@ -29,8 +29,8 @@ import { join } from "node:path";
  *
  * Green from the first run: no zoom-disabling directive exists anywhere in
  * src/ today (verified). The explicit zoom-permissive `viewport` export in
- * src/app/layout.tsx (width device-width, initialScale 1, no max-scale /
- * userScalable:false) keeps it green forever.
+ * src/app/layout.tsx (width device-width, initialScale 1, no scale cap and no
+ * scaling lock) keeps it green forever.
  */
 
 const REPO_ROOT = join(__dirname, "..", "..");
@@ -51,10 +51,12 @@ function walk(dir: string): string[] {
   return out;
 }
 
-// Zoom-disabling viewport directives. The literal forbidden tokens live ONLY
-// inside these regex literals (never bare in prose) so this guard would not
-// self-match if its own directory were ever in scope — it scans only src/, so
-// this test file in tests/visual/ is out of scope regardless.
+// Zoom-disabling viewport directives. This guard's own file necessarily
+// contains the forbidden tokens (in the regexes, labels, error message, and the
+// falsifiability test below), so the guard stays honest by SCOPE, not by
+// token-absence: it scans only src/, and this file lives in tests/visual/,
+// outside that scope. If the scan is ever widened to include tests/, exclude
+// this file explicitly (skip its own path in walk()) or it will self-flag.
 const FORBIDDEN: { re: RegExp; label: string }[] = [
   { re: /maximumScale\s*:/, label: "maximumScale: (Next Viewport export field)" },
   { re: /userScalable\s*:\s*false/, label: "userScalable: false (Next Viewport export field)" },
@@ -79,7 +81,7 @@ describe("zoom-meta guard (A11Y-02 / SC#2) — WCAG 1.4.4 Resize Text", () => {
     expect(
       violations,
       "viewport must never disable pinch-zoom (WCAG 1.4.4 Resize Text). " +
-        "Drop maximumScale / userScalable:false from the viewport export, " +
+        "Drop any scale cap or scaling lock from the viewport export, " +
         "and never hand-write a zoom-locking <meta name='viewport'>.",
     ).toEqual([]);
   });
@@ -90,5 +92,25 @@ describe("zoom-meta guard (A11Y-02 / SC#2) — WCAG 1.4.4 Resize Text", () => {
     // zero files, which would make the guard vacuously green).
     const files = walk(SRC_DIR);
     expect(files.length).toBeGreaterThan(50);
+  });
+
+  it("FORBIDDEN patterns still match known zoom-locking directives (anti-typo guard)", () => {
+    // Proves each regex actually matches a real violation. A typo that silently
+    // neutered a pattern would let a real zoom-lock slip past the src/ scan
+    // while the no-violations test stayed (falsely) green. These samples carry
+    // the forbidden tokens by necessity and live here in tests/visual/, outside
+    // the src/-only scan scope, by design (see the FORBIDDEN comment above).
+    const knownViolations = [
+      "export const viewport = { maximumScale: 1 }",
+      "export const viewport = { userScalable: false }",
+      '<meta name="viewport" content="width=device-width, maximum-scale=1" />',
+      '<meta name="viewport" content="width=device-width, user-scalable=no" />',
+    ];
+    for (const sample of knownViolations) {
+      expect(
+        FORBIDDEN.some(({ re }) => re.test(sample)),
+        `no FORBIDDEN pattern matched a known zoom-lock — a regex was likely typo-broken: ${sample}`,
+      ).toBe(true);
+    }
   });
 });

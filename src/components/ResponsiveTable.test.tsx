@@ -1,28 +1,31 @@
 /** @vitest-environment jsdom */
 /**
- * Phase 44 / A11Y-02 — ResponsiveTable overflow wrapper + sr-only scroll hint.
+ * Phase 44 / A11Y-02 — ResponsiveTable overflow wrapper + scroll hint.
  *
- * ResponsiveTable wraps arbitrary children in an `overflow-x-auto`,
- * focusable `role="region"` container and emits an `sr-only` scroll hint so
- * screen-reader users know the table scrolls horizontally. It adds ONLY the
- * scroll affordance — it does NOT restyle the wrapped table (column reshape
- * is phase 46 / TABLE-01).
+ * ResponsiveTable wraps arbitrary children in an `overflow-x-auto`, focusable
+ * `role="region"` container whose ACCESSIBLE NAME (aria-label) announces the
+ * horizontal-scroll affordance to screen-reader users. It adds ONLY the scroll
+ * affordance — it does NOT restyle the wrapped table (column reshape is phase
+ * 46 / TABLE-01).
  *
  * Test plan (covers both `hint ?? default` branches so the ratchet holds):
- *  1. Default hint — no `hint` prop → the static default sr-only string is
- *     rendered and used as the aria-label; the container carries
- *     `overflow-x-auto`, `role="region"`, and is focusable.
- *  2. Provided hint — a custom `hint` prop overrides both the sr-only text and
- *     the aria-label; assert the sr-only text DIFFERS from the default branch
- *     (proves both branches execute).
+ *  1. Default hint — no `hint` prop → the static default string is the region's
+ *     aria-label; the container carries `overflow-x-auto`, `role="region"`, is
+ *     focusable, and emits NO redundant `sr-only` node (the double-announce
+ *     a11y regression guard).
+ *  2. Provided hint — a custom `hint` prop overrides the aria-label; assert it
+ *     DIFFERS from the default branch (proves both branches execute).
  *  3. Children render inside the overflow container.
  */
 import { describe, it, expect } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import { ResponsiveTable } from "./ResponsiveTable";
 
-describe("[A11Y-02] ResponsiveTable — overflow wrapper + sr-only scroll hint", () => {
-  it("renders the default scroll hint and a focusable overflow region", () => {
+const DEFAULT_HINT =
+  "Table scrolls horizontally. Swipe or use arrow keys to see more columns.";
+
+describe("[A11Y-02] ResponsiveTable — overflow wrapper + scroll hint", () => {
+  it("renders the default scroll hint as the region's accessible name (no sr-only duplicate)", () => {
     render(
       <ResponsiveTable>
         <table>
@@ -39,18 +42,18 @@ describe("[A11Y-02] ResponsiveTable — overflow wrapper + sr-only scroll hint",
     expect(region).toHaveClass("overflow-x-auto");
     expect(region).toHaveAttribute("tabindex", "0");
 
-    // Default hint drives both the sr-only text and the aria-label.
+    // The default hint is the region's accessible name.
     const defaultLabel = region.getAttribute("aria-label");
-    expect(defaultLabel).toBeTruthy();
-    const srOnly = region.querySelector("span.sr-only");
-    expect(srOnly).not.toBeNull();
-    expect(srOnly?.textContent).toBe(defaultLabel);
-    // The default wording must mention scrolling horizontally so SR users
-    // understand the affordance.
-    expect(srOnly?.textContent?.toLowerCase()).toContain("scroll");
+    expect(defaultLabel).toBe(DEFAULT_HINT);
+    // The wording must mention scrolling so SR users understand the affordance.
+    expect(defaultLabel?.toLowerCase()).toContain("scroll");
+    // Double-announce regression guard: the hint lives ONLY in the aria-label,
+    // never also as an sr-only child (that would read the hint twice — once as
+    // the region name, once as in-region content).
+    expect(region.querySelector(".sr-only")).toBeNull();
   });
 
-  it("uses a provided hint for both the sr-only text and the aria-label", () => {
+  it("uses a provided hint as the region's accessible name", () => {
     const customHint = "Holdings table scrolls sideways to reveal more metrics.";
     render(
       <ResponsiveTable hint={customHint}>
@@ -66,12 +69,9 @@ describe("[A11Y-02] ResponsiveTable — overflow wrapper + sr-only scroll hint",
 
     const region = screen.getByRole("region", { name: customHint });
     expect(region).toHaveClass("overflow-x-auto");
-    const srOnly = region.querySelector("span.sr-only");
-    expect(srOnly?.textContent).toBe(customHint);
+    expect(region.querySelector(".sr-only")).toBeNull();
     // Proves the provided-hint branch diverges from the default branch.
-    expect(srOnly?.textContent).not.toBe(
-      "Table scrolls horizontally. Swipe or use arrow keys to see more columns.",
-    );
+    expect(region.getAttribute("aria-label")).not.toBe(DEFAULT_HINT);
   });
 
   it("renders children inside the overflow container", () => {
