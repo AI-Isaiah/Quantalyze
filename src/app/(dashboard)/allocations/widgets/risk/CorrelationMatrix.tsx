@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { normalizeDailyReturns, type DailyPoint } from "@/lib/portfolio-math-utils";
 import { mean } from "@/lib/portfolio-math-utils";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
@@ -170,7 +171,7 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
 
   return (
     <div className="flex flex-col gap-3" data-testid="correlation-matrix">
-      <div className="overflow-auto">
+      <ResponsiveTable>
         <table className="w-full border-collapse text-center" style={{ fontSize: 11 }}>
           <thead>
             <tr>
@@ -217,7 +218,7 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
             ))}
           </tbody>
         </table>
-      </div>
+      </ResponsiveTable>
 
       {/* Color legend */}
       <div className="flex items-center gap-2 px-1">
