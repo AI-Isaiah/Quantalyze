@@ -14,15 +14,12 @@
 
 ## v1.3 phase 45 nav follow-ups (deferred from /ship pre-landing review, 2026-06-27)
 
-### P2: "Bridge" mobile-nav item lands on a tab with no bridge surface
-The mobile bottom nav's "Bridge" item deep-links `/allocations?tab=risk#bridge`. It
-is reachable and has a distinct href (satisfying SC#1), but it opens the **Risk**
-tab, which renders no bridge surface — the `BridgeWidget` is not mounted anywhere in
-the live UI, and the actual bridge browse (`BridgeDrawer`) is reached from the
-ScenarioComposer on the **Scenario** tab. The `#bridge` fragment also anchors nothing
-(no `id="bridge"` element). Decide deliberately where "Bridge" should land (likely the
-Scenario tab, or wire a real bridge anchor on the Risk tab) and update the href.
-Comments in `Sidebar.tsx`/`MobileNav.tsx` now flag this honestly.
+### ~~P2: "Bridge" mobile-nav item lands on a tab with no bridge surface~~ — ✅ DONE (2026-06-27)
+Pointed Bridge → `/allocations?tab=scenario`, where the ScenarioComposer's "Open
+Bridge" card → BridgeDrawer actually lives (the Risk tab had no bridge surface;
+`BridgeWidget` is mounted nowhere and `#bridge` anchored nothing). Dropped the inert
+`#bridge` fragment; the new href is naturally distinct from Risk's so SC#1 still holds.
+Product decision per user. Shipped on the v1.3 phases-46-48 branch.
 
 ### P3: tab-strip edge-tab focus ring clipped by `overflow-x-auto`
 Converting the allocation tablist to a horizontal scroll container clips the outer 2px
