@@ -345,8 +345,8 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
             GUI entry point — only reachable via direct URL — so founders
             with a track-record CSV but no exchange API key had no way in.
             This is the bridge: a quiet inline link from the API wizard's
-            first step to the CSV branch. Same wizard chrome, same
-            DesktopGate, just a different first-step component. */}
+            first step to the CSV branch. Same wizard chrome, just a
+            different first-step component. */}
         <p className="pt-2 text-xs text-text-muted">
           Don&apos;t have an API key yet?{" "}
           <Link
