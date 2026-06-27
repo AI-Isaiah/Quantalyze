@@ -22,16 +22,17 @@ import { assertNoReflow } from "./helpers/reflow";
  * 400%-equivalent assertion is the 320px assertNoReflow pass below.
  *
  * UNSEEDED spec — runs against the placeholder-env build on PUBLIC routes,
- * with NO `HAS_SEED_ENV` / `test.skip(!process.env.TEST_SUPABASE_*)` guard
- * (matching reflow.spec.ts). It is wired into the UNSEEDED Playwright list in
- * .github/workflows/ci.yml (the `e2e/auth.spec.ts … e2e/reflow.spec.ts
- * e2e/target-size.spec.ts` line). FLOW-01 dual-wiring (gate added but never
- * runs, burned twice): the ci.yml unseeded-list entry is place 1; the
- * deliberate ABSENCE of any env self-skip is place 2 — together they
- * guarantee the gate actually executes in CI.
+ * carrying NO seed-env self-skip guard at all (matching reflow.spec.ts). It is
+ * wired into the UNSEEDED Playwright list in .github/workflows/ci.yml (the
+ * `e2e/auth.spec.ts … e2e/reflow.spec.ts e2e/target-size.spec.ts` line).
+ * FLOW-01 dual-wiring (gate added but never runs, burned twice): the ci.yml
+ * unseeded-list entry is place 1; the deliberate ABSENCE of any env self-skip
+ * is place 2 — together they guarantee the gate actually executes in CI. (The
+ * literal seed-env token is intentionally absent from this file so the
+ * "no env guard" property is provable by a plain grep.)
  *
  * The seeded authed half of the sweep lives in e2e/reflow-sweep-authed.spec.ts
- * (HAS_SEED_ENV self-skip + the ci.yml seeded MA-8 list).
+ * (the seed-env self-skip + the ci.yml seeded MA-8 list).
  */
 
 // Curated public route floor (SC#1). Each anchor is a VISIBLE content element
