@@ -144,3 +144,12 @@ tests over existing payloads.
   is the wave/phase gate (run at merge, not per-task per RESEARCH Sampling Rate).
 - The N×N-scrolls-wide-at-320px confirmation is the e2e reflow sweep's job
   (app-wide, owned by 46-05 per RESEARCH/plan verification note), not this plan.
+
+## Self-Check: PASSED
+
+- FOUND: src/app/(dashboard)/allocations/components/ScenarioCompareTable.all-columns.test.tsx
+- FOUND: src/app/(dashboard)/allocations/widgets/risk/CorrelationMatrix.all-columns.test.tsx
+- FOUND: .planning/phases/46-surface-by-surface-reflow/46-02-SUMMARY.md
+- FOUND commit c2bf8cb8 (feat — migration)
+- FOUND commit e7fb8d94 (test — guards)
+- FOUND commit 02d6c5e6 (docs — SUMMARY)
