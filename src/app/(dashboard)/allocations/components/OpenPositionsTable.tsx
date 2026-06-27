@@ -19,6 +19,7 @@
  */
 
 import { type CSSProperties } from "react";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 
 const AMBER_CHIP_STYLE: CSSProperties = {
   color: "var(--color-warning)",
@@ -124,6 +125,7 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
           No open derivative positions.
         </p>
       ) : (
+        <ResponsiveTable>
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-muted">
@@ -213,6 +215,7 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
             </tr>
           </tfoot>
         </table>
+        </ResponsiveTable>
       )}
     </section>
   );

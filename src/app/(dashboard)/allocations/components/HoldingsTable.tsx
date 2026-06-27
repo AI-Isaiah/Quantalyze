@@ -35,6 +35,7 @@
 import { Fragment, useMemo, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 import {
   HoldingNoteIconButton,
   HoldingNoteRow,
@@ -257,6 +258,7 @@ function StrategyRowsTable({ rows }: { rows: StrategyRow[] }) {
           No strategies onboarded yet.
         </p>
       ) : (
+        <ResponsiveTable>
         <table className="w-full text-sm" data-table="strategies">
           <thead>
             <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-muted">
@@ -310,6 +312,7 @@ function StrategyRowsTable({ rows }: { rows: StrategyRow[] }) {
             ))}
           </tbody>
         </table>
+        </ResponsiveTable>
       )}
     </section>
   );
@@ -396,6 +399,7 @@ function LegacyHoldingsTable({
           No holdings to display.
         </p>
       ) : (
+        <ResponsiveTable>
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-muted">
@@ -489,6 +493,7 @@ function LegacyHoldingsTable({
             })}
           </tbody>
         </table>
+        </ResponsiveTable>
       )}
 
       {!showRevoked && hiddenCount > 0 ? (
@@ -617,6 +622,7 @@ function DesignHoldingsTable({
           No holdings to display.
         </p>
       ) : (
+        <ResponsiveTable>
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-muted">
@@ -803,6 +809,7 @@ function DesignHoldingsTable({
             })}
           </tbody>
         </table>
+        </ResponsiveTable>
       )}
 
       {!showRevoked && hiddenCount > 0 && onShowRevokedChange ? (
