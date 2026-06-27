@@ -329,6 +329,35 @@ const TAB_COUNT_BADGE_ACTIVE =
 const TAB_COUNT_BADGE_INACTIVE =
   "rounded-full bg-page px-1.5 py-0.5 text-[10px] font-mono leading-none text-text-muted";
 
+/**
+ * NAV-02 (Phase 45) — pure horizontal-scroll math for the <sm tab strip.
+ *
+ * Given the active tab's content-box left/width and the strip's visible window
+ * (scrollLeft + clientWidth), return the strip scrollLeft target that brings the
+ * tab fully into view, plus the motion to use, or `null` when it is already
+ * visible (the no-op case). This deliberately models ONLY the horizontal axis:
+ * the prior `scrollIntoView({ block: "nearest" })` also moved the nearest
+ * VERTICAL scroll container, which yanked the page back up to the strip after a
+ * user had scrolled down — defeating `changeTab`'s intentional
+ * `router.replace(..., { scroll: false })`. Keeping the math pure here makes the
+ * reduced-motion branch (WCAG — never animate a forced scroll for reduce users)
+ * and the already-visible no-op directly unit-testable without a layout engine.
+ */
+export function computeTabStripScroll(args: {
+  elLeft: number;
+  elWidth: number;
+  viewLeft: number;
+  viewWidth: number;
+  prefersReducedMotion: boolean;
+}): { left: number; behavior: ScrollBehavior } | null {
+  const { elLeft, elWidth, viewLeft, viewWidth, prefersReducedMotion } = args;
+  const behavior: ScrollBehavior = prefersReducedMotion ? "auto" : "smooth";
+  if (elLeft < viewLeft) return { left: elLeft, behavior };
+  const elRight = elLeft + elWidth;
+  if (elRight > viewLeft + viewWidth) return { left: elRight - viewWidth, behavior };
+  return null; // already in view — no scroll, and never any vertical movement
+}
+
 export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   const router = useRouter();
   const pathname = usePathname();
@@ -471,26 +500,48 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   };
 
   // NAV-02 (Phase 45) — keep the active tab in view inside the <sm
-  // horizontally-scrollable strip. A keyboard arrow-nav or a programmatic
-  // tab change can leave the selected tab clipped off-screen; scroll it back
-  // into view on every activeTab change. Honor prefers-reduced-motion: an
-  // instant (behavior:"auto") scroll for reduce, smooth otherwise — never
-  // animate a forced scroll for reduced-motion users (UI-SPEC States row).
-  // The `typeof ... === "function"` guard keeps this safe in environments
-  // that don't implement Element.scrollIntoView / matchMedia (jsdom, older
-  // browsers) — the effect no-ops there instead of throwing.
+  // horizontally-scrollable strip. A keyboard arrow-nav or a programmatic tab
+  // change can leave the selected tab clipped off-screen; scroll it back into
+  // view on every activeTab change. We scroll the STRIP (the role="tablist"
+  // scroll container — the tab button's direct parent, pinned by the axe
+  // aria-required-children gate) on its horizontal axis ONLY, never the page.
+  // The earlier `el.scrollIntoView({ block: "nearest" })` also moved the
+  // nearest VERTICAL scroll container, so switching tabs after scrolling down
+  // yanked the page back up to the strip — defeating changeTab's deliberate
+  // router.replace(..., { scroll: false }). `computeTabStripScroll` returns null
+  // when the tab is already visible (and at >=sm where the strip wraps and never
+  // overflows), so this is a no-op except when a horizontal correction is
+  // actually needed. Honor prefers-reduced-motion: instant ("auto") for reduce,
+  // smooth otherwise — never animate a forced scroll for reduced-motion users
+  // (UI-SPEC States row). The `typeof ... === "function"` guards keep it safe in
+  // environments without getBoundingClientRect / Element.scrollTo / matchMedia
+  // (jsdom, older browsers) — the effect no-ops there instead of throwing.
   useEffect(() => {
     const el = tabRefs.current[activeTab];
-    if (!el || typeof el.scrollIntoView !== "function") return;
+    const strip = el?.parentElement;
+    if (
+      !el ||
+      !strip ||
+      typeof el.getBoundingClientRect !== "function" ||
+      typeof strip.scrollTo !== "function"
+    )
+      return;
     const prefersReducedMotion =
       typeof window !== "undefined" &&
       typeof window.matchMedia === "function" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    el.scrollIntoView({
-      inline: "nearest",
-      block: "nearest",
-      behavior: prefersReducedMotion ? "auto" : "smooth",
+    const elRect = el.getBoundingClientRect();
+    const stripRect = strip.getBoundingClientRect();
+    const target = computeTabStripScroll({
+      // Active tab's left in the strip's CONTENT coordinate space (add back the
+      // current scrollLeft so it is comparable to the scrollLeft-based window).
+      elLeft: elRect.left - stripRect.left + strip.scrollLeft,
+      elWidth: elRect.width,
+      viewLeft: strip.scrollLeft,
+      viewWidth: strip.clientWidth,
+      prefersReducedMotion,
     });
+    if (target) strip.scrollTo(target);
   }, [activeTab]);
 
   // PR3 (dashboard parity) — count badges on Holdings + Outcomes tabs

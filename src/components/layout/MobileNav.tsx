@@ -15,13 +15,17 @@ import { buildPrimaryMobileNav } from "./Sidebar";
  * drawer remains the FULL nav; this is the <=5-item primary subset.
  *
  * Active-state discretion (45-RESEARCH Pitfall 6 / A3): `usePathname()` strips
- * the query string, so `/allocations?tab=risk` and `/allocations` both resolve
- * to pathname `/allocations`. We deliberately KEEP the simple pathname-prefix
- * match (the same rule the desktop Sidebar uses) rather than introducing
- * `useSearchParams()`, which would force a Next 16 CSR-bailout requiring a
- * Suspense boundary around this component (DashboardChrome renders it without
- * one). Consequence: the My Allocation / Risk / Bridge cells share an active
- * highlight on `/allocations*` — a purely cosmetic, SSR-safe tradeoff.
+ * the query string, so it returns `/allocations` for every allocations URL. We
+ * deliberately KEEP the simple pathname-prefix match (the same rule the desktop
+ * Sidebar uses) rather than introducing `useSearchParams()`, which would force a
+ * Next 16 CSR-bailout requiring a Suspense boundary around this component
+ * (DashboardChrome renders it without one). Consequence: only the My Allocation
+ * cell (href `/allocations`) is ever marked active on `/allocations*`. The Risk
+ * and Bridge cells keep the query/hash in their hrefs
+ * (`/allocations?tab=risk`, `/allocations?tab=risk#bridge`), which the stripped
+ * pathname never contains, so the equality/prefix check never matches them —
+ * those two cells never render `aria-current`. A purely cosmetic, SSR-safe
+ * tradeoff.
  */
 export function MobileNav({
   isAllocator,

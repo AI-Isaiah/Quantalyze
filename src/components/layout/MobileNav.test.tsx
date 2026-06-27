@@ -13,8 +13,9 @@ import { MobileNav } from "./MobileNav";
  *     so an allocator never gets manager/admin-only destinations and vice-versa
  *     (T-45-01 information-disclosure mitigation in the plan threat register);
  *   - the SC#1 allocator head — My Allocation / Risk / Bridge with DISTINCT
- *     hrefs (Bridge deep-links the BridgeWidget on the Risk tab — there is no
- *     /bridge route, verified in 45-RESEARCH Pitfall 1);
+ *     hrefs (there is no /bridge route, verified in 45-RESEARCH Pitfall 1; the
+ *     `#bridge` hash is currently inert — see the KNOWN GAP note on
+ *     buildPrimaryMobileNav in Sidebar.tsx);
  *   - role "both" lighting the allocator set (NOT the pre-fix !isAllocator
  *     short-circuit);
  *   - the <=5 cap;
@@ -165,6 +166,18 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     const nav = screen.getByRole("navigation", { name: "Primary mobile" });
     const myAlloc = within(nav).getByText("My Allocation").closest("a");
     expect(myAlloc).toHaveAttribute("aria-current", "page");
+    // The inactive branch (aria-current={active ? "page" : undefined}): the
+    // Risk and Bridge cells keep the query/hash in their hrefs, which the
+    // stripped pathname `/allocations` never contains, so they must NOT be
+    // marked active even though they live under /allocations* (pins the
+    // documented query-stripping tradeoff so a regression that lit every cell
+    // — or the wrong cell — on a non-matching pathname fails here).
+    const risk = within(nav).getByText("Risk").closest("a");
+    const bridge = within(nav).getByText("Bridge").closest("a");
+    const profile = within(nav).getByText("Profile").closest("a");
+    expect(risk).not.toHaveAttribute("aria-current");
+    expect(bridge).not.toHaveAttribute("aria-current");
+    expect(profile).not.toHaveAttribute("aria-current");
   });
 
   it("gives every bottom-nav target a >=44px min height (WCAG 2.5.8)", () => {

@@ -122,14 +122,21 @@ function buildNavSections(
  *
  * Why not derive directly from `buildNavSections`? Two of the three SC#1
  * allocator destinations (Risk, Bridge) are NOT routes in `buildNavSections`:
- * Risk is the `/allocations?tab=risk` tab and Bridge is the `BridgeWidget` that
- * lives on that Risk tab (there is no `/bridge` route — verified 45-RESEARCH
- * Pitfall 1). So we represent them as tab deep-links with DISTINCT hrefs:
+ * there is no `/bridge` route (verified 45-RESEARCH Pitfall 1), so we represent
+ * them as tab deep-links with DISTINCT hrefs:
  *   - My Allocation → `/allocations`
  *   - Risk         → `/allocations?tab=risk`
- *   - Bridge       → `/allocations?tab=risk#bridge`  (anchors the BridgeWidget)
+ *   - Bridge       → `/allocations?tab=risk#bridge`
  * No two items resolve to the identical URL, satisfying SC#1's "labeled,
  * reachable entries with distinct hrefs".
+ *
+ * KNOWN GAP (flagged for product follow-up, not yet wired): the `#bridge`
+ * fragment currently anchors nothing — there is no `id="bridge"` element, and
+ * the `BridgeWidget` is not rendered on the Risk tab (the live bridge browse,
+ * `BridgeDrawer`, is reached from the ScenarioComposer on the Scenario tab). So
+ * tapping Bridge today lands on the Risk tab and the `#bridge` hash is inert; it
+ * serves only to keep the href distinct from Risk's. Where Bridge SHOULD land
+ * once the surface is wired is a deliberate product decision — see the PR/TODO.
  *
  * The list is capped at <=5 (the hamburger drawer remains the full nav). Role
  * gating mirrors the SAME `showsAllocatorWorkspace`/`showsManagerWorkspace`
@@ -142,8 +149,9 @@ export function buildPrimaryMobileNav(p: {
   isAdmin?: boolean;
   flaggedCount?: number;
 }): NavItem[] {
-  // Mirror buildNavSections' role OR-logic EXACTLY (Sidebar.tsx:34-36) so the
-  // two navs share one source of truth and "both" lights the allocator set.
+  // Mirror buildNavSections' role OR-logic EXACTLY (its showsAllocatorWorkspace
+  // / showsManagerWorkspace derivations) so the two navs share one source of
+  // truth and "both" lights the allocator set.
   const showsAllocatorWorkspace = p.isAllocator || p.isAdmin;
   const showsManagerWorkspace = p.isManager || p.isAdmin;
 
@@ -164,7 +172,11 @@ export function buildPrimaryMobileNav(p: {
     );
     // Discovery is a discretionary filler (allocator browse surface) — trimmed
     // first when the cap binds (admin keeps the SC trio + a manager destination).
-    fillers.push({ label: "Discovery", href: "/discovery", icon: SearchIcon });
+    // Href is the canonical landing slug `/discovery/crypto-sma` (the same target
+    // the /discovery layout redirect uses): bare `/discovery` has no page.tsx
+    // (only layout.tsx + [slug]/), so it 404s — a regression from the prior
+    // hardcoded TABS value this helper replaced.
+    fillers.push({ label: "Discovery", href: "/discovery/crypto-sma", icon: SearchIcon });
   }
   if (showsManagerWorkspace) {
     primary.push(
