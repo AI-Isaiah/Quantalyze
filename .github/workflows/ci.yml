@@ -1260,6 +1260,7 @@ jobs:
             e2e/strategy-v2-axe.spec.ts \
             e2e/composer-axe.spec.ts \
             e2e/mobile-drawer-keyboard.spec.ts \
+            e2e/reflow-sweep-authed.spec.ts \
             --timeout 60000
           # Same kill+wait+nuke pattern as the unconditional step above so any
           # follow-up runner work (artifact upload) doesn't race on resources.
