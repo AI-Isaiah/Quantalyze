@@ -13,9 +13,10 @@ import { MobileNav } from "./MobileNav";
  *     so an allocator never gets manager/admin-only destinations and vice-versa
  *     (T-45-01 information-disclosure mitigation in the plan threat register);
  *   - the SC#1 allocator head — My Allocation / Risk / Bridge with DISTINCT
- *     hrefs (there is no /bridge route, verified in 45-RESEARCH Pitfall 1; the
- *     `#bridge` hash is currently inert — see the KNOWN GAP note on
- *     buildPrimaryMobileNav in Sidebar.tsx);
+ *     hrefs (there is no /bridge route, verified in 45-RESEARCH Pitfall 1;
+ *     Bridge deep-links the Scenario tab `/allocations?tab=scenario`, where the
+ *     composer's "Open Bridge" card → BridgeDrawer lives — see buildPrimaryMobileNav
+ *     in Sidebar.tsx);
  *   - role "both" lighting the allocator set (NOT the pre-fix !isAllocator
  *     short-circuit);
  *   - the <=5 cap;
@@ -38,12 +39,12 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     // SC#1 trio present.
     expect(hrefs).toContain("/allocations");
     expect(hrefs).toContain("/allocations?tab=risk");
-    expect(hrefs).toContain("/allocations?tab=risk#bridge");
+    expect(hrefs).toContain("/allocations?tab=scenario");
     // The SC#1 trio leads the list (My Allocation, Risk, Bridge in order).
     expect(hrefs.slice(0, 3)).toEqual([
       "/allocations",
       "/allocations?tab=risk",
-      "/allocations?tab=risk#bridge",
+      "/allocations?tab=scenario",
     ]);
     // Every href distinct — no two items resolve to the identical URL.
     expect(new Set(hrefs).size).toBe(hrefs.length);
@@ -75,7 +76,7 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     // No allocator destinations leak into a manager's bottom nav.
     expect(hrefs).not.toContain("/allocations");
     expect(hrefs).not.toContain("/allocations?tab=risk");
-    expect(hrefs).not.toContain("/allocations?tab=risk#bridge");
+    expect(hrefs).not.toContain("/allocations?tab=scenario");
   });
 
   it("admin: EXACT <=5 set — SC#1 trio + one manager dest + Profile; Portfolios/Discovery trimmed to the drawer", () => {
@@ -89,7 +90,7 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     expect(hrefs).toEqual([
       "/allocations",
       "/allocations?tab=risk",
-      "/allocations?tab=risk#bridge",
+      "/allocations?tab=scenario",
       "/strategies",
       "/profile",
     ]);
@@ -110,7 +111,7 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     expect(hrefs).toEqual([
       "/allocations",
       "/allocations?tab=risk",
-      "/allocations?tab=risk#bridge",
+      "/allocations?tab=scenario",
       "/strategies",
       "/profile",
     ]);
@@ -143,7 +144,7 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     const hrefs = links.map((l) => l.getAttribute("href"));
     expect(hrefs).toContain("/allocations");
     expect(hrefs).toContain("/allocations?tab=risk");
-    expect(hrefs).toContain("/allocations?tab=risk#bridge");
+    expect(hrefs).toContain("/allocations?tab=scenario");
     expect(within(nav).getByText("My Allocation")).toBeInTheDocument();
     expect(within(nav).getByText("Bridge")).toBeInTheDocument();
     expect(within(nav).getByText("Risk")).toBeInTheDocument();
@@ -167,7 +168,7 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     const myAlloc = within(nav).getByText("My Allocation").closest("a");
     expect(myAlloc).toHaveAttribute("aria-current", "page");
     // The inactive branch (aria-current={active ? "page" : undefined}): the
-    // Risk and Bridge cells keep the query/hash in their hrefs, which the
+    // Risk and Bridge cells keep the query string in their hrefs, which the
     // stripped pathname `/allocations` never contains, so they must NOT be
     // marked active even though they live under /allocations* (pins the
     // documented query-stripping tradeoff so a regression that lit every cell

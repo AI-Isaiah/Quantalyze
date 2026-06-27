@@ -21,8 +21,8 @@ import { buildPrimaryMobileNav } from "./Sidebar";
  * Next 16 CSR-bailout requiring a Suspense boundary around this component
  * (DashboardChrome renders it without one). Consequence: only the My Allocation
  * cell (href `/allocations`) is ever marked active on `/allocations*`. The Risk
- * and Bridge cells keep the query/hash in their hrefs
- * (`/allocations?tab=risk`, `/allocations?tab=risk#bridge`), which the stripped
+ * and Bridge cells keep the query string in their hrefs
+ * (`/allocations?tab=risk`, `/allocations?tab=scenario`), which the stripped
  * pathname never contains, so the equality/prefix check never matches them —
  * those two cells never render `aria-current`. A purely cosmetic, SSR-safe
  * tradeoff.
