@@ -5,6 +5,7 @@ import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, 
 import { usePayload, useXRange, useActiveComparator, useRegimes } from "./factsheet-context";
 import { resolveSeries, type ChartConfig, type ChartValueFormat, type ResolvedSeries } from "./chart-configs";
 import { trackFactsheetEvent } from "./factsheet-analytics";
+import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 
 const VB_W = 880;
 const PAD = { top: 20, right: 30, bottom: 24, left: 50 };
@@ -561,23 +562,24 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
         ))}
       </div>
 
-      <svg
+      {/* ResponsiveChartFrame supplies the shared responsive recipe verbatim:
+          viewBox="0 0 880 280", preserveAspectRatio="xMidYMid meet", the leading
+          `block w-full` className, and style aspectRatio/maxHeight/width/height.
+          The output SVG DOM is byte-identical to the prior inline <svg> — only
+          the chart-specific className tail + the ref/aria/handlers pass through
+          here. `meet` preserves the chart's natural aspect (text + axis spacing
+          stays proportional); paired with the CSS aspect-ratio the container
+          height tracks width 1:1 with no letterbox at any viewport size. */}
+      <ResponsiveChartFrame
         ref={svgRef}
-        viewBox={`0 0 ${VB_W} ${height}`}
-        // `meet` preserves the chart's natural aspect (text + axis spacing stays
-        // proportional). Paired with CSS aspect-ratio on the SVG, the container
-        // height tracks width 1:1 so there's no letterbox at any viewport size.
-        preserveAspectRatio="xMidYMid meet"
+        width={VB_W}
+        height={height}
         role="img"
         aria-label={ariaLabel(config, payload.strategyName, cmp.name, !!cmp.cumulative)}
         aria-describedby={`chart-help-${config.key}`}
         tabIndex={0}
         focusable="true"
-        className="block w-full cursor-crosshair touch-pan-y select-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-        // aspectRatio = viewBox width / viewBox height keeps the rendered shape
-        // proportional. maxHeight caps growth on very wide monitors so a 4K
-        // viewer doesn't get a 500px-tall chart.
-        style={{ aspectRatio: `${VB_W} / ${height}`, maxHeight: height, width: "100%", height: "auto" }}
+        className="cursor-crosshair touch-pan-y select-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
         onPointerMove={onPointerMove}
         onPointerLeave={onPointerLeave}
         onPointerDown={onPointerDown}
@@ -871,7 +873,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             />
           </g>
         )}
-      </svg>
+      </ResponsiveChartFrame>
     </figure>
   );
 }
