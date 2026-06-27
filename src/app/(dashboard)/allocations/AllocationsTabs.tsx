@@ -329,6 +329,35 @@ const TAB_COUNT_BADGE_ACTIVE =
 const TAB_COUNT_BADGE_INACTIVE =
   "rounded-full bg-page px-1.5 py-0.5 text-[10px] font-mono leading-none text-text-muted";
 
+/**
+ * NAV-02 (Phase 45) — pure horizontal-scroll math for the <sm tab strip.
+ *
+ * Given the active tab's content-box left/width and the strip's visible window
+ * (scrollLeft + clientWidth), return the strip scrollLeft target that brings the
+ * tab fully into view, plus the motion to use, or `null` when it is already
+ * visible (the no-op case). This deliberately models ONLY the horizontal axis:
+ * the prior `scrollIntoView({ block: "nearest" })` also moved the nearest
+ * VERTICAL scroll container, which yanked the page back up to the strip after a
+ * user had scrolled down — defeating `changeTab`'s intentional
+ * `router.replace(..., { scroll: false })`. Keeping the math pure here makes the
+ * reduced-motion branch (WCAG — never animate a forced scroll for reduce users)
+ * and the already-visible no-op directly unit-testable without a layout engine.
+ */
+export function computeTabStripScroll(args: {
+  elLeft: number;
+  elWidth: number;
+  viewLeft: number;
+  viewWidth: number;
+  prefersReducedMotion: boolean;
+}): { left: number; behavior: ScrollBehavior } | null {
+  const { elLeft, elWidth, viewLeft, viewWidth, prefersReducedMotion } = args;
+  const behavior: ScrollBehavior = prefersReducedMotion ? "auto" : "smooth";
+  if (elLeft < viewLeft) return { left: elLeft, behavior };
+  const elRight = elLeft + elWidth;
+  if (elRight > viewLeft + viewWidth) return { left: elRight - viewWidth, behavior };
+  return null; // already in view — no scroll, and never any vertical movement
+}
+
 export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   const router = useRouter();
   const pathname = usePathname();
@@ -470,6 +499,51 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     }
   };
 
+  // NAV-02 (Phase 45) — keep the active tab in view inside the <sm
+  // horizontally-scrollable strip. A keyboard arrow-nav or a programmatic tab
+  // change can leave the selected tab clipped off-screen; scroll it back into
+  // view on every activeTab change. We scroll the STRIP (the role="tablist"
+  // scroll container — the tab button's direct parent, pinned by the axe
+  // aria-required-children gate) on its horizontal axis ONLY, never the page.
+  // The earlier `el.scrollIntoView({ block: "nearest" })` also moved the
+  // nearest VERTICAL scroll container, so switching tabs after scrolling down
+  // yanked the page back up to the strip — defeating changeTab's deliberate
+  // router.replace(..., { scroll: false }). `computeTabStripScroll` returns null
+  // when the tab is already visible (and at >=sm where the strip wraps and never
+  // overflows), so this is a no-op except when a horizontal correction is
+  // actually needed. Honor prefers-reduced-motion: instant ("auto") for reduce,
+  // smooth otherwise — never animate a forced scroll for reduced-motion users
+  // (UI-SPEC States row). The `typeof ... === "function"` guards keep it safe in
+  // environments without getBoundingClientRect / Element.scrollTo / matchMedia
+  // (jsdom, older browsers) — the effect no-ops there instead of throwing.
+  useEffect(() => {
+    const el = tabRefs.current[activeTab];
+    const strip = el?.parentElement;
+    if (
+      !el ||
+      !strip ||
+      typeof el.getBoundingClientRect !== "function" ||
+      typeof strip.scrollTo !== "function"
+    )
+      return;
+    const prefersReducedMotion =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const elRect = el.getBoundingClientRect();
+    const stripRect = strip.getBoundingClientRect();
+    const target = computeTabStripScroll({
+      // Active tab's left in the strip's CONTENT coordinate space (add back the
+      // current scrollLeft so it is comparable to the scrollLeft-based window).
+      elLeft: elRect.left - stripRect.left + strip.scrollLeft,
+      elWidth: elRect.width,
+      viewLeft: strip.scrollLeft,
+      viewWidth: strip.clientWidth,
+      prefersReducedMotion,
+    });
+    if (target) strip.scrollTo(target);
+  }, [activeTab]);
+
   // PR3 (dashboard parity) — count badges on Holdings + Outcomes tabs
   // matching the truth screenshot ("Holdings 8", "Outcomes 4"). Counts
   // come straight from the payload arrays already on `props`; no new
@@ -563,10 +637,26 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
             tablist wraps just the tabs; the actions are siblings in the same
             flex row. */}
         <div className="ml-auto flex items-center gap-1">
+          {/* NAV-02 (Phase 45) — CSS-first horizontally-scrollable tab strip at
+              <sm so all six surfaces stay reachable on a phone (no tab dropped).
+              JOURNEY-03 is preserved: this is the SAME element with the SAME
+              role="tablist" and the SAME direct role="tab" children — no role is
+              added to any wrapper and the tabs are NOT re-nested (re-nesting would
+              re-introduce the critical axe aria-required-children violation the
+              comment above warns about; the seeded composer-axe.spec.ts gate
+              catches a regression). `flex-nowrap overflow-x-auto` keeps the tabs on
+              one scrollable line at <sm; `sm:flex-wrap sm:overflow-x-visible`
+              restores the original wrap-on-one-row layout at >=sm. The native
+              scrollbar is hidden ([scrollbar-width:none]) and iOS momentum-scrolls
+              ([-webkit-overflow-scrolling:touch]); the cut-off tab peeking past the
+              right edge IS the scroll affordance — no edge-fade overlay is
+              added (DESIGN.md hairline-clean rule). `snap-x` + per-tab `snap-start shrink-0`
+              (appended to the parity-pinned TAB_BUTTON_* consts below) snap each
+              tab cleanly without compressing labels. */}
           <div
             role="tablist"
             aria-label="Allocation surfaces"
-            className="flex items-center gap-1"
+            className="flex flex-nowrap items-center gap-1 overflow-x-auto sm:flex-wrap sm:overflow-x-visible snap-x [scrollbar-width:none] [-webkit-overflow-scrolling:touch]"
           >
           {VISIBLE_TAB_KEYS.map((key) => {
             const isActive = activeTab === key;
@@ -587,7 +677,13 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
                 tabIndex={isActive ? 0 : -1}
                 onClick={() => changeTab(key)}
                 onKeyDown={(e) => handleTabKeyDown(e, key)}
-                className={isActive ? TAB_BUTTON_ACTIVE : TAB_BUTTON_INACTIVE}
+                // NAV-02 (Phase 45) — the parity-pinned TAB_BUTTON_* consts stay
+                // byte-identical; the scroll-snap classes are APPENDED here (not
+                // reordered into the consts) so the dashboard-parity Tailwind class
+                // order is untouched. `snap-start` aligns each tab to the strip
+                // start; `shrink-0` keeps labels from compressing in the
+                // flex-nowrap scroll container.
+                className={`${isActive ? TAB_BUTTON_ACTIVE : TAB_BUTTON_INACTIVE} snap-start shrink-0`}
               >
                 {label}
                 {typeof count === "number" && count > 0 ? (

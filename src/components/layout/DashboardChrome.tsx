@@ -64,7 +64,28 @@ export function DashboardChrome({
   if (isFullBleed) {
     return (
       <div className="flex h-full">
-        <main className="flex-1 overflow-y-auto pb-16 md:pb-0">
+        {/* NAV-03 app-shell skip-link — FIRST focusable element. Targets the
+            <main id="main-content" tabIndex={-1}> below. inert while the drawer
+            is open so the background skip-link can't be tabbed to behind the
+            modal (it's a SIBLING of <main>, not covered by <main>'s inert). */}
+        <a href="#main-content" className="app-skip-link" inert={menuOpen}>
+          Skip to main content
+        </a>
+        {/* NAV-03: inert the background <main> while the drawer is open so focus
+            cannot leak behind the backdrop. Scoped to <main> (the drawer's
+            SIBLING) — NEVER the `flex h-full` wrapper, which also contains the
+            drawer (that would inert the drawer too). React 19 native boolean
+            prop; SSR-safe since menuOpen starts false. MobileTopBar stays INSIDE
+            <main> on purpose: the open drawer's z-40 backdrop fully occludes the
+            sticky z-20 top bar (close happens via backdrop/Escape), and keeping
+            the hamburger inside the inert region keeps focus contained — moving
+            it out would make it tabbable outside the drawer. */}
+        <main
+          id="main-content"
+          tabIndex={-1}
+          inert={menuOpen}
+          className="flex-1 overflow-y-auto pb-16 md:pb-0"
+        >
           <MobileTopBar
             ref={hamburgerRef}
             onMenuClick={() => setMenuOpen(true)}
@@ -76,7 +97,13 @@ export function DashboardChrome({
           </div>
           <LegalFooter />
         </main>
-        <MobileNav />
+        <MobileNav
+          isAdmin={isAdmin}
+          isAllocator={isAllocator}
+          isManager={isManager}
+          flaggedCount={flaggedCount}
+          inert={menuOpen}
+        />
         <MobileSidebarDrawer
           open={menuOpen}
           onClose={() => setMenuOpen(false)}
@@ -93,6 +120,12 @@ export function DashboardChrome({
 
   return (
     <div className="flex h-full">
+      {/* NAV-03 app-shell skip-link — FIRST focusable element, before the
+          desktop sidebar. Targets the <main id="main-content" tabIndex={-1}>.
+          inert while the drawer is open (sibling of <main>, not covered by it). */}
+      <a href="#main-content" className="app-skip-link" inert={menuOpen}>
+        Skip to main content
+      </a>
       {/* Desktop sidebar */}
       <div className="hidden md:block">
         {/* Plan 11 / R5 — pass `flaggedCount` so Sidebar can render the
@@ -105,7 +138,16 @@ export function DashboardChrome({
           flaggedCount={flaggedCount}
         />
       </div>
-      <main aria-label="Dashboard content" className="flex-1 md:ml-[260px] overflow-y-auto pb-16 md:pb-0">
+      {/* NAV-03: inert the background <main> while the drawer is open (scoped to
+          <main> ONLY, not the `flex h-full` wrapper that also holds the drawer).
+          id + tabIndex make it the skip-link target. */}
+      <main
+        id="main-content"
+        tabIndex={-1}
+        inert={menuOpen}
+        aria-label="Dashboard content"
+        className="flex-1 md:ml-[260px] overflow-y-auto pb-16 md:pb-0"
+      >
         <MobileTopBar
           ref={hamburgerRef}
           onMenuClick={() => setMenuOpen(true)}
@@ -117,8 +159,16 @@ export function DashboardChrome({
         </div>
         <LegalFooter />
       </main>
-      {/* Mobile bottom nav */}
-      <MobileNav />
+      {/* Mobile bottom nav — inert while the drawer is open so its links (a
+          SIBLING of the inert <main>) are removed from the tab order behind the
+          backdrop; the drawer's manual Tab trap remains as defence-in-depth. */}
+      <MobileNav
+        isAdmin={isAdmin}
+        isAllocator={isAllocator}
+        isManager={isManager}
+        flaggedCount={flaggedCount}
+        inert={menuOpen}
+      />
       {/* Mobile sidebar drawer — opens from the top bar hamburger.
           The desktop Sidebar above is <div className="hidden md:block">
           so the drawer and desktop rail never render simultaneously. */}
@@ -127,6 +177,7 @@ export function DashboardChrome({
         onClose={() => setMenuOpen(false)}
         isAdmin={isAdmin}
         isAllocator={isAllocator}
+        isManager={isManager}
         populatedSlugs={populatedSlugs}
         triggerRef={hamburgerRef}
         flaggedCount={flaggedCount}

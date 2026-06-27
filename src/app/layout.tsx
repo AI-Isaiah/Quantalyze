@@ -1,6 +1,6 @@
 // Phase 16 / OBSERV-01 + OBSERV-04 — meta carries correlation_id to client
 // error boundaries (Plan 3 src/app/error.tsx + global-error.tsx consumers).
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import Script from "next/script";
 import { DM_Sans, Instrument_Serif, Geist_Mono } from "next/font/google";
 import "./globals.css";
@@ -33,6 +33,17 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Quantalyze",
   description: "Verified quantitative strategy marketplace",
+};
+
+// A11Y-02 / SC#2 — WCAG 1.4.4 Resize Text. Explicit zoom-permissive viewport.
+// Emits <meta name="viewport" content="width=device-width, initial-scale=1">.
+// maximumScale and userScalable are deliberately OMITTED: setting them would
+// disable pinch-zoom (a WCAG 1.4.4 failure) and trip the zoom-meta guard at
+// tests/visual/viewport-zoom-meta.test.ts. The typed export is the single
+// source of truth — do NOT hand-write a <meta name="viewport"> in <head>.
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
 };
 
 const plausibleDomain = process.env.NEXT_PUBLIC_PLAUSIBLE_DOMAIN;

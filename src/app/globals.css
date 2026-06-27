@@ -406,6 +406,40 @@ body[data-display-font="sans"] .font-display {
   outline-offset: 1px;
 }
 
+/* Phase 45 Plan 01 (NAV-03) — app-shell skip-link, generalized from the
+   factsheet `.strategy-v2-skip-link` above. Rendered as the FIRST focusable
+   element in DashboardChrome on every authed route; targets
+   <main id="main-content" tabIndex={-1}>. Visually hidden until focused, then
+   pinned top-left. z-index 100 clears the drawer overlay (z-40) and the bottom
+   nav (z-30) so it stays reachable with the mobile chrome present. The
+   factsheet's per-panel `.strategy-v2-skip-link` is kept intact above. */
+.app-skip-link {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+.app-skip-link:focus {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 100;
+  width: auto;
+  height: auto;
+  padding: 8px 12px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-accent);
+  color: var(--color-accent);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 400;
+  text-decoration: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
 /* ============================================================
    Factsheet v2 — print stylesheet
    ============================================================ */

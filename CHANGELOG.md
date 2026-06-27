@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.35.0.0] - 2026-06-27
+### Added — mobile-adaptive UI: responsive foundation + a complete navigation shell (v1.3 phases 44–45)
+
+The authenticated dashboard now works on a phone. This milestone opener lands two layers: the responsive primitives every later phase builds on, and a finished mobile navigation shell.
+
+Foundation primitives (phase 44): a SSR-safe `useBreakpoint` hook that names the current viewport class (mobile/tablet/desktop) using the Tailwind default thresholds and resolves to `desktop` on the server with no hydration mismatch; a `ResponsiveTable` wrapper that makes any wide table horizontally scrollable inside a focusable region whose accessible name announces the scroll affordance to screen readers; and a `ResponsiveChartFrame` that extracts the chart-sizing recipe (viewBox + `preserveAspectRatio` + CSS aspect-ratio) so charts scale to any viewport without letterboxing — the factsheet time-series chart now renders through it with byte-identical output. WCAG 1.4.4 (Resize Text) is satisfied by an explicit zoom-permissive viewport that never disables pinch-zoom, pinned by a source-scan guard. Two new e2e gates run at 320px against the public `/security` page: a reflow check (no horizontal scroll, no clipped content) and a target-size check (interactive controls meet the ≥44px touch floor).
+
+Navigation shell (phase 45): a role-aware bottom navigation bar for mobile that single-sources its items from the same role logic as the desktop sidebar (so the two never drift) and caps the primary set at five with Profile always present; the allocator surfaces lead with My Allocation, Risk, and Bridge. While the hamburger drawer is open, the background `<main>` and the bottom nav are marked `inert` so focus is fully contained behind the backdrop, and an app-shell "Skip to main content" link is now the first focusable element on every authenticated route. At narrow widths the six allocation surfaces stay reachable through a CSS-first horizontally-scrollable, scroll-snapping tab strip (no tab is dropped), which re-wraps to the original layout at ≥sm. A seeded e2e proves drawer keyboard containment, the skip link, and the 320px nav shell.
+
+### Fixed — two issues caught in the pre-landing review of the new navigation
+- The mobile bottom nav's "Discovery" item pointed at `/discovery`, which has no page and returns not-found; it now lands on the canonical `/discovery/crypto-sma` (the same target the discovery route already redirects to), matching the destination the desktop nav used before this shell replaced it.
+- Switching allocation tabs after scrolling down inside a long panel jumped the viewport back up to the tab strip, defeating the deliberate scroll-position preservation on tab change. The keep-the-active-tab-in-view behavior now scrolls only the tab strip's own horizontal axis and never the page, so vertical scroll position is preserved on every viewport. Reduced-motion users still get an instant (non-animated) correction.
+
 ## [0.34.0.3] - 2026-06-26
 ### Fixed — the Scenario composer's live-book baseline included a revoked exchange key the blend excluded
 

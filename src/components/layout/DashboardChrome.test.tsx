@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { Sidebar } from "./Sidebar";
 import { DashboardChrome } from "./DashboardChrome";
 import {
@@ -152,9 +152,12 @@ describe("DashboardChrome — standard vs full-bleed layout (M-0410)", () => {
         <div>page</div>
       </DashboardChrome>,
     );
-    // Sidebar emits the allocator workspace link; its presence proves the
-    // desktop sidebar subtree mounted (not the full-bleed branch).
-    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    // Phase 45: the role-aware MobileNav ALSO surfaces "My Allocation" now, so
+    // scope the assertion to the desktop Sidebar's <nav aria-label="Primary">
+    // (the bottom nav is <nav aria-label="Primary mobile">). Its presence there
+    // proves the desktop sidebar subtree mounted (not the full-bleed branch).
+    const desktopNav = screen.getByRole("navigation", { name: "Primary" });
+    expect(within(desktopNav).getByText("My Allocation")).toBeInTheDocument();
   });
 
   it("full-bleed route (/admin/match/[id]) drops the 'Dashboard content' main + desktop sidebar", () => {
