@@ -65,5 +65,5 @@
     "typescript": "^6",
     "vitest": "^4.1.2"
   },
-  "version": "0.35.0.4"
+  "version": "0.35.0.5"
 }

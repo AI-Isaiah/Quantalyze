@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.35.0.5] - 2026-06-28
+### Fixed — e2e "Seed demo data" step crashed on Node 20 (e2e job was red repo-wide)
+
+The CI e2e job's seed step died before it could insert a single row: `@supabase/realtime-js` 2.101 (pulled in by the `@supabase/supabase-js` bump) eagerly constructs a realtime client inside `createClient()`, and its WebSocket factory throws `Node.js 20 detected without native WebSocket support` — Node 20 has no native `WebSocket`, and the seed runner is pinned to Node 20. Every recent main commit was red on the advisory `e2e` job for this reason, leaving end-to-end coverage dark. The seed script never opens a realtime channel, so it now polyfills `globalThis.WebSocket` from the `ws` implementation that ships as a direct dependency of `@supabase/realtime-js` — guarded by a presence check so it stays a no-op on Node 22+, browsers, and a future CI Node bump. No new dependency, no Node-version or CI-cache churn.
+
 ## [0.35.0.4] - 2026-06-28
 ### Changed — analytics-service dependency group bump: supabase 2.31, fastapi 0.138, pandera 0.32 (#480)
 
