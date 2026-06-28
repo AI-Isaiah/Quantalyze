@@ -103,7 +103,17 @@ export async function launchBrowser(): Promise<Browser> {
         const chromium = (await import("@sparticuz/chromium")).default;
         return puppeteer.launch({
           args: chromium.args,
-          defaultViewport: chromium.defaultViewport,
+          // @sparticuz/chromium v149 removed the `defaultViewport` getter;
+          // inline the serverless preset it used to return so PDF layout
+          // (1920×1080 @1x) is byte-for-byte unchanged.
+          defaultViewport: {
+            deviceScaleFactor: 1,
+            hasTouch: false,
+            height: 1080,
+            isLandscape: true,
+            isMobile: false,
+            width: 1920,
+          },
           executablePath: await chromium.executablePath(),
           headless: true,
         });
