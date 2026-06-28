@@ -1,6 +1,7 @@
 "use client";
 
-import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Line, LineChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
+import { TouchTooltip } from "./TouchTooltip";
 import {
   CHART_ACCENT,
   CHART_BORDER,
@@ -41,7 +42,7 @@ export function RollingVolatilityChart({ data }: RollingVolatilityChartProps) {
             axisLine={false}
             tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
           />
-          <Tooltip
+          <TouchTooltip
             contentStyle={CHART_TOOLTIP_STYLE}
             formatter={(v) => [`${(Number(v) * 100).toFixed(2)}%`, "Volatility"]}
           />

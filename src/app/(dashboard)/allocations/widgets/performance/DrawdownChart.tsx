@@ -10,10 +10,10 @@ import {
   Area,
   AreaChart,
   ResponsiveContainer,
-  Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
+import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import {
   CHART_BORDER,
   CHART_NEGATIVE,
@@ -243,7 +243,7 @@ export default function DrawdownChart({
               tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
               domain={["dataMin", 0]}
             />
-            <Tooltip
+            <TouchTooltip
               formatter={(v) => [`${(Number(v) * 100).toFixed(2)}%`, "Drawdown"]}
               contentStyle={CHART_TOOLTIP_STYLE}
             />

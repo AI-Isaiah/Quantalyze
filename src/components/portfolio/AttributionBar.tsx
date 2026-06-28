@@ -1,6 +1,7 @@
 "use client";
 
-import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, Cell, ResponsiveContainer, XAxis, YAxis } from "recharts";
+import { TouchTooltip } from "@/components/charts/TouchTooltip";
 
 interface AttributionBarProps {
   data: { strategy_id: string; strategy_name: string; contribution: number }[] | null;
@@ -35,7 +36,7 @@ export function AttributionBar({ data }: AttributionBarProps) {
           axisLine={false}
           width={120}
         />
-        <Tooltip
+        <TouchTooltip
           formatter={(v) => [`${Number(v) >= 0 ? "+" : ""}${(Number(v) * 100).toFixed(2)}%`, "Contribution"]}
           contentStyle={{ fontSize: 12, borderColor: "#E2E8F0", borderRadius: 6 }}
         />

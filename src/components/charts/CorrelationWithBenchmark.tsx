@@ -6,10 +6,10 @@ import {
   LineChart,
   ReferenceLine,
   ResponsiveContainer,
-  Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
+import { TouchTooltip } from "./TouchTooltip";
 import type { StrategyAnalytics } from "@/lib/types";
 import {
   CORRELATION_90D_MIN_DAYS,
@@ -222,7 +222,7 @@ export function CorrelationWithBenchmark({
           tickFormatter={(v: number) => v.toFixed(1)}
         />
         <ReferenceLine y={0} stroke={CHART_TEXT_MUTED} strokeDasharray={CHART_REFERENCE_DASH} />
-        <Tooltip
+        <TouchTooltip
           contentStyle={{ fontSize: 12, borderColor: CHART_BORDER }}
           formatter={(v) => {
             const n = Number(v);

@@ -200,7 +200,7 @@ export default function SecurityPage() {
                   Allocators evaluating us under diligence —{" "}
                   <a
                     href="mailto:security@quantalyze.com?subject=Posture%20letter%20request"
-                    className="text-accent underline-offset-4 hover:underline"
+                    className="text-accent underline underline-offset-4"
                   >
                     request a posture letter
                   </a>
@@ -227,7 +227,7 @@ export default function SecurityPage() {
                 For coordinated vulnerability disclosure, our{" "}
                 <a
                   href="/.well-known/security.txt"
-                  className="text-accent underline-offset-4 hover:underline"
+                  className="text-accent underline underline-offset-4"
                 >
                   security.txt
                 </a>{" "}
@@ -323,7 +323,7 @@ export default function SecurityPage() {
               If you have an account, you can{" "}
               <a
                 href="/profile?tab=security"
-                className="text-accent underline-offset-4 hover:underline"
+                className="text-accent underline underline-offset-4"
               >
                 download your audit log
               </a>{" "}
@@ -392,7 +392,7 @@ export default function SecurityPage() {
               should email{" "}
               <a
                 href="mailto:security@quantalyze.com"
-                className="text-accent underline-offset-4 hover:underline"
+                className="text-accent underline underline-offset-4"
               >
                 security@quantalyze.com
               </a>
@@ -499,7 +499,7 @@ export default function SecurityPage() {
                 analytics service egress range. Email{" "}
                 <a
                   href="mailto:security@quantalyze.com"
-                  className="text-accent underline-offset-4 hover:underline"
+                  className="text-accent underline underline-offset-4"
                 >
                   security@quantalyze.com
                 </a>{" "}
@@ -518,7 +518,7 @@ export default function SecurityPage() {
                 to contact{" "}
                 <a
                   href="mailto:security@quantalyze.com"
-                  className="text-accent underline-offset-4 hover:underline"
+                  className="text-accent underline underline-offset-4"
                 >
                   security@quantalyze.com
                 </a>

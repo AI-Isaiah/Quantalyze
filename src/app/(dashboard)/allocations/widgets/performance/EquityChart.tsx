@@ -8,6 +8,7 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
 // throws the RSC "called on the server" boundary error. We import them for this
 // widget's own Props + re-export below so client-side importers are unchanged.
 import { toWealth, type WealthPoint } from "@/lib/scenario";
+import { useTapPin } from "@/hooks/useTapPin";
 import { CustomRangePicker } from "../../components/CustomRangePicker";
 import { useTweakValue } from "../../context/TweaksContext";
 import { WidgetState } from "../../components/WidgetState";
@@ -43,7 +44,7 @@ const sentryEmittedSites = new Set<string>();
 // search loops; collapse into one — JIT inlines, no perf hit. The
 // epochs array is assumed sorted ascending (invariant maintained by
 // sortedEquityPoints + sliceByPeriod's filter-only semantics).
-function nearestIndex(epochs: number[], target: number): number {
+export function nearestIndex(epochs: number[], target: number): number {
   let lo = 0;
   let hi = epochs.length - 1;
   while (lo < hi) {
@@ -55,6 +56,36 @@ function nearestIndex(epochs: number[], target: number): number {
     return lo - 1;
   }
   return lo;
+}
+
+// Phase 48 / CHART-01b — the SINGLE px→index mapping shared by BOTH the desktop
+// `handleMove` mouse path AND the touch `pointerToIndex` adapter wired into
+// `useTapPin`, so a tap pins exactly what hover reveals (parity is structural,
+// not asserted-by-coincidence). `px` is the chart-area-local x (already
+// `clientX - rect.left`). The body is a verbatim transcription of the original
+// handleMove chain (EquityChart.tsx:1213-1226) — same n===0/n===1 early arms,
+// same clamp, same epoch inversion, same O(log n) `nearestIndex`:
+//   - n === 0 → null (no selectable index; handleMove's `if (n===0) return`)
+//   - n === 1 → 0     (handleMove's `if (n===1) { setHoverIdx(0); return }`)
+//   - else    → nearestIndex over the clamped target epoch
+// Returning `null` (not a phantom index) for the empty window lets the touch
+// adapter feed `useTapPin` a real "off-grid → un-pin" signal.
+export interface EpochIndexGeom {
+  padL: number;
+  chartW: number;
+  firstEpochX: number;
+  totalMs: number;
+  visibleEpochs: number[];
+  n: number;
+}
+
+export function epochIndexFromPx(px: number, geom: EpochIndexGeom): number | null {
+  const { padL, chartW, firstEpochX, totalMs, visibleEpochs, n } = geom;
+  if (n === 0) return null;
+  if (n === 1) return 0;
+  const clampedPx = Math.max(padL, Math.min(padL + chartW, px));
+  const targetEpoch = firstEpochX + ((clampedPx - padL) / chartW) * totalMs;
+  return nearestIndex(visibleEpochs, targetEpoch);
 }
 
 function captureChartIssue(
@@ -1095,6 +1126,35 @@ export function EquityChart({
     hasScenario,
   ]);
 
+  // ── Touch tap-to-pin (CHART-01b, additive) ─────────────────────────
+  // Phase 48: wire the Phase-47 useTapPin gesture core onto the SAME <svg>
+  // additively. The desktop onMouseMove/handleMove/hoverIdx path stays
+  // byte-identical (below); this path only fires for pointerType "touch" (the
+  // hook gates taps on `ti.type === "touch"`). `pointerToIndex` reuses the EXACT
+  // shared `epochIndexFromPx` mapping handleMove runs, so a tap pins the value
+  // the desktop hover reveals. `selectedIdx`/`pinned` are the hook's own state —
+  // NOT added to any projection useMemo dep (Pitfall 7: that would re-introduce
+  // the per-pixel hover regression). Dismissal matches TimeSeriesChart: re-tap
+  // toggles off, a tap moves the pin, survives pointerleave, no auto-timer.
+  // RULES-OF-HOOKS: this call sits ABOVE the `!projection` early-return so it
+  // runs every render. `count` falls back to 0 and `pointerToIndex` guards on
+  // `projection`, so the warming-up render (no <svg>, no pointer events) is a
+  // harmless no-op.
+  const tap = useTapPin({
+    count: projection?.n ?? 0,
+    pointerToIndex: (clientX, _clientY, rect) => {
+      if (!projection) return null;
+      return epochIndexFromPx(clientX - rect.left, {
+        padL: projection.pad.l,
+        chartW: projection.chartW,
+        firstEpochX: projection.firstEpochX,
+        totalMs: projection.totalMs,
+        visibleEpochs: projection.visibleEpochs,
+        n: projection.n,
+      });
+    },
+  });
+
   // Single warm-up early-return — covers BOTH the empty-series case and the
   // degenerate-base (M-1063) case, which the memo collapses to `null`.
   if (!projection) {
@@ -1139,24 +1199,43 @@ export function EquityChart({
   // pixel position back to a target epoch and finding the nearest visible
   // data point. Clamp to [pad.l, pad.l+chartW] first so out-of-bounds
   // mouse events don't produce an impossible target epoch.
+  // Phase 48 / CHART-01b: handleMove now routes through the SHARED
+  // `epochIndexFromPx` helper so the desktop mouse path and the touch
+  // `pointerToIndex` adapter (wired into useTapPin below) compute the index
+  // from one implementation — a tap pins exactly what hover reveals.
+  // Behaviour is byte-identical to the previous inline chain:
+  //   n===0 → helper returns null → early-return without setting hoverIdx
+  //           (the old `if (n===0) return`);
+  //   n===1 → helper returns 0 → setHoverIdx(0) (the old single-point arm);
+  //   else  → helper returns the same clamp+epoch+nearestIndex result.
+  // The PR-3+4 performance H1 binary-search (O(log n) over the precomputed
+  // visibleEpochs cache, no per-pixel parseISO) lives inside the helper.
   function handleMove(e: React.MouseEvent<SVGSVGElement>) {
-    if (n === 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const px = e.clientX - rect.left;
-    if (n === 1) { setHoverIdx(0); return; }
-    // Clamp px to chart area
-    const clampedPx = Math.max(pad.l, Math.min(pad.l + chartW, px));
-    // Map pixel → target epoch
-    const targetEpoch = firstEpochX + ((clampedPx - pad.l) / chartW) * totalMs;
-    // PR-3+4 performance H1 (audit-2026-05-07): binary-search the
-    // precomputed visibleEpochs array (sorted ascending by construction
-    // — composite is f7-anchored on a monotonic equityDailyPoints, and
-    // sliceByPeriod only filters). Pre-fix this loop did n parseISO
-    // calls per mousemove pixel; now O(log n) via nearestIndex against
-    // a cached epoch array. Hover-drag is no longer linear in window
-    // length.
-    setHoverIdx(nearestIndex(visibleEpochs, targetEpoch));
+    const idx = epochIndexFromPx(px, {
+      padL: pad.l,
+      chartW,
+      firstEpochX,
+      totalMs,
+      visibleEpochs,
+      n,
+    });
+    if (idx == null) return;
+    setHoverIdx(idx);
   }
+
+  // Touch tap-to-pin (CHART-01b) is wired via `useTapPin` ABOVE the `!projection`
+  // warm-up early-return (rules-of-hooks) — see that call site for `tap`.
+
+  // The reveal renders the pinned tap (touch) when present, else the transient
+  // mouse-hover index — identical crosshair/dot/tooltip either way, reading the
+  // SAME precomputed values (no recompute). PIN-FIRST precedence mirrors
+  // HeatmapPanels' `pinned ?? hovered`: on a hybrid touch+mouse device a stray
+  // hover must NOT silently clear an explicit tap-pin. On a pure-mouse desktop
+  // `tap.selectedIdx` is always null (useTapPin only pins on pointerType
+  // "touch"), so this stays byte-identical to the hover-only path.
+  const reveal = tap.selectedIdx ?? hoverIdx;
 
   // ── Period toggle + range picker handlers ────────────────────────
   const setPeriodChecked = (p: Period) => {
@@ -1418,15 +1497,27 @@ export function EquityChart({
       </div>
       )}
 
-      <div style={{ position: "relative" }}>
+      {/* CHART-01b: pointer-coarse:min-h-[44px] makes the touch tap-target
+          contract explicit (WCAG 2.5.5). The chart body already exceeds 44px
+          (height=260) so this never resizes anything; the coarse-only class
+          leaves the desktop pointer-fine layout untouched. */}
+      <div
+        style={{ position: "relative" }}
+        className="pointer-coarse:min-h-[44px]"
+      >
         <svg
+          ref={tap.setChartEl}
           width={width}
           height={height}
           role="img"
           aria-label="Equity chart"
-          style={{ display: "block", cursor: "crosshair" }}
+          style={{ display: "block", cursor: "crosshair", touchAction: "pan-y" }}
           onMouseMove={handleMove}
           onMouseLeave={() => setHoverIdx(null)}
+          onPointerDown={tap.onPointerDown}
+          onPointerMove={tap.onPointerMove}
+          onPointerUp={tap.onPointerUp}
+          onPointerLeave={tap.onPointerLeave}
         >
           {/* Gradient fill — uses the prefixed `--color-chart-strategy`
               token (DESIGN.md institutional teal). The bare
@@ -1586,21 +1677,21 @@ export function EquityChart({
               emits y(NaN) = NaN into a SVG attribute, producing an invisible
               dot with no diagnostic. The vertical rule still renders so the
               date tooltip fires at the right x position. */}
-          {hoverIdx != null && hoverIdx < n && (
+          {reveal != null && reveal < n && (
             <g>
               <line
-                x1={x(hoverIdx)}
-                x2={x(hoverIdx)}
+                x1={x(reveal)}
+                x2={x(reveal)}
                 y1={pad.t}
                 y2={pad.t + chartH}
                 stroke="var(--color-chart-benchmark)"
                 strokeWidth={1}
                 strokeDasharray="2 2"
               />
-              {Number.isFinite(visibleNormalized[hoverIdx]) && (
+              {Number.isFinite(visibleNormalized[reveal]) && (
                 <circle
-                  cx={x(hoverIdx)}
-                  cy={y(visibleNormalized[hoverIdx])}
+                  cx={x(reveal)}
+                  cy={y(visibleNormalized[reveal])}
                   r={3.5}
                   fill="var(--color-chart-strategy)"
                   stroke="var(--color-surface)"
@@ -1616,8 +1707,8 @@ export function EquityChart({
             doesn't render "NaN%" to the allocator. The tooltip is simply
             suppressed for that index; the one-shot warn fires once per bad
             date so the case surfaces in local dev without flooding the log. */}
-        {hoverIdx != null && hoverIdx < n && (() => {
-          const i = hoverIdx;
+        {reveal != null && reveal < n && (() => {
+          const i = reveal;
           const portNorm = visibleNormalized[i];
           if (!Number.isFinite(portNorm)) {
             if (typeof console !== "undefined") {

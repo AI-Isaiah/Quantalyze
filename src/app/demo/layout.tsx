@@ -29,7 +29,13 @@ export default function DemoLayout({ children }: { children: React.ReactNode }) 
 
 function DemoBanner() {
   return (
-    <div className="sticky top-0 z-10 border-b border-border bg-surface">
+    // A11Y-01 (Phase 48): the sticky demo banner is site chrome (logo +
+    // sign-up CTA) that sat outside any landmark, tripping axe's `region`
+    // rule ("All page content should be contained by landmarks"). A <header>
+    // is the correct landmark for this masthead; the page body keeps its own
+    // <main> below, so there is exactly one <main> (no duplicate-landmark
+    // trap — the /demo route does not nest an authed <main>).
+    <header className="sticky top-0 z-10 border-b border-border bg-surface">
       <div className="mx-auto flex max-w-[1100px] items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
         <div className="min-w-0">
           <p className="font-display text-xl text-text-primary">Quantalyze</p>
@@ -44,6 +50,6 @@ function DemoBanner() {
           Sign up →
         </Link>
       </div>
-    </div>
+    </header>
   );
 }

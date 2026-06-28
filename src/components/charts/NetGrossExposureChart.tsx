@@ -7,10 +7,10 @@ import {
   Line,
   ReferenceLine,
   ResponsiveContainer,
-  Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
+import { TouchTooltip } from "./TouchTooltip";
 import {
   CHART_ACCENT,
   CHART_BORDER,
@@ -59,7 +59,7 @@ export function NetGrossExposureChart({ data }: NetGrossExposureChartProps) {
             axisLine={false}
             tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
           />
-          <Tooltip
+          <TouchTooltip
             contentStyle={CHART_TOOLTIP_STYLE}
             formatter={(v, name) => [`${(Number(v) * 100).toFixed(1)}%`, String(name)]}
           />

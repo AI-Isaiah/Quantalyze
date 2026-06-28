@@ -6,9 +6,9 @@ import {
   Bar,
   XAxis,
   YAxis,
-  Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { buildCompositeReturns } from "../lib/composite-returns";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
@@ -138,7 +138,7 @@ function TailRiskInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
               tickLine={false}
               axisLine={false}
             />
-            <Tooltip
+            <TouchTooltip
               contentStyle={{
                 fontSize: 12,
                 borderColor: "#E2E8F0",

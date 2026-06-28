@@ -1,7 +1,8 @@
 "use client";
 
 import { useMemo } from "react";
-import { Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis, Legend } from "recharts";
+import { Line, LineChart, ReferenceLine, ResponsiveContainer, XAxis, YAxis, Legend } from "recharts";
+import { TouchTooltip } from "./TouchTooltip";
 import {
   CHART_ACCENT,
   CHART_BORDER,
@@ -154,7 +155,7 @@ export function RollingMetrics({
             tickLine={false}
             axisLine={false}
           />
-          <Tooltip
+          <TouchTooltip
             contentStyle={{ fontSize: 12, borderColor: CHART_BORDER }}
             formatter={(v, name) => [Number(v).toFixed(2), labelFor(String(name))]}
           />

@@ -73,6 +73,11 @@ __pycache__/
 /test-results/
 /playwright-report/
 
+# Phase 48-05 / A11Y-03: @lhci/cli writes its run output (HTML/JSON Lighthouse
+# reports + link records) here on every `lhci autorun`. Runtime artifact only —
+# the budget config is lighthouserc.json (committed); this dir is never committed.
+.lighthouseci/
+
 # screenshots and docs at repo root
 *.png
 *.docx

@@ -579,6 +579,12 @@ jobs:
     # branch protection rules — silently letting broken code merge. The
     # explicit `exit 1` on any non-success forces a definite `failure`
     # status that all branch-protection configurations honor.
+    #
+    # Phase 48-05 / A11Y-03 (FLOW-01 spirit — prove it's actually wired):
+    # `lighthouse-mobile` is added to BOTH `needs` AND the result-check loop
+    # below so the mobile perf budget is a BLOCKING gate via this single
+    # required aggregator check (not relying on a separately-configured
+    # branch-protection entry). Defined as the `lighthouse-mobile:` job above.
     runs-on: ubuntu-latest
     needs:
       - frontend-typecheck
@@ -587,6 +593,7 @@ jobs:
       - frontend-coverage
       - frontend-policy
       - frontend-build
+      - lighthouse-mobile
     if: always()
     steps:
       - name: Verify all frontend-* jobs succeeded
@@ -598,7 +605,8 @@ jobs:
             "frontend-test=${{ needs.frontend-test.result }}" \
             "frontend-coverage=${{ needs.frontend-coverage.result }}" \
             "frontend-policy=${{ needs.frontend-policy.result }}" \
-            "frontend-build=${{ needs.frontend-build.result }}"; do
+            "frontend-build=${{ needs.frontend-build.result }}" \
+            "lighthouse-mobile=${{ needs.lighthouse-mobile.result }}"; do
             name="${r%=*}"; result="${r#*=}"
             echo "$name: $result"
             if [ "$result" != "success" ]; then fail=1; fi
@@ -1056,7 +1064,13 @@ jobs:
             fi
             sleep 1
           done
-          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts
+          # Phase 48-04 / A11Y-01 / FLOW-01 (place 1, UNSEEDED): the new
+          # e2e/axe-app-wide.spec.ts runs its PUBLIC route × viewport rows here
+          # (those describe blocks carry NO seed gate); its authed + embedded
+          # describes self-skip without seed env (place 2 = the spec's
+          # HAS_SEED_ENV const) and run in the seeded MA-8 list below. Adding a
+          # spec? Update BOTH lists or the gate silently never runs (burned >=3x).
+          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/axe-app-wide.spec.ts
           # v0.17.1.18: belt + suspenders + nuclear port-3000 cleanup.
           # The v0.17.1.15 attempt (lsof + 5s poll) was insufficient — CI
           # confirmed (PR #98 run #320) that the next-server grandchild
@@ -1274,6 +1288,23 @@ jobs:
           # SEEDED chart-tap-rect cases (which self-skip in the unseeded run)
           # actually execute; its unseeded /security case keeps running in the
           # unseeded list. Both new gates are HAS_SEED_ENV-guarded (place 2).
+          # Phase 48-04 / A11Y-01: e2e/axe-app-wide.spec.ts is intentionally
+          # NOT in this seeded MA-8 list — it runs PUBLIC-only in the unseeded
+          # list above (line ~1059), where its public route × viewport matrix
+          # is green. Its authed/embedded describes self-skip without seed env
+          # (the spec's HAS_SEED_ENV const) and are therefore dormant in CI.
+          # WHY public-only: the MA-8 invocation shares ONE test database across
+          # all specs, which is NOT hermetic for a broad authed seeding matrix —
+          # running axe-app-wide here regressed three other behaviours (it
+          # published a non-example strategy into the crypto-sma category that
+          # discovery-hide-examples-default.spec.ts asserts is empty; its public
+          # rows re-ran against the real-test-Supabase rebuild and 500'd /demo;
+          # and the polluted DB state produced spurious axe findings on the
+          # wizard that the focused wizard-axe.spec.ts — same surface, same
+          # rules — does NOT see). Authed-route a11y stays covered by the focused
+          # MA-8 axe specs (discovery-axe / strategy-v2-axe / composer-axe /
+          # wizard-axe). Re-enabling the authed/mobile matrix needs a hermetic
+          # per-spec seeded DB (deferred), not this shared invocation.
           # Same kill+wait+nuke pattern as the unconditional step above so any
           # follow-up runner work (artifact upload) doesn't race on resources.
           kill $SERVER_PID 2>/dev/null || true
@@ -1334,3 +1365,116 @@ jobs:
           name: playwright-report
           path: playwright-report/
           retention-days: 7
+
+  lighthouse-mobile:
+    # Phase 48-05 / A11Y-03: mobile Lighthouse performance budget gating the
+    # 5 PUBLIC routes (lighthouserc.json). Mirrors the e2e job's
+    # build-artifact-restore + start-server shape: download the production
+    # nextjs-build artifact (.next + public), `npm run start` against the
+    # PRODUCTION build, then `npx lhci autorun` (Pitfall 6 — never next dev).
+    #
+    # SECURITY (T-48-05-INFO): this job receives NO TEST_SUPABASE_* secret.
+    # lighthouserc.json collects PUBLIC routes ONLY (headless can't auth) and
+    # uploads to temporary-public-storage, so nothing sensitive could leak to
+    # that public target. Build/runtime env is PLACEHOLDER only, exactly like
+    # the unconditional e2e spec set — public routes render on placeholders.
+    # Authed-route perf is covered by the human real-device sign-off
+    # (48-HUMAN-UAT.md / SC#5), not by lhci.
+    runs-on: ubuntu-latest
+    # Depend on the artifact producer (frontend-build) + typecheck so we don't
+    # burn a runner when the build/types are already known-broken. Same `needs`
+    # rationale as the e2e job above (don't gate on the slow unit-test shard).
+    needs:
+      - frontend-build
+      - frontend-typecheck
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 20
+          cache: npm
+      # Restore the shared node_modules cache (populated by deps-cache) — same
+      # restore-only pattern as the other frontend-* jobs. @lhci/cli is a pinned
+      # devDependency (0.15.1), so a cache hit already carries it.
+      - name: Restore node_modules
+        id: node_modules_cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+      - name: npm ci (cache miss; retry transient network failures)
+        if: steps.node_modules_cache.outputs.cache-hit != 'true'
+        run: |
+          n=0
+          until npm ci --prefer-offline --no-audit --no-fund; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "npm ci failed after $n attempts"; exit 1; fi
+            echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
+      # lhci drives a real headless Chrome (chrome-launcher). Reuse the trusted
+      # `playwright install chromium` path (already used by the e2e job) rather
+      # than adding a third-party Chrome-setup action (supply-chain surface).
+      # chrome-launcher honours $CHROME_PATH at top priority (verified:
+      # node_modules/chrome-launcher/dist/chrome-finder.js:71-80), so we point
+      # it at the installed Chromium binary explicitly.
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('node_modules/@playwright/test/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+      - name: Install Playwright Chromium (for lhci's headless Chrome)
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            echo "Cache hit — chromium bundle restored. Runner image has system libs; skipping apt install."
+          else
+            npx playwright install --with-deps chromium
+          fi
+      # Download the SAME production .next + public artifact the e2e job uses.
+      # It was built with PLACEHOLDER NEXT_PUBLIC_* (frontend-build) — public
+      # routes render fine on placeholders, and lhci needs no real secret.
+      - name: Download .next + public artifact from frontend-build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: nextjs-build
+      - name: Run Lighthouse mobile budget (lhci autorun against npm run start)
+        run: |
+          # Resolve the Playwright-installed Chromium so chrome-launcher uses it
+          # (top-priority via $CHROME_PATH). The glob covers the linux headless
+          # shell layout playwright install lays down.
+          CHROME_BIN="$(find "$HOME/.cache/ms-playwright" -name 'chrome' -path '*chrome-linux*' -type f 2>/dev/null | head -1)"
+          if [ -z "$CHROME_BIN" ]; then
+            CHROME_BIN="$(find "$HOME/.cache/ms-playwright" -name 'headless_shell' -type f 2>/dev/null | head -1)"
+          fi
+          if [ -z "$CHROME_BIN" ]; then
+            echo "::error::Could not locate a Playwright-installed Chromium for lhci"; exit 1
+          fi
+          echo "Using CHROME_PATH=$CHROME_BIN"
+          export CHROME_PATH="$CHROME_BIN"
+          # lighthouserc.json owns startServerCommand (`npm run start`) + the
+          # ready-pattern wait + the 5 public URLs + the mobile form-factor +
+          # the error-level minScore. lhci starts/stops the server itself.
+          npx lhci autorun --config=lighthouserc.json
+        env:
+          # PLACEHOLDER env ONLY — public routes render on placeholders and lhci
+          # needs no real secret. Deliberately NO TEST_SUPABASE_* here
+          # (T-48-05-INFO): the lhci report uploads to temporary-public-storage.
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
+          SUPABASE_SERVICE_ROLE_KEY: placeholder_service_role
+          ADMIN_EMAIL: test@example.com
+          PLATFORM_NAME: Quantalyze
+          PLATFORM_EMAIL: test@quantalyze.com
+      - name: Upload Lighthouse reports on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lighthouse-mobile-report
+          path: .lighthouseci/
+          retention-days: 7
+          if-no-files-found: ignore

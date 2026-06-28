@@ -35,7 +35,7 @@
  * (place 1). "Proven to execute in CI (passed, not skipped) when
  * vars.E2E_TEST_DB_CONFIGURED == 'true'" is the explicit post-push must_have.
  */
-import { test } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 import { assertNoReflow } from "./helpers/reflow";
 
@@ -149,5 +149,139 @@ test.describe("reflow sweep (WCAG 1.4.10 / 1.4.4) @ 320px — authed", () => {
     // The honest-empty headline is the EmptyState card's own <h2> — a real
     // honest-empty DOM node, not generic chrome (Pitfall 5).
     await assertNoReflow(page, 'h2:has-text("No positions to analyze yet")');
+  });
+});
+
+// Phase 48-05 / A11Y-03 (SC#4) — rotate-stability fold. ADDITIVE to this
+// already-seeded, already-dual-wired spec (it is in the ci.yml seeded MA-8 list
+// AND HAS_SEED_ENV-gated above), so NO new FLOW-01 wiring is needed (the
+// composer-axe GUARD-03 fold precedent). NOT a new harness — a self-contained
+// describe in the existing mobile host spec, per the A11Y-03 contract.
+//
+// Proves that rotating the viewport portrait -> landscape -> portrait on an
+// authed route that mounts a ResizeObserver-driven chart (/allocations ->
+// EquityChart's measured-width ResizeObserver, EquityChart.tsx:517-528) does
+// NOT emit the "ResizeObserver loop completed with undelivered notifications"
+// browser error (the classic feedback-loop symptom of a resize handler that
+// writes layout-affecting state synchronously inside the observer callback) and
+// does NOT grow JS heap unboundedly across the rotate cycle (a leaked
+// observer / listener per rotate). The console listener is registered BEFORE
+// navigation so a load-time RO loop is also caught.
+test.describe("rotate-stability (SC#4) — /allocations EquityChart, authed", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "rotate-stability: seed-helper env vars not wired " +
+      "(set TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY) — " +
+      "skipping prevents a false-green against an unhydrated login page (W-02).",
+  );
+
+  let allocator: Awaited<ReturnType<typeof seedTestAllocator>>;
+
+  test.beforeAll(async () => {
+    allocator = await seedTestAllocator();
+  });
+
+  test.beforeEach(async ({ page }) => {
+    await loginViaForm(page, allocator.email, allocator.password);
+  });
+
+  test("no ResizeObserver loop error + bounded heap across portrait<->landscape rotate", async ({
+    page,
+  }) => {
+    // Register the console listener BEFORE navigation so a load-time RO loop is
+    // captured too (the demo-public/wizard-hydration-probe page.on idiom).
+    const consoleErrors: string[] = [];
+    page.on("console", (m) => {
+      if (m.type() === "error") consoleErrors.push(m.text());
+    });
+    // pageerror catches an uncaught RO-loop exception that some browsers throw
+    // rather than logging to console.
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err) => {
+      pageErrors.push(err.message);
+    });
+
+    // Start in portrait phone size. EquityChart mounts on /allocations
+    // (AllocationDashboardV2 performance widget); its ResizeObserver re-measures
+    // width on every viewport change.
+    await page.setViewportSize({ width: 375, height: 812 });
+    const res = await page.goto("/allocations");
+    if (res && res.status() >= 400) {
+      throw new Error(
+        `/allocations returned HTTP ${res.status()} — cannot run rotate-stability case`,
+      );
+    }
+    // Fail loud on an unhydrated/login page (Pitfall 4) — anchor on the
+    // route-specific "My Allocation" <h1> the seeded allocator always renders.
+    await expect(page.locator('h1:has-text("My Allocation")')).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // performance.memory is a Chromium-only, opt-in heap gauge; read it if
+    // present (it is under headless Chromium) and skip the memory bound
+    // gracefully otherwise (SC#4 says "stable memory", a BOUNDED check — never
+    // a hard byte count, which would flake on GC timing).
+    const readHeap = async (): Promise<number | null> =>
+      page.evaluate(() => {
+        const mem = (
+          performance as Performance & { memory?: { usedJSHeapSize: number } }
+        ).memory;
+        return mem ? mem.usedJSHeapSize : null;
+      });
+
+    const heapBefore = await readHeap();
+
+    // Rotate portrait -> landscape -> portrait, settling between each so the
+    // ResizeObserver callback + any rAF-scheduled re-measure runs to quiescence.
+    const rotations = [
+      { width: 812, height: 375, label: "landscape" },
+      { width: 375, height: 812, label: "portrait" },
+      { width: 812, height: 375, label: "landscape" },
+      { width: 375, height: 812, label: "portrait" },
+    ];
+    for (const r of rotations) {
+      await page.setViewportSize({ width: r.width, height: r.height });
+      // Let layout + the ResizeObserver callback + a frame settle.
+      await page.waitForTimeout(250);
+      // Keep the chart in view across the cycle (it must stay mounted for the
+      // ResizeObserver to keep firing — a leaked observer would compound here).
+      await expect(page.locator('h1:has-text("My Allocation")')).toBeVisible();
+    }
+
+    // SC#4 core assertion: NO ResizeObserver-loop error in console OR as an
+    // uncaught pageerror across the whole rotate cycle.
+    const roLoopConsole = consoleErrors.filter((t) =>
+      /ResizeObserver loop/i.test(t),
+    );
+    const roLoopPageErr = pageErrors.filter((t) =>
+      /ResizeObserver loop/i.test(t),
+    );
+    expect(
+      roLoopConsole,
+      `ResizeObserver loop console errors during rotate: ${JSON.stringify(roLoopConsole)}`,
+    ).toEqual([]);
+    expect(
+      roLoopPageErr,
+      `ResizeObserver loop pageerrors during rotate: ${JSON.stringify(roLoopPageErr)}`,
+    ).toEqual([]);
+
+    // SC#4 stable-memory: a BOUNDED growth check, only when the gauge exists.
+    // A leaked observer/listener per rotate would blow well past a generous 4x
+    // bound; transient GC jitter stays comfortably under it. Skip cleanly if
+    // performance.memory is unavailable in the runner (never a hard byte count).
+    const heapAfter = await readHeap();
+    if (heapBefore !== null && heapAfter !== null && heapBefore > 0) {
+      const growthRatio = heapAfter / heapBefore;
+      expect(
+        growthRatio,
+        `JS heap grew ${growthRatio.toFixed(2)}x across the rotate cycle ` +
+          `(before=${heapBefore} after=${heapAfter}) — suspected leaked ` +
+          `ResizeObserver/listener per rotate`,
+      ).toBeLessThan(4);
+    } else {
+      console.log(
+        "rotate-stability: performance.memory unavailable — heap-bound check skipped (RO-loop assertion still enforced).",
+      );
+    }
   });
 });

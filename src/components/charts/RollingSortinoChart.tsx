@@ -1,6 +1,7 @@
 "use client";
 
-import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Line, LineChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
+import { TouchTooltip } from "./TouchTooltip";
 import {
   CHART_ACCENT,
   CHART_BORDER,
@@ -40,7 +41,7 @@ export function RollingSortinoChart({ data }: RollingSortinoChartProps) {
             axisLine={false}
             tickFormatter={(v: number) => v.toFixed(2)}
           />
-          <Tooltip
+          <TouchTooltip
             contentStyle={CHART_TOOLTIP_STYLE}
             formatter={(v) => [Number(v).toFixed(2), "Sortino"]}
           />

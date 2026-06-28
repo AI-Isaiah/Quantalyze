@@ -71,6 +71,13 @@ export default async function Home() {
         </div>
       </header>
 
+      {/* A11Y-01 (Phase 48): the landing body lives in a <main> landmark so
+          axe's landmark-one-main + page-has-main + region rules pass. The root
+          layout (src/app/layout.tsx) renders {children} with NO shared <main>
+          wrapper (so it does NOT double-wrap authed routes that supply their
+          own <main>); the public landing page therefore owns its own <main>
+          here, between the page-local <header> and <footer>. */}
+      <main>
       {/* Hero */}
       <section className="mx-auto max-w-6xl px-6 py-24 md:py-32 text-center">
         <div className="mx-auto max-w-3xl">
@@ -262,6 +269,7 @@ export default async function Home() {
           </div>
         </div>
       </section>
+      </main>
 
       {/* Footer */}
       <footer className="border-t border-border bg-white">

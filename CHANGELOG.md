@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.35.0.3] - 2026-06-28
+### Added — Recharts + EquityChart go touch, and "v1.3 done" becomes falsifiable (v1.3 phase 48)
+
+The last and weakest chart family answers a touch. The 18 Recharts charts that previously showed a tooltip only on a desktop hover (the allocator widgets, the rolling-metrics / drawdown / histogram / exposure / correlation charts, the portfolio donut + attribution bars, the strategy compare overlay) now flip to a tap-to-show/tap-to-pin tooltip on a phone — wired through one shared `TouchTooltip` shim that sets Recharts' native `trigger="click"` at the mobile breakpoint and leaves `trigger="hover"` everywhere else, so every desktop chart render stays byte-identical. The sparkline that never had a tooltip is left alone (its value is already in the adjacent KPI cell). The 2277-line hand-rolled `EquityChart` is tuned for touch WITHOUT a rewrite: the Phase-47 `useTapPin` gesture core is wired additively onto its existing `<svg>`, with the touch `pointerToIndex` and the desktop `handleMove` routing through one shared `epochIndexFromPx` helper so a tap pins exactly what hover reveals; the desktop mouse path, the ResizeObserver measured-width path, and the projection memo are untouched.
+
+"v1.3 done" is now a CI fact, not a claim. A new app-wide axe WCAG-AA gate (`axe-app-wide`) covers every primary route at BOTH a desktop and a 375px mobile viewport, FLOW-01 dual-wired into the seeded and unseeded CI lists; the embedded factsheet's legitimate landmark nesting is handled with the scoped serious+critical filter (never a rule disable), while the standalone factsheet stays strict. The complete bespoke gate matrix — 320px reflow, 44px target-size (now including the EquityChart tap-rect), zoom-meta grep, mobile keyboard/focus — runs app-wide as blocking checks beside it. A mobile performance budget gates the five public routes via `@lhci/cli` and a new `lighthouse-mobile` CI job (mobile form-factor, thresholds seeded from a real baseline and ratcheted over time; no Supabase secrets, public routes only), plus a rotate-stability assertion that fails on a ResizeObserver-loop error. A `48-HUMAN-UAT.md` checklist drives the real-device authed sign-off a headless browser can't perform. This completes milestone v1.3.
+
+### Fixed — public-route accessibility debt the new strict axe matrix surfaced
+The app-wide strict matrix did its job and caught four pre-existing WCAG-AA failures on the public routes, fixed at root: the landing page wraps its content in a `<main>` landmark (page-local, so authed routes keep exactly one `<main>` — no duplicate-landmark regression); the `/security` page's inline prose links now carry a persistent underline so they're distinguishable without colour (WCAG 1.4.1); the `/for-quants` definition list is valid markup; and the `/demo` banner sits in a `<header>` landmark.
+
+### Fixed — issues caught in the pre-landing review army + red-team
+- Two latent CI failures that vitest masked were root-fixed before they could fail CI cold: a `TS2322` in the `TouchTooltip` test (the test formatter was typed narrower than Recharts' `Formatter<ValueType>`; esbuild type-stripping hid it from vitest while `tsc --noEmit` would have rejected it), and a `react-hooks/rules-of-hooks` violation where `useTapPin` was called below the EquityChart warm-up early-return (hoisted above it, with the projection read lazily and null-guarded).
+- The EquityChart reveal precedence was hover-first (`hoverIdx ?? tap.selectedIdx`), so on a hybrid touch+mouse device a stray hover silently cleared an explicit tap-pin; it's now pin-first (`tap.selectedIdx ?? hoverIdx`), matching the tap-to-pin intent, with a render-level guard test.
+- A new whole-codebase grep guard (`recharts-touchtooltip-usage`) locks the contract that `TouchTooltip` is the only file importing the raw Recharts `<Tooltip>`, so a reverted or forgotten swap can't silently ship a hover-only mobile chart.
+
+### Changed
+- DESIGN.md's Decisions Log records the inline-prose-link underline as the one approved visual change in the phase-48 a11y remediation, scoped to body-prose links only (nav/button/card links unaffected).
+
 ## [0.35.0.2] - 2026-06-28
 ### Added — every chart reveals its values by tap on a phone, and stays legible at 320px (v1.3 phase 47)
 

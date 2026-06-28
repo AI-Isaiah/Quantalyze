@@ -6,10 +6,10 @@ import {
   Bar,
   XAxis,
   YAxis,
-  Tooltip,
   ResponsiveContainer,
   Cell,
 } from "recharts";
+import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
 import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
@@ -167,7 +167,7 @@ function RiskDecompositionInner({ data }: { data: RiskWidgetData } & BaseWidgetP
             axisLine={false}
             width={80}
           />
-          <Tooltip
+          <TouchTooltip
             contentStyle={{
               fontSize: 12,
               borderColor: "#E2E8F0",

@@ -1,6 +1,7 @@
 "use client";
 
-import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
+import { Cell, Pie, PieChart, ResponsiveContainer } from "recharts";
+import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import { formatCurrency, formatNumber, formatPercent, STRATEGY_PALETTE } from "@/lib/utils";
 import { SyncBadge } from "@/components/strategy/SyncBadge";
 
@@ -53,7 +54,7 @@ export function CompositionDonut({ strategies }: CompositionDonutProps) {
                 <Cell key={i} fill={STRATEGY_PALETTE[i % STRATEGY_PALETTE.length]} />
               ))}
             </Pie>
-            <Tooltip
+            <TouchTooltip
               formatter={(v, name) => [`${(Number(v) * 100).toFixed(1)}%`, name]}
               contentStyle={{ fontSize: 12, borderColor: "#E2E8F0", borderRadius: 6 }}
             />

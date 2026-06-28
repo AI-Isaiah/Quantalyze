@@ -33,12 +33,17 @@ vi.mock("recharts", () => {
     formatter?: (name: string) => React.ReactNode;
   }) => <div data-testid="legend">{formatter ? formatter("sharpe_365d") : null}</div>;
   Legend.displayName = "RechartsMockLegend";
+  // CHART-01b — surface the `trigger` the TouchTooltip shim injects so a test
+  // can prove the default-desktop render resolves to "hover" (byte-identical to
+  // pre-shim, where Recharts' own default trigger is "hover").
   const Tooltip = ({
     formatter,
+    trigger,
   }: {
     formatter?: (value: number, name: string) => [string, React.ReactNode];
+    trigger?: string;
   }) => (
-    <div data-testid="tooltip">
+    <div data-testid="tooltip" data-trigger={trigger ?? ""}>
       {formatter ? formatter(0.5, "sharpe_365d")[1] : null}
     </div>
   );
@@ -246,5 +251,21 @@ describe("RollingMetrics seriesLabels override (WR-01)", () => {
     render(<RollingMetrics data={sampleData365} />);
     expect(screen.getByTestId("legend").textContent).toBe("365d");
     expect(screen.getByTestId("tooltip").textContent).toBe("365d");
+  });
+});
+
+describe("RollingMetrics desktop byte-identity (CHART-01b, LineChart family)", () => {
+  // useBreakpoint is NOT mocked here, so the real SSR-safe hook resolves to
+  // "desktop" on its all-false jsdom media-query snapshot (useBreakpoint.ts:25-30).
+  // The TouchTooltip shim must therefore inject trigger="hover" — Recharts' own
+  // default — so the desktop render is byte-identical to the pre-shim chart
+  // (Assumption A1). Falsifiable: a regression that hard-codes "click", or that
+  // reads the breakpoint as mobile on the server, fails this exactly.
+  it("renders the Recharts tooltip with trigger=\"hover\" on the default desktop viewport", () => {
+    render(<RollingMetrics data={sampleData} />);
+    const tooltip = screen.getByTestId("tooltip");
+    expect(tooltip.getAttribute("data-trigger")).toBe("hover");
+    // No tap-to-pin "click" trigger leaks into the desktop render.
+    expect(tooltip.getAttribute("data-trigger")).not.toBe("click");
   });
 });

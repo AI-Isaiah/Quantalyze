@@ -1,6 +1,7 @@
 "use client";
 
-import { Area, AreaChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, Line, ResponsiveContainer, XAxis, YAxis } from "recharts";
+import { TouchTooltip } from "./TouchTooltip";
 import {
   CHART_ACCENT,
   CHART_BORDER,
@@ -84,7 +85,7 @@ export function DrawdownChart({ data, benchmarkSeries }: DrawdownChartProps) {
           tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
           domain={["dataMin", 0]}
         />
-        <Tooltip
+        <TouchTooltip
           formatter={(v, name) => [
             `${(Number(v) * 100).toFixed(2)}%`,
             name === "benchmarkDrawdown" ? "BTC" : "Drawdown",

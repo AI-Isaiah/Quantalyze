@@ -8,10 +8,10 @@ import {
   Bar,
   XAxis,
   YAxis,
-  Tooltip,
   ResponsiveContainer,
   Legend,
 } from "recharts";
+import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
 import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 
@@ -164,7 +164,7 @@ function AlphaBetaDecompositionInner({ data }: { data: RiskWidgetData } & BaseWi
               axisLine={false}
               width={0}
             />
-            <Tooltip
+            <TouchTooltip
               formatter={(v) => [`${(Number(v) * 100).toFixed(2)}%`]}
               contentStyle={{ fontSize: 12, borderColor: "#E2E8F0" }}
             />
