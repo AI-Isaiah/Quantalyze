@@ -6,10 +6,10 @@ import {
   Line,
   LineChart,
   ResponsiveContainer,
-  Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
+import { TouchTooltip } from "./TouchTooltip";
 import {
   CHART_ACCENT,
   CHART_BORDER,
@@ -87,7 +87,7 @@ export function RollingAlphaBetaChart({
             axisLine={false}
             tickFormatter={(v: number) => v.toFixed(2)}
           />
-          <Tooltip
+          <TouchTooltip
             contentStyle={CHART_TOOLTIP_STYLE}
             formatter={(v, name) => [Number(v).toFixed(3), String(name)]}
           />

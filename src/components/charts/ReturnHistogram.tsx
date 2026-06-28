@@ -1,6 +1,7 @@
 "use client";
 
-import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Cell } from "recharts";
+import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis, Cell } from "recharts";
+import { TouchTooltip } from "./TouchTooltip";
 import {
   CHART_BORDER,
   CHART_NEGATIVE,
@@ -82,7 +83,7 @@ export function ReturnHistogram({ returns, benchmarkReturns, bins = 20 }: Return
           tickLine={false}
           axisLine={false}
         />
-        <Tooltip
+        <TouchTooltip
           formatter={(v) => [Number(v), "Count"]}
           contentStyle={{ fontSize: 12, borderColor: CHART_BORDER }}
         />

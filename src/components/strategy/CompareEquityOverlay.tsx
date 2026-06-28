@@ -7,9 +7,9 @@ import {
   Line,
   XAxis,
   YAxis,
-  Tooltip,
   CartesianGrid,
 } from "recharts";
+import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import {
   CHART_BORDER,
@@ -134,7 +134,7 @@ export function CompareEquityOverlay({ items }: { items: CompareItem[] }) {
             tickFormatter={(v: number) => `${v.toFixed(0)}%`}
             width={48}
           />
-          <Tooltip
+          <TouchTooltip
             contentStyle={CHART_TOOLTIP_STYLE}
             formatter={(value, name) => {
               const label = keys.find((k) => k.key === name)?.name ?? String(name);

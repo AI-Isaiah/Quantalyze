@@ -1,6 +1,7 @@
 "use client";
 
-import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Cell } from "recharts";
+import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis, Cell } from "recharts";
+import { TouchTooltip } from "./TouchTooltip";
 import { CHART_BORDER, CHART_NEGATIVE, CHART_POSITIVE, CHART_TICK_STYLE } from "./chart-tokens";
 
 interface YearlyReturnsProps {
@@ -39,7 +40,7 @@ export function YearlyReturns({ monthlyReturns }: YearlyReturnsProps) {
           axisLine={false}
           tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
         />
-        <Tooltip
+        <TouchTooltip
           formatter={(v) => [`${(Number(v) * 100).toFixed(2)}%`, "Annual Return"]}
           contentStyle={{ fontSize: 12, borderColor: CHART_BORDER }}
         />

@@ -4,10 +4,10 @@ import {
   Line,
   LineChart,
   ResponsiveContainer,
-  Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
+import { TouchTooltip } from "./TouchTooltip";
 import {
   CHART_ACCENT,
   CHART_BORDER,
@@ -48,7 +48,7 @@ export function TurnoverChart({ data }: TurnoverChartProps) {
             axisLine={false}
             tickFormatter={(v: number) => `${(v * 100).toFixed(1)}%`}
           />
-          <Tooltip
+          <TouchTooltip
             contentStyle={CHART_TOOLTIP_STYLE}
             formatter={(v) => [`${(Number(v) * 100).toFixed(2)}%`, "Turnover"]}
           />

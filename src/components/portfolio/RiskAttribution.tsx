@@ -1,6 +1,7 @@
 "use client";
 
-import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
+import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import { formatPercent, STRATEGY_PALETTE } from "@/lib/utils";
 
 interface RiskAttributionProps {
@@ -35,7 +36,7 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
         <BarChart accessibilityLayer={false} data={chartData} layout="vertical" margin={{ top: 0, right: 8, bottom: 0, left: 8 }}>
           <XAxis type="number" hide domain={[0, 1]} />
           <YAxis type="category" dataKey="label" hide />
-          <Tooltip
+          <TouchTooltip
             formatter={(v, name) => [`${(Number(v) * 100).toFixed(1)}%`, name]}
             contentStyle={{ fontSize: 12, borderColor: "#E2E8F0", borderRadius: 6 }}
           />
