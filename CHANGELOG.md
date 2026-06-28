@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.35.0.4] - 2026-06-28
+### Changed — analytics-service dependency group bump: supabase 2.31, fastapi 0.138, pandera 0.32 (#480)
+
+Cleared the last open Dependabot item, the one that needed a hand migration rather than an auto-merge. `supabase` 2.15.1 → 2.31.0 moves the whole PostgREST stack onto its 2.x line, which made `postgrest.APIResponse` / `SingleAPIResponse` / `SyncSelectRequestBuilder` non-generic — so every `APIResponse[Any]` annotation across the sync worker (db.py, position_reconstruction.py, job_worker.py) drops its now-invalid type parameter, and the freshly-concrete `.data` JSON union is narrowed at the existing `rows()` / `one()` seam (and a count-preserving `cast` in the paginator, where filtering a row would falsely shorten a page) instead of splattering the union across call sites. The group also carries fastapi 0.115 → 0.138, pydantic 2.11 → 2.13, pandera 0.20.4 → 0.32.0 (which dropped its `multimethod` dependency, retiring the Python-3.14 pytest-collection workaround), numpy 2.2.4 → 2.4.6, psycopg 3.2 → 3.3, sentry-sdk, uvicorn, slowapi, python-multipart, and mypy 2.0 → 2.1. Verified against a CI-pinned Python 3.12 venv: `mypy --strict` clean across the full service surface and the 2675-test suite green; the DB-backed specs run in CI where the test-database credentials live.
+
 ## [0.35.0.3] - 2026-06-28
 ### Added — Recharts + EquityChart go touch, and "v1.3 done" becomes falsifiable (v1.3 phase 48)
 
