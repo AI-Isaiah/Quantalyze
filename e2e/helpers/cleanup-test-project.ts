@@ -11,6 +11,7 @@
  * identification trivial if a cleanup ever skips. Failures are logged
  * loudly so persistent leaks surface in CI logs.
  */
+import "./node-websocket-polyfill"; // must precede any createClient() (Node 20 WebSocket shim)
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import {
   assertNotProductionSupabaseUrl,

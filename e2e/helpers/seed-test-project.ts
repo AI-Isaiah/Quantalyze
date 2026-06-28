@@ -27,6 +27,7 @@
  *   project ref or the project name). The Plan 11-07 Task 3 BLOCKING
  *   checkpoint is still authoritative — this is just belt-and-braces.
  */
+import "./node-websocket-polyfill"; // must precede any createClient() (Node 20 WebSocket shim)
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import {
   assertNotProductionSupabaseUrl,
