@@ -8,6 +8,7 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
 // throws the RSC "called on the server" boundary error. We import them for this
 // widget's own Props + re-export below so client-side importers are unchanged.
 import { toWealth, type WealthPoint } from "@/lib/scenario";
+import { useTapPin } from "@/hooks/useTapPin";
 import { CustomRangePicker } from "../../components/CustomRangePicker";
 import { useTweakValue } from "../../context/TweaksContext";
 import { WidgetState } from "../../components/WidgetState";
@@ -1195,6 +1196,37 @@ export function EquityChart({
     setHoverIdx(idx);
   }
 
+  // ── Touch tap-to-pin (CHART-01b, additive) ─────────────────────────
+  // Phase 48: wire the Phase-47 useTapPin gesture core onto the SAME <svg>
+  // additively. The desktop onMouseMove/handleMove/hoverIdx path stays
+  // byte-identical (above); this path only fires for pointerType "touch"
+  // (the hook gates taps on `ti.type === "touch"`). `pointerToIndex` reuses
+  // the EXACT shared `epochIndexFromPx` mapping handleMove runs, so a tap
+  // pins the value the desktop hover reveals. `selectedIdx`/`pinned` are the
+  // hook's own state — they are NOT added to any projection useMemo dep
+  // (Pitfall 7: that would re-introduce the per-pixel hover regression).
+  // Dismissal matches TimeSeriesChart: re-tap toggles off, a tap moves the
+  // pin, the pin survives pointerleave, no auto-dismiss timer (all owned by
+  // useTapPin).
+  const tap = useTapPin({
+    count: n,
+    pointerToIndex: (clientX, _clientY, rect) =>
+      epochIndexFromPx(clientX - rect.left, {
+        padL: pad.l,
+        chartW,
+        firstEpochX,
+        totalMs,
+        visibleEpochs,
+        n,
+      }),
+  });
+
+  // The reveal renders the pinned tap (touch) when present, else the transient
+  // mouse-hover index — identical crosshair/dot/tooltip either way, reading the
+  // SAME precomputed values (no recompute). Mirrors HeatmapPanels' `pinned ??
+  // hovered` precedence.
+  const reveal = hoverIdx ?? tap.selectedIdx;
+
   // ── Period toggle + range picker handlers ────────────────────────
   const setPeriodChecked = (p: Period) => {
     if (p === "CUSTOM") {
@@ -1455,15 +1487,27 @@ export function EquityChart({
       </div>
       )}
 
-      <div style={{ position: "relative" }}>
+      {/* CHART-01b: pointer-coarse:min-h-[44px] makes the touch tap-target
+          contract explicit (WCAG 2.5.5). The chart body already exceeds 44px
+          (height=260) so this never resizes anything; the coarse-only class
+          leaves the desktop pointer-fine layout untouched. */}
+      <div
+        style={{ position: "relative" }}
+        className="pointer-coarse:min-h-[44px]"
+      >
         <svg
+          ref={tap.setChartEl}
           width={width}
           height={height}
           role="img"
           aria-label="Equity chart"
-          style={{ display: "block", cursor: "crosshair" }}
+          style={{ display: "block", cursor: "crosshair", touchAction: "pan-y" }}
           onMouseMove={handleMove}
           onMouseLeave={() => setHoverIdx(null)}
+          onPointerDown={tap.onPointerDown}
+          onPointerMove={tap.onPointerMove}
+          onPointerUp={tap.onPointerUp}
+          onPointerLeave={tap.onPointerLeave}
         >
           {/* Gradient fill — uses the prefixed `--color-chart-strategy`
               token (DESIGN.md institutional teal). The bare
@@ -1623,21 +1667,21 @@ export function EquityChart({
               emits y(NaN) = NaN into a SVG attribute, producing an invisible
               dot with no diagnostic. The vertical rule still renders so the
               date tooltip fires at the right x position. */}
-          {hoverIdx != null && hoverIdx < n && (
+          {reveal != null && reveal < n && (
             <g>
               <line
-                x1={x(hoverIdx)}
-                x2={x(hoverIdx)}
+                x1={x(reveal)}
+                x2={x(reveal)}
                 y1={pad.t}
                 y2={pad.t + chartH}
                 stroke="var(--color-chart-benchmark)"
                 strokeWidth={1}
                 strokeDasharray="2 2"
               />
-              {Number.isFinite(visibleNormalized[hoverIdx]) && (
+              {Number.isFinite(visibleNormalized[reveal]) && (
                 <circle
-                  cx={x(hoverIdx)}
-                  cy={y(visibleNormalized[hoverIdx])}
+                  cx={x(reveal)}
+                  cy={y(visibleNormalized[reveal])}
                   r={3.5}
                   fill="var(--color-chart-strategy)"
                   stroke="var(--color-surface)"
@@ -1653,8 +1697,8 @@ export function EquityChart({
             doesn't render "NaN%" to the allocator. The tooltip is simply
             suppressed for that index; the one-shot warn fires once per bad
             date so the case surfaces in local dev without flooding the log. */}
-        {hoverIdx != null && hoverIdx < n && (() => {
-          const i = hoverIdx;
+        {reveal != null && reveal < n && (() => {
+          const i = reveal;
           const portNorm = visibleNormalized[i];
           if (!Number.isFinite(portNorm)) {
             if (typeof console !== "undefined") {
