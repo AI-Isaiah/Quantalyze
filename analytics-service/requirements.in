@@ -86,4 +86,4 @@ vcrpy==8.1.1
 # import with `module 'aiohttp.streams' has no attribute 'AsyncStreamReaderMixin'`.
 # No released vcrpy supports aiohttp 3.14 yet (vcrpy#927 open), so pin below 3.14
 # until vcrpy ships a 3.14-compatible stub; resolves to the last-known-good 3.13.5.
-aiohttp<3.14
+aiohttp<3.15
