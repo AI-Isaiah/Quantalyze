@@ -45,7 +45,10 @@ export function StreakDistributionPanel() {
           streak {s.longestWin}d · max loss streak {s.longestLoss}d
         </p>
       </header>
-      <div className="grid grid-cols-2 gap-4 mt-2">
+      {/* Single-column on mobile so each StreakHist renders ~288px wide → the
+          coarse hit-rect's colW=68 viewBox units land ≈44.5 CSS px (CR-01).
+          Desktop (≥sm) stays 2-col — byte-identical to today's render. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-2">
         <StreakHist title="Wins" data={s.winsByLength} color="var(--color-positive)" maxLen={s.maxLen} />
         <StreakHist title="Losses" data={s.lossesByLength} color="var(--color-negative)" maxLen={s.maxLen} />
       </div>
@@ -155,9 +158,13 @@ function StreakHist({ title, data, color, maxLen }: { title: string; data: numbe
             <rect> per bar, spanning the full plot height. `hidden
             pointer-coarse:block` keeps them off pointer-fine (desktop hover via
             the bar <title> stays byte-identical) and present on touch. The
-            column is widened to ≥68 viewBox units so each lands ≥44 CSS px at a
-            ~288px / 440 viewBox scale (0.65×). The visible bar width is
-            unchanged — this layer is geometry-only. */}
+            column is widened to ≥68 viewBox units. The ACTUAL mobile scale: the
+            parent grid collapses to a single column below sm (CR-01), so each
+            histogram renders ~288 CSS px wide against VB_W=440 → scale ≈
+            288/440 ≈ 0.65×, giving 68 × 0.65 ≈ 44.5 CSS px (clears the 44px WCAG
+            target). On a 2-col mobile grid the scale would be ~0.32× and the
+            hit-rect ~22px — hence the single-column collapse is load-bearing.
+            The visible bar width is unchanged — this layer is geometry-only. */}
         {data.map((_, i) => {
           const colW = Math.max(barW, 68);
           const cx = HIST_PAD.left + i * barW + barW / 2;
