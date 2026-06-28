@@ -35,8 +35,42 @@ export interface TypeTier {
  * test imports cleanly and fails on assertions, not on a missing module.
  */
 export const TYPE_SCALE = {
-  // Tiers populated in 49-02 (Wave 1). Wave 0 ships this skeleton so the drift
-  // test imports cleanly and fails on assertions, not on a missing module.
+  // px endpoints map DESIGN.md §Typography 1:1 (hero 48/32, page-title 32,
+  // h2 24, h3 16, body 14, small 13, caption 12, micro 10-11). Each `clamp`
+  // is a STATIC literal (never `buildClamp(...)` at module-eval) so the drift
+  // test reads it verbatim, and MUST appear byte-identically as
+  // `--text-${tier}: ${clamp}` in the plain @theme block of globals.css.
+  // Invariants (49-RESEARCH Pattern 2): the middle term carries a `rem`
+  // component (WCAG 1.4.4 zoom-safety) and maxPx <= 2.5*minPx (200% zoom reach).
+  // Anchors derived over the 320px→1280px viewport band.
+  hero: { minPx: 32, maxPx: 48, clamp: "clamp(2rem, 1.5rem + 2.5vw, 3rem)" },
+  "page-title": {
+    minPx: 24,
+    maxPx: 32,
+    clamp: "clamp(1.5rem, 1.2rem + 1.5vw, 2rem)",
+  },
+  h2: { minPx: 20, maxPx: 24, clamp: "clamp(1.25rem, 1.1rem + 0.75vw, 1.5rem)" },
+  h3: { minPx: 16, maxPx: 18, clamp: "clamp(1rem, 0.95rem + 0.25vw, 1.125rem)" },
+  body: {
+    minPx: 14,
+    maxPx: 16,
+    clamp: "clamp(0.875rem, 0.85rem + 0.125vw, 1rem)",
+  },
+  small: {
+    minPx: 13,
+    maxPx: 14,
+    clamp: "clamp(0.8125rem, 0.8rem + 0.0625vw, 0.875rem)",
+  },
+  caption: {
+    minPx: 12,
+    maxPx: 13,
+    clamp: "clamp(0.75rem, 0.73rem + 0.0625vw, 0.8125rem)",
+  },
+  micro: {
+    minPx: 10,
+    maxPx: 11,
+    clamp: "clamp(0.625rem, 0.61rem + 0.0625vw, 0.6875rem)",
+  },
 } as const satisfies Record<string, TypeTier>;
 
 /**
