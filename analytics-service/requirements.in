@@ -77,13 +77,14 @@ sentry-sdk[fastapi]==2.58.0
 # Three-layer redaction (filter_headers + filter_query_parameters +
 # before_record_response deep walker) covers Bybit v5 / OKX / Binance signing
 # variants per Plan 16-08 FIX 3 (Binance signs via QUERY string, not headers).
-vcrpy==8.1.1
-# aiohttp upper-bound: vcrpy 8.1.1's aiohttp stub
-# (vcr/stubs/aiohttp_stubs.py) imports aiohttp.streams.AsyncStreamReaderMixin
-# at module load. aiohttp 3.14.0 (released 2026-06) removed that symbol, so the
-# unpinned transitive resolve (supabase->realtime requires >=3.11.18,<4.0.0)
-# floats to 3.14.0 and every vcr-backed test in test_repro_key_flow.py fails at
-# import with `module 'aiohttp.streams' has no attribute 'AsyncStreamReaderMixin'`.
-# No released vcrpy supports aiohttp 3.14 yet (vcrpy#927 open), so pin below 3.14
-# until vcrpy ships a 3.14-compatible stub; resolves to the last-known-good 3.13.5.
+vcrpy==8.2.1
+# aiohttp upper-bound: vcrpy's aiohttp stub (vcr/stubs/aiohttp_stubs.py) imports
+# symbols from aiohttp.streams at module load. aiohttp 3.14.0 (released 2026-06)
+# removed AsyncStreamReaderMixin, which vcrpy 8.1.1 still referenced — every
+# vcr-backed test in test_repro_key_flow.py failed at import with
+# `module 'aiohttp.streams' has no attribute 'AsyncStreamReaderMixin'`. vcrpy
+# 8.2.1 ships the 3.14-compatible stub (vcrpy#927 resolved), so aiohttp may now
+# float to 3.14.x. Cap stays below 3.15 so the next aiohttp minor is gated for
+# deliberate review, not a silent transitive float (the 3.14 incident proved
+# that class) — supabase->realtime only requires >=3.11.18,<4.0.0.
 aiohttp<3.15
