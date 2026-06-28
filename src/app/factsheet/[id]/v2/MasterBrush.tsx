@@ -3,6 +3,8 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { usePayload, useXRange } from "./factsheet-context";
+import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
+import { useBreakpoint } from "@/hooks/useBreakpoint";
 
 /**
  * Master brush — a mini equity-curve overview pinned above the chart stack.
@@ -22,10 +24,14 @@ import { usePayload, useXRange } from "./factsheet-context";
  */
 
 const VB_W = 1100;
-const VB_H = 60;
+// Desktop viewBox height = today's literal (60). CHART-03 portrait: a taller
+// mobile viewBox is selected per-render so the desktop SSR render stays
+// byte-identical. The brush DRAG math only reads the width axis (VB_W / PLOT_W),
+// so a taller VB_H never perturbs pan/resize/select behavior.
+const VB_H_DESKTOP = 60;
+const VB_H_MOBILE = 110;
 const PAD = { top: 6, right: 6, bottom: 16, left: 6 };
 const PLOT_W = VB_W - PAD.left - PAD.right;
-const PLOT_H = VB_H - PAD.top - PAD.bottom;
 const HANDLE_W = 8; // px in viewBox space — visible handle width
 // Hit-test radius for handles, in viewBox px. Wider than the visible handle so
 // touch users get a 44+px tap target without the UI looking chunky. The
@@ -36,6 +42,12 @@ const MIN_VISIBLE = 5;
 export function MasterBrush() {
   const payload = usePayload();
   const { xRange, setXRange, resetXRange } = useXRange();
+  const isMobile = useBreakpoint() === "mobile";
+  // Desktop arms = today's literals (VB_H 60, year-tick fontSize 9). Mobile:
+  // taller viewBox + bigger labels. PLOT_H derives from the selected VB_H.
+  const VB_H = isMobile ? VB_H_MOBILE : VB_H_DESKTOP;
+  const PLOT_H = VB_H - PAD.top - PAD.bottom;
+  const yearTickFont = isMobile ? 15 : 9;
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<
     | { mode: "pan" | "left" | "right" | "select"; startVbX: number; startRange: readonly [number, number] }
@@ -73,7 +85,7 @@ export function MasterBrush() {
       parts.push(`${parts.length === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`);
     }
     return parts.join(" ");
-  }, [eq]);
+  }, [eq, PLOT_H]);
 
   const idxToX = useCallback(
     (i: number) => PAD.left + (n > 1 ? i / (n - 1) : 0) * PLOT_W,
@@ -197,15 +209,16 @@ export function MasterBrush() {
           {startDate} → {endDate}
         </span>
       </div>
-      <svg
+      {/* Brush is wide + short; ResponsiveChartFrame emits the meet aspect that
+          preserves the natural ratio so the sparkline doesn't squish on narrow
+          viewports. Drag math uses rect.width / VB_W (width axis only), so the
+          taller mobile VB_H is safe. */}
+      <ResponsiveChartFrame
         ref={svgRef}
-        viewBox={`0 0 ${VB_W} ${VB_H}`}
-        // Brush is wide + short; meet preserves the natural aspect so the
-        // sparkline doesn't squish horizontally on narrow viewports. Tooltip
-        // and drag math use rect.width / VB_W ratio, so meet is safe here.
-        preserveAspectRatio="xMidYMid meet"
-        className="block w-full select-none"
-        style={{ aspectRatio: `${VB_W} / ${VB_H}`, maxHeight: VB_H, width: "100%", height: "auto", cursor: isDragging ? "grabbing" : "default" }}
+        width={VB_W}
+        height={VB_H}
+        className="select-none"
+        style={{ cursor: isDragging ? "grabbing" : "default" }}
         role="img"
         aria-label="Master brush — full timeline equity overview"
         onPointerDown={onPointerDown}
@@ -311,7 +324,7 @@ export function MasterBrush() {
               x={idxToX(t.idx)}
               y={PAD.top + PLOT_H + 12}
               textAnchor="middle"
-              fontSize={9}
+              fontSize={yearTickFont}
               fontFamily="var(--font-mono)"
               fill="var(--color-text-muted)"
             >
@@ -319,7 +332,7 @@ export function MasterBrush() {
             </text>
           </g>
         ))}
-      </svg>
+      </ResponsiveChartFrame>
     </section>
   );
 }

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.35.0.2] - 2026-06-28
+### Added — every chart reveals its values by tap on a phone, and stays legible at 320px (v1.3 phase 47)
+
+The hand-rolled SVG charts that previously surfaced a value only on a desktop hover now answer a touch. Tap a cell of the daily-returns calendar or the daily heatmap, or a bar of the win/loss streak distribution, and the exact value the desktop `<title>` shows pins in place — it survives lifting your finger so you can read it, re-tapping the same spot clears it, and a gesture that turns into a drag (a scroll) never pins. The behavior is one shared `useTapPin` gesture hook (touch-only, an 8px slop / 350ms tap window, re-tap-to-toggle, pinned-selection-survives-leave), so every chart offers the same affordance instead of each re-implementing it. Desktop mouse hover is untouched — the hook fires only for touch — and the whole desktop/SSR render stays byte-identical: every mobile change (taller portrait viewBoxes, bumped axis/tick fonts so labels clear the legibility floor at 320px instead of downscaling to ~5px, reduced tick density) is gated behind a viewport check whose server snapshot resolves to "desktop". This lands across the factsheet's analytical panels (streak distribution, bootstrap CI, the distribution/signature/cross-signature panels, the histogram + master brush), the daily-returns heatmap and calendar, the return-quantiles box plot, and the Monte Carlo band chart. The new touch tap-targets meet the ≥44px WCAG 2.5.5 floor.
+
+A fresh seeded e2e (`svg-chart-parity`) captures desktop chart goldens plus a 320px portrait reflow; it self-skips loudly when the goldens have not been baked in the seeded CI environment, so it can't silently false-pass — and a target-size gate now asserts the chart tap-rects clear 44px at 320px.
+
+### Fixed — edge cases caught in the pre-landing review of the new tap gesture
+- The shared tap gesture now matches the pointer id between press and release, so a second finger landing mid-gesture can no longer pin the wrong cell on a multi-touch screen.
+- A chart with an empty data set no longer resolves a tap to a phantom first cell — an empty collection selects nothing.
+- On the streak-distribution charts the screen-reader name no longer says "tap a bar to reveal its count" on desktop, where the affordance is hover, not tap; the tap wording is now mobile-only, matching the daily heatmap.
+
 ## [0.35.0.1] - 2026-06-27
 ### Added — every dense table reflows on a phone, and onboarding works without a desktop (v1.3 phase 46)
 

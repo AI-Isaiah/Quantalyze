@@ -2,6 +2,8 @@
 
 import { useMemo } from "react";
 import { usePayload, useActiveComparator } from "./factsheet-context";
+import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
+import { useBreakpoint } from "@/hooks/useBreakpoint";
 
 /**
  * Three compact analytical panels sharing a common visual language:
@@ -26,6 +28,7 @@ import { usePayload, useActiveComparator } from "./factsheet-context";
 export function EndOfYearBarsPanel() {
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
+  const isMobile = useBreakpoint() === "mobile";
   const hasBench = cmpKey !== "none" && Array.isArray(cmp.dailyReturns);
 
   // Strategy per-year compounded — already pre-aggregated server-side.
@@ -65,12 +68,19 @@ export function EndOfYearBarsPanel() {
 
   const VB_W = 880;
   // Wider rows when paired with benchmark — two bars + a thin gap need vertical room.
-  const ROW_H = hasBench ? 30 : 22;
-  const BAR_H = hasBench ? 11 : 16;
+  // CHART-03 portrait: at mobile each row gets more vertical room (taller viewBox
+  // = larger effective label px at 320px); desktop ROW_H/BAR_H = today's literals.
+  const ROW_H = isMobile ? (hasBench ? 44 : 34) : hasBench ? 30 : 22;
+  const BAR_H = isMobile ? (hasBench ? 14 : 22) : hasBench ? 11 : 16;
   const PAD = { top: 26, right: 80, bottom: 12, left: 60 };
   const plotW = VB_W - PAD.left - PAD.right;
   const VB_H = PAD.top + rows.length * ROW_H + PAD.bottom;
   const zeroX = PAD.left + plotW / 2;
+  // CHART-02 legibility: mobile font-bumps; desktop arms = today's literals.
+  const legendFont = isMobile ? 16 : 10;
+  const yearFont = isMobile ? 18 : 11;
+  const stratValFont = isMobile ? 18 : 11;
+  const benchValFont = isMobile ? 16 : 10;
 
   return (
     <figure className="flex flex-col gap-2" style={{ contentVisibility: "auto", containIntrinsicSize: `auto ${VB_H + 60}px` }}>
@@ -83,24 +93,22 @@ export function EndOfYearBarsPanel() {
           {hasBench ? ` · strategy in accent, ${cmp.shortName} in muted` : ""}
         </p>
       </header>
-      <svg
-        viewBox={`0 0 ${VB_W} ${VB_H}`}
-        preserveAspectRatio="xMidYMid meet"
-        className="block w-full"
-        style={{ aspectRatio: `${VB_W} / ${VB_H}`, maxHeight: VB_H, width: "100%", height: "auto" }}
+      <ResponsiveChartFrame
+        width={VB_W}
+        height={VB_H}
         role="img"
         aria-label={hasBench ? `End-of-year returns by calendar year, strategy vs ${cmp.shortName}` : "End-of-year returns by calendar year"}
       >
         {/* Legend */}
         <g>
           <rect x={PAD.left} y={6} width={10} height={6} fill="var(--color-accent)" />
-          <text x={PAD.left + 14} y={12} fontSize={10} fontFamily="var(--font-mono)" fill="var(--color-text-2)">
+          <text x={PAD.left + 14} y={12} fontSize={legendFont} fontFamily="var(--font-mono)" fill="var(--color-text-2)">
             {payload.strategyName}
           </text>
           {hasBench && (
             <>
               <rect x={PAD.left + 180} y={6} width={10} height={6} fill="var(--color-text-muted)" />
-              <text x={PAD.left + 194} y={12} fontSize={10} fontFamily="var(--font-mono)" fill="var(--color-text-2)">
+              <text x={PAD.left + 194} y={12} fontSize={legendFont} fontFamily="var(--font-mono)" fill="var(--color-text-2)">
                 {cmp.name}
               </text>
             </>
@@ -117,7 +125,7 @@ export function EndOfYearBarsPanel() {
                 x={PAD.left - 8}
                 y={cy + 4}
                 textAnchor="end"
-                fontSize={11}
+                fontSize={yearFont}
                 fontFamily="var(--font-mono)"
                 fill="var(--color-text-2)"
               >
@@ -160,7 +168,7 @@ export function EndOfYearBarsPanel() {
                   x={PAD.left + plotW + 6}
                   y={hasBench ? cy - 2 : cy + 4}
                   textAnchor="start"
-                  fontSize={11}
+                  fontSize={stratValFont}
                   fontFamily="var(--font-mono)"
                   fill="var(--color-text-primary)"
                 >
@@ -172,7 +180,7 @@ export function EndOfYearBarsPanel() {
                   x={PAD.left + plotW + 6}
                   y={cy + 11}
                   textAnchor="start"
-                  fontSize={10}
+                  fontSize={benchValFont}
                   fontFamily="var(--font-mono)"
                   fill="var(--color-text-muted)"
                 >
@@ -182,7 +190,7 @@ export function EndOfYearBarsPanel() {
             </g>
           );
         })}
-      </svg>
+      </ResponsiveChartFrame>
     </figure>
   );
 }
@@ -191,6 +199,7 @@ export function EndOfYearBarsPanel() {
 
 export function QuantileBoxPlotPanel() {
   const payload = usePayload();
+  const isMobile = useBreakpoint() === "mobile";
   const q = payload.quantiles;
   // Use min/max as the visible range; clamp at twice the P95-P05 IQR-ish so
   // a 50% tail-event day doesn't push the box into a tiny sliver.
@@ -198,7 +207,11 @@ export function QuantileBoxPlotPanel() {
   const lo = Math.max(q.min, q.p05 - span * 1.5);
   const hi = Math.min(q.max, q.p95 + span * 1.5);
   const VB_W = 880;
-  const VB_H = 130;
+  // CHART-03 portrait: taller mobile viewBox; desktop VB_H = today's literal (130).
+  const VB_H = isMobile ? 200 : 130;
+  // CHART-02 legibility: mobile font-bumps; desktop arms = today's literals (9 / 10).
+  const refLabelFont = isMobile ? 16 : 9;
+  const axisTickFont = isMobile ? 16 : 10;
   const PAD = { top: 30, right: 30, bottom: 26, left: 30 };
   const plotW = VB_W - PAD.left - PAD.right;
   const cy = PAD.top + (VB_H - PAD.top - PAD.bottom) / 2;
@@ -223,11 +236,9 @@ export function QuantileBoxPlotPanel() {
           5-number summary · whiskers at min/max · box P25–P75 · median accent line
         </p>
       </header>
-      <svg
-        viewBox={`0 0 ${VB_W} ${VB_H}`}
-        preserveAspectRatio="xMidYMid meet"
-        className="block w-full"
-        style={{ aspectRatio: `${VB_W} / ${VB_H}`, maxHeight: VB_H, width: "100%", height: "auto" }}
+      <ResponsiveChartFrame
+        width={VB_W}
+        height={VB_H}
         role="img"
         aria-label="Quantile box plot for the strategy's daily return distribution"
       >
@@ -265,10 +276,10 @@ export function QuantileBoxPlotPanel() {
         <line x1={X(q.p05)} y1={cy - 18} x2={X(q.p05)} y2={cy + 18} stroke="var(--color-text-muted)" strokeDasharray="2 2" strokeWidth={1} />
         <line x1={X(q.p95)} y1={cy - 18} x2={X(q.p95)} y2={cy + 18} stroke="var(--color-text-muted)" strokeDasharray="2 2" strokeWidth={1} />
         {/* P05/P95 labels above */}
-        <text x={X(q.p05)} y={cy - 22} textAnchor="middle" fontSize={9} fontFamily="var(--font-mono)" fill="var(--color-text-muted)">
+        <text x={X(q.p05)} y={cy - 22} textAnchor="middle" fontSize={refLabelFont} fontFamily="var(--font-mono)" fill="var(--color-text-muted)">
           P5 {pctSigned(q.p05)}
         </text>
-        <text x={X(q.p95)} y={cy - 22} textAnchor="middle" fontSize={9} fontFamily="var(--font-mono)" fill="var(--color-text-muted)">
+        <text x={X(q.p95)} y={cy - 22} textAnchor="middle" fontSize={refLabelFont} fontFamily="var(--font-mono)" fill="var(--color-text-muted)">
           P95 {pctSigned(q.p95)}
         </text>
         {/* Axis ticks */}
@@ -279,7 +290,7 @@ export function QuantileBoxPlotPanel() {
               x={X(t.value)}
               y={VB_H - PAD.bottom + 16}
               textAnchor="middle"
-              fontSize={10}
+              fontSize={axisTickFont}
               fontFamily="var(--font-mono)"
               fill="var(--color-text-muted)"
             >
@@ -287,7 +298,7 @@ export function QuantileBoxPlotPanel() {
             </text>
           </g>
         ))}
-      </svg>
+      </ResponsiveChartFrame>
       <div className="grid grid-cols-5 gap-3 text-[11px] tabular-nums font-mono mt-1">
         <Kpi label="P5" value={pctSigned(q.p05)} tone="muted" />
         <Kpi label="P25" value={pctSigned(q.p25)} tone="muted" />
@@ -317,16 +328,23 @@ function Kpi({ label, value, tone }: { label: string; value: string; tone: "mute
 
 export function CorrelationStripPanel() {
   const payload = usePayload();
+  const isMobile = useBreakpoint() === "mobile";
   const rows = payload.correlations.filter(r => Number.isFinite(r.rho));
   if (rows.length === 0) return null;
   const VB_W = 880;
-  const ROW_H = 26;
+  // CHART-03 portrait: taller mobile rows; desktop ROW_H = today's literal (26).
+  const ROW_H = isMobile ? 40 : 26;
   const PAD = { top: 30, right: 70, bottom: 18, left: 110 };
   const plotW = VB_W - PAD.left - PAD.right;
   const VB_H = PAD.top + rows.length * ROW_H + PAD.bottom;
   const zeroX = PAD.left + plotW / 2;
   const X = (rho: number) => PAD.left + ((rho + 1) / 2) * plotW;
-  const ticks = [-1, -0.5, 0, 0.5, 1];
+  // CHART-02 legibility: fewer ticks + bigger font at mobile; desktop = today's
+  // 5-tick literal set and font literals (10 / 11).
+  const ticks = isMobile ? [-1, 0, 1] : [-1, -0.5, 0, 0.5, 1];
+  const tickFont = isMobile ? 16 : 10;
+  const nameFont = isMobile ? 16 : 11;
+  const rhoFont = isMobile ? 16 : 11;
 
   return (
     <figure className="flex flex-col gap-2" style={{ contentVisibility: "auto", containIntrinsicSize: `auto ${VB_H + 60}px` }}>
@@ -338,11 +356,9 @@ export function CorrelationStripPanel() {
           Pearson ρ on aligned daily returns · ρ near 0 implies diversification benefit
         </p>
       </header>
-      <svg
-        viewBox={`0 0 ${VB_W} ${VB_H}`}
-        preserveAspectRatio="xMidYMid meet"
-        className="block w-full"
-        style={{ aspectRatio: `${VB_W} / ${VB_H}`, maxHeight: VB_H, width: "100%", height: "auto" }}
+      <ResponsiveChartFrame
+        width={VB_W}
+        height={VB_H}
         role="img"
         aria-label="Cross-asset correlations between strategy and major benchmarks"
       >
@@ -362,7 +378,7 @@ export function CorrelationStripPanel() {
               x={X(t)}
               y={PAD.top - 10}
               textAnchor="middle"
-              fontSize={10}
+              fontSize={tickFont}
               fontFamily="var(--font-mono)"
               fill="var(--color-text-muted)"
             >
@@ -383,7 +399,7 @@ export function CorrelationStripPanel() {
                 x={PAD.left - 8}
                 y={cy + 4}
                 textAnchor="end"
-                fontSize={11}
+                fontSize={nameFont}
                 fontFamily="var(--font-sans)"
                 fill="var(--color-text-2)"
               >
@@ -394,7 +410,7 @@ export function CorrelationStripPanel() {
                 x={PAD.left + plotW + 6}
                 y={cy + 4}
                 textAnchor="start"
-                fontSize={11}
+                fontSize={rhoFont}
                 fontFamily="var(--font-mono)"
                 fill="var(--color-text-primary)"
               >
@@ -403,7 +419,7 @@ export function CorrelationStripPanel() {
             </g>
           );
         })}
-      </svg>
+      </ResponsiveChartFrame>
       <p className="text-[10px] italic text-text-muted">
         ρ measured against the strategy&apos;s observation dates with each benchmark forward-filled to the same calendar.
       </p>
@@ -422,14 +438,23 @@ export function CorrelationStripPanel() {
  */
 export function CorrelationsMatrixPanel() {
   const payload = usePayload();
+  const isMobile = useBreakpoint() === "mobile";
   const { labels, matrix } = payload.correlationMatrix;
   if (labels.length === 0) return null;
 
   const N = labels.length;
-  const CELL_W = 88;
-  const CELL_H = 36;
-  const LABEL_W = 110;
+  // CHART-03 keep-all-cells: cell COUNT is data-driven (N×N) at every breakpoint —
+  // never sliced/dropped. The dense matrix stays inside the existing
+  // overflow-x-auto scroll region; at mobile we only enlarge each cell + bump the
+  // label fonts so every cell label clears the legibility floor inside the scroll.
+  // Desktop cell/label dims = today's literals (88 / 36 / 110 / 11 / 12).
+  const CELL_W = isMobile ? 104 : 88;
+  const CELL_H = isMobile ? 48 : 36;
+  const LABEL_W = isMobile ? 128 : 110;
   const HEADER_H = 28;
+  const headerFont = isMobile ? 16 : 11;
+  const rowLabelFont = isMobile ? 16 : 11;
+  const cellFont = isMobile ? 17 : 12;
   const W = LABEL_W + N * CELL_W + 6;
   const H = HEADER_H + N * CELL_H + 6;
 
@@ -447,12 +472,17 @@ export function CorrelationsMatrixPanel() {
         </p>
       </header>
       <div className="overflow-x-auto">
-        <svg
-          viewBox={`0 0 ${W} ${H}`}
-          preserveAspectRatio="xMinYMid meet"
+        {/* CHART-03 keep-all-cells: the matrix stays a horizontally-scrolling SVG
+            (minWidth=W inside overflow-x-auto) rather than a fit-to-width chart,
+            so no row/col is ever dropped at 320px. The responsive style keys are
+            overridden on the frame to restore that scroll recipe (width:100% +
+            minWidth + height:auto, no aspect-ratio cap). */}
+        <ResponsiveChartFrame
+          width={W}
+          height={H}
           role="img"
           aria-label="Pairwise correlation matrix of strategy and benchmarks"
-          style={{ display: "block", width: "100%", height: "auto", minWidth: W }}
+          style={{ display: "block", width: "100%", height: "auto", minWidth: W, aspectRatio: "auto", maxHeight: "none" }}
           shapeRendering="crispEdges"
         >
           {/* Column headers */}
@@ -462,7 +492,7 @@ export function CorrelationsMatrixPanel() {
               x={LABEL_W + j * CELL_W + CELL_W / 2}
               y={HEADER_H - 8}
               textAnchor="middle"
-              fontSize={11}
+              fontSize={headerFont}
               fontFamily="var(--font-mono)"
               fill="var(--color-text-2)"
             >
@@ -478,7 +508,7 @@ export function CorrelationsMatrixPanel() {
                 x={LABEL_W - 8}
                 y={HEADER_H + i * CELL_H + CELL_H / 2 + 4}
                 textAnchor="end"
-                fontSize={11}
+                fontSize={rowLabelFont}
                 fontFamily="var(--font-mono)"
                 fill="var(--color-text-2)"
               >
@@ -504,7 +534,7 @@ export function CorrelationsMatrixPanel() {
                       x={x + CELL_W / 2}
                       y={y + CELL_H / 2 + 4}
                       textAnchor="middle"
-                      fontSize={12}
+                      fontSize={cellFont}
                       fontFamily="var(--font-mono)"
                       fill={tint.fg}
                       fontWeight={isDiag ? 600 : 500}
@@ -516,7 +546,7 @@ export function CorrelationsMatrixPanel() {
               })}
             </g>
           ))}
-        </svg>
+        </ResponsiveChartFrame>
       </div>
     </figure>
   );

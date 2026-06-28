@@ -3,6 +3,8 @@
 import { useMemo } from "react";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import type { EventSignature, EventSignaturesSet } from "@/lib/factsheet/types";
+import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
+import { useBreakpoint } from "@/hooks/useBreakpoint";
 
 /**
  * Cross Signatures — mean-trajectory overlays per horizon.
@@ -20,10 +22,13 @@ import type { EventSignature, EventSignaturesSet } from "@/lib/factsheet/types";
  */
 
 const VB_W = 880;
-const VB_H = 200;
+// Desktop viewBox height = today's literal (200). CHART-03 portrait: a taller
+// mobile viewBox is selected per-render inside CrossPanel so the desktop SSR
+// render stays byte-identical.
+const VB_H_DESKTOP = 200;
+const VB_H_MOBILE = 280;
 const PAD = { top: 22, right: 30, bottom: 32, left: 56 };
 const PLOT_W = VB_W - PAD.left - PAD.right;
-const PLOT_H = VB_H - PAD.top - PAD.bottom;
 const WINDOW = 14;
 const TRACE_LEN = WINDOW * 2 + 1;
 
@@ -130,6 +135,16 @@ function CrossPanel({
   benchMean: EventSignature;
   tone: "positive" | "negative";
 }) {
+  const isMobile = useBreakpoint() === "mobile";
+  // Desktop arms = today's literals (VB_H 200, fontSize 10, 4 nice Y-ticks,
+  // full 5-point X-tick set). Mobile: taller viewBox + bigger fonts + fewer ticks.
+  const VB_H = isMobile ? VB_H_MOBILE : VB_H_DESKTOP;
+  const PLOT_H = VB_H - PAD.top - PAD.bottom;
+  const yTickFont = isMobile ? 16 : 10;
+  const xTickFont = isMobile ? 16 : 10;
+  const eventFont = isMobile ? 16 : 10;
+  const yTickCount = isMobile ? 3 : 4;
+
   // Y-domain spans both means so the comparison is legible. Always include 0.
   const yDomain = useMemo<[number, number]>(() => {
     let lo = 0;
@@ -149,7 +164,17 @@ function CrossPanel({
   const X = (i: number) => PAD.left + (i / (TRACE_LEN - 1)) * PLOT_W;
   const Y = (v: number) => PAD.top + (1 - (v - yDomain[0]) / (yDomain[1] - yDomain[0])) * PLOT_H;
   const eventX = X(WINDOW);
-  const yTicks = useMemo(() => niceTicks(yDomain[0], yDomain[1], 4), [yDomain]);
+  const yTicks = useMemo(() => niceTicks(yDomain[0], yDomain[1], yTickCount), [yDomain, yTickCount]);
+  // Reduce x-axis label density at mobile (keep −14d / 0d / +14d); desktop keeps
+  // the full 5-point set.
+  const xTicksAll = [
+    { i: 0, label: "−14d" },
+    { i: 7, label: "−7d" },
+    { i: 14, label: "0d" },
+    { i: 21, label: "+7d" },
+    { i: 28, label: "+14d" },
+  ];
+  const xTicks = isMobile ? xTicksAll.filter(t => t.i % 14 === 0) : xTicksAll;
   const stratColor = tone === "positive" ? "var(--color-positive)" : "var(--color-negative)";
 
   return (
@@ -157,13 +182,11 @@ function CrossPanel({
       <header>
         <p className="text-[12px] font-semibold text-text-primary">{title}</p>
       </header>
-      <svg
-        viewBox={`0 0 ${VB_W} ${VB_H}`}
-        preserveAspectRatio="xMidYMid meet"
+      <ResponsiveChartFrame
+        width={VB_W}
+        height={VB_H}
         role="img"
         aria-label={title}
-        className="block w-full"
-        style={{ aspectRatio: `${VB_W} / ${VB_H}`, maxHeight: VB_H, width: "100%", height: "auto" }}
       >
         {yTicks.map(t => (
           <g key={`y-${t.value}`}>
@@ -180,7 +203,7 @@ function CrossPanel({
               x={PAD.left - 6}
               y={Y(t.value) + 3}
               textAnchor="end"
-              fontSize={10}
+              fontSize={yTickFont}
               fontFamily="var(--font-mono)"
               fill="var(--color-text-muted)"
             >
@@ -221,7 +244,7 @@ function CrossPanel({
           x={eventX}
           y={PAD.top - 8}
           textAnchor="middle"
-          fontSize={10}
+          fontSize={eventFont}
           fontFamily="var(--font-mono)"
           fill="var(--color-text-primary)"
         >
@@ -236,13 +259,7 @@ function CrossPanel({
           stroke="var(--color-text)"
           strokeWidth={1}
         />
-        {[
-          { i: 0, label: "−14d" },
-          { i: 7, label: "−7d" },
-          { i: 14, label: "0d" },
-          { i: 21, label: "+7d" },
-          { i: 28, label: "+14d" },
-        ].map(t => (
+        {xTicks.map(t => (
           <g key={t.label}>
             <line
               x1={X(t.i)}
@@ -256,7 +273,7 @@ function CrossPanel({
               x={X(t.i)}
               y={PAD.top + PLOT_H + 16}
               textAnchor="middle"
-              fontSize={10}
+              fontSize={xTickFont}
               fontFamily="var(--font-mono)"
               fill="var(--color-text-muted)"
             >
@@ -264,7 +281,7 @@ function CrossPanel({
             </text>
           </g>
         ))}
-      </svg>
+      </ResponsiveChartFrame>
     </figure>
   );
 }

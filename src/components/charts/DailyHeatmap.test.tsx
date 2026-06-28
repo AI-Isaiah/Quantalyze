@@ -1,6 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render } from "@testing-library/react";
+import { render, fireEvent } from "@testing-library/react";
 import { DailyHeatmap, SVG_THRESHOLD_CELLS } from "./DailyHeatmap";
+
+// Phase 47-03 — the SvgRenderer now reads useBreakpoint for the mobile
+// legibility branch + consumes useTapPin for touch tap-reveal. Mock the
+// breakpoint seam so the new isMobile conditional can be driven to BOTH arms
+// in-wave (holds the branch-coverage ratchet). Default "desktop" in beforeEach
+// so every pre-existing assertion (baked-tint fills, <title> format, canvas
+// ordering) keeps its desktop-render expectation.
+vi.mock("@/hooks/useBreakpoint", () => ({
+  useBreakpoint: vi.fn(() => "desktop" as const),
+}));
+import { useBreakpoint } from "@/hooks/useBreakpoint";
+const mockedUseBreakpoint = vi.mocked(useBreakpoint);
 
 /**
  * Phase 14b / KPI-07 — DailyHeatmap dual SVG/Canvas renderer tests.
@@ -129,6 +141,7 @@ function buildFiveYearFixture(): { date: string; value: number }[] {
 
 beforeEach(() => {
   installCanvasMock();
+  mockedUseBreakpoint.mockReturnValue("desktop");
 });
 
 afterEach(() => {
@@ -446,5 +459,106 @@ describe("DailyHeatmap — Phase 14b dual renderer", () => {
       // DOM lib types and TypeScript blocks `delete` on non-optional members.
       delete (document as unknown as { fonts?: unknown }).fonts;
     }
+  });
+});
+
+/**
+ * Phase 47-03 / CHART-01a + CHART-02 + CHART-03 — the SVG branch grew an
+ * `isMobile` legibility/scroll conditional + a `useTapPin` touch tap-reveal.
+ * These tests exercise BOTH viewport arms IN THIS WAVE (the branch-coverage
+ * ratchet, branches ≥ 72, is a BLOCKING CI gate) and prove:
+ *   - desktop render byte-identity: the <title> format + baked-tint fills are
+ *     unchanged when isMobile=false (a desktop literal mutation would FAIL);
+ *   - keep-all-cells: the mobile render emits the SAME data-cell count as
+ *     desktop (no row/col drop at 320px);
+ *   - the touch tap path pins a reveal whose text equals the existing
+ *     `"{ISO}: {pct}%"` <title> format (no new string).
+ * Reuses the existing harness/fixtures — zero net-new deps.
+ */
+describe("DailyHeatmap — Phase 47-03 viewport branches + tap-reveal (SVG branch)", () => {
+  // A small ≤365-cell fixture → SVG branch. One value per the baked ramp so the
+  // desktop fill assertion is falsifiable against chart-tokens.
+  function svgFixture(): { date: string; value: number }[] {
+    return [
+      { date: "2024-01-01", value: 0.15 }, // CHART_POSITIVE_800 #166534
+      { date: "2024-03-15", value: 0 }, // CHART_NEUTRAL #FFFFFF
+      { date: "2024-06-30", value: -0.15 }, // CHART_NEGATIVE_800 #991B1B
+    ];
+  }
+
+  it("renders the SVG branch on the desktop arm (isMobile=false) with the literal 12px axis font + unchanged baked fills", () => {
+    mockedUseBreakpoint.mockReturnValue("desktop");
+    const { container } = render(<DailyHeatmap data={svgFixture()} />);
+    // Desktop byte-identity: axis fontSize literal stays 12 (a mobile-only bump
+    // must NOT leak into the desktop render).
+    const monthLabel = container.querySelector('svg text[data-axis="month"]');
+    expect(monthLabel?.getAttribute("font-size")).toBe("12");
+    const yearLabel = container.querySelector('svg text[data-axis="year"]');
+    expect(yearLabel?.getAttribute("font-size")).toBe("12");
+    // Baked-tint fills unchanged + still no fill-opacity (PR #108 invariant).
+    const cells = container.querySelectorAll("svg rect[data-cell]");
+    const fills = Array.from(cells).map((c) => c.getAttribute("fill"));
+    expect(fills).toEqual(["#166534", "#FFFFFF", "#991B1B"]);
+    for (const c of cells) expect(c.getAttribute("fill-opacity")).toBeNull();
+    // <title> format intact.
+    const title = container.querySelector("svg title");
+    expect(title?.textContent).toBe("2024-01-01: 15.00%");
+  });
+
+  it("renders the SVG branch on the mobile arm (isMobile=true) with a bumped axis font and the SAME cell count (no row/col drop)", () => {
+    mockedUseBreakpoint.mockReturnValue("desktop");
+    const dCount = render(<DailyHeatmap data={svgFixture()} />).container.querySelectorAll(
+      "svg rect[data-cell]",
+    ).length;
+
+    mockedUseBreakpoint.mockReturnValue("mobile");
+    const { container } = render(<DailyHeatmap data={svgFixture()} />);
+    const mCells = container.querySelectorAll("svg rect[data-cell]");
+    // Keep-all-cells: identical cell count on mobile (CHART-03 no row/col drop).
+    expect(mCells.length).toBe(dCount);
+    expect(mCells.length).toBe(3);
+    // Mobile legibility: axis font is bumped above the desktop literal 12.
+    const monthLabel = container.querySelector('svg text[data-axis="month"]');
+    expect(Number(monthLabel?.getAttribute("font-size"))).toBeGreaterThan(12);
+    // <title> format is the SAME on mobile (value source unchanged).
+    const title = container.querySelector("svg title");
+    expect(title?.textContent).toBe("2024-01-01: 15.00%");
+  });
+
+  it("a synthetic touch tap pins a reveal whose text equals the existing \"{ISO}: {pct}%\" <title> format", () => {
+    mockedUseBreakpoint.mockReturnValue("mobile");
+    const data = svgFixture();
+    const { container } = render(<DailyHeatmap data={data} />);
+    const svg = container.querySelector("svg")!;
+    expect(svg).not.toBeNull();
+
+    // Geometry (mirrors SvgRenderer): width = 56 + 365*2 = 786; the first cell
+    // (2024-01-01, doy 0) sits at x≈56 (+1 to land inside), row 0 at y≈24+8.
+    // jsdom returns a 0-sized rect, so stub getBoundingClientRect to the viewBox
+    // so the pointer→viewBox math resolves to a real cell.
+    const width = 56 + 365 * 2;
+    const height = 24 + 1 * 16 + 8;
+    svg.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width, height, right: width, bottom: height, x: 0, y: 0, toJSON() {} }) as DOMRect;
+
+    // A tap = pointerdown→pointerup at the same point, pointerType "touch",
+    // within slop + < 350ms. Target the first cell's center (doy 0, row 0).
+    const cx = 56 + 1; // just inside the day-0 column
+    const cy = 24 + 8; // inside row 0 band
+    // fireEvent wraps the dispatch in act() internally, so the tap-pin state
+    // update flushes before the assertion below.
+    fireEvent.pointerDown(svg, { clientX: cx, clientY: cy, pointerType: "touch", pointerId: 1 });
+    fireEvent.pointerUp(svg, { clientX: cx, clientY: cy, pointerType: "touch", pointerId: 1 });
+
+    const reveal = container.querySelector('svg text[data-tap-reveal="daily-heatmap"]');
+    expect(reveal).not.toBeNull();
+    // The pinned reveal reuses the <title> format exactly (no new string).
+    expect(reveal?.textContent).toBe("2024-01-01: 15.00%");
+  });
+
+  it("does NOT show the pinned reveal by default (desktop mouse render)", () => {
+    mockedUseBreakpoint.mockReturnValue("desktop");
+    const { container } = render(<DailyHeatmap data={svgFixture()} />);
+    expect(container.querySelector('svg text[data-tap-reveal="daily-heatmap"]')).toBeNull();
   });
 });

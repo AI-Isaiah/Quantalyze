@@ -2,6 +2,8 @@
 
 import { formatPercent } from "@/lib/utils";
 import { CHART_ACCENT, CHART_BORDER, CHART_AXIS_TICK } from "@/components/charts/chart-tokens";
+import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
+import { useBreakpoint } from "@/hooks/useBreakpoint";
 import type { MonteCarloBandPoint } from "../lib/scenario-montecarlo";
 
 /**
@@ -21,18 +23,33 @@ import type { MonteCarloBandPoint } from "../lib/scenario-montecarlo";
  * also surfaced as text in the section's terminal summary.
  */
 
+// Fixed width axis (unchanged at every breakpoint). Desktop viewBox height +
+// tick font are today's literals (240, 12); CHART-02/03 select a taller mobile
+// viewBox + a bumped tick font so the chart is legible at 320px while the
+// desktop SSR arm keeps today's literals (server snapshot is "desktop"). NB the
+// svg wrapper is now ResponsiveChartFrame, so only these literals + the
+// band/median path data are unchanged — the wrapper markup itself is not
+// byte-identical to the pre-phase-47 bare <svg>. Not on a parity-golden route.
 const W = 600;
-const H = 240;
+const H_DESKTOP = 240;
+const H_MOBILE = 320;
 const PAD_L = 48;
 const PAD_R = 12;
 const PAD_T = 12;
 const PAD_B = 24;
 const PLOT_W = W - PAD_L - PAD_R;
-const PLOT_H = H - PAD_T - PAD_B;
+// At 320px against VB_W=600 a 12px tick lands at ~5.8px effective (the WCAG
+// 1.4.4 downscale trap, RESEARCH legibility math); the mobile arm bumps it to
+// clear the ~12px effective floor.
+const TICK_FONT_DESKTOP = 12;
+const TICK_FONT_MOBILE = 20;
 
 // The default quantile band edges this chart renders. The section always runs
-// the engine with the default quantile set (MC_QUANTILES_DEFAULT), so these keys
-// are present on every point; a missing key skips that band rather than throwing.
+// the engine with the default quantile set (MC_QUANTILES_DEFAULT), so all five
+// keys are ASSUMED PRESENT on every point per that engine contract. (No
+// per-key guard here: an absent key would make `y(undefined)` → NaN and emit a
+// malformed `L<x>,NaN` path, not skip the band — so a future quantile-set
+// change must keep these keys, or add a guard at that time. YAGNI for v1.)
 const OUTER_LO = "p5";
 const INNER_LO = "p25";
 const MEDIAN = "p50";
@@ -44,6 +61,17 @@ interface MonteCarloBandChartProps {
 }
 
 export function MonteCarloBandChart({ bands }: MonteCarloBandChartProps) {
+  // CHART-02/03: a narrow viewport gets a taller viewBox + bumped tick font so
+  // the chart is legible at 320px. Desktop returns today's exact literals
+  // (H=240, fontSize=12) so the svg content stays unchanged (the wrapper is now
+  // ResponsiveChartFrame). This chart is
+  // `role="img"` by DESIGN (deliberately non-interactive — see header) and stays
+  // so at every breakpoint: NO tabIndex / pointer handlers are ever added.
+  const isMobile = useBreakpoint() === "mobile";
+  const H = isMobile ? H_MOBILE : H_DESKTOP;
+  const PLOT_H = H - PAD_T - PAD_B;
+  const tickFont = isMobile ? TICK_FONT_MOBILE : TICK_FONT_DESKTOP;
+
   if (bands.length === 0) return null;
 
   const n = bands.length;
@@ -89,9 +117,9 @@ export function MonteCarloBandChart({ bands }: MonteCarloBandChartProps) {
   const yZero = y(0);
 
   return (
-    <svg
-      viewBox={`0 0 ${W} ${H}`}
-      width="100%"
+    <ResponsiveChartFrame
+      width={W}
+      height={H}
       role="img"
       aria-label={ariaLabel}
       data-testid="montecarlo-band-chart"
@@ -113,7 +141,7 @@ export function MonteCarloBandChart({ bands }: MonteCarloBandChartProps) {
           y={y(v) + 3}
           textAnchor="end"
           fontFamily="var(--font-mono), monospace"
-          fontSize={12}
+          fontSize={tickFont}
           fill={CHART_AXIS_TICK}
           style={{ fontVariantNumeric: "tabular-nums" }}
         >
@@ -121,12 +149,12 @@ export function MonteCarloBandChart({ bands }: MonteCarloBandChartProps) {
         </text>
       ))}
       {/* x ticks: today / horizon */}
-      <text x={PAD_L} y={H - 6} textAnchor="start" fontFamily="var(--font-mono), monospace" fontSize={12} fill={CHART_AXIS_TICK}>
+      <text x={PAD_L} y={H - 6} textAnchor="start" fontFamily="var(--font-mono), monospace" fontSize={tickFont} fill={CHART_AXIS_TICK}>
         Today
       </text>
-      <text x={W - PAD_R} y={H - 6} textAnchor="end" fontFamily="var(--font-mono), monospace" fontSize={12} fill={CHART_AXIS_TICK} style={{ fontVariantNumeric: "tabular-nums" }}>
+      <text x={W - PAD_R} y={H - 6} textAnchor="end" fontFamily="var(--font-mono), monospace" fontSize={tickFont} fill={CHART_AXIS_TICK} style={{ fontVariantNumeric: "tabular-nums" }}>
         {n}d
       </text>
-    </svg>
+    </ResponsiveChartFrame>
   );
 }

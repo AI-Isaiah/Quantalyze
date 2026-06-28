@@ -1,6 +1,8 @@
 "use client";
 
 import { memo, useEffect, useMemo, useRef } from "react";
+import { useBreakpoint } from "@/hooks/useBreakpoint";
+import { useTapPin } from "@/hooks/useTapPin";
 import {
   CHART_BORDER,
   CHART_AXIS_TICK,
@@ -131,29 +133,105 @@ const SVG_CELL_H = 16;
 const SVG_LEFT_GUTTER = 56; // room for the year label
 const SVG_TOP_GUTTER = 24; // room for the month label
 
+/** The cell reveal copy — the SAME `"{ISO}: {pct}%"` string the per-cell
+ *  `<title>` shows (DailyHeatmap.test.tsx:206 asserts the format). Single value
+ *  source for both the desktop `<title>`/AT path and the touch pinned reveal. */
+function cellLabel(d: DailyHeatmapDataPoint): string {
+  return `${d.date}: ${(d.value * 100).toFixed(2)}%`;
+}
+
 const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapDataPoint[] }) {
   const rows = useMemo(() => groupByYear(data), [data]);
+  const isMobile = useBreakpoint() === "mobile";
 
   // Width spans all 365 day-of-year columns at 2px each (+ left gutter).
   const width = SVG_LEFT_GUTTER + 365 * SVG_DOY_CELL_W;
   const height = SVG_TOP_GUTTER + rows.length * SVG_CELL_H + 8;
 
+  // Flat cell list (with grid position) so the tap path can map a pointer to a
+  // cell index and the pinned reveal can read the value from the precomputed
+  // prop (NEVER recomputed). Cell COUNT is identical at every breakpoint — no
+  // row/col drop on mobile (RESEARCH: the mobile fix is the scroll region +
+  // larger labels, not a taller viewBox or a dropped row).
+  const flatCells = useMemo(
+    () =>
+      rows.flatMap((row, rowIdx) =>
+        row.days.map((d) => ({ d, rowIdx, doy: dayOfYear(d.date) })),
+      ),
+    [rows],
+  );
+
+  // Touch tap-reveal/pin (CHART-01a): the shared hook owns slop/time/touch-only/
+  // re-tap/leave. `pointerToIndex` maps the pointer to a flat cell index by
+  // resolving (rowIdx, doy) then picking the cell in that row nearest the tap.
+  const pointerToIndex = (clientX: number, clientY: number, rect: DOMRect): number | null => {
+    const vbX = ((clientX - rect.left) / rect.width) * width;
+    const vbY = ((clientY - rect.top) / rect.height) * height;
+    const rowIdx = Math.floor((vbY - SVG_TOP_GUTTER) / SVG_CELL_H);
+    if (rowIdx < 0 || rowIdx >= rows.length) return null;
+    const doy = Math.round((vbX - SVG_LEFT_GUTTER) / SVG_DOY_CELL_W);
+    if (doy < 0 || doy > 364) return null;
+    let best = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < flatCells.length; i++) {
+      const c = flatCells[i];
+      if (c.rowIdx !== rowIdx) continue;
+      const dist = Math.abs(c.doy - doy);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = i;
+      }
+    }
+    return best >= 0 ? best : null;
+  };
+  const { selectedIdx, setChartEl, onPointerDown, onPointerMove, onPointerUp, onPointerLeave } =
+    useTapPin({ count: flatCells.length, pointerToIndex });
+  const pinned =
+    selectedIdx != null && selectedIdx >= 0 && selectedIdx < flatCells.length
+      ? flatCells[selectedIdx]
+      : null;
+
+  // WR-01: gate every desktop-affecting attribute behind isMobile so the
+  // desktop/SSR arm emits today's EXACT literals (byte-identical invariant):
+  //   - wrapper: plain `w-full` (no overflow-x-auto / scroll style)
+  //   - svg: no `style` attribute at all (no touchAction / minWidth)
+  //   - aria-label: the original "Daily returns heatmap"
+  // The mobile arm keeps the legibility fix (RESEARCH): overflow-x-auto so the
+  // 730px-wide grid keeps its natural cell size and the user pans rather than
+  // the viewBox downscaling labels to ~4px (-webkit-overflow-scrolling for
+  // iOS), touchAction:pan-y for the touch tap-reveal, and the tap-hint label.
+  const wrapperClass = isMobile ? "w-full overflow-x-auto" : "w-full";
+  const wrapperStyle = isMobile
+    ? { minHeight: 280, WebkitOverflowScrolling: "touch" as const }
+    : undefined;
+  const svgStyle = isMobile ? { touchAction: "pan-y", minWidth: width } : undefined;
+  const ariaLabel = isMobile
+    ? "Daily returns heatmap — tap a cell to reveal its value"
+    : "Daily returns heatmap";
+
   return (
-    <div className="w-full" style={{ minHeight: 280 }}>
+    <div className={wrapperClass} style={wrapperStyle}>
       <svg
+        ref={setChartEl}
         role="img"
-        aria-label="Daily returns heatmap"
+        aria-label={ariaLabel}
         width="100%"
         viewBox={`0 0 ${width} ${height}`}
+        style={svgStyle}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerLeave={onPointerLeave}
       >
-        {/* X-axis month labels — positioned at each month's day-of-year start */}
+        {/* X-axis month labels — positioned at each month's day-of-year start.
+            Mobile bumps the font for 320px legibility; desktop = literal 12. */}
         {MONTHS.map((m, i) => (
           <text
             key={m}
             data-axis="month"
             x={SVG_LEFT_GUTTER + MONTH_DOY_START[i] * SVG_DOY_CELL_W}
             y={SVG_TOP_GUTTER - 8}
-            fontSize={12}
+            fontSize={isMobile ? 16 : 12}
             fill={CHART_AXIS_TICK}
             textAnchor="start"
           >
@@ -169,7 +247,7 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
               x={SVG_LEFT_GUTTER - 8}
               y={SVG_TOP_GUTTER + rowIdx * SVG_CELL_H + SVG_CELL_H / 2 + 4}
               fontFamily={CHART_FONT_MONO}
-              fontSize={12}
+              fontSize={isMobile ? 16 : 12}
               fill={CHART_TEXT_MUTED}
               textAnchor="end"
             >
@@ -180,6 +258,7 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
               // Use day-of-year for x — consistent with Canvas branch.
               const x = SVG_LEFT_GUTTER + dayOfYear(d.date) * SVG_DOY_CELL_W;
               const y = SVG_TOP_GUTTER + rowIdx * SVG_CELL_H;
+              const isPinned = pinned?.d.date === d.date;
               return (
                 <rect
                   key={d.date}
@@ -189,21 +268,55 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
                   width={SVG_DOY_CELL_W}
                   height={SVG_CELL_H}
                   fill={fill}
-                  stroke={CHART_BORDER}
-                  strokeWidth={0.5}
+                  stroke={isPinned ? CHART_AXIS_TICK : CHART_BORDER}
+                  strokeWidth={isPinned ? 1.5 : 0.5}
                 >
-                  <title>{`${d.date}: ${(d.value * 100).toFixed(2)}%`}</title>
+                  <title>{cellLabel(d)}</title>
                 </rect>
               );
             })}
           </g>
         ))}
 
-        {/* Hover-state stroke value is reachable via CSS but the test asserts
-         * the static stroke = CHART_BORDER. CHART_AXIS_TICK is referenced
-         * here to keep the import alive for future hover styling without
-         * tripping noUnusedLocals. */}
-        <desc data-hover-stroke={CHART_AXIS_TICK} />
+        {/* Pointer-coarse-ONLY ≥44px tap targets: an invisible interaction
+            <rect> per rendered ROW spanning the full grid width + a ≥44px
+            (viewBox-unit) height band. `hidden pointer-coarse:block` keeps them
+            off pointer-fine (desktop hover via the cell <title> stays
+            byte-identical) and present on touch. A tap maps to the nearest cell
+            in that row via `pointerToIndex`. Visible cells are NOT resized. */}
+        {rows.map((row, rowIdx) => {
+          const bandH = Math.max(SVG_CELL_H, 44);
+          const cy = SVG_TOP_GUTTER + rowIdx * SVG_CELL_H + SVG_CELL_H / 2;
+          return (
+            <rect
+              key={`hit-${row.year}`}
+              className="hidden pointer-coarse:block"
+              x={SVG_LEFT_GUTTER}
+              y={cy - bandH / 2}
+              width={365 * SVG_DOY_CELL_W}
+              height={bandH}
+              fill="transparent"
+            />
+          );
+        })}
+
+        {/* Touch pinned reveal — reuses the `"{ISO}: {pct}%"` <title> format (no
+            new string). Rendered only when a cell is tap-selected. */}
+        {pinned && (
+          <text
+            data-tap-reveal="daily-heatmap"
+            x={SVG_LEFT_GUTTER}
+            y={height - 2}
+            fontFamily={CHART_FONT_MONO}
+            fontSize={isMobile ? 16 : 12}
+            fontWeight={600}
+            fill={CHART_AXIS_TICK}
+            textAnchor="start"
+            pointerEvents="none"
+          >
+            {cellLabel(pinned.d)}
+          </text>
+        )}
       </svg>
     </div>
   );

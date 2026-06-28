@@ -1,8 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import { usePayload, useToggles } from "./factsheet-context";
 import { resolvePalette } from "./palette";
+import { useBreakpoint } from "@/hooks/useBreakpoint";
+import { useTapPin } from "@/hooks/useTapPin";
 import type { DailyHeatmapYear, MonthlyReturnsRow } from "@/lib/factsheet/types";
 
 /** Resolve the heatmap mixing trio from the central palette. */
@@ -169,7 +172,7 @@ export function DailyReturnsHeatmap() {
           Daily Returns Calendar
         </h3>
         <p className="text-[11px] text-text-muted">
-          one cell per trading day · color scale clamped to ±{(maxAbs * 100).toFixed(1)}% · hover any cell for value
+          one cell per trading day · color scale clamped to ±{(maxAbs * 100).toFixed(1)}% · hover or tap any cell for value
         </p>
       </header>
 
@@ -257,6 +260,13 @@ function YearCalendarCanvas({
   monthLabelH: number;
   monthLabels: { col: number; label: string }[];
 }) {
+  const isMobile = useBreakpoint() === "mobile";
+  // Mobile legibility (CHART-02): bump the month/weekday overlay label font from
+  // its desktop literals (9 / 8) so it clears the floor at 320px. Desktop arm =
+  // today's literals → desktop render byte-identical.
+  const monthFont = isMobile ? 13 : 9;
+  const dayFont = isMobile ? 12 : 8;
+
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [scale, setScale] = useState(1); // CSS px per logical viewBox unit
@@ -331,37 +341,118 @@ function YearCalendarCanvas({
     }
   }, [tintGrid, palette, scale, w, h, labelW, monthLabelH]);
 
-  // Pointer hover → cell lookup.
-  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    const el = wrapRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const xPx = (e.clientX - rect.left) / scale;
-    const yPx = (e.clientY - rect.top) / scale;
-    const wk = Math.floor((xPx - labelW) / (CELL + CELL_GAP));
-    const d = Math.floor((yPx - monthLabelH) / (CELL + CELL_GAP));
-    if (wk < 0 || wk >= year.cells.length || d < 0 || d >= 7) {
-      setHovered(null);
-      return;
-    }
+  // Map a pointer position (relative to the wrapper rect) to its (week, weekday)
+  // grid coordinate. The single source of the coord→grid math, shared by the
+  // hover lookup (cellAt) AND the touch tap path (pointerToIndex) so they can't
+  // drift on the gutter/scale arithmetic.
+  const coordToCell = (clientX: number, clientY: number, rect: DOMRect): { wk: number; d: number } => {
+    const xPx = (clientX - rect.left) / scale;
+    const yPx = (clientY - rect.top) / scale;
+    return {
+      wk: Math.floor((xPx - labelW) / (CELL + CELL_GAP)),
+      d: Math.floor((yPx - monthLabelH) / (CELL + CELL_GAP)),
+    };
+  };
+
+  // Map a (week, weekday) coordinate to the cell's tooltip payload, reading the
+  // value straight from the precomputed `year.cells` (NEVER recomputed) and
+  // deriving the pixel center + ISO date. The single source of the grid→payload
+  // math, shared by BOTH the desktop mouse hover (cellAt) AND the touch tap-pin
+  // path (pinnedCell) so they reveal identical content and can't drift.
+  const cellPayload = (
+    wk: number,
+    d: number,
+  ): { cx: number; cy: number; iso: string; v: number } | null => {
+    if (wk < 0 || wk >= year.cells.length || d < 0 || d >= 7) return null;
     const v = year.cells[wk]?.[d];
-    if (v == null) {
-      setHovered(null);
-      return;
-    }
+    if (v == null) return null;
     const doy = wk * 7 + d - year.firstWeekOffset + 1;
     const dt = new Date(Date.UTC(parseInt(year.year, 10), 0, doy));
-    if (Number.isNaN(dt.getTime())) {
-      setHovered(null);
-      return;
-    }
+    if (Number.isNaN(dt.getTime())) return null;
     const iso = dt.toISOString().slice(0, 10);
     const cx = (labelW + wk * (CELL + CELL_GAP) + CELL / 2) * scale;
     const cy = (monthLabelH + d * (CELL + CELL_GAP) + CELL / 2) * scale;
-    setHovered({ cx, cy, iso, v });
+    return { cx, cy, iso, v };
+  };
+
+  // Desktop mouse hover path: pointer position → grid coord → payload.
+  const cellAt = (clientX: number, clientY: number, rect: DOMRect) => {
+    const { wk, d } = coordToCell(clientX, clientY, rect);
+    return cellPayload(wk, d);
+  };
+
+  // Pointer hover → cell lookup (desktop mouse path, unchanged behaviour).
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const el = wrapRef.current;
+    if (!el) return;
+    setHovered(cellAt(e.clientX, e.clientY, el.getBoundingClientRect()));
   };
 
   const onPointerLeave = () => setHovered(null);
+
+  // Touch tap-reveal/pin (CHART-01a): the shared hook owns slop/time/touch-only/
+  // re-tap/leave; `pointerToIndex` returns the flat cell index (wk*7+d) so the
+  // hook can clamp/round it. The reveal reuses the existing floating tooltip
+  // content. `selectedIdx` un-pins (null) on a tap off-grid. Desktop mouse hover
+  // is untouched (the hook only fires for pointerType "touch").
+  const COLS = year.cells.length;
+  // The hook's pointer handlers are aliased (tap*) because this component already
+  // owns local mouse onPointerMove/onPointerLeave that it composes with the touch
+  // ones; setChartEl (a callback ref) is attached to the wrapper div via setWrap.
+  const {
+    selectedIdx,
+    setChartEl,
+    onPointerDown: tapPointerDown,
+    onPointerMove: tapPointerMove,
+    onPointerUp: tapPointerUp,
+    onPointerLeave: tapPointerLeave,
+  } = useTapPin({
+    count: COLS * 7,
+    pointerToIndex: (clientX, clientY, rect) => {
+      // Reuse the shared coord→grid math; return the flat index only for a real
+      // (populated, in-range) cell so the hook's re-tap/clamp logic operates on
+      // a valid index. An off-grid tap returns null (un-pins).
+      const { wk, d } = coordToCell(clientX, clientY, rect);
+      return cellPayload(wk, d) == null ? null : wk * 7 + d;
+    },
+  });
+
+  // Resolve the pinned cell's tooltip payload from the hook's selectedIdx via
+  // the SAME cellPayload derivation as the hover path (no recompute, no drift).
+  const pinnedCell =
+    selectedIdx == null
+      ? null
+      : cellPayload(Math.floor(selectedIdx / 7), selectedIdx % 7);
+
+  // Point both refs at the wrapper div: wrapRef (this component's own, for the
+  // ResizeObserver + mouse-hover rect) and the hook's chart element (via its
+  // setChartEl callback ref, so the tap path reads getBoundingClientRect off the
+  // same node). Memoised so the ref doesn't detach/reattach every render. The
+  // div is runtime-safe — the hook only calls getBoundingClientRect, which divs
+  // expose.
+  const setWrap = useCallback(
+    (el: HTMLDivElement | null) => {
+      wrapRef.current = el;
+      setChartEl(el);
+    },
+    [setChartEl],
+  );
+
+  // Compose: run the existing mouse handler AND the hook handler.
+  const asSvg = (h: (e: ReactPointerEvent<SVGSVGElement>) => void) =>
+    h as unknown as (e: React.PointerEvent<HTMLDivElement>) => void;
+  const composedMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    onPointerMove(e);
+    asSvg(tapPointerMove)(e);
+  };
+  const composedLeave = (e: React.PointerEvent<HTMLDivElement>) => {
+    onPointerLeave();
+    asSvg(tapPointerLeave)(e);
+  };
+
+  // The reveal shows the pinned cell (touch) when present, else the transient
+  // mouse-hover cell. Identical tooltip content either way.
+  const reveal = pinnedCell ?? hovered;
 
   return (
     <div className="flex items-start gap-3">
@@ -369,15 +460,23 @@ function YearCalendarCanvas({
         {year.year}
       </div>
       <div
-        ref={wrapRef}
+        ref={setWrap}
         // minWidth = w forces the canvas to render at natural size; the
         // parent <div className="overflow-x-auto"> on the year stack lets the
         // user pan when the viewport is too narrow. Floors cell size at the
         // 12px design value instead of shrinking to ~6px on mobile.
-        className="flex-1 relative"
-        style={{ height: h * scale, minWidth: w }}
-        onPointerMove={onPointerMove}
-        onPointerLeave={onPointerLeave}
+        // The whole calendar is the touch tap surface; a tap maps to the
+        // nearest cell via `pointerToIndex`/`coordToCell` (Math.floor over the
+        // 14px grid; `cellAt` is the desktop mouse-hover path). On
+        // pointer-coarse the interaction layer is floored at ≥44px (WCAG 2.5.5)
+        // — it already exceeds that via `h*scale` (7 rows × 14px + gutter), the
+        // class makes the touch-target contract explicit without resizing cells.
+        className="flex-1 relative pointer-coarse:min-h-[44px]"
+        style={{ height: h * scale, minWidth: w, touchAction: "pan-y" }}
+        onPointerDown={asSvg(tapPointerDown)}
+        onPointerMove={composedMove}
+        onPointerUp={asSvg(tapPointerUp)}
+        onPointerLeave={composedLeave}
         role="img"
         aria-label={`Daily-return calendar for ${year.year}`}
       >
@@ -394,7 +493,7 @@ function YearCalendarCanvas({
               key={`m-${ml.col}-${ml.label}`}
               x={labelW + ml.col * (CELL + CELL_GAP)}
               y={10}
-              fontSize={9}
+              fontSize={monthFont}
               fontFamily="var(--font-mono)"
               fill="var(--color-text-muted)"
             >
@@ -406,7 +505,7 @@ function YearCalendarCanvas({
               key={`d-${i}`}
               x={0}
               y={monthLabelH + i * (CELL + CELL_GAP) + 8}
-              fontSize={8}
+              fontSize={dayFont}
               fontFamily="var(--font-mono)"
               fill="var(--color-text-muted)"
             >
@@ -414,23 +513,26 @@ function YearCalendarCanvas({
             </text>
           ))}
         </svg>
-        {/* Hover tooltip — positioned in CSS px so it tracks the scaled canvas. */}
-        {hovered && (
+        {/* Reveal tooltip — positioned in CSS px so it tracks the scaled canvas.
+            Renders the touch-pinned cell when present, else the transient
+            mouse-hover cell. Identical content + styling either way (no new
+            accent surface). */}
+        {reveal && (
           <div
             role="status"
             className="pointer-events-none absolute z-10 px-2 py-1 text-[10px] font-mono tabular-nums rounded-sm border whitespace-nowrap"
             style={{
-              left: hovered.cx + 8,
-              top: hovered.cy - 24,
+              left: reveal.cx + 8,
+              top: reveal.cy - 24,
               background: "var(--color-surface)",
               borderColor: "var(--color-border)",
               color: "var(--color-text-primary)",
               boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
             }}
           >
-            <span className="text-text-muted mr-1">{hovered.iso}</span>
-            <span style={{ color: hovered.v >= 0 ? "var(--color-positive)" : "var(--color-negative)", fontWeight: 600 }}>
-              {formatPct(hovered.v, 2)}
+            <span className="text-text-muted mr-1">{reveal.iso}</span>
+            <span style={{ color: reveal.v >= 0 ? "var(--color-positive)" : "var(--color-negative)", fontWeight: 600 }}>
+              {formatPct(reveal.v, 2)}
             </span>
           </div>
         )}

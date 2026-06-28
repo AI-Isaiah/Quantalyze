@@ -55,3 +55,30 @@ class IntersectionObserverStub {
 }
 (globalThis as { IntersectionObserver?: typeof IntersectionObserver }).IntersectionObserver =
   IntersectionObserverStub as unknown as typeof IntersectionObserver;
+
+// jsdom does not implement matchMedia. `useMediaQuery` / `useBreakpoint` (the
+// Phase-44 SSR-safe breakpoint primitives) call `window.matchMedia(query)` in
+// their `useSyncExternalStore` getSnapshot, which throws under vitest+jsdom
+// without a stub. Phase 47 wires `useBreakpoint` into the factsheet SVG panels
+// (legibility/portrait), so the existing factsheet render tests (FactsheetBody
+// degenerate-matrix, etc.) now mount a breakpoint consumer. Mirror the
+// observer stubs above with a no-op `matches:false` default — that resolves
+// `useBreakpoint` to "desktop" (the same all-false server snapshot the hook
+// documents), so tests that don't explicitly drive the viewport get the
+// byte-identical desktop branch. Tests that need a specific breakpoint override
+// per-test via `installMatchMedia({...})` (useBreakpoint.test.ts) or by mocking
+// the hook directly.
+if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener() {}, // deprecated, kept for older consumers
+    removeListener() {}, // deprecated
+    addEventListener() {},
+    removeEventListener() {},
+    dispatchEvent() {
+      return false;
+    },
+  })) as unknown as typeof window.matchMedia;
+}

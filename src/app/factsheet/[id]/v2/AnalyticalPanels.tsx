@@ -1,6 +1,9 @@
 "use client";
 
 import { usePayload } from "./factsheet-context";
+import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
+import { useBreakpoint } from "@/hooks/useBreakpoint";
+import { useTapPin } from "@/hooks/useTapPin";
 
 /**
  * Three analytical panels rounding out the v2 page:
@@ -10,10 +13,19 @@ import { usePayload } from "./factsheet-context";
  *   - BootstrapCIPanel: 95% CIs on the three headline ratios.
  *
  * All three use real strategy data — no demo badges needed.
+ *
+ * Phase 47 (CHART-01a/02/03): StreakHist gets touch tap-reveal/pin via the
+ * shared `useTapPin` hook — a tap reveals (and pins) the SAME value the desktop
+ * per-bar `<title>` shows; the desktop hover path + desktop render stay
+ * byte-identical (every tuning change is gated behind `isMobile`, desktop arm =
+ * today's literal). BootstrapCIPanel (no hover) gets legibility + portrait only.
  */
 
 const VB_W = 440;
-const VB_H = 200;
+// Desktop viewBox height is today's literal (200). Mobile is taller for a
+// portrait-friendly aspect at 320px (CHART-03). The width axis (VB_W) is fixed.
+const VB_H_DESKTOP = 200;
+const VB_H_MOBILE = 280;
 const HIST_PAD = { top: 14, right: 16, bottom: 26, left: 42 };
 
 export function StreakDistributionPanel() {
@@ -22,7 +34,7 @@ export function StreakDistributionPanel() {
   return (
     <figure
       className="flex flex-col gap-2"
-      style={{ contentVisibility: "auto", containIntrinsicSize: `auto ${VB_H + 80}px` }}
+      style={{ contentVisibility: "auto", containIntrinsicSize: `auto ${VB_H_DESKTOP + 80}px` }}
     >
       <header>
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
@@ -33,7 +45,10 @@ export function StreakDistributionPanel() {
           streak {s.longestWin}d · max loss streak {s.longestLoss}d
         </p>
       </header>
-      <div className="grid grid-cols-2 gap-4 mt-2">
+      {/* Single-column on mobile so each StreakHist renders ~288px wide → the
+          coarse hit-rect's colW=76 viewBox units land ≈49 CSS px (CR-01).
+          Desktop (≥sm) stays 2-col — byte-identical to today's render. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-2">
         <StreakHist title="Wins" data={s.winsByLength} color="var(--color-positive)" maxLen={s.maxLen} />
         <StreakHist title="Losses" data={s.lossesByLength} color="var(--color-negative)" maxLen={s.maxLen} />
       </div>
@@ -41,7 +56,19 @@ export function StreakDistributionPanel() {
   );
 }
 
+/** The exact desktop `<title>` copy for a streak bar — the single value source
+ *  that BOTH the desktop hover `<title>` AND the touch pinned reveal show. */
+function streakLabel(i: number, c: number, maxLen: number): string {
+  return `Length ${i + 1}${i + 1 === maxLen ? "+" : ""}: ${c} streak${c === 1 ? "" : "s"}`;
+}
+
 function StreakHist({ title, data, color, maxLen }: { title: string; data: number[]; color: string; maxLen: number }) {
+  const isMobile = useBreakpoint() === "mobile";
+  // Desktop branch = today's literals (byte-identical). Mobile bumps the axis
+  // font (CHART-02: 9px at VB_W=440 lands ~5.9px effective at 320px) + reduces
+  // x-tick density + uses a taller viewBox (CHART-03 portrait).
+  const VB_H = isMobile ? VB_H_MOBILE : VB_H_DESKTOP;
+  const axisFont = isMobile ? 18 : 9;
   const plotW = VB_W - HIST_PAD.left - HIST_PAD.right;
   const plotH = VB_H - HIST_PAD.top - HIST_PAD.bottom;
   const maxCount = Math.max(1, ...data);
@@ -49,14 +76,46 @@ function StreakHist({ title, data, color, maxLen }: { title: string; data: numbe
   // Nice-rounded Y ticks: 4 evenly-spaced count levels capped to the data max.
   const yTicks = niceCountTicks(0, maxCount, 4);
   const yPx = (c: number) => HIST_PAD.top + plotH - (c / Math.max(1, yTicks[yTicks.length - 1].value || maxCount)) * plotH;
+
+  // x-tick lengths: every other length on desktop (today's set); on mobile show
+  // fewer so each fits the bumped font — endpoints + the midpoint + the max.
+  const allLengths = Array.from({ length: maxLen }, (_, i) => i + 1);
+  const xTickLengths = isMobile
+    ? allLengths.filter(n => n === 1 || n === Math.ceil(maxLen / 2) || n === maxLen)
+    : allLengths.filter(n => n % 2 === 1 || n === maxLen);
+
+  // Touch tap-reveal/pin: map the pointer x to a bar index over the plot region;
+  // the hook owns slop/time/touch-only/re-tap/leave. Desktop mouse keeps its
+  // native per-bar <title> hover (the hook only fires for pointerType "touch").
+  const pointerToIndex = (clientX: number, _clientY: number, rect: DOMRect): number | null => {
+    const vbX = ((clientX - rect.left) / rect.width) * VB_W;
+    const i = Math.floor((vbX - HIST_PAD.left) / barW);
+    if (i < 0 || i >= data.length) return null;
+    return i;
+  };
+  const { selectedIdx, setChartEl, onPointerDown, onPointerMove, onPointerUp, onPointerLeave } =
+    useTapPin({ count: data.length, pointerToIndex });
+  const selected =
+    selectedIdx != null && selectedIdx >= 0 && selectedIdx < data.length ? selectedIdx : null;
+
   return (
     <div>
       <p className="text-[10px] font-mono uppercase tracking-wider text-text-muted mb-1">{title}</p>
-      <svg
-        viewBox={`0 0 ${VB_W} ${VB_H}`}
-        preserveAspectRatio="xMidYMid meet"
-        className="block w-full"
-        style={{ aspectRatio: `${VB_W} / ${VB_H}`, maxHeight: VB_H, width: "100%", height: "auto" }}
+      <ResponsiveChartFrame
+        ref={setChartEl}
+        width={VB_W}
+        height={VB_H}
+        role="img"
+        aria-label={
+          isMobile
+            ? `${title} streak-length distribution — tap a bar to reveal its count`
+            : `${title} streak-length distribution`
+        }
+        style={{ touchAction: "pan-y" }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerLeave={onPointerLeave}
       >
         {/* Y gridlines + labels */}
         {yTicks.map(t => (
@@ -74,7 +133,7 @@ function StreakHist({ title, data, color, maxLen }: { title: string; data: numbe
               x={HIST_PAD.left - 4}
               y={yPx(t.value) + 3}
               textAnchor="end"
-              fontSize={9}
+              fontSize={axisFont}
               fontFamily="var(--font-mono)"
               fill="var(--color-text-muted)"
             >
@@ -94,41 +153,84 @@ function StreakHist({ title, data, color, maxLen }: { title: string; data: numbe
               width={Math.max(0, barW - 1)}
               height={h}
               fill={color}
-              fillOpacity={0.85}
+              fillOpacity={selected === i ? 1 : 0.85}
             >
-              <title>{`Length ${i + 1}${i + 1 === maxLen ? "+" : ""}: ${c} streak${c === 1 ? "" : "s"}`}</title>
+              <title>{streakLabel(i, c, maxLen)}</title>
             </rect>
           );
         })}
-        {/* X-axis ticks: every other length */}
-        {Array.from({ length: maxLen }, (_, i) => i + 1)
-          .filter(n => n % 2 === 1 || n === maxLen)
-          .map(n => {
-            const x = HIST_PAD.left + (n - 0.5) * barW;
-            return (
-              <g key={`tick-${n}`}>
-                <line
-                  x1={x}
-                  x2={x}
-                  y1={HIST_PAD.top + plotH}
-                  y2={HIST_PAD.top + plotH + 3}
-                  stroke="var(--color-text-muted)"
-                  strokeWidth={1}
-                />
-                <text
-                  x={x}
-                  y={HIST_PAD.top + plotH + 14}
-                  textAnchor="middle"
-                  fontSize={9}
-                  fontFamily="var(--font-mono)"
-                  fill="var(--color-text-muted)"
-                >
-                  {n === maxLen ? `${n}+` : n}
-                </text>
-              </g>
-            );
-          })}
-      </svg>
+        {/* Pointer-coarse-ONLY ≥44px tap targets: one invisible interaction
+            <rect> per bar, spanning the full plot height. `hidden
+            pointer-coarse:block` keeps them off pointer-fine (desktop hover via
+            the bar <title> stays byte-identical) and present on touch. The
+            column is widened to ≥76 viewBox units. The ACTUAL mobile scale: the
+            parent grid collapses to a single column below sm (CR-01), so each
+            histogram renders ~288 CSS px wide against VB_W=440 → scale ≈
+            288/440 ≈ 0.65×, giving 76 × 0.65 ≈ 49 CSS px — clears the 44px WCAG
+            target with ~5px margin so intermediate padding / a scrollbar / a
+            sub-320px device doesn't silently drop it below 44px. On a 2-col
+            mobile grid the scale would be ~0.32× and the hit-rect ~24px — hence
+            the single-column collapse is load-bearing.
+            The visible bar width is unchanged — this layer is geometry-only. */}
+        {data.map((_, i) => {
+          const colW = Math.max(barW, 76);
+          const cx = HIST_PAD.left + i * barW + barW / 2;
+          return (
+            <rect
+              key={`hit-${i}`}
+              className="hidden pointer-coarse:block"
+              x={cx - colW / 2}
+              y={HIST_PAD.top}
+              width={colW}
+              height={plotH}
+              fill="transparent"
+            />
+          );
+        })}
+        {/* X-axis ticks */}
+        {xTickLengths.map(n => {
+          const x = HIST_PAD.left + (n - 0.5) * barW;
+          return (
+            <g key={`tick-${n}`}>
+              <line
+                x1={x}
+                x2={x}
+                y1={HIST_PAD.top + plotH}
+                y2={HIST_PAD.top + plotH + 3}
+                stroke="var(--color-text-muted)"
+                strokeWidth={1}
+              />
+              <text
+                x={x}
+                y={HIST_PAD.top + plotH + 14}
+                textAnchor="middle"
+                fontSize={axisFont}
+                fontFamily="var(--font-mono)"
+                fill="var(--color-text-muted)"
+              >
+                {n === maxLen ? `${n}+` : n}
+              </text>
+            </g>
+          );
+        })}
+        {/* Touch pinned reveal — shows the SAME copy the per-bar <title> shows
+            (no new format/accent). Rendered only when a bar is tap-selected. */}
+        {selected != null && (
+          <g data-tap-reveal="streak" pointerEvents="none">
+            <text
+              x={VB_W / 2}
+              y={HIST_PAD.top - 2}
+              textAnchor="middle"
+              fontSize={Math.max(12, axisFont)}
+              fontFamily="var(--font-mono)"
+              fontWeight={600}
+              fill="var(--color-text-primary)"
+            >
+              {streakLabel(selected, data[selected], maxLen)}
+            </text>
+          </g>
+        )}
+      </ResponsiveChartFrame>
     </div>
   );
 }
@@ -271,8 +373,12 @@ function BootHist({
   fmt: (n: number) => string;
   accent?: boolean;
 }) {
+  const isMobile = useBreakpoint() === "mobile";
   const W = 340;
-  const H = 36;
+  // Desktop height = today's literal (36). Mobile uses a taller strip so the CI
+  // band + bars read at 320px (CHART-02/03 — no hover, so legibility + portrait
+  // only). The width axis (W) is fixed → desktop render byte-identical.
+  const H = isMobile ? 56 : 36;
   const PAD = { left: 4, right: 4, top: 4, bottom: 10 };
   const plotW = W - PAD.left - PAD.right;
   const plotH = H - PAD.top - PAD.bottom;
@@ -305,12 +411,7 @@ function BootHist({
           <span className="text-text-2">{fmt(ci[1])}</span>
         </span>
       </div>
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        preserveAspectRatio="xMidYMid meet"
-        className="block w-full"
-        style={{ aspectRatio: `${W} / ${H}`, maxHeight: H, width: "100%", height: "auto" }}
-      >
+      <ResponsiveChartFrame width={W} height={H} role="img" aria-label={`${title} bootstrap distribution`}>
         {/* CI shaded band */}
         <rect
           x={X(ci[0])}
@@ -344,7 +445,7 @@ function BootHist({
           stroke="var(--color-text-primary)"
           strokeWidth={1.4}
         />
-      </svg>
+      </ResponsiveChartFrame>
     </div>
   );
 }
