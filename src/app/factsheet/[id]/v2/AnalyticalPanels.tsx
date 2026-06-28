@@ -46,7 +46,7 @@ export function StreakDistributionPanel() {
         </p>
       </header>
       {/* Single-column on mobile so each StreakHist renders ~288px wide → the
-          coarse hit-rect's colW=68 viewBox units land ≈44.5 CSS px (CR-01).
+          coarse hit-rect's colW=76 viewBox units land ≈49 CSS px (CR-01).
           Desktop (≥sm) stays 2-col — byte-identical to today's render. */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-2">
         <StreakHist title="Wins" data={s.winsByLength} color="var(--color-positive)" maxLen={s.maxLen} />
@@ -93,24 +93,29 @@ function StreakHist({ title, data, color, maxLen }: { title: string; data: numbe
     if (i < 0 || i >= data.length) return null;
     return i;
   };
-  const tap = useTapPin({ count: data.length, pointerToIndex });
+  const { selectedIdx, setChartEl, onPointerDown, onPointerMove, onPointerUp, onPointerLeave } =
+    useTapPin({ count: data.length, pointerToIndex });
   const selected =
-    tap.selectedIdx != null && tap.selectedIdx >= 0 && tap.selectedIdx < data.length ? tap.selectedIdx : null;
+    selectedIdx != null && selectedIdx >= 0 && selectedIdx < data.length ? selectedIdx : null;
 
   return (
     <div>
       <p className="text-[10px] font-mono uppercase tracking-wider text-text-muted mb-1">{title}</p>
       <ResponsiveChartFrame
-        ref={tap.svgRef}
+        ref={setChartEl}
         width={VB_W}
         height={VB_H}
         role="img"
-        aria-label={`${title} streak-length distribution — tap a bar to reveal its count`}
+        aria-label={
+          isMobile
+            ? `${title} streak-length distribution — tap a bar to reveal its count`
+            : `${title} streak-length distribution`
+        }
         style={{ touchAction: "pan-y" }}
-        onPointerDown={tap.onPointerDown}
-        onPointerMove={tap.onPointerMove}
-        onPointerUp={tap.onPointerUp}
-        onPointerLeave={tap.onPointerLeave}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerLeave={onPointerLeave}
       >
         {/* Y gridlines + labels */}
         {yTicks.map(t => (
@@ -158,15 +163,17 @@ function StreakHist({ title, data, color, maxLen }: { title: string; data: numbe
             <rect> per bar, spanning the full plot height. `hidden
             pointer-coarse:block` keeps them off pointer-fine (desktop hover via
             the bar <title> stays byte-identical) and present on touch. The
-            column is widened to ≥68 viewBox units. The ACTUAL mobile scale: the
+            column is widened to ≥76 viewBox units. The ACTUAL mobile scale: the
             parent grid collapses to a single column below sm (CR-01), so each
             histogram renders ~288 CSS px wide against VB_W=440 → scale ≈
-            288/440 ≈ 0.65×, giving 68 × 0.65 ≈ 44.5 CSS px (clears the 44px WCAG
-            target). On a 2-col mobile grid the scale would be ~0.32× and the
-            hit-rect ~22px — hence the single-column collapse is load-bearing.
+            288/440 ≈ 0.65×, giving 76 × 0.65 ≈ 49 CSS px — clears the 44px WCAG
+            target with ~5px margin so intermediate padding / a scrollbar / a
+            sub-320px device doesn't silently drop it below 44px. On a 2-col
+            mobile grid the scale would be ~0.32× and the hit-rect ~24px — hence
+            the single-column collapse is load-bearing.
             The visible bar width is unchanged — this layer is geometry-only. */}
         {data.map((_, i) => {
-          const colW = Math.max(barW, 68);
+          const colW = Math.max(barW, 76);
           const cx = HIST_PAD.left + i * barW + barW / 2;
           return (
             <rect

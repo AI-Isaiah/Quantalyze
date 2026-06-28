@@ -18,7 +18,7 @@
  *  7. Tap elsewhere (≥ threshold) while pinned → moves the pin
  *  8. pointerleave while pinned → selectedIdx survives
  *  9. pointerleave while unpinned → selectedIdx clears
- * 10. svgRef unset (no <svg> attached) → early return (defensive arm)
+ * 10. chart element unset (setChartEl never called) → early return (defensive arm)
  * 11. Index clamped to [0, count-1] when pointerToIndex overshoots
  *
  * Pointer events are synthesized as plain objects carrying only the fields the
@@ -67,8 +67,8 @@ function pointerEvent(over: {
 
 /**
  * Render the hook with a deterministic pointerToIndex + count, and attach a
- * stub SVG element to svgRef so getBoundingClientRect resolves (unless the test
- * opts out via attachSvg:false to exercise the svgRef-unset arm).
+ * stub element via setChartEl so getBoundingClientRect resolves (unless the test
+ * opts out via attachSvg:false to exercise the no-element-attached arm).
  */
 function setup(
   opts: Partial<UseTapPinOptions> & { attachSvg?: boolean } = {},
@@ -81,13 +81,16 @@ function setup(
   const count = opts.count ?? 10;
   const utils = renderHook(() => useTapPin({ count, pointerToIndex }));
   if (attachSvg) {
-    // Attach a stub SVG element exposing getBoundingClientRect; the hook only
-    // reads the rect to forward into pointerToIndex.
-    utils.result.current.svgRef.current = {
-      getBoundingClientRect: () =>
-        ({ left: 0, top: 0, width: 100, height: 100 }) as DOMRect,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any;
+    // Attach a stub element exposing getBoundingClientRect via the hook's
+    // setChartEl callback ref; the hook only reads the rect to forward into
+    // pointerToIndex.
+    act(() => {
+      utils.result.current.setChartEl({
+        getBoundingClientRect: () =>
+          ({ left: 0, top: 0, width: 100, height: 100 }) as DOMRect,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+    });
   }
   return utils;
 }
@@ -221,7 +224,7 @@ describe("[CHART-01a] useTapPin — tap-vs-drag + pin-toggle gesture core", () =
     expect(result.current.selectedIdx).toBeNull();
   });
 
-  it("does nothing if no <svg> is attached to svgRef (defensive early return)", () => {
+  it("does nothing if no chart element is attached (defensive early return)", () => {
     vi.spyOn(Date, "now").mockReturnValue(1000);
     const { result } = setup({ pointerToIndex: () => 4, attachSvg: false });
     act(() => result.current.onPointerDown(pointerEvent({ pointerType: "touch" })));
@@ -245,6 +248,36 @@ describe("[CHART-01a] useTapPin — tap-vs-drag + pin-toggle gesture core", () =
     act(() => result.current.onPointerDown(pointerEvent({ pointerType: "touch" })));
     act(() => result.current.onPointerUp(pointerEvent({ pointerType: "touch" })));
     expect(result.current.selectedIdx).toBe(0);
+  });
+
+  it("ignores a pointerup whose pointerId doesn't match the pointerdown (multi-touch safety)", () => {
+    // A second concurrent finger overwrites tapInfo. The first finger's up (or a
+    // stray up with a different id) must NOT resolve this gesture — without the
+    // pointerId guard it would pin using mismatched down/up state. The matching
+    // finger's own up still resolves normally afterward.
+    vi.spyOn(Date, "now").mockReturnValue(1000);
+    const { result } = setup({ pointerToIndex: () => 4 });
+    act(() => result.current.onPointerDown(pointerEvent({ pointerType: "touch", pointerId: 1 })));
+    act(() => result.current.onPointerUp(pointerEvent({ pointerType: "touch", pointerId: 2 })));
+    expect(result.current.selectedIdx).toBeNull();
+    expect(result.current.pinned).toBe(false);
+    // The recorded down (id 1) survives the mismatched up, so its own up pins.
+    act(() => result.current.onPointerUp(pointerEvent({ pointerType: "touch", pointerId: 1 })));
+    expect(result.current.selectedIdx).toBe(4);
+    expect(result.current.pinned).toBe(true);
+  });
+
+  it("count<=0 (empty collection) selects nothing rather than a phantom index 0", () => {
+    // Without the count<=0 guard the clamp Math.max(0, Math.min(count-1, …))
+    // resolves to Math.max(0, -1) = 0, pinning index 0 of an EMPTY collection.
+    // The guard must clear + un-pin instead. Falsifiable: removing the guard
+    // makes selectedIdx===0/pinned===true and fails this test.
+    vi.spyOn(Date, "now").mockReturnValue(1000);
+    const { result } = setup({ count: 0, pointerToIndex: () => 0 });
+    act(() => result.current.onPointerDown(pointerEvent({ pointerType: "touch" })));
+    act(() => result.current.onPointerUp(pointerEvent({ pointerType: "touch" })));
+    expect(result.current.selectedIdx).toBeNull();
+    expect(result.current.pinned).toBe(false);
   });
 
   it("a pointermove with no prior pointerdown is a no-op (no tapInfo yet)", () => {

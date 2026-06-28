@@ -197,4 +197,63 @@ describe("[CHART-01a/02/03] tap-reveal panels — both viewport branches", () =>
     const { container } = renderPanel(<StreakDistributionPanel />);
     expect(container.querySelector('svg [data-tap-reveal="streak"]')).toBeNull();
   });
+
+  // ---- Synthetic touch tap pins the DailyReturnsHeatmap cell reveal (CHART-01a) ----
+  //
+  // DailyReturnsHeatmap doesn't consume the hook's pinned state directly — it has
+  // bespoke glue (svgRef aliased onto the wrapper <div>, a `pinnedCell` that
+  // re-derives wk/d from selectedIdx, composed mouse+touch handlers, and a
+  // pinned-over-hover `reveal`). The render-without-throwing tests above only
+  // cover the isMobile font branches; this test drives an actual touch tap so a
+  // regression in that glue (e.g. the wk*7+d ↔ idx/7 round-trip) is caught.
+
+  it("a synthetic touch tap on DailyReturnsHeatmap pins the cell tooltip (ISO + pct)", () => {
+    setBreakpoint("mobile");
+    // Build the payload up-front so we can find a populated (wk, d) cell and tap
+    // its exact center deterministically (no reliance on the synthetic layout).
+    const payload = makeApiPayload();
+    const year = payload.dailyHeatmap[0];
+    expect(year).toBeTruthy();
+    let twk = -1;
+    let td = -1;
+    for (let wk = 0; wk < year.cells.length && twk < 0; wk++) {
+      for (let d = 0; d < 7; d++) {
+        if (year.cells[wk][d] != null) {
+          twk = wk;
+          td = d;
+          break;
+        }
+      }
+    }
+    expect(twk).toBeGreaterThanOrEqual(0); // fixture sanity: ≥1 populated cell
+
+    const { container } = render(
+      <FactsheetProvider payload={payload}>
+        <DailyReturnsHeatmap />
+      </FactsheetProvider>,
+    );
+    // The whole calendar wrapper (role=img) is the tap surface; the hook's svgRef
+    // is aliased onto it. jsdom never fires ResizeObserver, so scale stays 1 → a
+    // cell center in CSS px is gutter(14) + idx*(CELL 12 + CELL_GAP 2) + CELL/2(6).
+    const wrap = container.querySelector('[aria-label^="Daily-return calendar"]') as HTMLElement;
+    expect(wrap).not.toBeNull();
+    wrap.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 120, right: 800, bottom: 120, x: 0, y: 0, toJSON() {} }) as DOMRect;
+    const cx = 14 + twk * 14 + 6;
+    const cy = 14 + td * 14 + 6;
+    fireEvent.pointerDown(wrap, { clientX: cx, clientY: cy, pointerType: "touch", pointerId: 1 });
+    fireEvent.pointerUp(wrap, { clientX: cx, clientY: cy, pointerType: "touch", pointerId: 1 });
+
+    // The pinned reveal is the role=status tooltip; it reuses the ISO + pct copy
+    // the desktop hover shows. A regression in the bespoke glue fails this.
+    const tip = container.querySelector('[role="status"]');
+    expect(tip).not.toBeNull();
+    expect(tip?.textContent ?? "").toMatch(/\d{4}-\d{2}-\d{2}/);
+  });
+
+  it("DailyReturnsHeatmap shows no pinned reveal by default (desktop mouse render)", () => {
+    setBreakpoint("desktop");
+    const { container } = renderPanel(<DailyReturnsHeatmap />);
+    expect(container.querySelector('[role="status"]')).toBeNull();
+  });
 });

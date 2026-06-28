@@ -111,8 +111,7 @@ function viewBoxes(container: HTMLElement): string[] {
 
 /** The viewBox HEIGHT (4th token of "0 0 W H") of the first svg. */
 function firstViewBoxHeight(container: HTMLElement): number {
-  const vb = viewBoxes(container)[0];
-  const parts = vb.split(/\s+/);
+  const parts = (viewBoxes(container)[0] ?? "").split(/\s+/);
   return Number(parts[3]);
 }
 

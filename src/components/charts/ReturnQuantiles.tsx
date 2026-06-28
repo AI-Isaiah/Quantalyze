@@ -15,8 +15,10 @@ interface ReturnQuantilesProps {
 
 // Fixed width axis (unchanged at every breakpoint). Desktop viewBox height is
 // today's literal (200); CHART-03 portrait selects a taller mobile viewBox so
-// the box bodies + labels breathe at 320px while the desktop SSR render stays
-// byte-identical (server snapshot is "desktop").
+// the box bodies + labels breathe at 320px while the desktop SSR arm keeps
+// today's literals (server snapshot is "desktop"). NB the svg wrapper is now
+// ResponsiveChartFrame, so only these literals + the box/whisker geometry are
+// unchanged — the wrapper markup itself is not byte-identical to the old <svg>.
 const VB_W = 600;
 const VB_H_DESKTOP = 200;
 const VB_H_MOBILE = 280;
@@ -46,7 +48,8 @@ const Y_FRACS_MOBILE = [0, 0.5, 1];
  * `useBreakpoint` mobile branch bumps the axis/period fonts + reduces the
  * y-gridline density + raises the viewBox height so the chart is legible at
  * 320px. The DESKTOP branch returns today's exact literals (viewBox 600×200,
- * fontSize 10/11, 5 gridlines) so the desktop render is byte-identical. This
+ * fontSize 10/11, 5 gridlines) so the desktop svg content is unchanged (the
+ * wrapper itself is now ResponsiveChartFrame, not the old bare <svg>). This
  * chart has NO desktop hover, so it gets legibility + portrait ONLY — no
  * tap-reveal / tabIndex / pointer handlers (parity-only rule).
  */

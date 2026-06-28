@@ -134,8 +134,8 @@ const SVG_LEFT_GUTTER = 56; // room for the year label
 const SVG_TOP_GUTTER = 24; // room for the month label
 
 /** The cell reveal copy — the SAME `"{ISO}: {pct}%"` string the per-cell
- *  `<title>` shows (DailyHeatmap.test.tsx:187-194). Single value source for both
- *  the desktop `<title>`/AT path and the touch pinned reveal. */
+ *  `<title>` shows (DailyHeatmap.test.tsx:206 asserts the format). Single value
+ *  source for both the desktop `<title>`/AT path and the touch pinned reveal. */
 function cellLabel(d: DailyHeatmapDataPoint): string {
   return `${d.date}: ${(d.value * 100).toFixed(2)}%`;
 }
@@ -184,10 +184,11 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
     }
     return best >= 0 ? best : null;
   };
-  const tap = useTapPin({ count: flatCells.length, pointerToIndex });
+  const { selectedIdx, setChartEl, onPointerDown, onPointerMove, onPointerUp, onPointerLeave } =
+    useTapPin({ count: flatCells.length, pointerToIndex });
   const pinned =
-    tap.selectedIdx != null && tap.selectedIdx >= 0 && tap.selectedIdx < flatCells.length
-      ? flatCells[tap.selectedIdx]
+    selectedIdx != null && selectedIdx >= 0 && selectedIdx < flatCells.length
+      ? flatCells[selectedIdx]
       : null;
 
   // WR-01: gate every desktop-affecting attribute behind isMobile so the
@@ -211,16 +212,16 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
   return (
     <div className={wrapperClass} style={wrapperStyle}>
       <svg
-        ref={tap.svgRef}
+        ref={setChartEl}
         role="img"
         aria-label={ariaLabel}
         width="100%"
         viewBox={`0 0 ${width} ${height}`}
         style={svgStyle}
-        onPointerDown={tap.onPointerDown}
-        onPointerMove={tap.onPointerMove}
-        onPointerUp={tap.onPointerUp}
-        onPointerLeave={tap.onPointerLeave}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerLeave={onPointerLeave}
       >
         {/* X-axis month labels — positioned at each month's day-of-year start.
             Mobile bumps the font for 320px legibility; desktop = literal 12. */}

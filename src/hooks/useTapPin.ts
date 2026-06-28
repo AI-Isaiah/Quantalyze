@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 
 /**
  * Phase 47 / CHART-01a — the shared tap-vs-drag + pin-toggle gesture core.
@@ -68,8 +68,14 @@ export interface UseTapPin {
   selectedIdx: number | null;
   /** Whether the current selection is pinned (survives `pointerleave`). */
   pinned: boolean;
-  /** Attach to the consuming `<svg>` so the hook can read its bounding rect. */
-  svgRef: RefObject<SVGSVGElement | null>;
+  /**
+   * Callback ref — attach to the consuming chart element (its `<svg>`, or a
+   * wrapper element the chart owns) via `ref={setChartEl}` so the hook can read
+   * its bounding rect. A callback ref (not a returned RefObject) so consumers
+   * never mutate a hook-owned ref's `.current`, which the react-compiler rule
+   * forbids.
+   */
+  setChartEl: (el: Element | null) => void;
   onPointerDown: (e: ReactPointerEvent<SVGSVGElement>) => void;
   onPointerMove: (e: ReactPointerEvent<SVGSVGElement>) => void;
   onPointerUp: (e: ReactPointerEvent<SVGSVGElement>) => void;
@@ -88,18 +94,27 @@ export function useTapPin(opts: UseTapPinOptions): UseTapPin {
   // Tap-detection bookkeeping: if the pointer never moved beyond TAP_SLOP and
   // the gesture lasted < TAP_MAX_MS, treat it as a tap rather than a drag.
   const tapInfoRef = useRef<{
+    id: number;
     x: number;
     y: number;
     t: number;
     type: string;
   } | null>(null);
   const movedRef = useRef(false);
-  const svgRef = useRef<SVGSVGElement | null>(null);
+  // The hook owns this ref; consumers attach the chart element through the
+  // `setChartEl` callback ref below (never by mutating a returned RefObject).
+  const elRef = useRef<Element | null>(null);
+  const setChartEl = useCallback((el: Element | null) => {
+    elRef.current = el;
+  }, []);
 
   const onPointerDown = useCallback(
     (e: ReactPointerEvent<SVGSVGElement>) => {
       // Record tap-start for the touch tap-to-pin detection in onPointerUp.
+      // `id` lets onPointerUp ignore a different concurrent pointer's up (a
+      // second finger would otherwise corrupt this gesture's tap resolution).
       tapInfoRef.current = {
+        id: e.pointerId,
         x: e.clientX,
         y: e.clientY,
         t: Date.now(),
@@ -137,15 +152,20 @@ export function useTapPin(opts: UseTapPinOptions): UseTapPin {
       // the value stays visible after the finger lifts. A pinned tap that
       // re-taps within RETAP_THRESHOLD (toggling) clears the pin instead.
       const ti = tapInfoRef.current;
+      // Ignore a pointerup whose id doesn't match the recorded pointerdown (a
+      // second concurrent finger overwrote tapInfo, or a stray up). Don't null
+      // the bookkeeping here so the MATCHING finger's own up can still resolve.
+      if (!ti || ti.id !== e.pointerId) return;
       tapInfoRef.current = null;
-      if (!ti || ti.type !== "touch" || movedRef.current) return;
+      if (ti.type !== "touch" || movedRef.current) return;
       if (Date.now() - ti.t > TAP_MAX_MS) return;
-      const svg = svgRef.current;
-      if (!svg) return;
-      const rect = svg.getBoundingClientRect();
+      const el = elRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
       const idxF = pointerToIndex(e.clientX, e.clientY, rect);
-      if (idxF == null) {
-        // Tap outside the selectable region — clear any existing pin.
+      if (idxF == null || count <= 0) {
+        // Tap outside the selectable region, or an empty collection (count<=0,
+        // which would otherwise clamp to a phantom index 0) — clear any pin.
         setPinned(false);
         setSelectedIdx(null);
         return;
@@ -172,7 +192,7 @@ export function useTapPin(opts: UseTapPinOptions): UseTapPin {
   return {
     selectedIdx,
     pinned,
-    svgRef,
+    setChartEl,
     onPointerDown,
     onPointerMove,
     onPointerUp,
