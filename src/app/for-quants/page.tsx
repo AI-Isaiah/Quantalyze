@@ -197,16 +197,28 @@ export default function ForQuantsPage() {
             reviews within 24 hours.
           </p>
 
+          {/* A11Y-01 (Phase 48): a <dl> may directly contain only <dt>/<dd>
+              groups or <div>s wrapping them (axe `definition-list` /
+              `only-dlitems`). The prior grouping <div> held a bare <span> step
+              number alongside <dt>/<dd>, which trips the rule. The step number
+              now lives INSIDE the <dt> (a nested flex preserving the 72px/title
+              two-line visual), so the grouping <div> contains only <dt>/<dd>.
+              Visual is unchanged: the <dt> still spans the number + title
+              columns, the <dd> the body. */}
           <dl className="mt-10 divide-y divide-border border-t border-b border-border">
             {HOW_STEPS.map((step) => (
               <div
                 key={step.n}
-                className="grid gap-2 py-5 md:grid-cols-[72px_280px_1fr] md:items-baseline md:gap-8"
+                className="grid gap-2 py-5 md:grid-cols-[352px_1fr] md:items-baseline md:gap-8"
               >
-                <span className="font-metric text-xs tracking-wider text-text-muted">
-                  {step.n}
-                </span>
-                <dt className="font-medium text-text-primary">{step.title}</dt>
+                <dt className="grid gap-2 md:grid-cols-[56px_1fr] md:gap-8">
+                  <span className="font-metric text-xs tracking-wider text-text-muted">
+                    {step.n}
+                  </span>
+                  <span className="font-medium text-text-primary">
+                    {step.title}
+                  </span>
+                </dt>
                 <dd className="text-text-secondary">{step.body}</dd>
               </div>
             ))}
