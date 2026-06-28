@@ -34,7 +34,7 @@ export function WizardIpAllowlistHint() {
         see{" "}
         <a
           href="/security#egress-ips"
-          className="text-accent underline-offset-4 hover:underline"
+          className="text-accent underline underline-offset-4"
         >
           /security#egress-ips
         </a>
