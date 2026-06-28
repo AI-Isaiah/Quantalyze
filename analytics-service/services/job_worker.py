@@ -513,13 +513,13 @@ async def _check_circuit_breaker(
     exchange_name = key_row.get("exchange", "")
     cooldown = EXCHANGE_COOLDOWNS.get(exchange_name, 120)
 
-    def _cooldown_remaining() -> APIResponse[Any]:
+    def _cooldown_remaining() -> APIResponse:
         # Boundary re-assertion: supabase 2.15.1 types Client.rpc() as Any, so
         # `.execute()` statically yields Any. Re-assert the genuine runtime
-        # APIResponse[Any] here (the same stub-gap bridge services/db.py applies
+        # APIResponse here (the same stub-gap bridge services/db.py applies
         # in rows()/one()) so the consumed `res.data` read stays typed — no
         # cast, no ignore.
-        resp: APIResponse[Any] = supabase.rpc("api_key_cooldown_remaining", {
+        resp: APIResponse = supabase.rpc("api_key_cooldown_remaining", {
             "p_api_key_id": key_row["id"],
             "p_cooldown_seconds": cooldown,
         }).execute()

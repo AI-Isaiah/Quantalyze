@@ -20,7 +20,7 @@ from typing import Any
 
 from supabase import Client
 
-from services.db import PaginatedSelectTruncated, one, paginated_select
+from services.db import PaginatedSelectTruncated, one, paginated_select, rows
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ def compute_hit_rate_metrics(
             .in_("role", ["allocator", "both"])
             .execute()
         )
-        filtered_allocator_ids = [p["id"] for p in (allocators_result.data or [])]
+        filtered_allocator_ids = [p["id"] for p in rows(allocators_result)]
         if not filtered_allocator_ids:
             return _empty_metrics(lookback_days)
 
@@ -103,7 +103,7 @@ def compute_hit_rate_metrics(
         allocator_id = intro.get("allocator_id") if isinstance(intro, dict) else None
         strategy_id = intro.get("strategy_id") if isinstance(intro, dict) else None
         created_at = intro.get("created_at") if isinstance(intro, dict) else None
-        if not (allocator_id and strategy_id and created_at):
+        if not (isinstance(intro, dict) and allocator_id and strategy_id and created_at):
             logger.warning(
                 "compute_hit_rate_metrics: skipping malformed intro (missing required fields): %s",
                 intro,
@@ -397,9 +397,10 @@ def _find_strategy_rank_in_latest_batch_before(
         .limit(1)
         .execute()
     )
-    if not batch_result.data:
+    batch_rows = rows(batch_result)
+    if not batch_rows:
         return None
-    batch_id = batch_result.data[0]["id"]
+    batch_id = batch_rows[0]["id"]
 
     # Look for the candidate in that batch
     cand_result = (

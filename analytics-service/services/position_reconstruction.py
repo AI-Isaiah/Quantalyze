@@ -364,13 +364,13 @@ async def _reconstruct_positions_inner(
     dashboard with empty positions and contradictory trade_metrics.
     """
     # Query fills ordered by timestamp
-    def _fetch_fills() -> APIResponse[Any]:
+    def _fetch_fills() -> APIResponse:
         # Boundary re-assertion: supabase 2.15.1 types Client.table() as Any so
         # `.execute()` statically yields Any. Re-assert the genuine runtime
-        # APIResponse[Any] here (the same stub-gap bridge services/db.py applies
+        # APIResponse here (the same stub-gap bridge services/db.py applies
         # in rows()/one()) so the consumed rows(result) read stays typed — no
         # cast, no ignore.
-        resp: APIResponse[Any] = (
+        resp: APIResponse = (
             supabase.table("trades")
             .select("*")
             .eq("strategy_id", strategy_id)
@@ -831,10 +831,10 @@ async def _attribute_funding(
             start = page * _PAGE_SIZE
             end = start + _PAGE_SIZE - 1
 
-            def _fetch_funding(s: int = start, e: int = end) -> APIResponse[Any]:
+            def _fetch_funding(s: int = start, e: int = end) -> APIResponse:
                 # Boundary re-assertion (see _fetch_fills): supabase types
-                # `.execute()` as Any; re-assert APIResponse[Any] for rows().
-                resp: APIResponse[Any] = (
+                # `.execute()` as Any; re-assert APIResponse for rows().
+                resp: APIResponse = (
                     supabase.table("funding_fees")
                     # NEW-C30-02: include currency so we can skip
                     # base-coin-denominated (inverse-perp) rows before
@@ -1727,10 +1727,10 @@ async def compute_exposure_metrics(
     # lookup failed (unknown) — stay discriminable to security reviewers.
     api_key_lookup_failed = False
     try:
-        def _fetch_self() -> APIResponse[Any]:
+        def _fetch_self() -> APIResponse:
             # Boundary re-assertion (see _fetch_fills): supabase types
-            # `.execute()` as Any; re-assert APIResponse[Any] for rows().
-            resp: APIResponse[Any] = (
+            # `.execute()` as Any; re-assert APIResponse for rows().
+            resp: APIResponse = (
                 supabase.table("strategies")
                 .select("api_key_id")
                 .eq("id", strategy_id)
@@ -1752,10 +1752,10 @@ async def compute_exposure_metrics(
 
     if api_key_id:
         try:
-            def _fetch_siblings() -> APIResponse[Any]:
+            def _fetch_siblings() -> APIResponse:
                 # Boundary re-assertion (see _fetch_fills): supabase types
-                # `.execute()` as Any; re-assert APIResponse[Any] for rows().
-                resp: APIResponse[Any] = (
+                # `.execute()` as Any; re-assert APIResponse for rows().
+                resp: APIResponse = (
                     supabase.table("strategies")
                     .select("id")
                     .eq("api_key_id", api_key_id)
@@ -1793,10 +1793,10 @@ async def compute_exposure_metrics(
                 strategy_id, exc,
             )
 
-    def _fetch_snapshots() -> APIResponse[Any]:
+    def _fetch_snapshots() -> APIResponse:
         # Boundary re-assertion (see _fetch_fills): supabase types `.execute()`
-        # as Any; re-assert APIResponse[Any] for rows().
-        resp: APIResponse[Any] = (
+        # as Any; re-assert APIResponse for rows().
+        resp: APIResponse = (
             supabase.table("position_snapshots")
             .select("snapshot_date, side, size_usd")
             .eq("strategy_id", strategy_id)
