@@ -63,7 +63,7 @@ export function nearestIndex(epochs: number[], target: number): number {
 // `useTapPin`, so a tap pins exactly what hover reveals (parity is structural,
 // not asserted-by-coincidence). `px` is the chart-area-local x (already
 // `clientX - rect.left`). The body is a verbatim transcription of the original
-// handleMove chain (EquityChart.tsx:1142-1159) — same n===0/n===1 early arms,
+// handleMove chain (EquityChart.tsx:1213-1226) — same n===0/n===1 early arms,
 // same clamp, same epoch inversion, same O(log n) `nearestIndex`:
 //   - n === 0 → null (no selectable index; handleMove's `if (n===0) return`)
 //   - n === 1 → 0     (handleMove's `if (n===1) { setHoverIdx(0); return }`)

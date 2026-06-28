@@ -31,8 +31,8 @@ import { useBreakpoint } from "@/hooks/useBreakpoint";
 type TooltipProps = ComponentProps<typeof Tooltip>;
 
 export function TouchTooltip(props: TooltipProps) {
-  // Mirror the canonical "is mobile" spelling used at the live useTapPin call
-  // site (HeatmapPanels.tsx:263) so the project has ONE definition of mobile.
+  // Mirror the canonical "is mobile" spelling (HeatmapPanels.tsx:263) so the
+  // project has ONE definition of mobile.
   const trigger = useBreakpoint() === "mobile" ? "click" : "hover";
   // Spread AFTER `trigger` so a caller could override it (none do today — all
   // 18 charts pass only `formatter` + `contentStyle`).

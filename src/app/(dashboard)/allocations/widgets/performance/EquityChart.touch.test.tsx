@@ -9,7 +9,7 @@
  * shared pure helper — `epochIndexFromPx` — so parity is STRUCTURAL, not
  * asserted-by-coincidence.
  *
- * The mapping chain (mirrored from handleMove, EquityChart.tsx:1142-1159):
+ * The mapping chain (mirrored from handleMove, EquityChart.tsx:1213-1226):
  *
  *   px         = clientX - rect.left
  *   clampedPx  = Math.max(pad.l, Math.min(pad.l + chartW, px))   // clamp to chart area
@@ -25,7 +25,12 @@
 import { describe, it, expect } from "vitest";
 import { render, fireEvent } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
-import { EquityChart, epochIndexFromPx, nearestIndex } from "./EquityChart";
+import {
+  EquityChart,
+  epochIndexFromPx,
+  nearestIndex,
+  type EpochIndexGeom,
+} from "./EquityChart";
 
 // A simple monotonic series — enough points that the projection is non-null and
 // the chart renders its <svg> (mirrors EquityChart.test.tsx's makeSeries).
@@ -59,21 +64,15 @@ function makeEpochs(count: number): number[] {
 }
 
 // The reference computation — a literal transcription of handleMove's body
-// (EquityChart.tsx:1142-1159) for a given px. The test asserts the extracted
+// (EquityChart.tsx:1213-1226) for a given px. The test asserts the extracted
 // helper produces the SAME index for the same px, so the production helper and
 // handleMove cannot drift (they share `epochIndexFromPx` by construction; this
 // reference is the independent oracle that the shared helper is correct).
-function handleMoveReference(
-  px: number,
-  geom: {
-    padL: number;
-    chartW: number;
-    firstEpochX: number;
-    totalMs: number;
-    visibleEpochs: number[];
-    n: number;
-  },
-): number | null {
+// The `geom` param binds to the EXPORTED `EpochIndexGeom` (not a re-declared
+// inline shape) so a future change to the geom contract forces this oracle to
+// update or fail to compile — the body stays an independent transcription, but
+// the TYPE cannot silently drift from production (review WR: type-design).
+function handleMoveReference(px: number, geom: EpochIndexGeom): number | null {
   const { padL, chartW, firstEpochX, totalMs, visibleEpochs, n } = geom;
   if (n === 0) return null;
   if (n === 1) return 0;
@@ -231,5 +230,23 @@ describe("[CHART-01b] EquityChart touch path — rendered wiring (WR-02)", () =>
     // `hoverIdx ?? tap.selectedIdx`, the stray hover would move it → this fails.
     fireEvent.mouseMove(svg, { clientX: 60, clientY: 120 });
     expect(crosshair()?.getAttribute("x1")).toBe(pinnedX);
+  });
+
+  it("a re-tap at the same point un-pins (dismiss wiring; useTapPin re-tap toggle)", () => {
+    const { container } = render(
+      <EquityChart equityDailyPoints={makeRenderSeries(200)} initialPeriod="ALL" />,
+    );
+    const svg = container.querySelector("svg")!;
+    const tap = () => {
+      fireEvent.pointerDown(svg, { pointerId: 1, clientX: 400, clientY: 120, pointerType: "touch" });
+      fireEvent.pointerUp(svg, { pointerId: 1, clientX: 400, clientY: 120, pointerType: "touch" });
+    };
+    // First tap pins; a second tap within RETAP_THRESHOLD of the pin toggles it
+    // OFF (useTapPin.ts re-tap branch) → the reveal crosshair must disappear.
+    // Without the onPointer wiring re-asserting this, a stale pin would linger.
+    tap();
+    expect(crosshairCount(container)).toBeGreaterThan(0);
+    tap();
+    expect(crosshairCount(container)).toBe(0);
   });
 });

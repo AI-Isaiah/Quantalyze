@@ -186,7 +186,7 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — chart tap-rects @ 320px (
  *
  * The Phase-48-03 EquityChart edit wires the Phase-47 useTapPin gesture core
  * onto the hand-rolled `<svg role="img" aria-label="Equity chart">` and wraps
- * it in a `pointer-coarse:min-h-[44px]` layer (EquityChart.tsx:1494-1511) — the
+ * it in a `pointer-coarse:min-h-[44px]` layer (EquityChart.tsx:1500-1511) — the
  * explicit WCAG 2.5.5/2.5.8 touch hit-rect. This gate proves that contract
  * holds on the LIVE route (mirroring the Phase-47 self-analog above that proves
  * the DailyReturnsHeatmap / StreakDistribution hit-rects on /factsheet/[id]/v2).
