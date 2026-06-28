@@ -42,8 +42,11 @@ const TICK_FONT_DESKTOP = 12;
 const TICK_FONT_MOBILE = 20;
 
 // The default quantile band edges this chart renders. The section always runs
-// the engine with the default quantile set (MC_QUANTILES_DEFAULT), so these keys
-// are present on every point; a missing key skips that band rather than throwing.
+// the engine with the default quantile set (MC_QUANTILES_DEFAULT), so all five
+// keys are ASSUMED PRESENT on every point per that engine contract. (No
+// per-key guard here: an absent key would make `y(undefined)` → NaN and emit a
+// malformed `L<x>,NaN` path, not skip the band — so a future quantile-set
+// change must keep these keys, or add a guard at that time. YAGNI for v1.)
 const OUTER_LO = "p5";
 const INNER_LO = "p25";
 const MEDIAN = "p50";
