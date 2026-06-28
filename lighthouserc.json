@@ -1,0 +1,35 @@
+{
+  "_comment": "Phase 48 / A11Y-03 — Wave 0 SCAFFOLD. PLACEHOLDER minScore — plan 05 reseeds it from a real baseline run (floor set a few points UNDER measured actual, coverage-ratchet philosophy). PUBLIC routes only (headless can't auth; no authed URLs -> no info-disclosure to temporary-public-storage). lhci runs against the PRODUCTION next build via `npm run start` (NOT next dev — Pitfall 6).",
+  "ci": {
+    "collect": {
+      "startServerCommand": "npm run start",
+      "startServerReadyPattern": "ready|started|listening",
+      "startServerReadyTimeout": 30000,
+      "url": [
+        "http://localhost:3000/",
+        "http://localhost:3000/security",
+        "http://localhost:3000/for-quants",
+        "http://localhost:3000/browse",
+        "http://localhost:3000/demo"
+      ],
+      "numberOfRuns": 3,
+      "settings": {
+        "preset": "mobile"
+      }
+    },
+    "assert": {
+      "preset": "lighthouse:no-pwa",
+      "assertions": {
+        "categories:performance": [
+          "error",
+          {
+            "minScore": 0.5
+          }
+        ]
+      }
+    },
+    "upload": {
+      "target": "temporary-public-storage"
+    }
+  }
+}
