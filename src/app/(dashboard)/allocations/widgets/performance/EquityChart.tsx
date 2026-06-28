@@ -1230,9 +1230,12 @@ export function EquityChart({
 
   // The reveal renders the pinned tap (touch) when present, else the transient
   // mouse-hover index — identical crosshair/dot/tooltip either way, reading the
-  // SAME precomputed values (no recompute). Mirrors HeatmapPanels' `pinned ??
-  // hovered` precedence.
-  const reveal = hoverIdx ?? tap.selectedIdx;
+  // SAME precomputed values (no recompute). PIN-FIRST precedence mirrors
+  // HeatmapPanels' `pinned ?? hovered`: on a hybrid touch+mouse device a stray
+  // hover must NOT silently clear an explicit tap-pin. On a pure-mouse desktop
+  // `tap.selectedIdx` is always null (useTapPin only pins on pointerType
+  // "touch"), so this stays byte-identical to the hover-only path.
+  const reveal = tap.selectedIdx ?? hoverIdx;
 
   // ── Period toggle + range picker handlers ────────────────────────
   const setPeriodChecked = (p: Period) => {

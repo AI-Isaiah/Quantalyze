@@ -23,7 +23,23 @@
  *   - px right of pad.l+chartW → clamps to the last index
  */
 import { describe, it, expect } from "vitest";
-import { epochIndexFromPx, nearestIndex } from "./EquityChart";
+import { render, fireEvent } from "@testing-library/react";
+import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { EquityChart, epochIndexFromPx, nearestIndex } from "./EquityChart";
+
+// A simple monotonic series — enough points that the projection is non-null and
+// the chart renders its <svg> (mirrors EquityChart.test.tsx's makeSeries).
+function makeRenderSeries(n: number): DailyPoint[] {
+  const pts: DailyPoint[] = [];
+  const d = new Date(Date.UTC(2024, 0, 1));
+  let cumulative = 1.0;
+  for (let i = 0; i < n; i++) {
+    pts.push({ date: d.toISOString().slice(0, 10), value: cumulative });
+    cumulative *= 1 + Math.sin(i * 0.3) * 0.01;
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return pts;
+}
 
 // A small, fixed geometry mirroring the projection's coordinate space. pad.l=8
 // and chartW=888 reproduce the production padding (pad = {t,r,b,l}, l=8; chartW
@@ -152,5 +168,68 @@ describe("[CHART-01b] EquityChart touch path — pointerToIndex parity", () => {
     const clientX = rectLeft + PAD_L + CHART_W * 0.5; // pointer at the window centre
     const px = clientX - rectLeft;
     expect(epochIndexFromPx(px, geom)).toBe(handleMoveReference(px, geom));
+  });
+});
+
+// WR-02 (code review): the parity test above exercises only the pure helper.
+// This render-level test proves the WIRING — that the rendered <svg> actually
+// carries useTapPin's `setChartEl` ref + `onPointer*` handlers and a `count`
+// that pins, and that the `reveal` pipeline renders from a tap. A dropped
+// onPointer prop, a wrong `count`, or a broken setChartEl ref would all leave
+// the crosshair absent after a tap and fail here (the unit-helper test would
+// not catch any of them).
+describe("[CHART-01b] EquityChart touch path — rendered wiring (WR-02)", () => {
+  // The reveal crosshair is the only <line> drawn with a "2 2" dasharray
+  // (EquityChart.tsx:1689); it renders ONLY when `reveal != null`.
+  const crosshairCount = (container: HTMLElement) =>
+    container.querySelectorAll('svg line[stroke-dasharray="2 2"]').length;
+
+  it("a touch tap on the <svg> pins the reveal crosshair (full setChartEl + onPointer wiring)", () => {
+    const { container } = render(
+      <EquityChart equityDailyPoints={makeRenderSeries(200)} initialPeriod="ALL" />,
+    );
+    const svg = container.querySelector("svg");
+    expect(svg).not.toBeNull();
+    // Nothing pinned/hovered yet → no reveal crosshair.
+    expect(crosshairCount(container)).toBe(0);
+
+    // A touch tap: pointerdown→pointerup at the same point, pointerType "touch",
+    // matching pointerId, synchronous (well under TAP_MAX_MS), zero movement.
+    fireEvent.pointerDown(svg!, {
+      pointerId: 1,
+      clientX: 400,
+      clientY: 120,
+      pointerType: "touch",
+    });
+    fireEvent.pointerUp(svg!, {
+      pointerId: 1,
+      clientX: 400,
+      clientY: 120,
+      pointerType: "touch",
+    });
+
+    // The tap pinned a value → the reveal crosshair is now drawn.
+    expect(crosshairCount(container)).toBeGreaterThan(0);
+  });
+
+  it("a hover at a DIFFERENT point does not move a tap-pin (pin-first precedence, WR-01 guard)", () => {
+    const { container } = render(
+      <EquityChart equityDailyPoints={makeRenderSeries(200)} initialPeriod="ALL" />,
+    );
+    const svg = container.querySelector("svg")!;
+    // Pin via a touch tap on the RIGHT side of the chart.
+    fireEvent.pointerDown(svg, { pointerId: 1, clientX: 600, clientY: 120, pointerType: "touch" });
+    fireEvent.pointerUp(svg, { pointerId: 1, clientX: 600, clientY: 120, pointerType: "touch" });
+    const crosshair = () =>
+      container.querySelector('svg line[stroke-dasharray="2 2"]');
+    const pinnedX = crosshair()?.getAttribute("x1");
+    expect(pinnedX).toBeTruthy();
+
+    // Now hover the mouse FAR to the left — handleMove sets `hoverIdx` to a
+    // different index. With pin-first `reveal = tap.selectedIdx ?? hoverIdx`,
+    // the crosshair MUST stay at the pinned x. Under the inverted (buggy)
+    // `hoverIdx ?? tap.selectedIdx`, the stray hover would move it → this fails.
+    fireEvent.mouseMove(svg, { clientX: 60, clientY: 120 });
+    expect(crosshair()?.getAttribute("x1")).toBe(pinnedX);
   });
 });
