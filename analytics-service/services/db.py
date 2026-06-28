@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 # postgrest does not re-export SingleAPIResponse from its package root (only
 # APIResponse is). Both live in base_request_builder, which is where supabase-py
@@ -164,15 +164,16 @@ async def db_execute(fn: Callable[[], _T]) -> _T:
 Row = dict[str, Any]
 
 
-# ``APIResponse``/``SingleAPIResponse`` are ``Generic[_ReturnT]`` on the
-# postgrest pinned by ``requirements.txt`` (supabase==2.15.1 -> postgrest 1.0.x),
-# which is what CI and prod install — so ``--strict`` (disallow_any_generics)
-# requires the explicit parameter. ``[Any]`` is the honest argument: we do not
-# model per-table row shapes (``Row`` keeps VALUES ``Any``; see the seam comment
-# above), so the row payload genuinely is ``Any``. (A drifted local venv on
-# postgrest 2.28.x, where these are non-generic, will flag the subscript — that
-# is a venv-drift symptom, not a typing bug; verify against the pinned deps.)
-def rows(resp: APIResponse[Any]) -> list[Row]:
+# ``APIResponse``/``SingleAPIResponse`` are NON-generic on the postgrest pinned
+# by ``requirements.txt`` (supabase==2.31.0 -> postgrest 2.31.0), which is what
+# CI and prod install — they take no type argument, and ``.data`` is the raw
+# PostgREST JSON union (``list[JSON]`` / ``JSON``). Narrowing that union into a
+# typed row shape is exactly what these accessors exist for; we do not model
+# per-table shapes (``Row`` keeps VALUES ``Any``; see the seam comment above).
+# (postgrest <2 was ``Generic[_ReturnT]`` and ``--strict``'s disallow_any_generics
+# required an explicit ``[Any]`` here; the 2.31 bump dropped the type parameter,
+# so the subscript was removed — supabase #480.)
+def rows(resp: APIResponse) -> list[Row]:
     """Narrow a multi-row PostgREST response (``.execute()`` / ``.rpc()``) to
     ``list[Row]``.
 
@@ -184,7 +185,7 @@ def rows(resp: APIResponse[Any]) -> list[Row]:
     return [r for r in resp.data if isinstance(r, dict)]
 
 
-def one(resp: SingleAPIResponse[Any] | None) -> Row | None:
+def one(resp: SingleAPIResponse | None) -> Row | None:
     """Narrow a single-row PostgREST response (``.single()`` /
     ``.maybe_single().execute()``) to ``Row | None``.
 
@@ -235,7 +236,7 @@ class PaginatedSelectTruncated(RuntimeError):
 
 
 def paginated_select(
-    builder: SyncSelectRequestBuilder[Any],
+    builder: SyncSelectRequestBuilder,
     order_by: tuple[tuple[str, bool], ...],
     page_size: int = 1000,
     hard_cap_pages: int = 1000,
@@ -280,7 +281,13 @@ def paginated_select(
         start = page * page_size
         end = start + page_size - 1
         result = ordered.range(start, end).execute()
-        chunk = result.data or []
+        # postgrest 2.31 types APIResponse.data as the raw JSON union
+        # (list[JSON]); a PostgREST SELECT row is always a JSON object, so
+        # assert dict element shape WITHOUT filtering — dropping a row here
+        # would shorten the page and falsely trip the short-page stop below,
+        # silently truncating the result (the pagination invariant the local
+        # ``rows`` accumulator and ``rows()`` seam deliberately differ on).
+        chunk = cast(list[dict[str, Any]], result.data)
         rows.extend(chunk)
         if len(chunk) < page_size:
             return rows

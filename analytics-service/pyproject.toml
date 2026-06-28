@@ -29,3 +29,14 @@ ignore_missing_imports = true
 module = ["quantstats.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
+
+# pandera ships py.typed but pandera 0.32 left DataFrameSchema.__init__
+# unannotated, so csv_validator.py's `pa.DataFrameSchema(...)` calls raise
+# no-untyped-call in --strict (supabase #480 bumped pandera 0.20.4 -> 0.32.0).
+# Same situation and same lever as quantstats above: follow_imports=skip makes
+# pandera opaque (Any) at the import seam, which is acceptable here — the CSV
+# schema surface is exercised by the csv_validator test suite, not the type
+# checker.
+[[tool.mypy.overrides]]
+module = ["pandera.*"]
+follow_imports = "skip"

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 import logging
 
-from .db import get_supabase, db_execute
+from .db import get_supabase, db_execute, rows
 
 logger = logging.getLogger("quantalyze.analytics")
 
@@ -106,7 +106,7 @@ async def get_benchmark_returns(
 
         if result.data and len(result.data) > 10:
             # Freshness check: reject cache older than 48 hours
-            most_recent_date = max(row["date"] for row in result.data)
+            most_recent_date = max(row["date"] for row in rows(result))
             most_recent = pd.Timestamp(most_recent_date)
             staleness = datetime.now(timezone.utc) - most_recent.tz_localize(timezone.utc)
 

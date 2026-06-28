@@ -36,4 +36,4 @@ pytest-cov
 pytest-asyncio
 pytest-mock
 cryptography
-mypy==2.0.0
+mypy==2.1.0
