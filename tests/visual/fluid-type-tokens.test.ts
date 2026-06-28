@@ -39,7 +39,12 @@ describe("fluid type clamp guard (DS-02)", () => {
   it.each(TEXT_TOKENS.map((m) => [m[0], m[1]] as const))(
     "%s has a rem term (zoom-safe, WCAG 1.4.4)",
     (_decl, args) => {
-      expect(/\brem\b/.test(args)).toBe(true);
+      // `Nrem` (e.g. `2rem`) has NO word boundary between the digit and `r`
+      // (both are \w), so `/\brem\b/` can never match a real CSS length and
+      // the guard was unsatisfiable for every conformant token. The intent is
+      // "the clamp string contains a rem unit" — a plain substring of `rem`
+      // preceded by a digit. Match `\drem` (and bare `rem`) instead.
+      expect(/\d*\.?\d*rem|rem/.test(args)).toBe(true);
     },
   );
 
