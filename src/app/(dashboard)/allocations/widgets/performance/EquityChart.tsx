@@ -43,7 +43,7 @@ const sentryEmittedSites = new Set<string>();
 // search loops; collapse into one — JIT inlines, no perf hit. The
 // epochs array is assumed sorted ascending (invariant maintained by
 // sortedEquityPoints + sliceByPeriod's filter-only semantics).
-function nearestIndex(epochs: number[], target: number): number {
+export function nearestIndex(epochs: number[], target: number): number {
   let lo = 0;
   let hi = epochs.length - 1;
   while (lo < hi) {
@@ -55,6 +55,36 @@ function nearestIndex(epochs: number[], target: number): number {
     return lo - 1;
   }
   return lo;
+}
+
+// Phase 48 / CHART-01b — the SINGLE px→index mapping shared by BOTH the desktop
+// `handleMove` mouse path AND the touch `pointerToIndex` adapter wired into
+// `useTapPin`, so a tap pins exactly what hover reveals (parity is structural,
+// not asserted-by-coincidence). `px` is the chart-area-local x (already
+// `clientX - rect.left`). The body is a verbatim transcription of the original
+// handleMove chain (EquityChart.tsx:1142-1159) — same n===0/n===1 early arms,
+// same clamp, same epoch inversion, same O(log n) `nearestIndex`:
+//   - n === 0 → null (no selectable index; handleMove's `if (n===0) return`)
+//   - n === 1 → 0     (handleMove's `if (n===1) { setHoverIdx(0); return }`)
+//   - else    → nearestIndex over the clamped target epoch
+// Returning `null` (not a phantom index) for the empty window lets the touch
+// adapter feed `useTapPin` a real "off-grid → un-pin" signal.
+export interface EpochIndexGeom {
+  padL: number;
+  chartW: number;
+  firstEpochX: number;
+  totalMs: number;
+  visibleEpochs: number[];
+  n: number;
+}
+
+export function epochIndexFromPx(px: number, geom: EpochIndexGeom): number | null {
+  const { padL, chartW, firstEpochX, totalMs, visibleEpochs, n } = geom;
+  if (n === 0) return null;
+  if (n === 1) return 0;
+  const clampedPx = Math.max(padL, Math.min(padL + chartW, px));
+  const targetEpoch = firstEpochX + ((clampedPx - padL) / chartW) * totalMs;
+  return nearestIndex(visibleEpochs, targetEpoch);
 }
 
 function captureChartIssue(
@@ -1139,23 +1169,30 @@ export function EquityChart({
   // pixel position back to a target epoch and finding the nearest visible
   // data point. Clamp to [pad.l, pad.l+chartW] first so out-of-bounds
   // mouse events don't produce an impossible target epoch.
+  // Phase 48 / CHART-01b: handleMove now routes through the SHARED
+  // `epochIndexFromPx` helper so the desktop mouse path and the touch
+  // `pointerToIndex` adapter (wired into useTapPin below) compute the index
+  // from one implementation — a tap pins exactly what hover reveals.
+  // Behaviour is byte-identical to the previous inline chain:
+  //   n===0 → helper returns null → early-return without setting hoverIdx
+  //           (the old `if (n===0) return`);
+  //   n===1 → helper returns 0 → setHoverIdx(0) (the old single-point arm);
+  //   else  → helper returns the same clamp+epoch+nearestIndex result.
+  // The PR-3+4 performance H1 binary-search (O(log n) over the precomputed
+  // visibleEpochs cache, no per-pixel parseISO) lives inside the helper.
   function handleMove(e: React.MouseEvent<SVGSVGElement>) {
-    if (n === 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const px = e.clientX - rect.left;
-    if (n === 1) { setHoverIdx(0); return; }
-    // Clamp px to chart area
-    const clampedPx = Math.max(pad.l, Math.min(pad.l + chartW, px));
-    // Map pixel → target epoch
-    const targetEpoch = firstEpochX + ((clampedPx - pad.l) / chartW) * totalMs;
-    // PR-3+4 performance H1 (audit-2026-05-07): binary-search the
-    // precomputed visibleEpochs array (sorted ascending by construction
-    // — composite is f7-anchored on a monotonic equityDailyPoints, and
-    // sliceByPeriod only filters). Pre-fix this loop did n parseISO
-    // calls per mousemove pixel; now O(log n) via nearestIndex against
-    // a cached epoch array. Hover-drag is no longer linear in window
-    // length.
-    setHoverIdx(nearestIndex(visibleEpochs, targetEpoch));
+    const idx = epochIndexFromPx(px, {
+      padL: pad.l,
+      chartW,
+      firstEpochX,
+      totalMs,
+      visibleEpochs,
+      n,
+    });
+    if (idx == null) return;
+    setHoverIdx(idx);
   }
 
   // ── Period toggle + range picker handlers ────────────────────────
