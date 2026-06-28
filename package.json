@@ -62,7 +62,7 @@
     "knip": "^6.23.0",
     "tailwindcss": "^4",
     "tsx": "^4.21.0",
-    "typescript": "^5",
+    "typescript": "^6",
     "vitest": "^4.1.2"
   },
   "version": "0.35.0.3"
