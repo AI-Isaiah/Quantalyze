@@ -1126,6 +1126,35 @@ export function EquityChart({
     hasScenario,
   ]);
 
+  // ── Touch tap-to-pin (CHART-01b, additive) ─────────────────────────
+  // Phase 48: wire the Phase-47 useTapPin gesture core onto the SAME <svg>
+  // additively. The desktop onMouseMove/handleMove/hoverIdx path stays
+  // byte-identical (below); this path only fires for pointerType "touch" (the
+  // hook gates taps on `ti.type === "touch"`). `pointerToIndex` reuses the EXACT
+  // shared `epochIndexFromPx` mapping handleMove runs, so a tap pins the value
+  // the desktop hover reveals. `selectedIdx`/`pinned` are the hook's own state —
+  // NOT added to any projection useMemo dep (Pitfall 7: that would re-introduce
+  // the per-pixel hover regression). Dismissal matches TimeSeriesChart: re-tap
+  // toggles off, a tap moves the pin, survives pointerleave, no auto-timer.
+  // RULES-OF-HOOKS: this call sits ABOVE the `!projection` early-return so it
+  // runs every render. `count` falls back to 0 and `pointerToIndex` guards on
+  // `projection`, so the warming-up render (no <svg>, no pointer events) is a
+  // harmless no-op.
+  const tap = useTapPin({
+    count: projection?.n ?? 0,
+    pointerToIndex: (clientX, _clientY, rect) => {
+      if (!projection) return null;
+      return epochIndexFromPx(clientX - rect.left, {
+        padL: projection.pad.l,
+        chartW: projection.chartW,
+        firstEpochX: projection.firstEpochX,
+        totalMs: projection.totalMs,
+        visibleEpochs: projection.visibleEpochs,
+        n: projection.n,
+      });
+    },
+  });
+
   // Single warm-up early-return — covers BOTH the empty-series case and the
   // degenerate-base (M-1063) case, which the memo collapses to `null`.
   if (!projection) {
@@ -1196,30 +1225,8 @@ export function EquityChart({
     setHoverIdx(idx);
   }
 
-  // ── Touch tap-to-pin (CHART-01b, additive) ─────────────────────────
-  // Phase 48: wire the Phase-47 useTapPin gesture core onto the SAME <svg>
-  // additively. The desktop onMouseMove/handleMove/hoverIdx path stays
-  // byte-identical (above); this path only fires for pointerType "touch"
-  // (the hook gates taps on `ti.type === "touch"`). `pointerToIndex` reuses
-  // the EXACT shared `epochIndexFromPx` mapping handleMove runs, so a tap
-  // pins the value the desktop hover reveals. `selectedIdx`/`pinned` are the
-  // hook's own state — they are NOT added to any projection useMemo dep
-  // (Pitfall 7: that would re-introduce the per-pixel hover regression).
-  // Dismissal matches TimeSeriesChart: re-tap toggles off, a tap moves the
-  // pin, the pin survives pointerleave, no auto-dismiss timer (all owned by
-  // useTapPin).
-  const tap = useTapPin({
-    count: n,
-    pointerToIndex: (clientX, _clientY, rect) =>
-      epochIndexFromPx(clientX - rect.left, {
-        padL: pad.l,
-        chartW,
-        firstEpochX,
-        totalMs,
-        visibleEpochs,
-        n,
-      }),
-  });
+  // Touch tap-to-pin (CHART-01b) is wired via `useTapPin` ABOVE the `!projection`
+  // warm-up early-return (rules-of-hooks) — see that call site for `tap`.
 
   // The reveal renders the pinned tap (touch) when present, else the transient
   // mouse-hover index — identical crosshair/dot/tooltip either way, reading the
