@@ -1,6 +1,10 @@
 import { test, expect } from "@playwright/test";
 import { assertTargetSizes } from "./helpers/reflow";
-import { seedStrategyWithHistory } from "./helpers/seed-test-project";
+import {
+  seedStrategyWithHistory,
+  seedTestAllocator,
+  seedAllocatorBook,
+} from "./helpers/seed-test-project";
 
 /**
  * Phase 44-04 / A11Y-02 — Target-size gate (WCAG 2.5.8) at 320px CSS width.
@@ -172,6 +176,107 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — chart tap-rects @ 320px (
       page,
       '#factsheet-main [aria-label*="streak-length distribution"]',
       '#factsheet-main [aria-label*="streak-length distribution"] rect.pointer-coarse\\:block',
+    );
+  });
+});
+
+/**
+ * Phase 48-04 / CHART-01b — EquityChart coarse tap-rect target-size at 320px
+ * on the SEEDED `/allocations` Overview tab.
+ *
+ * The Phase-48-03 EquityChart edit wires the Phase-47 useTapPin gesture core
+ * onto the hand-rolled `<svg role="img" aria-label="Equity chart">` and wraps
+ * it in a `pointer-coarse:min-h-[44px]` layer (EquityChart.tsx:1494-1511) — the
+ * explicit WCAG 2.5.5/2.5.8 touch hit-rect. This gate proves that contract
+ * holds on the LIVE route (mirroring the Phase-47 self-analog above that proves
+ * the DailyReturnsHeatmap / StreakDistribution hit-rects on /factsheet/[id]/v2).
+ *
+ * MOUNT-POINT (load-bearing): the EquityChart svg mounts ONLY on the Overview
+ * tab via AllocationDashboardV2 — the scenario composer swapped to
+ * ScenarioFactsheetChart in Phase 38-03, and the standalone factsheet uses the
+ * factsheet engine. AllocationDashboardV2 short-circuits to EmptyState when the
+ * allocator has zero holdings, so this case seeds a minimal connected BOOK
+ * (seedAllocatorBook: one active api_key + one holding + a daily equity curve)
+ * for a freshly-seeded allocator, then logs in and lands on Overview. Without
+ * the book the page renders EmptyState and the EquityChart never mounts — the
+ * visible-anchor gate below then fails LOUD (not a hollow-zero false-green).
+ *
+ * COARSE-POINTER EMULATION: like the Phase-47 block, `test.use({ hasTouch,
+ * isMobile })` makes Chromium report pointer:coarse so the
+ * `pointer-coarse:min-h-[44px]` layer is active + measurable (it is un-floored
+ * on the default pointer-fine Desktop context, keeping desktop byte-identical).
+ *
+ * SEEDED — runs in the ci.yml MA-8 seeded list (target-size.spec.ts is ALREADY
+ * in BOTH lists; no new FLOW-01 wiring needed) with a HAS_SEED_ENV self-skip.
+ * MIN_TARGET_PX=44 in e2e/helpers/reflow.ts is NOT lowered.
+ */
+async function loginViaForm(
+  page: import("@playwright/test").Page,
+  email: string,
+  password: string,
+) {
+  await page.goto("/login");
+  await page.fill('input[name="email"], input[placeholder*="email" i]', email);
+  await page.fill('input[type="password"]', password);
+  await page.click('button:has-text("Sign in")');
+  await page.waitForURL(/\/(discovery|strategies|allocations|dashboard)/, {
+    timeout: 10_000,
+  });
+}
+
+test.describe("target-size gate (WCAG 2.5.5/2.5.8) — EquityChart tap-rect @ 320px (seeded)", () => {
+  // Coarse pointer so the `pointer-coarse:min-h-[44px]` layer is present +
+  // measurable (display/min-height only apply under pointer:coarse).
+  test.use({ hasTouch: true, isMobile: true });
+
+  test.skip(
+    !HAS_SEED_ENV,
+    "EquityChart tap-rect target-size: seed-helper env vars not wired " +
+      "(set TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY) — " +
+      "skipping prevents a false-green against an empty/404/EmptyState " +
+      "/allocations page (W-02). Runs in the seeded MA-8 CI job once the " +
+      "env is present.",
+  );
+
+  test("EquityChart tap surface measures >= 44px at 320px (coarse) on /allocations", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 320, height: 800 });
+
+    // Seed a verified allocator with a connected BOOK so the Overview tab
+    // renders the EquityChart (not EmptyState), then sign in.
+    const allocator = await seedTestAllocator();
+    await seedAllocatorBook({ allocatorUserId: allocator.userId, days: 120 });
+    await loginViaForm(page, allocator.email, allocator.password);
+
+    const res = await page.goto("/allocations?tab=overview");
+    if (res && res.status() >= 400) {
+      throw new Error(
+        `/allocations returned HTTP ${res.status()} — ` +
+          "cannot run EquityChart tap-rect target-size gate",
+      );
+    }
+
+    // Anchor on the EquityChart svg itself (role=img + aria-label="Equity
+    // chart"). A redirect-to-login / EmptyState page would NOT show it, so a
+    // hollow zero is impossible — the measurement only runs on a mounted chart.
+    const equity = page
+      .locator('[data-testid="overview-equity-curve"]')
+      .getByRole("img", { name: "Equity chart" })
+      .first();
+    await equity.scrollIntoViewIfNeeded();
+    await expect(
+      equity,
+      "EquityChart svg not visible — EmptyState/login page would false-green",
+    ).toBeVisible({ timeout: 15_000 });
+
+    // Measure the coarse tap surface — the EquityChart svg (role=img) under its
+    // pointer-coarse:min-h-[44px] wrapper. assertTargetSizes asserts >= 44px
+    // and fails loud if zero elements are measured (false-green guard).
+    await assertTargetSizes(
+      page,
+      '[data-testid="overview-equity-curve"] [aria-label="Equity chart"]',
+      '[data-testid="overview-equity-curve"] [aria-label="Equity chart"]',
     );
   });
 });

@@ -481,3 +481,93 @@ export async function seedStrategyWithHistory(opts: {
 
   return strategy.id;
 }
+
+/**
+ * Phase 48 / CHART-01b — seed a minimal connected BOOK (one active api_key +
+ * one holding + a daily equity curve) for an EXISTING allocator so the
+ * `/allocations` Overview tab mounts the hand-rolled `<svg aria-label="Equity
+ * chart">` (EquityChart) instead of the EmptyState "connect an exchange"
+ * branch.
+ *
+ * WHY this is needed (vs. seedTestAllocator alone): AllocationDashboardV2
+ * short-circuits to EmptyState when `holdingsEmpty` (zero allocator_holdings),
+ * and the equity series only renders past that gate. The EquityChart svg
+ * mounts ONLY on the Overview tab (the composer swapped to ScenarioFactsheetChart
+ * in Phase 38-03), so target-size's EquityChart case must seed a real book.
+ *
+ * SCHEMA (verified against migrations):
+ *   - api_keys (initial_schema): user_id, exchange, label, api_key_encrypted
+ *     NOT NULL; encryption is an APPLICATION-layer concern, no DB INSERT trigger
+ *     rejects placeholder ciphertext — the service-role admin client writes it
+ *     directly (the read-only-permission rejection is enforced at the wizard
+ *     submission path, not at INSERT). is_active defaults true.
+ *   - allocator_holdings (20260420073003): api_key_id NOT NULL → the key above;
+ *     an enforce_allocator_holdings_owner_coherence trigger asserts
+ *     allocator_id === api_keys.user_id, so both use the SAME allocatorUserId.
+ *   - allocator_equity_snapshots (20260420213754): allocator_id + asof +
+ *     value_usd NOT NULL; pre_terminus_balance_unknown omitted (NULL = trusted),
+ *     source defaults 'exchange_primary'. The dashboard reads these directly
+ *     (RLS owner-select on allocator_id = auth.uid()).
+ *
+ * Deterministic curve (no RNG) so the chart renders meaningful variation
+ * without flakiness — same sin()-drift idiom as seedStrategyWithHistory.
+ */
+export async function seedAllocatorBook(opts: {
+  allocatorUserId: string;
+  days?: number;
+}): Promise<{ apiKeyId: string }> {
+  const admin = getAdmin();
+  const days = opts.days ?? 120;
+
+  // 1. Active api_key (placeholder ciphertext — no DB-level validation trigger).
+  const { data: key, error: kErr } = await admin
+    .from("api_keys")
+    .insert({
+      user_id: opts.allocatorUserId,
+      exchange: "binance",
+      label: `e2e-equitychart-book-${uniqueSuffix(6)}`,
+      api_key_encrypted: "e2e-placeholder-ciphertext",
+      is_active: true,
+    })
+    .select("id")
+    .single();
+  if (kErr || !key) {
+    throw new Error(`seedAllocatorBook (api_key) failed: ${kErr?.message}`);
+  }
+
+  // 2. One spot holding so holdingsEmpty === false (clears the EmptyState gate).
+  //    allocator_id MUST equal api_keys.user_id (owner-coherence trigger).
+  const asofToday = new Date().toISOString().slice(0, 10);
+  const { error: hErr } = await admin.from("allocator_holdings").insert({
+    allocator_id: opts.allocatorUserId,
+    api_key_id: key.id,
+    venue: "binance",
+    symbol: "BTC",
+    asof: asofToday,
+    holding_type: "spot",
+    side: "long",
+    quantity: 1,
+    value_usd: 100_000,
+    mark_price: 100_000,
+  });
+  if (hErr) {
+    throw new Error(`seedAllocatorBook (holding) failed: ${hErr.message}`);
+  }
+
+  // 3. A daily equity curve so EquityChart has a real series to draw.
+  const snapshots = Array.from({ length: days }, (_, i) => ({
+    allocator_id: opts.allocatorUserId,
+    asof: new Date(Date.now() - (days - 1 - i) * 86_400_000)
+      .toISOString()
+      .slice(0, 10),
+    value_usd: 100_000 * (1 + Math.sin(i / 30) * 0.08 * (i / Math.max(1, days))),
+  }));
+  const { error: sErr } = await admin
+    .from("allocator_equity_snapshots")
+    .upsert(snapshots, { onConflict: "allocator_id,asof" });
+  if (sErr) {
+    throw new Error(`seedAllocatorBook (equity snapshots) failed: ${sErr.message}`);
+  }
+
+  return { apiKeyId: key.id };
+}
