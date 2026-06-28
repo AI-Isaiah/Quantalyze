@@ -190,18 +190,33 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
       ? flatCells[tap.selectedIdx]
       : null;
 
+  // WR-01: gate every desktop-affecting attribute behind isMobile so the
+  // desktop/SSR arm emits today's EXACT literals (byte-identical invariant):
+  //   - wrapper: plain `w-full` (no overflow-x-auto / scroll style)
+  //   - svg: no `style` attribute at all (no touchAction / minWidth)
+  //   - aria-label: the original "Daily returns heatmap"
+  // The mobile arm keeps the legibility fix (RESEARCH): overflow-x-auto so the
+  // 730px-wide grid keeps its natural cell size and the user pans rather than
+  // the viewBox downscaling labels to ~4px (-webkit-overflow-scrolling for
+  // iOS), touchAction:pan-y for the touch tap-reveal, and the tap-hint label.
+  const wrapperClass = isMobile ? "w-full overflow-x-auto" : "w-full";
+  const wrapperStyle = isMobile
+    ? { minHeight: 280, WebkitOverflowScrolling: "touch" as const }
+    : undefined;
+  const svgStyle = isMobile ? { touchAction: "pan-y", minWidth: width } : undefined;
+  const ariaLabel = isMobile
+    ? "Daily returns heatmap — tap a cell to reveal its value"
+    : "Daily returns heatmap";
+
   return (
-    // overflow-x-auto is the mobile legibility fix (RESEARCH): the 730px-wide
-    // grid keeps its natural cell size and the user pans, rather than the
-    // viewBox downscaling labels to ~4px. -webkit-overflow-scrolling for iOS.
-    <div className="w-full overflow-x-auto" style={{ minHeight: 280, WebkitOverflowScrolling: "touch" }}>
+    <div className={wrapperClass} style={wrapperStyle}>
       <svg
         ref={tap.svgRef}
         role="img"
-        aria-label="Daily returns heatmap — tap a cell to reveal its value"
+        aria-label={ariaLabel}
         width="100%"
         viewBox={`0 0 ${width} ${height}`}
-        style={{ touchAction: "pan-y", ...(isMobile ? { minWidth: width } : null) }}
+        style={svgStyle}
         onPointerDown={tap.onPointerDown}
         onPointerMove={tap.onPointerMove}
         onPointerUp={tap.onPointerUp}
