@@ -39,7 +39,7 @@ jobs:
   deps-cache:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
@@ -83,7 +83,7 @@ jobs:
   frontend-typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -133,7 +133,7 @@ jobs:
   frontend-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -194,7 +194,7 @@ jobs:
       matrix:
         shard: [1, 2]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # fetch-depth: 0 — the phase-29/30 frozen-spine guards
           # (src/__tests__/phase-{29,30}-frozen-spine-guards.test.ts) resolve
@@ -273,7 +273,7 @@ jobs:
     # ratchet baseline (which was measured with those tests skipped).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # fetch-depth: 0 — this job runs the full suite, including the
           # phase-29/30 frozen-spine guards, which resolve a diff baseline from
@@ -322,7 +322,7 @@ jobs:
     # per-PR critical path adds 15-30s with no behavior signal.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -419,7 +419,7 @@ jobs:
     # re-accumulate. Promote to a gate once the exports/types baseline is zero.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
@@ -483,7 +483,7 @@ jobs:
     # FS — it is never uploaded as an artifact.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -666,7 +666,7 @@ jobs:
     runs-on: ubuntu-latest
     if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true'
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. The sql-tests job
@@ -791,7 +791,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0
           # retro-PR179-M-persist-chain: actions/checkout defaults
@@ -818,7 +818,7 @@ jobs:
     # checked-out tree; the no-progress flag keeps CI logs quiet.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. lychee-action only
@@ -876,7 +876,7 @@ jobs:
       run:
         working-directory: analytics-service
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. The python/pytest job
@@ -975,7 +975,7 @@ jobs:
       - frontend-build
       - frontend-typecheck
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -1388,7 +1388,7 @@ jobs:
       - frontend-build
       - frontend-typecheck
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
