@@ -9,6 +9,8 @@
  * already shipped). Future batches add their rules here:
  *   - B9  no-passthrough-on-ipc           (LANDED — bans Zod .passthrough()/.catchall())
  *   - B14 no-raw-staleness-derivation     (LANDED — bans raw last_sync_at vs cutoff; route via deriveSyncFreshness)
+ *   - DS-04 no-raw-font-px                (LANDED — bans raw px font-size; route to fluid --text-* tiers)
+ *   - DS-04 no-rem-less-clamp             (LANDED — bans a rem-less clamp() preferred term in CSS strings)
  *   - B17 labeled-metric-consumption      (after B17 ships its runtime half)
  *
  * See .planning/audit-2026-05-07/B25-PLAN.md for the honesty-gate inventory
@@ -19,6 +21,8 @@ import noRawPublishedPredicate from "./rules/no-raw-published-predicate.mjs";
 import noRawRetryAfterParse from "./rules/no-raw-retry-after-parse.mjs";
 import noPassthroughOnIpc from "./rules/no-passthrough-on-ipc.mjs";
 import noRawStalenessDerivation from "./rules/no-raw-staleness-derivation.mjs";
+import noRawFontPx from "./rules/no-raw-font-px.mjs";
+import noRemLessClamp from "./rules/no-rem-less-clamp.mjs";
 
 const plugin = {
   meta: { name: "eslint-plugin-quantalyze", version: "0.1.0" },
@@ -28,6 +32,8 @@ const plugin = {
     "no-raw-retry-after-parse": noRawRetryAfterParse,
     "no-passthrough-on-ipc": noPassthroughOnIpc,
     "no-raw-staleness-derivation": noRawStalenessDerivation,
+    "no-raw-font-px": noRawFontPx,
+    "no-rem-less-clamp": noRemLessClamp,
   },
 };
 
