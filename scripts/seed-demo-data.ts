@@ -25,6 +25,7 @@
  */
 
 import { createClient } from "@supabase/supabase-js";
+import { WebSocket as WsWebSocket } from "ws";
 
 // ---------- Fixed UUIDs + STRATEGY_PROFILES (re-exported pure-data module) ----------
 //
@@ -61,6 +62,19 @@ import {
   STALLED_PORTFOLIO_ID,
 } from "./seed-demo-profiles";
 import type { StrategyProfile } from "./seed-demo-profiles";
+
+// realtime-js 2.101's WebSocketFactory probes globalThis.WebSocket the moment
+// createClient() constructs its (unused-here) realtime client, and throws
+// "Node.js <ver> detected without native WebSocket support" on Node < 22. CI
+// runs Node 20, which has no native WebSocket, so the seed step died at
+// createClient() before issuing a single insert (every recent main run is red
+// on the e2e "Seed demo data" step for this reason). This seed path never opens
+// a realtime channel; point the global at the `ws` impl that ships as a direct
+// dependency of @supabase/realtime-js. Guarded, so it stays a no-op on Node 22+
+// / browsers where a native WebSocket already exists (incl. a future CI bump).
+if (typeof globalThis.WebSocket === "undefined") {
+  (globalThis as { WebSocket?: unknown }).WebSocket = WsWebSocket;
+}
 
 // ---------- Deterministic PRNG (mulberry32) ----------
 
