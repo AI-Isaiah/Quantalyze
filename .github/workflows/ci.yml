@@ -1056,7 +1056,13 @@ jobs:
             fi
             sleep 1
           done
-          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts
+          # Phase 48-04 / A11Y-01 / FLOW-01 (place 1, UNSEEDED): the new
+          # e2e/axe-app-wide.spec.ts runs its PUBLIC route × viewport rows here
+          # (those describe blocks carry NO seed gate); its authed + embedded
+          # describes self-skip without seed env (place 2 = the spec's
+          # HAS_SEED_ENV const) and run in the seeded MA-8 list below. Adding a
+          # spec? Update BOTH lists or the gate silently never runs (burned >=3x).
+          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/axe-app-wide.spec.ts
           # v0.17.1.18: belt + suspenders + nuclear port-3000 cleanup.
           # The v0.17.1.15 attempt (lsof + 5s poll) was insufficient — CI
           # confirmed (PR #98 run #320) that the next-server grandchild
@@ -1263,6 +1269,7 @@ jobs:
             e2e/reflow-sweep-authed.spec.ts \
             e2e/svg-chart-parity.spec.ts \
             e2e/target-size.spec.ts \
+            e2e/axe-app-wide.spec.ts \
             --timeout 60000
           # Phase 47-05 / FLOW-01 (place 1 of 2): the fresh
           # e2e/svg-chart-parity.spec.ts (desktop goldens + 320px portrait)
@@ -1274,6 +1281,16 @@ jobs:
           # SEEDED chart-tap-rect cases (which self-skip in the unseeded run)
           # actually execute; its unseeded /security case keeps running in the
           # unseeded list. Both new gates are HAS_SEED_ENV-guarded (place 2).
+          # Phase 48-04 / A11Y-01 / FLOW-01 (place 1 of 2): the new
+          # e2e/axe-app-wide.spec.ts is ALSO listed here so its AUTHED standalone
+          # rows (/allocations, /strategy/[id]/v2, /discovery/[slug],
+          # /strategies/new/wizard) and the EMBEDDED-factsheet composer row
+          # (/allocations?tab=scenario, scoped serious+critical) run SEEDED.
+          # Its PUBLIC rows also run in the unseeded list above (line ~1059) —
+          # that overlap is cheap and intended. Place 2 = the spec's
+          # HAS_SEED_ENV const which self-skips the authed/embedded describes
+          # when seed env is absent. Both switches flipped or the authed half
+          # silently never runs (FLOW-01 burned >=3x).
           # Same kill+wait+nuke pattern as the unconditional step above so any
           # follow-up runner work (artifact upload) doesn't race on resources.
           kill $SERVER_PID 2>/dev/null || true
