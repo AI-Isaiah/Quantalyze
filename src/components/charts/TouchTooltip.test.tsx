@@ -23,6 +23,11 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
+import type { ComponentProps } from "react";
+// Type-only import — erased at runtime, so it does NOT collide with the
+// vi.mock("recharts") below; it just gives us Recharts' real Tooltip prop types
+// so the test `formatter` matches the shim's `formatter` (Formatter<ValueType>).
+import type { Tooltip as RechartsTooltip } from "recharts";
 
 // Mock recharts Tooltip to a div that surfaces the props it received. The real
 // Tooltip needs a Recharts chart context + hover geometry that jsdom lacks.
@@ -84,7 +89,9 @@ describe("[CHART-01b] TouchTooltip — breakpoint-gated <Tooltip trigger>", () =
 
   it("spreads caller props (formatter, contentStyle) through to <Tooltip> unchanged", () => {
     mockedUseBreakpoint.mockReturnValue("desktop");
-    const formatter = (v: number) => [String(v), "label"] as [string, string];
+    const formatter: NonNullable<
+      ComponentProps<typeof RechartsTooltip>["formatter"]
+    > = (v) => [String(v), "label"];
     render(
       <TouchTooltip
         formatter={formatter}
