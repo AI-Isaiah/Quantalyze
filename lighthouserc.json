@@ -1,9 +1,10 @@
 {
-  "_comment": "Phase 48 / A11Y-03 — Wave 0 SCAFFOLD. PLACEHOLDER minScore — plan 05 reseeds it from a real baseline run (floor set a few points UNDER measured actual, coverage-ratchet philosophy). PUBLIC routes only (headless can't auth; no authed URLs -> no info-disclosure to temporary-public-storage). lhci runs against the PRODUCTION next build via `npm run start` (NOT next dev — Pitfall 6).",
+  "_comment": "Phase 48 / A11Y-03 — mobile Lighthouse perf budget on PUBLIC routes only (headless can't auth; no authed URLs -> no info-disclosure to temporary-public-storage, T-48-05-INFO). lhci runs against the PRODUCTION next build via `npm run start` (NOT next dev — Pitfall 6). NOTE: there is NO `preset: \"mobile\"` in Lighthouse 12.x (CLI `preset` only accepts perf/experimental/desktop; the Wave-0 stub's `preset:\"mobile\"` was an invalid value that failed `lhci collect`). Mobile IS the Lighthouse DEFAULT form-factor, set here EXPLICITLY via settings.formFactor + settings.screenEmulation (MotoG-class) so the config is unambiguous and self-documenting.",
+  "_baseline": "Baselined 2026-06-28 (plan 48-05 Task 1), Lighthouse 12.6.1, mobile form-factor, simulated mobileSlow4G throttling. Measured categories:performance per route (single run): / 0.93, /security 0.94, /for-quants 0.92, /browse 0.94, /demo 0.67 (lowest). minScore seeded at 0.60 — 7 points UNDER the lowest measured (/demo) per the coverage-ratchet philosophy: low enough to absorb local-vs-CI + single-run noise, high enough that a real regression fails the build. The FIRST CI run on a GitHub Actions runner (3-run median, CI throttling) establishes the true CI baseline to ratchet UP from over time (do NOT set a hard 0.90+ day one — flaky-red).",
   "ci": {
     "collect": {
       "startServerCommand": "npm run start",
-      "startServerReadyPattern": "ready|started|listening",
+      "startServerReadyPattern": "ready|started|listening|Local:",
       "startServerReadyTimeout": 30000,
       "url": [
         "http://localhost:3000/",
@@ -14,16 +15,23 @@
       ],
       "numberOfRuns": 3,
       "settings": {
-        "preset": "mobile"
+        "formFactor": "mobile",
+        "throttlingMethod": "simulate",
+        "screenEmulation": {
+          "mobile": true,
+          "width": 412,
+          "height": 823,
+          "deviceScaleFactor": 1.75,
+          "disabled": false
+        }
       }
     },
     "assert": {
-      "preset": "lighthouse:no-pwa",
       "assertions": {
         "categories:performance": [
           "error",
           {
-            "minScore": 0.5
+            "minScore": 0.6
           }
         ]
       }
