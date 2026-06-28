@@ -63,6 +63,8 @@
  * `toHaveScreenshot(name, { maxDiffPixelRatio: 0.02 })`, full-page
  * `{ maxDiffPixelRatio: 0.05 }`.
  */
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { test, expect, type Locator } from "@playwright/test";
 import { seedStrategyWithHistory } from "./helpers/seed-test-project";
 
@@ -73,6 +75,31 @@ import { seedStrategyWithHistory } from "./helpers/seed-test-project";
 const HAS_SEED_ENV =
   !!process.env.TEST_SUPABASE_URL &&
   !!process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
+
+// WR-02 — the golden-presence guard. `toHaveScreenshot` HARD-FAILS in CI on a
+// missing baseline (Playwright only writes-and-passes a missing snapshot under
+// `--update-snapshots`, which the MA-8 job does NOT pass). No goldens are
+// committed yet (the README defers baking to avoid a false-green), so without
+// this guard the seeded MA-8 run would go RED on the first run — a
+// false-negative that also risks SKIPPING the Railway deploy (project lesson: a
+// red merge check skips the analytics deploy). We detect "no PNGs baked" by
+// scanning the snapshot dir (it holds only README.md until goldens land) and
+// SKIP LOUDLY (annotated, not a silent pass). The spec stays fully wired
+// (HAS_SEED_ENV + the ci.yml MA-8 list are untouched), so the moment the
+// goldens are baked + committed this guard flips false and the gate goes live
+// automatically — no spec edit needed.
+const SNAPSHOT_DIR = join(__dirname, "__snapshots__", "svg-chart-parity.spec.ts");
+const HAS_GOLDENS =
+  existsSync(SNAPSHOT_DIR) &&
+  readdirSync(SNAPSHOT_DIR).some((f) => f.toLowerCase().endsWith(".png"));
+const GOLDEN_PENDING_REASON =
+  "svg-chart-parity: PENDING GOLDEN BAKE — no *.png baselines in " +
+  "e2e/__snapshots__/svg-chart-parity.spec.ts/ (only README.md). " +
+  "toHaveScreenshot hard-fails on a missing baseline in CI (no " +
+  "--update-snapshots in the MA-8 job), so this would false-RED until baked. " +
+  "Run the spec with --update-snapshots in the seeded env (desktop goldens " +
+  "FIRST per Pitfall 2), review the diff, commit the PNGs; this guard then " +
+  "flips and the gate goes live with NO spec change.";
 
 // Each in-scope hand-rolled SVG panel exposes a stable `role="img"` +
 // descriptive `aria-label` (added by Phase-47 plans 02/03). Anchoring +
@@ -123,6 +150,13 @@ test.describe("Phase 47 — SVG chart parity (desktop goldens) + 320px portrait"
       "test-Supabase env. The live parity proof runs in CI / /qa once seed " +
       "env is present.",
   );
+
+  // WR-02 — golden-presence skip. Even WITH the seed env, a missing baseline
+  // makes toHaveScreenshot HARD-FAIL in CI (no --update-snapshots in MA-8). Skip
+  // LOUDLY until the goldens are baked + committed rather than false-RED the
+  // gate (and risk skipping the Railway deploy). This flips automatically once
+  // PNGs land — the spec + ci.yml wiring stay untouched.
+  test.skip(HAS_SEED_ENV && !HAS_GOLDENS, GOLDEN_PENDING_REASON);
 
   // One seeded published strategy with a full year of history drives every
   // panel. The factsheet payload is derived from `returns_series` so the
