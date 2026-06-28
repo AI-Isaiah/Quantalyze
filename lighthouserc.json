@@ -15,6 +15,7 @@
       ],
       "numberOfRuns": 3,
       "settings": {
+        "chromeFlags": "--no-sandbox --disable-dev-shm-usage",
         "formFactor": "mobile",
         "throttlingMethod": "simulate",
         "screenEmulation": {
