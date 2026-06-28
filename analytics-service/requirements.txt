@@ -229,7 +229,7 @@ storage3==0.11.3
     # via supabase
 strenum==0.4.15
     # via supafunc
-structlog==25.5.0
+structlog==26.1.0
     # via -r requirements.in
 supabase==2.15.1
     # via -r requirements.in

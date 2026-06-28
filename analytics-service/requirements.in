@@ -57,7 +57,7 @@ pandera==0.20.4
 # removes the `overload` symbol pandera 0.20.4 imports, so stay on 1.x.
 python-multipart==0.0.27
 # Phase 16 / OBSERV-09: structlog JSON-format logs with correlation_id contextvar.
-structlog==25.5.0
+structlog==26.1.0
 # Phase 16 / OBSERV-10: psycopg required for direct-DSN trigger/RLS audit tests
 # (analytics-service/tests/test_trigger_rls_audit.py). supabase-py is HTTP-only
 # (postgrest), so this dep is NOT transitive — it must be pinned explicitly.
