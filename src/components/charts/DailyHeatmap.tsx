@@ -316,12 +316,6 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
             {cellLabel(pinned.d)}
           </text>
         )}
-
-        {/* Hover-state stroke value is reachable via CSS but the test asserts
-         * the static stroke = CHART_BORDER. CHART_AXIS_TICK is referenced
-         * here to keep the import alive for future hover styling without
-         * tripping noUnusedLocals. */}
-        <desc data-hover-stroke={CHART_AXIS_TICK} />
       </svg>
     </div>
   );
