@@ -130,10 +130,16 @@ export default async function ComparePage({
         title={title}
         breadcrumb={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]}
       />
-      <div className="space-y-8">
-        <CompareTable items={items} />
-        <CompareEquityOverlay items={strategyOnlyItems} />
-        <CompareCorrelationMatrix items={strategyOnlyItems} />
+      {/* APPLY-01 / TYPE-03: compare is a DATA surface — fluid-fill toward
+          ~1920px then center with gutters beyond, so the comparison table
+          reads as a deliberate institutional layout at the wider measure
+          rather than stranded across an uncapped canvas. */}
+      <div className="mx-auto max-w-[1920px]">
+        <div className="space-y-8">
+          <CompareTable items={items} />
+          <CompareEquityOverlay items={strategyOnlyItems} />
+          <CompareCorrelationMatrix items={strategyOnlyItems} />
+        </div>
       </div>
     </>
   );
