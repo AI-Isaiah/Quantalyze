@@ -13,6 +13,13 @@ import {
   type HoldingCompareItem,
 } from "./lib/holding-compare-adapter";
 
+// Phase 51 NAV-02 — the back-path crumb is identical across all three render
+// branches (empty-selection, not-available, results), so it lives in one place.
+const COMPARE_BREADCRUMB = [
+  { label: "Discovery", href: "/discovery/crypto-sma" },
+  { label: "Compare" },
+];
+
 export default async function ComparePage({
   searchParams,
 }: {
@@ -30,7 +37,7 @@ export default async function ComparePage({
       <>
         <PageHeader
           title="Compare Strategies"
-          breadcrumb={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]}
+          breadcrumb={COMPARE_BREADCRUMB}
         />
         <p className="text-sm text-text-muted text-center py-16">
           Select strategies from the discovery page to compare. Add up to 4 strategies using the compare checkboxes.
@@ -93,7 +100,7 @@ export default async function ComparePage({
       <>
         <PageHeader
           title="Compare"
-          breadcrumb={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]}
+          breadcrumb={COMPARE_BREADCRUMB}
         />
         <p className="text-sm text-text-muted text-center py-16">
           This comparison isn&apos;t available.
