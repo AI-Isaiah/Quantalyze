@@ -130,6 +130,24 @@ describe("[H-0191] MetadataStep", () => {
     expect(submit).toBeDisabled();
   });
 
+  it("[WR-03] keeps Submit disabled for a whitespace-only description (gate matches .trim() rule)", async () => {
+    // A whitespace-only description ("   ") is truthy but invalid. The
+    // disabled-gate must use the SAME .trim() predicate as the validation
+    // rule, so it stays disabled — otherwise the user reaches an "enabled"
+    // button that handleSubmit then silently no-ops on (the inconsistency
+    // that breeds regressions).
+    render(<MetadataStep {...baseProps} />);
+    const select = (await screen.findByLabelText("Category")) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("cat-aaa"));
+
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "   " },
+    });
+
+    const submit = screen.getByRole("button", { name: /review and submit/i });
+    expect(submit).toBeDisabled();
+  });
+
   // ── Phase 53 / APPLY-02 — inline per-field validation surfacing ──────────
   it("[APPLY-02] blur on an empty description surfaces the wizardErrors copy through Field a11y", async () => {
     render(<MetadataStep {...baseProps} />);
