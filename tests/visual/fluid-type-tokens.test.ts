@@ -31,20 +31,57 @@ const TEXT_TOKENS = [
   ...css.matchAll(/--text-[\w-]+:\s*clamp\(([^;]+)\);/g),
 ];
 
+/**
+ * Split a clamp argument list into its top-level comma-separated terms,
+ * respecting nested parens (e.g. `calc(...)`, `min(...)`, `max(...)`). Ported
+ * verbatim from `tools/eslint-plugin-quantalyze/rules/no-rem-less-clamp.mjs`
+ * so the Vitest grep guard and the edit-time ESLint rule share ONE definition
+ * of "rem-safe" — a naive `.split(',')` would mis-split a `min()`/`max()` term
+ * that legitimately contains its own top-level commas.
+ *
+ * @param {string} argText  the text BETWEEN the outermost clamp parens
+ * @returns {string[]}
+ */
+function splitTopLevelArgs(argText: string): string[] {
+  const args: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const ch of argText) {
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    if (ch === "," && depth === 0) {
+      args.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  args.push(current);
+  return args;
+}
+
+// A CSS length carrying rem/em (the zoom-safe anchor); `\d` guards against a
+// stray "rem" in prose. Mirrors REM_EM in no-rem-less-clamp.mjs.
+const REM_EM = /[\d.]+\s*r?em\b/;
+
 describe("fluid type clamp guard (DS-02)", () => {
   it("declares at least the 8 named tiers", () => {
     expect(TEXT_TOKENS.length).toBeGreaterThanOrEqual(8);
   });
 
   it.each(TEXT_TOKENS.map((m) => [m[0], m[1]] as const))(
-    "%s has a rem term (zoom-safe, WCAG 1.4.4)",
+    "%s preferred (middle) term has a rem term (zoom-safe, WCAG 1.4.4)",
     (_decl, args) => {
-      // `Nrem` (e.g. `2rem`) has NO word boundary between the digit and `r`
-      // (both are \w), so `/\brem\b/` can never match a real CSS length and
-      // the guard was unsatisfiable for every conformant token. The intent is
-      // "the clamp string contains a rem unit" — a plain substring of `rem`
-      // preceded by a digit. Match `\drem` (and bare `rem`) instead.
-      expect(/\d*\.?\d*rem|rem/.test(args)).toBe(true);
+      // The MIDDLE (preferred) term is the load-bearing one. A clamp like
+      // `clamp(2rem, 3vw, 4rem)` carries `rem` in its bounds yet a `vw`-only
+      // preferred term — that NEVER re-scales under text zoom (the viewport
+      // doesn't change when you zoom), so it fails WCAG 1.4.4 / W3C F94 while
+      // a blunt "rem appears anywhere in the string" check waves it through.
+      // Split on TOP-LEVEL commas (respecting nested min()/max()/calc()) and
+      // assert args[1] — the preferred term — carries a rem/em length.
+      const terms = splitTopLevelArgs(args);
+      expect(terms.length).toBe(3);
+      expect(REM_EM.test(terms[1])).toBe(true);
     },
   );
 
