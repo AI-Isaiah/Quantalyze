@@ -252,4 +252,54 @@ test.describe("Phase 47 — SVG chart parity (desktop goldens) + 320px portrait"
       });
     }
   });
+
+  // DELIVERABLE 3 — 2560px ULTRA-WIDE tolerance goldens (Phase 54-06 /
+  // VERIFY-04). The byte-identity-by-tolerance replacement (per-panel 0.02,
+  // full-page 0.05, threshold 0.2 — the documented dead-spec tolerance pattern)
+  // extended to the ULTRA-WIDE upper bound so a value/recompute/layout drift at
+  // 2560 reds the golden too. The server snapshot is "desktop" (no mobile
+  // breakpoint at 2560), so this render is the SAME frozen engine output as the
+  // desktop golden, just composed into the ultra-wide column — a diff still
+  // means a crossed frozen-math / layout boundary (Pitfall 2).
+  //
+  // GREEN-BY-SKIP: this test lives INSIDE the describe that already carries BOTH
+  // the HAS_SEED_ENV self-skip AND the WR-02 golden-pending skip
+  // (test.skip(HAS_SEED_ENV && !HAS_GOLDENS, GOLDEN_PENDING_REASON), :159).
+  // Those describe-level guards gate every test in the block, so this 2560 row
+  // inherits the green-by-skip behaviour with NO extra wiring — it self-skips
+  // LOUDLY until the goldens are deliberately baked + committed (NEVER blind
+  // --update-snapshots; the bake is a reviewed per-chart CI commit, 54-CONTEXT
+  // Out-of-Scope lock). The moment PNGs land, HAS_GOLDENS flips true and this
+  // gate goes live automatically with NO spec edit. The spec is ALREADY in the
+  // ci.yml seeded MA-8 list (:1280) and HAS_SEED_ENV-gated — additive rows in an
+  // existing wired describe need no new FLOW-01 wiring.
+  test("ultra-wide 2560px: per-panel tolerance goldens + full page", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 2560, height: 1440 });
+    await gotoFactsheetAndSettle(page);
+
+    for (const panel of PANELS) {
+      const loc = panelLocator(page, panel.ariaLabelPrefix);
+      await loc.scrollIntoViewIfNeeded();
+      await expect(
+        loc,
+        `ultra-wide panel "${panel.name}" (role=img ~ "${panel.ariaLabelPrefix}") ` +
+          "not visible — would false-green a blank screenshot",
+      ).toBeVisible({ timeout: 15_000 });
+      await expect(loc).toHaveScreenshot(`${panel.name}-ultrawide-2560.png`, {
+        maxDiffPixelRatio: 0.02,
+        threshold: 0.2,
+      });
+    }
+
+    // Full-page golden at the looser tolerance — catches an ultra-wide
+    // layout/composition regression the per-panel crops miss.
+    await page.evaluate(() => window.scrollTo({ top: 0 }));
+    await expect(page).toHaveScreenshot("full-page-ultrawide-2560.png", {
+      fullPage: true,
+      maxDiffPixelRatio: 0.05,
+      threshold: 0.2,
+    });
+  });
 });
