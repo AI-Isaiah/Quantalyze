@@ -41,10 +41,13 @@ export default async function PortfoliosPage() {
           {portfolios.map((p) => (
             <Link key={p.id} href={`/portfolios/${p.id}`}>
               <Card className="hover:border-accent/40 transition-colors h-full">
-                <h3 className="font-semibold text-text-primary truncate">
+                <h3 className="font-semibold text-text-primary break-words min-w-0">
                   {p.name}
                 </h3>
                 {p.description && (
+                  /* line-clamp kept: the full description is one click away on
+                     this card's own detail page (the whole Card is a Link to
+                     /portfolios/[id]) — audit recommendation #3. */
                   <p className="mt-1 text-sm text-text-secondary line-clamp-2">
                     {p.description}
                   </p>

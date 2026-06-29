@@ -63,14 +63,14 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
       data-testid="wizard-csv-error"
       data-error-code={envelope.code}
     >
-      <p className="text-sm font-semibold text-negative">
+      <p className="text-body font-semibold text-negative">
         {errors.length > 0
           ? `${errors.length} ${errors.length === 1 ? "row" : "rows"} failed validation`
           : envelope.human_message}
       </p>
-      <p className="mt-1 text-xs text-text-secondary">{causeText}</p>
+      <p className="mt-1 text-caption text-text-secondary">{causeText}</p>
       {Object.entries(byRule).map(([rule, list]) => (
-        <details key={rule} className="mt-2 text-xs">
+        <details key={rule} className="mt-2 text-caption">
           <summary className="cursor-pointer text-text-secondary">
             {CSV_RULE_LABELS[rule] ?? rule} ({list.length} rows)
           </summary>
@@ -86,7 +86,7 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
         </details>
       ))}
       {/* Phase 16 / OBSERV-06 carrier marker — DOM shape stable. */}
-      <p className="mt-2 text-[11px] text-text-muted">
+      <p className="mt-2 text-micro text-text-muted">
         correlation_id: {envelope.correlation_id ?? "—"}
       </p>
     </div>

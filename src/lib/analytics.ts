@@ -30,6 +30,10 @@ export type ForQuantsEvent =
   | "wizard_step_view_2"
   | "wizard_step_view_3"
   | "wizard_step_view_4"
+  // Phase 53 / APPLY-02 — the review step shifts Submit to ordinal 5 on
+  // both branches, so the step-view funnel gains a 5th event. Additive
+  // telemetry only; the wizard state machine + finalize POST are unchanged.
+  | "wizard_step_view_5"
   | "wizard_step_complete_1"
   | "wizard_step_complete_2"
   | "wizard_step_complete_3"
@@ -52,7 +56,9 @@ export type CtaLocation =
   | "wizard_step_1"
   | "wizard_step_2"
   | "wizard_step_3"
-  | "wizard_step_4";
+  | "wizard_step_4"
+  // Phase 53 / APPLY-02 — Request-a-Call from the review step (ordinal 5).
+  | "wizard_step_5";
 
 export interface ForQuantsEventProps {
   /** Where the interaction happened inside the page (hero vs footer CTA). */

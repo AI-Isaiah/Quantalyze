@@ -203,22 +203,38 @@ export function ComputeJobsTable() {
         </p>
       )}
 
-      {/* Table */}
-      <ResponsiveTable label="Compute jobs">
+      {/* Table — ResponsiveTable is the SINGLE scroll region AND the
+          @container containment host (inline-size). The narrow-width column
+          priority-collapse lives on the CHILD th/td cells, never this host
+          (Tailwind v4 parent/child rule, #551). At a narrow container the two
+          lowest-priority columns (Attempts, Age) collapse from the right and
+          their real values relocate into the Kind cell as a sub-line — no
+          fabricated em-dash/zero. At the wide measure they un-collapse. */}
+      <ResponsiveTable label="Compute jobs" className="@container">
         <Table aria-label="Compute jobs" className="text-small">
           <TableHead>
             <TableRow className="hover:bg-transparent">
-              {["Kind", "Target", "Status", "Attempts", "Age", "Last Error"].map(
-                (h) => (
-                  <TableHeaderCell
-                    key={h}
-                    scope="col"
-                    className="px-3 py-2 text-micro uppercase tracking-wider"
-                  >
-                    {h}
-                  </TableHeaderCell>
-                ),
-              )}
+              {(
+                [
+                  { h: "Kind", collapse: false },
+                  { h: "Target", collapse: false },
+                  { h: "Status", collapse: false },
+                  { h: "Attempts", collapse: true },
+                  { h: "Age", collapse: true },
+                  { h: "Last Error", collapse: false },
+                ] as const
+              ).map(({ h, collapse }) => (
+                <TableHeaderCell
+                  key={h}
+                  scope="col"
+                  className={cn(
+                    "px-3 py-2 text-micro uppercase tracking-wider",
+                    collapse && "@max-2xl:hidden",
+                  )}
+                >
+                  {h}
+                </TableHeaderCell>
+              ))}
             </TableRow>
           </TableHead>
           <TableBody>
@@ -235,6 +251,12 @@ export function ComputeJobsTable() {
                 <TableRow key={job.id} className="h-11">
                   <TableCell className="px-3 py-2 font-metric text-caption text-text-primary">
                     {job.kind}
+                    {/* Narrow-container relocation of the collapsed Attempts +
+                        Age columns — the REAL values, not a fabricated dash. */}
+                    <span className="mt-0.5 block font-mono tabular-nums text-micro text-text-muted @2xl:hidden">
+                      {job.attempts}/{job.max_attempts} &middot;{" "}
+                      {formatRelativeTime(job.created_at, now)}
+                    </span>
                   </TableCell>
                   <TableCell
                     className="px-3 py-2 text-caption text-text-secondary truncate max-w-[180px]"
@@ -254,11 +276,11 @@ export function ComputeJobsTable() {
                   </TableCell>
                   <TableCell
                     numeric
-                    className="px-3 py-2 text-left text-caption text-text-primary"
+                    className="px-3 py-2 text-left text-caption text-text-primary @max-2xl:hidden"
                   >
                     {job.attempts}/{job.max_attempts}
                   </TableCell>
-                  <TableCell className="px-3 py-2 text-caption text-text-muted">
+                  <TableCell className="px-3 py-2 text-caption text-text-muted @max-2xl:hidden">
                     {formatRelativeTime(job.created_at, now)}
                   </TableCell>
                   <TableCell

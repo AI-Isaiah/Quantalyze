@@ -148,10 +148,10 @@ export function SendIntroPanel({
       <div className="relative z-10 w-full max-w-md bg-surface border-l border-border shadow-elevated overflow-y-auto">
         <div className="sticky top-0 bg-surface border-b border-border px-6 py-4 flex items-center justify-between">
           <div>
-            <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+            <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
               Send intro
             </p>
-            <h2 className="mt-0.5 text-lg font-display text-text-primary">
+            <h2 className="mt-0.5 text-h3 font-display text-text-primary">
               {displayStrategyName(candidate.strategies)}
             </h2>
           </div>
@@ -174,8 +174,8 @@ export function SendIntroPanel({
         {/* Already-sent banner */}
         {alreadySent && (
           <div className="px-6 py-4 border-b border-border bg-negative/5">
-            <p className="text-sm text-negative font-semibold">Intro already sent</p>
-            <p className="mt-1 text-xs text-text-secondary">
+            <p className="text-small text-negative font-semibold">Intro already sent</p>
+            <p className="mt-1 text-caption text-text-secondary">
               There&apos;s already a contact request for this allocator ×
               strategy pair. You can still close this panel and send a new
               message through your usual channel.
@@ -186,10 +186,10 @@ export function SendIntroPanel({
         {/* Empty-holdings banner — blocks submit per D-20c Option A contract. */}
         {holdingsEmpty && !alreadySent && (
           <div className="px-6 py-4 border-b border-border bg-negative/5">
-            <p className="text-sm text-negative font-semibold">
+            <p className="text-small text-negative font-semibold">
               Cannot send intro
             </p>
-            <p className="mt-1 text-xs text-text-secondary">
+            <p className="mt-1 text-caption text-text-secondary">
               Allocator has no current holdings — cannot send intro without an
               underperformer reference. Have them connect a portfolio first, or
               record at least one position.
@@ -199,12 +199,12 @@ export function SendIntroPanel({
 
         <form onSubmit={handleSubmit} className="p-6 space-y-5">
           <div>
-            <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-2">
+            <p className="text-micro uppercase tracking-wider text-text-muted font-medium mb-2">
               Reasons (edit if you want a different angle)
             </p>
             <ul className="space-y-1">
               {candidate.reasons.map((reason) => (
-                <li key={reason} className="flex items-start gap-2 text-sm text-text-secondary">
+                <li key={reason} className="flex items-start gap-2 text-small text-text-secondary">
                   <span className="mt-[6px] h-1 w-1 rounded-full bg-accent shrink-0" />
                   {reason}
                 </li>
@@ -216,18 +216,18 @@ export function SendIntroPanel({
           <div>
             <label
               htmlFor="original-strategy-select"
-              className="block text-[10px] uppercase tracking-wider text-text-muted font-medium mb-2"
+              className="block text-micro uppercase tracking-wider text-text-muted font-medium mb-2"
             >
               Underperformer being replaced
             </label>
             {holdingsLoading ? (
-              <p className="text-xs text-text-muted">Loading holdings…</p>
+              <p className="text-caption text-text-muted">Loading holdings…</p>
             ) : holdingsError ? (
-              <p className="text-xs text-negative">
+              <p className="text-caption text-negative">
                 Failed to load holdings: {holdingsError}
               </p>
             ) : holdingsEmpty ? (
-              <p className="text-xs text-text-muted">
+              <p className="text-caption text-text-muted">
                 No current holdings on this allocator&apos;s portfolio.
               </p>
             ) : (
@@ -236,7 +236,7 @@ export function SendIntroPanel({
                 value={originalStrategyId}
                 onChange={(e) => setOriginalStrategyId(e.target.value)}
                 disabled={alreadySent || submitting}
-                className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent"
+                className="w-full rounded-md border border-border bg-surface px-3 py-2 text-small text-text-primary focus:outline-none focus:border-accent"
                 required
               >
                 {(holdings ?? []).map((h) => (
@@ -259,7 +259,7 @@ export function SendIntroPanel({
           />
 
           {error && (
-            <p className="text-sm text-negative">{error}</p>
+            <p className="text-small text-negative">{error}</p>
           )}
 
           <div className="flex items-center gap-2">

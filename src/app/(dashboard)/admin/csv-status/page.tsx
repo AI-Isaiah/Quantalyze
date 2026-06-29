@@ -77,7 +77,7 @@ export default async function CsvStatusPage() {
 
       <div className="bg-white border border-border rounded-lg overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-small">
             <thead>
               <tr className="border-b border-border bg-page">
                 {[
@@ -90,7 +90,7 @@ export default async function CsvStatusPage() {
                 ].map((h) => (
                   <th
                     key={h}
-                    className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-text-muted"
+                    className="px-3 py-2 text-left text-micro font-medium uppercase tracking-wider text-text-muted"
                   >
                     {h}
                   </th>
@@ -125,26 +125,26 @@ export default async function CsvStatusPage() {
                     key={row.id}
                     className="border-b border-border last:border-b-0 hover:bg-gray-50 transition-colors"
                   >
-                    <td className="px-3 py-2 text-xs text-text-secondary">
+                    <td className="px-3 py-2 text-caption text-text-secondary">
                       {email}
                     </td>
-                    <td className="px-3 py-2 text-sm text-text-primary">
+                    <td className="px-3 py-2 text-small text-text-primary">
                       {strat?.name ?? "—"}
                     </td>
                     <td className="px-3 py-2">
                       <StatusBadge status={row.status} />
                     </td>
-                    <td className="px-3 py-2 text-xs text-text-secondary font-metric tabular-nums">
+                    <td className="px-3 py-2 text-caption text-text-secondary font-metric tabular-nums">
                       {row.trust_tier}
                     </td>
-                    <td className="px-3 py-2 text-xs text-text-muted font-metric">
+                    <td className="px-3 py-2 text-caption text-text-muted font-metric">
                       {submittedAt}
                     </td>
                     <td className="px-3 py-2">
                       {strat?.id && strat.status === "published" ? (
                         <Link
                           href={`/strategy/${strat.id}`}
-                          className="text-xs text-accent hover:underline"
+                          className="text-caption text-accent hover:underline"
                         >
                           View factsheet →
                         </Link>
@@ -157,7 +157,7 @@ export default async function CsvStatusPage() {
                         // instead. (Pre-fix this linked `/strategies/${id}` —
                         // PLURAL, a route that does not exist, only
                         // /strategies/[id]/edit — so EVERY row 404'd.)
-                        <span className="text-xs text-text-muted">
+                        <span className="text-caption text-text-muted">
                           {strat?.id ? "Not published" : "—"}
                         </span>
                       )}
@@ -169,7 +169,7 @@ export default async function CsvStatusPage() {
                 <tr>
                   <td
                     colSpan={6}
-                    className="px-3 py-8 text-center text-sm text-text-muted"
+                    className="px-3 py-8 text-center text-small text-text-muted"
                   >
                     No CSV submissions yet.
                   </td>
@@ -197,7 +197,7 @@ function StatusBadge({ status }: { status: string }) {
   };
   return (
     <span
-      className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+      className={`inline-block rounded px-1.5 py-0.5 text-micro font-semibold ${
         styles[status] ?? "bg-gray-50 text-text-muted"
       }`}
     >

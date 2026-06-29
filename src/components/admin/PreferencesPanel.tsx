@@ -181,10 +181,10 @@ export function PreferencesPanel({
       <div className="relative z-10 w-full max-w-lg bg-surface border-l border-border shadow-elevated overflow-y-auto">
         <div className="sticky top-0 bg-surface border-b border-border px-6 py-4 flex items-center justify-between z-10">
           <div>
-            <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+            <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
               Preferences
             </p>
-            <h2 className="mt-0.5 text-lg font-display text-text-primary">
+            <h2 className="mt-0.5 text-h3 font-display text-text-primary">
               CRM-style editor
             </h2>
           </div>
@@ -290,7 +290,7 @@ export function PreferencesPanel({
               `liquidity_preference` is unchanged; only the displayed
               label, aria-label, and option labels are updated. */}
           <div>
-            <p className="text-sm font-medium text-text-primary mb-2">
+            <p className="text-small font-medium text-text-primary mb-2">
               Minimum AUM
             </p>
             <div
@@ -315,7 +315,7 @@ export function PreferencesPanel({
                     onClick={() =>
                       setLiquidityPreference(active ? "" : value)
                     }
-                    className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                    className={`rounded-md border px-2.5 py-1 text-caption transition-colors ${
                       active
                         ? "border-accent bg-accent/10 text-accent"
                         : "border-border bg-surface text-text-secondary hover:border-border-focus"
@@ -330,7 +330,7 @@ export function PreferencesPanel({
 
           {/* Excluded styles — chip multi-select */}
           <div>
-            <p className="text-sm font-medium text-text-primary mb-2">
+            <p className="text-small font-medium text-text-primary mb-2">
               Excluded styles
             </p>
             <div className="flex flex-wrap gap-2">
@@ -347,7 +347,7 @@ export function PreferencesPanel({
                     // match "Excluded exchanges" below — an active excluded
                     // style is a removal, not a preference (accent/green is
                     // reserved for the "Preferred …" inclusion groups).
-                    className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                    className={`rounded-md border px-2.5 py-1 text-caption transition-colors ${
                       active
                         ? "border-negative bg-negative/10 text-negative"
                         : "border-border bg-surface text-text-secondary hover:border-border-focus"
@@ -362,7 +362,7 @@ export function PreferencesPanel({
 
           {/* Universe */}
           <div>
-            <p className="text-sm font-medium text-text-primary mb-2">
+            <p className="text-small font-medium text-text-primary mb-2">
               Preferred strategy types
             </p>
             <div className="flex flex-wrap gap-2">
@@ -373,7 +373,7 @@ export function PreferencesPanel({
                     key={type}
                     type="button"
                     onClick={() => toggle(preferredTypes, type, setPreferredTypes)}
-                    className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                    className={`rounded-md border px-2.5 py-1 text-caption transition-colors ${
                       active
                         ? "border-accent bg-accent/10 text-accent"
                         : "border-border bg-surface text-text-secondary hover:border-border-focus"
@@ -387,7 +387,7 @@ export function PreferencesPanel({
           </div>
 
           <div>
-            <p className="text-sm font-medium text-text-primary mb-2">
+            <p className="text-small font-medium text-text-primary mb-2">
               Preferred markets
             </p>
             <div className="flex flex-wrap gap-2">
@@ -398,7 +398,7 @@ export function PreferencesPanel({
                     key={market}
                     type="button"
                     onClick={() => toggle(preferredMarkets, market, setPreferredMarkets)}
-                    className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                    className={`rounded-md border px-2.5 py-1 text-caption transition-colors ${
                       active
                         ? "border-accent bg-accent/10 text-accent"
                         : "border-border bg-surface text-text-secondary hover:border-border-focus"
@@ -412,7 +412,7 @@ export function PreferencesPanel({
           </div>
 
           <div>
-            <p className="text-sm font-medium text-text-primary mb-2">
+            <p className="text-small font-medium text-text-primary mb-2">
               Excluded exchanges
             </p>
             <div className="flex flex-wrap gap-2">
@@ -423,7 +423,7 @@ export function PreferencesPanel({
                     key={exchange}
                     type="button"
                     onClick={() => toggle(excludedExchanges, exchange, setExcludedExchanges)}
-                    className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                    className={`rounded-md border px-2.5 py-1 text-caption transition-colors ${
                       active
                         ? "border-negative bg-negative/10 text-negative"
                         : "border-border bg-surface text-text-secondary hover:border-border-focus"
@@ -445,13 +445,13 @@ export function PreferencesPanel({
             rows={4}
           />
 
-          {error && <p className="text-sm text-negative">{error}</p>}
+          {error && <p className="text-small text-negative">{error}</p>}
           {savedMessage && !error && (
-            <p className="text-sm text-positive">{savedMessage}</p>
+            <p className="text-small text-positive">{savedMessage}</p>
           )}
 
           {preferences?.mandate_edited_at && (
-            <p className="text-xs text-text-muted font-metric">
+            <p className="text-caption text-text-muted font-metric">
               Mandate last edited by:{" "}
               {preferences.edited_by_user_id == null ? "allocator" : "admin"}{" "}
               {String.fromCharCode(183)}{" "}

@@ -84,15 +84,15 @@ export default function ForQuantsPage() {
       <section className="border-b border-border bg-white">
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-page px-3 py-1 text-xs font-medium text-text-secondary">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-page px-3 py-1 text-caption font-medium text-text-secondary">
               For Crypto Quant Teams
             </span>
 
-            <h1 className="mt-6 font-display text-4xl leading-tight tracking-tight text-text-primary md:text-5xl">
+            <h1 className="mt-6 font-display text-hero leading-tight tracking-tight text-text-primary">
               List a verified track record without exposing trading permissions.
             </h1>
 
-            <p className="mt-6 max-w-2xl text-lg leading-relaxed text-text-secondary">
+            <p className="mt-6 max-w-2xl text-body leading-relaxed text-text-secondary">
               Read-only exchange API keys, codename anonymization, founder-routed
               allocator intros. Free to list.
             </p>
@@ -100,7 +100,7 @@ export default function ForQuantsPage() {
             <ForQuantsCtas location="hero" />
 
             {/* Trust badge row (3 inline facts, no vanity counts) */}
-            <div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-3 text-sm text-text-muted">
+            <div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-3 text-caption text-text-muted">
               <span className="flex items-center gap-1.5">
                 <svg
                   aria-hidden="true"
@@ -159,7 +159,7 @@ export default function ForQuantsPage() {
       {/* 2. Trust block */}
       <section className="border-b border-border bg-page">
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
-          <h2 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
+          <h2 className="font-display text-h2 tracking-tight text-text-primary">
             Read-only keys only. You control visibility and intro approvals.
           </h2>
           <p className="mt-3 max-w-2xl text-text-secondary">
@@ -178,7 +178,7 @@ export default function ForQuantsPage() {
             ))}
           </dl>
 
-          <p className="mt-8 text-sm text-text-muted">
+          <p className="mt-8 text-caption text-text-muted">
             <Link
               href="/security"
               className="underline hover:text-text-primary"
@@ -192,7 +192,7 @@ export default function ForQuantsPage() {
       {/* 3. How It Works — single panel with hairline-divided steps */}
       <section className="border-b border-border bg-white">
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
-          <h2 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
+          <h2 className="font-display text-h2 tracking-tight text-text-primary">
             How it works
           </h2>
           <p className="mt-3 max-w-2xl text-text-secondary">
@@ -215,7 +215,7 @@ export default function ForQuantsPage() {
                 className="grid gap-2 py-5 md:grid-cols-[352px_1fr] md:items-baseline md:gap-8"
               >
                 <dt className="grid gap-2 md:grid-cols-[56px_1fr] md:gap-8">
-                  <span className="font-metric text-xs tracking-wider text-text-muted">
+                  <span className="font-metric text-caption tracking-wider text-text-muted">
                     {step.n}
                   </span>
                   <span className="font-medium text-text-primary">
@@ -232,7 +232,7 @@ export default function ForQuantsPage() {
       {/* 4. Factsheet Sample */}
       <section className="border-b border-border bg-page">
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
-          <h2 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
+          <h2 className="font-display text-h2 tracking-tight text-text-primary">
             Allocator view: your codename factsheet and verified risk metrics.
           </h2>
           <p className="mt-3 max-w-2xl text-text-secondary">
@@ -258,7 +258,7 @@ export default function ForQuantsPage() {
       <section className="bg-white">
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
-            <h2 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
+            <h2 className="font-display text-h2 tracking-tight text-text-primary">
               Ready to publish a verified strategy profile?
             </h2>
             <p className="mt-4 max-w-xl text-text-secondary">
@@ -268,7 +268,7 @@ export default function ForQuantsPage() {
 
             <ForQuantsCtas location="footer" />
 
-            <p className="mt-8 text-sm text-text-muted">
+            <p className="mt-8 text-caption text-text-muted">
               Already have an account?{" "}
               <Link href="/login" className="underline hover:text-text-primary">
                 Sign in →

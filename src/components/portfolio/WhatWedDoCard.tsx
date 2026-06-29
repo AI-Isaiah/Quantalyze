@@ -52,10 +52,10 @@ export function WhatWedDoCard({ suggestions, className }: WhatWedDoCardProps) {
       aria-label="What we would do"
       className={cn("flex flex-col gap-3", className)}
     >
-      <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+      <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
         What we&apos;d do in your shoes
       </p>
-      <p className="text-sm sm:text-base text-text-secondary leading-relaxed max-w-2xl">
+      <p className="text-small sm:text-body text-text-secondary leading-relaxed max-w-2xl">
         Add{" "}
         <span className="font-medium text-text-primary">{top.strategy_name}</span>{" "}
         at a 10% allocation to {why}. Optimizer score {top.score.toFixed(2)} on the

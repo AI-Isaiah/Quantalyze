@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, cleanup } from "@testing-library/react";
 import { AllocatorMatchQueue } from "./AllocatorMatchQueue";
 
 /**
@@ -56,6 +56,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  cleanup();
   vi.restoreAllMocks();
 });
 
@@ -271,5 +272,139 @@ describe("<AllocatorMatchQueue> — C-0126 demo read-only", () => {
     // The render above proves the GET was honored; confirm it hit the demo
     // lane (the read-only banner did not suppress the data layer).
     expect(fetchMock).toHaveBeenCalledWith(`/api/demo/match/${ALLOCATOR_ID}`);
+  });
+});
+
+/**
+ * TABLE-01 / T-53-11 — AllocatorMatchQueue @container parent/child STRUCTURAL
+ * guard (#551). All THREE raw `<table>`s (left rail, excluded list, decision
+ * history) migrated onto `ResponsiveTable className="@container"` hosts with
+ * `@max-*` priority-collapse on the CHILD cells. A class-string jsdom check
+ * FALSE-PASSES the same-element regression, so this guard asserts the
+ * RELATIONSHIP structurally: EVERY `@container` host must be a STRICT ANCESTOR
+ * of every `@-`variant cell beneath it (never the same node), and numeric
+ * columns keep `tabular-nums`.
+ */
+function buildRichPayload() {
+  const base = buildPayload();
+  return {
+    ...base,
+    excluded: [
+      {
+        id: "exc-1",
+        strategy_id: "strat-x",
+        score: 0.2,
+        score_breakdown: {},
+        reasons: [],
+        rank: null,
+        exclusion_reason: "AUM below floor",
+        exclusion_provenance: "preference_fit < 0.3",
+        strategies: {
+          id: "strat-x",
+          name: "Excluded One",
+          codename: "exc",
+          disclosure_tier: "named" as const,
+          strategy_types: ["systematic"],
+          supported_exchanges: ["binance"],
+          aum: 100_000,
+          max_capacity: 1_000_000,
+          user_id: "user-x",
+        },
+        analytics: null,
+      },
+    ],
+    decisions: [
+      {
+        id: "dec-1",
+        strategy_id: "strat-1",
+        decision: "thumbs_up",
+        founder_note: "Strong track record, low correlation with the book.",
+        contact_request_id: null,
+        created_at: new Date().toISOString(),
+        strategies: {
+          id: "strat-1",
+          name: "Alpha One",
+          codename: "alpha",
+          disclosure_tier: "named" as const,
+        },
+      },
+    ],
+  };
+}
+
+describe("<AllocatorMatchQueue> — @container parent/child structural guard", () => {
+  function variantEls(root: HTMLElement): HTMLElement[] {
+    return Array.from(
+      root.querySelectorAll<HTMLElement>(
+        '[class*="@max-"], [class*="@min-"], [class*="@2xl:"], [class*="@3xl:"]',
+      ),
+    );
+  }
+
+  it("EVERY @container host is a STRICT ANCESTOR of its @-variant cells (all three tables)", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(buildRichPayload()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const { container } = render(
+      <AllocatorMatchQueue
+        allocatorId={ALLOCATOR_ID}
+        forceReadOnly={true}
+        sourceApiPath="/api/demo/match"
+      />,
+    );
+
+    // Left rail renders once candidates load. displayStrategyName returns the
+    // codename ("alpha"), which appears in both the shortlist card and the
+    // left-rail row, so match all.
+    await screen.findAllByText(/alpha/);
+
+    // Open the excluded + history <details> so all three tables are in the DOM.
+    fireEvent.click(screen.getByText(/Excluded strategies/));
+    fireEvent.click(screen.getByText(/Decision history/));
+    // Excluded row renders the AUM-below-floor reason cell.
+    await screen.findByText(/AUM below floor/);
+
+    const hosts = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="@container"]'),
+    );
+    // Three migrated tables → three @container hosts.
+    expect(hosts.length).toBe(3);
+
+    for (const host of hosts) {
+      // Same-element host is the #551 bug — host must carry NO @-variant.
+      expect(host.className).not.toMatch(/@(max|min|2xl|3xl)/);
+      // Each host has @-variant descendants and is a strict ancestor of each.
+      const variants = variantEls(host);
+      expect(variants.length).toBeGreaterThan(0);
+      for (const el of variants) {
+        expect(host.contains(el)).toBe(true);
+        expect(host).not.toBe(el);
+      }
+    }
+  });
+
+  it("preserves tabular-nums on numeric columns across the reshape", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(buildRichPayload()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const { container } = render(
+      <AllocatorMatchQueue
+        allocatorId={ALLOCATOR_ID}
+        forceReadOnly={true}
+        sourceApiPath="/api/demo/match"
+      />,
+    );
+    await screen.findAllByText(/alpha/);
+
+    const tabular = container.querySelectorAll('[class*="tabular-nums"]');
+    expect(tabular.length).toBeGreaterThan(0);
   });
 });

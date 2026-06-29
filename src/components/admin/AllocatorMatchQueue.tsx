@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ScopedBanner } from "@/components/ui/ScopedBanner";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { computeFreshness } from "@/lib/freshness";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
@@ -336,7 +337,7 @@ export function AllocatorMatchQueue({
   if (error || !data) {
     return (
       <Card className="border-negative/40">
-        <p className="text-sm text-negative">{error || "Failed to load"}</p>
+        <p className="text-small text-negative">{error || "Failed to load"}</p>
         <Button variant="secondary" size="sm" onClick={load} className="mt-3">
           Retry
         </Button>
@@ -372,7 +373,7 @@ export function AllocatorMatchQueue({
 
       {/* Breadcrumb */}
       {!forceReadOnly && profile && (
-        <nav className="flex items-center gap-2 text-sm text-text-muted">
+        <nav className="flex items-center gap-2 text-small text-text-muted">
           <Link href="/admin/match" className="hover:text-text-primary">
             Match queue
           </Link>
@@ -386,7 +387,7 @@ export function AllocatorMatchQueue({
       {/* Read-only mobile banner */}
       {!forceReadOnly && (
         <div className="md:hidden rounded-md border border-accent/30 bg-accent/5 px-4 py-3">
-          <p className="text-sm text-text-primary">
+          <p className="text-small text-text-primary">
             <strong className="font-semibold">Read-only on mobile.</strong>{" "}
             Open on a desktop or tablet (1024px+) to use keyboard shortcuts
             and record KEEP / SKIP / Send Intro decisions.
@@ -400,14 +401,14 @@ export function AllocatorMatchQueue({
       <Card>
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
-            <h1 className="text-[24px] font-display text-text-primary">
+            <h1 className="text-h3 font-display text-text-primary">
               {profile.display_name || "(unknown)"}
             </h1>
             {profile.company && (
-              <p className="text-sm text-text-secondary mt-0.5">{profile.company}</p>
+              <p className="text-small text-text-secondary mt-0.5">{profile.company}</p>
             )}
             {preferences?.mandate_archetype && (
-              <p className="text-sm text-text-secondary mt-2 italic">
+              <p className="text-small text-text-secondary mt-2 italic">
                 &ldquo;{preferences.mandate_archetype}&rdquo;
               </p>
             )}
@@ -416,7 +417,7 @@ export function AllocatorMatchQueue({
             {batch && <ModeBadge mode={batch.mode} />}
             {hoursAgo !== null && (
               <span
-                className={`text-[11px] font-mono uppercase tracking-wider ${
+                className={`text-micro font-mono uppercase tracking-wider ${
                   isStale ? "text-negative" : "text-text-muted"
                 }`}
               >
@@ -451,7 +452,7 @@ export function AllocatorMatchQueue({
             </>
           )}
           {batch && (
-            <span className="ml-auto text-[11px] text-text-muted font-mono tabular-nums">
+            <span className="ml-auto text-micro text-text-muted font-mono tabular-nums">
               {candidates.length} candidates &middot;{" "}
               {decisions.filter((d) => d.decision === "sent_as_intro").length} sent &middot;{" "}
               {decisions.filter((d) => d.decision === "thumbs_up").length} kept
@@ -464,7 +465,7 @@ export function AllocatorMatchQueue({
       {/* Filter-relaxed callout */}
       {batch?.filter_relaxed && (
         <div className="rounded-md border border-negative/40 bg-transparent px-4 py-3">
-          <p className="text-sm text-text-primary">
+          <p className="text-small text-text-primary">
             Eligibility was relaxed to find these. Review carefully.
           </p>
         </div>
@@ -473,7 +474,7 @@ export function AllocatorMatchQueue({
       {/* Empty states */}
       {!batch && (
         <Card className="text-center py-12">
-          <p className="text-sm text-text-secondary mb-4">
+          <p className="text-small text-text-secondary mb-4">
             No candidates yet for this allocator.
           </p>
           {!forceReadOnly && (
@@ -485,7 +486,7 @@ export function AllocatorMatchQueue({
       )}
       {batch && candidates.length === 0 && (
         <Card className="text-center py-10">
-          <p className="text-sm text-text-muted">
+          <p className="text-small text-text-muted">
             No eligible candidates for this batch. Try editing preferences or relaxing criteria.
           </p>
         </Card>
@@ -494,7 +495,7 @@ export function AllocatorMatchQueue({
       {/* Shortlist strip (top 3 cards, above the fold) */}
       {candidates.length > 0 && (
         <div>
-          <p className="mb-2 text-[10px] uppercase tracking-wider text-text-muted font-medium">
+          <p className="mb-2 text-micro uppercase tracking-wider text-text-muted font-medium">
             Shortlist
           </p>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -516,72 +517,85 @@ export function AllocatorMatchQueue({
       {/* Two-pane: left rail + sticky right detail */}
       {candidates.length > 0 && (
         <div className="grid grid-cols-1 lg:grid-cols-[2fr_3fr] gap-4">
-          {/* Left rail */}
+          {/* Left rail — ResponsiveTable is the @container host (parent); the
+              @max-* rank-column collapse lives on the CHILD th/td (#551 rule).
+              At a narrow container the # column collapses and the real rank
+              relocates into the Strategy cell. */}
           <Card className="p-0 max-h-[600px] overflow-y-auto">
-            <table className="w-full">
-              <thead className="sticky top-0 bg-surface z-10">
-                <tr className="border-b border-border">
-                  <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-text-muted font-semibold w-10">
-                    #
-                  </th>
-                  <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-text-muted font-semibold">
-                    Strategy
-                  </th>
-                  <th className="px-3 py-2 text-right text-[10px] uppercase tracking-wider text-text-muted font-semibold">
-                    Score
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {candidates.map((cand, i) => {
-                  const selected = selectedIdx === i;
-                  const sent = sentStrategyIds.has(cand.strategy_id);
-                  const kept = thumbsUpIds.has(cand.strategy_id);
-                  const skipped = thumbsDownIds.has(cand.strategy_id);
-                  return (
-                    <tr
-                      key={cand.id}
-                      onClick={() => setSelectedIdx(i)}
-                      className={`border-b border-border cursor-pointer transition-colors ${
-                        selected
-                          ? "bg-accent/5 border-l-2 border-l-accent"
-                          : "hover:bg-page"
-                      } ${sent ? "opacity-50" : ""}`}
-                    >
-                      <td className="px-3 py-2 font-mono tabular-nums text-xs text-text-muted">
-                        {cand.rank}
-                      </td>
-                      <td className="px-3 py-2">
-                        <div>
-                          <p className="text-sm font-medium text-text-primary">
-                            {displayStrategyName(cand.strategies)}
-                          </p>
-                          {cand.reasons[0] && (
-                            <p className="text-xs text-text-secondary truncate max-w-[260px]">
-                              {cand.reasons[0]}
+            <ResponsiveTable label="Match candidates" className="@container">
+              <table className="w-full">
+                <thead className="sticky top-0 bg-surface z-10">
+                  <tr className="border-b border-border">
+                    <th className="px-3 py-2 text-left text-micro uppercase tracking-wider text-text-muted font-semibold w-10 @max-2xl:hidden">
+                      #
+                    </th>
+                    <th className="px-3 py-2 text-left text-micro uppercase tracking-wider text-text-muted font-semibold">
+                      Strategy
+                    </th>
+                    <th className="px-3 py-2 text-right text-micro uppercase tracking-wider text-text-muted font-semibold">
+                      Score
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {candidates.map((cand, i) => {
+                    const selected = selectedIdx === i;
+                    const sent = sentStrategyIds.has(cand.strategy_id);
+                    const kept = thumbsUpIds.has(cand.strategy_id);
+                    const skipped = thumbsDownIds.has(cand.strategy_id);
+                    return (
+                      <tr
+                        key={cand.id}
+                        onClick={() => setSelectedIdx(i)}
+                        className={`border-b border-border cursor-pointer transition-colors ${
+                          selected
+                            ? "bg-accent/5 border-l-2 border-l-accent"
+                            : "hover:bg-page"
+                        } ${sent ? "opacity-50" : ""}`}
+                      >
+                        <td className="px-3 py-2 font-mono tabular-nums text-caption text-text-muted @max-2xl:hidden">
+                          {cand.rank}
+                        </td>
+                        <td className="px-3 py-2">
+                          <div>
+                            <p className="text-small font-medium text-text-primary">
+                              {/* Narrow-container relocation of the collapsed
+                                  rank — the REAL value, not a fabricated dash. */}
+                              <span className="font-mono tabular-nums text-text-muted @2xl:hidden">
+                                {cand.rank !== null ? `${cand.rank}. ` : ""}
+                              </span>
+                              {displayStrategyName(cand.strategies)}
                             </p>
-                          )}
-                          <div className="mt-1 flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider">
-                            {sent && (
-                              <span className="text-text-muted">SENT</span>
+                            {cand.reasons[0] && (
+                              <p
+                                className="text-caption text-text-secondary truncate max-w-[260px]"
+                                title={cand.reasons[0]}
+                              >
+                                {cand.reasons[0]}
+                              </p>
                             )}
-                            {kept && !sent && (
-                              <span className="text-accent">KEPT</span>
-                            )}
-                            {skipped && !sent && (
-                              <span className="text-text-muted line-through">SKIP</span>
-                            )}
+                            <div className="mt-1 flex items-center gap-1.5 text-micro font-mono uppercase tracking-wider">
+                              {sent && (
+                                <span className="text-text-muted">SENT</span>
+                              )}
+                              {kept && !sent && (
+                                <span className="text-accent">KEPT</span>
+                              )}
+                              {skipped && !sent && (
+                                <span className="text-text-muted line-through">SKIP</span>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        <ScoreCell score={cand.score} />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          <ScoreCell score={cand.score} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </ResponsiveTable>
           </Card>
 
           {/* Sticky right pane */}
@@ -614,42 +628,56 @@ export function AllocatorMatchQueue({
               e.preventDefault();
               setShowExcluded((s) => !s);
             }}
-            className="cursor-pointer text-sm font-medium text-text-primary hover:text-accent"
+            className="cursor-pointer text-small font-medium text-text-primary hover:text-accent"
           >
             Excluded strategies ({excluded.length}) {showExcluded ? "\u25BC" : "\u25B6"}
           </summary>
           {showExcluded && (
             <Card className="mt-2 p-0">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-border">
-                    <th className="px-4 py-2 text-left text-[11px] uppercase tracking-wider text-text-muted font-semibold">
-                      Strategy
-                    </th>
-                    <th className="px-4 py-2 text-left text-[11px] uppercase tracking-wider text-text-muted font-semibold">
-                      Reason
-                    </th>
-                    <th className="px-4 py-2 text-left text-[11px] uppercase tracking-wider text-text-muted font-semibold">
-                      Detail
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {excluded.map((exc) => (
-                    <tr key={exc.id} className="border-b border-border">
-                      <td className="px-4 py-2 text-sm text-text-primary">
-                        {displayStrategyName(exc.strategies)}
-                      </td>
-                      <td className="px-4 py-2 text-sm text-text-secondary">
-                        {exc.exclusion_reason}
-                      </td>
-                      <td className="px-4 py-2 text-xs font-mono text-text-muted">
-                        {exc.exclusion_provenance || "\u2014"}
-                      </td>
+              {/* ResponsiveTable @container host (parent); the @max-* Detail
+                  collapse lives on the CHILD th/td (#551 rule). */}
+              <ResponsiveTable label="Excluded strategies" className="@container">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-border">
+                      <th className="px-4 py-2 text-left text-micro uppercase tracking-wider text-text-muted font-semibold">
+                        Strategy
+                      </th>
+                      <th className="px-4 py-2 text-left text-micro uppercase tracking-wider text-text-muted font-semibold">
+                        Reason
+                      </th>
+                      <th className="px-4 py-2 text-left text-micro uppercase tracking-wider text-text-muted font-semibold @max-2xl:hidden">
+                        Detail
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {excluded.map((exc) => (
+                      <tr key={exc.id} className="border-b border-border">
+                        <td className="px-4 py-2 text-small text-text-primary">
+                          {displayStrategyName(exc.strategies)}
+                        </td>
+                        <td
+                          className="px-4 py-2 text-small text-text-secondary"
+                          title={exc.exclusion_reason ?? undefined}
+                        >
+                          {exc.exclusion_reason}
+                          {/* Narrow-container relocation of the collapsed
+                              Detail \u2014 the REAL provenance value. */}
+                          {exc.exclusion_provenance && (
+                            <span className="mt-0.5 block font-mono text-micro text-text-muted @2xl:hidden">
+                              {exc.exclusion_provenance}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2 text-caption font-mono text-text-muted @max-2xl:hidden">
+                          {exc.exclusion_provenance || "\u2014"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </ResponsiveTable>
             </Card>
           )}
         </details>
@@ -663,48 +691,60 @@ export function AllocatorMatchQueue({
               e.preventDefault();
               setShowHistory((s) => !s);
             }}
-            className="cursor-pointer text-sm font-medium text-text-primary hover:text-accent"
+            className="cursor-pointer text-small font-medium text-text-primary hover:text-accent"
           >
             Decision history ({decisions.length}) {showHistory ? "\u25BC" : "\u25B6"}
           </summary>
           {showHistory && (
             <Card className="mt-2 p-0">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-border">
-                    <th className="px-4 py-2 text-left text-[11px] uppercase tracking-wider text-text-muted font-semibold">
-                      When
-                    </th>
-                    <th className="px-4 py-2 text-left text-[11px] uppercase tracking-wider text-text-muted font-semibold">
-                      Decision
-                    </th>
-                    <th className="px-4 py-2 text-left text-[11px] uppercase tracking-wider text-text-muted font-semibold">
-                      Strategy
-                    </th>
-                    <th className="px-4 py-2 text-left text-[11px] uppercase tracking-wider text-text-muted font-semibold">
-                      Note
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {decisions.map((d) => (
-                    <tr key={d.id} className="border-b border-border">
-                      <td className="px-4 py-2 text-xs font-mono text-text-muted">
-                        {new Date(d.created_at).toLocaleDateString()}
-                      </td>
-                      <td className="px-4 py-2 text-xs font-mono uppercase tracking-wider text-text-secondary">
-                        {d.decision.replace("_", " ")}
-                      </td>
-                      <td className="px-4 py-2 text-sm text-text-primary">
-                        {displayStrategyName(d.strategies)}
-                      </td>
-                      <td className="px-4 py-2 text-xs text-text-secondary max-w-[320px] truncate">
-                        {d.founder_note || "\u2014"}
-                      </td>
+              {/* ResponsiveTable @container host (parent); the @max-* When
+                  collapse lives on the CHILD th/td (#551 rule). */}
+              <ResponsiveTable label="Decision history" className="@container">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-border">
+                      <th className="px-4 py-2 text-left text-micro uppercase tracking-wider text-text-muted font-semibold @max-2xl:hidden">
+                        When
+                      </th>
+                      <th className="px-4 py-2 text-left text-micro uppercase tracking-wider text-text-muted font-semibold">
+                        Decision
+                      </th>
+                      <th className="px-4 py-2 text-left text-micro uppercase tracking-wider text-text-muted font-semibold">
+                        Strategy
+                      </th>
+                      <th className="px-4 py-2 text-left text-micro uppercase tracking-wider text-text-muted font-semibold">
+                        Note
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {decisions.map((d) => (
+                      <tr key={d.id} className="border-b border-border">
+                        <td className="px-4 py-2 text-caption font-mono text-text-muted @max-2xl:hidden">
+                          {new Date(d.created_at).toLocaleDateString()}
+                        </td>
+                        <td className="px-4 py-2 text-caption font-mono uppercase tracking-wider text-text-secondary">
+                          {d.decision.replace("_", " ")}
+                          {/* Narrow-container relocation of the collapsed When
+                              column \u2014 the REAL decision date. */}
+                          <span className="mt-0.5 block font-mono normal-case tracking-normal text-micro text-text-muted @2xl:hidden">
+                            {new Date(d.created_at).toLocaleDateString()}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 text-small text-text-primary">
+                          {displayStrategyName(d.strategies)}
+                        </td>
+                        <td
+                          className="px-4 py-2 text-caption text-text-secondary max-w-[320px] truncate"
+                          title={d.founder_note ?? undefined}
+                        >
+                          {d.founder_note || "\u2014"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </ResponsiveTable>
             </Card>
           )}
         </details>

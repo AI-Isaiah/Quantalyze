@@ -48,7 +48,7 @@ export function BridgeTrigger({
         <button
           type="button"
           onClick={handleOpen}
-          className="ml-2 text-sm font-medium underline underline-offset-2 transition-colors duration-150 ease-out hover:text-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          className="ml-2 text-small font-medium underline underline-offset-2 transition-colors duration-150 ease-out hover:text-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
           style={{ color: "#1B6B5A" }}
           aria-label={`Find replacement for ${insight.strategy_name ?? "underperforming strategy"}`}
         >

@@ -50,12 +50,12 @@ function MetricCell({
 }) {
   return (
     <div className="text-right">
-      <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+      <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
         {label}
       </p>
       <p
         className={cn(
-          "mt-0.5 text-sm font-metric tabular-nums",
+          "mt-0.5 text-small font-metric tabular-nums",
           liftClass(value),
         )}
       >
@@ -75,10 +75,12 @@ function SuggestionRow({
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface p-4 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold text-text-primary truncate">
+        <p className="text-small font-semibold text-text-primary break-words min-w-0">
           {suggestion.strategy_name}
         </p>
-        <p className="mt-0.5 font-mono text-[11px] text-text-muted truncate">
+        {/* Raw strategy_id is a legitimate single-line clip (not meaningful
+            prose to recover) — audit :81 classified legitimate, left as-is. */}
+        <p className="mt-0.5 font-mono text-micro text-text-muted truncate">
           {suggestion.strategy_id}
         </p>
       </div>
@@ -93,13 +95,13 @@ function SuggestionRow({
       <div className="flex items-center gap-2">
         <Link
           href={`/factsheet/${suggestion.strategy_id}`}
-          className="text-xs font-medium text-accent hover:text-accent-hover underline-offset-2 hover:underline"
+          className="text-caption font-medium text-accent hover:text-accent-hover underline-offset-2 hover:underline"
         >
           View strategy
         </Link>
         <Link
           href={`/portfolios/${portfolioId}/manage?add=${suggestion.strategy_id}`}
-          className="inline-flex items-center justify-center rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover transition-colors"
+          className="inline-flex items-center justify-center rounded-md bg-accent px-3 py-1.5 text-caption font-medium text-white hover:bg-accent-hover transition-colors"
         >
           Add to portfolio
         </Link>
@@ -165,10 +167,10 @@ export default function PortfolioOptimizer({
 
   const heading = (
     <div className="mb-4">
-      <h2 className="text-base font-semibold text-text-primary">
+      <h2 className="text-body font-semibold text-text-primary">
         Diversification Optimizer
       </h2>
-      <p className="mt-0.5 text-xs text-text-muted">
+      <p className="mt-0.5 text-caption text-text-muted">
         Identify uncorrelated strategies that improve your risk-adjusted return.
       </p>
     </div>
@@ -190,10 +192,10 @@ export default function PortfolioOptimizer({
       <Card>
         {heading}
         <div className="rounded-lg border border-negative/30 bg-negative/5 px-4 py-3">
-          <p className="text-sm font-medium text-negative">
+          <p className="text-small font-medium text-negative">
             Optimizer failed
           </p>
-          <p className="mt-0.5 text-xs text-text-secondary">
+          <p className="mt-0.5 text-caption text-text-secondary">
             {error ?? "We couldn't compute suggestions for this portfolio."}
           </p>
         </div>
@@ -211,7 +213,7 @@ export default function PortfolioOptimizer({
     return (
       <Card>
         {heading}
-        <p className="text-sm text-text-secondary">
+        <p className="text-small text-text-secondary">
           Run the optimizer to see strategies that could improve your
           portfolio&apos;s risk-adjusted return.
         </p>
@@ -220,7 +222,7 @@ export default function PortfolioOptimizer({
             {loading ? "Running..." : "Run Optimizer"}
           </Button>
           {error && (
-            <p className="mt-2 text-xs text-negative" role="alert">
+            <p className="mt-2 text-caption text-negative" role="alert">
               {error}
             </p>
           )}
@@ -234,7 +236,7 @@ export default function PortfolioOptimizer({
     return (
       <Card>
         {heading}
-        <p className="text-sm text-text-secondary">
+        <p className="text-small text-text-secondary">
           No candidates match your current mandate. Try relaxing filters.
         </p>
         <div className="mt-4">
@@ -242,7 +244,7 @@ export default function PortfolioOptimizer({
             {loading ? "Running..." : "Re-run Optimizer"}
           </Button>
           {error && (
-            <p className="mt-2 text-xs text-negative" role="alert">
+            <p className="mt-2 text-caption text-negative" role="alert">
               {error}
             </p>
           )}
@@ -262,7 +264,7 @@ export default function PortfolioOptimizer({
 
       {isStale && (
         <div className="mb-4 flex flex-col gap-2 rounded-lg border border-border bg-page px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-xs text-text-secondary">
+          <p className="text-caption text-text-secondary">
             Suggestions computed {days} days ago. Re-run to refresh.
           </p>
           <Button
@@ -287,7 +289,7 @@ export default function PortfolioOptimizer({
       </div>
 
       {error && (
-        <p className="mt-3 text-xs text-negative" role="alert">
+        <p className="mt-3 text-caption text-negative" role="alert">
           {error}
         </p>
       )}

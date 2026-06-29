@@ -45,15 +45,15 @@ function SnapshotMiniTable({ title, rows }: { title: string; rows: SnapshotStrat
   if (rows.length === 0) {
     return (
       <div>
-        <p className="text-[11px] uppercase tracking-wider text-text-muted mb-1">{title}</p>
-        <p className="text-xs text-text-muted">—</p>
+        <p className="text-micro uppercase tracking-wider text-text-muted mb-1">{title}</p>
+        <p className="text-caption text-text-muted">—</p>
       </div>
     );
   }
   return (
     <div>
-      <p className="text-[11px] uppercase tracking-wider text-text-muted mb-1">{title}</p>
-      <table className="text-xs">
+      <p className="text-micro uppercase tracking-wider text-text-muted mb-1">{title}</p>
+      <table className="text-caption">
         <tbody>
           {rows.map((r) => (
             <tr key={r.strategy_id}>
@@ -126,31 +126,31 @@ export default async function AdminIntrosPage() {
       />
 
       {rows.length === 0 ? (
-        <p className="text-sm text-text-muted">No intro requests yet.</p>
+        <p className="text-small text-text-muted">No intro requests yet.</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-small">
             <thead>
               <tr className="border-b border-border text-left">
-                <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider">
+                <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider">
                   When
                 </th>
-                <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider">
+                <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider">
                   Allocator
                 </th>
-                <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider">
+                <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider">
                   Strategy
                 </th>
-                <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider">
+                <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider">
                   Source
                 </th>
-                <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider">
+                <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider">
                   Replaces
                 </th>
-                <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider">
+                <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider">
                   Snapshot
                 </th>
-                <th className="py-2 font-medium text-text-muted text-xs uppercase tracking-wider">
+                <th className="py-2 font-medium text-text-muted text-caption uppercase tracking-wider">
                   Top/Bottom 3
                 </th>
               </tr>
@@ -189,13 +189,13 @@ export default async function AdminIntrosPage() {
 
                 return (
                   <tr key={row.id} className="border-b border-border/60 align-top">
-                    <td className="py-3 pr-4 font-metric text-xs tabular-nums text-text-secondary whitespace-nowrap">
+                    <td className="py-3 pr-4 font-metric text-caption tabular-nums text-text-secondary whitespace-nowrap">
                       {createdAtLabel}
                     </td>
                     <td className="py-3 pr-4 text-text-primary">
                       <div>{allocatorLabel}</div>
                       {profile?.email && profile.email !== allocatorLabel && (
-                        <div className="text-xs text-text-muted">{profile.email}</div>
+                        <div className="text-caption text-text-muted">{profile.email}</div>
                       )}
                     </td>
                     <td className="py-3 pr-4 text-text-primary">{strategyName}</td>
@@ -203,19 +203,19 @@ export default async function AdminIntrosPage() {
                       <span
                         className={
                           source === "bridge"
-                            ? "text-accent text-xs uppercase tracking-wider"
-                            : "text-text-muted text-xs uppercase tracking-wider"
+                            ? "text-accent text-caption uppercase tracking-wider"
+                            : "text-text-muted text-caption uppercase tracking-wider"
                         }
                       >
                         {source}
                       </span>
                     </td>
-                    <td className="py-3 pr-4 text-xs text-text-secondary">
+                    <td className="py-3 pr-4 text-caption text-text-secondary">
                       {replacementName ?? "—"}
                     </td>
                     <td className="py-3 pr-4">
-                      <div className="space-y-0.5 text-xs">
-                        <div className="text-[11px] uppercase tracking-wider text-text-muted">
+                      <div className="space-y-0.5 text-caption">
+                        <div className="text-micro uppercase tracking-wider text-text-muted">
                           {snapshotStatus}
                         </div>
                         <div className="text-text-primary font-metric tabular-nums">

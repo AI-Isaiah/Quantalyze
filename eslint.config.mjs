@@ -146,6 +146,44 @@ const eslintConfig = defineConfig([
       "src/app/factsheet/[id]/v2/loading.tsx",
       "src/app/factsheet/[id]/v2/error.tsx",
       "src/app/factsheet/[id]/v2/not-found.tsx",
+      // Phase 53 (v1.4) — Plan 53-03 marketing/security body migration.
+      // SCOPED to the PAGE BODIES only (per-file, mirroring the allocations/
+      // factsheet per-file precedent above): the shared P51 (marketing) shell —
+      // legal/layout.tsx, demo/layout.tsx — and the for-quants component files
+      // (RequestCallModal.tsx, ForQuantsCtas.tsx) still carry raw-font debt and
+      // stay at the repo-wide `warn` (deferred to a later 53/54 surface). The
+      // /security tree is its own clean glob (page.tsx is the only file).
+      "src/app/(marketing)/security/**",
+      "src/app/(marketing)/page.tsx",
+      "src/app/(marketing)/for-quants/page.tsx",
+      "src/app/(marketing)/demo/page.tsx",
+      "src/app/(marketing)/demo/founder-view/page.tsx",
+      "src/app/(marketing)/legal/disclaimer/page.tsx",
+      "src/app/(marketing)/legal/privacy/page.tsx",
+      "src/app/(marketing)/legal/terms/page.tsx",
+      // (auth)/** — 0 raw text-[Npx] today (PATTERNS A4: no migration needed);
+      // flip to error to lock the clean surface against regression.
+      "src/app/(auth)/**",
+      // Phase 53 (v1.4) — Plan 53-02 wizard surface migration. Every raw
+      // text-[Npx] / text-sm/-xs / text-2xl/-3xl across the wizard
+      // (strategies/new + wizard + steps, incl. the new ReviewStep) is now
+      // on the named --text-* tiers (form category: page-title/h3/body/
+      // caption + micro for badge/chip/counter text). Grep-verified clean.
+      "src/app/(dashboard)/strategies/new/**",
+      // Phase 53 (v1.4) — Plan 53-06 admin + portfolios DATA surfaces. Plans
+      // 53-04 (components/portfolio + portfolios page tree) and 53-05 (admin
+      // page tree + components/admin tables) migrated every raw text-[Npx] to
+      // the named --text-* tiers; both surfaces grep clean (0 raw px). Flip the
+      // four glob trees to error now. The shared EmptyStateCard primitive
+      // (src/components/ui/EmptyStateCard.tsx — rendered into both surfaces via
+      // CorrelationHeatmap / degenerate admin states) carried the last
+      // text-[11px]; it was migrated to text-micro in 53-06 (option a — single
+      // clean site), so the components/ui home stays clean too. This is the
+      // per-surface ratchet ONLY — the repo-wide flip is Phase 54 BP-03.
+      "src/app/(dashboard)/admin/**",
+      "src/components/admin/**",
+      "src/app/(dashboard)/portfolios/**",
+      "src/components/portfolio/**",
     ],
     rules: { "quantalyze/no-raw-font-px": "error" },
   },

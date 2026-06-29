@@ -66,7 +66,7 @@ export default async function ManagePortfolioPage({ params }: { params: Promise<
                 <Card key={ps.strategy_id} padding="sm">
                   <div className="flex items-center justify-between gap-4">
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-text-primary truncate">{s?.name ?? ps.strategy_id}</p>
+                      <p className="text-sm font-medium text-text-primary break-words min-w-0">{s?.name ?? ps.strategy_id}</p>
                       <div className="flex items-center gap-3 mt-1 text-xs text-text-secondary">
                         {ps.allocated_amount != null && <span className="font-metric">{formatCurrency(ps.allocated_amount)}</span>}
                         {ps.current_weight != null && <span className="font-metric">{(ps.current_weight * 100).toFixed(1)}%</span>}

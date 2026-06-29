@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { Textarea } from "@/components/ui/Textarea";
 import { Select } from "@/components/ui/Select";
+import { Field } from "@/components/ui/Field";
+import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
 import {
   STRATEGY_NAMES,
   STRATEGY_TYPES,
@@ -63,6 +64,11 @@ export function MetadataStep({
     initial?.categoryId ?? null,
   );
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
+  // WR-04 (Phase 53) — gate the empty-category hint on a SETTLED fetch so the
+  // honest "no categories yet" block does not flash during the initial load
+  // (and is distinguishable from the categoryLoadError failure path, which
+  // fires telemetry; an empty-but-readable result stays silent per M-0248).
+  const [categoriesLoaded, setCategoriesLoaded] = useState(false);
   const [strategyTypes, setStrategyTypes] = useState<string[]>(
     initial?.strategyTypes ?? [],
   );
@@ -85,6 +91,15 @@ export function MetadataStep({
   const [aum, setAum] = useState<string>(initial?.aum ?? "");
   const [maxCapacity, setMaxCapacity] = useState<string>(initial?.maxCapacity ?? "");
   const [categoryLoadError, setCategoryLoadError] = useState<string | null>(null);
+  // Phase 53 / APPLY-02 — inline per-field validation surfacing. The
+  // description is the required free-text field; surface its existing
+  // validation at the field on blur + on submit (the WizardErrorEnvelope
+  // stays the role=alert summary, unchanged). `descriptionBlurred` gates
+  // the on-blur reveal; submit reveals it unconditionally and focuses the
+  // first invalid field.
+  const [descriptionBlurred, setDescriptionBlurred] = useState(false);
+  const [submitAttempted, setSubmitAttempted] = useState(false);
+  const descriptionRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -113,6 +128,7 @@ export function MetadataStep({
           return;
         }
         setCategories(data ?? []);
+        setCategoriesLoaded(true);
         if (!categoryId && data && data.length > 0) {
           setCategoryId(data[0].id);
         }
@@ -138,8 +154,30 @@ export function MetadataStep({
     setter(list.includes(item) ? list.filter((x) => x !== item) : [...list, item]);
   }
 
+  // Inline validation derives from the EXISTING required-field rule (the
+  // Submit gate). Copy comes from wizardErrors.ts (canonical home) — never
+  // an invented inline string. The message shows on blur or after a submit
+  // attempt; it is NOT role="alert" (the envelope owns that).
+  const descriptionError = !description.trim()
+    ? WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause
+    : undefined;
+  const showDescriptionError =
+    (descriptionBlurred || submitAttempted) && descriptionError
+      ? descriptionError
+      : undefined;
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    setSubmitAttempted(true);
+    // On submit-with-errors, focus the first invalid field (description is
+    // the only inline-validated free-text field here; category is selected
+    // via auto-select / dropdown). The Submit button stays disabled until
+    // both are present, so this is a defense-in-depth focus aid for the AT
+    // path where the button is reached.
+    if (!description.trim()) {
+      descriptionRef.current?.focus();
+      return;
+    }
     onComplete({
       name,
       description,
@@ -158,11 +196,11 @@ export function MetadataStep({
     <section aria-labelledby="wizard-metadata-heading">
       <h2
         id="wizard-metadata-heading"
-        className="font-sans text-2xl font-semibold text-text-primary"
+        className="font-sans text-h3 font-semibold text-text-primary"
       >
         Tell allocators what this strategy is
       </h2>
-      <p className="mt-2 text-sm text-text-secondary">
+      <p className="mt-2 text-body text-text-secondary">
         We pre-filled what we could detect from your trades. Fill in the rest so
         allocators can evaluate the fit.
       </p>
@@ -175,14 +213,22 @@ export function MetadataStep({
           onChange={(e) => setName(e.target.value)}
         />
 
-        <Textarea
-          label="Description"
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          rows={3}
-          placeholder="One paragraph describing the strategy, edge, and risk framing."
-          required
-        />
+        {/* Phase 53 / APPLY-02 — the description is wrapped in Field so the
+            inline error wires aria-invalid + aria-describedby (the a11y the
+            bare Textarea primitive does NOT do). Copy is the existing
+            wizardErrors.ts string; the message is NOT role="alert". */}
+        <Field label="Description" error={showDescriptionError}>
+          <textarea
+            ref={descriptionRef}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            onBlur={() => setDescriptionBlurred(true)}
+            rows={3}
+            placeholder="One paragraph describing the strategy, edge, and risk framing."
+            required
+            className="rounded-lg border border-border bg-surface px-3 py-2 text-body text-text-primary placeholder:text-text-muted transition-colors focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20 aria-[invalid=true]:border-negative"
+          />
+        </Field>
 
         <Select
           label="Category"
@@ -191,9 +237,26 @@ export function MetadataStep({
           onChange={(e) => setCategoryId(e.target.value)}
         />
         {categoryLoadError && (
-          <p className="text-xs text-negative" role="alert">
+          <p className="text-caption text-negative" role="alert">
             {categoryLoadError} Refresh the page. If this persists, contact
             security@quantalyze.com.
+          </p>
+        )}
+        {/* WR-04 (Phase 53) — an empty-but-readable category list leaves the
+            user with categoryId=null and a permanently-disabled Submit (the
+            gate requires a category). On the CSV path there is no detected-
+            markets hint to explain the block, so surface an HONEST reason here
+            rather than a silent dead-end. This is the defense-in-depth pair to
+            the server-side null-category_id rejection in csv-finalize: ISSUE-010
+            must never reopen by persisting category_id=null. */}
+        {categoriesLoaded && !categoryLoadError && categories.length === 0 && (
+          <p
+            className="text-caption text-negative"
+            role="alert"
+            data-testid="metadata-categories-empty"
+          >
+            No strategy categories are available yet, so this strategy cannot be
+            submitted. Please contact security@quantalyze.com.
           </p>
         )}
 
@@ -219,13 +282,13 @@ export function MetadataStep({
             onToggle={(item) => toggle(markets, item, setMarkets)}
           />
           {detectedMarkets.length === 0 && (
-            <p className="mt-2 text-[11px] text-text-muted">
+            <p className="mt-2 text-micro text-text-muted">
               We could not identify the markets from your trades — please select
               manually.
             </p>
           )}
           {detectedMarkets.length > 0 && (
-            <p className="mt-2 text-[11px] text-text-muted">
+            <p className="mt-2 text-micro text-text-muted">
               Detected from your trade history: {detectedMarkets.join(", ")}.
             </p>
           )}
@@ -267,7 +330,12 @@ export function MetadataStep({
           <Button variant="secondary" type="button" onClick={onBack}>
             Back
           </Button>
-          <Button type="submit" disabled={!description || !categoryId}>
+          {/* WR-03 — gate on the SAME .trim() predicate as the descriptionError
+              derivation + the handleSubmit guard, so a whitespace-only
+              description ("   ") does not enable a button that then silently
+              no-ops in handleSubmit. The disabled-prop must not drift from the
+              validation rule. */}
+          <Button type="submit" disabled={!description.trim() || !categoryId}>
             Review and submit
           </Button>
         </div>
@@ -286,7 +354,7 @@ interface InlineChipGroupProps {
 function InlineChipGroup({ label, items, selected, onToggle }: InlineChipGroupProps) {
   return (
     <div>
-      <p className="text-xs font-medium text-text-primary">{label}</p>
+      <p className="text-caption font-medium text-text-primary">{label}</p>
       <div className="mt-2 flex flex-wrap gap-2">
         {items.map((item) => {
           const active = selected.includes(item);
@@ -295,7 +363,7 @@ function InlineChipGroup({ label, items, selected, onToggle }: InlineChipGroupPr
               key={item}
               type="button"
               onClick={() => onToggle(item)}
-              className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+              className={`rounded-md border px-3 py-1.5 text-caption font-medium transition-colors ${
                 active
                   ? "border-accent bg-accent/10 text-accent"
                   : "border-border text-text-muted hover:border-accent/50"

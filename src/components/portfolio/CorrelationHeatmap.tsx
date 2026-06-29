@@ -258,7 +258,7 @@ export function CorrelationHeatmap({
         <div className="bg-surface" />
         {/* Column headers */}
         {ids.map((id) => (
-          <div key={`ch-${id}`} className="bg-surface px-1 py-2 text-[10px] uppercase tracking-wider text-text-muted text-center truncate">
+          <div key={`ch-${id}`} className="bg-surface px-1 py-2 text-micro uppercase tracking-wider text-text-muted text-center truncate">
             {label(id)}
           </div>
         ))}
@@ -266,7 +266,7 @@ export function CorrelationHeatmap({
         {ids.map((rowId) => (
           <Fragment key={rowId}>
             {/* Row header */}
-            <div className="bg-surface px-2 py-2 text-[10px] uppercase tracking-wider text-text-muted truncate flex items-center">
+            <div className="bg-surface px-2 py-2 text-micro uppercase tracking-wider text-text-muted truncate flex items-center">
               {label(rowId)}
             </div>
             {/* Cells */}
@@ -296,7 +296,7 @@ export function CorrelationHeatmap({
                   key={`${rowId}-${colId}`}
                   role="img"
                   aria-label={ariaLabel}
-                  className="flex items-center justify-center py-2 font-metric text-xs"
+                  className="flex items-center justify-center py-2 font-metric text-caption"
                   style={{ backgroundColor, color }}
                 >
                   {hasValue ? v.toFixed(2) : "\u2014"}
@@ -313,7 +313,7 @@ export function CorrelationHeatmap({
           the host passes a finite number — a degenerate/null average shows no
           caption rather than a fabricated 0.00. */}
       {avgAbsCorrelation != null && Number.isFinite(avgAbsCorrelation) ? (
-        <div className="mt-2 text-[11px] text-text-muted">
+        <div className="mt-2 text-micro text-text-muted">
           Avg |ρ| <span className="font-metric">{avgAbsCorrelation.toFixed(2)}</span>
         </div>
       ) : null}

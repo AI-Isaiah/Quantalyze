@@ -47,14 +47,14 @@ export function AlertsList({ alerts: initialAlerts }: AlertsListProps) {
   if (alerts.length === 0) {
     return (
       <Card className="text-center py-8">
-        <p className="text-sm text-text-muted">No active alerts</p>
+        <p className="text-small text-text-muted">No active alerts</p>
       </Card>
     );
   }
 
   return (
     <div className="space-y-2">
-      {error && <p className="text-sm text-negative">{error}</p>}
+      {error && <p className="text-small text-negative">{error}</p>}
       {alerts.map((alert) => (
         <div
           key={alert.id}
@@ -62,15 +62,15 @@ export function AlertsList({ alerts: initialAlerts }: AlertsListProps) {
         >
           <span
             className={cn(
-              "inline-flex items-center rounded px-2 py-0.5 text-[10px] uppercase tracking-wider font-medium",
+              "inline-flex items-center rounded px-2 py-0.5 text-micro uppercase tracking-wider font-medium",
               SEVERITY_STYLES[alert.severity],
             )}
           >
             {alert.severity}
           </span>
           <div className="flex-1 min-w-0">
-            <p className="text-sm text-text-secondary">{alert.message}</p>
-            <p className="text-xs text-text-muted mt-0.5">
+            <p className="text-small text-text-secondary">{alert.message}</p>
+            <p className="text-caption text-text-muted mt-0.5">
               {formatTimestamp(alert.triggered_at)}
             </p>
           </div>
@@ -78,7 +78,7 @@ export function AlertsList({ alerts: initialAlerts }: AlertsListProps) {
             type="button"
             onClick={() => handleDismiss(alert.id)}
             disabled={dismissingId === alert.id}
-            className="text-xs font-medium text-accent hover:text-accent-hover disabled:opacity-50 disabled:pointer-events-none"
+            className="text-caption font-medium text-accent hover:text-accent-hover disabled:opacity-50 disabled:pointer-events-none"
           >
             {dismissingId === alert.id ? "Dismissing..." : "Dismiss"}
           </button>

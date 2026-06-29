@@ -17,7 +17,7 @@ export function PortfolioKPIRow({ analytics }: PortfolioKPIRowProps) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
       <Card padding="sm" className="text-center">
-        <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+        <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
           AUM
         </p>
         <p className="mt-1 text-2xl font-bold font-metric text-text-primary">
@@ -25,7 +25,7 @@ export function PortfolioKPIRow({ analytics }: PortfolioKPIRowProps) {
         </p>
       </Card>
       <Card padding="sm" className="text-center">
-        <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+        <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
           MTD TWR
         </p>
         <p className={`mt-1 text-2xl font-bold font-metric ${metricColor(analytics.return_mtd)}`}>
@@ -33,7 +33,7 @@ export function PortfolioKPIRow({ analytics }: PortfolioKPIRowProps) {
         </p>
       </Card>
       <Card padding="sm" className="text-center">
-        <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+        <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
           Avg Correlation
         </p>
         <p className={`mt-1 text-2xl font-bold font-metric ${correlationColor(analytics.avg_pairwise_correlation)}`}>
@@ -41,7 +41,7 @@ export function PortfolioKPIRow({ analytics }: PortfolioKPIRowProps) {
         </p>
       </Card>
       <Card padding="sm" className="text-center">
-        <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+        <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
           Portfolio Sharpe
         </p>
         <p className={`mt-1 text-2xl font-bold font-metric ${metricColor(analytics.portfolio_sharpe)}`}>

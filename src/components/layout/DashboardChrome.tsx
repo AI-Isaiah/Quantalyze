@@ -61,15 +61,20 @@ export function DashboardChrome({
   const isFullBleed = /^\/admin\/match\/[^/]+\/?$/.test(pathname) &&
     pathname !== "/admin/match/eval";
 
-  // Phase 52 (v1.4) — wide fluid-fill for the allocator-journey data surfaces
-  // ONLY (/allocations, /compare, /discovery/*). 52-02/03/04 raised these pages
-  // to a page-level `max-w-[1920px]`, but the standard shell's `max-w-7xl`
-  // (1280px) content cap below CLAMPED that, so they never visibly fluid-filled
-  // past 1280px. When isWide, the standard shell uses `max-w-[1920px]` so those
-  // page caps take effect. All other dashboard routes (incl. the Phase-53
-  // surfaces: portfolios/security/admin/wizard) keep `max-w-7xl`. Mirrors the
-  // `isFullBleed` allow-list regex so the widening stays scope-bounded.
-  const isWide = /^\/(allocations|compare|discovery)(\/|$)/.test(pathname);
+  // Phase 52/53 (v1.4) — wide fluid-fill for the DATA/TABLE surfaces only.
+  // P52 raised the allocator journey (/allocations, /compare, /discovery/*);
+  // P53 (APPLY-04) adds the two remaining data-dense trees (/admin, /portfolios,
+  // incl. their sub-paths). The allocator pages each set their OWN page-level
+  // `max-w-[1920px]` cap; for admin/portfolios the SHELL is the sole owner of
+  // the wide measure (the pages carry no inner cap — the @container data tables
+  // reshape within whatever width the shell grants). The standard shell's
+  // `max-w-7xl` (1280px) content cap below CLAMPED both, so neither fluid-filled
+  // past 1280px. When isWide, the shell uses `max-w-[1920px]`. Prose/form trees
+  // (the new-strategy wizard under /strategies, /security, marketing, auth) stay
+  // narrow at `max-w-7xl`. Mirrors the `isFullBleed` allow-list regex so the
+  // widening stays scope-bounded; the `isFullBleed` admin match-detail carve-out
+  // below takes a DIFFERENT branch (no centered container) and is unaffected.
+  const isWide = /^\/(allocations|compare|discovery|admin|portfolios)(\/|$)/.test(pathname);
 
   if (isFullBleed) {
     return (

@@ -22,10 +22,10 @@ export function BenchmarkComparison({ benchmarkComparison }: BenchmarkComparison
   if (!benchmarkComparison) {
     return (
       <Card padding="md">
-        <h3 className="font-display text-base text-text-primary mb-2">
+        <h3 className="font-display text-body text-text-primary mb-2">
           Benchmark Comparison
         </h3>
-        <p className="text-sm text-text-muted">Benchmark data unavailable.</p>
+        <p className="text-small text-text-muted">Benchmark data unavailable.</p>
       </Card>
     );
   }
@@ -39,11 +39,11 @@ export function BenchmarkComparison({ benchmarkComparison }: BenchmarkComparison
   return (
     <Card padding="md">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="font-display text-base text-text-primary">
+        <h3 className="font-display text-body text-text-primary">
           vs {symbol}
         </h3>
         {stale && (
-          <span className="text-[10px] uppercase tracking-wider text-text-muted bg-page px-2 py-0.5 rounded">
+          <span className="text-micro uppercase tracking-wider text-text-muted bg-page px-2 py-0.5 rounded">
             Stale
           </span>
         )}
@@ -51,34 +51,34 @@ export function BenchmarkComparison({ benchmarkComparison }: BenchmarkComparison
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="text-center">
-          <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+          <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
             Portfolio TWR
           </p>
-          <p className={`mt-1 text-xl font-bold font-metric ${metricColor(portfolio_twr)}`}>
+          <p className={`mt-1 text-h3 font-bold font-metric ${metricColor(portfolio_twr)}`}>
             {formatPercent(portfolio_twr)}
           </p>
         </div>
         <div className="text-center">
-          <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+          <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
             {symbol} TWR
           </p>
-          <p className={`mt-1 text-xl font-bold font-metric ${metricColor(benchmark_twr)}`}>
+          <p className={`mt-1 text-h3 font-bold font-metric ${metricColor(benchmark_twr)}`}>
             {formatPercent(benchmark_twr)}
           </p>
         </div>
         <div className="text-center">
-          <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+          <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
             Alpha
           </p>
-          <p className={`mt-1 text-xl font-bold font-metric ${metricColor(alpha)}`}>
+          <p className={`mt-1 text-h3 font-bold font-metric ${metricColor(alpha)}`}>
             {formatPercent(alpha)}
           </p>
         </div>
         <div className="text-center">
-          <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+          <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
             Correlation
           </p>
-          <p className="mt-1 text-xl font-bold font-metric text-text-primary">
+          <p className="mt-1 text-h3 font-bold font-metric text-text-primary">
             {formatNumber(correlation)}
           </p>
         </div>

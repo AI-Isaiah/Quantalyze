@@ -124,10 +124,10 @@ export function ReplacementPanel({
         {/* Header */}
         <header className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
           <div className="min-w-0">
-            <h2 className="text-base font-semibold text-text-primary truncate">
+            <h2 className="text-body font-semibold text-text-primary truncate">
               Replace {strategyName}
             </h2>
-            <p className="mt-1 text-xs text-text-muted leading-relaxed">
+            <p className="mt-1 text-caption text-text-muted leading-relaxed">
               {insightSentence}
             </p>
           </div>
@@ -166,12 +166,12 @@ export function ReplacementPanel({
 
           {error && (
             <div className="rounded-lg border border-negative/20 bg-negative/5 px-4 py-3">
-              <p className="text-sm text-negative">{error}</p>
+              <p className="text-small text-negative">{error}</p>
             </div>
           )}
 
           {candidates !== null && candidates.length === 0 && (
-            <p className="text-sm text-text-secondary">
+            <p className="text-small text-text-secondary">
               No replacement candidates found that would improve this portfolio.
             </p>
           )}

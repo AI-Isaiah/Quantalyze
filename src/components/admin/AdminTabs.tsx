@@ -209,7 +209,7 @@ function IntroRequestsTab({ requests }: { requests: IntroRequestRow[] }) {
   return (
     <div className="space-y-4">
       {/* Summary counts */}
-      <div className="flex gap-4 text-xs">
+      <div className="flex gap-4 text-caption">
         <span className="text-badge-market-neutral font-medium">{counts.pending} pending</span>
         <span className="text-accent font-medium">{counts.intro_made} in progress</span>
         <span className="text-positive font-medium">{counts.completed} completed</span>
@@ -223,7 +223,7 @@ function IntroRequestsTab({ requests }: { requests: IntroRequestRow[] }) {
             key={f.value}
             onClick={() => setFilter(f.value)}
             className={cn(
-              "px-3 py-1 text-xs rounded-md font-medium transition-colors",
+              "px-3 py-1 text-caption rounded-md font-medium transition-colors",
               filter === f.value
                 ? "bg-accent text-white"
                 : "bg-page text-text-muted hover:text-text-primary"
@@ -234,10 +234,10 @@ function IntroRequestsTab({ requests }: { requests: IntroRequestRow[] }) {
         ))}
       </div>
 
-      {error && <p className="text-sm text-negative">{error}</p>}
+      {error && <p className="text-small text-negative">{error}</p>}
 
       {filtered.length === 0 ? (
-        <Card className="text-center py-6 text-text-muted text-sm">No requests with this status.</Card>
+        <Card className="text-center py-6 text-text-muted text-small">No requests with this status.</Card>
       ) : (
         <div className="space-y-3">
           {filtered.map((r) => {
@@ -251,19 +251,19 @@ function IntroRequestsTab({ requests }: { requests: IntroRequestRow[] }) {
               <Card key={r.id}>
                 <div className="flex items-start justify-between">
                   <div>
-                    <p className="text-sm font-medium text-text-primary">
+                    <p className="text-small font-medium text-text-primary">
                       {profile?.display_name ?? "Unknown"} {profile?.company ? `(${profile.company})` : ""}
                     </p>
-                    <p className="text-xs text-text-muted mt-0.5">
+                    <p className="text-caption text-text-muted mt-0.5">
                       wants intro to <span className="font-medium text-text-secondary">{displayStrategyName(strategy)}</span>
                     </p>
                     {typeof r.message === "string" && r.message && (
-                      <p className="text-xs text-text-secondary mt-2 bg-page rounded p-2">{r.message}</p>
+                      <p className="text-caption text-text-secondary mt-2 bg-page rounded p-2">{r.message}</p>
                     )}
                     {typeof r.admin_note === "string" && r.admin_note && (
-                      <p className="text-[10px] text-text-muted mt-1 italic">Note: {r.admin_note}</p>
+                      <p className="text-micro text-text-muted mt-1 italic">Note: {r.admin_note}</p>
                     )}
-                    <p className="text-[10px] text-text-muted mt-1">
+                    <p className="text-micro text-text-muted mt-1">
                       {new Date(r.created_at).toLocaleDateString()}
                     </p>
                   </div>
@@ -418,7 +418,7 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
   return (
     <>
       {error && (
-        <p className="text-sm text-negative mb-3" role="alert">
+        <p className="text-small text-negative mb-3" role="alert">
           {error}
         </p>
       )}
@@ -446,12 +446,12 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <p className="text-sm font-medium text-text-primary">
+                    <p className="text-small font-medium text-text-primary">
                       {s.name}
                     </p>
                     <span
                       className={cn(
-                        "rounded-sm px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider",
+                        "rounded-sm px-1.5 py-0.5 text-micro font-medium uppercase tracking-wider",
                         isFreshOnboarding
                           ? "bg-accent/10 text-accent"
                           : "bg-page text-text-muted",
@@ -461,7 +461,7 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
                       {sourceBadgeLabel(source)}
                     </span>
                   </div>
-                  <p className="mt-0.5 text-xs text-text-muted">
+                  <p className="mt-0.5 text-caption text-text-muted">
                     by {profile?.display_name ?? "Unknown"} ·{" "}
                     Synced {formatRecency(analytics?.computed_at ?? null)}
                   </p>
@@ -482,7 +482,7 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
 
                   {analytics?.computation_status &&
                     analytics.computation_status !== "complete" && (
-                      <p className="mt-2 text-[11px] text-amber-600">
+                      <p className="mt-2 text-micro text-amber-600">
                         Analytics: {analytics.computation_status}
                       </p>
                     )}
@@ -490,7 +490,7 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
                 <div className="flex flex-col items-end gap-2">
                   <a
                     href={`/factsheet/${s.id}`}
-                    className="text-[11px] text-text-muted underline-offset-4 hover:text-accent hover:underline"
+                    className="text-micro text-text-muted underline-offset-4 hover:text-accent hover:underline"
                     target="_blank"
                     rel="noopener"
                   >
@@ -519,7 +519,7 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
         })}
       </div>
       <Modal open={!!rejectId} onClose={() => setRejectId(null)} title="Reject Strategy">
-        <p className="text-sm text-text-secondary mb-3">
+        <p className="text-small text-text-secondary mb-3">
           The manager will see this feedback on their strategy page.
         </p>
         <Textarea
@@ -546,8 +546,8 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
 function MetricCell({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <p className="text-[10px] uppercase tracking-wider text-text-muted">{label}</p>
-      <p className="mt-0.5 font-metric text-sm font-semibold text-text-primary tabular-nums">
+      <p className="text-micro uppercase tracking-wider text-text-muted">{label}</p>
+      <p className="mt-0.5 font-metric text-small font-semibold text-text-primary tabular-nums">
         {value}
       </p>
     </div>
@@ -579,13 +579,13 @@ function AllocatorsTab({ allocators }: { allocators: PendingProfileRow[] }) {
 
   return (
     <div className="space-y-3">
-      {error && <p className="text-sm text-negative mb-3">{error}</p>}
+      {error && <p className="text-small text-negative mb-3">{error}</p>}
       {allocators.map((a) => (
         <Card key={a.id}>
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-text-primary">{a.display_name}</p>
-              <p className="text-xs text-text-muted">{a.company ?? ""} {a.email ? `· ${a.email}` : ""}</p>
+              <p className="text-small font-medium text-text-primary">{a.display_name}</p>
+              <p className="text-caption text-text-muted">{a.company ?? ""} {a.email ? `· ${a.email}` : ""}</p>
             </div>
             <Button size="sm" onClick={() => approve(a.id)} disabled={loading === a.id}>
               Approve
@@ -627,13 +627,13 @@ function ManagersTab({ managers }: { managers: PendingManagerRow[] }) {
 
   return (
     <div className="space-y-3">
-      {error && <p className="text-sm text-negative mb-3">{error}</p>}
+      {error && <p className="text-small text-negative mb-3">{error}</p>}
       {managers.map((m) => (
         <Card key={m.id}>
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-text-primary">{m.display_name}</p>
-              <p className="text-xs text-text-muted">{m.company ?? ""} {m.email ? `· ${m.email}` : ""}</p>
+              <p className="text-small font-medium text-text-primary">{m.display_name}</p>
+              <p className="text-caption text-text-muted">{m.company ?? ""} {m.email ? `· ${m.email}` : ""}</p>
             </div>
             <Button size="sm" onClick={() => approve(m.id)} disabled={loading === m.id}>
               Approve

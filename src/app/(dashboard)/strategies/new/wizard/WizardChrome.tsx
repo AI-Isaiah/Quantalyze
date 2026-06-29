@@ -14,7 +14,9 @@ const DEFAULT_STEPS: { key: WizardStepKey; label: string; number: string }[] = [
   { key: "connect_key", label: "Connect key", number: "01" },
   { key: "sync_preview", label: "Verify data", number: "02" },
   { key: "metadata", label: "Strategy profile", number: "03" },
-  { key: "submit", label: "Submit", number: "04" },
+  // Phase 53 / APPLY-02 — read-only Review & confirm recap before Submit.
+  { key: "review", label: "Review & confirm", number: "04" },
+  { key: "submit", label: "Submit", number: "05" },
 ];
 
 /**
@@ -29,7 +31,9 @@ const CSV_STEPS: { key: WizardStepKey; label: string; number: string }[] = [
   { key: "csv_upload", label: "Upload CSV", number: "01" },
   { key: "csv_preview", label: "Preview", number: "02" },
   { key: "csv_metadata", label: "Strategy profile", number: "03" },
-  { key: "csv_submit", label: "Submit", number: "04" },
+  // Phase 53 / APPLY-02 — read-only Review & confirm recap before Submit.
+  { key: "csv_review", label: "Review & confirm", number: "04" },
+  { key: "csv_submit", label: "Submit", number: "05" },
 ];
 
 /** Re-export of CSV_STEPS for the WizardClient ?source=csv branch. */
@@ -48,9 +52,9 @@ export interface WizardChromeProps {
   /** Optional: tick the "Progress saved" toast. Called after each step save. */
   toastKey?: number;
   /**
-   * Phase 15: optional steps override. Absent ⇒ DEFAULT_STEPS (4-step API
-   * branch). Pass `WIZARD_STEPS_CSV` to render the 3-step CSV branch
-   * stepper.
+   * Phase 15: optional steps override. Absent ⇒ DEFAULT_STEPS (5-step API
+   * branch, after the Phase 53 Review step). Pass `WIZARD_STEPS_CSV` to render
+   * the 5-step CSV branch stepper.
    */
   steps?: { key: WizardStepKey; label: string; number: string }[];
   /**
@@ -63,6 +67,14 @@ export interface WizardChromeProps {
   source?: "api" | "csv";
   children: React.ReactNode;
 }
+
+// Stepper grid columns by step count. Full literals (no template) so Tailwind's
+// class scanner emits every variant. 5-col is the default for both branches
+// post-Phase-53; the 3/4-col arms cover any caller passing a shorter `steps`.
+const GRID_COLS_BY_COUNT: Record<number, string> = {
+  3: "grid-cols-1 sm:grid-cols-3",
+  4: "grid-cols-1 sm:grid-cols-4",
+};
 
 export function WizardChrome({
   currentStep,
@@ -80,12 +92,15 @@ export function WizardChrome({
   const totalLabel = String(totalCount).padStart(2, "0");
   // Phase 46 / WIZARD-01 reflow: the stepper rail is a fixed N-column grid on
   // ≥sm (640px) but stacks to a single column below it. With a bare
-  // grid-cols-3/4 the four step cells (each holding "03 / 04" + a label like
-  // "Strategy profile") force horizontal page overflow at 320px. Stacking
+  // grid-cols-N the step cells (each holding "04 / 05" + a label like
+  // "Review & confirm") force horizontal page overflow at 320px. Stacking
   // them keeps every step label fully visible — no truncation, no scroll —
   // and the existing top/bottom hairline borders read as a vertical list.
+  //
+  // Phase 53 / APPLY-02 added a Review step so both branches are now 5-step;
+  // GRID_COLS_BY_COUNT (module scope) maps the count to the literal classes.
   const gridColsClass =
-    totalCount === 3 ? "grid-cols-1 sm:grid-cols-3" : "grid-cols-1 sm:grid-cols-4";
+    GRID_COLS_BY_COUNT[totalCount] ?? "grid-cols-1 sm:grid-cols-5";
   const isCsv = source === "csv";
   const [showToast, setShowToast] = useState(false);
 
@@ -104,10 +119,10 @@ export function WizardChrome({
   return (
     <div className="mx-auto max-w-3xl px-6 py-10">
       <header className="mb-8">
-        <h1 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
+        <h1 className="font-display text-page-title tracking-tight text-text-primary">
           Connect Your Strategy
         </h1>
-        <p className="mt-2 text-sm text-text-secondary">
+        <p className="mt-2 text-body text-text-secondary">
           {isCsv
             ? "Upload a daily-returns, NAV, or trades CSV. We validate every row before computing your factsheet."
             : "Paste a read-only API key. We will compute your verified factsheet in the next screen."}
@@ -137,11 +152,11 @@ export function WizardChrome({
                 }`}
                 aria-current={isActive ? "step" : undefined}
               >
-                <p className="font-metric text-[10px] uppercase tracking-wider tabular-nums text-text-muted">
+                <p className="font-metric text-micro uppercase tracking-wider tabular-nums text-text-muted">
                   {step.number} / {totalLabel}
                 </p>
                 <p
-                  className={`mt-0.5 text-xs font-medium ${
+                  className={`mt-0.5 text-caption font-medium ${
                     isActive
                       ? "text-text-primary"
                       : isPast
@@ -157,7 +172,7 @@ export function WizardChrome({
         </div>
 
         <div className="flex items-center justify-between px-1 py-2">
-          <p className="text-[11px] text-text-muted tabular-nums">
+          <p className="text-micro text-text-muted tabular-nums">
             {savedAt ? (
               <span data-testid="wizard-saved-at">
                 Draft saved · {new Date(savedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -170,7 +185,7 @@ export function WizardChrome({
             <button
               type="button"
               onClick={onDeleteDraft}
-              className="text-[11px] text-text-muted underline-offset-4 hover:text-negative hover:underline"
+              className="text-micro text-text-muted underline-offset-4 hover:text-negative hover:underline"
               data-testid="wizard-delete-draft"
             >
               Delete draft
@@ -184,7 +199,7 @@ export function WizardChrome({
 
         {showToast && (
           <div
-            className="pointer-events-none absolute -top-2 right-0 rounded-md border border-border bg-white px-3 py-1.5 text-[11px] font-medium text-positive shadow-sm"
+            className="pointer-events-none absolute -top-2 right-0 rounded-md border border-border bg-white px-3 py-1.5 text-micro font-medium text-positive shadow-sm"
             role="status"
             aria-live="polite"
             data-testid="wizard-progress-saved-toast"
@@ -196,7 +211,7 @@ export function WizardChrome({
 
       <footer className="mt-12 border-t border-border pt-6">
         <div className="flex items-center justify-between">
-          <p className="text-[13px] text-text-muted">
+          <p className="text-caption text-text-muted">
             Wizard help ·{" "}
             <Link
               href="/security"
@@ -210,7 +225,7 @@ export function WizardChrome({
           <button
             type="button"
             onClick={onRequestCall}
-            className="text-xs text-text-muted underline-offset-4 hover:text-text-primary hover:underline focus-visible:outline-none focus-visible:text-text-primary focus-visible:underline"
+            className="text-caption text-text-muted underline-offset-4 hover:text-text-primary hover:underline focus-visible:outline-none focus-visible:text-text-primary focus-visible:underline"
             data-testid="wizard-request-call"
           >
             Stuck? Request a Call →

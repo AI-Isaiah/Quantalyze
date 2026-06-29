@@ -55,7 +55,7 @@ export default async function Home() {
       {/* Hero */}
       <section className="mx-auto max-w-6xl px-6 py-24 md:py-32 text-center">
         <div className="mx-auto max-w-3xl">
-          <div className="mb-6 inline-flex items-center gap-1.5 rounded-full border border-border bg-page px-3 py-1 text-xs font-medium text-text-secondary">
+          <div className="mb-6 inline-flex items-center gap-1.5 rounded-full border border-border bg-page px-3 py-1 text-caption font-medium text-text-secondary">
             <svg className="h-3.5 w-3.5 text-positive" viewBox="0 0 16 16" fill="currentColor">
               <path
                 fillRule="evenodd"
@@ -66,13 +66,13 @@ export default async function Home() {
             Exchange-verified performance data
           </div>
 
-          <h1 className="text-4xl tracking-tight text-text-primary md:text-5xl lg:text-6xl font-display">
+          <h1 className="text-hero tracking-tight text-text-primary font-display">
             Exchange-Verified
             <br />
             <span className="text-accent italic">Quant Strategies</span>
           </h1>
 
-          <p className="mt-6 text-lg text-text-secondary md:text-xl leading-relaxed">
+          <p className="mt-6 text-body text-text-secondary leading-relaxed">
             The only platform where performance data comes directly from exchange
             APIs. No self-reporting. No guessing.
           </p>
@@ -80,20 +80,20 @@ export default async function Home() {
           <div className="mt-10 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
             <Link
               href="/browse"
-              className="inline-flex w-full items-center justify-center rounded-lg bg-accent px-6 py-3 text-base font-medium text-white hover:bg-accent-hover transition-colors sm:w-auto"
+              className="inline-flex w-full items-center justify-center rounded-lg bg-accent px-6 py-3 text-body font-medium text-white hover:bg-accent-hover transition-colors sm:w-auto"
             >
               Browse Strategies
             </Link>
             <Link
               href="/signup"
-              className="inline-flex w-full items-center justify-center rounded-lg border border-border bg-white px-6 py-3 text-base font-medium text-text-primary hover:bg-page transition-colors sm:w-auto"
+              className="inline-flex w-full items-center justify-center rounded-lg border border-border bg-white px-6 py-3 text-body font-medium text-text-primary hover:bg-page transition-colors sm:w-auto"
             >
               List Your Strategy
             </Link>
           </div>
 
           {/* Trust badges */}
-          <div className="mt-10 flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-sm text-text-muted">
+          <div className="mt-10 flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-caption text-text-muted">
             <span className="flex items-center gap-1.5">
               <svg className="h-4 w-4 text-accent" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
                 <path d="M8 1.5l1.85 3.75 4.15.6-3 2.93.71 4.12L8 10.77 4.29 12.9l.71-4.12-3-2.93 4.15-.6z" strokeLinejoin="round" />
@@ -121,7 +121,7 @@ export default async function Home() {
       {/* How It Works */}
       <section className="border-t border-border bg-page">
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
-          <h2 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
+          <h2 className="font-display text-h2 tracking-tight text-text-primary">
             How It Works
           </h2>
           <p className="mt-3 text-text-secondary">
@@ -153,13 +153,13 @@ export default async function Home() {
                 key={item.step}
                 className="bg-page pt-8 md:pr-8"
               >
-                <p className="font-metric text-xs tracking-wider text-text-muted">
+                <p className="font-metric text-caption tracking-wider text-text-muted">
                   {item.step}
                 </p>
-                <h3 className="mt-3 text-base font-semibold text-text-primary">
+                <h3 className="mt-3 text-body font-semibold text-text-primary">
                   {item.title}
                 </h3>
-                <p className="mt-2 text-sm leading-relaxed text-text-secondary">
+                <p className="mt-2 text-body leading-relaxed text-text-secondary">
                   {item.description}
                 </p>
               </div>
@@ -171,7 +171,7 @@ export default async function Home() {
       {/* Verify Your Strategy */}
       <section className="mx-auto max-w-6xl px-6 py-20" id="verify">
         <div className="mx-auto max-w-2xl text-center mb-12">
-          <h2 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
+          <h2 className="font-display text-h2 tracking-tight text-text-primary">
             Verify Your Performance
           </h2>
           <p className="mt-4 text-text-secondary">
@@ -187,34 +187,34 @@ export default async function Home() {
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
           <div className="grid gap-8 text-center md:grid-cols-4">
             <div>
-              <p className="text-3xl font-bold text-text-primary font-metric md:text-4xl">
+              <p className="text-page-title font-bold text-text-primary font-metric">
                 {stats.strategies > 0 ? `${stats.strategies}+` : "--"}
               </p>
-              <p className="mt-1 text-sm text-text-muted">
+              <p className="mt-1 text-caption text-text-muted">
                 Verified strategies
               </p>
             </div>
             <div>
-              <p className="text-3xl font-bold text-text-primary font-metric md:text-4xl">
+              <p className="text-page-title font-bold text-text-primary font-metric">
                 {formatAum(stats.aum)}
               </p>
-              <p className="mt-1 text-sm text-text-muted">
+              <p className="mt-1 text-caption text-text-muted">
                 AUM tracked
               </p>
             </div>
             <div>
-              <p className="text-3xl font-bold text-text-primary font-metric md:text-4xl">
+              <p className="text-page-title font-bold text-text-primary font-metric">
                 {stats.intros > 0 ? `${stats.intros}+` : "--"}
               </p>
-              <p className="mt-1 text-sm text-text-muted">
+              <p className="mt-1 text-caption text-text-muted">
                 Introductions made
               </p>
             </div>
             <div>
-              <p className="text-3xl font-bold text-text-primary font-metric md:text-4xl">
+              <p className="text-page-title font-bold text-text-primary font-metric">
                 {EXCHANGES.length}
               </p>
-              <p className="mt-1 text-sm text-text-muted">
+              <p className="mt-1 text-caption text-text-muted">
                 Exchanges supported
               </p>
             </div>
@@ -227,7 +227,7 @@ export default async function Home() {
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
           <div className="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
             <div>
-              <h2 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
+              <h2 className="font-display text-h2 tracking-tight text-text-primary">
                 Ready to see verified performance?
               </h2>
               <p className="mt-3 text-text-secondary">
@@ -236,7 +236,7 @@ export default async function Home() {
             </div>
             <Link
               href="/signup"
-              className="inline-flex shrink-0 items-center justify-center rounded-lg bg-accent px-6 py-3 text-base font-medium text-white hover:bg-accent-hover transition-colors"
+              className="inline-flex shrink-0 items-center justify-center rounded-lg bg-accent px-6 py-3 text-body font-medium text-white hover:bg-accent-hover transition-colors"
             >
               Get Started
             </Link>

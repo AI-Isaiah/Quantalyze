@@ -40,17 +40,17 @@ export function ShortlistCard({
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-text-primary truncate">
+          <p className="text-small font-semibold text-text-primary truncate">
             {displayStrategyName(candidate.strategies)}
           </p>
           {candidate.reasons[0] && (
-            <p className="mt-1 text-xs text-text-secondary line-clamp-2">
+            <p className="mt-1 text-caption text-text-secondary line-clamp-2">
               {candidate.reasons[0]}
             </p>
           )}
         </div>
         <div className="shrink-0">
-          <span className="font-mono tabular-nums text-[24px] text-text-primary">
+          <span className="font-mono tabular-nums text-h3 text-text-primary">
             {candidate.score.toFixed(0)}
           </span>
         </div>
@@ -67,7 +67,7 @@ export function ShortlistCard({
         </div>
       </div>
       <div className="mt-3 flex items-center justify-between">
-        <span className="text-[10px] font-mono uppercase tracking-wider text-text-muted">
+        <span className="text-micro font-mono uppercase tracking-wider text-text-muted">
           Rank {candidate.rank}
         </span>
         {!readOnly && (
@@ -78,7 +78,7 @@ export function ShortlistCard({
               if (!alreadySent) onSendIntro();
             }}
             disabled={alreadySent}
-            className={`inline-flex items-center text-xs font-medium ${
+            className={`inline-flex items-center text-caption font-medium ${
               alreadySent ? "text-text-muted" : "text-accent hover:text-accent-hover cursor-pointer"
             }`}
           >
@@ -86,7 +86,7 @@ export function ShortlistCard({
           </button>
         )}
         {readOnly && alreadySent && (
-          <span className="inline-flex items-center text-xs font-medium text-text-muted">
+          <span className="inline-flex items-center text-caption font-medium text-text-muted">
             Sent
           </span>
         )}

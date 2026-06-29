@@ -49,10 +49,10 @@ export default function PartnerRoiPage() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* --- INPUT CARD --- */}
         <Card padding="md">
-          <h2 className="text-base font-semibold text-text-primary">
+          <h2 className="text-body font-semibold text-text-primary">
             Partner inputs
           </h2>
-          <p className="mt-1 text-sm text-text-secondary">
+          <p className="mt-1 text-small text-text-secondary">
             Type the partner&apos;s real numbers live in the meeting.
           </p>
 
@@ -92,10 +92,10 @@ export default function PartnerRoiPage() {
 
         {/* --- OUTPUT CARD --- */}
         <Card padding="md">
-          <h2 className="text-base font-semibold text-text-primary">
+          <h2 className="text-body font-semibold text-text-primary">
             Projected revenue
           </h2>
-          <p className="mt-1 text-sm text-text-secondary">
+          <p className="mt-1 text-small text-text-secondary">
             Based on the partner&apos;s inputs and our measured assumptions.
           </p>
 
@@ -103,7 +103,7 @@ export default function PartnerRoiPage() {
             <OutputRow
               label="Intros / month"
               value={
-                <span className="font-metric tabular-nums text-xl text-text-primary">
+                <span className="font-metric tabular-nums text-h3 text-text-primary">
                   {introsPerMonth.toFixed(1)}
                 </span>
               }
@@ -112,22 +112,22 @@ export default function PartnerRoiPage() {
             <OutputRow
               label="Partner revenue / month"
               value={
-                <span className="font-metric tabular-nums text-xl text-text-primary">
+                <span className="font-metric tabular-nums text-h3 text-text-primary">
                   {formatCurrency(partnerRevenuePerMonth)}
                 </span>
               }
             />
 
             <div>
-              <p className="text-xs font-medium uppercase tracking-wider text-text-muted">
+              <p className="text-caption font-medium uppercase tracking-wider text-text-muted">
                 Partner revenue / year
               </p>
               {isZeroState ? (
-                <p className="mt-2 text-xl text-text-muted">
+                <p className="mt-2 text-h3 text-text-muted">
                   Enter allocator count to see revenue
                 </p>
               ) : (
-                <p className="mt-2 font-display text-3xl text-accent tabular-nums">
+                <p className="mt-2 font-display text-h3 text-accent tabular-nums">
                   {formatCurrency(animatedYearly)}
                 </p>
               )}
@@ -137,7 +137,7 @@ export default function PartnerRoiPage() {
               <OutputRow
                 label="Intros / manager / month"
                 value={
-                  <span className="font-metric tabular-nums text-base text-text-secondary">
+                  <span className="font-metric tabular-nums text-body text-text-secondary">
                     {introsPerManagerPerMonth.toFixed(2)}
                   </span>
                 }
@@ -150,14 +150,14 @@ export default function PartnerRoiPage() {
 
       {/* --- FORMULA CARD --- */}
       <Card padding="md" className="mt-6">
-        <h2 className="text-base font-semibold text-text-primary">
+        <h2 className="text-body font-semibold text-text-primary">
           How this is calculated
         </h2>
-        <p className="mt-1 text-sm text-text-secondary">
+        <p className="mt-1 text-small text-text-secondary">
           Every number on this page comes from these three lines. No magic.
         </p>
 
-        <dl className="mt-5 space-y-4 text-sm text-text-secondary">
+        <dl className="mt-5 space-y-4 text-small text-text-secondary">
           <div>
             <dt className="font-medium text-text-primary">Intros / month</dt>
             <dd className="mt-1">
@@ -188,7 +188,7 @@ export default function PartnerRoiPage() {
           </div>
         </dl>
 
-        <p className="mt-5 text-sm text-text-secondary">
+        <p className="mt-5 text-small text-text-secondary">
           Hit rate assumption: 40% &mdash; tracked in real time via{" "}
           <code className="font-metric tabular-nums text-text-primary">
             /admin/match/eval
@@ -239,7 +239,7 @@ function NumberField({
     <div>
       <label
         htmlFor={inputId}
-        className="block text-xs font-medium text-text-secondary mb-1"
+        className="block text-caption font-medium text-text-secondary mb-1"
       >
         {label}
       </label>
@@ -254,7 +254,7 @@ function NumberField({
         step={step}
         className="w-full rounded-md border border-border bg-surface px-3 py-2 font-metric tabular-nums text-text-primary focus:border-accent focus:outline-none"
       />
-      {hint && <p className="mt-1 text-xs text-text-muted">{hint}</p>}
+      {hint && <p className="mt-1 text-caption text-text-muted">{hint}</p>}
     </div>
   );
 }
@@ -268,11 +268,11 @@ interface OutputRowProps {
 function OutputRow({ label, value, hint }: OutputRowProps) {
   return (
     <div>
-      <p className="text-xs font-medium uppercase tracking-wider text-text-muted">
+      <p className="text-caption font-medium uppercase tracking-wider text-text-muted">
         {label}
       </p>
       <div className="mt-1">{value}</div>
-      {hint && <p className="mt-1 text-xs text-text-muted">{hint}</p>}
+      {hint && <p className="mt-1 text-caption text-text-muted">{hint}</p>}
     </div>
   );
 }

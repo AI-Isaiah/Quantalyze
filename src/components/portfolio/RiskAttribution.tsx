@@ -17,7 +17,7 @@ interface RiskAttributionProps {
 export function RiskAttribution({ data }: RiskAttributionProps) {
   if (!data || data.length === 0) {
     return (
-      <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center text-text-muted text-sm">
+      <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center text-text-muted text-small">
         No risk attribution data available.
       </div>
     );
@@ -47,9 +47,9 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
       </ResponsiveContainer>
 
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full text-small">
           <thead>
-            <tr className="border-b border-border text-left text-xs text-text-muted uppercase tracking-wider">
+            <tr className="border-b border-border text-left text-caption text-text-muted uppercase tracking-wider">
               <th className="py-2 pr-4">Strategy</th>
               <th className="py-2 pr-4 text-right font-metric">Weight %</th>
               <th className="py-2 pr-4 text-right font-metric">Risk %</th>
@@ -70,7 +70,7 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
                   <td className="py-2 pr-4 text-right font-metric">{formatPercent(d.marginal_risk_pct)}</td>
                   <td className="py-2 pr-4 text-right font-metric">{formatPercent(d.standalone_vol)}</td>
                   <td className="py-2 text-right">
-                    <span className={`text-xs font-medium ${overweight ? "text-negative" : "text-positive"}`}>
+                    <span className={`text-caption font-medium ${overweight ? "text-negative" : "text-positive"}`}>
                       {overweight ? "Overweight risk" : "Balanced"}
                     </span>
                   </td>

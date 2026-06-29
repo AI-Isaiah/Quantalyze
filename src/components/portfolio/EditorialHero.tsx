@@ -51,7 +51,7 @@ function MetricCell({ label, value, negative }: MetricCellProps) {
   // <div> wrapper is allowed inside <dl> per the HTML spec.
   return (
     <div>
-      <dt className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+      <dt className="text-micro uppercase tracking-wider text-text-muted font-medium">
         {label}
       </dt>
       <dd
@@ -93,7 +93,7 @@ export function EditorialHero({
           {headline}
         </h1>
         {descriptor && (
-          <p className="mt-3 text-sm sm:text-base text-text-secondary max-w-2xl">
+          <p className="mt-3 text-small sm:text-body text-text-secondary max-w-2xl">
             {descriptor}
           </p>
         )}

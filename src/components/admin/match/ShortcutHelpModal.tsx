@@ -16,7 +16,7 @@ export function ShortcutHelpModal({ onClose }: { onClose: () => void }) {
   ];
   return (
     <Modal open onClose={onClose} title="Keyboard shortcuts">
-      <p className="text-sm text-text-secondary mb-4">
+      <p className="text-small text-text-secondary mb-4">
         Shortcuts only fire on the match-queue page and only on desktop
         (1024px+). They&rsquo;re suppressed whenever a modal or input has
         focus.
@@ -27,12 +27,12 @@ export function ShortcutHelpModal({ onClose }: { onClose: () => void }) {
             key={shortcut.label}
             className="flex items-center justify-between border-b border-border pb-2 last:border-b-0"
           >
-            <dt className="text-sm text-text-primary">{shortcut.label}</dt>
+            <dt className="text-small text-text-primary">{shortcut.label}</dt>
             <dd className="flex items-center gap-1">
               {shortcut.keys.map((k) => (
                 <kbd
                   key={k}
-                  className="inline-flex items-center rounded border border-border bg-page px-2 py-0.5 font-mono text-[11px] text-text-primary"
+                  className="inline-flex items-center rounded border border-border bg-page px-2 py-0.5 font-mono text-micro text-text-primary"
                 >
                   {k}
                 </kbd>

@@ -38,7 +38,7 @@ export function DocumentList({ documents }: DocumentListProps) {
     return (
       <Card className="text-center py-12">
         <p className="text-text-muted">No documents uploaded yet</p>
-        <p className="text-sm text-text-secondary mt-2">
+        <p className="text-small text-text-secondary mt-2">
           Upload contracts, factsheets, and founder updates to keep them organized.
         </p>
       </Card>
@@ -57,7 +57,7 @@ export function DocumentList({ documents }: DocumentListProps) {
     <div className="space-y-6">
       {orderedGroups.map((type) => (
         <div key={type}>
-          <h3 className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-2">
+          <h3 className="text-micro uppercase tracking-wider text-text-muted font-medium mb-2">
             {TYPE_LABELS[type] ?? type}
           </h3>
           <Card padding="sm">
@@ -65,8 +65,8 @@ export function DocumentList({ documents }: DocumentListProps) {
               {grouped[type].map((doc) => (
                 <li key={doc.id} className="flex items-center justify-between py-3 first:pt-1 last:pb-1">
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-text-primary truncate">{doc.title}</p>
-                    <p className="text-xs text-text-muted mt-0.5">{formatDate(doc.created_at)}</p>
+                    <p className="text-small font-medium text-text-primary truncate" title={doc.title}>{doc.title}</p>
+                    <p className="text-caption text-text-muted mt-0.5">{formatDate(doc.created_at)}</p>
                   </div>
                   <div className="flex items-center gap-3 ml-4">
                     <Badge label={TYPE_LABELS[type] ?? type} type="strategy" />
@@ -74,7 +74,7 @@ export function DocumentList({ documents }: DocumentListProps) {
                       href={doc.file_url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-xs font-medium text-accent hover:text-accent-hover"
+                      className="text-caption font-medium text-accent hover:text-accent-hover"
                     >
                       Download
                     </a>

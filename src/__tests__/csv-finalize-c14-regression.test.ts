@@ -120,6 +120,7 @@ function validBody(overrides: Record<string, unknown> = {}): Record<string, unkn
 
 import { POST } from "@/app/api/strategies/csv-finalize/route";
 import { parseDailyReturnsSeries } from "@/app/api/strategies/csv-finalize/route";
+import { parseCsvMetadata } from "@/app/api/strategies/csv-finalize/route";
 
 // ══════════════════════════════════════════════════════════════════════════
 
@@ -323,6 +324,100 @@ describe("NEW-C14-03: present-but-invalid aum/max_capacity → 400", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+
+describe("WR-04 (Phase 53): explicit null category_id → 400 (defense-in-depth for ISSUE-010)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+  });
+
+  it("rejects metadata.category_id: null with 400 CSV_INVALID_FORMAT before the RPC", async () => {
+    // ISSUE-010: the csv_metadata step exists to STOP persisting
+    // category_id=null. The client disabled-gate is the first guard, but the
+    // server must reject an explicit null so the strategy can never land
+    // invisible to discovery even if the gate is loosened or the categories
+    // fetch fails/returns empty. RPC must NOT be reached.
+    const res = await POST(
+      makeRequest(validBody({ metadata: { category_id: null } })),
+    );
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_INVALID_FORMAT");
+    expect(body.debug_context?.field).toContain("category_id");
+    // The finalize RPC must not have fired (rejected at the parse boundary).
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts a valid UUID category_id (ok:true)", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      error: null,
+    });
+    updateMock.mockResolvedValueOnce({ error: null });
+    const res = await POST(
+      makeRequest(
+        validBody({
+          metadata: { category_id: "ffffffff-ffff-ffff-ffff-ffffffffffff" },
+        }),
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+  });
+
+  it("still accepts metadata with the category_id key ABSENT (metadata-less path unchanged)", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      error: null,
+    });
+    updateMock.mockResolvedValueOnce({ error: null });
+    const res = await POST(makeRequest(validBody({ metadata: {} })));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+
+describe("WR-04 (Phase 53): parseCsvMetadata shared validator (both guard paths)", () => {
+  // The handler tests above prove the PRE-create call site rejects null. This
+  // pins the SHARED validator directly so the contract holds regardless of which
+  // call site invokes it — incl. the post-create `applyCsvMetadataUpdate` path
+  // that the pre-create guard normally shadows. If a refactor ever drops the
+  // pre-create guard, this still fails loudly on a null category_id.
+  it("rejects an explicit category_id: null (ok:false, field metadata.category_id)", () => {
+    const result = parseCsvMetadata({ category_id: null });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected rejection");
+    expect(result.field).toBe("metadata.category_id");
+  });
+
+  it("accepts a valid UUID category_id and carries it into the payload", () => {
+    const uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+    const result = parseCsvMetadata({ category_id: uuid });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected acceptance");
+    expect(result.payload?.category_id).toBe(uuid);
+  });
+
+  it("leaves the legitimate metadata-less path (absent key / null raw) untouched", () => {
+    // Absent category_id key → ok, no category_id in payload.
+    const absent = parseCsvMetadata({ description: "x" });
+    expect(absent.ok).toBe(true);
+    if (!absent.ok) throw new Error("expected acceptance");
+    expect(absent.payload?.category_id).toBeUndefined();
+    // Entirely absent metadata object → ok, null payload.
+    const none = parseCsvMetadata(null);
+    expect(none.ok).toBe(true);
+    if (!none.ok) throw new Error("expected acceptance");
+    expect(none.payload).toBeNull();
   });
 });
 

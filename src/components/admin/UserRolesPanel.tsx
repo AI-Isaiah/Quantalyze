@@ -128,12 +128,12 @@ export function UserRolesPanel({
   return (
     <div className="space-y-3">
       {error && (
-        <p className="text-xs text-negative" role="alert">
+        <p className="text-caption text-negative" role="alert">
           {error}
         </p>
       )}
       {notice && (
-        <p className="text-xs text-positive" role="status">
+        <p className="text-caption text-positive" role="status">
           {notice}
         </p>
       )}
@@ -152,21 +152,21 @@ export function UserRolesPanel({
             >
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-text-primary">
+                  <span className="text-small font-medium text-text-primary">
                     {label}
                   </span>
-                  <span className="font-mono text-[10px] uppercase tracking-wider text-text-muted">
+                  <span className="font-mono text-micro uppercase tracking-wider text-text-muted">
                     {role}
                   </span>
                   {has && (
-                    <span className="inline-flex items-center rounded-md bg-accent/10 text-accent px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider">
+                    <span className="inline-flex items-center rounded-md bg-accent/10 text-accent px-2 py-0.5 text-micro font-medium uppercase tracking-wider">
                       Active
                     </span>
                   )}
                 </div>
-                <p className="text-xs text-text-muted mt-1">{description}</p>
+                <p className="text-caption text-text-muted mt-1">{description}</p>
                 {has && grantInfo && (grantInfo.granted_at || grantInfo.granter_email) && (
-                  <p className="text-[11px] text-text-muted mt-1.5">
+                  <p className="text-micro text-text-muted mt-1.5">
                     Granted
                     {grantInfo.granted_at
                       ? ` ${formatGrantDate(grantInfo.granted_at)}`
@@ -177,7 +177,7 @@ export function UserRolesPanel({
                   </p>
                 )}
                 {selfAdminBlock && (
-                  <p className="text-[11px] text-text-muted mt-2 italic">
+                  <p className="text-micro text-text-muted mt-2 italic">
                     You cannot revoke your own admin role. Ask another admin.
                   </p>
                 )}

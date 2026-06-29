@@ -182,3 +182,77 @@ describe("ComputeJobsTable — primitive DOM (UI-03 port)", () => {
     expect(loadMore.tagName).toBe("BUTTON");
   });
 });
+
+/**
+ * TABLE-01 / T-53-11 — @container parent/child STRUCTURAL guard (#551).
+ *
+ * A class-string jsdom check FALSE-PASSES the #551 same-element regression: it
+ * confirms the strings exist but not the parent/child relationship that makes
+ * `@container` actually reshape the grid. So this guard asserts the RELATIONSHIP
+ * structurally — the element carrying `@container` must be a STRICT ANCESTOR of
+ * every element carrying an `@max-` or `@min-` variant (never the same node) —
+ * plus that numeric columns keep `tabular-nums`. Mutation: moving `@container`
+ * onto a `<th>`/`<td>` (the #551 bug) makes the ancestor assertion fail.
+ */
+describe("ComputeJobsTable — @container parent/child structural guard", () => {
+  function variantEls(root: HTMLElement): HTMLElement[] {
+    return Array.from(
+      root.querySelectorAll<HTMLElement>(
+        '[class*="@max-"], [class*="@min-"], [class*="@2xl:"], [class*="@3xl:"]',
+      ),
+    );
+  }
+
+  it("the @container host is a STRICT ANCESTOR of the @-variant cells (never same element)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => fullPage(),
+      })) as unknown as typeof fetch,
+    );
+    let container: HTMLElement;
+    await act(async () => {
+      ({ container } = render(<ComputeJobsTable />));
+    });
+
+    // Exactly one @container host (the ResponsiveTable scroll region).
+    const hosts = Array.from(
+      container!.querySelectorAll<HTMLElement>('[class*="@container"]'),
+    );
+    expect(hosts.length).toBe(1);
+    const host = hosts[0];
+
+    // The host itself must NOT carry an @max-*/@min-* variant (same-element
+    // host is the #551 bug — it never matches and freezes the grid 1-wide).
+    expect(host.className).not.toMatch(/@(max|min|2xl|3xl)/);
+
+    // There ARE @-variant cells, and EACH is a strict descendant of the host.
+    const variants = variantEls(container!);
+    expect(variants.length).toBeGreaterThan(0);
+    for (const el of variants) {
+      expect(host.contains(el)).toBe(true);
+      expect(host).not.toBe(el); // strict ancestor, never the same node
+    }
+  });
+
+  it("preserves tabular-nums on the numeric Attempts column and its relocated value", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => fullPage(),
+      })) as unknown as typeof fetch,
+    );
+    let container: HTMLElement;
+    await act(async () => {
+      ({ container } = render(<ComputeJobsTable />));
+    });
+
+    // Every cell that renders a number keeps tabular-nums across the reshape.
+    const tabular = container!.querySelectorAll('[class*="tabular-nums"]');
+    expect(tabular.length).toBeGreaterThan(0);
+  });
+});

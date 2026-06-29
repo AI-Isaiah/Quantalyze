@@ -24,7 +24,7 @@ export function EmptyStateCard({ heading, body }: EmptyStateCardProps) {
   return (
     <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center text-text-muted text-sm">
       <div className="font-semibold text-text-secondary">{heading}</div>
-      <div className="mt-1 text-[11px]">{body}</div>
+      <div className="mt-1 text-micro">{body}</div>
     </div>
   );
 }

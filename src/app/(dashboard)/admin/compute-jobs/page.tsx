@@ -102,13 +102,13 @@ export default async function ComputeJobsPage() {
       {/* Jobs table */}
       <div className="bg-white border border-border rounded-lg overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-small">
             <thead>
               <tr className="border-b border-border bg-page">
                 {["Kind", "Status", "Target", "Attempts", "Exchange", "Trades", "Error", "Updated"].map((h) => (
                   <th
                     key={h}
-                    className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-text-muted"
+                    className="px-3 py-2 text-left text-micro font-medium uppercase tracking-wider text-text-muted"
                   >
                     {h}
                   </th>
@@ -118,24 +118,24 @@ export default async function ComputeJobsPage() {
             <tbody>
               {jobs.map((job) => (
                 <tr key={job.id} className="border-b border-border last:border-b-0 hover:bg-gray-50 transition-colors">
-                  <td className="px-3 py-2 font-metric text-xs text-text-primary">{job.kind}</td>
+                  <td className="px-3 py-2 font-metric text-caption text-text-primary">{job.kind}</td>
                   <td className="px-3 py-2">
                     <StatusBadge status={job.status} />
                   </td>
-                  <td className="px-3 py-2 text-xs text-text-muted font-metric truncate max-w-[120px]">
+                  <td className="px-3 py-2 text-caption text-text-muted font-metric truncate max-w-[120px]">
                     {(job.strategy_id ?? job.portfolio_id ?? "—").slice(0, 8)}
                   </td>
-                  <td className="px-3 py-2 font-metric text-xs text-text-secondary">
+                  <td className="px-3 py-2 font-metric text-caption text-text-secondary">
                     {job.attempts}/{job.max_attempts}
                   </td>
-                  <td className="px-3 py-2 text-xs text-text-muted">{job.exchange ?? "—"}</td>
-                  <td className="px-3 py-2 font-metric text-xs text-text-secondary">
+                  <td className="px-3 py-2 text-caption text-text-muted">{job.exchange ?? "—"}</td>
+                  <td className="px-3 py-2 font-metric text-caption text-text-secondary">
                     {job.trade_count != null ? job.trade_count.toLocaleString() : "—"}
                   </td>
-                  <td className="px-3 py-2 text-xs text-negative truncate max-w-[200px]" title={job.last_error ?? undefined}>
+                  <td className="px-3 py-2 text-caption text-negative truncate max-w-[200px]" title={job.last_error ?? undefined}>
                     {job.last_error ? `${job.error_kind ?? ""}: ${job.last_error.slice(0, 60)}` : "—"}
                   </td>
-                  <td className="px-3 py-2 text-xs text-text-muted font-metric">
+                  <td className="px-3 py-2 text-caption text-text-muted font-metric">
                     {new Date(job.updated_at).toLocaleString("en-US", {
                       month: "short",
                       day: "numeric",
@@ -148,7 +148,7 @@ export default async function ComputeJobsPage() {
               ))}
               {jobs.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-3 py-8 text-center text-sm text-text-muted">
+                  <td colSpan={8} className="px-3 py-8 text-center text-small text-text-muted">
                     No compute jobs found.
                   </td>
                 </tr>
@@ -188,9 +188,9 @@ function HealthCard({
 
   return (
     <div className={`rounded-lg border px-4 py-3 ${borderColor}`}>
-      <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">{label}</p>
-      <p className={`mt-1 text-2xl font-bold font-metric ${valueColor}`}>{value}</p>
-      <p className="mt-1 text-xs text-text-muted">{description}</p>
+      <p className="text-micro uppercase tracking-wider text-text-muted font-medium">{label}</p>
+      <p className={`mt-1 text-h3 font-bold font-metric ${valueColor}`}>{value}</p>
+      <p className="mt-1 text-caption text-text-muted">{description}</p>
     </div>
   );
 }
@@ -206,7 +206,7 @@ function StatusBadge({ status }: { status: string }) {
   };
 
   return (
-    <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold ${styles[status] ?? "bg-gray-50 text-text-muted"}`}>
+    <span className={`inline-block rounded px-1.5 py-0.5 text-micro font-semibold ${styles[status] ?? "bg-gray-50 text-text-muted"}`}>
       {status}
     </span>
   );

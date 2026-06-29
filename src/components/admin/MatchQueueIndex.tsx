@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -134,8 +135,8 @@ export function MatchQueueIndex() {
         <Card className="border-negative/40 bg-negative/5">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-semibold text-negative">Engine: OFF</p>
-              <p className="mt-0.5 text-xs text-text-secondary">
+              <p className="text-small font-semibold text-negative">Engine: OFF</p>
+              <p className="mt-0.5 text-caption text-text-secondary">
                 New recomputes are blocked. Existing candidates remain visible.
               </p>
             </div>
@@ -186,7 +187,7 @@ export function MatchQueueIndex() {
         <select
           value={mandateFilter}
           onChange={(e) => setMandateFilter(e.target.value)}
-          className="ml-auto rounded-md border border-border bg-surface px-3 py-2 text-sm text-text-primary focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
+          className="ml-auto rounded-md border border-border bg-surface px-3 py-2 text-small text-text-primary focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
         >
           <option value="all">All mandates</option>
           {mandateArchetypes.map((m) => (
@@ -200,7 +201,7 @@ export function MatchQueueIndex() {
           placeholder="Search name or company..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="w-[260px] rounded-md border border-border bg-surface px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
+          className="w-[260px] rounded-md border border-border bg-surface px-3 py-2 text-small text-text-primary placeholder:text-text-muted focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
         />
         <EngineStatusPill
           enabled={killSwitch}
@@ -226,43 +227,49 @@ export function MatchQueueIndex() {
       {/* Allocator list */}
       {loading && (
         <Card className="text-center py-10">
-          <p className="text-sm text-text-muted">Loading allocators...</p>
+          <p className="text-small text-text-muted">Loading allocators...</p>
         </Card>
       )}
       {error && !loading && (
         <Card className="border-negative/40">
-          <p className="text-sm text-negative">{error}</p>
+          <p className="text-small text-negative">{error}</p>
         </Card>
       )}
       {!loading && !error && filtered.length === 0 && (
         <Card className="text-center py-10">
-          <p className="text-sm text-text-muted">No allocators match this filter.</p>
+          <p className="text-small text-text-muted">No allocators match this filter.</p>
         </Card>
       )}
       {!loading && !error && filtered.length > 0 && (
         <Card className="p-0">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-border text-left">
-                <th className="px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-                  Allocator
-                </th>
-                <th className="px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-                  Mandate
-                </th>
-                <th className="px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted font-mono-tabular text-right">
-                  Candidates
-                </th>
-                <th className="px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted text-right">
-                  Last intro
-                </th>
-                <th className="px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted text-right">
-                  Recomputed
-                </th>
-                <th className="px-4 py-3" />
-              </tr>
-            </thead>
-            <tbody>
+          {/* ResponsiveTable is the @container containment host (parent); the
+              @max-* priority-collapse lives on the CHILD th/td cells, never
+              this host (#551 parent/child rule). At a narrow container the two
+              lowest-priority columns (Last intro, Recomputed) collapse from the
+              right and their real values relocate into the Allocator cell. */}
+          <ResponsiveTable label="Match queue allocators" className="@container">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-border text-left">
+                  <th className="px-4 py-3 text-micro font-semibold uppercase tracking-wider text-text-muted">
+                    Allocator
+                  </th>
+                  <th className="px-4 py-3 text-micro font-semibold uppercase tracking-wider text-text-muted">
+                    Mandate
+                  </th>
+                  <th className="px-4 py-3 text-micro font-semibold uppercase tracking-wider text-text-muted tabular-nums text-right">
+                    Candidates
+                  </th>
+                  <th className="px-4 py-3 text-micro font-semibold uppercase tracking-wider text-text-muted text-right @max-2xl:hidden">
+                    Last intro
+                  </th>
+                  <th className="px-4 py-3 text-micro font-semibold uppercase tracking-wider text-text-muted text-right @max-2xl:hidden">
+                    Recomputed
+                  </th>
+                  <th className="px-4 py-3" />
+                </tr>
+              </thead>
+              <tbody>
               {filtered.map((row) => (
                 <tr
                   key={row.id}
@@ -277,22 +284,39 @@ export function MatchQueueIndex() {
                         />
                       )}
                       <div>
-                        <p className="text-sm font-medium text-text-primary">
+                        <p className="text-small font-medium text-text-primary">
                           {row.display_name || row.email || "(unknown)"}
                         </p>
                         {row.company && (
-                          <p className="text-xs text-text-secondary">{row.company}</p>
+                          <p className="text-caption text-text-secondary">{row.company}</p>
                         )}
+                        {/* Narrow-container relocation of the collapsed Last
+                            intro + Recomputed columns — the REAL values. */}
+                        <p className="mt-0.5 font-mono tabular-nums text-micro text-text-muted @2xl:hidden">
+                          intro{" "}
+                          {row.days_since_last_intro === null
+                            ? "never"
+                            : `${row.days_since_last_intro}d ago`}
+                          {" · recomputed "}
+                          {row.hours_since_recompute === null
+                            ? "never"
+                            : row.is_stale
+                              ? `${Math.floor(row.hours_since_recompute / 24)}d ago`
+                              : `${row.hours_since_recompute}h ago`}
+                        </p>
                       </div>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-sm text-text-secondary max-w-[260px] truncate">
+                  <td
+                    className="px-4 py-3 text-small text-text-secondary max-w-[260px] truncate"
+                    title={row.mandate_archetype ?? undefined}
+                  >
                     {row.mandate_archetype || <span className="text-text-muted">—</span>}
                   </td>
-                  <td className="px-4 py-3 text-sm text-right font-mono tabular-nums text-text-primary">
+                  <td className="px-4 py-3 text-small text-right font-mono tabular-nums text-text-primary">
                     {row.latest_batch?.candidate_count ?? "—"}
                   </td>
-                  <td className="px-4 py-3 text-sm text-right">
+                  <td className="px-4 py-3 text-small text-right @max-2xl:hidden">
                     {row.days_since_last_intro === null ? (
                       <span className="text-text-muted">never</span>
                     ) : row.days_since_last_intro > 14 ? (
@@ -305,7 +329,7 @@ export function MatchQueueIndex() {
                       </span>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-sm text-right">
+                  <td className="px-4 py-3 text-small text-right @max-2xl:hidden">
                     {row.hours_since_recompute === null ? (
                       <span className="text-text-muted">never</span>
                     ) : row.is_stale ? (
@@ -321,15 +345,16 @@ export function MatchQueueIndex() {
                   <td className="px-4 py-3 text-right">
                     <Link
                       href={`/admin/match/${row.id}`}
-                      className="text-sm font-medium text-accent hover:text-accent-hover"
+                      className="text-small font-medium text-accent hover:text-accent-hover"
                     >
                       Open →
                     </Link>
                   </td>
                 </tr>
               ))}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </ResponsiveTable>
         </Card>
       )}
     </div>
@@ -352,7 +377,7 @@ function FilterChip({
   return (
     <button
       onClick={onClick}
-      className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[13px] font-medium transition-colors ${
+      className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-caption font-medium transition-colors ${
         active
           ? "border-accent bg-accent/10 text-accent"
           : "border-border bg-surface text-text-secondary hover:border-border-focus"
@@ -360,7 +385,7 @@ function FilterChip({
     >
       {label}
       {count !== undefined && count > 0 && (
-        <span className="rounded-full bg-text-muted/20 px-1.5 text-[11px] font-mono tabular-nums">
+        <span className="rounded-full bg-text-muted/20 px-1.5 text-micro font-mono tabular-nums">
           {count}
         </span>
       )}
@@ -379,7 +404,7 @@ function EngineStatusPill({
   return (
     <button
       onClick={onToggle}
-      className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[11px] font-mono font-semibold uppercase tracking-wider transition-colors ${
+      className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-micro font-mono font-semibold uppercase tracking-wider transition-colors ${
         enabled
           ? "border-border text-text-secondary hover:border-border-focus"
           : "border-negative text-negative hover:bg-negative/5"

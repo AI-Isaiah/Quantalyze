@@ -12,8 +12,8 @@ export const metadata = {
 export default function RiskDisclaimerPage() {
   return (
     <>
-      <h1 className="font-display text-3xl text-text-primary md:text-[32px]">Risk Disclaimer</h1>
-      <p className="text-xs text-text-muted">Last updated: 2026-04-07</p>
+      <h1 className="font-display text-page-title text-text-primary">Risk Disclaimer</h1>
+      <p className="text-caption text-text-muted">Last updated: 2026-04-07</p>
 
       <h2>Past performance is not indicative of future results</h2>
       <p>

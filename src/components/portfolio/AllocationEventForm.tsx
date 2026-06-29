@@ -72,7 +72,7 @@ export function AllocationEventForm({ portfolioId, strategies }: AllocationEvent
           <Input label="Date" type="date" value={eventDate} onChange={(e) => setEventDate(e.target.value)} required />
         </div>
         <Textarea label="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Reason for allocation change..." rows={2} />
-        {error && <p className="text-sm text-negative">{error}</p>}
+        {error && <p className="text-small text-negative">{error}</p>}
         <div className="flex justify-end">
           <Button type="submit" disabled={status === "loading" || !amount || parseFloat(amount) <= 0}>
             {status === "loading" ? "Saving..." : "Record Event"}

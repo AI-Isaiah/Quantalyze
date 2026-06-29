@@ -26,7 +26,7 @@ export default function DemoFounderViewPage() {
         description="Read-only preview of the match queue from the founder's perspective. This is what we use to review, rank, and route intros on behalf of allocators."
       />
 
-      <p className="mb-6 text-sm text-text-muted">
+      <p className="mb-6 text-body text-text-muted">
         Back to{" "}
         <Link href="/demo" className="underline hover:text-text-primary">
           the allocator view

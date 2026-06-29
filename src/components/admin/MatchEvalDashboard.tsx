@@ -76,14 +76,14 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
   if (loading) {
     return (
       <Card className="text-center py-10">
-        <p className="text-sm text-text-muted">Loading eval metrics...</p>
+        <p className="text-small text-text-muted">Loading eval metrics...</p>
       </Card>
     );
   }
   if (error) {
     return (
       <Card className="border-negative/40">
-        <p className="text-sm text-negative">{error}</p>
+        <p className="text-small text-negative">{error}</p>
         <Button variant="secondary" size="sm" onClick={load} className="mt-3">
           Retry
         </Button>
@@ -142,7 +142,7 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
       </div>
 
       {/* Nav breadcrumb */}
-      <nav className="flex items-center gap-2 text-sm text-text-muted">
+      <nav className="flex items-center gap-2 text-small text-text-muted">
         <Link href="/admin/match" className="hover:text-text-primary">
           Match queue
         </Link>
@@ -152,12 +152,12 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
 
       {/* Lookback selector */}
       <div className="flex items-center gap-2">
-        <span className="text-xs text-text-muted">Window:</span>
+        <span className="text-caption text-text-muted">Window:</span>
         {[7, 28, 90].map((n) => (
           <button
             key={n}
             onClick={() => setLookback(n)}
-            className={`rounded-md border px-3 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors ${
+            className={`rounded-md border px-3 py-1.5 text-caption font-mono uppercase tracking-wider transition-colors ${
               lookback === n
                 ? "border-accent bg-accent/10 text-accent"
                 : "border-border bg-surface text-text-secondary hover:border-border-focus"
@@ -195,22 +195,22 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
       {/* Weekly breakdown (text table instead of a chart for v1) */}
       {metrics.weekly.length > 0 && (
         <Card>
-          <h2 className="text-base font-semibold text-text-primary mb-3">
+          <h2 className="text-body font-semibold text-text-primary mb-3">
             Weekly hit rate
           </h2>
           <table className="w-full">
             <thead>
               <tr className="border-b border-border text-left">
-                <th className="py-2 text-[11px] uppercase tracking-wider text-text-muted font-semibold">
+                <th className="py-2 text-micro uppercase tracking-wider text-text-muted font-semibold">
                   Week
                 </th>
-                <th className="py-2 text-right text-[11px] uppercase tracking-wider text-text-muted font-semibold">
+                <th className="py-2 text-right text-micro uppercase tracking-wider text-text-muted font-semibold">
                   Intros
                 </th>
-                <th className="py-2 text-right text-[11px] uppercase tracking-wider text-text-muted font-semibold">
+                <th className="py-2 text-right text-micro uppercase tracking-wider text-text-muted font-semibold">
                   Hits top-3
                 </th>
-                <th className="py-2 text-right text-[11px] uppercase tracking-wider text-text-muted font-semibold">
+                <th className="py-2 text-right text-micro uppercase tracking-wider text-text-muted font-semibold">
                   Hit rate
                 </th>
               </tr>
@@ -218,16 +218,16 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
             <tbody>
               {metrics.weekly.map((w) => (
                 <tr key={w.week_start} className="border-b border-border">
-                  <td className="py-2 text-sm font-mono text-text-primary">
+                  <td className="py-2 text-small font-mono text-text-primary">
                     {w.week_start}
                   </td>
-                  <td className="py-2 text-sm text-right font-mono tabular-nums text-text-primary">
+                  <td className="py-2 text-small text-right font-mono tabular-nums text-text-primary">
                     {w.intros}
                   </td>
-                  <td className="py-2 text-sm text-right font-mono tabular-nums text-text-primary">
+                  <td className="py-2 text-small text-right font-mono tabular-nums text-text-primary">
                     {w.hits_top_3}
                   </td>
-                  <td className="py-2 text-sm text-right font-mono tabular-nums text-text-primary">
+                  <td className="py-2 text-small text-right font-mono tabular-nums text-text-primary">
                     {(w.hit_rate_top_3 * 100).toFixed(0)}%
                   </td>
                 </tr>
@@ -240,10 +240,10 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
       {/* Missed intros */}
       {metrics.missed.length > 0 && (
         <Card>
-          <h2 className="text-base font-semibold text-text-primary mb-1">
+          <h2 className="text-body font-semibold text-text-primary mb-1">
             Intros the algorithm missed
           </h2>
-          <p className="text-xs text-text-muted mb-3">
+          <p className="text-caption text-text-muted mb-3">
             These are intros you shipped where the strategy wasn&apos;t in the
             top-3 of the most recent batch. Use this list to tune preferences or
             retrain the engine over time.
@@ -251,19 +251,19 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
           <table className="w-full">
             <thead>
               <tr className="border-b border-border text-left">
-                <th className="py-2 text-[11px] uppercase tracking-wider text-text-muted font-semibold">
+                <th className="py-2 text-micro uppercase tracking-wider text-text-muted font-semibold">
                   Date
                 </th>
-                <th className="py-2 text-[11px] uppercase tracking-wider text-text-muted font-semibold">
+                <th className="py-2 text-micro uppercase tracking-wider text-text-muted font-semibold">
                   Allocator
                 </th>
-                <th className="py-2 text-[11px] uppercase tracking-wider text-text-muted font-semibold">
+                <th className="py-2 text-micro uppercase tracking-wider text-text-muted font-semibold">
                   Strategy
                 </th>
-                <th className="py-2 text-right text-[11px] uppercase tracking-wider text-text-muted font-semibold">
+                <th className="py-2 text-right text-micro uppercase tracking-wider text-text-muted font-semibold">
                   Rank
                 </th>
-                <th className="py-2 text-[11px] uppercase tracking-wider text-text-muted font-semibold">
+                <th className="py-2 text-micro uppercase tracking-wider text-text-muted font-semibold">
                   Why
                 </th>
               </tr>
@@ -274,19 +274,19 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
                   key={`${m.allocator_id}-${m.strategy_id}-${m.created_at}`}
                   className="border-b border-border"
                 >
-                  <td className="py-2 text-xs font-mono text-text-muted">
+                  <td className="py-2 text-caption font-mono text-text-muted">
                     {new Date(m.created_at).toLocaleDateString()}
                   </td>
-                  <td className="py-2 text-xs font-mono text-text-secondary">
+                  <td className="py-2 text-caption font-mono text-text-secondary">
                     {m.allocator_id.slice(0, 8)}
                   </td>
-                  <td className="py-2 text-xs font-mono text-text-secondary">
+                  <td className="py-2 text-caption font-mono text-text-secondary">
                     {m.strategy_id.slice(0, 8)}
                   </td>
-                  <td className="py-2 text-xs text-right font-mono text-text-primary">
+                  <td className="py-2 text-caption text-right font-mono text-text-primary">
                     {m.rank_if_any ?? "—"}
                   </td>
-                  <td className="py-2 text-xs text-text-muted">{m.reason}</td>
+                  <td className="py-2 text-caption text-text-muted">{m.reason}</td>
                 </tr>
               ))}
             </tbody>
@@ -296,16 +296,16 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
 
       {metrics.intros_shipped === 0 && (
         <Card className="text-center py-10">
-          <h3 className="text-base font-semibold text-text-primary">
+          <h3 className="text-body font-semibold text-text-primary">
             Your hit-rate dashboard isn&rsquo;t ready yet
           </h3>
-          <p className="mt-2 text-sm text-text-secondary max-w-lg mx-auto">
+          <p className="mt-2 text-small text-text-secondary max-w-lg mx-auto">
             Ship 5+ introductions from the Match Queue and this view will
             compare the algorithm&rsquo;s ranking to the intros you actually
             sent — so you can see where the signal holds up and where the
             model is blind.
           </p>
-          <p className="mt-1 text-xs text-text-muted">
+          <p className="mt-1 text-caption text-text-muted">
             Intros shipped in the last {metrics.window_days} days:{" "}
             <span className="font-mono tabular-nums text-text-primary">
               {metrics.intros_shipped}
@@ -314,7 +314,7 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
           <div className="mt-4">
             <Link
               href="/admin/match"
-              className="inline-flex items-center text-sm font-medium text-accent hover:text-accent-hover"
+              className="inline-flex items-center text-small font-medium text-accent hover:text-accent-hover"
             >
               Open the Match Queue →
             </Link>
@@ -328,13 +328,13 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
 function Kpi({ label, value, subtitle }: { label: string; value: string; subtitle: string }) {
   return (
     <div className="px-4 py-4">
-      <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+      <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
         {label}
       </p>
-      <p className="mt-1 font-mono tabular-nums text-[32px] text-text-primary">
+      <p className="mt-1 font-mono tabular-nums text-h3 text-text-primary">
         {value}
       </p>
-      <p className="mt-1 text-xs text-text-muted">{subtitle}</p>
+      <p className="mt-1 text-caption text-text-muted">{subtitle}</p>
     </div>
   );
 }

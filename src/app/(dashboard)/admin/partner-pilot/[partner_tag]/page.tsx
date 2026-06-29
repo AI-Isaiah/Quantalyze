@@ -87,7 +87,7 @@ export default async function PartnerPilotPage({
         title="Partner pilot"
         description={`White-label pilot scoped to a subset of managers + allocators. Data is filtered to ${partner_tag}.`}
         meta={
-          <span className="inline-flex items-center rounded-md border border-accent/40 bg-accent/5 px-2 py-1 text-xs font-mono text-accent">
+          <span className="inline-flex items-center rounded-md border border-accent/40 bg-accent/5 px-2 py-1 text-caption font-mono text-accent">
             {partner_tag}
           </span>
         }
@@ -119,13 +119,13 @@ export default async function PartnerPilotPage({
             display "0 intros" on the partner pilot page. */}
         {introsCount > 0 && (
           <Card>
-            <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+            <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
               Intros shipped
             </p>
-            <p className="mt-2 font-metric tabular-nums text-[32px] text-text-primary">
+            <p className="mt-2 font-metric tabular-nums text-h3 text-text-primary">
               {introsCount}
             </p>
-            <p className="mt-1 text-xs text-text-muted">
+            <p className="mt-1 text-caption text-text-muted">
               Contact requests tagged to{" "}
               <span className="font-mono text-text-primary">{partner_tag}</span>
               .
@@ -137,15 +137,15 @@ export default async function PartnerPilotPage({
           {/* Allocators list with per-row "Open match queue" links. */}
           <Card>
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-base font-semibold text-text-primary">
+              <h2 className="text-body font-semibold text-text-primary">
                 Allocators
               </h2>
-              <span className="text-xs font-metric tabular-nums text-text-muted">
+              <span className="text-caption font-metric tabular-nums text-text-muted">
                 {allocators.length}
               </span>
             </div>
             {allocators.length === 0 ? (
-              <p className="text-sm text-text-muted">
+              <p className="text-small text-text-muted">
                 No allocators staged yet. Import a CSV from{" "}
                 <Link
                   href="/admin/partner-import"
@@ -163,18 +163,27 @@ export default async function PartnerPilotPage({
                     className="flex items-center justify-between px-2 py-2.5"
                   >
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-text-primary truncate">
+                      <p
+                        className="text-small font-medium text-text-primary truncate"
+                        title={a.display_name || a.email || a.id.slice(0, 8)}
+                      >
                         {a.display_name || a.email || a.id.slice(0, 8)}
                       </p>
                       {a.email && (
-                        <p className="text-xs font-mono text-text-muted truncate">
+                        // The email is a mid-clip on narrow cards; title= makes
+                        // the full address recoverable on hover (it is already
+                        // rendered to the admin, so this leaks nothing — T-53-10).
+                        <p
+                          className="text-caption font-mono text-text-muted truncate"
+                          title={a.email}
+                        >
                           {a.email}
                         </p>
                       )}
                     </div>
                     <Link
                       href={`/admin/match/${a.id}`}
-                      className="ml-3 shrink-0 text-xs text-accent hover:text-accent-hover"
+                      className="ml-3 shrink-0 text-caption text-accent hover:text-accent-hover"
                     >
                       Open match queue &rarr;
                     </Link>
@@ -187,15 +196,15 @@ export default async function PartnerPilotPage({
           {/* Strategies list. */}
           <Card>
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-base font-semibold text-text-primary">
+              <h2 className="text-body font-semibold text-text-primary">
                 Strategies
               </h2>
-              <span className="text-xs font-metric tabular-nums text-text-muted">
+              <span className="text-caption font-metric tabular-nums text-text-muted">
                 {strategies.length}
               </span>
             </div>
             {strategies.length === 0 ? (
-              <p className="text-sm text-text-muted">
+              <p className="text-small text-text-muted">
                 No strategies staged yet.
               </p>
             ) : (
@@ -206,10 +215,16 @@ export default async function PartnerPilotPage({
                     s.user_id.slice(0, 8);
                   return (
                     <li key={s.id} className="px-2 py-2.5">
-                      <p className="text-sm font-medium text-text-primary truncate">
+                      <p
+                        className="text-small font-medium text-text-primary truncate"
+                        title={s.name ?? undefined}
+                      >
                         {s.name}
                       </p>
-                      <p className="text-xs text-text-muted truncate">
+                      <p
+                        className="text-caption text-text-muted truncate"
+                        title={`${s.status} · ${s.disclosure_tier ?? "—"} · ${managerName}`}
+                      >
                         <span className="font-mono">{s.status}</span>
                         {" · "}
                         <span className="font-mono">

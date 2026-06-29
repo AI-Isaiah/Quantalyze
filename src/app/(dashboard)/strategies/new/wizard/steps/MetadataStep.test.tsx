@@ -5,14 +5,15 @@
  * Untested before: (a) categoryLoadError state when the discovery_categories
  * fetch errors; (b) auto-select of categories[0] when categoryId is null AND
  * data is non-empty (a regression to default "" would silently submit an
- * invalid category_id and fail at finalize); (c) supportedExchanges
- * defaulting to [canonicalizeExchange(detectedExchange)] when initial is
- * null; (d) the Submit gate (description + categoryId) and the onComplete
+ * invalid category_id and fail at finalize); (c) the detected-exchange chip
+ * renders pre-selected (aria-pressed) when initial is null — the canonicalized
+ * default; (d) the Submit gate (description + categoryId) and the onComplete
  * payload.
  */
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MetadataStep, type MetadataDraft } from "./MetadataStep";
+import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
 
 // Supabase client mock: MetadataStep does
 //   supabase.from("discovery_categories").select("id, name").order("sort_order")
@@ -111,6 +112,35 @@ describe("[H-0191] MetadataStep", () => {
     expect(errored).toBe(false);
   });
 
+  it("[WR-04] surfaces an honest block when categories load to an empty (readable) set", async () => {
+    // An empty-but-readable category list leaves categoryId=null and Submit
+    // permanently disabled. On the CSV path there is no detected-markets hint
+    // to explain the block, so the step must surface an honest reason rather
+    // than a silent dead-end (ISSUE-010 must never reopen via category_id=null).
+    orderResult = { data: [], error: null };
+    render(<MetadataStep {...baseProps} />);
+    // Wait for the fetch to settle (categoriesLoaded gates the hint).
+    expect(
+      await screen.findByTestId("metadata-categories-empty"),
+    ).toBeInTheDocument();
+    const submit = screen.getByRole("button", { name: /review and submit/i });
+    expect(submit).toBeDisabled();
+    // The honest empty block must NOT fire wizard_error telemetry (that is the
+    // failure path; an empty readable result is a legitimate degenerate state).
+    const errored = trackMock.mock.calls.some(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    );
+    expect(errored).toBe(false);
+  });
+
+  it("[WR-04] does NOT surface the empty-category block when categories load non-empty", async () => {
+    orderResult = { data: CATS, error: null };
+    render(<MetadataStep {...baseProps} />);
+    const select = (await screen.findByLabelText("Category")) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("cat-aaa"));
+    expect(screen.queryByTestId("metadata-categories-empty")).toBeNull();
+  });
+
   it("pre-selects the canonical exchange chip from detectedExchange (lowercase → canonical)", () => {
     // detectedExchange is the lowercase api_keys.exchange ('okx'); the chip
     // group matches case-sensitively against EXCHANGES ('OKX'). The default
@@ -127,6 +157,111 @@ describe("[H-0191] MetadataStep", () => {
     render(<MetadataStep {...baseProps} detectedMarkets={["BTC"]} />);
     const submit = screen.getByRole("button", { name: /review and submit/i });
     expect(submit).toBeDisabled();
+  });
+
+  it("[WR-03] keeps Submit disabled for a whitespace-only description (gate matches .trim() rule)", async () => {
+    // A whitespace-only description ("   ") is truthy but invalid. The
+    // disabled-gate must use the SAME .trim() predicate as the validation
+    // rule, so it stays disabled — otherwise the user reaches an "enabled"
+    // button that handleSubmit then silently no-ops on (the inconsistency
+    // that breeds regressions).
+    render(<MetadataStep {...baseProps} />);
+    const select = (await screen.findByLabelText("Category")) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("cat-aaa"));
+
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "   " },
+    });
+
+    const submit = screen.getByRole("button", { name: /review and submit/i });
+    expect(submit).toBeDisabled();
+  });
+
+  // ── Phase 53 / APPLY-02 — inline per-field validation surfacing ──────────
+  it("[APPLY-02] blur on an empty description surfaces the wizardErrors copy through Field a11y", async () => {
+    render(<MetadataStep {...baseProps} />);
+    const description = (await screen.findByLabelText(
+      "Description",
+    )) as HTMLTextAreaElement;
+
+    // No error before interaction.
+    expect(description.getAttribute("aria-invalid")).not.toBe("true");
+
+    fireEvent.blur(description);
+
+    // Field wires aria-invalid + aria-describedby pointing at the message id.
+    await waitFor(() =>
+      expect(description.getAttribute("aria-invalid")).toBe("true"),
+    );
+    const describedBy = description.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+
+    // The described element exists and carries the EXISTING wizardErrors copy
+    // (not a new inline string) — message id matches aria-describedby.
+    const messageNode = document.getElementById(describedBy!);
+    expect(messageNode).not.toBeNull();
+    expect(messageNode!.textContent).toBe(
+      WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause,
+    );
+  });
+
+  it("[APPLY-02] the per-field description message is NOT role=alert (envelope owns the summary)", async () => {
+    render(<MetadataStep {...baseProps} />);
+    const description = await screen.findByLabelText("Description");
+    fireEvent.blur(description);
+
+    const message = await screen.findByText(
+      WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause,
+    );
+    expect(message.getAttribute("role")).not.toBe("alert");
+    expect(message.closest('[role="alert"]')).toBeNull();
+  });
+
+  it("[APPLY-02] the inline error clears once a description is typed", async () => {
+    render(<MetadataStep {...baseProps} />);
+    const description = (await screen.findByLabelText(
+      "Description",
+    )) as HTMLTextAreaElement;
+    fireEvent.blur(description);
+    await screen.findByText(
+      WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause,
+    );
+
+    fireEvent.change(description, { target: { value: "A real description." } });
+    await waitFor(() =>
+      expect(
+        screen.queryByText(
+          WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause,
+        ),
+      ).toBeNull(),
+    );
+    expect(description.getAttribute("aria-invalid")).not.toBe("true");
+  });
+
+  it("[APPLY-02] submitting with an empty description reveals the error and focuses the field (AT path)", async () => {
+    // The Submit button is disabled until valid, so this exercises the
+    // submitAttempted branch directly via the form submit — the AT/keyboard
+    // path where the handler is reached with an empty description. It must
+    // reveal the inline error AND move focus to the offending field, AND NOT
+    // call onComplete (the invalid submit is blocked).
+    const onComplete = vi.fn();
+    render(<MetadataStep {...baseProps} onComplete={onComplete} />);
+    const description = (await screen.findByLabelText(
+      "Description",
+    )) as HTMLTextAreaElement;
+    const form = description.closest("form");
+    expect(form).not.toBeNull();
+
+    // No error before any submit attempt (description not blurred yet).
+    expect(description.getAttribute("aria-invalid")).not.toBe("true");
+
+    fireEvent.submit(form!);
+
+    await waitFor(() =>
+      expect(description.getAttribute("aria-invalid")).toBe("true"),
+    );
+    expect(document.activeElement).toBe(description);
+    expect(onComplete).not.toHaveBeenCalled();
   });
 
   it("emits the captured fields (incl. auto-selected categoryId) via onComplete", async () => {

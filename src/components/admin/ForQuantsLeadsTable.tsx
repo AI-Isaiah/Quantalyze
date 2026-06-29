@@ -100,7 +100,7 @@ export function ForQuantsLeadsTable({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-4 text-xs text-text-muted">
+      <div className="flex items-center gap-4 text-caption text-text-muted">
         <span>
           {showAll
             ? `Showing newest ${leads.length}${hitCap ? ` of up to ${fullViewCap}` : ""}`
@@ -117,7 +117,7 @@ export function ForQuantsLeadsTable({
       {hitCap && (
         <Card
           padding="sm"
-          className="border-badge-market-neutral/30 text-xs text-text-secondary"
+          className="border-badge-market-neutral/30 text-caption text-text-secondary"
         >
           Showing the newest {fullViewCap} leads. Older leads exist in the
           database but pagination is not wired yet. Filter in the Supabase
@@ -126,7 +126,7 @@ export function ForQuantsLeadsTable({
       )}
 
       {error && (
-        <Card padding="sm" className="border-negative/30 text-sm text-negative">
+        <Card padding="sm" className="border-negative/30 text-small text-negative">
           {error}
         </Card>
       )}
@@ -169,23 +169,23 @@ export function ForQuantsLeadsTable({
                       <h3 className="font-semibold text-text-primary">
                         {lead.name}
                       </h3>
-                      <span className="text-sm text-text-secondary">
+                      <span className="text-small text-text-secondary">
                         {lead.firm}
                       </span>
                       <span
-                        className="text-xs text-text-muted"
+                        className="text-caption text-text-muted"
                         suppressHydrationWarning
                       >
                         {timeLabel}
                       </span>
                       {wizard?.step && (
-                        <span className="inline-flex items-center rounded-md bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
+                        <span className="inline-flex items-center rounded-md bg-accent/10 px-2 py-0.5 text-micro font-medium text-accent">
                           from wizard · {wizard.step}
                         </span>
                       )}
                       {isStuckPendingNotify && (
                         <span
-                          className="inline-flex items-center rounded-md bg-warning/10 px-2 py-0.5 text-[10px] font-medium text-warning"
+                          className="inline-flex items-center rounded-md bg-warning/10 px-2 py-0.5 text-micro font-medium text-warning"
                           title={
                             lead.notify_error
                               ? `Founder notify failed: ${lead.notify_error}`
@@ -196,12 +196,12 @@ export function ForQuantsLeadsTable({
                         </span>
                       )}
                       {isProcessed && (
-                        <span className="inline-flex items-center rounded-md bg-positive/10 px-2 py-0.5 text-[10px] font-medium text-positive">
+                        <span className="inline-flex items-center rounded-md bg-positive/10 px-2 py-0.5 text-micro font-medium text-positive">
                           processed
                         </span>
                       )}
                     </div>
-                    <div className="mt-1 text-sm">
+                    <div className="mt-1 text-small">
                       <a
                         href={`mailto:${lead.email}`}
                         className="text-accent hover:underline"
@@ -210,12 +210,12 @@ export function ForQuantsLeadsTable({
                       </a>
                     </div>
                     {lead.preferred_time && (
-                      <div className="mt-1 text-xs text-text-muted">
+                      <div className="mt-1 text-caption text-text-muted">
                         Preferred: {lead.preferred_time}
                       </div>
                     )}
                     {lead.notes && (
-                      <p className="mt-2 text-sm text-text-secondary whitespace-pre-wrap">
+                      <p className="mt-2 text-small text-text-secondary whitespace-pre-wrap">
                         {lead.notes}
                       </p>
                     )}

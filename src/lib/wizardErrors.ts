@@ -25,6 +25,10 @@ export type WizardErrorCode =
   | "GATE_INSUFFICIENT_DAYS"
   | "GATE_ANALYTICS_FAILED"
   | "GATE_NO_DATA_SOURCE"
+  // Metadata step (MetadataStep) — Phase 53 / APPLY-02 inline per-field
+  // validation. Copy lives here (the canonical wizard-copy home) so the
+  // component never carries an invented inline string (copy-drift guard).
+  | "METADATA_DESCRIPTION_REQUIRED"
   // Wizard lifecycle
   | "SESSION_EXPIRED"
   | "SUBMIT_NOTIFY_FAILED"
@@ -278,6 +282,17 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#draft-resume",
     actions: ["start_fresh", "request_call"],
+  },
+
+  METADATA_DESCRIPTION_REQUIRED: {
+    title: "Add a description.",
+    cause:
+      "Allocators need a short description to evaluate the strategy. A description is required before you can continue.",
+    fix: [
+      "Write one paragraph describing the strategy, its edge, and how you frame risk.",
+    ],
+    docsHref: "/security",
+    actions: ["clear_and_retry"],
   },
 
   SESSION_EXPIRED: {

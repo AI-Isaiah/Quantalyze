@@ -35,10 +35,10 @@ export function CandidateDetail({
       {/* Title + score */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex-1">
-          <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-1">
+          <p className="text-micro uppercase tracking-wider text-text-muted font-medium mb-1">
             Rank {candidate.rank}
           </p>
-          <h2 className="text-[20px] font-display text-text-primary">
+          <h2 className="text-h3 font-display text-text-primary">
             {displayStrategyName(strategy)}
           </h2>
           {strategy?.strategy_types && strategy.strategy_types.length > 0 && (
@@ -46,7 +46,7 @@ export function CandidateDetail({
               {strategy.strategy_types.map((type) => (
                 <span
                   key={type}
-                  className="inline-flex items-center rounded border border-border bg-surface px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider text-text-secondary"
+                  className="inline-flex items-center rounded border border-border bg-surface px-2 py-0.5 text-micro font-mono uppercase tracking-wider text-text-secondary"
                 >
                   {type}
                 </span>
@@ -55,7 +55,7 @@ export function CandidateDetail({
           )}
         </div>
         <div className="text-right">
-          <span className="font-mono tabular-nums text-[32px] text-text-primary">
+          <span className="font-mono tabular-nums text-h3 text-text-primary">
             {candidate.score.toFixed(0)}
           </span>
           <div className="mt-1 h-[2px] w-[64px] bg-border ml-auto">
@@ -96,12 +96,12 @@ export function CandidateDetail({
       {/* Reasons */}
       {candidate.reasons.length > 0 && (
         <div className="mt-6 border-t border-border pt-4">
-          <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-2">
+          <p className="text-micro uppercase tracking-wider text-text-muted font-medium mb-2">
             Why this match
           </p>
           <ul className="space-y-1.5">
             {candidate.reasons.map((reason) => (
-              <li key={reason} className="flex items-start gap-2 text-sm text-text-secondary">
+              <li key={reason} className="flex items-start gap-2 text-small text-text-secondary">
                 <span className="mt-[6px] h-1 w-1 rounded-full bg-accent shrink-0" />
                 {reason}
               </li>
@@ -112,7 +112,7 @@ export function CandidateDetail({
 
       {/* Sub-scores */}
       <div className="mt-6 border-t border-border pt-4">
-        <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-3">
+        <p className="text-micro uppercase tracking-wider text-text-muted font-medium mb-3">
           Score breakdown
         </p>
         <div className="space-y-2">
@@ -135,7 +135,7 @@ export function CandidateDetail({
       {!isReadOnly && (
         <div className="mt-6 border-t border-border pt-4 flex items-center gap-2 flex-wrap">
           {alreadySent ? (
-            <div className="flex-1 text-sm text-text-muted">Intro already sent to this strategy.</div>
+            <div className="flex-1 text-small text-text-muted">Intro already sent to this strategy.</div>
           ) : (
             <>
               <Button variant="primary" size="sm" onClick={onSendIntro}>
@@ -164,7 +164,7 @@ export function CandidateDetail({
 
       {/* Keyboard hint — only on lg+ where shortcuts actually fire. */}
       {!isReadOnly && (
-        <div className="mt-4 pt-3 border-t border-border text-[10px] font-mono uppercase tracking-wider text-text-muted hidden lg:block">
+        <div className="mt-4 pt-3 border-t border-border text-micro font-mono uppercase tracking-wider text-text-muted hidden lg:block">
           Keyboard: j/k move · s send intro · u keep · d skip · r recompute · ? help
         </div>
       )}
@@ -177,8 +177,8 @@ export function CandidateDetail({
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <p className="text-[10px] uppercase tracking-wider text-text-muted">{label}</p>
-      <p className="mt-0.5 font-mono tabular-nums text-sm text-text-primary">{value}</p>
+      <p className="text-micro uppercase tracking-wider text-text-muted">{label}</p>
+      <p className="mt-0.5 font-mono tabular-nums text-small text-text-primary">{value}</p>
     </div>
   );
 }
@@ -187,14 +187,14 @@ function SubScoreBar({ label, value }: { label: string; value: number }) {
   const pct = Math.max(0, Math.min(1, value));
   return (
     <div className="flex items-center gap-3">
-      <span className="text-xs text-text-secondary w-[110px] shrink-0">{label}</span>
+      <span className="text-caption text-text-secondary w-[110px] shrink-0">{label}</span>
       <div className="flex-1 h-[4px] bg-border rounded-sm">
         <div
           className="h-full bg-accent rounded-sm"
           style={{ width: `${pct * 100}%` }}
         />
       </div>
-      <span className="font-mono tabular-nums text-xs text-text-muted w-[32px] text-right">
+      <span className="font-mono tabular-nums text-caption text-text-muted w-[32px] text-right">
         {(pct * 100).toFixed(0)}
       </span>
     </div>
