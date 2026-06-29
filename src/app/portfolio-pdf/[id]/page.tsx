@@ -179,8 +179,8 @@ export default async function PortfolioPdfPage({
           <p className="text-xs font-semibold text-accent">
             Portfolio Report
           </p>
-          <p className="text-[10px] text-text-muted">Generated {generatedAt}</p>
-          <p className="text-[10px] text-text-muted">{dataVintage}</p>
+          <p className="text-fixed-10 text-text-muted">Generated {generatedAt}</p>
+          <p className="text-fixed-10 text-text-muted">{dataVintage}</p>
         </div>
       </div>
 
@@ -190,7 +190,7 @@ export default async function PortfolioPdfPage({
             key={kpi.label}
             className="rounded-lg border border-border p-3"
           >
-            <p className="text-[10px] text-text-muted uppercase tracking-wide">
+            <p className="text-fixed-10 text-text-muted uppercase tracking-wide">
               {kpi.label}
             </p>
             <p className="text-lg font-bold font-metric text-text-primary mt-1">
@@ -220,7 +220,7 @@ export default async function PortfolioPdfPage({
             No strategies in this portfolio.
           </p>
         ) : (
-          <table className="w-full text-[10px]">
+          <table className="w-full text-fixed-10">
             <thead>
               <tr className="border-b border-border">
                 <th className="text-left py-1 px-1 font-medium text-text-muted">
@@ -281,7 +281,7 @@ export default async function PortfolioPdfPage({
           <h2 className="text-sm font-semibold text-text-primary mb-2">
             Correlation Matrix
           </h2>
-          <table className="w-full text-[10px]">
+          <table className="w-full text-fixed-10">
             <thead>
               <tr className="border-b border-border">
                 <th className="text-left py-1 px-1 font-medium text-text-muted">

@@ -199,7 +199,7 @@ function HeroMetric({
 }) {
   return (
     <Card padding="sm" className="text-center">
-      <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+      <p className="text-fixed-10 uppercase tracking-wider text-text-muted font-medium">
         {label}
       </p>
       <p
@@ -214,7 +214,7 @@ function HeroMetric({
 function MiniMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="text-center">
-      <p className="text-[10px] text-text-muted uppercase tracking-wide">
+      <p className="text-fixed-10 text-text-muted uppercase tracking-wide">
         {label}
       </p>
       <p className="text-sm font-metric font-medium text-text-primary mt-0.5">

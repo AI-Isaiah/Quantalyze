@@ -292,7 +292,7 @@ function RecommendationCard({
               {strategy.name}
             </h3>
             {categoryName && (
-              <span className="text-[10px] uppercase tracking-wider text-text-muted">
+              <span className="text-fixed-10 uppercase tracking-wider text-text-muted">
                 {categoryName}
               </span>
             )}
@@ -339,7 +339,7 @@ function Metric({
 }) {
   return (
     <div className="flex items-baseline gap-1.5">
-      <span className="text-[10px] uppercase tracking-wider text-text-muted">
+      <span className="text-fixed-10 uppercase tracking-wider text-text-muted">
         {label}
       </span>
       <span
