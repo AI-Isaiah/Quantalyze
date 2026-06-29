@@ -127,6 +127,22 @@
   --radius-xl: 12px;
 }
 
+/* Phase 49 / DS-02 — fluid type spine. PLAIN @theme (no `inline`) so text-*
+   utilities keep var(--text-*) and the clamp() re-evaluates on zoom (WCAG 1.4.4).
+   Tier→px maps DESIGN.md §Typography 1:1. Strings MUST match TYPE_SCALE[tier].clamp
+   in src/lib/design-tokens/typography.ts verbatim (tests/a11y/design-token-drift.test.ts
+   pins it). */
+@theme {
+  --text-hero: clamp(2rem, 1.5rem + 2.5vw, 3rem);
+  --text-page-title: clamp(1.5rem, 1.2rem + 1.5vw, 2rem);
+  --text-h2: clamp(1.25rem, 1.1rem + 0.75vw, 1.5rem);
+  --text-h3: clamp(1rem, 0.95rem + 0.25vw, 1.125rem);
+  --text-body: clamp(0.875rem, 0.85rem + 0.125vw, 1rem);
+  --text-small: clamp(0.8125rem, 0.8rem + 0.0625vw, 0.875rem);
+  --text-caption: clamp(0.75rem, 0.73rem + 0.0625vw, 0.8125rem);
+  --text-micro: clamp(0.625rem, 0.61rem + 0.0625vw, 0.6875rem);
+}
+
 /* Respect user motion preferences for the shared `animate-pulse` utility,
    used by Skeleton, ComputeStatus, wizard SyncPreviewStep liveness dots,
    and the compute-jobs admin UI. Tailwind's built-in keyframe fades

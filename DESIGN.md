@@ -30,6 +30,58 @@
   - Caption: 12px
   - Micro: 10-11px (labels, badges, uppercase tracking)
 
+### Fluid Type Spine (v1.4 Phase 49 / DS-02·DS-03)
+
+The fixed px scale above is the canonical superset; it is now also expressed as
+eight **named fluid `clamp()` tokens** so type scales smoothly across the full
+resolution range (small screens → ultra-wide) instead of snapping at media-query
+breakpoints. The named tiers map the px scale 1:1:
+
+| Tier | Token | px endpoints (min→max) | clamp |
+|------|-------|------------------------|-------|
+| Hero | `--text-hero` | 32→48 | `clamp(2rem, 1.5rem + 2.5vw, 3rem)` |
+| Page title | `--text-page-title` | 24→32 | `clamp(1.5rem, 1.2rem + 1.5vw, 2rem)` |
+| H2 | `--text-h2` | 20→24 | `clamp(1.25rem, 1.1rem + 0.75vw, 1.5rem)` |
+| H3 | `--text-h3` | 16→18 | `clamp(1rem, 0.95rem + 0.25vw, 1.125rem)` |
+| Body | `--text-body` | 14→16 | `clamp(0.875rem, 0.85rem + 0.125vw, 1rem)` |
+| Small | `--text-small` | 13→14 | `clamp(0.8125rem, 0.8rem + 0.0625vw, 0.875rem)` |
+| Caption | `--text-caption` | 12→13 | `clamp(0.75rem, 0.73rem + 0.0625vw, 0.8125rem)` |
+| Micro | `--text-micro` | 10→11 | `clamp(0.625rem, 0.61rem + 0.0625vw, 0.6875rem)` |
+
+**Where they live:** the tokens sit in a **plain `@theme { … }` block** in
+`src/app/globals.css` — deliberately NOT `@theme inline`. A plain `@theme` keeps
+each `text-*` utility a live `var(--text-*)` reference so the browser
+re-evaluates the `clamp()` on zoom; `@theme inline` would bake the clamp literal
+into every utility and flatten the variable chain, defeating zoom-safety. (Colors
+stay in `@theme inline` and are unaffected.)
+
+**Two hard invariants** (mechanically enforced):
+1. Every `clamp()` carries a **`rem` middle term** (`clamp(<rem>, <rem> + <vw>,
+   <rem>)`) — a `vw`-only size never scales under zoom and fails WCAG 1.4.4 / W3C
+   F94. The `rem` portion scales with the user's text-zoom; the `vw` only widens
+   the band between the bounds.
+2. **`max ≤ 2.5 × min`** — guarantees each tier can always reach 200% under zoom
+   on modern browsers (WCAG 1.4.4). The widest tier (hero 32→48) is 1.5×, well
+   inside the cap.
+
+**Single source of truth:** the same eight tiers are mirrored as `TYPE_SCALE`
+(`as const`) in `src/lib/design-tokens/typography.ts`, and the three-way drift
+gate `tests/a11y/design-token-drift.test.ts` asserts DESIGN.md ↔ the plain
+`@theme` block ↔ the TS mirror all agree verbatim (and that no `--text-*` ever
+regresses into `@theme inline`). The clamp-shape invariants are pinned by
+`tests/visual/fluid-type-tokens.test.ts`.
+
+**Migration posture (additive, not big-bang):** this phase only *defines* the
+spine. Existing `text-sm` / `text-[14px]` and other raw usages are **untouched**
+here — surfaces are migrated onto the named tiers per-surface in phases 52/53, so
+the fluid scale lands incrementally with no app-wide visual churn in Phase 49.
+
+**Lint scope (DS-04, scoped — not yet app-wide):** the `no-raw-font-px` design
+lint *errors* only on the clean `src/lib/design-tokens/**` token surface today;
+across the broader `src/**` it is a non-blocking `warn`. The app surfaces ratchet
+to `error` one at a time in phases 52/53, so DS-04's raw-px rejection is currently
+a scoped backstop on the new token files, not an app-wide prohibition.
+
 ## Color
 - **Approach:** Restrained — 1 accent + 3 semantic (positive/negative/warning) + neutrals. Color is rare and meaningful; warning is reserved for transient recoverable states that the system will handle on its own.
 - **Accent:** #1B6B5A — muted institutional teal. Darker and more serious than the bright teal (#0D9488) that competitors use. Means "verified" and "action".
@@ -242,3 +294,4 @@ Reference: FactSet quarterly factsheet pages.
 | 2026-06-27 | DESIGN-04 superseded — DesktopGate retired, wizard reflows CSS-first (v1.3 Phase 46 / WIZARD-01) | The 2026-05-01 DESIGN-04 decision deferred mobile wizard support and shipped the 640px `DesktopGate.tsx` hard-block, gated on a PostHog `wizard_start device_type='mobile' > 0` trigger that the credential-gapped audit could never observe (posthog-js short-circuits in production). v1.3's mobile/adaptive milestone makes the whole app phone-usable, so the gate is now a funnel leak: a founder with a track-record CSV but no exchange key on a phone hit an email-capture wall instead of onboarding. Phase 46 deletes `DesktopGate.tsx` (+ its test), renders the `WizardClient` Suspense subtree directly, and reflows the stepper rail to single-column below 640px. The phone-usable wizard is proven by `e2e/reflow-sweep-authed.spec.ts` (`/strategies/new/wizard` @320px, no horizontal overflow). The DESIGN-04 trigger/audit machinery is obsolete (superseded, not pending). | 
 | 2026-05-06 | Tailwind v4 `--color-*` token convention enforced + `--radius-{sm,md,lg,xl}` declared in `@theme inline` | v0.21.1.0 EquityChart polish surfaced silent token drift: bare `var(--positive)` / `var(--text-muted)` / `var(--chart-strategy)` etc. resolve to `currentColor` / black under Tailwind v4 because `@theme inline` only emits `--color-*`-prefixed tokens. Four widgets (`EquityChart`, `KpiStripWidget`, `MandateSnapshotWidget`, `AllocationByStyleWidget`) had been silently rendering with wrong colors. All call sites moved to `var(--color-*)`; the rule now: any color CSS variable consumed in a component MUST use the `--color-*` prefix. Same audit found three widgets referencing `var(--radius-lg)` / `var(--radius-md)` against undeclared tokens (silent 0px corners); `--radius-{sm,md,lg,xl}` now declared in `@theme inline` per the existing Border-radius ladder (sm 4 / md 6 / lg 8 / xl 12). |
 | 2026-06-28 | Inline body-prose links carry a persistent underline (WCAG 1.4.1, v1.3 Phase 48 / A11Y-01) | The app-wide axe matrix (`e2e/axe-app-wide.spec.ts`) surfaced `link-in-text-block` (serious) on `/security`: six inline prose links inside paragraph copy (`text-accent underline-offset-4 hover:underline`) were distinguishable from surrounding text by COLOUR ALONE until hover — a WCAG 1.4.1 (Use of Color) failure, since the accent teal does not meet the 3:1 contrast-against-adjacent-text carve-out. The standard accessibility remedy is a persistent underline on inline prose links: those six links now use `text-accent underline underline-offset-4` (the `underline-offset-4` spacing is kept; only the hover-gating is dropped). SCOPE: this applies ONLY to links embedded in body prose. Nav links, button-styled links, card links, and heading/anchor links (which are distinguishable by position, shape, or a non-colour affordance) are unaffected and deliberately keep their existing hover/no-underline treatment. USER-APPROVED visual change (the only visual delta in Phase 48's a11y remediation). Enforced by the strict public axe rows in `axe-app-wide.spec.ts`. |
+| 2026-06-29 | Fluid `--text-*` type spine in a plain `@theme` block (v1.4 Phase 49 / DS-01·DS-02·DS-03) | The fixed px type scale is now also expressed as eight named fluid `clamp()` tokens (`--text-{hero,page-title,h2,h3,body,small,caption,micro}` → 32-48 / 24-32 / 20-24 / 16-18 / 14-16 / 13-14 / 12-13 / 10-11) so type scales smoothly small→ultra-wide without media-query snapping. **Plain `@theme`, not `@theme inline`:** a plain block keeps each `text-*` utility a live `var(--text-*)` so the browser re-evaluates the `clamp()` on zoom; `@theme inline` would bake the clamp literal and flatten the var chain, defeating zoom-safety (verified against `@tailwindcss/postcss` 4.3.1: `text-hero` emits `font-size: var(--text-hero)`, while `@theme inline` colors stay baked literals). **Two hard invariants:** every `clamp()` carries a `rem` middle term (a `vw`-only size never scales under zoom — WCAG 1.4.4 / W3C F94) and `max ≤ 2.5 × min` (guarantees 200%-zoom reach; the widest tier hero 32→48 is 1.5×). **Single source of truth:** the eight tiers are mirrored as `TYPE_SCALE as const` in `src/lib/design-tokens/typography.ts`; the three-way drift gate `tests/a11y/design-token-drift.test.ts` asserts DESIGN.md ↔ plain `@theme` ↔ TS agree verbatim and that no `--text-*` regresses into `@theme inline`; the clamp-shape invariants are pinned by `tests/visual/fluid-type-tokens.test.ts`. **Evolve in place:** fonts (Instrument Serif / DM Sans / Geist Mono), the `#1B6B5A` accent, the fixed 4px space ladder and `--space-grid-gap: 10px` are byte-unchanged. **Additive migration:** Phase 49 only defines the spine — existing `text-sm` / `text-[14px]` usages are untouched and migrated onto the named tiers per-surface in phases 52/53, so there is no app-wide visual churn here. |

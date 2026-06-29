@@ -56,6 +56,41 @@ const eslintConfig = defineConfig([
       // comparison; route through deriveSyncFreshness() (@/lib/sync-freshness) so
       // the 24h cutoff lives in one place (two-sync-time max/sort is still fine).
       "quantalyze/no-raw-staleness-derivation": "error",
+      // DS-04 (Phase 49) — fluid type spine guards. SCOPED, NOT big-bang: unlike
+      // the B-series rules above (clean baselines → repo-wide error), the raw-px
+      // baseline is DIRTY (recon: 558 `text-[NNpx]` + 355 hex sites across 54
+      // files). A repo-wide `error` here would red-CI the whole tree and force
+      // the deferred strangler migration (phases 52/53) into Phase 49. So:
+      //   - no-rem-less-clamp → repo-wide ERROR: recon proved a CLEAN baseline
+      //     (zero rem-less clamp STRINGS in TSX today; the numeric Math-style
+      //     clamp() helpers are call expressions the rule deliberately ignores),
+      //     so it fails CI by construction on a future zoom-unsafe clamp string.
+      //   - no-raw-font-px → repo-wide WARN here (dirty baseline stays visible
+      //     but non-blocking); hard ERROR only on the proven-clean
+      //     `src/lib/design-tokens/**` surface (override block below). The 52/53
+      //     strangler ratchets the remaining ~53/54 dirty surfaces to error one
+      //     at a time. Chart / designer-bundle ports are turned off by glob; a
+      //     one-off carries a greppable `DS-04 sanctioned-exception:` comment.
+      "quantalyze/no-rem-less-clamp": "error",
+      "quantalyze/no-raw-font-px": "warn",
+    },
+  },
+  // DS-04 hard gate on the proven-clean new token/primitive surface. The
+  // design-tokens dir has ZERO `text-[NNpx]` / `fontSize:'NNpx'` sites today
+  // (recon), so escalating it to `error` locks the clean surface without
+  // touching the dirty 53/54 the strangler migration owns.
+  {
+    files: ["src/lib/design-tokens/**"],
+    rules: { "quantalyze/no-raw-font-px": "error" },
+  },
+  // Context allow-list: Recharts axis colors / designer-bundle chart ports pin
+  // raw px sizes legitimately. Turn BOTH DS-04 rules off here (mirrors how
+  // no-raw-localstorage is off for src/lib/storage/**).
+  {
+    files: ["src/components/charts/**"],
+    rules: {
+      "quantalyze/no-raw-font-px": "off",
+      "quantalyze/no-rem-less-clamp": "off",
     },
   },
   // Directory exemptions: the canonical helpers' own homes legitimately contain
@@ -86,6 +121,10 @@ const eslintConfig = defineConfig([
       "quantalyze/no-raw-retry-after-parse": "off",
       "quantalyze/no-passthrough-on-ipc": "off",
       "quantalyze/no-raw-staleness-derivation": "off",
+      // DS-04: test fixtures deliberately author raw px / vw-only clamps to
+      // assert the rules fire — the rules guard PRODUCTION source, not tests.
+      "quantalyze/no-raw-font-px": "off",
+      "quantalyze/no-rem-less-clamp": "off",
     },
   },
 ]);
