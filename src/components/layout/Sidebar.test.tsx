@@ -349,3 +349,77 @@ describe("Sidebar Discovery sub-groups", () => {
     expect(screen.queryByText("TradFi Decks")).toBeNull();
   });
 });
+
+/**
+ * Phase 51 NAV-02 / UI-SPEC §Item state contract — the desktop NavItemLink a11y
+ * gaps.
+ *
+ * The module-scope usePathname mock returns "/allocations", so the
+ * "My Allocation" entry (href "/allocations") is the ACTIVE item in every
+ * render below.
+ *
+ * RED CONTRACT (plan 51-01): today's NavItemLink (Sidebar.tsx L301-334) has NO
+ * `aria-current` and NO focus-visible affordance on its <Link>. These two
+ * assertions FAIL now; plan 51-03 mirrors MobileNav.tsx's
+ * `aria-current={active ? "page" : undefined}` + focus-visible ring (accent on
+ * the dark rail) onto NavItemLink, turning them GREEN. The active rule stays
+ * `pathname === href || pathname.startsWith(href + "/")` — the SSR-safe
+ * pathname-prefix match; no query-param hook / CSR-bailout is introduced.
+ */
+describe("Sidebar NavItemLink a11y (NAV-02, RED until 51-03)", () => {
+  it("marks the ACTIVE nav link with aria-current=page", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    // usePathname() === "/allocations" → My Allocation is active.
+    const active = screen.getByText("My Allocation").closest("a");
+    expect(active).toHaveAttribute("aria-current", "page");
+  });
+
+  it("gives the nav link a focus-visible ring/outline in the accent token", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    const link = screen.getByText("My Allocation").closest("a");
+    expect(link).not.toBeNull();
+    const className = link?.getAttribute("class") ?? "";
+    // Keyboard-only focus affordance via focus-visible (never bare focus:), in
+    // the accent token — mirrors MobileNav.tsx
+    // (focus-visible:outline-2 outline-accent). Accept the ring or outline form
+    // but require the focus-visible keyword AND the accent token.
+    expect(className).toMatch(/focus-visible:/);
+    expect(className).toMatch(/accent/);
+  });
+});
+
+/**
+ * T-45-01 (info-disclosure) — the role OR-logic PIN. This block locks the
+ * existing-correct behavior so any 51-03 nav-completeness edit that leaks an
+ * allocator-only surface to a manager (or vice-versa) turns this red.
+ *
+ * GREEN NOW (it pins live-correct behavior, NOT a future implementation): the
+ * `showsAllocatorWorkspace = isAllocator || isAdmin` /
+ * `showsManagerWorkspace = isManager || isAdmin` derivations in
+ * buildNavSections (Sidebar.tsx L34-35) already gate "My Allocation" (allocator
+ * surface) vs "Strategies"/"Portfolios" (manager surface) correctly. The mobile
+ * twin (buildPrimaryMobileNav) is already pinned by MobileNav.test.tsx; this is
+ * the DESKTOP-render pin for the same security property.
+ */
+describe("Sidebar role OR-logic pin — T-45-01 (GREEN, must not regress)", () => {
+  it("a manager-only user does NOT see the allocator-only 'My Allocation' entry", () => {
+    render(
+      <Sidebar populatedSlugs={[]} isManager={true} isAllocator={false} />,
+    );
+    // Manager surface present...
+    expect(screen.getByText("Strategies")).toBeInTheDocument();
+    expect(screen.getByText("Portfolios")).toBeInTheDocument();
+    // ...but the allocator-only workspace entry must NOT leak to a manager.
+    expect(screen.queryByText("My Allocation")).toBeNull();
+  });
+
+  it("an allocator DOES see 'My Allocation' but NOT the manager-only entries", () => {
+    render(
+      <Sidebar populatedSlugs={[]} isAllocator={true} isManager={false} />,
+    );
+    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    // The manager surface must NOT leak to a pure allocator.
+    expect(screen.queryByText("Strategies")).toBeNull();
+    expect(screen.queryByText("Portfolios")).toBeNull();
+  });
+});
