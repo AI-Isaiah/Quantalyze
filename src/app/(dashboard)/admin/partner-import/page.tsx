@@ -87,7 +87,13 @@ export default function PartnerImportPage() {
   );
 
   return (
-    <>
+    // RT-W2 (Phase 54 / VERIFY-05): the /admin tree fluid-fills to ~1920px via
+    // DashboardChrome's `isWide` allow-list — correct for the data tables, but
+    // this prose/form page stretches inputs to ~1856px on ultra-wide. Cap the
+    // content at the DESIGN.md "Max content width (main content area)" measure
+    // (1100px) WITHOUT touching the shell regex (CONTEXT-locked: admin mixes
+    // prose + data under one prefix, so a per-page cap is the surgical fix).
+    <div className="mx-auto max-w-[1100px]">
       <PageHeader
         title="Partner pilot import"
         description="Paste 2 CSVs (managers + allocators) to spin up a white-label pilot in seconds."
@@ -220,6 +226,6 @@ export default function PartnerImportPage() {
           </p>
         </div>
       </form>
-    </>
+    </div>
   );
 }

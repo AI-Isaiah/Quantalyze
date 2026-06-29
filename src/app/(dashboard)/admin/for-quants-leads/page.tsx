@@ -26,7 +26,11 @@ export default async function ForQuantsLeadsPage({
   const { rows, hitCap, error } = await listForQuantsLeads({ showAll });
 
   return (
-    <>
+    // RT-W2 (Phase 54 / VERIFY-05): cap this prose admin view at the DESIGN.md
+    // "Max content width (main content area)" measure (1100px) so it doesn't
+    // fluid-fill to ~1920px via DashboardChrome's `isWide` allow-list. Data
+    // tables keep the wide measure; the shell regex is CONTEXT-locked.
+    <div className="mx-auto max-w-[1100px]">
       <PageHeader
         title="Request-a-Call leads"
         description="Public /for-quants submissions. Mark as processed once you've reached out."
@@ -51,6 +55,6 @@ export default async function ForQuantsLeadsPage({
         hitCap={hitCap}
         fullViewCap={FOR_QUANTS_LEADS_FULL_VIEW_CAP}
       />
-    </>
+    </div>
   );
 }
