@@ -511,7 +511,7 @@ export function KpiStrip({
             key={label}
             className="rounded-lg border border-border bg-surface p-4"
           >
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+            <div className="text-micro font-semibold uppercase tracking-wider text-text-muted">
               {label}
             </div>
             {/* DESIGN.md: numeric data uses Geist Mono (font-mono) +

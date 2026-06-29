@@ -261,7 +261,7 @@ function StrategyRowsTable({ rows }: { rows: StrategyRow[] }) {
         <ResponsiveTable label="Strategies">
         <table className="w-full text-sm" data-table="strategies">
           <thead>
-            <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-muted">
+            <tr className="border-b border-border text-left text-micro uppercase tracking-wider text-text-muted">
               <StrategySortableHeader label="Strategy" sortKey="strategy" sort={sort} onSort={toggleSort} />
               <StrategySortableHeader label="Manager" sortKey="manager" sort={sort} onSort={toggleSort} />
               <StrategySortableHeader label="Weight" sortKey="weight" sort={sort} onSort={toggleSort} align="right" />
@@ -402,7 +402,7 @@ function LegacyHoldingsTable({
         <ResponsiveTable label="Holdings">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-muted">
+            <tr className="border-b border-border text-left text-micro uppercase tracking-wider text-text-muted">
               <th className="px-4 py-2 font-semibold">Venue / Symbol</th>
               <th className="px-4 py-2 font-semibold">Type</th>
               <th className="px-4 py-2 text-right font-semibold">Quantity</th>
@@ -440,7 +440,7 @@ function LegacyHoldingsTable({
                         </span>
                         {isRevoked ? (
                           <span
-                            className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider"
+                            className="inline-flex items-center rounded px-1.5 py-0.5 text-micro font-semibold uppercase tracking-wider"
                             style={AMBER_CHIP_STYLE}
                           >
                             Key revoked
@@ -625,7 +625,7 @@ function DesignHoldingsTable({
         <ResponsiveTable label="Holdings">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-muted">
+            <tr className="border-b border-border text-left text-micro uppercase tracking-wider text-text-muted">
               <th className="w-3 px-2 py-2" aria-label="Status" />
               <SortableHeader
                 label="Strategy"
@@ -710,7 +710,7 @@ function DesignHoldingsTable({
                         </span>
                         {isRevoked ? (
                           <span
-                            className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider"
+                            className="inline-flex items-center rounded px-1.5 py-0.5 text-micro font-semibold uppercase tracking-wider"
                             style={AMBER_CHIP_STYLE}
                           >
                             Key revoked
@@ -723,7 +723,7 @@ function DesignHoldingsTable({
                               e.stopPropagation();
                               setExpandedRowId(row.id);
                             }}
-                            className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-accent hover:bg-accent/20"
+                            className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-micro font-semibold uppercase tracking-wider text-accent hover:bg-accent/20"
                           >
                             Review
                           </button>
@@ -858,7 +858,7 @@ function SortableHeader({
       <button
         type="button"
         onClick={() => onSort(sortKey)}
-        className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-text-muted hover:text-text-primary"
+        className="inline-flex items-center gap-1 text-micro uppercase tracking-wider text-text-muted hover:text-text-primary"
       >
         {label}
         {arrow ? <span aria-hidden="true">{arrow}</span> : null}

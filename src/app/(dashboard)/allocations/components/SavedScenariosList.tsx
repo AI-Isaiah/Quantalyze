@@ -526,7 +526,11 @@ export function SavedScenariosList({
                       </div>
                     ) : (
                       <span className="flex flex-col min-w-0">
-                        <span className="truncate text-sm text-text-primary">
+                        {/* TYPE-02 (truncation-audit SavedScenariosList:529) —
+                            the user-named scenario is a list row (not tabular),
+                            so wrap it (`break-words`) instead of single-line
+                            clipping; the parent carries `min-w-0`. */}
+                        <span className="break-words text-sm text-text-primary">
                           {row.name}
                         </span>
                         <span className="text-xs text-text-muted">

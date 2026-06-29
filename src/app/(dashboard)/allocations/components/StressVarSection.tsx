@@ -235,7 +235,7 @@ export function StressVarSection({
           SAME VAR_CONFIDENCE constant the lib computes the quantile at, so the
           displayed "%" can never drift from the actual computation (WR-02).
           Never a bare VaR. */}
-      <p className="mt-2 text-[11px] text-text-muted">
+      <p className="mt-2 text-micro text-text-muted">
         {methodologyLine(result.varN)} {VAR_CONFIDENCE_LABEL} confidence.
       </p>
       {/* β-shock disclosure — names the BTC inner-join N (betaN) + the shock
@@ -246,18 +246,18 @@ export function StressVarSection({
           honest note that the BTC overlap was insufficient. */}
       {impactShown ? (
         twoNs ? (
-          <p className="mt-1 text-[11px] text-text-muted">
+          <p className="mt-1 text-micro text-text-muted">
             {methodologyLine(result.betaN)} Single-factor (BTC), linear β
             propagation, point-in-time.
           </p>
         ) : (
-          <p className="mt-1 text-[11px] text-text-muted">
+          <p className="mt-1 text-micro text-text-muted">
             Single-factor (BTC), linear β propagation over {result.betaN}{" "}
             overlapping days, point-in-time — not a forecast.
           </p>
         )
       ) : (
-        <p className="mt-1 text-[11px] text-text-muted">
+        <p className="mt-1 text-micro text-text-muted">
           BTC overlap too short to project a shock.
         </p>
       )}
