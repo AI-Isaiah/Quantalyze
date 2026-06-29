@@ -88,7 +88,7 @@ export function EndOfYearBarsPanel() {
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           {hasBench ? `End-of-Year Returns vs ${cmp.shortName}` : "End-of-Year Returns"}
         </h3>
-        <p className="text-[11px] text-text-muted">
+        <p className="text-micro text-text-muted">
           compounded annual returns · scale ±{(maxAbs * 100).toFixed(0)}%
           {hasBench ? ` · strategy in accent, ${cmp.shortName} in muted` : ""}
         </p>
@@ -232,7 +232,7 @@ export function QuantileBoxPlotPanel() {
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Daily-Return Quantile Box
         </h3>
-        <p className="text-[11px] text-text-muted">
+        <p className="text-micro text-text-muted">
           5-number summary · whiskers at min/max · box P25–P75 · median accent line
         </p>
       </header>
@@ -299,7 +299,7 @@ export function QuantileBoxPlotPanel() {
           </g>
         ))}
       </ResponsiveChartFrame>
-      <div className="grid grid-cols-5 gap-3 text-[11px] tabular-nums font-mono mt-1">
+      <div className="grid grid-cols-5 gap-3 text-micro tabular-nums font-mono mt-1">
         <Kpi label="P5" value={pctSigned(q.p05)} tone="muted" />
         <Kpi label="P25" value={pctSigned(q.p25)} tone="muted" />
         <Kpi label="Median" value={pctSigned(q.p50)} tone="accent" />
@@ -313,9 +313,9 @@ export function QuantileBoxPlotPanel() {
 function Kpi({ label, value, tone }: { label: string; value: string; tone: "muted" | "accent" }) {
   return (
     <div>
-      <p className="text-[9px] uppercase tracking-[0.18em] text-text-muted">{label}</p>
+      <p className="text-micro uppercase tracking-[0.18em] text-text-muted">{label}</p>
       <p
-        className="text-[13px]"
+        className="text-small"
         style={{ color: tone === "accent" ? "var(--color-accent)" : "var(--color-text-primary)", fontWeight: 600 }}
       >
         {value}
@@ -352,7 +352,7 @@ export function CorrelationStripPanel() {
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Cross-Asset Correlation
         </h3>
-        <p className="text-[11px] text-text-muted">
+        <p className="text-micro text-text-muted">
           Pearson ρ on aligned daily returns · ρ near 0 implies diversification benefit
         </p>
       </header>
@@ -420,7 +420,7 @@ export function CorrelationStripPanel() {
           );
         })}
       </ResponsiveChartFrame>
-      <p className="text-[10px] italic text-text-muted">
+      <p className="text-micro italic text-text-muted">
         ρ measured against the strategy&apos;s observation dates with each benchmark forward-filled to the same calendar.
       </p>
     </figure>
@@ -467,7 +467,7 @@ export function CorrelationsMatrixPanel() {
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Returns Correlations
         </h3>
-        <p className="text-[11px] text-text-muted">
+        <p className="text-micro text-text-muted">
           Pearson ρ on aligned daily returns · diagonal = 1.00 · pairwise off-diagonal
         </p>
       </header>
