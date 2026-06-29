@@ -14,7 +14,13 @@ import { createServerClient } from "@supabase/ssr";
 // would be bounced to the dashboard mid-reset. /forgot-password is NOT
 // bounce-exempt: an already-authed user landing there bounces to the dashboard,
 // matching /login + /signup.
-const PUBLIC_ROUTES = ["/login", "/signup", "/forgot-password", "/reset-password", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/scenario-share", "/api/benchmark/btc", "/legal", "/demo", "/api/demo", "/for-quants", "/api/for-quants-lead", "/security"];
+const PUBLIC_ROUTES = ["/login", "/signup", "/forgot-password", "/reset-password", "/api/health", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/scenario-share", "/api/benchmark/btc", "/legal", "/demo", "/api/demo", "/for-quants", "/api/for-quants-lead", "/security"];
+// 51-REVIEW (red-team): /api/health is a documented public liveness probe, but
+// it was NOT in PUBLIC_ROUTES — the proxy session gate runs BEFORE the route
+// handler, so an unauthenticated uptime/ops probe got 307→login instead of
+// {ok:true}. The prior manifest note ("returns before the session gate matters")
+// was inaccurate. getSession() is cookie-only (no network), so listing it here
+// keeps the probe independent of any auth backend.
 const ADMIN_ROUTES = ["/admin", "/api/admin"];
 const DEFAULT_AUTHENTICATED_ROUTE = "/discovery/crypto-sma";
 

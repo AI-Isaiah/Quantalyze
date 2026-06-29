@@ -239,6 +239,10 @@ describe("proxy public-route gating (anonymous session)", () => {
       "/browse/crypto-sma",
       "/factsheet/abc-123",
       "/api/factsheet/abc-123/pdf",
+      // 51-REVIEW (red-team): /api/health is a public liveness probe — an anon
+      // uptime/ops probe must get {ok:true}, not 307→login (the proxy gate runs
+      // before the route handler).
+      "/api/health",
       "/portfolio-pdf",
       // SHARE-02/03 (v0.26.0.0 follow-up): the public recipient page AND its
       // server-side BTC benchmark fetch (page.tsx fetches /api/benchmark/btc

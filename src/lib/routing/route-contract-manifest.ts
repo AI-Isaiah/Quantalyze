@@ -401,7 +401,7 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
     route: "/api/health",
     class: "exception",
     notes:
-      "EXCEPTION: unauthenticated GET health probe (route.ts, not a page). Reachable anonymously but deliberately NOT in PUBLIC_ROUTES (returns before the session gate matters). Skipped from the Rule-4 page-existence check. 51-RESEARCH L139.",
+      "EXCEPTION (route.ts handler, no page.tsx — so Rule 4 page-existence is skipped). It IS now in PUBLIC_ROUTES (proxy.ts): 51-REVIEW corrected the prior FALSE note ('returns before the session gate matters') — the proxy session gate runs BEFORE the route handler, so an anon liveness/ops probe was 307→login until /api/health was added to PUBLIC_ROUTES. The anon-reachable behavior is pinned by proxy.test (api routes are governed by PUBLIC_ROUTES + proxy.test, not the page-walk guard).",
   },
   {
     route: "/auth/callback",
