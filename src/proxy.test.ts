@@ -227,6 +227,13 @@ describe("proxy public-route gating (anonymous session)", () => {
       // don't silently drop one.
       "/login",
       "/signup",
+      // 51-REVIEW (#512 fix): an anon user clicking "Forgot password?" on the
+      // login page MUST reach /forgot-password, not 307→login (the dead loop
+      // that left password reset unreachable for logged-out users).
+      // /reset-password is public so a bare anon hit renders the "request a new
+      // link" affordance instead of bouncing.
+      "/forgot-password",
+      "/reset-password",
       "/legal/disclaimer",
       "/browse",
       "/browse/crypto-sma",
@@ -355,6 +362,12 @@ describe("proxy public-route gating (anonymous session)", () => {
       "/scenario-share/abc-token-123",
       "/legal",
       "/legal/privacy",
+      // 51-REVIEW: /reset-password is bounce-exempt — it is reached WITH a
+      // recovery session (minted by /auth/callback from the email token), so an
+      // authed user there must STAY to set the new password, not bounce to the
+      // dashboard. (/forgot-password is NOT exempt — see the dedicated test
+      // below — so an authed user there bounces away, matching /login.)
+      "/reset-password",
     ])(
       "%s with session does NOT redirect to dashboard",
       async (path) => {
@@ -383,6 +396,22 @@ describe("proxy public-route gating (anonymous session)", () => {
       const location = res.headers.get("location");
       expect(location).not.toBeNull();
       // Default authenticated route per src/proxy.ts.
+      expect(new URL(location!).pathname).toBe("/discovery/crypto-sma");
+    });
+
+    it("authenticated user on /forgot-password DOES redirect away (not bounce-exempt)", async () => {
+      // 51-REVIEW: /forgot-password is public (anon must reach it) but NOT
+      // bounce-exempt — an already-authed user there has no reason to request a
+      // password reset, so they bounce to the dashboard exactly like /login and
+      // /signup. (/reset-password IS exempt — pinned in the it.each above — so
+      // the authed-recovery flow is not broken by this.)
+      const req = new NextRequest(`https://example.com/forgot-password`, {
+        method: "GET",
+      });
+      const res = await proxy(req);
+      expect(res.status).toBe(307);
+      const location = res.headers.get("location");
+      expect(location).not.toBeNull();
       expect(new URL(location!).pathname).toBe("/discovery/crypto-sma");
     });
   });

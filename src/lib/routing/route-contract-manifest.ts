@@ -411,14 +411,14 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
   },
   {
     route: "/forgot-password",
-    class: "exception",
+    class: "public",
     notes:
-      "EXCEPTION: password-recovery entry page ((auth) group). NOT a PUBLIC_ROUTES member — see deferred-items.md: an anon visitor currently 307→login here (latent; a PUBLIC_ROUTES edit is a proxy behavior change scoped out of 51-02). Classified exception so the guard reflects proxy reality without silently blessing a wrong 'public' class.",
+      "PUBLIC: password-recovery entry page ((auth) group). Anon users reach it via the 'Forgot password?' link on the login page (LoginForm), so it MUST be in PUBLIC_ROUTES — a 51-REVIEW fix for the #512 dead loop where it previously 307→login'd a logged-out user (password reset was unreachable). Rule 2 now enforces the lockstep; an authed user there bounces to the dashboard (NOT bounce-exempt, matching /login + /signup).",
   },
   {
     route: "/reset-password",
-    class: "exception",
+    class: "public",
     notes:
-      "EXCEPTION: password-set page ((auth) group). Reached WITH a recovery session (the email links to /auth/callback?next=/reset-password, which mints the session), so it passes the proxy gate WITHOUT being in PUBLIC_ROUTES. Classified exception, not public.",
+      "PUBLIC: password-set page ((auth) group). Normally reached WITH a recovery session (/auth/callback mints it from the email token), but listed in PUBLIC_ROUTES so a bare anon hit renders the 'request a new link' affordance instead of 307→login. It IS in proxy isAuthBounceExempt so the authed-recovery user STAYS to set the new password rather than bouncing to the dashboard (51-REVIEW).",
   },
 ];

@@ -4,7 +4,17 @@ import { createServerClient } from "@supabase/ssr";
 // the proxy gate (see admin-route block below). Page-level `isAdminUser` is
 // the authoritative check.
 
-const PUBLIC_ROUTES = ["/login", "/signup", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/scenario-share", "/api/benchmark/btc", "/legal", "/demo", "/api/demo", "/for-quants", "/api/for-quants-lead", "/security"];
+// Phase 51 (NAV-03 / route-contract): /forgot-password + /reset-password are
+// genuinely public auth routes. An anon user clicks "Forgot password?" on the
+// login page (LoginForm) → must reach /forgot-password without a 307→login
+// bounce (the #512 class — a self-referential dead loop that left password
+// reset unreachable for logged-out users). /reset-password is reached WITH a
+// recovery session (minted by /auth/callback from the email token), so it is
+// also listed in isAuthBounceExempt below — otherwise the authed-recovery user
+// would be bounced to the dashboard mid-reset. /forgot-password is NOT
+// bounce-exempt: an already-authed user landing there bounces to the dashboard,
+// matching /login + /signup.
+const PUBLIC_ROUTES = ["/login", "/signup", "/forgot-password", "/reset-password", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/scenario-share", "/api/benchmark/btc", "/legal", "/demo", "/api/demo", "/for-quants", "/api/for-quants-lead", "/security"];
 const ADMIN_ROUTES = ["/admin", "/api/admin"];
 const DEFAULT_AUTHENTICATED_ROUTE = "/discovery/crypto-sma";
 
@@ -99,6 +109,14 @@ export async function proxy(request: NextRequest) {
   const isLegalRoute = path === "/legal" || path.startsWith("/legal/");
   const isScenarioShareRoute =
     path === "/scenario-share" || path.startsWith("/scenario-share/");
+  // /reset-password is public (anon can render the "request a new link"
+  // affordance) BUT is reached in the normal flow WITH a recovery session that
+  // /auth/callback mints from the email token — so an authed user there must
+  // STAY to set their new password, not bounce to the dashboard. /forgot-password
+  // is deliberately NOT exempt: an already-authed user there bounces to the
+  // dashboard, matching /login + /signup.
+  const isResetPasswordRoute =
+    path === "/reset-password" || path.startsWith("/reset-password/");
   const isAuthBounceExempt =
     isDemoRoute ||
     isForQuantsRoute ||
@@ -108,7 +126,8 @@ export async function proxy(request: NextRequest) {
     isBrowseRoute ||
     isPortfolioPdfRoute ||
     isLegalRoute ||
-    isScenarioShareRoute;
+    isScenarioShareRoute ||
+    isResetPasswordRoute;
   if (session && isPublicRoute && !isApiRoute && !isAuthBounceExempt) {
     const redirect = request.nextUrl.searchParams.get("redirect");
     const safePath = redirect && /^\/[a-z]/.test(redirect) ? redirect : DEFAULT_AUTHENTICATED_ROUTE;
