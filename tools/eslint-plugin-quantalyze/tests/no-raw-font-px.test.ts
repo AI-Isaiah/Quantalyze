@@ -18,6 +18,10 @@ ruleTester.run("no-raw-font-px", rule, {
     { code: 'const cls = "text-hero text-page-title text-micro";' },
     // A non-font arbitrary value is not a font-size.
     { code: 'const cls = "w-[14px] gap-[8px]";' },
+    // A rem font-size IS the zoom-safe shape this rule steers toward.
+    { code: 'const cls = "text-[0.875rem]";' },
+    // line-height in arbitrary px is not a font-size (matches `leading-`, not `text-`).
+    { code: 'const cls = "leading-[14px]";' },
     // A px value in pure arithmetic / a non-style string is not a font-size.
     { code: "const margin = 14;" },
     { code: 'const label = "13px label";' },
@@ -32,6 +36,21 @@ ruleTester.run("no-raw-font-px", rule, {
     // Arbitrary px font-size in a className string.
     {
       code: 'const cls = "text-[14px] text-secondary";',
+      errors: [{ messageId: "raw" }],
+    },
+    // Decimal px must still be caught (the rule is ERROR on design-tokens/**).
+    {
+      code: 'const cls = "text-[14.5px]";',
+      errors: [{ messageId: "raw" }],
+    },
+    // Uppercase PX is the same regression in disguise.
+    {
+      code: 'const cls = "text-[16PX]";',
+      errors: [{ messageId: "raw" }],
+    },
+    // Decimal px in an inline style object.
+    {
+      code: "const style = { fontSize: '14.5px' };",
       errors: [{ messageId: "raw" }],
     },
     // Arbitrary px font-size in a template literal chunk.

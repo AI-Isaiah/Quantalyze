@@ -51,6 +51,11 @@ ruleTester.run("no-rem-less-clamp", rule, {
       code: "const style = { width: 'clamp(2rem, 3vw, 4rem)' };",
       errors: [{ messageId: "raw" }],
     },
+    // vh is equally zoom-unsafe as vw — the viewport, not the text, drives it.
+    {
+      code: "const style = { fontSize: 'clamp(2rem, 3vh, 4rem)' };",
+      errors: [{ messageId: "raw" }],
+    },
     // Same shape inside a template-literal chunk.
     {
       code: "const css = `width: clamp(1px, 4vw, 5px)`;",

@@ -37,8 +37,11 @@ import { fileHasMarker } from "./_shared.mjs";
 // A length carrying rem/em (the zoom-safe anchor). `\d` guards against matching
 // e.g. a stray "rem" in prose; CSS lengths are number+unit.
 const REM_EM = /\d(?:\.\d+)?(?:rem|em)\b/;
-// A viewport unit in the preferred term (the zoom-unsafe driver).
-const VW_UNIT = /\d(?:\.\d+)?vw\b/;
+// A viewport unit in the preferred term (the zoom-unsafe driver). All of
+// vw/vh/vmin/vmax track the viewport, not text-zoom, so a `3vh` preferred term
+// is equally F94-unsafe as `3vw`. Deliberately NOT cqw: container-query units
+// are an intentional, separately-scoped pattern, not a zoom-safety regression.
+const VW_UNIT = /\d(?:\.\d+)?v(?:w|h|min|max)\b/;
 
 const MESSAGE =
   "rem-less clamp(): the preferred (middle) term must include a rem/em component " +

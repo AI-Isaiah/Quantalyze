@@ -34,8 +34,12 @@
  */
 import { fileHasMarker } from "./_shared.mjs";
 
-const FONT_PX = /\btext-\[\d+px\]/; // text-[14px]
-const PX_VALUE = /^\d+px$/; // the string value of a fontSize: '14px' property
+// `\d+(?:\.\d+)?` catches decimal px (`text-[14.5px]`); the `i` flag catches
+// uppercase (`text-[16PX]`, `fontSize: '14.5PX'`). The rule is ERROR on the
+// clean `src/lib/design-tokens/**` surface, so a missed decimal/uppercase form
+// is a silent escape, not a cosmetic gap.
+const FONT_PX = /\btext-\[\d+(?:\.\d+)?px\]/i; // text-[14px] / text-[14.5px] / text-[16PX]
+const PX_VALUE = /^\d+(?:\.\d+)?px$/i; // the string value of a fontSize: '14px' property
 
 const MESSAGE =
   "Raw px font-size. Use a fluid --text-* token (text-hero / text-page-title / " +
