@@ -28,7 +28,17 @@ const HTML_PATH = resolve(
   "scripts",
   "build-security-packet.html",
 );
-const PAGE_PATH = resolve(process.cwd(), "src", "app", "security", "page.tsx");
+// Phase 51 (NAV-04): /security moved into the (marketing) route group
+// (folder-only — the URL stays /security). The page source path picks up the
+// (marketing) segment; the route itself is unchanged.
+const PAGE_PATH = resolve(
+  process.cwd(),
+  "src",
+  "app",
+  "(marketing)",
+  "security",
+  "page.tsx",
+);
 
 /**
  * Extract the first ISO `YYYY-MM-DD` date that follows a "Last reviewed"
@@ -59,14 +69,14 @@ function extractLastReviewedDate(source: string, label: string): string {
 }
 
 describe("security packet ↔ /security page date parity (M-0943)", () => {
-  it("the 'Last reviewed' date in build-security-packet.html matches src/app/security/page.tsx", () => {
+  it("the 'Last reviewed' date in build-security-packet.html matches src/app/(marketing)/security/page.tsx", () => {
     const htmlDate = extractLastReviewedDate(
       readFileSync(HTML_PATH, "utf8"),
       "build-security-packet.html",
     );
     const pageDate = extractLastReviewedDate(
       readFileSync(PAGE_PATH, "utf8"),
-      "src/app/security/page.tsx",
+      "src/app/(marketing)/security/page.tsx",
     );
 
     // Sanity: both are well-formed ISO dates (the extractor already enforces

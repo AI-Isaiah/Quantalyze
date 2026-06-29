@@ -367,7 +367,9 @@ const DEMO_REFERENCE_ALLOWLIST = [
 ];
 
 const DEMO_ROUTE_PREFIXES = [
-  "src/app/demo/",
+  // Phase 51 (NAV-04): the /demo PAGE route moved into the (marketing) route
+  // group (folder-only — the URL stays /demo). The api/demo routes did NOT move.
+  "src/app/(marketing)/demo/",
   "src/app/api/demo/",
 ];
 
