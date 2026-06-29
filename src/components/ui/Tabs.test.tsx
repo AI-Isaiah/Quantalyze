@@ -16,13 +16,20 @@
  *      all 3 consumers): ArrowRight moves selection to the next trigger;
  *      Home/End jump to the first/last trigger.
  *
- * Query/keyboard pattern borrowed from WatchlistTabs.test.tsx (role/aria/
- * tabIndex + fireEvent.keyDown + document.activeElement) and the RTL render
- * convention from CardShell.test.tsx.
+ * Driver (Option A — orchestrator-authorized): Radix Tabs activates on real
+ * pointerdown/focus + a roving tabindex that does NOT settle synchronously under
+ * bare `fireEvent` in jsdom, so the activation/keyboard assertions are driven with
+ * `@testing-library/user-event` (`user.click` / `user.keyboard`), which dispatches
+ * the full pointer + key event sequence Radix listens for. The pointer-capture and
+ * `scrollIntoView` jsdom shims live in `src/test-setup.ts`. The two structural
+ * asserts (role anatomy + the initial single-`aria-selected` snapshot) need no
+ * driver and stay as plain render assertions. The keyboard INTENT is unchanged —
+ * real ArrowRight/Home/End roving-focus a11y is exercised, not softened.
  */
 
 import { describe, it, expect } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./Tabs";
 
 function renderTwoTab() {
@@ -55,41 +62,58 @@ describe("<Tabs> (Radix-backed primitive)", () => {
     expect(two.getAttribute("aria-selected")).toBe("false");
   });
 
-  it("clicking the second trigger flips aria-selected to it", () => {
+  it("clicking the second trigger flips aria-selected to it", async () => {
+    const user = userEvent.setup();
     renderTwoTab();
     const one = screen.getByRole("tab", { name: "One" });
     const two = screen.getByRole("tab", { name: "Two" });
-    fireEvent.click(two);
+    await user.click(two);
     expect(two.getAttribute("aria-selected")).toBe("true");
     expect(one.getAttribute("aria-selected")).toBe("false");
   });
 
-  it("roving tabindex: active trigger is tabIndex=0, inactive is tabIndex=-1", () => {
+  it("roving tabindex: the active trigger is tabIndex=0, inactive is tabIndex=-1", async () => {
+    const user = userEvent.setup();
     renderTwoTab();
     const one = screen.getByRole("tab", { name: "One" });
     const two = screen.getByRole("tab", { name: "Two" });
+    // The roving-tabindex contract: exactly the active trigger is reachable by
+    // Tab (tabIndex=0); the rest are -1 and reached via the arrow keys. Drive a
+    // real focus into the tablist (user-event) so Radix's roving state settles,
+    // then assert the 0/-1 split follows the active trigger.
+    await user.tab();
+    expect(one).toHaveFocus();
     expect(one.getAttribute("tabindex")).toBe("0");
     expect(two.getAttribute("tabindex")).toBe("-1");
+    // After ArrowRight activation the roving 0/-1 split moves to the new active
+    // trigger — the inactive one becomes unreachable by Tab.
+    await user.keyboard("{ArrowRight}");
+    expect(two.getAttribute("tabindex")).toBe("0");
+    expect(one.getAttribute("tabindex")).toBe("-1");
   });
 
-  it("ArrowRight moves selection to the next trigger (automatic activation)", () => {
+  it("ArrowRight moves selection to the next trigger (automatic activation)", async () => {
+    const user = userEvent.setup();
     renderTwoTab();
     const one = screen.getByRole("tab", { name: "One" });
     const two = screen.getByRole("tab", { name: "Two" });
     one.focus();
-    fireEvent.keyDown(one, { key: "ArrowRight" });
-    expect(document.activeElement).toBe(two);
+    await user.keyboard("{ArrowRight}");
+    expect(two).toHaveFocus();
+    // activationMode="automatic": arrow-key focus also flips selection.
     expect(two.getAttribute("aria-selected")).toBe("true");
+    expect(one.getAttribute("aria-selected")).toBe("false");
   });
 
-  it("Home jumps to the first trigger and End jumps to the last", () => {
+  it("Home jumps to the first trigger and End jumps to the last", async () => {
+    const user = userEvent.setup();
     renderTwoTab();
     const one = screen.getByRole("tab", { name: "One" });
     const two = screen.getByRole("tab", { name: "Two" });
     one.focus();
-    fireEvent.keyDown(one, { key: "End" });
-    expect(document.activeElement).toBe(two);
-    fireEvent.keyDown(two, { key: "Home" });
-    expect(document.activeElement).toBe(one);
+    await user.keyboard("{End}");
+    expect(two).toHaveFocus();
+    await user.keyboard("{Home}");
+    expect(one).toHaveFocus();
   });
 });
