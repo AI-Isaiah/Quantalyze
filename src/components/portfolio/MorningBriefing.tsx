@@ -29,6 +29,7 @@ export function MorningBriefing({
   if (variant === "dek") {
     return (
       <p
+        title={narrative}
         className={cn(
           "max-w-3xl text-sm sm:text-base text-text-secondary leading-relaxed line-clamp-3",
           className,

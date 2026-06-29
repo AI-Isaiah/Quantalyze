@@ -75,9 +75,11 @@ function SuggestionRow({
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface p-4 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold text-text-primary truncate">
+        <p className="text-sm font-semibold text-text-primary break-words min-w-0">
           {suggestion.strategy_name}
         </p>
+        {/* Raw strategy_id is a legitimate single-line clip (not meaningful
+            prose to recover) — audit :81 classified legitimate, left as-is. */}
         <p className="mt-0.5 font-mono text-[11px] text-text-muted truncate">
           {suggestion.strategy_id}
         </p>

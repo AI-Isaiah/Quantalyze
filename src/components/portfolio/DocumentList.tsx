@@ -65,7 +65,7 @@ export function DocumentList({ documents }: DocumentListProps) {
               {grouped[type].map((doc) => (
                 <li key={doc.id} className="flex items-center justify-between py-3 first:pt-1 last:pb-1">
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-text-primary truncate">{doc.title}</p>
+                    <p className="text-sm font-medium text-text-primary truncate" title={doc.title}>{doc.title}</p>
                     <p className="text-xs text-text-muted mt-0.5">{formatDate(doc.created_at)}</p>
                   </div>
                   <div className="flex items-center gap-3 ml-4">
