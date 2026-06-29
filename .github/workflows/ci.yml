@@ -1472,8 +1472,15 @@ jobs:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
-      - name: Upload Lighthouse reports on failure
-        if: failure()
+      # VERIFY-03 re-measure mechanism: upload UNCONDITIONALLY (if: always()),
+      # not just on failure. The `.lighthouseci/` manifest.json + *.report.json
+      # carry the per-URL 3-run-median `categories.performance.score`; the lhci
+      # minScore ratchet is data-driven (= lowest measured median − 0.02), so the
+      # measured floor must be READABLE from a GREEN run — not only when the
+      # assertion fails. PUBLIC-only URLs + placeholder env keep this safe to
+      # upload to temporary-public-storage (T-54-04-01 / T-48-05-INFO).
+      - name: Upload Lighthouse reports (always — readable measured floor)
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: lighthouse-mobile-report
