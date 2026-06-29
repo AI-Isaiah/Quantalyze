@@ -112,6 +112,35 @@ describe("[H-0191] MetadataStep", () => {
     expect(errored).toBe(false);
   });
 
+  it("[WR-04] surfaces an honest block when categories load to an empty (readable) set", async () => {
+    // An empty-but-readable category list leaves categoryId=null and Submit
+    // permanently disabled. On the CSV path there is no detected-markets hint
+    // to explain the block, so the step must surface an honest reason rather
+    // than a silent dead-end (ISSUE-010 must never reopen via category_id=null).
+    orderResult = { data: [], error: null };
+    render(<MetadataStep {...baseProps} />);
+    // Wait for the fetch to settle (categoriesLoaded gates the hint).
+    expect(
+      await screen.findByTestId("metadata-categories-empty"),
+    ).toBeInTheDocument();
+    const submit = screen.getByRole("button", { name: /review and submit/i });
+    expect(submit).toBeDisabled();
+    // The honest empty block must NOT fire wizard_error telemetry (that is the
+    // failure path; an empty readable result is a legitimate degenerate state).
+    const errored = trackMock.mock.calls.some(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    );
+    expect(errored).toBe(false);
+  });
+
+  it("[WR-04] does NOT surface the empty-category block when categories load non-empty", async () => {
+    orderResult = { data: CATS, error: null };
+    render(<MetadataStep {...baseProps} />);
+    const select = (await screen.findByLabelText("Category")) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("cat-aaa"));
+    expect(screen.queryByTestId("metadata-categories-empty")).toBeNull();
+  });
+
   it("pre-selects the canonical exchange chip from detectedExchange (lowercase → canonical)", () => {
     // detectedExchange is the lowercase api_keys.exchange ('okx'); the chip
     // group matches case-sensitively against EXCHANGES ('OKX'). The default

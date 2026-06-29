@@ -328,6 +328,63 @@ describe("NEW-C14-03: present-but-invalid aum/max_capacity → 400", () => {
 
 // ══════════════════════════════════════════════════════════════════════════
 
+describe("WR-04 (Phase 53): explicit null category_id → 400 (defense-in-depth for ISSUE-010)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+  });
+
+  it("rejects metadata.category_id: null with 400 CSV_INVALID_FORMAT before the RPC", async () => {
+    // ISSUE-010: the csv_metadata step exists to STOP persisting
+    // category_id=null. The client disabled-gate is the first guard, but the
+    // server must reject an explicit null so the strategy can never land
+    // invisible to discovery even if the gate is loosened or the categories
+    // fetch fails/returns empty. RPC must NOT be reached.
+    const res = await POST(
+      makeRequest(validBody({ metadata: { category_id: null } })),
+    );
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_INVALID_FORMAT");
+    expect(body.debug_context?.field).toContain("category_id");
+    // The finalize RPC must not have fired (rejected at the parse boundary).
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts a valid UUID category_id (ok:true)", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      error: null,
+    });
+    updateMock.mockResolvedValueOnce({ error: null });
+    const res = await POST(
+      makeRequest(
+        validBody({
+          metadata: { category_id: "ffffffff-ffff-ffff-ffff-ffffffffffff" },
+        }),
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+  });
+
+  it("still accepts metadata with the category_id key ABSENT (metadata-less path unchanged)", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      error: null,
+    });
+    updateMock.mockResolvedValueOnce({ error: null });
+    const res = await POST(makeRequest(validBody({ metadata: {} })));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+
 describe("NEW-C14-05: over-cap description → 400 instead of silent truncation", () => {
   beforeEach(() => {
     vi.clearAllMocks();

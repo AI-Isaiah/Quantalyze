@@ -64,6 +64,11 @@ export function MetadataStep({
     initial?.categoryId ?? null,
   );
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
+  // WR-04 (Phase 53) — gate the empty-category hint on a SETTLED fetch so the
+  // honest "no categories yet" block does not flash during the initial load
+  // (and is distinguishable from the categoryLoadError failure path, which
+  // fires telemetry; an empty-but-readable result stays silent per M-0248).
+  const [categoriesLoaded, setCategoriesLoaded] = useState(false);
   const [strategyTypes, setStrategyTypes] = useState<string[]>(
     initial?.strategyTypes ?? [],
   );
@@ -123,6 +128,7 @@ export function MetadataStep({
           return;
         }
         setCategories(data ?? []);
+        setCategoriesLoaded(true);
         if (!categoryId && data && data.length > 0) {
           setCategoryId(data[0].id);
         }
@@ -234,6 +240,23 @@ export function MetadataStep({
           <p className="text-caption text-negative" role="alert">
             {categoryLoadError} Refresh the page. If this persists, contact
             security@quantalyze.com.
+          </p>
+        )}
+        {/* WR-04 (Phase 53) — an empty-but-readable category list leaves the
+            user with categoryId=null and a permanently-disabled Submit (the
+            gate requires a category). On the CSV path there is no detected-
+            markets hint to explain the block, so surface an HONEST reason here
+            rather than a silent dead-end. This is the defense-in-depth pair to
+            the server-side null-category_id rejection in csv-finalize: ISSUE-010
+            must never reopen by persisting category_id=null. */}
+        {categoriesLoaded && !categoryLoadError && categories.length === 0 && (
+          <p
+            className="text-caption text-negative"
+            role="alert"
+            data-testid="metadata-categories-empty"
+          >
+            No strategy categories are available yet, so this strategy cannot be
+            submitted. Please contact security@quantalyze.com.
           </p>
         )}
 

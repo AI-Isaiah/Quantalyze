@@ -296,9 +296,24 @@ function parseCsvMetadata(raw: unknown): ParseCsvMetadataResult {
   // we already swallow as non-fatal — the user would land a published
   // strategy whose category_id silently failed to persist, breaking
   // discovery. Validate at the route boundary so the field either
-  // lands cleanly or is left out (better UX than a silent drop).
+  // lands cleanly or is rejected (better UX than a silent drop).
+  //
+  // WR-04 (Phase 53) — defense-in-depth for QA ISSUE-010: the csv_metadata
+  // step exists precisely to STOP the CSV branch persisting category_id=null
+  // (which leaves the strategy invisible to discovery). The client disabled-
+  // gate is the first line of defense, but if it is ever loosened — or the
+  // discovery_categories fetch fails/returns empty so the client never sets
+  // a categoryId — an explicit `category_id: null` must NOT silently persist.
+  // Reject it as a caller error here so the server is the authoritative guard,
+  // not the client. (An ABSENT key — metadata-less finalize — is a different,
+  // legitimate path and is left untouched.)
   if (obj.category_id === null) {
-    out.category_id = null;
+    return {
+      ok: false,
+      field: "metadata.category_id",
+      message:
+        "category_id is required — select a strategy category before submitting.",
+    };
   } else if (typeof obj.category_id === "string" && isUuid(obj.category_id)) {
     out.category_id = obj.category_id;
   }
