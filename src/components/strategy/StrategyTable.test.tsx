@@ -19,6 +19,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { StrategyTable } from "./StrategyTable";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
@@ -195,7 +196,14 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     ).toHaveLength(0);
   });
 
-  it("Case 5: scope='watchlist' with empty initialWatchedSet renders <EmptyWatchlist> and no table", () => {
+  // 50-05 port note: WatchlistTabs now routes through the Radix-backed Tabs
+  // primitive, whose Trigger activates on the real pointer sequence
+  // `@testing-library/user-event` dispatches (bare `fireEvent.click` does not flip
+  // the controlled scope). The scope-switch clicks below therefore use
+  // `await user.click(...)`; the test INTENT (switching to My Watchlist filters
+  // the table) is unchanged.
+  it("Case 5: scope='watchlist' with empty initialWatchedSet renders <EmptyWatchlist> and no table", async () => {
+    const user = userEvent.setup();
     render(
       <StrategyTable
         strategies={STRATEGIES}
@@ -205,7 +213,7 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
       />,
     );
     // Switch to My Watchlist scope.
-    fireEvent.click(screen.getByRole("tab", { name: /My Watchlist/ }));
+    await user.click(screen.getByRole("tab", { name: /My Watchlist/ }));
 
     // EmptyWatchlist heading + body are now visible and the table itself
     // is not rendered.
@@ -220,7 +228,8 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     expect(screen.queryByText("Gamma Pioneer")).toBeNull();
   });
 
-  it("Case 6: scope='watchlist' with initialWatchedSet of 2 strategies renders only those 2", () => {
+  it("Case 6: scope='watchlist' with initialWatchedSet of 2 strategies renders only those 2", async () => {
+    const user = userEvent.setup();
     render(
       <StrategyTable
         strategies={STRATEGIES}
@@ -229,7 +238,7 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
         initialWatchedSet={new Set([STRATEGY_ID_A, STRATEGY_ID_B])}
       />,
     );
-    fireEvent.click(screen.getByRole("tab", { name: /My Watchlist/ }));
+    await user.click(screen.getByRole("tab", { name: /My Watchlist/ }));
 
     // Table is still rendered (watchedSet is non-empty); only the two
     // starred strategies appear.
