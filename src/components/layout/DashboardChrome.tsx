@@ -63,11 +63,13 @@ export function DashboardChrome({
 
   // Phase 52/53 (v1.4) — wide fluid-fill for the DATA/TABLE surfaces only.
   // P52 raised the allocator journey (/allocations, /compare, /discovery/*);
-  // P53 (APPLY-04) adds the two remaining data surfaces (/admin, /portfolios,
-  // incl. their sub-paths). These pages set a page-level `max-w-[1920px]`, but
-  // the standard shell's `max-w-7xl` (1280px) content cap below CLAMPED that, so
-  // they never visibly fluid-filled past 1280px. When isWide, the standard shell
-  // uses `max-w-[1920px]` so those page caps take effect. Prose/form surfaces
+  // P53 (APPLY-04) adds the two remaining data-dense trees (/admin, /portfolios,
+  // incl. their sub-paths). The allocator pages each set their OWN page-level
+  // `max-w-[1920px]` cap; for admin/portfolios the SHELL is the sole owner of
+  // the wide measure (the pages carry no inner cap — the @container data tables
+  // reshape within whatever width the shell grants). The standard shell's
+  // `max-w-7xl` (1280px) content cap below CLAMPED both, so neither fluid-filled
+  // past 1280px. When isWide, the shell uses `max-w-[1920px]`. Prose/form trees
   // (the new-strategy wizard under /strategies, /security, marketing, auth) stay
   // narrow at `max-w-7xl`. Mirrors the `isFullBleed` allow-list regex so the
   // widening stays scope-bounded; the `isFullBleed` admin match-detail carve-out
