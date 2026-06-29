@@ -229,8 +229,33 @@ describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {
     expect(container).toHaveClass("max-w-[1920px]");
   });
 
-  it("keeps a non-allocator dashboard route (/portfolios) at the default max-w-7xl", () => {
+  it("widens the /portfolios data surface to max-w-[1920px] (Phase 53 APPLY-04)", () => {
     const container = contentContainerFor("/portfolios");
+    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).not.toHaveClass("max-w-7xl");
+  });
+
+  it("widens nested portfolio detail routes (/portfolios/abc/manage) to max-w-[1920px]", () => {
+    const container = contentContainerFor("/portfolios/abc/manage");
+    expect(container).toHaveClass("max-w-[1920px]");
+  });
+
+  it("widens the /admin data surface to max-w-[1920px] (Phase 53 APPLY-04)", () => {
+    const container = contentContainerFor("/admin");
+    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).not.toHaveClass("max-w-7xl");
+  });
+
+  it("widens nested admin sub-pages (/admin/compute-jobs) to max-w-[1920px]", () => {
+    const container = contentContainerFor("/admin/compute-jobs");
+    expect(container).toHaveClass("max-w-[1920px]");
+  });
+
+  it("keeps a still-narrow prose/form route (/strategies) at the default max-w-7xl", () => {
+    // /strategies (incl. the new-strategy wizard) is a form surface — it stays
+    // narrow. This is the not-widened negative case, retargeted off /portfolios
+    // (now widened) onto a route that genuinely stays at max-w-7xl.
+    const container = contentContainerFor("/strategies");
     expect(container).toHaveClass("max-w-7xl");
     expect(container).not.toHaveClass("max-w-[1920px]");
   });
