@@ -86,6 +86,17 @@ export function ProfileTabs({
     <Tabs
       value={activeTab}
       onValueChange={(v) => setActiveTab(v as TabKey)}
+      // 50-REVIEW (red-team): manual activation — selection commits only on
+      // Enter/Space/click, not on focus. ProfileTabs' onValueChange does a
+      // router.replace() AND its panels are heavy (the Exchanges panel mounts
+      // AllocatorExchangeManager, which spins up a Supabase client + fetch on
+      // mount). With Radix's default "automatic" mode, arrow-keying through the
+      // strip would fire a navigation + mount the focused panel on EVERY
+      // keystroke. Manual keeps full keyboard focus nav while committing only on
+      // activation — the behavior closest to the pre-port click/Enter original.
+      // (AdminTabs/WatchlistTabs keep automatic: their activation is cheap local
+      // state with no router or fetch side effect.)
+      activationMode="manual"
     >
       <TabsList variant="underline" className="mb-6">
         {tabs.map((tab) => (

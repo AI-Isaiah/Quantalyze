@@ -23,13 +23,17 @@ import {
   afterEach,
 } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { ProfileTabs } from "./ProfileTabs";
 import type { Profile } from "@/lib/types";
 
 // next/navigation hooks are not available in jsdom — supply minimal stubs.
+// routerReplace is a STABLE hoisted spy (a fresh vi.fn() per useRouter() call
+// would be unassertable) so the manual-activation test can assert nav timing.
+const { routerReplace } = vi.hoisted(() => ({ routerReplace: vi.fn() }));
 const searchParamsState = { tab: null as string | null };
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ replace: vi.fn(), push: vi.fn(), refresh: vi.fn() }),
+  useRouter: () => ({ replace: routerReplace, push: vi.fn(), refresh: vi.fn() }),
   usePathname: () => "/profile",
   useSearchParams: () => ({
     get: (k: string) => (k === "tab" ? searchParamsState.tab : null),
@@ -142,6 +146,30 @@ describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
     expect(
       screen.getByLabelText("Typical ticket size (USD)"),
     ).toBeInTheDocument();
+  });
+
+  // 50-REVIEW (red-team) — ProfileTabs uses activationMode="manual": arrow-key
+  // navigation moves focus but must NOT commit the tab (its onValueChange does a
+  // router.replace() and the Exchanges panel mounts a Supabase-backed component).
+  // Selection commits only on Enter/Space/click. Pins that arrow-focus is
+  // side-effect-free and activation still works.
+  it("50-REVIEW — manual activation: arrow-focus does not navigate; Enter commits", async () => {
+    const user = userEvent.setup();
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+    screen.getByRole("tab", { name: "Personal Info" }).focus();
+    routerReplace.mockClear();
+
+    // Arrow to the next tab — focus moves, but manual mode must NOT commit.
+    await user.keyboard("{ArrowRight}");
+    expect(routerReplace).not.toHaveBeenCalled();
+    // The newly-focused tab is still NOT the selected one.
+    expect(screen.getByRole("tab", { selected: true })).toHaveTextContent(
+      "Personal Info",
+    );
+
+    // Activating with Enter commits the focused tab → exactly one navigation.
+    await user.keyboard("{Enter}");
+    expect(routerReplace).toHaveBeenCalledTimes(1);
   });
 
   // 50-REVIEW (a11y BLOCKER) — every TabsTrigger must control a real
