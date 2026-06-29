@@ -48,7 +48,7 @@ quantalyze/
       (dashboard)/    # Authenticated pages (discovery, strategies, portfolios, allocations, profile, preferences)
         admin/match/  # Founder-only Match Queue (triage + detail + eval dashboard)
         portfolios/   # Portfolio dashboard, management, documents
-      demo/           # Public editorial /demo hero — 3 personas (?persona=active|cold|stalled)
+      (marketing)/    # Public marketing shell (shared layout): landing, legal/*, for-quants, security, and the editorial /demo hero (?persona=active|cold|stalled) — route group, URLs unchanged
       api/            # API routes
         cron/         # Vercel Cron handlers (warm-analytics, sync-funding, reconcile-strategies, cleanup-wizard-drafts, cleanup-ack-tokens, founder-lp-report)
         demo/         # Public demo endpoints (signed-token portfolio-pdf)

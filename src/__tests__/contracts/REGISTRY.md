@@ -52,7 +52,7 @@ its scoped error and its intentional warn so neither can silently flip.
 
 The authoritative list is `CONTRACT_GUARDS` in `contracts-registry.test.ts`
 (grep sweeps, parity matrices, compile-time pairings, registry-completeness checks,
-and the two `check-*` CI-gate scripts). Edit that array + this file together when
+and the three `check-*` CI-gate scripts). Edit that array + this file together when
 adding or removing a guard.
 
 | Guard | Batch | Invariant |

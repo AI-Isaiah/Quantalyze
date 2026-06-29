@@ -115,10 +115,10 @@ Run `rg 'security@quantalyze\.com' src` to regenerate this list
 whenever you touch auth, onboarding, or error messaging. As of
 audit-2026-05-07 PR-1 ship (v0.22.18.0, 2026-05-10) the alias appears in:
 
-- `src/app/security/page.tsx` (×7 — Request Call + Responsible
+- `src/app/(marketing)/security/page.tsx` (×7 — Request Call + Responsible
   Disclosure + generic contact + per-exchange setup blocks)
-- `src/app/for-quants/page.tsx` (security commitments block)
-- `src/app/for-quants/RequestCallModal.tsx` (×4 — mailto, generic
+- `src/app/(marketing)/for-quants/page.tsx` (security commitments block)
+- `src/app/(marketing)/for-quants/RequestCallModal.tsx` (×4 — mailto, generic
   failure, network error, on-screen contact line)
 - `src/app/api/for-quants-lead/route.ts` (×4 — per-UA 429,
   aggregate-cap 429, 503, 500 copy)

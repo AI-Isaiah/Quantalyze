@@ -68,8 +68,8 @@ Adopting any of these features requires a new ADR that addresses:
   - `src/app/(dashboard)/discovery/layout.tsx` (line 9)
   - `src/app/(dashboard)/exchanges/page.tsx` (line 9)
   - `src/app/(dashboard)/recommendations/page.tsx` (line 13)
-  - `src/app/demo/page.tsx` (line 38)
-  - `src/app/demo/founder-view/page.tsx` (line 8)
+  - `src/app/(marketing)/demo/page.tsx` (line 38)
+  - `src/app/(marketing)/demo/founder-view/page.tsx` (line 8)
   - `src/app/api/cron/warm-analytics/route.ts` (line 23)
 - `React.cache` usage: `src/lib/queries.ts` (lines 488-500) --
   `getRealPortfolio` request-scoped dedupe.

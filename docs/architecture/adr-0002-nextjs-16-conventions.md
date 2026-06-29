@@ -16,8 +16,8 @@ explicitly rejected.
 The following conventions are codified:
 
 1. **App Router only**: All route segments live under `src/app/`. Zero
-   `pages/` directory usage. Route groups `(auth)` and `(dashboard)` are
-   used for layout scoping.
+   `pages/` directory usage. Route groups `(auth)`, `(dashboard)`, and
+   `(marketing)` are used for layout scoping.
 
 2. **`proxy.ts` (Next 16 rename)**: The project uses `src/proxy.ts`, not
    `middleware.ts`. This file handles session checks and route protection.
@@ -62,7 +62,7 @@ The following conventions are codified:
 - Root layout (Server Component): `src/app/layout.tsx` (lines 29-52).
 - Dashboard layout (Server Component with DB reads):
   `src/app/(dashboard)/layout.tsx` (lines 6-46).
-- Route groups: `src/app/(auth)/` and `src/app/(dashboard)/`.
+- Route groups: `src/app/(auth)/`, `src/app/(dashboard)/`, and `src/app/(marketing)/`.
 - Zero Server Actions: grep for `'use server'` or `"use server"` across
   `src/` returns zero files.
 - Mutation route handlers: `src/app/api/**/route.ts` (multiple files).
