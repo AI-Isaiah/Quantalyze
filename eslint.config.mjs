@@ -65,21 +65,32 @@ const eslintConfig = defineConfig([
       //     (zero rem-less clamp STRINGS in TSX today; the numeric Math-style
       //     clamp() helpers are call expressions the rule deliberately ignores),
       //     so it fails CI by construction on a future zoom-unsafe clamp string.
-      //   - no-raw-font-px → repo-wide WARN here (dirty baseline stays visible
-      //     but non-blocking); hard ERROR only on the proven-clean
-      //     `src/lib/design-tokens/**` surface plus the Phase-52 per-surface /
-      //     per-file ratchet override block below. The 52/53 strangler ratchets
-      //     the remaining dirty surfaces to error one at a time. Phase 52 is
-      //     done: its grep-verified-clean allocator-journey surfaces (compare/,
-      //     discovery/, strategy/[id]/ + the clean allocations/factsheet files)
-      //     are now error; the orphan allocations/factsheet files (incl. the
-      //     frozen EquityChart + chart-internal SVG) and the Phase-53 surfaces
-      //     (portfolios/security/admin/wizard) remain at warn — see
-      //     .planning/phases/52-…/deferred-items.md for the orphan-px debt list.
-      //     Chart / designer-bundle ports are turned off by glob; a one-off
-      //     carries a greppable `DS-04 sanctioned-exception:` comment.
+      //   - no-raw-font-px → repo-wide ERROR as of Phase 54 / BP-03 (the final
+      //     strangler flip; was `warn` through phases 49–53). Phases 54-01b/
+      //     02a/02b cleaned every migratable non-frozen, non-test orphan to the
+      //     `--text-fixed-*` / named `--text-*` tiers, and 54-01a added the
+      //     frozen-chart off-glob, so the repo-wide flip now passes with 0
+      //     errors. The Phase-52/53 per-surface `error` ratchet blocks below are
+      //     redundant once repo-wide is error, but are harmless and left in
+      //     place (future cleanup, not required by BP-03).
+      //
+      //     BP-03 AUDIT NOTE — "error repo-wide" is satisfied as "error
+      //     everywhere EXCEPT the documented frozen-chart islands". The frozen
+      //     EquityChart (src/app/(dashboard)/allocations/widgets/performance/
+      //     EquityChart.tsx) and the three chart-internal factsheet SVGs
+      //     (TimeSeriesChart/HistogramChart/MasterBrush) carry raw `text-[Npx]`
+      //     sites that can NEVER migrate: they are in the FROZEN_ISLANDS
+      //     git-diff-zero list at phase-52-frozen-spine-guards.test.ts:158, so
+      //     any byte edit reds the frozen-spine guard. The CONTEXT-locked
+      //     resolution of the BP-03-vs-FROZEN_ISLANDS conflict is to EXEMPT
+      //     them via the `off` glob below (mirroring src/components/charts/**),
+      //     NEVER to edit them. This is NOT an unmet BP-03 gap — it is the
+      //     documented island carve-out. WorstDrawdowns.tsx rides the
+      //     components/charts/** off-glob; test/spec fixtures ride the
+      //     test-exempt block. No production source can author a new raw px
+      //     without failing CI.
       "quantalyze/no-rem-less-clamp": "error",
-      "quantalyze/no-raw-font-px": "warn",
+      "quantalyze/no-raw-font-px": "error",
     },
   },
   // DS-04 hard gate on the proven-clean new token/primitive surface. The
@@ -198,12 +209,22 @@ const eslintConfig = defineConfig([
   // NOT under src/components/charts/**, so it needs an explicit entry; the three
   // factsheet SVG charts (TimeSeriesChart/HistogramChart/MasterBrush) are the
   // chart-internal frozen islands. NEVER add edits to these files.
+  //
+  // NOTE (Plan 54-05): the three factsheet paths live under the literal `[id]`
+  // dynamic-route segment, so the brackets MUST be backslash-escaped. ESLint
+  // flat config matches `files` with minimatch, which reads an unescaped `[id]`
+  // as a character class (one of `i`/`d`) — NOT the literal directory `[id]` —
+  // so the unescaped form silently fails to match and the files ride the
+  // repo-wide rule. Before the warn→error flip that was harmless (they stayed
+  // `warn`); at `error` it would red CI on these frozen files. Escaping `\[id\]`
+  // makes the off-glob actually match the on-disk path. EquityChart has no
+  // bracket segment, so it matches as written.
   {
     files: [
       "src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx",
-      "src/app/factsheet/[id]/v2/TimeSeriesChart.tsx",
-      "src/app/factsheet/[id]/v2/HistogramChart.tsx",
-      "src/app/factsheet/[id]/v2/MasterBrush.tsx",
+      "src/app/factsheet/\\[id\\]/v2/TimeSeriesChart.tsx",
+      "src/app/factsheet/\\[id\\]/v2/HistogramChart.tsx",
+      "src/app/factsheet/\\[id\\]/v2/MasterBrush.tsx",
     ],
     rules: { "quantalyze/no-raw-font-px": "off" },
   },
