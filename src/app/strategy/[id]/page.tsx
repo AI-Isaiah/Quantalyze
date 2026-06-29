@@ -118,7 +118,7 @@ export default async function PublicStrategyPage({
         {/* Header */}
         <div className="mb-8">
           <div className="flex items-center gap-3 mb-2">
-            <h1 className="text-[32px] font-bold tracking-tight text-text-primary">
+            <h1 className="font-serif text-page-title leading-tight tracking-tight text-text-primary">
               {strategy.name}
             </h1>
             <VerifiedBadge trustTier={strategy.trust_tier} />
