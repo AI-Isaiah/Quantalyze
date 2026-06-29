@@ -382,10 +382,10 @@ const ROLL_LABEL_RE = /\((6mo|30d|90d)\)/i;
 function NotEnoughDataPanel({ title, body }: { title: string; body: string }) {
   return (
     <section className="border border-border bg-surface-subtle px-4 py-3">
-      <h3 className="text-[12px] font-semibold uppercase tracking-[0.18em] text-text-primary">
+      <h3 className="text-caption font-semibold uppercase tracking-[0.18em] text-text-primary">
         {title}
       </h3>
-      <p className="mt-1 text-[11px] text-text-muted">{body}</p>
+      <p className="mt-1 text-micro text-text-muted">{body}</p>
     </section>
   );
 }
@@ -418,21 +418,21 @@ function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
 
   return (
     <header className="border-b border-text pb-6">
-      <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-text-muted">
+      <p className="text-micro font-mono uppercase tracking-[0.22em] text-text-muted">
         Institutional Factsheet ·{" "}
         <span className="font-semibold text-accent">Quantalyze</span>
       </p>
       <div className="mt-2 flex flex-col sm:flex-row sm:flex-wrap sm:items-end sm:justify-between gap-4">
         <div className="max-w-3xl">
-          <h1 className="font-serif text-[28px] sm:text-[36px] lg:text-[44px] leading-tight sm:leading-none text-text-primary">
+          <h1 className="font-serif text-page-title leading-tight sm:leading-none text-text-primary">
             {payload.strategyName}
           </h1>
           <div className="mt-3 flex flex-wrap items-center gap-2 sm:gap-3">
             <TrustTierLabel trustTier={payload.trustTier} />
-            <span className="text-[12px] text-text-secondary">{chips.length > 0 ? chips.join(" · ") : "—"}</span>
+            <span className="text-caption text-text-secondary">{chips.length > 0 ? chips.join(" · ") : "—"}</span>
             {isSelfReported && chips.length > 0 && (
               <span
-                className="text-[10px] font-mono uppercase tracking-[0.14em] px-1.5 py-0.5 rounded-sm"
+                className="text-micro font-mono uppercase tracking-[0.14em] px-1.5 py-0.5 rounded-sm"
                 style={{
                   color: "var(--color-warning, #B45309)",
                   background: "color-mix(in srgb, var(--color-warning, #B45309) 12%, transparent)",
@@ -444,7 +444,7 @@ function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
             )}
           </div>
           {payload.description && (
-            <p className="mt-3 sm:mt-4 text-[13px] sm:text-[14px] leading-relaxed text-text-2 italic font-serif">
+            <p className="mt-3 sm:mt-4 text-small leading-relaxed text-text-2 italic font-serif">
               {payload.description}
             </p>
           )}
@@ -496,11 +496,11 @@ function FreshnessChip({ computedAt }: { computedAt: string }) {
   if (computedAt === EPOCH_SENTINEL) {
     return (
       <div>
-        <div className="flex items-center justify-end gap-1.5 text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
+        <div className="flex items-center justify-end gap-1.5 text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
           <span aria-hidden className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: "var(--color-text-muted)" }} />
           Computed · not yet
         </div>
-        <p className="mt-1 text-[13px] font-mono tabular-nums text-text-secondary">
+        <p className="mt-1 text-small font-mono tabular-nums text-text-secondary">
           N/A
         </p>
       </div>
@@ -528,11 +528,11 @@ function FreshnessChip({ computedAt }: { computedAt: string }) {
     : "—";
   return (
     <div>
-      <div className="flex items-center justify-end gap-1.5 text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
+      <div className="flex items-center justify-end gap-1.5 text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
         <span aria-hidden className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: toneColor }} />
         Computed · {label}
       </div>
-      <p className="mt-1 text-[13px] font-mono tabular-nums text-text-secondary">
+      <p className="mt-1 text-small font-mono tabular-nums text-text-secondary">
         {formatIsoDate(computedAt)}
         {Number.isFinite(days) && days >= 0 && <span className="ml-1 text-text-muted">({Math.round(days)}d)</span>}
       </p>
@@ -563,10 +563,10 @@ function CapacityChip({
     "var(--color-accent)";
   return (
     <div className="min-w-[160px]">
-      <p className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
+      <p className="text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
         AUM{selfReported && <span className="ml-1 normal-case" style={{ color: "var(--color-warning, #B45309)" }}>(self-reported)</span>}
       </p>
-      <p className="mt-1 text-[13px] font-mono tabular-nums text-text-secondary">
+      <p className="mt-1 text-small font-mono tabular-nums text-text-secondary">
         {formatUsdCompact(aum)}
         {maxCapacity != null && (
           <span className="ml-1 text-text-muted">/ {formatUsdCompact(maxCapacity)}</span>
@@ -624,10 +624,18 @@ function KpiStrip() {
       tone: signTone(j.info_ratio),
     });
   }
-  // Responsive grid: 9 cells need narrower cells on lg. Use grid-cols-9 only
-  // when we actually have 9 to render; otherwise let 7 cells breathe at lg-7.
-  // Mobile uses grid-cols-3 with smaller cells so 9 KPIs fit in 3 rows of 3.
-  const lgCols = items.length === 9 ? "lg:grid-cols-9" : "lg:grid-cols-7";
+  // Phase 52-06 / TYPE-04 — the strip reflows on ITS OWN width via `@container`
+  // (`@`-prefixed variants), NOT the viewport. The KPI strip sits in the
+  // factsheet body whose effective width varies (full ~1440 measure on the route
+  // vs the narrower composer mount), so a container query keeps it from thinking
+  // it is at desktop width when it isn't. The 9-cell strip steps up to its full
+  // column count only when the CONTAINER is wide (`@5xl`, ≈64rem — the old `lg:`
+  // ~1024px breakpoint as a container width); 7 cells likewise. `grid-cols-3` is
+  // the container-narrow fallback (3 rows of 3). Inline-size containment ONLY —
+  // the size-containment variant collapses the strip's block size to 0
+  // (Pitfall 1), so the bare `@container` host is deliberate.
+  const containerCols =
+    items.length === 9 ? "@5xl:grid-cols-9" : "@5xl:grid-cols-7";
   return (
     <section
       className="mt-6 overflow-hidden"
@@ -636,7 +644,7 @@ function KpiStrip() {
         border: "1px solid var(--color-border)",
       }}
     >
-      <div className={`grid grid-cols-3 sm:grid-cols-3 md:grid-cols-3 ${lgCols} md:divide-y-0`} style={{ }}>
+      <div className={`@container grid grid-cols-3 ${containerCols} @5xl:divide-y-0`} style={{ }}>
         {items.map(it => (
           <div
             key={it.label}
@@ -644,13 +652,13 @@ function KpiStrip() {
             style={{ borderRight: "1px solid var(--color-border)", borderTop: "1px solid var(--color-border)" }}
           >
             <p
-              className="text-[9px] sm:text-[10px] font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis"
+              className="text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis"
               style={{ color: "var(--color-text-muted)" }}
             >
               {it.label}
             </p>
             <p
-              className="mt-1.5 sm:mt-2 font-mono tabular-nums text-[15px] sm:text-[20px] lg:text-[22px] leading-none whitespace-nowrap overflow-hidden text-ellipsis"
+              className="mt-1.5 sm:mt-2 font-mono tabular-nums text-h2 leading-none whitespace-nowrap overflow-hidden text-ellipsis"
               style={{
                 color:
                   it.tone === "positive"
@@ -671,7 +679,7 @@ function KpiStrip() {
           never scroll to the MetricsColumn right-rail still see it. (NEW-C20-08) */}
       {m.n < 252 && (
         <p
-          className="px-3 sm:px-4 py-2 text-[10px] font-mono"
+          className="px-3 sm:px-4 py-2 text-micro font-mono"
           style={{
             borderTop: "1px solid var(--color-border)",
             color: "var(--color-warning, #B45309)",
@@ -750,7 +758,7 @@ function SectionNav() {
       aria-label="Factsheet sections"
       className="factsheet-v2-no-print mt-4 -mx-1 overflow-x-auto"
     >
-      <ul className="flex items-center gap-1 px-1 text-[10px] font-mono uppercase tracking-[0.18em]">
+      <ul className="flex items-center gap-1 px-1 text-micro font-mono uppercase tracking-[0.18em]">
         {sections.map(s => {
           const isActive = active === s.id;
           return (
@@ -823,7 +831,7 @@ function ShareLinkButton({ strategyId }: { strategyId: string }) {
       type="button"
       onClick={onClick}
       title="Copy a public, link-only factsheet URL — recipients see the same page with no outbound navigation"
-      className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+      className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
     >
       {copied ? "Link copied" : "Copy share link"}
     </button>
@@ -853,7 +861,7 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
         type="button"
         onClick={resetView}
         title="Reset comparator + visible window to defaults (toggles, persisted layout stay)"
-        className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+        className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
       >
         Reset view
       </button>
@@ -863,7 +871,7 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
           href={`/compare?ids=${payload.strategyId}`}
           onClick={() => trackFactsheetEvent("factsheet_v2_compare_click", { strategy_id: payload.strategyId })}
           title="Compare this strategy against another (multi-strategy overlay)"
-          className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
+          className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center"
         >
           Compare strategies
         </a>
@@ -884,11 +892,11 @@ function DisplayMenu() {
   const activeCount = (darkMode ? 1 : 0) + (colorblind ? 1 : 0) + (regimes ? 1 : 0);
   return (
     <details className="relative">
-      <summary className="list-none cursor-pointer px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center gap-1">
+      <summary className="list-none cursor-pointer px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] inline-flex items-center gap-1">
         Display
         {activeCount > 0 && (
           <span
-            className="inline-block px-1 rounded-sm text-[9px]"
+            className="inline-block px-1 rounded-sm text-micro"
             // Light: white on Oxford-green = 12:1. Dark: white on bright teal
             // = 1.5:1 (unreadable). Use page bg (dark slate) on teal in dark.
             style={{ background: "var(--color-accent)", color: "var(--color-page)" }}
@@ -957,9 +965,9 @@ function DisplayItem({
             borderColor: on ? "var(--color-accent)" : "var(--color-border)",
           }}
         />
-        <span className="text-[12px] font-medium text-text-primary">{label}</span>
+        <span className="text-caption font-medium text-text-primary">{label}</span>
       </div>
-      <p className="ml-5 mt-0.5 text-[10px] text-text-muted">{hint}</p>
+      <p className="ml-5 mt-0.5 text-micro text-text-muted">{hint}</p>
     </button>
   );
 }
@@ -978,7 +986,7 @@ function FactsheetFooter({
   const stamp = `QSF · ${payload.strategyId.slice(0, 8).toUpperCase()} · ${isoToYmd(payload.computedAt)}`;
   return (
     <footer className="mt-16 border-t border-text pt-6 flex flex-wrap items-start justify-between gap-6">
-      <p className="max-w-3xl text-[11px] italic leading-relaxed text-text-muted">
+      <p className="max-w-3xl text-micro italic leading-relaxed text-text-muted">
         Returns computed from the strategy&apos;s daily series. Benchmarks are daily
         closes (forward-filled to the strategy&apos;s observation dates). Risk-free
         rate set to 0%. Past performance is not indicative of future results.
@@ -986,12 +994,12 @@ function FactsheetFooter({
         with platform data.
       </p>
       <div className="text-right">
-        <p className="font-mono text-[10px] tracking-[0.18em] text-text-primary">{stamp}</p>
+        <p className="font-mono text-micro tracking-[0.18em] text-text-primary">{stamp}</p>
         {/* The "Page 1 / 1" stamp is a print-only artifact; suppress it on the
             on-screen composer mount (scenarioMode) while keeping the disclaimer
             above unconditional. */}
         {!scenarioMode && (
-          <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.18em] text-text-muted">
+          <p className="mt-1 font-mono text-micro uppercase tracking-[0.18em] text-text-muted">
             Page 1 / 1
           </p>
         )}

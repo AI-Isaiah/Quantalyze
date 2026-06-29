@@ -51,7 +51,16 @@ vi.mock("@/components/discovery/SimulateImpactButton", () => ({
  * contract is tracked, not vacuous — each surface plan appends its migrated
  * component as it lands, and this file's assertions are the gate they keep green.
  */
-const CONTAINER_MIGRATED = ["StrategyTable", "KpiStrip", "CompareTable"] as const;
+const CONTAINER_MIGRATED = [
+  "StrategyTable",
+  "KpiStrip",
+  "CompareTable",
+  // 52-06: the factsheet KPI strip (FactsheetView.tsx) migrated from
+  // `lg:grid-cols-9` viewport breakpoints to a `@container` grid; its
+  // alignment + @-prefixed-variant contract is gated by
+  // FactsheetView.kpistrip.test.tsx.
+  "FactsheetKpiStrip",
+] as const;
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 
