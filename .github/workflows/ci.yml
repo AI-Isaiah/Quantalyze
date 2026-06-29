@@ -1273,6 +1273,7 @@ jobs:
             e2e/strategy-v2-keyboard.spec.ts \
             e2e/strategy-v2-axe.spec.ts \
             e2e/composer-axe.spec.ts \
+            e2e/admin-compute-jobs-axe.spec.ts \
             e2e/mobile-drawer-keyboard.spec.ts \
             e2e/reflow-sweep-authed.spec.ts \
             e2e/svg-chart-parity.spec.ts \
