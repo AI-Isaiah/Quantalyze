@@ -12,6 +12,7 @@ import { SyncPreviewStep, type SyncPreviewSnapshot } from "./steps/SyncPreviewSt
 import { MetadataStep, type MetadataDraft } from "./steps/MetadataStep";
 import { canonicalizeExchangeList } from "@/lib/constants";
 import { SubmitStep } from "./steps/SubmitStep";
+import { ReviewStep } from "./steps/ReviewStep";
 import { CsvUploadStep } from "./steps/CsvUploadStep";
 import { CsvPreviewStep } from "./steps/CsvPreviewStep";
 import { CsvSubmitStep } from "./steps/CsvSubmitStep";
@@ -54,18 +55,24 @@ interface WizardClientProps {
   initialDraft: InitialDraft | null;
 }
 
-const STEP_INDEX: Record<WizardStepKey, 1 | 2 | 3 | 4> = {
+const STEP_INDEX: Record<WizardStepKey, 1 | 2 | 3 | 4 | 5> = {
   connect_key: 1,
   sync_preview: 2,
   metadata: 3,
-  submit: 4,
+  // Phase 53 / APPLY-02: the read-only Review & confirm recap takes ordinal
+  // 4 on both branches; Submit shifts 4 → 5 to match. Pure step-indexing /
+  // telemetry-ordinal change — the transition logic, autosave, and the
+  // finalize POST contract are unchanged.
+  review: 4,
+  submit: 5,
   csv_upload: 1,
   csv_preview: 2,
-  // QA report 2026-05-21 ISSUE-010: CSV branch now has 4 steps
-  // (Upload → Preview → Profile → Submit). csv_metadata uses index 3
-  // and csv_submit shifts from 3 → 4 to match.
+  // QA report 2026-05-21 ISSUE-010: CSV branch had 4 steps
+  // (Upload → Preview → Profile → Submit). Phase 53 inserts csv_review at
+  // ordinal 4 and csv_submit shifts 4 → 5 to match.
   csv_metadata: 3,
-  csv_submit: 4,
+  csv_review: 4,
+  csv_submit: 5,
 };
 
 /**
@@ -412,8 +419,11 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
   const handleMetadataComplete = useCallback(
     (draft: MetadataDraft) => {
       setMetadataDraft(draft);
-      setStep("submit");
-      persistPointer("submit", strategyId);
+      // Phase 53 / APPLY-02: metadata now advances to the read-only review
+      // recap (not straight to submit). The review step's "Create strategy"
+      // CTA advances to submit, where the unchanged finalize POST fires.
+      setStep("review");
+      persistPointer("review", strategyId);
       trackForQuantsEventClient("wizard_step_complete_3", {
         wizard_session_id: wizardSessionId,
         strategy_id: strategyId ?? undefined,
@@ -659,6 +669,31 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
               />
             )}
 
+            {step === "review" && strategyId && syncSnapshot && metadataDraft && (
+              // Phase 53 / APPLY-02 — read-only recap before finalize. Mirrors
+              // the submit branch's render guard (deps must exist). Continue
+              // advances to submit (where the unchanged POST fires); Edit/Back
+              // return to metadata via the existing seam (autosave preserves
+              // the draft). No data collection here.
+              <ReviewStep
+                branch="api"
+                strategyName={metadataDraft.name ?? ""}
+                metadata={metadataDraft}
+                onContinue={() => {
+                  setStep("submit");
+                  persistPointer("submit", strategyId);
+                }}
+                onBack={() => {
+                  setStep("metadata");
+                  persistPointer("metadata", strategyId);
+                }}
+                onEdit={(owningStep) => {
+                  setStep(owningStep);
+                  persistPointer(owningStep, strategyId);
+                }}
+              />
+            )}
+
             {step === "submit" && strategyId && syncSnapshot && metadataDraft && (
               <SubmitStep
                 strategyId={strategyId}
@@ -667,8 +702,10 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 metadata={metadataDraft}
                 onSubmitted={handleSubmitSuccess}
                 onBack={() => {
-                  setStep("metadata");
-                  persistPointer("metadata", strategyId);
+                  // Phase 53 / APPLY-02 — Back from submit returns to the
+                  // review recap (the step that now precedes submit).
+                  setStep("review");
+                  persistPointer("review", strategyId);
                 }}
               />
             )}
@@ -768,11 +805,14 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 detectedExchange={null}
                 onComplete={(draft) => {
                   setCsvMetadataDraft(draft);
-                  setStep("csv_submit");
+                  // Phase 53 / APPLY-02: advance to the read-only review recap
+                  // (not straight to submit). Mirrors the API metadata→review
+                  // re-point; autosave + the csv-finalize POST are unchanged.
+                  setStep("csv_review");
                   void saveWizardState({
                     strategyId: "",
                     wizardSessionId,
-                    step: "csv_submit",
+                    step: "csv_review",
                     source: "csv",
                     strategyName,
                   });
@@ -794,6 +834,61 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
               />
             )}
 
+            {step === "csv_review" && csvFmt && csvPreview && csvMetadataDraft && (
+              // Phase 53 / APPLY-02 — CSV read-only recap before finalize.
+              // Same render-guard deps as csv_submit. Continue advances to
+              // csv_submit (where the unchanged csv-finalize POST fires);
+              // Edit returns to the owning step via the existing autosave
+              // seam. The CSV metric values are the REAL parsed numbers.
+              <ReviewStep
+                branch="csv"
+                strategyName={strategyName}
+                csv={{
+                  fmt: csvFmt,
+                  rowCount: csvPreview.row_count,
+                  dateRange: csvPreview.date_range,
+                  columnsDetected: csvPreview.columns_detected,
+                }}
+                metadata={csvMetadataDraft}
+                onContinue={() => {
+                  setStep("csv_submit");
+                  void saveWizardState({
+                    strategyId: "",
+                    wizardSessionId,
+                    step: "csv_submit",
+                    source: "csv",
+                    strategyName,
+                  });
+                  setSavedAt(Date.now());
+                  setToastKey((k) => k + 1);
+                }}
+                onBack={() => {
+                  setStep("csv_metadata");
+                  void saveWizardState({
+                    strategyId: "",
+                    wizardSessionId,
+                    step: "csv_metadata",
+                    source: "csv",
+                    strategyName,
+                  });
+                  setSavedAt(Date.now());
+                  setToastKey((k) => k + 1);
+                }}
+                onEdit={(owningStep) => {
+                  setStep(owningStep);
+                  void saveWizardState({
+                    strategyId: "",
+                    wizardSessionId,
+                    step: owningStep,
+                    source: "csv",
+                    strategyName,
+                  });
+                  setSavedAt(Date.now());
+                  setToastKey((k) => k + 1);
+                }}
+              />
+            )}
+
             {step === "csv_submit" && csvFmt && csvPreview && csvMetadataDraft && (
               <CsvSubmitStep
                 wizardSessionId={wizardSessionId}
@@ -803,12 +898,14 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 dailyReturnsSeries={csvDailyReturnsSeries}
                 metadata={csvMetadataDraft}
                 onBack={() => {
-                  setStep("csv_metadata");
+                  // Phase 53 / APPLY-02 — Back from csv_submit returns to the
+                  // review recap (the step that now precedes csv_submit).
+                  setStep("csv_review");
                   // P473: async HMAC envelope — fire-and-forget.
                   void saveWizardState({
                     strategyId: "",
                     wizardSessionId,
-                    step: "csv_metadata",
+                    step: "csv_review",
                     source: "csv",
                     strategyName,
                   });

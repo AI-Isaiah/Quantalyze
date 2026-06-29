@@ -403,6 +403,52 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
     warn.mockRestore();
   });
 
+  // Phase 53 / APPLY-02 — the review steps were added to WizardStepKey +
+  // validSteps. A signed envelope pointing at `review` / `csv_review` must
+  // round-trip (the recap step resumes), while a step value outside the
+  // enum still safe-degrades to cold-start (the includes-guard).
+  it("round-trips a 'review' step pointer (APPLY-02 enum extension)", async () => {
+    await saveWizardState({
+      strategyId: "00000000-0000-4000-8000-000000000eee",
+      wizardSessionId: "session-review",
+      step: "review",
+    });
+    const loaded = await loadWizardState();
+    expect(loaded).not.toBeNull();
+    expect(loaded?.step).toBe("review");
+  });
+
+  it("round-trips a 'csv_review' step pointer (APPLY-02 enum extension)", async () => {
+    await saveWizardState({
+      strategyId: "",
+      wizardSessionId: "session-csv-review",
+      step: "csv_review",
+      source: "csv",
+      strategyName: "Aurora Capital",
+    });
+    const loaded = await loadWizardState();
+    expect(loaded).not.toBeNull();
+    expect(loaded?.step).toBe("csv_review");
+    expect(loaded?.strategyName).toBe("Aurora Capital");
+  });
+
+  it("safe-degrades an unknown stored step to cold-start (validSteps guard)", async () => {
+    // A future-tab / corrupted payload carrying a step value outside the
+    // WizardStepKey enum must be rejected (returns null) rather than
+    // resumed — the SSR default then takes over. We forge a VALID HMAC
+    // envelope (via the real signing path) so this proves the validSteps
+    // includes-guard, not the HMAC check.
+    await saveWizardState({
+      strategyId: "00000000-0000-4000-8000-000000000fff",
+      wizardSessionId: "session-unknown",
+      // Cast through unknown: an attacker/old-code-written value the enum
+      // does not know about.
+      step: "not_a_real_step" as unknown as WizardLocalState["step"],
+    });
+    const loaded = await loadWizardState();
+    expect(loaded).toBeNull();
+  });
+
   it("computeWizardHmac is deterministic for the same (payload, key) pair", async () => {
     const a = await computeWizardHmac("the-payload", "the-key");
     const b = await computeWizardHmac("the-payload", "the-key");

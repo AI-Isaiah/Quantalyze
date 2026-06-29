@@ -60,6 +60,12 @@ export type WizardStepKey =
   | "connect_key"
   | "sync_preview"
   | "metadata"
+  // Phase 53 / APPLY-02: read-only Review & confirm recap inserted
+  // immediately before the existing Submit step on the API branch. The
+  // only WizardStepKey change permitted (UI-SPEC §Wizard UX Upgrade 3).
+  // Additive enum extension only — no autosave-semantics change; an
+  // unknown stored step still safe-degrades via the validSteps guard.
+  | "review"
   | "submit"
   | "csv_upload"
   | "csv_preview"
@@ -69,6 +75,9 @@ export type WizardStepKey =
   // the new step between preview and submit that collects classification
   // metadata from the user (mirrors the API branch's MetadataStep).
   | "csv_metadata"
+  // Phase 53 / APPLY-02: CSV-branch counterpart of `review`, inserted
+  // before csv_submit. Same additive, safe-degrading contract.
+  | "csv_review"
   | "csv_submit";
 
 export interface WizardLocalState {
@@ -303,10 +312,15 @@ export async function loadWizardState(): Promise<WizardLocalState | null> {
       "connect_key",
       "sync_preview",
       "metadata",
+      // Phase 53 / APPLY-02 — review steps accepted by validation so a
+      // resumed pointer at the recap step round-trips; an unknown step
+      // still safe-degrades to the SSR default via this includes-guard.
+      "review",
       "submit",
       "csv_upload",
       "csv_preview",
       "csv_metadata",
+      "csv_review",
       "csv_submit",
     ];
     if (!validSteps.includes(obj.step as WizardStepKey)) {

@@ -125,6 +125,12 @@ const WIZARD_STEP_KEYS = [
   "connect_key",
   "sync_preview",
   "metadata",
+  // Phase 53 / APPLY-02 — read-only Review & confirm recap step before
+  // Submit on both branches. The compile-time exhaustiveness check below
+  // (which fired when WizardStepKey gained these variants) requires both
+  // the API `review` and CSV `csv_review` keys here so the wizard-context
+  // step enum stays in sync.
+  "review",
   "submit",
   "csv_upload",
   "csv_preview",
@@ -133,6 +139,7 @@ const WIZARD_STEP_KEYS = [
   // caught the missing entry on the v0.24.6.0 PR — kudos to the red-
   // team regression that pinned this drift class.
   "csv_metadata",
+  "csv_review",
   "csv_submit",
 ] as const satisfies readonly WizardStepKey[];
 

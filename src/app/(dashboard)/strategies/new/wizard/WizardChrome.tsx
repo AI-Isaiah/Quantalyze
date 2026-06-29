@@ -14,7 +14,9 @@ const DEFAULT_STEPS: { key: WizardStepKey; label: string; number: string }[] = [
   { key: "connect_key", label: "Connect key", number: "01" },
   { key: "sync_preview", label: "Verify data", number: "02" },
   { key: "metadata", label: "Strategy profile", number: "03" },
-  { key: "submit", label: "Submit", number: "04" },
+  // Phase 53 / APPLY-02 — read-only Review & confirm recap before Submit.
+  { key: "review", label: "Review & confirm", number: "04" },
+  { key: "submit", label: "Submit", number: "05" },
 ];
 
 /**
@@ -29,7 +31,9 @@ const CSV_STEPS: { key: WizardStepKey; label: string; number: string }[] = [
   { key: "csv_upload", label: "Upload CSV", number: "01" },
   { key: "csv_preview", label: "Preview", number: "02" },
   { key: "csv_metadata", label: "Strategy profile", number: "03" },
-  { key: "csv_submit", label: "Submit", number: "04" },
+  // Phase 53 / APPLY-02 — read-only Review & confirm recap before Submit.
+  { key: "csv_review", label: "Review & confirm", number: "04" },
+  { key: "csv_submit", label: "Submit", number: "05" },
 ];
 
 /** Re-export of CSV_STEPS for the WizardClient ?source=csv branch. */
@@ -80,12 +84,21 @@ export function WizardChrome({
   const totalLabel = String(totalCount).padStart(2, "0");
   // Phase 46 / WIZARD-01 reflow: the stepper rail is a fixed N-column grid on
   // ≥sm (640px) but stacks to a single column below it. With a bare
-  // grid-cols-3/4 the four step cells (each holding "03 / 04" + a label like
-  // "Strategy profile") force horizontal page overflow at 320px. Stacking
+  // grid-cols-N the step cells (each holding "04 / 05" + a label like
+  // "Review & confirm") force horizontal page overflow at 320px. Stacking
   // them keeps every step label fully visible — no truncation, no scroll —
   // and the existing top/bottom hairline borders read as a vertical list.
+  //
+  // Phase 53 / APPLY-02 added a Review step so both branches are now 5-step;
+  // the 3/4-column arms stay for back-compat with any caller passing a
+  // shorter custom `steps` array. Full literals (no template) so Tailwind's
+  // class scanner picks every variant up.
   const gridColsClass =
-    totalCount === 3 ? "grid-cols-1 sm:grid-cols-3" : "grid-cols-1 sm:grid-cols-4";
+    totalCount === 3
+      ? "grid-cols-1 sm:grid-cols-3"
+      : totalCount === 4
+        ? "grid-cols-1 sm:grid-cols-4"
+        : "grid-cols-1 sm:grid-cols-5";
   const isCsv = source === "csv";
   const [showToast, setShowToast] = useState(false);
 
