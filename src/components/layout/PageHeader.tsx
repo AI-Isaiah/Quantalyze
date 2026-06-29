@@ -1,4 +1,5 @@
 import { type ReactNode } from "react";
+import { Breadcrumb, type BreadcrumbItem } from "./Breadcrumb";
 
 interface PageHeaderProps {
   title: string;
@@ -6,11 +7,21 @@ interface PageHeaderProps {
   actions?: ReactNode;
   /** Optional small inline node rendered under the title (badges, pills, etc.). */
   meta?: ReactNode;
+  /**
+   * Phase 51 NAV-02 — optional curated back-path crumbs. When passed, a
+   * <Breadcrumb> renders ABOVE the <h1> (the app-wide "where am I / how do I get
+   * back" affordance). Curated items only (never segment auto-derivation — avoids
+   * raw-UUID/token crumbs on [id]/[token] routes). Omitting it renders the header
+   * exactly as before — additive, no regression for existing call sites.
+   */
+  breadcrumb?: BreadcrumbItem[];
 }
 
-export function PageHeader({ title, description, actions, meta }: PageHeaderProps) {
+export function PageHeader({ title, description, actions, meta, breadcrumb }: PageHeaderProps) {
   return (
-    <div className="flex items-start justify-between mb-8">
+    <>
+      {breadcrumb && breadcrumb.length > 0 && <Breadcrumb items={breadcrumb} />}
+      <div className="flex items-start justify-between mb-8">
       <div>
         <h1 className="font-display text-[32px] tracking-tight text-text-primary">
           {title}
@@ -21,6 +32,7 @@ export function PageHeader({ title, description, actions, meta }: PageHeaderProp
         {meta && <div className="mt-2 flex items-center gap-2">{meta}</div>}
       </div>
       {actions && <div className="flex items-center gap-3">{actions}</div>}
-    </div>
+      </div>
+    </>
   );
 }

@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-interface BreadcrumbItem {
+export interface BreadcrumbItem {
   label: string;
   href?: string;
 }
@@ -32,12 +32,19 @@ export function Breadcrumb({ items }: BreadcrumbProps) {
           {item.href ? (
             <Link
               href={item.href}
-              className="hover:text-text-primary transition-colors"
+              // Phase 51 NAV-02 — keyboard-only focus ring in the accent token
+              // (the <Link> had hover only). focus-visible (never bare focus:)
+              // per UI-SPEC §Breadcrumb Contract; mirrors the nav/MobileNav ring.
+              className="hover:text-text-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             >
               {item.label}
             </Link>
           ) : (
-            <span className="text-text-primary font-medium">{item.label}</span>
+            // Phase 51 NAV-02 — the leaf (current page) advertises itself to AT.
+            // Intermediate linked crumbs do NOT carry aria-current.
+            <span aria-current="page" className="text-text-primary font-medium">
+              {item.label}
+            </span>
           )}
         </span>
       ))}
