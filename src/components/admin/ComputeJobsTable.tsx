@@ -2,26 +2,44 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
+import { Button } from "@/components/ui/Button";
+import { Field } from "@/components/ui/Field";
+import { Select } from "@/components/ui/Select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeaderCell,
+  TableRow,
+} from "@/components/ui/Table";
+import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/utils";
 import { useCrossTabStorage } from "@/lib/storage/cross-tab";
 import { rawStringCodec } from "@/lib/storage/codecs";
 import type { ComputeJobAdminRow } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
-// Status badge color mapping (DESIGN.md semantic colors)
+// Status badge color mapping (DESIGN.md semantic tokens)
+//
+// UI-03 (Phase 50): the prior inline `rgba(...)`/`#hex` pairs are replaced by
+// the semantic token utilities (`bg-positive/10 text-positive`, …) — the SAME
+// status→semantic-tier mapping, now on the design tokens (matches the page's
+// own StatusBadge convention). `failed_retry`/`failed_final` keep their
+// distinct warning vs negative tiers; everything else is the muted tier.
 // ---------------------------------------------------------------------------
 
-function statusColor(status: string): { bg: string; text: string } {
+function statusBadgeClass(status: string): string {
   switch (status) {
     case "done":
-      return { bg: "rgba(21,128,61,0.1)", text: "#15803D" };
+      return "bg-positive/10 text-positive";
     case "failed_final":
-      return { bg: "rgba(220,38,38,0.1)", text: "#DC2626" };
+      return "bg-negative/10 text-negative";
     case "failed_retry":
-      return { bg: "rgba(217,119,6,0.1)", text: "#D97706" };
+      return "bg-warning/10 text-warning";
     default:
       // pending, running, done_pending_children
-      return { bg: "rgba(113,128,150,0.1)", text: "#64748B" };
+      return "bg-text-muted/10 text-text-muted";
   }
 }
 
@@ -142,77 +160,69 @@ export function ComputeJobsTable() {
   return (
     <div className="space-y-4" data-testid="compute-jobs-table">
       {/* Filters + auto-refresh */}
-      <div className="flex flex-wrap items-center gap-3">
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="rounded border px-2 py-1 text-xs"
-          style={{ borderColor: "#E2E8F0", color: "#1A1A2E" }}
-        >
-          {STATUS_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+      <div className="flex flex-wrap items-end gap-3">
+        {/* Status filter — Field-wrapped native Select primitive. The visible
+            label IS the prior "All statuses" placeholder option, so the control
+            stays self-describing; Field adds the htmlFor/id a11y wiring. */}
+        <Field label="Status">
+          <Select
+            options={STATUS_OPTIONS}
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="min-h-0 px-2 py-1 text-caption"
+          />
+        </Field>
 
-        <select
-          value={kindFilter}
-          onChange={(e) => setKindFilter(e.target.value)}
-          className="rounded border px-2 py-1 text-xs"
-          style={{ borderColor: "#E2E8F0", color: "#1A1A2E" }}
-        >
-          {KIND_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+        <Field label="Kind">
+          <Select
+            options={KIND_OPTIONS}
+            value={kindFilter}
+            onChange={(e) => setKindFilter(e.target.value)}
+            className="min-h-0 px-2 py-1 text-caption"
+          />
+        </Field>
 
-        <label className="flex items-center gap-1.5 text-xs" style={{ color: "#64748B" }}>
+        <label className="flex items-center gap-1.5 pb-1.5 text-caption text-text-muted">
           <input
             type="checkbox"
             checked={autoRefresh}
             onChange={toggleAutoRefresh}
-            className="accent-[#1B6B5A] h-3 w-3"
+            className="accent-accent h-3 w-3"
           />
           Auto-refresh
         </label>
 
         {loading && (
-          <span className="text-[10px]" style={{ color: "#64748B" }}>
-            Loading...
-          </span>
+          <span className="pb-1.5 text-micro text-text-muted">Loading...</span>
         )}
       </div>
 
       {error && (
-        <p className="text-sm" style={{ color: "#DC2626" }} role="alert">
+        <p className="text-small text-negative" role="alert">
           {error}
         </p>
       )}
 
       {/* Table */}
       <ResponsiveTable label="Compute jobs">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b" style={{ borderColor: "#E2E8F0" }}>
+        <Table aria-label="Compute jobs" className="text-small">
+          <TableHead>
+            <TableRow className="hover:bg-transparent">
               {["Kind", "Target", "Status", "Attempts", "Age", "Last Error"].map(
                 (h) => (
-                  <th
+                  <TableHeaderCell
                     key={h}
-                    className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider"
-                    style={{ color: "#64748B" }}
+                    scope="col"
+                    className="px-3 py-2 text-micro uppercase tracking-wider"
                   >
                     {h}
-                  </th>
+                  </TableHeaderCell>
                 ),
               )}
-            </tr>
-          </thead>
-          <tbody>
+            </TableRow>
+          </TableHead>
+          <TableBody>
             {jobs.map((job) => {
-              const sc = statusColor(job.status);
               const target =
                 job.strategy_name ?? job.portfolio_name ?? job.strategy_id ?? job.portfolio_id ?? "—";
               const errorText = job.last_error
@@ -222,74 +232,67 @@ export function ComputeJobsTable() {
                 : "—";
 
               return (
-                <tr
-                  key={job.id}
-                  className="border-b last:border-b-0 transition-colors"
-                  style={{ borderColor: "#E2E8F0", height: 44 }}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLElement).style.backgroundColor = "#F8F9FA";
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLElement).style.backgroundColor = "";
-                  }}
-                >
-                  <td className="px-3 py-2 font-metric text-xs" style={{ color: "#1A1A2E" }}>
+                <TableRow key={job.id} className="h-11">
+                  <TableCell className="px-3 py-2 font-metric text-caption text-text-primary">
                     {job.kind}
-                  </td>
-                  <td
-                    className="px-3 py-2 text-xs truncate max-w-[180px]"
-                    style={{ color: "#4A5568" }}
+                  </TableCell>
+                  <TableCell
+                    className="px-3 py-2 text-caption text-text-secondary truncate max-w-[180px]"
                     title={target}
                   >
                     {target}
-                  </td>
-                  <td className="px-3 py-2">
+                  </TableCell>
+                  <TableCell className="px-3 py-2">
                     <span
-                      className="inline-block rounded-sm px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider"
-                      style={{ backgroundColor: sc.bg, color: sc.text }}
+                      className={cn(
+                        "inline-block rounded-sm px-1.5 py-0.5 text-micro font-medium uppercase tracking-wider",
+                        statusBadgeClass(job.status),
+                      )}
                     >
                       {job.status}
                     </span>
-                  </td>
-                  <td className="px-3 py-2 font-metric tabular-nums text-xs" style={{ color: "#1A1A2E" }}>
+                  </TableCell>
+                  <TableCell
+                    numeric
+                    className="px-3 py-2 text-left text-caption text-text-primary"
+                  >
                     {job.attempts}/{job.max_attempts}
-                  </td>
-                  <td className="px-3 py-2 text-xs" style={{ color: "#64748B" }}>
+                  </TableCell>
+                  <TableCell className="px-3 py-2 text-caption text-text-muted">
                     {formatRelativeTime(job.created_at, now)}
-                  </td>
-                  <td
-                    className="px-3 py-2 text-xs truncate max-w-[240px]"
-                    style={{ color: job.last_error ? "#DC2626" : "#64748B" }}
+                  </TableCell>
+                  <TableCell
+                    className={cn(
+                      "px-3 py-2 text-caption truncate max-w-[240px]",
+                      job.last_error ? "text-negative" : "text-text-muted",
+                    )}
                     title={job.last_error ?? undefined}
                   >
                     {errorText}
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               );
             })}
 
             {jobs.length === 0 && !loading && (
-              <tr>
-                <td colSpan={6} className="px-3 py-8 text-center text-sm" style={{ color: "#64748B" }}>
+              <TableRow className="hover:bg-transparent">
+                <TableCell
+                  colSpan={6}
+                  className="px-3 py-8 text-center text-small text-text-muted"
+                >
                   No compute jobs found.
-                </td>
-              </tr>
+                </TableCell>
+              </TableRow>
             )}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       </ResponsiveTable>
 
       {/* Load more */}
       {hasMore && jobs.length > 0 && (
-        <button
-          type="button"
-          onClick={loadMore}
-          disabled={loading}
-          className="rounded border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[#F8F9FA]"
-          style={{ borderColor: "#E2E8F0", color: "#1B6B5A" }}
-        >
+        <Button variant="secondary" size="sm" onClick={loadMore} disabled={loading}>
           Load more
-        </button>
+        </Button>
       )}
     </div>
   );
