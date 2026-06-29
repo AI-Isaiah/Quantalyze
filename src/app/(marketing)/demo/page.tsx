@@ -217,7 +217,7 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
               href={pdfHref}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex h-11 items-center rounded-md bg-accent px-5 text-sm font-medium text-white transition-colors hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent/50"
+              className="inline-flex h-11 items-center rounded-md bg-accent px-5 text-body font-medium text-white transition-colors hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent/50"
             >
               Download IC Report
             </a>
@@ -243,7 +243,7 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
 
       {hasPortfolio && (
         <section className="mt-8">
-          <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-3">
+          <p className="text-caption uppercase tracking-wider text-text-muted font-medium mb-3">
             {profile?.company || profile?.display_name || "Active Allocator LP"}
             {totalAllocated > 0 && (
               <>
@@ -259,15 +259,15 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
                 className="flex items-center justify-between gap-4 py-4"
               >
                 <div className="min-w-0 flex-1">
-                  <p className="font-display text-base text-text-primary">
+                  <p className="font-display text-body text-text-primary">
                     {displayStrategyName(h.strategy)}
                   </p>
                   {h.strategy.description && (
-                    <p className="mt-1 line-clamp-2 text-xs text-text-muted">
+                    <p className="mt-1 break-words text-caption text-text-muted">
                       {h.strategy.description}
                     </p>
                   )}
-                  <div className="mt-2 flex flex-wrap items-center gap-4 text-xs">
+                  <div className="mt-2 flex flex-wrap items-center gap-4 text-caption">
                     <Metric
                       label="CAGR"
                       value={formatPercent(h.analytics?.cagr)}
@@ -284,12 +284,12 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
                   </div>
                 </div>
                 <div className="shrink-0 text-right">
-                  <p className="font-metric tabular-nums text-base text-text-primary">
+                  <p className="font-metric tabular-nums text-body text-text-primary">
                     {h.current_weight != null
                       ? `${(h.current_weight * 100).toFixed(0)}%`
                       : "—"}
                   </p>
-                  <p className="font-metric tabular-nums text-xs text-text-muted">
+                  <p className="font-metric tabular-nums text-caption text-text-muted">
                     {h.allocated_amount != null && h.allocated_amount > 0
                       ? formatCurrency(h.allocated_amount)
                       : "—"}
@@ -327,11 +327,11 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
       {hasRecommendations && (
         <section className="mb-8">
           <div className="mb-3 flex items-baseline justify-between gap-4">
-            <h2 className="text-base font-semibold text-text-primary">
+            <h2 className="text-h2 font-semibold text-text-primary">
               Top matches for this mandate
             </h2>
             {fellBackToPrevious && (
-              <span className="text-xs text-text-muted">
+              <span className="text-caption text-text-muted">
                 Showing previous batch (latest computing)
               </span>
             )}
@@ -347,17 +347,17 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
       )}
 
       {hasPortfolio && !hasRecommendations && (
-        <p className="text-sm text-text-secondary">
+        <p className="text-body text-text-secondary">
           Recommendations computing — showing current portfolio composition.
         </p>
       )}
 
       {!hasPortfolio && !hasRecommendations && (
         <div className="rounded-lg border border-border bg-surface p-8 text-center">
-          <h2 className="text-base font-semibold text-text-primary">
+          <h2 className="text-h2 font-semibold text-text-primary">
             Demo data is loading
           </h2>
-          <p className="mx-auto mt-2 max-w-md text-sm text-text-secondary">
+          <p className="mx-auto mt-2 max-w-md text-body text-text-secondary">
             The simulated allocator state is being seeded. Check back in a
             moment — or{" "}
             <Link href="/signup" className="underline hover:text-text-primary">
@@ -369,7 +369,7 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
       )}
 
       {/* Footer secondary CTAs only — primary CTA is the IC Report. */}
-      <footer className="mt-12 flex flex-wrap items-center gap-6 border-t border-border pt-6 text-xs text-text-muted">
+      <footer className="mt-12 flex flex-wrap items-center gap-6 border-t border-border pt-6 text-caption text-text-muted">
         <Link
           href="/demo/founder-view"
           className="hover:text-accent"
@@ -436,9 +436,9 @@ function adaptHoldings(rows: unknown): PortfolioHoldingRow[] {
 function PersonaSwitcher({ current }: { current: PersonaKey }) {
   // Touch target sizing: min-h-[44px] + min-w-[44px] meets WCAG 2.5.5
   // Target Size Level AAA AND the iOS HIG 44pt minimum. The text remains
-  // text-xs for visual density; padding takes up the rest.
+  // text-caption for visual density; padding takes up the rest.
   const baseClass =
-    "inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-md px-4 text-xs font-medium";
+    "inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-md px-4 text-caption font-medium";
   return (
     <nav
       aria-label="Demo persona"
@@ -472,22 +472,22 @@ function RecommendationCard({ rec }: { rec: RecommendationRow }) {
       <div className="flex items-start justify-between gap-6">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-3">
-            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-accent/10 text-xs font-semibold text-accent">
+            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-accent/10 text-micro font-semibold text-accent">
               #{rec.rank ?? "—"}
             </span>
-            <h3 className="font-display text-base text-text-primary">
+            <h3 className="font-display text-body text-text-primary">
               {displayStrategyName(rec.strategy)}
             </h3>
           </div>
-          <p className="mt-2 text-sm leading-relaxed text-text-secondary">
+          <p className="mt-2 text-body leading-relaxed text-text-secondary">
             {primaryReason}
           </p>
           {rec.strategy.description && (
-            <p className="mt-2 line-clamp-2 text-xs text-text-muted">
+            <p className="mt-2 break-words text-caption text-text-muted">
               {rec.strategy.description}
             </p>
           )}
-          <div className="mt-3 flex flex-wrap items-center gap-4 text-xs">
+          <div className="mt-3 flex flex-wrap items-center gap-4 text-caption">
             <Metric label="CAGR" value={formatPercent(rec.analytics?.cagr)} />
             <Metric label="Sharpe" value={formatNumber(rec.analytics?.sharpe)} />
             <Metric
@@ -498,10 +498,10 @@ function RecommendationCard({ rec }: { rec: RecommendationRow }) {
           </div>
         </div>
         <div className="shrink-0 text-right">
-          <p className="text-xs uppercase tracking-wider text-text-muted">
+          <p className="text-caption uppercase tracking-wider text-text-muted">
             Score
           </p>
-          <p className="font-metric tabular-nums text-2xl text-text-primary">
+          <p className="font-metric tabular-nums text-page-title text-text-primary">
             {rec.score.toFixed(0)}
           </p>
         </div>
@@ -521,7 +521,7 @@ function Metric({
 }) {
   return (
     <div className="flex items-baseline gap-1.5">
-      <span className="text-[10px] uppercase tracking-wider text-text-muted">
+      <span className="text-caption uppercase tracking-wider text-text-muted">
         {label}
       </span>
       <span

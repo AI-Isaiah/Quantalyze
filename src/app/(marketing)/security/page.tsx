@@ -45,10 +45,10 @@ export default function SecurityPage() {
     <main className="mx-auto max-w-[1100px] px-6 py-16 md:py-20">
         {/* --- 1. Editorial hero: 3-block credibility document --- */}
         <article className="max-w-[640px]">
-          <h1 className="font-display text-[32px] leading-tight tracking-tight text-text-primary">
+          <h1 className="font-display text-page-title leading-tight tracking-tight text-text-primary">
             Security practices
           </h1>
-          <p className="mt-4 text-[14px] leading-relaxed text-text-secondary">
+          <p className="mt-4 text-body leading-relaxed text-text-secondary">
             Quantalyze is a data-analytics platform, not a custodian. We read
             your trade history from your exchange via a read-only API key and
             compute verified performance metrics. We never hold funds, never
@@ -61,11 +61,11 @@ export default function SecurityPage() {
           >
             <h2
               id="data-handling"
-              className="font-display text-2xl tracking-tight text-text-primary"
+              className="font-display text-h2 tracking-tight text-text-primary"
             >
               Data handling
             </h2>
-            <div className="mt-4 space-y-4 text-[14px] leading-relaxed text-text-primary">
+            <div className="mt-4 space-y-4 text-body leading-relaxed text-text-primary">
               <p>
                 The data we persist is: read-only exchange API credentials
                 (encrypted), raw trade fills, and aggregate analytics
@@ -80,11 +80,11 @@ export default function SecurityPage() {
                 Tenant isolation is enforced at the database. Row-Level
                 Security policies gate every read path, and a BEFORE INSERT
                 trigger on{" "}
-                <code className="rounded bg-page px-1 py-0.5 font-mono text-[13px]">
+                <code className="rounded bg-page px-1 py-0.5 font-mono text-caption">
                   strategies
                 </code>{" "}
                 refuses any attempt to link an{" "}
-                <code className="rounded bg-page px-1 py-0.5 font-mono text-[13px]">
+                <code className="rounded bg-page px-1 py-0.5 font-mono text-caption">
                   api_key_id
                 </code>{" "}
                 owned by a different user. The check runs with SECURITY
@@ -104,7 +104,7 @@ export default function SecurityPage() {
                 service-to-service calls use the same profile. Certificates
                 are issued by a public CA and rotated automatically before
                 expiry. HSTS is enabled for{" "}
-                <code className="rounded bg-page px-1 py-0.5 font-mono text-[13px]">
+                <code className="rounded bg-page px-1 py-0.5 font-mono text-caption">
                   quantalyze.com
                 </code>{" "}
                 with a one-year max-age.
@@ -118,11 +118,11 @@ export default function SecurityPage() {
           >
             <h2
               id="key-handling"
-              className="font-display text-2xl tracking-tight text-text-primary"
+              className="font-display text-h2 tracking-tight text-text-primary"
             >
               Key handling
             </h2>
-            <div className="mt-4 space-y-4 text-[14px] leading-relaxed text-text-primary">
+            <div className="mt-4 space-y-4 text-body leading-relaxed text-text-primary">
               <p>
                 API keys are stored read-only, enforced at submission. Every
                 key is validated against the exchange the moment you paste it
@@ -139,11 +139,11 @@ export default function SecurityPage() {
                 service-role client, can unwrap the DEK. The Next.js web tier
                 cannot, and neither can your own dashboard — the encrypted
                 columns are revoked at the column-grant level from the{" "}
-                <code className="rounded bg-page px-1 py-0.5 font-mono text-[13px]">
+                <code className="rounded bg-page px-1 py-0.5 font-mono text-caption">
                   anon
                 </code>{" "}
                 and{" "}
-                <code className="rounded bg-page px-1 py-0.5 font-mono text-[13px]">
+                <code className="rounded bg-page px-1 py-0.5 font-mono text-caption">
                   authenticated
                 </code>{" "}
                 Postgres roles.
@@ -163,7 +163,7 @@ export default function SecurityPage() {
           >
             <h2
               id="compliance-posture"
-              className="font-display text-2xl tracking-tight text-text-primary"
+              className="font-display text-h2 tracking-tight text-text-primary"
             >
               Compliance posture
             </h2>
@@ -175,7 +175,7 @@ export default function SecurityPage() {
               aria-live="polite"
               className="mt-6 mb-6 rounded-lg border-l-4 border-warning bg-warning/5 px-4 py-3"
             >
-              <p className="text-sm leading-relaxed text-text-primary">
+              <p className="text-body leading-relaxed text-text-primary">
                 <span className="font-semibold">
                   SOC 2 status: pre-audit, preparing for SOC 2 Type 1.
                 </span>{" "}
@@ -191,7 +191,7 @@ export default function SecurityPage() {
                 </span>
               </p>
             </div>
-            <div className="mt-4 space-y-4 text-[14px] leading-relaxed text-text-primary">
+            <div className="mt-4 space-y-4 text-body leading-relaxed text-text-primary">
               <p>
                 We are a pre-audit company. Preparing for SOC 2 Type 1;
                 internal controls — access reviews, change management,
@@ -225,15 +225,15 @@ export default function SecurityPage() {
           >
             <h2
               id="data-handling-summary"
-              className="font-display text-2xl tracking-tight text-text-primary"
+              className="font-display text-h2 tracking-tight text-text-primary"
             >
               Data handling at a glance
             </h2>
-            <p className="mt-4 text-[14px] leading-relaxed text-text-secondary">
+            <p className="mt-4 text-body leading-relaxed text-text-secondary">
               The three control surfaces a risk team checks first — transport,
               storage, and authorization — summarized on one line each.
             </p>
-            <table className="mt-6 w-full border-collapse text-left text-[14px]">
+            <table className="mt-6 w-full border-collapse text-left text-body">
               <caption className="sr-only">
                 Quantalyze data-handling matrix — transport, storage, and
                 access controls.
@@ -242,25 +242,25 @@ export default function SecurityPage() {
                 <tr className="border-b border-border">
                   <th
                     scope="col"
-                    className="py-2 pr-4 text-[11px] font-medium uppercase tracking-wider text-text-muted"
+                    className="py-2 pr-4 text-caption font-medium uppercase tracking-wider text-text-muted"
                   >
                     Surface
                   </th>
                   <th
                     scope="col"
-                    className="py-2 pr-4 text-[11px] font-medium uppercase tracking-wider text-text-muted"
+                    className="py-2 pr-4 text-caption font-medium uppercase tracking-wider text-text-muted"
                   >
                     Control
                   </th>
                   <th
                     scope="col"
-                    className="py-2 text-[11px] font-medium uppercase tracking-wider text-text-muted"
+                    className="py-2 text-caption font-medium uppercase tracking-wider text-text-muted"
                   >
                     Detail
                   </th>
                 </tr>
               </thead>
-              <tbody className="font-mono text-[13px] tabular-nums text-text-primary">
+              <tbody className="font-mono text-caption tabular-nums text-text-primary">
                 <tr className="border-b border-border">
                   <th
                     scope="row"
@@ -302,7 +302,7 @@ export default function SecurityPage() {
             {/* Phase 11 / S4c / D-05 — public audit-log link line. Verbatim
                 CONTEXT D-05 phrasing; LOCKED. Editorial pointer to the
                 authenticated /profile?tab=security audit-log subsection. */}
-            <p className="mt-6 text-[14px] leading-relaxed text-text-muted">
+            <p className="mt-6 text-body leading-relaxed text-text-muted">
               If you have an account, you can{" "}
               <a
                 href="/profile?tab=security"
@@ -320,11 +320,11 @@ export default function SecurityPage() {
           >
             <h2
               id="breach-notification"
-              className="font-display text-2xl tracking-tight text-text-primary"
+              className="font-display text-h2 tracking-tight text-text-primary"
             >
               Breach notification
             </h2>
-            <div className="mt-4 space-y-4 text-[14px] leading-relaxed text-text-primary">
+            <div className="mt-4 space-y-4 text-body leading-relaxed text-text-primary">
               <p>
                 In the event of a personal-data breach affecting your account,
                 we notify you within 72 hours of becoming aware of it, in line
@@ -347,11 +347,11 @@ export default function SecurityPage() {
             <a
               href="/security-packet.pdf"
               aria-label="Download Quantalyze security packet PDF"
-              className="inline-flex h-10 items-center rounded-md bg-accent px-4 text-sm font-medium text-white transition-colors hover:bg-accent-hover"
+              className="inline-flex h-10 items-center rounded-md bg-accent px-4 text-body font-medium text-white transition-colors hover:bg-accent-hover"
             >
               Download security packet (PDF)
             </a>
-            <p className="mt-3 text-[13px] text-text-muted">
+            <p className="mt-3 text-caption text-text-muted">
               One-page summary — encryption spec, scopes, retention,
               incident-response contact. Updated when policy changes; see
               the last-reviewed date below.
@@ -365,11 +365,11 @@ export default function SecurityPage() {
           >
             <h2
               id="security-contact"
-              className="font-display text-2xl tracking-tight text-text-primary"
+              className="font-display text-h2 tracking-tight text-text-primary"
             >
               Security contact
             </h2>
-            <p className="mt-4 text-[14px] leading-relaxed text-text-primary">
+            <p className="mt-4 text-body leading-relaxed text-text-primary">
               Allocators asking for a posture letter, researchers reporting
               a vulnerability, and anyone with a concrete security question
               should email{" "}
@@ -382,7 +382,7 @@ export default function SecurityPage() {
               . We reply within one business day. Acknowledgments for
               coordinated disclosure are published on this page.
             </p>
-            <p className="mt-3 text-[13px] text-text-muted">
+            <p className="mt-3 text-caption text-text-muted">
               Last reviewed: 2026-04-12.
             </p>
           </section>
@@ -396,11 +396,11 @@ export default function SecurityPage() {
         >
           <h2
             id="operational-reference"
-            className="font-display text-2xl tracking-tight text-text-primary"
+            className="font-display text-h2 tracking-tight text-text-primary"
           >
             Operational reference
           </h2>
-          <p className="mt-3 text-[14px] leading-relaxed text-text-secondary">
+          <p className="mt-3 text-body leading-relaxed text-text-secondary">
             Step-by-step guides the Connect wizard links into when a key
             fails validation, sync is slow, or a draft needs resuming. Kept
             on one page so the wizard error surface has a stable landing
@@ -418,7 +418,7 @@ export default function SecurityPage() {
               </p>
               <div className="mt-4 space-y-4">
                 <SubAnchor id="binance-readonly" title="Binance">
-                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-[14px] text-text-secondary">
+                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-body text-text-secondary">
                     <li>
                       Go to Binance API Management and click Create API. Pick
                       System-generated.
@@ -436,7 +436,7 @@ export default function SecurityPage() {
                 </SubAnchor>
 
                 <SubAnchor id="okx-readonly" title="OKX">
-                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-[14px] text-text-secondary">
+                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-body text-text-secondary">
                     <li>
                       Go to OKX API Management and click Create API Key V5.
                     </li>
@@ -452,7 +452,7 @@ export default function SecurityPage() {
                 </SubAnchor>
 
                 <SubAnchor id="bybit-readonly" title="Bybit">
-                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-[14px] text-text-secondary">
+                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-body text-text-secondary">
                     <li>
                       Go to Bybit API Management and click Create New Key.
                       Pick System-generated.
@@ -577,13 +577,13 @@ function Section({
     <section id={id} aria-labelledby={`${id}-title`} className="space-y-3">
       <h3
         id={`${id}-title`}
-        className="font-display text-base font-semibold tracking-tight text-text-primary"
+        className="font-display text-body font-semibold tracking-tight text-text-primary"
       >
         <a href={`#${id}`} className="transition-colors hover:text-accent">
           {title}
         </a>
       </h3>
-      <div className="text-[14px] leading-relaxed text-text-secondary">
+      <div className="text-body leading-relaxed text-text-secondary">
         {children}
       </div>
     </section>
@@ -601,12 +601,12 @@ function SubAnchor({
 }) {
   return (
     <div id={id} className="border-t border-border pt-3">
-      <h4 className="font-display text-base text-text-primary">
+      <h4 className="font-display text-body text-text-primary">
         <a href={`#${id}`} className="transition-colors hover:text-accent">
           {title}
         </a>
       </h4>
-      <div className="text-[14px] leading-relaxed text-text-secondary">
+      <div className="text-body leading-relaxed text-text-secondary">
         {children}
       </div>
     </div>
