@@ -170,6 +170,20 @@ const eslintConfig = defineConfig([
       // on the named --text-* tiers (form category: page-title/h3/body/
       // caption + micro for badge/chip/counter text). Grep-verified clean.
       "src/app/(dashboard)/strategies/new/**",
+      // Phase 53 (v1.4) — Plan 53-06 admin + portfolios DATA surfaces. Plans
+      // 53-04 (components/portfolio + portfolios page tree) and 53-05 (admin
+      // page tree + components/admin tables) migrated every raw text-[Npx] to
+      // the named --text-* tiers; both surfaces grep clean (0 raw px). Flip the
+      // four glob trees to error now. The shared EmptyStateCard primitive
+      // (src/components/ui/EmptyStateCard.tsx — rendered into both surfaces via
+      // CorrelationHeatmap / degenerate admin states) carried the last
+      // text-[11px]; it was migrated to text-micro in 53-06 (option a — single
+      // clean site), so the components/ui home stays clean too. This is the
+      // per-surface ratchet ONLY — the repo-wide flip is Phase 54 BP-03.
+      "src/app/(dashboard)/admin/**",
+      "src/components/admin/**",
+      "src/app/(dashboard)/portfolios/**",
+      "src/components/portfolio/**",
     ],
     rules: { "quantalyze/no-raw-font-px": "error" },
   },
