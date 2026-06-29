@@ -13,6 +13,7 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MetadataStep, type MetadataDraft } from "./MetadataStep";
+import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
 
 // Supabase client mock: MetadataStep does
 //   supabase.from("discovery_categories").select("id, name").order("sort_order")
@@ -127,6 +128,67 @@ describe("[H-0191] MetadataStep", () => {
     render(<MetadataStep {...baseProps} detectedMarkets={["BTC"]} />);
     const submit = screen.getByRole("button", { name: /review and submit/i });
     expect(submit).toBeDisabled();
+  });
+
+  // ── Phase 53 / APPLY-02 — inline per-field validation surfacing ──────────
+  it("[APPLY-02] blur on an empty description surfaces the wizardErrors copy through Field a11y", async () => {
+    render(<MetadataStep {...baseProps} />);
+    const description = (await screen.findByLabelText(
+      "Description",
+    )) as HTMLTextAreaElement;
+
+    // No error before interaction.
+    expect(description.getAttribute("aria-invalid")).not.toBe("true");
+
+    fireEvent.blur(description);
+
+    // Field wires aria-invalid + aria-describedby pointing at the message id.
+    await waitFor(() =>
+      expect(description.getAttribute("aria-invalid")).toBe("true"),
+    );
+    const describedBy = description.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+
+    // The described element exists and carries the EXISTING wizardErrors copy
+    // (not a new inline string) — message id matches aria-describedby.
+    const messageNode = document.getElementById(describedBy!);
+    expect(messageNode).not.toBeNull();
+    expect(messageNode!.textContent).toBe(
+      WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause,
+    );
+  });
+
+  it("[APPLY-02] the per-field description message is NOT role=alert (envelope owns the summary)", async () => {
+    render(<MetadataStep {...baseProps} />);
+    const description = await screen.findByLabelText("Description");
+    fireEvent.blur(description);
+
+    const message = await screen.findByText(
+      WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause,
+    );
+    expect(message.getAttribute("role")).not.toBe("alert");
+    expect(message.closest('[role="alert"]')).toBeNull();
+  });
+
+  it("[APPLY-02] the inline error clears once a description is typed", async () => {
+    render(<MetadataStep {...baseProps} />);
+    const description = (await screen.findByLabelText(
+      "Description",
+    )) as HTMLTextAreaElement;
+    fireEvent.blur(description);
+    await screen.findByText(
+      WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause,
+    );
+
+    fireEvent.change(description, { target: { value: "A real description." } });
+    await waitFor(() =>
+      expect(
+        screen.queryByText(
+          WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause,
+        ),
+      ).toBeNull(),
+    );
+    expect(description.getAttribute("aria-invalid")).not.toBe("true");
   });
 
   it("emits the captured fields (incl. auto-selected categoryId) via onComplete", async () => {

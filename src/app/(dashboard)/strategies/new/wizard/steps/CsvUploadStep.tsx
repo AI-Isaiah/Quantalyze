@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { Field } from "@/components/ui/Field";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 import {
@@ -355,48 +356,50 @@ export function CsvUploadStep({
       </p>
 
       <form onSubmit={handleSubmit} className="mt-8 space-y-5">
-        {/* Row 1 — Strategy-name input (cross-AI revision 2026-04-30). */}
+        {/* Row 1 — Strategy-name input (cross-AI revision 2026-04-30).
+            Phase 53 / APPLY-02: wrapped in Field so aria-invalid +
+            aria-describedby wire automatically (the exact gap the bare
+            hand-wired input had — it set aria-invalid but NOT
+            aria-describedby). The char-counter stays an aria-live sibling;
+            the error/help copy threads through Field's error/hint slots
+            (existing wizardErrors / heading strings — never invented). */}
         <div>
-          <div className="flex items-center justify-between">
-            <label
-              htmlFor="strategy-name"
-              className="text-xs font-medium text-text-primary"
-            >
-              Strategy name
-            </label>
-            <span
-              className="text-[11px] font-metric tabular-nums text-text-muted"
-              aria-live="polite"
-            >
-              {strategyName.length} / {MAX_NAME_CHARS}
-            </span>
-          </div>
-          <input
+          <Field
             id="strategy-name"
-            type="text"
-            required
-            maxLength={MAX_NAME_CHARS}
-            value={strategyName}
-            onChange={(e) => handleNameChange(e.target.value)}
-            placeholder="Aurora Capital — BTC vol carry"
-            aria-label="Strategy name"
-            aria-required="true"
-            aria-invalid={nameError !== null}
-            data-testid="csv-strategy-name"
-            className="mt-2 block w-full rounded-md border border-border bg-white px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20"
-          />
-          {nameError ? (
-            <p
-              className="mt-1 text-xs text-negative"
-              data-testid="csv-strategy-name-error"
-            >
-              {nameError}
-            </p>
-          ) : (
-            <p className="mt-1 text-xs text-text-muted">
-              {CSV_UPLOAD_STEP_HEADINGS.nameHelper}
-            </p>
-          )}
+            label="Strategy name"
+            error={nameError ?? undefined}
+            hint={nameError ? undefined : CSV_UPLOAD_STEP_HEADINGS.nameHelper}
+          >
+            <input
+              type="text"
+              required
+              maxLength={MAX_NAME_CHARS}
+              value={strategyName}
+              onChange={(e) => handleNameChange(e.target.value)}
+              onBlur={() => {
+                // Surface the existing required/too-long validation at the
+                // field on blur (presentation-only; the finalize POST stays
+                // authoritative). Reuses the same wizardErrors copy the
+                // submit path uses — no new string.
+                const trimmed = strategyName.trim();
+                if (trimmed.length === 0) {
+                  setNameError(WIZARD_ERROR_COPY.CSV_STRATEGY_NAME_REQUIRED.title);
+                } else if (strategyName.length > MAX_NAME_CHARS) {
+                  setNameError(WIZARD_ERROR_COPY.CSV_STRATEGY_NAME_TOO_LONG.title);
+                }
+              }}
+              placeholder="Aurora Capital — BTC vol carry"
+              aria-required="true"
+              data-testid="csv-strategy-name"
+              className="block w-full rounded-md border border-border bg-white px-3 py-2 text-body text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20 aria-[invalid=true]:border-negative"
+            />
+          </Field>
+          <span
+            className="mt-1 block text-right text-micro font-metric tabular-nums text-text-muted"
+            aria-live="polite"
+          >
+            {strategyName.length} / {MAX_NAME_CHARS}
+          </span>
         </div>
 
         {/* Row 2 — Format selector (segmented control). */}

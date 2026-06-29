@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { Textarea } from "@/components/ui/Textarea";
 import { Select } from "@/components/ui/Select";
+import { Field } from "@/components/ui/Field";
+import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
 import {
   STRATEGY_NAMES,
   STRATEGY_TYPES,
@@ -85,6 +86,15 @@ export function MetadataStep({
   const [aum, setAum] = useState<string>(initial?.aum ?? "");
   const [maxCapacity, setMaxCapacity] = useState<string>(initial?.maxCapacity ?? "");
   const [categoryLoadError, setCategoryLoadError] = useState<string | null>(null);
+  // Phase 53 / APPLY-02 — inline per-field validation surfacing. The
+  // description is the required free-text field; surface its existing
+  // validation at the field on blur + on submit (the WizardErrorEnvelope
+  // stays the role=alert summary, unchanged). `descriptionBlurred` gates
+  // the on-blur reveal; submit reveals it unconditionally and focuses the
+  // first invalid field.
+  const [descriptionBlurred, setDescriptionBlurred] = useState(false);
+  const [submitAttempted, setSubmitAttempted] = useState(false);
+  const descriptionRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -138,8 +148,30 @@ export function MetadataStep({
     setter(list.includes(item) ? list.filter((x) => x !== item) : [...list, item]);
   }
 
+  // Inline validation derives from the EXISTING required-field rule (the
+  // Submit gate). Copy comes from wizardErrors.ts (canonical home) — never
+  // an invented inline string. The message shows on blur or after a submit
+  // attempt; it is NOT role="alert" (the envelope owns that).
+  const descriptionError = !description.trim()
+    ? WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause
+    : undefined;
+  const showDescriptionError =
+    (descriptionBlurred || submitAttempted) && descriptionError
+      ? descriptionError
+      : undefined;
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    setSubmitAttempted(true);
+    // On submit-with-errors, focus the first invalid field (description is
+    // the only inline-validated free-text field here; category is selected
+    // via auto-select / dropdown). The Submit button stays disabled until
+    // both are present, so this is a defense-in-depth focus aid for the AT
+    // path where the button is reached.
+    if (!description.trim()) {
+      descriptionRef.current?.focus();
+      return;
+    }
     onComplete({
       name,
       description,
@@ -175,14 +207,22 @@ export function MetadataStep({
           onChange={(e) => setName(e.target.value)}
         />
 
-        <Textarea
-          label="Description"
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          rows={3}
-          placeholder="One paragraph describing the strategy, edge, and risk framing."
-          required
-        />
+        {/* Phase 53 / APPLY-02 — the description is wrapped in Field so the
+            inline error wires aria-invalid + aria-describedby (the a11y the
+            bare Textarea primitive does NOT do). Copy is the existing
+            wizardErrors.ts string; the message is NOT role="alert". */}
+        <Field label="Description" error={showDescriptionError}>
+          <textarea
+            ref={descriptionRef}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            onBlur={() => setDescriptionBlurred(true)}
+            rows={3}
+            placeholder="One paragraph describing the strategy, edge, and risk framing."
+            required
+            className="rounded-lg border border-border bg-surface px-3 py-2 text-body text-text-primary placeholder:text-text-muted transition-colors focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20 aria-[invalid=true]:border-negative"
+          />
+        </Field>
 
         <Select
           label="Category"
