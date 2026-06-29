@@ -76,6 +76,12 @@ spine. Existing `text-sm` / `text-[14px]` and other raw usages are **untouched**
 here — surfaces are migrated onto the named tiers per-surface in phases 52/53, so
 the fluid scale lands incrementally with no app-wide visual churn in Phase 49.
 
+**Lint scope (DS-04, scoped — not yet app-wide):** the `no-raw-font-px` design
+lint *errors* only on the clean `src/lib/design-tokens/**` token surface today;
+across the broader `src/**` it is a non-blocking `warn`. The app surfaces ratchet
+to `error` one at a time in phases 52/53, so DS-04's raw-px rejection is currently
+a scoped backstop on the new token files, not an app-wide prohibition.
+
 ## Color
 - **Approach:** Restrained — 1 accent + 3 semantic (positive/negative/warning) + neutrals. Color is rare and meaningful; warning is reserved for transient recoverable states that the system will handle on its own.
 - **Accent:** #1B6B5A — muted institutional teal. Darker and more serious than the bright teal (#0D9488) that competitors use. Means "verified" and "action".
