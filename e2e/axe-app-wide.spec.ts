@@ -87,11 +87,19 @@ const PUBLIC_ROUTES: { path: string; anchor: string }[] = [
   { path: "/demo", anchor: "#editorial-hero-headline" },
 ];
 
-// Both viewports — every axe check runs at Desktop AND a mobile viewport (375px
-// per Assumption A3). This is the route × viewport matrix.
+// Three viewports — every axe check runs at Desktop, a mobile viewport (375px
+// per Assumption A3), AND the 2560px ultra-wide upper bound (Phase 54 /
+// VERIFY-01). This is the route × viewport matrix. The three for-loops below
+// (public, authed, embedded) iterate this const, so adding the ultrawide row
+// fans EVERY scan out to 2560 automatically — no per-loop edit needed. Only the
+// PUBLIC describe runs unseeded in CI, so this widens the public matrix to 2560
+// today; the authed + embedded 2560 rows stay HAS_SEED_ENV-gated and activate
+// with VERIFY-02 in Plan 54-08 (un-skipping those describes into the seeded
+// MA-8 job is that plan's work, NOT this matrix widening).
 const VIEWPORTS = [
   { w: 1280, h: 800, name: "Desktop" },
   { w: 375, h: 812, name: "mobile" },
+  { w: 2560, h: 1440, name: "ultrawide" },
 ] as const;
 
 // --- PUBLIC matrix (UNSEEDED — runs in both CI jobs; cheap overlap intended) ---
