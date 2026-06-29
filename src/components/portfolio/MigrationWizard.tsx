@@ -99,7 +99,7 @@ export function MigrationWizardButton({ portfolioId }: MigrationWizardButtonProp
     <>
       <Button variant="secondary" onClick={() => setIsOpen(true)}>Claim Legacy Allocation</Button>
       <Modal open={isOpen} onClose={handleClose} title="Claim Legacy Allocation">
-        <p className="text-xs text-text-muted mb-4">Step {stepNum} of 3</p>
+        <p className="text-caption text-text-muted mb-4">Step {stepNum} of 3</p>
 
         {step === "select" && (
           <div className="space-y-4">
@@ -115,7 +115,7 @@ export function MigrationWizardButton({ portfolioId }: MigrationWizardButtonProp
                   <li key={s.id}>
                     <button type="button"
                       onClick={() => { setSelected(s); setQuery(""); setResults([]); }}
-                      className="block w-full text-left px-3 py-2 text-sm text-text-primary hover:bg-page transition-colors">
+                      className="block w-full text-left px-3 py-2 text-small text-text-primary hover:bg-page transition-colors">
                       {s.name}
                     </button>
                   </li>
@@ -123,14 +123,14 @@ export function MigrationWizardButton({ portfolioId }: MigrationWizardButtonProp
               </ul>
             )}
             {!selected && query.trim().length >= 2 && results.length === 0 && (
-              <p className="text-xs text-text-muted">No published strategies match. Try a different name.</p>
+              <p className="text-caption text-text-muted">No published strategies match. Try a different name.</p>
             )}
           </div>
         )}
 
         {step === "details" && selected && (
           <div className="space-y-4">
-            <p className="text-sm text-text-secondary">Strategy: <span className="font-medium text-text-primary">{selected.name}</span></p>
+            <p className="text-small text-text-secondary">Strategy: <span className="font-medium text-text-primary">{selected.name}</span></p>
             <Input label="Amount ($)" type="number" min="0.01" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="10000" required />
             <Input label="Allocation date" type="date" value={eventDate} onChange={(e) => setEventDate(e.target.value)} required />
           </div>
@@ -139,11 +139,11 @@ export function MigrationWizardButton({ portfolioId }: MigrationWizardButtonProp
         {step === "notes" && (
           <div className="space-y-4">
             <Textarea label="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Any prior communications, terms, or context..." rows={4} />
-            {error && <p className="text-sm text-negative">{error}</p>}
+            {error && <p className="text-small text-negative">{error}</p>}
           </div>
         )}
 
-        {step === "saving" && <p className="text-sm text-text-secondary">Saving allocation...</p>}
+        {step === "saving" && <p className="text-small text-text-secondary">Saving allocation...</p>}
 
         <div className="flex items-center justify-between mt-6 gap-2">
           <Button variant="ghost"

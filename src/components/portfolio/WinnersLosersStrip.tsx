@@ -21,10 +21,10 @@ function Row({ name, contribution }: { name: string; contribution: number }) {
   const positive = contribution >= 0;
   return (
     <li className="flex items-baseline justify-between gap-4 py-2">
-      <span className="text-sm text-text-primary truncate">{name}</span>
+      <span className="text-small text-text-primary truncate">{name}</span>
       <span
         className={cn(
-          "font-metric tabular-nums text-sm",
+          "font-metric tabular-nums text-small",
           positive ? "text-positive" : "text-negative",
         )}
       >
@@ -45,7 +45,7 @@ function Column({
 }) {
   return (
     <div>
-      <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-2">
+      <p className="text-micro uppercase tracking-wider text-text-muted font-medium mb-2">
         {heading}
       </p>
       {rows.length > 0 ? (
@@ -59,7 +59,7 @@ function Column({
           ))}
         </ul>
       ) : (
-        <p className="text-sm text-text-muted">{emptyCopy}</p>
+        <p className="text-small text-text-muted">{emptyCopy}</p>
       )}
     </div>
   );

@@ -82,7 +82,7 @@ export function DocumentUpload({ portfolioId, userId, strategies }: DocumentUplo
 
   return (
     <Card>
-      <h2 className="text-base font-semibold text-text-primary mb-4">Upload Document</h2>
+      <h2 className="text-body font-semibold text-text-primary mb-4">Upload Document</h2>
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input label="Title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Q1 2026 factsheet" required />
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -90,10 +90,10 @@ export function DocumentUpload({ portfolioId, userId, strategies }: DocumentUplo
           <Select label="Strategy (optional)" value={strategyId} onChange={(e) => setStrategyId(e.target.value)} options={strategyOptions} />
         </div>
         <label className="block">
-          <span className="text-sm font-medium text-text-primary block mb-1.5">File</span>
-          <input type="file" required onChange={(e) => setFile(e.target.files?.[0] ?? null)} className="block w-full text-sm text-text-secondary file:mr-4 file:rounded-lg file:border-0 file:bg-accent file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-accent-hover" />
+          <span className="text-small font-medium text-text-primary block mb-1.5">File</span>
+          <input type="file" required onChange={(e) => setFile(e.target.files?.[0] ?? null)} className="block w-full text-small text-text-secondary file:mr-4 file:rounded-lg file:border-0 file:bg-accent file:px-4 file:py-2 file:text-small file:font-medium file:text-white hover:file:bg-accent-hover" />
         </label>
-        {error && <p className="text-sm text-negative">{error}</p>}
+        {error && <p className="text-small text-negative">{error}</p>}
         <div className="flex justify-end">
           <Button type="submit" disabled={uploading || !file || !title.trim()}>
             {uploading ? "Uploading..." : "Upload"}

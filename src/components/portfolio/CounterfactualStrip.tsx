@@ -29,7 +29,7 @@ export function CounterfactualStrip({
   return (
     <aside
       aria-label="Counterfactual comparison"
-      className={cn("text-sm sm:text-base text-text-secondary", className)}
+      className={cn("text-small sm:text-body text-text-secondary", className)}
     >
       Had you allocated {period}:{" "}
       <span className="font-metric tabular-nums text-text-primary">

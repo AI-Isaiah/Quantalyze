@@ -111,12 +111,12 @@ export function CreatePortfolioForm() {
               placeholder="What is this portfolio for? (optional)"
               rows={3}
             />
-            <p className="text-xs text-text-muted">
+            <p className="text-caption text-text-muted">
               Saved as a test/scenario portfolio for comparison. Your real
               allocations live on the My Allocation page.
             </p>
           </div>
-          {error && <p className="text-sm text-negative mt-3">{error}</p>}
+          {error && <p className="text-small text-negative mt-3">{error}</p>}
           <div className="flex justify-end gap-3 mt-6">
             <Button
               type="button"

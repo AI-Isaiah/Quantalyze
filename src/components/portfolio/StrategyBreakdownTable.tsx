@@ -120,7 +120,7 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
 
   if (sorted.length === 0) {
     return (
-      <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center text-text-muted text-sm">
+      <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center text-text-muted text-small">
         No strategies in this portfolio.
       </div>
     );
@@ -128,7 +128,7 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
 
   return (
     <div className="overflow-x-auto rounded-lg border border-border bg-surface">
-      <table className="w-full text-sm">
+      <table className="w-full text-small">
         <thead>
           <tr className="border-b border-border">
             {COLUMNS.map((col) => (

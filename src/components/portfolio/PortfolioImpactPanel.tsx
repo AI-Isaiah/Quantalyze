@@ -194,13 +194,13 @@ export function PortfolioImpactPanel({
           <div className="min-w-0">
             <h2
               id={titleId}
-              className="truncate text-base font-semibold text-text-primary"
+              className="truncate text-body font-semibold text-text-primary"
             >
               Simulate impact: {candidateName}
             </h2>
             <p
               id={descriptionId}
-              className="mt-1 text-xs leading-relaxed text-text-muted"
+              className="mt-1 text-caption leading-relaxed text-text-muted"
             >
               Preview how adding this strategy would shift your portfolio&rsquo;s
               Sharpe, drawdown, correlation and concentration.
@@ -304,9 +304,9 @@ function ErrorState({
       className="rounded-lg border border-negative/20 bg-negative/5 px-4 py-3"
       role="alert"
     >
-      <p className="text-sm text-negative">{message}</p>
+      <p className="text-small text-negative">{message}</p>
       {isRateLimited && (
-        <p className="mt-1 text-xs text-negative/80">
+        <p className="mt-1 text-caption text-negative/80">
           Try again in {formatRetryAfter(retryAfter)}.
         </p>
       )}
@@ -314,7 +314,7 @@ function ErrorState({
         type="button"
         onClick={onRetry}
         disabled={isRateLimited}
-        className="mt-2 rounded-md border border-negative/30 bg-surface px-3 py-1 text-xs font-medium text-negative transition-colors hover:bg-negative/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-negative disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-surface"
+        className="mt-2 rounded-md border border-negative/30 bg-surface px-3 py-1 text-caption font-medium text-negative transition-colors hover:bg-negative/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-negative disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-surface"
       >
         Retry
       </button>
@@ -339,7 +339,7 @@ function NonOkState({ data }: { data: SimulatorCandidate }) {
         : "Your portfolio has no strategies yet. Add at least one strategy before simulating impact.";
   return (
     <div className="rounded-lg border border-border bg-page px-4 py-3">
-      <p className="text-sm text-text-secondary">{copy}</p>
+      <p className="text-small text-text-secondary">{copy}</p>
     </div>
   );
 }
@@ -367,7 +367,7 @@ function SuccessBody({ data }: { data: SimulatorResponseOk }) {
   if (data.overlap_days < 30 || allDeltasNull) {
     return (
       <div className="rounded-lg border border-border bg-page px-4 py-3">
-        <p className="text-sm text-text-secondary">
+        <p className="text-small text-text-secondary">
           Not enough overlapping history to compute reliable projections.
           Requires at least 30 trading days of overlap with your portfolio.
         </p>
@@ -399,7 +399,7 @@ function SuccessBody({ data }: { data: SimulatorResponseOk }) {
 function PartialHistoryBanner({ overlapDays }: { overlapDays: number }) {
   return (
     <div
-      className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning"
+      className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-caption text-warning"
       role="note"
     >
       <strong className="font-medium">Partial history:</strong>{" "}
@@ -463,7 +463,7 @@ function DeltaHero({ deltas }: { deltas: SimulatorDeltas }) {
   const chips = deltaChips(deltas);
   return (
     <section aria-label="Portfolio impact deltas">
-      <h3 className="mb-2 text-[11px] font-medium uppercase tracking-wider text-text-muted">
+      <h3 className="mb-2 text-micro font-medium uppercase tracking-wider text-text-muted">
         Projected impact
       </h3>
       <div className="grid grid-cols-2 gap-2">
@@ -505,7 +505,7 @@ function DeltaChipCard({ chip }: { chip: DeltaChip }) {
       title={notComputable ? `${chip.hint} (not computable — operand metric unavailable)` : chip.hint}
     >
       <div className="flex items-center justify-between">
-        <p className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
+        <p className="text-micro font-medium uppercase tracking-wider text-text-muted">
           {chip.label}
         </p>
         {improving && (
@@ -516,7 +516,7 @@ function DeltaChipCard({ chip }: { chip: DeltaChip }) {
           />
         )}
       </div>
-      <p className={`mt-1 font-metric text-sm tabular-nums ${color}`}>
+      <p className={`mt-1 font-metric text-small tabular-nums ${color}`}>
         {formatDelta(chip.value, chip.format)}
       </p>
     </div>
@@ -572,10 +572,10 @@ function EquityOverlay({
   if (merged.length === 0) {
     return (
       <section aria-label="Equity curve overlay">
-        <h3 className="mb-2 text-[11px] font-medium uppercase tracking-wider text-text-muted">
+        <h3 className="mb-2 text-micro font-medium uppercase tracking-wider text-text-muted">
           Equity overlay
         </h3>
-        <div className="rounded-lg border border-border bg-page px-3 py-6 text-center text-xs text-text-muted">
+        <div className="rounded-lg border border-border bg-page px-3 py-6 text-center text-caption text-text-muted">
           No equity history available.
         </div>
       </section>
@@ -585,10 +585,10 @@ function EquityOverlay({
   return (
     <section aria-label="Equity curve overlay">
       <div className="mb-2 flex items-center justify-between">
-        <h3 className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
+        <h3 className="text-micro font-medium uppercase tracking-wider text-text-muted">
           Equity overlay
         </h3>
-        <div className="flex items-center gap-3 text-[11px] text-text-muted">
+        <div className="flex items-center gap-3 text-micro text-text-muted">
           <span className="inline-flex items-center gap-1.5">
             <span
               aria-hidden="true"

@@ -134,14 +134,14 @@ export function PortfolioEquityCurve({
         {/* Legend */}
         <div className="flex flex-wrap items-center gap-3">
           {portfolioEquityCurve && portfolioEquityCurve.length > 0 && (
-            <span className="flex items-center gap-1.5 text-xs text-text-muted">
+            <span className="flex items-center gap-1.5 text-caption text-text-muted">
               <span className="inline-block w-3 h-0.5 rounded-full bg-[#1B6B5A]" style={{ height: 3 }} />
               Portfolio
             </span>
           )}
           {strategies.map((s, i) =>
             s.equityCurve && s.equityCurve.length > 0 ? (
-              <span key={s.id} className="flex items-center gap-1.5 text-xs text-text-muted">
+              <span key={s.id} className="flex items-center gap-1.5 text-caption text-text-muted">
                 <span
                   className="inline-block w-3 rounded-full"
                   style={{ height: 2, backgroundColor: STRATEGY_PALETTE[(i + 1) % STRATEGY_PALETTE.length] }}
@@ -151,7 +151,7 @@ export function PortfolioEquityCurve({
             ) : null
           )}
           {overlayCurve && overlayCurve.length > 0 && (
-            <span className="flex items-center gap-1.5 text-xs text-text-muted">
+            <span className="flex items-center gap-1.5 text-caption text-text-muted">
               <span
                 className="inline-block w-3 rounded-full border-t-[2px] border-dashed border-[#1B6B5A] bg-transparent"
                 style={{ height: 2 }}
@@ -161,7 +161,7 @@ export function PortfolioEquityCurve({
           )}
         </div>
         {/* PnL / Return toggle */}
-        <div className="flex items-center gap-1 text-xs">
+        <div className="flex items-center gap-1 text-caption">
           <button
             onClick={() => setMode("return")}
             className={`px-2 py-0.5 rounded transition-colors ${mode === "return" ? "bg-accent text-white" : "text-text-muted hover:text-text-primary"}`}

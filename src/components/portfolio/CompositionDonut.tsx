@@ -25,7 +25,7 @@ interface CompositionDonutProps {
 export function CompositionDonut({ strategies }: CompositionDonutProps) {
   if (!strategies || strategies.length === 0) {
     return (
-      <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center text-text-muted text-sm">
+      <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center text-text-muted text-small">
         No composition data available.
       </div>
     );
@@ -62,15 +62,15 @@ export function CompositionDonut({ strategies }: CompositionDonutProps) {
         </ResponsiveContainer>
         {/* Center label */}
         <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-          <span className="text-xs text-text-muted">Total AUM</span>
-          <span className="text-lg font-semibold font-metric text-text-primary">{formatCurrency(totalAUM)}</span>
+          <span className="text-caption text-text-muted">Total AUM</span>
+          <span className="text-h3 font-semibold font-metric text-text-primary">{formatCurrency(totalAUM)}</span>
         </div>
       </div>
 
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full text-small">
           <thead>
-            <tr className="border-b border-border text-left text-xs text-text-muted uppercase tracking-wider">
+            <tr className="border-b border-border text-left text-caption text-text-muted uppercase tracking-wider">
               <th className="py-2 pr-4">Strategy</th>
               <th className="py-2 pr-4 text-right font-metric">Amount</th>
               <th className="py-2 pr-4 text-right font-metric">Weight %</th>

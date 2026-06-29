@@ -150,12 +150,12 @@ export function InsightStrip({
       aria-label="Portfolio insights"
       className={cn("flex flex-col gap-3", className)}
     >
-      <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+      <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
         What we noticed
       </p>
       <ul role="list" className="space-y-2">
         {flaggedCount !== undefined && flaggedCount > 0 && (
-          <li className="flex items-start gap-3 text-sm text-text-secondary">
+          <li className="flex items-start gap-3 text-small text-text-secondary">
             <span
               aria-hidden="true"
               className="mt-1.5 inline-block h-2 w-2 flex-shrink-0 rounded-full bg-text-muted"
@@ -168,7 +168,7 @@ export function InsightStrip({
         {insights.map((insight) => (
           <li
             key={`${insight.key}${insight.strategy_id ? `:${insight.strategy_id}` : ""}`}
-            className="flex items-start gap-3 text-sm text-text-secondary"
+            className="flex items-start gap-3 text-small text-text-secondary"
           >
             <span
               aria-hidden="true"

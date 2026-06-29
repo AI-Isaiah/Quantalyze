@@ -31,7 +31,7 @@ export function MorningBriefing({
       <p
         title={narrative}
         className={cn(
-          "max-w-3xl text-sm sm:text-base text-text-secondary leading-relaxed line-clamp-3",
+          "max-w-3xl text-small sm:text-body text-text-secondary leading-relaxed line-clamp-3",
           className,
         )}
       >
@@ -50,11 +50,11 @@ export function MorningBriefing({
     >
       <h2
         id="morning-briefing-title"
-        className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-2"
+        className="text-micro uppercase tracking-wider text-text-muted font-medium mb-2"
       >
         Morning Briefing
       </h2>
-      <p className="text-sm text-text-secondary leading-relaxed">{narrative}</p>
+      <p className="text-small text-text-secondary leading-relaxed">{narrative}</p>
     </section>
   );
 }

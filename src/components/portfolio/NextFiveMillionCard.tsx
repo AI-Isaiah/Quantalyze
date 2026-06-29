@@ -41,7 +41,7 @@ export function NextFiveMillionCard({
       aria-label="Where the next allocation would go"
       className={cn("flex flex-col gap-3", className)}
     >
-      <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+      <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
         Where would the next {formatCurrency(amount)} go?
       </p>
       <ol className="divide-y divide-border">
@@ -50,11 +50,11 @@ export function NextFiveMillionCard({
             key={row.strategy_id}
             className="flex items-baseline justify-between gap-4 py-3"
           >
-            <span className="text-sm text-text-primary">
+            <span className="text-small text-text-primary">
               <span className="text-text-muted mr-2">{i + 1}.</span>
               {row.strategy_name}
             </span>
-            <span className="font-metric tabular-nums text-sm text-text-primary">
+            <span className="font-metric tabular-nums text-small text-text-primary">
               {formatCurrency(dollars)}
             </span>
           </li>

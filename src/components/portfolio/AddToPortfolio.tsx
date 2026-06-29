@@ -92,15 +92,15 @@ export function AddToPortfolio({ strategyId }: { strategyId: string }) {
       {open && (
         <div className="absolute right-0 top-full mt-2 w-56 rounded-lg border border-border bg-surface shadow-elevated z-50">
           {feedback ? (
-            <div className="px-4 py-3 text-sm text-center text-positive font-medium">
+            <div className="px-4 py-3 text-small text-center text-positive font-medium">
               {feedback}
             </div>
           ) : loading ? (
-            <div className="px-4 py-3 text-sm text-text-muted text-center">
+            <div className="px-4 py-3 text-small text-text-muted text-center">
               Loading...
             </div>
           ) : portfolios.length === 0 ? (
-            <div className="px-4 py-3 text-sm text-text-muted text-center">
+            <div className="px-4 py-3 text-small text-text-muted text-center">
               No portfolios yet.
               <Link
                 href="/portfolios"
@@ -115,7 +115,7 @@ export function AddToPortfolio({ strategyId }: { strategyId: string }) {
                 <button
                   key={p.id}
                   onClick={() => handleAdd(p.id)}
-                  className="w-full text-left px-4 py-2 text-sm text-text-primary hover:bg-page transition-colors"
+                  className="w-full text-left px-4 py-2 text-small text-text-primary hover:bg-page transition-colors"
                 >
                   {p.name}
                 </button>

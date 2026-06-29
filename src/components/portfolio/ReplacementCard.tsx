@@ -113,12 +113,12 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
     <div className="rounded-lg border border-border bg-surface px-4 py-3">
       {/* Header: name + fit badge */}
       <div className="flex items-center justify-between gap-2 mb-2">
-        <p className="text-sm font-medium text-text-primary truncate">
+        <p className="text-small font-medium text-text-primary truncate">
           {candidate.strategy_name}
         </p>
         <span
           className={cn(
-            "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider",
+            "shrink-0 rounded px-1.5 py-0.5 text-micro font-medium uppercase tracking-wider",
             FIT_STYLES[candidate.fit_label],
           )}
         >
@@ -132,7 +132,7 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
           <span
             key={d.label}
             className={cn(
-              "font-metric text-xs tabular-nums",
+              "font-metric text-caption tabular-nums",
               deltaColor(d.improvement),
             )}
           >
@@ -143,12 +143,12 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
 
       {/* Intro button */}
       {introState === "done" ? (
-        <p className="text-xs text-text-muted">Intro Requested</p>
+        <p className="text-caption text-text-muted">Intro Requested</p>
       ) : (
         <>
           {/* H-1067: distinct, actionable error — not a silent generic retry. */}
           {introState === "error" && introError && (
-            <p className="mb-2 text-xs text-negative" role="alert">
+            <p className="mb-2 text-caption text-negative" role="alert">
               {introError}
             </p>
           )}
@@ -157,7 +157,7 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
             onClick={handleIntro}
             disabled={introState === "loading"}
             className={cn(
-              "rounded-md border border-accent bg-accent px-3 py-1 text-xs font-medium text-white transition-colors duration-150",
+              "rounded-md border border-accent bg-accent px-3 py-1 text-caption font-medium text-white transition-colors duration-150",
               introState === "loading"
                 ? "cursor-wait opacity-60"
                 : "hover:bg-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent",
