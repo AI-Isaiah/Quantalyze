@@ -98,6 +98,23 @@ describe("[APPLY-02] ReviewStep — API branch recap", () => {
     expect(dashes.length).toBeGreaterThanOrEqual(7);
   });
 
+  it("[WR-02] renders an em-dash for a non-numeric AUM/Max-capacity value, never $NaN", () => {
+    // AUM/Max capacity are free-form strings from <Input type="number">; a
+    // non-empty-but-non-numeric value ("1e", a pasted "1,000") makes
+    // Number(...) return NaN. The recap must fall back to the em-dash
+    // sentinel, never show the fabricated string "$NaN" (no-invented-data).
+    renderApi({
+      ...FULL_METADATA,
+      aum: "1e",
+      maxCapacity: "1,000",
+    });
+    expect(screen.queryByText("$NaN")).toBeNull();
+    expect(screen.queryByText(/NaN/)).toBeNull();
+    // Both money rows fall back to the em-dash placeholder.
+    const dashes = screen.getAllByText("—");
+    expect(dashes.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("clicking the profile Edit calls onEdit('metadata')", () => {
     const { onEdit } = renderApi();
     fireEvent.click(screen.getByTestId("wizard-review-edit-metadata"));

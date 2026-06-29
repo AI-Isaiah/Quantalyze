@@ -73,6 +73,25 @@ const FMT_LABEL: Record<ReviewCsvSummary["fmt"], string> = {
 /** Em-dash sentinel for a genuinely-absent OPTIONAL field. Never a zero. */
 const ABSENT = "—";
 
+/**
+ * Format a free-form money string (AUM / Max capacity) for the recap.
+ *
+ * WR-02 — these fields are free-form strings sourced from `<Input
+ * type="number">` (`MetadataDraft.aum`/`.maxCapacity` are `string`). A bare
+ * truthiness guard catches only the empty string; any non-empty-but-non-numeric
+ * value ("1e", a pasted "1,000", a scientific-notation partial) makes
+ * `Number(...)` return `NaN`, so the recap would render the fabricated string
+ * "$NaN" right before finalize — a no-invented-data violation. Guard on a
+ * FINITE parse and fall back to the em-dash sentinel instead. Single home so
+ * the guard cannot drift between the ApiRecap and CsvRecap copies (IN-03).
+ */
+function formatMoney(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return ABSENT;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? `$${n.toLocaleString()}` : ABSENT;
+}
+
 export function ReviewStep(props: ReviewStepProps) {
   // WR-01 — advance verb, NOT a finalize verb: this CTA only advances to the
   // owning Submit step (which carries the real "Create strategy"/"Submit
@@ -160,18 +179,10 @@ function ApiRecap({
         value={metadata.supportedExchanges.join(", ") || ABSENT}
       />
       <RecapRow label="Leverage range" value={metadata.leverageRange || ABSENT} />
-      <RecapRow
-        label="AUM (USD)"
-        value={metadata.aum ? `$${Number(metadata.aum).toLocaleString()}` : ABSENT}
-        numeric
-      />
+      <RecapRow label="AUM (USD)" value={formatMoney(metadata.aum)} numeric />
       <RecapRow
         label="Max capacity (USD)"
-        value={
-          metadata.maxCapacity
-            ? `$${Number(metadata.maxCapacity).toLocaleString()}`
-            : ABSENT
-        }
+        value={formatMoney(metadata.maxCapacity)}
         numeric
       />
     </RecapSection>
@@ -230,20 +241,10 @@ function CsvRecap({
           value={metadata.supportedExchanges.join(", ") || ABSENT}
         />
         <RecapRow label="Leverage range" value={metadata.leverageRange || ABSENT} />
-        <RecapRow
-          label="AUM (USD)"
-          value={
-            metadata.aum ? `$${Number(metadata.aum).toLocaleString()}` : ABSENT
-          }
-          numeric
-        />
+        <RecapRow label="AUM (USD)" value={formatMoney(metadata.aum)} numeric />
         <RecapRow
           label="Max capacity (USD)"
-          value={
-            metadata.maxCapacity
-              ? `$${Number(metadata.maxCapacity).toLocaleString()}`
-              : ABSENT
-          }
+          value={formatMoney(metadata.maxCapacity)}
           numeric
         />
       </RecapSection>
