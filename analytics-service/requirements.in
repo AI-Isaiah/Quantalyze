@@ -27,7 +27,7 @@ quantstats==0.0.81
 # regenerated lock (Dependabot's own pip-compile won't match the uv/universal
 # format).
 ccxt==4.5.59
-pandas==2.2.3
+pandas==3.0.4
 numpy==2.4.6
 # NOTE: pyarrow is NOT here — it is a TEST-ONLY dependency (pd.read_parquet of the
 # golden_252d_input.parquet fixture, tests/conftest.py + tests/fixtures/regen_golden.py).
@@ -44,7 +44,7 @@ cryptography>=44.0
 # Phase 15 / CSV-01..CSV-02: pandera CSV row-schema validation +
 # python-multipart UploadFile parsing for /api/csv/validate (the only
 # multipart route in the service). pandera 0.32.x is compatible with
-# pandas==2.2.3 / numpy==2.4.6 (pinned above). supabase #480 bumped pandera
+# pandas==3.0.4 / numpy==2.4.6 (pinned above). supabase #480 bumped pandera
 # 0.20.4 -> 0.32.0, which dropped the multimethod dependency entirely — the
 # prior Python-3.14 multimethod<=1.10.0 pytest-collection workaround is gone.
 # (0.32 also left DataFrameSchema.__init__ unannotated; mypy clears it via the
