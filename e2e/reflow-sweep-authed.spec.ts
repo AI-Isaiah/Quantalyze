@@ -285,3 +285,70 @@ test.describe("rotate-stability (SC#4) — /allocations EquityChart, authed", ()
     }
   });
 });
+
+// Phase 52-01 / APPLY-01 + TYPE-03 — 2560px ultra-wide reflow row. ADDITIVE to
+// this already-seeded, already-dual-wired spec (it is in the ci.yml seeded MA-8
+// list AND HAS_SEED_ENV-gated above), so NO new FLOW-01 wiring is needed — the
+// rotate-stability fold above is the additive-fold precedent. NOT a new harness:
+// a self-contained describe in the existing seeded host spec, reusing the same
+// HAS_SEED_ENV + test.skip + seedTestAllocator + loginViaForm scaffolding.
+//
+// The 320px sweep above proves WCAG 1.4.10 Reflow at the lower bound; this row
+// proves the v1.4 "layouts hold to ULTRA-WIDE" requirement at the upper bound
+// (no horizontal overflow when the allocator viewport is 2560px). It is the
+// cheap IN-SCOPE subset of the app-wide 2560 sweep that FORMALLY lands in Phase
+// 54 (VERIFY-*) — here it is scoped to the allocator surfaces this milestone
+// restyles, so an ultra-wide overflow on /allocations + its key tabs + /compare
+// fails LOUD in the journey phase rather than waiting for the verification phase.
+//
+// Each anchor is a route-specific VISIBLE content node a freshly-seeded
+// allocator reliably renders (Pitfall 5 / W-02 false-green guard) — never a
+// bare body/main chrome anchor — so a 404 / login / unhydrated page fails loud
+// instead of measuring against nothing. The "My Allocation" <h1> sits above the
+// tab-panel switch (AllocationsTabs.tsx) so it is present on every ?tab= value;
+// /compare with no ?ids= renders the empty-selection PageHeader <h1> ("Compare
+// Strategies"), which a seeded allocator with no compare selection always hits.
+const ULTRAWIDE_ROUTES: { path: string; anchor: string; label: string }[] = [
+  { path: "/allocations", anchor: 'h1:has-text("My Allocation")', label: "allocations (default)" },
+  { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My Allocation")', label: "allocations Scenario composer" },
+  { path: "/allocations?tab=risk", anchor: 'h1:has-text("My Allocation")', label: "allocations Risk" },
+  { path: "/compare", anchor: 'h1:has-text("Compare Strategies")', label: "compare (empty-selection)" },
+];
+
+test.describe("reflow sweep @ 2560px ultra-wide — authed", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "reflow-sweep-authed (2560): seed-helper env vars not wired " +
+      "(set TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY) — " +
+      "skipping prevents a false-green against an empty/404/login page (W-02). " +
+      "The live ultra-wide reflow proof runs in CI once seed env is present.",
+  );
+
+  // One seeded allocator + login for the whole row (mirrors the 320px sweep and
+  // the rotate-stability fold above). The session cookie carries across goto.
+  let allocator: Awaited<ReturnType<typeof seedTestAllocator>>;
+
+  test.beforeAll(async () => {
+    allocator = await seedTestAllocator();
+  });
+
+  test.beforeEach(async ({ page }) => {
+    await loginViaForm(page, allocator.email, allocator.password);
+  });
+
+  for (const r of ULTRAWIDE_ROUTES) {
+    test(`${r.label} — no horizontal overflow at 2560px`, async ({ page }) => {
+      await page.setViewportSize({ width: 2560, height: 1440 });
+      const res = await page.goto(r.path);
+      if (res) {
+        const status = res.status();
+        if (status >= 400) {
+          throw new Error(
+            `${r.path} returned HTTP ${status} — cannot run ultra-wide reflow sweep`,
+          );
+        }
+      }
+      await assertNoReflow(page, r.anchor);
+    });
+  }
+});
