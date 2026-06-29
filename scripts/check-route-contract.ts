@@ -290,6 +290,48 @@ export function parsePublicRoutes(proxySource: string): string[] {
 }
 
 /**
+ * Parse the `source` values out of the `redirects()` block in `next.config.ts`.
+ * Drives Rule 3: a manifest `redirectFrom` MUST appear as a `source` here, so
+ * the old link 308s to the new path instead of 404-ing.
+ *
+ * As with `parsePublicRoutes`, comments are stripped FIRST (so a `source:`
+ * literal sitting only inside a comment cannot satisfy the lockstep), then the
+ * live `redirects()` span is located in the stripped source and the actual
+ * `source: "..."` string literals are read from the ORIGINAL source within that
+ * span. Returns `[]` when there is no `redirects()` block (the correct state for
+ * plan 51-02 — no moves yet — so every `redirectFrom`-less entry passes Rule 3
+ * vacuously and the rule stays ready for 51-05).
+ */
+export function parseRedirectSources(nextConfigSource: string): string[] {
+  const stripped = stripComments(nextConfigSource);
+  const marker = stripped.match(/redirects\s*\(\s*\)/);
+  if (!marker || marker.index === undefined) return [];
+  // The `redirects()` body is delimited by its `return [ ... ]`. Locate the
+  // array open bracket after the marker in the stripped source, then walk the
+  // ORIGINAL source bracket-balanced to find the matching close so nested
+  // objects (`{ source, destination }`) don't truncate the span.
+  const arrOpen = stripped.indexOf("[", marker.index);
+  if (arrOpen === -1) return [];
+  let depth = 0;
+  let arrClose = -1;
+  for (let i = arrOpen; i < stripped.length; i += 1) {
+    const ch = stripped[i];
+    if (ch === "[") depth += 1;
+    else if (ch === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        arrClose = i;
+        break;
+      }
+    }
+  }
+  if (arrClose === -1) return [];
+  const body = nextConfigSource.slice(arrOpen + 1, arrClose);
+  // Read each `source: "..."` (single or double quoted) from the live span.
+  return [...body.matchAll(/source\s*:\s*["']([^"']+)["']/g)].map((mm) => mm[1]);
+}
+
+/**
  * Pure entry point for the gate. Takes a root directory (so tests can drive a
  * tmp fixture tree) and an explicit manifest (so tests can inject fixture
  * entries without monkey-patching the import). Returns the violation list —
@@ -328,28 +370,76 @@ export function runCheck(
     publicRoutes = [];
   }
 
-  // Rule 1 — every discovered page route is classified in the manifest.
-  // STUB (51-02): emit `UNCLASSIFIED: ...` for each pageUrl with no manifest
-  // entry. Currently a no-op so the Task-2 unclassified assertion is RED.
-  void pageUrls;
+  // Parse the live next.config.ts redirects() sources (used by Rule 3). FINAL.
+  let redirectSources: string[] = [];
+  try {
+    redirectSources = parseRedirectSources(
+      readFileSync(resolve(rootDir, "next.config.ts"), "utf-8"),
+    );
+  } catch {
+    redirectSources = [];
+  }
+  const redirectSourceSet = new Set(redirectSources);
 
-  // Rule 2 — every manifest "public" route is in PUBLIC_ROUTES (the #512
-  // lockstep). STUB (51-02): for each manifest entry whose class === "public"
-  // and whose route is not matched by PUBLIC_ROUTES, emit
-  // `MISSING-FROM-PUBLIC: ...`. Currently a no-op so the Task-2 Rule-2 and
-  // comment-bypass assertions are RED.
-  void publicRoutes;
+  // The proxy's public-route matcher, replicated EXACTLY (proxy.ts L53-55) so
+  // the guard and the runtime agree: a route is public iff it is the `/`
+  // special-case OR a PUBLIC_ROUTES prefix matches it via
+  // `route === prefix || route.startsWith(prefix + "/")`. A bare
+  // `startsWith(prefix)` would wrongly match siblings (`/login` ⊃ `/loginx`),
+  // the exact C-0186 substring hazard the proxy test pins.
+  const isCoveredByPublicRoutes = (route: string): boolean =>
+    route === "/" ||
+    publicRoutes.some(
+      (prefix) => route === prefix || route.startsWith(prefix + "/"),
+    );
+
+  // Rule 1 — every discovered page route is classified in the manifest.
+  for (const url of pageUrls) {
+    if (!manifestByRoute.has(url)) {
+      violations.push(
+        `UNCLASSIFIED: page route ${url} has no entry in ROUTE_CONTRACT_MANIFEST (src/lib/routing/route-contract-manifest.ts). Add an entry declaring its class (public|private|admin|exception).`,
+      );
+    }
+  }
+
+  // Rule 2 — every manifest "public" route is covered by PUBLIC_ROUTES (the
+  // #512 lockstep). A public route the proxy matcher does NOT cover would 307→
+  // login for an anonymous visitor — the regression this gate exists to refuse.
+  for (const entry of manifest) {
+    if (entry.class !== "public") continue;
+    if (!isCoveredByPublicRoutes(entry.route)) {
+      violations.push(
+        `MISSING-FROM-PUBLIC: route ${entry.route} is classified "public" but is not covered by PUBLIC_ROUTES in src/proxy.ts (the #512 lockstep — an anon visitor would 307→login). Add a covering prefix to PUBLIC_ROUTES or re-classify the route.`,
+      );
+    }
+  }
 
   // Rule 3 — every manifest `redirectFrom` has a matching next.config.ts
-  // redirects() source. STUB (51-02): parse next.config.ts redirects() and emit
-  // `MISSING-REDIRECT: ...` for each redirectFrom with no matching source.
-  // Currently a no-op so the Task-2 Rule-3 assertion is RED.
+  // redirects() source. (No redirects() block exists yet → redirectSourceSet is
+  // empty → only entries that declare a redirectFrom can violate this, which is
+  // none in plan 51-02. The rule is live and ready for 51-05's moves.)
+  for (const entry of manifest) {
+    if (!entry.redirectFrom) continue;
+    if (!redirectSourceSet.has(entry.redirectFrom)) {
+      violations.push(
+        `MISSING-REDIRECT: route ${entry.route} declares redirectFrom ${entry.redirectFrom} but next.config.ts redirects() has no matching source — the old link would 404. Add { source: "${entry.redirectFrom}", destination: "${entry.route}", permanent: true }.`,
+      );
+    }
+  }
 
-  // Rule 4 — every manifest entry maps to a real page file. STUB (51-02): for
-  // each manifest entry whose route is not produced by the page walk above (and
-  // is not an `exception`/API carve-out), emit `STALE: ...`. Currently a no-op
-  // so the Task-2 Rule-4 assertion is RED.
-  void manifestByRoute;
+  // Rule 4 — every NON-exception manifest entry maps to a real page file on
+  // disk. `exception` entries are explicitly skipped: they may be `route.ts`
+  // handlers (/api/health, /auth/callback) with no page.tsx, which the page
+  // walk above never discovers (51-RESEARCH L139-140).
+  const pageUrlSet = new Set(pageUrls);
+  for (const entry of manifest) {
+    if (entry.class === "exception") continue;
+    if (!pageUrlSet.has(entry.route)) {
+      violations.push(
+        `STALE: manifest entry ${entry.route} maps to no page.tsx under src/app. Remove the entry or restore the page (or mark it an "exception" if it is a route.ts handler).`,
+      );
+    }
+  }
 
   return violations;
 }
