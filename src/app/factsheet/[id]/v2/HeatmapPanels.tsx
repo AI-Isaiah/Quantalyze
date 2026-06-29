@@ -51,7 +51,7 @@ export function MonthlyReturnsHeatmap() {
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Monthly Returns
         </h3>
-        <p className="text-[11px] text-text-muted">
+        <p className="text-micro text-text-muted">
           compounded monthly returns · YTD on the right · color scale clamped to ±{(maxAbs * 100).toFixed(0)}%
         </p>
       </header>
@@ -65,18 +65,18 @@ export function MonthlyReturnsHeatmap() {
           </colgroup>
           <thead>
             <tr>
-              <th className="text-left py-1 px-1 text-[9px] uppercase tracking-[0.18em] font-medium text-text-muted">
+              <th className="text-left py-1 px-1 text-micro uppercase tracking-[0.18em] font-medium text-text-muted">
                 Year
               </th>
               {MONTH_HEADERS.map(m => (
                 <th
                   key={m}
-                  className="text-center py-1 text-[9px] uppercase tracking-[0.12em] font-medium text-text-muted"
+                  className="text-center py-1 text-micro uppercase tracking-[0.12em] font-medium text-text-muted"
                 >
                   {m}
                 </th>
               ))}
-              <th className="text-right py-1 px-1 text-[9px] uppercase tracking-[0.18em] font-medium text-text-muted">
+              <th className="text-right py-1 px-1 text-micro uppercase tracking-[0.18em] font-medium text-text-muted">
                 YTD
               </th>
             </tr>
@@ -93,13 +93,13 @@ export function MonthlyReturnsHeatmap() {
 function MonthlyRow({ row, maxAbs, palette }: { row: MonthlyReturnsRow; maxAbs: number; palette: { base: string; accent: string; negative: string } }) {
   return (
     <tr>
-      <td className="text-left text-[11px] tabular-nums text-text-primary pr-1">{row.year}</td>
+      <td className="text-left text-micro tabular-nums text-text-primary pr-1">{row.year}</td>
       {row.byMonth.map((v, i) => {
         if (v == null) {
           return (
             <td
               key={i}
-              className="text-center text-[9px]"
+              className="text-center text-micro"
               style={{
                 background: "var(--color-surface-subtle, #FBFCFD)",
                 color: "var(--color-text-muted)",
@@ -116,7 +116,7 @@ function MonthlyRow({ row, maxAbs, palette }: { row: MonthlyReturnsRow; maxAbs: 
         return (
           <td
             key={i}
-            className="text-center text-[9px] tabular-nums"
+            className="text-center text-micro tabular-nums"
             style={{
               background: tint.bg,
               color: tint.fg,
@@ -130,7 +130,7 @@ function MonthlyRow({ row, maxAbs, palette }: { row: MonthlyReturnsRow; maxAbs: 
         );
       })}
       <td
-        className="text-right text-[10px] tabular-nums pl-1 pr-1"
+        className="text-right text-micro tabular-nums pl-1 pr-1"
         style={{
           color: row.ytd >= 0 ? "var(--color-positive)" : "var(--color-negative)",
           fontWeight: 600,
@@ -171,7 +171,7 @@ export function DailyReturnsHeatmap() {
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Daily Returns Calendar
         </h3>
-        <p className="text-[11px] text-text-muted">
+        <p className="text-micro text-text-muted">
           one cell per trading day · color scale clamped to ±{(maxAbs * 100).toFixed(1)}% · hover or tap any cell for value
         </p>
       </header>
@@ -456,7 +456,7 @@ function YearCalendarCanvas({
 
   return (
     <div className="flex items-start gap-3">
-      <div className="font-mono text-[11px] tabular-nums text-text-primary pt-[14px] flex-shrink-0" style={{ minWidth: 38 }}>
+      <div className="font-mono text-micro tabular-nums text-text-primary pt-[14px] flex-shrink-0" style={{ minWidth: 38 }}>
         {year.year}
       </div>
       <div
@@ -520,7 +520,7 @@ function YearCalendarCanvas({
         {reveal && (
           <div
             role="status"
-            className="pointer-events-none absolute z-10 px-2 py-1 text-[10px] font-mono tabular-nums rounded-sm border whitespace-nowrap"
+            className="pointer-events-none absolute z-10 px-2 py-1 text-micro font-mono tabular-nums rounded-sm border whitespace-nowrap"
             style={{
               left: reveal.cx + 8,
               top: reveal.cy - 24,
@@ -544,7 +544,7 @@ function YearCalendarCanvas({
 function DailyHeatmapLegend({ maxAbs, palette }: { maxAbs: number; palette: { base: string; accent: string; negative: string } }) {
   const stops = [-1, -0.5, -0.25, 0, 0.25, 0.5, 1];
   return (
-    <div className="mt-2 flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider text-text-muted">
+    <div className="mt-2 flex items-center gap-2 text-micro font-mono uppercase tracking-wider text-text-muted">
       <span>{formatPct(-maxAbs, 1)}</span>
       <div className="flex">
         {stops.map(s => {

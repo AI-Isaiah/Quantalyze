@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { cache } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getPublicStrategyDetail } from "@/lib/queries";
@@ -12,6 +13,10 @@ import { formatPercent, formatNumber, metricColor } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/server";
 import { StrategyNoteCard } from "@/components/notes/StrategyNoteCard";
 
+// Request-memoized so generateMetadata + the page share ONE Supabase fetch per
+// request (Next renders both for the same URL). React.cache dedupes by args.
+const getStrategyDetail = cache(getPublicStrategyDetail);
+
 /* ---------- OG metadata ---------- */
 
 export async function generateMetadata({
@@ -20,7 +25,7 @@ export async function generateMetadata({
   params: Promise<{ id: string }>;
 }): Promise<Metadata> {
   const { id } = await params;
-  const result = await getPublicStrategyDetail(id);
+  const result = await getStrategyDetail(id);
 
   if (!result) {
     return { title: "Strategy Not Found | Quantalyze" };
@@ -78,7 +83,7 @@ export default async function PublicStrategyPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const result = await getPublicStrategyDetail(id);
+  const result = await getStrategyDetail(id);
 
   if (!result) notFound();
 
@@ -118,7 +123,7 @@ export default async function PublicStrategyPage({
         {/* Header */}
         <div className="mb-8">
           <div className="flex items-center gap-3 mb-2">
-            <h1 className="text-[32px] font-bold tracking-tight text-text-primary">
+            <h1 className="font-serif text-page-title leading-tight tracking-tight text-text-primary">
               {strategy.name}
             </h1>
             <VerifiedBadge trustTier={strategy.trust_tier} />

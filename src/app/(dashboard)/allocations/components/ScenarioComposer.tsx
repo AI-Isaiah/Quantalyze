@@ -2776,7 +2776,15 @@ export function ScenarioComposer({
                             role="listitem"
                             className="flex items-center gap-2 py-2"
                           >
-                            <span className="text-[12px] text-text-primary truncate max-w-[160px]">
+                            {/* TYPE-02 (truncation-audit ScenarioComposer:2779)
+                                — table-aligned <li>, so keep single-line but add
+                                a `title` for full-text recovery; the title
+                                exposes only the already-rendered constituent
+                                name (T-52-06). text-[12px] → text-caption tier. */}
+                            <span
+                              className="text-caption text-text-primary truncate max-w-[160px]"
+                              title={strategyNames[id] ?? id}
+                            >
                               {strategyNames[id] ?? id.slice(0, 8)}
                             </span>
                             {isHedge && (
@@ -3360,6 +3368,12 @@ function ResetConfirmationModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="reset-modal-title"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          onCancel();
+        }
+      }}
       style={{
         position: "fixed",
         inset: 0,
@@ -3394,6 +3408,7 @@ function ResetConfirmationModal({
         <div className="mt-6 flex justify-end gap-3">
           <button
             type="button"
+            autoFocus
             onClick={onCancel}
             className="rounded-md border border-border px-3 py-1.5 text-sm text-text-secondary hover:border-accent hover:text-text-primary"
           >

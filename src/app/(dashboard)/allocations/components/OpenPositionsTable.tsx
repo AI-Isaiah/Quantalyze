@@ -128,7 +128,7 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
         <ResponsiveTable label="Open positions">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-muted">
+            <tr className="border-b border-border text-left text-micro uppercase tracking-wider text-text-muted">
               <th className="px-4 py-2 font-semibold">Venue / Symbol</th>
               <th className="px-4 py-2 font-semibold">Side</th>
               <th className="px-4 py-2 text-right font-semibold">Quantity</th>
@@ -161,7 +161,7 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                       </span>
                       {isRevoked ? (
                         <span
-                          className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider"
+                          className="inline-flex items-center rounded px-1.5 py-0.5 text-micro font-semibold uppercase tracking-wider"
                           style={AMBER_CHIP_STYLE}
                         >
                           Key revoked

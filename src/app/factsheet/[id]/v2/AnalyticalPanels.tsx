@@ -33,22 +33,26 @@ export function StreakDistributionPanel() {
   const s = payload.streaks;
   return (
     <figure
-      className="flex flex-col gap-2"
+      className="@container flex flex-col gap-2"
       style={{ contentVisibility: "auto", containIntrinsicSize: `auto ${VB_H_DESKTOP + 80}px` }}
     >
       <header>
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Consecutive-Day Streak Distribution
         </h3>
-        <p className="text-[11px] text-text-muted">
+        <p className="text-micro text-text-muted">
           {s.totalWins.toLocaleString()} winning streaks · {s.totalLosses.toLocaleString()} losing streaks · max win
           streak {s.longestWin}d · max loss streak {s.longestLoss}d
         </p>
       </header>
-      {/* Single-column on mobile so each StreakHist renders ~288px wide → the
-          coarse hit-rect's colW=76 viewBox units land ≈49 CSS px (CR-01).
-          Desktop (≥sm) stays 2-col — byte-identical to today's render. */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-2">
+      {/* Phase 52-06 / TYPE-04: single-column when the PANEL is narrow so each
+          StreakHist renders ~288px wide → the coarse hit-rect's colW=76 viewBox
+          units land ≈49 CSS px (CR-01). The split now keys off the panel's OWN
+          width (`@container` on the figure, `@2xl:grid-cols-2` at ≈42rem) rather
+          than the viewport `sm:` breakpoint — bare inline-size @container
+          (Pitfall 1). The single-column collapse stays load-bearing for the touch
+          hit-rect scale; useBreakpoint/useTapPin (frozen islands) are untouched. */}
+      <div className="grid grid-cols-1 @2xl:grid-cols-2 gap-4 mt-2">
         <StreakHist title="Wins" data={s.winsByLength} color="var(--color-positive)" maxLen={s.maxLen} />
         <StreakHist title="Losses" data={s.lossesByLength} color="var(--color-negative)" maxLen={s.maxLen} />
       </div>
@@ -100,7 +104,7 @@ function StreakHist({ title, data, color, maxLen }: { title: string; data: numbe
 
   return (
     <div>
-      <p className="text-[10px] font-mono uppercase tracking-wider text-text-muted mb-1">{title}</p>
+      <p className="text-micro font-mono uppercase tracking-wider text-text-muted mb-1">{title}</p>
       <ResponsiveChartFrame
         ref={setChartEl}
         width={VB_W}
@@ -265,16 +269,16 @@ export function CalmarByYearPanel() {
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
-        <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary">Calmar by Year</h3>
+        <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">Calmar by Year</h3>
       </header>
-      <table className="w-full text-[11px]">
+      <table className="w-full text-micro">
         <thead>
           <tr className="border-b border-border/60">
-            <th className="py-1 pr-2 text-left font-mono text-[9px] uppercase tracking-wider text-text-muted">Year</th>
-            <th className="py-1 px-2 text-right font-mono text-[9px] uppercase tracking-wider text-text-muted">Return</th>
-            <th className="py-1 px-2 text-right font-mono text-[9px] uppercase tracking-wider text-text-muted">Max DD</th>
-            <th className="py-1 px-2 text-right font-mono text-[9px] uppercase tracking-wider text-text-muted">Calmar</th>
-            <th className="py-1 pl-2 text-right font-mono text-[9px] uppercase tracking-wider text-text-muted">Days</th>
+            <th className="py-1 pr-2 text-left font-mono text-micro uppercase tracking-wider text-text-muted">Year</th>
+            <th className="py-1 px-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">Return</th>
+            <th className="py-1 px-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">Max DD</th>
+            <th className="py-1 px-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">Calmar</th>
+            <th className="py-1 pl-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">Days</th>
           </tr>
         </thead>
         <tbody>
@@ -286,7 +290,7 @@ export function CalmarByYearPanel() {
                   {r.year}
                   {partial && (
                     <span
-                      className="ml-1 text-[9px]"
+                      className="ml-1 text-micro"
                       style={{ color: "var(--color-warning, #B45309)" }}
                       title={`Only ${r.days} trading days — Calmar/return for this year is based on a partial sample`}
                     >
@@ -304,7 +308,7 @@ export function CalmarByYearPanel() {
         </tbody>
       </table>
       {hasPartial && (
-        <p className="mt-2 text-[10px] italic text-text-muted">
+        <p className="mt-2 text-micro italic text-text-muted">
           ⚠ Years with &lt; 200 trading days are partial — Calmar values are not comparable to full-year rows.
         </p>
       )}
@@ -319,20 +323,20 @@ export function BootstrapCIPanel() {
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
-        <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary">Bootstrap 95% Confidence</h3>
+        <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">Bootstrap 95% Confidence</h3>
       </header>
       {lowN && (
-        <p className="mb-2 text-[10px] italic" style={{ color: "var(--color-warning, #B45309)" }}>
+        <p className="mb-2 text-micro italic" style={{ color: "var(--color-warning, #B45309)" }}>
           ⚠ Bootstrap resamples are drawn from {payload.strategyMetrics.n} observations.
           CI width is wide and may understate true uncertainty below 252 days (1 year).
         </p>
       )}
-      <table className="w-full text-[11px]">
+      <table className="w-full text-micro">
         <thead>
           <tr className="border-b border-border/60">
-            <th className="py-1 pr-2 text-left font-mono text-[9px] uppercase tracking-wider text-text-muted">Metric</th>
-            <th className="py-1 px-2 text-right font-mono text-[9px] uppercase tracking-wider text-text-muted">Point</th>
-            <th className="py-1 pl-2 text-right font-mono text-[9px] uppercase tracking-wider text-text-muted">95% CI</th>
+            <th className="py-1 pr-2 text-left font-mono text-micro uppercase tracking-wider text-text-muted">Metric</th>
+            <th className="py-1 px-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">Point</th>
+            <th className="py-1 pl-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">95% CI</th>
           </tr>
         </thead>
         <tbody>
@@ -351,7 +355,7 @@ export function BootstrapCIPanel() {
         <BootHist title="Max DD" hist={b.max_dd.hist} point={b.max_dd.point} ci={[b.max_dd.lo, b.max_dd.hi]} fmt={n => `${(n * 100).toFixed(1)}%`} />
       </div>
 
-      <p className="mt-2 text-[10px] italic text-text-muted">
+      <p className="mt-2 text-micro italic text-text-muted">
         {b.n_resamples.toLocaleString()} stationary block-bootstrap resamples · {b.block_len}-day block length · 95% CI
       </p>
     </section>
@@ -391,11 +395,11 @@ function BootHist({
   if (degenerate) {
     return (
       <div>
-        <div className="flex items-baseline justify-between text-[10px] font-mono uppercase tracking-[0.14em] text-text-muted">
+        <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
           <span>{title}</span>
           <span className="normal-case tracking-normal text-text-muted">no variance</span>
         </div>
-        <div className="h-[36px] flex items-center justify-center text-[10px] text-text-muted italic">
+        <div className="h-[36px] flex items-center justify-center text-micro text-text-muted italic">
           all resamples produced {fmt(point)}
         </div>
       </div>
@@ -403,7 +407,7 @@ function BootHist({
   }
   return (
     <div>
-      <div className="flex items-baseline justify-between text-[10px] font-mono uppercase tracking-[0.14em] text-text-muted">
+      <div className="flex items-baseline justify-between text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
         <span>{title}</span>
         <span className="normal-case tracking-normal">
           <span className="text-text-2">{fmt(ci[0])}</span> ·{" "}

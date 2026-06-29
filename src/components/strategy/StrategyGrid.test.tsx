@@ -107,3 +107,20 @@ describe("StrategyGrid — DISCO-04 sparkline color rule on grid card", () => {
     expect(getCardSparklineStroke()).toBe("var(--color-chart-benchmark)");
   });
 });
+
+describe("StrategyGrid — TYPE-02 tile-name truncation recovery", () => {
+  it("recovers the full strategy name via title= on the truncated tile heading (real name, never a fabricated placeholder)", () => {
+    const longName = "A Very Long Strategy Name That Truncates On The Tile";
+    const fixture = makeStrategy({ id: STRATEGY_ID, name: longName });
+    render(<StrategyGrid strategies={[fixture]} categorySlug="crypto-sma" />);
+    // The tile heading stays single-line (`truncate min-w-0`); title= recovers
+    // the full real name on hover / for assistive tech — never a fabricated
+    // stand-in (no-invented-data / STATE-02). Mirrors CompareTable.test.tsx
+    // Test 3 for the sibling table surface.
+    const h3 = document.querySelector("h3");
+    expect(h3).not.toBeNull();
+    expect(h3!.getAttribute("title")).toBe(longName);
+    expect(h3!.className).toContain("truncate");
+    expect(h3!.textContent).toContain(longName);
+  });
+});

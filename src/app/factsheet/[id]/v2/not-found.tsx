@@ -6,7 +6,7 @@ import Link from "next/link";
 export default function FactsheetV2NotFound() {
   return (
     <article className="mx-auto max-w-2xl px-6 py-16">
-      <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-text-muted">
+      <p className="text-micro font-mono uppercase tracking-[0.22em] text-text-muted">
         Institutional Factsheet · Not available
       </p>
       <h1 className="mt-2 font-serif text-3xl text-text-primary">
@@ -18,7 +18,7 @@ export default function FactsheetV2NotFound() {
       </p>
       <p className="mt-2 text-text-2">
         If you expect this strategy to be live, check that it has a recent
-        <code className="mx-1 font-mono text-[12px]">strategy_analytics</code>
+        <code className="mx-1 font-mono text-caption">strategy_analytics</code>
         row with daily returns.
       </p>
       <div className="mt-6 flex gap-3">

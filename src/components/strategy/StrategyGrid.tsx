@@ -60,7 +60,18 @@ export function StrategyGrid({
               {/* Header: name + badges */}
               <div className="mb-3 max-[375px]:mb-2">
                 <div className="flex items-start gap-2 min-h-[44px] max-[375px]:min-h-[44px]">
-                  <h3 className="text-sm font-semibold text-text-primary group-hover:text-accent transition-colors leading-tight truncate min-w-0">
+                  {/* TYPE-02 truncation recovery: the tile <h3> stays
+                      single-line (`truncate min-w-0`) so it keeps the
+                      `min-h-[44px]` header row aligned with the badges +
+                      star overlay; `title={s.name}` recovers the full,
+                      REAL strategy name on hover/AT (wizardErrors.ts:481
+                      warns managers that longer names truncate). The tile
+                      always renders the honest {s.name} — never a fabricated
+                      placeholder (STATE-02 / no-invented-data). */}
+                  <h3
+                    title={s.name}
+                    className="text-sm font-semibold text-text-primary group-hover:text-accent transition-colors leading-tight truncate min-w-0"
+                  >
                     {s.name}
                   </h3>
                   <HealthScore analytics={s.analytics} startDate={s.start_date} className="shrink-0 mt-0.5" />
@@ -71,7 +82,7 @@ export function StrategyGrid({
                     />
                   )}
                   {s.is_example && (
-                    <span className="shrink-0 mt-0.5 inline-flex items-center rounded-md bg-badge-other/10 text-badge-other px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider">
+                    <span className="shrink-0 mt-0.5 inline-flex items-center rounded-md bg-badge-other/10 text-badge-other px-1.5 py-0.5 text-micro font-semibold uppercase tracking-wider">
                       Example
                     </span>
                   )}

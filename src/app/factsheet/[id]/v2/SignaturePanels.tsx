@@ -90,7 +90,7 @@ function SignatureHorizon({
             strategy signals.
           </Explainer>
         </div>
-        <p className="text-[11px] text-text-muted">{subtitle}</p>
+        <p className="text-micro text-text-muted">{subtitle}</p>
       </header>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
         <SignaturePanel
@@ -178,7 +178,7 @@ function SignaturePanel({
   return (
     <figure className="flex flex-col gap-2">
       <header>
-        <p className="text-[12px] font-semibold text-text-primary">{title}</p>
+        <p className="text-caption font-semibold text-text-primary">{title}</p>
       </header>
       <ResponsiveChartFrame
         width={VB_W}
@@ -333,11 +333,11 @@ function Explainer({ label, children }: { label: string; children: React.ReactNo
       <summary
         aria-label={label}
         title={label}
-        className="list-none cursor-pointer inline-flex items-center justify-center w-4 h-4 rounded-full border border-border text-[9px] text-text-muted hover:bg-surface-subtle focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+        className="list-none cursor-pointer inline-flex items-center justify-center w-4 h-4 rounded-full border border-border text-micro text-text-muted hover:bg-surface-subtle focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
       >
         ?
       </summary>
-      <div className="absolute z-10 left-0 top-full mt-1 max-w-xs p-3 text-[11px] leading-relaxed text-text-2 bg-surface border border-border rounded-sm shadow-sm">
+      <div className="absolute z-10 left-0 top-full mt-1 max-w-xs p-3 text-micro leading-relaxed text-text-2 bg-surface border border-border rounded-sm shadow-sm">
         {children}
       </div>
     </details>

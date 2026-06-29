@@ -187,3 +187,58 @@ describe("DashboardChrome — standard vs full-bleed layout (M-0410)", () => {
     ).toBeInTheDocument();
   });
 });
+
+/**
+ * Phase 52 (v1.4) — DashboardChrome wide fluid-fill variant.
+ *
+ * 52-02/03/04 raised the allocator-journey PAGE content to a page-level
+ * `max-w-[1920px]`, but the standard shell's content container caps at
+ * `max-w-7xl` (1280px), which clamped that page cap. This pins the shell-level
+ * widening: the allocator-journey routes (/allocations, /compare, /discovery/*)
+ * get `max-w-[1920px]`, while every other dashboard route (incl. Phase-53
+ * surfaces) keeps `max-w-7xl`.
+ *
+ * The content container is the direct child <div> of the labeled <main> that
+ * holds the page children (the `mx-auto max-w-* px-4 …` wrapper).
+ */
+describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {
+  function contentContainerFor(pathname: string) {
+    navState.pathname = pathname;
+    render(
+      <DashboardChrome isAllocator={true} populatedSlugs={[]}>
+        <div data-testid="page-body">page</div>
+      </DashboardChrome>,
+    );
+    // The content container is the closest `mx-auto …` ancestor of the children.
+    return screen.getByTestId("page-body").closest("div.mx-auto");
+  }
+
+  it("widens the allocator route /allocations to max-w-[1920px]", () => {
+    const container = contentContainerFor("/allocations");
+    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).not.toHaveClass("max-w-7xl");
+  });
+
+  it("widens /compare to max-w-[1920px]", () => {
+    const container = contentContainerFor("/compare");
+    expect(container).toHaveClass("max-w-[1920px]");
+  });
+
+  it("widens nested discovery routes (/discovery/digital-assets) to max-w-[1920px]", () => {
+    const container = contentContainerFor("/discovery/digital-assets");
+    expect(container).toHaveClass("max-w-[1920px]");
+  });
+
+  it("keeps a non-allocator dashboard route (/portfolios) at the default max-w-7xl", () => {
+    const container = contentContainerFor("/portfolios");
+    expect(container).toHaveClass("max-w-7xl");
+    expect(container).not.toHaveClass("max-w-[1920px]");
+  });
+
+  it("does NOT widen a route that merely starts with the prefix string (/discoveryx)", () => {
+    // Regex boundary: /discoveryx is NOT a discovery route — keeps max-w-7xl.
+    const container = contentContainerFor("/discoveryx");
+    expect(container).toHaveClass("max-w-7xl");
+    expect(container).not.toHaveClass("max-w-[1920px]");
+  });
+});

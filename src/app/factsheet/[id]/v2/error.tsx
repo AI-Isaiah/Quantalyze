@@ -21,7 +21,7 @@ export default function FactsheetV2Error({
 
   return (
     <article className="mx-auto max-w-2xl px-6 py-16">
-      <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-text-muted">
+      <p className="text-micro font-mono uppercase tracking-[0.22em] text-text-muted">
         Institutional Factsheet · Error
       </p>
       <h1 className="mt-2 font-serif text-3xl text-text-primary">
@@ -32,7 +32,7 @@ export default function FactsheetV2Error({
         rendering failure on our side.
       </p>
       {error.digest && (
-        <p className="mt-2 text-[12px] font-mono text-text-muted">
+        <p className="mt-2 text-caption font-mono text-text-muted">
           Reference: <code>{error.digest}</code>
         </p>
       )}

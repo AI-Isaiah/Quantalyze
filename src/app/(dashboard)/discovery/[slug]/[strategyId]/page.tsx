@@ -128,13 +128,13 @@ export default async function StrategyDetailPage({
         <FactsheetView payload={factsheetPayload} />
       ) : (
         <article className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12">
-          <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-text-muted">
+          <p className="text-micro font-mono uppercase tracking-[0.22em] text-text-muted">
             Institutional Factsheet · Quantalyze
           </p>
-          <h1 className="mt-2 font-serif text-[28px] sm:text-[36px] leading-tight text-text-primary">
+          <h1 className="mt-2 font-serif text-page-title leading-tight text-text-primary">
             {displayName}
           </h1>
-          <p className="mt-6 text-[13px] text-text-secondary">
+          <p className="mt-6 text-small text-text-secondary">
             The detailed factsheet for this strategy is still computing.
             Daily-return data hasn&apos;t been ingested yet — once the
             analytics service finishes the first compute pass, the full

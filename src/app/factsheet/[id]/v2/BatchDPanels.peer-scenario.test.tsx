@@ -124,10 +124,12 @@ describe("PeerPercentilePanel — scenario-path disclosure (PEER-02)", () => {
     expect(getByText("Sortino")).toBeTruthy();
     expect(getByText("Max DD (shallower = better)")).toBeTruthy();
 
-    // The verbatim disclosure copy renders — plain 10px muted, NOT italic.
+    // The verbatim disclosure copy renders — plain muted micro-tier, NOT italic.
+    // (Phase 52-06 / TYPE-04 migrated the raw `text-[10px]` onto the fluid
+    // `--text-micro` tier; the PEER-02 plain-vs-italic distinction is preserved.)
     const disclosure = getByText(DISCLOSURE);
     expect(disclosure).toBeTruthy();
-    expect(disclosure.className).toContain("text-[10px]");
+    expect(disclosure.className).toContain("text-micro");
     expect(disclosure.className).toContain("text-text-muted");
     expect(disclosure.className).not.toContain("italic");
 

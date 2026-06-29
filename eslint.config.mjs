@@ -67,10 +67,17 @@ const eslintConfig = defineConfig([
       //     so it fails CI by construction on a future zoom-unsafe clamp string.
       //   - no-raw-font-px → repo-wide WARN here (dirty baseline stays visible
       //     but non-blocking); hard ERROR only on the proven-clean
-      //     `src/lib/design-tokens/**` surface (override block below). The 52/53
-      //     strangler ratchets the remaining ~53/54 dirty surfaces to error one
-      //     at a time. Chart / designer-bundle ports are turned off by glob; a
-      //     one-off carries a greppable `DS-04 sanctioned-exception:` comment.
+      //     `src/lib/design-tokens/**` surface plus the Phase-52 per-surface /
+      //     per-file ratchet override block below. The 52/53 strangler ratchets
+      //     the remaining dirty surfaces to error one at a time. Phase 52 is
+      //     done: its grep-verified-clean allocator-journey surfaces (compare/,
+      //     discovery/, strategy/[id]/ + the clean allocations/factsheet files)
+      //     are now error; the orphan allocations/factsheet files (incl. the
+      //     frozen EquityChart + chart-internal SVG) and the Phase-53 surfaces
+      //     (portfolios/security/admin/wizard) remain at warn — see
+      //     .planning/phases/52-…/deferred-items.md for the orphan-px debt list.
+      //     Chart / designer-bundle ports are turned off by glob; a one-off
+      //     carries a greppable `DS-04 sanctioned-exception:` comment.
       "quantalyze/no-rem-less-clamp": "error",
       "quantalyze/no-raw-font-px": "warn",
     },
@@ -81,6 +88,65 @@ const eslintConfig = defineConfig([
   // touching the dirty 53/54 the strangler migration owns.
   {
     files: ["src/lib/design-tokens/**"],
+    rules: { "quantalyze/no-raw-font-px": "error" },
+  },
+  // Phase 52 (v1.4) strangler ratchet — per-surface / per-file no-raw-font-px
+  // ERROR for the allocator-journey surfaces 52-02..06 migrated to the fluid
+  // `--text-*` spine. SCOPE-CORRECTED vs the original 52-07 plan (user decision
+  // "per-file ratchet + log debt"): allocations/** and factsheet/[id]/v2/** are
+  // NOT flipped whole — the planner under-scoped those migrations, so each tree
+  // still carries ORPHAN raw-px files (allocations: 18 incl. the FROZEN
+  // EquityChart that can never migrate; factsheet: 7 incl. the chart-internal
+  // SVG TimeSeriesChart/HistogramChart/MasterBrush). Flipping the whole glob
+  // would red CI. Instead we list ONLY the grep-proven-clean (zero raw
+  // text-[Npx]) globs + files. The orphan files stay at the repo-wide `warn`
+  // and are logged as Phase-53/54 debt in
+  // .planning/phases/52-…/deferred-items.md. Phase-53 surfaces
+  // (portfolios/security/admin/wizard) are untouched — the ratchet is
+  // per-surface, not big-bang.
+  {
+    files: [
+      // Fully-clean surface globs (grep-verified 0 raw text-[Npx]):
+      "src/app/(dashboard)/compare/**",
+      "src/app/(dashboard)/discovery/**",
+      "src/app/strategy/[id]/**",
+      // Clean component files:
+      "src/components/strategy/CompareTable.tsx",
+      "src/components/strategy/StrategyGrid.tsx",
+      // Allocations — per-FILE (only the grep-proven-clean files; the orphan
+      // widgets/components + the frozen EquityChart stay at warn):
+      "src/app/(dashboard)/allocations/HoldingsTabPanel.tsx",
+      "src/app/(dashboard)/allocations/RiskTabPanel.tsx",
+      "src/app/(dashboard)/allocations/OutcomesTabPanel.tsx",
+      "src/app/(dashboard)/allocations/ScenarioStub.tsx",
+      "src/app/(dashboard)/allocations/EmptyState.tsx",
+      "src/app/(dashboard)/allocations/AllocationContext.tsx",
+      "src/app/(dashboard)/allocations/page.tsx",
+      "src/app/(dashboard)/allocations/loading.tsx",
+      "src/app/(dashboard)/allocations/error.tsx",
+      "src/app/(dashboard)/allocations/components/KpiStrip.tsx",
+      "src/app/(dashboard)/allocations/components/AlertBanner.tsx",
+      "src/app/(dashboard)/allocations/components/HoldingsTable.tsx",
+      "src/app/(dashboard)/allocations/components/StressVarSection.tsx",
+      "src/app/(dashboard)/allocations/components/MonteCarloSection.tsx",
+      "src/app/(dashboard)/allocations/components/OpenPositionsTable.tsx",
+      // Factsheet v2 — per-FILE (only grep-proven-clean; the chart-internal
+      // TimeSeriesChart/HistogramChart/MasterBrush + MetricsColumn/MandatePanels/
+      // StressWindowsPanel/page stay at warn as orphan debt):
+      "src/app/factsheet/[id]/v2/FactsheetView.tsx",
+      "src/app/factsheet/[id]/v2/AnalyticalPanels.tsx",
+      "src/app/factsheet/[id]/v2/BatchDPanels.tsx",
+      "src/app/factsheet/[id]/v2/ComparatorPicker.tsx",
+      "src/app/factsheet/[id]/v2/CrossSignaturePanels.tsx",
+      "src/app/factsheet/[id]/v2/DistributionPanels.tsx",
+      "src/app/factsheet/[id]/v2/HeatmapPanels.tsx",
+      "src/app/factsheet/[id]/v2/SignaturePanels.tsx",
+      "src/app/factsheet/[id]/v2/LazyMount.tsx",
+      "src/app/factsheet/[id]/v2/factsheet-context.tsx",
+      "src/app/factsheet/[id]/v2/loading.tsx",
+      "src/app/factsheet/[id]/v2/error.tsx",
+      "src/app/factsheet/[id]/v2/not-found.tsx",
+    ],
     rules: { "quantalyze/no-raw-font-px": "error" },
   },
   // Context allow-list: Recharts axis colors / designer-bundle chart ports pin

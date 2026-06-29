@@ -35,20 +35,20 @@ export function StyleDriftPanel() {
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
-        <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary">
+        <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">
           Style Drift — First Half vs Second Half
         </h3>
-        <p className="mt-0.5 text-[10px] text-text-muted">
+        <p className="mt-0.5 text-micro text-text-muted">
           {monthYear(h1.start)} → {monthYear(h1.end)} ({h1.n}d) · {monthYear(h2.start)} → {monthYear(h2.end)} ({h2.n}d)
         </p>
       </header>
-      <table className="w-full text-[11px]">
+      <table className="w-full text-micro">
         <thead>
           <tr className="border-b border-border/60">
-            <th className="py-1 pr-2 text-left font-mono text-[9px] uppercase tracking-wider text-text-muted">Metric</th>
-            <th className="py-1 px-2 text-right font-mono text-[9px] uppercase tracking-wider text-text-muted">First</th>
-            <th className="py-1 px-2 text-right font-mono text-[9px] uppercase tracking-wider text-text-muted">Second</th>
-            <th className="py-1 pl-2 text-right font-mono text-[9px] uppercase tracking-wider text-text-muted">Δ</th>
+            <th className="py-1 pr-2 text-left font-mono text-micro uppercase tracking-wider text-text-muted">Metric</th>
+            <th className="py-1 px-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">First</th>
+            <th className="py-1 px-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">Second</th>
+            <th className="py-1 pl-2 text-right font-mono text-micro uppercase tracking-wider text-text-muted">Δ</th>
           </tr>
         </thead>
         <tbody>
@@ -62,12 +62,12 @@ export function StyleDriftPanel() {
           ))}
         </tbody>
       </table>
-      <p className="mt-2 text-[10px] italic text-text-muted">
+      <p className="mt-2 text-micro italic text-text-muted">
         Two-sample Kolmogorov-Smirnov: D = {ksD.toFixed(3)}, p = {ksP.toFixed(3)} —{" "}
         {ksSignificant ? "distributions differ at α=0.05" : "no significant distributional drift (α=0.05)"}
       </p>
       {thinHalf && (
-        <p className="mt-1 text-[10px] italic" style={{ color: "var(--color-warning, #B45309)" }}>
+        <p className="mt-1 text-micro italic" style={{ color: "var(--color-warning, #B45309)" }}>
           ⚠ One or both halves have &lt; 126 obs (≈ 6 months) — drift signal may be noisy.
         </p>
       )}
@@ -92,10 +92,10 @@ export function PeerPercentilePanel() {
   return (
     <section>
       <header className="mb-2 flex items-baseline justify-between border-b border-text pb-1">
-        <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary">
+        <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">
           Peer Percentile {!isScenario && <DemoBadge>Demo cohort</DemoBadge>}
         </h3>
-        <span className="text-[9px] font-mono uppercase tracking-wider text-text-muted">
+        <span className="text-micro font-mono uppercase tracking-wider text-text-muted">
           N={p.cohortSize}
         </span>
       </header>
@@ -110,11 +110,11 @@ export function PeerPercentilePanel() {
           U+00B7 middle-dot separators — that the blend is ranked vs the REAL
           verified universe on the engine's sample/252 basis (42-UI-SPEC §1). */}
       {isScenario ? (
-        <p className="mt-2 text-[10px] text-text-muted">
+        <p className="mt-2 text-micro text-text-muted">
           hypothetical blend · ranked vs verified strategies · sample/252 basis
         </p>
       ) : (
-        <p className="mt-2 text-[10px] italic text-text-muted">
+        <p className="mt-2 text-micro italic text-text-muted">
           Synthesized peer cohort (deterministic seed). Production: replace with platform strategy DB.
         </p>
       )}
@@ -156,18 +156,18 @@ export function OwnBookDeltaPanel() {
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
-        <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary">
+        <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">
           vs Your Book
         </h3>
       </header>
-      <table className="w-full text-[12px]">
+      <table className="w-full text-caption">
         <tbody>
           <DeltaRow label="Sharpe" value={delta.sharpe} kind="ratio" />
           <DeltaRow label="Sortino" value={delta.sortino} kind="ratio" />
           <DeltaRow label="Max DD (blend vs book)" value={delta.max_dd} kind="maxdd" />
         </tbody>
       </table>
-      <p className="mt-2 text-[10px] italic text-text-muted">
+      <p className="mt-2 text-micro italic text-text-muted">
         Delta = blend minus your live book · sample/252 basis · over each series&rsquo; own window
         ({delta.blend_n.toLocaleString()} obs blend · {delta.book_n.toLocaleString()} obs book)
       </p>
@@ -230,7 +230,7 @@ function signGlyph(v: number): string {
 
 function PercentileBar({ label, pct }: { label: string; pct: number }) {
   return (
-    <div className="grid grid-cols-[110px_1fr_48px] items-center gap-2 text-[11px]">
+    <div className="grid grid-cols-[110px_1fr_48px] items-center gap-2 text-micro">
       <span className="text-text-2">{label}</span>
       <div className="relative h-2 bg-surface-subtle rounded-sm overflow-hidden">
         <div
@@ -262,7 +262,7 @@ export function AllocatorSection() {
         </h2>
         <p className="mt-1 text-xs text-text-muted">
           Pick a sample portfolio to preview sleeve sizing and tail co-movement.
-          Production will accept a CSV upload (<code className="font-mono text-[11px]">date,nav</code>) or pick
+          Production will accept a CSV upload (<code className="font-mono text-micro">date,nav</code>) or pick
           from saved allocator portfolios.
         </p>
       </header>
@@ -274,7 +274,7 @@ export function AllocatorSection() {
             type="button"
             onClick={() => setActive(opt.key)}
             className={
-              "px-3 py-1 text-[10px] font-mono uppercase tracking-wider rounded-sm border transition-colors " +
+              "px-3 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border transition-colors " +
               (opt.key === active
                 ? "bg-accent text-white border-accent"
                 : "bg-surface-subtle text-text-2 border-border hover:bg-surface")
@@ -284,17 +284,17 @@ export function AllocatorSection() {
           </button>
         ))}
       </div>
-      <p className="text-[11px] italic text-text-muted mb-6">{p.composition}</p>
+      <p className="text-micro italic text-text-muted mb-6">{p.composition}</p>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
         <div>
-          <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary border-b border-text pb-1 mb-2">
+          <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary border-b border-text pb-1 mb-2">
             Sleeve Sizing
           </h3>
-          <p className="text-[10px] text-text-muted italic mb-2">
+          <p className="text-micro text-text-muted italic mb-2">
             Target portfolio vol = {(p.vol_target * 100).toFixed(0)}% · search 1% allocation grid for closest blended vol
           </p>
-          <table className="w-full text-[12px]">
+          <table className="w-full text-caption">
             <tbody>
               <KvRow k="Portfolio Vol (ann)" v={`${(p.ann_vol * 100).toFixed(1)}%`} />
               <KvRow k="Correlation with MultiMarket" v={signed(p.corr)} />
@@ -308,13 +308,13 @@ export function AllocatorSection() {
         </div>
 
         <div>
-          <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary border-b border-text pb-1 mb-2">
+          <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary border-b border-text pb-1 mb-2">
             Tail Co-Movement
           </h3>
-          <p className="text-[10px] text-text-muted italic mb-2">
+          <p className="text-micro text-text-muted italic mb-2">
             Rolling 21-day windows where the portfolio drew ≥ 5% · MultiMarket&apos;s same-window behaviour
           </p>
-          <table className="w-full text-[12px]">
+          <table className="w-full text-caption">
             <tbody>
               <KvRow k="Stress windows in sample" v={String(p.tail_count)} />
               <KvRow k="MultiMarket mean return" v={pctSigned2(p.tail_mm_mean)} />
@@ -322,7 +322,7 @@ export function AllocatorSection() {
               <KvRow k="Windows MM was positive" v={`${Math.round(p.tail_mm_pos * 100)}%`} accent />
             </tbody>
           </table>
-          <p className="mt-2 text-[10px] italic text-text-muted">
+          <p className="mt-2 text-micro italic text-text-muted">
             {p.tail_count === 0
               ? "No stress windows in the observed sample — portfolio never drew ≥ 5% in any 21-day window."
               : `During the ${p.tail_count} stress windows, MultiMarket was positive ${Math.round(p.tail_mm_pos * 100)}% of the time.`}
@@ -335,7 +335,7 @@ export function AllocatorSection() {
 
 function DemoBadge({ children }: { children: React.ReactNode }) {
   return (
-    <span className="ml-2 inline-block px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider align-middle bg-surface-subtle text-text-muted border border-border rounded-sm">
+    <span className="ml-2 inline-block px-1.5 py-0.5 text-micro font-mono uppercase tracking-wider align-middle bg-surface-subtle text-text-muted border border-border rounded-sm">
       {children}
     </span>
   );
@@ -348,7 +348,7 @@ function KvRow({ k, v, accent, negative }: { k: string; v: string; accent?: bool
       <td
         className={
           "py-1 pl-2 text-right font-mono tabular-nums " +
-          (accent ? "text-accent text-[14px]" : negative ? "text-text-primary" : "text-text-primary")
+          (accent ? "text-accent text-body" : negative ? "text-text-primary" : "text-text-primary")
         }
         style={negative ? { color: "var(--color-negative, currentColor)" } : undefined}
       >

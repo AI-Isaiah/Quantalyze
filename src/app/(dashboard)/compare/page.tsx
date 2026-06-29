@@ -35,12 +35,17 @@ export default async function ComparePage({
   if (ids.length === 0) {
     return (
       <>
+        {/* 52-UI-SPEC copy contract: the empty-selection state names what is
+            missing + what to do (honest absence, neutral muted card — never a
+            fabricated zero/count-up; STATE-02). The "Compare Strategies"
+            PageHeader title is preserved verbatim — it is the 52-01 e2e
+            reflow-sweep anchor (h1:has-text("Compare Strategies")). */}
         <PageHeader
           title="Compare Strategies"
           breadcrumb={COMPARE_BREADCRUMB}
         />
         <p className="text-sm text-text-muted text-center py-16">
-          Select strategies from the discovery page to compare. Add up to 4 strategies using the compare checkboxes.
+          Pick two or more strategies from discovery to see them side by side. Add up to 4 strategies using the compare checkboxes.
         </p>
       </>
     );
@@ -130,10 +135,16 @@ export default async function ComparePage({
         title={title}
         breadcrumb={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]}
       />
-      <div className="space-y-8">
-        <CompareTable items={items} />
-        <CompareEquityOverlay items={strategyOnlyItems} />
-        <CompareCorrelationMatrix items={strategyOnlyItems} />
+      {/* APPLY-01 / TYPE-03: compare is a DATA surface — fluid-fill toward
+          ~1920px then center with gutters beyond, so the comparison table
+          reads as a deliberate institutional layout at the wider measure
+          rather than stranded across an uncapped canvas. */}
+      <div className="mx-auto max-w-[1920px]">
+        <div className="space-y-8">
+          <CompareTable items={items} />
+          <CompareEquityOverlay items={strategyOnlyItems} />
+          <CompareCorrelationMatrix items={strategyOnlyItems} />
+        </div>
       </div>
     </>
   );

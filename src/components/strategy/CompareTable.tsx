@@ -79,15 +79,30 @@ export function CompareTable({ items }: { items: CompareItem[] }) {
         <HoldingFactsheet key={item.holding_ref} item={item} />
       ))}
 
-      {/* Strategy comparison table — preserved verbatim from pre-Phase-09 */}
+      {/* Strategy comparison table. 52-03 / TYPE-04: the overflow wrapper is the
+          `@container` containment context (mirrors the ResponsiveTable +
+          StrategyTable idiom). Column behavior reacts to the TABLE's own measure
+          via `@`-prefixed variants, never a viewport `lg:` — so at the wider
+          fluid-fill canvas (page caps at max-w-[1920px]) the comparison columns
+          gain deliberate horizontal breathing room (`@3xl:px-8`) rather than
+          stranding two columns in whitespace (Pitfall 4). Plain `@container`,
+          never `@container-size` (Pitfall 1). */}
       {strategyItems.length > 0 && (
-        <div className="overflow-x-auto">
+        <div className="@container overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border">
-                <th className="text-left px-4 py-3 text-xs font-semibold text-text-muted w-40">Metric</th>
+                <th className="text-left px-4 @3xl:px-8 py-3 text-xs font-semibold text-text-muted w-40">Metric</th>
                 {strategyItems.map((item) => (
-                  <th key={item.strategy.id} className="text-right px-4 py-3 text-xs font-semibold text-text-primary">
+                  // TYPE-02 tabular treatment: single-line name + title={name} so
+                  // the full strategy name recovers on hover in this dense
+                  // tabular-aligned context (audit treatment (b)). Never a
+                  // fabricated placeholder — the real name renders.
+                  <th
+                    key={item.strategy.id}
+                    title={item.strategy.name}
+                    className="text-right px-4 @3xl:px-8 py-3 text-xs font-semibold text-text-primary whitespace-nowrap"
+                  >
                     {item.strategy.name}
                   </th>
                 ))}
@@ -98,21 +113,28 @@ export function CompareTable({ items }: { items: CompareItem[] }) {
                 const winnerIdx = findWinner(strategyItems, metric.key, metric.higherIsBetter);
                 return (
                   <tr key={metric.key} className="border-b border-border/50 hover:bg-page/50">
-                    <td className="px-4 py-2.5 text-xs text-text-muted">{metric.label}</td>
+                    <td className="px-4 @3xl:px-8 py-2.5 text-xs text-text-muted">{metric.label}</td>
                     {strategyItems.map((item, i) => {
                       const val = getValue(item.analytics, metric.key);
                       const isWinner = winnerIdx === i && strategyItems.length > 1;
                       const qual = metric.qualKey ? getMetricLabel(metric.qualKey, val) : null;
                       return (
-                        <td key={item.strategy.id} className="text-right px-4 py-2.5">
+                        <td key={item.strategy.id} className="text-right px-4 @3xl:px-8 py-2.5">
                           <div className="flex items-center justify-end gap-2">
                             {qual && (
-                              <span className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", LABEL_COLORS[qual.color])}>
+                              // DS-04 / 52-UI-SPEC badge exception: the qual chip
+                              // uses the --text-micro tier (10→11px), permitted
+                              // ONLY for badge text. Migrated off the prior raw
+                              // font-px literal onto the named tier.
+                              <span className={cn("rounded px-1.5 py-0.5 text-micro font-medium", LABEL_COLORS[qual.color])}>
                                 {qual.label}
                               </span>
                             )}
+                            {/* TYPE-04: tabular-nums on every numeric value so the
+                                comparison columns stay digit-aligned under the
+                                fluid type spine and across the @container reflow. */}
                             <span className={cn(
-                              "text-xs font-metric",
+                              "text-xs font-metric tabular-nums",
                               isWinner ? "text-accent font-bold" : "text-text-secondary",
                             )}>
                               {formatValue(val, metric.format)}

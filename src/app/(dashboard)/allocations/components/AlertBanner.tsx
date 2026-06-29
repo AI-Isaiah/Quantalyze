@@ -96,11 +96,7 @@ export function AlertBanner({ portfolioId }: AlertBannerProps) {
     // assuming "no critical alerts").
     return (
       <p
-        className="hidden md:block mb-2 text-[12px]"
-        style={{
-          color: "#A3A3A3",
-          fontFamily: "DM Sans, sans-serif",
-        }}
+        className="hidden md:block mb-2 text-caption text-text-muted"
         role="status"
       >
         Couldn&apos;t verify critical alerts.
@@ -115,28 +111,19 @@ export function AlertBanner({ portfolioId }: AlertBannerProps) {
     <div
       role="alert"
       aria-live="polite"
-      className="hidden md:flex items-center justify-between mb-6 px-6 border-t border-[#DC2626]"
-      style={{
-        backgroundColor: "#FEF2F2",
-        height: "56px",
-        fontFamily: "DM Sans, sans-serif",
-      }}
+      className="hidden md:flex items-center justify-between mb-6 px-6 border-t border-negative bg-[#FEF2F2]"
+      style={{ height: "56px" }}
     >
       <div className="flex items-center gap-3 min-w-0">
-        <p
-          className="truncate text-[14px]"
-          style={{ color: "#1A1A2E" }}
-        >
+        {/* TYPE-02 (truncation-audit AlertBanner:127) — the critical-alert
+            message is meaningful prose; wrap it (`break-words min-w-0`) so the
+            text is never silently single-line-clipped. The +N overflow chip
+            stays a fixed-size affordance to its right. */}
+        <p className="break-words min-w-0 text-body text-text-primary">
           {head.message}
         </p>
         {extra > 0 && (
-          <span
-            className="shrink-0 rounded px-2 py-0.5 text-[11px] tracking-wider uppercase"
-            style={{
-              backgroundColor: "#FECACA",
-              color: "#1A1A2E",
-            }}
-          >
+          <span className="shrink-0 rounded bg-[#FECACA] px-2 py-0.5 text-micro tracking-wider uppercase text-text-primary">
             +{extra} more
           </span>
         )}
@@ -145,8 +132,7 @@ export function AlertBanner({ portfolioId }: AlertBannerProps) {
         type="button"
         onClick={handleAcknowledge}
         disabled={acking}
-        className="h-6 min-w-6 text-[#DC2626] hover:underline disabled:opacity-50 disabled:cursor-not-allowed text-[14px]"
-        style={{ fontFamily: "DM Sans, sans-serif" }}
+        className="h-6 min-w-6 text-negative hover:underline disabled:opacity-50 disabled:cursor-not-allowed text-body"
       >
         Acknowledge
       </button>

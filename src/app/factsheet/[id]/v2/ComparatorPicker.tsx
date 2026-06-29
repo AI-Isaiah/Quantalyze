@@ -23,7 +23,7 @@ export function ComparatorPicker() {
       role="group"
       aria-label="Comparator"
     >
-      <span className="text-[10px] font-mono uppercase tracking-wider text-text-muted">
+      <span className="text-micro font-mono uppercase tracking-wider text-text-muted">
         Compare to
       </span>
       {KEYS.map(key => {
@@ -46,7 +46,7 @@ export function ComparatorPicker() {
             }}
             className={
               // pointer-coarse: 44px tap target on touch devices (WCAG 2.5.5).
-              "px-2.5 py-1 pointer-coarse:px-4 pointer-coarse:min-h-[44px] inline-flex items-center text-[10px] font-mono uppercase tracking-wider rounded-sm border transition-colors " +
+              "px-2.5 py-1 pointer-coarse:px-4 pointer-coarse:min-h-[44px] inline-flex items-center text-micro font-mono uppercase tracking-wider rounded-sm border transition-colors " +
               (active
                 ? "bg-accent text-white border-accent"
                 : "bg-surface-subtle text-text-2 border-border hover:bg-surface")

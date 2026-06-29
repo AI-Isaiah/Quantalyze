@@ -155,7 +155,7 @@ export function MonteCarloSection({
     return (
       <div data-testid="mc-computing">
         <Skeleton className="h-[240px] w-full" />
-        <p className="mt-2 text-[11px] text-text-muted">Simulating forward paths…</p>
+        <p className="mt-2 text-micro text-text-muted">Simulating forward paths…</p>
       </div>
     );
   }
@@ -191,12 +191,12 @@ export function MonteCarloSection({
       </div>
       {/* Disclosure — never a bare band. Single-sourced via methodologyLine,
           extended with the path count + block length + the no-Normal framing. */}
-      <p className="mt-2 text-[11px] text-text-muted" data-testid="mc-disclosure">
+      <p className="mt-2 text-micro text-text-muted" data-testid="mc-disclosure">
         Block bootstrap of realized daily returns · {pathCount} paths · block{" "}
         {blockLength}d · {methodologyLine(overlapN ?? 0)} Not a Normal model.
       </p>
       {shortHistory && (
-        <p className="mt-1 text-[11px] text-text-muted" data-testid="mc-short-history">
+        <p className="mt-1 text-micro text-text-muted" data-testid="mc-short-history">
           This interval is wide because the strategies share only {overlapN} overlapping days — more
           common history would tighten it.
         </p>
