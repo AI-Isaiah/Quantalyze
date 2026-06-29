@@ -82,7 +82,7 @@ export function StrategyGrid({
                     />
                   )}
                   {s.is_example && (
-                    <span className="shrink-0 mt-0.5 inline-flex items-center rounded-md bg-badge-other/10 text-badge-other px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider">
+                    <span className="shrink-0 mt-0.5 inline-flex items-center rounded-md bg-badge-other/10 text-badge-other px-1.5 py-0.5 text-micro font-semibold uppercase tracking-wider">
                       Example
                     </span>
                   )}
