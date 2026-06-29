@@ -146,6 +146,24 @@ const eslintConfig = defineConfig([
       "src/app/factsheet/[id]/v2/loading.tsx",
       "src/app/factsheet/[id]/v2/error.tsx",
       "src/app/factsheet/[id]/v2/not-found.tsx",
+      // Phase 53 (v1.4) — Plan 53-03 marketing/security body migration.
+      // SCOPED to the PAGE BODIES only (per-file, mirroring the allocations/
+      // factsheet per-file precedent above): the shared P51 (marketing) shell —
+      // legal/layout.tsx, demo/layout.tsx — and the for-quants component files
+      // (RequestCallModal.tsx, ForQuantsCtas.tsx) still carry raw-font debt and
+      // stay at the repo-wide `warn` (deferred to a later 53/54 surface). The
+      // /security tree is its own clean glob (page.tsx is the only file).
+      "src/app/(marketing)/security/**",
+      "src/app/(marketing)/page.tsx",
+      "src/app/(marketing)/for-quants/page.tsx",
+      "src/app/(marketing)/demo/page.tsx",
+      "src/app/(marketing)/demo/founder-view/page.tsx",
+      "src/app/(marketing)/legal/disclaimer/page.tsx",
+      "src/app/(marketing)/legal/privacy/page.tsx",
+      "src/app/(marketing)/legal/terms/page.tsx",
+      // (auth)/** — 0 raw text-[Npx] today (PATTERNS A4: no migration needed);
+      // flip to error to lock the clean surface against regression.
+      "src/app/(auth)/**",
     ],
     rules: { "quantalyze/no-raw-font-px": "error" },
   },
