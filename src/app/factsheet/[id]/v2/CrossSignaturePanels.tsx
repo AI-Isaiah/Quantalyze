@@ -78,8 +78,8 @@ function CrossHorizon({
     <div className="flex flex-col gap-4">
       <header>
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">{title}</h3>
-        <p className="text-[11px] text-text-muted">{subtitle}</p>
-        <div className="mt-2 flex flex-wrap gap-3 text-[11px]">
+        <p className="text-micro text-text-muted">{subtitle}</p>
+        <div className="mt-2 flex flex-wrap gap-3 text-micro">
           <span className="inline-flex items-center gap-1.5">
             <span aria-hidden className="inline-block w-3 h-0.5" style={{ background: "var(--color-accent)" }} />
             <span className="text-text-2">
@@ -180,7 +180,7 @@ function CrossPanel({
   return (
     <figure className="flex flex-col gap-2">
       <header>
-        <p className="text-[12px] font-semibold text-text-primary">{title}</p>
+        <p className="text-caption font-semibold text-text-primary">{title}</p>
       </header>
       <ResponsiveChartFrame
         width={VB_W}
