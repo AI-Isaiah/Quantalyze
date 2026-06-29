@@ -23,15 +23,23 @@ describe("/allocations/loading.tsx — route skeleton (STATE-01)", () => {
     expect(status.getAttribute("aria-live")).toBe("polite");
   });
 
-  it("emphasizes the KPI strip as the dominant anchor — a full-width 4-cell grid", () => {
+  it("emphasizes the KPI strip as the dominant anchor — a 4-cell grid stepped by @container width, host on a SEPARATE ancestor", () => {
     const { container } = render(<AllocationsLoading />);
-    // The anchor is the @container 4-cell grid (the first/largest region),
-    // mirroring the live KpiStrip shape; locate it and assert 4 cells.
-    const anchor = container.querySelector("div.\\@container.grid");
-    expect(anchor).not.toBeNull();
-    // Tailwind v4 container 4-col target so the anchor reads as the KPI strip.
-    expect(anchor!.className).toContain("@lg:grid-cols-4");
-    expect(anchor!.children.length).toBe(4);
+    // The anchor grid mirrors the live KpiStrip shape: a 4-cell grid whose
+    // column count steps by CONTAINER width (`@lg:grid-cols-4`).
+    const grid = Array.from(
+      container.querySelectorAll<HTMLElement>("div.grid"),
+    ).find((el) => el.className.includes("@lg:grid-cols-4"));
+    expect(grid, "the KPI-anchor grid must exist").toBeDefined();
+    expect(grid!.children.length).toBe(4);
+    // The grid must NOT be its own @container: an element never queries its own
+    // container size (CSS containment spec), so a same-element host+variant is
+    // inert and the skeleton would freeze single-column. The host must be a
+    // SEPARATE ancestor that wraps the grid.
+    expect(grid!.className).not.toContain("@container");
+    const host = grid!.closest(".\\@container");
+    expect(host, "the @container host must wrap the grid").not.toBeNull();
+    expect(host).not.toBe(grid);
   });
 
   it("assembles from the shared Skeleton primitive (animate-pulse), not hand-rolled bars", () => {

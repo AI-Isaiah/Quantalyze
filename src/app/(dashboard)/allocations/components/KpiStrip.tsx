@@ -455,16 +455,21 @@ export function KpiStrip({
     // The prime case: a KpiStrip dropped into the ~380px metrics rail must NOT
     // think it is at desktop width. Column count steps up by CONTAINER width via
     // `@`-prefixed variants (the StrategyTable @container idiom), replacing the
-    // old `sm:`/`lg:` viewport breakpoints. Inline-size containment ONLY — the
-    // size-containment variant would collapse the strip's block size to 0
-    // (Pitfall 1), so the bare `@container` host is deliberate. Every numeric
-    // value cell below keeps `font-mono … tabular-nums` so the fluid --text-*
-    // tier never raggeds a KPI column (Pitfall 2 / 52-01 tabular-nums contract).
-    <div
-      className="@container grid grid-cols-1 gap-3 @sm:grid-cols-2 @lg:grid-cols-5"
-      role="group"
-      aria-label="Portfolio KPIs"
-    >
+    // old `sm:`/`lg:` viewport breakpoints. The `@container` HOST and the
+    // `@sm`/`@lg` grid variants must sit on SEPARATE elements — an element never
+    // queries its OWN container size (CSS containment spec), so the host wraps
+    // the grid rather than sharing its class list (a same-element host never
+    // reflows). Inline-size containment ONLY — the size-containment variant would
+    // collapse the strip's block size to 0 (Pitfall 1), so the bare `@container`
+    // host is deliberate. Every numeric value cell below keeps `font-mono …
+    // tabular-nums` so the fluid --text-* tier never raggeds a KPI column
+    // (Pitfall 2 / 52-01 tabular-nums contract).
+    <div className="@container">
+      <div
+        className="grid grid-cols-1 gap-3 @sm:grid-cols-2 @lg:grid-cols-5"
+        role="group"
+        aria-label="Portfolio KPIs"
+      >
       {cells.map(({ label, raw, formatted, sub, metricKey }) => {
         // Resolve scenario primary + delta for this cell when the gate
         // is open AND the cell has a metricKey (AUM has none → falls
@@ -544,6 +549,7 @@ export function KpiStrip({
           </div>
         );
       })}
+      </div>
     </div>
   );
 }

@@ -633,18 +633,21 @@ function KpiStrip() {
   // ~1024px breakpoint as a container width); 7 cells likewise. `grid-cols-3` is
   // the container-narrow fallback (3 rows of 3). Inline-size containment ONLY —
   // the size-containment variant collapses the strip's block size to 0
-  // (Pitfall 1), so the bare `@container` host is deliberate.
+  // (Pitfall 1), so the bare `@container` host is deliberate. The host is the
+  // enclosing `<section>` (an ANCESTOR of the grid), not the grid itself — an
+  // element never queries its OWN container size (CSS containment spec), so a
+  // same-element `@container`+`@5xl:` pairing would never reflow.
   const containerCols =
     items.length === 9 ? "@5xl:grid-cols-9" : "@5xl:grid-cols-7";
   return (
     <section
-      className="mt-6 overflow-hidden"
+      className="mt-6 overflow-hidden @container"
       style={{
         backgroundColor: "var(--color-surface)",
         border: "1px solid var(--color-border)",
       }}
     >
-      <div className={`@container grid grid-cols-3 ${containerCols} @5xl:divide-y-0`} style={{ }}>
+      <div className={`grid grid-cols-3 ${containerCols} @5xl:divide-y-0`} style={{ }}>
         {items.map(it => (
           <div
             key={it.label}

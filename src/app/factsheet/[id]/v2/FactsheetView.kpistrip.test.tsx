@@ -12,13 +12,16 @@ import { FactsheetBody } from "./FactsheetView";
  * its raw `text-[Npx]` sizes are migrated onto the fluid `--text-*` tier spine.
  *
  * The three behaviors (52-06-PLAN Task 1 <behavior>):
- *   1. The KPI-strip region carries `@container`; its column count responds to
- *      container width via `@`-prefixed variants (NOT `lg:grid-cols-9`), with the
- *      `grid-cols-3` mobile fallback kept as a container-narrow variant.
+ *   1. The KPI-strip grid's column count responds to CONTAINER width via
+ *      `@`-prefixed variants (NOT `lg:grid-cols-9`), with the `@container` HOST
+ *      on a SEPARATE ancestor (the enclosing `<section>`) — an element never
+ *      queries its OWN container size, so a same-element host+variant would
+ *      never reflow — and the `grid-cols-3` mobile fallback kept as the
+ *      container-narrow base.
  *   2. Every KPI metric VALUE cell keeps `font-mono tabular-nums` (alignment
  *      preserved under the fluid tier); the KPI LABEL keeps its
  *      `text-ellipsis whitespace-nowrap` bounded-label affordance (the
- *      AUDIT-classified legitimate clip at FactsheetView:647 — not removed).
+ *      AUDIT-classified legitimate clip on the KPI label `<p>` — not removed).
  *   3. The factsheet shell stays `max-w-[1440px]` (measure NOT raised to 1920),
  *      and no fabricated zero appears for a degenerate metric (the body mounts
  *      honestly — the existing FactsheetBody.degenerate matrix stays green).
@@ -75,25 +78,35 @@ function renderBody() {
 }
 
 describe("FactsheetView KPI strip — @container + fluid-type migration (52-06 / TYPE-04)", () => {
-  it("Test 1 — the KPI strip is its OWN container-query context (@container) and steps columns by @-prefixed variants, NOT lg:grid-cols-9", () => {
+  it("Test 1 — the KPI strip's @container host is a SEPARATE ancestor of the grid, and the grid steps columns by @-prefixed variants, NOT lg:grid-cols-9 (and NOT a same-element host)", () => {
     const { container } = renderBody();
 
-    // The KPI strip grid is the element carrying both `grid` and `@container`.
-    const gridHosts = Array.from(
+    // At least one `@container` host exists (the enclosing section).
+    const hosts = Array.from(
       container.querySelectorAll<HTMLElement>(".\\@container"),
     );
-    expect(gridHosts.length).toBeGreaterThan(0);
+    expect(hosts.length).toBeGreaterThan(0);
 
-    // The KPI-strip grid: a grid host whose column variants are @-prefixed.
-    const kpiGrid = gridHosts.find(
-      (el) =>
-        el.className.includes("grid") &&
-        /@[\w[\]-]*:grid-cols-\d/.test(el.className),
-    );
+    // The KPI-strip grid: a grid element whose column variants are @-prefixed.
+    const kpiGrid = Array.from(
+      container.querySelectorAll<HTMLElement>("div.grid"),
+    ).find((el) => /@[\w[\]-]*:grid-cols-\d/.test(el.className));
     expect(
       kpiGrid,
-      "the KPI strip must be a @container grid with @-prefixed grid-cols variants",
+      "the KPI strip must be a grid with @-prefixed grid-cols variants",
     ).toBeDefined();
+
+    // The grid must NOT be its OWN container. An element never queries its own
+    // container size (CSS containment spec), so `@container` + `@5xl:grid-cols-*`
+    // on the SAME element is inert — the strip would freeze at grid-cols-3 at
+    // every width (the bug this guards). The host must be a SEPARATE ancestor.
+    expect(kpiGrid!.className).not.toContain("@container");
+    const host = kpiGrid!.closest(".\\@container");
+    expect(
+      host,
+      "the @container host must be an ANCESTOR of the KPI grid, not the grid itself",
+    ).not.toBeNull();
+    expect(host).not.toBe(kpiGrid);
 
     // The viewport breakpoint must be gone — column count now keys off the
     // CONTAINER width (the StrategyTable @container idiom), not the window.
@@ -102,19 +115,14 @@ describe("FactsheetView KPI strip — @container + fluid-type migration (52-06 /
     expect(kpiGrid!.className).toMatch(/\bgrid-cols-3\b/);
     // Size containment would collapse the strip's block size to 0 (Pitfall 1) —
     // the bare inline-size `@container` is deliberate.
-    expect(kpiGrid!.className).not.toContain("@container-size");
+    expect(host!.className).not.toContain("@container-size");
   });
 
   it("Test 2 — every KPI VALUE cell keeps font-mono tabular-nums; the KPI LABEL keeps its text-ellipsis whitespace-nowrap bounded-label clip", () => {
     const { container } = renderBody();
-    const gridHosts = Array.from(
-      container.querySelectorAll<HTMLElement>(".\\@container"),
-    );
-    const kpiGrid = gridHosts.find(
-      (el) =>
-        el.className.includes("grid") &&
-        /@[\w[\]-]*:grid-cols-\d/.test(el.className),
-    )!;
+    const kpiGrid = Array.from(
+      container.querySelectorAll<HTMLElement>("div.grid"),
+    ).find((el) => /@[\w[\]-]*:grid-cols-\d/.test(el.className))!;
     expect(kpiGrid).toBeDefined();
 
     // The KPI tiles are the direct children of the grid.

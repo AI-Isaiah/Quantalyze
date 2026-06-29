@@ -31,20 +31,22 @@ export default function AllocationsLoading() {
 
       {/* DOMINANT ANCHOR — the KPI strip: a full-width 4-cell grid, the first
           and largest region, matching the live KpiStrip @container shape. */}
-      <div
-        className="@container grid grid-cols-1 gap-3 @sm:grid-cols-2 @lg:grid-cols-4"
-        aria-hidden
-      >
-        {Array.from({ length: 4 }).map((_, i) => (
-          <div
-            key={i}
-            className="space-y-2 rounded-lg border border-border bg-surface p-4"
-          >
-            <Skeleton className="h-2.5 w-16" />
-            <Skeleton className="h-6 w-24" />
-            <Skeleton className="h-2.5 w-28" />
-          </div>
-        ))}
+      <div className="@container" aria-hidden>
+        {/* The `@container` HOST and the `@sm`/`@lg` grid variants must sit on
+            SEPARATE elements — an element never queries its own container size
+            (CSS containment spec), so the host wraps the grid. */}
+        <div className="grid grid-cols-1 gap-3 @sm:grid-cols-2 @lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div
+              key={i}
+              className="space-y-2 rounded-lg border border-border bg-surface p-4"
+            >
+              <Skeleton className="h-2.5 w-16" />
+              <Skeleton className="h-6 w-24" />
+              <Skeleton className="h-2.5 w-28" />
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* Equity-chart placeholder — sits below the KPI anchor. */}

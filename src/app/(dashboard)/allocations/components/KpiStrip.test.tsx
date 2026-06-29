@@ -336,7 +336,7 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
   // StrategyTable @container precedent the 52-01 tabular-nums contract anchors on.
   // ---------------------------------------------------------------------------
   describe("Phase 52-02 — @container migration (TYPE-04)", () => {
-    it("the strip's grid region carries @container and uses @-prefixed column variants (not sm:/lg: viewport variants)", () => {
+    it("the grid steps columns by @-prefixed variants, with the @container host on a SEPARATE ancestor (not the grid itself — an element can't query its own container)", () => {
       render(
         <KpiStrip
           analytics={{ ytd_twr: 0.12 }}
@@ -347,13 +347,21 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
         />,
       );
       const group = screen.getByRole("group", { name: "Portfolio KPIs" });
-      // Container-query host: the strip reflows on its own inline-size, so a
-      // strip dropped into the narrow 380px metrics rail stops thinking it is
-      // at desktop width.
-      expect(group.className).toContain("@container");
       // The column count must vary by CONTAINER width (`@`-prefixed variants),
       // never by viewport (`sm:`/`lg:`) — that is the whole point of TYPE-04.
       expect(group.className).toMatch(/@\S*grid-cols-/);
+      // …but the grid must NOT be its OWN container. An element never queries
+      // its own container size (CSS containment spec), so `@container` and the
+      // `@sm:`/`@lg:` variants on the SAME element are inert — the grid would
+      // freeze at its base column count at every width (the bug this guards).
+      // The host must be a SEPARATE ancestor that wraps the grid.
+      expect(group.className).not.toContain("@container");
+      const host = group.closest(".\\@container");
+      expect(
+        host,
+        "the @container host must be an ANCESTOR of the grid, not the grid itself",
+      ).not.toBeNull();
+      expect(host).not.toBe(group);
       // Forbid a VIEWPORT `sm:`/`lg:` grid variant — but NOT the container
       // `@sm:`/`@lg:` ones (the `@`-prefixed forms are exactly what we want). A
       // bare viewport variant is one NOT immediately preceded by `@`.
@@ -361,7 +369,7 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
       expect(group.className).not.toMatch(/(?<!@)\blg:grid-cols-/);
       // Inline-size container only — `@container-size` (size containment) would
       // collapse the strip's block size to 0 (Pitfall 1).
-      expect(group.className).not.toContain("@container-size");
+      expect(host!.className).not.toContain("@container-size");
     });
 
     it("every numeric value cell keeps font-mono AND tabular-nums after the migration (alignment preserved)", () => {
