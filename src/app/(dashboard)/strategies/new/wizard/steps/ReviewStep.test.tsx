@@ -110,10 +110,14 @@ describe("[APPLY-02] ReviewStep — API branch recap", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("uses the API finalize verb 'Create strategy'", () => {
+  it("[WR-01] uses an ADVANCE verb, not the finalize verb (the recap does not finalize)", () => {
     renderApi();
     const cta = screen.getByTestId("wizard-review-continue");
-    expect(cta).toHaveTextContent("Create strategy");
+    // The CTA advances to SubmitStep (which carries the real finalize verb);
+    // it must NOT claim to "Create strategy" — that would be a button-that-
+    // says-create-but-doesn't (WR-01).
+    expect(cta).toHaveTextContent("Continue to create");
+    expect(screen.queryByText("Create strategy")).toBeNull();
     expect(screen.queryByText("Submit strategy")).toBeNull();
   });
 
@@ -167,10 +171,13 @@ describe("[APPLY-02] ReviewStep — CSV branch recap", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("uses the CSV finalize verb 'Submit strategy'", () => {
+  it("[WR-01] uses an ADVANCE verb on the CSV branch, not the finalize verb", () => {
     renderCsv();
     const cta = screen.getByTestId("wizard-review-continue");
-    expect(cta).toHaveTextContent("Submit strategy");
+    // Advances to CsvSubmitStep (which carries the real "Submit strategy"
+    // finalize verb); the recap CTA must not claim to submit (WR-01).
+    expect(cta).toHaveTextContent("Continue to submit");
+    expect(screen.queryByText("Submit strategy")).toBeNull();
     expect(screen.queryByText("Create strategy")).toBeNull();
   });
 });
