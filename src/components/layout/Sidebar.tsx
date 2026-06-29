@@ -63,6 +63,22 @@ function buildNavSections(
       icon: PortfolioIcon,
       badge: flaggedCount,
     });
+    // Phase 51 NAV-01 — surface the genuine allocator orphans that had no nav
+    // entry (direct-link only today): /compare and /decks are allocator-owned
+    // dashboard surfaces. They live INSIDE the showsAllocatorWorkspace branch so
+    // they never leak to a manager (T-45-01 / T-51-02 info-disclosure). The role
+    // OR-logic derivations above are byte-unchanged. /recommendations is left OUT
+    // deliberately — it is mandate-CTA-reachable (a child of the profile mandate
+    // tab) and gets its back-path via the breadcrumb, not a top-level nav item
+    // (RESEARCH soft-orphan classification + UI-SPEC §completeness). The legacy
+    // scenarios and preferences slugs are redirect-stubs (NOT orphans) and
+    // /security is public marketing — none get nav entries here. (NB: this comment
+    // intentionally avoids the literal retired-route slug the FLOW-03 phase-32
+    // frozen-spine guard substring-matches on Sidebar.tsx.)
+    workspaceItems.push(
+      { label: "Compare", href: "/compare", icon: CompareIcon },
+      { label: "Decks", href: "/decks", icon: DeckIcon },
+    );
   }
   // FLOW-03 (Phase 32): the standalone "Strategy Sandbox" nav item (which
   // pointed at the now-retired Sandbox route) is removed. The example-universe
@@ -108,7 +124,17 @@ function buildNavSections(
       : []),
     {
       heading: "ACCOUNT",
-      items: [{ label: "Profile", href: "/profile", icon: UserIcon }],
+      // Phase 51 NAV-01 — /referral ("Earn rewards by referring asset managers
+      // and allocators") is an account-level affordance owned by allocators AND
+      // managers (RESEARCH orphan inventory). ACCOUNT is the role-neutral section
+      // (Profile is shown to every role), so a referral entry here is reachable
+      // by both owning roles without leaking a workspace-specific surface — it is
+      // not gated by the allocator/manager OR-logic and therefore cannot regress
+      // the T-45-01 role-leak pin.
+      items: [
+        { label: "Profile", href: "/profile", icon: UserIcon },
+        { label: "Referral", href: "/referral", icon: GiftIcon },
+      ],
     },
   ];
 }
@@ -312,7 +338,13 @@ function NavItemLink({
     <li>
       <Link
         href={item.href}
-        className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
+        // Phase 51 NAV-02 — expose the active item to AT (aria-current) and add a
+        // keyboard-only focus ring in the accent token (the rail had neither).
+        // Mirrors MobileNav's aria-current pattern; uses focus-visible:ring (never
+        // bare focus:) per UI-SPEC §Item state contract. The active bg stays the
+        // slate bg-sidebar-active (accent fill on the navy rail fails contrast).
+        aria-current={active ? "page" : undefined}
+        className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
           active
             ? "bg-sidebar-active text-sidebar-text-active"
             : "hover:bg-sidebar-hover hover:text-sidebar-text-active"
@@ -400,6 +432,41 @@ function ShieldIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M8 1.5l5 2v4.5c0 3-2 5.5-5 6.5-3-1-5-3.5-5-6.5V3.5l5-2z" />
+    </svg>
+  );
+}
+
+// Phase 51 NAV-01 — glyphs for the newly-surfaced allocator/account orphans.
+// House style: 16x16 viewBox, stroke-1.5, currentColor, no icon dependency —
+// matches the inline SVGs above so the nav stays a single self-contained file.
+function CompareIcon({ className }: { className?: string }) {
+  // Two side-by-side bars — "compare" two strategies.
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="3" width="4" height="10" rx="1" />
+      <rect x="10" y="3" width="4" height="10" rx="1" />
+      <path d="M8 2v12" />
+    </svg>
+  );
+}
+
+function DeckIcon({ className }: { className?: string }) {
+  // Stacked cards — a "deck" of strategies.
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="2" width="9" height="11" rx="1.5" />
+      <path d="M2 4.5v7.5A1.5 1.5 0 003.5 13.5H11" />
+    </svg>
+  );
+}
+
+function GiftIcon({ className }: { className?: string }) {
+  // A gift/reward — the referral "earn rewards" affordance.
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2.5" y="6" width="11" height="7.5" rx="1" />
+      <path d="M2 6h12M8 6v7.5" />
+      <path d="M8 6S6.5 2.5 4.75 3.25 6.5 6 8 6zM8 6s1.5-3.5 3.25-2.75S9.5 6 8 6z" />
     </svg>
   );
 }
