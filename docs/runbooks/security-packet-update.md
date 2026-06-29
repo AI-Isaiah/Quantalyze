@@ -57,7 +57,7 @@ for the per-request PDF routes.
 ## Editing the source
 
 `scripts/build-security-packet.html` is a self-contained document.
-Typography and colors mirror `src/app/security/page.tsx` and
+Typography and colors mirror `src/app/(marketing)/security/page.tsx` and
 `DESIGN.md`: Instrument Serif display, DM Sans body, Geist Mono data,
 `#1B6B5A` accent, `#E2E8F0` hairline dividers.
 
@@ -65,7 +65,7 @@ When you edit the HTML:
 
 1. Bump the `Last reviewed` date near the top of the file to today.
 2. Also update the `Last reviewed` line in
-   `src/app/security/page.tsx` (search for `Last reviewed:`) so the
+   `src/app/(marketing)/security/page.tsx` (search for `Last reviewed:`) so the
    two surfaces agree.
 3. Regenerate the PDF with the command above.
 4. Open `public/security-packet.pdf` and confirm it is still one page.
@@ -101,7 +101,7 @@ You are done when:
 
 ## Related
 
-- `src/app/security/page.tsx` — public `/security` page that hosts the
+- `src/app/(marketing)/security/page.tsx` — public `/security` page that hosts the
   download link.
 - `scripts/build-security-packet.html` — source of the PDF.
 - `scripts/build-security-packet.mjs` — build script.

@@ -1,6 +1,31 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  async redirects() {
+    return [
+      // Phase 51 NAV-01 (FLOW-02 follow-through): the legacy Strategy-Sandbox
+      // surface `/scenarios` is consolidated into the unified composer at
+      // `/allocations?tab=scenario`. This formalizes the former in-page
+      // `redirect()` stub into a config-level redirect: `redirects()` runs
+      // BEFORE the filesystem and BEFORE the proxy, so the old `page.tsx` is
+      // retired (deleted) and there is exactly ONE redirect source, not two.
+      // `permanent: true` → a 308 (method-preserving, CDN/SEO-cacheable) move;
+      // the query string is auto-preserved. The route-contract guard's Rule 3
+      // (`scripts/check-route-contract.ts`) requires this `source` to match the
+      // manifest's `redirectFrom: "/scenarios"` — the #512 lockstep. The
+      // destination `/allocations` keeps its own auth via the (dashboard)
+      // layout + page guards; an anon hit on `/scenarios` 308s here and the
+      // proxy then gates `/allocations` to /login (correct AUTHED behavior,
+      // NOT the #512 public-route-bounces-to-login defect — see
+      // e2e/route-redirects.spec.ts, which asserts the redirect lands on the
+      // composer, never on /login).
+      {
+        source: "/scenarios",
+        destination: "/allocations?tab=scenario",
+        permanent: true,
+      },
+    ];
+  },
   async rewrites() {
     return [
       // RFC 9116 canonical path is /.well-known/security.txt — also serve

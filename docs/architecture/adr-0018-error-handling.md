@@ -16,7 +16,7 @@ patterns vary across the codebase with no consistent strategy.
 (lines 41-55) wraps the DB read in try/catch and renders the attestation
 gate UI on failure. This is the most defensive pattern.
 
-**Pattern B -- Silent fallback**: `src/app/page.tsx` (lines 7-24) returns
+**Pattern B -- Silent fallback**: `src/app/(marketing)/page.tsx` (lines 7-24) returns
 zeros for social-proof counts on failure. The user sees a working page
 with incorrect data.
 
@@ -105,7 +105,7 @@ with a standardized format that includes the route path and error type.
 - Zero `unstable_rethrow` calls.
 - Pattern A (fail-closed): `src/app/(dashboard)/discovery/layout.tsx`
   (lines 41-55).
-- Pattern B (silent fallback): `src/app/page.tsx` (lines 7-24).
+- Pattern B (silent fallback): `src/app/(marketing)/page.tsx` (lines 7-24).
 - Pattern C (log + 500): `src/app/api/preferences/route.ts` (lines 19-22).
 - Pattern D (propagation warning): `src/lib/warmup-analytics.ts`
   (lines 11-17).

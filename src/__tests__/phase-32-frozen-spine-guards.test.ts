@@ -176,8 +176,17 @@ const CHANGED = changedFiles(BASE);
 const FROZEN_ENGINE = "src/lib/scenario.ts";
 
 // --- live-source paths (read from disk, not snapshots) ---
+// FLOW-02 was originally an in-page `redirect()` stub at
+// src/app/(dashboard)/scenarios/page.tsx. Phase 51-05 (NAV-01) FORMALIZED that
+// move into a config-level 308 in next.config.ts `redirects()` and RETIRED the
+// stub (the page file is deleted). The FLOW-02 invariant — "/scenarios
+// redirects to the composer, and the C-0017 admin-client leak is gone" — is now
+// proven by the next.config redirect (read below) PLUS the page-file's absence
+// (no page ⇒ no createAdminClient read can exist). So the guard reads the
+// redirect from its NEW home and asserts the old leak surface no longer exists.
 const SCENARIOS_PAGE_PATH = join(CWD, "src/app/(dashboard)/scenarios/page.tsx");
-const SCENARIOS_PAGE_SRC = readFileSync(SCENARIOS_PAGE_PATH, "utf8");
+const NEXT_CONFIG_PATH = join(CWD, "next.config.ts");
+const NEXT_CONFIG_SRC = readFileSync(NEXT_CONFIG_PATH, "utf8");
 
 const SCENARIO_BUILDER_PATH = join(
   CWD,
@@ -237,30 +246,34 @@ describe("Phase 32 frozen-spine + route-retirement exit-gate guards", () => {
     ).not.toContain(FROZEN_ENGINE);
   });
 
-  it("FLOW-02: /scenarios/page.tsx is a redirect to the composer and reads NOTHING (no admin-client leak)", () => {
-    // The redirect target must be the wired, tested deep-link. Assert the exact
-    // call so a future edit to the wrong tab/path fails.
+  it("FLOW-02: /scenarios redirects to the composer (now a next.config 308) and the in-page leak surface is GONE", () => {
+    // Phase 51-05 (NAV-01): the FLOW-02 redirect was formalized from an in-page
+    // stub into a config-level 308 in next.config.ts `redirects()`. The redirect
+    // target must still be the wired, tested deep-link — assert the exact
+    // source→destination tuple so a future edit to the wrong tab/path fails.
     expect(
-      SCENARIOS_PAGE_SRC,
-      "Phase 32 exit gate VIOLATED — scenarios/page.tsx must " +
-        'redirect("/allocations?tab=scenario") (FLOW-02). The legacy ' +
-        "Strategy-Sandbox surface is retired into the unified composer.",
-    ).toContain('redirect("/allocations?tab=scenario")');
+      NEXT_CONFIG_SRC,
+      "Phase 32 exit gate VIOLATED — next.config.ts redirects() must move " +
+        '/scenarios → "/allocations?tab=scenario" (FLOW-02, formalized as a ' +
+        "308 in Phase 51-05). The legacy Strategy-Sandbox surface is retired " +
+        "into the unified composer.",
+    ).toContain('source: "/scenarios"');
+    expect(
+      NEXT_CONFIG_SRC,
+      "Phase 32 exit gate VIOLATED — the /scenarios redirect must target " +
+        '"/allocations?tab=scenario" (FLOW-02).',
+    ).toContain('destination: "/allocations?tab=scenario"');
 
     // The C-0017 leak vector — the RLS-bypassing institutional-universe read —
-    // must be GONE. The retired page renders/reads nothing.
+    // is now eliminated BY CONSTRUCTION: the in-page stub is deleted, so there
+    // is no page to host a createAdminClient read. Assert the file is GONE.
     expect(
-      SCENARIOS_PAGE_SRC,
-      "Phase 32 exit gate VIOLATED — scenarios/page.tsx still references " +
-        "createAdminClient. The retirement REMOVES the RLS-bypassing " +
-        "institutional-universe read (C-0017). The page must only redirect.",
-    ).not.toContain("createAdminClient");
-    expect(
-      SCENARIOS_PAGE_SRC,
-      "Phase 32 exit gate VIOLATED — scenarios/page.tsx still references " +
-        "ScenarioBuilder. The Sandbox component is retired; the page must " +
-        "only redirect into the composer.",
-    ).not.toContain("ScenarioBuilder");
+      existsSync(SCENARIOS_PAGE_PATH),
+      "Phase 32 exit gate VIOLATED — src/app/(dashboard)/scenarios/page.tsx " +
+        "still exists. Phase 51-05 retired the in-page stub in favor of a " +
+        "next.config 308; the page file (and its C-0017 admin-client leak " +
+        "surface) must not exist.",
+    ).toBe(false);
   });
 
   it("FLOW-02: the ScenarioBuilder Sandbox component is DELETED", () => {

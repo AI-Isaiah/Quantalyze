@@ -7,13 +7,17 @@ import { Sidebar } from "./Sidebar";
  *
  * 2026-05-20 simplification: the allocator workspace collapsed to a
  * single entry "My Allocation". Scenarios and Recommendations used to
- * be top-level routes but are now TABS inside the My Allocation page —
- * a sidebar entry would duplicate navigation that already happens via
- * AllocationsTabs.
+ * be top-level routes but were folded — Scenarios into a TAB inside the
+ * My Allocation page, Recommendations dropped from the nav.
  *
- *   Allocator view: My Allocation. (Just that — Discovery + Account
- *     handle the rest. No Strategies, no Portfolios, no Scenarios, no
- *     Recommendations top-level entries.)
+ * 51-REVIEW override (2026-06-28): the user OVERRODE the Recommendations
+ * half of that decision. Recommendations is again a top-level allocator
+ * nav item (alongside Compare + Decks) so the daily match output is not a
+ * dead-end. Scenarios stays a tab (its top-level route is a redirect-stub).
+ *
+ *   Allocator view: My Allocation + Recommendations + Compare + Decks.
+ *     (Discovery + Account handle the rest. No Strategies, no Portfolios,
+ *     no Scenarios top-level entry.)
  *
  *   Manager / crypto-team view: Strategies → Portfolios.
  *
@@ -52,11 +56,15 @@ describe("Sidebar workspace — allocator view", () => {
     expect(screen.queryByText("Scenarios")).toBeNull();
   });
 
-  it("does NOT render 'Recommendations' as a top-level entry (tab inside My Allocation)", () => {
-    // Same 2026-05-20 simplification — Recommendations lives as a tab/view
-    // inside the My Allocation surface, not a separate route.
+  it("renders 'Recommendations' as a top-level allocator entry (51-REVIEW override)", () => {
+    // 51-REVIEW user override (2026-06-28): the 2026-05-20 simplification left
+    // Recommendations OUT of the nav (treated as a tab/CTA-only surface). The
+    // user OVERRODE that decision — Recommendations is now a top-level allocator
+    // nav item so the daily match output is not a dead-end. It lives INSIDE the
+    // showsAllocatorWorkspace branch (role-leak pinned by T-45-01 below).
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    expect(screen.queryByText("Recommendations")).toBeNull();
+    const link = screen.getByText("Recommendations").closest("a");
+    expect(link).toHaveAttribute("href", "/recommendations");
   });
 
   it("does NOT render 'Strategies' in the allocator workspace", () => {
@@ -137,6 +145,10 @@ describe("Sidebar workspace — manager / crypto-team view", () => {
     expect(screen.queryByText("My Allocation")).toBeNull();
     expect(screen.queryByText("Connections")).toBeNull();
     expect(screen.queryByText("Scenarios")).toBeNull();
+    // 51-REVIEW override: Recommendations is now a top-level ALLOCATOR nav item
+    // (it lives inside the showsAllocatorWorkspace branch). A manager-only user
+    // must therefore NOT see it — this is the role-leak pin for the new entry
+    // (T-45-01 info-disclosure), not a "Recommendations isn't a route" assertion.
     expect(screen.queryByText("Recommendations")).toBeNull();
   });
 
@@ -347,5 +359,86 @@ describe("Sidebar Discovery sub-groups", () => {
     expect(screen.getByText("Digital Assets")).toBeInTheDocument();
     expect(screen.queryByText("TradFi")).toBeNull();
     expect(screen.queryByText("TradFi Decks")).toBeNull();
+  });
+});
+
+/**
+ * Phase 51 NAV-02 / UI-SPEC §Item state contract — the desktop NavItemLink a11y
+ * gaps.
+ *
+ * The module-scope usePathname mock returns "/allocations", so the
+ * "My Allocation" entry (href "/allocations") is the ACTIVE item in every
+ * render below.
+ *
+ * RED CONTRACT (plan 51-01): today's NavItemLink (Sidebar.tsx L301-334) has NO
+ * `aria-current` and NO focus-visible affordance on its <Link>. These two
+ * assertions FAIL now; plan 51-03 mirrors MobileNav.tsx's
+ * `aria-current={active ? "page" : undefined}` + focus-visible ring (accent on
+ * the dark rail) onto NavItemLink, turning them GREEN. The active rule stays
+ * `pathname === href || pathname.startsWith(href + "/")` — the SSR-safe
+ * pathname-prefix match; no query-param hook / CSR-bailout is introduced.
+ */
+describe("Sidebar NavItemLink a11y (NAV-02, RED until 51-03)", () => {
+  it("marks the ACTIVE nav link with aria-current=page", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    // usePathname() === "/allocations" → My Allocation is active.
+    const active = screen.getByText("My Allocation").closest("a");
+    expect(active).toHaveAttribute("aria-current", "page");
+  });
+
+  it("gives the nav link a WCAG-AA-contrast focus ring on the dark rail (NOT accent)", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    const link = screen.getByText("My Allocation").closest("a");
+    expect(link).not.toBeNull();
+    const className = link?.getAttribute("class") ?? "";
+    // Keyboard-only focus affordance via focus-visible (never bare focus:). The
+    // ring MUST clear the WCAG 1.4.11 / 2.4.11 3:1 non-text-contrast floor against
+    // the navy rail (bg-sidebar #0F172A / -hover #1E293B / -active #334155). The
+    // accent token #1B6B5A measured 2.8:1 / 2.3:1 / 1.63:1 there — all FAIL — so
+    // the rail ring is intentionally WHITE (ring-white, >9:1 on every state) with a
+    // navy ring-offset, NOT accent. This is the dark-rail counterpart to the
+    // Breadcrumb ring, which keeps the accent token because it renders on the light
+    // page bg (6:1, passes). Pin both the focus-visible keyword AND that the rail
+    // ring is white-not-accent so a future "consistency" refactor can't silently
+    // reintroduce the contrast regression.
+    expect(className).toMatch(/focus-visible:/);
+    expect(className).toMatch(/ring-white/);
+    expect(className).not.toMatch(/ring-accent/);
+  });
+});
+
+/**
+ * T-45-01 (info-disclosure) — the role OR-logic PIN. This block locks the
+ * existing-correct behavior so any 51-03 nav-completeness edit that leaks an
+ * allocator-only surface to a manager (or vice-versa) turns this red.
+ *
+ * GREEN NOW (it pins live-correct behavior, NOT a future implementation): the
+ * `showsAllocatorWorkspace = isAllocator || isAdmin` /
+ * `showsManagerWorkspace = isManager || isAdmin` derivations in
+ * buildNavSections (Sidebar.tsx L34-35) already gate "My Allocation" (allocator
+ * surface) vs "Strategies"/"Portfolios" (manager surface) correctly. The mobile
+ * twin (buildPrimaryMobileNav) is already pinned by MobileNav.test.tsx; this is
+ * the DESKTOP-render pin for the same security property.
+ */
+describe("Sidebar role OR-logic pin — T-45-01 (GREEN, must not regress)", () => {
+  it("a manager-only user does NOT see the allocator-only 'My Allocation' entry", () => {
+    render(
+      <Sidebar populatedSlugs={[]} isManager={true} isAllocator={false} />,
+    );
+    // Manager surface present...
+    expect(screen.getByText("Strategies")).toBeInTheDocument();
+    expect(screen.getByText("Portfolios")).toBeInTheDocument();
+    // ...but the allocator-only workspace entry must NOT leak to a manager.
+    expect(screen.queryByText("My Allocation")).toBeNull();
+  });
+
+  it("an allocator DOES see 'My Allocation' but NOT the manager-only entries", () => {
+    render(
+      <Sidebar populatedSlugs={[]} isAllocator={true} isManager={false} />,
+    );
+    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    // The manager surface must NOT leak to a pure allocator.
+    expect(screen.queryByText("Strategies")).toBeNull();
+    expect(screen.queryByText("Portfolios")).toBeNull();
   });
 });

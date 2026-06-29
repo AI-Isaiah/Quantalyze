@@ -119,6 +119,11 @@ describe("Phase 11 / S4 — anchor IDs preserved (UI-SPEC AC #9)", () => {
       "security-contact",
       "operational-reference",
       "egress-ips",
+      // #csv-format is the most deep-linked anchor on this page — 13 wizard error
+      // help links (wizardErrors.ts docsHref "/security#csv-format") scroll here.
+      // If a refactor drops/renames it those links silently anchor nowhere, so it
+      // belongs in the preservation pin alongside egress-ips.
+      "csv-format",
     ];
     for (const id of expected) {
       expect(document.getElementById(id)).not.toBeNull();

@@ -166,6 +166,7 @@ export default async function RecommendationsPage() {
       <PageHeader
         title="Recommendations"
         description="Top 3 strategies that fit your mandate. Updated daily."
+        breadcrumb={[{ label: "My Allocation", href: "/allocations" }, { label: "Recommendations" }]}
         meta={
           batch?.computed_at ? (
             <FreshnessBadge

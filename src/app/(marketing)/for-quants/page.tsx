@@ -75,8 +75,11 @@ const SAMPLE_SPARKLINE = [
 export default function ForQuantsPage() {
   // Static page — no server-side auth round-trip. <ForQuantsCtas>
   // resolves logged-in vs logged-out state on the client (G9.B.8).
+  // The shared (marketing)/layout.tsx supplies the header + LegalFooter chrome
+  // and renders NO <main> of its own (NAV-04), so this page owns the single
+  // <main> landmark — exactly one <main> and one <h1> per rendered page.
   return (
-    <>
+    <main>
       {/* 1. Hero */}
       <section className="border-b border-border bg-white">
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
@@ -274,7 +277,7 @@ export default function ForQuantsPage() {
           </div>
         </div>
       </section>
-    </>
+    </main>
   );
 }
 

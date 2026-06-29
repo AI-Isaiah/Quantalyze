@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
-import { RequestCallModal } from "@/app/for-quants/RequestCallModal";
+import { RequestCallModal } from "@/app/(marketing)/for-quants/RequestCallModal";
 import { WizardChrome, WIZARD_STEPS_CSV } from "./WizardChrome";
 import { ConnectKeyStep, type ConnectKeySuccess } from "./steps/ConnectKeyStep";
 import { SyncPreviewStep, type SyncPreviewSnapshot } from "./steps/SyncPreviewStep";

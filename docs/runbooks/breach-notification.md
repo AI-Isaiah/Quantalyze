@@ -1,7 +1,7 @@
 # Breach Notification Runbook
 
 > Operational runbook backing the breach-notification commitment published on
-> [`/security`](../../src/app/security/page.tsx) (§ Breach notification) and the
+> [`/security`](../../src/app/(marketing)/security/page.tsx) (§ Breach notification) and the
 > "Incident response" row of [`soc2-readiness.md`](./soc2-readiness.md).
 > Audit-2026-05-07 M-0984: `/security` publicly commits to a 72-hour
 > notification window in line with GDPR Article 33; this runbook is the process
@@ -152,4 +152,4 @@ evidence an auditor or supervisory authority will ask for.
 
 - [`security-contact.md`](./security-contact.md) — the `security@` alias setup.
 - [`soc2-readiness.md`](./soc2-readiness.md) — the "Incident response" control row.
-- [`/security`](../../src/app/security/page.tsx) — the public commitment this runbook backs.
+- [`/security`](../../src/app/(marketing)/security/page.tsx) — the public commitment this runbook backs.

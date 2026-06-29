@@ -1070,7 +1070,7 @@ jobs:
           # describes self-skip without seed env (place 2 = the spec's
           # HAS_SEED_ENV const) and run in the seeded MA-8 list below. Adding a
           # spec? Update BOTH lists or the gate silently never runs (burned >=3x).
-          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/axe-app-wide.spec.ts
+          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/axe-app-wide.spec.ts e2e/marketing-shell.spec.ts e2e/route-redirects.spec.ts
           # v0.17.1.18: belt + suspenders + nuclear port-3000 cleanup.
           # The v0.17.1.15 attempt (lsof + 5s poll) was insufficient — CI
           # confirmed (PR #98 run #320) that the next-server grandchild

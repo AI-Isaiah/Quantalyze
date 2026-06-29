@@ -1,6 +1,4 @@
 import type { Metadata } from "next";
-import Link from "next/link";
-import { LegalFooter } from "@/components/legal/LegalFooter";
 
 /**
  * `/security` — public security practices page.
@@ -40,26 +38,11 @@ export const metadata: Metadata = {
 };
 
 export default function SecurityPage() {
+  // The shared (marketing)/layout.tsx supplies the header + LegalFooter chrome
+  // (NAV-04). This page keeps its own metadata (canonical/robots/openGraph above)
+  // and owns the single <main>/<h1> — exactly one <main> and one <h1>.
   return (
-    <div className="min-h-full bg-white">
-      <header className="border-b border-border bg-white">
-        <div className="mx-auto flex h-16 max-w-[1100px] items-center justify-between px-6">
-          <Link
-            href="/"
-            className="inline-flex items-center py-2 font-display text-lg tracking-tight text-text-primary"
-          >
-            Quantalyze
-          </Link>
-          <Link
-            href="/for-quants"
-            className="text-sm text-text-muted underline-offset-4 transition-colors hover:text-text-primary hover:underline"
-          >
-            For Quants →
-          </Link>
-        </div>
-      </header>
-
-      <main className="mx-auto max-w-[1100px] px-6 py-16 md:py-20">
+    <main className="mx-auto max-w-[1100px] px-6 py-16 md:py-20">
         {/* --- 1. Editorial hero: 3-block credibility document --- */}
         <article className="max-w-[640px]">
           <h1 className="font-display text-[32px] leading-tight tracking-tight text-text-primary">
@@ -578,9 +561,6 @@ export default function SecurityPage() {
           </div>
         </section>
       </main>
-
-      <LegalFooter />
-    </div>
   );
 }
 

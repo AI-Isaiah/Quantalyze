@@ -63,6 +63,25 @@ function buildNavSections(
       icon: PortfolioIcon,
       badge: flaggedCount,
     });
+    // Phase 51 NAV-01 — surface the genuine allocator orphans that had no nav
+    // entry (direct-link only today): /compare, /decks, and /recommendations are
+    // allocator-owned dashboard surfaces. They live INSIDE the
+    // showsAllocatorWorkspace branch so they never leak to a manager (T-45-01 /
+    // T-51-02 info-disclosure). The role OR-logic derivations above are
+    // byte-unchanged. /recommendations is now a top-level nav item per the
+    // 51-REVIEW user override (2026-06-28): it was previously left OUT per a
+    // 2026-05-20 decision (treated as mandate-CTA-reachable only), but the user
+    // chose to surface it directly so the allocator's daily match output is not a
+    // dead-end reachable only via a deep CTA. The legacy scenarios and preferences
+    // slugs are redirect-stubs (NOT orphans) and /security is public marketing —
+    // none get nav entries here. (NB: this comment intentionally avoids the
+    // literal retired-route slug the FLOW-03 phase-32 frozen-spine guard
+    // substring-matches on Sidebar.tsx.)
+    workspaceItems.push(
+      { label: "Recommendations", href: "/recommendations", icon: RecommendIcon },
+      { label: "Compare", href: "/compare", icon: CompareIcon },
+      { label: "Decks", href: "/decks", icon: DeckIcon },
+    );
   }
   // FLOW-03 (Phase 32): the standalone "Strategy Sandbox" nav item (which
   // pointed at the now-retired Sandbox route) is removed. The example-universe
@@ -108,7 +127,17 @@ function buildNavSections(
       : []),
     {
       heading: "ACCOUNT",
-      items: [{ label: "Profile", href: "/profile", icon: UserIcon }],
+      // Phase 51 NAV-01 — /referral ("Earn rewards by referring asset managers
+      // and allocators") is an account-level affordance owned by allocators AND
+      // managers (RESEARCH orphan inventory). ACCOUNT is the role-neutral section
+      // (Profile is shown to every role), so a referral entry here is reachable
+      // by both owning roles without leaking a workspace-specific surface — it is
+      // not gated by the allocator/manager OR-logic and therefore cannot regress
+      // the T-45-01 role-leak pin.
+      items: [
+        { label: "Profile", href: "/profile", icon: UserIcon },
+        { label: "Referral", href: "/referral", icon: GiftIcon },
+      ],
     },
   ];
 }
@@ -312,7 +341,17 @@ function NavItemLink({
     <li>
       <Link
         href={item.href}
-        className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
+        // Phase 51 NAV-02 — expose the active item to AT (aria-current) and add a
+        // keyboard-only focus ring (the rail had neither). The ring is WHITE with a
+        // navy ring-offset, NOT the accent token: accent teal #1B6B5A on the dark
+        // rail measures 2.8:1 / 2.3:1 / 1.63:1 against bg-sidebar / -hover / -active,
+        // all below the WCAG 1.4.11 / 2.4.11 3:1 non-text-contrast floor for a focus
+        // indicator (the project LOCKS WCAG-AA). White-on-navy clears it with margin
+        // (>9:1 on every rail state). aria-current mirrors MobileNav; focus-visible
+        // (never bare focus:) per UI-SPEC §Item state contract. The active bg stays
+        // slate bg-sidebar-active (an accent FILL on the navy rail fails contrast too).
+        aria-current={active ? "page" : undefined}
+        className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar ${
           active
             ? "bg-sidebar-active text-sidebar-text-active"
             : "hover:bg-sidebar-hover hover:text-sidebar-text-active"
@@ -400,6 +439,50 @@ function ShieldIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M8 1.5l5 2v4.5c0 3-2 5.5-5 6.5-3-1-5-3.5-5-6.5V3.5l5-2z" />
+    </svg>
+  );
+}
+
+// Phase 51 NAV-01 — glyphs for the newly-surfaced allocator/account orphans.
+// House style: 16x16 viewBox, stroke-1.5, currentColor, no icon dependency —
+// matches the inline SVGs above so the nav stays a single self-contained file.
+function RecommendIcon({ className }: { className?: string }) {
+  // A sparkle/star — the "recommended for you" match output.
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 2l1.6 3.7L13.5 6l-2.75 2.7.65 3.8L8 10.7 4.6 12.5l.65-3.8L2.5 6l3.9-.3L8 2z" />
+    </svg>
+  );
+}
+
+function CompareIcon({ className }: { className?: string }) {
+  // Two side-by-side bars — "compare" two strategies.
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="3" width="4" height="10" rx="1" />
+      <rect x="10" y="3" width="4" height="10" rx="1" />
+      <path d="M8 2v12" />
+    </svg>
+  );
+}
+
+function DeckIcon({ className }: { className?: string }) {
+  // Stacked cards — a "deck" of strategies.
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="2" width="9" height="11" rx="1.5" />
+      <path d="M2 4.5v7.5A1.5 1.5 0 003.5 13.5H11" />
+    </svg>
+  );
+}
+
+function GiftIcon({ className }: { className?: string }) {
+  // A gift/reward — the referral "earn rewards" affordance.
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2.5" y="6" width="11" height="7.5" rx="1" />
+      <path d="M2 6h12M8 6v7.5" />
+      <path d="M8 6S6.5 2.5 4.75 3.25 6.5 6 8 6zM8 6s1.5-3.5 3.25-2.75S9.5 6 8 6z" />
     </svg>
   );
 }
