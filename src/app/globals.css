@@ -141,6 +141,32 @@
   --text-small: clamp(0.8125rem, 0.8rem + 0.0625vw, 0.875rem);
   --text-caption: clamp(0.75rem, 0.73rem + 0.0625vw, 0.8125rem);
   --text-micro: clamp(0.625rem, 0.61rem + 0.0625vw, 0.6875rem);
+
+  /* Phase 54 / BP-03 — FIXED-VALUE type aliases (the byte-identity spine).
+     Unlike the fluid `--text-*` tiers above (clamp() that re-evaluates on zoom),
+     these resolve to a SINGLE rem value equal to the current raw `text-[Npx]`
+     site, so migrating `text-[Npx]` → `text-fixed-N` is RENDER byte-identical
+     (the deferred VERIFY-04 golden re-bake + the phase-52 frozen-spine guard
+     stay valid). They are deliberately NOT in TYPE_SCALE (src/lib/design-tokens/
+     typography.ts) — the fluid drift gate (tests/a11y/design-token-drift.test.ts)
+     iterates TYPE_SCALE only, so a `--text-fixed-*` token outside it is invisible
+     to the gate and needs no reconciliation. One alias per raw px size present in
+     the migratable surface (grep `text-\[[0-9]+px\]`: 9,10,11,12,13,18,22,24,28,
+     32,36). The fluid `--text-micro` clamp(10→11px) is NOT byte-identical at
+     desktop, so it must NOT be used for the locked surfaces — these fixed aliases
+     are the byte-identity mechanism the migration halves (54-01b/54-02a/54-02b)
+     consume as pure className swaps that never touch this file. */
+  --text-fixed-9: 0.5625rem; /* = 9px @16px root — byte-identical to text-[9px] */
+  --text-fixed-10: 0.625rem; /* = 10px @16px root — byte-identical to text-[10px] */
+  --text-fixed-11: 0.6875rem; /* = 11px @16px root — byte-identical to text-[11px] */
+  --text-fixed-12: 0.75rem; /* = 12px @16px root — byte-identical to text-[12px] */
+  --text-fixed-13: 0.8125rem; /* = 13px @16px root — byte-identical to text-[13px] */
+  --text-fixed-18: 1.125rem; /* = 18px @16px root — byte-identical to text-[18px] */
+  --text-fixed-22: 1.375rem; /* = 22px @16px root — byte-identical to text-[22px] */
+  --text-fixed-24: 1.5rem; /* = 24px @16px root — byte-identical to text-[24px] */
+  --text-fixed-28: 1.75rem; /* = 28px @16px root — byte-identical to text-[28px] */
+  --text-fixed-32: 2rem; /* = 32px @16px root — byte-identical to text-[32px] */
+  --text-fixed-36: 2.25rem; /* = 36px @16px root — byte-identical to text-[36px] */
 }
 
 /* Respect user motion preferences for the shared `animate-pulse` utility,

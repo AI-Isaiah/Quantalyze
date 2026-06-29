@@ -187,6 +187,26 @@ const eslintConfig = defineConfig([
     ],
     rules: { "quantalyze/no-raw-font-px": "error" },
   },
+  // Phase 54 / BP-03 — FROZEN-island chart off-glob. These 4 files carry raw
+  // `text-[Npx]` sites but can NEVER migrate: they are in the FROZEN_ISLANDS
+  // git-diff-zero list (src/__tests__/phase-52-frozen-spine-guards.test.ts:158),
+  // so any byte change reds the frozen-spine guard. The CONTEXT-locked BP-03/
+  // FROZEN conflict resolution is to EXEMPT them via this `off` glob (mirroring
+  // the src/components/charts/** block below) instead of editing them — so the
+  // repo-wide `error` flip (Plan 54-05) passes while the render stays
+  // byte-identical. EquityChart lives under allocations/widgets/performance/,
+  // NOT under src/components/charts/**, so it needs an explicit entry; the three
+  // factsheet SVG charts (TimeSeriesChart/HistogramChart/MasterBrush) are the
+  // chart-internal frozen islands. NEVER add edits to these files.
+  {
+    files: [
+      "src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx",
+      "src/app/factsheet/[id]/v2/TimeSeriesChart.tsx",
+      "src/app/factsheet/[id]/v2/HistogramChart.tsx",
+      "src/app/factsheet/[id]/v2/MasterBrush.tsx",
+    ],
+    rules: { "quantalyze/no-raw-font-px": "off" },
+  },
   // Context allow-list: Recharts axis colors / designer-bundle chart ports pin
   // raw px sizes legitimately. Turn BOTH DS-04 rules off here (mirrors how
   // no-raw-localstorage is off for src/lib/storage/**).
