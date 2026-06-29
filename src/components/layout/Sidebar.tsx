@@ -342,12 +342,16 @@ function NavItemLink({
       <Link
         href={item.href}
         // Phase 51 NAV-02 — expose the active item to AT (aria-current) and add a
-        // keyboard-only focus ring in the accent token (the rail had neither).
-        // Mirrors MobileNav's aria-current pattern; uses focus-visible:ring (never
-        // bare focus:) per UI-SPEC §Item state contract. The active bg stays the
-        // slate bg-sidebar-active (accent fill on the navy rail fails contrast).
+        // keyboard-only focus ring (the rail had neither). The ring is WHITE with a
+        // navy ring-offset, NOT the accent token: accent teal #1B6B5A on the dark
+        // rail measures 2.8:1 / 2.3:1 / 1.63:1 against bg-sidebar / -hover / -active,
+        // all below the WCAG 1.4.11 / 2.4.11 3:1 non-text-contrast floor for a focus
+        // indicator (the project LOCKS WCAG-AA). White-on-navy clears it with margin
+        // (>9:1 on every rail state). aria-current mirrors MobileNav; focus-visible
+        // (never bare focus:) per UI-SPEC §Item state contract. The active bg stays
+        // slate bg-sidebar-active (an accent FILL on the navy rail fails contrast too).
         aria-current={active ? "page" : undefined}
-        className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+        className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar ${
           active
             ? "bg-sidebar-active text-sidebar-text-active"
             : "hover:bg-sidebar-hover hover:text-sidebar-text-active"
