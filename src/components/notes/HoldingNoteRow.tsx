@@ -244,7 +244,7 @@ export function HoldingNoteRow(props: HoldingNoteRowProps) {
               placeholder="No note yet. Start typing to add one."
               autoFocus
               rows={4}
-              className="w-full resize-none rounded border border-border p-2 font-mono text-[13px] leading-[1.6] focus:border-accent focus:outline-none"
+              className="w-full resize-none rounded border border-border p-2 font-mono text-fixed-13 leading-[1.6] focus:border-accent focus:outline-none"
             />
           ) : (
             <div>

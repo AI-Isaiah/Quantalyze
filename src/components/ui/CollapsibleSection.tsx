@@ -149,12 +149,12 @@ export function CollapsibleSection({
             {title}
           </h2>
           {subtitle && (
-            <span className="text-[11px] text-text-muted normal-case tracking-normal">
+            <span className="text-fixed-11 text-text-muted normal-case tracking-normal">
               {subtitle}
             </span>
           )}
         </div>
-        <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
+        <span className="text-fixed-10 font-mono uppercase tracking-[0.18em] text-text-muted">
           {open ? "Hide" : "Show"}
         </span>
       </summary>

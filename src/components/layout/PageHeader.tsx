@@ -23,7 +23,7 @@ export function PageHeader({ title, description, actions, meta, breadcrumb }: Pa
       {breadcrumb && breadcrumb.length > 0 && <Breadcrumb items={breadcrumb} />}
       <div className="flex items-start justify-between mb-8">
       <div>
-        <h1 className="font-display text-[32px] tracking-tight text-text-primary">
+        <h1 className="font-display text-fixed-32 tracking-tight text-text-primary">
           {title}
         </h1>
         {description && (

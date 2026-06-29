@@ -282,7 +282,7 @@ export function Sidebar({
                 effective `#525D71 on #0F172A = 2.68:1` (axe color-contrast,
                 serious). Use full sidebar-text (#94A3B8) which gives 6.75:1 on
                 the same bg. Hierarchy preserved by font-semibold + tracking. */}
-            <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-widest text-sidebar-text">
+            <p className="mb-2 px-3 text-fixed-10 font-semibold uppercase tracking-widest text-sidebar-text">
               {section.heading}
             </p>
             {section.items.length > 0 && (
@@ -306,7 +306,7 @@ export function Sidebar({
                     #0F172A, axe-flagged). Sub-group labels use full
                     sidebar-text and rely on font-medium (vs the parent's
                     semibold) + smaller tracking for hierarchy. */}
-                <p className="mb-1 px-3 text-[10px] font-medium uppercase tracking-wider text-sidebar-text">
+                <p className="mb-1 px-3 text-fixed-10 font-medium uppercase tracking-wider text-sidebar-text">
                   {group.label}
                 </p>
                 <ul className="space-y-0.5">
@@ -362,7 +362,7 @@ function NavItemLink({
         {showBadge && (
           <span
             aria-label={`${badge} flagged holding${badge === 1 ? "" : "s"}`}
-            className="ml-auto inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-medium text-white"
+            className="ml-auto inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-fixed-10 font-medium text-white"
           >
             {badge}
           </span>

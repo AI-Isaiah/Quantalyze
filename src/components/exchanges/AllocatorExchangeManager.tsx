@@ -714,13 +714,13 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
                     <p className="text-sm font-semibold text-text-primary truncate">
                       {key.label}
                     </p>
-                    <p className="text-[10px] text-text-muted uppercase tracking-wider mt-0.5">
+                    <p className="text-fixed-10 text-text-muted uppercase tracking-wider mt-0.5">
                       {key.exchange} · Read-only · Balance{" "}
                       {formatUsd(key.account_balance_usdt)}
                     </p>
                   </div>
                   <div className="text-right">
-                    <p className="text-[10px] uppercase tracking-wider text-text-muted font-semibold">
+                    <p className="text-fixed-10 uppercase tracking-wider text-text-muted font-semibold">
                       Last sync
                     </p>
                     <p className="text-xs text-text-secondary font-metric mt-0.5">
@@ -801,13 +801,13 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
                     <p className="text-sm font-semibold text-text-primary truncate">
                       {key.label}
                     </p>
-                    <p className="text-[10px] text-text-muted uppercase tracking-wider mt-0.5">
+                    <p className="text-fixed-10 text-text-muted uppercase tracking-wider mt-0.5">
                       {key.exchange} · Disconnected{" "}
                       {formatRelative(key.disconnected_at)}
                     </p>
                   </div>
                   <div className="text-right">
-                    <p className="text-[10px] uppercase tracking-wider text-text-muted font-semibold">
+                    <p className="text-fixed-10 uppercase tracking-wider text-text-muted font-semibold">
                       Last sync
                     </p>
                     <p className="text-xs text-text-secondary font-metric mt-0.5">
@@ -944,7 +944,7 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
                 </label>
                 <p
                   id="cascade-holdings-help"
-                  className="ml-6 mt-1 text-[11px] text-text-muted"
+                  className="ml-6 mt-1 text-fixed-11 text-text-muted"
                 >
                   {cascadeHoldings
                     ? "Checked: holdings are permanently deleted and excluded from all historical metrics."
