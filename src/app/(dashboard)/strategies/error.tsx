@@ -9,8 +9,10 @@ import { Button } from "@/components/ui/Button";
  * T-53-01). The list route already had a `loading.tsx` but no `error.tsx`; this
  * sibling catches a throw from the list page's server-fetch.
  *
- * Mirrors the canonical `(dashboard)/error.tsx` shape: client component,
- * `unstable_retry` (Next 16.2.0 — NOT `reset`), digest-ONLY. Never renders the
+ * Same boundary CONTRACT as the canonical `(dashboard)/error.tsx` (client
+ * component, `unstable_retry` — Next 16.2.0, NOT `reset` — digest-ONLY), but
+ * using the Phase 53 type-tiers (`text-h2`/`text-small`/`text-caption`) where
+ * the canonical still uses raw `text-2xl`/`text-sm`/`text-xs`. Never renders the
  * thrown message text: for a Server-Component throw that text is the original
  * server-side error string, and surfacing it to the client is Information
  * Disclosure (T-53-01). The thrown error is logged client-side for diagnostics

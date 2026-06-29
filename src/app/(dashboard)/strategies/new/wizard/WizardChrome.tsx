@@ -52,9 +52,9 @@ export interface WizardChromeProps {
   /** Optional: tick the "Progress saved" toast. Called after each step save. */
   toastKey?: number;
   /**
-   * Phase 15: optional steps override. Absent ⇒ DEFAULT_STEPS (4-step API
-   * branch). Pass `WIZARD_STEPS_CSV` to render the 3-step CSV branch
-   * stepper.
+   * Phase 15: optional steps override. Absent ⇒ DEFAULT_STEPS (5-step API
+   * branch, after the Phase 53 Review step). Pass `WIZARD_STEPS_CSV` to render
+   * the 5-step CSV branch stepper.
    */
   steps?: { key: WizardStepKey; label: string; number: string }[];
   /**
@@ -67,6 +67,14 @@ export interface WizardChromeProps {
   source?: "api" | "csv";
   children: React.ReactNode;
 }
+
+// Stepper grid columns by step count. Full literals (no template) so Tailwind's
+// class scanner emits every variant. 5-col is the default for both branches
+// post-Phase-53; the 3/4-col arms cover any caller passing a shorter `steps`.
+const GRID_COLS_BY_COUNT: Record<number, string> = {
+  3: "grid-cols-1 sm:grid-cols-3",
+  4: "grid-cols-1 sm:grid-cols-4",
+};
 
 export function WizardChrome({
   currentStep,
@@ -90,15 +98,9 @@ export function WizardChrome({
   // and the existing top/bottom hairline borders read as a vertical list.
   //
   // Phase 53 / APPLY-02 added a Review step so both branches are now 5-step;
-  // the 3/4-column arms stay for back-compat with any caller passing a
-  // shorter custom `steps` array. Full literals (no template) so Tailwind's
-  // class scanner picks every variant up.
+  // GRID_COLS_BY_COUNT (module scope) maps the count to the literal classes.
   const gridColsClass =
-    totalCount === 3
-      ? "grid-cols-1 sm:grid-cols-3"
-      : totalCount === 4
-        ? "grid-cols-1 sm:grid-cols-4"
-        : "grid-cols-1 sm:grid-cols-5";
+    GRID_COLS_BY_COUNT[totalCount] ?? "grid-cols-1 sm:grid-cols-5";
   const isCsv = source === "csv";
   const [showToast, setShowToast] = useState(false);
 

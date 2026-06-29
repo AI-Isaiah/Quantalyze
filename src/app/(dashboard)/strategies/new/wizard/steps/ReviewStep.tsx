@@ -24,7 +24,7 @@ import type { MetadataDraft } from "./MetadataStep";
  * The CTA carries an ADVANCE verb — "Continue to create" (API) / "Continue to
  * submit" (CSV) — NOT a finalize verb, because this step does not finalize: it
  * only advances the state machine to SubmitStep / CsvSubmitStep, which present
- * the actual finalize CTA ("Create strategy" / "Submit strategy") and fire the
+ * the actual finalize CTA ("Submit for review" / "Submit strategy") and fire the
  * unchanged finalize POST. Keeping the finalize verb unique to the step that
  * finalizes (WR-01) avoids the misleading "button-that-says-create-but-doesn't"
  * seam between review and submit.
@@ -94,9 +94,9 @@ function formatMoney(value: string): string {
 
 export function ReviewStep(props: ReviewStepProps) {
   // WR-01 — advance verb, NOT a finalize verb: this CTA only advances to the
-  // owning Submit step (which carries the real "Create strategy"/"Submit
-  // strategy" finalize CTA). The finalize verb stays unique to the step that
-  // actually finalizes.
+  // owning Submit step (which carries the real "Submit for review" (API) /
+  // "Submit strategy" (CSV) finalize CTA). The finalize verb stays unique to
+  // the step that actually finalizes.
   const advanceLabel =
     props.branch === "csv" ? "Continue to submit" : "Continue to create";
 

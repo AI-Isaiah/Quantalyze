@@ -5,9 +5,9 @@
  * Untested before: (a) categoryLoadError state when the discovery_categories
  * fetch errors; (b) auto-select of categories[0] when categoryId is null AND
  * data is non-empty (a regression to default "" would silently submit an
- * invalid category_id and fail at finalize); (c) supportedExchanges
- * defaulting to [canonicalizeExchange(detectedExchange)] when initial is
- * null; (d) the Submit gate (description + categoryId) and the onComplete
+ * invalid category_id and fail at finalize); (c) the detected-exchange chip
+ * renders pre-selected (aria-pressed) when initial is null — the canonicalized
+ * default; (d) the Submit gate (description + categoryId) and the onComplete
  * payload.
  */
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";

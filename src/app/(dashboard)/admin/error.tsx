@@ -6,8 +6,10 @@ import { Button } from "@/components/ui/Button";
 
 /**
  * Route-level error boundary for the WHOLE /admin subtree (STATE-05 / ASVS V7 /
- * T-53-09). Mirrors the canonical `(dashboard)/error.tsx` shape: client
- * component, `unstable_retry` (Next 16.2.0 — NOT `reset`), digest-ONLY.
+ * T-53-09). Same boundary CONTRACT as the canonical `(dashboard)/error.tsx`
+ * (client component, `unstable_retry` — Next 16.2.0, NOT `reset` — digest-ONLY),
+ * but using the Phase 53 design type-tiers (`text-h2`/`text-small`/`text-caption`)
+ * where the canonical still uses raw `text-2xl`/`text-sm`/`text-xs`.
  *
  * Admin is the highest-sensitivity in-scope surface (staff-facing,
  * access-gated). When an admin Server Component throws (fetch failure, RLS

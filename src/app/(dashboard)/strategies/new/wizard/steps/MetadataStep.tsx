@@ -330,8 +330,8 @@ export function MetadataStep({
           <Button variant="secondary" type="button" onClick={onBack}>
             Back
           </Button>
-          {/* WR-03 — gate on the SAME .trim() predicate as descriptionError
-              (line ~155) + the handleSubmit guard, so a whitespace-only
+          {/* WR-03 — gate on the SAME .trim() predicate as the descriptionError
+              derivation + the handleSubmit guard, so a whitespace-only
               description ("   ") does not enable a button that then silently
               no-ops in handleSubmit. The disabled-prop must not drift from the
               validation rule. */}

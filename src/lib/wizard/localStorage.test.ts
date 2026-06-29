@@ -403,10 +403,11 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
     warn.mockRestore();
   });
 
-  // Phase 53 / APPLY-02 — the review steps were added to WizardStepKey +
-  // validSteps. A signed envelope pointing at `review` / `csv_review` must
-  // round-trip (the recap step resumes), while a step value outside the
-  // enum still safe-degrades to cold-start (the includes-guard).
+  // Phase 53 / APPLY-02 — the review steps were added to the WIZARD_STEP_KEYS
+  // single source (both the type and the load guard derive from it). A signed
+  // envelope pointing at `review` / `csv_review` must round-trip (the recap step
+  // resumes), while a step value outside the enum still safe-degrades to
+  // cold-start (the includes-guard).
   it("round-trips a 'review' step pointer (APPLY-02 enum extension)", async () => {
     await saveWizardState({
       strategyId: "00000000-0000-4000-8000-000000000eee",
@@ -432,11 +433,11 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
     expect(loaded?.strategyName).toBe("Aurora Capital");
   });
 
-  it("safe-degrades an unknown stored step to cold-start (validSteps guard)", async () => {
+  it("safe-degrades an unknown stored step to cold-start (WIZARD_STEP_KEYS guard)", async () => {
     // A future-tab / corrupted payload carrying a step value outside the
     // WizardStepKey enum must be rejected (returns null) rather than
     // resumed — the SSR default then takes over. We forge a VALID HMAC
-    // envelope (via the real signing path) so this proves the validSteps
+    // envelope (via the real signing path) so this proves the WIZARD_STEP_KEYS
     // includes-guard, not the HMAC check.
     await saveWizardState({
       strategyId: "00000000-0000-4000-8000-000000000fff",

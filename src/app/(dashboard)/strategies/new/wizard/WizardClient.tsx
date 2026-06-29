@@ -420,8 +420,9 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
     (draft: MetadataDraft) => {
       setMetadataDraft(draft);
       // Phase 53 / APPLY-02: metadata now advances to the read-only review
-      // recap (not straight to submit). The review step's "Create strategy"
-      // CTA advances to submit, where the unchanged finalize POST fires.
+      // recap (not straight to submit). The review step's "Continue to create"
+      // CTA advances to submit, where the unchanged finalize POST ("Submit for
+      // review") fires.
       setStep("review");
       persistPointer("review", strategyId);
       trackForQuantsEventClient("wizard_step_complete_3", {
