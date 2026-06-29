@@ -244,7 +244,7 @@ export function ScenarioCompareTable({
                 single shared-window header). A whole below-floor column is gated
                 to the neutral sample-floor copy instead of its window stamp. */}
             <tr>
-              <td className="px-4 py-2 text-[11px] text-text-muted uppercase tracking-wider">
+              <td className="px-4 py-2 text-fixed-11 text-text-muted uppercase tracking-wider">
                 Window
               </td>
               {allColumns.map((c, i) => {

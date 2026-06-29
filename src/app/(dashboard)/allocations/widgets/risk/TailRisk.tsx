@@ -88,7 +88,7 @@ function TailRiskInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
     <div className="flex h-full flex-col gap-2" data-testid="tail-risk">
       <div className="flex items-center justify-between px-1">
         <span
-          className="font-sans text-[11px] font-medium"
+          className="font-sans text-fixed-11 font-medium"
           style={{ color: "#4A5568" }}
         >
           Extreme losses (below -2%)
@@ -99,19 +99,19 @@ function TailRiskInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
             so the guides never rendered. Surface them as honest header text. */}
         <div className="flex items-center gap-2">
           <span
-            className="font-metric text-[10px] tabular-nums"
+            className="font-metric text-fixed-10 tabular-nums"
             style={{ color: "#CA8A04" }}
           >
             P5 {(p5 * 100).toFixed(1)}%
           </span>
           <span
-            className="font-metric text-[10px] tabular-nums"
+            className="font-metric text-fixed-10 tabular-nums"
             style={{ color: "#DC2626" }}
           >
             P1 {(p1 * 100).toFixed(1)}%
           </span>
           <span
-            className="rounded bg-red-50 px-1.5 py-0.5 font-metric text-[10px] tabular-nums"
+            className="rounded bg-red-50 px-1.5 py-0.5 font-metric text-fixed-10 tabular-nums"
             style={{ color: "#DC2626" }}
           >
             {tailCount} events

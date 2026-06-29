@@ -325,9 +325,9 @@ const TAB_BUTTON_INACTIVE =
   "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent";
 
 const TAB_COUNT_BADGE_ACTIVE =
-  "rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] font-mono leading-none text-accent";
+  "rounded-full bg-accent/15 px-1.5 py-0.5 text-fixed-10 font-mono leading-none text-accent";
 const TAB_COUNT_BADGE_INACTIVE =
-  "rounded-full bg-page px-1.5 py-0.5 text-[10px] font-mono leading-none text-text-muted";
+  "rounded-full bg-page px-1.5 py-0.5 text-fixed-10 font-mono leading-none text-text-muted";
 
 /**
  * NAV-02 (Phase 45) — pure horizontal-scroll math for the <sm tab strip.
@@ -620,14 +620,14 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
       >
         <div className="flex flex-col gap-1">
           {entityName ? (
-            <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-text-muted">
+            <p className="text-fixed-10 font-mono uppercase tracking-[0.22em] text-text-muted">
               {entityName}
             </p>
           ) : null}
           {/* Tweaks display-font knob (serif | sans). `.font-display` resolves
               to Instrument Serif by default and flips to DM Sans when the
               user picks Sans via the Tweaks panel — see globals.css. */}
-          <h1 className="font-display text-[28px] leading-none tracking-tight text-text-primary">
+          <h1 className="font-display text-fixed-28 leading-none tracking-tight text-text-primary">
             My Allocation
           </h1>
         </div>

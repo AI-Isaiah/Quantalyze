@@ -73,7 +73,7 @@ function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidg
             {formatPercent(var95)}
           </div>
           <div
-            className="mt-1 font-sans text-[11px] font-medium uppercase tracking-wider"
+            className="mt-1 font-sans text-fixed-11 font-medium uppercase tracking-wider"
             style={{ color: "#64748B" }}
           >
             VaR 95%
@@ -87,7 +87,7 @@ function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidg
             {formatPercent(var99)}
           </div>
           <div
-            className="mt-1 font-sans text-[11px] font-medium uppercase tracking-wider"
+            className="mt-1 font-sans text-fixed-11 font-medium uppercase tracking-wider"
             style={{ color: "#64748B" }}
           >
             VaR 99%
@@ -101,7 +101,7 @@ function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidg
             {formatPercent(es95)}
           </div>
           <div
-            className="mt-1 font-sans text-[11px] font-medium uppercase tracking-wider"
+            className="mt-1 font-sans text-fixed-11 font-medium uppercase tracking-wider"
             style={{ color: "#64748B" }}
           >
             CVaR 95%
@@ -117,11 +117,11 @@ function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidg
           <div className="flex-1" style={{ backgroundColor: "#DC2626" }} />
         </div>
         <div className="mt-1.5 flex items-center justify-between">
-          <span className="font-sans text-[10px]" style={{ color: "#64748B" }}>
+          <span className="font-sans text-fixed-10" style={{ color: "#64748B" }}>
             Low risk
           </span>
           <span
-            className="rounded px-2 py-0.5 font-sans text-[10px] font-semibold uppercase"
+            className="rounded px-2 py-0.5 font-sans text-fixed-10 font-semibold uppercase"
             style={{
               color: ZONE_COLORS[zone],
               backgroundColor: `${ZONE_COLORS[zone]}14`,
@@ -129,7 +129,7 @@ function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidg
           >
             {zone}
           </span>
-          <span className="font-sans text-[10px]" style={{ color: "#64748B" }}>
+          <span className="font-sans text-fixed-10" style={{ color: "#64748B" }}>
             High risk
           </span>
         </div>

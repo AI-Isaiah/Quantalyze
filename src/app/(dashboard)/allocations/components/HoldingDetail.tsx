@@ -248,7 +248,7 @@ export function HoldingDetail({
                   placeholder="No note yet. Start typing to add one."
                   autoFocus
                   rows={4}
-                  className="w-full resize-none rounded border border-border bg-surface p-2 font-mono text-[13px] leading-[1.6] focus:border-accent focus:outline-none"
+                  className="w-full resize-none rounded border border-border bg-surface p-2 font-mono text-fixed-13 leading-[1.6] focus:border-accent focus:outline-none"
                 />
               ) : (
                 <div>
@@ -280,7 +280,7 @@ export function HoldingDetail({
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wider text-text-muted">
+      <div className="text-fixed-10 uppercase tracking-wider text-text-muted">
         {label}
       </div>
       <div className="font-metric tabular-nums text-text-primary">{value}</div>

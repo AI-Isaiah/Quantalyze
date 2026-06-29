@@ -156,7 +156,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             data-testid="overview-factsheet-warmup"
             className="mx-auto mt-8 max-w-[1100px] py-12 text-center"
           >
-            <p className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-muted">
+            <p className="text-fixed-10 font-mono uppercase tracking-[0.18em] text-text-muted">
               Portfolio factsheet
             </p>
             <p className="mt-3 text-sm text-text-secondary">
@@ -165,7 +165,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
               the API keys you connect on the My Allocation page.
             </p>
             {snapshotCount > 0 && snapshotCount < 2 && (
-              <p className="mt-2 text-[11px] text-text-muted">
+              <p className="mt-2 text-fixed-11 text-text-muted">
                 {snapshotCount} snapshot recorded so far.
               </p>
             )}

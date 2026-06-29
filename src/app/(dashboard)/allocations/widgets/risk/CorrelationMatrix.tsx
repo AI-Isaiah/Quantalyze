@@ -222,7 +222,7 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
 
       {/* Color legend */}
       <div className="flex items-center gap-2 px-1">
-        <span className="font-metric text-[10px]" style={{ color: "#64748B" }}>
+        <span className="font-metric text-fixed-10" style={{ color: "#64748B" }}>
           -1.0
         </span>
         <div
@@ -231,7 +231,7 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
             background: "linear-gradient(to right, rgb(220,38,38), rgb(255,255,255) 50%, rgb(27,107,90))",
           }}
         />
-        <span className="font-metric text-[10px]" style={{ color: "#64748B" }}>
+        <span className="font-metric text-fixed-10" style={{ color: "#64748B" }}>
           +1.0
         </span>
       </div>

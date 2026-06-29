@@ -140,7 +140,7 @@ function WidgetHeader({ pendingCount }: { pendingCount: number }) {
         <h3 className="m-0 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-text-primary">
           Bridge outcomes
           <span
-            className="inline-flex items-center rounded-sm px-1.5 py-0.5 text-[9px] font-mono font-medium uppercase tracking-wider"
+            className="inline-flex items-center rounded-sm px-1.5 py-0.5 text-fixed-9 font-mono font-medium uppercase tracking-wider"
             style={{
               backgroundColor: "color-mix(in srgb, var(--color-accent) 12%, transparent)",
               color: "var(--color-accent)",
@@ -150,7 +150,7 @@ function WidgetHeader({ pendingCount }: { pendingCount: number }) {
           </span>
         </h3>
         <div
-          className="mt-0.5 text-[12px]"
+          className="mt-0.5 text-fixed-12"
           style={{ color: "var(--color-text-muted)" }}
         >
           Realized delta from Bridge-driven reallocations
@@ -255,13 +255,13 @@ function KpiCell({
       }}
     >
       <div
-        className="text-[11px] font-semibold uppercase tracking-wider"
+        className="text-fixed-11 font-semibold uppercase tracking-wider"
         style={{ color: "var(--color-text-muted)" }}
       >
         {label}
       </div>
       <div
-        className="mt-1 font-mono text-[22px] font-medium tabular-nums"
+        className="mt-1 font-mono text-fixed-22 font-medium tabular-nums"
         // Route the color through a CSS custom property so the literal hex
         // survives JSDOM style-attribute normalization in tests (which
         // otherwise rewrites `#15803D` -> `rgb(22, 163, 74)`). Tests at
@@ -276,7 +276,7 @@ function KpiCell({
         {value}
       </div>
       <div
-        className="mt-0.5 text-[11px]"
+        className="mt-0.5 text-fixed-11"
         style={{ color: "var(--color-text-muted)" }}
       >
         {sub}
@@ -429,7 +429,7 @@ function ExpandedPanel({
       style={{ backgroundColor: "var(--color-surface-subtle)" }}
     >
       <div
-        className="mb-3 text-[11px] font-semibold uppercase tracking-wider"
+        className="mb-3 text-fixed-11 font-semibold uppercase tracking-wider"
         style={{ color: "var(--color-text-muted)" }}
       >
         Realized delta vs held baseline
@@ -447,7 +447,7 @@ function ExpandedPanel({
         <div
           role="alert"
           data-testid="outcomes-curve-error"
-          className="mb-2 text-[11px] italic"
+          className="mb-2 text-fixed-11 italic"
           style={{ color: "var(--color-text-muted)" }}
         >
           Couldn&apos;t load curve
@@ -471,14 +471,14 @@ function ExpandedPanel({
               className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3.5"
             >
               <div
-                className="text-[11px] font-medium"
+                className="text-fixed-11 font-medium"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 {col.label}
               </div>
               {isPending ? (
                 <div
-                  className="mt-2.5 flex items-center gap-2 text-[13px] italic"
+                  className="mt-2.5 flex items-center gap-2 text-fixed-13 italic"
                   style={{ color: "var(--color-text-muted)" }}
                 >
                   <span
@@ -489,7 +489,7 @@ function ExpandedPanel({
                 </div>
               ) : (
                 <div
-                  className="mt-1.5 font-mono text-[24px] font-medium tabular-nums"
+                  className="mt-1.5 font-mono text-fixed-24 font-medium tabular-nums"
                   style={{ color: toneColor(d.tone) }}
                 >
                   {d.text}
@@ -576,7 +576,7 @@ function TimelineRow({
     if (v === null) {
       return (
         <span
-          className="text-[12px] italic"
+          className="text-fixed-12 italic"
           style={{ color: "var(--color-text-muted)" }}
         >
           pending
@@ -590,7 +590,7 @@ function TimelineRow({
     const cellColor = v >= 0 ? "#15803D" : "#DC2626";
     return (
       <span
-        className="font-mono text-[13px] font-medium tabular-nums"
+        className="font-mono text-fixed-13 font-medium tabular-nums"
         style={{
           ["--delta-color" as string]: cellColor,
           color: "var(--delta-color)",
@@ -615,14 +615,14 @@ function TimelineRow({
               <a
                 href={`/strategy/${originalStrategy.id}`}
                 onClick={(e) => e.stopPropagation()}
-                className="text-[12px] hover:underline"
+                className="text-fixed-12 hover:underline"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 {originalStrategy.name}
               </a>
             ) : (
               <span
-                className="text-[12px]"
+                className="text-fixed-12"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 {"—"}
@@ -630,7 +630,7 @@ function TimelineRow({
             )}
             <span
               aria-hidden="true"
-              className="text-[10px]"
+              className="text-fixed-10"
               style={{ color: "var(--color-text-muted)" }}
             >
               {"›"}
@@ -639,14 +639,14 @@ function TimelineRow({
               <a
                 href={`/strategy/${replacementStrategy.id}`}
                 onClick={(e) => e.stopPropagation()}
-                className="text-[13px] font-medium hover:underline"
+                className="text-fixed-13 font-medium hover:underline"
                 style={{ color: "var(--color-text-primary)" }}
               >
                 {replacementStrategy.name}
               </a>
             ) : (
               <span
-                className="text-[13px] font-medium"
+                className="text-fixed-13 font-medium"
                 style={{ color: "var(--color-text-primary)" }}
               >
                 {"—"}
@@ -659,7 +659,7 @@ function TimelineRow({
             Designer comp shows $-amount, but allocator AUM isn't wired
             through the payload yet. Showing the honest percent avoids
             fabricating a $-figure from a magic-number proxy. */}
-        <td className="px-4 py-3 text-right font-mono text-[13px] tabular-nums">
+        <td className="px-4 py-3 text-right font-mono text-fixed-13 tabular-nums">
           {sizePercent != null ? (
             <span style={{ color: "var(--color-text-primary)" }}>
               {sizePercent.toFixed(1)}%
@@ -671,7 +671,7 @@ function TimelineRow({
 
         {/* Recorded */}
         <td
-          className="px-4 py-3 text-[12px]"
+          className="px-4 py-3 text-fixed-12"
           style={{ color: "var(--color-text-secondary)" }}
         >
           {formatDate(dateIso)}
@@ -703,7 +703,7 @@ function TimelineRow({
           >
             <span
               aria-hidden="true"
-              className="text-[10px]"
+              className="text-fixed-10"
               style={{
                 transform: isExpanded ? "rotate(90deg)" : "none",
                 transition: "transform 150ms ease-out",
@@ -905,47 +905,47 @@ function OutcomesWidgetInner({
       <WidgetHeader pendingCount={kpis.pendingCount} />
       <KpiStrip kpis={kpis} />
       <div className="flex-1 overflow-auto">
-        <table className="w-full border-collapse text-[13px]">
+        <table className="w-full border-collapse text-fixed-13">
           <thead>
             <tr>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-left text-fixed-11 font-semibold uppercase tracking-wider"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 Reallocation
               </th>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-fixed-11 font-semibold uppercase tracking-wider"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 Size
               </th>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-left text-fixed-11 font-semibold uppercase tracking-wider"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 Recorded
               </th>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-fixed-11 font-semibold uppercase tracking-wider whitespace-nowrap"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 {"Δ 30d"}
               </th>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-fixed-11 font-semibold uppercase tracking-wider whitespace-nowrap"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 {"Δ 90d"}
               </th>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-fixed-11 font-semibold uppercase tracking-wider whitespace-nowrap"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 {"Δ 180d"}
               </th>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-fixed-11 font-semibold uppercase tracking-wider"
                 style={{ color: "var(--color-text-muted)", width: 48 }}
                 aria-hidden="true"
               />
@@ -975,7 +975,7 @@ function OutcomesWidgetInner({
         style={{ backgroundColor: "var(--color-page)" }}
       >
         <span
-          className="text-[11px]"
+          className="text-fixed-11"
           style={{ color: "var(--color-text-muted)" }}
         >
           Hit rate and avg α exclude positions under 1% and rejected decisions
