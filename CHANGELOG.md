@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.35.0.9] - 2026-06-29
+### Fixed — /demo screenshot baselines after the Phase 51 shell move (closes #549)
+
+The advisory `e2e` `demo-screenshot.spec.ts` was red on main after v0.35.0.8: moving `/demo` under the `(marketing)` group gave it the shared masthead + `LegalFooter`, so the page is taller (mobile 876→1038px, desktop 800→912px) and the May-21 chromium-linux baselines no longer matched. Not a regression — an intended visual change with stale baselines. Regenerated the `demo-375` + `demo-1280` baselines in the `mcr.microsoft.com/playwright:v1.61.1-jammy` image (placeholder-Supabase env, matching how CI captures them; `demo-768` was already within the 0.05 tolerance and is unchanged) and verified the committed baselines pass a clean no-`--update` comparison. Code untouched — this is the baseline regen the v0.35.0.8 ship flagged but couldn't do locally without docker.
+
 ## [0.35.0.8] - 2026-06-29
 ### Added — the navigation shell + route-contract spine (v1.4 phase 51)
 
