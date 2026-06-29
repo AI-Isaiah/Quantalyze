@@ -1445,6 +1445,45 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     ).toBe(false);
   });
 
+  // T_C14b — Escape dismisses the reset modal (keyboard parity with Cancel).
+  // Regression guard for the CR-03 a11y fix (WCAG 2.1.2): the destructive
+  // confirmation must be Escape-dismissable, and Escape must behave like
+  // Cancel (keep the draft), never like Confirm (wipe it).
+  it("T_C14b Escape on the reset modal closes it (keyboard dismissal) and KEEPS the draft", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: "strat-c14b",
+      name: "C14b Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    fireEvent.click(screen.getByTestId("scenario-footer-reset"));
+    // The destructive confirmation is open…
+    const dialog = screen.getByRole("dialog");
+    expect(
+      screen.getByText(/Discard your scenario draft\?/i),
+    ).toBeInTheDocument();
+    // …and Escape dismisses it (the onKeyDown handler on the dialog).
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(
+      screen.queryByText(/Discard your scenario draft\?/i),
+    ).not.toBeInTheDocument();
+    // Escape == Cancel: the draft is preserved (commit still enabled), NOT
+    // wiped — an Escape that silently confirmed would be a data-loss
+    // regression.
+    expect(
+      (screen.getByTestId("scenario-footer-commit") as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+  });
+
   // -------------------------------------------------------------------------
   // T_C_MODE1 — entry-mode segmented control renders two accessible segments
   //   (UNIFY-01/02). radiogroup + two radios; the live book defaults to
