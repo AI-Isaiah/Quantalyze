@@ -27,10 +27,10 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
     >
       <div className="bg-surface rounded-xl border border-border shadow-elevated w-full max-w-lg p-6">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-text-primary">{title}</h2>
+          <h2 className="text-h3 font-semibold text-text-primary">{title}</h2>
           <button
             onClick={onClose}
-            className="text-text-muted hover:text-text-primary transition-colors"
+            className="text-text-muted hover:text-text-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
             aria-label="Close"
           >
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
