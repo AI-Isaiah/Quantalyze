@@ -116,7 +116,7 @@ export function PendingIntros({ requests }: { requests: IntroRequest[] }) {
           Intro Requests
         </h2>
         {pendingCount > 0 && (
-          <span className="bg-accent text-white text-[10px] rounded-full px-1.5 py-0.5">
+          <span className="bg-accent text-white text-fixed-10 rounded-full px-1.5 py-0.5">
             {pendingCount} pending
           </span>
         )}
@@ -162,7 +162,7 @@ export function PendingIntros({ requests }: { requests: IntroRequest[] }) {
                     Founder note: {r.founder_notes}
                   </p>
                 )}
-                <p className="text-[10px] text-text-muted mt-1">
+                <p className="text-fixed-10 text-text-muted mt-1">
                   {new Date(r.created_at).toLocaleDateString()}
                 </p>
               </div>

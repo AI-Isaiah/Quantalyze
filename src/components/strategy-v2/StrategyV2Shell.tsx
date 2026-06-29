@@ -59,7 +59,7 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
               className="text-text-primary"
               style={{
                 fontFamily: "var(--font-serif), serif",
-                fontSize: "32px",
+                fontSize: "var(--text-fixed-32)" /* = 32px @16px root — byte-identical to fontSize:"32px" (BP-03, token from 54-01a) */,
                 fontWeight: 400,
                 lineHeight: 1.1,
               }}

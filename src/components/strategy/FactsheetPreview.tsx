@@ -108,14 +108,14 @@ export function FactsheetPreview({
         </div>
         <div className="text-right">
           <p
-            className={`text-[11px] font-semibold ${badge.className}`}
+            className={`text-fixed-11 font-semibold ${badge.className}`}
             data-testid="factsheet-verification-badge"
             data-verification-state={verificationState}
           >
             {badge.headline}
           </p>
           {badge.caption && (
-            <p className="text-[10px] text-text-muted">{badge.caption}</p>
+            <p className="text-fixed-10 text-text-muted">{badge.caption}</p>
           )}
         </div>
       </div>
@@ -124,14 +124,14 @@ export function FactsheetPreview({
       <div className="grid grid-cols-2 divide-x divide-border md:grid-cols-6">
         {metrics.map((m) => (
           <div key={m.label} className="px-4 py-4">
-            <p className="text-[10px] uppercase tracking-wide text-text-muted">
+            <p className="text-fixed-10 uppercase tracking-wide text-text-muted">
               {m.label}
             </p>
             <p className="mt-1 font-metric text-lg font-semibold text-text-primary">
               {m.value}
             </p>
             {m.qualifier && (
-              <p className="mt-0.5 text-[10px] text-text-muted">{m.qualifier}</p>
+              <p className="mt-0.5 text-fixed-10 text-text-muted">{m.qualifier}</p>
             )}
           </div>
         ))}
@@ -140,7 +140,7 @@ export function FactsheetPreview({
       {/* Equity sparkline — full-width under the metric row */}
       {sparklineReturns && sparklineReturns.length > 1 && (
         <div className="border-t border-border px-6 py-4">
-          <p className="mb-2 text-[10px] uppercase tracking-wide text-text-muted">
+          <p className="mb-2 text-fixed-10 uppercase tracking-wide text-text-muted">
             Equity Curve
           </p>
           <Sparkline

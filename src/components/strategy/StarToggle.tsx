@@ -154,7 +154,7 @@ export function StarToggle({
         <span
           role="status"
           aria-live="polite"
-          className="pointer-events-none absolute left-full top-1/2 ml-1.5 -translate-y-1/2 whitespace-nowrap rounded border border-border bg-card px-1.5 py-0.5 text-[10px] text-text-muted shadow-sm"
+          className="pointer-events-none absolute left-full top-1/2 ml-1.5 -translate-y-1/2 whitespace-nowrap rounded border border-border bg-card px-1.5 py-0.5 text-fixed-10 text-text-muted shadow-sm"
         >
           {FAILURE_MESSAGES[failureReason]}
         </span>
