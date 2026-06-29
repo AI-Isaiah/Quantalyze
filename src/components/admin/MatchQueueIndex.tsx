@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -241,28 +242,34 @@ export function MatchQueueIndex() {
       )}
       {!loading && !error && filtered.length > 0 && (
         <Card className="p-0">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-border text-left">
-                <th className="px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-                  Allocator
-                </th>
-                <th className="px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-                  Mandate
-                </th>
-                <th className="px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted font-mono-tabular text-right">
-                  Candidates
-                </th>
-                <th className="px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted text-right">
-                  Last intro
-                </th>
-                <th className="px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted text-right">
-                  Recomputed
-                </th>
-                <th className="px-4 py-3" />
-              </tr>
-            </thead>
-            <tbody>
+          {/* ResponsiveTable is the @container containment host (parent); the
+              @max-* priority-collapse lives on the CHILD th/td cells, never
+              this host (#551 parent/child rule). At a narrow container the two
+              lowest-priority columns (Last intro, Recomputed) collapse from the
+              right and their real values relocate into the Allocator cell. */}
+          <ResponsiveTable label="Match queue allocators" className="@container">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-border text-left">
+                  <th className="px-4 py-3 text-micro font-semibold uppercase tracking-wider text-text-muted">
+                    Allocator
+                  </th>
+                  <th className="px-4 py-3 text-micro font-semibold uppercase tracking-wider text-text-muted">
+                    Mandate
+                  </th>
+                  <th className="px-4 py-3 text-micro font-semibold uppercase tracking-wider text-text-muted tabular-nums text-right">
+                    Candidates
+                  </th>
+                  <th className="px-4 py-3 text-micro font-semibold uppercase tracking-wider text-text-muted text-right @max-2xl:hidden">
+                    Last intro
+                  </th>
+                  <th className="px-4 py-3 text-micro font-semibold uppercase tracking-wider text-text-muted text-right @max-2xl:hidden">
+                    Recomputed
+                  </th>
+                  <th className="px-4 py-3" />
+                </tr>
+              </thead>
+              <tbody>
               {filtered.map((row) => (
                 <tr
                   key={row.id}
@@ -277,22 +284,39 @@ export function MatchQueueIndex() {
                         />
                       )}
                       <div>
-                        <p className="text-sm font-medium text-text-primary">
+                        <p className="text-small font-medium text-text-primary">
                           {row.display_name || row.email || "(unknown)"}
                         </p>
                         {row.company && (
-                          <p className="text-xs text-text-secondary">{row.company}</p>
+                          <p className="text-caption text-text-secondary">{row.company}</p>
                         )}
+                        {/* Narrow-container relocation of the collapsed Last
+                            intro + Recomputed columns — the REAL values. */}
+                        <p className="mt-0.5 font-mono tabular-nums text-micro text-text-muted @2xl:hidden">
+                          intro{" "}
+                          {row.days_since_last_intro === null
+                            ? "never"
+                            : `${row.days_since_last_intro}d ago`}
+                          {" · recomputed "}
+                          {row.hours_since_recompute === null
+                            ? "never"
+                            : row.is_stale
+                              ? `${Math.floor(row.hours_since_recompute / 24)}d ago`
+                              : `${row.hours_since_recompute}h ago`}
+                        </p>
                       </div>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-sm text-text-secondary max-w-[260px] truncate">
+                  <td
+                    className="px-4 py-3 text-small text-text-secondary max-w-[260px] truncate"
+                    title={row.mandate_archetype ?? undefined}
+                  >
                     {row.mandate_archetype || <span className="text-text-muted">—</span>}
                   </td>
-                  <td className="px-4 py-3 text-sm text-right font-mono tabular-nums text-text-primary">
+                  <td className="px-4 py-3 text-small text-right font-mono tabular-nums text-text-primary">
                     {row.latest_batch?.candidate_count ?? "—"}
                   </td>
-                  <td className="px-4 py-3 text-sm text-right">
+                  <td className="px-4 py-3 text-small text-right @max-2xl:hidden">
                     {row.days_since_last_intro === null ? (
                       <span className="text-text-muted">never</span>
                     ) : row.days_since_last_intro > 14 ? (
@@ -305,7 +329,7 @@ export function MatchQueueIndex() {
                       </span>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-sm text-right">
+                  <td className="px-4 py-3 text-small text-right @max-2xl:hidden">
                     {row.hours_since_recompute === null ? (
                       <span className="text-text-muted">never</span>
                     ) : row.is_stale ? (
@@ -321,15 +345,16 @@ export function MatchQueueIndex() {
                   <td className="px-4 py-3 text-right">
                     <Link
                       href={`/admin/match/${row.id}`}
-                      className="text-sm font-medium text-accent hover:text-accent-hover"
+                      className="text-small font-medium text-accent hover:text-accent-hover"
                     >
                       Open →
                     </Link>
                   </td>
                 </tr>
               ))}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </ResponsiveTable>
         </Card>
       )}
     </div>
