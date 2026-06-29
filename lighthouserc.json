@@ -27,12 +27,13 @@
         }
       }
     },
+    "_ratchet": "Ratcheted 2026-06-30 (plan 54-04 / VERIFY-03) from 0.60 -> 0.65. Data-driven 'under-actual' floor = lowest measured median - 0.02. The lowest measured route is /demo at 0.67 (the documented 2026-06-28 single-run baseline above); 0.67 - 0.02 = 0.65. NOTE: that 0.67 was a single run, not the CI 3-run median this gate uses. The lhci report now uploads UNCONDITIONALLY (ci.yml lighthouse-mobile, if: always()), so the next CI run's .lighthouseci/manifest.json reports the true per-route 3-run-median floor. CI-CONFIRM (deferred-to-CI): if any of the 5 public routes measures below 0.65 on that run, lower minScore to (that route's median - 0.02) and update this comment with the measured value + date.",
     "assert": {
       "assertions": {
         "categories:performance": [
           "error",
           {
-            "minScore": 0.6
+            "minScore": 0.65
           }
         ]
       }
