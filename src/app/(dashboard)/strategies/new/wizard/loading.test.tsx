@@ -33,11 +33,13 @@ describe("wizard loading.tsx — STATE-05 fallback contract", () => {
     expect(container.querySelector(".animate-pulse")).toBeTruthy();
   });
 
-  it("renders the stepper-rail anchor structure (>= 4 cells)", () => {
+  it("renders the stepper-rail anchor with one cell per DEFAULT_STEPS step (5)", () => {
     const { container } = render(<WizardLoading />);
     const rail = container.querySelector('[data-testid="wizard-skeleton-rail"]');
     expect(rail).toBeTruthy();
-    // 4-step stepper rail → at least 4 placeholder cells.
-    expect(rail!.children.length).toBeGreaterThanOrEqual(4);
+    // IN-05: the skeleton must mirror the now-5-step DEFAULT_STEPS exactly, so
+    // the rail does not shift by a column when WizardClient mounts. Pin the
+    // count to 5 (not >= 4) so a future step-count change re-fails this test.
+    expect(rail!.children.length).toBe(5);
   });
 });
