@@ -76,4 +76,12 @@ describe("wizard error.tsx — STATE-05 / T-53-01 boundary contract", () => {
     const link = screen.getByTestId("next-link");
     expect(link.getAttribute("href")).toBe("/strategies");
   });
+
+  it("logs to console.error with the [wizard-error] tag on mount", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const err = Object.assign(new Error("server-prep boom"), { digest: "d-4" });
+    render(<WizardError error={err} unstable_retry={vi.fn()} />);
+    expect(spy).toHaveBeenCalledWith("[wizard-error]", err);
+    spy.mockRestore();
+  });
 });

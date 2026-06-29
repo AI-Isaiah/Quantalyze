@@ -120,6 +120,7 @@ function validBody(overrides: Record<string, unknown> = {}): Record<string, unkn
 
 import { POST } from "@/app/api/strategies/csv-finalize/route";
 import { parseDailyReturnsSeries } from "@/app/api/strategies/csv-finalize/route";
+import { parseCsvMetadata } from "@/app/api/strategies/csv-finalize/route";
 
 // ══════════════════════════════════════════════════════════════════════════
 
@@ -380,6 +381,43 @@ describe("WR-04 (Phase 53): explicit null category_id → 400 (defense-in-depth 
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+
+describe("WR-04 (Phase 53): parseCsvMetadata shared validator (both guard paths)", () => {
+  // The handler tests above prove the PRE-create call site rejects null. This
+  // pins the SHARED validator directly so the contract holds regardless of which
+  // call site invokes it — incl. the post-create `applyCsvMetadataUpdate` path
+  // that the pre-create guard normally shadows. If a refactor ever drops the
+  // pre-create guard, this still fails loudly on a null category_id.
+  it("rejects an explicit category_id: null (ok:false, field metadata.category_id)", () => {
+    const result = parseCsvMetadata({ category_id: null });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected rejection");
+    expect(result.field).toBe("metadata.category_id");
+  });
+
+  it("accepts a valid UUID category_id and carries it into the payload", () => {
+    const uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+    const result = parseCsvMetadata({ category_id: uuid });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected acceptance");
+    expect(result.payload?.category_id).toBe(uuid);
+  });
+
+  it("leaves the legitimate metadata-less path (absent key / null raw) untouched", () => {
+    // Absent category_id key → ok, no category_id in payload.
+    const absent = parseCsvMetadata({ description: "x" });
+    expect(absent.ok).toBe(true);
+    if (!absent.ok) throw new Error("expected acceptance");
+    expect(absent.payload?.category_id).toBeUndefined();
+    // Entirely absent metadata object → ok, null payload.
+    const none = parseCsvMetadata(null);
+    expect(none.ok).toBe(true);
+    if (!none.ok) throw new Error("expected acceptance");
+    expect(none.payload).toBeNull();
   });
 });
 

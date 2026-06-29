@@ -31,10 +31,10 @@ export default function WizardError({
     <div className="flex min-h-[60vh] items-center justify-center px-4">
       <div className="max-w-md text-center">
         <p className="font-metric text-5xl text-accent">Error</p>
-        <h1 className="mt-4 font-display text-h3 text-text-primary">
+        <h1 className="mt-4 font-display text-h2 text-text-primary">
           Something went wrong
         </h1>
-        <p className="mt-2 text-body text-text-muted">
+        <p className="mt-2 text-small text-text-muted">
           This section encountered an error. You can retry or navigate to
           another page.
         </p>

@@ -271,7 +271,11 @@ type ParseCsvMetadataResult =
   | { ok: true; payload: CsvMetadataPayload | null }
   | { ok: false; field: string; message: string };
 
-function parseCsvMetadata(raw: unknown): ParseCsvMetadataResult {
+// Exported for direct unit testing: this is the SINGLE shared validator both
+// the pre-create (line ~928) and post-create (`applyCsvMetadataUpdate`, line
+// ~1135) guards depend on. Unit-testing it pins the WR-04 contract independent
+// of which call site fires.
+export function parseCsvMetadata(raw: unknown): ParseCsvMetadataResult {
   if (raw == null || typeof raw !== "object") {
     return { ok: true, payload: null };
   }

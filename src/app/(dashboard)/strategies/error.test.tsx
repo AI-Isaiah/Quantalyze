@@ -69,4 +69,12 @@ describe("strategies error.tsx — STATE-05 / T-53-01 boundary contract", () => 
 
     expect(container.textContent).not.toContain(secret);
   });
+
+  it("logs to console.error with the [strategies-error] tag on mount", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const err = Object.assign(new Error("list fetch boom"), { digest: "d-4" });
+    render(<StrategiesError error={err} unstable_retry={vi.fn()} />);
+    expect(spy).toHaveBeenCalledWith("[strategies-error]", err);
+    spy.mockRestore();
+  });
 });

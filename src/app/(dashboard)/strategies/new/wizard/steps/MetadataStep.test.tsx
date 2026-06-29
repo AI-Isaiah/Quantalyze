@@ -238,6 +238,32 @@ describe("[H-0191] MetadataStep", () => {
     expect(description.getAttribute("aria-invalid")).not.toBe("true");
   });
 
+  it("[APPLY-02] submitting with an empty description reveals the error and focuses the field (AT path)", async () => {
+    // The Submit button is disabled until valid, so this exercises the
+    // submitAttempted branch directly via the form submit — the AT/keyboard
+    // path where the handler is reached with an empty description. It must
+    // reveal the inline error AND move focus to the offending field, AND NOT
+    // call onComplete (the invalid submit is blocked).
+    const onComplete = vi.fn();
+    render(<MetadataStep {...baseProps} onComplete={onComplete} />);
+    const description = (await screen.findByLabelText(
+      "Description",
+    )) as HTMLTextAreaElement;
+    const form = description.closest("form");
+    expect(form).not.toBeNull();
+
+    // No error before any submit attempt (description not blurred yet).
+    expect(description.getAttribute("aria-invalid")).not.toBe("true");
+
+    fireEvent.submit(form!);
+
+    await waitFor(() =>
+      expect(description.getAttribute("aria-invalid")).toBe("true"),
+    );
+    expect(document.activeElement).toBe(description);
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it("emits the captured fields (incl. auto-selected categoryId) via onComplete", async () => {
     const onComplete = vi.fn();
     render(<MetadataStep {...baseProps} onComplete={onComplete} />);

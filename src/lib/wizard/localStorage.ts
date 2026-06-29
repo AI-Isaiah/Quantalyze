@@ -56,29 +56,41 @@ const HMAC_HEX_LEN = 16;
 /** Envelope schema version. v2 = HMAC-signed. v1 was plaintext (rejected). */
 const ENVELOPE_VERSION = 2;
 
-export type WizardStepKey =
-  | "connect_key"
-  | "sync_preview"
-  | "metadata"
+/**
+ * Canonical ordered list of wizard step keys — the SINGLE source of truth.
+ * Both `WizardStepKey` (the type) and the `loadWizardState` validation guard
+ * derive from this one array, so they cannot drift: adding a step here both
+ * types it at every call site AND makes a resumed pointer at that step pass
+ * validation. (Previously a separate hand-listed `validSteps` array inside
+ * `loadWizardState` could silently fall short of the union — a new step would
+ * compile yet get its persisted pointer discarded at resume time.)
+ */
+export const WIZARD_STEP_KEYS = [
+  "connect_key",
+  "sync_preview",
+  "metadata",
   // Phase 53 / APPLY-02: read-only Review & confirm recap inserted
   // immediately before the existing Submit step on the API branch. The
   // only WizardStepKey change permitted (UI-SPEC §Wizard UX Upgrade 3).
   // Additive enum extension only — no autosave-semantics change; an
-  // unknown stored step still safe-degrades via the validSteps guard.
-  | "review"
-  | "submit"
-  | "csv_upload"
-  | "csv_preview"
+  // unknown stored step still safe-degrades via the load-time guard.
+  "review",
+  "submit",
+  "csv_upload",
+  "csv_preview",
   // QA report 2026-05-21 ISSUE-010: the CSV branch wrote
   // category_id=null + empty strategy_types/markets/aum/etc, leaving the
   // strategy invisible to discovery and bare in lists. csv_metadata is
   // the new step between preview and submit that collects classification
   // metadata from the user (mirrors the API branch's MetadataStep).
-  | "csv_metadata"
+  "csv_metadata",
   // Phase 53 / APPLY-02: CSV-branch counterpart of `review`, inserted
   // before csv_submit. Same additive, safe-degrading contract.
-  | "csv_review"
-  | "csv_submit";
+  "csv_review",
+  "csv_submit",
+] as const;
+
+export type WizardStepKey = (typeof WIZARD_STEP_KEYS)[number];
 
 export interface WizardLocalState {
   /**
@@ -308,22 +320,10 @@ export async function loadWizardState(): Promise<WizardLocalState | null> {
       return null;
     }
     const obj = parsed as Record<string, unknown>;
-    const validSteps: readonly WizardStepKey[] = [
-      "connect_key",
-      "sync_preview",
-      "metadata",
-      // Phase 53 / APPLY-02 — review steps accepted by validation so a
-      // resumed pointer at the recap step round-trips; an unknown step
-      // still safe-degrades to the SSR default via this includes-guard.
-      "review",
-      "submit",
-      "csv_upload",
-      "csv_preview",
-      "csv_metadata",
-      "csv_review",
-      "csv_submit",
-    ];
-    if (!validSteps.includes(obj.step as WizardStepKey)) {
+    // Validate against the canonical key list (single source of truth shared
+    // with the `WizardStepKey` type). A resumed pointer at any known step
+    // round-trips; an unknown/corrupt step safe-degrades to the SSR default.
+    if (!WIZARD_STEP_KEYS.includes(obj.step as WizardStepKey)) {
       return null;
     }
     // Phase 15: optional `source` discriminator. Absent ⇒ 'api'

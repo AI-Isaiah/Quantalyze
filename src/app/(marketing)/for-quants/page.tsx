@@ -88,7 +88,7 @@ export default function ForQuantsPage() {
               For Crypto Quant Teams
             </span>
 
-            <h1 className="mt-6 font-display text-page-title leading-tight tracking-tight text-text-primary">
+            <h1 className="mt-6 font-display text-hero leading-tight tracking-tight text-text-primary">
               List a verified track record without exposing trading permissions.
             </h1>
 
