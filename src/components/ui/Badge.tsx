@@ -50,7 +50,7 @@ export function Badge({ label, type = "strategy", className = "" }: BadgeProps) 
 
   return (
     <span
-      className={cn("inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium", styles, className)}
+      className={cn("inline-flex items-center rounded-md px-2 py-0.5 text-caption font-medium", styles, className)}
     >
       {displayLabel}
     </span>
