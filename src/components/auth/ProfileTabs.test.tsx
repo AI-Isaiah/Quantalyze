@@ -64,16 +64,23 @@ const PROFILE_FIXTURE: Profile = {
 } as unknown as Profile;
 
 describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
+  // 50-RESEARCH Pitfall 2 — the consolidated ProfileTabs renders triggers via
+  // the Radix-backed Tabs primitive, whose Trigger is role="tab" (the
+  // hand-rolled version used bare <button>, implicit role=button). These tab
+  // queries are mechanically ported getByRole("button") -> getByRole("tab"); the
+  // behavioral contract (allocator-only Security tab visibility, tab order, URL
+  // gating) is unchanged. Note: the in-panel "Download audit log CSV" control in
+  // Test 3 is a real <button> and correctly stays role="button".
   it("Test 1 — allocator sees the Security tab", () => {
     render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
     expect(
-      screen.getByRole("button", { name: "Security" }),
+      screen.getByRole("tab", { name: "Security" }),
     ).toBeInTheDocument();
   });
 
   it("Test 2 — non-allocator does NOT see the Security tab", () => {
     render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={false} />);
-    expect(screen.queryByRole("button", { name: "Security" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Security" })).toBeNull();
   });
 
   it("Test 3 — when ?tab=security and user is allocator, AuditLogSubsection renders", () => {
@@ -101,7 +108,7 @@ describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
 
   it("Test 5 — Security tab appears AFTER Exchanges and BEFORE Organizations in tab order", () => {
     render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
-    const buttons = screen.getAllByRole("button").map((b) => b.textContent);
+    const buttons = screen.getAllByRole("tab").map((b) => b.textContent);
     const exchangesIdx = buttons.indexOf("Exchanges");
     const securityIdx = buttons.indexOf("Security");
     const organizationsIdx = buttons.indexOf("Organizations");
@@ -125,7 +132,7 @@ describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
       screen.queryByLabelText("Typical ticket size (USD)"),
     ).toBeNull();
     // The Mandate tab button itself must not even render for non-allocators.
-    expect(screen.queryByRole("button", { name: "Mandate" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Mandate" })).toBeNull();
   });
 
   it("M-0393 — allocator with ?tab=mandate DOES render MandateForm", () => {

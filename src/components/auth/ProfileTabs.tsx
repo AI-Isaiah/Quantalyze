@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { cn } from "@/lib/utils";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { ProfileForm } from "./ProfileForm";
 import { DeleteAccountButton } from "./DeleteAccountButton";
 import { OrganizationTab } from "@/components/org/OrganizationTab";
@@ -83,23 +83,28 @@ export function ProfileTabs({
   const tabs = ALL_TABS.filter((t) => !("allocatorOnly" in t && t.allocatorOnly) || isAllocator);
 
   return (
-    <div>
-      <div className="flex gap-1 border-b border-border mb-6">
+    <Tabs
+      value={activeTab}
+      onValueChange={(v) => setActiveTab(v as TabKey)}
+    >
+      <TabsList variant="underline" className="mb-6">
         {tabs.map((tab) => (
-          <button
+          <TabsTrigger
             key={tab.key}
-            onClick={() => setActiveTab(tab.key)}
-            className={cn(
-              "px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px",
-              activeTab === tab.key
-                ? "border-accent text-text-primary"
-                : "border-transparent text-text-muted hover:text-text-secondary",
-            )}
+            value={tab.key}
+            variant="underline"
+            // ProfileTabs' exact active treatment differs from the underline
+            // default: active text is text-text-primary (not text-accent),
+            // inactive hover is text-text-secondary (not text-text-primary), and
+            // the strip uses py-2.5. Override those three via the className hook
+            // (data-[state=active] wins over the base via cascade order) to keep
+            // the 1:1 port byte-faithful (50-UI-SPEC consumer mapping).
+            className="py-2.5 hover:text-text-secondary data-[state=active]:text-text-primary"
           >
             {tab.label}
-          </button>
+          </TabsTrigger>
         ))}
-      </div>
+      </TabsList>
 
       {activeTab === "personal" && <ProfileForm profile={profile} />}
       {activeTab === "mandate" && isAllocator && (
@@ -125,6 +130,6 @@ export function ProfileTabs({
           <DeleteAccountButton />
         </div>
       )}
-    </div>
+    </Tabs>
   );
 }
