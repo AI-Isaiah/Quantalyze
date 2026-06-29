@@ -37,10 +37,16 @@ which is strictly stronger than a bypassable lint rule — so they get NO rule:
 | `no-raw-published-predicate` | B10 | `.eq("status","published")` | `withPublishedOnly` (`@/lib/visibility`) | files with `B10 sanctioned-exception:` / `B10 visibility:`; test files |
 | `no-raw-retry-after-parse` | B20 | `Number()/parseInt()` of a Retry-After header | `parseRetryAfterSeconds` (`@/lib/retry`) | `src/lib/retry/**`; files with `B20 sanctioned-exception:`; test files |
 | `no-passthrough-on-ipc` | B9 | Zod `.passthrough()` / `.catchall()` / `.loose()` / `z.looseObject()` (all four Zod-v4 "keep unknown keys" forms) on a boundary parser (NEW-C40-01 leak class) | `.strict()` (fail loud) or default `.strip()` | per-site inline `// eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception:` (~22 forward-compat read-only envelopes: HTTP responses + widget render contracts); test files. **Enforced repo-wide, not file-scoped** — a file allowlist could go stale when a new boundary module is added. Matched by method NAME (not Zod-type resolution): a future unrelated non-Zod `.passthrough()`/`.loose()` would also flag and the same inline escape is the sanctioned mechanism. |
+| `no-rem-less-clamp` | DS-04 (v1.4 ph49) | a CSS `clamp()` whose preferred (middle) term is viewport-only (no `rem`/`em`) — the WCAG 1.4.4 / W3C F94 zoom-unsafe shape, e.g. `clamp(2rem, 3vw, 4rem)` | a `rem`-anchored middle term, e.g. `clamp(1rem, 0.95rem + 0.25vw, 1.125rem)` | numeric `Math.clamp(...)` (no viewport unit) is invisible to it; `src/components/charts/**`; test/fixture files; files with `DS-04 sanctioned-exception:`. **Enforced repo-wide at `"error"`** (the baseline has zero rem-less clamp strings). |
+| `no-raw-font-px` | DS-04 (v1.4 ph49) | a raw px font-size — `text-[NNpx]` arbitrary class or `fontSize: "NNpx"` inline style (decimal + uppercase variants too) | a fluid `--text-*` token / `text-*` utility | `src/components/charts/**`; test files; files with `DS-04 sanctioned-exception:`. **SCOPED, not repo-wide:** `"error"` only on the clean `src/lib/design-tokens/**` surface, `"warn"` on the 558-site dirty baseline — a strangler that ratchets to error per-surface in phases 52/53 (a repo-wide error would red-CI the existing app). |
 
-Rules are `"error"` (not `"warn"`): the recon proved a clean baseline, so they fail
+Most rules are `"error"` repo-wide (not `"warn"`): the recon proved a clean baseline, so they fail
 CI by construction on a future raw offender — the literal goal of the capstone.
 The escape hatch is a greppable, batch-tagged `B<n> sanctioned-exception:` comment.
+The one deliberate exception is `no-raw-font-px` (DS-04), which is `"error"` only on the
+clean `src/lib/design-tokens/**` surface and `"warn"` on the dirty `text-[NNpx]` baseline
+pending the per-surface strangler in phases 52/53 — `contracts-registry.test.ts` asserts both
+its scoped error and its intentional warn so neither can silently flip.
 
 ## Registered invariant guards
 

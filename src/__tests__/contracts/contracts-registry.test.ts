@@ -29,20 +29,39 @@ import quantalyzePlugin from "../../../tools/eslint-plugin-quantalyze/index.mjs"
 
 const ROOT = process.cwd();
 
-const EXPECTED_RULES = [
+// Rules wired repo-wide at "error" in the broad src/** block, so the "resolves
+// every rule to error" probe below (which targets src/lib/visibility.ts)
+// covers them with no rule→file split needed.
+const REPO_WIDE_ERROR_RULES = [
   "no-raw-localstorage",
   "no-raw-published-predicate",
   "no-raw-retry-after-parse",
-  // B9 — bans Zod .passthrough()/.catchall() at boundary parsers. Wired
-  // repo-wide at "error" in the broad src/** block, so the "resolves every
-  // rule to error" probe below (which targets src/lib/visibility.ts) covers
-  // it with no rule→file split needed.
+  // B9 — bans Zod .passthrough()/.catchall() at boundary parsers.
   "no-passthrough-on-ipc",
   // B14 — bans raw `last_sync_at`-vs-cutoff staleness comparisons outside the
-  // deriveSyncFreshness SoT. Wired at "error" in the broad src/** block; its
-  // own module (src/lib/sync-freshness/**) and test files are the only
-  // exemptions, so the "resolves to error for visibility.ts" probe covers it.
+  // deriveSyncFreshness SoT. Its own module (src/lib/sync-freshness/**) and
+  // test files are the only exemptions.
   "no-raw-staleness-derivation",
+  // DS-04 (phase 49) — bans a `clamp()` whose preferred (middle) term is
+  // viewport-only (no rem), the WCAG 1.4.4 / F94 zoom-unsafe shape. Wired
+  // repo-wide at "error" (the dirty baseline has zero rem-less clamp strings).
+  "no-rem-less-clamp",
+] as const;
+
+// DS-04 (phase 49) — `no-raw-font-px` is SCOPED, not repo-wide: it errors only
+// on the clean `src/lib/design-tokens/**` surface and warns on the 558-site
+// dirty `text-[NNpx]` baseline (a strangler that ratchets to error per-surface
+// in phases 52/53 — a repo-wide error would red-CI the existing app, which the
+// "not big-bang" decision forbids). Its teeth are therefore asserted on a
+// token-surface file, and its NON-error level on a dirty file is asserted too,
+// so neither the scoped error nor the intentional warn can silently flip.
+const SCOPED_ERROR_RULES: Record<string, string> = {
+  "no-raw-font-px": "src/lib/design-tokens/typography.ts",
+};
+
+const EXPECTED_RULES = [
+  ...REPO_WIDE_ERROR_RULES,
+  ...Object.keys(SCOPED_ERROR_RULES),
 ] as const;
 
 interface Guard {
@@ -121,14 +140,37 @@ describe("[B25] eslint-plugin-quantalyze wiring integrity", () => {
     // level for a real, non-exempt src file (also robust to quote reformatting).
     const { ESLint } = await import("eslint");
     const eslint = new ESLint({ cwd: ROOT });
-    const cfg = await eslint.calculateConfigForFile("src/lib/visibility.ts");
-    for (const rule of EXPECTED_RULES) {
+    const resolve = async (file: string, rule: string) => {
+      const cfg = await eslint.calculateConfigForFile(file);
       const entry = (cfg.rules ?? {})[`quantalyze/${rule}`];
-      const severity = Array.isArray(entry) ? entry[0] : entry;
+      return { entry, severity: Array.isArray(entry) ? entry[0] : entry };
+    };
+    // Repo-wide rules must resolve to "error" for a representative non-exempt src file.
+    for (const rule of REPO_WIDE_ERROR_RULES) {
+      const { entry, severity } = await resolve("src/lib/visibility.ts", rule);
       expect(
         severity === 2 || severity === "error",
         `quantalyze/${rule} must RESOLVE to "error" for src files (got ${JSON.stringify(entry)}). ` +
           `A missing wiring or an over-broad "off" override silently neuters the by-construction CI teeth.`,
+      ).toBe(true);
+    }
+    // Scoped rules must resolve to "error" on their declared clean surface (teeth
+    // exist where intended) AND must NOT be "error" on the dirty baseline (the
+    // intentional warn-tier strangler — a flip to repo-wide error would red-CI
+    // the existing app, which the "not big-bang" DS-04 decision forbids).
+    for (const [rule, surfaceFile] of Object.entries(SCOPED_ERROR_RULES)) {
+      const onSurface = await resolve(surfaceFile, rule);
+      expect(
+        onSurface.severity === 2 || onSurface.severity === "error",
+        `quantalyze/${rule} must RESOLVE to "error" on its clean surface ${surfaceFile} ` +
+          `(got ${JSON.stringify(onSurface.entry)}) — its scoped teeth were neutered.`,
+      ).toBe(true);
+      const onDirty = await resolve("src/lib/visibility.ts", rule);
+      expect(
+        !(onDirty.severity === 2 || onDirty.severity === "error"),
+        `quantalyze/${rule} must NOT resolve to "error" on the dirty baseline ` +
+          `(src/lib/visibility.ts, got ${JSON.stringify(onDirty.entry)}) — a repo-wide error would ` +
+          `red-CI the 558-site baseline, violating the scoped "not big-bang" DS-04 decision.`,
       ).toBe(true);
     }
   });
