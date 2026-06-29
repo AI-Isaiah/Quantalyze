@@ -260,9 +260,10 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
   },
   {
     route: "/scenarios",
-    class: "private",
+    class: "exception",
+    redirectFrom: "/scenarios",
     notes:
-      "Redirect-stub (the page redirect()s to /allocations?tab=scenario). Session-gated; not a redirectFrom yet (51-05 may convert it).",
+      "EXCEPTION: MOVED route (Phase 51 NAV-01). The in-page redirect stub is RETIRED — `/scenarios` is now a config-level 308 redirect to /allocations?tab=scenario in next.config.ts `redirects()` (runs before the filesystem, so there is NO backing page.tsx). `redirectFrom: \"/scenarios\"` makes the guard's Rule 3 require that redirects() source — the #512 lockstep. Classified `exception` (not private) precisely because it has no page file: a redirected-away route lives only in next.config, so the Rule-4 STALE page-existence check must skip it (the same carve-out as a route.ts handler). The destination /allocations stays `private`; no PUBLIC_ROUTES delta — the move does not widen the public surface.",
   },
   {
     route: "/strategies",
