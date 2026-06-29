@@ -16,7 +16,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
         {label && (
           <label
             htmlFor={selectId}
-            className="text-sm font-medium text-text-primary"
+            className="text-small font-medium text-text-primary"
           >
             {label}
           </label>
@@ -24,7 +24,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
         <select
           ref={ref}
           id={selectId}
-          className={cn("min-h-[44px] rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-text-primary transition-colors focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20", error && "border-negative", className)}
+          className={cn("min-h-[44px] rounded-lg border border-border bg-surface px-3 py-2.5 text-body text-text-primary transition-colors focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20", error && "border-negative", className)}
           {...props}
         >
           {options.map((opt) => (
@@ -33,7 +33,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
             </option>
           ))}
         </select>
-        {error && <p className="text-xs text-negative">{error}</p>}
+        {error && <p className="text-caption text-negative">{error}</p>}
       </div>
     );
   }
