@@ -122,7 +122,11 @@ export function CompareTable({ items }: { items: CompareItem[] }) {
                         <td key={item.strategy.id} className="text-right px-4 @3xl:px-8 py-2.5">
                           <div className="flex items-center justify-end gap-2">
                             {qual && (
-                              <span className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", LABEL_COLORS[qual.color])}>
+                              // DS-04 / 52-UI-SPEC badge exception: the qual chip
+                              // uses the --text-micro tier (10→11px), permitted
+                              // ONLY for badge text. Migrated off the prior raw
+                              // font-px literal onto the named tier.
+                              <span className={cn("rounded px-1.5 py-0.5 text-micro font-medium", LABEL_COLORS[qual.color])}>
                                 {qual.label}
                               </span>
                             )}

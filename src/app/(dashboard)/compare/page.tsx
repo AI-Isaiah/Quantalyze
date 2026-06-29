@@ -35,12 +35,17 @@ export default async function ComparePage({
   if (ids.length === 0) {
     return (
       <>
+        {/* 52-UI-SPEC copy contract: the empty-selection state names what is
+            missing + what to do (honest absence, neutral muted card — never a
+            fabricated zero/count-up; STATE-02). The "Compare Strategies"
+            PageHeader title is preserved verbatim — it is the 52-01 e2e
+            reflow-sweep anchor (h1:has-text("Compare Strategies")). */}
         <PageHeader
           title="Compare Strategies"
           breadcrumb={COMPARE_BREADCRUMB}
         />
         <p className="text-sm text-text-muted text-center py-16">
-          Select strategies from the discovery page to compare. Add up to 4 strategies using the compare checkboxes.
+          Pick two or more strategies from discovery to see them side by side. Add up to 4 strategies using the compare checkboxes.
         </p>
       </>
     );
