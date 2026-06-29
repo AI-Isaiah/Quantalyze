@@ -39,7 +39,11 @@ export default async function DiscoveryPage({
   const initialWatchedSet = watchedSet ?? new Set<string>();
 
   return (
-    <>
+    // Data surface fluid-fill: fill toward ~1920px then center (Phase 52
+    // APPLY-01 / TYPE-03). (dashboard)/layout.tsx does NOT cap width, so the
+    // cap goes here at the page shell. The accredited-investor attestation
+    // gate stays in discovery/layout.tsx (force-dynamic) — untouched.
+    <div className="mx-auto max-w-[1920px]">
       <Breadcrumb
         items={[
           { label: "Discovery", href: "/discovery/crypto-sma" },
@@ -75,6 +79,6 @@ export default async function DiscoveryPage({
         userId={user.id}
         initialWatchedSet={initialWatchedSet}
       />
-    </>
+    </div>
   );
 }
