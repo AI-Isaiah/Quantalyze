@@ -450,8 +450,18 @@ export function KpiStrip({
     scenarioMetrics != null;
 
   return (
+    // Phase 52-02 / TYPE-04 — the strip is its OWN container-query context
+    // (`@container`, inline-size) so it reflows on ITS width, not the viewport.
+    // The prime case: a KpiStrip dropped into the ~380px metrics rail must NOT
+    // think it is at desktop width. Column count steps up by CONTAINER width via
+    // `@`-prefixed variants (the StrategyTable @container idiom), replacing the
+    // old `sm:`/`lg:` viewport breakpoints. Inline-size containment ONLY — the
+    // size-containment variant would collapse the strip's block size to 0
+    // (Pitfall 1), so the bare `@container` host is deliberate. Every numeric
+    // value cell below keeps `font-mono … tabular-nums` so the fluid --text-*
+    // tier never raggeds a KPI column (Pitfall 2 / 52-01 tabular-nums contract).
     <div
-      className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5"
+      className="@container grid grid-cols-1 gap-3 @sm:grid-cols-2 @lg:grid-cols-5"
       role="group"
       aria-label="Portfolio KPIs"
     >

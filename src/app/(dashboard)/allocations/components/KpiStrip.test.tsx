@@ -327,4 +327,80 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
     // exemption directly).
     expect(warmupNodes.length).toBe(4);
   });
+
+  // ---------------------------------------------------------------------------
+  // Phase 52-02 / TYPE-04 — @container migration. The strip must respond to ITS
+  // OWN width (the ~380px metrics rail) via CSS `@container`, not the viewport,
+  // and EVERY numeric value cell must keep `font-mono tabular-nums` so the
+  // fluid --text-* tier (Phase 49) never raggeds a KPI column. Mirrors the
+  // StrategyTable @container precedent the 52-01 tabular-nums contract anchors on.
+  // ---------------------------------------------------------------------------
+  describe("Phase 52-02 — @container migration (TYPE-04)", () => {
+    it("the strip's grid region carries @container and uses @-prefixed column variants (not sm:/lg: viewport variants)", () => {
+      render(
+        <KpiStrip
+          analytics={{ ytd_twr: 0.12 }}
+          metrics={EMPTY_METRICS}
+          timeframe="ALL"
+          aum={1_000_000}
+          snapshotCount={30}
+        />,
+      );
+      const group = screen.getByRole("group", { name: "Portfolio KPIs" });
+      // Container-query host: the strip reflows on its own inline-size, so a
+      // strip dropped into the narrow 380px metrics rail stops thinking it is
+      // at desktop width.
+      expect(group.className).toContain("@container");
+      // The column count must vary by CONTAINER width (`@`-prefixed variants),
+      // never by viewport (`sm:`/`lg:`) — that is the whole point of TYPE-04.
+      expect(group.className).toMatch(/@\S*grid-cols-/);
+      // Forbid a VIEWPORT `sm:`/`lg:` grid variant — but NOT the container
+      // `@sm:`/`@lg:` ones (the `@`-prefixed forms are exactly what we want). A
+      // bare viewport variant is one NOT immediately preceded by `@`.
+      expect(group.className).not.toMatch(/(?<!@)\bsm:grid-cols-/);
+      expect(group.className).not.toMatch(/(?<!@)\blg:grid-cols-/);
+      // Inline-size container only — `@container-size` (size containment) would
+      // collapse the strip's block size to 0 (Pitfall 1).
+      expect(group.className).not.toContain("@container-size");
+    });
+
+    it("every numeric value cell keeps font-mono AND tabular-nums after the migration (alignment preserved)", () => {
+      render(
+        <KpiStrip
+          analytics={{
+            ytd_twr: 0.12,
+            sharpe: 1.73,
+            max_drawdown_12m: -0.08,
+            avg_correlation: 0.42,
+          }}
+          metrics={EMPTY_METRICS}
+          timeframe="ALL"
+          aum={1_000_000}
+          snapshotCount={30}
+        />,
+      );
+      const group = screen.getByRole("group", { name: "Portfolio KPIs" });
+      // Each cell's primary value div is `font-mono … tabular-nums`. Query the
+      // value divs directly (font-mono is the value-cell marker) and assert
+      // EVERY one keeps both classes so a future refactor can't silently drop
+      // the fixed-glyph advance that keeps the 5 columns aligned.
+      const valueCells = Array.from(
+        group.querySelectorAll<HTMLDivElement>("div.font-mono"),
+      );
+      // Non-vacuity: the 5-cell strip renders 5 value divs.
+      expect(valueCells.length).toBeGreaterThanOrEqual(5);
+      for (const cell of valueCells) {
+        expect(cell.className).toContain("font-mono");
+        expect(cell.className).toContain("tabular-nums");
+      }
+      // And the real formatted KPI values are the ones carrying the classes —
+      // prove the cells we asserted on are the actual numeric values, not chrome.
+      const rendered = valueCells.map((c) => c.textContent?.trim());
+      // formatCurrency renders compact notation ($1.0M), the others are the
+      // exact formatPercent / formatNumber outputs.
+      for (const v of ["$1.0M", "+12.00%", "1.73", "-8.00%", "0.42"]) {
+        expect(rendered).toContain(v);
+      }
+    });
+  });
 });
