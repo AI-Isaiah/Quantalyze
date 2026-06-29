@@ -29,10 +29,11 @@
  * from any context (tests, the CI guard, docs gen) without pulling in
  * `server-only` or the Supabase client. (Mirrors `src/lib/auth/rbac-manifest.ts`.)
  *
- * Plan 51-02 replaces the 51-01 seed with the FULL inventory: every `page.tsx`
- * route under `src/app/**` (57 page routes, the exact set the guard's
- * `findRouteFiles` + `pageFileToUrl` produces) plus the two flow exceptions
- * (`/api/health`, `/auth/callback`) that are `route.ts` handlers, not pages.
+ * The FULL inventory: every `page.tsx` route under `src/app/**` (the exact set
+ * the guard's `findRouteFiles` + `pageFileToUrl` produces — the guard prints the
+ * live count at runtime, so this comment carries no hard number to drift) plus
+ * the flow exceptions (`/api/health`, `/auth/callback`) that are `route.ts`
+ * handlers, not pages.
  */
 
 /**
@@ -93,7 +94,7 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
     route: "/",
     class: "public",
     notes:
-      "Landing page. Public via the proxy `path === \"/\"` special-case (proxy.ts L54), not a PUBLIC_ROUTES array member. Authed users redirect('/discovery/crypto-sma') IN THE PAGE (page.tsx), not the proxy.",
+      "Landing page. Public via the proxy `path === \"/\"` special-case (the isPublicRoute matcher in proxy.ts), not a PUBLIC_ROUTES array member. Authed users redirect('/discovery/crypto-sma') IN THE PAGE (page.tsx), not the proxy.",
   },
 
   // ----- admin (auth + admin-gated) -----

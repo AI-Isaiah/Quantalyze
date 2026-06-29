@@ -19,12 +19,10 @@ import type { RouteEntry } from "../lib/routing/route-contract-manifest";
  * explicit, cross-checked contract declaration (Phase 51 NAV-03, the #512
  * class).
  *
- * RED CONTRACT (plan 51-01): these tests are written FIRST and FAIL against the
- * stubbed `runCheck` shipped in 51-01 (the four rule bodies are no-ops, so
- * `runCheck` currently returns `[]` for every fixture). Each `it()` asserts a
- * SPECIFIC violation it expects the gate to emit; against the stub it gets `[]`
- * and goes RED. Plan 51-02 implements the rule bodies to turn this suite GREEN.
- * Do NOT soften these assertions to pass the stub — the RED state is the point.
+ * Each `it()` asserts a SPECIFIC violation string the gate must emit for a
+ * crafted fixture (one rule per describe block), plus a golden no-violation
+ * pass. Do NOT soften these assertions — a guard that emits the wrong code (or
+ * none) is the regression these pins exist to catch.
  *
  * Strategy (mirrors src/__tests__/check-admin-route-manifest.test.ts): build a
  * tiny `<root>/src/app/.../page.tsx` tree plus a `<root>/src/proxy.ts` fixture
@@ -115,6 +113,39 @@ describe("runCheck — Rule 2 (#512 lockstep: manifest-public ⊆ PUBLIC_ROUTES)
     const violations = runCheck(fixtureRoot, manifest);
     expect(violations.some((v) => /MISSING-FROM-PUBLIC/.test(v))).toBe(true);
     expect(violations.some((v) => v.includes("/legal"))).toBe(true);
+  });
+});
+
+describe("runCheck — Rule 5 (inverse #512 lockstep: no private/admin route in PUBLIC_ROUTES)", () => {
+  it("emits EXTRA-PUBLIC when a manifest 'private' route is covered by a PUBLIC_ROUTES prefix", () => {
+    // /vault is a session-gated page (class "private") but someone added it to
+    // PUBLIC_ROUTES — an anon visitor would reach it. This is the INVERSE of
+    // Rule 2 and the more dangerous direction (anon EXPOSURE, not lockout): the
+    // exact silent-auth-hole the route-contract guard exists to refuse.
+    writeRoute("src/app/vault/page.tsx", PAGE_STUB);
+    writeRoute("src/proxy.ts", proxyWithPublicRoutes(["/vault"]));
+    const manifest: RouteEntry[] = [
+      { route: "/vault", class: "private", notes: "" },
+    ];
+    const violations = runCheck(fixtureRoot, manifest);
+    expect(violations.some((v) => /EXTRA-PUBLIC/.test(v))).toBe(true);
+    expect(violations.some((v) => v.includes("/vault"))).toBe(true);
+  });
+
+  it("does NOT flag a private route that only shares a prefix STRING with a public one (sibling-safe)", () => {
+    // PUBLIC_ROUTES has the public "/strategy" artifact; the private
+    // "/strategies" route shares the leading substring but is NOT covered by the
+    // prefix+"/" matcher. Rule 5 must reuse the sibling-safe matcher so it does
+    // not false-positive here (the C-0186 substring hazard, inverted).
+    writeRoute("src/app/strategy/page.tsx", PAGE_STUB);
+    writeRoute("src/app/strategies/page.tsx", PAGE_STUB);
+    writeRoute("src/proxy.ts", proxyWithPublicRoutes(["/strategy"]));
+    const manifest: RouteEntry[] = [
+      { route: "/strategy", class: "public", notes: "" },
+      { route: "/strategies", class: "private", notes: "" },
+    ];
+    const violations = runCheck(fixtureRoot, manifest);
+    expect(violations.some((v) => /EXTRA-PUBLIC/.test(v))).toBe(false);
   });
 });
 

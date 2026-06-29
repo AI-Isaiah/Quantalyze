@@ -24,6 +24,11 @@
  *      MISSING-REDIRECT — the old link would 404.
  *   4. Every manifest entry MUST map to a real page file on disk. An entry
  *      with no backing page is STALE.
+ *   5. The INVERSE of Rule 2 — no manifest entry classified `private`|`admin`
+ *      may be covered by a `PUBLIC_ROUTES` prefix. An authed route accidentally
+ *      added to PUBLIC_ROUTES silently serves a session-gated page to anonymous
+ *      visitors — EXTRA-PUBLIC, the more dangerous direction of the #512 class
+ *      (Rule 2 catches the anon-locked-out direction; Rule 5 the anon-exposed one).
  *
  * Exit codes
  * ----------
@@ -32,19 +37,8 @@
  *
  * Invocation
  * ----------
- * Plan 51-02 wires this into `npm run check:route-contract` and `npm run lint`
- * (the `frontend-lint` CI hook in `.github/workflows/ci.yml`). Plan 51-01 ships
- * the skeleton only — the script is NOT yet in `package.json` lint.
- *
- * RED CONTRACT (plan 51-01)
- * -------------------------
- * The four rules below are deliberately STUBBED — each is present and
- * reachable, but the lockstep logic is intentionally incomplete so the
- * regression suite at `src/__tests__/check-route-contract.test.ts` fails on
- * ASSERTIONS (not on a missing import or a process.exit). Plan 51-02 fills in
- * the rule bodies to turn that suite GREEN. The exported helpers
- * (`stripComments`, `findRouteFiles`, `runCheck`) and the import graph are
- * final; only the rule bodies inside `runCheck` are stubbed.
+ * Wired into `npm run check:route-contract` and `npm run lint` (the
+ * `frontend-lint` CI hook in `.github/workflows/ci.yml`), so any drift fails CI.
  *
  * The `stripComments` tokenizer is REUSED VERBATIM from
  * `scripts/check-admin-route-manifest.ts` — it is the hardened single-pass
@@ -281,12 +275,31 @@ export function parsePublicRoutes(proxySource: string): string[] {
   const stripped = stripComments(proxySource);
   const marker = stripped.match(/const\s+PUBLIC_ROUTES\s*=\s*\[/);
   if (!marker || marker.index === undefined) return [];
-  const openIdx = proxySource.indexOf("[", marker.index);
+  // Walk bracket-balanced over the STRIPPED source (positions stay aligned with
+  // the original) to find the matching close — mirrors parseRedirectSources. A
+  // bare indexOf("]") would truncate the span if PUBLIC_ROUTES is ever
+  // reformatted multi-line or gains a nested bracket, silently dropping entries
+  // and re-opening Rule-2 false negatives.
+  const openIdx = stripped.indexOf("[", marker.index);
   if (openIdx === -1) return [];
-  const closeIdx = proxySource.indexOf("]", openIdx);
+  let depth = 0;
+  let closeIdx = -1;
+  for (let i = openIdx; i < stripped.length; i += 1) {
+    const ch = stripped[i];
+    if (ch === "[") depth += 1;
+    else if (ch === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        closeIdx = i;
+        break;
+      }
+    }
+  }
   if (closeIdx === -1) return [];
   const body = proxySource.slice(openIdx + 1, closeIdx);
-  return [...body.matchAll(/"([^"]+)"/g)].map((mm) => mm[1]);
+  // Accept single OR double quotes (mirrors parseRedirectSources) so a
+  // single-quoted PUBLIC_ROUTES entry can't slip past the #512 lockstep.
+  return [...body.matchAll(/["']([^"']+)["']/g)].map((mm) => mm[1]);
 }
 
 /**
@@ -298,9 +311,10 @@ export function parsePublicRoutes(proxySource: string): string[] {
  * literal sitting only inside a comment cannot satisfy the lockstep), then the
  * live `redirects()` span is located in the stripped source and the actual
  * `source: "..."` string literals are read from the ORIGINAL source within that
- * span. Returns `[]` when there is no `redirects()` block (the correct state for
- * plan 51-02 — no moves yet — so every `redirectFrom`-less entry passes Rule 3
- * vacuously and the rule stays ready for 51-05).
+ * span. Returns `[]` when there is no `redirects()` block — in which case any
+ * entry that declares `redirectFrom` fails Rule 3 (a declared move with no live
+ * redirect would 404). The `/scenarios` → `/allocations?tab=scenario` 308 is the
+ * first such move in the block.
  */
 export function parseRedirectSources(nextConfigSource: string): string[] {
   const stripped = stripComments(nextConfigSource);
@@ -337,13 +351,6 @@ export function parseRedirectSources(nextConfigSource: string): string[] {
  * entries without monkey-patching the import). Returns the violation list —
  * empty list = pass. The CLI `main()` below exit-codes on whether the list is
  * empty.
- *
- * RED CONTRACT (plan 51-01): the four rule bodies below are STUBBED. They are
- * present and reachable (so the import graph and the test's calls resolve), but
- * the lockstep logic is intentionally incomplete — `runCheck` currently returns
- * NO violations for any input. This makes the Task-2 regression suite fail on
- * its assertions (it expects specific violations and gets `[]`), which is the
- * RED contract. Plan 51-02 implements the rule bodies marked `STUB` below.
  */
 export function runCheck(
   rootDir: string,
@@ -354,13 +361,12 @@ export function runCheck(
   const manifestByRoute = new Map<string, RouteEntry>();
   for (const entry of manifest) manifestByRoute.set(entry.route, entry);
 
-  // Discover the on-disk page routes (used by Rules 1 and 4). The walk + URL
-  // derivation are FINAL; only the rule bodies that consume them are stubbed.
+  // Discover the on-disk page routes (used by Rules 1, 4 and 5).
   const pageUrls = findRouteFiles(resolve(rootDir, "src/app")).map((abs) =>
     pageFileToUrl(relative(rootDir, abs)),
   );
 
-  // Parse the live PUBLIC_ROUTES (used by Rule 2). FINAL.
+  // Parse the live PUBLIC_ROUTES (used by Rules 2 and 5).
   let publicRoutes: string[] = [];
   try {
     publicRoutes = parsePublicRoutes(
@@ -370,7 +376,7 @@ export function runCheck(
     publicRoutes = [];
   }
 
-  // Parse the live next.config.ts redirects() sources (used by Rule 3). FINAL.
+  // Parse the live next.config.ts redirects() sources (used by Rule 3).
   let redirectSources: string[] = [];
   try {
     redirectSources = parseRedirectSources(
@@ -381,8 +387,8 @@ export function runCheck(
   }
   const redirectSourceSet = new Set(redirectSources);
 
-  // The proxy's public-route matcher, replicated EXACTLY (proxy.ts L53-55) so
-  // the guard and the runtime agree: a route is public iff it is the `/`
+  // The proxy's public-route matcher, replicated EXACTLY (proxy.ts isPublicRoute)
+  // so the guard and the runtime agree: a route is public iff it is the `/`
   // special-case OR a PUBLIC_ROUTES prefix matches it via
   // `route === prefix || route.startsWith(prefix + "/")`. A bare
   // `startsWith(prefix)` would wrongly match siblings (`/login` ⊃ `/loginx`),
@@ -437,6 +443,23 @@ export function runCheck(
     if (!pageUrlSet.has(entry.route)) {
       violations.push(
         `STALE: manifest entry ${entry.route} maps to no page.tsx under src/app. Remove the entry or restore the page (or mark it an "exception" if it is a route.ts handler).`,
+      );
+    }
+  }
+
+  // Rule 5 — the INVERSE #512 lockstep. Rule 2 catches a public route MISSING
+  // from PUBLIC_ROUTES (anon → 307→login). Rule 5 catches the more dangerous
+  // opposite: a route the manifest classifies "private"|"admin" that IS covered
+  // by a PUBLIC_ROUTES prefix, which would silently serve a session-gated page to
+  // an anonymous visitor. `exception` entries are intentionally not checked —
+  // they (e.g. /api/health) may be public route.ts handlers that legitimately
+  // live in PUBLIC_ROUTES. The sibling-safe matcher (prefix + "/") means a
+  // public "/strategy" does NOT cover a private "/strategies".
+  for (const entry of manifest) {
+    if (entry.class !== "private" && entry.class !== "admin") continue;
+    if (isCoveredByPublicRoutes(entry.route)) {
+      violations.push(
+        `EXTRA-PUBLIC: route ${entry.route} is classified "${entry.class}" but is covered by a PUBLIC_ROUTES prefix in src/proxy.ts — an anonymous visitor would reach a session-gated route (the inverse of the #512 hole). Remove the covering prefix from PUBLIC_ROUTES or re-classify the route.`,
       );
     }
   }
