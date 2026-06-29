@@ -625,6 +625,21 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     expect(strategyHeader.className).toContain("z-30");
   });
 
+  it("50-REVIEW — sortable headers are keyboard-operable <button>s with aria-sort (WCAG 2.1.1 / 4.1.2)", () => {
+    render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
+    const strategyHeader = screen.getByRole("columnheader", { name: /Strategy/ });
+    // Pre-fix this <th> was click-only (no inner control, no aria-sort): not
+    // keyboard-operable and the sort state was conveyed only by a visual ↑/↓
+    // glyph. The sort control must now be a real <button> (keyboard-operable)
+    // and the <th> must expose aria-sort.
+    expect(strategyHeader).toHaveAttribute("aria-sort");
+    const sortButton = within(strategyHeader).getByRole("button", { name: /Strategy/ });
+    // Activating the control (a native button — Enter/Space operable) changes
+    // the column's sort state, and aria-sort reflects it for assistive tech.
+    fireEvent.click(sortButton);
+    expect(strategyHeader.getAttribute("aria-sort")).toMatch(/ascending|descending/);
+  });
+
   it("the sticky first DATA column stays solid bg-surface and does NOT take the translucent row hover (Pitfall 5)", () => {
     render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
     const nameLink = screen.getByText("Alpha Stellar");

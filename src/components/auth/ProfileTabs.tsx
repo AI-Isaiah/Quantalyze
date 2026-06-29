@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/Tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { ProfileForm } from "./ProfileForm";
 import { DeleteAccountButton } from "./DeleteAccountButton";
 import { OrganizationTab } from "@/components/org/OrganizationTab";
@@ -106,30 +106,49 @@ export function ProfileTabs({
         ))}
       </TabsList>
 
-      {activeTab === "personal" && <ProfileForm profile={profile} />}
-      {activeTab === "mandate" && isAllocator && (
-        <MandateForm initial={initialPreferences} />
+      {/* Each body lives in a Radix TabsContent (role="tabpanel") so every
+          TabsTrigger's aria-controls resolves to a real panel and the active
+          panel is labelled by its tab (WCAG 4.1.2 / 1.3.1). Radix renders only
+          the active panel. The allocator-only panels are gated on `isAllocator`
+          to stay symmetric with their triggers (a trigger without a panel —
+          or a panel without a trigger — would re-introduce the dangling
+          aria-controls). The exchanges panel renders whenever the exchanges
+          trigger does (isAllocator) and is null-safe inside, so the trigger
+          never points at a missing panel when `exchanges` is absent. */}
+      <TabsContent value="personal">
+        <ProfileForm profile={profile} />
+      </TabsContent>
+      {isAllocator && (
+        <TabsContent value="mandate">
+          <MandateForm initial={initialPreferences} />
+        </TabsContent>
       )}
-      {activeTab === "exchanges" && isAllocator && exchanges && (
-        <ExchangesTabContent
-          initialKeys={exchanges.initialKeys}
-          activePortfolio={exchanges.activePortfolio}
-        />
+      {isAllocator && (
+        <TabsContent value="exchanges">
+          {exchanges && (
+            <ExchangesTabContent
+              initialKeys={exchanges.initialKeys}
+              activePortfolio={exchanges.activePortfolio}
+            />
+          )}
+        </TabsContent>
       )}
-      {activeTab === "security" && isAllocator && (
-        <div>
+      {isAllocator && (
+        <TabsContent value="security">
           {/* Phase 11 / S6 / D-05 — Allocator self-serve audit-log CSV.
               Future security subsections (key encryption details, MFA, etc.)
               will mount alongside the AuditLogSubsection inside this body. */}
           <AuditLogSubsection />
-        </div>
+        </TabsContent>
       )}
-      {activeTab === "organizations" && <OrganizationTab />}
-      {activeTab === "account" && (
+      <TabsContent value="organizations">
+        <OrganizationTab />
+      </TabsContent>
+      <TabsContent value="account">
         <div className="max-w-xl">
           <DeleteAccountButton />
         </div>
-      )}
+      </TabsContent>
     </Tabs>
   );
 }

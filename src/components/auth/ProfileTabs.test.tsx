@@ -144,6 +144,30 @@ describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
     ).toBeInTheDocument();
   });
 
+  // 50-REVIEW (a11y BLOCKER) — every TabsTrigger must control a real
+  // role="tabpanel". The first port rendered the bodies as bare conditionals
+  // OUTSIDE <TabsContent>, so Radix's Trigger emitted aria-controls at panel
+  // ids that never existed in the DOM (6 dangling aria-controls, 0 tabpanels) —
+  // a NEW WCAG 4.1.2 / 1.3.1 regression vs the pre-port hand-rolled <button>s.
+  // This pins the trigger<->panel round-trip so a future un-wrapping fails loud.
+  it("50-REVIEW — active tab controls a real tabpanel (no dangling aria-controls)", () => {
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+
+    // The default active tab is Personal Info.
+    const activeTab = screen.getByRole("tab", { selected: true });
+    expect(activeTab).toHaveTextContent("Personal Info");
+
+    // Radix renders exactly the active panel, and it is a real tabpanel.
+    const panel = screen.getByRole("tabpanel");
+    expect(panel).toBeInTheDocument();
+
+    // Round-trip the WAI-ARIA wiring: the active trigger's aria-controls
+    // resolves to the panel, and the panel's aria-labelledby resolves to the
+    // active trigger. A body rendered outside <TabsContent> breaks both.
+    expect(activeTab).toHaveAttribute("aria-controls", panel.id);
+    expect(panel).toHaveAttribute("aria-labelledby", activeTab.id);
+  });
+
   it("Phase 11 IN-06 — activeTab derives per-render from searchParams (back/forward parity)", () => {
     // Mount with ?tab=security — Audit log heading visible.
     searchParamsState.tab = "security";

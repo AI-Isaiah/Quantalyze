@@ -541,17 +541,36 @@ export function StrategyTable({
                           ? "sticky left-11 top-0 z-20 bg-surface border-r border-border"
                           : "sticky left-0 top-0 z-30 bg-surface border-r border-border"
                         : "sticky top-0 z-20 bg-surface";
+                      const sortedHere = tableSortKey === col.key;
                       return (
                         <th
                           key={col.key}
                           scope="col"
-                          onClick={() => handleColumnSort(col.key)}
-                          className={`${stickyLeft} px-4 py-3 font-medium text-text-muted cursor-pointer hover:text-text-primary transition-colors select-none ${col.align === "right" ? "text-right" : "text-left"} ${col.collapse ? "@max-3xl:hidden" : ""}`}
+                          // aria-sort exposes the current sort state to assistive
+                          // tech (WCAG 4.1.2) \u2014 the visual \u2191/\u2193 glyph alone is not an
+                          // accessible cue.
+                          aria-sort={
+                            sortedHere
+                              ? tableSortDir === "asc"
+                                ? "ascending"
+                                : "descending"
+                              : "none"
+                          }
+                          className={`${stickyLeft} px-4 py-3 font-medium text-text-muted ${col.align === "right" ? "text-right" : "text-left"} ${col.collapse ? "@max-3xl:hidden" : ""}`}
                         >
-                          {col.label}
-                          {tableSortKey === col.key && (
-                            <span className="ml-1">{tableSortDir === "asc" ? "\u2191" : "\u2193"}</span>
-                          )}
+                          {/* The sort control is a real <button> so it is
+                              keyboard-operable (WCAG 2.1.1) \u2014 the prior click-only
+                              <th> could not be sorted from the keyboard. */}
+                          <button
+                            type="button"
+                            onClick={() => handleColumnSort(col.key)}
+                            className="-mx-1 inline-flex items-center gap-1 rounded px-1 hover:text-text-primary transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                          >
+                            {col.label}
+                            {sortedHere && (
+                              <span aria-hidden="true">{tableSortDir === "asc" ? "\u2191" : "\u2193"}</span>
+                            )}
+                          </button>
                         </th>
                       );
                     })}
