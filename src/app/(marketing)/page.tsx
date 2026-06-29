@@ -44,39 +44,13 @@ export default async function Home() {
   const stats = await getSocialProofStats();
 
   return (
-    <div className="min-h-full bg-white">
-      {/* Nav */}
-      <header className="border-b border-border bg-white">
-        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
-          <Link
-            href="/"
-            className="inline-flex items-center py-2 font-display text-lg tracking-tight text-text-primary"
-          >
-            Quantalyze
-          </Link>
-          <div className="flex items-center gap-2">
-            <Link
-              href="/login"
-              className="inline-flex min-h-[44px] items-center rounded-md px-3 py-2 text-sm font-medium text-text-secondary hover:bg-page hover:text-text-primary transition-colors"
-            >
-              Log in
-            </Link>
-            <Link
-              href="/signup"
-              className="inline-flex min-h-[44px] items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
-            >
-              Get Started
-            </Link>
-          </div>
-        </div>
-      </header>
-
+    <>
       {/* A11Y-01 (Phase 48): the landing body lives in a <main> landmark so
-          axe's landmark-one-main + page-has-main + region rules pass. The root
-          layout (src/app/layout.tsx) renders {children} with NO shared <main>
-          wrapper (so it does NOT double-wrap authed routes that supply their
-          own <main>); the public landing page therefore owns its own <main>
-          here, between the page-local <header> and <footer>. */}
+          axe's landmark-one-main + page-has-main + region rules pass. The
+          shared (marketing)/layout.tsx supplies the header + LegalFooter chrome
+          (NAV-04 consolidation) and renders NO <main> of its own, so the
+          landing page owns the single <main> here — exactly one <main> and one
+          <h1> per rendered page. */}
       <main>
       {/* Hero */}
       <section className="mx-auto max-w-6xl px-6 py-24 md:py-32 text-center">
@@ -270,42 +244,6 @@ export default async function Home() {
         </div>
       </section>
       </main>
-
-      {/* Footer */}
-      <footer className="border-t border-border bg-white">
-        <div className="mx-auto max-w-6xl px-6 py-10">
-          <div className="flex flex-col items-start justify-between gap-6 md:flex-row md:items-center">
-            <div>
-              <span className="font-display text-base text-text-primary">
-                Quantalyze
-              </span>
-              <p className="mt-1 text-xs text-text-muted">
-                Exchange-verified quant strategy marketplace
-              </p>
-            </div>
-            <nav className="flex items-center gap-2 text-sm text-text-muted">
-              <Link
-                href="/security"
-                className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary transition-colors"
-              >
-                Security
-              </Link>
-              <Link
-                href="/login"
-                className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary transition-colors"
-              >
-                Log in
-              </Link>
-              <Link
-                href="/signup"
-                className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary transition-colors"
-              >
-                Sign up
-              </Link>
-            </nav>
-          </div>
-        </div>
-      </footer>
-    </div>
+    </>
   );
 }
