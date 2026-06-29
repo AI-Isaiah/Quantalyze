@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import {
   AdminTabs,
   type IntroRequestRow,
@@ -157,25 +158,35 @@ describe("AdminTabs — typed-row render paths (H-0353)", () => {
     expect(screen.queryByText(/Top Secret Strat/)).toBeNull();
   });
 
-  it("Strategy Review tab renders strategy name + strategy_types + author", () => {
+  // Radix Tabs triggers activate on the pointerdown/keyboard sequence that
+  // `@testing-library/user-event` dispatches — bare `fireEvent.click` does not
+  // flip the active panel (50-RESEARCH driver note; same mechanical test-port as
+  // the Tabs primitive spec). The tab-switching clicks below therefore use
+  // `await user.click(...)`. The test INTENT (clicking a tab reveals its panel
+  // content) is unchanged. The trigger text ("Strategy Review", etc.) still
+  // resolves the trigger via getByText/getByRole.
+  it("Strategy Review tab renders strategy name + strategy_types + author", async () => {
+    const user = userEvent.setup();
     renderTabs();
-    fireEvent.click(screen.getByText("Strategy Review"));
+    await user.click(screen.getByRole("tab", { name: /Strategy Review/ }));
     expect(screen.getByText("Beta Strat")).toBeTruthy(); // s.name
     expect(screen.getByText("Long-Only")).toBeTruthy(); // s.strategy_types[]
     expect(screen.getByText(/Quant Bob/)).toBeTruthy(); // s.profiles.display_name
   });
 
-  it("Allocators tab renders display_name, company and email", () => {
+  it("Allocators tab renders display_name, company and email", async () => {
+    const user = userEvent.setup();
     renderTabs();
-    fireEvent.click(screen.getByText("Allocators"));
+    await user.click(screen.getByRole("tab", { name: /Allocators/ }));
     expect(screen.getByText("Carol Allocator")).toBeTruthy();
     expect(screen.getByText(/Carol Co/)).toBeTruthy();
     expect(screen.getByText(/carol@example\.com/)).toBeTruthy();
   });
 
-  it("Managers tab renders display_name and email", () => {
+  it("Managers tab renders display_name and email", async () => {
+    const user = userEvent.setup();
     renderTabs();
-    fireEvent.click(screen.getByText("Managers"));
+    await user.click(screen.getByRole("tab", { name: /Managers/ }));
     expect(screen.getByText("Dave Manager")).toBeTruthy();
     expect(screen.getByText(/dave@example\.com/)).toBeTruthy();
   });
@@ -187,13 +198,14 @@ describe("AdminTabs — typed-row render paths (H-0353)", () => {
 // server message hid actionable detail (e.g. a missing review note).
 describe("AdminTabs — Strategy Review reject surfaces the server error (M-0378)", () => {
   it("renders the server-supplied rejection reason in the alert, not the generic fallback", async () => {
+    const user = userEvent.setup();
     const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue({
       ok: false,
       json: async () => ({ error: "Review note is required." }),
     } as unknown as Response);
 
     renderTabs();
-    fireEvent.click(screen.getByText("Strategy Review"));
+    await user.click(screen.getByRole("tab", { name: /Strategy Review/ }));
     // The card's ghost "Reject" (first in DOM) opens the modal + sets rejectId.
     fireEvent.click(screen.getAllByText("Reject")[0]);
     // The modal's danger "Reject" (last in DOM) confirms → reject() → fetch.

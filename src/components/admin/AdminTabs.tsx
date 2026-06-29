@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Textarea } from "@/components/ui/Textarea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import {
   cn,
   extractAnalytics,
@@ -119,35 +120,36 @@ export function AdminTabs({ introRequests, pendingStrategies, pendingAllocators,
   };
 
   return (
-    <div>
-      <div className="flex gap-1 border-b border-border mb-6">
+    <Tabs value={tab} onValueChange={(v) => setTab(v as Tab)}>
+      <TabsList variant="underline" className="mb-6">
         {TABS.map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={cn(
-              "px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px",
-              tab === t
-                ? "border-accent text-accent"
-                : "border-transparent text-text-muted hover:text-text-primary"
-            )}
-          >
+          <TabsTrigger key={t} value={t} variant="underline">
             {t}
             {badgeCounts[t] > 0 && (
-              <span className="ml-2 bg-accent text-white text-[10px] rounded-full px-1.5 py-0.5">
+              <span className="ml-2 rounded-full bg-accent px-1.5 py-0.5 text-micro text-white">
                 {badgeCounts[t]}
               </span>
             )}
-          </button>
+          </TabsTrigger>
         ))}
-      </div>
+      </TabsList>
 
-      {tab === "Intro Requests" && <IntroRequestsTab requests={introRequests} />}
-      {tab === "Strategy Review" && <StrategyReviewTab strategies={pendingStrategies} />}
-      {tab === "Allocators" && <AllocatorsTab allocators={pendingAllocators} />}
-      {tab === "Managers" && <ManagersTab managers={pendingManagers} />}
-      {tab === "Compute Jobs" && <ComputeJobsTable />}
-    </div>
+      <TabsContent value="Intro Requests">
+        <IntroRequestsTab requests={introRequests} />
+      </TabsContent>
+      <TabsContent value="Strategy Review">
+        <StrategyReviewTab strategies={pendingStrategies} />
+      </TabsContent>
+      <TabsContent value="Allocators">
+        <AllocatorsTab allocators={pendingAllocators} />
+      </TabsContent>
+      <TabsContent value="Managers">
+        <ManagersTab managers={pendingManagers} />
+      </TabsContent>
+      <TabsContent value="Compute Jobs">
+        <ComputeJobsTable />
+      </TabsContent>
+    </Tabs>
   );
 }
 
