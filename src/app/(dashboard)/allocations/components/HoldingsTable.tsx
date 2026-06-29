@@ -335,6 +335,9 @@ function StrategySortableHeader({
   return (
     <th
       className={`px-4 py-2 font-semibold ${align === "right" ? "text-right" : ""}`}
+      aria-sort={
+        isActive ? (sort.dir === "asc" ? "ascending" : "descending") : "none"
+      }
     >
       <button
         type="button"
