@@ -305,19 +305,19 @@ export default async function FactsheetV2Page({
       });
     return (
       <article className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12">
-        <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-text-muted">
+        <p className="text-fixed-10 font-mono uppercase tracking-[0.22em] text-text-muted">
           Institutional Factsheet · Quantalyze
         </p>
-        <h1 className="mt-2 font-serif text-[28px] sm:text-[36px] leading-tight text-text-primary">
+        <h1 className="mt-2 font-serif text-fixed-28 sm:text-fixed-36 leading-tight text-text-primary">
           {pendingName}
         </h1>
-        <p className="mt-6 text-[13px] text-text-secondary">
+        <p className="mt-6 text-fixed-13 text-text-secondary">
           The detailed factsheet for this strategy is still computing.
           Daily-return data hasn&apos;t been ingested yet — once the
           analytics service finishes the first compute pass, the full panel
           set will render here.
         </p>
-        <p className="mt-3 text-[12px] text-text-muted italic">
+        <p className="mt-3 text-fixed-12 text-text-muted italic">
           If this persists for more than a few minutes, the strategy may
           have insufficient observations inside the bundled benchmark
           window (2023-04-26 onward). See the dev-server console for the
