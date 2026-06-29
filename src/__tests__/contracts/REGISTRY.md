@@ -58,6 +58,7 @@ adding or removing a guard.
 | Guard | Batch | Invariant |
 |---|---|---|
 | `src/lib/sample-floor.test.ts` | Phase22 | `SAMPLE_FLOOR_OVERLAPPING_DAYS=60` value pin + every `evaluateSampleFloor` gate branch (ok / below-floor / no-usable-n incl. null/NaN/Infinity/negative / per-call override). The HONEST-02 single-source floor — fails loud if a future feature (Phases 26/27) forks its own floor instead of importing this one. |
+| `scripts/check-route-contract.ts` | NAV-03 (Phase 51) | `ROUTE_CONTRACT_MANIFEST` ↔ `proxy.ts` `PUBLIC_ROUTES` + `next.config.ts` `redirects()` lockstep (the #512 class). A CI-gate script run in `npm run lint`: walks the `src/app/**` page tree and fails if a page route is unclassified, a manifest-`public` route is not covered by `PUBLIC_ROUTES` (anon would 307→login), a `redirectFrom` has no `redirects()` source (old link 404s), or a non-`exception` manifest entry maps to no page. Closes the route-drift class by construction at lint time. |
 
 ## Adding a new by-construction guard
 
