@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.35.0.7] - 2026-06-29
+### Added — the evolved primitive library (v1.4 phase 50)
+
+Phase 50 builds the component toolkit every later surface assembles from. The six core primitives (Button/Card/Input/Badge/Modal/Skeleton + Select/Textarea) are refreshed onto the Phase-49 fluid `--text-*` tiers — a pure className/token swap with **byte-identical public prop APIs**, so all ~68 Button importers and every other consumer inherit the new sizing and the `focus:`→`focus-visible:` rings with zero per-call-site edits. Three genuinely-new primitives land: a Radix-backed **Tabs** (`@radix-ui/react-tabs`, exact-pinned — the one widget with no native HTML equivalent, so native `<dialog>`/`<select>` are deliberately retained, UI-04), a semantic **Table** base (th `scope` + caption + landmark-unique name), and a **Field** wrapper (label `htmlFor` + `aria-describedby` + `aria-invalid`). The three hand-rolled Tabs implementations (AdminTabs/ProfileTabs/WatchlistTabs) consolidate 1:1 onto the one primitive — the highest-value dedup in the phase.
+
+The Discovery `StrategyTable` gets a best-in-class dense reshape — sticky header + sticky first column (opaque, z-layered), `@container` priority-collapse of low-priority columns to a reachable `<details>` that relocates the *real* value (honest-null em-dash, never a fabricated 0 — the no-invented-data invariant holds, and is test-pinned), a visible scroll cue paired with (not doubled against) the existing scroll-affordance announcement, and a table-scoped density control. Restrained motion arrives via a native `document.startViewTransition` helper (no motion library, no experimental Next flag) scoped to the tab-panel + density toggle, with a `prefers-reduced-motion` instant-swap fallback that extends the existing reduce blocks. The strangler pilot migrates `/admin/compute-jobs` off raw `<button>`/`<table>`/`<input>` onto the primitives (the admin gate and the compute-jobs claim-token gate are preserved), proving the per-surface migration is incremental — the broad migration is phases 52/53. The TS coverage ratchet held (82.95 / 75.48 / 78.95 / 85.09 vs the 80 / 72 / 74 / 82 gates). `scenario.ts`, `compute.ts`, the factsheet math, the fonts, and the accent are untouched.
+
+### Fixed — a11y regressions the specialist fan-out + red-team caught before merge
+
+A five-specialist review plus a fresh red-team pass, run on this diff, caught issues no single review would:
+- **(blocker)** the ProfileTabs consolidation rendered tab bodies *outside* `<TabsContent>`, so Radix emitted `aria-controls` at tabpanel ids that never existed (6 dangling references, 0 panels) — a new WCAG 4.1.2 / 1.3.1 regression vs the pre-port plain `<button>`s. Each body is now wrapped in `<TabsContent>` with trigger↔panel symmetry; a test pins the `aria-controls`↔`aria-labelledby` round-trip.
+- **(regression)** ProfileTabs inherited Radix's default automatic activation, so arrow-keying the strip fired a `router.replace()` and mounted the Supabase-backed Exchanges panel on *every* keystroke. Set to manual activation (commit on Enter/Space/click) — AdminTabs/WatchlistTabs keep automatic (cheap local-state activation).
+- the reshaped `StrategyTable` sortable headers were click-only `<th>` (not keyboard-operable, no `aria-sort`); the sort control is now a real `<button>` with `aria-sort` on the `<th>` (WCAG 2.1.1 / 4.1.2).
+- the new `admin-compute-jobs` axe spec was wired into the seeded CI job but could never pass (no admin-user seed → `/admin/*` redirects → the URL-pin fails deterministically), so it would run permanently-red; it now skips cleanly until Phase 54 / VERIFY-04 lands an admin seed, keeping the `ci.yml` wiring so it auto-activates then. The migrated component's a11y is covered now by its semantic-DOM unit test.
+
 ## [0.35.0.6] - 2026-06-29
 ### Added — the fluid type-token spine v1.4 builds on (v1.4 phase 49)
 
