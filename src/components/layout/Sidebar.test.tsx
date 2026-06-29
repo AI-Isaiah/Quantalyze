@@ -7,13 +7,17 @@ import { Sidebar } from "./Sidebar";
  *
  * 2026-05-20 simplification: the allocator workspace collapsed to a
  * single entry "My Allocation". Scenarios and Recommendations used to
- * be top-level routes but are now TABS inside the My Allocation page —
- * a sidebar entry would duplicate navigation that already happens via
- * AllocationsTabs.
+ * be top-level routes but were folded — Scenarios into a TAB inside the
+ * My Allocation page, Recommendations dropped from the nav.
  *
- *   Allocator view: My Allocation. (Just that — Discovery + Account
- *     handle the rest. No Strategies, no Portfolios, no Scenarios, no
- *     Recommendations top-level entries.)
+ * 51-REVIEW override (2026-06-28): the user OVERRODE the Recommendations
+ * half of that decision. Recommendations is again a top-level allocator
+ * nav item (alongside Compare + Decks) so the daily match output is not a
+ * dead-end. Scenarios stays a tab (its top-level route is a redirect-stub).
+ *
+ *   Allocator view: My Allocation + Recommendations + Compare + Decks.
+ *     (Discovery + Account handle the rest. No Strategies, no Portfolios,
+ *     no Scenarios top-level entry.)
  *
  *   Manager / crypto-team view: Strategies → Portfolios.
  *
@@ -52,11 +56,15 @@ describe("Sidebar workspace — allocator view", () => {
     expect(screen.queryByText("Scenarios")).toBeNull();
   });
 
-  it("does NOT render 'Recommendations' as a top-level entry (tab inside My Allocation)", () => {
-    // Same 2026-05-20 simplification — Recommendations lives as a tab/view
-    // inside the My Allocation surface, not a separate route.
+  it("renders 'Recommendations' as a top-level allocator entry (51-REVIEW override)", () => {
+    // 51-REVIEW user override (2026-06-28): the 2026-05-20 simplification left
+    // Recommendations OUT of the nav (treated as a tab/CTA-only surface). The
+    // user OVERRODE that decision — Recommendations is now a top-level allocator
+    // nav item so the daily match output is not a dead-end. It lives INSIDE the
+    // showsAllocatorWorkspace branch (role-leak pinned by T-45-01 below).
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    expect(screen.queryByText("Recommendations")).toBeNull();
+    const link = screen.getByText("Recommendations").closest("a");
+    expect(link).toHaveAttribute("href", "/recommendations");
   });
 
   it("does NOT render 'Strategies' in the allocator workspace", () => {
@@ -137,6 +145,10 @@ describe("Sidebar workspace — manager / crypto-team view", () => {
     expect(screen.queryByText("My Allocation")).toBeNull();
     expect(screen.queryByText("Connections")).toBeNull();
     expect(screen.queryByText("Scenarios")).toBeNull();
+    // 51-REVIEW override: Recommendations is now a top-level ALLOCATOR nav item
+    // (it lives inside the showsAllocatorWorkspace branch). A manager-only user
+    // must therefore NOT see it — this is the role-leak pin for the new entry
+    // (T-45-01 info-disclosure), not a "Recommendations isn't a route" assertion.
     expect(screen.queryByText("Recommendations")).toBeNull();
   });
 

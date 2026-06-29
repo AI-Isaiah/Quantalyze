@@ -64,18 +64,21 @@ function buildNavSections(
       badge: flaggedCount,
     });
     // Phase 51 NAV-01 — surface the genuine allocator orphans that had no nav
-    // entry (direct-link only today): /compare and /decks are allocator-owned
-    // dashboard surfaces. They live INSIDE the showsAllocatorWorkspace branch so
-    // they never leak to a manager (T-45-01 / T-51-02 info-disclosure). The role
-    // OR-logic derivations above are byte-unchanged. /recommendations is left OUT
-    // deliberately — it is mandate-CTA-reachable (a child of the profile mandate
-    // tab) and gets its back-path via the breadcrumb, not a top-level nav item
-    // (RESEARCH soft-orphan classification + UI-SPEC §completeness). The legacy
-    // scenarios and preferences slugs are redirect-stubs (NOT orphans) and
-    // /security is public marketing — none get nav entries here. (NB: this comment
-    // intentionally avoids the literal retired-route slug the FLOW-03 phase-32
-    // frozen-spine guard substring-matches on Sidebar.tsx.)
+    // entry (direct-link only today): /compare, /decks, and /recommendations are
+    // allocator-owned dashboard surfaces. They live INSIDE the
+    // showsAllocatorWorkspace branch so they never leak to a manager (T-45-01 /
+    // T-51-02 info-disclosure). The role OR-logic derivations above are
+    // byte-unchanged. /recommendations is now a top-level nav item per the
+    // 51-REVIEW user override (2026-06-28): it was previously left OUT per a
+    // 2026-05-20 decision (treated as mandate-CTA-reachable only), but the user
+    // chose to surface it directly so the allocator's daily match output is not a
+    // dead-end reachable only via a deep CTA. The legacy scenarios and preferences
+    // slugs are redirect-stubs (NOT orphans) and /security is public marketing —
+    // none get nav entries here. (NB: this comment intentionally avoids the
+    // literal retired-route slug the FLOW-03 phase-32 frozen-spine guard
+    // substring-matches on Sidebar.tsx.)
     workspaceItems.push(
+      { label: "Recommendations", href: "/recommendations", icon: RecommendIcon },
       { label: "Compare", href: "/compare", icon: CompareIcon },
       { label: "Decks", href: "/decks", icon: DeckIcon },
     );
@@ -439,6 +442,15 @@ function ShieldIcon({ className }: { className?: string }) {
 // Phase 51 NAV-01 — glyphs for the newly-surfaced allocator/account orphans.
 // House style: 16x16 viewBox, stroke-1.5, currentColor, no icon dependency —
 // matches the inline SVGs above so the nav stays a single self-contained file.
+function RecommendIcon({ className }: { className?: string }) {
+  // A sparkle/star — the "recommended for you" match output.
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 2l1.6 3.7L13.5 6l-2.75 2.7.65 3.8L8 10.7 4.6 12.5l.65-3.8L2.5 6l3.9-.3L8 2z" />
+    </svg>
+  );
+}
+
 function CompareIcon({ className }: { className?: string }) {
   // Two side-by-side bars — "compare" two strategies.
   return (

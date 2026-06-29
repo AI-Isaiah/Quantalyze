@@ -17,6 +17,7 @@ export default async function DecksPage() {
       <PageHeader
         title="Decks"
         description="Curated strategy bundles for diversified allocation."
+        breadcrumb={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Decks" }]}
       />
 
       {decks.length === 0 ? (

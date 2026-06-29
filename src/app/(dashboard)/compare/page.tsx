@@ -3,7 +3,6 @@ import { withPublishedOnly } from "@/lib/visibility";
 import { EMPTY_ANALYTICS } from "@/lib/queries";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { CompareTable } from "@/components/strategy/CompareTable";
 import { CompareEquityOverlay } from "@/components/strategy/CompareEquityOverlay";
 import { CompareCorrelationMatrix } from "@/components/strategy/CompareCorrelationMatrix";
@@ -29,8 +28,10 @@ export default async function ComparePage({
   if (ids.length === 0) {
     return (
       <>
-        <Breadcrumb items={[{ label: "Compare Strategies" }]} />
-        <PageHeader title="Compare Strategies" />
+        <PageHeader
+          title="Compare Strategies"
+          breadcrumb={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]}
+        />
         <p className="text-sm text-text-muted text-center py-16">
           Select strategies from the discovery page to compare. Add up to 4 strategies using the compare checkboxes.
         </p>
@@ -90,8 +91,10 @@ export default async function ComparePage({
   if (items.length === 0) {
     return (
       <>
-        <Breadcrumb items={[{ label: "Compare" }]} />
-        <PageHeader title="Compare" />
+        <PageHeader
+          title="Compare"
+          breadcrumb={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]}
+        />
         <p className="text-sm text-text-muted text-center py-16">
           This comparison isn&apos;t available.
         </p>
@@ -116,8 +119,10 @@ export default async function ComparePage({
 
   return (
     <>
-      <Breadcrumb items={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]} />
-      <PageHeader title={title} />
+      <PageHeader
+        title={title}
+        breadcrumb={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]}
+      />
       <div className="space-y-8">
         <CompareTable items={items} />
         <CompareEquityOverlay items={strategyOnlyItems} />
