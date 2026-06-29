@@ -39,7 +39,7 @@ export default async function ForQuantsLeadsPage({
         // unseen.
         <div
           role="alert"
-          className="mb-4 rounded border border-red-300 bg-red-50 p-4 text-sm text-red-900"
+          className="mb-4 rounded border border-red-300 bg-red-50 p-4 text-small text-red-900"
         >
           Could not load leads. Check Supabase status or try again. Details:{" "}
           {error}

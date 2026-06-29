@@ -337,7 +337,7 @@ export function AllocatorMatchQueue({
   if (error || !data) {
     return (
       <Card className="border-negative/40">
-        <p className="text-sm text-negative">{error || "Failed to load"}</p>
+        <p className="text-small text-negative">{error || "Failed to load"}</p>
         <Button variant="secondary" size="sm" onClick={load} className="mt-3">
           Retry
         </Button>
@@ -373,7 +373,7 @@ export function AllocatorMatchQueue({
 
       {/* Breadcrumb */}
       {!forceReadOnly && profile && (
-        <nav className="flex items-center gap-2 text-sm text-text-muted">
+        <nav className="flex items-center gap-2 text-small text-text-muted">
           <Link href="/admin/match" className="hover:text-text-primary">
             Match queue
           </Link>
@@ -387,7 +387,7 @@ export function AllocatorMatchQueue({
       {/* Read-only mobile banner */}
       {!forceReadOnly && (
         <div className="md:hidden rounded-md border border-accent/30 bg-accent/5 px-4 py-3">
-          <p className="text-sm text-text-primary">
+          <p className="text-small text-text-primary">
             <strong className="font-semibold">Read-only on mobile.</strong>{" "}
             Open on a desktop or tablet (1024px+) to use keyboard shortcuts
             and record KEEP / SKIP / Send Intro decisions.
@@ -401,14 +401,14 @@ export function AllocatorMatchQueue({
       <Card>
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
-            <h1 className="text-[24px] font-display text-text-primary">
+            <h1 className="text-h3 font-display text-text-primary">
               {profile.display_name || "(unknown)"}
             </h1>
             {profile.company && (
-              <p className="text-sm text-text-secondary mt-0.5">{profile.company}</p>
+              <p className="text-small text-text-secondary mt-0.5">{profile.company}</p>
             )}
             {preferences?.mandate_archetype && (
-              <p className="text-sm text-text-secondary mt-2 italic">
+              <p className="text-small text-text-secondary mt-2 italic">
                 &ldquo;{preferences.mandate_archetype}&rdquo;
               </p>
             )}
@@ -417,7 +417,7 @@ export function AllocatorMatchQueue({
             {batch && <ModeBadge mode={batch.mode} />}
             {hoursAgo !== null && (
               <span
-                className={`text-[11px] font-mono uppercase tracking-wider ${
+                className={`text-micro font-mono uppercase tracking-wider ${
                   isStale ? "text-negative" : "text-text-muted"
                 }`}
               >
@@ -452,7 +452,7 @@ export function AllocatorMatchQueue({
             </>
           )}
           {batch && (
-            <span className="ml-auto text-[11px] text-text-muted font-mono tabular-nums">
+            <span className="ml-auto text-micro text-text-muted font-mono tabular-nums">
               {candidates.length} candidates &middot;{" "}
               {decisions.filter((d) => d.decision === "sent_as_intro").length} sent &middot;{" "}
               {decisions.filter((d) => d.decision === "thumbs_up").length} kept
@@ -465,7 +465,7 @@ export function AllocatorMatchQueue({
       {/* Filter-relaxed callout */}
       {batch?.filter_relaxed && (
         <div className="rounded-md border border-negative/40 bg-transparent px-4 py-3">
-          <p className="text-sm text-text-primary">
+          <p className="text-small text-text-primary">
             Eligibility was relaxed to find these. Review carefully.
           </p>
         </div>
@@ -474,7 +474,7 @@ export function AllocatorMatchQueue({
       {/* Empty states */}
       {!batch && (
         <Card className="text-center py-12">
-          <p className="text-sm text-text-secondary mb-4">
+          <p className="text-small text-text-secondary mb-4">
             No candidates yet for this allocator.
           </p>
           {!forceReadOnly && (
@@ -486,7 +486,7 @@ export function AllocatorMatchQueue({
       )}
       {batch && candidates.length === 0 && (
         <Card className="text-center py-10">
-          <p className="text-sm text-text-muted">
+          <p className="text-small text-text-muted">
             No eligible candidates for this batch. Try editing preferences or relaxing criteria.
           </p>
         </Card>
@@ -495,7 +495,7 @@ export function AllocatorMatchQueue({
       {/* Shortlist strip (top 3 cards, above the fold) */}
       {candidates.length > 0 && (
         <div>
-          <p className="mb-2 text-[10px] uppercase tracking-wider text-text-muted font-medium">
+          <p className="mb-2 text-micro uppercase tracking-wider text-text-muted font-medium">
             Shortlist
           </p>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -628,7 +628,7 @@ export function AllocatorMatchQueue({
               e.preventDefault();
               setShowExcluded((s) => !s);
             }}
-            className="cursor-pointer text-sm font-medium text-text-primary hover:text-accent"
+            className="cursor-pointer text-small font-medium text-text-primary hover:text-accent"
           >
             Excluded strategies ({excluded.length}) {showExcluded ? "\u25BC" : "\u25B6"}
           </summary>
@@ -691,7 +691,7 @@ export function AllocatorMatchQueue({
               e.preventDefault();
               setShowHistory((s) => !s);
             }}
-            className="cursor-pointer text-sm font-medium text-text-primary hover:text-accent"
+            className="cursor-pointer text-small font-medium text-text-primary hover:text-accent"
           >
             Decision history ({decisions.length}) {showHistory ? "\u25BC" : "\u25B6"}
           </summary>

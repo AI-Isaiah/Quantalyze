@@ -105,7 +105,7 @@ export function DeletionRequestActions({
   return (
     <div className="flex flex-col items-end gap-1">
       {error && (
-        <p className="text-[11px] text-negative" role="alert">
+        <p className="text-micro text-negative" role="alert">
           {error}
         </p>
       )}

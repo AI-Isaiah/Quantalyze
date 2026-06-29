@@ -104,7 +104,7 @@ export default async function AdminUserDetailPage({
         meta={
           <>
             {profile.company && (
-              <span className="text-xs text-text-muted">
+              <span className="text-caption text-text-muted">
                 {profile.company}
               </span>
             )}
@@ -115,10 +115,10 @@ export default async function AdminUserDetailPage({
 
       <div className="grid gap-6 md:grid-cols-[2fr_3fr]">
         <Card>
-          <h2 className="font-display text-xl text-text-primary mb-4">
+          <h2 className="font-display text-h3 text-text-primary mb-4">
             Profile
           </h2>
-          <dl className="space-y-3 text-sm">
+          <dl className="space-y-3 text-small">
             <Row
               label="Profile role"
               value={profile.role}
@@ -148,10 +148,10 @@ export default async function AdminUserDetailPage({
         </Card>
 
         <Card>
-          <h2 className="font-display text-xl text-text-primary mb-2">
+          <h2 className="font-display text-h3 text-text-primary mb-2">
             App roles
           </h2>
-          <p className="text-xs text-text-muted mb-4">
+          <p className="text-caption text-text-muted mb-4">
             Grant or revoke roles. Each change is audited and immediately
             visible to the user on their next login.
           </p>
@@ -178,14 +178,14 @@ function Row({
 }) {
   return (
     <div className="flex items-start justify-between gap-4 border-b border-border pb-2 last:border-0 last:pb-0">
-      <dt className="text-[11px] uppercase tracking-wider text-text-muted shrink-0">
+      <dt className="text-micro uppercase tracking-wider text-text-muted shrink-0">
         {label}
       </dt>
       <dd
         className={
           mono
-            ? "font-mono text-xs text-text-secondary text-right break-all"
-            : "text-sm text-text-primary text-right"
+            ? "font-mono text-caption text-text-secondary text-right break-all"
+            : "text-small text-text-primary text-right"
         }
       >
         {value ?? "—"}

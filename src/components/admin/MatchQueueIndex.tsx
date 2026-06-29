@@ -135,8 +135,8 @@ export function MatchQueueIndex() {
         <Card className="border-negative/40 bg-negative/5">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-semibold text-negative">Engine: OFF</p>
-              <p className="mt-0.5 text-xs text-text-secondary">
+              <p className="text-small font-semibold text-negative">Engine: OFF</p>
+              <p className="mt-0.5 text-caption text-text-secondary">
                 New recomputes are blocked. Existing candidates remain visible.
               </p>
             </div>
@@ -187,7 +187,7 @@ export function MatchQueueIndex() {
         <select
           value={mandateFilter}
           onChange={(e) => setMandateFilter(e.target.value)}
-          className="ml-auto rounded-md border border-border bg-surface px-3 py-2 text-sm text-text-primary focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
+          className="ml-auto rounded-md border border-border bg-surface px-3 py-2 text-small text-text-primary focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
         >
           <option value="all">All mandates</option>
           {mandateArchetypes.map((m) => (
@@ -201,7 +201,7 @@ export function MatchQueueIndex() {
           placeholder="Search name or company..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="w-[260px] rounded-md border border-border bg-surface px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
+          className="w-[260px] rounded-md border border-border bg-surface px-3 py-2 text-small text-text-primary placeholder:text-text-muted focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
         />
         <EngineStatusPill
           enabled={killSwitch}
@@ -227,17 +227,17 @@ export function MatchQueueIndex() {
       {/* Allocator list */}
       {loading && (
         <Card className="text-center py-10">
-          <p className="text-sm text-text-muted">Loading allocators...</p>
+          <p className="text-small text-text-muted">Loading allocators...</p>
         </Card>
       )}
       {error && !loading && (
         <Card className="border-negative/40">
-          <p className="text-sm text-negative">{error}</p>
+          <p className="text-small text-negative">{error}</p>
         </Card>
       )}
       {!loading && !error && filtered.length === 0 && (
         <Card className="text-center py-10">
-          <p className="text-sm text-text-muted">No allocators match this filter.</p>
+          <p className="text-small text-text-muted">No allocators match this filter.</p>
         </Card>
       )}
       {!loading && !error && filtered.length > 0 && (
@@ -377,7 +377,7 @@ function FilterChip({
   return (
     <button
       onClick={onClick}
-      className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[13px] font-medium transition-colors ${
+      className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-caption font-medium transition-colors ${
         active
           ? "border-accent bg-accent/10 text-accent"
           : "border-border bg-surface text-text-secondary hover:border-border-focus"
@@ -385,7 +385,7 @@ function FilterChip({
     >
       {label}
       {count !== undefined && count > 0 && (
-        <span className="rounded-full bg-text-muted/20 px-1.5 text-[11px] font-mono tabular-nums">
+        <span className="rounded-full bg-text-muted/20 px-1.5 text-micro font-mono tabular-nums">
           {count}
         </span>
       )}
@@ -404,7 +404,7 @@ function EngineStatusPill({
   return (
     <button
       onClick={onToggle}
-      className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[11px] font-mono font-semibold uppercase tracking-wider transition-colors ${
+      className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-micro font-mono font-semibold uppercase tracking-wider transition-colors ${
         enabled
           ? "border-border text-text-secondary hover:border-border-focus"
           : "border-negative text-negative hover:bg-negative/5"

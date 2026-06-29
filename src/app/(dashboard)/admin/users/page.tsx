@@ -65,14 +65,14 @@ export default async function AdminUsersPage() {
 
       <Card padding="sm">
         {rows.length === 0 ? (
-          <p className="p-6 text-center text-text-muted text-sm">
+          <p className="p-6 text-center text-text-muted text-small">
             No users found.
           </p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-small">
               <thead>
-                <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-muted">
+                <tr className="border-b border-border text-left text-micro uppercase tracking-wider text-text-muted">
                   <th className="px-4 py-3 font-medium">Name</th>
                   <th className="px-4 py-3 font-medium">Email</th>
                   <th className="px-4 py-3 font-medium">Profile role</th>
@@ -91,15 +91,15 @@ export default async function AdminUsersPage() {
                       <td className="px-4 py-3 text-text-primary font-medium">
                         {p.display_name}
                         {p.company && (
-                          <span className="ml-2 text-text-muted text-xs">
+                          <span className="ml-2 text-text-muted text-caption">
                             ({p.company})
                           </span>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-text-secondary text-xs font-mono">
+                      <td className="px-4 py-3 text-text-secondary text-caption font-mono">
                         {p.email ?? "—"}
                       </td>
-                      <td className="px-4 py-3 text-text-secondary text-xs">
+                      <td className="px-4 py-3 text-text-secondary text-caption">
                         {p.role}
                         {p.is_admin && (
                           <Badge label="legacy admin" className="ml-2" />
@@ -107,7 +107,7 @@ export default async function AdminUsersPage() {
                       </td>
                       <td className="px-4 py-3">
                         {appRoles.length === 0 ? (
-                          <span className="text-text-muted text-xs italic">
+                          <span className="text-text-muted text-caption italic">
                             none
                           </span>
                         ) : (
@@ -121,7 +121,7 @@ export default async function AdminUsersPage() {
                       <td className="px-4 py-3 text-right">
                         <Link
                           href={`/admin/users/${p.id}`}
-                          className="text-xs text-accent hover:underline underline-offset-4"
+                          className="text-caption text-accent hover:underline underline-offset-4"
                         >
                           Manage →
                         </Link>
@@ -135,7 +135,7 @@ export default async function AdminUsersPage() {
         )}
         {atRoleLimit && (
           <p
-            className="px-4 py-3 text-text-muted text-[11px] italic"
+            className="px-4 py-3 text-text-muted text-micro italic"
             data-testid="user-app-roles-limit-notice"
           >
             Showing 500 most recent role assignments — refine search to narrow.

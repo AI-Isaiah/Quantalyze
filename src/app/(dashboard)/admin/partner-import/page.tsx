@@ -95,10 +95,10 @@ export default function PartnerImportPage() {
 
       <form onSubmit={handleSubmit} className="space-y-6">
         <Card>
-          <h2 className="text-base font-semibold text-text-primary mb-3">
+          <h2 className="text-body font-semibold text-text-primary mb-3">
             Partner tag
           </h2>
-          <p className="text-xs text-text-muted mb-3">
+          <p className="text-caption text-text-muted mb-3">
             Lowercase, digits, and hyphens only. We auto-slugify as you type.
           </p>
           <Input
@@ -109,7 +109,7 @@ export default function PartnerImportPage() {
             aria-label="Partner tag"
           />
           {slug !== partnerTag && (
-            <p className="mt-2 text-xs text-text-muted">
+            <p className="mt-2 text-caption text-text-muted">
               Will be saved as:{" "}
               <span className="font-mono text-text-primary">{slug || "—"}</span>
             </p>
@@ -119,10 +119,10 @@ export default function PartnerImportPage() {
         <Card>
           <div className="flex items-start justify-between mb-3 gap-4">
             <div>
-              <h2 className="text-base font-semibold text-text-primary">
+              <h2 className="text-body font-semibold text-text-primary">
                 Managers CSV
               </h2>
-              <p className="text-xs text-text-muted mt-1">
+              <p className="text-caption text-text-muted mt-1">
                 Columns: <span className="font-mono">manager_email</span>,{" "}
                 <span className="font-mono">strategy_name</span>,{" "}
                 <span className="font-mono">disclosure_tier</span> (institutional | exploratory)
@@ -142,7 +142,7 @@ export default function PartnerImportPage() {
             value={managersCsv}
             onChange={(e) => setManagersCsv(e.target.value)}
             rows={6}
-            className="font-mono text-xs"
+            className="font-mono text-caption"
             disabled={loading}
             aria-label="Managers CSV"
           />
@@ -151,10 +151,10 @@ export default function PartnerImportPage() {
         <Card>
           <div className="flex items-start justify-between mb-3 gap-4">
             <div>
-              <h2 className="text-base font-semibold text-text-primary">
+              <h2 className="text-body font-semibold text-text-primary">
                 Allocators CSV
               </h2>
-              <p className="text-xs text-text-muted mt-1">
+              <p className="text-caption text-text-muted mt-1">
                 Columns: <span className="font-mono">allocator_email</span>,{" "}
                 <span className="font-mono">mandate_archetype</span>,{" "}
                 <span className="font-mono">ticket_size_usd</span>
@@ -174,7 +174,7 @@ export default function PartnerImportPage() {
             value={allocatorsCsv}
             onChange={(e) => setAllocatorsCsv(e.target.value)}
             rows={6}
-            className="font-mono text-xs"
+            className="font-mono text-caption"
             disabled={loading}
             aria-label="Allocators CSV"
           />
@@ -182,7 +182,7 @@ export default function PartnerImportPage() {
 
         {error && (
           <Card className="border-negative/40">
-            <p className="text-sm text-negative">{error}</p>
+            <p className="text-small text-negative">{error}</p>
           </Card>
         )}
 
@@ -215,7 +215,7 @@ export default function PartnerImportPage() {
           <Button type="submit" disabled={loading || !slug}>
             {loading ? "Importing…" : "Import pilot"}
           </Button>
-          <p className="text-xs text-text-muted">
+          <p className="text-caption text-text-muted">
             Target: <span className="font-mono">/admin/partner-pilot/{slug || "—"}</span>
           </p>
         </div>

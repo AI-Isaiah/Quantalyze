@@ -101,14 +101,14 @@ export default async function AdminDeletionRequestsPage() {
 
       <Card padding="sm">
         {rows.length === 0 ? (
-          <p className="p-6 text-center text-text-muted text-sm">
+          <p className="p-6 text-center text-text-muted text-small">
             No deletion requests yet.
           </p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-small">
               <thead>
-                <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-muted">
+                <tr className="border-b border-border text-left text-micro uppercase tracking-wider text-text-muted">
                   <th className="px-4 py-3 font-medium">Status</th>
                   <th className="px-4 py-3 font-medium">User</th>
                   <th className="px-4 py-3 font-medium">Requested</th>
@@ -135,20 +135,20 @@ export default async function AdminDeletionRequestsPage() {
                           {profile?.display_name ?? "—"}
                         </div>
                         {profile?.email && (
-                          <div className="text-text-muted text-xs font-mono">
+                          <div className="text-text-muted text-caption font-mono">
                             {profile.email}
                           </div>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-text-secondary text-xs">
+                      <td className="px-4 py-3 text-text-secondary text-caption">
                         {new Date(r.requested_at).toLocaleString()}
                       </td>
-                      <td className="px-4 py-3 text-text-secondary text-xs">
+                      <td className="px-4 py-3 text-text-secondary text-caption">
                         {terminalAt
                           ? new Date(terminalAt).toLocaleString()
                           : "—"}
                       </td>
-                      <td className="px-4 py-3 text-text-secondary text-xs max-w-[240px]">
+                      <td className="px-4 py-3 text-text-secondary text-caption max-w-[240px]">
                         {r.rejection_reason || r.notes || "—"}
                       </td>
                       <td className="px-4 py-3 text-right">

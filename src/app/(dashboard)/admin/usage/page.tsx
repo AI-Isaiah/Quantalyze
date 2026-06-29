@@ -27,7 +27,7 @@ export const dynamic = "force-dynamic"; // PostHog data must not be ISR'd
 
 function NoticeBox({ message }: { message: string }) {
   return (
-    <div className="rounded-md border border-border/60 bg-surface px-4 py-3 text-sm text-text-secondary">
+    <div className="rounded-md border border-border/60 bg-surface px-4 py-3 text-small text-text-secondary">
       {message}
     </div>
   );
@@ -84,34 +84,34 @@ export default async function AdminUsagePage() {
 
       {/* ───── Section 1: Daily funnel ───── */}
       <section className="mb-12">
-        <h2 className="font-display text-2xl text-text-primary mb-3">
+        <h2 className="font-display text-h3 text-text-primary mb-3">
           Daily funnel (30d)
         </h2>
         {funnel.error ? (
           <NoticeBox message={funnel.error} />
         ) : funnel.rows.length === 0 ? (
-          <p className="text-sm text-text-muted">No usage events yet.</p>
+          <p className="text-small text-text-muted">No usage events yet.</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-small">
               <thead>
                 <tr className="border-b border-border text-left">
-                  <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider">
+                  <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider">
                     Day
                   </th>
-                  <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider text-right">
+                  <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider text-right">
                     session_start
                   </th>
-                  <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider text-right">
+                  <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider text-right">
                     widget_viewed
                   </th>
-                  <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider text-right">
+                  <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider text-right">
                     intro_submitted
                   </th>
-                  <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider text-right">
+                  <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider text-right">
                     bridge_click
                   </th>
-                  <th className="py-2 font-medium text-text-muted text-xs uppercase tracking-wider text-right">
+                  <th className="py-2 font-medium text-text-muted text-caption uppercase tracking-wider text-right">
                     alert_acknowledged
                   </th>
                 </tr>
@@ -119,7 +119,7 @@ export default async function AdminUsagePage() {
               <tbody>
                 {funnel.rows.map((row) => (
                   <tr key={row.day} className="border-b border-border/60">
-                    <td className="py-2 pr-4 font-metric text-xs tabular-nums text-text-secondary whitespace-nowrap">
+                    <td className="py-2 pr-4 font-metric text-caption tabular-nums text-text-secondary whitespace-nowrap">
                       {row.day}
                     </td>
                     <td className="py-2 pr-4 text-text-primary font-metric tabular-nums text-right">
@@ -147,25 +147,25 @@ export default async function AdminUsagePage() {
 
       {/* ───── Section 2: Widget views ───── */}
       <section className="mb-12">
-        <h2 className="font-display text-2xl text-text-primary mb-3">
+        <h2 className="font-display text-h3 text-text-primary mb-3">
           Widget views (30d)
         </h2>
         {widgets.error ? (
           <NoticeBox message={widgets.error} />
         ) : widgets.rows.length === 0 ? (
-          <p className="text-sm text-text-muted">No widget_viewed events yet.</p>
+          <p className="text-small text-text-muted">No widget_viewed events yet.</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-small">
               <thead>
                 <tr className="border-b border-border text-left">
-                  <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider">
+                  <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider">
                     Widget id
                   </th>
-                  <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider text-right">
+                  <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider text-right">
                     Views
                   </th>
-                  <th className="py-2 font-medium text-text-muted text-xs uppercase tracking-wider text-right">
+                  <th className="py-2 font-medium text-text-muted text-caption uppercase tracking-wider text-right">
                     Unique allocators
                   </th>
                 </tr>
@@ -190,30 +190,30 @@ export default async function AdminUsagePage() {
 
       {/* ───── Section 3: Session heatmap ───── */}
       <section>
-        <h2 className="font-display text-2xl text-text-primary mb-3">
+        <h2 className="font-display text-h3 text-text-primary mb-3">
           Session heatmap (14d)
         </h2>
         {heatmap.error ? (
           <NoticeBox message={heatmap.error} />
         ) : heatmapRows.length === 0 ? (
-          <p className="text-sm text-text-muted">No session_start events yet.</p>
+          <p className="text-small text-text-muted">No session_start events yet.</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-small">
               <thead>
                 <tr className="border-b border-border text-left">
-                  <th className="py-2 pr-4 font-medium text-text-muted text-xs uppercase tracking-wider">
+                  <th className="py-2 pr-4 font-medium text-text-muted text-caption uppercase tracking-wider">
                     Allocator
                   </th>
                   {heatmap.days.map((d) => (
                     <th
                       key={d}
-                      className="py-2 pr-2 font-medium text-text-muted text-[10px] uppercase tracking-wider text-right whitespace-nowrap"
+                      className="py-2 pr-2 font-medium text-text-muted text-micro uppercase tracking-wider text-right whitespace-nowrap"
                     >
                       {d.slice(5)}
                     </th>
                   ))}
-                  <th className="py-2 font-medium text-text-muted text-xs uppercase tracking-wider text-right">
+                  <th className="py-2 font-medium text-text-muted text-caption uppercase tracking-wider text-right">
                     Total
                   </th>
                 </tr>
@@ -221,13 +221,13 @@ export default async function AdminUsagePage() {
               <tbody>
                 {heatmapRows.map((row) => (
                   <tr key={row.email} className="border-b border-border/60">
-                    <td className="py-2 pr-4 text-text-primary text-xs whitespace-nowrap">
+                    <td className="py-2 pr-4 text-text-primary text-caption whitespace-nowrap">
                       {row.email}
                     </td>
                     {heatmap.days.map((d) => (
                       <td
                         key={d}
-                        className="py-2 pr-2 font-metric tabular-nums text-text-secondary text-right text-xs"
+                        className="py-2 pr-2 font-metric tabular-nums text-text-secondary text-right text-caption"
                       >
                         {row.by_day[d] ?? 0}
                       </td>
