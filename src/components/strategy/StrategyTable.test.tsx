@@ -595,3 +595,130 @@ describe("StrategyTable — prefs mirror per scope (F9 M-0475/M-0476)", () => {
     });
   });
 });
+
+// --- 50-06 STATE-03/04 dense reshape ----------------------------------------
+//
+// Pins the four reshape behaviors added in Plan 50-06: (a) the sticky header +
+// sticky first column class contract; (b) HONEST priority-collapse — the per-row
+// <details> relocates the SAME real value (and a genuinely-null source stays the
+// honest-null em-dash, never a fabricated 0); (c) the table-scoped density
+// control flips data-density on the TABLE ROOT (not <body>), wrapped in the
+// reduced-motion-safe View-Transition helper; (d) the WatchlistTabs role=tabpanel
+// / aria-labelledby wiring (Plan 50-05 contract) still resolves through the
+// reshape. These are structural DOM/ARIA assertions, mirroring the file's style.
+
+describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
+  it("sticky header cells carry `sticky top-0` + an explicit z-index + opaque bg-surface", () => {
+    render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
+    const headerCells = screen.getAllByRole("columnheader");
+    // Every <th> in the sticky thead pins to the top with an opaque backing.
+    for (const th of headerCells) {
+      expect(th.className).toContain("sticky");
+      expect(th.className).toContain("top-0");
+      expect(th.className).toContain("bg-surface");
+      expect(th.className).toMatch(/\bz-\d+\b/);
+    }
+    // The Strategy (first) header is the sticky-left corner; with no star column
+    // it is the highest-ranked cell (z-30) and pins left.
+    const strategyHeader = screen.getByRole("columnheader", { name: /Strategy/ });
+    expect(strategyHeader.className).toContain("left-0");
+    expect(strategyHeader.className).toContain("z-30");
+  });
+
+  it("the sticky first DATA column stays solid bg-surface and does NOT take the translucent row hover (Pitfall 5)", () => {
+    render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
+    const nameLink = screen.getByText("Alpha Stellar");
+    const firstCell = nameLink.closest("td");
+    expect(firstCell).not.toBeNull();
+    expect(firstCell!.className).toContain("sticky");
+    expect(firstCell!.className).toContain("left-0");
+    expect(firstCell!.className).toContain("bg-surface");
+    // The translucent hover lives on the OTHER cells (group-hover:bg-page/50);
+    // the sticky first column must not carry it or scrolled cells bleed through.
+    expect(firstCell!.className).not.toContain("group-hover:bg-page/50");
+  });
+
+  it("a collapsed-column <details> relocates the SAME real value the visible cell shows", () => {
+    const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    // Distinctive volatility so we can prove the details value === the cell value.
+    fixture.analytics.volatility = 0.3377;
+    render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
+
+    const expected = "+33.77%"; // formatPercent(0.3377)
+    // The value appears in BOTH the (CSS-collapsed) visible cell and the details
+    // disclosure — getAllByText proves the relocated value is the real one.
+    const matches = screen.getAllByText(expected);
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+
+    // And it lives inside a <details> "More" disclosure (the reachable detail).
+    const summary = screen.getByText("More");
+    const details = summary.closest("details");
+    expect(details).not.toBeNull();
+    expect(within(details as HTMLElement).getByText(expected)).toBeDefined();
+  });
+
+  it("a NULL collapsed source renders the honest-null em-dash in the details — NEVER a fabricated 0 (no-invented-data / T-50-09)", () => {
+    const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    // Genuinely-absent volatility AND aum: the honest path must surface "—".
+    fixture.analytics.volatility = null as unknown as number;
+    fixture.aum = null as unknown as number;
+    render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
+
+    const summary = screen.getByText("More");
+    const details = summary.closest("details") as HTMLElement;
+    // The Volatility row in the details shows the honest-null em-dash…
+    const volDt = within(details).getByText("Volatility");
+    const volDd = volDt.nextElementSibling as HTMLElement;
+    expect(volDd.textContent).toBe("—");
+    // …and crucially NOT a fabricated zero / demo value.
+    expect(volDd.textContent).not.toBe("0");
+    expect(volDd.textContent).not.toBe("0.00%");
+    expect(volDd.textContent).not.toMatch(/\$?0/);
+
+    const aumDt = within(details).getByText("AUM");
+    const aumDd = aumDt.nextElementSibling as HTMLElement;
+    expect(aumDd.textContent).toBe("—");
+    expect(aumDd.textContent).not.toMatch(/\$0/);
+  });
+
+  it("the density control has accessible name 'Table density' and toggling sets data-density on the TABLE ROOT (not <body>)", async () => {
+    const user = userEvent.setup();
+    render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
+
+    const group = screen.getByRole("group", { name: "Table density" });
+    expect(group).toBeDefined();
+
+    // The data-density carrier is the [data-strategy-table] root, NOT <body>.
+    const tableRoot = document.querySelector("[data-strategy-table]") as HTMLElement;
+    expect(tableRoot).not.toBeNull();
+    // Comfortable (default) leaves data-density unset — inherits :root 44px.
+    expect(tableRoot.getAttribute("data-density")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Compact" }));
+    expect(tableRoot.getAttribute("data-density")).toBe("tight");
+    // The global <body> density (allocator dashboard knob) is untouched.
+    expect(document.body.getAttribute("data-density")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Comfortable" }));
+    expect(tableRoot.getAttribute("data-density")).toBeNull();
+  });
+
+  it("the WatchlistTabs role=tabpanel / aria-labelledby wiring still resolves through the reshape (Plan 50-05 contract)", () => {
+    render(
+      <StrategyTable
+        strategies={STRATEGIES}
+        categorySlug="crypto-sma"
+        userId="u-1"
+        initialWatchedSet={new Set()}
+      />,
+    );
+    const panel = screen.getByRole("tabpanel");
+    const labelledBy = panel.getAttribute("aria-labelledby");
+    expect(labelledBy).toBeTruthy();
+    // The id the panel points at must resolve to a real tab element (the "All"
+    // scope tab by default) — proves the trigger↔panel link is intact.
+    const labelEl = document.getElementById(labelledBy!);
+    expect(labelEl).not.toBeNull();
+    expect(labelEl!.getAttribute("role")).toBe("tab");
+  });
+});
