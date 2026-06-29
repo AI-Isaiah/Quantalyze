@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { cn } from "@/lib/utils";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { ProfileForm } from "./ProfileForm";
 import { DeleteAccountButton } from "./DeleteAccountButton";
 import { OrganizationTab } from "@/components/org/OrganizationTab";
@@ -83,48 +83,83 @@ export function ProfileTabs({
   const tabs = ALL_TABS.filter((t) => !("allocatorOnly" in t && t.allocatorOnly) || isAllocator);
 
   return (
-    <div>
-      <div className="flex gap-1 border-b border-border mb-6">
+    <Tabs
+      value={activeTab}
+      onValueChange={(v) => setActiveTab(v as TabKey)}
+      // 50-REVIEW (red-team): manual activation — selection commits only on
+      // Enter/Space/click, not on focus. ProfileTabs' onValueChange does a
+      // router.replace() AND its panels are heavy (the Exchanges panel mounts
+      // AllocatorExchangeManager, which spins up a Supabase client + fetch on
+      // mount). With Radix's default "automatic" mode, arrow-keying through the
+      // strip would fire a navigation + mount the focused panel on EVERY
+      // keystroke. Manual keeps full keyboard focus nav while committing only on
+      // activation — the behavior closest to the pre-port click/Enter original.
+      // (AdminTabs/WatchlistTabs keep automatic: their activation is cheap local
+      // state with no router or fetch side effect.)
+      activationMode="manual"
+    >
+      <TabsList variant="underline" className="mb-6">
         {tabs.map((tab) => (
-          <button
+          <TabsTrigger
             key={tab.key}
-            onClick={() => setActiveTab(tab.key)}
-            className={cn(
-              "px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px",
-              activeTab === tab.key
-                ? "border-accent text-text-primary"
-                : "border-transparent text-text-muted hover:text-text-secondary",
-            )}
+            value={tab.key}
+            variant="underline"
+            // ProfileTabs' exact active treatment differs from the underline
+            // default: active text is text-text-primary (not text-accent),
+            // inactive hover is text-text-secondary (not text-text-primary), and
+            // the strip uses py-2.5. Override those three via the className hook
+            // (data-[state=active] wins over the base via cascade order) to keep
+            // the 1:1 port byte-faithful (50-UI-SPEC consumer mapping).
+            className="py-2.5 hover:text-text-secondary data-[state=active]:text-text-primary"
           >
             {tab.label}
-          </button>
+          </TabsTrigger>
         ))}
-      </div>
+      </TabsList>
 
-      {activeTab === "personal" && <ProfileForm profile={profile} />}
-      {activeTab === "mandate" && isAllocator && (
-        <MandateForm initial={initialPreferences} />
+      {/* Each body lives in a Radix TabsContent (role="tabpanel") so every
+          TabsTrigger's aria-controls resolves to a real panel and the active
+          panel is labelled by its tab (WCAG 4.1.2 / 1.3.1). Radix renders only
+          the active panel. The allocator-only panels are gated on `isAllocator`
+          to stay symmetric with their triggers (a trigger without a panel —
+          or a panel without a trigger — would re-introduce the dangling
+          aria-controls). The exchanges panel renders whenever the exchanges
+          trigger does (isAllocator) and is null-safe inside, so the trigger
+          never points at a missing panel when `exchanges` is absent. */}
+      <TabsContent value="personal">
+        <ProfileForm profile={profile} />
+      </TabsContent>
+      {isAllocator && (
+        <TabsContent value="mandate">
+          <MandateForm initial={initialPreferences} />
+        </TabsContent>
       )}
-      {activeTab === "exchanges" && isAllocator && exchanges && (
-        <ExchangesTabContent
-          initialKeys={exchanges.initialKeys}
-          activePortfolio={exchanges.activePortfolio}
-        />
+      {isAllocator && (
+        <TabsContent value="exchanges">
+          {exchanges && (
+            <ExchangesTabContent
+              initialKeys={exchanges.initialKeys}
+              activePortfolio={exchanges.activePortfolio}
+            />
+          )}
+        </TabsContent>
       )}
-      {activeTab === "security" && isAllocator && (
-        <div>
+      {isAllocator && (
+        <TabsContent value="security">
           {/* Phase 11 / S6 / D-05 — Allocator self-serve audit-log CSV.
               Future security subsections (key encryption details, MFA, etc.)
               will mount alongside the AuditLogSubsection inside this body. */}
           <AuditLogSubsection />
-        </div>
+        </TabsContent>
       )}
-      {activeTab === "organizations" && <OrganizationTab />}
-      {activeTab === "account" && (
+      <TabsContent value="organizations">
+        <OrganizationTab />
+      </TabsContent>
+      <TabsContent value="account">
         <div className="max-w-xl">
           <DeleteAccountButton />
         </div>
-      )}
-    </div>
+      </TabsContent>
+    </Tabs>
   );
 }

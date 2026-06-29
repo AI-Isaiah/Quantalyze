@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 
 /** Default scroll affordance copy when the caller does not supply one. */
 const DEFAULT_HINT =
@@ -31,14 +31,36 @@ export function ResponsiveTable({
   children,
   hint,
   label,
+  className,
+  scrollRef,
 }: {
   children: ReactNode;
   hint?: string;
   label?: string;
+  /**
+   * Extra classes merged onto the scroll region. Phase 50 / STATE-03 uses this
+   * to make the region the `@container` containment context for the
+   * StrategyTable priority-collapse, so the single scroll box is also the
+   * query container (no second wrapper, no double scroll).
+   */
+  className?: string;
+  /**
+   * Optional ref to the underlying scroll `<div>`. STATE-03's visible scroll
+   * cue measures `scrollWidth > clientWidth` on this exact box (the one that
+   * actually scrolls), so the cue and the region aria-label describe the SAME
+   * affordance. Additive — existing callers ignore it.
+   */
+  scrollRef?: Ref<HTMLDivElement>;
 }) {
   const accessibleName = hint ?? (label ? `${label}: ${DEFAULT_HINT}` : DEFAULT_HINT);
   return (
-    <div className="overflow-x-auto" role="region" aria-label={accessibleName} tabIndex={0}>
+    <div
+      ref={scrollRef}
+      className={["overflow-x-auto", className].filter(Boolean).join(" ")}
+      role="region"
+      aria-label={accessibleName}
+      tabIndex={0}
+    >
       {children}
     </div>
   );

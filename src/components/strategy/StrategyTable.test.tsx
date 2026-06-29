@@ -19,6 +19,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { StrategyTable } from "./StrategyTable";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
@@ -195,7 +196,14 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     ).toHaveLength(0);
   });
 
-  it("Case 5: scope='watchlist' with empty initialWatchedSet renders <EmptyWatchlist> and no table", () => {
+  // 50-05 port note: WatchlistTabs now routes through the Radix-backed Tabs
+  // primitive, whose Trigger activates on the real pointer sequence
+  // `@testing-library/user-event` dispatches (bare `fireEvent.click` does not flip
+  // the controlled scope). The scope-switch clicks below therefore use
+  // `await user.click(...)`; the test INTENT (switching to My Watchlist filters
+  // the table) is unchanged.
+  it("Case 5: scope='watchlist' with empty initialWatchedSet renders <EmptyWatchlist> and no table", async () => {
+    const user = userEvent.setup();
     render(
       <StrategyTable
         strategies={STRATEGIES}
@@ -205,7 +213,7 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
       />,
     );
     // Switch to My Watchlist scope.
-    fireEvent.click(screen.getByRole("tab", { name: /My Watchlist/ }));
+    await user.click(screen.getByRole("tab", { name: /My Watchlist/ }));
 
     // EmptyWatchlist heading + body are now visible and the table itself
     // is not rendered.
@@ -220,7 +228,8 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     expect(screen.queryByText("Gamma Pioneer")).toBeNull();
   });
 
-  it("Case 6: scope='watchlist' with initialWatchedSet of 2 strategies renders only those 2", () => {
+  it("Case 6: scope='watchlist' with initialWatchedSet of 2 strategies renders only those 2", async () => {
+    const user = userEvent.setup();
     render(
       <StrategyTable
         strategies={STRATEGIES}
@@ -229,7 +238,7 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
         initialWatchedSet={new Set([STRATEGY_ID_A, STRATEGY_ID_B])}
       />,
     );
-    fireEvent.click(screen.getByRole("tab", { name: /My Watchlist/ }));
+    await user.click(screen.getByRole("tab", { name: /My Watchlist/ }));
 
     // Table is still rendered (watchedSet is non-empty); only the two
     // starred strategies appear.
@@ -584,5 +593,147 @@ describe("StrategyTable — prefs mirror per scope (F9 M-0475/M-0476)", () => {
     await waitFor(() => {
       expect(document.querySelector("table")).toBeNull();
     });
+  });
+});
+
+// --- 50-06 STATE-03/04 dense reshape ----------------------------------------
+//
+// Pins the four reshape behaviors added in Plan 50-06: (a) the sticky header +
+// sticky first column class contract; (b) HONEST priority-collapse — the per-row
+// <details> relocates the SAME real value (and a genuinely-null source stays the
+// honest-null em-dash, never a fabricated 0); (c) the table-scoped density
+// control flips data-density on the TABLE ROOT (not <body>), wrapped in the
+// reduced-motion-safe View-Transition helper; (d) the WatchlistTabs role=tabpanel
+// / aria-labelledby wiring (Plan 50-05 contract) still resolves through the
+// reshape. These are structural DOM/ARIA assertions, mirroring the file's style.
+
+describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
+  it("sticky header cells carry `sticky top-0` + an explicit z-index + opaque bg-surface", () => {
+    render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
+    const headerCells = screen.getAllByRole("columnheader");
+    // Every <th> in the sticky thead pins to the top with an opaque backing.
+    for (const th of headerCells) {
+      expect(th.className).toContain("sticky");
+      expect(th.className).toContain("top-0");
+      expect(th.className).toContain("bg-surface");
+      expect(th.className).toMatch(/\bz-\d+\b/);
+    }
+    // The Strategy (first) header is the sticky-left corner; with no star column
+    // it is the highest-ranked cell (z-30) and pins left.
+    const strategyHeader = screen.getByRole("columnheader", { name: /Strategy/ });
+    expect(strategyHeader.className).toContain("left-0");
+    expect(strategyHeader.className).toContain("z-30");
+  });
+
+  it("50-REVIEW — sortable headers are keyboard-operable <button>s with aria-sort (WCAG 2.1.1 / 4.1.2)", () => {
+    render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
+    const strategyHeader = screen.getByRole("columnheader", { name: /Strategy/ });
+    // Pre-fix this <th> was click-only (no inner control, no aria-sort): not
+    // keyboard-operable and the sort state was conveyed only by a visual ↑/↓
+    // glyph. The sort control must now be a real <button> (keyboard-operable)
+    // and the <th> must expose aria-sort.
+    expect(strategyHeader).toHaveAttribute("aria-sort");
+    const sortButton = within(strategyHeader).getByRole("button", { name: /Strategy/ });
+    // Activating the control (a native button — Enter/Space operable) changes
+    // the column's sort state, and aria-sort reflects it for assistive tech.
+    fireEvent.click(sortButton);
+    expect(strategyHeader.getAttribute("aria-sort")).toMatch(/ascending|descending/);
+  });
+
+  it("the sticky first DATA column stays solid bg-surface and does NOT take the translucent row hover (Pitfall 5)", () => {
+    render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
+    const nameLink = screen.getByText("Alpha Stellar");
+    const firstCell = nameLink.closest("td");
+    expect(firstCell).not.toBeNull();
+    expect(firstCell!.className).toContain("sticky");
+    expect(firstCell!.className).toContain("left-0");
+    expect(firstCell!.className).toContain("bg-surface");
+    // The translucent hover lives on the OTHER cells (group-hover:bg-page/50);
+    // the sticky first column must not carry it or scrolled cells bleed through.
+    expect(firstCell!.className).not.toContain("group-hover:bg-page/50");
+  });
+
+  it("a collapsed-column <details> relocates the SAME real value the visible cell shows", () => {
+    const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    // Distinctive volatility so we can prove the details value === the cell value.
+    fixture.analytics.volatility = 0.3377;
+    render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
+
+    const expected = "+33.77%"; // formatPercent(0.3377)
+    // The value appears in BOTH the (CSS-collapsed) visible cell and the details
+    // disclosure — getAllByText proves the relocated value is the real one.
+    const matches = screen.getAllByText(expected);
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+
+    // And it lives inside a <details> "More" disclosure (the reachable detail).
+    const summary = screen.getByText("More");
+    const details = summary.closest("details");
+    expect(details).not.toBeNull();
+    expect(within(details as HTMLElement).getByText(expected)).toBeDefined();
+  });
+
+  it("a NULL collapsed source renders the honest-null em-dash in the details — NEVER a fabricated 0 (no-invented-data / T-50-09)", () => {
+    const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    // Genuinely-absent volatility AND aum: the honest path must surface "—".
+    fixture.analytics.volatility = null as unknown as number;
+    fixture.aum = null as unknown as number;
+    render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
+
+    const summary = screen.getByText("More");
+    const details = summary.closest("details") as HTMLElement;
+    // The Volatility row in the details shows the honest-null em-dash…
+    const volDt = within(details).getByText("Volatility");
+    const volDd = volDt.nextElementSibling as HTMLElement;
+    expect(volDd.textContent).toBe("—");
+    // …and crucially NOT a fabricated zero / demo value.
+    expect(volDd.textContent).not.toBe("0");
+    expect(volDd.textContent).not.toBe("0.00%");
+    expect(volDd.textContent).not.toMatch(/\$?0/);
+
+    const aumDt = within(details).getByText("AUM");
+    const aumDd = aumDt.nextElementSibling as HTMLElement;
+    expect(aumDd.textContent).toBe("—");
+    expect(aumDd.textContent).not.toMatch(/\$0/);
+  });
+
+  it("the density control has accessible name 'Table density' and toggling sets data-density on the TABLE ROOT (not <body>)", async () => {
+    const user = userEvent.setup();
+    render(<StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />);
+
+    const group = screen.getByRole("group", { name: "Table density" });
+    expect(group).toBeDefined();
+
+    // The data-density carrier is the [data-strategy-table] root, NOT <body>.
+    const tableRoot = document.querySelector("[data-strategy-table]") as HTMLElement;
+    expect(tableRoot).not.toBeNull();
+    // Comfortable (default) leaves data-density unset — inherits :root 44px.
+    expect(tableRoot.getAttribute("data-density")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Compact" }));
+    expect(tableRoot.getAttribute("data-density")).toBe("tight");
+    // The global <body> density (allocator dashboard knob) is untouched.
+    expect(document.body.getAttribute("data-density")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Comfortable" }));
+    expect(tableRoot.getAttribute("data-density")).toBeNull();
+  });
+
+  it("the WatchlistTabs role=tabpanel / aria-labelledby wiring still resolves through the reshape (Plan 50-05 contract)", () => {
+    render(
+      <StrategyTable
+        strategies={STRATEGIES}
+        categorySlug="crypto-sma"
+        userId="u-1"
+        initialWatchedSet={new Set()}
+      />,
+    );
+    const panel = screen.getByRole("tabpanel");
+    const labelledBy = panel.getAttribute("aria-labelledby");
+    expect(labelledBy).toBeTruthy();
+    // The id the panel points at must resolve to a real tab element (the "All"
+    // scope tab by default) — proves the trigger↔panel link is intact.
+    const labelEl = document.getElementById(labelledBy!);
+    expect(labelEl).not.toBeNull();
+    expect(labelEl!.getAttribute("role")).toBe("tab");
   });
 });

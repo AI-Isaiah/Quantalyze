@@ -154,6 +154,18 @@
     animation: none;
     opacity: 1;
   }
+
+  /* Phase 50 / STATE-04 — View Transitions collapse to an instant swap under
+     reduced motion. The native `withViewTransition` helper
+     (src/lib/view-transition.ts) already short-circuits to a synchronous
+     update() when this media query matches, so it never even snapshots; this
+     rule is the belt-and-suspenders pass for any ::view-transition pseudo that
+     still slips through (e.g. a CSS `view-transition-name` set without the
+     helper). The `(*)` selector zeros every named/auto VT group. */
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0s !important;
+  }
 }
 
 body {
@@ -178,6 +190,25 @@ body[data-density="tight"] {
   font-size: 13px;
 }
 body[data-density="loose"] {
+  --row-h: 52px;
+  --density-pad: 20px;
+}
+
+/* Phase 50 / STATE-04 — TABLE-SCOPED density. The StrategyTable on the public
+   discovery surface (Wave 2 / Plan 50-06) carries its own `data-density` on a
+   `[data-strategy-table]` root, so its density control flips only that table's
+   --row-h / --density-pad and NEVER the global body[data-density] that drives
+   the allocator dashboard (RESEARCH Q2). Reuses the existing token names and
+   the same tight step (36px / 12px) as body[data-density="tight"], but WITHOUT
+   the global `font-size: 13px` — that font shrink must not leak into a public
+   table. `loose` mirrors the global loose step for symmetry. The base
+   [data-strategy-table] inherits the :root 44px/16px default when no density
+   attribute is set. */
+[data-strategy-table][data-density="tight"] {
+  --row-h: 36px;
+  --density-pad: 12px;
+}
+[data-strategy-table][data-density="loose"] {
   --row-h: 52px;
   --density-pad: 20px;
 }

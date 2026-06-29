@@ -23,13 +23,17 @@ import {
   afterEach,
 } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { ProfileTabs } from "./ProfileTabs";
 import type { Profile } from "@/lib/types";
 
 // next/navigation hooks are not available in jsdom — supply minimal stubs.
+// routerReplace is a STABLE hoisted spy (a fresh vi.fn() per useRouter() call
+// would be unassertable) so the manual-activation test can assert nav timing.
+const { routerReplace } = vi.hoisted(() => ({ routerReplace: vi.fn() }));
 const searchParamsState = { tab: null as string | null };
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ replace: vi.fn(), push: vi.fn(), refresh: vi.fn() }),
+  useRouter: () => ({ replace: routerReplace, push: vi.fn(), refresh: vi.fn() }),
   usePathname: () => "/profile",
   useSearchParams: () => ({
     get: (k: string) => (k === "tab" ? searchParamsState.tab : null),
@@ -64,16 +68,23 @@ const PROFILE_FIXTURE: Profile = {
 } as unknown as Profile;
 
 describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
+  // 50-RESEARCH Pitfall 2 — the consolidated ProfileTabs renders triggers via
+  // the Radix-backed Tabs primitive, whose Trigger is role="tab" (the
+  // hand-rolled version used bare <button>, implicit role=button). These tab
+  // queries are mechanically ported getByRole("button") -> getByRole("tab"); the
+  // behavioral contract (allocator-only Security tab visibility, tab order, URL
+  // gating) is unchanged. Note: the in-panel "Download audit log CSV" control in
+  // Test 3 is a real <button> and correctly stays role="button".
   it("Test 1 — allocator sees the Security tab", () => {
     render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
     expect(
-      screen.getByRole("button", { name: "Security" }),
+      screen.getByRole("tab", { name: "Security" }),
     ).toBeInTheDocument();
   });
 
   it("Test 2 — non-allocator does NOT see the Security tab", () => {
     render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={false} />);
-    expect(screen.queryByRole("button", { name: "Security" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Security" })).toBeNull();
   });
 
   it("Test 3 — when ?tab=security and user is allocator, AuditLogSubsection renders", () => {
@@ -101,7 +112,7 @@ describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
 
   it("Test 5 — Security tab appears AFTER Exchanges and BEFORE Organizations in tab order", () => {
     render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
-    const buttons = screen.getAllByRole("button").map((b) => b.textContent);
+    const buttons = screen.getAllByRole("tab").map((b) => b.textContent);
     const exchangesIdx = buttons.indexOf("Exchanges");
     const securityIdx = buttons.indexOf("Security");
     const organizationsIdx = buttons.indexOf("Organizations");
@@ -125,7 +136,7 @@ describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
       screen.queryByLabelText("Typical ticket size (USD)"),
     ).toBeNull();
     // The Mandate tab button itself must not even render for non-allocators.
-    expect(screen.queryByRole("button", { name: "Mandate" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Mandate" })).toBeNull();
   });
 
   it("M-0393 — allocator with ?tab=mandate DOES render MandateForm", () => {
@@ -135,6 +146,54 @@ describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
     expect(
       screen.getByLabelText("Typical ticket size (USD)"),
     ).toBeInTheDocument();
+  });
+
+  // 50-REVIEW (red-team) — ProfileTabs uses activationMode="manual": arrow-key
+  // navigation moves focus but must NOT commit the tab (its onValueChange does a
+  // router.replace() and the Exchanges panel mounts a Supabase-backed component).
+  // Selection commits only on Enter/Space/click. Pins that arrow-focus is
+  // side-effect-free and activation still works.
+  it("50-REVIEW — manual activation: arrow-focus does not navigate; Enter commits", async () => {
+    const user = userEvent.setup();
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+    screen.getByRole("tab", { name: "Personal Info" }).focus();
+    routerReplace.mockClear();
+
+    // Arrow to the next tab — focus moves, but manual mode must NOT commit.
+    await user.keyboard("{ArrowRight}");
+    expect(routerReplace).not.toHaveBeenCalled();
+    // The newly-focused tab is still NOT the selected one.
+    expect(screen.getByRole("tab", { selected: true })).toHaveTextContent(
+      "Personal Info",
+    );
+
+    // Activating with Enter commits the focused tab → exactly one navigation.
+    await user.keyboard("{Enter}");
+    expect(routerReplace).toHaveBeenCalledTimes(1);
+  });
+
+  // 50-REVIEW (a11y BLOCKER) — every TabsTrigger must control a real
+  // role="tabpanel". The first port rendered the bodies as bare conditionals
+  // OUTSIDE <TabsContent>, so Radix's Trigger emitted aria-controls at panel
+  // ids that never existed in the DOM (6 dangling aria-controls, 0 tabpanels) —
+  // a NEW WCAG 4.1.2 / 1.3.1 regression vs the pre-port hand-rolled <button>s.
+  // This pins the trigger<->panel round-trip so a future un-wrapping fails loud.
+  it("50-REVIEW — active tab controls a real tabpanel (no dangling aria-controls)", () => {
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+
+    // The default active tab is Personal Info.
+    const activeTab = screen.getByRole("tab", { selected: true });
+    expect(activeTab).toHaveTextContent("Personal Info");
+
+    // Radix renders exactly the active panel, and it is a real tabpanel.
+    const panel = screen.getByRole("tabpanel");
+    expect(panel).toBeInTheDocument();
+
+    // Round-trip the WAI-ARIA wiring: the active trigger's aria-controls
+    // resolves to the panel, and the panel's aria-labelledby resolves to the
+    // active trigger. A body rendered outside <TabsContent> breaks both.
+    expect(activeTab).toHaveAttribute("aria-controls", panel.id);
+    expect(panel).toHaveAttribute("aria-labelledby", activeTab.id);
   });
 
   it("Phase 11 IN-06 — activeTab derives per-render from searchParams (back/forward parity)", () => {

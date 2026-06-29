@@ -56,6 +56,33 @@ class IntersectionObserverStub {
 (globalThis as { IntersectionObserver?: typeof IntersectionObserver }).IntersectionObserver =
   IntersectionObserverStub as unknown as typeof IntersectionObserver;
 
+// jsdom does not implement the pointer-capture API or `scrollIntoView`, which
+// `@radix-ui/react-tabs` (the Phase-50 Tabs primitive) touches when a trigger is
+// activated via pointer/keyboard — Radix calls `hasPointerCapture` on pointerdown
+// and `scrollIntoView` when moving the active trigger into view. Without these,
+// `@testing-library/user-event` (which dispatches real pointer + keyboard events,
+// unlike bare `fireEvent`) throws "not a function" the moment it drives a Radix
+// tab. Stub them as additive no-ops so every component test that mounts a Radix
+// widget can be driven by user-event. These are universally safe no-ops for the
+// rest of the suite (nothing asserts on their side effects).
+if (typeof Element !== "undefined") {
+  if (typeof Element.prototype.scrollIntoView !== "function") {
+    Element.prototype.scrollIntoView = function scrollIntoView() {};
+  }
+  if (typeof Element.prototype.hasPointerCapture !== "function") {
+    Element.prototype.hasPointerCapture = function hasPointerCapture() {
+      return false;
+    };
+  }
+  if (typeof Element.prototype.setPointerCapture !== "function") {
+    Element.prototype.setPointerCapture = function setPointerCapture() {};
+  }
+  if (typeof Element.prototype.releasePointerCapture !== "function") {
+    Element.prototype.releasePointerCapture =
+      function releasePointerCapture() {};
+  }
+}
+
 // jsdom does not implement matchMedia. `useMediaQuery` / `useBreakpoint` (the
 // Phase-44 SSR-safe breakpoint primitives) call `window.matchMedia(query)` in
 // their `useSyncExternalStore` getSnapshot, which throws under vitest+jsdom
