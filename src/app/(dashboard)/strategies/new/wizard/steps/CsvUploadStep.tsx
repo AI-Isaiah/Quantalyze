@@ -347,11 +347,11 @@ export function CsvUploadStep({
     <section aria-labelledby="wizard-csv-upload-heading">
       <h2
         id="wizard-csv-upload-heading"
-        className="font-sans text-2xl font-semibold text-text-primary"
+        className="font-sans text-h3 font-semibold text-text-primary"
       >
         {CSV_UPLOAD_STEP_HEADINGS.title}
       </h2>
-      <p className="mt-2 text-sm text-text-secondary">
+      <p className="mt-2 text-body text-text-secondary">
         {CSV_UPLOAD_STEP_HEADINGS.subtitle}
       </p>
 
@@ -404,7 +404,7 @@ export function CsvUploadStep({
 
         {/* Row 2 — Format selector (segmented control). */}
         <fieldset>
-          <legend className="text-xs font-medium text-text-primary">Format</legend>
+          <legend className="text-caption font-medium text-text-primary">Format</legend>
           <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-3">
             {FORMATS.map((f) => {
               const active = f.id === fmt;
@@ -421,10 +421,10 @@ export function CsvUploadStep({
                   aria-pressed={active}
                   data-testid={f.testId}
                 >
-                  <p className="text-sm font-semibold text-text-primary">
+                  <p className="text-body font-semibold text-text-primary">
                     {f.label}
                   </p>
-                  <p className="mt-1 text-[11px] text-text-muted">{f.caption}</p>
+                  <p className="mt-1 text-micro text-text-muted">{f.caption}</p>
                 </button>
               );
             })}
@@ -446,22 +446,22 @@ export function CsvUploadStep({
           >
             {file ? (
               <>
-                <p className="text-sm text-text-primary font-medium">
+                <p className="text-body text-text-primary font-medium">
                   {CSV_UPLOAD_STEP_HEADINGS.fileLabel(
                     file.name,
                     fileSizeMb ?? "0",
                   )}
                 </p>
-                <p className="mt-1 text-xs text-text-muted">
+                <p className="mt-1 text-caption text-text-muted">
                   Drop a different file to replace, or use the button below.
                 </p>
               </>
             ) : (
               <>
-                <p className="text-sm text-text-muted mb-1">
+                <p className="text-body text-text-muted mb-1">
                   {CSV_UPLOAD_STEP_HEADINGS.dropzoneIdle}
                 </p>
-                <p className="text-xs text-text-muted">
+                <p className="text-caption text-text-muted">
                   Required columns shown above. Max 10 MB.
                 </p>
               </>
@@ -479,7 +479,7 @@ export function CsvUploadStep({
             <button
               type="button"
               onClick={handleClearFile}
-              className="mt-2 text-[11px] text-text-muted underline-offset-4 hover:text-text-primary hover:underline"
+              className="mt-2 text-micro text-text-muted underline-offset-4 hover:text-text-primary hover:underline"
             >
               Choose a different file
             </button>

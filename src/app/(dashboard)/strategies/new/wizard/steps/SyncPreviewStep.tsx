@@ -568,7 +568,7 @@ export function SyncPreviewStep({
       <section aria-labelledby="wizard-sync-heading">
         <h2
           id="wizard-sync-heading"
-          className="font-sans text-2xl font-semibold text-text-primary"
+          className="font-sans text-h3 font-semibold text-text-primary"
         >
           We could not verify this strategy
         </h2>
@@ -593,11 +593,11 @@ export function SyncPreviewStep({
       <section aria-labelledby="wizard-sync-heading">
         <h2
           id="wizard-sync-heading"
-          className="font-sans text-2xl font-semibold text-text-primary"
+          className="font-sans text-h3 font-semibold text-text-primary"
         >
           Your verified factsheet is ready
         </h2>
-        <p className="mt-2 text-sm text-text-secondary">
+        <p className="mt-2 text-body text-text-secondary">
           {snapshot.tradeCount} trade{snapshot.tradeCount === 1 ? "" : "s"} detected
           across{" "}
           {snapshot.detectedMarkets.length > 0
@@ -660,11 +660,11 @@ export function SyncPreviewStep({
     <section aria-labelledby="wizard-sync-heading">
       <h2
         id="wizard-sync-heading"
-        className="font-sans text-2xl font-semibold text-text-primary"
+        className="font-sans text-h3 font-semibold text-text-primary"
       >
         Computing your verified factsheet
       </h2>
-      <p className="mt-2 text-sm text-text-secondary">
+      <p className="mt-2 text-body text-text-secondary">
         We are fetching your trade history from the exchange and computing risk
         metrics. Usually takes 15–30 seconds.
       </p>
@@ -672,7 +672,7 @@ export function SyncPreviewStep({
       <div className="mt-6 rounded-md border border-border bg-page px-4 py-3">
         <div className="flex items-center gap-3">
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-accent" />
-          <p className="text-sm font-medium text-text-primary">
+          <p className="text-body font-medium text-text-primary">
             {computationStatus === "failed"
               ? "Sync reported a failure"
               : phase === "kicking_off"
@@ -681,20 +681,20 @@ export function SyncPreviewStep({
                   ? "Computing analytics..."
                   : "Fetching trades..."}
           </p>
-          <span className="ml-auto font-metric text-xs tabular-nums text-text-muted">
+          <span className="ml-auto font-metric text-caption tabular-nums text-text-muted">
             {elapsedSeconds}s
           </span>
         </div>
 
         {showSlowHint && !showWarn && (
-          <p className="mt-2 text-xs text-text-muted">
+          <p className="mt-2 text-caption text-text-muted">
             First sync of the day can take up to 45 seconds while the analytics
             service wakes up.
           </p>
         )}
 
         {showWarn && !showRetry && (
-          <p className="mt-2 text-xs text-amber-600">
+          <p className="mt-2 text-caption text-amber-600">
             This is taking longer than usual. Large accounts with multi-year
             history can take up to 3 minutes. Your draft is saved.
           </p>
@@ -702,7 +702,7 @@ export function SyncPreviewStep({
 
         {showRetry && (
           <div className="mt-2 space-y-2">
-            <p className="text-xs text-negative">
+            <p className="text-caption text-negative">
               Sync is taking much longer than expected. You can leave this page
               and come back — the draft is saved.
             </p>
@@ -713,7 +713,7 @@ export function SyncPreviewStep({
           <button
             type="button"
             onClick={() => setExpandLog((v) => !v)}
-            className="mt-2 text-[11px] text-text-muted underline-offset-4 hover:text-text-primary hover:underline"
+            className="mt-2 text-micro text-text-muted underline-offset-4 hover:text-text-primary hover:underline"
             data-testid="wizard-sync-expand-log"
           >
             {expandLog ? "Hide details" : "Show me what is happening"}
@@ -721,7 +721,7 @@ export function SyncPreviewStep({
         )}
 
         {expandLog && (
-          <pre className="mt-2 overflow-x-auto rounded border border-border bg-white px-3 py-2 text-[10px] text-text-muted">
+          <pre className="mt-2 overflow-x-auto rounded border border-border bg-white px-3 py-2 text-micro text-text-muted">
             strategy_id={strategyId}
             {"\n"}
             status={computationStatus ?? "unknown"}

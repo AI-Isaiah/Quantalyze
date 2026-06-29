@@ -240,11 +240,11 @@ export function CsvSubmitStep({
     <section aria-labelledby="wizard-csv-submit-heading">
       <h2
         id="wizard-csv-submit-heading"
-        className="font-sans text-2xl font-semibold text-text-primary"
+        className="font-sans text-h3 font-semibold text-text-primary"
       >
         {CSV_SUBMIT_STEP_HEADINGS.title}
       </h2>
-      <p className="mt-2 text-sm text-text-secondary">
+      <p className="mt-2 text-body text-text-secondary">
         {CSV_SUBMIT_STEP_HEADINGS.subtitle}
       </p>
 
@@ -307,10 +307,10 @@ export function CsvSubmitStep({
 function SummaryRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="grid gap-1 px-4 py-3 md:grid-cols-[180px_1fr] md:gap-6">
-      <dt className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
+      <dt className="text-micro font-medium uppercase tracking-wider text-text-muted">
         {label}
       </dt>
-      <dd className="text-xs text-text-secondary">{value}</dd>
+      <dd className="text-caption text-text-secondary">{value}</dd>
     </div>
   );
 }

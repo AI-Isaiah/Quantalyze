@@ -28,7 +28,7 @@ export function WizardIpAllowlistHint() {
       <p
         role="note"
         aria-label="Exchange IP allowlist hint"
-        className="text-sm text-text-secondary"
+        className="text-body text-text-secondary"
       >
         Locking your exchange key to an IP allowlist? Allow our egress IPs —
         see{" "}

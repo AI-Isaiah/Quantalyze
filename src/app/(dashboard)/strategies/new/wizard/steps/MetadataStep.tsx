@@ -190,11 +190,11 @@ export function MetadataStep({
     <section aria-labelledby="wizard-metadata-heading">
       <h2
         id="wizard-metadata-heading"
-        className="font-sans text-2xl font-semibold text-text-primary"
+        className="font-sans text-h3 font-semibold text-text-primary"
       >
         Tell allocators what this strategy is
       </h2>
-      <p className="mt-2 text-sm text-text-secondary">
+      <p className="mt-2 text-body text-text-secondary">
         We pre-filled what we could detect from your trades. Fill in the rest so
         allocators can evaluate the fit.
       </p>
@@ -231,7 +231,7 @@ export function MetadataStep({
           onChange={(e) => setCategoryId(e.target.value)}
         />
         {categoryLoadError && (
-          <p className="text-xs text-negative" role="alert">
+          <p className="text-caption text-negative" role="alert">
             {categoryLoadError} Refresh the page. If this persists, contact
             security@quantalyze.com.
           </p>
@@ -259,13 +259,13 @@ export function MetadataStep({
             onToggle={(item) => toggle(markets, item, setMarkets)}
           />
           {detectedMarkets.length === 0 && (
-            <p className="mt-2 text-[11px] text-text-muted">
+            <p className="mt-2 text-micro text-text-muted">
               We could not identify the markets from your trades — please select
               manually.
             </p>
           )}
           {detectedMarkets.length > 0 && (
-            <p className="mt-2 text-[11px] text-text-muted">
+            <p className="mt-2 text-micro text-text-muted">
               Detected from your trade history: {detectedMarkets.join(", ")}.
             </p>
           )}
@@ -326,7 +326,7 @@ interface InlineChipGroupProps {
 function InlineChipGroup({ label, items, selected, onToggle }: InlineChipGroupProps) {
   return (
     <div>
-      <p className="text-xs font-medium text-text-primary">{label}</p>
+      <p className="text-caption font-medium text-text-primary">{label}</p>
       <div className="mt-2 flex flex-wrap gap-2">
         {items.map((item) => {
           const active = selected.includes(item);
@@ -335,7 +335,7 @@ function InlineChipGroup({ label, items, selected, onToggle }: InlineChipGroupPr
               key={item}
               type="button"
               onClick={() => onToggle(item)}
-              className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+              className={`rounded-md border px-3 py-1.5 text-caption font-medium transition-colors ${
                 active
                   ? "border-accent bg-accent/10 text-accent"
                   : "border-border text-text-muted hover:border-accent/50"

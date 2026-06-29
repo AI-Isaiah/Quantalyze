@@ -164,6 +164,12 @@ const eslintConfig = defineConfig([
       // (auth)/** — 0 raw text-[Npx] today (PATTERNS A4: no migration needed);
       // flip to error to lock the clean surface against regression.
       "src/app/(auth)/**",
+      // Phase 53 (v1.4) — Plan 53-02 wizard surface migration. Every raw
+      // text-[Npx] / text-sm/-xs / text-2xl/-3xl across the wizard
+      // (strategies/new + wizard + steps, incl. the new ReviewStep) is now
+      // on the named --text-* tiers (form category: page-title/h3/body/
+      // caption + micro for badge/chip/counter text). Grep-verified clean.
+      "src/app/(dashboard)/strategies/new/**",
     ],
     rules: { "quantalyze/no-raw-font-px": "error" },
   },

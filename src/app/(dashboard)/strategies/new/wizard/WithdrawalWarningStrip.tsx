@@ -27,14 +27,14 @@ export function WithdrawalWarningStrip() {
   return (
     <WarningBanner className="border-l-4 border-warning bg-warning/5">
       <div role="note" aria-label="Wizard read-only key requirement">
-        <p className="text-sm">
+        <p className="text-body">
           <span className="font-semibold text-text-primary">READ ONLY</span>{" "}
           <span className="text-text-secondary">
             ONLY — keys with Trade or Withdraw permissions are refused on
             submission.
           </span>
         </p>
-        <p className="mt-1 text-xs text-text-muted">
+        <p className="mt-1 text-caption text-text-muted">
           Read-only is enforced server-side at validation — Trade/Withdraw
           scopes are rejected before encryption.
         </p>

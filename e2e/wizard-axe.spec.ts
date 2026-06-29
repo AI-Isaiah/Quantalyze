@@ -108,4 +108,65 @@ test.describe("Phase 17 — wizard axe (DESIGN-05)", () => {
     const results = await buildAxe(page).analyze();
     expect(results.violations).toEqual([]);
   });
+
+  // Phase 53 / APPLY-02 — the read-only Review & confirm recap is the new
+  // wizard UX area; it must hold the WCAG-AA floor. The CSV branch is the
+  // one branch drivable to the review step without a real exchange-key sync
+  // (the API branch needs a synced verifiable key the seed helper doesn't
+  // provide — it shares the same drivability limit as the api-branch scan
+  // above, which only reaches the first step). We drive upload → preview →
+  // profile → review, then axe-scan the recap surface. The review step's
+  // a11y invariants (aria wiring, no role=alert) are additionally pinned at
+  // the component level in steps/ReviewStep.test.tsx for BOTH branches.
+  test("zero axe violations on the CSV-branch Review & confirm step", async ({
+    page,
+  }) => {
+    if (HAS_SEED_ENV) {
+      const allocator = await seedTestAllocator();
+      await loginViaForm(page, allocator.email, allocator.password);
+    }
+
+    await page.goto("/strategies/new/wizard?source=csv");
+    await expect(page).toHaveURL(/\/strategies\/new\/wizard\?source=csv/, {
+      timeout: 10_000,
+    });
+
+    // Upload a minimal valid daily-returns CSV.
+    await page.getByTestId("csv-strategy-name").fill("E2E Axe Review Strat");
+    await page.getByTestId("wizard-csv-file-input").setInputFiles({
+      name: "axe_returns.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from(
+        [
+          "date,daily_return",
+          "2026-01-05,0.012",
+          "2026-01-06,-0.005",
+          "2026-01-07,0.008",
+          "2026-01-08,0.003",
+          "2026-01-09,-0.002",
+        ].join("\n"),
+        "utf-8",
+      ),
+    });
+    await page.getByTestId("wizard-csv-validate-submit").click();
+
+    // Preview → Strategy profile (csv_metadata) — fill the required
+    // description so the step can advance.
+    await page.getByTestId("wizard-csv-preview-continue").click();
+    await expect(
+      page.getByRole("heading", {
+        name: "Tell allocators what this strategy is",
+      }),
+    ).toBeVisible({ timeout: 15_000 });
+    await page.getByLabel("Description").fill("Automated axe-scan description.");
+    await page.getByRole("button", { name: /review and submit/i }).click();
+
+    // The Review & confirm recap renders — scan it.
+    await expect(
+      page.getByRole("heading", { name: /review & confirm/i }),
+    ).toBeVisible({ timeout: 15_000 });
+
+    const results = await buildAxe(page).analyze();
+    expect(results.violations).toEqual([]);
+  });
 });

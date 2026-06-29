@@ -191,11 +191,11 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
     <section aria-labelledby="wizard-connect-key-heading">
       <h2
         id="wizard-connect-key-heading"
-        className="font-sans text-2xl font-semibold text-text-primary"
+        className="font-sans text-h3 font-semibold text-text-primary"
       >
         Connect your exchange
       </h2>
-      <p className="mt-2 text-sm text-text-secondary">
+      <p className="mt-2 text-body text-text-secondary">
         Paste a read-only API key. We validate scopes server-side before storing
         anything. Secrets are never persisted to your browser.
       </p>
@@ -208,8 +208,8 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
               key={atom.title}
               className="grid gap-1 px-4 py-3 md:grid-cols-[180px_1fr] md:gap-6"
             >
-              <dt className="text-xs font-medium text-text-primary">{atom.title}</dt>
-              <dd className="text-xs text-text-secondary">{atom.body}</dd>
+              <dt className="text-caption font-medium text-text-primary">{atom.title}</dt>
+              <dd className="text-caption text-text-secondary">{atom.body}</dd>
             </div>
           ))}
         </dl>
@@ -218,7 +218,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
       <form onSubmit={handleSubmit} className="mt-8 space-y-5">
         {/* Exchange cards */}
         <fieldset>
-          <legend className="text-xs font-medium text-text-primary">
+          <legend className="text-caption font-medium text-text-primary">
             Exchange
           </legend>
           <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-3">
@@ -237,13 +237,13 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
                   aria-pressed={active}
                   data-testid={`wizard-exchange-${ex.id}`}
                 >
-                  <p className="text-sm font-semibold text-text-primary">{ex.name}</p>
-                  <p className="mt-1 text-[11px] text-text-muted">{ex.caption}</p>
+                  <p className="text-body font-semibold text-text-primary">{ex.name}</p>
+                  <p className="mt-1 text-micro text-text-muted">{ex.caption}</p>
                 </button>
               );
             })}
           </div>
-          <p className="mt-2 text-[11px] text-text-muted">
+          <p className="mt-2 text-micro text-text-muted">
             Need help creating a read-only key?{" "}
             <Link
               href={`/security#${exchange}-readonly`}
@@ -269,14 +269,14 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
           <div className="flex items-center justify-between">
             <label
               htmlFor="wizard-api-secret"
-              className="text-xs font-medium text-text-primary"
+              className="text-caption font-medium text-text-primary"
             >
               API Secret
             </label>
             <button
               type="button"
               onClick={() => setShowSecret((v) => !v)}
-              className="text-[11px] text-text-muted underline-offset-4 hover:text-text-primary hover:underline"
+              className="text-micro text-text-muted underline-offset-4 hover:text-text-primary hover:underline"
             >
               {showSecret ? "Hide" : "Show"}
             </button>
@@ -289,7 +289,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
             placeholder="Paste the secret"
             autoComplete="off"
             required
-            className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+            className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-body text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
           />
         </div>
 
@@ -304,7 +304,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
               autoComplete="off"
               required
             />
-            <p className="mt-1 text-[11px] text-text-muted">
+            <p className="mt-1 text-micro text-text-muted">
               OKX requires a passphrase in addition to key and secret. You set
               this when you created the API key on OKX.
             </p>
@@ -319,7 +319,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
             placeholder={`e.g. ${exchange} · prod`}
             autoComplete="off"
           />
-          <p className="mt-1 text-[11px] text-text-muted">
+          <p className="mt-1 text-micro text-text-muted">
             For your own reference inside Quantalyze. Never shown to allocators.
           </p>
         </div>
@@ -347,7 +347,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
             This is the bridge: a quiet inline link from the API wizard's
             first step to the CSV branch. Same wizard chrome, just a
             different first-step component. */}
-        <p className="pt-2 text-xs text-text-muted">
+        <p className="pt-2 text-caption text-text-muted">
           Don&apos;t have an API key yet?{" "}
           <Link
             href="/strategies/new/wizard?source=csv"

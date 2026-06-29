@@ -157,16 +157,37 @@ test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", (
     await expect(page.getByText("2026-01-05 → 2026-01-09")).toBeVisible();
     await expect(page.getByText(typedName).first()).toBeVisible();
 
-    // 8. Click "Submit strategy" to advance to Submit.
+    // 8. Click "Submit strategy" on Preview to advance to the Strategy
+    //    profile (csv_metadata) step (QA ISSUE-010 inserted this between
+    //    Preview and Submit).
     await page.getByTestId("wizard-csv-preview-continue").click();
 
-    // 9. Submit screen renders.
+    // 9. Strategy-profile (csv_metadata) step renders. A description is
+    //    required to advance (the MetadataStep Submit gate).
+    await expect(
+      page.getByRole("heading", { name: "Tell allocators what this strategy is" }),
+    ).toBeVisible({ timeout: 15_000 });
+    await page
+      .getByLabel("Description")
+      .fill("E2E CSV strategy — automated test description.");
+    await page.getByRole("button", { name: /review and submit/i }).click();
+
+    // 10. Phase 53 / APPLY-02 — read-only Review & confirm recap renders
+    //     before Submit on the CSV branch. It recaps the entered values and
+    //     carries no role=alert. Continue advances to the Submit step.
+    await expect(
+      page.getByRole("heading", { name: /review & confirm/i }),
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(typedName).first()).toBeVisible();
+    await page.getByTestId("wizard-review-continue").click();
+
+    // 11. Submit screen renders.
     await expect(
       page.getByRole("heading", { name: "Review and submit" }),
     ).toBeVisible();
     await expect(page.getByText(typedName).first()).toBeVisible();
 
-    // 10. Click the final "Submit strategy".
+    // 12. Click the final "Submit strategy".
     await page.getByTestId("wizard-csv-submit-cta").click();
 
     // 11. Redirect to the user's strategies list. The wizard now lands

@@ -94,11 +94,11 @@ export function CsvPreviewStep({
     <section aria-labelledby="wizard-csv-preview-heading">
       <h2
         id="wizard-csv-preview-heading"
-        className="font-sans text-2xl font-semibold text-text-primary"
+        className="font-sans text-h3 font-semibold text-text-primary"
       >
         {CSV_PREVIEW_STEP_HEADINGS.title}
       </h2>
-      <p className="mt-2 text-sm text-text-secondary">
+      <p className="mt-2 text-body text-text-secondary">
         {CSV_PREVIEW_STEP_HEADINGS.subtitle}
       </p>
 
@@ -124,7 +124,7 @@ export function CsvPreviewStep({
 
       {/* 6-row preview table — first 3 + last 3 rows. */}
       <div className="mt-6 overflow-x-auto">
-        <table className="w-full text-xs">
+        <table className="w-full text-caption">
           <thead>
             <tr className="border-b border-border">
               {preview.columns_detected.map((h, i) => (
@@ -156,7 +156,7 @@ export function CsvPreviewStep({
           </tbody>
         </table>
       </div>
-      <p className="mt-2 text-xs text-text-muted">
+      <p className="mt-2 text-caption text-text-muted">
         {/* Per-render row-count helper — not enumerated in UI-SPEC §14.1; */}
         {/* component-local dynamic template stays inline. */}
         Showing {firstCount} of {preview.row_count} rows from the start, and{" "}
@@ -187,10 +187,10 @@ export function CsvPreviewStep({
 function SummaryRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="grid gap-1 px-4 py-3 md:grid-cols-[180px_1fr] md:gap-6">
-      <dt className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
+      <dt className="text-micro font-medium uppercase tracking-wider text-text-muted">
         {label}
       </dt>
-      <dd className="text-xs text-text-secondary">{value}</dd>
+      <dd className="text-caption text-text-secondary">{value}</dd>
     </div>
   );
 }

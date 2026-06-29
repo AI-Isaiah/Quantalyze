@@ -117,10 +117,10 @@ export function WizardChrome({
   return (
     <div className="mx-auto max-w-3xl px-6 py-10">
       <header className="mb-8">
-        <h1 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
+        <h1 className="font-display text-page-title tracking-tight text-text-primary">
           Connect Your Strategy
         </h1>
-        <p className="mt-2 text-sm text-text-secondary">
+        <p className="mt-2 text-body text-text-secondary">
           {isCsv
             ? "Upload a daily-returns, NAV, or trades CSV. We validate every row before computing your factsheet."
             : "Paste a read-only API key. We will compute your verified factsheet in the next screen."}
@@ -150,11 +150,11 @@ export function WizardChrome({
                 }`}
                 aria-current={isActive ? "step" : undefined}
               >
-                <p className="font-metric text-[10px] uppercase tracking-wider tabular-nums text-text-muted">
+                <p className="font-metric text-micro uppercase tracking-wider tabular-nums text-text-muted">
                   {step.number} / {totalLabel}
                 </p>
                 <p
-                  className={`mt-0.5 text-xs font-medium ${
+                  className={`mt-0.5 text-caption font-medium ${
                     isActive
                       ? "text-text-primary"
                       : isPast
@@ -170,7 +170,7 @@ export function WizardChrome({
         </div>
 
         <div className="flex items-center justify-between px-1 py-2">
-          <p className="text-[11px] text-text-muted tabular-nums">
+          <p className="text-micro text-text-muted tabular-nums">
             {savedAt ? (
               <span data-testid="wizard-saved-at">
                 Draft saved · {new Date(savedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -183,7 +183,7 @@ export function WizardChrome({
             <button
               type="button"
               onClick={onDeleteDraft}
-              className="text-[11px] text-text-muted underline-offset-4 hover:text-negative hover:underline"
+              className="text-micro text-text-muted underline-offset-4 hover:text-negative hover:underline"
               data-testid="wizard-delete-draft"
             >
               Delete draft
@@ -197,7 +197,7 @@ export function WizardChrome({
 
         {showToast && (
           <div
-            className="pointer-events-none absolute -top-2 right-0 rounded-md border border-border bg-white px-3 py-1.5 text-[11px] font-medium text-positive shadow-sm"
+            className="pointer-events-none absolute -top-2 right-0 rounded-md border border-border bg-white px-3 py-1.5 text-micro font-medium text-positive shadow-sm"
             role="status"
             aria-live="polite"
             data-testid="wizard-progress-saved-toast"
@@ -209,7 +209,7 @@ export function WizardChrome({
 
       <footer className="mt-12 border-t border-border pt-6">
         <div className="flex items-center justify-between">
-          <p className="text-[13px] text-text-muted">
+          <p className="text-caption text-text-muted">
             Wizard help ·{" "}
             <Link
               href="/security"
@@ -223,7 +223,7 @@ export function WizardChrome({
           <button
             type="button"
             onClick={onRequestCall}
-            className="text-xs text-text-muted underline-offset-4 hover:text-text-primary hover:underline focus-visible:outline-none focus-visible:text-text-primary focus-visible:underline"
+            className="text-caption text-text-muted underline-offset-4 hover:text-text-primary hover:underline focus-visible:outline-none focus-visible:text-text-primary focus-visible:underline"
             data-testid="wizard-request-call"
           >
             Stuck? Request a Call →

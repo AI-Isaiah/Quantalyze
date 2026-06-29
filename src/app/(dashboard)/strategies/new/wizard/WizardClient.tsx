@@ -564,7 +564,7 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
         source={source}
       >
         {sessionExpired && (
-          <div className="mb-4 rounded-md border border-border bg-page px-3 py-2 text-xs text-text-secondary">
+          <div className="mb-4 rounded-md border border-border bg-page px-3 py-2 text-caption text-text-secondary">
             Your session expired. Your draft is saved.{" "}
             <a
               href="/login?next=/strategies/new/wizard"
@@ -578,10 +578,10 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
 
         {showResumeBanner && initialDraft && (
           <div className="mb-4 rounded-md border border-border bg-white px-4 py-3">
-            <p className="text-sm font-medium text-text-primary">
+            <p className="text-body font-medium text-text-primary">
               We saved your progress.
             </p>
-            <p className="mt-1 text-xs text-text-muted">
+            <p className="mt-1 text-caption text-text-muted">
               {source === "csv"
                 ? "A CSV upload draft from an earlier session is ready. Re-select the file and continue."
                 : "A draft from an earlier session is ready. Secrets are never stored in your browser, so you will need to paste your API secret again."}
@@ -935,7 +935,7 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
         onClose={() => setConfirmDelete(false)}
         title="Delete this draft?"
       >
-        <p className="text-sm text-text-secondary">
+        <p className="text-body text-text-secondary">
           Your draft and its linked API key will be removed. You will start over
           from step 1.
         </p>
