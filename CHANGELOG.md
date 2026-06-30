@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.35.0.14] - 2026-06-30
+### Fixed
+- Completes the v0.35.0.13 factsheet mobile-reflow fix. The live 320px production canary after .13 still scrolled the page ~97px — there were **two** unwrapped wide factsheet tables, not one. .13 wrapped Stress Windows; this wraps the **"Worst 10 Drawdowns"** table (8 columns, 10.5px) in the same `ResponsiveTable` (horizontal scroll inside a labelled `region`, distinct landmark name). The monthly-returns heatmap already scrolled via a plain `overflow-x-auto` div and the other factsheet tables fit at 320px, so the factsheet now holds 320→2560 with zero horizontal page reflow. Unconditional wrap, so the factsheet body stays byte-identical (BODY-02 gate holds); `scenario.ts`/`compute.ts` untouched. Falsifiable regression test pins the table inside the scroll region.
+
 ## [0.35.0.13] - 2026-06-30
 ### Fixed
 - The factsheet **Stress Windows** table no longer forces horizontal page scroll on a phone. It rendered as a raw `<table>` with no scroll wrapper, so at 320px its column width pushed the whole page ~97px wider than the viewport (WCAG 1.4.10 Reflow); desktop/tablet were unaffected. It is now wrapped in the existing `ResponsiveTable` (horizontal scroll inside a labelled `region`), matching the holdings/positions tables from v1.3. Found by an authed production QA sweep on the v1.4 milestone-close deferred items. The wrap is unconditional, so the factsheet body stays byte-identical on both the real `/factsheet/[id]` route and the scenario composer (the BODY-02 parity gate holds); `scenario.ts`/`compute.ts` are untouched. A falsifiable regression test pins the table inside the scroll region.
