@@ -18,7 +18,20 @@ import {
   assertSupabaseServiceRoleKey,
 } from "../../src/lib/test-safety";
 
-function getAdmin(): SupabaseClient {
+/**
+ * The prod-safe service-role admin client every teardown in this module
+ * uses. Carries the WR-05 prod-URL probe + service-role-key brand probe so a
+ * misconfigured TEST_SUPABASE_URL pointed at prod fails LOUDLY at the boundary
+ * BEFORE any mutation — it can ONLY ever target the TEST project (the prod ref
+ * khslejtfbuezsmvmtsdn is refused by assertNotProductionSupabaseUrl).
+ *
+ * Exported as getCleanupAdmin (Phase 54 / VERIFY-02) so a spec can issue a
+ * single narrow, scoped delete-by-id teardown inline WITHOUT constructing its
+ * own client — the prod-safety probe stays the only path to a service-role
+ * client in tests. For owner-cascade cleanup use cleanupTestStrategy /
+ * cleanupTestAllocator below; this accessor is for narrow scoped row deletes.
+ */
+export function getCleanupAdmin(): SupabaseClient {
   const url = process.env.TEST_SUPABASE_URL;
   const key = process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) {
@@ -41,6 +54,10 @@ function getAdmin(): SupabaseClient {
   return createClient(url, key, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
+}
+
+function getAdmin(): SupabaseClient {
+  return getCleanupAdmin();
 }
 
 /**

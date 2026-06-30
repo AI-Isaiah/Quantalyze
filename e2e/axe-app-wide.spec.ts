@@ -52,6 +52,19 @@ import {
   seedStrategyWithHistory,
   seedBridgeCandidate,
 } from "./helpers/seed-test-project";
+// VERIFY-02 hermetic teardown — the crypto-sma discovery seed below is the ONE
+// cross-spec-dangerous row (discovery-hide-examples-default.spec.ts asserts the
+// crypto-sma category is EMPTY on first paint; the v1.3 attempt left this seed
+// around and regressed that spec). getCleanupAdmin returns the SAME prod-safe
+// service-role admin client the seed/cleanup helpers use — it carries
+// assertNotProductionSupabaseUrl / assertSupabaseServiceRoleKey, so it ONLY ever
+// targets the TEST Supabase project, NEVER prod (khslejtfbuezsmvmtsdn). We delete
+// the seeded strategy row by id (the scoped, surgical teardown) and then cascade
+// the throwaway bridge-owner user via cleanupTestStrategy for full hermeticity.
+import {
+  cleanupTestStrategy,
+  getCleanupAdmin,
+} from "./helpers/cleanup-test-project";
 
 // FLOW-01 self-skip [place 2] — armed for the AUTHED + EMBEDDED rows. When the
 // seed env vars are absent those describe blocks self-skip; the public describe
@@ -192,19 +205,41 @@ test.describe("axe app-wide (A11Y-01) — authed standalone routes", () => {
       // Seed a published strategy in the canonical crypto-sma category so the
       // discovery page renders a real grid (not empty-state); mirrors
       // discovery-axe's seeded path.
-      await seedBridgeCandidate({ categorySlug: "crypto-sma" });
-      const allocator = await seedTestAllocator();
-      await loginViaForm(page, allocator.email, allocator.password);
+      //
+      // VERIFY-02 HERMETICITY: capture the seeded struct and tear it down in a
+      // `finally` so this published non-example strategy NEVER leaks into the
+      // shared MA-8 DB. discovery-hide-examples-default.spec.ts asserts the
+      // crypto-sma category shows the "No strategies" empty state on first
+      // paint (all 8 seeds are is_example=true; no other non-example published
+      // row exists) — leaving this seed around is the exact v1.3 DISCO-05
+      // pollution. cleanupTestStrategy deletes the throwaway bridge-owner user,
+      // cascading the strategy row away (with a strategyId delete().eq fallback),
+      // via the prod-safe service-role admin client (TEST project only).
+      const seeded = await seedBridgeCandidate({ categorySlug: "crypto-sma" });
+      try {
+        const allocator = await seedTestAllocator();
+        await loginViaForm(page, allocator.email, allocator.password);
 
-      const res = await page.goto("/discovery/crypto-sma");
-      if (res && res.status() >= 400) {
-        throw new Error(`/discovery/crypto-sma returned HTTP ${res.status()}`);
+        const res = await page.goto("/discovery/crypto-sma");
+        if (res && res.status() >= 400) {
+          throw new Error(`/discovery/crypto-sma returned HTTP ${res.status()}`);
+        }
+        await expect(page.locator("h1, h2").first()).toBeVisible({
+          timeout: 10_000,
+        });
+        const results = await buildAxe(page).analyze();
+        expect(results.violations).toEqual([]);
+      } finally {
+        // Prod-safe admin (TEST project only; prod ref refused at the boundary).
+        const admin = getCleanupAdmin();
+        await admin.from("strategies").delete().eq("id", seeded.strategyId);
+        // Scoped delete-by-id above removes the published non-example strategy
+        // from the crypto-sma category, restoring the empty-category state that
+        // discovery-hide-examples-default.spec.ts depends on. Then cascade the
+        // throwaway bridge-owner user for full hermeticity (best-effort locally,
+        // fail-loud in CI per the helper).
+        await cleanupTestStrategy(seeded);
       }
-      await expect(page.locator("h1, h2").first()).toBeVisible({
-        timeout: 10_000,
-      });
-      const results = await buildAxe(page).analyze();
-      expect(results.violations).toEqual([]);
     });
 
     test(`zero WCAG-AA violations on /strategies/new/wizard @ ${vp.name}`, async ({
