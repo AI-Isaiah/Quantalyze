@@ -879,15 +879,21 @@ describe("Critical regression guards", () => {
     // Pinning BOTH stops a regression that either drops the spec from
     // the CI command or guts the redirect assertion inside it.
     describe("H-1024 — placeholder-env e2e lane covers protected-route redirect", () => {
-      // The first `npx playwright test e2e/...` line in the e2e job is
-      // the UNCONDITIONAL invocation (the seed-gated one is wrapped in a
-      // separate, vars-gated step). We isolate it so a seed-gated-only
-      // addition of auth coverage can't satisfy this test.
+      // The UNCONDITIONAL invocation is the placeholder-env "Start server
+      // and run Playwright" step's normal command. As of v0.35.0.22 that
+      // step carries a workflow_dispatch bake branch
+      // (demo-screenshot --update-snapshots) BEFORE the normal command, so
+      // the FIRST `npx playwright test e2e/...` line is no longer the
+      // unconditional lane. Anchor on e2e/smoke.spec.ts: it appears ONLY on
+      // the normal unconditional command — never on a single-spec bake
+      // branch or the seed-gated lane (which is a separate, vars-gated
+      // step) — so this still isolates the right command AND a
+      // seed-gated-only addition of auth coverage can't satisfy this test.
       function unconditionalPlaywrightCmd(src: string): string {
         return findOrFail(
           src,
-          /npx playwright test (e2e\/[^\n]*)/,
-          "ci.yml: could not locate the unconditional `npx playwright test e2e/...` command in the e2e job — e2e lane shape drifted",
+          /npx playwright test (e2e\/[^\n]*\be2e\/smoke\.spec\.ts\b[^\n]*)/,
+          "ci.yml: could not locate the unconditional `npx playwright test e2e/...` command (anchored on e2e/smoke.spec.ts) in the e2e job — e2e lane shape drifted",
         );
       }
 
