@@ -5,6 +5,20 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual one-shot trigger for re-baking the SVG-chart parity goldens. Inert
+  # for normal CI (push/PR) — the input defaults false and only changes the
+  # seeded e2e step's behaviour when explicitly checked on a dispatch. Must
+  # live on the default branch for `gh workflow run` / the UI to see it.
+  workflow_dispatch:
+    inputs:
+      bake_svg_goldens:
+        description: >-
+          Bake e2e/svg-chart-parity.spec.ts goldens: the seeded e2e job runs
+          ONLY that spec with --update-snapshots and uploads the generated PNGs
+          as an artifact for per-chart human review. Never auto-commits them.
+        type: boolean
+        default: false
+        required: false
 
 # Cancel in-flight CI on PR force-pushes only. On `push` to `main`, every
 # commit must produce its own recorded green CI run (deploy automation +
@@ -1263,25 +1277,37 @@ jobs:
           # variable set the gate above resolves to true → seeded run.
           # Adding/removing a seed-gated spec? Update both this list and
           # the e2e/<spec>.spec.ts HAS_SEED_ENV constant.
-          npx playwright test \
-            e2e/onboarding-funnel.spec.ts \
-            e2e/discovery-axe.spec.ts \
-            e2e/discovery-hide-examples-default.spec.ts \
-            e2e/discovery-prefs-isolation.spec.ts \
-            e2e/strategy-v2-partial-data.spec.ts \
-            e2e/strategy-v2-chart-parity.spec.ts \
-            e2e/strategy-v2-keyboard.spec.ts \
-            e2e/strategy-v2-axe.spec.ts \
-            e2e/composer-axe.spec.ts \
-            e2e/wizard-axe.spec.ts \
-            e2e/admin-compute-jobs-axe.spec.ts \
-            e2e/mobile-drawer-keyboard.spec.ts \
-            e2e/reflow-sweep-authed.spec.ts \
-            e2e/svg-chart-parity.spec.ts \
-            e2e/target-size.spec.ts \
-            e2e/no-clip-sweep.spec.ts \
-            e2e/axe-app-wide.spec.ts \
-            --timeout 60000
+          if [ "${BAKE_SVG_GOLDENS}" = "true" ]; then
+            # One-shot golden bake (workflow_dispatch input bake_svg_goldens).
+            # Run ONLY the svg-parity spec with --update-snapshots so no other
+            # spec's baselines are touched; the PNGs upload as an artifact for
+            # per-chart human review. NEVER auto-committed here (the locked
+            # "no blind --update-snapshots" rule) — a follow-up PR lands the
+            # reviewed PNGs and the spec's WR-02 guard flips the gate live.
+            npx playwright test e2e/svg-chart-parity.spec.ts \
+              --update-snapshots \
+              --timeout 60000
+          else
+            npx playwright test \
+              e2e/onboarding-funnel.spec.ts \
+              e2e/discovery-axe.spec.ts \
+              e2e/discovery-hide-examples-default.spec.ts \
+              e2e/discovery-prefs-isolation.spec.ts \
+              e2e/strategy-v2-partial-data.spec.ts \
+              e2e/strategy-v2-chart-parity.spec.ts \
+              e2e/strategy-v2-keyboard.spec.ts \
+              e2e/strategy-v2-axe.spec.ts \
+              e2e/composer-axe.spec.ts \
+              e2e/wizard-axe.spec.ts \
+              e2e/admin-compute-jobs-axe.spec.ts \
+              e2e/mobile-drawer-keyboard.spec.ts \
+              e2e/reflow-sweep-authed.spec.ts \
+              e2e/svg-chart-parity.spec.ts \
+              e2e/target-size.spec.ts \
+              e2e/no-clip-sweep.spec.ts \
+              e2e/axe-app-wide.spec.ts \
+              --timeout 60000
+          fi
           # Phase 47-05 / FLOW-01 (place 1 of 2): the fresh
           # e2e/svg-chart-parity.spec.ts (desktop goldens + 320px portrait)
           # is added here so it runs SEEDED. The dead
@@ -1323,6 +1349,10 @@ jobs:
           wait $SERVER_PID 2>/dev/null || true
           lsof -ti:3000 2>/dev/null | xargs -r kill -9 2>/dev/null || true
         env:
+          # workflow_dispatch one-shot golden-bake toggle (drives the if/else
+          # in the run block above). Renders "true" only on a manual dispatch
+          # with bake_svg_goldens checked; "false" on every push/PR run.
+          BAKE_SVG_GOLDENS: ${{ github.event_name == 'workflow_dispatch' && inputs.bake_svg_goldens }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
@@ -1342,6 +1372,21 @@ jobs:
           # No production exposure: prod sets NEXT_PUBLIC_SITE_URL to the
           # canonical Vercel host.
           NEXT_PUBLIC_ALLOWED_ORIGINS: http://localhost:3000
+      # Golden bake (workflow_dispatch input bake_svg_goldens): upload ONLY the
+      # svg-chart-parity snapshot PNGs — chart images, no .next bundle /
+      # trace.zip / page HTML — so the C-0293(c) secret-in-artifact concern
+      # that gates the playwright-report upload below does NOT apply here. These
+      # PNGs are the per-chart review material; a human eyeballs each, then a
+      # follow-up PR commits them (the locked "never blind --update-snapshots"
+      # rule). if-no-files-found: error fails loud if the bake produced nothing.
+      - name: Upload baked SVG goldens for review (workflow_dispatch bake only)
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.bake_svg_goldens }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: svg-chart-goldens-baked
+          path: e2e/svg-chart-parity.spec.ts-snapshots/**/*.png
+          if-no-files-found: error
+          retention-days: 7
       # retro-PR179-H1 / C-0293(c) extension: skip the playwright-report
       # upload on the SEED-GATED code path. When E2E_TEST_DB_CONFIGURED is
       # 'true', a failed run could be against the REAL-env rebuild (see
