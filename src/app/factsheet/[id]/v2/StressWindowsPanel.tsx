@@ -1,5 +1,7 @@
 "use client";
 
+import { ResponsiveTable } from "@/components/ResponsiveTable";
+
 import { usePayload } from "./factsheet-context";
 
 /**
@@ -49,6 +51,7 @@ export function StressWindowsPanel() {
           )}
         </p>
       </header>
+      <ResponsiveTable label="Stress windows">
       <table className="w-full text-fixed-11">
         <thead>
           <tr className="border-b border-text">
@@ -121,6 +124,7 @@ export function StressWindowsPanel() {
           ))}
         </tbody>
       </table>
+      </ResponsiveTable>
     </figure>
   );
 }
