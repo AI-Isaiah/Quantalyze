@@ -307,8 +307,23 @@ export async function seedBridgeCandidate(opts?: {
 export async function seedStrategyWithHistory(opts: {
   days: number;
   name?: string;
+  /**
+   * Anchor (end) of the synthesized date window, in epoch ms. Defaults to
+   * `Date.now()` — byte-identical for every existing caller. Pass a FIXED
+   * timestamp when the rendered output is screenshot-compared (svg-chart-parity
+   * goldens): time-relative dates make the year-bucketed panels (daily-return
+   * heatmap, end-of-year bars) and the benchmark-correlation window slide every
+   * day, so the goldens would drift. Pin it INSIDE the bundled benchmark fixture
+   * coverage (src/lib/factsheet/data/*-daily.json, ~2023-04-26 → 2026-05-12) so
+   * the Pearson ρ panels stay finite — outside it, alignReturns forward-fills a
+   * constant close → zero variance → NaN ρ → the correlation panels render null.
+   */
+  anchorMs?: number;
 }): Promise<string> {
   const admin = getAdmin();
+  // Date anchor — see `anchorMs` doc above. Default keeps the historical
+  // time-relative behaviour for the non-screenshot callers.
+  const anchorMs = opts.anchorMs ?? Date.now();
 
   // Owner profile — separate from any test allocator, mirrors seedBridgeCandidate.
   const ownerEmail = `e2e-strategy-v2-owner-${uniqueSuffix(6)}@example.test`;
@@ -331,7 +346,7 @@ export async function seedStrategyWithHistory(opts: {
     );
 
   const name = opts.name ?? `Phase 14b ${opts.days}d fixture`;
-  const startDate = new Date(Date.now() - opts.days * 86_400_000)
+  const startDate = new Date(anchorMs - opts.days * 86_400_000)
     .toISOString()
     .slice(0, 10);
 
@@ -362,7 +377,7 @@ export async function seedStrategyWithHistory(opts: {
   // Small drift via sin() so the curve isn't flat — drives the equity chart
   // through enough variation to render meaningfully without random noise.
   const series = Array.from({ length: opts.days }, (_, i) => ({
-    date: new Date(Date.now() - (opts.days - i) * 86_400_000)
+    date: new Date(anchorMs - (opts.days - i) * 86_400_000)
       .toISOString()
       .slice(0, 10),
     value: 1 + Math.sin(i / 30) * 0.05 * (i / Math.max(1, opts.days)),

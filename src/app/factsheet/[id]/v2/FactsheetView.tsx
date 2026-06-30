@@ -12,7 +12,7 @@ import { HistogramChart } from "./HistogramChart";
 import { MetricsColumn } from "./MetricsColumn";
 import { StyleDriftPanel, PeerPercentilePanel, AllocatorSection } from "./BatchDPanels";
 import { StreakDistributionPanel } from "./AnalyticalPanels";
-import { EndOfYearBarsPanel, QuantileBoxPlotPanel } from "./DistributionPanels";
+import { EndOfYearBarsPanel, QuantileBoxPlotPanel, CorrelationStripPanel, CorrelationsMatrixPanel } from "./DistributionPanels";
 import { MasterBrush } from "./MasterBrush";
 import { StressWindowsPanel } from "./StressWindowsPanel";
 import { CollapsibleSection, COLLAPSIBLE_OPEN_ALL_EVENT } from "@/components/ui/CollapsibleSection";
@@ -220,6 +220,8 @@ export function FactsheetBody({
               <HistogramChart />
               <QuantileBoxPlotPanel />
               <EndOfYearBarsPanel />
+              <CorrelationStripPanel />
+              <CorrelationsMatrixPanel />
             </CollapsibleSection>
             <CollapsibleSection
               id="factsheet-heatmaps"

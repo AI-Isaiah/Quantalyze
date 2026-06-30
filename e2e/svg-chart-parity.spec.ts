@@ -181,10 +181,22 @@ test.describe("Phase 47 — SVG chart parity (desktop goldens) + 320px portrait"
   // real data to render.
   let strategyId: string;
 
+  // FIXED date anchor — NOT time-relative. These are pixel goldens, so the
+  // seeded date window must be deterministic run-to-run: a trailing-from-today
+  // window slides every day and the year-bucketed panels (daily-return heatmap,
+  // end-of-year bars) + the Pearson-ρ correlation window would drift, rotting
+  // the baselines. 2026-04-15 with days:252 puts the whole window
+  // (~2025-08-07 → 2026-04-14) INSIDE the bundled benchmark fixture coverage
+  // (~2023-04-26 → 2026-05-12), so alignReturns has real benchmark closes to
+  // correlate against and the two correlation panels render finite ρ (outside
+  // coverage they'd forward-fill a constant → NaN ρ → null panels).
+  const SEED_ANCHOR_MS = Date.UTC(2026, 3, 15); // 2026-04-15 (month is 0-based)
+
   test.beforeAll(async () => {
     strategyId = await seedStrategyWithHistory({
       days: 252,
       name: "Phase 47 svg-parity",
+      anchorMs: SEED_ANCHOR_MS,
     });
   });
 
