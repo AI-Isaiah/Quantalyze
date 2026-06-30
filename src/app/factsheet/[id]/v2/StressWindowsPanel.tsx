@@ -21,7 +21,7 @@ export function StressWindowsPanel() {
           <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
             Stress Windows
           </h3>
-          <p className="text-[11px] text-text-muted">
+          <p className="text-fixed-11 text-text-muted">
             All {totalCatalogued} catalogued stress windows for this asset class occurred outside this
             strategy&apos;s observation period — none can be evaluated.
           </p>
@@ -38,7 +38,7 @@ export function StressWindowsPanel() {
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Stress Windows
         </h3>
-        <p className="text-[11px] text-text-muted">
+        <p className="text-fixed-11 text-text-muted">
           strategy vs {benchName} compounded return + max drawdown during named market events
           {(droppedOutOfRange > 0 || droppedPartial > 0) && (
             <>
@@ -49,28 +49,28 @@ export function StressWindowsPanel() {
           )}
         </p>
       </header>
-      <table className="w-full text-[11px]">
+      <table className="w-full text-fixed-11">
         <thead>
           <tr className="border-b border-text">
-            <th className="py-1.5 pr-2 text-left font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">
+            <th className="py-1.5 pr-2 text-left font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted">
               Event
             </th>
-            <th className="py-1.5 px-2 text-left font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">
+            <th className="py-1.5 px-2 text-left font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted">
               Window
             </th>
-            <th className="py-1.5 px-2 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">
+            <th className="py-1.5 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted">
               Days
             </th>
-            <th className="py-1.5 px-2 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">
+            <th className="py-1.5 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted">
               Strategy
             </th>
-            <th className="py-1.5 px-2 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">
+            <th className="py-1.5 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted">
               Strat DD
             </th>
-            <th className="py-1.5 px-2 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">
+            <th className="py-1.5 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted">
               {benchName}
             </th>
-            <th className="py-1.5 pl-2 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">
+            <th className="py-1.5 pl-2 text-right font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted">
               {benchName} DD
             </th>
           </tr>
@@ -83,7 +83,7 @@ export function StressWindowsPanel() {
                   {w.name}
                   {w.coverage === "partial" && (
                     <span
-                      className="ml-1.5 inline-block px-1 py-px text-[9px] uppercase font-mono tracking-wider rounded-sm"
+                      className="ml-1.5 inline-block px-1 py-px text-fixed-9 uppercase font-mono tracking-wider rounded-sm"
                       style={{ backgroundColor: "var(--color-surface-subtle)", color: "var(--color-warning)" }}
                       title={`Observed ${w.days} of ${w.expectedCalendarDays} expected days`}
                     >
@@ -91,7 +91,7 @@ export function StressWindowsPanel() {
                     </span>
                   )}
                 </div>
-                <div className="text-[10px] text-text-muted">{w.note}</div>
+                <div className="text-fixed-10 text-text-muted">{w.note}</div>
               </td>
               <td className="py-1.5 px-2 font-mono tabular-nums text-text-2 whitespace-nowrap">
                 {w.start.slice(0, 10)} → {w.end.slice(0, 10)}

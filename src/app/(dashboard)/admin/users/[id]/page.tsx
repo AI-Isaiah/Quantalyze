@@ -97,7 +97,11 @@ export default async function AdminUserDetailPage({
   const isSelf = profile.id === user.id;
 
   return (
-    <>
+    // RT-W2 (Phase 54 / VERIFY-05): cap this prose/form admin detail page at
+    // the DESIGN.md "Max content width (main content area)" measure (1100px) so
+    // it doesn't fluid-fill to ~1920px via DashboardChrome's `isWide` allow-list.
+    // Data tables keep the wide measure; the shell regex is CONTEXT-locked.
+    <div className="mx-auto max-w-[1100px]">
       <PageHeader
         title={profile.display_name ?? "User"}
         description={profile.email ?? undefined}
@@ -163,7 +167,7 @@ export default async function AdminUserDetailPage({
           />
         </Card>
       </div>
-    </>
+    </div>
   );
 }
 

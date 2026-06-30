@@ -115,7 +115,7 @@ export function ScenarioFooter({
       <span className="rounded-md px-2 py-1 text-xs font-medium text-text-muted">
         {countLabel}
       </span>
-      <span className="font-mono text-[13px] font-medium tabular-nums text-text-secondary">
+      <span className="font-mono text-fixed-13 font-medium tabular-nums text-text-secondary">
         {summaryText}
       </span>
       <div className="flex items-center gap-3">

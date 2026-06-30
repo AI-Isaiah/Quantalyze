@@ -193,13 +193,13 @@ export default async function ScenarioSharePage({
       {/* Header — scenario NAME only (Instrument Serif). NEVER the allocator
           identity. Persistent PROJECTED framing directly beneath. */}
       <header className="border-b border-border pb-6">
-        <h1 className="font-serif text-[28px] leading-tight text-text-primary md:text-4xl">
+        <h1 className="font-serif text-fixed-28 leading-tight text-text-primary md:text-4xl">
           {name}
         </h1>
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <span
             data-testid="scenario-projected-badge"
-            className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-[10px] uppercase tracking-wide font-semibold text-text-muted"
+            className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-fixed-10 uppercase tracking-wide font-semibold text-text-muted"
           >
             {PROJECTED_LABEL}
           </span>
@@ -215,7 +215,7 @@ export default async function ScenarioSharePage({
         <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-border sm:grid-cols-4 lg:grid-cols-7">
           {kpis.map((k) => (
             <div key={k.label} className="bg-surface px-4 py-3">
-              <div className="text-[11px] uppercase tracking-wide text-text-muted">
+              <div className="text-fixed-11 uppercase tracking-wide text-text-muted">
                 {k.label}
               </div>
               <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-text-primary">

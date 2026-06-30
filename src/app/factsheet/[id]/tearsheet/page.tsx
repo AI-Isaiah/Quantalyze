@@ -177,7 +177,7 @@ export default async function TearSheetPage({
       {/* Header strip */}
       <header className="mb-6 flex items-start justify-between border-b border-border pb-4">
         <div className="min-w-0">
-          <p className="text-[10px] uppercase tracking-wider text-text-muted">
+          <p className="text-fixed-10 uppercase tracking-wider text-text-muted">
             {PLATFORM_NAME} · Institutional Tear Sheet
           </p>
           <h1 className="mt-1 font-display text-3xl leading-tight text-text-primary">
@@ -193,7 +193,7 @@ export default async function TearSheetPage({
             label="Data"
             variant="pill"
           />
-          <p className="mt-1 text-[10px] text-text-muted">
+          <p className="mt-1 text-fixed-10 text-text-muted">
             Generated{" "}
             {new Date().toLocaleDateString("en-US", {
               year: "numeric",
@@ -230,7 +230,7 @@ export default async function TearSheetPage({
         <section className="mb-6 rounded-lg border border-border p-4">
           <div className="mb-2 flex items-center justify-between">
             <h2 className="text-sm font-semibold text-text-primary">Equity Curve</h2>
-            <span className="text-[10px] text-text-muted">
+            <span className="text-fixed-10 text-text-muted">
               {strategy.start_date ? `Live since ${strategy.start_date}` : ""}
             </span>
           </div>
@@ -286,7 +286,7 @@ export default async function TearSheetPage({
         <section className="mb-6">
           <h2 className="mb-2 text-sm font-semibold text-text-primary">Monthly Returns</h2>
           <div className="overflow-x-auto">
-            <table className="w-full text-[10px]">
+            <table className="w-full text-fixed-10">
               <thead>
                 <tr className="border-b border-border">
                   <th className="py-1 pr-2 text-left font-medium text-text-muted">Year</th>
@@ -350,7 +350,7 @@ export default async function TearSheetPage({
       {/* Risk disclosure */}
       <section className="mb-6 border-t border-border pt-4">
         <h2 className="mb-2 text-sm font-semibold text-text-primary">Risk Disclosure</h2>
-        <p className="text-[10px] text-text-muted leading-relaxed">
+        <p className="text-fixed-10 text-text-muted leading-relaxed">
           Past performance does not guarantee future results. Cryptocurrency
           trading involves substantial risk of total loss. This tear sheet is
           for informational purposes only and does not constitute investment,
@@ -411,7 +411,7 @@ function HeroMetric({
 }) {
   return (
     <div className="rounded-lg border border-border p-3 text-center">
-      <p className="text-[9px] uppercase tracking-wider text-text-muted">{label}</p>
+      <p className="text-fixed-9 uppercase tracking-wider text-text-muted">{label}</p>
       <p
         className={`mt-1 font-metric text-xl font-bold ${
           danger ? "text-negative" : "text-text-primary"
@@ -426,7 +426,7 @@ function HeroMetric({
 function DetailMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="text-center">
-      <p className="text-[9px] uppercase tracking-wider text-text-muted">{label}</p>
+      <p className="text-fixed-9 uppercase tracking-wider text-text-muted">{label}</p>
       <p className="mt-0.5 font-metric text-sm font-medium text-text-primary">
         {value}
       </p>

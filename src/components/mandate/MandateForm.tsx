@@ -211,7 +211,7 @@ export function MandateForm({ initial }: Props) {
       <Card>
         <div className="space-y-6">
           <div className="flex items-center gap-3 border-b border-border pb-3 -mx-6 px-6 -mt-6 pt-6">
-            <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
+            <p className="text-fixed-11 font-medium uppercase tracking-[0.12em] text-text-muted">
               Basics
             </p>
             <span
@@ -277,7 +277,7 @@ export function MandateForm({ initial }: Props) {
             <div className="relative">
               <span
                 aria-hidden="true"
-                className="absolute left-3 top-1/2 -translate-y-1/2 font-metric text-[13px] text-text-muted tabular-nums pointer-events-none"
+                className="absolute left-3 top-1/2 -translate-y-1/2 font-metric text-fixed-13 text-text-muted tabular-nums pointer-events-none"
               >
                 $
               </span>

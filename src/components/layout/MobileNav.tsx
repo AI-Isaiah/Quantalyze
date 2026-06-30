@@ -72,7 +72,7 @@ export function MobileNav({
                 // SC#4: min-h-[44px] + justify-center lifts the ~36px stub cell
                 // to the WCAG 2.5.8 floor. focus-visible ring added (the stub
                 // had none) — matches MobileTopBar's accent outline.
-                "relative flex flex-1 flex-col items-center justify-center gap-0.5 min-h-[44px] py-2 text-[10px] font-medium transition-colors",
+                "relative flex flex-1 flex-col items-center justify-center gap-0.5 min-h-[44px] py-2 text-fixed-10 font-medium transition-colors",
                 "focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent",
                 active ? "text-accent" : "text-text-muted",
               )}
@@ -82,7 +82,7 @@ export function MobileNav({
                 {showBadge && (
                   <span
                     aria-label={`${badge} flagged holding${badge === 1 ? "" : "s"}`}
-                    className="absolute -right-2 -top-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-medium text-white"
+                    className="absolute -right-2 -top-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-fixed-10 font-medium text-white"
                   >
                     {badge}
                   </span>

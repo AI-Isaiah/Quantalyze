@@ -37,7 +37,7 @@ export function SyncBadge({ computedAt, exchange, className }: SyncBadgeProps) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 text-[10px] text-text-muted",
+        "inline-flex items-center gap-1.5 text-fixed-10 text-text-muted",
         className,
       )}
     >

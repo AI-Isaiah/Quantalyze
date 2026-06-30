@@ -140,7 +140,7 @@ export function BridgeWidget({
       >
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <span
-            className="text-[10px] font-mono uppercase tracking-[0.14em]"
+            className="text-fixed-10 font-mono uppercase tracking-[0.14em]"
             style={{ color: "var(--color-warning)" }}
           >
             Bridge
@@ -205,7 +205,7 @@ export function BridgeWidget({
       >
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <span
-            className="text-[10px] font-mono uppercase tracking-[0.14em]"
+            className="text-fixed-10 font-mono uppercase tracking-[0.14em]"
             style={{ color: "var(--color-warning)" }}
           >
             Bridge

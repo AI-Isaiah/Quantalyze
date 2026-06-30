@@ -81,13 +81,13 @@ export function CompareCorrelationMatrix({ items }: { items: CompareItem[] }) {
         <thead>
           <tr className="border-b" style={{ borderColor: "#E2E8F0" }}>
             <th
-              className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider"
+              className="px-3 py-2 text-left text-fixed-11 font-medium uppercase tracking-wider"
               style={{ color: "#64748B" }}
             />
             {items.map((item) => (
               <th
                 key={item.strategy.id}
-                className="px-3 py-2 text-right text-[11px] font-medium uppercase tracking-wider truncate max-w-[120px]"
+                className="px-3 py-2 text-right text-fixed-11 font-medium uppercase tracking-wider truncate max-w-[120px]"
                 style={{ color: "#1A1A2E" }}
                 title={item.strategy.name}
               >

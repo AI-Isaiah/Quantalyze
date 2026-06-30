@@ -8,7 +8,12 @@ This directory holds the Playwright screenshot goldens for
   diff → red.
 - `*-portrait-320.png` — the 320px PORTRAIT legibility/portrait snapshots
   (CHART-02 + CHART-03).
-- `full-page-desktop.png` — the full-page composition golden.
+- `*-ultrawide-2560.png` — the 2560px ULTRA-WIDE tolerance goldens (Phase 54-06 /
+  VERIFY-04). Same frozen engine output as the desktop golden (no mobile branch
+  at 2560), composed into the ultra-wide column; a diff means a crossed
+  frozen-math / layout boundary at the upper bound.
+- `full-page-desktop.png` / `full-page-ultrawide-2560.png` — the full-page
+  composition goldens (desktop + ultra-wide).
 
 ## Why no PNGs are committed yet
 
@@ -33,6 +38,11 @@ npx playwright test e2e/svg-chart-parity.spec.ts \
 # 2. THEN bake the 320px portrait snapshots and commit them.
 npx playwright test e2e/svg-chart-parity.spec.ts \
   -g "portrait 320px" --update-snapshots
+
+# 3. THEN bake the 2560px ultra-wide tolerance goldens and commit them
+#    (VERIFY-04; same frozen-math no-recompute discipline as the desktop bake).
+npx playwright test e2e/svg-chart-parity.spec.ts \
+  -g "ultra-wide 2560px" --update-snapshots
 ```
 
 ## The one rule

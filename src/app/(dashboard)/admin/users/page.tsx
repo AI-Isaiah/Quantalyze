@@ -57,7 +57,13 @@ export default async function AdminUsersPage() {
   const rows = profiles ?? [];
 
   return (
-    <>
+    // RT-W2 (Phase 54 / VERIFY-05): cap this admin page at the DESIGN.md
+    // "Max content width (main content area)" measure (1100px) so it doesn't
+    // fluid-fill to ~1920px via DashboardChrome's `isWide` allow-list. The users
+    // list is a narrow (5-col) table that reads better at 1100px than stretched
+    // to 1920px; only the ultra-wide allocator tables (allocations/compare/
+    // discovery) keep the 1920px measure. The shell `isWide` regex is CONTEXT-locked.
+    <div className="mx-auto max-w-[1100px]">
       <PageHeader
         title="Users"
         description="Grant or revoke app roles. Changes are audited."
@@ -142,6 +148,6 @@ export default async function AdminUsersPage() {
           </p>
         )}
       </Card>
-    </>
+    </div>
   );
 }

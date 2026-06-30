@@ -103,7 +103,7 @@ describe("ConstituentMandatePanel — per-constituent chips (PEER-04)", () => {
     expect(typeChip.tagName).toBe("SPAN");
     expect(typeChip.className).toContain("rounded-sm");
     expect(typeChip.className).toContain("border-border");
-    expect(typeChip.className).toContain("text-[10px]");
+    expect(typeChip.className).toContain("text-fixed-10");
     expect(typeChip.className).toContain("uppercase");
     expect(typeChip.className).toContain("text-text-secondary");
     // Read-only: no interactive role on the chip.

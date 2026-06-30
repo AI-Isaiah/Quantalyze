@@ -14,7 +14,7 @@ export function HealthScore({ analytics, startDate, className }: HealthScoreProp
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold tabular-nums",
+        "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-fixed-11 font-semibold tabular-nums",
         healthScoreBg(score),
         healthScoreColor(score),
         className,

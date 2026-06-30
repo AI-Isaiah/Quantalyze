@@ -30,7 +30,7 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
     >
       <div className="flex items-start justify-between">
         <div>
-          <span className="inline-block text-[10px] uppercase tracking-wider text-text-muted font-medium px-2 py-0.5 rounded bg-[#F8F9FA] mb-2">
+          <span className="inline-block text-fixed-10 uppercase tracking-wider text-text-muted font-medium px-2 py-0.5 rounded bg-[#F8F9FA] mb-2">
             Holding
           </span>
           <h3 className="font-display text-2xl text-text-primary">{symbol}</h3>
@@ -42,7 +42,7 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
 
       <dl className="grid grid-cols-2 gap-4">
         <div>
-          <dt className="text-[10px] uppercase tracking-wider text-text-muted">
+          <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
             Cumulative return
           </dt>
           <dd className="font-mono text-lg text-text-primary">
@@ -50,7 +50,7 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
           </dd>
         </div>
         <div>
-          <dt className="text-[10px] uppercase tracking-wider text-text-muted">
+          <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
             Sharpe
           </dt>
           <dd className="font-mono text-lg text-text-primary">
@@ -58,7 +58,7 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
           </dd>
         </div>
         <div>
-          <dt className="text-[10px] uppercase tracking-wider text-text-muted">
+          <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
             Max drawdown
           </dt>
           <dd className="font-mono text-lg text-text-primary">
@@ -66,7 +66,7 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
           </dd>
         </div>
         <div>
-          <dt className="text-[10px] uppercase tracking-wider text-text-muted">
+          <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
             Vol (annualized)
           </dt>
           <dd className="font-mono text-lg text-text-primary">

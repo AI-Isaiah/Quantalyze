@@ -44,7 +44,7 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         </Panel>
         <Panel title="Main Metrics" benchHeader={bn}>
           {m.n < 252 && (
-            <p className="mb-2 text-[10px] italic" style={{ color: "var(--color-warning, #B45309)" }}>
+            <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
               ⚠ Only {m.n} observations ({(m.n / 252).toFixed(2)}y) — Sharpe / Sortino / Calmar below
               have wide statistical confidence intervals. Conventional reliability threshold is
               ≥ 252 trading days (1 year).
@@ -90,12 +90,12 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         </Panel>
         <BootstrapCIPanel />
         <Panel title="Best / Worst Period">
-          <table className="w-full text-[11px]">
+          <table className="w-full text-fixed-11">
             <thead>
               <tr className="border-b border-text">
-                <th className="text-left py-1 pr-2 font-mono text-[9px] uppercase tracking-[0.18em] text-text-muted">Scale</th>
-                <th className="text-right py-1 px-2 font-mono text-[9px] uppercase tracking-[0.18em] text-text-muted">Best</th>
-                <th className="text-right py-1 pl-2 font-mono text-[9px] uppercase tracking-[0.18em] text-text-muted">Worst</th>
+                <th className="text-left py-1 pr-2 font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Scale</th>
+                <th className="text-right py-1 px-2 font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Best</th>
+                <th className="text-right py-1 pl-2 font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Worst</th>
               </tr>
             </thead>
             <tbody>
@@ -161,10 +161,10 @@ function EditorialSection({ label, name, children }: { label: string; name: stri
     <section className="flex flex-col gap-6">
       <header className="border-b-[2px] border-text pb-2">
         <div className="flex items-baseline gap-3">
-          <span className="font-mono text-[10px] uppercase tracking-[0.28em] text-text-muted">
+          <span className="font-mono text-fixed-10 uppercase tracking-[0.28em] text-text-muted">
             §{label}
           </span>
-          <h2 className="font-serif italic text-[22px] leading-tight text-text-primary">{name}</h2>
+          <h2 className="font-serif italic text-fixed-22 leading-tight text-text-primary">{name}</h2>
         </div>
       </header>
       {children}
@@ -209,11 +209,11 @@ function Panel({
           (hideHeaderRule ? "" : "border-b border-border pb-1")
         }
       >
-        <h3 className="text-[12px] font-semibold uppercase tracking-[0.18em] text-text-primary">
+        <h3 className="text-fixed-12 font-semibold uppercase tracking-[0.18em] text-text-primary">
           {title}
         </h3>
         {benchHeader != null && benchHeader !== "" && (
-          <span className="text-[9px] font-mono uppercase tracking-[0.18em] text-text-muted">
+          <span className="text-fixed-9 font-mono uppercase tracking-[0.18em] text-text-muted">
             vs {benchHeader}
           </span>
         )}
@@ -225,7 +225,7 @@ function Panel({
 
 function Kpm({ children }: { children: ReactNode }) {
   return (
-    <table className="w-full text-[12px]">
+    <table className="w-full text-fixed-12">
       <tbody>{children}</tbody>
     </table>
   );
@@ -251,7 +251,7 @@ function Row({ label, value, bench, accent }: { label: string; value: string; be
 function BwRow({ scale, best, worst }: { scale: string; best: number; worst: number }) {
   return (
     <tr className="border-b border-border/30 last:border-0">
-      <td className="py-1 pr-2 font-mono text-[10px] uppercase tracking-[0.14em] text-text-muted">
+      <td className="py-1 pr-2 font-mono text-fixed-10 uppercase tracking-[0.14em] text-text-muted">
         {scale}
       </td>
       <td
@@ -313,14 +313,14 @@ function RollingMetricsPanel() {
   const so = rollingStats(payload.strategyRollingSortino);
   return (
     <Panel title={`Rolling Metrics (${payload.rollingWindow?.label ?? "6mo"})`}>
-      <table className="w-full text-[12px]">
+      <table className="w-full text-fixed-12">
         <thead>
           <tr className="border-b border-border/60">
-            <th className="py-1 pr-2 text-left font-mono text-[9px] uppercase tracking-[0.18em] text-text-muted">Metric</th>
-            <th className="py-1 px-2 text-right font-mono text-[9px] uppercase tracking-[0.18em] text-text-muted">Now</th>
-            <th className="py-1 px-2 text-right font-mono text-[9px] uppercase tracking-[0.18em] text-text-muted">Avg</th>
-            <th className="py-1 px-2 text-right font-mono text-[9px] uppercase tracking-[0.18em] text-text-muted">Min</th>
-            <th className="py-1 pl-2 text-right font-mono text-[9px] uppercase tracking-[0.18em] text-text-muted">Max</th>
+            <th className="py-1 pr-2 text-left font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Metric</th>
+            <th className="py-1 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Now</th>
+            <th className="py-1 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Avg</th>
+            <th className="py-1 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Min</th>
+            <th className="py-1 pl-2 text-right font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">Max</th>
           </tr>
         </thead>
         <tbody>
@@ -466,28 +466,32 @@ function WorstDrawdownsTablePanel() {
   if (rows.length === 0) return null;
   return (
     <Panel title="Worst 10 Drawdowns">
-      <table className="w-full text-[10.5px]">
+      {/* 54-01b: no --text-fixed-10.5 token exists (54-01a added integer-px
+          aliases only; this plan must not touch globals.css). 10.5px = 0.65625rem
+          exactly, so the rem arbitrary value is byte-identical AND clears
+          no-raw-font-px (which matches px-units only). */}
+      <table className="w-full text-[0.65625rem]">
         <thead>
           <tr className="border-b border-border/60">
-            <th className="py-1 pr-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">#</th>
-            <th className="py-1 px-1 text-left font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap">Peak</th>
-            <th className="py-1 px-1 text-left font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap">Trough</th>
-            <th className="py-1 px-1 text-left font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap">Recov.</th>
-            <th className="py-1 px-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap">Depth</th>
+            <th className="py-1 pr-1 text-right font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted">#</th>
+            <th className="py-1 px-1 text-left font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted whitespace-nowrap">Peak</th>
+            <th className="py-1 px-1 text-left font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted whitespace-nowrap">Trough</th>
+            <th className="py-1 px-1 text-left font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted whitespace-nowrap">Recov.</th>
+            <th className="py-1 px-1 text-right font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted whitespace-nowrap">Depth</th>
             <th
-              className="py-1 px-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap"
+              className="py-1 px-1 text-right font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted whitespace-nowrap"
               title="Days from peak to trough"
             >
               DD d
             </th>
             <th
-              className="py-1 px-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap"
+              className="py-1 px-1 text-right font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted whitespace-nowrap"
               title="Days from trough to recovery"
             >
               Rec d
             </th>
             <th
-              className="py-1 pl-1 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted whitespace-nowrap"
+              className="py-1 pl-1 text-right font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted whitespace-nowrap"
               title="Total period peak to recovery"
             >
               Total
@@ -549,17 +553,17 @@ function EoyReturnsPanel() {
   if (years.length === 0) return null;
   return (
     <Panel title="EOY Returns" benchHeader={hasBench ? cmp.shortName : undefined}>
-      <table className="w-full text-[11px]">
+      <table className="w-full text-fixed-11">
         <thead>
           <tr className="border-b border-border/60">
-            <th className="py-1 pr-2 text-left font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">Year</th>
-            <th className="py-1 px-2 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">Strategy</th>
+            <th className="py-1 pr-2 text-left font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted">Year</th>
+            <th className="py-1 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted">Strategy</th>
             {hasBench && (
               <>
-                <th className="py-1 px-2 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">
+                <th className="py-1 px-2 text-right font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted">
                   {cmp.shortName}
                 </th>
-                <th className="py-1 pl-2 text-right font-mono text-[9px] uppercase tracking-[0.14em] text-text-muted">Δ</th>
+                <th className="py-1 pl-2 text-right font-mono text-fixed-9 uppercase tracking-[0.14em] text-text-muted">Δ</th>
               </>
             )}
           </tr>

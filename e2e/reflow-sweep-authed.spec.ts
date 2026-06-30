@@ -308,10 +308,33 @@ test.describe("rotate-stability (SC#4) — /allocations EquityChart, authed", ()
 // tab-panel switch (AllocationsTabs.tsx) so it is present on every ?tab= value;
 // /compare with no ?ids= renders the empty-selection PageHeader <h1> ("Compare
 // Strategies"), which a seeded allocator with no compare selection always hits.
+// Phase 54-06 / VERIFY-01 widens this from the Phase-52 IN-SCOPE allocator
+// subset (allocations + scenario/risk + /compare) to the APP-WIDE set of routes
+// a FRESHLY-SEEDED allocator (seedTestAllocator, role='allocator', NO extra
+// seed) reliably renders with a stable VISIBLE anchor — the same reachability
+// the 320px AUTHED_ROUTES sweep above already proves. Added rows:
+//   - the remaining /allocations tabs (overview/holdings/outcomes/mandate) — the
+//     "My Allocation" <h1> sits above the tab-panel switch on every ?tab= value;
+//   - the de-blocked onboarding wizard (API + CSV entries) — its step <h2 id=…>
+//     anchors, mirroring the 320px sweep (WIZARD-01 de-block proof at 2560 too);
+//   - authed /security (same <main h1> as the public page, in-session).
+// ADMIN routes are deliberately EXCLUDED (see :26-31 — seedTestAllocator stamps
+// role='allocator'; /admin redirects a non-admin → a false-green). Admin
+// ultra-wide width is covered by the static admin-width.test.tsx (Plan 54-03),
+// not here. /discovery/[slug] is OMITTED: without a seedBridgeCandidate the
+// freshly-seeded allocator hits the category empty-state, not a stable
+// content-bearing layout to gate on (the axe spec seeds a bridge for that).
 const ULTRAWIDE_ROUTES: { path: string; anchor: string; label: string }[] = [
   { path: "/allocations", anchor: 'h1:has-text("My Allocation")', label: "allocations (default)" },
-  { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My Allocation")', label: "allocations Scenario composer" },
+  { path: "/allocations?tab=overview", anchor: 'h1:has-text("My Allocation")', label: "allocations Overview" },
+  { path: "/allocations?tab=holdings", anchor: 'h1:has-text("My Allocation")', label: "allocations Holdings" },
+  { path: "/allocations?tab=outcomes", anchor: 'h1:has-text("My Allocation")', label: "allocations Outcomes" },
+  { path: "/allocations?tab=mandate", anchor: 'h1:has-text("My Allocation")', label: "allocations Mandate" },
   { path: "/allocations?tab=risk", anchor: 'h1:has-text("My Allocation")', label: "allocations Risk" },
+  { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My Allocation")', label: "allocations Scenario composer" },
+  { path: "/strategies/new/wizard", anchor: "#wizard-connect-key-heading", label: "onboarding wizard API entry (de-blocked)" },
+  { path: "/strategies/new/wizard?source=csv", anchor: "#wizard-csv-upload-heading", label: "onboarding wizard CSV entry (de-blocked)" },
+  { path: "/security", anchor: "main h1", label: "security (authed)" },
   { path: "/compare", anchor: 'h1:has-text("Compare Strategies")', label: "compare (empty-selection)" },
 ];
 

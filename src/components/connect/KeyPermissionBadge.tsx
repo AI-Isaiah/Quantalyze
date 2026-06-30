@@ -57,7 +57,7 @@ function Pill({ label, granted }: PillProps) {
   }
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-sm border border-border px-2 py-0.5 text-[13px] ${cls}`}
+      className={`inline-flex items-center gap-1 rounded-sm border border-border px-2 py-0.5 text-fixed-13 ${cls}`}
       data-testid={`key-perm-pill-${label.toLowerCase()}`}
       data-granted={granted ? "true" : "false"}
       aria-label={`${label} ${granted ? "granted" : "not granted"}`}
@@ -134,7 +134,7 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
           type="button"
           onClick={load}
           disabled={loading}
-          className="text-[12px] text-text-muted underline-offset-4 hover:text-text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+          className="text-fixed-12 text-text-muted underline-offset-4 hover:text-text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="key-permission-recheck"
         >
           {loading ? "Checking…" : "Re-check"}
@@ -158,7 +158,7 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
       )}
 
       {!loading && error && (
-        <p className="text-[13px] text-negative" role="alert">
+        <p className="text-fixed-13 text-negative" role="alert">
           {error}
         </p>
       )}
@@ -198,7 +198,7 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
                     : "⚠ No read permission detected on this key. The key may have been revoked or scoped wrong.";
             return (
               <p
-                className={`text-[13px] ${
+                className={`text-fixed-13 ${
                   summaryState === "read-only" ? "text-accent" : "text-negative"
                 }`}
                 data-testid="key-permission-summary"
@@ -222,7 +222,7 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
             <Pill label="Trade" granted={perms.trade} />
             <Pill label="Withdraw" granted={perms.withdraw} />
           </div>
-          <p className="text-[12px] text-text-muted">
+          <p className="text-fixed-12 text-text-muted">
             Detected{" "}
             <time dateTime={perms.detected_at} title={perms.detected_at}>
               {formatRelativeTime(perms.detected_at, Date.now())}

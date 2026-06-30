@@ -23,7 +23,7 @@ export function MandateAdvancedSection({ trigger, children }: Props) {
         aria-controls={panelId}
         className="flex w-full items-center justify-between py-1 text-text-primary hover:text-accent transition-colors rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/20"
       >
-        <span className="text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted group-hover:text-accent">
+        <span className="text-fixed-11 font-medium uppercase tracking-[0.12em] text-text-muted group-hover:text-accent">
           {trigger}
         </span>
         <svg

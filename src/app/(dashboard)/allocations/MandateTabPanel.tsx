@@ -110,7 +110,7 @@ function MandateSnapshotCard({
             {mandate.style_exclusions.map((s) => (
               <span
                 key={s}
-                className="rounded bg-surface-muted px-2 py-0.5 text-[11px] text-text-secondary"
+                className="rounded bg-surface-muted px-2 py-0.5 text-fixed-11 text-text-secondary"
               >
                 {s}
               </span>
@@ -128,7 +128,7 @@ function MandateSnapshotCard({
             {mandate.preferred_strategy_types.map((t) => (
               <span
                 key={t}
-                className="rounded bg-accent/10 px-2 py-0.5 text-[11px] text-accent"
+                className="rounded bg-accent/10 px-2 py-0.5 text-fixed-11 text-accent"
               >
                 {t}
               </span>

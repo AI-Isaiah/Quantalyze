@@ -258,7 +258,7 @@ export function ScenarioFlaggedHoldingsList({
                       {h.breach_reasons.map((reason) => (
                         <span
                           key={reason}
-                          className="rounded bg-surface-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-text-muted"
+                          className="rounded bg-surface-muted px-1.5 py-0.5 text-fixed-10 uppercase tracking-wider text-text-muted"
                         >
                           {reason}
                         </span>

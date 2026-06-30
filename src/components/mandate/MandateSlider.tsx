@@ -153,13 +153,13 @@ export function MandateSlider({
           className="flex-1"
         />
         {displayValue !== null ? (
-          <span className="font-metric text-[13px] tabular-nums text-text-primary min-w-[52px] text-right tracking-tight">
+          <span className="font-metric text-fixed-13 tabular-nums text-text-primary min-w-[52px] text-right tracking-tight">
             {displayValue}
           </span>
         ) : (
           <span
             aria-hidden="true"
-            className="font-metric text-[13px] tabular-nums text-text-muted min-w-[52px] text-right tracking-tight"
+            className="font-metric text-fixed-13 tabular-nums text-text-muted min-w-[52px] text-right tracking-tight"
           >
             —
           </span>

@@ -74,7 +74,7 @@ export function Tooltip({ content, children, className }: TooltipProps) {
         <span
           id={id}
           role="tooltip"
-          className="absolute bottom-full left-1/2 z-50 mb-2 w-56 -translate-x-1/2 rounded-md border bg-white px-3 py-2 text-[13px] leading-snug shadow-sm pointer-events-none"
+          className="absolute bottom-full left-1/2 z-50 mb-2 w-56 -translate-x-1/2 rounded-md border bg-white px-3 py-2 text-fixed-13 leading-snug shadow-sm pointer-events-none"
           style={{
             color: "#1A1A2E",
             borderColor: "#E2E8F0",

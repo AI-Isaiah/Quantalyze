@@ -142,7 +142,7 @@ export function WeightOptimizerSection({ strategies, onApply }: WeightOptimizerS
   return (
     <div>
       <h3 className="text-base font-semibold text-text-primary">Suggested weights</h3>
-      <p className="mt-1 text-[11px] text-text-muted">
+      <p className="mt-1 text-fixed-11 text-text-muted">
         A long-only allocation for the objective below, computed from the strategies&apos;
         overlapping history. Suggestions are <strong>in-sample</strong> (fit to the past, not a
         forecast) and write to your draft only — nothing is saved until you Save the scenario.
@@ -161,7 +161,7 @@ export function WeightOptimizerSection({ strategies, onApply }: WeightOptimizerS
       </div>
 
       {objective === "max_sharpe" && (
-        <p className="mt-2 text-[11px] text-text-muted">
+        <p className="mt-2 text-fixed-11 text-text-muted">
           Max-Sharpe maximizes the in-sample risk-adjusted return — it is the most
           overfit-prone objective; treat the weights as a starting point, not a recommendation.
         </p>
@@ -216,7 +216,7 @@ export function WeightOptimizerSection({ strategies, onApply }: WeightOptimizerS
                 </div>
               ))}
           </div>
-          <p className="mt-2 text-[11px] text-text-muted">
+          <p className="mt-2 text-fixed-11 text-text-muted">
             {result!.objective === "min_vol" ? "Minimum-volatility" : "Maximum-Sharpe"} weights ·
             in-sample over {result!.n} overlapping days · Ledoit-Wolf shrinkage · not a forecast.
           </p>

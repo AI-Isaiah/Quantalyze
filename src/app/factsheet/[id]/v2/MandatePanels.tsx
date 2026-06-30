@@ -32,9 +32,9 @@ export function StrategyThesisPanel() {
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
-        <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary">Strategy Thesis</h3>
+        <h3 className="text-fixed-13 font-semibold uppercase tracking-wider text-text-primary">Strategy Thesis</h3>
       </header>
-      <p className="text-[12px] leading-relaxed text-text-2">
+      <p className="text-fixed-12 leading-relaxed text-text-2">
         <em className="font-serif text-text-primary not-italic font-medium">{payload.strategyName}</em>
         {" "}{types ? <>operates as a {types.toLowerCase()} strategy</> : <>is a systematic strategy</>}
         {markets ? <> across {markets.toLowerCase()}.</> : <>.</>}{" "}
@@ -42,7 +42,7 @@ export function StrategyThesisPanel() {
         ({payload.strategyMetrics.n.toLocaleString()} trading days, {payload.strategyMetrics.years.toFixed(2)} years).
         Comparator analytics are aligned to the same calendar with each benchmark forward-filled.
       </p>
-      <p className="mt-2 text-[10px] italic text-text-muted">
+      <p className="mt-2 text-fixed-10 italic text-text-muted">
         A full thesis (objective, edge, capacity, risk regime) is provided by the strategy author. The summary above
         is derived only from the strategy&apos;s observed return series.
       </p>
@@ -77,15 +77,15 @@ export function TermsPanel() {
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
-        <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary">Terms</h3>
+        <h3 className="text-fixed-13 font-semibold uppercase tracking-wider text-text-primary">Terms</h3>
       </header>
-      <dl className="grid grid-cols-[140px_1fr] gap-y-1 text-[11px]">
+      <dl className="grid grid-cols-[140px_1fr] gap-y-1 text-fixed-11">
         <Term label="Data source">{tierLabel}</Term>
         {payload.startDate && (
           <Term label="Live since">
             {iso(payload.startDate)}
             {hasBacktestGap && (
-              <span className="ml-2 text-[10px] italic" style={{ color: "var(--color-warning, #B45309)" }}>
+              <span className="ml-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
                 — observation window starts {start}; portion before live date is backtest
               </span>
             )}
@@ -103,10 +103,10 @@ export function TermsPanel() {
       {/* Fees / commercial terms slot. Renders as a contractual placeholder
           until the strategy registry exposes mgmt/perf fee fields. Each row is
           honest about being not-yet-provided rather than fabricating. */}
-      <h4 className="mt-4 mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted border-b border-border/60 pb-1">
+      <h4 className="mt-4 mb-2 text-fixed-10 font-semibold uppercase tracking-[0.18em] text-text-muted border-b border-border/60 pb-1">
         Fees & Subscription
       </h4>
-      <dl className="grid grid-cols-[140px_1fr] gap-y-1 text-[11px]">
+      <dl className="grid grid-cols-[140px_1fr] gap-y-1 text-fixed-11">
         <Term label="Management fee">— on request</Term>
         <Term label="Performance fee">— on request</Term>
         <Term label="High-water mark">— on request</Term>
@@ -116,7 +116,7 @@ export function TermsPanel() {
         <Term label="Notice period">— on request</Term>
       </dl>
 
-      <p className="mt-2 text-[10px] italic text-text-muted">
+      <p className="mt-2 text-fixed-10 italic text-text-muted">
         Commercial terms not yet wired through from the strategy registry. Allocators should request
         the full fund offering memorandum directly from the manager before subscribing.
       </p>
@@ -163,7 +163,7 @@ export function ConstituentMandatePanel() {
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
-        <h3 className="text-[13px] font-semibold uppercase tracking-wider text-text-primary">Mandate</h3>
+        <h3 className="text-fixed-13 font-semibold uppercase tracking-wider text-text-primary">Mandate</h3>
       </header>
       {anyMetadata ? (
         <div>
@@ -171,7 +171,7 @@ export function ConstituentMandatePanel() {
             const hasMeta = c.strategy_types.length > 0 || c.markets.length > 0;
             return (
               <div key={`${c.name}-${i}`} className="py-2 border-b border-border/40 last:border-0">
-                <p className="text-[11px] font-semibold text-text-primary mb-1">{c.name}</p>
+                <p className="text-fixed-11 font-semibold text-text-primary mb-1">{c.name}</p>
                 {hasMeta ? (
                   <div className="flex flex-col gap-1">
                     {c.strategy_types.length > 0 && (
@@ -199,14 +199,14 @@ export function ConstituentMandatePanel() {
                     )}
                   </div>
                 ) : (
-                  <p className="text-[11px] italic text-text-muted">no mandate metadata</p>
+                  <p className="text-fixed-11 italic text-text-muted">no mandate metadata</p>
                 )}
               </div>
             );
           })}
         </div>
       ) : (
-        <p className="text-[11px] italic text-text-muted">
+        <p className="text-fixed-11 italic text-text-muted">
           No mandate metadata available for this blend&apos;s constituents.
         </p>
       )}
@@ -220,7 +220,7 @@ export function ConstituentMandatePanel() {
  */
 function Chip({ children }: { children: React.ReactNode }) {
   return (
-    <span className="inline-flex items-center rounded-sm border border-border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-text-secondary">
+    <span className="inline-flex items-center rounded-sm border border-border px-2 py-0.5 text-fixed-10 font-medium uppercase tracking-wider text-text-secondary">
       {children}
     </span>
   );
@@ -235,7 +235,7 @@ function formatLeverage(l: number): string {
 function Term({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <>
-      <dt className="font-mono text-[10px] uppercase tracking-[0.14em] text-text-muted self-center">{label}</dt>
+      <dt className="font-mono text-fixed-10 uppercase tracking-[0.14em] text-text-muted self-center">{label}</dt>
       <dd className="text-text-primary tabular-nums">{children}</dd>
     </>
   );

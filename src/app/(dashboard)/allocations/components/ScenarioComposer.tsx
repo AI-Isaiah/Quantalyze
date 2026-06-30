@@ -2116,7 +2116,7 @@ export function ScenarioComposer({
         <h2 className="text-2xl font-semibold text-text-primary">Portfolio</h2>
         <span
           data-testid="scenario-projected-badge"
-          className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-[10px] uppercase tracking-wide font-semibold text-text-muted"
+          className="inline-flex items-center rounded-sm border border-text-muted px-2 py-0.5 text-fixed-10 uppercase tracking-wide font-semibold text-text-muted"
         >
           PROJECTED — hypothetical, not your live book
         </span>
@@ -2298,7 +2298,7 @@ export function ScenarioComposer({
           (helper → null), so the caveat never names a phantom strategy. */}
       <p
         data-testid="scenario-coverage-caveat"
-        className="mt-2 text-[11px] text-text-muted"
+        className="mt-2 text-fixed-11 text-text-muted"
       >
         {methodologyLine(scenarioMetrics.n)}
         {coverageShortestName !== null
@@ -2461,7 +2461,7 @@ export function ScenarioComposer({
       {leverageApplied && (
         <p
           data-testid="scenario-leverage-caveat"
-          className="mt-2 text-[11px] text-text-muted"
+          className="mt-2 text-fixed-11 text-text-muted"
         >
           Leverage modeled as daily-return scaling; excludes borrow / funding
           cost. The correlation matrix is leverage-invariant; risk-adjusted
@@ -2534,7 +2534,7 @@ export function ScenarioComposer({
         {scenarioAum <= 0 && (
           <div
             aria-live="polite"
-            className="mt-2 text-center text-[11px] text-text-muted"
+            className="mt-2 text-center text-fixed-11 text-text-muted"
           >
             Illustrative shape only — no live capital connected
           </div>
@@ -2659,7 +2659,7 @@ export function ScenarioComposer({
                   (NO red, NO icon). */}
               {diversification.tooSimilarPairs.length > 0 && (
                 <div>
-                  <span className="inline-flex items-center gap-1.5 rounded-sm border bg-warning-bg border-warning-border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-warning">
+                  <span className="inline-flex items-center gap-1.5 rounded-sm border bg-warning-bg border-warning-border px-2 py-0.5 text-fixed-10 font-medium uppercase tracking-wider text-warning">
                     {diversification.tooSimilarPairs.length}{" "}
                     {diversification.tooSimilarPairs.length === 1
                       ? "pair"
@@ -2681,7 +2681,7 @@ export function ScenarioComposer({
                   avgAbsCorrelation={scenarioMetrics.avg_pairwise_correlation}
                 />
                 {scenarioMetrics.correlation_matrix && (
-                  <p className="text-[11px] text-text-muted mt-2">
+                  <p className="text-fixed-11 text-text-muted mt-2">
                     Burnt orange = positive correlation (concentration risk).
                     Pairs ≥ {TOO_SIMILAR_THRESHOLD} are flagged above.
                   </p>
@@ -2695,26 +2695,26 @@ export function ScenarioComposer({
                 <div className="flex flex-wrap gap-8 items-start">
                   {diversification.diversificationRatio != null && (
                     <div className="flex flex-col gap-1">
-                      <span className="text-[12px] text-text-muted">
+                      <span className="text-fixed-12 text-text-muted">
                         Diversification Ratio
                       </span>
-                      <span className="text-[18px] font-metric font-semibold tabular-nums text-text-primary">
+                      <span className="text-fixed-18 font-metric font-semibold tabular-nums text-text-primary">
                         {diversification.diversificationRatio.toFixed(2)}
                       </span>
                     </div>
                   )}
                   {diversification.effectiveNumberOfBets != null && (
                     <div className="flex flex-col gap-1">
-                      <span className="text-[12px] text-text-muted">
+                      <span className="text-fixed-12 text-text-muted">
                         Effective Bets
                       </span>
-                      <span className="text-[18px] font-metric font-semibold tabular-nums text-text-primary">
+                      <span className="text-fixed-18 font-metric font-semibold tabular-nums text-text-primary">
                         {diversification.effectiveNumberOfBets.toFixed(1)}
                       </span>
-                      <span className="text-[11px] text-text-muted">
+                      <span className="text-fixed-11 text-text-muted">
                         ENB = 1 / Σ PCRᵢ²
                       </span>
-                      <span className="text-[12px] text-text-secondary">
+                      <span className="text-fixed-12 text-text-secondary">
                         {diversification.effectiveNumberOfBets.toFixed(1)}{" "}
                         effective{" "}
                         {diversification.effectiveNumberOfBets < 1.5
@@ -2733,7 +2733,7 @@ export function ScenarioComposer({
                       {diversification.effectiveNumberOfBets < 1 && (
                         <span
                           data-testid="enb-below-one-disclosure"
-                          className="text-[11px] text-text-muted"
+                          className="text-fixed-11 text-text-muted"
                         >
                           Below 1 — a hedge offsets risk, so the blend behaves
                           like less than one independent bet.
@@ -2756,7 +2756,7 @@ export function ScenarioComposer({
                     "broken". The signed % text is preserved either way. */}
               {diversification.pcr != null && (
                 <div>
-                  <p className="text-[12px] text-text-muted mb-2">
+                  <p className="text-fixed-12 text-text-muted mb-2">
                     Risk contribution per constituent (% of total)
                   </p>
                   <ul role="list" className="divide-y divide-border">
@@ -2790,7 +2790,7 @@ export function ScenarioComposer({
                             {isHedge && (
                               <span
                                 data-testid="pcr-risk-reducing-tag"
-                                className="inline-flex items-center rounded-sm bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-accent"
+                                className="inline-flex items-center rounded-sm bg-accent/10 px-1.5 py-0.5 text-fixed-10 font-medium uppercase tracking-wider text-accent"
                               >
                                 risk-reducing
                               </span>
@@ -2806,7 +2806,7 @@ export function ScenarioComposer({
                                 style={{ width: `${barWidth}%` }}
                               />
                             </div>
-                            <span className="text-[12px] font-metric tabular-nums text-text-primary w-[48px] text-right">
+                            <span className="text-fixed-12 font-metric tabular-nums text-text-primary w-[48px] text-right">
                               {(pcr * 100).toFixed(1)}%
                             </span>
                           </li>
@@ -3239,7 +3239,7 @@ function CompositionList({
                 <span className="text-xs text-text-muted">{h.venue}</span>
                 {sharedSym && (
                   <span
-                    className="text-[11px] text-warning"
+                    className="text-fixed-11 text-warning"
                     title={`Returns merged with ${otherVenuesForSym.join(", ")} (symbol shared across venues)`}
                   >
                     Returns merged with {otherVenuesForSym.join(", ")} (symbol

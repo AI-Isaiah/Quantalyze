@@ -314,7 +314,7 @@ export function StrategyFilters({
         >
           All Filters
           {activeCount > 0 && (
-            <span className="ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-accent text-white text-[11px] font-semibold">
+            <span className="ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-accent text-white text-fixed-11 font-semibold">
               {activeCount}
             </span>
           )}

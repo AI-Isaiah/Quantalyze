@@ -80,3 +80,44 @@ test.describe("reflow sweep (WCAG 1.4.10 / 1.4.4) @ 320px — public", () => {
     });
   }
 });
+
+/**
+ * Phase 54-06 / VERIFY-01 — the PUBLIC half of the app-wide 2560px ultra-wide
+ * reflow sweep. The 320px describe above proves the WCAG 1.4.10 Reflow LOWER
+ * bound; this parallel describe proves the v1.4 "layouts hold to ULTRA-WIDE"
+ * requirement at the UPPER bound (no horizontal overflow when the viewport is
+ * 2560px) across the SAME curated public route floor — so an ultra-wide overflow
+ * on any public route fails LOUD app-wide.
+ *
+ * UNSEEDED, no env gate — matching this file's deliberate no-seed property
+ * (provable by the absence of any seed-env token, :30-32). It is ALREADY in the
+ * ci.yml UNSEEDED Playwright list (the `… e2e/reflow-sweep.spec.ts …` line), so
+ * an additive describe here needs NO new FLOW-01 wiring. The authed half lives
+ * in e2e/reflow-sweep-authed.spec.ts (the 2560 ultra-wide block there).
+ *
+ * @container 2560 trap (54-RESEARCH Pitfall 3): at 2560 a Tailwind v4 SAME-
+ * element `@container` host+variant freezes grids 1-wide and overflows; the
+ * runtime assertNoReflow (browser-measured documentElement.scrollWidth) catches
+ * what jsdom class-string tests false-pass. Any 2560 finding traces to a
+ * same-element host/variant — fix by splitting host(parent)/variant(child) as
+ * P53 admin tables did, NEVER by widening the slop (CLAUDE.md Rule 6).
+ */
+test.describe("reflow sweep @ 2560px ultra-wide — public", () => {
+  for (const r of PUBLIC_ROUTES) {
+    test(`${r.path} no horizontal overflow at 2560px`, async ({ page }) => {
+      await page.setViewportSize({ width: 2560, height: 1440 });
+      const res = await page.goto(r.path);
+      // Surface an outright 4xx/5xx early; the visible-anchor check inside
+      // assertNoReflow is the real fail-loud guard against a blank/404 page.
+      if (res) {
+        const status = res.status();
+        if (status >= 400) {
+          throw new Error(
+            `${r.path} returned HTTP ${status} — cannot run ultra-wide reflow sweep`,
+          );
+        }
+      }
+      await assertNoReflow(page, r.anchor);
+    });
+  }
+});

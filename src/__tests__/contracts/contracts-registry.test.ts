@@ -46,22 +46,34 @@ const REPO_WIDE_ERROR_RULES = [
   // viewport-only (no rem), the WCAG 1.4.4 / F94 zoom-unsafe shape. Wired
   // repo-wide at "error" (the dirty baseline has zero rem-less clamp strings).
   "no-rem-less-clamp",
+  // DS-04 (phase 49) → BP-03 (phase 54): `no-raw-font-px` began as a SCOPED
+  // strangler (error on the clean design-tokens surface, warn on the dirty
+  // text-[NNpx] baseline) and ratcheted to error per-surface across phases
+  // 52/53. Phase 54 BP-03 COMPLETED the migration and flipped it to error
+  // REPO-WIDE — the only documented exemptions are the 4 frozen-chart islands
+  // (EquityChart + the 3 factsheet SVGs), `src/components/charts/**`, and test
+  // fixtures (editing a FROZEN_ISLANDS file reds the frozen-spine guard). Its
+  // repo-wide teeth are asserted on visibility.ts below; the intentional
+  // frozen-island exemption is asserted via FROZEN_EXEMPT, so neither the
+  // repo-wide error nor the frozen off-glob can silently flip.
+  "no-raw-font-px",
 ] as const;
 
-// DS-04 (phase 49) — `no-raw-font-px` is SCOPED, not repo-wide: it errors only
-// on the clean `src/lib/design-tokens/**` surface and warns on the 558-site
-// dirty `text-[NNpx]` baseline (a strangler that ratchets to error per-surface
-// in phases 52/53 — a repo-wide error would red-CI the existing app, which the
-// "not big-bang" decision forbids). Its teeth are therefore asserted on a
-// token-surface file, and its NON-error level on a dirty file is asserted too,
-// so neither the scoped error nor the intentional warn can silently flip.
-const SCOPED_ERROR_RULES: Record<string, string> = {
-  "no-raw-font-px": "src/lib/design-tokens/typography.ts",
-};
+// Phase 54 BP-03 — `no-raw-font-px` must RESOLVE to a NON-error level on the
+// documented frozen-chart islands (the off-glob exemption), proving the carve-out
+// is real + intentional. A flip to error here would red-CI an un-editable frozen
+// file; an over-broad off-glob would silently neuter the repo-wide teeth.
+const FROZEN_EXEMPT: Array<{ rule: string; file: string }> = [
+  { rule: "no-raw-font-px", file: "src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx" },
+  // A factsheet/[id]/v2 chart — guards the `\[id\]` minimatch escaping in the
+  // off-glob. 54-05 caught a literal `[id]` being read as a char-class that
+  // silently never matched (re-exposing 3 frozen files at the error flip). If
+  // that escape regresses, this resolves to error and fails loud.
+  { rule: "no-raw-font-px", file: "src/app/factsheet/[id]/v2/TimeSeriesChart.tsx" },
+];
 
 const EXPECTED_RULES = [
   ...REPO_WIDE_ERROR_RULES,
-  ...Object.keys(SCOPED_ERROR_RULES),
 ] as const;
 
 interface Guard {
@@ -155,23 +167,19 @@ describe("[B25] eslint-plugin-quantalyze wiring integrity", () => {
           `A missing wiring or an over-broad "off" override silently neuters the by-construction CI teeth.`,
       ).toBe(true);
     }
-    // Scoped rules must resolve to "error" on their declared clean surface (teeth
-    // exist where intended) AND must NOT be "error" on the dirty baseline (the
-    // intentional warn-tier strangler — a flip to repo-wide error would red-CI
-    // the existing app, which the "not big-bang" DS-04 decision forbids).
-    for (const [rule, surfaceFile] of Object.entries(SCOPED_ERROR_RULES)) {
-      const onSurface = await resolve(surfaceFile, rule);
+    // Phase 54 BP-03 — `no-raw-font-px` is now repo-wide error (asserted on
+    // visibility.ts by the repo-wide loop above). Here we assert the inverse
+    // teeth: it must RESOLVE to a NON-error level on the documented frozen-chart
+    // islands (the off-glob exemption), so the carve-out stays real + intentional.
+    // A flip to error on a frozen file would red-CI an un-editable FROZEN_ISLANDS
+    // file; an over-broad off-glob would silently neuter the repo-wide teeth.
+    for (const { rule, file: frozenFile } of FROZEN_EXEMPT) {
+      const onFrozen = await resolve(frozenFile, rule);
       expect(
-        onSurface.severity === 2 || onSurface.severity === "error",
-        `quantalyze/${rule} must RESOLVE to "error" on its clean surface ${surfaceFile} ` +
-          `(got ${JSON.stringify(onSurface.entry)}) — its scoped teeth were neutered.`,
-      ).toBe(true);
-      const onDirty = await resolve("src/lib/visibility.ts", rule);
-      expect(
-        !(onDirty.severity === 2 || onDirty.severity === "error"),
-        `quantalyze/${rule} must NOT resolve to "error" on the dirty baseline ` +
-          `(src/lib/visibility.ts, got ${JSON.stringify(onDirty.entry)}) — a repo-wide error would ` +
-          `red-CI the 558-site baseline, violating the scoped "not big-bang" DS-04 decision.`,
+        !(onFrozen.severity === 2 || onFrozen.severity === "error"),
+        `quantalyze/${rule} must NOT resolve to "error" on the documented frozen-chart ` +
+          `island ${frozenFile} (got ${JSON.stringify(onFrozen.entry)}) — editing a FROZEN_ISLANDS ` +
+          `file reds the frozen-spine guard, so it must stay off-globbed (BP-03 exemption).`,
       ).toBe(true);
     }
   });

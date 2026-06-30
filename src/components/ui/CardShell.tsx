@@ -60,7 +60,7 @@ export function CardShell({
               role="status"
               aria-live="polite"
               title={staleHint}
-              className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-text-muted"
+              className="flex items-center gap-1.5 text-fixed-10 uppercase tracking-wider text-text-muted"
             >
               <span
                 aria-hidden="true"

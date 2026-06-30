@@ -65,21 +65,32 @@ const eslintConfig = defineConfig([
       //     (zero rem-less clamp STRINGS in TSX today; the numeric Math-style
       //     clamp() helpers are call expressions the rule deliberately ignores),
       //     so it fails CI by construction on a future zoom-unsafe clamp string.
-      //   - no-raw-font-px → repo-wide WARN here (dirty baseline stays visible
-      //     but non-blocking); hard ERROR only on the proven-clean
-      //     `src/lib/design-tokens/**` surface plus the Phase-52 per-surface /
-      //     per-file ratchet override block below. The 52/53 strangler ratchets
-      //     the remaining dirty surfaces to error one at a time. Phase 52 is
-      //     done: its grep-verified-clean allocator-journey surfaces (compare/,
-      //     discovery/, strategy/[id]/ + the clean allocations/factsheet files)
-      //     are now error; the orphan allocations/factsheet files (incl. the
-      //     frozen EquityChart + chart-internal SVG) and the Phase-53 surfaces
-      //     (portfolios/security/admin/wizard) remain at warn — see
-      //     .planning/phases/52-…/deferred-items.md for the orphan-px debt list.
-      //     Chart / designer-bundle ports are turned off by glob; a one-off
-      //     carries a greppable `DS-04 sanctioned-exception:` comment.
+      //   - no-raw-font-px → repo-wide ERROR as of Phase 54 / BP-03 (the final
+      //     strangler flip; was `warn` through phases 49–53). Phases 54-01b/
+      //     02a/02b cleaned every migratable non-frozen, non-test orphan to the
+      //     `--text-fixed-*` / named `--text-*` tiers, and 54-01a added the
+      //     frozen-chart off-glob, so the repo-wide flip now passes with 0
+      //     errors. The Phase-52/53 per-surface `error` ratchet blocks below are
+      //     redundant once repo-wide is error, but are harmless and left in
+      //     place (future cleanup, not required by BP-03).
+      //
+      //     BP-03 AUDIT NOTE — "error repo-wide" is satisfied as "error
+      //     everywhere EXCEPT the documented frozen-chart islands". The frozen
+      //     EquityChart (src/app/(dashboard)/allocations/widgets/performance/
+      //     EquityChart.tsx) and the three chart-internal factsheet SVGs
+      //     (TimeSeriesChart/HistogramChart/MasterBrush) carry raw `text-[Npx]`
+      //     sites that can NEVER migrate: they are in the FROZEN_ISLANDS
+      //     git-diff-zero list at phase-52-frozen-spine-guards.test.ts:158, so
+      //     any byte edit reds the frozen-spine guard. The CONTEXT-locked
+      //     resolution of the BP-03-vs-FROZEN_ISLANDS conflict is to EXEMPT
+      //     them via the `off` glob below (mirroring src/components/charts/**),
+      //     NEVER to edit them. This is NOT an unmet BP-03 gap — it is the
+      //     documented island carve-out. WorstDrawdowns.tsx rides the
+      //     components/charts/** off-glob; test/spec fixtures ride the
+      //     test-exempt block. No production source can author a new raw px
+      //     without failing CI.
       "quantalyze/no-rem-less-clamp": "error",
-      "quantalyze/no-raw-font-px": "warn",
+      "quantalyze/no-raw-font-px": "error",
     },
   },
   // DS-04 hard gate on the proven-clean new token/primitive surface. The
@@ -94,16 +105,14 @@ const eslintConfig = defineConfig([
   // ERROR for the allocator-journey surfaces 52-02..06 migrated to the fluid
   // `--text-*` spine. SCOPE-CORRECTED vs the original 52-07 plan (user decision
   // "per-file ratchet + log debt"): allocations/** and factsheet/[id]/v2/** are
-  // NOT flipped whole — the planner under-scoped those migrations, so each tree
-  // still carries ORPHAN raw-px files (allocations: 18 incl. the FROZEN
-  // EquityChart that can never migrate; factsheet: 7 incl. the chart-internal
-  // SVG TimeSeriesChart/HistogramChart/MasterBrush). Flipping the whole glob
-  // would red CI. Instead we list ONLY the grep-proven-clean (zero raw
-  // text-[Npx]) globs + files. The orphan files stay at the repo-wide `warn`
-  // and are logged as Phase-53/54 debt in
-  // .planning/phases/52-…/deferred-items.md. Phase-53 surfaces
-  // (portfolios/security/admin/wizard) are untouched — the ratchet is
-  // per-surface, not big-bang.
+  // Phase-52/53 per-surface `error` ratchet — the strangler that PRECEDED the
+  // BP-03 repo-wide flip. As of Phase 54 / BP-03 the repo-wide default is now
+  // `error` (see the top-of-file block), so every entry below is REDUNDANT and
+  // harmless — retained as the historical ratchet record, no longer load-bearing.
+  // All formerly-orphan files were migrated to `text-fixed-N` in 54-01b/02a/02b
+  // and ride the repo-wide `error` clean; the only surviving raw-px holdouts are
+  // the off-globbed frozen chart islands (EquityChart + the 3 factsheet SVGs)
+  // + components/charts/**.
   {
     files: [
       // Fully-clean surface globs (grep-verified 0 raw text-[Npx]):
@@ -130,9 +139,10 @@ const eslintConfig = defineConfig([
       "src/app/(dashboard)/allocations/components/StressVarSection.tsx",
       "src/app/(dashboard)/allocations/components/MonteCarloSection.tsx",
       "src/app/(dashboard)/allocations/components/OpenPositionsTable.tsx",
-      // Factsheet v2 — per-FILE (only grep-proven-clean; the chart-internal
-      // TimeSeriesChart/HistogramChart/MasterBrush + MetricsColumn/MandatePanels/
-      // StressWindowsPanel/page stay at warn as orphan debt):
+      // Factsheet v2 — per-FILE (Phase-52 record; all factsheet files incl.
+      // MetricsColumn/MandatePanels/StressWindowsPanel/page were migrated in
+      // 54-01b and now ride the repo-wide `error` clean. The chart-internal SVGs
+      // TimeSeriesChart/HistogramChart/MasterBrush remain off-globbed (frozen)):
       "src/app/factsheet/[id]/v2/FactsheetView.tsx",
       "src/app/factsheet/[id]/v2/AnalyticalPanels.tsx",
       "src/app/factsheet/[id]/v2/BatchDPanels.tsx",
@@ -186,6 +196,36 @@ const eslintConfig = defineConfig([
       "src/components/portfolio/**",
     ],
     rules: { "quantalyze/no-raw-font-px": "error" },
+  },
+  // Phase 54 / BP-03 — FROZEN-island chart off-glob. These 4 files carry raw
+  // `text-[Npx]` sites but can NEVER migrate: they are in the FROZEN_ISLANDS
+  // git-diff-zero list (src/__tests__/phase-52-frozen-spine-guards.test.ts:158),
+  // so any byte change reds the frozen-spine guard. The CONTEXT-locked BP-03/
+  // FROZEN conflict resolution is to EXEMPT them via this `off` glob (mirroring
+  // the src/components/charts/** block below) instead of editing them — so the
+  // repo-wide `error` flip (Plan 54-05) passes while the render stays
+  // byte-identical. EquityChart lives under allocations/widgets/performance/,
+  // NOT under src/components/charts/**, so it needs an explicit entry; the three
+  // factsheet SVG charts (TimeSeriesChart/HistogramChart/MasterBrush) are the
+  // chart-internal frozen islands. NEVER add edits to these files.
+  //
+  // NOTE (Plan 54-05): the three factsheet paths live under the literal `[id]`
+  // dynamic-route segment, so the brackets MUST be backslash-escaped. ESLint
+  // flat config matches `files` with minimatch, which reads an unescaped `[id]`
+  // as a character class (one of `i`/`d`) — NOT the literal directory `[id]` —
+  // so the unescaped form silently fails to match and the files ride the
+  // repo-wide rule. Before the warn→error flip that was harmless (they stayed
+  // `warn`); at `error` it would red CI on these frozen files. Escaping `\[id\]`
+  // makes the off-glob actually match the on-disk path. EquityChart has no
+  // bracket segment, so it matches as written.
+  {
+    files: [
+      "src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx",
+      "src/app/factsheet/\\[id\\]/v2/TimeSeriesChart.tsx",
+      "src/app/factsheet/\\[id\\]/v2/HistogramChart.tsx",
+      "src/app/factsheet/\\[id\\]/v2/MasterBrush.tsx",
+    ],
+    rules: { "quantalyze/no-raw-font-px": "off" },
   },
   // Context allow-list: Recharts axis colors / designer-bundle chart ports pin
   // raw px sizes legitimately. Turn BOTH DS-04 rules off here (mirrors how

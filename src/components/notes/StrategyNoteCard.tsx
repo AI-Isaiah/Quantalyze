@@ -59,7 +59,7 @@ export function StrategyNoteCard(props: StrategyNoteCardProps) {
           placeholder="Private note about this strategy — markdown supported."
           autoFocus
           rows={6}
-          className="w-full resize-none rounded border border-border p-2 font-mono text-[13px] leading-[1.6] focus:border-accent focus:outline-none"
+          className="w-full resize-none rounded border border-border p-2 font-mono text-fixed-13 leading-[1.6] focus:border-accent focus:outline-none"
         />
       ) : (
         <div>

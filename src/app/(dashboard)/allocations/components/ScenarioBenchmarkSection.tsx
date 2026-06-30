@@ -157,7 +157,7 @@ export function ScenarioBenchmarkSection({
         />
         <MetricRow metric="beta" label="Beta" value={formatNumber(m.beta)} />
       </div>
-      <p className="mt-2 text-[11px] text-text-muted">
+      <p className="mt-2 text-fixed-11 text-text-muted">
         {methodologyLine(m.n)} Metrics are 252-day annualized active returns.
       </p>
     </div>
