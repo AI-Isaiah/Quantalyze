@@ -34,7 +34,7 @@ export function WithdrawalWarningStrip() {
             submission.
           </span>
         </p>
-        <p className="mt-1 text-caption text-text-muted">
+        <p className="mt-1 text-caption text-text-secondary">
           Read-only is enforced server-side at validation — Trade/Withdraw
           scopes are rejected before encryption.
         </p>

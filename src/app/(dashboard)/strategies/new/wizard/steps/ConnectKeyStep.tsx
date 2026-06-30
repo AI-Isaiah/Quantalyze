@@ -238,7 +238,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
                   data-testid={`wizard-exchange-${ex.id}`}
                 >
                   <p className="text-body font-semibold text-text-primary">{ex.name}</p>
-                  <p className="mt-1 text-micro text-text-muted">{ex.caption}</p>
+                  <p className="mt-1 text-micro text-text-secondary">{ex.caption}</p>
                 </button>
               );
             })}

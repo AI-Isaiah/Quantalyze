@@ -157,13 +157,20 @@ function parseOptimizerSuggestionRow(v: Json): OptimizerSuggestionRow | null {
   };
 }
 
+// Plain `{}` (not `Object.create(null)`) so these objects survive the
+// React Server→Client serialization boundary: the adapted analytics flows
+// into the `"use client"` InsightStrip on /demo, and RSC rejects
+// null-prototype objects ("Classes or null prototypes are not supported"),
+// which 500'd /demo whenever correlation data was populated. Prototype-
+// pollution safety is preserved by `isSafeKey` (it drops __proto__/
+// constructor/prototype before any assignment), not by the prototype itself.
 function parseCorrelationMatrix(v: Json): CorrelationMatrix | null {
   if (!isObject(v)) return null;
-  const result: CorrelationMatrix = Object.create(null);
+  const result: CorrelationMatrix = {};
   for (const [rowKey, row] of Object.entries(v)) {
     if (!isSafeKey(rowKey)) continue;
     if (!isObject(row)) continue;
-    const inner: Record<string, number | null> = Object.create(null);
+    const inner: Record<string, number | null> = {};
     for (const [colKey, val] of Object.entries(row)) {
       if (!isSafeKey(colKey)) continue;
       inner[colKey] = asNumber(val);
@@ -185,7 +192,8 @@ function parseRollingCorrelation(
     return series.length > 0 ? { _legacy: series } : null;
   }
   if (!isObject(v)) return null;
-  const result: Record<string, TimeSeriesPoint[]> = Object.create(null);
+  // Plain `{}` for RSC serialization — see parseCorrelationMatrix above.
+  const result: Record<string, TimeSeriesPoint[]> = {};
   for (const [pairKey, series] of Object.entries(v)) {
     if (!isSafeKey(pairKey)) continue;
     const parsed = parseTimeSeries(series);

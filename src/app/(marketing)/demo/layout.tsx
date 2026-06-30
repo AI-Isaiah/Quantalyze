@@ -47,7 +47,7 @@ function DemoNotice() {
       className="sticky top-0 z-10 border-b border-border bg-surface"
     >
       <div className="mx-auto flex max-w-[1100px] items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
-        <p className="min-w-0 truncate text-xs text-text-muted">
+        <p className="min-w-0 text-xs text-text-muted">
           Live demo — simulated allocator data. Real product on production.
         </p>
         <Link
