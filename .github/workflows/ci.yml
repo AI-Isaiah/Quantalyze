@@ -1280,6 +1280,7 @@ jobs:
             e2e/svg-chart-parity.spec.ts \
             e2e/target-size.spec.ts \
             e2e/no-clip-sweep.spec.ts \
+            e2e/axe-app-wide.spec.ts \
             --timeout 60000
           # Phase 47-05 / FLOW-01 (place 1 of 2): the fresh
           # e2e/svg-chart-parity.spec.ts (desktop goldens + 320px portrait)
@@ -1291,23 +1292,31 @@ jobs:
           # SEEDED chart-tap-rect cases (which self-skip in the unseeded run)
           # actually execute; its unseeded /security case keeps running in the
           # unseeded list. Both new gates are HAS_SEED_ENV-guarded (place 2).
-          # Phase 48-04 / A11Y-01: e2e/axe-app-wide.spec.ts is intentionally
-          # NOT in this seeded MA-8 list — it runs PUBLIC-only in the unseeded
-          # list above (line ~1059), where its public route × viewport matrix
-          # is green. Its authed/embedded describes self-skip without seed env
-          # (the spec's HAS_SEED_ENV const) and are therefore dormant in CI.
-          # WHY public-only: the MA-8 invocation shares ONE test database across
-          # all specs, which is NOT hermetic for a broad authed seeding matrix —
-          # running axe-app-wide here regressed three other behaviours (it
-          # published a non-example strategy into the crypto-sma category that
-          # discovery-hide-examples-default.spec.ts asserts is empty; its public
-          # rows re-ran against the real-test-Supabase rebuild and 500'd /demo;
-          # and the polluted DB state produced spurious axe findings on the
-          # wizard that the focused wizard-axe.spec.ts — same surface, same
-          # rules — does NOT see). Authed-route a11y stays covered by the focused
-          # MA-8 axe specs (discovery-axe / strategy-v2-axe / composer-axe /
-          # wizard-axe). Re-enabling the authed/mobile matrix needs a hermetic
-          # per-spec seeded DB (deferred), not this shared invocation.
+          # Phase 54-08 / VERIFY-02 / FLOW-01 (place 1 of 2): e2e/axe-app-wide.spec.ts
+          # is NOW in this seeded MA-8 list (above) so its authed + embedded +
+          # mobile + 2560 ultra-wide describes run hermetically against the seeded
+          # DB. It ALSO stays in the unseeded list (~line 1059) for its public
+          # route × viewport rows; the spec's HAS_SEED_ENV const + the two
+          # test.skip(!HAS_SEED_ENV, …) gates (place 2) self-skip the authed/
+          # embedded describes when the seed env is absent, so unseeded/local
+          # runs stay green-by-skip.
+          # WHY this is safe now (it was PUBLIC-only in v1.3 / Phase 48-04): the
+          # MA-8 invocation shares ONE test database across all specs, and the
+          # v1.3 attempt to run axe-app-wide here regressed three behaviours —
+          # (a) seedBridgeCandidate({crypto-sma}) published a non-example strategy
+          # into the crypto-sma category that discovery-hide-examples-default.spec.ts
+          # asserts is EMPTY on first paint; (b) its public rows re-ran against the
+          # rebuilt test-Supabase and 500'd /demo; (c) the polluted DB produced
+          # spurious wizard axe findings the focused wizard-axe.spec.ts does NOT
+          # see. VERIFY-02 closes all three: the ONE cross-spec-dangerous seed —
+          # the crypto-sma discovery row — is now torn down by id in a `finally`
+          # (delete-by-id + bridge-owner cascade via the prod-safe cleanup helper),
+          # so discovery-hide-examples-default sees the category empty again and
+          # the /demo + wizard regressions (downstream of that pollution) no longer
+          # occur. The per-unique-user allocator/strategy/wizard seeds are inert to
+          # other specs (timestamped emails). The focused MA-8 axe specs
+          # (discovery-axe / strategy-v2-axe / composer-axe / wizard-axe) still run
+          # alongside as the per-route floor.
           # Same kill+wait+nuke pattern as the unconditional step above so any
           # follow-up runner work (artifact upload) doesn't race on resources.
           kill $SERVER_PID 2>/dev/null || true
