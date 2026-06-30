@@ -4,9 +4,11 @@
  *
  * v1.4 LIFTS the desktop-byte-identity invariant for the VISUAL layer — the
  * restyle is free to fix scaling / clipping / hierarchy on the allocator
- * surfaces. But a hard floor remains LOCKED: the SEVEN frozen client islands
+ * surfaces. But a hard floor remains LOCKED: the frozen client islands
  * (CONTEXT collapses the chart-interactivity trio EquityChart + TouchTooltip +
- * useTapPin into one "chart interactivity" island, so eight file paths) must
+ * useTapPin into one "chart interactivity" island; Phase 54 BP-03 adds the 3
+ * factsheet SVG charts — TimeSeriesChart/HistogramChart/MasterBrush — frozen
+ * because they are off-globbed from `no-raw-font-px`; so eleven file paths) must
  * NOT be touched during a restyle. They are frozen because:
  *
  *   - `src/lib/scenario.ts` — the 252-day-annualization projection engine
@@ -158,6 +160,14 @@ const FROZEN_ISLANDS: string[] = [
   "src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx",
   "src/components/charts/TouchTooltip.tsx",
   "src/hooks/useTapPin.ts",
+  // Phase 54 (BP-03): the 3 factsheet chart-internal SVGs are off-globbed from
+  // `no-raw-font-px` (they keep raw px pending the deferred VERIFY-04 tolerance-
+  // golden re-baseline). The off-glob removes lint protection, so freeze them
+  // here — otherwise a future raw-px / render edit to them is caught by NO gate
+  // (lint off + goldens deferred). Zero-diff vs the baseline today.
+  "src/app/factsheet/[id]/v2/TimeSeriesChart.tsx",
+  "src/app/factsheet/[id]/v2/HistogramChart.tsx",
+  "src/app/factsheet/[id]/v2/MasterBrush.tsx",
 ];
 
 describe("Phase 52 frozen-spine exit-gate guards", () => {
@@ -170,7 +180,7 @@ describe("Phase 52 frozen-spine exit-gate guards", () => {
   });
 
   // One assertion per frozen island so a CI failure names the EXACT offending
-  // file (a single combined assertion would only say "one of eight changed").
+  // file (a single combined assertion would only say "one of eleven changed").
   for (const island of FROZEN_ISLANDS) {
     it(`exit gate (frozen client island): ${island} is zero-diff vs the phase baseline`, () => {
       expect(

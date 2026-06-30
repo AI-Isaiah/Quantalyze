@@ -155,7 +155,11 @@
      32,36). The fluid `--text-micro` clamp(10→11px) is NOT byte-identical at
      desktop, so it must NOT be used for the locked surfaces — these fixed aliases
      are the byte-identity mechanism the migration halves (54-01b/54-02a/54-02b)
-     consume as pure className swaps that never touch this file. */
+     consume as pure className swaps that never touch this file. (The grep above
+     also matches the frozen-chart islands + components/charts/** — those keep
+     their raw px via the eslint off-glob, but their sizes overlap this set, so
+     one alias per distinct size present across the migratable surface covers
+     them too without ever editing a frozen file.) */
   --text-fixed-9: 0.5625rem; /* = 9px @16px root — byte-identical to text-[9px] */
   --text-fixed-10: 0.625rem; /* = 10px @16px root — byte-identical to text-[10px] */
   --text-fixed-11: 0.6875rem; /* = 11px @16px root — byte-identical to text-[11px] */

@@ -70,6 +70,14 @@ async function findClippedText(page: Page): Promise<string[]> {
       if (r.width === 0 && r.height === 0) continue; // hidden — skip
       measured += 1;
       const cs = getComputedStyle(el);
+      // Scope: ellipsis-clamp truncation — the mode the app's `truncate` /
+      // `text-ellipsis` Tailwind utilities produce, and the VERIFY-03 regression
+      // surface. We deliberately do NOT flag `text-overflow: clip`: `clip` is the
+      // CSS *default* value, so every overflow:hidden element carries it (rounded
+      // cards, scroll containers) — flagging it would false-positive at scale. A
+      // hard `overflow:hidden` text-cut with no ellipsis is not runtime-separable
+      // from a legitimate clipped container without per-text-node analysis, so it
+      // is out of this gate's scope; the ellipsis check covers the utilities in use.
       const ellipsis =
         cs.textOverflow === "ellipsis" && cs.overflow !== "visible";
       const overflowed = el.scrollWidth > el.clientWidth + 1;

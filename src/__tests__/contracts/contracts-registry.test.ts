@@ -63,9 +63,14 @@ const REPO_WIDE_ERROR_RULES = [
 // documented frozen-chart islands (the off-glob exemption), proving the carve-out
 // is real + intentional. A flip to error here would red-CI an un-editable frozen
 // file; an over-broad off-glob would silently neuter the repo-wide teeth.
-const FROZEN_EXEMPT: Record<string, string> = {
-  "no-raw-font-px": "src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx",
-};
+const FROZEN_EXEMPT: Array<{ rule: string; file: string }> = [
+  { rule: "no-raw-font-px", file: "src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx" },
+  // A factsheet/[id]/v2 chart — guards the `\[id\]` minimatch escaping in the
+  // off-glob. 54-05 caught a literal `[id]` being read as a char-class that
+  // silently never matched (re-exposing 3 frozen files at the error flip). If
+  // that escape regresses, this resolves to error and fails loud.
+  { rule: "no-raw-font-px", file: "src/app/factsheet/[id]/v2/TimeSeriesChart.tsx" },
+];
 
 const EXPECTED_RULES = [
   ...REPO_WIDE_ERROR_RULES,
@@ -168,7 +173,7 @@ describe("[B25] eslint-plugin-quantalyze wiring integrity", () => {
     // islands (the off-glob exemption), so the carve-out stays real + intentional.
     // A flip to error on a frozen file would red-CI an un-editable FROZEN_ISLANDS
     // file; an over-broad off-glob would silently neuter the repo-wide teeth.
-    for (const [rule, frozenFile] of Object.entries(FROZEN_EXEMPT)) {
+    for (const { rule, file: frozenFile } of FROZEN_EXEMPT) {
       const onFrozen = await resolve(frozenFile, rule);
       expect(
         !(onFrozen.severity === 2 || onFrozen.severity === "error"),

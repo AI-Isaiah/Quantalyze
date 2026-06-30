@@ -65,9 +65,9 @@ describe("admin width — RT-W2 (4 prose/form pages capped; data pages stay wide
   for (const { label, path } of IN_SCOPE) {
     it(`IN SCOPE: admin/${label} carries the inner ${CAP} prose/form cap`, () => {
       const src = readFileSync(path, "utf8");
-      expect(src).toContain(CAP);
-      // Exactly one cap per page — a second one would mean a stray nested
-      // wrapper, not the single page-content cap this plan applies.
+      // Exactly one cap per page — a second would mean a stray nested wrapper,
+      // not the single page-content cap this plan applies. The ===1 count
+      // subsumes a presence check (zero matches fails it just as loudly).
       expect(src.match(/max-w-\[1100px\]/g)?.length ?? 0).toBe(1);
     });
   }

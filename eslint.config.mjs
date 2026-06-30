@@ -105,16 +105,14 @@ const eslintConfig = defineConfig([
   // ERROR for the allocator-journey surfaces 52-02..06 migrated to the fluid
   // `--text-*` spine. SCOPE-CORRECTED vs the original 52-07 plan (user decision
   // "per-file ratchet + log debt"): allocations/** and factsheet/[id]/v2/** are
-  // NOT flipped whole — the planner under-scoped those migrations, so each tree
-  // still carries ORPHAN raw-px files (allocations: 18 incl. the FROZEN
-  // EquityChart that can never migrate; factsheet: 7 incl. the chart-internal
-  // SVG TimeSeriesChart/HistogramChart/MasterBrush). Flipping the whole glob
-  // would red CI. Instead we list ONLY the grep-proven-clean (zero raw
-  // text-[Npx]) globs + files. The orphan files stay at the repo-wide `warn`
-  // and are logged as Phase-53/54 debt in
-  // .planning/phases/52-…/deferred-items.md. Phase-53 surfaces
-  // (portfolios/security/admin/wizard) are untouched — the ratchet is
-  // per-surface, not big-bang.
+  // Phase-52/53 per-surface `error` ratchet — the strangler that PRECEDED the
+  // BP-03 repo-wide flip. As of Phase 54 / BP-03 the repo-wide default is now
+  // `error` (see the top-of-file block), so every entry below is REDUNDANT and
+  // harmless — retained as the historical ratchet record, no longer load-bearing.
+  // All formerly-orphan files were migrated to `text-fixed-N` in 54-01b/02a/02b
+  // and ride the repo-wide `error` clean; the only surviving raw-px holdouts are
+  // the off-globbed frozen chart islands (EquityChart + the 3 factsheet SVGs)
+  // + components/charts/**.
   {
     files: [
       // Fully-clean surface globs (grep-verified 0 raw text-[Npx]):
@@ -141,9 +139,10 @@ const eslintConfig = defineConfig([
       "src/app/(dashboard)/allocations/components/StressVarSection.tsx",
       "src/app/(dashboard)/allocations/components/MonteCarloSection.tsx",
       "src/app/(dashboard)/allocations/components/OpenPositionsTable.tsx",
-      // Factsheet v2 — per-FILE (only grep-proven-clean; the chart-internal
-      // TimeSeriesChart/HistogramChart/MasterBrush + MetricsColumn/MandatePanels/
-      // StressWindowsPanel/page stay at warn as orphan debt):
+      // Factsheet v2 — per-FILE (Phase-52 record; all factsheet files incl.
+      // MetricsColumn/MandatePanels/StressWindowsPanel/page were migrated in
+      // 54-01b and now ride the repo-wide `error` clean. The chart-internal SVGs
+      // TimeSeriesChart/HistogramChart/MasterBrush remain off-globbed (frozen)):
       "src/app/factsheet/[id]/v2/FactsheetView.tsx",
       "src/app/factsheet/[id]/v2/AnalyticalPanels.tsx",
       "src/app/factsheet/[id]/v2/BatchDPanels.tsx",

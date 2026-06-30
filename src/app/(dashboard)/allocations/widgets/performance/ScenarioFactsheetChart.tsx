@@ -159,10 +159,13 @@ function PeriodControl({ axisLength }: { axisLength: number }) {
           // for the composer's WCAG-AA axe gate (a role="tab" must carry it).
           aria-selected={false}
           onClick={() => selectPeriod(p)}
-          // Match the factsheet TimeSeriesChart tab recipe verbatim (the
-          // factsheet is the source of truth): text-fixed-10 uppercase font-mono
-          // tracking-wider on a surface-subtle bordered pill. ONE deliberate
-          // divergence: the factsheet uses `text-text-2`, but `--color-text-2`
+          // Match the factsheet TimeSeriesChart tab recipe (the factsheet is the
+          // source of truth): uppercase font-mono tracking-wider at the 10px tier
+          // on a surface-subtle bordered pill. TWO deliberate class-literal
+          // divergences, same rendered output: (1) the factsheet pill is a FROZEN
+          // island so it keeps raw `text-[10px]`; this non-frozen site uses the
+          // byte-identical `text-fixed-10` token (BP-03). (2) the factsheet uses
+          // `text-text-2`, but `--color-text-2`
           // is injected only on the `.factsheet-v2-shell` palette (palette.ts);
           // this chart mounts OUTSIDE that shell, so we use the globally-declared
           // `text-text-secondary` token (the same "primary > secondary > muted"

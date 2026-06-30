@@ -2780,7 +2780,7 @@ export function ScenarioComposer({
                                 — table-aligned <li>, so keep single-line but add
                                 a `title` for full-text recovery; the title
                                 exposes only the already-rendered constituent
-                                name (T-52-06). text-fixed-12 → text-caption tier. */}
+                                name (T-52-06). text-[12px] → text-caption tier. */}
                             <span
                               className="text-caption text-text-primary truncate max-w-[160px]"
                               title={strategyNames[id] ?? id}
