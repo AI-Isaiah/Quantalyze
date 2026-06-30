@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.35.0.23] - 2026-06-30
+### Fixed — committed the re-baked /demo screenshot baselines (demo-375 + demo-1280)
+Committed the two refreshed `chromium-linux` baselines produced by the `workflow_dispatch bake_demo_screenshots=true` run on `main` @ `9a34d46c` (the v0.35.0.22 mechanism's first use). Each was surfaced for per-shot human review before commit (the locked "never blind `--update-snapshots`" gate): **demo-375** now shows the "Live demo …" notice wrapping to two lines instead of ellipsis-clipping (the v0.35.0.20 truncation fix), and **demo-1280** settles the Phase-53 fluid-type height drift — both verified as real placeholder-env renders, not blank/error pages. `demo-768` came back byte-identical to the committed baseline, so it is left untouched.
+
+This clears the perpetual `2 failed` in the advisory step-9 e2e run (confirmed failing on `main` @ `d8c61f5f`): `demo-screenshot.spec.ts` now matches at all three viewports, so a *new* demo-screenshot regression is no longer masked behind the stale-baseline noise.
+
 ## [0.35.0.22] - 2026-06-30
 ### Added — `bake_demo_screenshots` dispatch input (re-bake the stale /demo baselines)
 The `/demo` screenshot baselines (`demo-375`, `demo-1280`) have been failing the advisory step-9 e2e run since the Phase-53 fluid-type height drift and the v0.35.0.20 notice-unwrap fix (`demo-768` still passes). They are tolerated by the v0.35.0.18 `continue-on-error`, so they don't block — but a perpetual "2 failed" masks any *new* demo-screenshot regression, so the baselines need refreshing. Confirmed against live `main` @ `d8c61f5f`: the e2e job logs `2 failed` (375 + 1280), `81 passed`.
