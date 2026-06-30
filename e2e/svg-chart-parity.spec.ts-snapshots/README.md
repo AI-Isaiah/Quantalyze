@@ -26,8 +26,21 @@ left to bake on the first run that has the seed env.
 
 ## How to bake them
 
-On the first seeded CI run (`vars.E2E_TEST_DB_CONFIGURED == 'true'`), or
-locally with the test-Supabase env exported:
+**Preferred — one-shot CI bake (`workflow_dispatch`).** The baselines MUST be
+baked in CI's Linux runner: pixel goldens baked on macOS / another OS differ in
+font antialiasing and would false-red every CI diff. Trigger the dedicated bake
+(runs ONLY this spec with `--update-snapshots`, uploads the PNGs as an artifact
+for per-chart review — never auto-committed):
+
+```bash
+gh workflow run ci.yml --ref main -f bake_svg_goldens=true
+# then: download the `svg-chart-goldens-baked` artifact, review each chart,
+# commit the PNGs into THIS directory. The spec's WR-02 guard then flips live.
+```
+
+The per-deliverable commands below are the manual fallback, valid ONLY when run
+inside the Linux Playwright image (e.g. mcr.microsoft.com/playwright) with the
+test-Supabase env exported — never bake them on a non-Linux host:
 
 ```bash
 # 1. Bake the DESKTOP goldens FIRST (Pitfall 2 — the no-recompute discipline),

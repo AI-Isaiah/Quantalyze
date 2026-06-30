@@ -88,18 +88,32 @@ const HAS_SEED_ENV =
 // (HAS_SEED_ENV + the ci.yml MA-8 list are untouched), so the moment the
 // goldens are baked + committed this guard flips false and the gate goes live
 // automatically — no spec edit needed.
-const SNAPSHOT_DIR = join(__dirname, "__snapshots__", "svg-chart-parity.spec.ts");
+// Playwright's default snapshotPathTemplate (no override in playwright.config.ts)
+// writes/reads baselines at {testFileName}-snapshots/ — i.e. this path, NOT
+// e2e/__snapshots__/<spec>/ (an earlier wrong assumption that was never exposed
+// because no golden had ever baked). Proven by the only committed baselines,
+// e2e/demo-screenshot.spec.ts-snapshots/. HAS_GOLDENS must scan the SAME dir
+// Playwright reads, or the gate can never flip true after PNGs land.
+const SNAPSHOT_DIR = join(__dirname, "svg-chart-parity.spec.ts-snapshots");
 const HAS_GOLDENS =
   existsSync(SNAPSHOT_DIR) &&
   readdirSync(SNAPSHOT_DIR).some((f) => f.toLowerCase().endsWith(".png"));
 const GOLDEN_PENDING_REASON =
   "svg-chart-parity: PENDING GOLDEN BAKE — no *.png baselines in " +
-  "e2e/__snapshots__/svg-chart-parity.spec.ts/ (only README.md). " +
+  "e2e/svg-chart-parity.spec.ts-snapshots/ (only README.md). " +
   "toHaveScreenshot hard-fails on a missing baseline in CI (no " +
   "--update-snapshots in the MA-8 job), so this would false-RED until baked. " +
   "Run the spec with --update-snapshots in the seeded env (desktop goldens " +
   "FIRST per Pitfall 2), review the diff, commit the PNGs; this guard then " +
   "flips and the gate goes live with NO spec change.";
+
+// Bake escape hatch. The WR-02 skip below would otherwise skip the WHOLE
+// describe on the very run meant to CREATE the goldens (no PNGs yet →
+// HAS_GOLDENS false → skip fires, and --update-snapshots does NOT override a
+// test.skip). The ci.yml workflow_dispatch bake step sets BAKE_SVG_GOLDENS=true
+// for its `--update-snapshots` invocation only; normal push/PR runs leave it
+// "false", so the WR-02 guard keeps its protective behaviour there.
+const BAKING = process.env.BAKE_SVG_GOLDENS === "true";
 
 // Each in-scope hand-rolled SVG panel exposes a stable `role="img"` +
 // descriptive `aria-label` (added by Phase-47 plans 02/03). Anchoring +
@@ -155,8 +169,11 @@ test.describe("Phase 47 — SVG chart parity (desktop goldens) + 320px portrait"
   // makes toHaveScreenshot HARD-FAIL in CI (no --update-snapshots in MA-8). Skip
   // LOUDLY until the goldens are baked + committed rather than false-RED the
   // gate (and risk skipping the Railway deploy). This flips automatically once
-  // PNGs land — the spec + ci.yml wiring stay untouched.
-  test.skip(HAS_SEED_ENV && !HAS_GOLDENS, GOLDEN_PENDING_REASON);
+  // PNGs land — the spec + ci.yml wiring stay untouched. The `!BAKING` term is
+  // the bake escape hatch: when the workflow_dispatch bake sets
+  // BAKE_SVG_GOLDENS=true, the guard stands down so --update-snapshots can
+  // actually write the missing PNGs (the catch-22 it would otherwise create).
+  test.skip(HAS_SEED_ENV && !HAS_GOLDENS && !BAKING, GOLDEN_PENDING_REASON);
 
   // One seeded published strategy with a full year of history drives every
   // panel. The factsheet payload is derived from `returns_series` so the
