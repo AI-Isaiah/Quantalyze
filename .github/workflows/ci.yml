@@ -1107,7 +1107,17 @@ jobs:
           # describes self-skip without seed env (place 2 = the spec's
           # HAS_SEED_ENV const) and run in the seeded MA-8 list below. Adding a
           # spec? Update BOTH lists or the gate silently never runs (burned >=3x).
+          # Capture the test exit code WITHOUT aborting the script (default
+          # shell is `bash -e`). The port-3000 cleanup below is a FINALLY: it
+          # must run even when these public specs fail, or the orphaned server
+          # is never reaped and the seeded step's WR-04 guard fail-fasts on the
+          # still-bound port. Pre-continue-on-error this was masked — a step-9
+          # failure skipped the seeded step entirely; now that the seeded specs
+          # run regardless (continue-on-error), the leftover listener trips them.
+          set +e
           npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/no-clip-sweep.spec.ts e2e/axe-app-wide.spec.ts e2e/marketing-shell.spec.ts e2e/route-redirects.spec.ts
+          PW_EXIT=$?
+          set -e
           # v0.17.1.18: belt + suspenders + nuclear port-3000 cleanup.
           # The v0.17.1.15 attempt (lsof + 5s poll) was insufficient — CI
           # confirmed (PR #98 run #320) that the next-server grandchild
@@ -1147,6 +1157,11 @@ jobs:
             sleep 1
           done
           echo "[port-cleanup] after: $(lsof -ti:3000 2>/dev/null | tr '\n' ' '),ss:$(ss -ltn 2>/dev/null | grep ':3000\b' || echo none)"
+          # Re-surface the test result as the step's exit code now that the
+          # port is freed. continue-on-error tolerates it (conclusion=success),
+          # so the seeded step still runs; the advisory public-route failures
+          # stay visible as a red step + log.
+          exit $PW_EXIT
         env:
           # C-0293(c): runtime env mirrors the placeholder build above.
           # The unconditional spec set (auth, smoke, demo-public,
