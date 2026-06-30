@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 import type { JointMetrics } from "@/lib/factsheet/types";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import { CalmarByYearPanel, BootstrapCIPanel } from "./AnalyticalPanels";
@@ -470,6 +471,7 @@ function WorstDrawdownsTablePanel() {
           aliases only; this plan must not touch globals.css). 10.5px = 0.65625rem
           exactly, so the rem arbitrary value is byte-identical AND clears
           no-raw-font-px (which matches px-units only). */}
+      <ResponsiveTable label="Worst 10 drawdowns">
       <table className="w-full text-[0.65625rem]">
         <thead>
           <tr className="border-b border-border/60">
@@ -520,6 +522,7 @@ function WorstDrawdownsTablePanel() {
           })}
         </tbody>
       </table>
+      </ResponsiveTable>
     </Panel>
   );
 }
