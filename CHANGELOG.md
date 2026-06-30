@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.35.0.13] - 2026-06-30
+### Fixed
+- The factsheet **Stress Windows** table no longer forces horizontal page scroll on a phone. It rendered as a raw `<table>` with no scroll wrapper, so at 320px its column width pushed the whole page ~97px wider than the viewport (WCAG 1.4.10 Reflow); desktop/tablet were unaffected. It is now wrapped in the existing `ResponsiveTable` (horizontal scroll inside a labelled `region`), matching the holdings/positions tables from v1.3. Found by an authed production QA sweep on the v1.4 milestone-close deferred items. The wrap is unconditional, so the factsheet body stays byte-identical on both the real `/factsheet/[id]` route and the scenario composer (the BODY-02 parity gate holds); `scenario.ts`/`compute.ts` are untouched. A falsifiable regression test pins the table inside the scroll region.
+
 ## [0.35.0.12] - 2026-06-30
 ### Added — app-wide verification + v1.3 debt cleanup + visual-regression replacement (v1.4 phase 54, closes the milestone)
 
