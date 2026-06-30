@@ -1077,6 +1077,19 @@ jobs:
         # a failed one) keeps success() true, so seed/rebuild/bake still run.
         # Normal push/PR (and non-bake dispatches) are unaffected — the step runs.
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.bake_svg_goldens) }}
+        # continue-on-error generalises the v0.35.0.16 bake-skip fix to EVERY run.
+        # The same success()-gating that skipped the bake also skips the seeded
+        # MA-8 specs below (seed → rebuild → verify → run) on normal push/PR
+        # whenever this placeholder-env step flakes (getaddrinfo ENOTFOUND
+        # placeholder.supabase.co) — so composer-axe / strategy-v2 / axe-app-wide
+        # AUTHED+SEEDED rows silently never ran. With continue-on-error the step's
+        # conclusion is `success` even on a flake, so success() stays true and the
+        # seeded specs always run and become the real e2e signal. This step's own
+        # public-route specs are advisory (e2e is not in the `frontend` aggregator
+        # gate); a genuine regression here still shows as a failed-step annotation
+        # + log, just not a red job. ponytail: one line; if public-route signal
+        # ever needs to be hard, split these specs into their own non-seeded job.
+        continue-on-error: true
         run: |
           npm run start &
           SERVER_PID=$!
