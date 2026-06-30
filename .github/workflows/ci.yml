@@ -1067,6 +1067,16 @@ jobs:
           # public extract to project root, matching `npm run start`'s
           # expected layout.
       - name: Start server and run Playwright
+        # Skip the unconditional placeholder-env smoke specs during a golden-bake
+        # dispatch. They are irrelevant to baking, and this step is flaky
+        # (placeholder.supabase.co public-route specs). Its failure would SKIP the
+        # seeded bake step below: that step's `if: vars.E2E_TEST_DB_CONFIGURED`
+        # carries no status function, so GitHub implicitly ANDs it with success(),
+        # and a FAILED prior step makes success() false → the bake never runs and
+        # the artifact upload then fails on if-no-files-found. A SKIPPED step (not
+        # a failed one) keeps success() true, so seed/rebuild/bake still run.
+        # Normal push/PR (and non-bake dispatches) are unaffected — the step runs.
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.bake_svg_goldens) }}
         run: |
           npm run start &
           SERVER_PID=$!
