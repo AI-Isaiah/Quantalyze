@@ -424,7 +424,7 @@ export function CsvUploadStep({
                   <p className="text-body font-semibold text-text-primary">
                     {f.label}
                   </p>
-                  <p className="mt-1 text-micro text-text-muted">{f.caption}</p>
+                  <p className="mt-1 text-micro text-text-secondary">{f.caption}</p>
                 </button>
               );
             })}

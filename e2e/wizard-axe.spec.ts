@@ -126,6 +126,40 @@ test.describe("Phase 17 — wizard axe (DESIGN-05)", () => {
       await loginViaForm(page, allocator.email, allocator.password);
     }
 
+    // Mock the analytics-backed validate route. This test axe-scans the
+    // Review & confirm recap (its stated intent); it is not validating real
+    // analytics. The CI e2e job runs no analytics service and sets neither
+    // ANALYTICS_SERVICE_URL nor INTERNAL_API_TOKEN, so the live route 503s
+    // (CSV_UPSTREAM_FAIL) → CsvUploadStep never advances → the preview-continue
+    // click below would hang to the 60s timeout. Fulfilling a valid envelope
+    // (matching the 5-row CSV uploaded next) lets the wizard reach review so
+    // the recap can be scanned. Review a11y is also pinned at the component
+    // level in steps/ReviewStep.test.tsx.
+    await page.route("**/api/strategies/csv-validate", async (route) => {
+      const rows = [
+        { date: "2026-01-05", daily_return: 0.012 },
+        { date: "2026-01-06", daily_return: -0.005 },
+        { date: "2026-01-07", daily_return: 0.008 },
+        { date: "2026-01-08", daily_return: 0.003 },
+        { date: "2026-01-09", daily_return: -0.002 },
+      ];
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          preview: {
+            row_count: rows.length,
+            date_range: [rows[0].date, rows[rows.length - 1].date],
+            columns_detected: ["date", "daily_return"],
+            first_rows: rows.slice(0, 3),
+            last_rows: rows.slice(-2),
+          },
+          daily_returns_series: rows,
+        }),
+      });
+    });
+
     await page.goto("/strategies/new/wizard?source=csv");
     await expect(page).toHaveURL(/\/strategies\/new\/wizard\?source=csv/, {
       timeout: 10_000,
