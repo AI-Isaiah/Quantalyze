@@ -5,10 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # Manual one-shot trigger for re-baking the SVG-chart parity goldens. Inert
-  # for normal CI (push/PR) — the input defaults false and only changes the
-  # seeded e2e step's behaviour when explicitly checked on a dispatch. Must
-  # live on the default branch for `gh workflow run` / the UI to see it.
+  # Manual one-shot triggers for re-baking e2e screenshot baselines. Inert for
+  # normal CI (push/PR) — both inputs default false and only change the e2e
+  # job's behaviour when explicitly checked on a dispatch. Must live on the
+  # default branch for `gh workflow run` / the UI to see them.
   workflow_dispatch:
     inputs:
       bake_svg_goldens:
@@ -16,6 +16,15 @@ on:
           Bake e2e/svg-chart-parity.spec.ts goldens: the seeded e2e job runs
           ONLY that spec with --update-snapshots and uploads the generated PNGs
           as an artifact for per-chart human review. Never auto-commits them.
+        type: boolean
+        default: false
+        required: false
+      bake_demo_screenshots:
+        description: >-
+          Bake e2e/demo-screenshot.spec.ts baselines: the placeholder-env e2e
+          step runs ONLY that spec with --update-snapshots and uploads the
+          regenerated PNGs as an artifact for per-shot human review. Never
+          auto-commits them.
         type: boolean
         default: false
         required: false
@@ -1115,7 +1124,20 @@ jobs:
           # failure skipped the seeded step entirely; now that the seeded specs
           # run regardless (continue-on-error), the leftover listener trips them.
           set +e
-          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/no-clip-sweep.spec.ts e2e/axe-app-wide.spec.ts e2e/marketing-shell.spec.ts e2e/route-redirects.spec.ts
+          if [ "${BAKE_DEMO_SCREENSHOTS}" = "true" ]; then
+            # One-shot baseline bake (workflow_dispatch input bake_demo_screenshots).
+            # Run ONLY demo-screenshot with --update-snapshots so no other spec's
+            # baselines are touched; the regenerated PNGs (taken in THIS
+            # placeholder env — the same env they're diffed against — so no
+            # jammy-vs-ubuntu divergence) upload as an artifact for per-shot human
+            # review. NEVER auto-committed here (the locked "no blind
+            # --update-snapshots" rule) — a follow-up PR lands the reviewed PNGs.
+            npx playwright test e2e/demo-screenshot.spec.ts \
+              --update-snapshots \
+              --timeout 60000
+          else
+            npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/no-clip-sweep.spec.ts e2e/axe-app-wide.spec.ts e2e/marketing-shell.spec.ts e2e/route-redirects.spec.ts
+          fi
           PW_EXIT=$?
           set -e
           # v0.17.1.18: belt + suspenders + nuclear port-3000 cleanup.
@@ -1163,6 +1185,10 @@ jobs:
           # stay visible as a red step + log.
           exit $PW_EXIT
         env:
+          # workflow_dispatch one-shot baseline-bake toggle (drives the if/else
+          # in the run block above). Renders "true" only on a manual dispatch
+          # with bake_demo_screenshots checked; "false" on every push/PR run.
+          BAKE_DEMO_SCREENSHOTS: ${{ github.event_name == 'workflow_dispatch' && inputs.bake_demo_screenshots }}
           # C-0293(c): runtime env mirrors the placeholder build above.
           # The unconditional spec set (auth, smoke, demo-public,
           # demo-founder-view, onboarding-banner-smoke) does NOT
@@ -1175,6 +1201,20 @@ jobs:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
+      # Baseline bake (workflow_dispatch input bake_demo_screenshots): upload
+      # ONLY the demo-screenshot snapshot PNGs — page images, no .next bundle /
+      # trace.zip / page HTML — so the C-0293(c) secret-in-artifact concern that
+      # gates the playwright-report upload below does NOT apply here. These PNGs
+      # are the per-shot review material; a human eyeballs each, then a follow-up
+      # PR commits them. if-no-files-found: error fails loud if nothing was baked.
+      - name: Upload baked demo screenshots for review (workflow_dispatch bake only)
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.bake_demo_screenshots }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: demo-screenshots-baked
+          path: e2e/demo-screenshot.spec.ts-snapshots/**/*.png
+          if-no-files-found: error
+          retention-days: 7
       # Plan 11-07 / BLOCK-3: gated step runs the full onboarding-funnel
       # spec against a dedicated test Supabase project. Gate uses the repo
       # VARIABLE `E2E_TEST_DB_CONFIGURED` (NOT `secrets.X != ''`) — vars
