@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.35.0.21] - 2026-06-30
+### Added — svg-chart-parity goldens (VERIFY-01/04 — the v1.4-deferred bake)
+Baked and committed the 29 SVG-chart-parity baselines into `e2e/svg-chart-parity.spec.ts-snapshots/` (10 chart types × desktop / portrait-320 / ultrawide-2560 + full-page composites), produced by the `workflow_dispatch bake_svg_goldens=true` run on `main` @ `94e64ae4` (now with the two correlation panels mounted and the seed pinned for determinism). Each golden was surfaced for per-chart human review before commit (the locked "never blind `--update-snapshots`" gate) — including the two never-before-baked panels (`correlations-matrix`, `correlation-strip`, internally consistent: the strip equals the matrix's first row) and the seed-sensitive year-bucketed charts (`daily-returns-heatmap`, `end-of-year-bars`), which the pin holds deterministic.
+
+This flips the spec's WR-02 golden-presence guard: `HAS_GOLDENS` scans the snapshot dir for any `*.png`, so with the baselines committed the guard stands down and the parity gate goes live (enforcing in the seeded MA-8 CI job) with **no spec change**. The desktop branch is the byte-identity record of the frozen Phase-47 chart engine; a future desktop-golden diff means an unintended recompute.
+
 ## [0.35.0.20] - 2026-06-30
 ### Fixed — pre-existing seeded-e2e failures surfaced once the seeded specs actually ran (v0.35.0.18/.19)
 With the seeded MA-8 specs finally executing, 12 failures surfaced — none from the factsheet panels (composer-axe + strategy-v2-axe pass). They traced to four pre-existing root causes, all fixed here:
