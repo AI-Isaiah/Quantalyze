@@ -128,7 +128,6 @@ import { parseCsvMetadata } from "@/app/api/strategies/csv-finalize/route";
 // now requires after RED-TEAM-H1 added the ownership join.
 // .select(...).eq(col1, val1).eq(col2, val2).maybeSingle()
 function makeAdminFromOwnershipMock(result: { data: unknown; error: unknown }) {
-   
   return {
     select: (_cols: string) => ({
       eq: (_col1: string, _val1: unknown) => ({

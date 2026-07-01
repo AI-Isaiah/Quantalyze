@@ -142,7 +142,6 @@ export function BridgeDrawer({
     // once reset, React bails on the identical reference. The rule fires only
     // because the setter arg is a non-primitive it can't prove is stable (the
     // prior four primitive setters did not trip it).
-     
     setState(INITIAL_STATE);
   }, [isOpen]);
 

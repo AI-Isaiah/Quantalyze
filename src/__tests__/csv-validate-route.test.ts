@@ -127,7 +127,6 @@ type AdminSelectResult = {
 };
 const adminSelectMaybeSingleMock = vi.hoisted(
   () =>
-     
     vi.fn(
       async (
         _table?: string,

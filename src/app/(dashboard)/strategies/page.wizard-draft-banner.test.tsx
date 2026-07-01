@@ -134,7 +134,6 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
- 
 async function renderPage(): Promise<HTMLElement> {
   const { default: StrategiesPage } = await import("./page");
   // server component returns a Promise<JSX>

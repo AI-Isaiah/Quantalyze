@@ -353,7 +353,6 @@ function ExpandedPanel({
     // doesn't carry the stale alert into a subsequent successful fetch
     // (e.g. expanding outcome A fails, then expanding the same row
     // refreshes the outcome.id and the cache-hit branch succeeds).
-     
     setError(null);
 
     if (curvesCache.current.has(outcome.id)) {
