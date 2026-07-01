@@ -5346,6 +5346,120 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     );
   });
 
+  // Phase 58 (COVERAGE-04) — the include-cost affordance. Widening past B's last
+  // day auto-excludes B; its row must carry the amber "Outside window" chip AND a
+  // cost-disclosing include button. The load-bearing oracle is the REAL engine
+  // member_count: clicking Include must RAISE it (B becomes a member again) and B
+  // must leave the auto-excluded group. The button reuses the same applyWindow
+  // path as the presets, so this proves the disclosed cost reaches the engine.
+  it("COVERAGE-04: an auto-excluded row shows the amber chip + a cost-disclosing include button, and clicking it raises the engine member_count (B re-admitted)", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Widen the window PAST B's last day → the engine drops B (member_count 2→1)
+    // and B relocates to the auto-excluded group.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+
+    // B's auto-excluded row carries BOTH the amber chip ("Outside window") and the
+    // cost-disclosing include button. The button label discloses the moved bound
+    // date (the intersection end = B's last day, 2026-01-06) + a whole-month cost
+    // ("−…mo") BEFORE applying — no modal.
+    const bRow = screen.getByTestId(`auto-excluded-row-${REF_WIN_B}`);
+    expect(within(bRow).getByText("Outside window")).toBeInTheDocument();
+    const includeBtn = within(bRow).getByTestId(
+      `auto-excluded-include-${REF_WIN_B}`,
+    );
+    expect(includeBtn).toHaveTextContent("Include → shortens window to");
+    // The disclosed bound (2026-01-06) + a "−N mo" delta are both in the label.
+    expect(includeBtn).toHaveTextContent("2026-01-06");
+    expect(includeBtn.textContent).toMatch(/−\d+ mo/);
+
+    // Click Include → narrows the window to the intersection that re-admits B.
+    // The REAL engine member_count RISES back to 2 (B is a member again) — the
+    // load-bearing oracle that the disclosed cost genuinely reached the engine.
+    act(() => {
+      fireEvent.click(includeBtn);
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+    expect(lastScenarioMetrics()?.member_ids).toEqual(
+      expect.arrayContaining([REF_WIN_A, REF_WIN_B]),
+    );
+    // B has left the auto-excluded group (it is a member again).
+    expect(
+      screen.queryByTestId(`auto-excluded-row-${REF_WIN_B}`),
+    ).not.toBeInTheDocument();
+    // The applied window is exactly the intersection [2026-01-01, 2026-01-06].
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+  });
+
+  it("COVERAGE-04: applying a window (the include path) NEVER reselects a manually-off strategy — manual-off stays sticky (T-58-05)", () => {
+    // Mount B as MANUALLY-OFF (selected: false). A stays selected. Because B is
+    // not selected it never appears in the auto-excluded group (that group is
+    // coverage-drops of SELECTED strategies only) — so it carries no include
+    // button. The invariant under test: the applyWindow path the include button
+    // uses NEVER flips `selected`, so no window move can silently re-admit B.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
+        mkWinStrat(REF_WIN_B, WIN_DATES.slice(0, 6)), // 2026-01-01 … 2026-01-06
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: false }, // B manually OFF
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Only A is a member (B is manually off — never in the blend, never
+    // auto-excluded). B has no include button.
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+    expect(lastScenarioMetrics()?.member_ids).toEqual([REF_WIN_A]);
+    expect(
+      screen.queryByTestId(`auto-excluded-row-${REF_WIN_B}`),
+    ).not.toBeInTheDocument();
+
+    // Apply a window (the same setter the include button uses) whose bounds B
+    // WOULD cover if it were selected ([2026-01-01, 2026-01-06] = B's own span).
+    // The window-move MUST NOT flip B back on — applyWindow only moves the window,
+    // it never touches `selected` (WINDOW-03 subset-only / T-58-05). B stays off.
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-06" });
+    });
+    // Divisor stays 1 (A only) — B was NOT silently re-admitted by the window
+    // move; the manually-off strategy is sticky.
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+    expect(lastScenarioMetrics()?.member_ids).toEqual([REF_WIN_A]);
+  });
+
   it("window: when the intersection is empty, the engine receives a state WITHOUT a window key (union path preserved)", () => {
     // Two DISJOINT spans → defaultWindowFor(spans) === null → nothing to seed →
     // engineState === deAliased.state (no `window` key added; union-when-absent).
