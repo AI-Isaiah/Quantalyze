@@ -7,7 +7,7 @@ import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { notifyManagerApproved } from "@/lib/email";
-import { checkStrategyGate, STRATEGY_GATE_MIN_CSV_ROWS } from "@/lib/strategyGate";
+import { checkStrategyGate, STRATEGY_GATE_MIN_TRADES, STRATEGY_GATE_MIN_CSV_ROWS } from "@/lib/strategyGate";
 import { logAuditEventAsUser } from "@/lib/audit";
 
 // Handler body inlined (rather than wrapped via withAdminAuth) so we run a
@@ -94,7 +94,7 @@ export async function POST(req: NextRequest) {
       { data: earliestTrade },
       { data: latestTrade },
       { data: analytics },
-      { count: csvRowCount },
+      { count: csvRowCount, error: csvCountError },
     ] = await Promise.all([
       admin.from("strategies").select("api_key_id, name, user_id").eq("id", id).single(),
       admin.from("trades").select("id", { count: "exact", head: true }).eq("strategy_id", id),
@@ -106,6 +106,18 @@ export async function POST(req: NextRequest) {
       // (else every CSV strategy is un-approvable — NO_DATA_SOURCE).
       admin.from("csv_daily_returns").select("strategy_id", { count: "exact", head: true }).eq("strategy_id", id),
     ]);
+
+    // Fail LOUD on a csv-count read error rather than coercing to 0: a silent
+    // `csvRowCount = 0` would return the misleading NO_DATA_SOURCE 400 for a
+    // CSV strategy that DOES have data (re-creating the very bug this fixes),
+    // with no diagnostic trail. Mirrors the verify-strategy count-read guard.
+    if (csvCountError) {
+      console.error("[admin/strategy-review] csv_daily_returns count failed:", csvCountError);
+      return NextResponse.json(
+        { error: "Cannot verify strategy data source. Please try again." },
+        { status: 503 },
+      );
+    }
 
     const gate = checkStrategyGate({
       apiKeyId: strategy?.api_key_id ?? null,
@@ -152,7 +164,7 @@ export async function POST(req: NextRequest) {
     const [
       { data: recheckStrategy },
       { count: recheckTradeCount },
-      { count: recheckCsvCount },
+      { count: recheckCsvCount, error: recheckCsvError },
       { data: recheckAnalytics },
     ] = await Promise.all([
       admin
@@ -174,6 +186,16 @@ export async function POST(req: NextRequest) {
         .eq("strategy_id", id)
         .single(),
     ]);
+    // Fail loud on a csv-count read error here too (same rationale as the
+    // first-pass guard) — a coerced 0 would misclassify a CSV strategy onto
+    // the trade branch and 409 it with a misleading "trade count" message.
+    if (recheckCsvError) {
+      console.error("[admin/strategy-review] csv_daily_returns re-check count failed:", recheckCsvError);
+      return NextResponse.json(
+        { error: "Cannot verify strategy data source. Please try again." },
+        { status: 503 },
+      );
+    }
     // CSV-sourced strategies (no key, zero trades, history in csv_daily_returns)
     // must re-check the CSV row count, not the trade count — the trade branch
     // would 409 every CSV strategy on a `trades < 5` that is 0 by construction.
@@ -190,7 +212,7 @@ export async function POST(req: NextRequest) {
           { status: 409 },
         );
       }
-    } else if ((recheckTradeCount ?? 0) < 5) {
+    } else if ((recheckTradeCount ?? 0) < STRATEGY_GATE_MIN_TRADES) {
       return NextResponse.json(
         { error: "Cannot approve: trade count fell below threshold during review." },
         { status: 409 },

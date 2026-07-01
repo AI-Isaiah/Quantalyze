@@ -806,6 +806,8 @@ describe("POST /api/admin/strategy-review — strategy.approve emission", () => 
     }));
     vi.doMock("@/lib/strategyGate", () => ({
       checkStrategyGate: () => ({ passed: true }),
+      STRATEGY_GATE_MIN_TRADES: 5,
+      STRATEGY_GATE_MIN_CSV_ROWS: 7,
     }));
 
     const { POST } = await import("@/app/api/admin/strategy-review/route");

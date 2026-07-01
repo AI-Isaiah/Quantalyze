@@ -65,6 +65,8 @@ vi.mock("@/lib/email", () => ({
 
 vi.mock("@/lib/strategyGate", () => ({
   checkStrategyGate: () => ({ passed: true }),
+  STRATEGY_GATE_MIN_TRADES: 5,
+  STRATEGY_GATE_MIN_CSV_ROWS: 7,
 }));
 
 import { runAdminPostCsrfRateLimitSuite } from "@/__tests__/helpers/adminPostCsrfRateLimit";
@@ -112,6 +114,11 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     recheckStatus: "pending" | "computing" | "complete" | "failed" | null;
     /** rows returned by the strategies UPDATE().eq().eq().select('id'). */
     updateAffected: Array<{ id: string }>;
+    /** api_key_id from the re-check strategies read. Default "key-1" (exchange
+     *  path). Pass null to exercise the CSV-sourced re-check branch. */
+    recheckApiKeyId?: string | null;
+    /** count returned by the re-check csv_daily_returns query (CSV path). */
+    recheckCsvCount?: number;
   };
 
   /**
@@ -175,6 +182,19 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
               }),
             };
           }
+          if (table === "csv_daily_returns") {
+            // Re-check csv row count (CSV-sourced path). .select().eq()
+            // resolves to a head:true count shape.
+            return {
+              select: () => ({
+                eq: async () => ({
+                  count: opts.recheckCsvCount ?? 0,
+                  data: null,
+                  error: null,
+                }),
+              }),
+            };
+          }
           // strategies — supports both the first-pass single() lookup
           // and the .update().eq().eq().select() write path.
           return {
@@ -182,7 +202,10 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
               eq: () => ({
                 single: async () => ({
                   data: {
-                    api_key_id: "key-1",
+                    api_key_id:
+                      opts.recheckApiKeyId !== undefined
+                        ? opts.recheckApiKeyId
+                        : "key-1",
                     name: "Strat 1",
                     user_id: "user-1",
                     // M-1152: the post-approve manager-notify reads
@@ -321,6 +344,52 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error).toMatch(/no longer awaiting review/i);
+  });
+
+  // --- CSV-sourced re-check branch (no key, 0 trades, history in
+  //     csv_daily_returns). The route re-derives isCsvSourced independently
+  //     of the (mocked-passed) gate, so these guard the route's own logic —
+  //     the branch that actually delivers the un-approvable-CSV fix. ---
+
+  it("CSV strategy PASSES the re-check: no key + 0 trades + >=7 csv rows + analytics complete -> 200", async () => {
+    // Regression guard for the whole PR: with 0 trades the `< MIN_TRADES`
+    // branch would 409 an exchange strategy, but isCsvSourced must route to
+    // the csv-row check (1112 >= 7) and let it publish.
+    mockAdminClient({
+      recheckApiKeyId: null,
+      recheckTradeCount: 0,
+      recheckCsvCount: 1112,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+  });
+
+  it("CSV strategy with < MIN_CSV_ROWS in the re-check -> 409 (CSV history threshold, not trade count)", async () => {
+    mockAdminClient({
+      recheckApiKeyId: null,
+      recheckTradeCount: 0,
+      recheckCsvCount: 3,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/CSV history fell below threshold/i);
+  });
+
+  it("CSV strategy at EXACTLY the 7-row floor in the re-check -> 200 (pins MIN_CSV_ROWS, not < 5)", async () => {
+    mockAdminClient({
+      recheckApiKeyId: null,
+      recheckTradeCount: 0,
+      recheckCsvCount: 7,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(200);
   });
 });
 
