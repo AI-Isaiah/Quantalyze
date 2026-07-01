@@ -33,7 +33,7 @@ vi.mock("@/hooks/useLazyPanelMetrics", () => ({
 }));
 
 // Mock the 5 sub-charts so the test asserts on routing, not paint.
-let dailyHeatmapRenderCount = 0;
+let _dailyHeatmapRenderCount = 0;
 let lastDailyHeatmapDataRef: unknown = null;
 vi.mock("@/components/charts/MonthlyHeatmap", () => ({
   MonthlyHeatmap: ({ data }: { data: unknown }) => (
@@ -42,7 +42,7 @@ vi.mock("@/components/charts/MonthlyHeatmap", () => ({
 }));
 vi.mock("@/components/charts/DailyHeatmap", () => ({
   DailyHeatmap: ({ data }: { data: { date: string; value: number }[] }) => {
-    dailyHeatmapRenderCount++;
+    _dailyHeatmapRenderCount++;
     lastDailyHeatmapDataRef = data;
     return <div data-testid="daily-heatmap" data-len={data.length} />;
   },
@@ -79,7 +79,7 @@ function makeReturns(n: number): { date: string; value: number }[] {
 
 beforeEach(() => {
   mockHookReturn = { ref: () => {}, data: null, status: "idle" };
-  dailyHeatmapRenderCount = 0;
+  _dailyHeatmapRenderCount = 0;
   lastDailyHeatmapDataRef = null;
 });
 

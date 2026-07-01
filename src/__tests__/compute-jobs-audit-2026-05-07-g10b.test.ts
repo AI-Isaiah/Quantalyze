@@ -105,7 +105,7 @@ async function fetchJob(
   return data as unknown as ComputeJobRow;
 }
 
-async function deleteJob(
+async function _deleteJob(
   admin: SupabaseClient,
   jobId: string,
 ): Promise<void> {

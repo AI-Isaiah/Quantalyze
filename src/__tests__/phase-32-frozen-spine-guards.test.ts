@@ -188,12 +188,12 @@ const MANAGE_PAGE_SRC = readFileSync(MANAGE_PAGE_PATH, "utf8");
 const ID_PAGE_SRC = readFileSync(ID_PAGE_PATH, "utf8");
 
 /** Recursively collect every .tsx/.ts source file under `dir`. */
-function collectSourceFiles(dir: string): string[] {
+function _collectSourceFiles(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) {
-      out.push(...collectSourceFiles(full));
+      out.push(..._collectSourceFiles(full));
     } else if (/\.tsx?$/.test(entry)) {
       out.push(full);
     }

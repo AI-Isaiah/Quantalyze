@@ -36,11 +36,11 @@ import {
 import { ScenarioFlaggedHoldingsList } from "./ScenarioFlaggedHoldingsList";
 
 export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
-  const holdingsSummary = props.holdingsSummary ?? [];
+  const holdingsSummary = useMemo(() => props.holdingsSummary ?? [], [props.holdingsSummary]);
   const flaggedHoldings = props.flaggedHoldings ?? [];
   const matchDecisionsByHoldingRef = props.matchDecisionsByHoldingRef ?? {};
-  const apiKeys = props.apiKeys ?? [];
-  const strategies = props.strategies ?? [];
+  const apiKeys = useMemo(() => props.apiKeys ?? [], [props.apiKeys]);
+  const strategies = useMemo(() => props.strategies ?? [], [props.strategies]);
 
   const [showRevoked, setShowRevoked] = useState(true);
 

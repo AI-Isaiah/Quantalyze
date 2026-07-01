@@ -1696,7 +1696,7 @@ describe("NEW-C18-06 — drawer recomputes size_at_decision_usd from edited perc
 
   it("voluntary_add: user edits percent from default → size recomputed via scenarioAum prop", async () => {
     const fetchSpy = vi.fn(
-      async (_url: string, init: { method: string; body: string }) =>
+      async (_url: string, _init: { method: string; body: string }) =>
         new Response(
           JSON.stringify({
             recorded: 1,
@@ -1751,7 +1751,7 @@ describe("NEW-C18-06 — drawer recomputes size_at_decision_usd from edited perc
     // intended behavior — any time percent_allocated is set, the wire
     // shape's size is derived from it deterministically.
     const fetchSpy = vi.fn(
-      async (_url: string, init: { method: string; body: string }) =>
+      async (_url: string, _init: { method: string; body: string }) =>
         new Response(
           JSON.stringify({
             recorded: 1,
@@ -1792,7 +1792,7 @@ describe("NEW-C18-06 — drawer recomputes size_at_decision_usd from edited perc
 
   it("voluntary_add: scenarioAum=0 → fallback to composer-time size (avoids server divide-by-zero gate)", async () => {
     const fetchSpy = vi.fn(
-      async (_url: string, init: { method: string; body: string }) =>
+      async (_url: string, _init: { method: string; body: string }) =>
         new Response(
           JSON.stringify({
             recorded: 1,
