@@ -58,7 +58,7 @@ export function BlendHeader({ metrics, unionSpan }: BlendHeaderProps) {
       ) : n === 1 ? (
         // N=1 degrade note is the quieter regular tier (58-UI-SPEC §Typography);
         // rendered as one text node so the verbatim copy stays a single string.
-        <span className="text-fixed-11 text-text-muted">
+        <span className="text-fixed-11 font-normal text-text-muted">
           1 strategy — not a blend
         </span>
       ) : (
@@ -69,7 +69,7 @@ export function BlendHeader({ metrics, unionSpan }: BlendHeaderProps) {
           {"–"}
           <span className="font-mono tabular-nums">{effEnd}</span>
           {truncated ? (
-            <span className="text-fixed-11 text-text-muted">
+            <span className="text-fixed-11 font-normal text-text-muted">
               {" · window truncated from full range"}
             </span>
           ) : null}
