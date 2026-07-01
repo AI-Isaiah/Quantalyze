@@ -237,7 +237,10 @@ export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
         <button
           type="button"
           onClick={handleSkip}
-          className="text-sm text-text-muted hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50"
+          // inline-flex + min-h-[44px]: match the sibling `<Button>` primitive's
+          // 44px touch target (DESIGN.md touch standard). The bare text button
+          // rendered ~20px tall, below WCAG 2.5.8 (Target Size Minimum).
+          className="inline-flex items-center min-h-[44px] text-sm text-text-muted hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50"
         >
           Skip for now
         </button>

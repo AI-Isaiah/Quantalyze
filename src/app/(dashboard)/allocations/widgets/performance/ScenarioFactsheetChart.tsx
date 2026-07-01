@@ -161,8 +161,8 @@ function PeriodControl({ axisLength }: { axisLength: number }) {
           onClick={() => selectPeriod(p)}
           // Match the factsheet TimeSeriesChart tab recipe (the factsheet is the
           // source of truth): uppercase font-mono tracking-wider at the 10px tier
-          // on a surface-subtle bordered pill. TWO deliberate class-literal
-          // divergences, same rendered output: (1) the factsheet pill is a FROZEN
+          // on a surface-subtle bordered pill. THREE deliberate class-literal
+          // divergences from that recipe: (1) the factsheet pill is a FROZEN
           // island so it keeps raw `text-[10px]`; this non-frozen site uses the
           // byte-identical `text-fixed-10` token (BP-03). (2) the factsheet uses
           // `text-text-2`, but `--color-text-2`
@@ -171,7 +171,13 @@ function PeriodControl({ axisLength }: { axisLength: number }) {
           // `text-text-secondary` token (the same "primary > secondary > muted"
           // mid tier text-2 maps to) — keeping `text-text-2` here would resolve
           // to an undefined var and fall back to the inherited colour.
-          className="rounded-sm border border-border bg-surface-subtle px-2 py-0.5 text-fixed-10 font-mono uppercase tracking-wider tabular-nums text-text-secondary hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+          // (3) `inline-flex min-h-6 items-center justify-center` raises the pill
+          // to a 24px min height for WCAG 2.5.8 (Target Size Minimum) — the prior
+          // `py-0.5` rendered ~21px on touch. This is a deliberate DIVERGENCE from
+          // the frozen factsheet twin (which stays ~21px, un-editable pending its
+          // own VERIFY-04 tolerance-golden re-bake); the two live on separate
+          // pages so the cross-surface height difference is never seen side-by-side.
+          className="inline-flex min-h-6 items-center justify-center rounded-sm border border-border bg-surface-subtle px-2 text-fixed-10 font-mono uppercase tracking-wider tabular-nums text-text-secondary hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
         >
           {p}
         </button>

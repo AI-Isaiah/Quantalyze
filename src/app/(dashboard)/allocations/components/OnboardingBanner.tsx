@@ -38,7 +38,18 @@ export function OnboardingBanner() {
 
   return (
     <WarningBanner className="border-l-4 border-warning bg-warning/5">
-      <div className="flex items-center gap-4">
+      {/*
+        flex-wrap + a grouped shrink-0 actions block: the CTA Link and the
+        dismiss × are kept together and never compressed. On wide/normal widths
+        (>=~336px) everything sits on one row (heading grows to fill). On very
+        narrow phones the actions block wraps BELOW the heading instead of
+        stealing its width. Rationale: pinning only the × (shrink-0) would just
+        move flex-compression onto the un-pinned Link, which could clip/overflow
+        the "Connect Exchange →" pill at ~320px. Grouping the actions removes the
+        horizontal competition entirely so the × keeps its full 32×32 tap target
+        (WCAG 2.5.8) at every width.
+      */}
+      <div className="flex flex-wrap items-center gap-4">
         <div className="flex-1">
           {/*
             This heading is <h2>: the page outline on /allocations is
@@ -60,20 +71,26 @@ export function OnboardingBanner() {
             one sync cycle and populate Performance, Bridge, and Scenario.
           </p>
         </div>
-        <Link
-          href="/profile?tab=exchanges"
-          className="inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-hover transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
-        >
-          Connect Exchange →
-        </Link>
-        <button
-          type="button"
-          onClick={handleDismiss}
-          aria-label="Dismiss for this session"
-          className="relative inline-flex h-8 w-8 items-center justify-center text-text-muted hover:text-text-primary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 before:absolute before:inset-[-6px] before:content-['']"
-        >
-          <span aria-hidden="true">×</span>
-        </button>
+        <div className="flex shrink-0 items-center gap-4">
+          <Link
+            href="/profile?tab=exchanges"
+            className="inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-hover transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
+          >
+            Connect Exchange →
+          </Link>
+          <button
+            type="button"
+            onClick={handleDismiss}
+            aria-label="Dismiss for this session"
+            // shrink-0 (belt-and-suspenders under the shrink-0 actions wrapper):
+            // keeps the 32×32 box from ever compressing below WCAG 2.5.8 — the
+            // prior bare button collapsed to ~15px wide on narrow phones. Full
+            // 32×32 visible, 44×44 with the `before:inset-[-6px]` hit-area.
+            className="relative inline-flex h-8 w-8 shrink-0 items-center justify-center text-text-muted hover:text-text-primary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 before:absolute before:inset-[-6px] before:content-['']"
+          >
+            <span aria-hidden="true">×</span>
+          </button>
+        </div>
       </div>
     </WarningBanner>
   );
