@@ -82,6 +82,7 @@ import {
   defaultWindowFor,
   unionOf,
   type CoverageSpan,
+  type CoverageWindow,
 } from "@/lib/scenario-window";
 import { isoDayFromDate, localMidnight, parseIsoDay } from "@/lib/dateday";
 import type {
@@ -390,6 +391,58 @@ function formatUsd0(n: number): string {
         maximumFractionDigits: 0,
       })
     : "—";
+}
+
+const MONTH_ABBR = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
+
+/**
+ * Format an ISO "YYYY-MM-DD" day as "Mon YYYY" for the auto-excluded inline
+ * reason. Pure STRING slicing — never `new Date(iso)` (the UTC/local off-by-one
+ * `dateday.ts` exists to kill). Falls back to the raw string on a malformed
+ * input (defensive; the composer only ever feeds it valid spans).
+ */
+function formatIsoMonth(iso: string): string {
+  const year = iso.slice(0, 4);
+  const monthIdx = Number(iso.slice(5, 7)) - 1;
+  const abbr = MONTH_ABBR[monthIdx];
+  if (!abbr || year.length !== 4) return iso;
+  return `${abbr} ${year}`;
+}
+
+/**
+ * Phase 57 Plan 03 (POLISH-02) — the minimal honest reason a SELECTED strategy
+ * is coverage-auto-excluded from the current window. Derived from its span vs
+ * the window: an ended strategy (`span.last < window.end`) reads "ends {Mon
+ * YYYY} — outside window"; a ragged-head one (`span.first > window.start`) reads
+ * "starts {Mon YYYY} — outside window"; a strategy with NO data (null span)
+ * reads "no data — outside window". Real text (never color-only). Kept MINIMAL —
+ * the rich three-state chips / gantt are Phase 58.
+ */
+function coverageDropReason(
+  span: CoverageSpan | null,
+  window: CoverageWindow,
+): string {
+  if (!span) return "no data — outside window";
+  if (span.last < window.end) {
+    return `ends ${formatIsoMonth(span.last)} — outside window`;
+  }
+  if (span.first > window.start) {
+    return `starts ${formatIsoMonth(span.first)} — outside window`;
+  }
+  return "outside window";
 }
 
 
@@ -1684,6 +1737,30 @@ export function ScenarioComposer({
     }
     return eligible;
   }, [deAliased, coverageWindow]);
+
+  // Phase 57 Plan 03 Task 2 (POLISH-02) — the coverage-auto-excluded rows:
+  // SELECTED (in the subset) but NOT eligible for the current window. These are
+  // the strategies the engine dropped from the blend for coverage — DISTINCT
+  // from manual-off (`selected === false`, never here) and from in-blend. Each
+  // carries a minimal honest reason derived from its span vs the window. Empty
+  // when nothing is coverage-dropped (the group is then absent, not an empty
+  // shell) and on the union path (coverageWindow === null → no drops).
+  const autoExcluded = useMemo<
+    Array<{ id: string; name: string; reason: string }>
+  >(() => {
+    if (!coverageWindow) return [];
+    const out: Array<{ id: string; name: string; reason: string }> = [];
+    for (const s of deAliased.strategies) {
+      if (!deAliased.state.selected[s.id]) continue; // manual-off is NOT here
+      if (coverageEligible[s.id]) continue; // in-blend
+      out.push({
+        id: s.id,
+        name: s.name,
+        reason: coverageDropReason(coverageSpanOf(s.daily_returns), coverageWindow),
+      });
+    }
+    return out;
+  }, [deAliased, coverageWindow, coverageEligible]);
 
   // Dev-mode cross-check (Pitfall 2): on the passthrough (non-aliased) scenario
   // path the UI's in-blend set { selected && coverageEligible } must equal the
@@ -3294,6 +3371,45 @@ export function ScenarioComposer({
         />
       </CollapsibleSection>
 
+      {/* Phase 57 Plan 03 Task 2 (POLISH-02) — the auto-excluded (outside window)
+          group. Renders adjacent to the composition list ONLY when a SELECTED
+          strategy was coverage-dropped for the current window (autoExcluded
+          non-empty). Each row animates (fade + slide) into place and carries a
+          minimal honest inline reason (real text, not color-only). DESIGN.md
+          warning tokens (bg-warning-bg / border-warning-border / text-warning,
+          AA-verified). Distinct from manual-off (never here) and from in-blend.
+          The rich three-state chips / gantt are Phase 58 — this is the FUNCTIONAL
+          group + minimal label + animation only. */}
+      {autoExcluded.length > 0 && (
+        <section
+          data-testid="scenario-auto-excluded-group"
+          aria-labelledby="scenario-auto-excluded-heading"
+          className="mt-4 rounded-md border border-warning-border bg-warning-bg p-4"
+        >
+          <h3
+            id="scenario-auto-excluded-heading"
+            className="text-fixed-11 font-medium uppercase tracking-wider text-warning"
+          >
+            Auto-excluded (outside window)
+          </h3>
+          <p className="mt-1 text-fixed-11 text-text-secondary">
+            These selected strategies have no data across the whole coverage
+            window, so they are not in the blend or its divisor. Narrow the
+            window (or use Common period) to include them.
+          </p>
+          <ul className="mt-3 grid gap-2">
+            {autoExcluded.map((row) => (
+              <AutoExcludedRow
+                key={row.id}
+                id={row.id}
+                name={row.name}
+                reason={row.reason}
+              />
+            ))}
+          </ul>
+        </section>
+      )}
+
       <div className="mt-8 rounded-lg border border-border bg-surface p-4">
         <div className="text-base font-semibold text-text-primary">
           Add more strategies
@@ -3405,6 +3521,57 @@ export function ScenarioComposer({
         }}
       />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AutoExcludedRow — sub-component (POLISH-02)
+// ---------------------------------------------------------------------------
+
+/**
+ * A single coverage-auto-excluded strategy row. Animates (fade + slide) into the
+ * "Auto-excluded (outside window)" group on mount so the drop is a VISIBLE
+ * relocation, not a silent vanish (T-57-06). The move is comprehension-aiding
+ * only (DESIGN.md: no decorative animation): opacity 0→1 + a small translate.
+ * DESIGN.md Motion — medium 250ms → Tailwind `duration-300` (`duration-250` is
+ * not a valid v4 token) + `ease-out` (enter). `motion-reduce:transition-none`
+ * honours prefers-reduced-motion on the SINGLE transition-carrying element
+ * (Pitfall 5 — no residual transition elsewhere). The reason is real text
+ * (never color-only), read out with the strategy name for the group's a11y.
+ */
+function AutoExcludedRow({
+  id,
+  name,
+  reason,
+}: {
+  id: string;
+  name: string;
+  reason: string;
+}) {
+  const [entered, setEntered] = useState(false);
+  useEffect(() => {
+    // Trigger the enter transition on the frame after mount so the browser
+    // paints the pre-transition state first (opacity-0 + translated), then
+    // animates to the settled state. Reduced-motion users skip the tween via
+    // the `motion-reduce:transition-none` class (the class, not JS, gates it).
+    const raf = requestAnimationFrame(() => setEntered(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  return (
+    <li
+      data-testid={`auto-excluded-row-${id}`}
+      className={`flex items-center justify-between gap-3 rounded-md border border-warning-border bg-surface p-3 transition-all duration-300 ease-out motion-reduce:transition-none ${
+        entered ? "translate-y-0 opacity-100" : "translate-y-1 opacity-0"
+      }`}
+    >
+      <span className="truncate text-sm text-text-primary">{name}</span>
+      <span
+        data-testid="auto-excluded-reason"
+        className="shrink-0 text-fixed-11 font-medium text-warning"
+      >
+        {reason}
+      </span>
+    </li>
   );
 }
 

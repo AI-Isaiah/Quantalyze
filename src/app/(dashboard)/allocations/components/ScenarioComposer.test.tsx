@@ -5895,3 +5895,170 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     ).toBe(true);
   });
 });
+
+// ===========================================================================
+// Phase 57 Plan 03 Task 2 — auto-excluded group + inline reason + animation
+// (POLISH-02)
+//
+// A coverage-dropped row (selected && !coverageEligible) renders in a distinct
+// "Auto-excluded (outside window)" group with a minimal honest inline reason,
+// animates (fade+slide) into place respecting prefers-reduced-motion, and stays
+// separate from manual-off. The group is absent when nothing is dropped.
+// ===========================================================================
+describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  it("auto-excluded: a coverage-dropped strategy renders in the group with an inline reason", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Widen past B's last day → B is coverage-auto-excluded.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+
+    // The group renders with an accessible label naming it.
+    const group = screen.getByTestId("scenario-auto-excluded-group");
+    expect(group).toBeInTheDocument();
+    expect(
+      within(group).getByText(/Auto-excluded \(outside window\)/i),
+    ).toBeInTheDocument();
+
+    // B's row is inside it, with a minimal honest reason (real text).
+    const row = within(group).getByTestId(`auto-excluded-row-${REF_WIN_B}`);
+    expect(row).toBeInTheDocument();
+    const reason = within(row).getByTestId("auto-excluded-reason");
+    // B ends 2026-01-06 (< window end 2026-01-12) → "ends Jan 2026 — outside window".
+    expect(reason).toHaveTextContent(/outside window/i);
+    expect(reason).toHaveTextContent(/ends Jan 2026/i);
+    // Real text, not color-only.
+    expect(reason.textContent?.trim().length ?? 0).toBeGreaterThan(0);
+  });
+
+  it("auto-excluded: the animated row uses duration-300 + ease-out + motion-reduce:transition-none on every transition-carrying element", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    const row = screen.getByTestId(`auto-excluded-row-${REF_WIN_B}`);
+    const cls = row.className;
+    // DESIGN.md Motion: medium 250ms → Tailwind duration-300 (duration-250 is not
+    // a valid v4 token and silently drops).
+    expect(cls).toContain("duration-300");
+    expect(cls).not.toContain("duration-250");
+    expect(cls).toContain("ease-out");
+    // Pitfall 5 — reduced-motion honoured on EVERY element carrying a transition.
+    expect(cls).toContain("motion-reduce:transition-none");
+    // No transition-* utility may exist without the reduced-motion guard.
+    const transitionCarriers = Array.from(
+      row.querySelectorAll<HTMLElement>('[class*="transition"]'),
+    ).concat(cls.includes("transition") ? [row] : []);
+    for (const el of transitionCarriers) {
+      expect(el.className).toContain("motion-reduce:transition-none");
+    }
+  });
+
+  it("auto-excluded: the group is ABSENT when no strategy is coverage-dropped", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Default intersection window → both members, nothing dropped.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+    expect(
+      screen.queryByTestId("scenario-auto-excluded-group"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("auto-excluded: manual-off rows are NOT in the auto-excluded group (the two states stay distinct)", () => {
+    // A selected + short-span; B UNSELECTED (manual-off) + full-span. Narrow to
+    // A's span so B WOULD be coverage-eligible — but B is manual-off, so it must
+    // NOT appear in the coverage-auto-excluded group (and there is nothing
+    // coverage-dropped, so the group is absent entirely).
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 6)), // selected, 01-01…01-06
+        mkWinStrat(REF_WIN_B, WIN_DATES), // UNSELECTED, 01-01…01-12
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: false },
+        weights: { [REF_WIN_A]: 1, [REF_WIN_B]: 0 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The manual-off B is never in the auto-excluded group.
+    expect(
+      screen.queryByTestId(`auto-excluded-row-${REF_WIN_B}`),
+    ).not.toBeInTheDocument();
+    // Nothing is coverage-dropped → group absent.
+    expect(
+      screen.queryByTestId("scenario-auto-excluded-group"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("auto-excluded: the group uses DESIGN.md warning tokens (no raw hex / px)", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    const group = screen.getByTestId("scenario-auto-excluded-group");
+    const cls = group.className;
+    // DESIGN.md warning-token utility classes (bg / border / text), no raw hex.
+    expect(cls).toMatch(/warning/);
+    expect(cls).not.toMatch(/#[0-9a-fA-F]{6}/);
+    expect(cls).not.toMatch(/\[\d+px\]/);
+  });
+});
