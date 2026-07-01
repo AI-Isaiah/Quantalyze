@@ -461,8 +461,18 @@ function coverageDropReason(
 interface IncludeCost {
   /** The exact window to apply so the strategy becomes a member. */
   target: CoverageWindow;
-  /** The single moved window bound (what the label discloses as `{date}`). */
-  date: string;
+  /**
+   * Which window bound(s) actually move when the strategy is re-admitted. The
+   * label MUST phrase the disclosed date(s) to agree with this (WR-01/WR-02):
+   * `"end"` (tail-ragged, the window shortens to a new end), `"start"`
+   * (head-ragged, the window start moves forward), or `"both"` (ragged on both
+   * ends — both bounds are named so the `{N} mo` cost reconciles with the dates).
+   */
+  movedBound: "start" | "end" | "both";
+  /** The moved start bound (`target.start`) — disclosed when `start`/`both` move. */
+  start: string;
+  /** The moved end bound (`target.end`) — disclosed when `end`/`both` move. */
+  end: string;
   /** Whole-month cost of the narrow vs the current window (the `−{N} mo`). */
   months: number;
 }
@@ -474,12 +484,15 @@ interface IncludeCost {
  *
  * The target window is `intersectionOf([currentWindow-as-span, strategySpan])` —
  * the bound math is DELEGATED to scenario-window.ts (Rule 2: never hand-roll
- * min/max interval math over date strings). The label's `{date}` is the single
- * bound that moved (whichever of start/end differs from the current window; if
- * both move — a strategy ragged on BOTH ends — the end bound is shown as the
- * headline cost, and `{months}` is the net whole-month delta across the moved
- * span). `{months}` = `diffDays(oldBound, newBound)` folded to whole months
- * (round-to-nearest; floored at 1 when the delta is > 0 but < 1 month — A3).
+ * min/max interval math over date strings). `movedBound` names which bound(s)
+ * actually move so the caller can phrase the disclosure honestly (WR-01/WR-02):
+ * a tail-ragged strategy moves the `end` only (window shortens to a new end), a
+ * head-ragged strategy moves the `start` only (window start slides forward — NOT
+ * a shortening of the end), and a both-ends-ragged strategy moves `both` (the
+ * label names both dates so `{months}` reconciles against what is shown).
+ * `{months}` = the whole-month cost across ALL moved bounds (head-forward days +
+ * tail-back days, summed then folded: round-to-nearest, floored at 1 when the
+ * delta is > 0 but < 1 month — A3).
  *
  * Returns `null` when the strategy has no data (null span) or the intersection is
  * empty (`intersectionOf === null`) — there is then no window that re-admits it,
@@ -502,9 +515,12 @@ function includeCostFor(
   // there is nothing to include.
   if (!startMoved && !endMoved) return null;
 
-  // The headline moved bound: prefer the end bound when both moved (an ended
-  // strategy is the common case), else whichever single bound actually moved.
-  const date = endMoved ? target.end : target.start;
+  // Which bound(s) actually moved. The label phrases the disclosed date(s) to
+  // match this so the shown date and the `−{N} mo` cost always reconcile
+  // (WR-01: a head-ragged strategy moves the START, never the end; WR-02: a
+  // both-ends-ragged strategy names BOTH dates against the two-ended cost).
+  const movedBound: IncludeCost["movedBound"] =
+    startMoved && endMoved ? "both" : endMoved ? "end" : "start";
 
   // Net whole-month cost across the moved span. The narrowed window is
   // [target.start, target.end] ⊆ [window.start, window.end]; the total shrink is
@@ -524,7 +540,7 @@ function includeCostFor(
   let months = Math.round(shrinkDays / AVG_DAYS_PER_MONTH);
   if (months === 0 && shrinkDays > 0) months = 1;
 
-  return { target, date, months };
+  return { target, movedBound, start: target.start, end: target.end, months };
 }
 
 
@@ -3914,17 +3930,41 @@ function AutoExcludedRow({
           </span>
         </div>
         {includeCost && onInclude && (
-          // COVERAGE-04 — the cost-disclosing include text-button. The `{date}`
-          // + `−{N} mo` render in font-mono tabular-nums (DESIGN.md numbers). No
-          // modal — the cost is in the label and the apply is reversible.
+          // COVERAGE-04 — the cost-disclosing include text-button. The disclosed
+          // date(s) + `−{N} mo` render in font-mono tabular-nums (DESIGN.md
+          // numbers). No modal — the cost is in the label and the apply is
+          // reversible. The verb agrees with the bound(s) that actually move
+          // (WR-01/WR-02): a tail move "shortens window to {end}", a head move
+          // "moves window start to {start}", a both-ends move names both dates so
+          // the shown date(s) and the `−{N} mo` cost always reconcile.
           <button
             type="button"
             data-testid={`auto-excluded-include-${id}`}
             onClick={onInclude}
             className="rounded-sm text-fixed-11 font-medium text-accent transition-colors duration-150 ease-out hover:text-accent-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 motion-reduce:transition-none"
           >
-            Include → shortens window to{" "}
-            <span className="font-mono tabular-nums">{includeCost.date}</span>{" "}
+            {includeCost.movedBound === "start" ? (
+              <>
+                Include → moves window start to{" "}
+                <span className="font-mono tabular-nums">
+                  {includeCost.start}
+                </span>{" "}
+              </>
+            ) : includeCost.movedBound === "both" ? (
+              <>
+                Include → shortens window to{" "}
+                <span className="font-mono tabular-nums">
+                  {includeCost.start}–{includeCost.end}
+                </span>{" "}
+              </>
+            ) : (
+              <>
+                Include → shortens window to{" "}
+                <span className="font-mono tabular-nums">
+                  {includeCost.end}
+                </span>{" "}
+              </>
+            )}
             <span className="font-mono tabular-nums">
               (−{includeCost.months} mo)
             </span>

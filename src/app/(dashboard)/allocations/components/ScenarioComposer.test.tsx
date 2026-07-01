@@ -5409,6 +5409,157 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     ).toContain("2026-01-01 → 2026-01-06");
   });
 
+  // WR-01 — the HEAD-ragged branch. The tail case above only moves the END
+  // bound, so `movedBound === "end"` and the label reads "shortens window to
+  // {end}". A strategy that STARTS after the window start (span.first >
+  // window.start) moves only the START bound instead; disclosing that start
+  // date with end-bound phrasing ("shortens window to {start}") would tell the
+  // allocator they are trading away RECENT history when they are actually
+  // trading away EARLY history. The label must read "moves window start to
+  // {start}" and the disclosed date must be the moved START (the intersection
+  // start = LATE's first day), with a reconcilable month cost.
+  it("COVERAGE-04: a ragged-HEAD auto-excluded row discloses the moved START bound ('moves window start to {start}'), not end-bound phrasing (WR-01)", () => {
+    const REF_WIN_LATE = "strat-window-late";
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
+        mkWinStrat(REF_WIN_LATE, WIN_DATES.slice(3)), // 2026-01-04 … 2026-01-12 (ragged HEAD)
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_LATE]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_LATE]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Default window = defaultWindowFor(spans) = [2026-01-04, 2026-01-12]
+    // (max firsts / min lasts) → both A and LATE are members.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+
+    // Widen the window START back to 2026-01-01 (BEFORE LATE's first day). LATE's
+    // span [01-04, 01-12] no longer covers [01-01, 01-12] → LATE is dropped for a
+    // HEAD reason (starts too late). A is the sole member.
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+    expect(lastScenarioMetrics()?.member_ids).toEqual([REF_WIN_A]);
+
+    // The include button discloses the moved START bound with start-bound
+    // phrasing — NOT "shortens window to" (which reads as an end move). The
+    // disclosed date is the intersection start (LATE's first day, 2026-01-04).
+    const lateRow = screen.getByTestId(`auto-excluded-row-${REF_WIN_LATE}`);
+    const includeBtn = within(lateRow).getByTestId(
+      `auto-excluded-include-${REF_WIN_LATE}`,
+    );
+    expect(includeBtn).toHaveTextContent("Include → moves window start to");
+    expect(includeBtn).not.toHaveTextContent("shortens window");
+    expect(includeBtn).toHaveTextContent("2026-01-04");
+    // The month cost is reconcilable with the shown (start) bound: the head
+    // pulls forward 3 days (01-01 → 01-04), which floors to a "−1 mo" delta.
+    expect(includeBtn.textContent).toMatch(/−1 mo/);
+
+    // Clicking Include narrows the window to the intersection that re-admits LATE
+    // (the START moves to 2026-01-04); the REAL engine member_count rises to 2.
+    act(() => {
+      fireEvent.click(includeBtn);
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+    expect(lastScenarioMetrics()?.member_ids).toEqual(
+      expect.arrayContaining([REF_WIN_A, REF_WIN_LATE]),
+    );
+    expect(
+      screen.queryByTestId(`auto-excluded-row-${REF_WIN_LATE}`),
+    ).not.toBeInTheDocument();
+    // The applied window is exactly the intersection [2026-01-04, 2026-01-12] —
+    // the disclosed start bound is the one that actually moved.
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-04 → 2026-01-12");
+  });
+
+  // WR-02 — the BOTH-ends-ragged branch. When a strategy begins after the window
+  // start AND ends before the window end, both bounds move; a single-date label
+  // ("shortens window to {end}") with a two-ended month cost cannot be
+  // reconciled (the head shift is silent). The label must name BOTH moved dates
+  // so the shown span and the "−{N} mo" cost agree.
+  it("COVERAGE-04: a BOTH-ends-ragged auto-excluded row discloses both moved bounds ('shortens window to {start}–{end}') so the month cost reconciles (WR-02)", () => {
+    const REF_WIN_MID = "strat-window-mid";
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
+        mkWinStrat(REF_WIN_MID, WIN_DATES.slice(3, 9)), // 2026-01-04 … 2026-01-09 (ragged BOTH ends)
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_MID]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_MID]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Default window = [2026-01-04, 2026-01-09] (max firsts / min lasts) → both
+    // A and MID are members.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+
+    // Widen the window to the full range [2026-01-01, 2026-01-12]. MID's span
+    // [01-04, 01-09] falls INSIDE on both ends → MID is dropped (ragged both
+    // ends). A is the sole member.
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+    expect(lastScenarioMetrics()?.member_ids).toEqual([REF_WIN_A]);
+
+    // The include button names BOTH moved bounds (start–end) — not a single date
+    // — so the "−{N} mo" cost (head + tail shift) reconciles against what is
+    // shown. The intersection that re-admits MID is [2026-01-04, 2026-01-09].
+    const midRow = screen.getByTestId(`auto-excluded-row-${REF_WIN_MID}`);
+    const includeBtn = within(midRow).getByTestId(
+      `auto-excluded-include-${REF_WIN_MID}`,
+    );
+    expect(includeBtn).toHaveTextContent("Include → shortens window to");
+    expect(includeBtn).toHaveTextContent("2026-01-04–2026-01-09");
+    // Head +3 days (01-01 → 01-04) and tail −3 days (01-12 → 01-09) = 6 days →
+    // floors to "−1 mo". The single number now names a span, not one bound.
+    expect(includeBtn.textContent).toMatch(/−1 mo/);
+
+    // Clicking Include narrows to the both-ends intersection; member_count rises.
+    act(() => {
+      fireEvent.click(includeBtn);
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+    expect(lastScenarioMetrics()?.member_ids).toEqual(
+      expect.arrayContaining([REF_WIN_A, REF_WIN_MID]),
+    );
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-04 → 2026-01-09");
+  });
+
   it("COVERAGE-04: applying a window (the include path) NEVER reselects a manually-off strategy — manual-off stays sticky (T-58-05)", () => {
     // Mount B as MANUALLY-OFF (selected: false). A stays selected. Because B is
     // not selected it never appears in the auto-excluded group (that group is
