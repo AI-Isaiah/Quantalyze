@@ -6129,8 +6129,10 @@ describe("ScenarioComposer — Phase 57 Plan 03 empty-intersection banner (WINDO
     );
     const banner = screen.getByTestId("scenario-empty-intersection-banner");
     expect(banner).toBeInTheDocument();
-    // role/aria for a non-blocking warning (mirrors CustomRangePicker's clamp).
-    expect(banner).toHaveAttribute("role", "alert");
+    // role/aria for a NON-blocking guided fix: role=status + aria-live=polite per
+    // DESIGN-05 (role=alert is reserved for blocking errors; this banner is an
+    // explicitly non-blocking, recoverable guided fix, so it announces politely).
+    expect(banner).toHaveAttribute("role", "status");
     expect(banner).toHaveAttribute("aria-live", "polite");
     // The outlier is named (ETH is the latest-start holding breaking the overlap).
     expect(

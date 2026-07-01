@@ -85,7 +85,7 @@ import {
   type CoverageSpan,
   type CoverageWindow,
 } from "@/lib/scenario-window";
-import { isoDayFromDate, localMidnight, parseIsoDay } from "@/lib/dateday";
+import { localMidnight, localMidnightToday, parseIsoDay } from "@/lib/dateday";
 import type {
   OwnBookDeltaPayload,
   PeerPercentilePayload,
@@ -1673,7 +1673,7 @@ export function ScenarioComposer({
     if (!minDay || !maxDay) return null;
     const min = localMidnight(minDay);
     const unionMax = localMidnight(maxDay);
-    const today = localMidnight(isoDayFromDate(new Date()));
+    const today = localMidnightToday();
     return { min, max: unionMax > today ? unionMax : today };
   }, [selectedSpans]);
 
@@ -2742,11 +2742,13 @@ export function ScenarioComposer({
           outlier(s) via outlierIdsFor, and offers a one-click "Deselect {name}"
           that restores a valid intersection. It does NOT block the rest of the
           composer — a guided fix, not a hard stop. DESIGN.md warning tokens
-          (AA-verified); role=alert + aria-live=polite (mirrors the picker's
-          clamp region). */}
+          (AA-verified); role=status + aria-live=polite per DESIGN-05
+          (role=status on non-blocking state changes; role=alert is reserved for
+          blocking errors) — this banner is an explicitly non-blocking guided
+          fix, so it is announced politely, not assertively. */}
       {emptyIntersectionOutliers.length > 0 && (
         <div
-          role="alert"
+          role="status"
           aria-live="polite"
           data-testid="scenario-empty-intersection-banner"
           className="mt-6 rounded-md border border-warning-border bg-warning-bg px-4 py-3"
@@ -3486,9 +3488,10 @@ export function ScenarioComposer({
             Auto-excluded (outside window)
           </h3>
           <p className="mt-1 text-fixed-11 text-text-secondary">
-            These selected strategies have no data across the whole coverage
-            window, so they are not in the blend or its divisor. Narrow the
-            window (or use Common period) to include them.
+            These selected strategies do not span the entire coverage window
+            (they start after it begins or end before it ends), so they are
+            excluded from the blend and its divisor. Narrow the window (or use
+            Common period) to include them.
           </p>
           <ul className="mt-3 grid gap-2">
             {autoExcluded.map((row) => (
