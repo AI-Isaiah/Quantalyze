@@ -126,3 +126,64 @@ export function defaultWindowFor(spans: CoverageSpan[]): CoverageWindow | null {
 export function covers(span: CoverageSpan, window: CoverageWindow): boolean {
   return span.first <= window.start && span.last >= window.end;
 }
+
+/**
+ * The WINDOW-06 "name the outlier(s)" source: given a map of
+ * `{strategyId → CoverageSpan}`, return the id(s) whose removal restores a
+ * non-null common intersection over the remaining spans — the strategy(ies)
+ * breaking the overlap that the empty-intersection banner names for a one-click
+ * "deselect {X}" fix.
+ *
+ * Contract:
+ *   - If the whole set already intersects (`intersectionOf !== null`), returns
+ *     `[]` — there is a common window, no outlier. Empty map and single-strategy
+ *     map also return `[]` (a single span always intersects itself).
+ *   - Otherwise the empty overlap is bounded by exactly two spans: the one with
+ *     the MAXIMUM `first` (latest start) and the one with the MINIMUM `last`
+ *     (earliest end). Those are the only removal candidates — dropping anything
+ *     else cannot move both offending bounds. Return the id(s) whose removal
+ *     yields a non-null `intersectionOf` over the remainder.
+ *   - Deterministic tie-break when BOTH candidates individually restore overlap:
+ *     prefer the id with the latest `first` (the strategy that starts after
+ *     everyone else's data ends); if the firsts tie, prefer the earliest `last`.
+ *
+ * REMOVAL-RESTORES-OVERLAP invariant (T-57-02): every returned id, when removed,
+ * yields a non-null intersection — proven in the tests. The intersection math is
+ * NOT re-derived here; it delegates to `intersectionOf`. Pure: no mutation,
+ * lexicographic compare, no JS Date.
+ */
+export function outlierIdsFor(
+  spansById: Record<string, CoverageSpan>,
+): string[] {
+  const ids = Object.keys(spansById);
+  if (ids.length <= 1) return [];
+
+  const allSpans = ids.map((id) => spansById[id]);
+  if (intersectionOf(allSpans) !== null) return [];
+
+  // The empty overlap is defined by the latest start and the earliest end.
+  let maxFirstId = ids[0];
+  let minLastId = ids[0];
+  for (const id of ids) {
+    if (spansById[id].first > spansById[maxFirstId].first) maxFirstId = id;
+    if (spansById[id].last < spansById[minLastId].last) minLastId = id;
+  }
+
+  // Candidate order encodes the tie-break: prefer the latest-start strategy,
+  // then the earliest-end one. (When they are the SAME id, it is tested once.)
+  const candidates =
+    maxFirstId === minLastId ? [maxFirstId] : [maxFirstId, minLastId];
+
+  const restoresOverlap = (removeId: string): boolean =>
+    intersectionOf(
+      ids.filter((id) => id !== removeId).map((id) => spansById[id]),
+    ) !== null;
+
+  for (const id of candidates) {
+    if (restoresOverlap(id)) return [id];
+  }
+
+  // Neither single removal restores overlap: both bounding strategies must go
+  // (their removal jointly restores a common window over the remainder).
+  return candidates;
+}

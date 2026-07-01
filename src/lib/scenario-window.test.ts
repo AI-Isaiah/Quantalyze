@@ -5,7 +5,9 @@ import {
   defaultWindowFor,
   covers,
   unionOf,
+  outlierIdsFor,
 } from "./scenario-window";
+import type { CoverageSpan } from "./scenario-window";
 import type { DailyPoint } from "./portfolio-math-utils";
 
 /**
@@ -211,5 +213,96 @@ describe("unionOf (earliest-start … latest-end — the 'Full range' preset tar
     const snapshot = JSON.parse(JSON.stringify(spans));
     unionOf(spans);
     expect(spans).toEqual(snapshot);
+  });
+});
+
+describe("outlierIdsFor (WINDOW-06 — name the strategy breaking the overlap)", () => {
+  /**
+   * WHY (Rule 9): the empty-intersection banner (WINDOW-06) must not be a
+   * dead-end — it names the specific strategy id(s) whose removal restores a
+   * common window, so the allocator can one-click "deselect {X}". The correctness
+   * contract is the REMOVAL-RESTORES-OVERLAP invariant: every id this helper
+   * returns, when dropped from the set, MUST yield a non-null intersection over
+   * the remainder. A helper that named a non-outlier would mislead the fix — the
+   * user would deselect a strategy and the banner would persist (T-57-02). The
+   * helper reuses `intersectionOf` (single source of the interval math); it must
+   * never re-derive `start > end` inline.
+   */
+
+  // A local invariant-checker: proves the named ids genuinely restore overlap.
+  function intersectionAfterRemoving(
+    spansById: Record<string, CoverageSpan>,
+    idsToRemove: string[],
+  ): CoverageSpan[] {
+    return Object.entries(spansById)
+      .filter(([id]) => !idsToRemove.includes(id))
+      .map(([, span]) => span);
+  }
+
+  it("returns [] for an empty map (no strategies → no outlier)", () => {
+    expect(outlierIdsFor({})).toEqual([]);
+  });
+
+  it("returns [] for a single-strategy map (a span always intersects itself)", () => {
+    expect(
+      outlierIdsFor({ A: { first: "2023-01-01", last: "2023-12-31" } }),
+    ).toEqual([]);
+  });
+
+  it("returns [] when the set has a valid common intersection (no outlier)", () => {
+    const spansById = {
+      A: { first: "2023-01-01", last: "2024-06-01" },
+      B: { first: "2023-04-01", last: "2024-03-01" },
+      C: { first: "2023-02-01", last: "2024-05-01" },
+    };
+    // Non-null intersection [2023-04-01, 2024-03-01] exists → no outlier.
+    expect(intersectionOf(Object.values(spansById))).not.toBeNull();
+    expect(outlierIdsFor(spansById)).toEqual([]);
+  });
+
+  it("names the late-starting strategy when its start is AFTER everyone else's data ends", () => {
+    // A ends 2023-12; B starts 2024-06 (disjoint). B is the outlier: removing B
+    // leaves {A} which intersects itself. Tie-break prefers the latest `first`.
+    const spansById = {
+      A: { first: "2023-01-01", last: "2023-12-31" },
+      B: { first: "2024-06-01", last: "2024-12-31" },
+    };
+    expect(intersectionOf(Object.values(spansById))).toBeNull();
+    expect(outlierIdsFor(spansById)).toEqual(["B"]);
+  });
+
+  it("names the ONE outlier in a set where the others share a window", () => {
+    // A, B, C overlap richly on 2023; X is disjoint in 2024. Removing X restores
+    // the [2023-03-01, 2023-09-01]-ish common window; X is the single outlier.
+    const spansById = {
+      A: { first: "2023-01-01", last: "2023-12-31" },
+      B: { first: "2023-03-01", last: "2023-11-30" },
+      C: { first: "2023-02-15", last: "2023-10-31" },
+      X: { first: "2024-06-01", last: "2024-12-31" },
+    };
+    expect(intersectionOf(Object.values(spansById))).toBeNull();
+    expect(outlierIdsFor(spansById)).toEqual(["X"]);
+  });
+
+  it("REMOVAL-RESTORES-OVERLAP invariant: removing every returned id yields a non-null intersection", () => {
+    const spansById = {
+      A: { first: "2023-01-01", last: "2023-12-31" },
+      B: { first: "2023-03-01", last: "2023-11-30" },
+      X: { first: "2024-06-01", last: "2024-12-31" },
+    };
+    const outliers = outlierIdsFor(spansById);
+    expect(outliers.length).toBeGreaterThan(0);
+    const remaining = intersectionAfterRemoving(spansById, outliers);
+    expect(intersectionOf(remaining)).not.toBeNull();
+  });
+
+  it("does NOT mutate its input map or the span objects", () => {
+    const spansById = {
+      A: { first: "2023-01-01", last: "2023-12-31" },
+      B: { first: "2024-06-01", last: "2024-12-31" },
+    };
+    const snapshot = JSON.parse(JSON.stringify(spansById));
+    outlierIdsFor(spansById);
+    expect(spansById).toEqual(snapshot);
   });
 });
