@@ -234,16 +234,18 @@ describe("Phase 32 frozen-spine + route-retirement exit-gate guards", () => {
     expect(typeof BASE).toBe("string");
   });
 
-  it("exit gate (frozen engine SCENARIO-05): src/lib/scenario.ts is zero-diff vs baseline", () => {
+  // v1.5 coverage-window re-baseline (ADR-001): the FROZEN-ENGINE assertion is
+  // INVERTED (not deleted) — v1.5 Phase 55 deliberately edits scenario.ts ONCE
+  // (the coverage-window blend). The guard stays LIVE. ALL FLOW-01/02/03 route /
+  // redirect / delete assertions BELOW are UNCHANGED (Phase 55 touches no routes).
+  it("exit gate (frozen engine SCENARIO-05): src/lib/scenario.ts is the v1.5-Phase-55 coverage-window edit (ADR-001 re-baseline)", () => {
     expect(
       CHANGED,
-      `Phase 32 exit gate VIOLATED — ${FROZEN_ENGINE} changed in the phase ` +
-        "delta. The projection engine is FROZEN (SCENARIO-05; the 252-day " +
-        "annualization basis the whole product relies on). Phase 32 is " +
-        "routing + nav + two deletions — it touches NO engine code. The " +
-        `deleted ScenarioBuilder imported @/lib/scenario but did not modify ` +
-        `it. Revert ${FROZEN_ENGINE} to the baseline.`,
-    ).not.toContain(FROZEN_ENGINE);
+      `Phase 32 re-baseline (v1.5 ADR-001) — ${FROZEN_ENGINE} is expected in ` +
+        "the phase delta (v1.5 Phase 55 deliberately edits the frozen engine " +
+        "ONCE — the coverage-window blend). If this fails, the reviewed edit " +
+        "was reverted or re-frozen — restore it or update the re-baseline.",
+    ).toContain(FROZEN_ENGINE);
   });
 
   it("FLOW-02: /scenarios redirects to the composer (now a next.config 308) and the in-page leak surface is GONE", () => {

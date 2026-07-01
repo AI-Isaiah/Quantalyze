@@ -171,27 +171,29 @@ describe("Phase 31 frozen-spine + hide-don't-unmount exit-gate guards", () => {
     expect(typeof BASE).toBe("string");
   });
 
-  it("exit gate (frozen engine SCENARIO-05): src/lib/scenario.ts is zero-diff vs baseline", () => {
+  // v1.5 coverage-window re-baseline (ADR-001): the two FROZEN-ENGINE assertions
+  // are INVERTED (not deleted) — v1.5 Phase 55 deliberately edits scenario.ts +
+  // scenario.test.ts ONCE (the coverage-window blend). The guard stays LIVE. The
+  // LAYOUT-02 hide-don't-unmount CompositionList assertions BELOW are UNCHANGED
+  // (Phase 55 touches no composer JSX).
+  it("exit gate (frozen engine SCENARIO-05): src/lib/scenario.ts is the v1.5-Phase-55 coverage-window edit (ADR-001 re-baseline)", () => {
     expect(
       CHANGED,
-      `Phase 31 exit gate VIOLATED — ${FROZEN_ENGINE} changed in the phase ` +
-        "delta. The projection engine is FROZEN (SCENARIO-05; the 252-day " +
-        "annualization basis the whole product relies on). Phase 31 only wraps " +
-        "the existing CompositionList in the lifted CollapsibleSection — a " +
-        "client-side disclosure UI. The engine must not be edited. Revert " +
-        `${FROZEN_ENGINE} to the baseline.`,
-    ).not.toContain(FROZEN_ENGINE);
+      `Phase 31 re-baseline (v1.5 ADR-001) — ${FROZEN_ENGINE} is expected in ` +
+        "the phase delta (v1.5 Phase 55 deliberately edits the frozen engine " +
+        "ONCE — the coverage-window blend). If this fails, the reviewed edit " +
+        "was reverted or re-frozen — restore it or update the re-baseline.",
+    ).toContain(FROZEN_ENGINE);
   });
 
-  it("exit gate (frozen engine pins): src/lib/scenario.test.ts is zero-diff vs baseline", () => {
+  it("exit gate (frozen engine pins): src/lib/scenario.test.ts is the v1.5-Phase-55 additive coverage-window cases (ADR-001 re-baseline)", () => {
     expect(
       CHANGED,
-      `Phase 31 exit gate VIOLATED — ${FROZEN_ENGINE_TEST} changed in the ` +
-        "phase delta. That file holds the 252-day annualization convention " +
-        "pins — the SOLE proof the frozen engine's math was not loosened (it " +
-        "FAILS SILENTLY otherwise). It must stay byte-unchanged this phase. " +
-        `Revert ${FROZEN_ENGINE_TEST} to the baseline.`,
-    ).not.toContain(FROZEN_ENGINE_TEST);
+      `Phase 31 re-baseline (v1.5 ADR-001) — ${FROZEN_ENGINE_TEST} is expected ` +
+        "in the phase delta (v1.5 Phase 55 ADDS coverage-window cases; the " +
+        "legacy 252-annualization pins + the union pin stay unchanged/green). " +
+        "If this fails, the additive cases were reverted — restore them.",
+    ).toContain(FROZEN_ENGINE_TEST);
   });
 
   it("hide-don't-unmount (LAYOUT-02 / Pitfall 5): CompositionList is WRAPPED in the lifted CollapsibleSection", () => {
