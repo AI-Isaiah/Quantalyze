@@ -23,6 +23,32 @@
  *      when a late-inception strategy joins, and makes earlier
  *      include-from dates actually take effect.
  *
+ *      v1.5 COVERAGE-WINDOW (ADR-001): behavior 1 above is the
+ *      absent-`state.window` (UNION) path, preserved BYTE-IDENTICALLY for
+ *      every own-book caller (queries.ts, computeCompositeCurve, share-
+ *      resolve). When `state.window` is PRESENT (the scenario tab passes
+ *      it explicitly), the engine instead blends over the CLOSED window
+ *      `[winStart, winEnd]` with a CONSTANT divisor = member count:
+ *        - member iff `enabled AND coverageSpanOf(returns) ⊇ window`
+ *          (INCLUSIVE-CLOSED containment: `span.first <= winStart &&
+ *          span.last >= winEnd`). An ENDED strategy (last < winEnd) is NOT
+ *          a member and no longer divides the mean toward zero.
+ *        - the divisor is constant across the window (window-fixed
+ *          membership); interior mid-window gaps for a member 0-fill in
+ *          the numerator ONLY (never outside the window, never for a
+ *          non-member — that would reintroduce the tail dilution).
+ *        - weighted blends renormalize the SURVIVING members' weights to
+ *          sum-to-1 (typed `state.weights` stay the source of truth; the
+ *          renorm is ephemeral, never mutates the caller's weights).
+ *        - a ZERO-member window returns the honest empty-state shape
+ *          (`member_count: 0`, null metrics, empty series) — no
+ *          divide-by-zero, no fabricated flat-zero curve (no-invented-data).
+ *      Coverage spans are derived INSIDE the engine from the returns maps
+ *      via `scenario-window.ts`, never from `start_date` or the
+ *      `"2022-01-01"` sentinel. Output exposes `member_count` /
+ *      `member_ids` additively; `effective_start`/`effective_end` carry
+ *      the window bounds and `n` carries N.
+ *
  *   2. Correlation uses SAMPLE covariance (divide by n-1), consistent
  *      with the SAMPLE std used for portfolio volatility. Correlation
  *      between two identical series is 1.
@@ -45,6 +71,7 @@
 
 import type { DailyPoint } from "./portfolio-math-utils";
 export type { DailyPoint } from "./portfolio-math-utils";
+import { coverageSpanOf, covers } from "./scenario-window";
 
 export interface StrategyForBuilder {
   id: string;
@@ -80,6 +107,23 @@ export interface ScenarioState {
    * pre-R4 behaviour, so every `scenario.test.ts` pin holds unchanged.
    */
   leverage?: Record<string, number>;
+  /**
+   * v1.5 COVERAGE-WINDOW (ADR-001) — an OPTIONAL explicit closed blend window
+   * `[start, end]`. When PRESENT (the scenario tab derives it via
+   * `defaultWindowFor()` and passes it in), `computeScenario` blends only
+   * members whose coverage span ⊇ this window, with a constant divisor = the
+   * member count (an ended strategy no longer dilutes the mean — the whole
+   * point of v1.5). See the file-header behavior note.
+   *
+   * Additive + optional, but its byte-compat claim is CONDITIONAL (unlike
+   * `leverage?`): a state WITHOUT `window` runs the legacy UNION path
+   * byte-identically (the own-book callers queries.ts:2208/:2356,
+   * computeCompositeCurve, and share-resolve pass no window and stay
+   * unchanged — the `scenario.test.ts` "never shrinks to the overlap" pin
+   * holds green). The NEW intersection behavior fires ONLY on the
+   * present-`window` path.
+   */
+  window?: { start: string; end: string };
 }
 
 export interface ComputedMetrics {
@@ -126,6 +170,28 @@ export interface ComputedMetrics {
    * (no overlap rather than a false window). Consumers read it with `?? []`.
    */
   portfolio_daily_returns?: Array<{ date: string; value: number }>;
+  /**
+   * v1.5 COVERAGE-WINDOW (ADR-001, BLEND-06) — the blend DIVISOR and its
+   * membership, exposed so consumers read the divisor rather than infer it.
+   *
+   * `member_count` is the number of strategies that participated in the blend:
+   * on the present-`window` path it is the count of members whose coverage span
+   * ⊇ the window (the CONSTANT divisor); on the absent-`window` union path it is
+   * the active-set size (output completeness). `member_ids` lists those ids in
+   * strategy order. `effective_start`/`effective_end` carry the window bounds
+   * and `n` carries N.
+   *
+   * Declared OPTIONAL so both fields are fully additive: the external
+   * `ComputedMetrics` construction sites this engine does NOT own —
+   * `liveBaselineToComputedMetrics` (ScenarioComposer.tsx) and `NULL_METRICS`
+   * (ScenarioComparePanel.tsx) — compile UNCHANGED and need no edit (mirroring
+   * the `portfolio_daily_returns?` additive precedent). Consumers read them with
+   * a `?? 0` / `?? []` default. `computeScenario` itself ALWAYS sets both: to the
+   * real member set on every return path, or `0` / `[]` on the zero-member and
+   * zero-selected empty-states.
+   */
+  member_count?: number;
+  member_ids?: string[];
 }
 
 /**
@@ -170,11 +236,70 @@ export function computeScenario(
       effective_start: null,
       effective_end: null,
       portfolio_daily_returns: [],
+      member_count: 0,
+      member_ids: [],
     };
   }
 
   const activeStrategies = strategies.filter((s) => state.selected[s.id]);
-  const totalWeight = activeStrategies.reduce(
+
+  // v1.5 COVERAGE-WINDOW (ADR-001). When `state.window` is PRESENT, the blend
+  // is over the CLOSED window `[winStart, winEnd]` with a constant divisor =
+  // the count of MEMBERS (strategies whose coverage span ⊇ the window). When
+  // ABSENT, the engine keeps its legacy UNION axis byte-identically (own-book
+  // callers + computeCompositeCurve + share-resolve are untouched). `members`
+  // and `axisBounds` below select the axis + divisor set for the two paths;
+  // everything downstream (metrics block, correlation, curve) is shared and
+  // unchanged.
+  const window = state.window ?? null;
+
+  // Members = the strategies that participate in the blend / divisor.
+  //   - PRESENT window: enabled AND coverageSpanOf(returns) ⊇ window (INCLUSIVE-
+  //     CLOSED containment via `covers`). An ended strategy (last < winEnd) or a
+  //     ragged-head one (first > winStart) is EXCLUDED and no longer dilutes.
+  //     Coverage is derived from the RETURNS array only (scenario-window.ts) —
+  //     never `start_date` / the "2022-01-01" sentinel.
+  //   - ABSENT window: every active strategy (the legacy union divisor set).
+  const members: StrategyForBuilder[] = window
+    ? activeStrategies.filter((s) => {
+        const span = coverageSpanOf(s.daily_returns);
+        return span !== null && covers(span, window);
+      })
+    : activeStrategies;
+
+  // BLEND-05 (Pitfall 4): a zero-member window returns the honest empty-state
+  // shape BEFORE the day loop — never reaching the `activeWeightSum > 0 ? … : 0`
+  // fabrication that would emit a plausible flat-0% curve. Only fires on the
+  // present-window path (absent-window `members === activeStrategies`, already
+  // non-empty here).
+  if (members.length === 0) {
+    return {
+      n: 0,
+      twr: null,
+      cagr: null,
+      volatility: null,
+      sharpe: null,
+      sortino: null,
+      max_drawdown: null,
+      max_dd_days: null,
+      correlation_matrix: null,
+      avg_pairwise_correlation: null,
+      equity_curve: [],
+      effective_start: null,
+      effective_end: null,
+      portfolio_daily_returns: [],
+      member_count: 0,
+      member_ids: [],
+    };
+  }
+  const member_ids = members.map((s) => s.id);
+  // Weight mass is summed over the MEMBER set (BLEND-04). On the absent-window
+  // path `members === activeStrategies`, so this is byte-identical to the legacy
+  // renorm over the active set. On the present-window path, a strategy dropped
+  // for non-coverage is excluded from the denominator, so the SURVIVING members'
+  // typed weights renormalize to sum-to-1 — WITHOUT mutating `state.weights`
+  // (the renorm is ephemeral; typed weights stay the source of truth).
+  const totalWeight = members.reduce(
     (s, x) => s + (state.weights[x.id] ?? 0),
     0,
   );
@@ -190,19 +315,50 @@ export function computeScenario(
     return Number.isFinite(L) && (L as number) >= 0 ? (L as number) : 1;
   };
 
+  // Per-strategy include-from.
+  //   - PRESENT window: every member's include-from is `winStart` (the closed
+  //     window lower bound). Members bracket the window by definition, so the
+  //     axis below is exactly the window's trading days — no `startDates` /
+  //     `start_date` / "2022-01-01" sentinel is consulted on this path (the
+  //     coverage window is the authority; the sentinel is confined to the union
+  //     path below).
+  //   - ABSENT window: the legacy per-strategy include-from over the active set.
   const strategyStart = new Map<string, string>();
-  for (const s of activeStrategies) {
-    const chosen = state.startDates[s.id] ?? s.start_date ?? "2022-01-01";
-    strategyStart.set(s.id, chosen);
+  if (window) {
+    for (const s of members) {
+      strategyStart.set(s.id, window.start);
+    }
+  } else {
+    for (const s of activeStrategies) {
+      const chosen = state.startDates[s.id] ?? s.start_date ?? "2022-01-01";
+      strategyStart.set(s.id, chosen);
+    }
   }
 
-  // Union of all dates that appear in ANY active strategy AFTER its own
-  // include-from. Sorted chronologically.
+  // Merged date axis.
+  //   - PRESENT window: the union of MEMBERS' dates that fall in the CLOSED
+  //     window `[winStart, winEnd]`. Members bracket the window, so this is the
+  //     full set of the window's trading days; a member missing an interior day
+  //     leaves a gap that 0-fills in the numerator only (below), never shrinking
+  //     the axis or the divisor (BLEND-03). Dates OUTSIDE the window are never
+  //     added — 0-fill can never leak past the window (Pitfall 3).
+  //   - ABSENT window: the legacy UNION of every active strategy's dates >= its
+  //     own include-from (byte-identical).
   const allDateSet = new Set<string>();
-  for (const s of activeStrategies) {
-    const from = strategyStart.get(s.id)!;
-    for (const d of s.daily_returns) {
-      if (d.date >= from) allDateSet.add(d.date);
+  if (window) {
+    for (const s of members) {
+      for (const d of s.daily_returns) {
+        if (d.date >= window.start && d.date <= window.end) {
+          allDateSet.add(d.date);
+        }
+      }
+    }
+  } else {
+    for (const s of activeStrategies) {
+      const from = strategyStart.get(s.id)!;
+      for (const d of s.daily_returns) {
+        if (d.date >= from) allDateSet.add(d.date);
+      }
     }
   }
   const commonDates = Array.from(allDateSet).sort();
@@ -220,14 +376,20 @@ export function computeScenario(
       correlation_matrix: null,
       avg_pairwise_correlation: null,
       equity_curve: [],
-      effective_start: commonDates[0] ?? null,
-      effective_end: commonDates[n - 1] ?? null,
+      effective_start: window ? window.start : commonDates[0] ?? null,
+      effective_end: window ? window.end : commonDates[n - 1] ?? null,
       portfolio_daily_returns: [],
+      member_count: members.length,
+      member_ids,
     };
   }
 
+  // Downstream loops iterate the MEMBER set. On the absent-window path
+  // `members === activeStrategies`, so the axis / blend / correlation are
+  // byte-identical to the legacy union behavior; on the present-window path
+  // only covering members participate (constant divisor).
   const strategyReturns: Record<string, number[]> = {};
-  for (const s of activeStrategies) {
+  for (const s of members) {
     const map = dateMapCache.get(s.id)!;
     const from = strategyStart.get(s.id)!;
     strategyReturns[s.id] = commonDates.map((d) =>
@@ -236,12 +398,14 @@ export function computeScenario(
   }
 
   // Portfolio daily returns = weighted sum, with renormalization on days
-  // where some strategies haven't started yet.
+  // where some strategies haven't started yet (absent-window path) or over
+  // the constant member set (present-window path — divisor is constant, so
+  // `activeWeightSum` sums the full member mass every day).
   const portDaily: number[] = new Array(n);
   for (let i = 0; i < n; i++) {
     let r = 0;
     let activeWeightSum = 0;
-    for (const s of activeStrategies) {
+    for (const s of members) {
       const from = strategyStart.get(s.id)!;
       if (commonDates[i] < from) continue;
       const w = normWeight(s.id);
@@ -322,9 +486,11 @@ export function computeScenario(
       correlation_matrix: null,
       avg_pairwise_correlation: null,
       equity_curve: [],
-      effective_start: commonDates[0],
-      effective_end: commonDates[n - 1],
+      effective_start: window ? window.start : commonDates[0],
+      effective_end: window ? window.end : commonDates[n - 1],
       portfolio_daily_returns: [],
+      member_count: members.length,
+      member_ids,
     };
   }
 
@@ -383,7 +549,7 @@ export function computeScenario(
     string,
     { mean: number; std: number; demeaned: number[] }
   >();
-  for (const s of activeStrategies) {
+  for (const s of members) {
     const vec = strategyReturns[s.id];
     const mean = vec.reduce((sum, v) => sum + v, 0) / vec.length;
     const demeaned = vec.map((v) => v - mean);
@@ -401,12 +567,12 @@ export function computeScenario(
   const correlation_matrix: Record<string, Record<string, number>> = {};
   let absCorrSum = 0;
   let corrCount = 0;
-  for (let i = 0; i < activeStrategies.length; i++) {
-    const idA = activeStrategies[i].id;
+  for (let i = 0; i < members.length; i++) {
+    const idA = members[i].id;
     correlation_matrix[idA] = {};
     const statA = strategyStats.get(idA)!;
-    for (let j = 0; j < activeStrategies.length; j++) {
-      const idB = activeStrategies[j].id;
+    for (let j = 0; j < members.length; j++) {
+      const idB = members[j].id;
       if (i === j) {
         correlation_matrix[idA][idB] = 1;
         continue;
@@ -458,9 +624,15 @@ export function computeScenario(
     correlation_matrix,
     avg_pairwise_correlation,
     equity_curve,
-    effective_start: commonDates[0],
-    effective_end: commonDates[n - 1],
+    // PRESENT window: the effective bounds ARE the window `[winStart, winEnd]`
+    // (members bracket the window, so commonDates[0]/[n-1] equal the window
+    // bounds anyway — but pin them explicitly to the window authority).
+    // ABSENT window: the legacy union bounds (byte-identical).
+    effective_start: window ? window.start : commonDates[0],
+    effective_end: window ? window.end : commonDates[n - 1],
     portfolio_daily_returns,
+    member_count: members.length,
+    member_ids,
   };
 }
 

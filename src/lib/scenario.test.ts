@@ -349,6 +349,14 @@ describe("computeScenario — [REGRESSION PIN] staggered start weight renormaliz
   });
 
   it("never 'shrinks' the scenario window to the overlap when a late-inception strategy joins", () => {
+    // v1.5 UNION-WHEN-ABSENT PIN. This documents the PRESERVED absent-`window`
+    // legacy path: with NO `state.window`, the engine keeps its UNION axis +
+    // 0-fill-tail + renormalize convention byte-identically (LOAD-BEARING, 55-
+    // CONTEXT §Decisions — protects the own-book callers queries.ts:2208/:2356,
+    // computeCompositeCurve, and share-resolve). The NEW coverage-window /
+    // intersection behavior fires ONLY when `state.window` is present and is
+    // asserted by the ADDITIVE cases below — it never re-bases THIS pin.
+    //
     // Strategy a has 60 days of history. Strategy b joins on day 40.
     // Before the regression fix, the scenario window was clamped to the
     // OVERLAP (20 days). After the fix, the window is the UNION (60
@@ -366,6 +374,227 @@ describe("computeScenario — [REGRESSION PIN] staggered start weight renormaliz
     expect(metrics.n).toBe(60);
     expect(metrics.effective_start).toBe(dates[0]);
     expect(metrics.effective_end).toBe(dates[59]);
+  });
+});
+
+// =========================================================================
+// v1.5 COVERAGE-WINDOW BLEND (ADR-001, BLEND-01…06)
+//
+// When `state.window` is PRESENT, computeScenario blends ONLY members whose
+// coverage span ⊇ the window, with a CONSTANT divisor = member count. An ended
+// strategy (span ends before winEnd) is NOT a member and no longer dilutes the
+// mean toward zero (the whole reason for v1.5). These cases are ADDITIVE — the
+// absent-`window` union pin above stays green.
+// =========================================================================
+
+describe("computeScenario — v1.5 coverage window", () => {
+  it("[BLEND-01] with an explicit window the axis is exactly [winStart,winEnd] and n === trading-day count", () => {
+    const dates = buildDates("2024-01-02", 60);
+    const strategies = [constantReturnStrategy("a", dates, 0.001)];
+    const cache = buildDateMapCache(strategies);
+    // Window = the middle 20 days [dates[20], dates[39]].
+    const state: ScenarioState = {
+      ...defaultState(strategies),
+      window: { start: dates[20], end: dates[39] },
+    };
+    const metrics = computeScenario(strategies, state, cache);
+
+    // n === closed-window trading-day count (20), effective bounds === window.
+    expect(metrics.n).toBe(20);
+    expect(metrics.effective_start).toBe(dates[20]);
+    expect(metrics.effective_end).toBe(dates[39]);
+    // Single full-window member.
+    expect(metrics.member_count).toBe(1);
+    expect(metrics.member_ids).toEqual(["a"]);
+  });
+
+  it("[BLEND-02][member_count] an ended-tail strategy is NOT a member and no longer dilutes — divisor === 1 on the post-end tail", () => {
+    // A covers the full 60-day window; B ends on day 39 (span [d0, d39]). The
+    // window is the full [d0, d59]. B does NOT cover it (last < winEnd) → B is
+    // excluded; member_count === 1, and the blend over the WHOLE window equals
+    // A alone (no half-toward-zero tail dilution).
+    const dates = buildDates("2024-01-02", 60);
+    const stratA = constantReturnStrategy("a", dates, 0.002);
+    const stratB = constantReturnStrategy("b", dates.slice(0, 40), 0.004);
+    const strategies = [stratA, stratB];
+    const cache = buildDateMapCache(strategies);
+    const state: ScenarioState = {
+      ...defaultState(strategies),
+      window: { start: dates[0], end: dates[59] },
+    };
+    const metrics = computeScenario(strategies, state, cache);
+
+    expect(metrics.member_count).toBe(1);
+    expect(metrics.member_ids).toEqual(["a"]);
+    // Portfolio return over the full window === A alone: (1.002)^60 - 1. If B
+    // still divided the tail toward zero, twr would be materially lower.
+    const expectedTwr = Math.pow(1 + 0.002, 60) - 1;
+    expect(metrics.twr).toBeCloseTo(expectedTwr, 4);
+  });
+
+  it("[BLEND-02] two full-window members equal-weight each contribute exactly 1/2 (constant divisor === 2)", () => {
+    const dates = buildDates("2024-01-02", 60);
+    const strategies = [
+      constantReturnStrategy("a", dates, 0.002),
+      constantReturnStrategy("b", dates, -0.001),
+    ];
+    const cache = buildDateMapCache(strategies);
+    const state: ScenarioState = {
+      ...defaultState(strategies),
+      window: { start: dates[0], end: dates[59] },
+    };
+    const metrics = computeScenario(strategies, state, cache);
+
+    expect(metrics.member_count).toBe(2);
+    expect(metrics.member_ids).toEqual(["a", "b"]);
+    // (0.002 + -0.001) / 2 = 0.0005 every day.
+    const expectedTwr = Math.pow(1 + 0.0005, 60) - 1;
+    expect(metrics.twr).toBeCloseTo(expectedTwr, 4);
+  });
+
+  it("[BLEND-03][interior gap] a member missing ONE mid-window day stays a member; that day contributes 0; divisor unchanged", () => {
+    // A: full window. B: covers the window (data on/before winStart AND on/
+    // after winEnd) but is MISSING one interior day. B stays a member (its span
+    // brackets the window); the missing day 0-fills in the numerator only.
+    const dates = buildDates("2024-01-02", 60);
+    const stratA = constantReturnStrategy("a", dates, 0.002);
+    // B has data on every day EXCEPT interior day index 30.
+    const bDates = dates.filter((_, i) => i !== 30);
+    const stratB = constantReturnStrategy("b", bDates, 0.002);
+    const strategies = [stratA, stratB];
+    const cache = buildDateMapCache(strategies);
+    const state: ScenarioState = {
+      ...defaultState(strategies),
+      window: { start: dates[0], end: dates[59] },
+    };
+    const metrics = computeScenario(strategies, state, cache);
+
+    // B still covers [d0, d59] (its first/last bracket the window) → member.
+    expect(metrics.member_count).toBe(2);
+    expect(metrics.member_ids).toEqual(["a", "b"]);
+    // n is the full window (60): the interior gap does NOT shrink the axis.
+    expect(metrics.n).toBe(60);
+    // On the missing day, B contributes 0 → portfolio return that day is
+    // (0.002 + 0)/2 = 0.001; every other day (0.002 + 0.002)/2 = 0.002.
+    const expectedTwr = Math.pow(1 + 0.002, 59) * Math.pow(1 + 0.001, 1) - 1;
+    expect(metrics.twr).toBeCloseTo(expectedTwr, 4);
+  });
+
+  it("[BLEND-04][renorm] weighted members renormalize to sum-1 after a coverage drop WITHOUT mutating state.weights", () => {
+    // A(0.6) full window, B(0.2) full window, C(0.2) ends before winEnd (dropped
+    // for non-coverage). Surviving A,B renormalize to 0.75 / 0.25.
+    const dates = buildDates("2024-01-02", 60);
+    const stratA = constantReturnStrategy("a", dates, 0.003);
+    const stratB = constantReturnStrategy("b", dates, 0.001);
+    const stratC = constantReturnStrategy("c", dates.slice(0, 40), 0.01);
+    const strategies = [stratA, stratB, stratC];
+    const cache = buildDateMapCache(strategies);
+    const state: ScenarioState = {
+      ...defaultState(strategies),
+      weights: { a: 0.6, b: 0.2, c: 0.2 },
+      window: { start: dates[0], end: dates[59] },
+    };
+    const frozenWeights = { ...state.weights };
+    const metrics = computeScenario(strategies, state, cache);
+
+    // C dropped; A,B members; renormalized 0.6/0.8=0.75, 0.2/0.8=0.25.
+    expect(metrics.member_count).toBe(2);
+    expect(metrics.member_ids).toEqual(["a", "b"]);
+    const expectedDaily = 0.75 * 0.003 + 0.25 * 0.001;
+    const expectedTwr = Math.pow(1 + expectedDaily, 60) - 1;
+    expect(metrics.twr).toBeCloseTo(expectedTwr, 4);
+    // Typed weights are the source of truth — never mutated by the renorm.
+    expect(state.weights).toEqual(frozenWeights);
+  });
+
+  it("[BLEND-04][renorm] a narrow-back window that re-admits C restores C's typed 0.2 then re-renormalizes to 0.6/0.2/0.2", () => {
+    // Same book, but a NARROWER window [d0, d39] that C DOES cover → all three
+    // are members again; typed weights (0.6/0.2/0.2) already sum to 1, so the
+    // blend is the full 3-way weighted mean.
+    const dates = buildDates("2024-01-02", 60);
+    const stratA = constantReturnStrategy("a", dates, 0.003);
+    const stratB = constantReturnStrategy("b", dates, 0.001);
+    const stratC = constantReturnStrategy("c", dates.slice(0, 40), 0.01);
+    const strategies = [stratA, stratB, stratC];
+    const cache = buildDateMapCache(strategies);
+    const state: ScenarioState = {
+      ...defaultState(strategies),
+      weights: { a: 0.6, b: 0.2, c: 0.2 },
+      window: { start: dates[0], end: dates[39] },
+    };
+    const metrics = computeScenario(strategies, state, cache);
+
+    expect(metrics.member_count).toBe(3);
+    expect(metrics.member_ids).toEqual(["a", "b", "c"]);
+    const expectedDaily = 0.6 * 0.003 + 0.2 * 0.001 + 0.2 * 0.01;
+    const expectedTwr = Math.pow(1 + expectedDaily, 40) - 1;
+    expect(metrics.twr).toBeCloseTo(expectedTwr, 4);
+  });
+
+  it("[BLEND-05][empty] a window no selected strategy fully covers → member_count 0, honest empty-state (no ÷0, no fabricated flat-zero curve)", () => {
+    // A covers [d0, d29], B covers [d30, d59]. A window [d0, d59] is covered by
+    // NEITHER (each ends/starts mid-window) → zero members → empty state.
+    const dates = buildDates("2024-01-02", 60);
+    const stratA = constantReturnStrategy("a", dates.slice(0, 30), 0.002);
+    const stratB = constantReturnStrategy("b", dates.slice(30), 0.002);
+    const strategies = [stratA, stratB];
+    const cache = buildDateMapCache(strategies);
+    const state: ScenarioState = {
+      ...defaultState(strategies),
+      window: { start: dates[0], end: dates[59] },
+    };
+    const metrics = computeScenario(strategies, state, cache);
+
+    expect(metrics.member_count).toBe(0);
+    expect(metrics.member_ids).toEqual([]);
+    // Honest empty-state: NULL metrics, EMPTY series — never a flat-zero curve.
+    expect(metrics.n).toBe(0);
+    expect(metrics.twr).toBeNull();
+    expect(metrics.cagr).toBeNull();
+    expect(metrics.sharpe).toBeNull();
+    expect(metrics.equity_curve).toEqual([]);
+    expect(metrics.portfolio_daily_returns).toEqual([]);
+    expect(metrics.effective_start).toBeNull();
+    expect(metrics.effective_end).toBeNull();
+  });
+
+  it("[BLEND-06][member_count] a single-member window computes honestly with member_count 1 and the window bounds", () => {
+    const dates = buildDates("2024-01-02", 60);
+    // A covers the window; B ends early (not a member).
+    const stratA = constantReturnStrategy("a", dates, 0.0015);
+    const stratB = constantReturnStrategy("b", dates.slice(0, 25), 0.01);
+    const strategies = [stratA, stratB];
+    const cache = buildDateMapCache(strategies);
+    const state: ScenarioState = {
+      ...defaultState(strategies),
+      window: { start: dates[10], end: dates[59] },
+    };
+    const metrics = computeScenario(strategies, state, cache);
+
+    expect(metrics.member_count).toBe(1);
+    expect(metrics.member_ids).toEqual(["a"]);
+    expect(metrics.effective_start).toBe(dates[10]);
+    expect(metrics.effective_end).toBe(dates[59]);
+    expect(metrics.n).toBe(50);
+    // Blend === A alone over the window: (1.0015)^50 - 1.
+    const expectedTwr = Math.pow(1 + 0.0015, 50) - 1;
+    expect(metrics.twr).toBeCloseTo(expectedTwr, 4);
+  });
+
+  it("[BLEND-06][member_count] absent-window path also reports member_count / member_ids from the active set", () => {
+    // Output completeness: even on the preserved union path, member_count and
+    // member_ids are populated (from the active set) so consumers always read
+    // them with a real value, not undefined.
+    const dates = buildDates("2024-01-02", 30);
+    const strategies = [
+      constantReturnStrategy("a", dates, 0.001),
+      constantReturnStrategy("b", dates, 0.002),
+    ];
+    const cache = buildDateMapCache(strategies);
+    const metrics = computeScenario(strategies, defaultState(strategies), cache);
+
+    expect(metrics.member_count).toBe(2);
+    expect(metrics.member_ids).toEqual(["a", "b"]);
   });
 });
 
