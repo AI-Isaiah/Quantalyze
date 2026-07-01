@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.35.0.24] - 2026-07-01
+### Fixed — WCAG 2.5.8 tap-target minimums on three allocator controls (device-profile sweep follow-up)
+The 2026-06-30 device-profile authed sweep (Playwright MCP + per-device CDP device-metrics on prod, iPhone SE→4K) came back clean on reflow and console errors, but flagged three interactive controls below the WCAG 2.5.8 (Target Size Minimum, 24px) floor on touch profiles. All three fixes are className-only and land on **non-frozen** components (the frozen `EquityChart`/factsheet-chart islands are untouched — verified by the phase-52 frozen-spine guard staying green):
+
+- **Scenario-tab period pills (`ScenarioFactsheetChart` `PeriodControl`)** rendered ~21px tall (`py-0.5` at the 10px tier). Raised to a 24px min via `inline-flex min-h-6 items-center justify-center` (drop `py-0.5`). This is a **deliberate, documented divergence** from the frozen factsheet `TimeSeriesChart` period tabs, which stay ~21px (un-editable pending their own VERIFY-04 tolerance-golden re-bake); the two live on separate pages and are never seen side-by-side.
+- **Onboarding-banner dismiss `×`** was a 32×32 box but a direct child of a `flex` row with no `shrink-0`, so it flex-compressed to ~15px wide on narrow phones. Fixed at the root by grouping the CTA Link + `×` into one `shrink-0` actions block and adding `flex-wrap`: on wide/normal widths (≥~336px) everything stays on one row; on very narrow phones the actions wrap below the heading instead of competing for width. This keeps the `×` at its full 32×32 (44×44 hit-area) at every width without shifting the compression onto the un-pinned CTA Link (which would have clipped/overflowed at ~320px).
+- **Mandate quick-set "Skip for now"** was a bare `text-sm` button ~20px tall next to a `<Button>` primitive. Raised to the primitive's 44px touch target via `inline-flex items-center min-h-[44px]`.
+
+Added `src/__tests__/tap-target-minimums.test.ts` — a source-scan class-contract guard (readFileSync + substring, mirroring `admin-width.test.tsx`; jsdom has no layout engine so it can't measure tap sizes). Live 24px/44px verification is the post-deploy device sweep. Findings F1/F2 are documented; the pre-existing 21px frozen factsheet twin and inline-text-link / native-checkbox controls (formal 2.5.8 exceptions) are intentionally left as-is.
+
 ## [0.35.0.23] - 2026-06-30
 ### Fixed — committed the re-baked /demo screenshot baselines (demo-375 + demo-1280)
 Committed the two refreshed `chromium-linux` baselines produced by the `workflow_dispatch bake_demo_screenshots=true` run on `main` @ `9a34d46c` (the v0.35.0.22 mechanism's first use). Each was surfaced for per-shot human review before commit (the locked "never blind `--update-snapshots`" gate): **demo-375** now shows the "Live demo …" notice wrapping to two lines instead of ellipsis-clipping (the v0.35.0.20 truncation fix), and **demo-1280** settles the Phase-53 fluid-type height drift — both verified as real placeholder-env renders, not blank/error pages. `demo-768` came back byte-identical to the committed baseline, so it is left untouched.
