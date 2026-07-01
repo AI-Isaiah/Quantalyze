@@ -145,6 +145,8 @@ import { CustomRangePicker } from "./CustomRangePicker";
 import { BlendHeader } from "./BlendHeader";
 import { CoverageStateChip } from "./CoverageStateChip";
 import type { CoverageState } from "./CoverageStateChip";
+import { CoverageTimeline } from "./CoverageTimeline";
+import { DefaultChangeNote } from "./DefaultChangeNote";
 import { BridgeDrawer } from "./BridgeDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { ScenarioFooter } from "./ScenarioFooter";
@@ -1899,6 +1901,38 @@ export function ScenarioComposer({
     return out;
   }, [deAliased, coverageWindow, coverageEligible, selectedSpanById]);
 
+  // Phase 58 (COVERAGE-01) — the mini-gantt rows: one per SELECTED strategy,
+  // carrying its coverage span + the in-blend/auto-excluded flag read from the
+  // SAME engine axis (`coverageEligible`) the :1813 desync guard reconciles.
+  // Membership is NEVER re-derived here — CoverageTimeline receives `inBlend` as
+  // a prop and never runs the containment predicate locally, so the gantt bars
+  // agree with the row chips and the divisor by construction. Spans come from the
+  // shared `selectedSpanById` scan (Rule 2: computed once).
+  const timelineRows = useMemo(
+    () =>
+      deAliased.strategies
+        .filter((s) => deAliased.state.selected[s.id])
+        .map((s) => ({
+          id: s.id,
+          name: s.name,
+          span: selectedSpanById.get(s.id) ?? null,
+          inBlend: coverageEligible[s.id] === true,
+        })),
+    [deAliased, selectedSpanById, coverageEligible],
+  );
+
+  // Phase 58 (POLISH-03) — the note's visibility gate: does the active coverage
+  // window truncate the union of the selected set? Lexicographic "YYYY-MM-DD"
+  // compare (never JS Date), the SAME truncation shape BlendHeader uses. Null
+  // window (union path) or no union → no truncation → no note.
+  const intersectionTruncatesUnion = useMemo(() => {
+    if (!coverageWindow || !fullRangeWindow) return false;
+    return (
+      coverageWindow.start > fullRangeWindow.start ||
+      coverageWindow.end < fullRangeWindow.end
+    );
+  }, [coverageWindow, fullRangeWindow]);
+
   // Dev-mode cross-check (Pitfall 2): on the passthrough (non-aliased) scenario
   // path the UI's in-blend set { selected && coverageEligible } must equal the
   // engine's `member_ids`. A mismatch means the UI group and the divisor have
@@ -2913,6 +2947,20 @@ export function ScenarioComposer({
         </div>
       )}
 
+      {/* Phase 58 (POLISH-03) — the one-time union→intersection default-change
+          note. Placed ABOVE the blend header / window control (58-UI-SPEC
+          placement). Self-gates: it renders only when the active window truly
+          truncates the union AND the user has not dismissed it, and it is
+          SSR-safe (no flash). "Show full range" reuses the existing Full-range
+          preset via applyWindow(fullRangeWindow) — no new window logic. */}
+      {windowBounds && (
+        <DefaultChangeNote
+          memberCount={scenarioMetrics.member_count ?? 0}
+          intersectionTruncatesUnion={intersectionTruncatesUnion}
+          onShowFullRange={() => fullRangeWindow && applyWindow(fullRangeWindow)}
+        />
+      )}
+
       {/* Phase 58 (COVERAGE-03) — the honest blend header is the PRIMARY visual
           anchor of this surface (58-UI-SPEC §Interaction): it states the engine's
           member_count · effective window ABOVE the coverage-window control, so
@@ -3006,6 +3054,23 @@ export function ScenarioComposer({
               initialRange={coverageWindow}
             />
           )}
+        </div>
+      )}
+
+      {/* Phase 58 (COVERAGE-01) — the collapsed-by-default coverage timeline
+          (tertiary disclosure, 58-UI-SPEC §Interaction): within/after the window
+          control so the allocator can reveal "why did X drop / how much history
+          keeps it?" on demand. Rows carry the in-blend/auto-excluded flag from
+          the SAME `coverageEligible` axis (never re-derived); the bars agree with
+          the row chips by construction. Only mounts when there is a windowed set
+          to plot. */}
+      {windowBounds && (
+        <div className="mt-6">
+          <CoverageTimeline
+            rows={timelineRows}
+            unionWindow={fullRangeWindow}
+            activeWindow={coverageWindow}
+          />
         </div>
       )}
 

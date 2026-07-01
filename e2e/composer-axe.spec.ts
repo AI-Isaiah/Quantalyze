@@ -193,6 +193,31 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     // the seed yields n>=2. (a) #factsheet-main + (b) #factsheet-diversification
     // are the load-bearing anti-false-green gates before analyze().
 
+    // --- Phase 58 / COVERAGE-01/03: gate on the new disclosure surfaces ---
+    // (d) The honest blend header (COVERAGE-03) is the PRIMARY anchor of the
+    // Phase-58 legibility surface — always present once the composed set has a
+    // window to describe. Gating on it before analyze() means the WCAG-AA scan
+    // covers its polite live region + mono numerals; a missing header would fail
+    // LOUDLY here rather than let axe hollow-zero over an unrendered surface.
+    const blendHeader = page.locator('[data-testid="scenario-blend-header"]');
+    await blendHeader.scrollIntoViewIfNeeded();
+    await expect(blendHeader).toBeVisible({ timeout: 10_000 });
+
+    // (e) The coverage timeline (COVERAGE-01) mounts COLLAPSED by default (its
+    // "Coverage timeline" <summary> toggle is present, the bars behind it). Expand
+    // it so the mini-gantt bars (their aria-labels + amber/accent encoding) are in
+    // the accessible tree the single analyze() over the whole <main> then scans —
+    // otherwise the collapsed <details> would keep the bars out of the a11y pass.
+    const timelineToggle = page.locator("summary", {
+      hasText: "Coverage timeline",
+    });
+    await timelineToggle.scrollIntoViewIfNeeded();
+    await expect(timelineToggle).toBeVisible({ timeout: 10_000 });
+    await timelineToggle.click();
+    await expect(
+      page.locator('[data-testid="scenario-coverage-timeline-body"]'),
+    ).toBeVisible({ timeout: 5_000 });
+
     // The composed surface EMBEDS the real factsheet body (Phase 40-43), whose own
     // internal complementary/region landmarks (the MetricsColumn <aside>, etc.) are
     // legitimately nested under the /allocations page's <main>. axe's page-level
