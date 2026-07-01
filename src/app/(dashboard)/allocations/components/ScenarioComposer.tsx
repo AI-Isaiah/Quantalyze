@@ -1627,15 +1627,31 @@ export function ScenarioComposer({
   // UI's window derivation and the engine's membership on the SAME strategy set
   // (RESEARCH Pitfall 2: pre/post-collapse desync). All interval math delegates
   // to scenario-window.ts (Rule 2: never re-derive coverage math here).
-  const selectedSpans = useMemo<CoverageSpan[]>(() => {
-    const spans: CoverageSpan[] = [];
+  //
+  // `selectedSpanById` is the ONE coverage-span scan per selected strategy,
+  // shared by every window memo below (selectedSpans / coverageEligible /
+  // autoExcluded / emptyIntersectionOutliers) so each strategy's daily_returns
+  // is scanned once per recompute instead of four times. Null-span entries are
+  // KEPT so the eligibility + drop-reason lookups can tell "has no data" apart
+  // from "not selected". The `=== false` gate matches selectedSpans (the
+  // broadest consumer); the narrower `!selected` consumers apply their own gate
+  // before the lookup, so the map is a safe superset.
+  const selectedSpanById = useMemo(() => {
+    const m = new Map<string, CoverageSpan | null>();
     for (const s of deAliased.strategies) {
       if (deAliased.state.selected[s.id] === false) continue;
-      const span = coverageSpanOf(s.daily_returns);
+      m.set(s.id, coverageSpanOf(s.daily_returns));
+    }
+    return m;
+  }, [deAliased]);
+
+  const selectedSpans = useMemo<CoverageSpan[]>(() => {
+    const spans: CoverageSpan[] = [];
+    for (const span of selectedSpanById.values()) {
       if (span) spans.push(span);
     }
     return spans;
-  }, [deAliased]);
+  }, [selectedSpanById]);
 
   // WINDOW-01 — seed the default window ONCE from the intersection of the
   // selected spans (Pitfall 3: a one-time seed + preset target, NEVER a
@@ -1754,11 +1770,12 @@ export function ScenarioComposer({
       // The SAME predicate the engine applies (scenario.ts:263-268): a null span
       // (no data) is never a member; otherwise INCLUSIVE-CLOSED containment via
       // covers(coverageSpanOf(...), window) — no inline interval math (Rule 2).
-      const span = coverageSpanOf(s.daily_returns);
+      // Span read from the shared selectedSpanById scan (Rule 2: computed once).
+      const span = selectedSpanById.get(s.id) ?? null;
       eligible[s.id] = span !== null && covers(span, coverageWindow);
     }
     return eligible;
-  }, [deAliased, coverageWindow]);
+  }, [deAliased, coverageWindow, selectedSpanById]);
 
   // Phase 57 Plan 03 Task 2 (POLISH-02) — the coverage-auto-excluded rows:
   // SELECTED (in the subset) but NOT eligible for the current window. These are
@@ -1778,11 +1795,14 @@ export function ScenarioComposer({
       out.push({
         id: s.id,
         name: s.name,
-        reason: coverageDropReason(coverageSpanOf(s.daily_returns), coverageWindow),
+        reason: coverageDropReason(
+          selectedSpanById.get(s.id) ?? null,
+          coverageWindow,
+        ),
       });
     }
     return out;
-  }, [deAliased, coverageWindow, coverageEligible]);
+  }, [deAliased, coverageWindow, coverageEligible, selectedSpanById]);
 
   // Dev-mode cross-check (Pitfall 2): on the passthrough (non-aliased) scenario
   // path the UI's in-blend set { selected && coverageEligible } must equal the
@@ -1829,13 +1849,15 @@ export function ScenarioComposer({
     Array<{ id: string; name: string; isAdded: boolean }>
   >(() => {
     // Only fires on a genuine empty intersection — a non-null default window
-    // means a common window exists, so there is no outlier to name.
-    if (defaultWindowFor(selectedSpans) !== null) return [];
+    // means a common window exists, so there is no outlier to name. Reuse the
+    // memoized `commonPeriodWindow` (= defaultWindowFor(selectedSpans)) rather
+    // than recomputing the same intersection a third time.
+    if (commonPeriodWindow !== null) return [];
     const spansById: Record<string, CoverageSpan> = {};
     const nameById: Record<string, string> = {};
     for (const s of deAliased.strategies) {
       if (!deAliased.state.selected[s.id]) continue; // subset-only
-      const span = coverageSpanOf(s.daily_returns);
+      const span = selectedSpanById.get(s.id) ?? null;
       if (span) spansById[s.id] = span;
       nameById[s.id] = s.name;
     }
@@ -1844,7 +1866,7 @@ export function ScenarioComposer({
       name: nameById[id] ?? id,
       isAdded: addedIdSet.has(id),
     }));
-  }, [deAliased, selectedSpans, addedIdSet]);
+  }, [deAliased, commonPeriodWindow, selectedSpanById, addedIdSet]);
 
   // The deselect action for a WINDOW-06 outlier: an added strategy is removed
   // from the subset (handleRemoveAdded); a live holding is toggled off

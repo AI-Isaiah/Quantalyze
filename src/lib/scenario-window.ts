@@ -3,18 +3,20 @@
  * coverage-window blend (ADR-001, BLEND-02).
  *
  * The SINGLE source of truth for deriving a scenario's blend window. The
- * `computeScenario` coverage path (55-02), the BLEND-07 gate (55-03), and the
- * composer / share-resolve / compare consumers (Phases 57/59) all import these
- * functions so the window is derived IDENTICALLY everywhere. Defining the
- * contracts here — interface-first, with boundary-cell tests — locks two
- * invariants before any engine code depends on them:
+ * `computeScenario` coverage path (55-02), the BLEND-07 gate (55-03), the
+ * composer window control (Phase 57), and the diversification panel all import
+ * these functions so the window is derived IDENTICALLY everywhere. Own-book
+ * callers (queries.ts, computeCompositeCurve, share-resolve) pass no window and
+ * never import these. Defining the contracts here — interface-first, with
+ * boundary-cell tests — locks two invariants before any engine code depends on
+ * them:
  *
  *   1. INCLUSIVE-CLOSED containment (Pitfall 1). The blend window is the closed
  *      interval `[winStart, winEnd]`; a strategy is a member iff
  *      `span.first <= winStart && span.last >= winEnd`. A `<` vs `<=` off-by-one
  *      silently admits or drops the wrong strategy. This mirrors the
- *      additive-field doc-comment discipline of `scenario.ts` (`leverage?`,
- *      :68-82) — the invariant is pinned in prose and in tests.
+ *      additive-field doc-comment discipline of the `leverage?` field in
+ *      `scenario.ts` — the invariant is pinned in prose and in tests.
  *
  *   2. Coverage is derived from the RETURNS ARRAY ONLY (Pitfall 2). A span is
  *      `[first date WITH data, last date WITH data]` — never the legacy
