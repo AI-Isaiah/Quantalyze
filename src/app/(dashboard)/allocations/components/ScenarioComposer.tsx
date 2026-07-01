@@ -1627,6 +1627,19 @@ export function ScenarioComposer({
     setWinEnd(range.end);
   }, []);
 
+  // WINDOW-04/05 — the two preset targets over the selected spans. "Common
+  // period (all in)" = the intersection (defaultWindowFor); every selected
+  // strategy covers it by construction → all in. "Full range (some drop out)" =
+  // the union (unionOf); strategies whose span does not ⊇ the union drop out (via
+  // the engine's `covers` gate). Both delegate to scenario-window.ts — no
+  // re-derived interval math. `commonPeriodWindow` is null on an empty
+  // intersection, which disables the "Common period" preset (WINDOW-06 seam).
+  const commonPeriodWindow = useMemo(
+    () => defaultWindowFor(selectedSpans),
+    [selectedSpans],
+  );
+  const fullRangeWindow = useMemo(() => unionOf(selectedSpans), [selectedSpans]);
+
   const scenarioMetrics = useMemo(() => {
     // ⚠️ HAZARD FIX (RESEARCH Pitfall 1): collapseAliasedHoldingStrategies
     // reconstructs the ScenarioState and SILENTLY DROPS `state.window`. Setting
@@ -2558,6 +2571,40 @@ export function ScenarioComposer({
               : "All history"}
           </span>
           <div className="ml-auto flex flex-wrap items-center gap-2">
+            {/* WINDOW-04 — "Common period (all in)" snaps to the intersection so
+                every selected strategy is a member. Disabled (aria-disabled +
+                explainer) when the selected set shares no common window
+                (defaultWindowFor === null); the WINDOW-06 guided-fix banner is
+                Plan 03. Secondary button per DESIGN.md (transparent + border). */}
+            <button
+              type="button"
+              onClick={() =>
+                commonPeriodWindow && applyWindow(commonPeriodWindow)
+              }
+              disabled={!commonPeriodWindow}
+              aria-disabled={!commonPeriodWindow}
+              title={
+                commonPeriodWindow
+                  ? undefined
+                  : "The selected strategies share no common period — widen the set or use Full range."
+              }
+              className="rounded-md border border-border px-3 py-1.5 text-fixed-13 font-medium text-text-primary transition-colors duration-150 ease-out hover:border-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-border motion-reduce:transition-none"
+            >
+              Common period (all in)
+            </button>
+            {/* WINDOW-05 — "Full range (some drop out)" widens to the union;
+                non-covering strategies auto-drop via the engine's coverage gate.
+                A union always exists for a non-empty set, so this stays enabled
+                even when the intersection is empty. */}
+            <button
+              type="button"
+              onClick={() => fullRangeWindow && applyWindow(fullRangeWindow)}
+              disabled={!fullRangeWindow}
+              aria-disabled={!fullRangeWindow}
+              className="rounded-md border border-border px-3 py-1.5 text-fixed-13 font-medium text-text-primary transition-colors duration-150 ease-out hover:border-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-border motion-reduce:transition-none"
+            >
+              Full range (some drop out)
+            </button>
             <button
               type="button"
               onClick={() => setPickerOpen(true)}

@@ -45,6 +45,7 @@ import {
   within,
 } from "@testing-library/react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { isoDayFromDate } from "@/lib/dateday";
 
 // --- next/navigation mock -------------------------------------------------
 
@@ -5338,5 +5339,154 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     for (const a of composedArgs) {
       expect("window" in a.state).toBe(false);
     }
+  });
+});
+
+// ===========================================================================
+// Phase 57 Plan 02 Task 2 — the two coverage presets (WINDOW-04, WINDOW-05)
+// ===========================================================================
+describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  it("preset: both preset buttons and the picker trigger have accessible names", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Common period \(all in\)/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Full range \(some drop out\)/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("preset: 'Common period (all in)' snaps the window to the intersection — all selected strategies are members", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // First widen so the state is off the default, then snap back via the preset.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Common period \(all in\)/i }),
+    );
+    // Intersection = [2026-01-01, 2026-01-06] → BOTH A and B cover it.
+    const sm = lastScenarioMetrics();
+    expect(sm?.member_count).toBe(2);
+    // The applied window is exactly the intersection.
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+  });
+
+  it("preset: 'Full range (some drop out)' widens to the union — the short-span strategy drops (member_count < selected count)", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Default = intersection → both in.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Full range \(some drop out\)/i }),
+    );
+    // Union = [2026-01-01, 2026-01-12] → only A (full span) covers it; B drops.
+    const sm = lastScenarioMetrics();
+    expect(sm?.member_count).toBe(1);
+    expect(sm?.member_ids).toEqual([REF_WIN_A]);
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-12");
+  });
+
+  it("preset: 'Common period' is disabled on an empty intersection; 'Full range' stays enabled", () => {
+    // Two DISJOINT spans → defaultWindowFor === null (empty intersection).
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 4)), // 01-01 … 01-04
+        mkWinStrat(REF_WIN_B, WIN_DATES.slice(8, 12)), // 01-09 … 01-12
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const common = screen.getByRole("button", {
+      name: /Common period \(all in\)/i,
+    });
+    const full = screen.getByRole("button", {
+      name: /Full range \(some drop out\)/i,
+    });
+    expect(common).toBeDisabled();
+    expect(common).toHaveAttribute("aria-disabled", "true");
+    expect(full).toBeEnabled();
+  });
+
+  it("preset: no separate picker component is forked — the reused CustomRangePicker carries min = union earliest first", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    expect(lastPickerProps).not.toBeNull();
+    // min = union earliest first = 2026-01-01 (local midnight).
+    expect(isoDayFromDate(lastPickerProps!.min)).toBe("2026-01-01");
+    // max = union latest last or today (whichever is later); today > Jan 2026 in
+    // this fixture era only if the machine clock is future — assert it is at
+    // least the union end.
+    expect(isoDayFromDate(lastPickerProps!.max) >= "2026-01-12").toBe(true);
   });
 });
