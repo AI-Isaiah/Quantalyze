@@ -15,9 +15,10 @@ import {
  * `src/components/strategy/CompareTable.tsx` EXACTLY for the table scaffold +
  * `findWinner` highlighting + `formatValue` em-dash, but reads keys from
  * `ComputedMetrics` (the scenario engine output) and carries ONE load-bearing
- * divergence: each column stamps its OWN `methodologyLine(n)` caption —
- * heterogeneous windows are correct, there is NO single shared-window header
- * (common-window alignment is Phase 24).
+ * divergence: each column stamps its OWN `methodologyLine(n)` caption over its
+ * OWN coverage window — heterogeneous windows are correct, there is NO single
+ * shared-window header. Shared-window compare alignment is Phase 59
+ * (PERSIST-03), not this component.
  *
  * Honesty invariants (test-pinned in ScenarioCompareTable.test.tsx):
  *   - A null/degenerate metric renders "—" via formatPercent/formatNumber —

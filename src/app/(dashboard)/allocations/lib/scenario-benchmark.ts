@@ -6,13 +6,18 @@
  *   - `innerJoinByDate(port, bench)` aligns two dated daily-return series by
  *     INTERSECTION (inner-join) — only dates present in BOTH survive, with NO
  *     zero-fill and NO interpolation. This is the load-bearing honesty step:
- *     the scenario engine's own date axis is a zero-filled UNION (late
- *     strategies contribute 0 before their inception — the union-date axis +
- *     zero-fill-before-inception + renormalizing weighted-sum in
- *     `computeScenario`, scenario.ts), but the benchmark must NOT be
- *     zero-filled — a non-overlapping day is an
- *     absence, not a 0% return. Mirrors `analytics-service/routers/portfolio.py
- *     :915-916` (`reindex(...).dropna()`).
+ *     on the scenario surface `computeScenario` now blends over an explicit
+ *     coverage window (a strategy is a member iff its data span ⊇ the window,
+ *     with a constant member-count divisor — v1.5 ADR-001), so the portfolio
+ *     series it emits is the member-intersection window, no longer a
+ *     union tail padded with 0. The inner-join here stays load-bearing
+ *     regardless (it intersects that portfolio series with BTC, ∩ against the
+ *     smaller of the two), and the benchmark must still NOT be zero-filled — a
+ *     non-overlapping day is an absence, not a 0% return (before v1.5 the
+ *     portfolio series was the old union tail padded with 0 before each late
+ *     strategy's inception; that tail dilution is gone). Mirrors
+ *     `analytics-service/routers/portfolio.py:915-916`
+ *     (`reindex(...).dropna()`).
  *
  *   - `computeScenarioBenchmark(portfolioDaily, btcDaily)` inner-joins the two
  *     series, then assembles tracking error / information ratio / alpha / beta
