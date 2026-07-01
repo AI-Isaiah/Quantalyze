@@ -138,52 +138,97 @@ export function covers(span: CoverageSpan, window: CoverageWindow): boolean {
  *   - If the whole set already intersects (`intersectionOf !== null`), returns
  *     `[]` — there is a common window, no outlier. Empty map and single-strategy
  *     map also return `[]` (a single span always intersects itself).
- *   - Otherwise the empty overlap is bounded by exactly two spans: the one with
- *     the MAXIMUM `first` (latest start) and the one with the MINIMUM `last`
- *     (earliest end). Those are the only removal candidates — dropping anything
- *     else cannot move both offending bounds. Return the id(s) whose removal
- *     yields a non-null `intersectionOf` over the remainder.
- *   - Deterministic tie-break when BOTH candidates individually restore overlap:
- *     prefer the id with the latest `first` (the strategy that starts after
- *     everyone else's data ends); if the firsts tie, prefer the earliest `last`.
+ *   - Otherwise it PEELS greedily until the remainder intersects. Each step the
+ *     empty overlap is bounded by exactly two spans — the one with the MAXIMUM
+ *     `first` (latest start) and the one with the MINIMUM `last` (earliest end).
+ *     Dropping anything else cannot move either offending bound, so only those
+ *     two are removal candidates. The step removes whichever candidate most
+ *     CLOSES the `max(first) − min(last)` gap over the remainder (the smaller
+ *     resulting gap wins); it accumulates that id and repeats. This peels one
+ *     span per step and provably terminates: each removal strictly shrinks the
+ *     set, and once `remaining.size === 1` (or the remainder intersects) it
+ *     stops. The returned set is the accumulated removals.
+ *   - Deterministic tie-break when both candidate removals yield the SAME
+ *     resulting gap: prefer removing the id with the latest `first` (the
+ *     strategy that starts after everyone else's data ends); if the firsts also
+ *     tie, prefer removing the earliest `last`. Ties are broken by id key order
+ *     as a final deterministic backstop.
  *
- * REMOVAL-RESTORES-OVERLAP invariant (T-57-02): every returned id, when removed,
- * yields a non-null intersection — proven in the tests. The intersection math is
- * NOT re-derived here; it delegates to `intersectionOf`. Pure: no mutation,
- * lexicographic compare, no JS Date.
+ * REMOVAL-RESTORES-OVERLAP invariant (T-57-02): after removing EVERY returned id
+ * the remainder yields a non-null `intersectionOf` (or is a single span, which
+ * always intersects itself) — proven in the tests, including the 3+ and 4
+ * mutually-disjoint cells that the earlier two-candidate implementation silently
+ * violated. The intersection math is NOT re-derived here; it delegates to
+ * `intersectionOf` and `gapOf`. Pure: the input map is never mutated,
+ * lexicographic string compare only, no JS Date.
  */
 export function outlierIdsFor(
   spansById: Record<string, CoverageSpan>,
 ): string[] {
-  const ids = Object.keys(spansById);
-  if (ids.length <= 1) return [];
+  const allIds = Object.keys(spansById);
+  if (allIds.length <= 1) return [];
+  if (intersectionOf(allIds.map((id) => spansById[id])) !== null) return [];
 
-  const allSpans = ids.map((id) => spansById[id]);
-  if (intersectionOf(allSpans) !== null) return [];
+  // The signed gap max(first) − min(last) over a set: > "" (positive-ish, i.e.
+  // start > end) means empty overlap; <= means a real window. Because these are
+  // lexicographic "YYYY-MM-DD" strings we cannot subtract — instead we compare
+  // the resulting [start, end] pairs directly to decide which removal closes the
+  // overlap more. Returns the {start, end} bound pair for a remaining id set.
+  const boundsOf = (
+    remaining: string[],
+  ): { start: string; end: string } => {
+    let start = spansById[remaining[0]].first;
+    let end = spansById[remaining[0]].last;
+    for (let i = 1; i < remaining.length; i++) {
+      const sp = spansById[remaining[i]];
+      if (sp.first > start) start = sp.first;
+      if (sp.last < end) end = sp.last;
+    }
+    return { start, end };
+  };
 
-  // The empty overlap is defined by the latest start and the earliest end.
-  let maxFirstId = ids[0];
-  let minLastId = ids[0];
-  for (const id of ids) {
-    if (spansById[id].first > spansById[maxFirstId].first) maxFirstId = id;
-    if (spansById[id].last < spansById[minLastId].last) minLastId = id;
+  // Peel greedily. Work on a mutable COPY of the id list (never the input map).
+  const remaining = [...allIds];
+  const removed: string[] = [];
+
+  while (
+    remaining.length > 1 &&
+    intersectionOf(remaining.map((id) => spansById[id])) === null
+  ) {
+    // The two bounding candidates: latest `first`, earliest `last`.
+    let maxFirstId = remaining[0];
+    let minLastId = remaining[0];
+    for (const id of remaining) {
+      if (spansById[id].first > spansById[maxFirstId].first) maxFirstId = id;
+      if (spansById[id].last < spansById[minLastId].last) minLastId = id;
+    }
+
+    let pick: string;
+    if (maxFirstId === minLastId) {
+      // A single span pins BOTH bounds — remove it.
+      pick = maxFirstId;
+    } else {
+      const boundsWithoutMaxFirst = boundsOf(
+        remaining.filter((id) => id !== maxFirstId),
+      );
+      const boundsWithoutMinLast = boundsOf(
+        remaining.filter((id) => id !== minLastId),
+      );
+      // The resulting overlap "gap" is start − end: the SMALLER (more negative)
+      // the better closed. Compare the two candidate remainders' bound pairs by
+      // their (start, end) so the removal that pulls start earliest / end latest
+      // wins. Lower start wins first; on a start tie, higher end wins.
+      const removeMaxFirstIsBetter =
+        boundsWithoutMaxFirst.start < boundsWithoutMinLast.start ||
+        (boundsWithoutMaxFirst.start === boundsWithoutMinLast.start &&
+          boundsWithoutMaxFirst.end >= boundsWithoutMinLast.end);
+      // Tie-break: prefer removing the latest-`first` strategy (maxFirstId).
+      pick = removeMaxFirstIsBetter ? maxFirstId : minLastId;
+    }
+
+    removed.push(pick);
+    remaining.splice(remaining.indexOf(pick), 1);
   }
 
-  // Candidate order encodes the tie-break: prefer the latest-start strategy,
-  // then the earliest-end one. (When they are the SAME id, it is tested once.)
-  const candidates =
-    maxFirstId === minLastId ? [maxFirstId] : [maxFirstId, minLastId];
-
-  const restoresOverlap = (removeId: string): boolean =>
-    intersectionOf(
-      ids.filter((id) => id !== removeId).map((id) => spansById[id]),
-    ) !== null;
-
-  for (const id of candidates) {
-    if (restoresOverlap(id)) return [id];
-  }
-
-  // Neither single removal restores overlap: both bounding strategies must go
-  // (their removal jointly restores a common window over the remainder).
-  return candidates;
+  return removed;
 }

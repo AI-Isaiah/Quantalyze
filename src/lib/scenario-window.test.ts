@@ -296,6 +296,49 @@ describe("outlierIdsFor (WINDOW-06 — name the strategy breaking the overlap)",
     expect(intersectionOf(remaining)).not.toBeNull();
   });
 
+  it("REMOVAL-RESTORES-OVERLAP invariant holds for 3 MUTUALLY-disjoint spans (HI-01 regression)", () => {
+    // Three spans that pairwise never overlap: A(Jan–Feb), B(May–Jun), C(Sep–Oct).
+    // No two of them share a common window, so removing a SINGLE span can never
+    // restore overlap — the greedy peel MUST remove two, leaving a single span
+    // that intersects itself. The earlier two-candidate implementation returned a
+    // pair whose joint removal still left a disjoint remainder (WINDOW-06
+    // dead-end); the invariant assertion below is the real contract.
+    const spansById = {
+      A: { first: "2023-01-01", last: "2023-02-01" },
+      B: { first: "2023-05-01", last: "2023-06-01" },
+      C: { first: "2023-09-01", last: "2023-10-01" },
+    };
+    expect(intersectionOf(Object.values(spansById))).toBeNull();
+    const outliers = outlierIdsFor(spansById);
+    expect(outliers.length).toBeGreaterThan(0);
+    const remaining = intersectionAfterRemoving(spansById, outliers);
+    // Either a non-null intersection OR a single surviving span (which trivially
+    // intersects itself) — both satisfy the guided-fix "not a dead-end" contract.
+    expect(remaining.length <= 1 || intersectionOf(remaining) !== null).toBe(
+      true,
+    );
+  });
+
+  it("REMOVAL-RESTORES-OVERLAP invariant holds for 4 MUTUALLY-disjoint spans (HI-01 regression — reviewer repro)", () => {
+    // The exact reviewer repro: 4 mutually-disjoint spans across two years. The
+    // shipped two-candidate logic returned ["D","A"] whose removal left {B,C}
+    // still disjoint → intersectionOf(remainder) === null (INVARIANT VIOLATED).
+    // The greedy peel removes spans until the remainder intersects.
+    const spansById = {
+      A: { first: "2023-01-01", last: "2023-02-01" },
+      B: { first: "2023-05-01", last: "2023-06-01" },
+      C: { first: "2023-09-01", last: "2023-10-01" },
+      D: { first: "2024-01-01", last: "2024-02-01" },
+    };
+    expect(intersectionOf(Object.values(spansById))).toBeNull();
+    const outliers = outlierIdsFor(spansById);
+    expect(outliers.length).toBeGreaterThan(0);
+    const remaining = intersectionAfterRemoving(spansById, outliers);
+    expect(remaining.length <= 1 || intersectionOf(remaining) !== null).toBe(
+      true,
+    );
+  });
+
   it("does NOT mutate its input map or the span objects", () => {
     const spansById = {
       A: { first: "2023-01-01", last: "2023-12-31" },
