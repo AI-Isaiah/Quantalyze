@@ -113,29 +113,7 @@ function resolveBaselineRef(): string {
   );
 }
 
-/**
- * Build the set of files added or changed in this phase vs `base`:
- *   - `git diff --name-only <base> HEAD` — committed adds/changes
- *   - `git ls-files --others --exclude-standard` — untracked, not-ignored files
- * `.planning/` is gitignored, so it never pollutes the set.
- */
-function changedFiles(base: string): string[] {
-  const committed = git(["diff", "--name-only", base, "HEAD"])
-    .split("\n")
-    .map((f) => f.trim())
-    .filter(Boolean);
-  const untracked = git(["ls-files", "--others", "--exclude-standard"])
-    .split("\n")
-    .map((f) => f.trim())
-    .filter(Boolean);
-  return [...new Set([...committed, ...untracked])];
-}
-
 const BASE = resolveBaselineRef();
-const CHANGED = changedFiles(BASE);
-
-const FROZEN_ENGINE = "src/lib/scenario.ts";
-const FROZEN_ENGINE_TEST = "src/lib/scenario.test.ts";
 
 describe("Phase 30 frozen-spine exit-gate guards", () => {
   it("resolves a real phase baseline ref (fails loud if it cannot — Rule 12)", () => {
@@ -146,26 +124,13 @@ describe("Phase 30 frozen-spine exit-gate guards", () => {
     expect(typeof BASE).toBe("string");
   });
 
-  it("exit gate (frozen engine SCENARIO-05): src/lib/scenario.ts is zero-diff vs baseline", () => {
-    expect(
-      CHANGED,
-      `Phase 30 exit gate VIOLATED — ${FROZEN_ENGINE} changed in the phase ` +
-        "delta. The projection engine is FROZEN (SCENARIO-05; the 252-day " +
-        "annualization basis the whole product relies on). Phase 30 assembles " +
-        "existing leaf charts over the pure-TS scenario-blend-panels adapter, " +
-        "which MIRRORS the engine's math — the engine itself must not be " +
-        `edited. Revert ${FROZEN_ENGINE} to the baseline.`,
-    ).not.toContain(FROZEN_ENGINE);
-  });
-
-  it("exit gate (frozen engine pins): src/lib/scenario.test.ts is zero-diff vs baseline", () => {
-    expect(
-      CHANGED,
-      `Phase 30 exit gate VIOLATED — ${FROZEN_ENGINE_TEST} changed in the ` +
-        "phase delta. That file holds the 252-day annualization convention " +
-        "pins — the SOLE proof the frozen engine's math was not loosened (it " +
-        "FAILS SILENTLY otherwise). It must stay byte-unchanged this phase. " +
-        `Revert ${FROZEN_ENGINE_TEST} to the baseline.`,
-    ).not.toContain(FROZEN_ENGINE_TEST);
-  });
+  // v1.5 coverage-window re-baseline (ADR-001): Phase 30's frozen-spine target
+  // was scenario.ts + scenario.test.ts (the SCENARIO-05 zero-diff engine). v1.5
+  // Phase 55 deliberately edits that engine ONCE (the coverage-window blend), so
+  // the freeze is RETIRED here as a reviewed act — NOT inverted to a `.toContain`
+  // delta pin, which would go red on every future phase branch once this merges
+  // and the merge-base advances past the edit (scenario.ts naturally leaves each
+  // later delta). scenario.ts is now protected by scenario.test.ts's own pins +
+  // the BLEND-07 numpy gate; this guard retains its baseline-ref resolution check
+  // (Rule 12) as its remaining exit-gate value.
 });

@@ -30,7 +30,6 @@ import {
 function _typeAssertions(): void {
   // ---------- H-1021: PortfolioAnalyticsJSONB discriminated union narrowing ----
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const row = null as unknown as PortfolioAnalyticsJSONB;
 
   // `complete` arm: metrics ARE accessible.

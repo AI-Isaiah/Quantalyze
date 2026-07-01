@@ -10,7 +10,7 @@ import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
 import { HistogramChart } from "./HistogramChart";
 import { MetricsColumn } from "./MetricsColumn";
-import { StyleDriftPanel, PeerPercentilePanel, AllocatorSection } from "./BatchDPanels";
+import { AllocatorSection } from "./BatchDPanels";
 import { StreakDistributionPanel } from "./AnalyticalPanels";
 import { EndOfYearBarsPanel, QuantileBoxPlotPanel, CorrelationStripPanel, CorrelationsMatrixPanel } from "./DistributionPanels";
 import { MasterBrush } from "./MasterBrush";
@@ -89,7 +89,6 @@ export function FactsheetView({ payload }: { payload: FactsheetPayload }) {
  * the article container. Lives inside the provider so it can subscribe.
  */
 function FactsheetShell({ payload }: { payload: FactsheetPayload }) {
-  const { colorblind, darkMode } = useDisplay();
 
   // One-shot view event when the page mounts so adoption of the new
   // surface can be measured cleanly without folding into the v1 funnel.

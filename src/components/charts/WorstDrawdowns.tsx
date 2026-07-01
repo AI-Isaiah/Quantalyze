@@ -51,7 +51,6 @@ function normalize(analytics: StrategyAnalytics): DrawdownEpisode[] {
     const shapeValid = serverRaw.filter(isServerEpisode);
     if (shapeValid.length === 0) {
       // P65: surface the malformation instead of silently falling through.
-      // eslint-disable-next-line no-console
       console.error(
         "[WorstDrawdowns] server drawdown_episodes malformed — every entry failed shape validation. Sample:",
         JSON.stringify(serverRaw[0]),

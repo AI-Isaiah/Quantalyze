@@ -30,7 +30,6 @@ import { Tweaks } from "./components/Tweaks";
 import { OnboardingBanner } from "./components/OnboardingBanner";
 import { MandateQuickSetCard } from "./components/MandateQuickSetCard";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
-import { trackUsageEventClient } from "@/lib/analytics/usage-events-client";
 import { useCrossTabStorage } from "@/lib/storage/cross-tab";
 import { rawStringCodec } from "@/lib/storage/codecs";
 

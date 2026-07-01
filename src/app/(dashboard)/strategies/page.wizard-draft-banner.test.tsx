@@ -134,7 +134,6 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function renderPage(): Promise<HTMLElement> {
   const { default: StrategiesPage } = await import("./page");
   // server component returns a Promise<JSX>

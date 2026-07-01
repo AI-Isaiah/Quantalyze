@@ -152,28 +152,7 @@ function resolveBaselineRef(): string {
   );
 }
 
-/**
- * Build the set of files added or changed in this phase vs `base`:
- *   - `git diff --name-only <base> HEAD` — committed adds/changes
- *   - `git ls-files --others --exclude-standard` — untracked, not-ignored files
- * `.planning/` is gitignored, so it never pollutes the set.
- */
-function changedFiles(base: string): string[] {
-  const committed = git(["diff", "--name-only", base, "HEAD"])
-    .split("\n")
-    .map((f) => f.trim())
-    .filter(Boolean);
-  const untracked = git(["ls-files", "--others", "--exclude-standard"])
-    .split("\n")
-    .map((f) => f.trim())
-    .filter(Boolean);
-  return [...new Set([...committed, ...untracked])];
-}
-
 const BASE = resolveBaselineRef();
-const CHANGED = changedFiles(BASE);
-
-const FROZEN_ENGINE = "src/lib/scenario.ts";
 
 // --- live-source paths (read from disk, not snapshots) ---
 // FLOW-02 was originally an in-page `redirect()` stub at
@@ -209,12 +188,12 @@ const MANAGE_PAGE_SRC = readFileSync(MANAGE_PAGE_PATH, "utf8");
 const ID_PAGE_SRC = readFileSync(ID_PAGE_PATH, "utf8");
 
 /** Recursively collect every .tsx/.ts source file under `dir`. */
-function collectSourceFiles(dir: string): string[] {
+function _collectSourceFiles(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) {
-      out.push(...collectSourceFiles(full));
+      out.push(..._collectSourceFiles(full));
     } else if (/\.tsx?$/.test(entry)) {
       out.push(full);
     }
@@ -234,18 +213,15 @@ describe("Phase 32 frozen-spine + route-retirement exit-gate guards", () => {
     expect(typeof BASE).toBe("string");
   });
 
-  it("exit gate (frozen engine SCENARIO-05): src/lib/scenario.ts is zero-diff vs baseline", () => {
-    expect(
-      CHANGED,
-      `Phase 32 exit gate VIOLATED — ${FROZEN_ENGINE} changed in the phase ` +
-        "delta. The projection engine is FROZEN (SCENARIO-05; the 252-day " +
-        "annualization basis the whole product relies on). Phase 32 is " +
-        "routing + nav + two deletions — it touches NO engine code. The " +
-        `deleted ScenarioBuilder imported @/lib/scenario but did not modify ` +
-        `it. Revert ${FROZEN_ENGINE} to the baseline.`,
-    ).not.toContain(FROZEN_ENGINE);
-  });
-
+  // v1.5 coverage-window re-baseline (ADR-001): Phase 32 froze scenario.ts. v1.5
+  // Phase 55 deliberately edits that engine ONCE (the coverage-window blend), so
+  // the frozen-engine assertion is RETIRED here as a reviewed act — NOT inverted
+  // to a `.toContain` delta pin, which would go red on every future phase branch
+  // once this merges and the merge-base advances past the edit (scenario.ts
+  // naturally leaves each later delta). scenario.ts is now protected by
+  // scenario.test.ts's own pins + the BLEND-07 numpy gate. ALL FLOW-01/02/03
+  // route / redirect / delete assertions BELOW are UNCHANGED (Phase 55 touches
+  // no routes).
   it("FLOW-02: /scenarios redirects to the composer (now a next.config 308) and the in-page leak surface is GONE", () => {
     // Phase 51-05 (NAV-01): the FLOW-02 redirect was formalized from an in-page
     // stub into a config-level 308 in next.config.ts `redirects()`. The redirect

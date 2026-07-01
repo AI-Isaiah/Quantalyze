@@ -70,7 +70,7 @@ function makeAlertRows(n: number) {
   }));
 }
 
-function setupChainReturning(rows: unknown[]) {
+function _setupChainReturning(rows: unknown[]) {
   rangeSpy.mockClear();
   const inner = {
     is: vi.fn().mockReturnThis(),

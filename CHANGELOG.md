@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.35.0.26] - 2026-07-01
+### Added — scenario coverage-window blend (v1.5 phases 55-57)
+Allocators can now pin a scenario blend to an explicit **coverage window** so a short-lived or already-ended strategy no longer distorts the projection. Previously the blend ran over the union of every selected strategy's dates, silently diluting the tail with strategies that had stopped reporting. Now the composer exposes a coverage-window date-range control with two one-click presets — **"Common period (all in)"** (the intersection: every selected strategy is a member) and **"Full range (some drop out)"** (the union: short-span strategies drop). Inside the chosen closed window `[start, end]` the engine blends only the **members** (strategies whose data span ⊇ the window) with a *constant* member-count divisor, so an ended/ragged strategy is excluded rather than blended in at 0%.
+
+- **New engine path (`computeScenario`).** When a `state.window` is present the blend switches to the window axis + member divisor; when absent it stays **byte-identical** to the legacy union path, so every own-book caller (queries, composite curve, share-resolve) is unchanged. Zero new dependencies.
+- **`scenario-window.ts`** — a new single-source-of-truth module of pure, lexicographic (no JS `Date`) window primitives: `coverageSpanOf`, `intersectionOf`, `unionOf`, `defaultWindowFor`, `covers` (inclusive-closed containment), and `outlierIdsFor` (greedy peel that names the strategies breaking an empty intersection).
+- **Auto-excluded (outside window) group** — strategies dropped for coverage render in a distinct, animated (reduced-motion-aware) group with an honest inline reason ("ends {Mon}" / "starts {Mon}" / "no data — outside window"), separate from manually toggled-off rows.
+- **Empty-intersection warning banner** — when the selected set shares no common window, a non-blocking `role="status"` banner names the outlier and offers a one-click **Deselect** to restore a valid window (guided fix, not a dead end).
+- **Factsheet parity** — the scenario factsheet renders the *windowed* member-intersection series by construction (it consumes the engine's emitted series, never re-deriving the blend), pinned by a structural single-source guard plus a runtime parity test and an independent from-scratch **numpy oracle** (`BLEND-07`) so a future golden re-bake can't canonize an engine-math drift.
+
+### Fixed — diversification panel now honors the coverage window (found in pre-landing review)
+The diversification panel (Diversification Ratio / effective-number-of-bets / percent-contribution-to-risk / cluster order) was still computed over the raw union axis and full active set while every other metric on the tab used the windowed member set — so a window-excluded strategy silently re-diluted DR/ENB/PCR, re-introducing the exact inconsistency v1.5 removes. Root-cause fix: `alignConstituentReturns` now honors `state.window` (mirroring the engine's member filter + window axis exactly), fed from one lifted `engineState` shared by both `computeScenario` and the panel — so the two can never desync. Pinned by a windowed consistency test (rebuilt ρ ≡ the engine `correlation_matrix`, and the aligned constituent set ≡ the engine's `member_ids`).
+
+### Changed
+- **Sticky coverage window by design** — the window does not silently re-snap when the selection changes; deselecting a member leaves the user's window intact (surviving members re-blend correctly; non-covering ones auto-exclude; deselecting every covering member yields the honest zero-member empty state), with one-click presets for recovery. Documented after adversarial review.
+- **Frozen-spine guards re-baselined** for the intentional v1.5 engine edit (ADR-001): `scenario.ts` leaves the phase-52 frozen island set; the other islands (compute.ts, EquityChart, TouchTooltip, useTapPin) stay frozen.
+- **Perf/DRY** — the coverage-span scan is hoisted into one shared `Map` reused by all four window memos (one scan per strategy per recompute instead of four); the empty-intersection guard reuses the memoized common-period window.
+
+### Removed
+- 9 orphaned trailing-whitespace lines left by a prior lint-cleanup, plus several stale/misleading code comments (a non-existent `gapOf` reference, a "window is dormant" note, and a compare-helper comment claiming an intersection window it never applied).
+
 ## [0.35.0.25] - 2026-07-01
 ### Fixed — CSV-uploaded strategies could never be approved (admin strategy-review gate)
 Found during an API-key + CSV calculation-verification QA pass: **no CSV-uploaded strategy could ever be approved** in the admin strategy-review queue — every one returned `400 Cannot approve: Strategy has no API key connected and no trade data uploaded` (`NO_DATA_SOURCE`). Every pre-existing CSV strategy in the queue was stuck `pending_review` for the same reason.

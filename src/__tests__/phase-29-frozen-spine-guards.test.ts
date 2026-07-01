@@ -138,7 +138,6 @@ const CHANGED = changedFiles(BASE);
 // every one matches /scenario|share/i, so that single pattern is the gate.
 const FORBIDDEN_MIGRATION_RE = /scenario|share/i;
 
-const FROZEN_ENGINE = "src/lib/scenario.ts";
 const RLS_SQL_SCENARIOS = "supabase/tests/test_scenarios_rls.sql";
 const RLS_SQL_SHARES = "supabase/tests/test_scenario_shares_rls.sql";
 
@@ -169,17 +168,15 @@ describe("Phase 29 frozen-spine exit-gate guards", () => {
     ).toEqual([]);
   });
 
-  it("exit gate (frozen engine SCENARIO-05): src/lib/scenario.ts is zero-diff vs baseline", () => {
-    expect(
-      CHANGED,
-      `Phase 29 exit gate VIOLATED — ${FROZEN_ENGINE} changed in the phase ` +
-        "delta. The projection engine is FROZEN (SCENARIO-05; the 252-day " +
-        "annualization pins). The example-add path flows through the " +
-        "unchanged adapter — the engine must not be edited. Revert " +
-        `${FROZEN_ENGINE} to the baseline.`,
-    ).not.toContain(FROZEN_ENGINE);
-  });
-
+  // v1.5 coverage-window re-baseline (ADR-001): the frozen-engine assertion
+  // (scenario.ts SCENARIO-05 zero-diff) was RETIRED here as a reviewed act —
+  // v1.5 Phase 55 deliberately edits the projection engine ONCE (the
+  // coverage-window blend). It is NOT inverted to a `.toContain` delta pin:
+  // that goes red on every future phase branch once this merges and the
+  // merge-base advances past the edit (scenario.ts naturally leaves each later
+  // delta). scenario.ts is now protected by scenario.test.ts's own pins + the
+  // BLEND-07 numpy gate. The RLS + no-schema-change assertions — the real
+  // protective value of THIS guard — stay UNCHANGED.
   it("exit gate (RLS untouched): the scenarios + scenario_shares RLS sql tests are byte-unchanged", () => {
     expect(
       CHANGED,

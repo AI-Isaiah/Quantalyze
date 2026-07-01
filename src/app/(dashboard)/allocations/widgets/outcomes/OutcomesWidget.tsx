@@ -353,7 +353,6 @@ function ExpandedPanel({
     // doesn't carry the stale alert into a subsequent successful fetch
     // (e.g. expanding outcome A fails, then expanding the same row
     // refreshes the outcome.id and the cache-hit branch succeeds).
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setError(null);
 
     if (curvesCache.current.has(outcome.id)) {
@@ -813,7 +812,12 @@ function OutcomesWidgetInner({
   // `outcomes` for the hooks below: the populated rows, or [] for the
   // loading/empty states (hooks must run unconditionally, before the
   // `switch` returns). computeOutcomeKPIs([]) is a no-op zero-KPI result.
-  const outcomes = view.kind === "ok" ? view.outcomes : [];
+  // Wrapped in useMemo so the array identity is stable across renders and
+  // downstream useMemo deps don't change on every render.
+  const outcomes = useMemo(
+    () => (data.outcomes ? (data.outcomes as OutcomeRow[]) : []),
+    [data.outcomes],
+  );
 
   const curvesCache = useRef<Map<string, CurveData>>(new Map());
   const [expandedId, setExpandedId] = useState<string | null>(null);

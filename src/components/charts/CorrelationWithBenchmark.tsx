@@ -160,7 +160,6 @@ export function resolveBenchmarkCorrelation(
     const sample = Array.isArray(precomputed)
       ? JSON.stringify(precomputed.slice(0, 2))
       : typeof precomputed;
-    // eslint-disable-next-line no-console
     console.error(
       `[CorrelationWithBenchmark] btc_rolling_correlation_90d malformed: ${sample}`,
     );

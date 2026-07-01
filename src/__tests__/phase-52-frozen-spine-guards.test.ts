@@ -11,9 +11,12 @@
  * because they are off-globbed from `no-raw-font-px`; so eleven file paths) must
  * NOT be touched during a restyle. They are frozen because:
  *
- *   - `src/lib/scenario.ts` — the 252-day-annualization projection engine
- *     (SCENARIO-05 zero-diff). A one-line tweak silently re-bases the math the
- *     whole product (KPI strip, factsheet, scenario blend) relies on.
+ *   - `src/lib/scenario.ts` — the 252-day-annualization projection engine.
+ *     v1.5 coverage-window re-baseline (ADR-001): REMOVED from FROZEN_ISLANDS
+ *     below because v1.5 Phase 55 deliberately edits the engine ONCE (the
+ *     coverage-window blend). The phase-{29,30,31,32} git-delta guards now pin
+ *     that reviewed edit; the 252-annualization math itself stays LOCKED
+ *     (scenario.test.ts's pins + the from-scratch numpy gate in 55-03 prove it).
  *   - `src/lib/factsheet/compute.ts` — the client-side factsheet compute that
  *     gives the scenario blend parity BY CONSTRUCTION (BODY-02). A drift here
  *     silently de-syncs the real factsheet from the scenario one.
@@ -152,7 +155,14 @@ const CHANGED = changedFiles(BASE);
  * is an exit-gate violation — the visual layer is free, the locked spine is not.
  */
 const FROZEN_ISLANDS: string[] = [
-  "src/lib/scenario.ts",
+  // v1.5 coverage-window re-baseline (ADR-001): `src/lib/scenario.ts` was
+  // REMOVED from this frozen-island set because v1.5 Phase 55 deliberately
+  // edits the projection engine ONCE (the coverage-window blend). The
+  // phase-{29,30,31,32} git-delta guards now PIN that reviewed edit; freezing
+  // it here too would double-fail on the same intended change. The other TEN
+  // islands below STAY FROZEN — Phase 55 must not touch compute.ts, the
+  // FactsheetProvider, useBreakpoint, the MC worker, the chart-interactivity
+  // island (EquityChart/TouchTooltip/useTapPin), or the 3 factsheet SVGs.
   "src/lib/factsheet/compute.ts",
   "src/app/factsheet/[id]/v2/factsheet-context.tsx",
   "src/hooks/useBreakpoint.ts",

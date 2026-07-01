@@ -24,8 +24,11 @@
  *     that null flow straight through — NO `?? 0` — so the render layer shows an
  *     honest em-dash, never a fabricated 0.
  *
- *   - Heterogeneous windows. Each draft reports its OWN overlap `n`; the helper
- *     does not force a common window (common-window alignment is Phase 24).
+ *   - Heterogeneous windows. Each draft runs the engine's UNION-when-absent path
+ *     (no `state.window` is passed here) and reports its OWN overlap `n`; the
+ *     helper does not force a shared window across drafts. Per-persisted-window
+ *     compare alignment is Phase 59 (PERSIST-03), which will wire the saved window
+ *     in through the same `defaultWindowFor()` helper.
  *
  *   - Live-book column computed through the SAME engine path over a synthetic
  *     "all live holdings, equity-weight" draft (`buildLiveBookDraft`) — NOT the

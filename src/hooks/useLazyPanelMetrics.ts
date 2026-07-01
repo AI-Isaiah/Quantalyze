@@ -184,7 +184,6 @@ export function useLazyPanelMetrics<T = unknown>(
     );
     observerRef.current.observe(node);
     // panelId is the only true dependency — opts read via optsRef.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panelId]);
 
   return { ref, data, status };

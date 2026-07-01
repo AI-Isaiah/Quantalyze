@@ -38,6 +38,7 @@ import {
   type ScenarioState,
   type StrategyForBuilder,
 } from "@/lib/scenario";
+import { covers, coverageSpanOf } from "@/lib/scenario-window";
 
 /**
  * The engine's fallback include-from literal, mirrored here as a local const.
@@ -115,47 +116,75 @@ export interface DiversificationResult {
 }
 
 /**
- * Re-align each active constituent's returns on the engine's union-of-dates
- * axis, mirroring scenario.ts:199-236 EXACTLY:
- *   - active set = `state.selected[id]` (scenario.ts:154-156)
- *   - include-from = `state.startDates[id] ?? s.start_date ?? "2022-01-01"`
- *     (scenario.ts:195)
- *   - axis = UNION of every active strategy's dates ≥ its own include-from,
- *     sorted ascending (scenario.ts:199-208) — NOT an intersection
- *   - per-id values = `d >= from ? (map.get(d) ?? 0) : 0` (scenario.ts:233-235),
- *     RAW (un-levered) — leverage is applied ONLY to portfolio_daily_returns
- *     by the engine (scenario.ts:251), never to the per-constituent series the
- *     correlation matrix is built from.
+ * Re-align each constituent's returns on the engine's date axis, mirroring
+ * `computeScenario` (scenario.ts) EXACTLY so the rebuilt ρ / DR / ENB / PCR sit
+ * on the SAME member set + axis the engine's `correlation_matrix` / `n` do. The
+ * engine has two paths and this function follows whichever `state.window`
+ * selects:
  *
- * The engine emits the resulting aligned series ONLY as a transient local
+ *   ── ABSENT window (legacy union path, scenario.ts:331-363) ──
+ *   - member set = every ACTIVE strategy (`state.selected[id]`)
+ *   - include-from = `state.startDates[id] ?? s.start_date ?? "2022-01-01"`
+ *   - axis = UNION of every member's dates ≥ its own include-from — NOT an
+ *     intersection.
+ *
+ *   ── PRESENT window (v1.5 coverage-window path, scenario.ts:263-364) ──
+ *   - member set = the ACTIVE strategies whose coverage span ⊇ the window
+ *     (`coverageSpanOf(returns) !== null && covers(span, window)`). A window-
+ *     excluded (ended/ragged) strategy is DROPPED here exactly as the engine
+ *     drops it from the divisor — so it no longer dilutes DR/ENB/PCR or appears
+ *     in the cluster order, matching the rest of the windowed tab.
+ *   - include-from = `window.start` for every member (the closed lower bound)
+ *   - axis = UNION of members' dates within `[window.start, window.end]`.
+ *
+ * In both paths per-id values are `d >= from ? (map.get(d) ?? 0) : 0` — RAW
+ * (un-levered); leverage is applied ONLY to portfolio_daily_returns by the
+ * engine, never to the per-constituent series the correlation matrix is built
+ * from. The engine emits the resulting aligned series only as a transient local
  * (`strategyReturns`) and discards it, so this is the single frozen-safe way to
- * reconstruct the exact window the displayed ρ was computed on.
+ * reconstruct the exact window the displayed ρ was computed on. The consistency
+ * pin (rebuilt ρ ≡ engine correlation_matrix to 3dp, union AND windowed) catches
+ * any drift from the engine's member/axis logic.
  */
 export function alignConstituentReturns(
   strategies: StrategyForBuilder[],
   state: ScenarioState,
 ): AlignedConstituents {
+  const window = state.window ?? null;
   const active = strategies.filter((s) => state.selected[s.id]);
+  // Present window: keep only covering members (engine parity). Absent: all active.
+  const members = window
+    ? active.filter((s) => {
+        const span = coverageSpanOf(s.daily_returns);
+        return span !== null && covers(span, window);
+      })
+    : active;
 
   const includeFrom = new Map<string, string>();
-  for (const s of active) {
+  for (const s of members) {
     includeFrom.set(
       s.id,
-      state.startDates[s.id] ?? s.start_date ?? DEFAULT_INCLUDE_FROM,
+      window
+        ? window.start
+        : (state.startDates[s.id] ?? s.start_date ?? DEFAULT_INCLUDE_FROM),
     );
   }
 
   const allDateSet = new Set<string>();
-  for (const s of active) {
+  for (const s of members) {
     const from = includeFrom.get(s.id)!;
     for (const d of s.daily_returns) {
-      if (d.date >= from) allDateSet.add(d.date);
+      if (window) {
+        if (d.date >= window.start && d.date <= window.end) allDateSet.add(d.date);
+      } else if (d.date >= from) {
+        allDateSet.add(d.date);
+      }
     }
   }
   const commonDates = Array.from(allDateSet).sort();
 
   const returnsById: Record<string, number[]> = {};
-  for (const s of active) {
+  for (const s of members) {
     const map = new Map<string, number>(
       s.daily_returns.map((d: DailyPoint) => [d.date, d.value]),
     );
@@ -165,7 +194,7 @@ export function alignConstituentReturns(
     );
   }
 
-  return { ids: active.map((s) => s.id), commonDates, returnsById };
+  return { ids: members.map((s) => s.id), commonDates, returnsById };
 }
 
 /**

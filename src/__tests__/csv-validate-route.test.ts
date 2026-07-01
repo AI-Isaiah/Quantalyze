@@ -127,7 +127,6 @@ type AdminSelectResult = {
 };
 const adminSelectMaybeSingleMock = vi.hoisted(
   () =>
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     vi.fn(
       async (
         _table?: string,
@@ -494,7 +493,7 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
       ([n]) => n === "finalize_csv_strategy",
     );
     expect(finalizeCall).toBeDefined();
-    const [name, args] = finalizeCall!;
+    const [_name, args] = finalizeCall!;
     expect(args).toMatchObject({
       p_user_id: "00000000-0000-0000-0000-000000000abc",
       p_wizard_session_id: VALID_SESSION,

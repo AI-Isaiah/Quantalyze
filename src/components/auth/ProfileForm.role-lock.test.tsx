@@ -76,7 +76,7 @@ describe("ProfileForm — role lock (2026-05-20 regression)", () => {
   });
 
   it("omits `role` from the UPDATE payload when the form submits", async () => {
-    const { container, getByText } = render(<ProfileForm profile={BASE_PROFILE} />);
+    const { getByText } = render(<ProfileForm profile={BASE_PROFILE} />);
     fireEvent.click(getByText("Save changes"));
     await new Promise((r) => setTimeout(r, 0));
     expect(updateMock).toHaveBeenCalledOnce();

@@ -74,7 +74,7 @@ function normalizeWs(s: string): string {
  * Extract the block between the `deduped AS (` open and its matching `)`.
  * Throws if not found.
  */
-function extractDedupedCte(sql: string): string {
+function _extractDedupedCte(sql: string): string {
   const startRe = /deduped\s+AS\s*\(/i;
   const m = sql.match(startRe);
   if (!m || m.index === undefined) {

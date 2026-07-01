@@ -76,6 +76,16 @@ import {
 } from "@/lib/scenario-dealias";
 import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
+import {
+  coverageSpanOf,
+  covers,
+  defaultWindowFor,
+  outlierIdsFor,
+  unionOf,
+  type CoverageSpan,
+  type CoverageWindow,
+} from "@/lib/scenario-window";
+import { localMidnight, localMidnightToday, parseIsoDay } from "@/lib/dateday";
 import type {
   OwnBookDeltaPayload,
   PeerPercentilePayload,
@@ -125,6 +135,7 @@ import { KpiStrip } from "./KpiStrip";
 import { toWealth } from "../widgets/performance/EquityChart";
 import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
+import { CustomRangePicker } from "./CustomRangePicker";
 import { BridgeDrawer } from "./BridgeDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { ScenarioFooter } from "./ScenarioFooter";
@@ -382,6 +393,59 @@ function formatUsd0(n: number): string {
       })
     : "—";
 }
+
+const MONTH_ABBR = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
+
+/**
+ * Format an ISO "YYYY-MM-DD" day as "Mon YYYY" for the auto-excluded inline
+ * reason. Pure STRING slicing — never `new Date(iso)` (the UTC/local off-by-one
+ * `dateday.ts` exists to kill). Falls back to the raw string on a malformed
+ * input (defensive; the composer only ever feeds it valid spans).
+ */
+function formatIsoMonth(iso: string): string {
+  const year = iso.slice(0, 4);
+  const monthIdx = Number(iso.slice(5, 7)) - 1;
+  const abbr = MONTH_ABBR[monthIdx];
+  if (!abbr || year.length !== 4) return iso;
+  return `${abbr} ${year}`;
+}
+
+/**
+ * Phase 57 Plan 03 (POLISH-02) — the minimal honest reason a SELECTED strategy
+ * is coverage-auto-excluded from the current window. Derived from its span vs
+ * the window: an ended strategy (`span.last < window.end`) reads "ends {Mon
+ * YYYY} — outside window"; a ragged-head one (`span.first > window.start`) reads
+ * "starts {Mon YYYY} — outside window"; a strategy with NO data (null span)
+ * reads "no data — outside window". Real text (never color-only). Kept MINIMAL —
+ * the rich three-state chips / gantt are Phase 58.
+ */
+function coverageDropReason(
+  span: CoverageSpan | null,
+  window: CoverageWindow,
+): string {
+  if (!span) return "no data — outside window";
+  if (span.last < window.end) {
+    return `ends ${formatIsoMonth(span.last)} — outside window`;
+  }
+  if (span.first > window.start) {
+    return `starts ${formatIsoMonth(span.first)} — outside window`;
+  }
+  return "outside window";
+}
+
 
 /**
  * WR-05 (Phase 29 review) — book-returns boundary normalizer.
@@ -696,6 +760,33 @@ export function ScenarioComposer({
   // windows (client-side, 252-annualization basis — NOT the per-strategy panel's
   // 90/180/365 backend keys). Default 6M=126 per UI-SPEC §Component Inventory.
   const [rollingWindow, setRollingWindow] = useState(126);
+
+  // ---------------------------------------------------------------------------
+  // Phase 57 (WINDOW-01/04/05, POLISH-01) — the coverage window [winStart,winEnd].
+  //
+  // This is the ANALYTICAL blend window (which strategies are members), a
+  // SEPARATE axis from: the rolling-metrics `rollingWindow` above (63/126/252
+  // view of the blend's own series), the factsheet MasterBrush brush-zoom (a
+  // view pan, persist=false), and per-strategy `startDates` (legacy include-from).
+  // POLISH-01 (LOCKED) forbids conflating any of them.
+  //
+  // EPHEMERAL by design (persistence is Phase 59): plain composer useState, NOT
+  // in useScenarioState / ScenarioDraft — so NO SCENARIO_SCHEMA_VERSION bump. The
+  // values are ISO "YYYY-MM-DD" strings (the engine + scenario-window helpers all
+  // compare lexicographically); Date conversion happens ONLY at the
+  // CustomRangePicker boundary via dateday helpers.
+  //
+  // Null default: an empty intersection (`defaultWindowFor` === null) seeds no
+  // window, leaving the engine on the union-when-absent path (the WINDOW-06
+  // guided-fix banner is Plan 03).
+  const [winStart, setWinStart] = useState<string | null>(null);
+  const [winEnd, setWinEnd] = useState<string | null>(null);
+  // Pitfall 3 — the intersection default is a one-time SEED (and the "Common
+  // period" preset target), never a controlled value. Once the user sets a
+  // window (preset or picker) this flag is true and the seed effect never
+  // re-snaps their choice.
+  const windowTouchedRef = useRef(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   function handleWeightChange(scopeRef: string, weight: number) {
     if (!Number.isFinite(weight)) {
@@ -1529,9 +1620,266 @@ export function ScenarioComposer({
     () => buildDateMapCache(deAliased.strategies),
     [deAliased],
   );
+
+  // Phase 57 (WINDOW-01) — coverage spans of the strategies actually fed to the
+  // engine this render (the SELECTED, post-collapse set). Deriving spans from
+  // `deAliased.strategies` — the exact set computeScenario blends — keeps the
+  // UI's window derivation and the engine's membership on the SAME strategy set
+  // (RESEARCH Pitfall 2: pre/post-collapse desync). All interval math delegates
+  // to scenario-window.ts (Rule 2: never re-derive coverage math here).
+  //
+  // `selectedSpanById` is the ONE coverage-span scan per selected strategy,
+  // shared by every window memo below (selectedSpans / coverageEligible /
+  // autoExcluded / emptyIntersectionOutliers) so each strategy's daily_returns
+  // is scanned once per recompute instead of four times. Null-span entries are
+  // KEPT so the eligibility + drop-reason lookups can tell "has no data" apart
+  // from "not selected". The `=== false` gate matches selectedSpans (the
+  // broadest consumer); the narrower `!selected` consumers apply their own gate
+  // before the lookup, so the map is a safe superset.
+  const selectedSpanById = useMemo(() => {
+    const m = new Map<string, CoverageSpan | null>();
+    for (const s of deAliased.strategies) {
+      if (deAliased.state.selected[s.id] === false) continue;
+      m.set(s.id, coverageSpanOf(s.daily_returns));
+    }
+    return m;
+  }, [deAliased]);
+
+  const selectedSpans = useMemo<CoverageSpan[]>(() => {
+    const spans: CoverageSpan[] = [];
+    for (const span of selectedSpanById.values()) {
+      if (span) spans.push(span);
+    }
+    return spans;
+  }, [selectedSpanById]);
+
+  // WINDOW-01 — seed the default window ONCE from the intersection of the
+  // selected spans (Pitfall 3: a one-time seed + preset target, NEVER a
+  // controlled value that re-snaps a user narrow). `windowTouchedRef` gates
+  // re-seeding: after the first non-empty seed (or any user set), the effect is
+  // inert. An empty intersection (`defaultWindowFor` === null) seeds nothing and
+  // leaves the engine on the union-when-absent path (WINDOW-06 banner is Plan 03).
+  //
+  // STICKY BY DESIGN (adversarial review F1): because the window is NOT re-snapped
+  // on selection change, deselecting a strategy leaves the user's window intact.
+  // The surviving members simply re-blend over it (correct numbers), and any that
+  // no longer cover it move to the auto-excluded group with a reason; deselecting
+  // every covering member yields the honest zero-member empty state, not a wrong
+  // curve. Silently re-clamping to the new selection would override the window the
+  // user explicitly chose — a worse surprise — so recovery stays a one-click
+  // preset ("Common period" / "Full range") rather than an implicit move.
+  useEffect(() => {
+    if (windowTouchedRef.current) return;
+    const def = defaultWindowFor(selectedSpans);
+    if (def) {
+      windowTouchedRef.current = true;
+      setWinStart(def.start);
+      setWinEnd(def.end);
+    }
+  }, [selectedSpans]);
+
+  // The applied coverage window, or null when unset / empty-intersection. Null
+  // means "no window key" — the engine stays on its own-book union-when-absent
+  // path, byte-unchanged for every non-scenario caller.
+  const coverageWindow = useMemo(
+    () => (winStart && winEnd ? { start: winStart, end: winEnd } : null),
+    [winStart, winEnd],
+  );
+
+  // WINDOW mount bounds — the union span of the selected set gives the picker's
+  // min (earliest first) and max (latest last, or today when that is later, so a
+  // still-running strategy can always be windowed to the present). Local-midnight
+  // Dates ONLY at this picker boundary (dateday helpers, never `new Date(str)`).
+  const windowBounds = useMemo(() => {
+    const union = unionOf(selectedSpans);
+    if (!union) return null;
+    const minDay = parseIsoDay(union.start);
+    const maxDay = parseIsoDay(union.end);
+    if (!minDay || !maxDay) return null;
+    const min = localMidnight(minDay);
+    const unionMax = localMidnight(maxDay);
+    const today = localMidnightToday();
+    return { min, max: unionMax > today ? unionMax : today };
+  }, [selectedSpans]);
+
+  const applyWindow = useCallback((range: { start: string; end: string }) => {
+    windowTouchedRef.current = true;
+    setWinStart(range.start);
+    setWinEnd(range.end);
+  }, []);
+
+  // WINDOW-04/05 — the two preset targets over the selected spans. "Common
+  // period (all in)" = the intersection (defaultWindowFor); every selected
+  // strategy covers it by construction → all in. "Full range (some drop out)" =
+  // the union (unionOf); strategies whose span does not ⊇ the union drop out (via
+  // the engine's `covers` gate). Both delegate to scenario-window.ts — no
+  // re-derived interval math. `commonPeriodWindow` is null on an empty
+  // intersection, which disables the "Common period" preset (WINDOW-06 seam).
+  const commonPeriodWindow = useMemo(
+    () => defaultWindowFor(selectedSpans),
+    [selectedSpans],
+  );
+  const fullRangeWindow = useMemo(() => unionOf(selectedSpans), [selectedSpans]);
+
+  // ⚠️ HAZARD FIX (RESEARCH Pitfall 1): collapseAliasedHoldingStrategies
+  // reconstructs the ScenarioState and SILENTLY DROPS `state.window`. Setting
+  // the window on projectionState (pre-collapse) would never reach the engine.
+  // Inject it onto deAliased.state POST-collapse. This memo is the SINGLE "state
+  // the engine sees": BOTH computeScenario (below) AND alignConstituentReturns
+  // (the diversification panel — CORR-02/05/06) consume it, so the windowed
+  // member set / axis can never desync between the blend metrics and DR/ENB/PCR.
+  // Only the scenario-tab composed path attaches a window — own-book callers
+  // stay on the union-when-absent path (coverageWindow === null → no window key).
+  const engineState = useMemo(
+    () =>
+      coverageWindow
+        ? { ...deAliased.state, window: coverageWindow }
+        : deAliased.state,
+    [deAliased, coverageWindow],
+  );
+
   const scenarioMetrics = useMemo(
-    () => computeScenario(deAliased.strategies, deAliased.state, dateMapCache),
-    [deAliased, dateMapCache],
+    () => computeScenario(deAliased.strategies, engineState, dateMapCache),
+    [deAliased, engineState, dateMapCache],
+  );
+
+  // Phase 57 Plan 03 (WINDOW-02/03, ADR §"UI state machine") — the pure
+  // coverage-eligibility axis. For each SELECTED strategy (the manual subset),
+  // `eligible[id] = covers(coverageSpanOf(returns), coverageWindow)` using the
+  // SAME predicate the engine applies (scenario.ts:263-268), so the UI's
+  // auto-excluded group and the engine's `member_ids` / divisor can never
+  // disagree (Pitfall 2). In-blend iff `selected && coverageEligible`. Two hard
+  // invariants encoded here:
+  //   - SUBSET-ONLY (WINDOW-03): only SELECTED strategies are keyed — a narrow
+  //     that would "cover" an unselected strategy never adds it (`selected` is
+  //     the engine's activeStrategies gate; coverageEligible is consulted only
+  //     within that subset). `selected` is NEVER mutated by a coverage change.
+  //   - UNION PATH: when coverageWindow is null (untouched / empty-intersection),
+  //     every selected strategy is eligible (the engine runs its union path, no
+  //     drops) — mirrors the absent-window branch of the engine.
+  // Never re-derives interval math (Rule 2): delegates to scenario-window.ts.
+  // Keyed on `deAliased` (the post-collapse set the engine blends) + the window.
+  const coverageEligible = useMemo<Record<string, boolean>>(() => {
+    const eligible: Record<string, boolean> = {};
+    for (const s of deAliased.strategies) {
+      if (!deAliased.state.selected[s.id]) continue; // subset-only (activeStrategies)
+      if (!coverageWindow) {
+        eligible[s.id] = true; // union path — no coverage drops
+        continue;
+      }
+      // The SAME predicate the engine applies (scenario.ts:263-268): a null span
+      // (no data) is never a member; otherwise INCLUSIVE-CLOSED containment via
+      // covers(coverageSpanOf(...), window) — no inline interval math (Rule 2).
+      // Span read from the shared selectedSpanById scan (Rule 2: computed once).
+      const span = selectedSpanById.get(s.id) ?? null;
+      eligible[s.id] = span !== null && covers(span, coverageWindow);
+    }
+    return eligible;
+  }, [deAliased, coverageWindow, selectedSpanById]);
+
+  // Phase 57 Plan 03 Task 2 (POLISH-02) — the coverage-auto-excluded rows:
+  // SELECTED (in the subset) but NOT eligible for the current window. These are
+  // the strategies the engine dropped from the blend for coverage — DISTINCT
+  // from manual-off (`selected === false`, never here) and from in-blend. Each
+  // carries a minimal honest reason derived from its span vs the window. Empty
+  // when nothing is coverage-dropped (the group is then absent, not an empty
+  // shell) and on the union path (coverageWindow === null → no drops).
+  const autoExcluded = useMemo<
+    Array<{ id: string; name: string; reason: string }>
+  >(() => {
+    if (!coverageWindow) return [];
+    const out: Array<{ id: string; name: string; reason: string }> = [];
+    for (const s of deAliased.strategies) {
+      if (!deAliased.state.selected[s.id]) continue; // manual-off is NOT here
+      if (coverageEligible[s.id]) continue; // in-blend
+      out.push({
+        id: s.id,
+        name: s.name,
+        reason: coverageDropReason(
+          selectedSpanById.get(s.id) ?? null,
+          coverageWindow,
+        ),
+      });
+    }
+    return out;
+  }, [deAliased, coverageWindow, coverageEligible, selectedSpanById]);
+
+  // Dev-mode cross-check (Pitfall 2): on the passthrough (non-aliased) scenario
+  // path the UI's in-blend set { selected && coverageEligible } must equal the
+  // engine's `member_ids`. A mismatch means the UI group and the divisor have
+  // desynced — surface it loudly in dev (never in prod). The aliased-collapse
+  // seam (holdings merged pre-engine) is documented: for the scenario tab the
+  // toggle-able added rows are passthrough, so they align 1:1.
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
+    if (!coverageWindow) return;
+    const memberIds = scenarioMetrics.member_ids;
+    if (!memberIds) return;
+    const uiInBlend = deAliased.strategies
+      .filter((s) => deAliased.state.selected[s.id] && coverageEligible[s.id])
+      .map((s) => s.id)
+      .sort();
+    const engineMembers = [...memberIds].sort();
+    if (
+      uiInBlend.length !== engineMembers.length ||
+      uiInBlend.some((id, i) => id !== engineMembers[i])
+    ) {
+      console.warn(
+        "[ScenarioComposer] coverageEligible desync vs engine member_ids",
+        { uiInBlend, engineMembers },
+      );
+    }
+  }, [deAliased, coverageWindow, coverageEligible, scenarioMetrics.member_ids]);
+
+  // Phase 57 Plan 03 Task 3 (WINDOW-06) — empty-intersection outlier detection.
+  // When the SELECTED set shares no common window (defaultWindowFor === null),
+  // `outlierIdsFor` names the strategy(ies) whose removal restores a valid
+  // intersection (a guided fix, not a dead-end). The map is over SELECTED spans
+  // only (subset-only, same axis as coverageEligible). Each outlier carries its
+  // display name and a deselect handler: an ADDED strategy (a toggle-able unit)
+  // is removed via handleRemoveAdded; a live HOLDING is toggled off via
+  // scenario.toggleHolding (RESEARCH Open Question #2 — in practice the outlier
+  // is an added strategy; a holding is handled honestly). All interval / outlier
+  // math delegates to scenario-window.ts (Rule 2: never re-derive it here).
+  const addedIdSet = useMemo(
+    () => new Set<string>(scenario.draft.addedStrategies.map((a) => a.id)),
+    [scenario.draft.addedStrategies],
+  );
+  const emptyIntersectionOutliers = useMemo<
+    Array<{ id: string; name: string; isAdded: boolean }>
+  >(() => {
+    // Only fires on a genuine empty intersection — a non-null default window
+    // means a common window exists, so there is no outlier to name. Reuse the
+    // memoized `commonPeriodWindow` (= defaultWindowFor(selectedSpans)) rather
+    // than recomputing the same intersection a third time.
+    if (commonPeriodWindow !== null) return [];
+    const spansById: Record<string, CoverageSpan> = {};
+    const nameById: Record<string, string> = {};
+    for (const s of deAliased.strategies) {
+      if (!deAliased.state.selected[s.id]) continue; // subset-only
+      const span = selectedSpanById.get(s.id) ?? null;
+      if (span) spansById[s.id] = span;
+      nameById[s.id] = s.name;
+    }
+    return outlierIdsFor(spansById).map((id) => ({
+      id,
+      name: nameById[id] ?? id,
+      isAdded: addedIdSet.has(id),
+    }));
+  }, [deAliased, commonPeriodWindow, selectedSpanById, addedIdSet]);
+
+  // The deselect action for a WINDOW-06 outlier: an added strategy is removed
+  // from the subset (handleRemoveAdded); a live holding is toggled off
+  // (scenario.toggleHolding). Either removal drops the outlier from the selected
+  // set, so `selectedSpans` recomputes to a non-null intersection — the banner
+  // then disappears and a valid default window is available again.
+  const deselectOutlier = useCallback(
+    (outlier: { id: string; isAdded: boolean }) => {
+      if (outlier.isAdded) handleRemoveAdded(outlier.id);
+      else scenario.toggleHolding(outlier.id);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [handleRemoveAdded, scenario.toggleHolding],
   );
 
   // PEER-01/02/03 (Phase 42) — the blend's live peer rank vs the REAL verified
@@ -1728,10 +2076,10 @@ export function ScenarioComposer({
   // zero-sum-weight blend returns a null DR/ENB/PCR and the section renders its
   // honest empty state, never NaN. Keyed on the de-aliased set + the engine output.
   const diversification = useMemo(() => {
-    const aligned = alignConstituentReturns(
-      deAliased.strategies,
-      deAliased.state,
-    );
+    // engineState (NOT the raw deAliased.state) so the constituent set + axis
+    // match the windowed correlation_matrix / n the engine emits — a window-
+    // excluded strategy must not dilute DR/ENB/PCR or the cluster order.
+    const aligned = alignConstituentReturns(deAliased.strategies, engineState);
     // Normalize the active weights to sum→1 (engine renormalizes by the active
     // weight mass; a zero/negative total yields all-zero weights → the lib's PCR
     // guard nulls the result → honest empty).
@@ -1761,7 +2109,7 @@ export function ScenarioComposer({
       correlationMatrix: scenarioMetrics.correlation_matrix,
       n: scenarioMetrics.n,
     });
-  }, [deAliased, scenarioMetrics]);
+  }, [deAliased, engineState, scenarioMetrics]);
 
   // CORR-06 — the cluster-reordered matrix the (UNCHANGED) CorrelationHeatmap
   // receives. The heatmap renders axis/cell order from `Object.keys(matrix)` and
@@ -2428,6 +2776,131 @@ export function ScenarioComposer({
         </div>
       )}
 
+      {/* Phase 57 Plan 03 Task 3 (WINDOW-06) — empty-intersection guided fix.
+          When the selected set shares NO common window, this inline warning
+          banner sits ABOVE the window control (not a modal), names the
+          outlier(s) via outlierIdsFor, and offers a one-click "Deselect {name}"
+          that restores a valid intersection. It does NOT block the rest of the
+          composer — a guided fix, not a hard stop. DESIGN.md warning tokens
+          (AA-verified); role=status + aria-live=polite per DESIGN-05
+          (role=status on non-blocking state changes; role=alert is reserved for
+          blocking errors) — this banner is an explicitly non-blocking guided
+          fix, so it is announced politely, not assertively. */}
+      {emptyIntersectionOutliers.length > 0 && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="scenario-empty-intersection-banner"
+          className="mt-6 rounded-md border border-warning-border bg-warning-bg px-4 py-3"
+        >
+          <p className="text-fixed-13 font-medium text-warning">
+            No common period across the selected strategies
+          </p>
+          <p className="mt-1 text-fixed-11 text-text-secondary">
+            {emptyIntersectionOutliers.length === 1
+              ? `${emptyIntersectionOutliers[0].name} does not overlap the rest — deselect it to restore a common coverage window.`
+              : "Some selected strategies do not overlap — deselect an outlier to restore a common coverage window."}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {emptyIntersectionOutliers.map((outlier) => (
+              <button
+                key={outlier.id}
+                type="button"
+                onClick={() => deselectOutlier(outlier)}
+                aria-label={`Deselect ${outlier.name}${outlier.isAdded ? "" : " (live holding)"}`}
+                className="rounded-md border border-warning-border bg-surface px-3 py-1.5 text-fixed-13 font-medium text-warning transition-colors duration-150 ease-out hover:border-warning focus:outline-none focus-visible:ring-2 focus-visible:ring-warning/50 motion-reduce:transition-none"
+              >
+                Deselect {outlier.name}
+                {outlier.isAdded ? "" : " (holding)"}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Phase 57 (WINDOW-01/04/05) — coverage-window control. The ANALYTICAL
+          blend window is set HERE, above the KPIs, so the allocator steers
+          membership before reading the blend (mirrors how the rolling-window
+          control sits above its graph). Only mounts when the selected set has a
+          span to window (windowBounds !== null). A distinct axis from the
+          rolling-metrics window / factsheet brush-zoom / startDates (POLISH-01).
+          Presets + DESIGN.md styling land in the Task-2 pass. */}
+      {windowBounds && (
+        <div
+          className="mt-6 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-4 py-3"
+          data-testid="scenario-coverage-window"
+        >
+          <span className="text-fixed-11 font-medium uppercase tracking-wide text-text-muted">
+            Coverage window
+          </span>
+          <span
+            className="font-mono text-fixed-13 text-text-primary"
+            data-testid="scenario-coverage-window-value"
+          >
+            {coverageWindow
+              ? `${coverageWindow.start} → ${coverageWindow.end}`
+              : "All history"}
+          </span>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            {/* WINDOW-04 — "Common period (all in)" snaps to the intersection so
+                every selected strategy is a member. Disabled (aria-disabled +
+                explainer) when the selected set shares no common window
+                (defaultWindowFor === null); the WINDOW-06 guided-fix banner is
+                Plan 03. Secondary button per DESIGN.md (transparent + border). */}
+            <button
+              type="button"
+              onClick={() =>
+                commonPeriodWindow && applyWindow(commonPeriodWindow)
+              }
+              disabled={!commonPeriodWindow}
+              aria-disabled={!commonPeriodWindow}
+              title={
+                commonPeriodWindow
+                  ? undefined
+                  : "The selected strategies share no common period — widen the set or use Full range."
+              }
+              className="rounded-md border border-border px-3 py-1.5 text-fixed-13 font-medium text-text-primary transition-colors duration-150 ease-out hover:border-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-border motion-reduce:transition-none"
+            >
+              Common period (all in)
+            </button>
+            {/* WINDOW-05 — "Full range (some drop out)" widens to the union;
+                non-covering strategies auto-drop via the engine's coverage gate.
+                A union always exists for a non-empty set, so this stays enabled
+                even when the intersection is empty. */}
+            <button
+              type="button"
+              onClick={() => fullRangeWindow && applyWindow(fullRangeWindow)}
+              disabled={!fullRangeWindow}
+              aria-disabled={!fullRangeWindow}
+              className="rounded-md border border-border px-3 py-1.5 text-fixed-13 font-medium text-text-primary transition-colors duration-150 ease-out hover:border-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-border motion-reduce:transition-none"
+            >
+              Full range (some drop out)
+            </button>
+            <button
+              type="button"
+              onClick={() => setPickerOpen(true)}
+              aria-label="Set coverage window"
+              className="rounded-md border border-border px-3 py-1.5 text-fixed-13 font-medium text-text-primary transition-colors duration-150 ease-out hover:border-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 motion-reduce:transition-none"
+            >
+              Set window
+            </button>
+          </div>
+          {pickerOpen && (
+            <CustomRangePicker
+              isOpen={pickerOpen}
+              onClose={() => setPickerOpen(false)}
+              onApply={(range) => {
+                applyWindow(range);
+                setPickerOpen(false);
+              }}
+              min={windowBounds.min}
+              max={windowBounds.max}
+              initialRange={coverageWindow}
+            />
+          )}
+        </div>
+      )}
+
       <div className="mt-6">
         <KpiStrip
           mode="scenario"
@@ -3033,6 +3506,46 @@ export function ScenarioComposer({
         />
       </CollapsibleSection>
 
+      {/* Phase 57 Plan 03 Task 2 (POLISH-02) — the auto-excluded (outside window)
+          group. Renders adjacent to the composition list ONLY when a SELECTED
+          strategy was coverage-dropped for the current window (autoExcluded
+          non-empty). Each row animates (fade + slide) into place and carries a
+          minimal honest inline reason (real text, not color-only). DESIGN.md
+          warning tokens (bg-warning-bg / border-warning-border / text-warning,
+          AA-verified). Distinct from manual-off (never here) and from in-blend.
+          The rich three-state chips / gantt are Phase 58 — this is the FUNCTIONAL
+          group + minimal label + animation only. */}
+      {autoExcluded.length > 0 && (
+        <section
+          data-testid="scenario-auto-excluded-group"
+          aria-labelledby="scenario-auto-excluded-heading"
+          className="mt-4 rounded-md border border-warning-border bg-warning-bg p-4"
+        >
+          <h3
+            id="scenario-auto-excluded-heading"
+            className="text-fixed-11 font-medium uppercase tracking-wider text-warning"
+          >
+            Auto-excluded (outside window)
+          </h3>
+          <p className="mt-1 text-fixed-11 text-text-secondary">
+            These selected strategies do not span the entire coverage window
+            (they start after it begins or end before it ends), so they are
+            excluded from the blend and its divisor. Narrow the window (or use
+            Common period) to include them.
+          </p>
+          <ul className="mt-3 grid gap-2">
+            {autoExcluded.map((row) => (
+              <AutoExcludedRow
+                key={row.id}
+                id={row.id}
+                name={row.name}
+                reason={row.reason}
+              />
+            ))}
+          </ul>
+        </section>
+      )}
+
       <div className="mt-8 rounded-lg border border-border bg-surface p-4">
         <div className="text-base font-semibold text-text-primary">
           Add more strategies
@@ -3144,6 +3657,57 @@ export function ScenarioComposer({
         }}
       />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AutoExcludedRow — sub-component (POLISH-02)
+// ---------------------------------------------------------------------------
+
+/**
+ * A single coverage-auto-excluded strategy row. Animates (fade + slide) into the
+ * "Auto-excluded (outside window)" group on mount so the drop is a VISIBLE
+ * relocation, not a silent vanish (T-57-06). The move is comprehension-aiding
+ * only (DESIGN.md: no decorative animation): opacity 0→1 + a small translate.
+ * DESIGN.md Motion — medium 250ms → Tailwind `duration-300` (`duration-250` is
+ * not a valid v4 token) + `ease-out` (enter). `motion-reduce:transition-none`
+ * honours prefers-reduced-motion on the SINGLE transition-carrying element
+ * (Pitfall 5 — no residual transition elsewhere). The reason is real text
+ * (never color-only), read out with the strategy name for the group's a11y.
+ */
+function AutoExcludedRow({
+  id,
+  name,
+  reason,
+}: {
+  id: string;
+  name: string;
+  reason: string;
+}) {
+  const [entered, setEntered] = useState(false);
+  useEffect(() => {
+    // Trigger the enter transition on the frame after mount so the browser
+    // paints the pre-transition state first (opacity-0 + translated), then
+    // animates to the settled state. Reduced-motion users skip the tween via
+    // the `motion-reduce:transition-none` class (the class, not JS, gates it).
+    const raf = requestAnimationFrame(() => setEntered(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  return (
+    <li
+      data-testid={`auto-excluded-row-${id}`}
+      className={`flex items-center justify-between gap-3 rounded-md border border-warning-border bg-surface p-3 transition-all duration-300 ease-out motion-reduce:transition-none ${
+        entered ? "translate-y-0 opacity-100" : "translate-y-1 opacity-0"
+      }`}
+    >
+      <span className="truncate text-sm text-text-primary">{name}</span>
+      <span
+        data-testid="auto-excluded-reason"
+        className="shrink-0 text-fixed-11 font-medium text-warning"
+      >
+        {reason}
+      </span>
+    </li>
   );
 }
 

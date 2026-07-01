@@ -62,7 +62,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
  * `flow_type=onboard`. Source is taken from the request body — the wizard's
  * Connect step picks an exchange before submitting.
  */
-async function unifiedValidateAndEncryptHandler(args: {
+async function _unifiedValidateAndEncryptHandler(args: {
   exchange: string;
   api_key: string;
   api_secret: string;

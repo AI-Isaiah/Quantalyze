@@ -45,6 +45,7 @@ import {
   within,
 } from "@testing-library/react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { isoDayFromDate } from "@/lib/dateday";
 
 // --- next/navigation mock -------------------------------------------------
 
@@ -179,6 +180,72 @@ vi.mock("@/components/charts/RollingVolatilityChart", () => ({
 }));
 vi.mock("@/components/charts/RollingSortinoChart", () => ({
   RollingSortinoChart: vi.fn(() => <div data-testid="rolling-sortino-mock" />),
+}));
+
+// Phase 57 (WINDOW-*) — capturing CustomRangePicker mock. The composer mounts
+// the REAL picker for the coverage-window control; here it is replaced by an
+// inert spy that captures `onApply` (mirrors the browse-drawer capture pattern
+// at :318) so a window test can drive an apply without piloting the real
+// two-month calendar grid. It renders a testid div when open and records its
+// min/max/initialRange props so the mount-bounds assertions can read them.
+let pickerOnApply: ((r: { start: string; end: string }) => void) | null = null;
+let lastPickerProps: {
+  isOpen: boolean;
+  min: Date;
+  max: Date;
+  initialRange?: { start: string; end: string } | null;
+} | null = null;
+// Phase 57 — engine-arg recorder. `@/lib/scenario` stays REAL (computeScenario
+// still computes genuine metrics — the member_count oracle depends on it), but
+// `computeScenario` is wrapped so each invocation's `state` arg is captured. The
+// composed-branch call is the one whose strategies include the window fixtures;
+// the "no window key when empty-intersection" assertion reads its state arg.
+const computeScenarioStateArgs: Array<{
+  strategyIds: string[];
+  state: Record<string, unknown>;
+}> = [];
+vi.mock("@/lib/scenario", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/scenario")>();
+  return {
+    ...actual,
+    computeScenario: vi.fn(
+      (
+        strategies: Parameters<typeof actual.computeScenario>[0],
+        state: Parameters<typeof actual.computeScenario>[1],
+        cache: Parameters<typeof actual.computeScenario>[2],
+      ) => {
+        computeScenarioStateArgs.push({
+          strategyIds: strategies.map((s) => s.id),
+          state: state as unknown as Record<string, unknown>,
+        });
+        return actual.computeScenario(strategies, state, cache);
+      },
+    ),
+  };
+});
+
+vi.mock("./CustomRangePicker", () => ({
+  CustomRangePicker: vi.fn(
+    (props: {
+      isOpen: boolean;
+      onClose: () => void;
+      onApply: (r: { start: string; end: string }) => void;
+      min: Date;
+      max: Date;
+      initialRange?: { start: string; end: string } | null;
+    }) => {
+      pickerOnApply = props.onApply;
+      lastPickerProps = {
+        isOpen: props.isOpen,
+        min: props.min,
+        max: props.max,
+        initialRange: props.initialRange,
+      };
+      return props.isOpen ? (
+        <div data-testid="custom-range-picker-mock" />
+      ) : null;
+    },
+  ),
 }));
 
 // --- Imports after mocks --------------------------------------------------
@@ -423,6 +490,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // an added strategy. Same render output as the factory default (isOpen ? div
     // : null); tests that need a custom drawer still override it inline.
     browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
     vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
       isOpen: boolean;
       onAdd: (s: unknown) => void;
@@ -5062,5 +5131,1123 @@ describe("ScenarioComposer — Phase 43 GUARD-01 static guard + assembled degene
     }
     // No role=alert anywhere on the folded surface (derived-client honesty).
     expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+});
+
+// ===========================================================================
+// Phase 57 Plan 02 — Coverage-window control (WINDOW-01/04/05, POLISH-01)
+//
+// The adapter is mocked but `@/lib/scenario` (computeScenario) and
+// `@/lib/scenario-dealias` (the collapse) are REAL, so `member_count` on the
+// scenarioMetrics the composer feeds KpiStrip is the genuine engine membership.
+// That is the load-bearing oracle here: the window is proven to reach the engine
+// (post-collapse) ONLY if member_count moves when the window moves.
+// ===========================================================================
+
+// Two strategies with UNEQUAL spans, both added as toggle-able rows so they ride
+// the passthrough (non-collapsed) path and align 1:1 with the engine members.
+//   A: 2026-01-01 … 2026-01-12  (full span)
+//   B: 2026-01-01 … 2026-01-06  (ends early — dropped when the window widens past d6)
+const WIN_DATES = Array.from({ length: 12 }, (_, i) =>
+  `2026-01-${String(i + 1).padStart(2, "0")}`,
+);
+const REF_WIN_A = "strat-window-A";
+const REF_WIN_B = "strat-window-B";
+
+function mkWinStrat(
+  id: string,
+  dates: string[],
+): {
+  id: string;
+  name: string;
+  codename: null;
+  disclosure_tier: string;
+  strategy_types: string[];
+  markets: string[];
+  start_date: string;
+  daily_returns: { date: string; value: number }[];
+  cagr: null;
+  sharpe: null;
+  volatility: null;
+  max_drawdown: null;
+} {
+  return {
+    id,
+    name: id,
+    codename: null,
+    disclosure_tier: "public",
+    strategy_types: [],
+    markets: [],
+    start_date: dates[0],
+    daily_returns: dates.map((date, i) => ({
+      date,
+      value: [0.01, -0.008, 0.012, -0.005, 0.006][i % 5],
+    })),
+    cagr: null,
+    sharpe: null,
+    volatility: null,
+    max_drawdown: null,
+  };
+}
+
+/** Mount the adapter with A (full span) + B (short span), both selected. */
+function mountUnequalSpanBook(): void {
+  vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+    strategies: [
+      mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
+      mkWinStrat(REF_WIN_B, WIN_DATES.slice(0, 6)), // 2026-01-01 … 2026-01-06
+    ],
+    state: {
+      selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
+      weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+      startDates: {},
+    },
+  });
+}
+
+/** The latest scenarioMetrics the composer passed to KpiStrip this render. */
+function lastScenarioMetrics(): {
+  member_count?: number;
+  member_ids?: string[];
+} | null {
+  const calls = vi.mocked(KpiStrip).mock.calls;
+  if (calls.length === 0) return null;
+  return calls[calls.length - 1][0].scenarioMetrics ?? null;
+}
+
+describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  it("window: default seeds the intersection so both unequal-span strategies are members", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Default window = defaultWindowFor(spans) = [2026-01-01, 2026-01-06]
+    // (max firsts / min lasts). BOTH A and B cover it → member_count === 2.
+    const sm = lastScenarioMetrics();
+    expect(sm?.member_count).toBe(2);
+    expect(sm?.member_ids).toEqual(
+      expect.arrayContaining([REF_WIN_A, REF_WIN_B]),
+    );
+  });
+
+  it("window: MANDATORY member_count changes when the window moves — widening past B's last day drops it (2 → 1), narrowing restores it (1 → 2)", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Baseline: intersection default → both members.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+
+    // Open the window control so the (mocked) picker mounts and captures onApply.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+
+    // The picker receives the union span as bounds (min = earliest first) and
+    // the current window as initialRange — the mount contract for the control.
+    expect(lastPickerProps).not.toBeNull();
+    expect(lastPickerProps!.initialRange).toEqual({
+      start: "2026-01-01",
+      end: "2026-01-06",
+    });
+
+    // Widen winEnd PAST B's last data day (2026-01-06 → 2026-01-12). The picker
+    // bubbles the applied window; the composer injects it POST-collapse onto
+    // deAliased.state, so the engine drops B (its span no longer covers the
+    // window) → member_count === 1. This is the hazard-fix proof: if the window
+    // never reached the engine, member_count would stay 2.
+    expect(pickerOnApply).not.toBeNull();
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    const widened = lastScenarioMetrics();
+    expect(widened?.member_count).toBe(1);
+    expect(widened?.member_ids).toEqual([REF_WIN_A]);
+
+    // Narrow winEnd back within B's coverage (→ 2026-01-06). B is a member again
+    // → member_count === 2. Proves the toggle is driven by the live window, not a
+    // one-way latch.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-06" });
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+  });
+
+  it("window: when the intersection is empty, the engine receives a state WITHOUT a window key (union path preserved)", () => {
+    // Two DISJOINT spans → defaultWindowFor(spans) === null → nothing to seed →
+    // engineState === deAliased.state (no `window` key added; union-when-absent).
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 4)), // 01-01 … 01-04
+        mkWinStrat(REF_WIN_B, WIN_DATES.slice(8, 12)), // 01-09 … 01-12
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The composed-branch computeScenario call (its strategies carry the window
+    // fixtures) receives a state with NO window key.
+    const composedArgs = computeScenarioStateArgs.filter(
+      (a) =>
+        a.strategyIds.includes(REF_WIN_A) && a.strategyIds.includes(REF_WIN_B),
+    );
+    expect(composedArgs.length).toBeGreaterThan(0);
+    for (const a of composedArgs) {
+      expect("window" in a.state).toBe(false);
+    }
+  });
+});
+
+// ===========================================================================
+// Phase 57 Plan 02 Task 2 — the two coverage presets (WINDOW-04, WINDOW-05)
+// ===========================================================================
+describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  it("preset: both preset buttons and the picker trigger have accessible names", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Common period \(all in\)/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Full range \(some drop out\)/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("preset: 'Common period (all in)' snaps the window to the intersection — all selected strategies are members", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // First widen so the state is off the default, then snap back via the preset.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Common period \(all in\)/i }),
+    );
+    // Intersection = [2026-01-01, 2026-01-06] → BOTH A and B cover it.
+    const sm = lastScenarioMetrics();
+    expect(sm?.member_count).toBe(2);
+    // The applied window is exactly the intersection.
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+  });
+
+  it("preset: 'Full range (some drop out)' widens to the union — the short-span strategy drops (member_count < selected count)", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Default = intersection → both in.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Full range \(some drop out\)/i }),
+    );
+    // Union = [2026-01-01, 2026-01-12] → only A (full span) covers it; B drops.
+    const sm = lastScenarioMetrics();
+    expect(sm?.member_count).toBe(1);
+    expect(sm?.member_ids).toEqual([REF_WIN_A]);
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-12");
+  });
+
+  it("preset: 'Common period' is disabled on an empty intersection; 'Full range' stays enabled", () => {
+    // Two DISJOINT spans → defaultWindowFor === null (empty intersection).
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 4)), // 01-01 … 01-04
+        mkWinStrat(REF_WIN_B, WIN_DATES.slice(8, 12)), // 01-09 … 01-12
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const common = screen.getByRole("button", {
+      name: /Common period \(all in\)/i,
+    });
+    const full = screen.getByRole("button", {
+      name: /Full range \(some drop out\)/i,
+    });
+    expect(common).toBeDisabled();
+    expect(common).toHaveAttribute("aria-disabled", "true");
+    expect(full).toBeEnabled();
+  });
+
+  it("preset: no separate picker component is forked — the reused CustomRangePicker carries min = union earliest first", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    expect(lastPickerProps).not.toBeNull();
+    // min = union earliest first = 2026-01-01 (local midnight).
+    expect(isoDayFromDate(lastPickerProps!.min)).toBe("2026-01-01");
+    // max = union latest last or today (whichever is later); today > Jan 2026 in
+    // this fixture era only if the machine clock is future — assert it is at
+    // least the union end.
+    expect(isoDayFromDate(lastPickerProps!.max) >= "2026-01-12").toBe(true);
+  });
+});
+
+// ===========================================================================
+// Phase 57 Plan 02 Task 3 — POLISH-01 separation guard (LOCKED)
+//
+// The coverage window [winStart,winEnd] (analytical membership) is a DISTINCT
+// axis from every VIEW axis. This guard proves none of them can leak into
+// another:
+//   (a) rollingWindow (63/126/252) — the rolling-metrics view of the blend series
+//   (b) the ScenarioFactsheetChart MasterBrush brush-zoom (persist=false view pan)
+//   (c) per-strategy startDates — the legacy include-from axis
+// ===========================================================================
+describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
+  // A 130-trading-day fixture so BOTH the 63-day ("3M") AND 126-day ("6M")
+  // rolling windows are enabled and clickable (the 12-day fixtures above leave
+  // every rolling option disabled; the default active window is 6M=126). Dates
+  // are consecutive calendar days from 2026-01-01, sufficient for the rolling
+  // usableN gate (which counts overlapping daily-return rows, not trading days).
+  const LONG_DATES = Array.from({ length: 130 }, (_, i) => {
+    const d = new Date(Date.UTC(2026, 0, 1));
+    d.setUTCDate(d.getUTCDate() + i);
+    return d.toISOString().slice(0, 10);
+  });
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  it("POLISH-01: changing the rolling window (3M/6M/12M) does NOT change the state.window passed to computeScenario", () => {
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, LONG_DATES),
+        mkWinStrat(REF_WIN_B, LONG_DATES),
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The window value the engine currently sees (both spans equal → full
+    // intersection window covering everything).
+    const windowBefore = computeScenarioStateArgs
+      .filter(
+        (a) =>
+          a.strategyIds.includes(REF_WIN_A) &&
+          a.strategyIds.includes(REF_WIN_B),
+      )
+      .at(-1)?.state.window;
+    expect(windowBefore).toBeDefined();
+
+    computeScenarioStateArgs.length = 0;
+
+    // Change the ROLLING window (a separate VIEW axis). Click "3M" (63) in the
+    // "Rolling window" group.
+    const rollingGroup = screen.getByRole("group", { name: /rolling window/i });
+    fireEvent.click(within(rollingGroup).getByRole("button", { name: "3M" }));
+
+    // The coverage window the engine sees is UNCHANGED — rolling is a view of the
+    // blend series, never the analytical membership window.
+    const windowAfter = computeScenarioStateArgs
+      .filter(
+        (a) =>
+          a.strategyIds.includes(REF_WIN_A) &&
+          a.strategyIds.includes(REF_WIN_B),
+      )
+      .at(-1)?.state.window;
+    // If the rolling click triggered no recompute (window is state-only), the
+    // last-known window is still the pre-click one; either way it must equal it.
+    expect(windowAfter ?? windowBefore).toEqual(windowBefore);
+    // The coverage-window READOUT is unchanged by a rolling-window click.
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain(
+      `${(windowBefore as { start: string }).start} → ${(windowBefore as { end: string }).end}`,
+    );
+  });
+
+  it("POLISH-01: ScenarioFactsheetChart's brush stays a VIEW axis — the mount receives NO coverage-window prop and no persist prop", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Move the coverage window (widen to union) so a leak, if any, would surface.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Full range \(some drop out\)/i }),
+    );
+
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls.at(-1)?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    expect(props).toBeDefined();
+    // The coverage window is NEVER threaded to the factsheet chart — the brush is
+    // a self-contained persist=false view control (POLISH-01). None of these
+    // coverage-window prop names appear on the mount.
+    for (const forbidden of [
+      "window",
+      "coverageWindow",
+      "winStart",
+      "winEnd",
+      "winRange",
+      "persist",
+    ]) {
+      expect(forbidden in props!).toBe(false);
+    }
+  });
+
+  it("POLISH-01: source guard — the composer never passes persist / a coverage-window prop to ScenarioFactsheetChart, and the brush stays persist=false", () => {
+    const src = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "ScenarioComposer.tsx",
+      ),
+      "utf8",
+    );
+    // The composer mount block for ScenarioFactsheetChart must not pass persist
+    // nor thread the coverage window into it.
+    const mountIdx = src.indexOf("<ScenarioFactsheetChart");
+    expect(mountIdx).toBeGreaterThan(-1);
+    const mountBlock = src.slice(mountIdx, src.indexOf("/>", mountIdx));
+    expect(mountBlock).not.toMatch(/persist=/);
+    expect(mountBlock).not.toMatch(/winStart|winEnd|coverageWindow/);
+    // The brush-zoom stays persist=false inside ScenarioFactsheetChart itself.
+    const chartSrc = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "..",
+        "widgets",
+        "performance",
+        "ScenarioFactsheetChart.tsx",
+      ),
+      "utf8",
+    );
+    expect(chartSrc).toMatch(/persist=\{false\}/);
+  });
+
+  it("POLISH-01: changing the coverage window leaves rollingWindow and per-strategy startDates untouched", () => {
+    // Both strategies full 130-day spans so the default 6M (126) rolling window
+    // is ENABLED (usableN = 130 >= 126). A carries a legacy include-from
+    // startDate — the third distinct axis.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, LONG_DATES),
+        mkWinStrat(REF_WIN_B, LONG_DATES),
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+        // A per-strategy startDate on A — the legacy include-from axis.
+        startDates: { [REF_WIN_A]: LONG_DATES[5] },
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Record the active rolling-window button before touching the coverage window.
+    const rollingGroup = screen.getByRole("group", { name: /rolling window/i });
+    const activeBefore = within(rollingGroup)
+      .getAllByRole("button")
+      .find((b) => b.getAttribute("aria-pressed") === "true")?.textContent;
+    expect(activeBefore).toBe("6M"); // default 126
+
+    // Record startDates flowing into the engine before the coverage change.
+    const startDatesBefore = computeScenarioStateArgs
+      .filter((a) => a.strategyIds.includes(REF_WIN_A))
+      .at(-1)?.state.startDates;
+    expect(startDatesBefore).toEqual({ [REF_WIN_A]: LONG_DATES[5] });
+
+    // Change the COVERAGE window via the picker (narrow it slightly, keeping
+    // >=126 overlapping days so the 6M rolling option's ENABLED state is not a
+    // confound). This must NOT touch the rolling window nor per-strategy
+    // startDates — the coverage window is a distinct axis.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: LONG_DATES[1], end: LONG_DATES[129] });
+    });
+
+    const activeAfter = within(rollingGroup)
+      .getAllByRole("button")
+      .find((b) => b.getAttribute("aria-pressed") === "true")?.textContent;
+    expect(activeAfter).toBe("6M"); // rolling window unchanged
+
+    const startDatesAfter = computeScenarioStateArgs
+      .filter((a) => a.strategyIds.includes(REF_WIN_A))
+      .at(-1)?.state.startDates;
+    // The legacy include-from axis is byte-identical across a coverage-window edit.
+    expect(startDatesAfter).toEqual(startDatesBefore);
+  });
+});
+
+// ===========================================================================
+// Phase 57 Plan 03 Task 1 — coverageEligible auto-toggle state machine
+// (WINDOW-02 widen→auto-off, WINDOW-03 narrow→auto-on, subset-only guard)
+//
+// The auto-excluded GROUP (Task 2) is the UI proof of coverage-off; here the
+// oracle is the ENGINE membership (`member_count`/`member_ids` on the real
+// computeScenario — @/lib/scenario + @/lib/scenario-dealias are un-mocked). The
+// composer's coverageEligible memo uses the SAME `covers(coverageSpanOf(...))`
+// predicate the engine applies, so the UI group and the engine divisor can
+// never disagree — and `selected` (the manual subset axis) is never mutated by
+// a coverage change.
+// ===========================================================================
+describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  it("WINDOW-02: widening the window past B's last day auto-excludes B (member_count 2 → 1)", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Default intersection window → both members.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+
+    // Widen winEnd past B's last data day (01-06 → 01-12): coverageEligible[B]
+    // flips false (its span no longer covers the window) → B drops from the blend
+    // AND the divisor. member_count === 1, member_ids === [A].
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    const sm = lastScenarioMetrics();
+    expect(sm?.member_count).toBe(1);
+    expect(sm?.member_ids).toEqual([REF_WIN_A]);
+  });
+
+  it("WINDOW-03: narrowing back within B's coverage auto-restores it (member_count 1 → 2)", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Widen → B auto-excluded.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+
+    // Narrow winEnd back within B's coverage (→ 01-06): coverageEligible[B] flips
+    // true → B returns to the blend. Not a one-way latch.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-06" });
+    });
+    const sm = lastScenarioMetrics();
+    expect(sm?.member_count).toBe(2);
+    expect(sm?.member_ids).toEqual(
+      expect.arrayContaining([REF_WIN_A, REF_WIN_B]),
+    );
+  });
+
+  it("WINDOW-03 subset-only: an UNSELECTED strategy is NEVER auto-added even when the window covers it", () => {
+    // B is FULL-span (01-01…01-12) but manually OFF (selected=false). A is short
+    // (01-01…01-06). The default window is A's span; a narrow to A's span "covers"
+    // B (B's span ⊇ [01-01,01-06]) — but B must stay OUT because it is not in the
+    // selected subset. coverageEligible is consulted for SELECTED strategies only;
+    // in-blend = selected && coverageEligible.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 6)), // 01-01 … 01-06 (selected)
+        mkWinStrat(REF_WIN_B, WIN_DATES), // 01-01 … 01-12 (UNSELECTED)
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: false },
+        weights: { [REF_WIN_A]: 1, [REF_WIN_B]: 0 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Only A is selected → only A is a member, even though B's span covers the
+    // window. The engine's activeStrategies filter (selected truthy) already
+    // excludes B; the UI never fabricates its inclusion.
+    const sm = lastScenarioMetrics();
+    expect(sm?.member_count).toBe(1);
+    expect(sm?.member_ids).toEqual([REF_WIN_A]);
+
+    // Snap to A's intersection window (which fully covers B's span too) and
+    // re-assert: B is STILL excluded (subset-only, not coverage).
+    fireEvent.click(
+      screen.getByRole("button", { name: /Common period \(all in\)/i }),
+    );
+    const after = lastScenarioMetrics();
+    expect(after?.member_count).toBe(1);
+    expect(after?.member_ids).toEqual([REF_WIN_A]);
+  });
+
+  it("dev-invariant: { selected && coverageEligible } === member_ids on a passthrough set (UI group never desyncs from the divisor)", () => {
+    // Both selected, unequal spans, widen so exactly one drops for coverage. The
+    // engine's member_ids is the ground truth; the composer derives the same set
+    // from selected && coverageEligible on the SAME deAliased strategies. On a
+    // passthrough (non-aliased) book they align 1:1 — assert it directly.
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    // member_ids = the coverage-eligible selected set. A covers [01-01,01-12], B
+    // does not → member_ids === [A]. This is exactly { selected && eligible }.
+    expect(lastScenarioMetrics()?.member_ids).toEqual([REF_WIN_A]);
+  });
+
+  it("selected is NOT mutated by a window change — the toggle map is coverage-independent", () => {
+    // Widening past B for coverage must not flip B's `selected` (manual axis). The
+    // engine state arg carries `selected`; assert B stays selected=true across the
+    // widen (only coverageEligible, an ephemeral derivation, changes).
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    const composedArg = computeScenarioStateArgs
+      .filter(
+        (a) =>
+          a.strategyIds.includes(REF_WIN_A) &&
+          a.strategyIds.includes(REF_WIN_B),
+      )
+      .at(-1);
+    expect(composedArg).toBeDefined();
+    // B is coverage-excluded from the blend but STILL selected (its span is not a
+    // member of the widened window, yet `selected[B]` is untouched).
+    expect(
+      (composedArg!.state.selected as Record<string, boolean>)[REF_WIN_B],
+    ).toBe(true);
+  });
+});
+
+// ===========================================================================
+// Phase 57 Plan 03 Task 2 — auto-excluded group + inline reason + animation
+// (POLISH-02)
+//
+// A coverage-dropped row (selected && !coverageEligible) renders in a distinct
+// "Auto-excluded (outside window)" group with a minimal honest inline reason,
+// animates (fade+slide) into place respecting prefers-reduced-motion, and stays
+// separate from manual-off. The group is absent when nothing is dropped.
+// ===========================================================================
+describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  it("auto-excluded: a coverage-dropped strategy renders in the group with an inline reason", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Widen past B's last day → B is coverage-auto-excluded.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+
+    // The group renders with an accessible label naming it.
+    const group = screen.getByTestId("scenario-auto-excluded-group");
+    expect(group).toBeInTheDocument();
+    expect(
+      within(group).getByText(/Auto-excluded \(outside window\)/i),
+    ).toBeInTheDocument();
+
+    // B's row is inside it, with a minimal honest reason (real text).
+    const row = within(group).getByTestId(`auto-excluded-row-${REF_WIN_B}`);
+    expect(row).toBeInTheDocument();
+    const reason = within(row).getByTestId("auto-excluded-reason");
+    // B ends 2026-01-06 (< window end 2026-01-12) → "ends Jan 2026 — outside window".
+    expect(reason).toHaveTextContent(/outside window/i);
+    expect(reason).toHaveTextContent(/ends Jan 2026/i);
+    // Real text, not color-only.
+    expect(reason.textContent?.trim().length ?? 0).toBeGreaterThan(0);
+  });
+
+  it("auto-excluded: a ragged-head strategy (starts after the window start) reads 'starts {Mon}'", () => {
+    // Distinct from the "ends {Mon}" tail branch above: this exercises the OTHER
+    // coverageDropReason branch (span.first > window.start). A: full 01-01…01-12.
+    // LATE: starts 01-03. A window opening on 01-01 covers A but NOT LATE (its
+    // first day 01-03 falls after winStart) → LATE is coverage-excluded and its
+    // row must read "starts Jan 2026 — outside window", not the tail phrasing.
+    const REF_WIN_LATE = "strat-window-late";
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES), // 01-01 … 01-12
+        mkWinStrat(REF_WIN_LATE, WIN_DATES.slice(2)), // 01-03 … 01-12 (ragged head)
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_LATE]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_LATE]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Open the window on 01-01 (before LATE's first day) through 01-12.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    // A is the sole member; LATE is auto-excluded for STARTING after winStart.
+    expect(lastScenarioMetrics()?.member_ids).toEqual([REF_WIN_A]);
+    const row = screen.getByTestId(`auto-excluded-row-${REF_WIN_LATE}`);
+    const reason = within(row).getByTestId("auto-excluded-reason");
+    expect(reason).toHaveTextContent(/starts Jan 2026/i);
+    expect(reason).toHaveTextContent(/outside window/i);
+  });
+
+  it("auto-excluded: the animated row uses duration-300 + ease-out + motion-reduce:transition-none on every transition-carrying element", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    const row = screen.getByTestId(`auto-excluded-row-${REF_WIN_B}`);
+    const cls = row.className;
+    // DESIGN.md Motion: medium 250ms → Tailwind duration-300 (duration-250 is not
+    // a valid v4 token and silently drops).
+    expect(cls).toContain("duration-300");
+    expect(cls).not.toContain("duration-250");
+    expect(cls).toContain("ease-out");
+    // Pitfall 5 — reduced-motion honoured on EVERY element carrying a transition.
+    expect(cls).toContain("motion-reduce:transition-none");
+    // No transition-* utility may exist without the reduced-motion guard.
+    const transitionCarriers = Array.from(
+      row.querySelectorAll<HTMLElement>('[class*="transition"]'),
+    ).concat(cls.includes("transition") ? [row] : []);
+    for (const el of transitionCarriers) {
+      expect(el.className).toContain("motion-reduce:transition-none");
+    }
+  });
+
+  it("auto-excluded: the group is ABSENT when no strategy is coverage-dropped", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Default intersection window → both members, nothing dropped.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+    expect(
+      screen.queryByTestId("scenario-auto-excluded-group"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("auto-excluded: manual-off rows are NOT in the auto-excluded group (the two states stay distinct)", () => {
+    // A selected + short-span; B UNSELECTED (manual-off) + full-span. Narrow to
+    // A's span so B WOULD be coverage-eligible — but B is manual-off, so it must
+    // NOT appear in the coverage-auto-excluded group (and there is nothing
+    // coverage-dropped, so the group is absent entirely).
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 6)), // selected, 01-01…01-06
+        mkWinStrat(REF_WIN_B, WIN_DATES), // UNSELECTED, 01-01…01-12
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: false },
+        weights: { [REF_WIN_A]: 1, [REF_WIN_B]: 0 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The manual-off B is never in the auto-excluded group.
+    expect(
+      screen.queryByTestId(`auto-excluded-row-${REF_WIN_B}`),
+    ).not.toBeInTheDocument();
+    // Nothing is coverage-dropped → group absent.
+    expect(
+      screen.queryByTestId("scenario-auto-excluded-group"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("auto-excluded: the group uses DESIGN.md warning tokens (no raw hex / px)", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    const group = screen.getByTestId("scenario-auto-excluded-group");
+    const cls = group.className;
+    // DESIGN.md warning-token utility classes (bg / border / text), no raw hex.
+    expect(cls).toMatch(/warning/);
+    expect(cls).not.toMatch(/#[0-9a-fA-F]{6}/);
+    expect(cls).not.toMatch(/\[\d+px\]/);
+  });
+});
+
+// ===========================================================================
+// Phase 57 Plan 03 Task 3 — empty-intersection warning banner + deselect
+// (WINDOW-06)
+//
+// When the SELECTED set shares no common window (defaultWindowFor === null), an
+// inline warning banner names the outlier(s) via outlierIdsFor and offers a
+// one-click "Deselect {name}" that removes the outlier from the subset —
+// restoring a non-null intersection (guided fix, not a dead-end). Absent when
+// the set has a common window.
+// ===========================================================================
+describe("ScenarioComposer — Phase 57 Plan 03 empty-intersection banner (WINDOW-06)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  // Two DISJOINT-span HOLDINGS keyed on the REAL holding scopeRefs (REF_BTC /
+  // REF_ETH) so the deselect handler's `scenario.toggleHolding(scopeRef)` path is
+  // exercised faithfully — the draft (seeded by defaultDraftFromHoldings) carries
+  // these refs as toggle=true, so toggling flips them genuinely to false. ETH is
+  // the outlier (latest start: 01-09…01-12 pushes the overlap empty).
+  const BTC_EARLY = WIN_DATES.slice(0, 4); // 01-01 … 01-04
+  const ETH_LATE = WIN_DATES.slice(8, 12); // 01-09 … 01-12
+  /** Two DISJOINT-span holdings → empty intersection → outlier = REF_ETH. */
+  function mountDisjointBook(): void {
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_BTC, BTC_EARLY),
+        mkWinStrat(REF_ETH, ETH_LATE),
+      ],
+      state: {
+        selected: { [REF_BTC]: true, [REF_ETH]: true },
+        weights: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
+        startDates: {},
+      },
+    });
+  }
+
+  it("WINDOW-06: an empty-intersection selected set renders a warning banner naming the outlier + a Deselect button", () => {
+    mountDisjointBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const banner = screen.getByTestId("scenario-empty-intersection-banner");
+    expect(banner).toBeInTheDocument();
+    // role/aria for a NON-blocking guided fix: role=status + aria-live=polite per
+    // DESIGN-05 (role=alert is reserved for blocking errors; this banner is an
+    // explicitly non-blocking, recoverable guided fix, so it announces politely).
+    expect(banner).toHaveAttribute("role", "status");
+    expect(banner).toHaveAttribute("aria-live", "polite");
+    // The outlier is named (ETH is the latest-start holding breaking the overlap).
+    expect(
+      within(banner).getAllByText(new RegExp(REF_ETH)).length,
+    ).toBeGreaterThan(0);
+    // A "Deselect {name}" button with an accessible name naming the strategy.
+    expect(
+      within(banner).getByRole("button", {
+        name: new RegExp(`Deselect ${REF_ETH}`, "i"),
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("WINDOW-06: clicking Deselect removes the outlier, the banner disappears, and a valid intersection is restored", () => {
+    mountDisjointBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        // Own allocatorId: this test MUTATES (Deselect → toggleHolding) and the
+        // draft hook persists on a 150ms debounce (H-0125) that is not cancelled
+        // on unmount. Under slower CI the leaked write lands after teardown and
+        // pollutes a later test that shares the key (ETH-deselected draft →
+        // BTC-only → no empty intersection → banner absent). A per-test key
+        // isolates the write. (Deterministic in CI, green locally — this branch's
+        // first CI run surfaced it.)
+        allocatorId={`${ALLOCATOR_A}-w06-deselect`}
+        allocatorMandate={null}
+      />,
+    );
+    const banner = screen.getByTestId("scenario-empty-intersection-banner");
+    fireEvent.click(
+      within(banner).getByRole("button", {
+        name: new RegExp(`Deselect ${REF_ETH}`, "i"),
+      }),
+    );
+    // Banner gone (only BTC remains selected → single-span intersection non-null).
+    expect(
+      screen.queryByTestId("scenario-empty-intersection-banner"),
+    ).not.toBeInTheDocument();
+    // A common window exists again → the window control is present and the engine
+    // blends the remaining member (BTC) over a valid window.
+    expect(
+      screen.getByTestId("scenario-coverage-window"),
+    ).toBeInTheDocument();
+    expect(lastScenarioMetrics()?.member_ids).toEqual([REF_BTC]);
+  });
+
+  it("WINDOW-06: the banner is ABSENT when the selected set has a common window", () => {
+    mountUnequalSpanBook(); // A + B overlap on 01-01…01-06
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.queryByTestId("scenario-empty-intersection-banner"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("WINDOW-06: the banner uses DESIGN.md warning tokens (no raw hex / px)", () => {
+    mountDisjointBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        // Own allocatorId so a debounced draft write leaked from the mutating
+        // Deselect test above (150ms, not cancelled on unmount) can never
+        // hydrate here on slower CI and turn this disjoint book BTC-only.
+        allocatorId={`${ALLOCATOR_A}-w06-tokens`}
+        allocatorMandate={null}
+      />,
+    );
+    const cls = screen.getByTestId("scenario-empty-intersection-banner")
+      .className;
+    expect(cls).toMatch(/warning/);
+    expect(cls).not.toMatch(/#[0-9a-fA-F]{6}/);
+    expect(cls).not.toMatch(/\[\d+px\]/);
   });
 });
