@@ -1733,6 +1733,9 @@ export function ScenarioComposer({
         eligible[s.id] = true; // union path — no coverage drops
         continue;
       }
+      // The SAME predicate the engine applies (scenario.ts:263-268): a null span
+      // (no data) is never a member; otherwise INCLUSIVE-CLOSED containment via
+      // covers(coverageSpanOf(...), window) — no inline interval math (Rule 2).
       const span = coverageSpanOf(s.daily_returns);
       eligible[s.id] = span !== null && covers(span, coverageWindow);
     }
