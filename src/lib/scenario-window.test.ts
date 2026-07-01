@@ -4,6 +4,7 @@ import {
   intersectionOf,
   defaultWindowFor,
   covers,
+  unionOf,
 } from "./scenario-window";
 import type { DailyPoint } from "./portfolio-math-utils";
 
@@ -152,5 +153,63 @@ describe("intersectionOf / defaultWindowFor (latest-start … earliest-end)", ()
       start: "2023-06-15",
       end: "2023-06-15",
     });
+  });
+});
+
+describe("unionOf (earliest-start … latest-end — the 'Full range' preset target)", () => {
+  /**
+   * WHY (Rule 9): `unionOf` is the WINDOW-05 "Full range (some drop out)" preset
+   * target. It is the MIRROR of `intersectionOf` — the widest bounds `[min(firsts),
+   * max(lasts)]` — and, crucially, it NEVER returns null for a non-empty set: the
+   * union of even fully-disjoint intervals is a single spanning window. Members that
+   * fall outside that window are dropped DOWNSTREAM by `covers`, not by this helper.
+   * If a `<` vs `>` or a JS-Date compare crept in here, the preset would snap to the
+   * wrong span and either over- or under-widen the blend window.
+   */
+
+  it("returns null for an empty span set (mirrors intersectionOf empty case)", () => {
+    expect(unionOf([])).toBeNull();
+  });
+
+  it("returns the span itself (as a window) for a single-member set", () => {
+    expect(unionOf([{ first: "2023-01-01", last: "2023-06-30" }])).toEqual({
+      start: "2023-01-01",
+      end: "2023-06-30",
+    });
+  });
+
+  it("widens two overlapping spans to [min(firsts), max(lasts)]", () => {
+    const spans = [
+      { first: "2023-01-01", last: "2023-06-30" },
+      { first: "2023-03-01", last: "2023-12-31" },
+    ];
+    expect(unionOf(spans)).toEqual({
+      start: "2023-01-01",
+      end: "2023-12-31",
+    });
+  });
+
+  it("returns a single spanning window for FULLY-DISJOINT spans (never null for a non-empty set)", () => {
+    // The union of disjoint intervals is [earliest first, latest last] — the gap
+    // between them is irrelevant to the widest bounds. `covers` drops the members
+    // that do not span this window later; unionOf itself never returns null here.
+    const spans = [
+      { first: "2023-01-01", last: "2023-06-30" },
+      { first: "2024-06-01", last: "2024-12-31" },
+    ];
+    expect(unionOf(spans)).toEqual({
+      start: "2023-01-01",
+      end: "2024-12-31",
+    });
+  });
+
+  it("does NOT mutate its input array or its span objects", () => {
+    const spans = [
+      { first: "2023-03-01", last: "2023-09-01" },
+      { first: "2023-01-01", last: "2023-12-31" },
+    ];
+    const snapshot = JSON.parse(JSON.stringify(spans));
+    unionOf(spans);
+    expect(spans).toEqual(snapshot);
   });
 });
