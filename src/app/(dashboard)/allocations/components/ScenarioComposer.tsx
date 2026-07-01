@@ -1643,6 +1643,15 @@ export function ScenarioComposer({
   // re-seeding: after the first non-empty seed (or any user set), the effect is
   // inert. An empty intersection (`defaultWindowFor` === null) seeds nothing and
   // leaves the engine on the union-when-absent path (WINDOW-06 banner is Plan 03).
+  //
+  // STICKY BY DESIGN (adversarial review F1): because the window is NOT re-snapped
+  // on selection change, deselecting a strategy leaves the user's window intact.
+  // The surviving members simply re-blend over it (correct numbers), and any that
+  // no longer cover it move to the auto-excluded group with a reason; deselecting
+  // every covering member yields the honest zero-member empty state, not a wrong
+  // curve. Silently re-clamping to the new selection would override the window the
+  // user explicitly chose — a worse surprise — so recovery stays a one-click
+  // preset ("Common period" / "Full range") rather than an implicit move.
   useEffect(() => {
     if (windowTouchedRef.current) return;
     const def = defaultWindowFor(selectedSpans);

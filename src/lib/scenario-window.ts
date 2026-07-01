@@ -159,8 +159,9 @@ export function covers(span: CoverageSpan, window: CoverageWindow): boolean {
  * always intersects itself) — proven in the tests, including the 3+ and 4
  * mutually-disjoint cells that the earlier two-candidate implementation silently
  * violated. The intersection math is NOT re-derived here; it delegates to
- * `intersectionOf` and `gapOf`. Pure: the input map is never mutated,
- * lexicographic string compare only, no JS Date.
+ * `intersectionOf`, with an inline `boundsOf` closure comparing the candidate
+ * remainders' [start, end] pairs (lexicographic strings can't be subtracted).
+ * Pure: the input map is never mutated, string compare only, no JS Date.
  */
 export function outlierIdsFor(
   spansById: Record<string, CoverageSpan>,
