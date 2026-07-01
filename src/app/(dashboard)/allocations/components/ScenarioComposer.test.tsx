@@ -5961,6 +5961,44 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     expect(reason.textContent?.trim().length ?? 0).toBeGreaterThan(0);
   });
 
+  it("auto-excluded: a ragged-head strategy (starts after the window start) reads 'starts {Mon}'", () => {
+    // Distinct from the "ends {Mon}" tail branch above: this exercises the OTHER
+    // coverageDropReason branch (span.first > window.start). A: full 01-01…01-12.
+    // LATE: starts 01-03. A window opening on 01-01 covers A but NOT LATE (its
+    // first day 01-03 falls after winStart) → LATE is coverage-excluded and its
+    // row must read "starts Jan 2026 — outside window", not the tail phrasing.
+    const REF_WIN_LATE = "strat-window-late";
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES), // 01-01 … 01-12
+        mkWinStrat(REF_WIN_LATE, WIN_DATES.slice(2)), // 01-03 … 01-12 (ragged head)
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_LATE]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_LATE]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Open the window on 01-01 (before LATE's first day) through 01-12.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    // A is the sole member; LATE is auto-excluded for STARTING after winStart.
+    expect(lastScenarioMetrics()?.member_ids).toEqual([REF_WIN_A]);
+    const row = screen.getByTestId(`auto-excluded-row-${REF_WIN_LATE}`);
+    const reason = within(row).getByTestId("auto-excluded-reason");
+    expect(reason).toHaveTextContent(/starts Jan 2026/i);
+    expect(reason).toHaveTextContent(/outside window/i);
+  });
+
   it("auto-excluded: the animated row uses duration-300 + ease-out + motion-reduce:transition-none on every transition-carrying element", () => {
     mountUnequalSpanBook();
     render(

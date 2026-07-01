@@ -266,6 +266,61 @@ describe("consistency pin — rebuilt ρ matches the engine correlation_matrix",
       }
     }
   });
+
+  // v1.5 COVERAGE-WINDOW parity (CORR-window). A windowed blend must build
+  // DR/ENB/PCR/cluster-order on the SAME member set + axis the engine used for
+  // its correlation_matrix. A window-excluded (ragged/ended) strategy is dropped
+  // from BOTH the engine's member_ids AND alignConstituentReturns — else it
+  // re-dilutes the diversification panel (the exact tail-dilution v1.5 removes).
+  // REGRESSION: before alignConstituentReturns honored state.window, `ids` here
+  // was [A,B,C,D] (every active strategy) while member_ids was [A,B,C] → RED.
+  it("windowed: aligned ids == engine member_ids AND rebuilt ρ == correlation_matrix to 3dp", () => {
+    // D spans only 2024-01-02..2024-01-11, so it does NOT cover the full window
+    // [2024-01-01, 2024-01-12] (first > winStart) → the engine excludes it.
+    const D_DATES = DATES.slice(1, 11); // 01-02 .. 01-11 (ragged head + tail)
+    const D: StrategyForBuilder = {
+      id: "D",
+      name: "D",
+      codename: null,
+      disclosure_tier: "full",
+      strategy_types: [],
+      markets: [],
+      start_date: null,
+      daily_returns: D_DATES.map((date, i) => ({ date, value: C_VALUES[i + 1] })),
+      cagr: null,
+      sharpe: null,
+      volatility: null,
+      max_drawdown: null,
+    };
+    const strats4 = [...STRATS_3, D];
+    const windowed: ScenarioState = {
+      selected: { A: true, B: true, C: true, D: true },
+      weights: { A: 1, B: 1, C: 1, D: 1 },
+      startDates: {},
+      window: { start: DATES[0], end: DATES[N_OBS - 1] }, // [01-01, 01-12]
+    };
+    const dateMapCache = buildDateMapCache(strats4);
+    const metrics = computeScenario(strats4, windowed, dateMapCache);
+    expect(metrics.correlation_matrix).not.toBeNull();
+    expect(metrics.member_ids).toEqual(["A", "B", "C"]); // engine drops D
+
+    const { ids, returnsById } = alignConstituentReturns(strats4, windowed);
+    expect(ids).toEqual(metrics.member_ids); // the fix: align drops D too
+    const engine = metrics.correlation_matrix!;
+    const cov = covarianceMatrix(returnsById, ids)!;
+    const vols = constituentVols(returnsById, ids)!;
+
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = 0; j < ids.length; j++) {
+        if (i === j) continue;
+        const sa = vols[ids[i]];
+        const sb = vols[ids[j]];
+        const rhoLib =
+          sa > 0 && sb > 0 ? Number((cov[i][j] / (sa * sb)).toFixed(3)) : 0;
+        expect(rhoLib).toBeCloseTo(engine[ids[i]][ids[j]], 3);
+      }
+    }
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────

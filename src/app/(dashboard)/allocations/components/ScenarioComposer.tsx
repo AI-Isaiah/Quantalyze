@@ -1696,18 +1696,27 @@ export function ScenarioComposer({
   );
   const fullRangeWindow = useMemo(() => unionOf(selectedSpans), [selectedSpans]);
 
-  const scenarioMetrics = useMemo(() => {
-    // ⚠️ HAZARD FIX (RESEARCH Pitfall 1): collapseAliasedHoldingStrategies
-    // reconstructs the ScenarioState and SILENTLY DROPS `state.window`. Setting
-    // the window on projectionState (pre-collapse) would never reach the engine.
-    // Inject it onto deAliased.state POST-collapse, immediately before the call.
-    // Only the scenario-tab composed path attaches a window — own-book callers
-    // stay on the union-when-absent path (coverageWindow === null → no window key).
-    const engineState = coverageWindow
-      ? { ...deAliased.state, window: coverageWindow }
-      : deAliased.state;
-    return computeScenario(deAliased.strategies, engineState, dateMapCache);
-  }, [deAliased, dateMapCache, coverageWindow]);
+  // ⚠️ HAZARD FIX (RESEARCH Pitfall 1): collapseAliasedHoldingStrategies
+  // reconstructs the ScenarioState and SILENTLY DROPS `state.window`. Setting
+  // the window on projectionState (pre-collapse) would never reach the engine.
+  // Inject it onto deAliased.state POST-collapse. This memo is the SINGLE "state
+  // the engine sees": BOTH computeScenario (below) AND alignConstituentReturns
+  // (the diversification panel — CORR-02/05/06) consume it, so the windowed
+  // member set / axis can never desync between the blend metrics and DR/ENB/PCR.
+  // Only the scenario-tab composed path attaches a window — own-book callers
+  // stay on the union-when-absent path (coverageWindow === null → no window key).
+  const engineState = useMemo(
+    () =>
+      coverageWindow
+        ? { ...deAliased.state, window: coverageWindow }
+        : deAliased.state,
+    [deAliased, coverageWindow],
+  );
+
+  const scenarioMetrics = useMemo(
+    () => computeScenario(deAliased.strategies, engineState, dateMapCache),
+    [deAliased, engineState, dateMapCache],
+  );
 
   // Phase 57 Plan 03 (WINDOW-02/03, ADR §"UI state machine") — the pure
   // coverage-eligibility axis. For each SELECTED strategy (the manual subset),
@@ -2036,10 +2045,10 @@ export function ScenarioComposer({
   // zero-sum-weight blend returns a null DR/ENB/PCR and the section renders its
   // honest empty state, never NaN. Keyed on the de-aliased set + the engine output.
   const diversification = useMemo(() => {
-    const aligned = alignConstituentReturns(
-      deAliased.strategies,
-      deAliased.state,
-    );
+    // engineState (NOT the raw deAliased.state) so the constituent set + axis
+    // match the windowed correlation_matrix / n the engine emits — a window-
+    // excluded strategy must not dilute DR/ENB/PCR or the cluster order.
+    const aligned = alignConstituentReturns(deAliased.strategies, engineState);
     // Normalize the active weights to sum→1 (engine renormalizes by the active
     // weight mass; a zero/negative total yields all-zero weights → the lib's PCR
     // guard nulls the result → honest empty).
@@ -2069,7 +2078,7 @@ export function ScenarioComposer({
       correlationMatrix: scenarioMetrics.correlation_matrix,
       n: scenarioMetrics.n,
     });
-  }, [deAliased, scenarioMetrics]);
+  }, [deAliased, engineState, scenarioMetrics]);
 
   // CORR-06 — the cluster-reordered matrix the (UNCHANGED) CorrelationHeatmap
   // receives. The heatmap renders axis/cell order from `Object.keys(matrix)` and
