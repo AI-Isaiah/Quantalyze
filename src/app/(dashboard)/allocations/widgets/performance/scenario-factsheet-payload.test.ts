@@ -3,6 +3,12 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { compute, cumEq, drawdowns } from "@/lib/factsheet/compute";
 import { bootstrapCI } from "@/lib/factsheet/bootstrap";
 import { quantileSummary } from "@/lib/factsheet/quantiles";
+import {
+  computeScenario,
+  buildDateMapCache,
+  type StrategyForBuilder,
+} from "@/lib/scenario";
+import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 import { buildScenarioFactsheetPayload } from "./scenario-factsheet-payload";
 
 // ── Deterministic fixtures (no Math.random) ──────────────────────────
@@ -382,5 +388,212 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
     expect(p.strategyRollingVol.length).toBe(n);
     expect(p.strategyRollingSharpe.length).toBe(n);
     expect(p.strategyRollingSortino.length).toBe(n);
+  });
+});
+
+// ── Phase 56: coverage-window parity (PARITY-01) ──────────────────────
+// The v1.5 engine emits a SHORTER, member-windowed `portfolio_daily_returns`
+// when `state.window` is present (Phase 55). This block proves the factsheet
+// renders THAT identical shorter series — never a stale union series nor a
+// re-derived blend — by running the REAL engine (`computeScenario`) with an
+// explicit `window`, feeding its emitted series to the payload builder, and
+// asserting the payload body === `compute()`/`cumEq()`/`drawdowns()` on the SAME
+// series. This is the Phase 39 union parity contract, extended to the windowed
+// path — the single anchor Phase 60's golden re-bake depends on being green.
+//
+// NOTE (parity_contract_clarification, 56-01-PLAN): we do NOT assert the payload
+// metrics equal `m.volatility`/`m.sharpe`/`m.cagr`. `computeScenario` uses SAMPLE
+// stdev + a 252-trading-day CAGR year; `compute.ts` uses POPULATION stdev + a
+// 365.25-calendar-day year. They differ field-for-field BY DESIGN. The LOCKED
+// invariant is single-source-of-truth of the SERIES: same series → same
+// `compute()` → parity by construction.
+
+// Deterministic consecutive-day UTC fixtures (no Math.random). Anchored in 2024
+// so the axis is reproducible; consecutive calendar days so window bounds are
+// simple date strings.
+const cwYmd = (i: number) =>
+  new Date(Date.UTC(2024, 0, i + 1)).toISOString().slice(0, 10);
+
+/** A minimal StrategyForBuilder: only `id` + `daily_returns` drive the blend;
+ *  the scalar/metadata fields are honest null/[] placeholders. */
+function cwStrategy(id: string, returns: DailyPoint[]): StrategyForBuilder {
+  return {
+    id,
+    name: id,
+    codename: null,
+    disclosure_tier: "public",
+    strategy_types: [],
+    markets: [],
+    start_date: null,
+    daily_returns: returns,
+    cagr: null,
+    sharpe: null,
+    volatility: null,
+    max_drawdown: null,
+  };
+}
+
+// A: 90 days (2024-01-01 … 2024-03-30), full range.  net-positive alternating.
+const CW_A: DailyPoint[] = Array.from({ length: 90 }, (_, i) => ({
+  date: cwYmd(i),
+  value: i % 2 === 0 ? 0.004 : -0.001,
+}));
+// B: 90 days, full range, a different but deterministic pattern.
+const CW_B: DailyPoint[] = Array.from({ length: 90 }, (_, i) => ({
+  date: cwYmd(i),
+  value: i % 3 === 0 ? -0.002 : 0.003,
+}));
+// C: 30 days ONLY (2024-01-01 … 2024-01-30) — ENDS ~1/3 of the way through, so
+// the intersection window ends where C ends. C is the ended member.
+const CW_C: DailyPoint[] = Array.from({ length: 30 }, (_, i) => ({
+  date: cwYmd(i),
+  value: i % 2 === 0 ? 0.002 : 0.001,
+}));
+
+const CW_STRATS = [cwStrategy("A", CW_A), cwStrategy("B", CW_B), cwStrategy("C", CW_C)];
+const CW_SELECTED = { A: true, B: true, C: true };
+const CW_WEIGHTS = { A: 1, B: 1, C: 1 };
+const CW_CACHE = buildDateMapCache(CW_STRATS);
+
+// The default (intersection) window = [max(firsts), min(lasts)] = [2024-01-01,
+// 2024-01-30] (C's early end is the earliest last). All three strategies COVER
+// this window (each last >= 2024-01-30), so member_count === 3 here — but the
+// AXIS is truncated to C's span, which is strictly shorter than the union.
+const CW_SPANS = CW_STRATS
+  .map((s) => coverageSpanOf(s.daily_returns))
+  .filter((span): span is NonNullable<typeof span> => span !== null);
+const CW_WINDOW = defaultWindowFor(CW_SPANS)!;
+
+describe("buildScenarioFactsheetPayload — coverage-window parity (Phase 56, PARITY-01)", () => {
+  // Windowed run (explicit intersection window) — the v1.5 present-window path.
+  const mWin = computeScenario(
+    CW_STRATS,
+    { selected: CW_SELECTED, weights: CW_WEIGHTS, startDates: {}, window: CW_WINDOW },
+    CW_CACHE,
+  );
+  // Union run (no window) — the legacy path, for the non-vacuity comparison.
+  const mUnion = computeScenario(
+    CW_STRATS,
+    { selected: CW_SELECTED, weights: CW_WEIGHTS, startDates: {} },
+    CW_CACHE,
+  );
+
+  const winSeries = mWin.portfolio_daily_returns ?? [];
+  const winRets = winSeries.map((p) => p.value);
+  const winDates = winSeries.map((p) => p.date);
+  const p = buildScenarioFactsheetPayload({ portfolioDaily: mWin.portfolio_daily_returns });
+
+  // ── Test A: series identity + window truncation (non-vacuity) ──────────────
+  // WHY THIS MATTERS (Rule 9): the factsheet must render the SAME dates/returns
+  // the engine emits on the windowed path. If a future edit fed the chart the
+  // stale UNION series (or a downsampled equity_curve), payload.dates would no
+  // longer equal the engine's windowed dates — and would NOT be strictly shorter
+  // than the union — and this test fails LOUD.
+  it("payload.dates/returns === the engine's emitted WINDOWED series, bounded by the window", () => {
+    // The window is the intersection, ending where the short strategy C ends.
+    expect(CW_WINDOW).toEqual({ start: "2024-01-01", end: "2024-01-30" });
+    // Precondition: the engine actually emitted a real (non-degenerate) series.
+    expect(winSeries.length).toBeGreaterThanOrEqual(10);
+
+    // Series identity: the factsheet consumes the emitted series verbatim.
+    expect(p.dates).toEqual(winDates);
+    expect(p.strategyReturns).toEqual(winRets);
+
+    // Bounded by the closed window on both ends.
+    expect(p.dates[0] >= CW_WINDOW.start).toBe(true);
+    expect(p.dates.at(-1)! <= CW_WINDOW.end).toBe(true);
+
+    // Non-vacuity: the windowed series is STRICTLY SHORTER than the union series
+    // (the window truncated the tail past C's end). A stale-union render fails.
+    const unionLen = (mUnion.portfolio_daily_returns ?? []).length;
+    expect(winSeries.length).toBeLessThan(unionLen);
+    expect(unionLen).toBe(90); // union spans A/B's full 90-day range
+    expect(winSeries.length).toBe(30); // window is C's 30-day span
+  });
+
+  // ── Test B: metrics parity BY CONSTRUCTION on the windowed series ──────────
+  // WHY THIS MATTERS (Rule 9): parity-by-construction means the factsheet body
+  // equals the SAME compute()/cumEq()/drawdowns() the real strategy factsheet
+  // runs — applied to the engine-emitted windowed series. A factsheet that
+  // re-derived the blend (its own metrics) would diverge from compute() on this
+  // identical series and fail these field-by-field pins.
+  it("payload body === compute()/cumEq()/drawdowns() on the engine's windowed series", () => {
+    const ref = compute(winRets, winDates);
+    // Every numeric scalar of compute() (excl. eq/dd arrays + the yearly map)
+    // round-trips to 6 decimals — the SAME loop shape as the Phase 39 union pin,
+    // on the windowed path.
+    for (const k of Object.keys(ref) as (keyof typeof ref)[]) {
+      if (k === "eq" || k === "dd" || k === "yearly") continue;
+      const refVal = ref[k];
+      if (typeof refVal === "number") {
+        expect(
+          p.strategyMetrics[k as keyof typeof p.strategyMetrics] as number,
+          `strategyMetrics.${String(k)} must equal compute().${String(k)} on the windowed series`,
+        ).toBeCloseTo(refVal, 6);
+      }
+    }
+    expect(p.strategyMetrics.yearly).toEqual(ref.yearly);
+
+    // WR-01 single-axis: equity/drawdown are cumEq(rets)/drawdowns(cumEq(rets))
+    // on the SAME windowed series, to fp precision.
+    const eqRef = cumEq(winRets);
+    const ddRef = drawdowns(eqRef);
+    expect(p.strategyEquity.length).toBe(winRets.length);
+    expect(p.strategyDrawdowns.length).toBe(winRets.length);
+    for (let i = 0; i < winRets.length; i++) {
+      expect(p.strategyEquity[i]).toBeCloseTo(eqRef[i], 12);
+      expect(p.strategyDrawdowns[i]).toBeCloseTo(ddRef[i], 12);
+    }
+    // Non-vacuity: a real (non-zeroed) metric body was rendered.
+    expect(p.strategyMetrics.n).toBe(30);
+    expect(p.strategyMetrics.ann_vol).toBeGreaterThan(0);
+  });
+
+  // ── Test C: divisor honesty + no-invented-data ──────────────────────────────
+  // WHY THIS MATTERS (Rule 9): the whole point of v1.5 is that an ENDED strategy
+  // stops being a blend member (no tail-dilution), and that a window covering NO
+  // strategy yields an honest EMPTY state rather than fabricated zeros. If the
+  // engine kept the ended strategy in the divisor, or a zero-member window emitted
+  // a plausible flat-0% curve, these assertions fail loud.
+  it("member_count excludes an ended strategy; a zero-member window collapses to safe-empty", () => {
+    // A window that extends PAST C's end (the full A/B span) — A and B cover it,
+    // C does NOT (its last 2024-01-30 < 2024-03-30). Divisor drops C.
+    const pastCWindow = { start: "2024-01-01", end: "2024-03-30" };
+    const mNoC = computeScenario(
+      CW_STRATS,
+      { selected: CW_SELECTED, weights: CW_WEIGHTS, startDates: {}, window: pastCWindow },
+      CW_CACHE,
+    );
+    expect(mNoC.member_count).toBe(2); // A + B; the ended C is excluded
+    expect(mNoC.member_ids).toEqual(["A", "B"]);
+    // And the factsheet on that windowed series stays parity-by-construction.
+    const pNoC = buildScenarioFactsheetPayload({
+      portfolioDaily: mNoC.portfolio_daily_returns,
+    });
+    expect(pNoC.dates).toEqual((mNoC.portfolio_daily_returns ?? []).map((d) => d.date));
+
+    // The default intersection window DOES include C (all three cover it), so the
+    // divisor there is 3 — the ended strategy dilutes ONLY while it is co-live.
+    expect(mWin.member_count).toBe(3);
+
+    // Zero-member window: widened PAST everyone (June 2024, after A/B's 2024-03-30
+    // end). No strategy covers it → member_count 0, engine emits [] (no fabricated
+    // zeros), and the payload collapses to safe-empty without throwing.
+    const emptyWindow = { start: "2024-06-01", end: "2024-06-30" };
+    const mEmpty = computeScenario(
+      CW_STRATS,
+      { selected: CW_SELECTED, weights: CW_WEIGHTS, startDates: {}, window: emptyWindow },
+      CW_CACHE,
+    );
+    expect(mEmpty.member_count).toBe(0);
+    expect(mEmpty.portfolio_daily_returns).toEqual([]);
+    expect(() =>
+      buildScenarioFactsheetPayload({ portfolioDaily: mEmpty.portfolio_daily_returns ?? [] }),
+    ).not.toThrow();
+    const pEmpty = buildScenarioFactsheetPayload({
+      portfolioDaily: mEmpty.portfolio_daily_returns ?? [],
+    });
+    expect(pEmpty.dates).toEqual([]);
+    expect(pEmpty.strategyEquity).toEqual([]);
   });
 });
