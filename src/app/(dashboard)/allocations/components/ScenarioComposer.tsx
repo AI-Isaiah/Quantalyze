@@ -80,12 +80,18 @@ import {
   coverageSpanOf,
   covers,
   defaultWindowFor,
+  intersectionOf,
   outlierIdsFor,
   unionOf,
   type CoverageSpan,
   type CoverageWindow,
 } from "@/lib/scenario-window";
-import { localMidnight, localMidnightToday, parseIsoDay } from "@/lib/dateday";
+import {
+  diffDays,
+  localMidnight,
+  localMidnightToday,
+  parseIsoDay,
+} from "@/lib/dateday";
 import type {
   OwnBookDeltaPayload,
   PeerPercentilePayload,
@@ -447,6 +453,76 @@ function coverageDropReason(
     return `starts ${formatIsoMonth(span.first)} — outside window`;
   }
   return "outside window";
+}
+
+/** The include-cost of narrowing the window to re-admit an auto-excluded row. */
+interface IncludeCost {
+  /** The exact window to apply so the strategy becomes a member. */
+  target: CoverageWindow;
+  /** The single moved window bound (what the label discloses as `{date}`). */
+  date: string;
+  /** Whole-month cost of the narrow vs the current window (the `−{N} mo`). */
+  months: number;
+}
+
+/**
+ * Phase 58 (COVERAGE-04) — the cost of INCLUDING a coverage-auto-excluded
+ * strategy: narrow the current window to the intersection that re-admits it, and
+ * disclose that cost (the moved bound + whole-month delta) BEFORE applying.
+ *
+ * The target window is `intersectionOf([currentWindow-as-span, strategySpan])` —
+ * the bound math is DELEGATED to scenario-window.ts (Rule 2: never hand-roll
+ * min/max interval math over date strings). The label's `{date}` is the single
+ * bound that moved (whichever of start/end differs from the current window; if
+ * both move — a strategy ragged on BOTH ends — the end bound is shown as the
+ * headline cost, and `{months}` is the net whole-month delta across the moved
+ * span). `{months}` = `diffDays(oldBound, newBound)` folded to whole months
+ * (round-to-nearest; floored at 1 when the delta is > 0 but < 1 month — A3).
+ *
+ * Returns `null` when the strategy has no data (null span) or the intersection is
+ * empty (`intersectionOf === null`) — there is then no window that re-admits it,
+ * so no include button is offered. Never mutates its inputs; string compare only.
+ */
+function includeCostFor(
+  span: CoverageSpan | null,
+  window: CoverageWindow,
+): IncludeCost | null {
+  if (!span) return null;
+  const target = intersectionOf([
+    { first: window.start, last: window.end },
+    span,
+  ]);
+  if (!target) return null;
+
+  const startMoved = target.start !== window.start;
+  const endMoved = target.end !== window.end;
+  // No bound moved → the strategy already covers the window (not auto-excluded);
+  // there is nothing to include.
+  if (!startMoved && !endMoved) return null;
+
+  // The headline moved bound: prefer the end bound when both moved (an ended
+  // strategy is the common case), else whichever single bound actually moved.
+  const date = endMoved ? target.end : target.start;
+
+  // Net whole-month cost across the moved span. The narrowed window is
+  // [target.start, target.end] ⊆ [window.start, window.end]; the total shrink is
+  // the head shift + the tail shift, summed as calendar days then folded to
+  // whole months. Timezone-free via parseIsoDay + diffDays (never new Date(iso)).
+  const oldStart = parseIsoDay(window.start);
+  const oldEnd = parseIsoDay(window.end);
+  const newStart = parseIsoDay(target.start);
+  const newEnd = parseIsoDay(target.end);
+  let shrinkDays = 0;
+  if (oldStart && newStart) shrinkDays += diffDays(oldStart, newStart); // head pulled forward (≥ 0)
+  if (oldEnd && newEnd) shrinkDays += diffDays(newEnd, oldEnd); // tail pulled back (≥ 0)
+
+  // Fold days → whole months: round to nearest, but floor at 1 when the shrink is
+  // > 0 but rounds to 0 (a sub-month narrow still costs "1 mo" honestly — A3).
+  const AVG_DAYS_PER_MONTH = 30.437;
+  let months = Math.round(shrinkDays / AVG_DAYS_PER_MONTH);
+  if (months === 0 && shrinkDays > 0) months = 1;
+
+  return { target, date, months };
 }
 
 
@@ -1787,21 +1863,37 @@ export function ScenarioComposer({
   // carries a minimal honest reason derived from its span vs the window. Empty
   // when nothing is coverage-dropped (the group is then absent, not an empty
   // shell) and on the union path (coverageWindow === null → no drops).
+  //
+  // Phase 58 (COVERAGE-04) — each row also carries its `includeCost`: the window
+  // to apply (`intersectionOf([currentWindow, span])`, delegated to
+  // scenario-window.ts) plus the disclosed cost (moved bound date + whole-month
+  // delta) the include text-button shows in its label BEFORE applying. Null when
+  // there is no window that re-admits the strategy (no data / empty intersection)
+  // — that row then offers no include button.
   const autoExcluded = useMemo<
-    Array<{ id: string; name: string; reason: string }>
+    Array<{
+      id: string;
+      name: string;
+      reason: string;
+      includeCost: IncludeCost | null;
+    }>
   >(() => {
     if (!coverageWindow) return [];
-    const out: Array<{ id: string; name: string; reason: string }> = [];
+    const out: Array<{
+      id: string;
+      name: string;
+      reason: string;
+      includeCost: IncludeCost | null;
+    }> = [];
     for (const s of deAliased.strategies) {
       if (!deAliased.state.selected[s.id]) continue; // manual-off is NOT here
       if (coverageEligible[s.id]) continue; // in-blend
+      const span = selectedSpanById.get(s.id) ?? null;
       out.push({
         id: s.id,
         name: s.name,
-        reason: coverageDropReason(
-          selectedSpanById.get(s.id) ?? null,
-          coverageWindow,
-        ),
+        reason: coverageDropReason(span, coverageWindow),
+        includeCost: includeCostFor(span, coverageWindow),
       });
     }
     return out;
@@ -3557,6 +3649,18 @@ export function ScenarioComposer({
                 id={row.id}
                 name={row.name}
                 reason={row.reason}
+                includeCost={row.includeCost}
+                // COVERAGE-04 — one reversible click narrows the window to the
+                // intersection that re-admits this strategy. onInclude MUST call
+                // ONLY applyWindow — it never touches `selected`, so a
+                // manually-off strategy is never reselected (T-58-05). The
+                // window-move is reversible via the Common-period / Full-range
+                // presets (no bespoke undo needed).
+                onInclude={
+                  row.includeCost
+                    ? () => applyWindow(row.includeCost!.target)
+                    : undefined
+                }
               />
             ))}
           </ul>
@@ -3691,15 +3795,29 @@ export function ScenarioComposer({
  * honours prefers-reduced-motion on the SINGLE transition-carrying element
  * (Pitfall 5 — no residual transition elsewhere). The reason is real text
  * (never color-only), read out with the strategy name for the group's a11y.
+ *
+ * Phase 58 (COVERAGE-02, COVERAGE-04) — additively gains (Rule 3, surgical):
+ *   - the amber `CoverageStateChip state="auto-excluded"` ("Outside window") next
+ *     to the existing reason text — the third visually-distinct state; and
+ *   - a one-click "Include → shortens window to {date} (−{N} mo)" accent
+ *     text-button that DISCLOSES the cost in its label before applying and, on
+ *     click, narrows the window via the composer's `applyWindow` path (`onInclude`)
+ *     so the strategy becomes a member. The button is omitted when there is no
+ *     window that re-admits the row (`includeCost === null`). Never reselects a
+ *     manually-off strategy — `onInclude` only moves the window (T-58-05).
  */
 function AutoExcludedRow({
   id,
   name,
   reason,
+  includeCost,
+  onInclude,
 }: {
   id: string;
   name: string;
   reason: string;
+  includeCost: IncludeCost | null;
+  onInclude?: () => void;
 }) {
   const [entered, setEntered] = useState(false);
   useEffect(() => {
@@ -3713,17 +3831,41 @@ function AutoExcludedRow({
   return (
     <li
       data-testid={`auto-excluded-row-${id}`}
-      className={`flex items-center justify-between gap-3 rounded-md border border-warning-border bg-surface p-3 transition-all duration-300 ease-out motion-reduce:transition-none ${
+      className={`flex items-start justify-between gap-3 rounded-md border border-warning-border bg-surface p-3 transition-all duration-300 ease-out motion-reduce:transition-none ${
         entered ? "translate-y-0 opacity-100" : "translate-y-1 opacity-0"
       }`}
     >
-      <span className="truncate text-sm text-text-primary">{name}</span>
-      <span
-        data-testid="auto-excluded-reason"
-        className="shrink-0 text-fixed-11 font-medium text-warning"
-      >
-        {reason}
-      </span>
+      <span className="mt-0.5 truncate text-sm text-text-primary">{name}</span>
+      <div className="flex shrink-0 flex-col items-end gap-1">
+        <div className="flex items-center gap-2">
+          {/* COVERAGE-02 — the amber "Outside window" chip (the third state),
+              alongside the existing honest reason text (never color-only). */}
+          <CoverageStateChip state="auto-excluded" />
+          <span
+            data-testid="auto-excluded-reason"
+            className="text-fixed-11 font-medium text-warning"
+          >
+            {reason}
+          </span>
+        </div>
+        {includeCost && onInclude && (
+          // COVERAGE-04 — the cost-disclosing include text-button. The `{date}`
+          // + `−{N} mo` render in font-mono tabular-nums (DESIGN.md numbers). No
+          // modal — the cost is in the label and the apply is reversible.
+          <button
+            type="button"
+            data-testid={`auto-excluded-include-${id}`}
+            onClick={onInclude}
+            className="rounded-sm text-fixed-11 font-medium text-accent transition-colors duration-150 ease-out hover:text-accent-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 motion-reduce:transition-none"
+          >
+            Include → shortens window to{" "}
+            <span className="font-mono tabular-nums">{includeCost.date}</span>{" "}
+            <span className="font-mono tabular-nums">
+              (−{includeCost.months} mo)
+            </span>
+          </button>
+        )}
+      </div>
     </li>
   );
 }
