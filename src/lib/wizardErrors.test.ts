@@ -434,15 +434,23 @@ describe("M-0591 — every reachable error code resolves to real (non-UNKNOWN) c
       "NO_DATA_SOURCE",
       "INSUFFICIENT_TRADES",
       "INSUFFICIENT_DAYS",
+      "INSUFFICIENT_CSV_HISTORY",
       "ANALYTICS_MISSING",
       "ANALYTICS_PENDING",
       "ANALYTICS_COMPUTING",
       "ANALYTICS_FAILED",
     ];
-    const intentionallyTransient = new Set<GateFailureCode>([
+    // Codes that intentionally map to UNKNOWN: the ANALYTICS_* transient UI
+    // states (callers poll, not render), plus INSUFFICIENT_CSV_HISTORY, which
+    // is admin-approval-only and never flows through the wizard error mapper
+    // (the CSV wizard branch validates via csv-finalize; SyncPreviewStep is
+    // exchange-only). Everything else is a terminal wizard-reachable code and
+    // MUST resolve to real, non-UNKNOWN copy.
+    const intentionallyUnknown = new Set<GateFailureCode>([
       "ANALYTICS_MISSING",
       "ANALYTICS_PENDING",
       "ANALYTICS_COMPUTING",
+      "INSUFFICIENT_CSV_HISTORY",
     ]);
 
     for (const code of allGateCodes) {
@@ -450,7 +458,7 @@ describe("M-0591 — every reachable error code resolves to real (non-UNKNOWN) c
       // The mapped code MUST be a real key in the copy table (UNKNOWN counts
       // as a key, but for terminal codes we additionally require non-UNKNOWN).
       expect(Object.keys(WIZARD_ERROR_COPY)).toContain(mapped);
-      if (!intentionallyTransient.has(code)) {
+      if (!intentionallyUnknown.has(code)) {
         expect(mapped).not.toBe("UNKNOWN");
         // And the copy it resolves to must NOT be the UNKNOWN fallback copy.
         expect(formatKeyError(mapped).title).not.toBe(

@@ -3,6 +3,7 @@ import {
   checkStrategyGate,
   STRATEGY_GATE_MIN_TRADES,
   STRATEGY_GATE_MIN_DAYS,
+  STRATEGY_GATE_MIN_CSV_ROWS,
   type StrategyGateInput,
 } from "./strategyGate";
 
@@ -57,6 +58,91 @@ describe("checkStrategyGate", () => {
       tradeCount: 12,
     });
     expect(result.passed).toBe(true);
+  });
+
+  // --- CSV-uploaded strategies (no API key, zero trades, history in
+  //     csv_daily_returns). Regression for the un-approvable-CSV bug:
+  //     the gate previously returned NO_DATA_SOURCE for every CSV strategy
+  //     because it only counted the `trades` table. ---
+
+  it("CSV strategy PASSES: no key, zero trades, enough csv rows, analytics complete", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: null,
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: 1112,
+    });
+    expect(result.passed).toBe(true);
+    expect(result.code).toBeNull();
+  });
+
+  it("CSV strategy is NOT gated by the 5-trade / 7-day-span trade thresholds", () => {
+    // Zero trades + null trade span would trip INSUFFICIENT_TRADES/DAYS on the
+    // exchange path; the CSV branch must ignore both.
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: null,
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: 90,
+    });
+    expect(result.passed).toBe(true);
+  });
+
+  it("rejects a CSV strategy below the minimum row count", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: null,
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: 3,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("INSUFFICIENT_CSV_HISTORY");
+    expect(result.detail).toEqual({ rows: 3, min: STRATEGY_GATE_MIN_CSV_ROWS });
+  });
+
+  it("passes a CSV strategy at EXACTLY the minimum row count (7)", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: null,
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: STRATEGY_GATE_MIN_CSV_ROWS,
+    });
+    expect(result.passed).toBe(true);
+  });
+
+  it("still rejects NO_DATA_SOURCE when there is no key, no trades, AND no csv rows", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: null,
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: 0,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("NO_DATA_SOURCE");
+  });
+
+  it("a CSV strategy still requires analytics to be complete", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: null,
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: 1112,
+      computationStatus: "computing",
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("ANALYTICS_COMPUTING");
   });
 
   it("rejects below the minimum trade count", () => {

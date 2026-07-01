@@ -7,7 +7,7 @@ import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { notifyManagerApproved } from "@/lib/email";
-import { checkStrategyGate } from "@/lib/strategyGate";
+import { checkStrategyGate, STRATEGY_GATE_MIN_CSV_ROWS } from "@/lib/strategyGate";
 import { logAuditEventAsUser } from "@/lib/audit";
 
 // Handler body inlined (rather than wrapped via withAdminAuth) so we run a
@@ -94,12 +94,17 @@ export async function POST(req: NextRequest) {
       { data: earliestTrade },
       { data: latestTrade },
       { data: analytics },
+      { count: csvRowCount },
     ] = await Promise.all([
       admin.from("strategies").select("api_key_id, name, user_id").eq("id", id).single(),
       admin.from("trades").select("id", { count: "exact", head: true }).eq("strategy_id", id),
       admin.from("trades").select("timestamp").eq("strategy_id", id).order("timestamp", { ascending: true }).limit(1),
       admin.from("trades").select("timestamp").eq("strategy_id", id).order("timestamp", { ascending: false }).limit(1),
       admin.from("strategy_analytics").select("computation_status, computation_error").eq("strategy_id", id).single(),
+      // CSV-uploaded strategies keep their history in csv_daily_returns, not
+      // `trades`. Count it so the gate recognizes it as a valid data source
+      // (else every CSV strategy is un-approvable — NO_DATA_SOURCE).
+      admin.from("csv_daily_returns").select("strategy_id", { count: "exact", head: true }).eq("strategy_id", id),
     ]);
 
     const gate = checkStrategyGate({
@@ -109,6 +114,7 @@ export async function POST(req: NextRequest) {
       latestTradeAt: latestTrade?.[0]?.timestamp ? new Date(latestTrade[0].timestamp) : null,
       computationStatus: analytics?.computation_status ?? null,
       computationError: analytics?.computation_error ?? null,
+      csvRowCount: csvRowCount ?? 0,
     });
 
     if (!gate.passed) {
@@ -144,12 +150,23 @@ export async function POST(req: NextRequest) {
   // 'draft' is idempotent regardless of any intervening state.
   if (action === "approve") {
     const [
+      { data: recheckStrategy },
       { count: recheckTradeCount },
+      { count: recheckCsvCount },
       { data: recheckAnalytics },
     ] = await Promise.all([
       admin
+        .from("strategies")
+        .select("api_key_id")
+        .eq("id", id)
+        .single(),
+      admin
         .from("trades")
         .select("id", { count: "exact", head: true })
+        .eq("strategy_id", id),
+      admin
+        .from("csv_daily_returns")
+        .select("strategy_id", { count: "exact", head: true })
         .eq("strategy_id", id),
       admin
         .from("strategy_analytics")
@@ -157,7 +174,23 @@ export async function POST(req: NextRequest) {
         .eq("strategy_id", id)
         .single(),
     ]);
-    if ((recheckTradeCount ?? 0) < 5) {
+    // CSV-sourced strategies (no key, zero trades, history in csv_daily_returns)
+    // must re-check the CSV row count, not the trade count — the trade branch
+    // would 409 every CSV strategy on a `trades < 5` that is 0 by construction.
+    // Same predicate as the first-pass gate's isCsvSourced (no key + no trades
+    // + csv rows) so the two never diverge.
+    const isCsvSourced =
+      !recheckStrategy?.api_key_id &&
+      (recheckTradeCount ?? 0) === 0 &&
+      (recheckCsvCount ?? 0) > 0;
+    if (isCsvSourced) {
+      if ((recheckCsvCount ?? 0) < STRATEGY_GATE_MIN_CSV_ROWS) {
+        return NextResponse.json(
+          { error: "Cannot approve: CSV history fell below threshold during review." },
+          { status: 409 },
+        );
+      }
+    } else if ((recheckTradeCount ?? 0) < 5) {
       return NextResponse.json(
         { error: "Cannot approve: trade count fell below threshold during review." },
         { status: 409 },
