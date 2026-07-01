@@ -6189,7 +6189,14 @@ describe("ScenarioComposer — Phase 57 Plan 03 empty-intersection banner (WINDO
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        // Own allocatorId: this test MUTATES (Deselect → toggleHolding) and the
+        // draft hook persists on a 150ms debounce (H-0125) that is not cancelled
+        // on unmount. Under slower CI the leaked write lands after teardown and
+        // pollutes a later test that shares the key (ETH-deselected draft →
+        // BTC-only → no empty intersection → banner absent). A per-test key
+        // isolates the write. (Deterministic in CI, green locally — this branch's
+        // first CI run surfaced it.)
+        allocatorId={`${ALLOCATOR_A}-w06-deselect`}
         allocatorMandate={null}
       />,
     );
@@ -6230,7 +6237,10 @@ describe("ScenarioComposer — Phase 57 Plan 03 empty-intersection banner (WINDO
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        // Own allocatorId so a debounced draft write leaked from the mutating
+        // Deselect test above (150ms, not cancelled on unmount) can never
+        // hydrate here on slower CI and turn this disjoint book BTC-only.
+        allocatorId={`${ALLOCATOR_A}-w06-tokens`}
         allocatorMandate={null}
       />,
     );
