@@ -78,6 +78,7 @@ import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
 import {
   coverageSpanOf,
+  covers,
   defaultWindowFor,
   unionOf,
   type CoverageSpan,
@@ -390,6 +391,7 @@ function formatUsd0(n: number): string {
       })
     : "—";
 }
+
 
 /**
  * WR-05 (Phase 29 review) — book-returns boundary normalizer.
@@ -1652,6 +1654,63 @@ export function ScenarioComposer({
       : deAliased.state;
     return computeScenario(deAliased.strategies, engineState, dateMapCache);
   }, [deAliased, dateMapCache, coverageWindow]);
+
+  // Phase 57 Plan 03 (WINDOW-02/03, ADR §"UI state machine") — the pure
+  // coverage-eligibility axis. For each SELECTED strategy (the manual subset),
+  // `eligible[id] = covers(coverageSpanOf(returns), coverageWindow)` using the
+  // SAME predicate the engine applies (scenario.ts:263-268), so the UI's
+  // auto-excluded group and the engine's `member_ids` / divisor can never
+  // disagree (Pitfall 2). In-blend iff `selected && coverageEligible`. Two hard
+  // invariants encoded here:
+  //   - SUBSET-ONLY (WINDOW-03): only SELECTED strategies are keyed — a narrow
+  //     that would "cover" an unselected strategy never adds it (`selected` is
+  //     the engine's activeStrategies gate; coverageEligible is consulted only
+  //     within that subset). `selected` is NEVER mutated by a coverage change.
+  //   - UNION PATH: when coverageWindow is null (untouched / empty-intersection),
+  //     every selected strategy is eligible (the engine runs its union path, no
+  //     drops) — mirrors the absent-window branch of the engine.
+  // Never re-derives interval math (Rule 2): delegates to scenario-window.ts.
+  // Keyed on `deAliased` (the post-collapse set the engine blends) + the window.
+  const coverageEligible = useMemo<Record<string, boolean>>(() => {
+    const eligible: Record<string, boolean> = {};
+    for (const s of deAliased.strategies) {
+      if (!deAliased.state.selected[s.id]) continue; // subset-only (activeStrategies)
+      if (!coverageWindow) {
+        eligible[s.id] = true; // union path — no coverage drops
+        continue;
+      }
+      const span = coverageSpanOf(s.daily_returns);
+      eligible[s.id] = span !== null && covers(span, coverageWindow);
+    }
+    return eligible;
+  }, [deAliased, coverageWindow]);
+
+  // Dev-mode cross-check (Pitfall 2): on the passthrough (non-aliased) scenario
+  // path the UI's in-blend set { selected && coverageEligible } must equal the
+  // engine's `member_ids`. A mismatch means the UI group and the divisor have
+  // desynced — surface it loudly in dev (never in prod). The aliased-collapse
+  // seam (holdings merged pre-engine) is documented: for the scenario tab the
+  // toggle-able added rows are passthrough, so they align 1:1.
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
+    if (!coverageWindow) return;
+    const memberIds = scenarioMetrics.member_ids;
+    if (!memberIds) return;
+    const uiInBlend = deAliased.strategies
+      .filter((s) => deAliased.state.selected[s.id] && coverageEligible[s.id])
+      .map((s) => s.id)
+      .sort();
+    const engineMembers = [...memberIds].sort();
+    if (
+      uiInBlend.length !== engineMembers.length ||
+      uiInBlend.some((id, i) => id !== engineMembers[i])
+    ) {
+      console.warn(
+        "[ScenarioComposer] coverageEligible desync vs engine member_ids",
+        { uiInBlend, engineMembers },
+      );
+    }
+  }, [deAliased, coverageWindow, coverageEligible, scenarioMetrics.member_ids]);
 
   // PEER-01/02/03 (Phase 42) — the blend's live peer rank vs the REAL verified
   // universe. Fetched from POST /api/scenario/peer-rank, feeding the ENGINE's
