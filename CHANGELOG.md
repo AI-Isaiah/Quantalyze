@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.35.0.25] - 2026-07-01
+### Fixed — CSV-uploaded strategies could never be approved (admin strategy-review gate)
+Found during an API-key + CSV calculation-verification QA pass: **no CSV-uploaded strategy could ever be approved** in the admin strategy-review queue — every one returned `400 Cannot approve: Strategy has no API key connected and no trade data uploaded` (`NO_DATA_SOURCE`). Every pre-existing CSV strategy in the queue was stuck `pending_review` for the same reason.
+
+Root cause: the shared approval gate `checkStrategyGate` (`src/lib/strategyGate.ts`) and the route's TOCTOU re-check (`src/app/api/admin/strategy-review/route.ts`) both measured "has data" purely from the `trades` table. CSV strategies have **no API key** and store their history in `csv_daily_returns`, not `trades`, so `tradeCount` is always 0 → the `!apiKeyId && tradeCount === 0` data-source check false-failed, and the re-check's hardcoded `trades < 5 → 409` blocked them a second time.
+
+Fix (root, no DB workaround):
+- `checkStrategyGate` takes an optional `csvRowCount`. Data-source check now passes when a key OR trades OR csv rows exist. CSV-sourced strategies (no key, 0 trades, csv rows present) skip the trade-count (≥5) and trade-span (≥7 days) thresholds — both 0 by construction — and instead gate on `csvRowCount >= STRATEGY_GATE_MIN_CSV_ROWS` (7, mirroring the 7-day trade-history floor). Analytics `computation_status === "complete"` is still required on both paths.
+- The route fetches the `csv_daily_returns` count in both the first-pass gate and the TOCTOU re-check; the re-check derives `isCsvSourced` from a re-read (no key + no trades + csv rows), matching the first-pass predicate so the two never diverge and the status-pin race stays closed.
+- New `INSUFFICIENT_CSV_HISTORY` gate code is exhaustively handled in `wizardErrors.ts` (maps to UNKNOWN — it's admin-approval-only and never reaches the wizard, whose CSV branch validates via csv-finalize).
+
+Tests: 6 new CSV gate cases (data-source recognition, trade-threshold bypass, 7-row minimum + boundary, analytics-still-required, NO_DATA_SOURCE when truly empty); the `wizardErrors` M-0591 exhaustiveness safety-net now covers the new code; the audit-fanout integration mock handles the new `csv_daily_returns` query. Follow-ups noted (not blocking): csv-finalize allows ≥1 row while approval needs ≥7 (a 1–6 row CSV becomes a zombie `pending_review`); count queries coerce a read error to 0 (fail-safe, matches existing repo pattern).
+
 ## [0.35.0.24] - 2026-07-01
 ### Fixed — WCAG 2.5.8 tap-target minimums on three allocator controls (device-profile sweep follow-up)
 The 2026-06-30 device-profile authed sweep (Playwright MCP + per-device CDP device-metrics on prod, iPhone SE→4K) came back clean on reflow and console errors, but flagged three interactive controls below the WCAG 2.5.8 (Target Size Minimum, 24px) floor on touch profiles. All three fixes are className-only and land on **non-frozen** components (the frozen `EquityChart`/factsheet-chart islands are untouched — verified by the phase-52 frozen-spine guard staying green):
