@@ -690,6 +690,12 @@ export function gateFailureToWizardError(code: GateFailureCode): WizardErrorCode
       // should poll rather than render an error. Fall back to UNKNOWN
       // if they do reach this path so we catch the misuse.
       return "UNKNOWN";
+    case "INSUFFICIENT_CSV_HISTORY":
+      // Admin-approval-only gate code. The wizard's SyncPreviewStep is the
+      // exchange-key path (never CSV-sourced), and the CSV upload branch
+      // validates via csv-finalize — so this code never flows through the
+      // wizard error mapper. UNKNOWN flags the misuse if it ever does.
+      return "UNKNOWN";
   }
 }
 

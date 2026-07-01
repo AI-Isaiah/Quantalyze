@@ -782,6 +782,17 @@ describe("POST /api/admin/strategy-review — strategy.approve emission", () => 
               }),
             };
           }
+          if (table === "csv_daily_returns") {
+            // Approval gate + TOCTOU re-check count csv_daily_returns as a
+            // data source for CSV strategies. This strategy has api_key_id,
+            // so the count is 0 (exchange path) — .select().eq() resolves to
+            // a head:true count shape.
+            return {
+              select: () => ({
+                eq: async () => ({ count: 0, data: null, error: null }),
+              }),
+            };
+          }
           throw new Error(`unexpected from(${table})`);
         },
         // NEW-C10-01: strategy-review route switched to logAuditEventAsUser
@@ -795,6 +806,8 @@ describe("POST /api/admin/strategy-review — strategy.approve emission", () => 
     }));
     vi.doMock("@/lib/strategyGate", () => ({
       checkStrategyGate: () => ({ passed: true }),
+      STRATEGY_GATE_MIN_TRADES: 5,
+      STRATEGY_GATE_MIN_CSV_ROWS: 7,
     }));
 
     const { POST } = await import("@/app/api/admin/strategy-review/route");

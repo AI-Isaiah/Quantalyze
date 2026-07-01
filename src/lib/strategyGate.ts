@@ -7,11 +7,16 @@
 
 export const STRATEGY_GATE_MIN_TRADES = 5;
 export const STRATEGY_GATE_MIN_DAYS = 7;
+// CSV-uploaded strategies have no `trades` rows; their history lives in
+// `csv_daily_returns` (one row per day). Mirror the 7-day trade-history floor
+// as a 7-row minimum so a too-short CSV still can't be listed publicly.
+export const STRATEGY_GATE_MIN_CSV_ROWS = 7;
 
 export type GateFailureCode =
   | "NO_DATA_SOURCE"
   | "INSUFFICIENT_TRADES"
   | "INSUFFICIENT_DAYS"
+  | "INSUFFICIENT_CSV_HISTORY"
   | "ANALYTICS_MISSING"
   | "ANALYTICS_PENDING"
   | "ANALYTICS_COMPUTING"
@@ -35,6 +40,14 @@ export interface StrategyGateInput {
     | null;
   /** Raw `strategy_analytics.computation_error` for richer messaging. */
   computationError: string | null;
+  /**
+   * `csv_daily_returns` row count for CSV-uploaded strategies (one row per
+   * day). 0 / undefined for exchange-key strategies, whose history lives in
+   * `trades`. A CSV upload NEVER populates `trades`, so without this the
+   * `!apiKeyId && tradeCount === 0` data-source check false-failed every
+   * CSV strategy with NO_DATA_SOURCE and made CSV strategies un-approvable.
+   */
+  csvRowCount?: number;
 }
 
 export interface StrategyGateResult {
@@ -66,7 +79,13 @@ function computeSpanDays(earliest: Date | null, latest: Date | null): number | n
 }
 
 export function checkStrategyGate(input: StrategyGateInput): StrategyGateResult {
-  if (!input.apiKeyId && input.tradeCount === 0) {
+  const csvRowCount = input.csvRowCount ?? 0;
+
+  // A strategy needs at least one data source: a connected API key, ingested
+  // `trades`, OR an uploaded CSV daily-returns series. CSV uploads never write
+  // to `trades` (their history is in `csv_daily_returns`), so the prior
+  // `!apiKeyId && tradeCount === 0` check false-failed every CSV strategy.
+  if (!input.apiKeyId && input.tradeCount === 0 && csvRowCount === 0) {
     return {
       passed: false,
       code: "NO_DATA_SOURCE",
@@ -76,23 +95,40 @@ export function checkStrategyGate(input: StrategyGateInput): StrategyGateResult 
     };
   }
 
-  if (input.tradeCount < STRATEGY_GATE_MIN_TRADES) {
-    return {
-      passed: false,
-      code: "INSUFFICIENT_TRADES",
-      reason: `Strategy has only ${input.tradeCount} trade(s). A minimum of ${STRATEGY_GATE_MIN_TRADES} trades is required.`,
-      detail: { trades: input.tradeCount, min: STRATEGY_GATE_MIN_TRADES },
-    };
-  }
+  // CSV-sourced strategy (no key, no trades, but has daily-return rows): the
+  // trade-count and trade-span thresholds don't apply — there are zero trades
+  // by construction. Gate on the daily-return row count instead, then fall
+  // through to the shared analytics-completeness checks below.
+  const isCsvSourced =
+    !input.apiKeyId && input.tradeCount === 0 && csvRowCount > 0;
+  if (isCsvSourced) {
+    if (csvRowCount < STRATEGY_GATE_MIN_CSV_ROWS) {
+      return {
+        passed: false,
+        code: "INSUFFICIENT_CSV_HISTORY",
+        reason: `CSV history has only ${csvRowCount} day(s) of returns. A minimum of ${STRATEGY_GATE_MIN_CSV_ROWS} days is required.`,
+        detail: { rows: csvRowCount, min: STRATEGY_GATE_MIN_CSV_ROWS },
+      };
+    }
+  } else {
+    if (input.tradeCount < STRATEGY_GATE_MIN_TRADES) {
+      return {
+        passed: false,
+        code: "INSUFFICIENT_TRADES",
+        reason: `Strategy has only ${input.tradeCount} trade(s). A minimum of ${STRATEGY_GATE_MIN_TRADES} trades is required.`,
+        detail: { trades: input.tradeCount, min: STRATEGY_GATE_MIN_TRADES },
+      };
+    }
 
-  const spanDays = computeSpanDays(input.earliestTradeAt, input.latestTradeAt);
-  if (spanDays !== null && spanDays < STRATEGY_GATE_MIN_DAYS) {
-    return {
-      passed: false,
-      code: "INSUFFICIENT_DAYS",
-      reason: `Trades span only ${spanDays.toFixed(1)} day(s). A minimum of ${STRATEGY_GATE_MIN_DAYS} days of trading history is required.`,
-      detail: { days: Number(spanDays.toFixed(2)), min: STRATEGY_GATE_MIN_DAYS },
-    };
+    const spanDays = computeSpanDays(input.earliestTradeAt, input.latestTradeAt);
+    if (spanDays !== null && spanDays < STRATEGY_GATE_MIN_DAYS) {
+      return {
+        passed: false,
+        code: "INSUFFICIENT_DAYS",
+        reason: `Trades span only ${spanDays.toFixed(1)} day(s). A minimum of ${STRATEGY_GATE_MIN_DAYS} days of trading history is required.`,
+        detail: { days: Number(spanDays.toFixed(2)), min: STRATEGY_GATE_MIN_DAYS },
+      };
+    }
   }
 
   if (input.computationStatus === null) {
