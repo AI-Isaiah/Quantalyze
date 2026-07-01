@@ -5490,3 +5490,225 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
     expect(isoDayFromDate(lastPickerProps!.max) >= "2026-01-12").toBe(true);
   });
 });
+
+// ===========================================================================
+// Phase 57 Plan 02 Task 3 — POLISH-01 separation guard (LOCKED)
+//
+// The coverage window [winStart,winEnd] (analytical membership) is a DISTINCT
+// axis from every VIEW axis. This guard proves none of them can leak into
+// another:
+//   (a) rollingWindow (63/126/252) — the rolling-metrics view of the blend series
+//   (b) the ScenarioFactsheetChart MasterBrush brush-zoom (persist=false view pan)
+//   (c) per-strategy startDates — the legacy include-from axis
+// ===========================================================================
+describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
+  // A 130-trading-day fixture so BOTH the 63-day ("3M") AND 126-day ("6M")
+  // rolling windows are enabled and clickable (the 12-day fixtures above leave
+  // every rolling option disabled; the default active window is 6M=126). Dates
+  // are consecutive calendar days from 2026-01-01, sufficient for the rolling
+  // usableN gate (which counts overlapping daily-return rows, not trading days).
+  const LONG_DATES = Array.from({ length: 130 }, (_, i) => {
+    const d = new Date(Date.UTC(2026, 0, 1));
+    d.setUTCDate(d.getUTCDate() + i);
+    return d.toISOString().slice(0, 10);
+  });
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  it("POLISH-01: changing the rolling window (3M/6M/12M) does NOT change the state.window passed to computeScenario", () => {
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, LONG_DATES),
+        mkWinStrat(REF_WIN_B, LONG_DATES),
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The window value the engine currently sees (both spans equal → full
+    // intersection window covering everything).
+    const windowBefore = computeScenarioStateArgs
+      .filter(
+        (a) =>
+          a.strategyIds.includes(REF_WIN_A) &&
+          a.strategyIds.includes(REF_WIN_B),
+      )
+      .at(-1)?.state.window;
+    expect(windowBefore).toBeDefined();
+
+    computeScenarioStateArgs.length = 0;
+
+    // Change the ROLLING window (a separate VIEW axis). Click "3M" (63) in the
+    // "Rolling window" group.
+    const rollingGroup = screen.getByRole("group", { name: /rolling window/i });
+    fireEvent.click(within(rollingGroup).getByRole("button", { name: "3M" }));
+
+    // The coverage window the engine sees is UNCHANGED — rolling is a view of the
+    // blend series, never the analytical membership window.
+    const windowAfter = computeScenarioStateArgs
+      .filter(
+        (a) =>
+          a.strategyIds.includes(REF_WIN_A) &&
+          a.strategyIds.includes(REF_WIN_B),
+      )
+      .at(-1)?.state.window;
+    // If the rolling click triggered no recompute (window is state-only), the
+    // last-known window is still the pre-click one; either way it must equal it.
+    expect(windowAfter ?? windowBefore).toEqual(windowBefore);
+    // The coverage-window READOUT is unchanged by a rolling-window click.
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain(
+      `${(windowBefore as { start: string }).start} → ${(windowBefore as { end: string }).end}`,
+    );
+  });
+
+  it("POLISH-01: ScenarioFactsheetChart's brush stays a VIEW axis — the mount receives NO coverage-window prop and no persist prop", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Move the coverage window (widen to union) so a leak, if any, would surface.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Full range \(some drop out\)/i }),
+    );
+
+    const props = vi.mocked(ScenarioFactsheetChart).mock.calls.at(-1)?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    expect(props).toBeDefined();
+    // The coverage window is NEVER threaded to the factsheet chart — the brush is
+    // a self-contained persist=false view control (POLISH-01). None of these
+    // coverage-window prop names appear on the mount.
+    for (const forbidden of [
+      "window",
+      "coverageWindow",
+      "winStart",
+      "winEnd",
+      "winRange",
+      "persist",
+    ]) {
+      expect(forbidden in props!).toBe(false);
+    }
+  });
+
+  it("POLISH-01: source guard — the composer never passes persist / a coverage-window prop to ScenarioFactsheetChart, and the brush stays persist=false", () => {
+    const src = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "ScenarioComposer.tsx",
+      ),
+      "utf8",
+    );
+    // The composer mount block for ScenarioFactsheetChart must not pass persist
+    // nor thread the coverage window into it.
+    const mountIdx = src.indexOf("<ScenarioFactsheetChart");
+    expect(mountIdx).toBeGreaterThan(-1);
+    const mountBlock = src.slice(mountIdx, src.indexOf("/>", mountIdx));
+    expect(mountBlock).not.toMatch(/persist=/);
+    expect(mountBlock).not.toMatch(/winStart|winEnd|coverageWindow/);
+    // The brush-zoom stays persist=false inside ScenarioFactsheetChart itself.
+    const chartSrc = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "..",
+        "widgets",
+        "performance",
+        "ScenarioFactsheetChart.tsx",
+      ),
+      "utf8",
+    );
+    expect(chartSrc).toMatch(/persist=\{false\}/);
+  });
+
+  it("POLISH-01: changing the coverage window leaves rollingWindow and per-strategy startDates untouched", () => {
+    // Both strategies full 130-day spans so the default 6M (126) rolling window
+    // is ENABLED (usableN = 130 >= 126). A carries a legacy include-from
+    // startDate — the third distinct axis.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, LONG_DATES),
+        mkWinStrat(REF_WIN_B, LONG_DATES),
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+        // A per-strategy startDate on A — the legacy include-from axis.
+        startDates: { [REF_WIN_A]: LONG_DATES[5] },
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Record the active rolling-window button before touching the coverage window.
+    const rollingGroup = screen.getByRole("group", { name: /rolling window/i });
+    const activeBefore = within(rollingGroup)
+      .getAllByRole("button")
+      .find((b) => b.getAttribute("aria-pressed") === "true")?.textContent;
+    expect(activeBefore).toBe("6M"); // default 126
+
+    // Record startDates flowing into the engine before the coverage change.
+    const startDatesBefore = computeScenarioStateArgs
+      .filter((a) => a.strategyIds.includes(REF_WIN_A))
+      .at(-1)?.state.startDates;
+    expect(startDatesBefore).toEqual({ [REF_WIN_A]: LONG_DATES[5] });
+
+    // Change the COVERAGE window via the picker (narrow it slightly, keeping
+    // >=126 overlapping days so the 6M rolling option's ENABLED state is not a
+    // confound). This must NOT touch the rolling window nor per-strategy
+    // startDates — the coverage window is a distinct axis.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: LONG_DATES[1], end: LONG_DATES[129] });
+    });
+
+    const activeAfter = within(rollingGroup)
+      .getAllByRole("button")
+      .find((b) => b.getAttribute("aria-pressed") === "true")?.textContent;
+    expect(activeAfter).toBe("6M"); // rolling window unchanged
+
+    const startDatesAfter = computeScenarioStateArgs
+      .filter((a) => a.strategyIds.includes(REF_WIN_A))
+      .at(-1)?.state.startDates;
+    // The legacy include-from axis is byte-identical across a coverage-window edit.
+    expect(startDatesAfter).toEqual(startDatesBefore);
+  });
+});
