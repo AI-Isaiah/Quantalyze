@@ -136,6 +136,9 @@ import { toWealth } from "../widgets/performance/EquityChart";
 import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { CustomRangePicker } from "./CustomRangePicker";
+import { BlendHeader } from "./BlendHeader";
+import { CoverageStateChip } from "./CoverageStateChip";
+import type { CoverageState } from "./CoverageStateChip";
 import { BridgeDrawer } from "./BridgeDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { ScenarioFooter } from "./ScenarioFooter";
@@ -2818,6 +2821,19 @@ export function ScenarioComposer({
         </div>
       )}
 
+      {/* Phase 58 (COVERAGE-03) — the honest blend header is the PRIMARY visual
+          anchor of this surface (58-UI-SPEC §Interaction): it states the engine's
+          member_count · effective window ABOVE the coverage-window control, so
+          the allocator reads the honest N/window before steering membership.
+          Reads scenarioMetrics.member_count / effective_* + fullRangeWindow ONLY
+          — never re-derives the blend (the :1813 desync guard reconciles the same
+          axis). Mounts alongside the window control (a selected set to describe). */}
+      {windowBounds && (
+        <div className="mt-6">
+          <BlendHeader metrics={scenarioMetrics} unionSpan={fullRangeWindow} />
+        </div>
+      )}
+
       {/* Phase 57 (WINDOW-01/04/05) — coverage-window control. The ANALYTICAL
           blend window is set HERE, above the KPIs, so the allocator steers
           membership before reading the blend (mirrors how the rolling-window
@@ -3503,6 +3519,7 @@ export function ScenarioComposer({
               `/compare?ids=${encodeURIComponent(scopeRef)},${candidateId}`,
             )
           }
+          coverageEligible={coverageEligible}
         />
       </CollapsibleSection>
 
@@ -3727,6 +3744,14 @@ interface CompositionListProps {
   onSetLeverage: (scopeRef: string, leverage: number) => void;
   onRemoveAdded: (id: string) => void;
   onCompare: (scopeRef: string, candidateId: string) => void;
+  /**
+   * Phase 58 COVERAGE-02 — the coverage-eligibility axis (`coverageEligible`
+   * memo, ScenarioComposer.tsx:1762). Threaded READ-ONLY so each added-strategy
+   * row can render its three-state chip from the SAME axis the engine's divisor
+   * and the :1813 desync guard read. The chip state is NOT re-derived here —
+   * it is a projection of `selected` (row `enabled`) + this map.
+   */
+  coverageEligible: Record<string, boolean>;
 }
 
 function CompositionList({
@@ -3740,6 +3765,7 @@ function CompositionList({
   onSetLeverage,
   onRemoveAdded,
   onCompare,
+  coverageEligible,
 }: CompositionListProps) {
   const flaggedByRef = useMemo(() => {
     const map = new Map<string, FlaggedHolding>();
@@ -3838,6 +3864,19 @@ function CompositionList({
         {draft.addedStrategies.map((a) => {
           const enabled = draft.toggleByScopeRef[a.id] !== false;
           const weight = draft.weightOverrides[a.id] ?? 0;
+          // Phase 58 COVERAGE-02 — three-state chip, derived (NOT re-computed)
+          // from the row's `enabled` (the `selected` axis) + the threaded
+          // `coverageEligible` map, exactly the two states the plan wires here:
+          //   enabled === false            → manually-excluded
+          //   enabled && coverageEligible  → in-blend
+          // The enabled-but-not-eligible (auto-excluded, amber) state is rendered
+          // by its own group + Plan 02 — no chip here for it, so the main list
+          // never mislabels an outside-window row as in-blend.
+          const chipState: CoverageState | null = !enabled
+            ? "manually-excluded"
+            : coverageEligible[a.id]
+              ? "in-blend"
+              : null;
           return (
             <li
               key={a.id}
@@ -3865,6 +3904,9 @@ function CompositionList({
                   />
                 </button>
                 <span className="text-sm text-text-primary">{a.name}</span>
+                {chipState && (
+                  <CoverageStateChip state={chipState} className="shrink-0" />
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <label className="sr-only" htmlFor={`weight-${a.id}`}>

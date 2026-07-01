@@ -5306,6 +5306,46 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     expect(lastScenarioMetrics()?.member_count).toBe(2);
   });
 
+  // Phase 58 (COVERAGE-03) — the BlendHeader N is not an independent count; it
+  // IS the engine's member_count. Prove the header text and the divisor move
+  // together as the window drops a member. The header reads the SAME axis the
+  // :1813 desync guard reconciles, so this is the single-source guarantee under
+  // test — if BlendHeader ever recomputed membership, N would diverge here.
+  it("COVERAGE-03: BlendHeader N === engine member_count, and the header degrades in lockstep when the window drops a member", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Baseline: intersection default → both A and B are members (member_count 2).
+    // The header must read the REAL engine divisor, not a local recount.
+    const baseN = lastScenarioMetrics()?.member_count;
+    expect(baseN).toBe(2);
+    const header = screen.getByTestId("scenario-blend-header");
+    expect(header).toHaveTextContent(`Mean of ${baseN} strategies ·`);
+    // Non-blocking live region — announced politely, never assertively.
+    expect(header).toHaveAttribute("role", "status");
+
+    // Widen the window PAST B's last day → the engine drops B (member_count 1) and
+    // the header must degrade IN LOCKSTEP to the "not a blend" copy. Same axis.
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+    expect(screen.getByTestId("scenario-blend-header")).toHaveTextContent(
+      "1 strategy — not a blend",
+    );
+  });
+
   it("window: when the intersection is empty, the engine receives a state WITHOUT a window key (union path preserved)", () => {
     // Two DISJOINT spans → defaultWindowFor(spans) === null → nothing to seed →
     // engineState === deAliased.state (no `window` key added; union-when-absent).

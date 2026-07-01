@@ -28,6 +28,7 @@ export const APP_NAMESPACED_PREFIXES: readonly string[] = [
   "factsheet-v2:",
   "factsheet-collapse:",
   "composer-collapse:",
+  "composer.", // Phase 58 POLISH-03 — composer.coverageDefaultChangeNoteDismissed (distinct from composer-collapse:)
 ] as const;
 
 /**

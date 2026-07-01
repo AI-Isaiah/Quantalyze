@@ -133,6 +133,7 @@ describe("SignOutButton — T-13-02-01 cross-account localStorage purge", () => 
       "factsheet-v2:{strategyId}", // factsheet-context.tsx (templated, B7c)
       "factsheet-collapse:{strategyId}:{section}", // CollapsibleSection.tsx (templated, B7c)
       "composer-collapse:controls", // ScenarioComposer.tsx CollapsibleSection (Phase 31)
+      "composer.coverageDefaultChangeNoteDismissed", // DefaultChangeNote.tsx (Phase 58 POLISH-03)
     ];
 
     for (const key of KNOWN_APP_KEYS) {
