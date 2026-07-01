@@ -152,28 +152,7 @@ function resolveBaselineRef(): string {
   );
 }
 
-/**
- * Build the set of files added or changed in this phase vs `base`:
- *   - `git diff --name-only <base> HEAD` — committed adds/changes
- *   - `git ls-files --others --exclude-standard` — untracked, not-ignored files
- * `.planning/` is gitignored, so it never pollutes the set.
- */
-function changedFiles(base: string): string[] {
-  const committed = git(["diff", "--name-only", base, "HEAD"])
-    .split("\n")
-    .map((f) => f.trim())
-    .filter(Boolean);
-  const untracked = git(["ls-files", "--others", "--exclude-standard"])
-    .split("\n")
-    .map((f) => f.trim())
-    .filter(Boolean);
-  return [...new Set([...committed, ...untracked])];
-}
-
 const BASE = resolveBaselineRef();
-const CHANGED = changedFiles(BASE);
-
-const FROZEN_ENGINE = "src/lib/scenario.ts";
 
 // --- live-source paths (read from disk, not snapshots) ---
 // FLOW-02 was originally an in-page `redirect()` stub at
@@ -234,20 +213,15 @@ describe("Phase 32 frozen-spine + route-retirement exit-gate guards", () => {
     expect(typeof BASE).toBe("string");
   });
 
-  // v1.5 coverage-window re-baseline (ADR-001): the FROZEN-ENGINE assertion is
-  // INVERTED (not deleted) — v1.5 Phase 55 deliberately edits scenario.ts ONCE
-  // (the coverage-window blend). The guard stays LIVE. ALL FLOW-01/02/03 route /
-  // redirect / delete assertions BELOW are UNCHANGED (Phase 55 touches no routes).
-  it("exit gate (frozen engine SCENARIO-05): src/lib/scenario.ts is the v1.5-Phase-55 coverage-window edit (ADR-001 re-baseline)", () => {
-    expect(
-      CHANGED,
-      `Phase 32 re-baseline (v1.5 ADR-001) — ${FROZEN_ENGINE} is expected in ` +
-        "the phase delta (v1.5 Phase 55 deliberately edits the frozen engine " +
-        "ONCE — the coverage-window blend). If this fails, the reviewed edit " +
-        "was reverted or re-frozen — restore it or update the re-baseline.",
-    ).toContain(FROZEN_ENGINE);
-  });
-
+  // v1.5 coverage-window re-baseline (ADR-001): Phase 32 froze scenario.ts. v1.5
+  // Phase 55 deliberately edits that engine ONCE (the coverage-window blend), so
+  // the frozen-engine assertion is RETIRED here as a reviewed act — NOT inverted
+  // to a `.toContain` delta pin, which would go red on every future phase branch
+  // once this merges and the merge-base advances past the edit (scenario.ts
+  // naturally leaves each later delta). scenario.ts is now protected by
+  // scenario.test.ts's own pins + the BLEND-07 numpy gate. ALL FLOW-01/02/03
+  // route / redirect / delete assertions BELOW are UNCHANGED (Phase 55 touches
+  // no routes).
   it("FLOW-02: /scenarios redirects to the composer (now a next.config 308) and the in-page leak surface is GONE", () => {
     // Phase 51-05 (NAV-01): the FLOW-02 redirect was formalized from an in-page
     // stub into a config-level 308 in next.config.ts `redirects()`. The redirect

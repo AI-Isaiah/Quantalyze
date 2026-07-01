@@ -138,7 +138,6 @@ const CHANGED = changedFiles(BASE);
 // every one matches /scenario|share/i, so that single pattern is the gate.
 const FORBIDDEN_MIGRATION_RE = /scenario|share/i;
 
-const FROZEN_ENGINE = "src/lib/scenario.ts";
 const RLS_SQL_SCENARIOS = "supabase/tests/test_scenarios_rls.sql";
 const RLS_SQL_SHARES = "supabase/tests/test_scenario_shares_rls.sql";
 
@@ -169,24 +168,15 @@ describe("Phase 29 frozen-spine exit-gate guards", () => {
     ).toEqual([]);
   });
 
-  // v1.5 coverage-window re-baseline (ADR-001): the FROZEN engine is edited
-  // deliberately EXACTLY ONCE in v1.5 Phase 55 (the coverage-window blend —
-  // ADR-001, 55-02). This assertion is INVERTED (not deleted) so the guard
-  // stays LIVE: it now PINS that scenario.ts IS in the phase delta (the
-  // reviewed edit), and would fail loud if a future non-v1.5 phase reverted
-  // or re-froze it without also reverting the coverage-window change. The RLS
-  // + no-schema-change assertions below stay UNCHANGED. See 55-02-SUMMARY (Q4).
-  it("exit gate (frozen engine SCENARIO-05): src/lib/scenario.ts is the v1.5-Phase-55 coverage-window edit (ADR-001 re-baseline)", () => {
-    expect(
-      CHANGED,
-      `Phase 29 re-baseline (v1.5 ADR-001) — ${FROZEN_ENGINE} is expected in ` +
-        "the phase delta because v1.5 Phase 55 deliberately edits the frozen " +
-        "engine ONCE (the coverage-window blend). If this fails, the reviewed " +
-        "coverage-window edit was reverted or re-frozen — restore it or update " +
-        "this re-baseline in lockstep.",
-    ).toContain(FROZEN_ENGINE);
-  });
-
+  // v1.5 coverage-window re-baseline (ADR-001): the frozen-engine assertion
+  // (scenario.ts SCENARIO-05 zero-diff) was RETIRED here as a reviewed act —
+  // v1.5 Phase 55 deliberately edits the projection engine ONCE (the
+  // coverage-window blend). It is NOT inverted to a `.toContain` delta pin:
+  // that goes red on every future phase branch once this merges and the
+  // merge-base advances past the edit (scenario.ts naturally leaves each later
+  // delta). scenario.ts is now protected by scenario.test.ts's own pins + the
+  // BLEND-07 numpy gate. The RLS + no-schema-change assertions — the real
+  // protective value of THIS guard — stay UNCHANGED.
   it("exit gate (RLS untouched): the scenarios + scenario_shares RLS sql tests are byte-unchanged", () => {
     expect(
       CHANGED,

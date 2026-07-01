@@ -113,29 +113,7 @@ function resolveBaselineRef(): string {
   );
 }
 
-/**
- * Build the set of files added or changed in this phase vs `base`:
- *   - `git diff --name-only <base> HEAD` — committed adds/changes
- *   - `git ls-files --others --exclude-standard` — untracked, not-ignored files
- * `.planning/` is gitignored, so it never pollutes the set.
- */
-function changedFiles(base: string): string[] {
-  const committed = git(["diff", "--name-only", base, "HEAD"])
-    .split("\n")
-    .map((f) => f.trim())
-    .filter(Boolean);
-  const untracked = git(["ls-files", "--others", "--exclude-standard"])
-    .split("\n")
-    .map((f) => f.trim())
-    .filter(Boolean);
-  return [...new Set([...committed, ...untracked])];
-}
-
 const BASE = resolveBaselineRef();
-const CHANGED = changedFiles(BASE);
-
-const FROZEN_ENGINE = "src/lib/scenario.ts";
-const FROZEN_ENGINE_TEST = "src/lib/scenario.test.ts";
 
 describe("Phase 30 frozen-spine exit-gate guards", () => {
   it("resolves a real phase baseline ref (fails loud if it cannot — Rule 12)", () => {
@@ -146,29 +124,13 @@ describe("Phase 30 frozen-spine exit-gate guards", () => {
     expect(typeof BASE).toBe("string");
   });
 
-  // v1.5 coverage-window re-baseline (ADR-001): scenario.ts AND scenario.test.ts
-  // are BOTH edited deliberately in v1.5 Phase 55 (the coverage-window blend +
-  // its additive cases). Both assertions are INVERTED (not deleted) so the guard
-  // stays LIVE — it now PINS both files ARE in the phase delta (the reviewed
-  // edit) and fails loud if the coverage-window change is reverted/re-frozen.
-  it("exit gate (frozen engine SCENARIO-05): src/lib/scenario.ts is the v1.5-Phase-55 coverage-window edit (ADR-001 re-baseline)", () => {
-    expect(
-      CHANGED,
-      `Phase 30 re-baseline (v1.5 ADR-001) — ${FROZEN_ENGINE} is expected in ` +
-        "the phase delta (v1.5 Phase 55 deliberately edits the frozen engine " +
-        "ONCE — the coverage-window blend). If this fails, the reviewed edit " +
-        "was reverted or re-frozen — restore it or update the re-baseline.",
-    ).toContain(FROZEN_ENGINE);
-  });
-
-  it("exit gate (frozen engine pins): src/lib/scenario.test.ts is the v1.5-Phase-55 additive coverage-window cases (ADR-001 re-baseline)", () => {
-    expect(
-      CHANGED,
-      `Phase 30 re-baseline (v1.5 ADR-001) — ${FROZEN_ENGINE_TEST} is expected ` +
-        "in the phase delta (v1.5 Phase 55 ADDS coverage-window cases; the " +
-        "union pin and every legacy 252-annualization pin stay unchanged and " +
-        "green). If this fails, the additive cases were reverted — restore " +
-        "them or update the re-baseline.",
-    ).toContain(FROZEN_ENGINE_TEST);
-  });
+  // v1.5 coverage-window re-baseline (ADR-001): Phase 30's frozen-spine target
+  // was scenario.ts + scenario.test.ts (the SCENARIO-05 zero-diff engine). v1.5
+  // Phase 55 deliberately edits that engine ONCE (the coverage-window blend), so
+  // the freeze is RETIRED here as a reviewed act — NOT inverted to a `.toContain`
+  // delta pin, which would go red on every future phase branch once this merges
+  // and the merge-base advances past the edit (scenario.ts naturally leaves each
+  // later delta). scenario.ts is now protected by scenario.test.ts's own pins +
+  // the BLEND-07 numpy gate; this guard retains its baseline-ref resolution check
+  // (Rule 12) as its remaining exit-gate value.
 });

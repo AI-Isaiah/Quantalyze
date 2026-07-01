@@ -132,29 +132,7 @@ function resolveBaselineRef(): string {
   );
 }
 
-/**
- * Build the set of files added or changed in this phase vs `base`:
- *   - `git diff --name-only <base> HEAD` — committed adds/changes
- *   - `git ls-files --others --exclude-standard` — untracked, not-ignored files
- * `.planning/` is gitignored, so it never pollutes the set.
- */
-function changedFiles(base: string): string[] {
-  const committed = git(["diff", "--name-only", base, "HEAD"])
-    .split("\n")
-    .map((f) => f.trim())
-    .filter(Boolean);
-  const untracked = git(["ls-files", "--others", "--exclude-standard"])
-    .split("\n")
-    .map((f) => f.trim())
-    .filter(Boolean);
-  return [...new Set([...committed, ...untracked])];
-}
-
 const BASE = resolveBaselineRef();
-const CHANGED = changedFiles(BASE);
-
-const FROZEN_ENGINE = "src/lib/scenario.ts";
-const FROZEN_ENGINE_TEST = "src/lib/scenario.test.ts";
 
 const COMPOSER_PATH = join(
   CWD,
@@ -171,31 +149,15 @@ describe("Phase 31 frozen-spine + hide-don't-unmount exit-gate guards", () => {
     expect(typeof BASE).toBe("string");
   });
 
-  // v1.5 coverage-window re-baseline (ADR-001): the two FROZEN-ENGINE assertions
-  // are INVERTED (not deleted) — v1.5 Phase 55 deliberately edits scenario.ts +
-  // scenario.test.ts ONCE (the coverage-window blend). The guard stays LIVE. The
+  // v1.5 coverage-window re-baseline (ADR-001): Phase 31 froze scenario.ts +
+  // scenario.test.ts. v1.5 Phase 55 deliberately edits that engine ONCE (the
+  // coverage-window blend), so the frozen-engine assertions are RETIRED here as
+  // a reviewed act — NOT inverted to `.toContain` delta pins, which would go red
+  // on every future phase branch once this merges and the merge-base advances
+  // past the edit (scenario.ts naturally leaves each later delta). scenario.ts is
+  // now protected by scenario.test.ts's own pins + the BLEND-07 numpy gate. The
   // LAYOUT-02 hide-don't-unmount CompositionList assertions BELOW are UNCHANGED
   // (Phase 55 touches no composer JSX).
-  it("exit gate (frozen engine SCENARIO-05): src/lib/scenario.ts is the v1.5-Phase-55 coverage-window edit (ADR-001 re-baseline)", () => {
-    expect(
-      CHANGED,
-      `Phase 31 re-baseline (v1.5 ADR-001) — ${FROZEN_ENGINE} is expected in ` +
-        "the phase delta (v1.5 Phase 55 deliberately edits the frozen engine " +
-        "ONCE — the coverage-window blend). If this fails, the reviewed edit " +
-        "was reverted or re-frozen — restore it or update the re-baseline.",
-    ).toContain(FROZEN_ENGINE);
-  });
-
-  it("exit gate (frozen engine pins): src/lib/scenario.test.ts is the v1.5-Phase-55 additive coverage-window cases (ADR-001 re-baseline)", () => {
-    expect(
-      CHANGED,
-      `Phase 31 re-baseline (v1.5 ADR-001) — ${FROZEN_ENGINE_TEST} is expected ` +
-        "in the phase delta (v1.5 Phase 55 ADDS coverage-window cases; the " +
-        "legacy 252-annualization pins + the union pin stay unchanged/green). " +
-        "If this fails, the additive cases were reverted — restore them.",
-    ).toContain(FROZEN_ENGINE_TEST);
-  });
-
   it("hide-don't-unmount (LAYOUT-02 / Pitfall 5): CompositionList is WRAPPED in the lifted CollapsibleSection", () => {
     // The lifted primitive must be imported from its generalized home (NOT the
     // factsheet-local copy) so the composer reuses the shared, factsheet-
