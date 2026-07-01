@@ -80,6 +80,7 @@ import {
   coverageSpanOf,
   covers,
   defaultWindowFor,
+  outlierIdsFor,
   unionOf,
   type CoverageSpan,
   type CoverageWindow,
@@ -1789,6 +1790,55 @@ export function ScenarioComposer({
     }
   }, [deAliased, coverageWindow, coverageEligible, scenarioMetrics.member_ids]);
 
+  // Phase 57 Plan 03 Task 3 (WINDOW-06) — empty-intersection outlier detection.
+  // When the SELECTED set shares no common window (defaultWindowFor === null),
+  // `outlierIdsFor` names the strategy(ies) whose removal restores a valid
+  // intersection (a guided fix, not a dead-end). The map is over SELECTED spans
+  // only (subset-only, same axis as coverageEligible). Each outlier carries its
+  // display name and a deselect handler: an ADDED strategy (a toggle-able unit)
+  // is removed via handleRemoveAdded; a live HOLDING is toggled off via
+  // scenario.toggleHolding (RESEARCH Open Question #2 — in practice the outlier
+  // is an added strategy; a holding is handled honestly). All interval / outlier
+  // math delegates to scenario-window.ts (Rule 2: never re-derive it here).
+  const addedIdSet = useMemo(
+    () => new Set<string>(scenario.draft.addedStrategies.map((a) => a.id)),
+    [scenario.draft.addedStrategies],
+  );
+  const emptyIntersectionOutliers = useMemo<
+    Array<{ id: string; name: string; isAdded: boolean }>
+  >(() => {
+    // Only fires on a genuine empty intersection — a non-null default window
+    // means a common window exists, so there is no outlier to name.
+    if (defaultWindowFor(selectedSpans) !== null) return [];
+    const spansById: Record<string, CoverageSpan> = {};
+    const nameById: Record<string, string> = {};
+    for (const s of deAliased.strategies) {
+      if (!deAliased.state.selected[s.id]) continue; // subset-only
+      const span = coverageSpanOf(s.daily_returns);
+      if (span) spansById[s.id] = span;
+      nameById[s.id] = s.name;
+    }
+    return outlierIdsFor(spansById).map((id) => ({
+      id,
+      name: nameById[id] ?? id,
+      isAdded: addedIdSet.has(id),
+    }));
+  }, [deAliased, selectedSpans, addedIdSet]);
+
+  // The deselect action for a WINDOW-06 outlier: an added strategy is removed
+  // from the subset (handleRemoveAdded); a live holding is toggled off
+  // (scenario.toggleHolding). Either removal drops the outlier from the selected
+  // set, so `selectedSpans` recomputes to a non-null intersection — the banner
+  // then disappears and a valid default window is available again.
+  const deselectOutlier = useCallback(
+    (outlier: { id: string; isAdded: boolean }) => {
+      if (outlier.isAdded) handleRemoveAdded(outlier.id);
+      else scenario.toggleHolding(outlier.id);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [handleRemoveAdded, scenario.toggleHolding],
+  );
+
   // PEER-01/02/03 (Phase 42) — the blend's live peer rank vs the REAL verified
   // universe. Fetched from POST /api/scenario/peer-rank, feeding the ENGINE's
   // sample/252-basis sharpe/sortino/max_drawdown (scenario.ts:454-456 — NOT the
@@ -2680,6 +2730,46 @@ export function ScenarioComposer({
             yet, so this projection blends your whole book. Per-source toggles
             appear once every key has its own history.
           </InfoBanner>
+        </div>
+      )}
+
+      {/* Phase 57 Plan 03 Task 3 (WINDOW-06) — empty-intersection guided fix.
+          When the selected set shares NO common window, this inline warning
+          banner sits ABOVE the window control (not a modal), names the
+          outlier(s) via outlierIdsFor, and offers a one-click "Deselect {name}"
+          that restores a valid intersection. It does NOT block the rest of the
+          composer — a guided fix, not a hard stop. DESIGN.md warning tokens
+          (AA-verified); role=alert + aria-live=polite (mirrors the picker's
+          clamp region). */}
+      {emptyIntersectionOutliers.length > 0 && (
+        <div
+          role="alert"
+          aria-live="polite"
+          data-testid="scenario-empty-intersection-banner"
+          className="mt-6 rounded-md border border-warning-border bg-warning-bg px-4 py-3"
+        >
+          <p className="text-fixed-13 font-medium text-warning">
+            No common period across the selected strategies
+          </p>
+          <p className="mt-1 text-fixed-11 text-text-secondary">
+            {emptyIntersectionOutliers.length === 1
+              ? `${emptyIntersectionOutliers[0].name} does not overlap the rest — deselect it to restore a common coverage window.`
+              : "Some selected strategies do not overlap — deselect an outlier to restore a common coverage window."}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {emptyIntersectionOutliers.map((outlier) => (
+              <button
+                key={outlier.id}
+                type="button"
+                onClick={() => deselectOutlier(outlier)}
+                aria-label={`Deselect ${outlier.name}${outlier.isAdded ? "" : " (live holding)"}`}
+                className="rounded-md border border-warning-border bg-surface px-3 py-1.5 text-fixed-13 font-medium text-warning transition-colors duration-150 ease-out hover:border-warning focus:outline-none focus-visible:ring-2 focus-visible:ring-warning/50 motion-reduce:transition-none"
+              >
+                Deselect {outlier.name}
+                {outlier.isAdded ? "" : " (holding)"}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 

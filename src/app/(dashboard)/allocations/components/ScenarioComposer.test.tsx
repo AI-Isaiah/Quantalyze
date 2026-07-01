@@ -6062,3 +6062,142 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     expect(cls).not.toMatch(/\[\d+px\]/);
   });
 });
+
+// ===========================================================================
+// Phase 57 Plan 03 Task 3 — empty-intersection warning banner + deselect
+// (WINDOW-06)
+//
+// When the SELECTED set shares no common window (defaultWindowFor === null), an
+// inline warning banner names the outlier(s) via outlierIdsFor and offers a
+// one-click "Deselect {name}" that removes the outlier from the subset —
+// restoring a non-null intersection (guided fix, not a dead-end). Absent when
+// the set has a common window.
+// ===========================================================================
+describe("ScenarioComposer — Phase 57 Plan 03 empty-intersection banner (WINDOW-06)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  // Two DISJOINT-span HOLDINGS keyed on the REAL holding scopeRefs (REF_BTC /
+  // REF_ETH) so the deselect handler's `scenario.toggleHolding(scopeRef)` path is
+  // exercised faithfully — the draft (seeded by defaultDraftFromHoldings) carries
+  // these refs as toggle=true, so toggling flips them genuinely to false. ETH is
+  // the outlier (latest start: 01-09…01-12 pushes the overlap empty).
+  const BTC_EARLY = WIN_DATES.slice(0, 4); // 01-01 … 01-04
+  const ETH_LATE = WIN_DATES.slice(8, 12); // 01-09 … 01-12
+  /** Two DISJOINT-span holdings → empty intersection → outlier = REF_ETH. */
+  function mountDisjointBook(): void {
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_BTC, BTC_EARLY),
+        mkWinStrat(REF_ETH, ETH_LATE),
+      ],
+      state: {
+        selected: { [REF_BTC]: true, [REF_ETH]: true },
+        weights: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
+        startDates: {},
+      },
+    });
+  }
+
+  it("WINDOW-06: an empty-intersection selected set renders a warning banner naming the outlier + a Deselect button", () => {
+    mountDisjointBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const banner = screen.getByTestId("scenario-empty-intersection-banner");
+    expect(banner).toBeInTheDocument();
+    // role/aria for a non-blocking warning (mirrors CustomRangePicker's clamp).
+    expect(banner).toHaveAttribute("role", "alert");
+    expect(banner).toHaveAttribute("aria-live", "polite");
+    // The outlier is named (ETH is the latest-start holding breaking the overlap).
+    expect(
+      within(banner).getAllByText(new RegExp(REF_ETH)).length,
+    ).toBeGreaterThan(0);
+    // A "Deselect {name}" button with an accessible name naming the strategy.
+    expect(
+      within(banner).getByRole("button", {
+        name: new RegExp(`Deselect ${REF_ETH}`, "i"),
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("WINDOW-06: clicking Deselect removes the outlier, the banner disappears, and a valid intersection is restored", () => {
+    mountDisjointBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const banner = screen.getByTestId("scenario-empty-intersection-banner");
+    fireEvent.click(
+      within(banner).getByRole("button", {
+        name: new RegExp(`Deselect ${REF_ETH}`, "i"),
+      }),
+    );
+    // Banner gone (only BTC remains selected → single-span intersection non-null).
+    expect(
+      screen.queryByTestId("scenario-empty-intersection-banner"),
+    ).not.toBeInTheDocument();
+    // A common window exists again → the window control is present and the engine
+    // blends the remaining member (BTC) over a valid window.
+    expect(
+      screen.getByTestId("scenario-coverage-window"),
+    ).toBeInTheDocument();
+    expect(lastScenarioMetrics()?.member_ids).toEqual([REF_BTC]);
+  });
+
+  it("WINDOW-06: the banner is ABSENT when the selected set has a common window", () => {
+    mountUnequalSpanBook(); // A + B overlap on 01-01…01-06
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.queryByTestId("scenario-empty-intersection-banner"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("WINDOW-06: the banner uses DESIGN.md warning tokens (no raw hex / px)", () => {
+    mountDisjointBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const cls = screen.getByTestId("scenario-empty-intersection-banner")
+      .className;
+    expect(cls).toMatch(/warning/);
+    expect(cls).not.toMatch(/#[0-9a-fA-F]{6}/);
+    expect(cls).not.toMatch(/\[\d+px\]/);
+  });
+});
