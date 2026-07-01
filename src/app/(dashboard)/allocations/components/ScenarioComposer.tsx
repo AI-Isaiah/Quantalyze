@@ -76,6 +76,13 @@ import {
 } from "@/lib/scenario-dealias";
 import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
+import {
+  coverageSpanOf,
+  defaultWindowFor,
+  unionOf,
+  type CoverageSpan,
+} from "@/lib/scenario-window";
+import { isoDayFromDate, localMidnight, parseIsoDay } from "@/lib/dateday";
 import type {
   OwnBookDeltaPayload,
   PeerPercentilePayload,
@@ -125,6 +132,7 @@ import { KpiStrip } from "./KpiStrip";
 import { toWealth } from "../widgets/performance/EquityChart";
 import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
+import { CustomRangePicker } from "./CustomRangePicker";
 import { BridgeDrawer } from "./BridgeDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { ScenarioFooter } from "./ScenarioFooter";
@@ -696,6 +704,33 @@ export function ScenarioComposer({
   // windows (client-side, 252-annualization basis — NOT the per-strategy panel's
   // 90/180/365 backend keys). Default 6M=126 per UI-SPEC §Component Inventory.
   const [rollingWindow, setRollingWindow] = useState(126);
+
+  // ---------------------------------------------------------------------------
+  // Phase 57 (WINDOW-01/04/05, POLISH-01) — the coverage window [winStart,winEnd].
+  //
+  // This is the ANALYTICAL blend window (which strategies are members), a
+  // SEPARATE axis from: the rolling-metrics `rollingWindow` above (63/126/252
+  // view of the blend's own series), the factsheet MasterBrush brush-zoom (a
+  // view pan, persist=false), and per-strategy `startDates` (legacy include-from).
+  // POLISH-01 (LOCKED) forbids conflating any of them.
+  //
+  // EPHEMERAL by design (persistence is Phase 59): plain composer useState, NOT
+  // in useScenarioState / ScenarioDraft — so NO SCENARIO_SCHEMA_VERSION bump. The
+  // values are ISO "YYYY-MM-DD" strings (the engine + scenario-window helpers all
+  // compare lexicographically); Date conversion happens ONLY at the
+  // CustomRangePicker boundary via dateday helpers.
+  //
+  // Null default: an empty intersection (`defaultWindowFor` === null) seeds no
+  // window, leaving the engine on the union-when-absent path (the WINDOW-06
+  // guided-fix banner is Plan 03).
+  const [winStart, setWinStart] = useState<string | null>(null);
+  const [winEnd, setWinEnd] = useState<string | null>(null);
+  // Pitfall 3 — the intersection default is a one-time SEED (and the "Common
+  // period" preset target), never a controlled value. Once the user sets a
+  // window (preset or picker) this flag is true and the seed effect never
+  // re-snaps their choice.
+  const windowTouchedRef = useRef(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   function handleWeightChange(scopeRef: string, weight: number) {
     if (!Number.isFinite(weight)) {
@@ -1529,10 +1564,81 @@ export function ScenarioComposer({
     () => buildDateMapCache(deAliased.strategies),
     [deAliased],
   );
-  const scenarioMetrics = useMemo(
-    () => computeScenario(deAliased.strategies, deAliased.state, dateMapCache),
-    [deAliased, dateMapCache],
+
+  // Phase 57 (WINDOW-01) — coverage spans of the strategies actually fed to the
+  // engine this render (the SELECTED, post-collapse set). Deriving spans from
+  // `deAliased.strategies` — the exact set computeScenario blends — keeps the
+  // UI's window derivation and the engine's membership on the SAME strategy set
+  // (RESEARCH Pitfall 2: pre/post-collapse desync). All interval math delegates
+  // to scenario-window.ts (Rule 2: never re-derive coverage math here).
+  const selectedSpans = useMemo<CoverageSpan[]>(() => {
+    const spans: CoverageSpan[] = [];
+    for (const s of deAliased.strategies) {
+      if (deAliased.state.selected[s.id] === false) continue;
+      const span = coverageSpanOf(s.daily_returns);
+      if (span) spans.push(span);
+    }
+    return spans;
+  }, [deAliased]);
+
+  // WINDOW-01 — seed the default window ONCE from the intersection of the
+  // selected spans (Pitfall 3: a one-time seed + preset target, NEVER a
+  // controlled value that re-snaps a user narrow). `windowTouchedRef` gates
+  // re-seeding: after the first non-empty seed (or any user set), the effect is
+  // inert. An empty intersection (`defaultWindowFor` === null) seeds nothing and
+  // leaves the engine on the union-when-absent path (WINDOW-06 banner is Plan 03).
+  useEffect(() => {
+    if (windowTouchedRef.current) return;
+    const def = defaultWindowFor(selectedSpans);
+    if (def) {
+      windowTouchedRef.current = true;
+      setWinStart(def.start);
+      setWinEnd(def.end);
+    }
+  }, [selectedSpans]);
+
+  // The applied coverage window, or null when unset / empty-intersection. Null
+  // means "no window key" — the engine stays on its own-book union-when-absent
+  // path, byte-unchanged for every non-scenario caller.
+  const coverageWindow = useMemo(
+    () => (winStart && winEnd ? { start: winStart, end: winEnd } : null),
+    [winStart, winEnd],
   );
+
+  // WINDOW mount bounds — the union span of the selected set gives the picker's
+  // min (earliest first) and max (latest last, or today when that is later, so a
+  // still-running strategy can always be windowed to the present). Local-midnight
+  // Dates ONLY at this picker boundary (dateday helpers, never `new Date(str)`).
+  const windowBounds = useMemo(() => {
+    const union = unionOf(selectedSpans);
+    if (!union) return null;
+    const minDay = parseIsoDay(union.start);
+    const maxDay = parseIsoDay(union.end);
+    if (!minDay || !maxDay) return null;
+    const min = localMidnight(minDay);
+    const unionMax = localMidnight(maxDay);
+    const today = localMidnight(isoDayFromDate(new Date()));
+    return { min, max: unionMax > today ? unionMax : today };
+  }, [selectedSpans]);
+
+  const applyWindow = useCallback((range: { start: string; end: string }) => {
+    windowTouchedRef.current = true;
+    setWinStart(range.start);
+    setWinEnd(range.end);
+  }, []);
+
+  const scenarioMetrics = useMemo(() => {
+    // ⚠️ HAZARD FIX (RESEARCH Pitfall 1): collapseAliasedHoldingStrategies
+    // reconstructs the ScenarioState and SILENTLY DROPS `state.window`. Setting
+    // the window on projectionState (pre-collapse) would never reach the engine.
+    // Inject it onto deAliased.state POST-collapse, immediately before the call.
+    // Only the scenario-tab composed path attaches a window — own-book callers
+    // stay on the union-when-absent path (coverageWindow === null → no window key).
+    const engineState = coverageWindow
+      ? { ...deAliased.state, window: coverageWindow }
+      : deAliased.state;
+    return computeScenario(deAliased.strategies, engineState, dateMapCache);
+  }, [deAliased, dateMapCache, coverageWindow]);
 
   // PEER-01/02/03 (Phase 42) — the blend's live peer rank vs the REAL verified
   // universe. Fetched from POST /api/scenario/peer-rank, feeding the ENGINE's
@@ -2425,6 +2531,55 @@ export function ScenarioComposer({
             yet, so this projection blends your whole book. Per-source toggles
             appear once every key has its own history.
           </InfoBanner>
+        </div>
+      )}
+
+      {/* Phase 57 (WINDOW-01/04/05) — coverage-window control. The ANALYTICAL
+          blend window is set HERE, above the KPIs, so the allocator steers
+          membership before reading the blend (mirrors how the rolling-window
+          control sits above its graph). Only mounts when the selected set has a
+          span to window (windowBounds !== null). A distinct axis from the
+          rolling-metrics window / factsheet brush-zoom / startDates (POLISH-01).
+          Presets + DESIGN.md styling land in the Task-2 pass. */}
+      {windowBounds && (
+        <div
+          className="mt-6 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-4 py-3"
+          data-testid="scenario-coverage-window"
+        >
+          <span className="text-fixed-11 font-medium uppercase tracking-wide text-text-muted">
+            Coverage window
+          </span>
+          <span
+            className="font-mono text-fixed-13 text-text-primary"
+            data-testid="scenario-coverage-window-value"
+          >
+            {coverageWindow
+              ? `${coverageWindow.start} → ${coverageWindow.end}`
+              : "All history"}
+          </span>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPickerOpen(true)}
+              aria-label="Set coverage window"
+              className="rounded-md border border-border px-3 py-1.5 text-fixed-13 font-medium text-text-primary transition-colors duration-150 ease-out hover:border-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 motion-reduce:transition-none"
+            >
+              Set window
+            </button>
+          </div>
+          {pickerOpen && (
+            <CustomRangePicker
+              isOpen={pickerOpen}
+              onClose={() => setPickerOpen(false)}
+              onApply={(range) => {
+                applyWindow(range);
+                setPickerOpen(false);
+              }}
+              min={windowBounds.min}
+              max={windowBounds.max}
+              initialRange={coverageWindow}
+            />
+          )}
         </div>
       )}
 

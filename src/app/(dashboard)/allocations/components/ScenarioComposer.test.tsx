@@ -181,6 +181,72 @@ vi.mock("@/components/charts/RollingSortinoChart", () => ({
   RollingSortinoChart: vi.fn(() => <div data-testid="rolling-sortino-mock" />),
 }));
 
+// Phase 57 (WINDOW-*) — capturing CustomRangePicker mock. The composer mounts
+// the REAL picker for the coverage-window control; here it is replaced by an
+// inert spy that captures `onApply` (mirrors the browse-drawer capture pattern
+// at :318) so a window test can drive an apply without piloting the real
+// two-month calendar grid. It renders a testid div when open and records its
+// min/max/initialRange props so the mount-bounds assertions can read them.
+let pickerOnApply: ((r: { start: string; end: string }) => void) | null = null;
+let lastPickerProps: {
+  isOpen: boolean;
+  min: Date;
+  max: Date;
+  initialRange?: { start: string; end: string } | null;
+} | null = null;
+// Phase 57 — engine-arg recorder. `@/lib/scenario` stays REAL (computeScenario
+// still computes genuine metrics — the member_count oracle depends on it), but
+// `computeScenario` is wrapped so each invocation's `state` arg is captured. The
+// composed-branch call is the one whose strategies include the window fixtures;
+// the "no window key when empty-intersection" assertion reads its state arg.
+const computeScenarioStateArgs: Array<{
+  strategyIds: string[];
+  state: Record<string, unknown>;
+}> = [];
+vi.mock("@/lib/scenario", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/scenario")>();
+  return {
+    ...actual,
+    computeScenario: vi.fn(
+      (
+        strategies: Parameters<typeof actual.computeScenario>[0],
+        state: Parameters<typeof actual.computeScenario>[1],
+        cache: Parameters<typeof actual.computeScenario>[2],
+      ) => {
+        computeScenarioStateArgs.push({
+          strategyIds: strategies.map((s) => s.id),
+          state: state as unknown as Record<string, unknown>,
+        });
+        return actual.computeScenario(strategies, state, cache);
+      },
+    ),
+  };
+});
+
+vi.mock("./CustomRangePicker", () => ({
+  CustomRangePicker: vi.fn(
+    (props: {
+      isOpen: boolean;
+      onClose: () => void;
+      onApply: (r: { start: string; end: string }) => void;
+      min: Date;
+      max: Date;
+      initialRange?: { start: string; end: string } | null;
+    }) => {
+      pickerOnApply = props.onApply;
+      lastPickerProps = {
+        isOpen: props.isOpen,
+        min: props.min,
+        max: props.max,
+        initialRange: props.initialRange,
+      };
+      return props.isOpen ? (
+        <div data-testid="custom-range-picker-mock" />
+      ) : null;
+    },
+  ),
+}));
+
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer } from "./ScenarioComposer";
@@ -423,6 +489,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // an added strategy. Same render output as the factory default (isOpen ? div
     // : null); tests that need a custom drawer still override it inline.
     browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
     vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
       isOpen: boolean;
       onAdd: (s: unknown) => void;
@@ -5062,5 +5130,213 @@ describe("ScenarioComposer — Phase 43 GUARD-01 static guard + assembled degene
     }
     // No role=alert anywhere on the folded surface (derived-client honesty).
     expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+});
+
+// ===========================================================================
+// Phase 57 Plan 02 — Coverage-window control (WINDOW-01/04/05, POLISH-01)
+//
+// The adapter is mocked but `@/lib/scenario` (computeScenario) and
+// `@/lib/scenario-dealias` (the collapse) are REAL, so `member_count` on the
+// scenarioMetrics the composer feeds KpiStrip is the genuine engine membership.
+// That is the load-bearing oracle here: the window is proven to reach the engine
+// (post-collapse) ONLY if member_count moves when the window moves.
+// ===========================================================================
+
+// Two strategies with UNEQUAL spans, both added as toggle-able rows so they ride
+// the passthrough (non-collapsed) path and align 1:1 with the engine members.
+//   A: 2026-01-01 … 2026-01-12  (full span)
+//   B: 2026-01-01 … 2026-01-06  (ends early — dropped when the window widens past d6)
+const WIN_DATES = Array.from({ length: 12 }, (_, i) =>
+  `2026-01-${String(i + 1).padStart(2, "0")}`,
+);
+const REF_WIN_A = "strat-window-A";
+const REF_WIN_B = "strat-window-B";
+
+function mkWinStrat(
+  id: string,
+  dates: string[],
+): {
+  id: string;
+  name: string;
+  codename: null;
+  disclosure_tier: string;
+  strategy_types: string[];
+  markets: string[];
+  start_date: string;
+  daily_returns: { date: string; value: number }[];
+  cagr: null;
+  sharpe: null;
+  volatility: null;
+  max_drawdown: null;
+} {
+  return {
+    id,
+    name: id,
+    codename: null,
+    disclosure_tier: "public",
+    strategy_types: [],
+    markets: [],
+    start_date: dates[0],
+    daily_returns: dates.map((date, i) => ({
+      date,
+      value: [0.01, -0.008, 0.012, -0.005, 0.006][i % 5],
+    })),
+    cagr: null,
+    sharpe: null,
+    volatility: null,
+    max_drawdown: null,
+  };
+}
+
+/** Mount the adapter with A (full span) + B (short span), both selected. */
+function mountUnequalSpanBook(): void {
+  vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+    strategies: [
+      mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
+      mkWinStrat(REF_WIN_B, WIN_DATES.slice(0, 6)), // 2026-01-01 … 2026-01-06
+    ],
+    state: {
+      selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
+      weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+      startDates: {},
+    },
+  });
+}
+
+/** The latest scenarioMetrics the composer passed to KpiStrip this render. */
+function lastScenarioMetrics(): {
+  member_count?: number;
+  member_ids?: string[];
+} | null {
+  const calls = vi.mocked(KpiStrip).mock.calls;
+  if (calls.length === 0) return null;
+  return calls[calls.length - 1][0].scenarioMetrics ?? null;
+}
+
+describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  it("window: default seeds the intersection so both unequal-span strategies are members", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Default window = defaultWindowFor(spans) = [2026-01-01, 2026-01-06]
+    // (max firsts / min lasts). BOTH A and B cover it → member_count === 2.
+    const sm = lastScenarioMetrics();
+    expect(sm?.member_count).toBe(2);
+    expect(sm?.member_ids).toEqual(
+      expect.arrayContaining([REF_WIN_A, REF_WIN_B]),
+    );
+  });
+
+  it("window: MANDATORY member_count changes when the window moves — widening past B's last day drops it (2 → 1), narrowing restores it (1 → 2)", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Baseline: intersection default → both members.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+
+    // Open the window control so the (mocked) picker mounts and captures onApply.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+
+    // The picker receives the union span as bounds (min = earliest first) and
+    // the current window as initialRange — the mount contract for the control.
+    expect(lastPickerProps).not.toBeNull();
+    expect(lastPickerProps!.initialRange).toEqual({
+      start: "2026-01-01",
+      end: "2026-01-06",
+    });
+
+    // Widen winEnd PAST B's last data day (2026-01-06 → 2026-01-12). The picker
+    // bubbles the applied window; the composer injects it POST-collapse onto
+    // deAliased.state, so the engine drops B (its span no longer covers the
+    // window) → member_count === 1. This is the hazard-fix proof: if the window
+    // never reached the engine, member_count would stay 2.
+    expect(pickerOnApply).not.toBeNull();
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    const widened = lastScenarioMetrics();
+    expect(widened?.member_count).toBe(1);
+    expect(widened?.member_ids).toEqual([REF_WIN_A]);
+
+    // Narrow winEnd back within B's coverage (→ 2026-01-06). B is a member again
+    // → member_count === 2. Proves the toggle is driven by the live window, not a
+    // one-way latch.
+    fireEvent.click(screen.getByRole("button", { name: /set coverage window/i }));
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-06" });
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+  });
+
+  it("window: when the intersection is empty, the engine receives a state WITHOUT a window key (union path preserved)", () => {
+    // Two DISJOINT spans → defaultWindowFor(spans) === null → nothing to seed →
+    // engineState === deAliased.state (no `window` key added; union-when-absent).
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 4)), // 01-01 … 01-04
+        mkWinStrat(REF_WIN_B, WIN_DATES.slice(8, 12)), // 01-09 … 01-12
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // The composed-branch computeScenario call (its strategies carry the window
+    // fixtures) receives a state with NO window key.
+    const composedArgs = computeScenarioStateArgs.filter(
+      (a) =>
+        a.strategyIds.includes(REF_WIN_A) && a.strategyIds.includes(REF_WIN_B),
+    );
+    expect(composedArgs.length).toBeGreaterThan(0);
+    for (const a of composedArgs) {
+      expect("window" in a.state).toBe(false);
+    }
   });
 });
