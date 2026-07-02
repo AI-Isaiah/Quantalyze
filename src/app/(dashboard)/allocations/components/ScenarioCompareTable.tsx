@@ -261,7 +261,7 @@ export function ScenarioCompareTable({
                       // Undecodable (older format) takes precedence over the
                       // sample-floor verdict: this column can't be compared
                       // because of its FORMAT, not a short overlap window.
-                      <span className="block text-xs text-text-muted">
+                      <span className="block text-fixed-11 text-text-muted">
                         {OLDER_FORMAT_STAMP}
                       </span>
                     ) : verdict.ok ? (
@@ -269,29 +269,27 @@ export function ScenarioCompareTable({
                       // stamp with the column's OWN effective window, read from
                       // the engine output (NEVER re-derived). Each compared
                       // scenario computes at its own persisted draft.window, so
-                      // heterogeneous windows read honestly per column. The dates
-                      // mirror BlendHeader's treatment (font-mono tabular-nums,
-                      // en-dash, lexicographic YYYY-MM-DD); the label stays the
-                      // quiet text-text-muted honesty caption — never accent/
-                      // warning/winner. Omitted when either bound is null
+                      // heterogeneous windows read honestly per column. The whole
+                      // stamp keeps the PRE-EXISTING `font-metric` whole-line
+                      // mono convention (Rule 11 — the day-count number AND the
+                      // dates render in Geist Mono per DESIGN.md "all numbers
+                      // use Geist Mono") at the text-fixed-11 tier, and stays
+                      // the quiet text-text-muted honesty caption — never
+                      // accent/warning/winner. Omitted when either bound is null
                       // (degenerate) — show just the day-count stamp.
-                      <span className="text-fixed-11 text-text-muted">
+                      <span className="text-fixed-11 font-metric text-text-muted">
                         {methodologyLine(c.metrics.n)}
                         {c.metrics.effective_start && c.metrics.effective_end ? (
                           <>
                             {" · "}
-                            <span className="font-mono tabular-nums">
-                              {c.metrics.effective_start}
-                            </span>
+                            {c.metrics.effective_start}
                             {"–"}
-                            <span className="font-mono tabular-nums">
-                              {c.metrics.effective_end}
-                            </span>
+                            {c.metrics.effective_end}
                           </>
                         ) : null}
                       </span>
                     ) : (
-                      <span className="block text-xs text-text-muted">
+                      <span className="block text-fixed-11 text-text-muted">
                         <span className="block font-medium">{SAMPLE_FLOOR_HEADING}</span>
                         <span className="block">
                           {sampleFloorBody(verdict, { feature: "comparison" })}

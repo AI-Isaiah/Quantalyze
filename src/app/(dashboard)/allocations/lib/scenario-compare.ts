@@ -54,7 +54,7 @@ import {
   buildStrategyForBuilderSet,
   type StrategyForBuilderId,
 } from "./scenario-adapter";
-import type { ScenarioDraft } from "./scenario-state";
+import { SCENARIO_SCHEMA_VERSION, type ScenarioDraft } from "./scenario-state";
 
 /**
  * The slice of the composer's live payload the compare engine needs. Mirrors
@@ -185,7 +185,10 @@ export function computeMetricsForDraft(
  */
 export function buildLiveBookDraft(): ScenarioDraft {
   return {
-    schema_version: 2,
+    // The synthetic draft never round-trips the codec (computeMetricsForDraft
+    // consumes it directly), but pin the CURRENT version constant so a future
+    // bump can never leave this literal behind as a stale-looking v2.
+    schema_version: SCENARIO_SCHEMA_VERSION,
     init_holdings_fingerprint: "live-book",
     toggleByScopeRef: {},
     addedStrategies: [],

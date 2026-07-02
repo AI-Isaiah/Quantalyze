@@ -27,8 +27,9 @@ import { ScenarioCompareTable, type ScenarioColumn } from "./ScenarioCompareTabl
  *
  * v1.5 PERSIST-03 adds the per-column effective-window label pins:
  *   8. A verdict.ok column AUGMENTS its day-count stamp with the effective
- *      {start}–{end} window (engine-emitted bounds, font-mono tabular-nums,
- *      en-dash) — quiet text-text-muted caption, never accent/warning.
+ *      {start}–{end} window (engine-emitted bounds, whole-line font-metric
+ *      mono at text-fixed-11, en-dash) — quiet text-text-muted caption,
+ *      never accent/warning.
  *   9. Two columns with different windows render DIFFERENT ranges (heterogeneous).
  *  10. Undecodable + below-floor columns SUPPRESS the range (no honest window);
  *      a verdict.ok column with null bounds shows just the day-count stamp.
@@ -289,9 +290,13 @@ describe("ScenarioCompareTable", () => {
     expect(alphaStamp.textContent).toContain("2024-01-02");
     expect(alphaStamp.textContent).toContain("2024-06-01");
     expect(alphaStamp.textContent).toMatch(/·\s*2024-01-02–2024-06-01/);
-    // Dates use the BlendHeader font-mono tabular-nums treatment.
-    const dateSpans = alphaStamp.querySelectorAll("span.font-mono.tabular-nums");
-    expect(dateSpans.length).toBe(2);
+    // The WHOLE stamp (day count + dates) keeps the pre-existing font-metric
+    // whole-line mono convention (Geist Mono + tabular-nums, Rule 11) at the
+    // text-fixed-11 tier — no inner per-date font spans.
+    const stampSpan = alphaStamp.querySelector("span.font-metric");
+    expect(stampSpan).not.toBeNull();
+    expect(stampSpan!.className).toContain("text-fixed-11");
+    expect(stampSpan!.textContent).toContain("2024-01-02–2024-06-01");
     // The label stays the quiet honesty caption — never accent/warning/winner.
     expect(alphaStamp.innerHTML).not.toMatch(/text-accent|text-negative|text-warning/);
   });
@@ -333,7 +338,8 @@ describe("ScenarioCompareTable", () => {
       within(olderStamp).getByText(/Saved in an older format — can't be compared/),
     ).toBeInTheDocument();
     expect(olderStamp.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
-    expect(olderStamp.querySelector("span.font-mono.tabular-nums")).toBeNull();
+    // No windowed (font-metric) stamp renders for an undecodable column.
+    expect(olderStamp.querySelector("span.font-metric")).toBeNull();
   });
 
   it("suppresses the date range on a below-sample-floor column", () => {
@@ -350,7 +356,8 @@ describe("ScenarioCompareTable", () => {
       within(thinStamp).getByText(/Not enough history for this estimate/),
     ).toBeInTheDocument();
     expect(thinStamp.textContent).not.toMatch(/·\s*\d{4}-\d{2}-\d{2}–/);
-    expect(thinStamp.querySelector("span.font-mono.tabular-nums")).toBeNull();
+    // No windowed (font-metric) stamp renders for a below-floor column.
+    expect(thinStamp.querySelector("span.font-metric")).toBeNull();
   });
 
   it("omits the date range when a verdict.ok column has null effective bounds (degenerate but usable)", () => {
@@ -367,9 +374,9 @@ describe("ScenarioCompareTable", () => {
     );
 
     const stamp = screen.getByTestId("stamp-NoBounds");
-    // The day-count stamp still renders; no date range.
+    // The day-count stamp still renders; no date range is fabricated.
     expect(within(stamp).getByText(methodologyLine(80))).toBeInTheDocument();
-    expect(stamp.querySelector("span.font-mono.tabular-nums")).toBeNull();
+    expect(stamp.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}–\d{4}-\d{2}-\d{2}/);
   });
 
   it("renders the under-selection hint with fewer than 2 columns", () => {
