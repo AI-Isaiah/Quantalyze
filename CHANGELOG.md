@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.0.31] - 2026-07-02
+### Fixed
+- **Added strategies now actually join a book-based scenario blend** (P61-BUG-1, found by the Phase-61 authed prod canary): in book mode with per-key data sources active — every real book, and exactly the CSV-strategies-plus-API-keys mixed setup — a strategy added from the browse drawer rendered a live-looking weight row while contributing nothing to the blend, the coverage timeline, or any KPI. The per-key engine set now merges the added units (per-key equity weights normalized to shares so fractional weights are commensurable; the keys-only blend is numerically unchanged).
+- **Saved book scenarios no longer compute empty in compare** (P61-BUG-2): the compare engine rebuilt saved drafts on holdings-snapshot series whose spans don't match the per-key series the draft was windowed on, yielding "0 overlapping days" columns. It now computes on the same per-key + added set the composer projects.
+- **Book-only scenario shares fail honestly instead of minting dead links** (P61-BUG-2): the public share page never exposes an owner's private book series (deliberate boundary), so sharing a scenario with no added strategies produced an all-em-dash page. Minting now returns a clear "nothing shareable" explanation, and already-minted links render the honest-absence card with the reason.
+
+
 ## [0.35.0.30] - 2026-07-02
 ### Changed
 - **The mobile Lighthouse perf budget is now advisory** (was blocking via the `frontend` merge gate): after coverage folded into the test shards it was the gate's slowest dependency (~+2 minutes on every merge) and its noisiest signal. The job still runs on every PR and reports its own check; the merge gate drops from ~7 to ~5.5 minutes.
