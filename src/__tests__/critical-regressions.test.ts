@@ -698,43 +698,54 @@ describe("Critical regression guards", () => {
         );
       });
 
-      // retro-PR179-H4: seed-gated rebuild step contract. The step
-      // MUST (a) be gated on vars.E2E_TEST_DB_CONFIGURED, (b) wipe
-      // .next/server + .next/static + the 3 manifests, (c) re-run
-      // `npm run build` with the REAL secrets in env.
-      it("ci.yml seed-gated rebuild step has the required shape (contract for C-0293(c) Path 2)", () => {
+      // retro-PR179-H4, RE-BASELINED 2026-07-02 (CI-speed split, reviewed
+      // act): the seed-gated Playwright batch moved from a mid-job rebuild
+      // inside `e2e` to its OWN `e2e-seeded` job that builds from a CLEAN
+      // workspace. The C-0293(c) Path-2 contract is now: (a) the JOB is
+      // gated on vars.E2E_TEST_DB_CONFIGURED == 'true', (b) it builds with
+      // the REAL secrets in env, (c) it NEVER downloads the placeholder
+      // nextjs-build artifact (a clean workspace replaces the old
+      // rm -rf wipe — there are no placeholder chunks to leak through),
+      // (d) the inline-URL verify step still proves the real env landed
+      // in the bundle.
+      it("ci.yml e2e-seeded job has the required shape (contract for C-0293(c) Path 2)", () => {
         const src = readText(".github/workflows/ci.yml");
-        // The rebuild step's identifying name is unique in the file.
-        const step = findOrFail(
+        const job = findOrFail(
           src,
-          /-\s*name:\s*Rebuild Next\.js with real test-Supabase env[\s\S]*?(?=\n\s{0,6}-\s)/,
-          "ci.yml: rebuild step name not found — Path 2 contract drifted",
+          /\n {2}e2e-seeded:\n[\s\S]*?(?=\n {2}[a-z][a-z0-9-]*:\n|$)/,
+          "ci.yml: e2e-seeded job not found — Path 2 contract drifted",
         );
-        // (a) gated on vars.E2E_TEST_DB_CONFIGURED
+        // (a) JOB-level gate on vars.E2E_TEST_DB_CONFIGURED == 'true'
         expectMatch(
-          step,
-          /if:\s*\$\{\{\s*vars\.E2E_TEST_DB_CONFIGURED\s*==\s*'true'\s*\}\}/,
-          "rebuild step not gated on vars.E2E_TEST_DB_CONFIGURED — would run on fork PRs and burn rebuild cost",
+          job,
+          /\n {4}if:[^\n]*vars\.E2E_TEST_DB_CONFIGURED\s*==\s*'true'/,
+          "e2e-seeded job lost its vars.E2E_TEST_DB_CONFIGURED == 'true' job-level gate",
         );
-        // (b) wipes the placeholder manifests before rebuild
+        // (b) builds with REAL secrets in env
+        expectMatch(job, /npm run build/, "e2e-seeded job no longer runs `npm run build`");
         expectMatch(
-          step,
-          /rm\s+-rf\s+\.next\/server\s+\.next\/static/,
-          "rebuild step no longer wipes .next/server + .next/static — placeholder chunks could leak through",
-        );
-        // (c) re-runs `npm run build` with REAL secrets in env (not
-        // placeholder values). secrets.TEST_SUPABASE_URL must appear
-        // in the env block.
-        expectMatch(step, /npm run build/, "rebuild step no longer runs `npm run build`");
-        expectMatch(
-          step,
+          job,
           /NEXT_PUBLIC_SUPABASE_URL:\s*\$\{\{\s*secrets\.TEST_SUPABASE_URL\s*\}\}/,
-          "rebuild step env no longer wires secrets.TEST_SUPABASE_URL — seed-gated specs would run against placeholder bundle",
+          "e2e-seeded build env no longer wires secrets.TEST_SUPABASE_URL — seeded specs would run against a placeholder bundle",
         );
         expectMatch(
-          step,
+          job,
           /NEXT_PUBLIC_SUPABASE_ANON_KEY:\s*\$\{\{\s*secrets\.TEST_SUPABASE_ANON_KEY\s*\}\}/,
-          "rebuild step env no longer wires secrets.TEST_SUPABASE_ANON_KEY",
+          "e2e-seeded build env no longer wires secrets.TEST_SUPABASE_ANON_KEY",
+        );
+        // (c) clean workspace: the placeholder artifact is never downloaded
+        // here (downloading it would reintroduce the placeholder-chunk
+        // merge hazard the old rm -rf wipe existed to prevent).
+        expectNoMatch(
+          job,
+          /name:\s*nextjs-build/,
+          "e2e-seeded job downloads the placeholder nextjs-build artifact — clean-workspace contract broken",
+        );
+        // (d) the inlined-URL verification step survives
+        expectMatch(
+          job,
+          /Verify build inlined real test-Supabase URL/,
+          "e2e-seeded job lost the inline-URL verify step (retro-PR188-D4)",
         );
       });
     });
@@ -771,55 +782,53 @@ describe("Critical regression guards", () => {
       // Fail-CLOSED semantics: the gate should be checked against the
       // literal 'true' string only. A fail-OPEN inverted gate
       // (!= 'false') would open the upload on the seed-gated path.
-      it("ci.yml Upload Playwright report on failure is gated against the seed-gated path", () => {
+      // RE-BASELINED 2026-07-02 (CI-speed split, reviewed act): the old
+      // single e2e job mixed placeholder and real-env specs, so the exfil
+      // closure was a vars-allow-listed upload gate (retro-PR188-F6). The
+      // split encodes the SAME closure structurally, which is stricter:
+      // the real-env job carries no report upload at all, and the smoke
+      // job (whose upload is now unconditional-on-failure) carries no
+      // test-Supabase secrets, so its traces can only ever embed
+      // placeholder values.
+      it("ci.yml playwright-report exfil closure holds across the e2e split (C-0293(c))", () => {
         const src = readText(".github/workflows/ci.yml");
-        // Locate the step by its unique name, then walk to the next step
-        // boundary (`<spaces>-`) or non-indented line, or EOF. The previous
-        // attempt's lookahead boundary `(?=\n\s{0,6}-\s|\n[a-z])` did not
-        // match this step because it is the LAST step in the e2e job —
-        // there is no trailing step or next job to anchor on.
-        const stepStart = src.search(/-\s*name:\s*Upload Playwright report on failure/);
-        expect(
-          stepStart,
-          "ci.yml: Upload Playwright report on failure step not found — retro-PR179-H1 fix reverted?",
-        ).toBeGreaterThanOrEqual(0);
-        const stepTail = src.slice(stepStart).split("\n");
-        const stepLines: string[] = [];
-        for (let i = 0; i < stepTail.length; i++) {
-          const line = stepTail[i];
-          if (i > 0 && /^\s+-\s/.test(line)) break;
-          if (i > 0 && /^\S/.test(line)) break;
-          stepLines.push(line);
-        }
-        const step = stepLines.join("\n");
-        expect(
-          step.length,
-          "ci.yml: Upload Playwright report on failure step body walked empty",
-        ).toBeGreaterThan(0);
-        // Must reference the seed-gate variable explicitly.
-        expectMatch(
-          step,
-          /vars\.E2E_TEST_DB_CONFIGURED/,
-          "Upload Playwright report step lost the vars.E2E_TEST_DB_CONFIGURED gate — retro-PR179-H1 / C-0293(c) exfil re-opens",
+        const seededJob = findOrFail(
+          src,
+          /\n {2}e2e-seeded:\n[\s\S]*?(?=\n {2}[a-z][a-z0-9-]*:\n|$)/,
+          "ci.yml: e2e-seeded job not found",
         );
-        // Accept either an explicit allow-list (== '' || == 'false') OR
-        // the documented `!= 'true'` form. Both deny upload when the
-        // seed-gated rebuild ran. Reject other gate variants.
-        const hasFailClosedAllowlist =
-          /E2E_TEST_DB_CONFIGURED\s*==\s*''|E2E_TEST_DB_CONFIGURED\s*==\s*'false'/.test(step);
-        const hasNegationGate = /E2E_TEST_DB_CONFIGURED\s*!=\s*'true'/.test(step);
-        expect(
-          hasFailClosedAllowlist || hasNegationGate,
-          "Upload Playwright report step gate must check vars.E2E_TEST_DB_CONFIGURED against 'true' — current expression does not match either accepted form",
-        ).toBe(true);
-        // Anti-pattern explicitly forbidden: a `!= 'false'` negation
-        // (the inverse of the intent) would open the upload on the
-        // seed-gated path. If a future refactor flips the operator this
-        // test fails loud.
+        // (a) The REAL-env job must contain NO playwright-report upload:
+        // its traces/screenshots embed the test-Supabase URL + anon key
+        // from the rebuilt bundle, and an actions artifact would sit for
+        // days with actions:read scope — the exact exfil pivot C-0293(c)
+        // closed for nextjs-build.
+        // Match the upload SHAPE (`name:`/`path:` keys), not the bare word —
+        // the job legitimately documents the closure in a comment that says
+        // "playwright-report" (comment-vs-code FP class, B6 lesson).
         expectNoMatch(
-          step,
-          /E2E_TEST_DB_CONFIGURED\s*!=\s*'false'/,
-          "Upload Playwright report step uses the INVERTED gate (!= 'false') — opens uploads on the seed-gated REAL-creds path",
+          seededJob,
+          /(name|path):\s*playwright-report/,
+          "e2e-seeded job gained a playwright-report upload — C-0293(c) exfil re-opens on the real-creds path",
+        );
+        const smokeJob = findOrFail(
+          src,
+          /\n {2}e2e:\n[\s\S]*?(?=\n {2}[a-z][a-z0-9-]*:\n|$)/,
+          "ci.yml: e2e (smoke) job not found",
+        );
+        // (b) The smoke job's unconditional failure upload is only safe
+        // while the job never touches the real test-Supabase env. Pin
+        // that: no TEST_SUPABASE_* secret reference anywhere in the job.
+        expectNoMatch(
+          smokeJob,
+          /secrets\.TEST_SUPABASE_/,
+          "e2e smoke job references TEST_SUPABASE_* secrets — its unconditional playwright-report upload could then exfil real creds; move the secret-bearing work to e2e-seeded",
+        );
+        // (c) The smoke upload still exists (losing it silently would drop
+        // the only failure-report artifact the split kept).
+        expectMatch(
+          smokeJob,
+          /Upload Playwright report on failure/,
+          "e2e smoke job lost its failure-report upload",
         );
       });
     });
