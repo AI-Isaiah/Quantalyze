@@ -272,7 +272,9 @@ test.describe("axe app-wide (A11Y-01) — authed standalone routes", () => {
 // its page-level <main>; the factsheet's own complementary/region landmarks
 // legitimately nest there, firing the page-level landmark BEST-PRACTICE rules
 // (all "moderate"). Per D-Area-3 / Assumption A2 + the composer-axe GUARD-03
-// precedent (composer-axe.spec.ts:208-212), the EMBEDDED surface gates on
+// precedent (the serious+critical comment above the final analyze() in
+// composer-axe.spec.ts — durable anchor, not a line number: that file re-flows),
+// the EMBEDDED surface gates on
 // serious+critical ONLY (every rule still RUNS, NO rule disabled). Standalone
 // /factsheet/[id]/v2 stays STRICT — it is already proven green with ALL impacts
 // by the focused specs and is intentionally NOT re-scanned here.

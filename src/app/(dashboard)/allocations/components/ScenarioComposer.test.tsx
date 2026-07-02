@@ -5238,6 +5238,46 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     cleanup();
   });
 
+  // Phase 60 (VERIFY-01) — the NEGATIVE path the composer-axe e2e stopped
+  // exercising when its anchors went unconditional: a SELECTED set whose
+  // series yield no coverage spans (empty daily_returns → coverageSpanOf
+  // null for every row) must leave `windowBounds` null, so the ENTIRE
+  // Phase-58 surface (window control, blend header, timeline) honestly does
+  // not mount. Pinned here at the unit layer because an e2e negative over
+  // the shared leave-around test DB could non-deterministically pick a
+  // WITH-returns strategy and false-red.
+  it("window: no derivable coverage spans → the whole window surface honestly does not mount", () => {
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        { ...mkWinStrat(REF_WIN_A, WIN_DATES), daily_returns: [] },
+        { ...mkWinStrat(REF_WIN_B, WIN_DATES), daily_returns: [] },
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={`${ALLOCATOR_A}-p60-no-spans`}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.queryByTestId("scenario-coverage-window"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("scenario-blend-header"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("scenario-coverage-timeline-body"),
+    ).not.toBeInTheDocument();
+  });
+
   it("window: default seeds the intersection so both unequal-span strategies are members", () => {
     mountUnequalSpanBook();
     render(
