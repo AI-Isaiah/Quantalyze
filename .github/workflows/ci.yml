@@ -622,11 +622,13 @@ jobs:
     # explicit `exit 1` on any non-success forces a definite `failure`
     # status that all branch-protection configurations honor.
     #
-    # Phase 48-05 / A11Y-03 (FLOW-01 spirit — prove it's actually wired):
-    # `lighthouse-mobile` is added to BOTH `needs` AND the result-check loop
-    # below so the mobile perf budget is a BLOCKING gate via this single
-    # required aggregator check (not relying on a separately-configured
-    # branch-protection entry). Defined as the `lighthouse-mobile:` job above.
+    # CI speed (2026-07-02, user decision): `lighthouse-mobile` was REMOVED
+    # from this gate (Phase 48-05 / A11Y-03 had wired it into BOTH `needs`
+    # and the result-check loop). After coverage folded into the test shards,
+    # the perf-budget job was the aggregator's slowest dependency (~+2m on
+    # every merge) and its noisiest signal. It is now ADVISORY like e2e: it
+    # still runs on every PR and reports its own check — it just no longer
+    # blocks this aggregator.
     runs-on: ubuntu-latest
     needs:
       - frontend-typecheck
@@ -635,7 +637,6 @@ jobs:
       - frontend-coverage
       - frontend-policy
       - frontend-build
-      - lighthouse-mobile
     if: always()
     steps:
       - name: Verify all frontend-* jobs succeeded
@@ -647,8 +648,7 @@ jobs:
             "frontend-test=${{ needs.frontend-test.result }}" \
             "frontend-coverage=${{ needs.frontend-coverage.result }}" \
             "frontend-policy=${{ needs.frontend-policy.result }}" \
-            "frontend-build=${{ needs.frontend-build.result }}" \
-            "lighthouse-mobile=${{ needs.lighthouse-mobile.result }}"; do
+            "frontend-build=${{ needs.frontend-build.result }}"; do
             name="${r%=*}"; result="${r#*=}"
             echo "$name: $result"
             if [ "$result" != "success" ]; then fail=1; fi
@@ -1552,8 +1552,16 @@ jobs:
       # shell; the smoke job's placeholder-env report still uploads.
 
   lighthouse-mobile:
-    # Phase 48-05 / A11Y-03: mobile Lighthouse performance budget gating the
-    # 5 PUBLIC routes (lighthouserc.json). Mirrors the e2e job's
+    # Phase 48-05 / A11Y-03: mobile Lighthouse performance budget over the
+    # 5 PUBLIC routes (lighthouserc.json).
+    #
+    # ADVISORY since 2026-07-02 (CI speed, user decision): no longer in the
+    # `frontend` aggregator's needs/result-check — it was the merge gate's
+    # slowest dependency (~+2m) and its noisiest signal. A red check here is
+    # still visible on every PR; treat a real perf regression seriously, it
+    # just doesn't block the merge.
+    #
+    # Mirrors the e2e job's
     # build-artifact-restore + start-server shape: download the production
     # nextjs-build artifact (.next + public), `npm run start` against the
     # PRODUCTION build, then `npx lhci autorun` (Pitfall 6 — never next dev).

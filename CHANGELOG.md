@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.35.0.30] - 2026-07-02
+### Changed
+- **The mobile Lighthouse perf budget is now advisory** (was blocking via the `frontend` merge gate): after coverage folded into the test shards it was the gate's slowest dependency (~+2 minutes on every merge) and its noisiest signal. The job still runs on every PR and reports its own check; the merge gate drops from ~7 to ~5.5 minutes.
+
 ## [0.35.0.29] - 2026-07-02
 ### Changed
 - **CI is ~40% faster** with no loss of coverage or gating: the vitest shards now emit coverage themselves and a lightweight job merges the shard reports and enforces the same coverage ratchet (the duplicate full-suite coverage run is gone — the suite executes once, not twice), and the e2e Playwright batches (public smoke + seeded) now run in parallel jobs instead of back-to-back. Merge-gate latency drops from ~8 to ~6.5 minutes and full e2e signal from ~14.6 to ~9 minutes.
