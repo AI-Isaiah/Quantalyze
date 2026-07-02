@@ -127,6 +127,7 @@ import { useScenarioState } from "../hooks/useScenarioState";
 import {
   buildStrategyForBuilderSet,
   buildPerKeyStrategyForBuilderSet,
+  mergeAddedIntoPerKeySet,
 } from "../lib/scenario-adapter";
 import {
   buildHoldingRef,
@@ -1684,9 +1685,35 @@ export function ScenarioComposer({
 
   // The strategy set actually fed to the engine this render — the per-key units
   // when the per-source path is active, else the holdings/added units.
-  const activeAdapterOutput = usePerKeySources
-    ? perKeyAdapterOutput
-    : adapterOutput;
+  //
+  // P61-BUG-1 fix: the per-key set is MERGED with the draft's added-strategy
+  // units (mergeAddedIntoPerKeySet — per-key USD weights normalized to shares
+  // there so the fractional added weights are commensurable). Before this the
+  // per-key path discarded `draft.addedStrategies` wholesale: a drawer-add in
+  // book mode rendered a live-looking weight row while contributing NOTHING to
+  // member_count / timeline / KPIs (the CSV-strategies + API-keys blend path).
+  const activeAdapterOutput = useMemo(() => {
+    if (!usePerKeySources) return adapterOutput;
+    return mergeAddedIntoPerKeySet(
+      perKeyAdapterOutput,
+      scenario.draft.addedStrategies,
+      addedStrategyReturnsLookup as Record<
+        import("../lib/scenario-adapter").StrategyForBuilderId,
+        DailyPoint[]
+      >,
+      addedStrategyMetadataLookup as Record<
+        import("../lib/scenario-adapter").StrategyForBuilderId,
+        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+      >,
+    );
+  }, [
+    usePerKeySources,
+    adapterOutput,
+    perKeyAdapterOutput,
+    scenario.draft.addedStrategies,
+    addedStrategyReturnsLookup,
+    addedStrategyMetadataLookup,
+  ]);
 
   // DSRC-02 — render-gating for the "Data sources" control:
   //   showDataSources       → the per-key path is active → render the control.
@@ -1712,11 +1739,20 @@ export function ScenarioComposer({
     return (payload.apiKeys ?? []).filter((k) => eligible.includes(k.id));
   }, [payload.apiKeys, payload.eligibleApiKeyIds]);
 
-  // All-excluded honest-empty trigger (DSRC-03): every eligible key toggled off.
+  // All-excluded honest-empty trigger (DSRC-03): every eligible key toggled off
+  // AND no live added strategy. Since P61-BUG-1 the merged engine set carries
+  // the draft's added strategies, so all-keys-excluded with a live (toggled-on)
+  // added leg is a legitimate added-only projection — the "nothing to project"
+  // card must not contradict the live chart below it (red-team F1). The added
+  // liveness check mirrors projectionState's draft-toggle rule (absent → on).
   // Derived from the ephemeral include map (default included), so re-including
   // any source instantly flips this back to false and restores the projection.
+  const hasLiveAddedStrategy = scenario.draft.addedStrategies.some(
+    (s) => scenario.draft.toggleByScopeRef[s.id] !== false,
+  );
   const allDataSourcesExcluded =
     showDataSources &&
+    !hasLiveAddedStrategy &&
     dataSourceKeys.length > 0 &&
     dataSourceKeys.every((k) => includeByApiKeyId[k.id] === false);
 
@@ -1756,6 +1792,15 @@ export function ScenarioComposer({
   // leverage UI so their multiplier is always 1, while an added strategy's
   // multiplier flows through here. The collapse weight-averages leverage across
   // aliased venues and computeScenario applies `wᵢ·Lᵢ·rᵢ`.
+  // P61-BUG-1: the ids of the draft's added strategies — the per-key branch
+  // below needs this to tell an ADDED unit (draft toggle/weight semantics)
+  // apart from a per-key unit (ephemeral include map). Also consumed by the
+  // WINDOW-06 outlier machinery further down.
+  const addedIdSet = useMemo(
+    () => new Set<string>(scenario.draft.addedStrategies.map((a) => a.id)),
+    [scenario.draft.addedStrategies],
+  );
+
   const projectionState = useMemo(() => {
     const selected: Record<string, boolean> = {};
     const weights: Record<string, number> = {};
@@ -1767,7 +1812,11 @@ export function ScenarioComposer({
       // the per-day weight mass; the engine renormalizes over the remaining
       // selected set (r / activeWeightSum) — an honest recompute, never a hide.
       // The holdings path keeps its draft `toggleByScopeRef` semantics unchanged.
-      if (usePerKeySources) {
+      //
+      // P61-BUG-1: on the per-key path the merged set ALSO carries the draft's
+      // added-strategy units — those ride the draft toggle channel (same
+      // semantics as the holdings path), NOT the per-key include map.
+      if (usePerKeySources && !addedIdSet.has(s.id)) {
         selected[s.id] = includeByApiKeyId[s.id] ?? true;
       } else {
         const toggle = scenario.draft.toggleByScopeRef[s.id];
@@ -1800,6 +1849,7 @@ export function ScenarioComposer({
   }, [
     activeAdapterOutput,
     usePerKeySources,
+    addedIdSet,
     includeByApiKeyId,
     scenario.draft.toggleByScopeRef,
     scenario.draft.weightOverrides,
@@ -2214,10 +2264,8 @@ export function ScenarioComposer({
   // scenario.toggleHolding (RESEARCH Open Question #2 — in practice the outlier
   // is an added strategy; a holding is handled honestly). All interval / outlier
   // math delegates to scenario-window.ts (Rule 2: never re-derive it here).
-  const addedIdSet = useMemo(
-    () => new Set<string>(scenario.draft.addedStrategies.map((a) => a.id)),
-    [scenario.draft.addedStrategies],
-  );
+  // (P61-BUG-1: `addedIdSet` was hoisted above `projectionState`, which now
+  // needs it to route added ids on the per-key path.)
   const emptyIntersectionOutliers = useMemo<
     Array<{ id: string; name: string; isAdded: boolean }>
   >(() => {

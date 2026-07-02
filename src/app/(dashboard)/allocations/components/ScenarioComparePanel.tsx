@@ -58,9 +58,22 @@ export interface ScenarioComparePanelProps {
       venue: string;
       holding_type: "spot" | "derivative";
       value_usd: number;
+      /** P61-BUG-2 — per-key equity grouping (nullable on older shapes). */
+      api_key_id?: string | null;
+      unrealized_pnl_usd?: number | null;
     }>;
     strategies: ComparePayloadStrategy[];
     holdingReturnsByScopeRef: Record<string, DailyPoint[]>;
+    /**
+     * P61-BUG-2 — the per-key channel (the same fields the composer's
+     * book-mode engine selection reads). The AllocationsTabs call site passes
+     * the WHOLE dashboard payload, so these exist at runtime; typed optional
+     * so a narrow test payload still type-checks and falls back to the
+     * legacy holdings path.
+     */
+    perKeyReturnsByApiKeyId?: Record<string, DailyPoint[]>;
+    eligibleApiKeyIds?: string[];
+    perKeyDailiesGateSatisfied?: boolean;
   };
 }
 
@@ -145,12 +158,36 @@ function deriveCompareInputs(
     symbolByHoldingId.set(buildHoldingRef(h), h.symbol);
   }
 
+  // P61-BUG-2 — per-key equity shares, grouped by api_key_id. Mirrors the
+  // composer's `equityByApiKeyId` memo (and the SSR holdingEquityContribution,
+  // queries.ts): derivative → unrealized_pnl_usd (value_usd is leveraged
+  // NOTIONAL), spot → value_usd; non-finite → 0. Local copy per the
+  // established duplication precedent (queries.ts is server-only).
+  const equityByApiKeyId: Record<string, number> = {};
+  for (const h of payload.holdingsSummary) {
+    if (!h.api_key_id) continue;
+    const contribution =
+      h.holding_type === "derivative"
+        ? Number.isFinite(h.unrealized_pnl_usd ?? 0)
+          ? (h.unrealized_pnl_usd ?? 0)
+          : 0
+        : Number.isFinite(h.value_usd)
+          ? h.value_usd
+          : 0;
+    equityByApiKeyId[h.api_key_id] =
+      (equityByApiKeyId[h.api_key_id] ?? 0) + contribution;
+  }
+
   return {
     holdingsSummary: payload.holdingsSummary,
     holdingReturnsByScopeRef: payload.holdingReturnsByScopeRef,
     addedStrategyReturnsLookup,
     addedStrategyMetadataLookup,
     symbolByHoldingId,
+    perKeyReturnsByApiKeyId: payload.perKeyReturnsByApiKeyId,
+    eligibleApiKeyIds: payload.eligibleApiKeyIds,
+    equityByApiKeyId,
+    perKeyDailiesGateSatisfied: payload.perKeyDailiesGateSatisfied,
   };
 }
 

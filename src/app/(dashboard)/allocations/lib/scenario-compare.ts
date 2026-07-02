@@ -58,7 +58,9 @@ import {
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 import {
+  buildPerKeyStrategyForBuilderSet,
   buildStrategyForBuilderSet,
+  mergeAddedIntoPerKeySet,
   type StrategyForBuilderId,
 } from "./scenario-adapter";
 import { SCENARIO_SCHEMA_VERSION, type ScenarioDraft } from "./scenario-state";
@@ -87,6 +89,22 @@ export interface ScenarioCompareInputs {
     Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
   >;
   symbolByHoldingId: ReadonlyMap<string, string>;
+  /**
+   * P61-BUG-2 — the per-key channel, mirroring the composer's book-mode
+   * engine selection. When `perKeyDailiesGateSatisfied` is true the draft
+   * computes on PER-KEY units merged with its added strategies (the same set
+   * the composer projects), NOT on the holdings-snapshot units — whose spans
+   * differ from the series the draft was authored on, which made every saved
+   * book draft compute EMPTY under its persisted window ("0 overlapping
+   * days"). Three fields come verbatim from the live payload;
+   * `equityByApiKeyId` is derived by the panel from the payload's holdings
+   * rows (mirroring the composer's memo). Absent → the legacy holdings path
+   * runs unchanged.
+   */
+  perKeyReturnsByApiKeyId?: Record<string, DailyPoint[]>;
+  eligibleApiKeyIds?: string[];
+  equityByApiKeyId?: Record<string, number>;
+  perKeyDailiesGateSatisfied?: boolean;
 }
 
 /**
@@ -110,10 +128,14 @@ export interface ComputeMetricsForDraftOptions {
  * `computeScenario`, returning the SAME `ComputedMetrics` the composer shows
  * for that draft over the same live inputs.
  *
- * The chain is the composer's verbatim (no new math):
- *   buildStrategyForBuilderSet → overlay draft toggle/weight into projectionState
- *   (NO leverage) → collapseAliasedHoldingStrategies → buildDateMapCache →
- *   computeScenario.
+ * The chain is the composer's verbatim (no new math). Which builder runs
+ * mirrors the composer's engine-set selection (P61-BUG-2):
+ *   - per-key gate satisfied → buildPerKeyStrategyForBuilderSet →
+ *     mergeAddedIntoPerKeySet (per-key units + the draft's added strategies)
+ *   - otherwise → buildStrategyForBuilderSet (holdings-snapshot units)
+ * then in both cases: overlay draft toggle/weight into projectionState
+ * (NO leverage) → collapseAliasedHoldingStrategies → buildDateMapCache →
+ * computeScenario.
  */
 export function computeMetricsForDraft(
   draft: ScenarioDraft,
@@ -126,20 +148,54 @@ export function computeMetricsForDraft(
   // `disabledHoldingRefs` memo).
   const disabledHoldingRefs = new Set<string>();
 
-  const adapterOutput = buildStrategyForBuilderSet(
-    liveInputs.holdingsSummary,
-    disabledHoldingRefs,
-    draft.addedStrategies,
-    liveInputs.holdingReturnsByScopeRef,
-    liveInputs.addedStrategyReturnsLookup as Record<
-      StrategyForBuilderId,
-      DailyPoint[]
-    >,
-    liveInputs.addedStrategyMetadataLookup as Record<
-      StrategyForBuilderId,
-      Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
-    >,
-  );
+  // P61-BUG-2 — mirror the composer's engine-set selection (`usePerKeySources`):
+  // per-key units merged with the draft's added strategies when the D3 gate is
+  // satisfied, else the legacy holdings+added path. Same eligible-key filter
+  // as the composer (DSRC-03 honesty fix: blend ONLY the keys that get a
+  // toggle row). `includeByApiKeyId` is ephemeral UI state (never persisted),
+  // so a saved draft correctly computes with ALL eligible keys included.
+  const usePerKeySources = liveInputs.perKeyDailiesGateSatisfied === true;
+  let adapterOutput: {
+    strategies: StrategyForBuilder[];
+    state: ScenarioState;
+  };
+  if (usePerKeySources) {
+    const all = liveInputs.perKeyReturnsByApiKeyId ?? {};
+    const eligible = new Set(liveInputs.eligibleApiKeyIds ?? []);
+    const eligibleOnly = Object.fromEntries(
+      Object.entries(all).filter(([id]) => eligible.has(id)),
+    );
+    adapterOutput = mergeAddedIntoPerKeySet(
+      buildPerKeyStrategyForBuilderSet(
+        eligibleOnly,
+        liveInputs.equityByApiKeyId ?? {},
+      ),
+      draft.addedStrategies,
+      liveInputs.addedStrategyReturnsLookup as Record<
+        StrategyForBuilderId,
+        DailyPoint[]
+      >,
+      liveInputs.addedStrategyMetadataLookup as Record<
+        StrategyForBuilderId,
+        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+      >,
+    );
+  } else {
+    adapterOutput = buildStrategyForBuilderSet(
+      liveInputs.holdingsSummary,
+      disabledHoldingRefs,
+      draft.addedStrategies,
+      liveInputs.holdingReturnsByScopeRef,
+      liveInputs.addedStrategyReturnsLookup as Record<
+        StrategyForBuilderId,
+        DailyPoint[]
+      >,
+      liveInputs.addedStrategyMetadataLookup as Record<
+        StrategyForBuilderId,
+        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+      >,
+    );
+  }
 
   // Overlay the draft's toggle + weight state onto the adapter defaults BEFORE
   // the collapse, so computeScenario reflects exactly what the saved draft
@@ -219,9 +275,12 @@ export function computeMetricsForDraft(
 }
 
 /**
- * Build the synthetic "live book" draft: ALL live holdings enabled,
- * equity-weight (the adapter's value-proportional default), no added
- * strategies, no toggle/weight overrides, no leverage. Fed through
+ * Build the synthetic "live book" draft: the WHOLE live book enabled at its
+ * natural weights, no added strategies, no toggle/weight overrides, no
+ * leverage. With the per-key gate satisfied that is the per-key blend at
+ * equity shares (P61-BUG-2 — the same Phase-36 per-key basis as
+ * liveBaselineMetrics); otherwise all live holdings at the adapter's
+ * value-proportional default. Fed through
  * `computeMetricsForDraft` it computes all six metrics through the SAME engine
  * path so the live-book compare column populates honestly — rather than the
  * thin `payload.liveBaselineMetrics` shape (RESOLVED decision).

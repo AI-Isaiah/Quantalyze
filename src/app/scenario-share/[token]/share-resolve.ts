@@ -75,6 +75,14 @@ export interface ResolvedOk {
  *  EmptyStateCard, NEVER a live-book substitution (DI-23-01). */
 export interface ResolvedHonestAbsence {
   kind: "honest-absence";
+  /**
+   * P61-BUG-2 — why the scenario can't be displayed, so the page can say the
+   * honest thing. "book-only": the draft is built solely on the owner's
+   * private book sources (API keys), which the live-book boundary deliberately
+   * never resolves on this public page — there is nothing computable to show.
+   * Absent → the original undecodable-format copy.
+   */
+  reason?: "book-only";
 }
 
 export type ResolvedSharedScenario = ResolvedOk | ResolvedHonestAbsence;
@@ -176,6 +184,18 @@ export function resolveSharedScenario(
     const ov = draft.weightOverrides[id];
     weights[id] = typeof ov === "number" && Number.isFinite(ov) ? ov : 0;
     startDates[id] = daily[0]?.date ?? "2022-01-01";
+  }
+
+  // P61-BUG-2 — a BOOK-ONLY draft (no added strategies) has nothing this page
+  // is allowed to compute: its projection units are the owner's private
+  // per-key book series, which the live-book boundary above deliberately
+  // never resolves here. Rendering the metrics of an empty set produced a
+  // dead em-dash shell ("0 overlapping days", every metric "—") that read as
+  // a broken link. Surface the designed honest-absence state instead, with
+  // the reason so the page can say why. (The share-mint route now also
+  // rejects minting these — this branch keeps ALREADY-MINTED links honest.)
+  if (strategies.length === 0) {
+    return { kind: "honest-absence", reason: "book-only" };
   }
 
   // No leverage is persisted in the draft schema (it is transient UI state), so

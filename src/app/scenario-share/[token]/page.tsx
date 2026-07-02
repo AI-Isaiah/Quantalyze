@@ -158,7 +158,11 @@ export default async function ScenarioSharePage({
       <main className="mx-auto max-w-3xl px-4 py-16">
         <EmptyStateCard
           heading="This shared scenario can't be displayed"
-          body="The link is valid, but this scenario was saved in a newer format we can't show here."
+          body={
+            resolved.reason === "book-only"
+              ? "This scenario is built only on the owner's private book sources, which are never shown on a public link. Ask the owner for a scenario that includes catalog strategies."
+              : "The link is valid, but this scenario was saved in a newer format we can't show here."
+          }
         />
       </main>
     );

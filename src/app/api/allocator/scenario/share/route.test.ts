@@ -67,7 +67,13 @@ vi.mock("@/lib/api/withAllocatorAuth", () => ({
 
 type DbResult = { data: unknown; error: { code?: string; message: string } | null };
 // Ownership probe default: the caller OWNS the scenario (one row).
-let ownershipResult: DbResult = { data: { id: "scen-1" }, error: null };
+// P61-BUG-2: the probe now also reads `draft` for the book-only mint gate —
+// the default fixture is SHAREABLE (has an added strategy) so the T_SH
+// success-path contracts run unchanged.
+let ownershipResult: DbResult = {
+  data: { id: "scen-1", draft: { addedStrategies: [{ id: "strat-1" }] } },
+  error: null,
+};
 // Atomic create RPC default: returns the new share row id.
 let createShareResult: DbResult = { data: "share-1", error: null };
 let lastRpcArgs: Record<string, unknown> | null = null;
@@ -164,7 +170,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   authShouldFail = false;
   rateLimitState = "allow";
-  ownershipResult = { data: { id: "scen-1" }, error: null };
+  ownershipResult = {
+    data: { id: "scen-1", draft: { addedStrategies: [{ id: "strat-1" }] } },
+    error: null,
+  };
   createShareResult = { data: "share-1", error: null };
   lastRpcArgs = null;
   lastProbeEq = null;
@@ -341,6 +350,34 @@ describe("scenario/share generate route — static security guards", () => {
 
   it("imports the user-scoped client from @/lib/supabase/server (RLS is the tenant gate)", () => {
     expect(routeSrc).toContain('from "@/lib/supabase/server"');
+  });
+
+  // P61-BUG-2 (prod canary 2026-07-02) — the book-only mint gate. A draft with
+  // NO added strategies has nothing the public share page is allowed to
+  // resolve (the live-book boundary never exposes the owner's private per-key
+  // series), so minting it produces a dead link by construction. The route
+  // fails loud at the source: 409 + code:"book_only_draft" + a user-facing
+  // message, and NO token is minted.
+  it("T_SH13 — a BOOK-ONLY draft (no added strategies) → 409 book_only_draft, NO share minted", async () => {
+    ownershipResult = {
+      data: { id: "scen-1", draft: { addedStrategies: [] } },
+      error: null,
+    };
+    const res = await POST(mkPost({ scenario_id: SCENARIO_ID }));
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { code?: string; message?: string };
+    expect(body.code).toBe("book_only_draft");
+    expect(body.message).toMatch(/private book/i);
+    // No token minted, no RPC write.
+    expect(rpcSpy).not.toHaveBeenCalled();
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("T_SH14 — a missing/misshapen draft takes the same 409 branch (nothing resolvable to share)", async () => {
+    ownershipResult = { data: { id: "scen-1", draft: null }, error: null };
+    const res = await POST(mkPost({ scenario_id: SCENARIO_ID }));
+    expect(res.status).toBe(409);
+    expect(rpcSpy).not.toHaveBeenCalled();
   });
 
   it("does NOT import an admin / service-role client (owner writes stay on RLS)", () => {

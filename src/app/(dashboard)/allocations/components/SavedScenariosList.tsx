@@ -260,7 +260,21 @@ export function SavedScenariosList({
         });
         if (!res.ok) {
           // Honest failure — onMutated NOT fired (T_SL7b/T_SL7c contract).
-          setMutationError("Couldn't create a share link. Try again.");
+          // P61-BUG-2: a 409 book_only_draft carries a stable user-facing
+          // `message` saying WHY nothing is shareable (no added strategies —
+          // private book sources never render on the public page); surface it
+          // instead of the generic retry copy, which can't fix it.
+          const body = (await res.json().catch(() => null)) as {
+            code?: string;
+            message?: string;
+          } | null;
+          setMutationError(
+            res.status === 409 &&
+              body?.code === "book_only_draft" &&
+              body.message
+              ? body.message
+              : "Couldn't create a share link. Try again.",
+          );
           return;
         }
         const { url } = (await res.json()) as { url?: string };
