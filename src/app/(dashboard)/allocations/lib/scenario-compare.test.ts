@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { DailyPoint } from "@/lib/scenario";
+import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 import type { ScenarioDraft, AddedStrategy } from "./scenario-state";
 import {
   computeMetricsForDraft,
@@ -31,8 +32,10 @@ import {
  *      (member_count reflects window membership, distinct from the union).
  *   7. Two drafts with DIFFERENT windows compute independently (heterogeneous,
  *      never force-aligned to a shared window).
- *   8. The live-book draft (window omitted) + any windowless (v2) draft stay on
- *      the union path — byte-identical to today (Phase-55 own-book union lock).
+ *   8. The live-book draft (window omitted, `{ liveBook: true }`) stays on the
+ *      union path (Phase-55 own-book union lock), while a windowless SAVED
+ *      draft defaults to the INTERSECTION of its selected spans — the RT-1
+ *      "same rule everywhere" contract (59-CONTEXT Area 3 Q4).
  *
  * Fixtures mirror `scenario.test.ts` style: business-day windows + a
  * constant/alternating return generator, fed through the SAME live-input
@@ -195,19 +198,24 @@ describe("computeMetricsForDraft", () => {
   // Force-aligning them to a shared window would be dishonest — a member that
   // ended before another's window should not be silently stretched to it. The
   // engine already computes windowed metrics; these pin that computeMetricsForDraft
-  // THREADS the persisted draft.window through to the engine (POST-collapse) so
-  // the compare column is windowed, and that a windowless (v2 / live-book) draft
-  // is unchanged from the union path (Phase-55 own-book lock).
+  // THREADS the persisted draft.window through to the engine (POST-collapse).
+  // Ship-review RT-1 (deliberate contract correction, locked 59-CONTEXT Area 3
+  // Q4: "A windowless v2 draft in a compare set → intersection default (same
+  // rule everywhere)"): a windowless SAVED draft now defaults to the
+  // INTERSECTION of its selected spans via the shared scenario-window helpers —
+  // the same rule the composer's WINDOW-01 auto-default and share-resolve
+  // apply. ONLY the live-book column (`{ liveBook: true }`, a structural
+  // compute input) stays on the union path (Phase-55 own-book lock).
   // =======================================================================
 
-  it("a windowed draft narrows effective bounds to the window (distinct from the union)", () => {
+  it("a windowed draft narrows effective bounds to the window (distinct from the windowless default)", () => {
     // Two holdings with DIFFERENT coverage spans:
     //   BTC — the full ~140-day span (2024-01-02 → ~2024-07-16)
-    //   ETH — a LATE-starting span that begins ~2024-04-01, so the union spans
-    //         BTC's full range while ETH only covers the later portion.
-    // A window pinned to the LATER sub-range is covered by BOTH, so the windowed
-    // blend keeps both members but its effective bounds are the window, NOT the
-    // union's wider BTC-driven bounds.
+    //   ETH — a LATE-starting span that begins ~2024-04-01.
+    // A window pinned to a LATER sub-range strictly inside ETH's coverage is
+    // covered by BOTH, so the windowed blend keeps both members but its
+    // effective bounds are the explicit window — NOT the windowless
+    // intersection default (which starts at ETH's first date).
     const btcDates = buildDates("2024-01-02", 140);
     const ethDates = buildDates("2024-04-01", 80);
     const holdings: HoldingFixture[] = [
@@ -222,20 +230,22 @@ describe("computeMetricsForDraft", () => {
     // A window inside ETH's coverage (both members cover it).
     const window = { start: ethDates[10], end: ethDates[60] };
 
-    const union = computeMetricsForDraft(draft(), inputs);
+    // RT-1 re-baseline: the windowless baseline is now the INTERSECTION default
+    // (ETH's span here — the latest start), no longer the legacy union.
+    const defaulted = computeMetricsForDraft(draft(), inputs);
     const windowed = computeMetricsForDraft(draft({ window }), inputs);
 
-    // The union path spans BTC's full range; the windowed path is clamped to the
-    // window — its effective bounds differ from the union's (the window is honored).
-    expect(union.effective_start).not.toBeNull();
+    // The explicit window is honored verbatim — its bounds differ from the
+    // intersection default's (which starts at ethDates[0], not ethDates[10]).
+    expect(defaulted.effective_start).not.toBeNull();
     expect(windowed.effective_start).not.toBeNull();
     expect(windowed.effective_end).not.toBeNull();
-    expect(windowed.effective_start).not.toBe(union.effective_start);
+    expect(windowed.effective_start).not.toBe(defaulted.effective_start);
     // The windowed bounds fall within the requested window (engine reads state.window).
     expect(windowed.effective_start! >= window.start).toBe(true);
     expect(windowed.effective_end! <= window.end).toBe(true);
-    // A shorter window means fewer trading days than the full union.
-    expect(windowed.n).toBeLessThan(union.n);
+    // A narrower explicit window means fewer trading days than the default.
+    expect(windowed.n).toBeLessThan(defaulted.n);
   });
 
   it("a windowed draft drops members that do not cover the window (member_count reflects the window)", () => {
@@ -287,38 +297,88 @@ describe("computeMetricsForDraft", () => {
     expect(early.effective_start! < late.effective_start!).toBe(true);
   });
 
-  it("the live-book draft stays WINDOWLESS — its metrics are byte-identical to the union path (Phase-55 lock)", () => {
-    // buildLiveBookDraft() omits `window` → the live-book column MUST run the
-    // union path. This pins the Phase-55 own-book union lock: the live column's
-    // metrics equal a windowless draft over the same book and are UNAFFECTED by
-    // any window in the compare set.
+  it("the live-book column ({ liveBook: true }) stays on the UNION path while a windowless SAVED draft gets the intersection default (Phase-55 lock, structural exception)", () => {
+    // RT-1 re-baseline of the Phase-55 own-book union lock pin. Over a RAGGED
+    // book (BTC full 120 days, ETH starting ~30 trading days later) the two
+    // rules are observably different:
+    //   - the live-book column (buildLiveBookDraft + { liveBook: true }) is the
+    //     allocator's OWN book, not a saved scenario → union-when-absent path,
+    //     byte-identical to the pre-RT-1 behavior (full BTC-driven bounds, all
+    //     120 trading days);
+    //   - a windowless SAVED draft over the SAME book defaults to the
+    //     intersection (ETH's late start clamps it).
     const dates = buildDates("2024-01-02", 120);
+    const ethDates = dates.slice(30);
     const holdings: HoldingFixture[] = [
       { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 6000 },
       { symbol: "ETH", venue: "binance", holding_type: "spot", value_usd: 4000 },
     ];
     const inputs = liveInputs(holdings, {
       [holdingRef("binance", "BTC", "spot")]: altReturns(dates, 0.01, -0.008),
-      [holdingRef("binance", "ETH", "spot")]: altReturns(dates, 0.012, -0.009),
+      [holdingRef("binance", "ETH", "spot")]: altReturns(ethDates, 0.012, -0.009),
     });
 
     const liveDraft = buildLiveBookDraft();
     expect(liveDraft.window).toBeUndefined(); // never carries a window
 
-    const live = computeMetricsForDraft(liveDraft, inputs);
-    // A plain windowless draft over the same book is the union baseline.
-    const unionBaseline = computeMetricsForDraft(draft(), inputs);
+    const live = computeMetricsForDraft(liveDraft, inputs, { liveBook: true });
+    // Union path — the full blended span, from BTC's first day, all 120 days.
+    expect(live.effective_start).toBe(dates[0]);
+    expect(live.n).toBe(120);
 
-    // Byte-identical union behavior — effective bounds + n + twr all match.
-    expect(live.effective_start).toBe(unionBaseline.effective_start);
-    expect(live.effective_end).toBe(unionBaseline.effective_end);
-    expect(live.n).toBe(unionBaseline.n);
-    expect(live.twr).toBe(unionBaseline.twr);
+    // The SAME windowless draft as a SAVED column → intersection default:
+    // clamped to ETH's late start, fewer days than the union.
+    const saved = computeMetricsForDraft(draft(), inputs);
+    expect(saved.effective_start).toBe(ethDates[0]);
+    expect(saved.n).toBeLessThan(live.n);
   });
 
-  it("a windowless (v2) draft is unchanged — no window key → union path (byte-identical to today)", () => {
-    // A pre-v1.5 draft carries no `window` field. It must run the exact union
-    // path it ran before Plan 03 — the window injection is inert when absent.
+  it("a windowless (v2) SAVED draft defaults to the INTERSECTION of its selected spans — same rule as the composer + share (RT-1 contract correction)", () => {
+    // RE-BASELINED (ship-review RT-1, DELIBERATE contract correction — locked
+    // 59-CONTEXT Area 3 Q4: "A windowless v2 draft in a compare set →
+    // intersection default (same rule everywhere)"): this pin previously
+    // asserted the legacy union path for a windowless saved draft, which made
+    // the SAME scenario compute under a different divisor rule in compare than
+    // in the owner's composer. The ragged book proves the intersection rule
+    // and the determinism of the shared helper chain (coverageSpanOf →
+    // defaultWindowFor — the SAME helpers the composer's WINDOW-01 default and
+    // share-resolve use), which is the oracle below.
+    const btcDates = buildDates("2024-01-02", 90);
+    const ethDates = buildDates("2024-03-01", 50); // ragged head, later tail
+    const holdings: HoldingFixture[] = [
+      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 5000 },
+      { symbol: "ETH", venue: "binance", holding_type: "spot", value_usd: 5000 },
+    ];
+    const btcReturns = altReturns(btcDates, 0.01, -0.008);
+    const ethReturns = altReturns(ethDates, 0.012, -0.009);
+    const inputs = liveInputs(holdings, {
+      [holdingRef("binance", "BTC", "spot")]: btcReturns,
+      [holdingRef("binance", "ETH", "spot")]: ethReturns,
+    });
+
+    const windowlessDraft = draft();
+    expect(windowlessDraft.window).toBeUndefined();
+
+    // The composer-side default for the same book, via the shared helpers.
+    const composerDefault = defaultWindowFor([
+      coverageSpanOf(btcReturns)!,
+      coverageSpanOf(ethReturns)!,
+    ]);
+    expect(composerDefault).not.toBeNull();
+
+    const m = computeMetricsForDraft(windowlessDraft, inputs);
+    // Determinism: same helper, same inputs → the lexicographically identical
+    // window on every surface (compare == composer == share).
+    expect(m.effective_start).toBe(composerDefault!.start);
+    expect(m.effective_end).toBe(composerDefault!.end);
+    // Both holdings cover the intersection by construction → both are members.
+    expect(m.member_count).toBe(2);
+  });
+
+  it("a windowless SAVED draft over a single-span book is numerically unchanged (intersection of one span == its full span)", () => {
+    // Back-compat note for the RT-1 re-baseline: for a book whose selected
+    // spans all coincide (here: ONE holding), intersection == union — the
+    // default-window change is observable only on ragged books.
     const dates = buildDates("2024-01-02", 90);
     const holdings: HoldingFixture[] = [
       { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 5000 },
@@ -327,11 +387,8 @@ describe("computeMetricsForDraft", () => {
       [holdingRef("binance", "BTC", "spot")]: altReturns(dates, 0.01, -0.008),
     });
 
-    const windowlessDraft = draft();
-    expect(windowlessDraft.window).toBeUndefined();
-
-    const m = computeMetricsForDraft(windowlessDraft, inputs);
-    // Full union span, all trading days — nothing clamped.
+    const m = computeMetricsForDraft(draft(), inputs);
+    // Full span, all trading days — nothing clamped.
     expect(m.n).toBe(90);
     expect(m.effective_start).not.toBeNull();
     expect(m.effective_end).not.toBeNull();

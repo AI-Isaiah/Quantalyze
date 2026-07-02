@@ -34,6 +34,7 @@ import {
   type ScenarioCompareInputs,
 } from "@/app/(dashboard)/allocations/lib/scenario-compare";
 import type { StrategyForBuilderId } from "@/app/(dashboard)/allocations/lib/scenario-adapter";
+import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 import type { DailyPoint } from "@/lib/scenario";
 
 // --- Fixtures --------------------------------------------------------------
@@ -44,9 +45,19 @@ const STRAT_B = "22222222-2222-4222-8222-222222222222";
 /** A long, drifting daily-return series so computeScenario clears its n>=10
  *  floor and produces non-null metrics. 40 points, small positive drift. */
 function makeSeries(seedOffset: number): DailyPoint[] {
+  return makeSeriesFrom("2023-01-01", 40, seedOffset);
+}
+
+/** `makeSeries` with an arbitrary start date + length — for RAGGED-span
+ *  fixtures where the intersection default must differ from the union. */
+function makeSeriesFrom(
+  startDate: string,
+  days: number,
+  seedOffset: number,
+): DailyPoint[] {
   const out: DailyPoint[] = [];
-  const start = new Date("2023-01-01T00:00:00Z");
-  for (let i = 0; i < 40; i += 1) {
+  const start = new Date(startDate + "T00:00:00Z");
+  for (let i = 0; i < days; i += 1) {
     const d = new Date(start.getTime() + i * 86_400_000);
     const date = d.toISOString().slice(0, 10);
     // Deterministic, non-constant series (avoids zero-variance degeneracy).
@@ -319,10 +330,19 @@ describe("resolveSharedScenario — owner-projection parity (WR-05)", () => {
 // PERSIST-02 — the recipient recomputes at the OWNER's saved coverage window,
 // VERBATIM. The window rides in the returned `draft` JSONB (get_shared_scenario
 // returns it whole — no RPC/SQL change) and share-resolve threads draft.window
-// onto the engine state before computeScenario. The recipient does NOT re-derive
-// a fresh intersection (which could differ from the owner's snapshot → divergent
-// membership; Phase-59 Pitfall 5). A windowless (upgraded-v2) draft resolves ok
-// after the non-destructive 2→3 upgrade and runs the union path.
+// onto the engine state before computeScenario. A SAVED window is never
+// re-derived from the recipient's series (which could differ from the owner's
+// snapshot → divergent membership; Phase-59 Pitfall 5).
+//
+// Ship-review RT-1 (DELIBERATE contract correction): a WINDOWLESS draft — a
+// pre-v1.5 upgraded-v2 share OR a v3 saved before a window was chosen — now
+// defaults to the INTERSECTION of its strategies' coverage spans via the ONE
+// shared helper chain (coverageSpanOf → defaultWindowFor), matching the locked
+// 59-CONTEXT Area 2 Q4 decision: "Pre-v1.5 shared draft (v2, no window) →
+// recipient defaults to intersection (same rule as owner reopen)". The prior
+// pins here asserted the legacy UNION path, which made the SAME saved scenario
+// compute under a DIFFERENT divisor rule on the share page than in the owner's
+// composer (WINDOW-01 intersection auto-default) — re-baselined below.
 // ===========================================================================
 describe("resolveSharedScenario — owner coverage window verbatim (PERSIST-02)", () => {
   it("a v3 shared draft carrying a window resolves ok with effective bounds == the owner's saved window (recipient == owner, no re-derivation)", () => {
@@ -355,8 +375,16 @@ describe("resolveSharedScenario — owner coverage window verbatim (PERSIST-02)"
     expect(result.metrics.member_count).toBe(2);
   });
 
-  it("a v3 windowless shared draft runs the union path (effective bounds = the full common series, NOT a window)", () => {
-    // A v3 save made before a window was chosen → no window key → union path.
+  it("a v3 windowless shared draft defaults to the INTERSECTION of its strategies' spans — same rule as owner reopen (RT-1 contract correction)", () => {
+    // RE-BASELINED (ship-review RT-1, deliberate contract correction — locked
+    // 59-CONTEXT Area 2 Q4): this pin previously asserted the legacy UNION path
+    // (effective_start = the earliest series date). RAGGED spans make the two
+    // rules observably different:
+    //   A — 2023-01-01 … 2023-02-09 (40 days)
+    //   B — 2023-01-15 … 2023-02-23 (40 days, ragged head AND tail)
+    // Intersection = [2023-01-15, 2023-02-09]; union = [2023-01-01, 2023-02-23].
+    const seriesA = makeSeries(0);
+    const seriesB = makeSeriesFrom("2023-01-15", 40, 7);
     const windowlessV3: ScenarioDraft = {
       ...okDraft(),
       schema_version: SCENARIO_SCHEMA_VERSION,
@@ -365,19 +393,31 @@ describe("resolveSharedScenario — owner coverage window verbatim (PERSIST-02)"
       name: "Windowless v3",
       draft: windowlessV3,
       schema_version: SCENARIO_SCHEMA_VERSION,
-      series: okSeriesRows(),
+      series: [
+        { strategy_id: STRAT_A, daily_returns: seriesA },
+        { strategy_id: STRAT_B, daily_returns: seriesB },
+      ],
     });
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") throw new Error("expected ok");
-    // Union path → the effective bounds are the full common series span, not a
-    // window. (This is the byte-compat pre-window behavior.)
-    expect(result.metrics.effective_start).toBe("2023-01-01");
+    // Intersection default — NOT the union's 2023-01-01 … 2023-02-23 bounds.
+    expect(result.metrics.effective_start).toBe("2023-01-15");
+    expect(result.metrics.effective_end).toBe("2023-02-09");
+    // Both strategies cover the intersection by construction → a real 2-member
+    // blend under the SAME divisor rule the owner's composer defaults to.
+    expect(result.metrics.member_count).toBe(2);
   });
 
-  it("a pre-v1.5 v2 (windowless) shared draft resolves ok (NOT honest-absence) after the non-destructive upgrade, and runs the union path", () => {
+  it("a pre-v1.5 v2 (windowless) shared draft resolves ok (NOT honest-absence) after the non-destructive upgrade, at the intersection default", () => {
     // Wave 1 added the non-destructive v2→v3 codec branch: a valid v2 draft now
     // decodes outcome:"ok" (reason "upgraded_v2_windowless"), so share-resolve
     // reaches the compute path instead of honest-absencing every pre-v1.5 share.
+    // RE-BASELINED (ship-review RT-1, deliberate contract correction — locked
+    // 59-CONTEXT Area 2 Q4: "recipient defaults to intersection, same rule as
+    // owner reopen"): the ragged fixture proves the intersection rule, where
+    // the prior union pin only held for equal spans.
+    const seriesA = makeSeries(0); // 2023-01-01 … 2023-02-09
+    const seriesB = makeSeriesFrom("2023-01-15", 40, 7); // 2023-01-15 … 2023-02-23
     const v2Draft: ScenarioDraft = {
       ...okDraft(),
       schema_version: 2, // pre-v1.5, windowless
@@ -387,7 +427,10 @@ describe("resolveSharedScenario — owner coverage window verbatim (PERSIST-02)"
       name: "Legacy v2 share",
       draft: v2Draft,
       schema_version: 2,
-      series: okSeriesRows(),
+      series: [
+        { strategy_id: STRAT_A, daily_returns: seriesA },
+        { strategy_id: STRAT_B, daily_returns: seriesB },
+      ],
     });
 
     // MUST be ok — resetting/honest-absencing here would silently 404 every
@@ -395,8 +438,39 @@ describe("resolveSharedScenario — owner coverage window verbatim (PERSIST-02)"
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") throw new Error("expected ok");
     expect(result.metrics.n).toBeGreaterThanOrEqual(10);
-    // Windowless → union path, effective bounds are the full series span.
-    expect(result.metrics.effective_start).toBe("2023-01-01");
+    // Windowless v2 → the intersection default, same rule as owner reopen.
+    expect(result.metrics.effective_start).toBe("2023-01-15");
+    expect(result.metrics.effective_end).toBe("2023-02-09");
+  });
+
+  it("determinism: the recipient's derived default == the composer's default for the same series (same shared helper → lexicographically identical window)", () => {
+    // RT-1's honesty core: the windowless default is derived through the ONE
+    // shared helper chain (coverageSpanOf → defaultWindowFor) that the
+    // composer's WINDOW-01 auto-default uses — same helper, same inputs →
+    // the lexicographically identical window on every surface. The oracle
+    // computes the composer-side default DIRECTLY from the fixture series via
+    // those helpers and requires the share page's effective bounds to equal it.
+    const seriesA = makeSeriesFrom("2023-01-05", 60, 3);
+    const seriesB = makeSeriesFrom("2023-01-20", 60, 11);
+    const composerDefault = defaultWindowFor([
+      coverageSpanOf(seriesA)!,
+      coverageSpanOf(seriesB)!,
+    ]);
+    expect(composerDefault).not.toBeNull();
+
+    const result = resolveSharedScenario({
+      name: "Determinism",
+      draft: { ...okDraft(), schema_version: SCENARIO_SCHEMA_VERSION },
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: [
+        { strategy_id: STRAT_A, daily_returns: seriesA },
+        { strategy_id: STRAT_B, daily_returns: seriesB },
+      ],
+    });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.metrics.effective_start).toBe(composerDefault!.start);
+    expect(result.metrics.effective_end).toBe(composerDefault!.end);
   });
 
   // Pre-landing review I5 pin (b), share path — an INVERTED (start > end)

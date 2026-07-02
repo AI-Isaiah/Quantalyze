@@ -39,6 +39,7 @@ import {
   type StrategyForBuilder,
   type DailyPoint,
 } from "@/lib/scenario";
+import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 
 /** One `get_shared_scenario` series row (RPC `series` jsonb element). */
@@ -183,19 +184,43 @@ export function resolveSharedScenario(
   //
   // v1.5 PERSIST-02 — thread the OWNER's saved coverage window VERBATIM. The
   // window rides in the returned `draft` JSONB (get_shared_scenario returns the
-  // draft whole; no RPC/SQL change). The recipient reads it directly onto the
-  // engine state — it does NOT re-derive an intersection from its own visible
-  // published series (which may have drifted since save → divergent membership;
-  // Phase-59 Pitfall 5). So the recipient view == the owner view, deterministic.
+  // draft whole; no RPC/SQL change). A SAVED window is read directly onto the
+  // engine state — never re-derived from the recipient's visible published
+  // series (which may have drifted since save → divergent membership;
+  // Phase-59 Pitfall 5).
+  //
+  // Ship-review RT-1 — a WINDOWLESS draft (a pre-v1.5 upgraded-v2 share, or a
+  // v3 saved before a window was chosen) gets the INTERSECTION DEFAULT, derived
+  // from the selected strategies' series just built above via the ONE shared
+  // helper chain (coverageSpanOf → defaultWindowFor) that the composer's
+  // WINDOW-01 auto-default and scenario-compare use. This is the locked
+  // 59-CONTEXT Area 2 Q4 rule: "Pre-v1.5 shared draft (v2, no window) →
+  // recipient defaults to intersection (same rule as owner reopen)". The prior
+  // union-when-absent path here made the SAME scenario compute under a
+  // DIFFERENT divisor rule on the share page than in the owner's composer.
+  // Determinism: same helper over the same inputs → the lexicographically
+  // identical window the owner's composer defaults to for these series (pinned
+  // in share-resolve.test.ts). No spans / empty intersection → null → NO
+  // window key, and the engine's union-when-absent guard applies (matching the
+  // composer's WINDOW-06 empty-intersection behavior).
+  //
   // There is NO collapseAliasedHoldingStrategies here (strategies are built
   // straight from addedStrategies), so `state` IS the engine state — inject
-  // directly (Pitfall 4 N/A). A windowless (upgraded-v2) draft has no `window`
-  // key → the engine's union-when-absent path (correct for a pre-window save).
+  // directly (Pitfall 4 N/A).
+  const window =
+    draft.window ??
+    defaultWindowFor(
+      strategies.flatMap((s) => {
+        if (selected[s.id] === false) return []; // spans of SELECTED strategies only
+        const span = coverageSpanOf(s.daily_returns);
+        return span ? [span] : [];
+      }),
+    );
   const state: ScenarioState = {
     selected,
     weights,
     startDates,
-    ...(draft.window ? { window: draft.window } : {}),
+    ...(window ? { window } : {}),
   };
   const dateMapCache = buildDateMapCache(strategies);
   const metrics = computeScenario(strategies, state, dateMapCache);
