@@ -137,6 +137,12 @@ BEGIN
   -- A's scenario references strat_a_id in addedStrategies (the resolvable class).
   -- Holdings refs ("holding:...") are deliberately present too, to prove the
   -- RPC does NOT resolve them.
+  -- v1.5 PERSIST-02 — A's draft carries a coverage window. Kept on a
+  -- schema_version 2 row so this also exercises the pre-v1.5 round-trip: the
+  -- window is an additive optional field that must survive the SECDEF RPC whole
+  -- (get_shared_scenario returns `draft` verbatim — no per-field re-projection).
+  -- The window is two ISO date strings; it introduces NO forbidden live-book
+  -- token, so Assertion 1's negative over-return guard covers it unchanged.
   INSERT INTO scenarios (allocator_id, name, draft, schema_version)
   VALUES (
     uid_a, 'tenant a shared scenario',
@@ -146,7 +152,8 @@ BEGIN
                            'markets', jsonb_build_array(), 'strategy_types', jsonb_build_array())
       ),
       'toggleByScopeRef', jsonb_build_object('holding:binance:BTC:spot', true),
-      'weightOverrides',  jsonb_build_object('holding:binance:BTC:spot', 0.5)
+      'weightOverrides',  jsonb_build_object('holding:binance:BTC:spot', 0.5),
+      'window', jsonb_build_object('start', '2024-01-01', 'end', '2024-12-31')
     ),
     2
   ) RETURNING id INTO scen_a_id;
@@ -238,7 +245,20 @@ BEGIN
     RAISE EXCEPTION
       'TEST FAILED (Assertion 1): shared payload contains a forbidden live-book field (api_key|allocated_amount|account_balance|value_usd) — OVER-RETURN LEAK. payload=%', payload_text;
   END IF;
-  RAISE NOTICE 'Assertion 1 OK: A''s token returns A''s scenario + only A''s published series; no forbidden live-book field.';
+
+  -- v1.5 PERSIST-02 — POSITIVE round-trip: A's saved coverage window must survive
+  -- the SECDEF RPC intact (it rides inside the already-leak-scoped `draft` JSONB;
+  -- no RPC change threads it). This proves the shared recipient can recompute at
+  -- the owner's window verbatim. Additive to — never a weakening of — the
+  -- negative over-return guard above (which stays byte-intact and still covers
+  -- this new field, since the window is only two ISO date strings).
+  IF (r.draft->'window'->>'start') IS DISTINCT FROM '2024-01-01'
+     OR (r.draft->'window'->>'end') IS DISTINCT FROM '2024-12-31' THEN
+    RAISE EXCEPTION
+      'TEST FAILED (Assertion 1): draft.window did not round-trip through get_shared_scenario (start=%, end=%) — the owner''s coverage window was stripped/re-projected',
+      r.draft->'window'->>'start', r.draft->'window'->>'end';
+  END IF;
+  RAISE NOTICE 'Assertion 1 OK: A''s token returns A''s scenario + only A''s published series; no forbidden live-book field; draft.window round-trips.';
 
   -- ----- ASSERTION 2: EMPTY addedStrategies → series = [] (no holdings) ---
   SELECT * INTO r FROM public.get_shared_scenario(hash_a_empty);
