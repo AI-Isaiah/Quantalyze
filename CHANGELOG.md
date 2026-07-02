@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.35.0.27] - 2026-07-02
+### Added — coverage legibility & durable windows (v1.5 phases 58-59)
+Allocators can now **see, at a glance, which strategies are in the blend and why** — and the coverage window now **follows a scenario wherever it goes**: saved, shared, or compared.
+
+- **Honest blend header** — an always-visible header states the blend plainly ("Mean of {N} strategies · {start}–{end}"), reading the engine's own member count so the label can never desync from the divisor. It degrades honestly: "1 strategy — not a blend", "No strategies span the selected window", and a "window truncated from full range" note when the window is narrower than the full history.
+- **Three-state strategy chips** — every row shows *In blend* (teal), *Excluded* (muted, manual), or *Outside window* (amber, auto-excluded with an inline reason). Amber means recoverable — never red.
+- **Coverage timeline (mini-gantt)** — a collapsed-by-default panel draws each selected strategy's data span against the active window band, so "why did X drop?" and "how much history would keep it?" are visible instead of implied.
+- **One-click include with the cost in the label** — an auto-excluded row offers "Include → shortens window to {date} (−{N} mo)" (phrased per moved bound: end, start, or both), applying immediately and reversibly — no modal, no surprise.
+- **One-time default-change note** — returning users see "Now showing the common period where all {N} overlap · Show full range" once (dismissal persists per browser), only while the common period is actually what's shown.
+- **Saved scenarios keep their window** — the applied coverage window persists inside the saved scenario and reopening recomputes *today's* numbers at that window. Pre-existing saved scenarios are never dropped by the schema upgrade: a windowless one opens at the common period with a provenance note ("This saved scenario predates coverage windows…") and a Show-full-range escape hatch.
+- **Shared links match the owner's view** — a share recipient recomputes at the owner's saved window (or the identically-derived common period for windowless scenarios), with the leak-scan proving the window rides along without exposing anything new.
+- **Compare across each scenario's own window** — side-by-side compare computes every column at its own persisted window (heterogeneous windows are honest) and stamps each column's effective {start}–{end}; the live-book column stays on full history by design.
+
+### Fixed
+- Include-cost labels now disclose the correct moved bound for ragged-start and both-ends coverage gaps (previously phrased as if only the end moved).
+- Windowless saved scenarios now compute at the same common-period default on the share page and in compare as in the composer (previously those surfaces silently used the legacy full-range rule — different numbers for the same scenario).
+- The provenance and default-change notes can no longer claim "showing the common period" over a custom or full-range window; the provenance note also dismisses itself when its own "Show full range" action is used.
+- A reopened scenario's window is fully cleared on Reset, and a drifted (holdings-changed) reopen no longer displays a window the save would not persist.
+- Accessibility and ergonomics on the new surfaces: the auto-excluded timeline bar is visible against its rail (≥3:1 border), gantt bars expose their coverage text to screen readers (`role="img"`), dismiss and include buttons meet the 24px tap-target floor, and keyboard focus lands on the window control after an Include click instead of being dropped.
+
+### Changed
+- Scenario draft schema bumped v2 → v3 (adds the optional coverage window). The upgrade is non-destructive — every existing saved scenario loads unchanged.
+- Draft window bounds are validated as exact ISO dates; an inverted window degrades honestly to an empty blend rather than fabricating numbers.
+
 ## [0.35.0.26] - 2026-07-01
 ### Added — scenario coverage-window blend (v1.5 phases 55-57)
 Allocators can now pin a scenario blend to an explicit **coverage window** so a short-lived or already-ended strategy no longer distorts the projection. Previously the blend ran over the union of every selected strategy's dates, silently diluting the tail with strategies that had stopped reporting. Now the composer exposes a coverage-window date-range control with two one-click presets — **"Common period (all in)"** (the intersection: every selected strategy is a member) and **"Full range (some drop out)"** (the union: short-span strategies drop). Inside the chosen closed window `[start, end]` the engine blends only the **members** (strategies whose data span ⊇ the window) with a *constant* member-count divisor, so an ended/ragged strategy is excluded rather than blended in at 0%.
