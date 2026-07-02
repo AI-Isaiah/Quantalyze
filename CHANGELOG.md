@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.35.0.29] - 2026-07-02
+### Changed
+- **CI is ~40% faster** with no loss of coverage or gating: the vitest shards now emit coverage themselves and a lightweight job merges the shard reports and enforces the same coverage ratchet (the duplicate full-suite coverage run is gone — the suite executes once, not twice), and the e2e Playwright batches (public smoke + seeded) now run in parallel jobs instead of back-to-back. Merge-gate latency drops from ~8 to ~6.5 minutes and full e2e signal from ~14.6 to ~9 minutes.
+
 ## [0.35.0.28] - 2026-07-02
 ### Fixed
 - **Heatmap cell labels now always meet WCAG AA contrast** — the monthly/daily returns heatmaps flipped to white text at a fixed intensity threshold, but mid-saturation cells (e.g. a −19% month) were too light for white at the required 4.5:1 (measured 3.62:1). The label color is now chosen by computed contrast, and a cell deepens slightly when neither label color would pass — visible only on cells that were previously violating.
