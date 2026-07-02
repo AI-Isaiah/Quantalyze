@@ -5258,6 +5258,13 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     );
   });
 
+  // WINDOW-06 flake class (H-0125 / 72dc23a4): applyWindow now WRITE-THROUGHS
+  // setWindow into the draft, whose autosave is a 150ms debounce that is not
+  // cancelled on unmount — a leaked write from any window-mutating test can
+  // pollute a later test sharing the allocator key on slower CI. Every test in
+  // this file that applies a window (pickerOnApply / preset click / Include)
+  // therefore renders with its OWN `${ALLOCATOR_A}-<test>` key (the
+  // ScenarioComposer.save.test.tsx CR-01 idiom).
   it("window: MANDATORY member_count changes when the window moves — widening past B's last day drops it (2 → 1), narrowing restores it (1 → 2)", () => {
     mountUnequalSpanBook();
     render(
@@ -5265,7 +5272,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
         payload={makePayload({
           holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
         })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w01-move`}
         allocatorMandate={null}
       />,
     );
@@ -5318,7 +5325,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
         payload={makePayload({
           holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
         })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-cov03-lockstep`}
         allocatorMandate={null}
       />,
     );
@@ -5359,7 +5366,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
         payload={makePayload({
           holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
         })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-cov04-include`}
         allocatorMandate={null}
       />,
     );
@@ -5436,7 +5443,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
         payload={makePayload({
           holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
         })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-wr01-head`}
         allocatorMandate={null}
       />,
     );
@@ -5513,7 +5520,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
         payload={makePayload({
           holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
         })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-wr02-both`}
         allocatorMandate={null}
       />,
     );
@@ -5582,7 +5589,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
         payload={makePayload({
           holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
         })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-t5805-sticky`}
         allocatorMandate={null}
       />,
     );
@@ -5698,7 +5705,7 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w04-common`}
         allocatorMandate={null}
       />,
     );
@@ -5726,7 +5733,7 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w05-full`}
         allocatorMandate={null}
       />,
     );
@@ -5902,7 +5909,7 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-p01-brush`}
         allocatorMandate={null}
       />,
     );
@@ -5978,7 +5985,7 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-p01-axes`}
         allocatorMandate={null}
       />,
     );
@@ -6058,7 +6065,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w02-widen`}
         allocatorMandate={null}
       />,
     );
@@ -6082,7 +6089,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w03-narrow`}
         allocatorMandate={null}
       />,
     );
@@ -6126,7 +6133,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w03-subset`}
         allocatorMandate={null}
       />,
     );
@@ -6156,7 +6163,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w03-devinv`}
         allocatorMandate={null}
       />,
     );
@@ -6177,7 +6184,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w03-selected`}
         allocatorMandate={null}
       />,
     );
@@ -6238,7 +6245,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-p02-reason`}
         allocatorMandate={null}
       />,
     );
@@ -6287,7 +6294,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-p02-head`}
         allocatorMandate={null}
       />,
     );
@@ -6309,7 +6316,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-p02-motion`}
         allocatorMandate={null}
       />,
     );
@@ -6389,7 +6396,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-p02-tokens`}
         allocatorMandate={null}
       />,
     );
