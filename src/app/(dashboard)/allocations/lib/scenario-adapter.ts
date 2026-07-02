@@ -84,6 +84,45 @@ export interface ScenarioAdapterInputs {
  *
  * Default `minReturnDays` = 30 (Phase 07 D-03 warmup-gate mirror).
  */
+/**
+ * The added-strategy unit construction shared by `buildStrategyForBuilderSet`
+ * (the holdings path) and `mergeAddedIntoPerKeySet` (the per-key path). One
+ * `StrategyForBuilder` per added strategy: real series from the returns
+ * lookup (or [] — warm-up-gated out, never a fabricated series), metadata
+ * from the metadata lookup with the public/null default.
+ */
+function buildAddedUnits(
+  addedStrategies: AddedStrategy[],
+  addedStrategyReturnsLookup: Record<StrategyForBuilderId, DailyPoint[]>,
+  addedStrategyMetadataLookup: Record<
+    StrategyForBuilderId,
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+  >,
+): StrategyForBuilder[] {
+  return addedStrategies.map((a) => {
+    const meta = addedStrategyMetadataLookup[a.id] ?? {
+      disclosure_tier: "public" as const,
+      cagr: null,
+      sharpe: null,
+    };
+    const returns = addedStrategyReturnsLookup[a.id] ?? [];
+    return {
+      id: a.id,
+      name: a.name,
+      codename: null,
+      disclosure_tier: meta.disclosure_tier,
+      strategy_types: a.strategy_types,
+      markets: a.markets,
+      start_date: returns[0]?.date ?? null,
+      daily_returns: returns,
+      cagr: meta.cagr,
+      sharpe: meta.sharpe,
+      volatility: null,
+      max_drawdown: null,
+    };
+  });
+}
+
 export function buildStrategyForBuilderSet(
   holdings: HoldingForDefault[],
   disabledHoldingRefs: Set<string>,
@@ -120,28 +159,11 @@ export function buildStrategyForBuilderSet(
   });
 
   // Added strategies — built INSIDE the adapter from the lookup maps.
-  const addedAsBuilder: StrategyForBuilder[] = addedStrategies.map((a) => {
-    const meta = addedStrategyMetadataLookup[a.id] ?? {
-      disclosure_tier: "public" as const,
-      cagr: null,
-      sharpe: null,
-    };
-    const returns = addedStrategyReturnsLookup[a.id] ?? [];
-    return {
-      id: a.id,
-      name: a.name,
-      codename: null,
-      disclosure_tier: meta.disclosure_tier,
-      strategy_types: a.strategy_types,
-      markets: a.markets,
-      start_date: returns[0]?.date ?? null,
-      daily_returns: returns,
-      cagr: meta.cagr,
-      sharpe: meta.sharpe,
-      volatility: null,
-      max_drawdown: null,
-    };
-  });
+  const addedAsBuilder = buildAddedUnits(
+    addedStrategies,
+    addedStrategyReturnsLookup,
+    addedStrategyMetadataLookup,
+  );
 
   const allStrategies = [...holdingStrategies, ...addedAsBuilder];
 
@@ -259,4 +281,74 @@ export function buildPerKeyStrategyForBuilderSet(
   }
 
   return { strategies, state: { selected, weights, startDates } };
+}
+
+/**
+ * P61-BUG-1 fix (prod canary 2026-07-02) — merge the draft's ADDED strategies
+ * into the per-key unit set so a drawer-add participates in the book-mode
+ * projection. Before this, `activeAdapterOutput` in book mode (per-key gate
+ * satisfied — every real book) was `perKeyAdapterOutput` alone: the added
+ * units were built on the holdings path and then discarded wholesale, leaving
+ * every add inert (checked toggle, live weight input, zero engine effect).
+ * This is the CSV-strategies-plus-API-keys mixed blend path.
+ *
+ * WEIGHT COMMENSURABILITY (the one real design point): per-key weights arrive
+ * RAW (USD equity — Pitfall 1 above), while added-strategy weights are 0–1
+ * fractions from `draft.weightOverrides`. Merging them raw would keep adds
+ * inert (0.5 vs 70_000). So the per-key weights are normalized to EQUITY
+ * SHARES (÷ Σ) here, at the merge point only:
+ *   - the per-key-only blend is numerically IDENTICAL (the frozen engine
+ *     renormalizes per-day over the selected set — w/Σw is scale-invariant),
+ *     so the `weights.A === 70` raw-weight pin on the builder stays true and
+ *     the DSRC recompute oracles stay green;
+ *   - an added fraction w now reads "w of the whole book" against the keys'
+ *     Σshares = 1 (an added 0.5 → 0.5/1.5 of the blend once selected).
+ * Added units keep the deliberate weight-0 default (F9 H-0133) — the draft's
+ * weightOverrides overlay happens downstream in the composer's
+ * projectionState, exactly like the holdings path.
+ *
+ * A no-added call returns the per-key output UNCHANGED (raw weights and all)
+ * so the pure per-key path is byte-identical to Phase 37.
+ */
+export function mergeAddedIntoPerKeySet(
+  perKey: { strategies: StrategyForBuilder[]; state: ScenarioState },
+  addedStrategies: AddedStrategy[],
+  addedStrategyReturnsLookup: Record<StrategyForBuilderId, DailyPoint[]>,
+  addedStrategyMetadataLookup: Record<
+    StrategyForBuilderId,
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+  >,
+): { strategies: StrategyForBuilder[]; state: ScenarioState } {
+  if (addedStrategies.length === 0) return perKey;
+
+  const addedAsBuilder = buildAddedUnits(
+    addedStrategies,
+    addedStrategyReturnsLookup,
+    addedStrategyMetadataLookup,
+  );
+
+  // Normalize per-key RAW USD equity to shares (see WEIGHT COMMENSURABILITY).
+  // Σ ≤ 0 (degenerate all-zero-equity book) keeps the raw 0s — identical to
+  // the pre-merge behavior for that degenerate case.
+  const totalEquity = Object.values(perKey.state.weights).reduce(
+    (s, w) => s + w,
+    0,
+  );
+  const weights: Record<string, number> = {};
+  for (const [id, w] of Object.entries(perKey.state.weights)) {
+    weights[id] = totalEquity > 0 ? w / totalEquity : w;
+  }
+
+  const selected: Record<string, boolean> = { ...perKey.state.selected };
+  const startDates: Record<string, string> = { ...perKey.state.startDates };
+  for (const s of addedAsBuilder) {
+    selected[s.id] = true;
+    weights[s.id] = 0; // F9 H-0133 deliberate 0 default (overlay downstream)
+    startDates[s.id] = s.start_date ?? "2022-01-01";
+  }
+
+  return {
+    strategies: [...perKey.strategies, ...addedAsBuilder],
+    state: { selected, weights, startDates },
+  };
 }

@@ -34,7 +34,7 @@
  * ScenarioStub / ScenarioFlaggedHoldingsList / AllocationDashboardV2 tests
  * are untouched by Plan 06b.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   render,
   screen,
@@ -7241,5 +7241,221 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     expect(document.activeElement).toBe(
       screen.getByTestId("scenario-coverage-window"),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P61-BUG-1 (prod canary 2026-07-02) — added strategies must JOIN the per-key
+// book projection. Phase 37's per-key path swapped `activeAdapterOutput` to
+// `perKeyAdapterOutput`, whose builder has no addedStrategies input, so every
+// drawer-add in book mode (per-key gate satisfied — i.e. every real book) was
+// built on the holdings path and then discarded wholesale: checked toggle,
+// live-looking weight input, ZERO effect on member_count / timeline / KPIs.
+// This is the CSV-strategies-plus-API-keys mixed blend path. These tests
+// render with the gate TRUE and drive the real per-key builder + merge +
+// frozen engine (only the holdings-path builder is mocked, per this file's
+// mock philosophy) — they FAIL on the pre-fix composer.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — P61-BUG-1: added strategies join the per-key book projection", () => {
+  const P61_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-02-${String(i + 1).padStart(2, "0")}`,
+  );
+  const P61_KEY_SERIES_A = P61_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const P61_KEY_SERIES_B = P61_DATES.map((date, i) => ({
+    date,
+    value: [-0.03, 0.04, -0.05, 0.02, -0.01][i % 5],
+  }));
+  /** Covers the keys' whole span → a member under the intersection default. */
+  const P61_ADDED_SERIES = P61_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.006][i % 2],
+  }));
+  /** Ends 4 days early → does NOT cover the keys-only sticky window. */
+  const P61_SHORT_SERIES = P61_ADDED_SERIES.slice(0, 10);
+
+  const P61_ADDED_ID = "p61-added-csv-strat";
+
+  const mkKey = (id: string, exchange: string) => ({
+    id,
+    exchange,
+    label: `${id} desk`,
+    is_active: true,
+    sync_status: null,
+    last_sync_at: null,
+    account_balance_usdt: null,
+    created_at: "2026-01-01T00:00:00Z",
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
+  });
+  const mkKeyHolding = (apiKeyId: string, venue: string, usd: number) => ({
+    symbol: "BTC",
+    venue,
+    holding_type: "spot" as const,
+    value_usd: usd,
+    quantity: 1,
+    mark_price_usd: usd,
+    api_key_id: apiKeyId,
+    side: null as "long" | "short" | "flat" | null,
+    entry_price: null as number | null,
+    unrealized_pnl_usd: null as number | null,
+  });
+
+  function p61Payload(): MyAllocationDashboardPayload {
+    return makePayload({
+      apiKeys: [mkKey("p61-key-A", "binance"), mkKey("p61-key-B", "okx")],
+      holdingsSummary: [
+        mkKeyHolding("p61-key-A", "binance", 70_000),
+        mkKeyHolding("p61-key-B", "okx", 30_000),
+      ],
+      perKeyReturnsByApiKeyId: {
+        "p61-key-A": P61_KEY_SERIES_A,
+        "p61-key-B": P61_KEY_SERIES_B,
+      },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: ["p61-key-A", "p61-key-B"],
+    });
+  }
+
+  /** Stub fetch so the added id's lazy returns resolve immediately with the
+   *  given series (the added id is NOT in payload.strategies, so the composer
+   *  must lazy-fetch — the same seam the prod bug rode). */
+  function stubLazyReturns(series: Array<{ date: string; value: number }>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (String(url).includes(`/api/strategies/${P61_ADDED_ID}/returns`)) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ daily_returns: series }),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    // The holdings-path builder stays mocked-empty (this file's philosophy):
+    // the fix must NOT depend on it — added units are built by the REAL
+    // merge helper on the per-key path.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("a covering added strategy becomes a blend MEMBER: member_count 2 → 3, member_ids includes it", async () => {
+    stubLazyReturns(P61_ADDED_SERIES);
+    render(
+      <ScenarioComposer
+        payload={p61Payload()}
+        allocatorId={`${ALLOCATOR_A}-p61-member`}
+        allocatorMandate={null}
+      />,
+    );
+    // Baseline: the two per-key units blend.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+
+    addStrategy({
+      id: P61_ADDED_ID,
+      name: "P61 Added CSV Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // Once the lazy series resolves, the added strategy is an ENGINE MEMBER —
+    // the exact signal that was dead on prod (header stuck at "Mean of 2").
+    await waitFor(() => {
+      const sm = lastScenarioMetrics();
+      expect(sm?.member_count).toBe(3);
+      expect(sm?.member_ids).toEqual(expect.arrayContaining([P61_ADDED_ID]));
+    });
+  });
+
+  it("a NON-covering added strategy surfaces in the auto-excluded accounting (not silently dropped)", async () => {
+    stubLazyReturns(P61_SHORT_SERIES);
+    render(
+      <ScenarioComposer
+        payload={p61Payload()}
+        allocatorId={`${ALLOCATOR_A}-p61-autoexcl`}
+        allocatorMandate={null}
+      />,
+    );
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+
+    addStrategy({
+      id: P61_ADDED_ID,
+      name: "P61 Short CSV Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // The keys-only window is sticky (WINDOW-01: seeded once from the keys'
+    // intersection = the full 14 days); the short added series ends early, so
+    // it must land in the auto-excluded group WITH accounting — never vanish.
+    await waitFor(() => {
+      expect(lastScenarioMetrics()?.member_count).toBe(2);
+      const group = screen.getByTestId("scenario-auto-excluded-group");
+      expect(group).toBeInTheDocument();
+      expect(group.textContent).toContain("P61 Short CSV Strat");
+    });
+  });
+
+  it("the added member's weight MOVES the blend numbers (0 → 0.5 changes the equity curve)", async () => {
+    stubLazyReturns(P61_ADDED_SERIES);
+    render(
+      <ScenarioComposer
+        payload={p61Payload()}
+        allocatorId={`${ALLOCATOR_A}-p61-weight`}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: P61_ADDED_ID,
+      name: "P61 Added CSV Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await waitFor(() => {
+      expect(lastScenarioMetrics()?.member_count).toBe(3);
+    });
+    const before = vi.mocked(KpiStrip).mock.calls.at(-1)?.[0]?.scenarioMetrics;
+
+    // Drive the weight through the SAME channel the CompositionList input uses.
+    const weightInput = screen.getByLabelText(
+      "P61 Added CSV Strat weight",
+    ) as HTMLInputElement;
+    fireEvent.change(weightInput, { target: { value: "0.5" } });
+
+    await waitFor(() => {
+      const after = vi
+        .mocked(KpiStrip)
+        .mock.calls.at(-1)?.[0]?.scenarioMetrics;
+      expect(after?.member_count).toBe(3);
+      // Non-vacuous: a 50% sleeve of a distinct series must move the numbers.
+      expect(after?.twr).not.toBe(before?.twr);
+    });
   });
 });

@@ -127,6 +127,7 @@ import { useScenarioState } from "../hooks/useScenarioState";
 import {
   buildStrategyForBuilderSet,
   buildPerKeyStrategyForBuilderSet,
+  mergeAddedIntoPerKeySet,
 } from "../lib/scenario-adapter";
 import {
   buildHoldingRef,
@@ -1684,9 +1685,35 @@ export function ScenarioComposer({
 
   // The strategy set actually fed to the engine this render — the per-key units
   // when the per-source path is active, else the holdings/added units.
-  const activeAdapterOutput = usePerKeySources
-    ? perKeyAdapterOutput
-    : adapterOutput;
+  //
+  // P61-BUG-1 fix: the per-key set is MERGED with the draft's added-strategy
+  // units (mergeAddedIntoPerKeySet — per-key USD weights normalized to shares
+  // there so the fractional added weights are commensurable). Before this the
+  // per-key path discarded `draft.addedStrategies` wholesale: a drawer-add in
+  // book mode rendered a live-looking weight row while contributing NOTHING to
+  // member_count / timeline / KPIs (the CSV-strategies + API-keys blend path).
+  const activeAdapterOutput = useMemo(() => {
+    if (!usePerKeySources) return adapterOutput;
+    return mergeAddedIntoPerKeySet(
+      perKeyAdapterOutput,
+      scenario.draft.addedStrategies,
+      addedStrategyReturnsLookup as Record<
+        import("../lib/scenario-adapter").StrategyForBuilderId,
+        DailyPoint[]
+      >,
+      addedStrategyMetadataLookup as Record<
+        import("../lib/scenario-adapter").StrategyForBuilderId,
+        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+      >,
+    );
+  }, [
+    usePerKeySources,
+    adapterOutput,
+    perKeyAdapterOutput,
+    scenario.draft.addedStrategies,
+    addedStrategyReturnsLookup,
+    addedStrategyMetadataLookup,
+  ]);
 
   // DSRC-02 — render-gating for the "Data sources" control:
   //   showDataSources       → the per-key path is active → render the control.
@@ -1756,6 +1783,15 @@ export function ScenarioComposer({
   // leverage UI so their multiplier is always 1, while an added strategy's
   // multiplier flows through here. The collapse weight-averages leverage across
   // aliased venues and computeScenario applies `wᵢ·Lᵢ·rᵢ`.
+  // P61-BUG-1: the ids of the draft's added strategies — the per-key branch
+  // below needs this to tell an ADDED unit (draft toggle/weight semantics)
+  // apart from a per-key unit (ephemeral include map). Also consumed by the
+  // WINDOW-06 outlier machinery further down.
+  const addedIdSet = useMemo(
+    () => new Set<string>(scenario.draft.addedStrategies.map((a) => a.id)),
+    [scenario.draft.addedStrategies],
+  );
+
   const projectionState = useMemo(() => {
     const selected: Record<string, boolean> = {};
     const weights: Record<string, number> = {};
@@ -1767,7 +1803,11 @@ export function ScenarioComposer({
       // the per-day weight mass; the engine renormalizes over the remaining
       // selected set (r / activeWeightSum) — an honest recompute, never a hide.
       // The holdings path keeps its draft `toggleByScopeRef` semantics unchanged.
-      if (usePerKeySources) {
+      //
+      // P61-BUG-1: on the per-key path the merged set ALSO carries the draft's
+      // added-strategy units — those ride the draft toggle channel (same
+      // semantics as the holdings path), NOT the per-key include map.
+      if (usePerKeySources && !addedIdSet.has(s.id)) {
         selected[s.id] = includeByApiKeyId[s.id] ?? true;
       } else {
         const toggle = scenario.draft.toggleByScopeRef[s.id];
@@ -1800,6 +1840,7 @@ export function ScenarioComposer({
   }, [
     activeAdapterOutput,
     usePerKeySources,
+    addedIdSet,
     includeByApiKeyId,
     scenario.draft.toggleByScopeRef,
     scenario.draft.weightOverrides,
@@ -2214,10 +2255,8 @@ export function ScenarioComposer({
   // scenario.toggleHolding (RESEARCH Open Question #2 — in practice the outlier
   // is an added strategy; a holding is handled honestly). All interval / outlier
   // math delegates to scenario-window.ts (Rule 2: never re-derive it here).
-  const addedIdSet = useMemo(
-    () => new Set<string>(scenario.draft.addedStrategies.map((a) => a.id)),
-    [scenario.draft.addedStrategies],
-  );
+  // (P61-BUG-1: `addedIdSet` was hoisted above `projectionState`, which now
+  // needs it to route added ids on the per-key path.)
   const emptyIntersectionOutliers = useMemo<
     Array<{ id: string; name: string; isAdded: boolean }>
   >(() => {
