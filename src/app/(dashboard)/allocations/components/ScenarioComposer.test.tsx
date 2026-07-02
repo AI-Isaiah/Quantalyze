@@ -6464,6 +6464,92 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     expect(cls).not.toMatch(/#[0-9a-fA-F]{6}/);
     expect(cls).not.toMatch(/\[\d+px\]/);
   });
+
+  // Pre-landing review I8a — the includeCost===null branch: a SELECTED strategy
+  // whose span has NO intersection with the current window is auto-excluded
+  // with chip + honest reason, but there is NO window that could re-admit it,
+  // so the cost-disclosing include button must NOT render (a dead-end button
+  // would disclose a window the apply path cannot produce).
+  it("auto-excluded: a row with NO intersection with the current window shows chip + reason but NO include button (includeCost === null)", () => {
+    const REF_WIN_SHORT = "strat-window-short-head";
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
+        mkWinStrat(REF_WIN_SHORT, WIN_DATES.slice(0, 3)), // 01-01 … 01-03
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_SHORT]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_SHORT]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-i8a-nocost`}
+        allocatorMandate={null}
+      />,
+    );
+    // Apply a window DISJOINT from SHORT's span ([01-05, 01-12] vs 01-01…01-03):
+    // SHORT is coverage-dropped and no intersection can re-admit it.
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-05", end: "2026-01-12" });
+    });
+    const row = screen.getByTestId(`auto-excluded-row-${REF_WIN_SHORT}`);
+    // Chip + honest reason still render (never color-only, never a dead end
+    // without explanation) …
+    expect(within(row).getByText("Outside window")).toBeInTheDocument();
+    expect(
+      within(row).getByTestId("auto-excluded-reason").textContent,
+    ).toMatch(/outside window/);
+    // … but the include affordance is honestly absent.
+    expect(
+      within(row).queryByTestId(`auto-excluded-include-${REF_WIN_SHORT}`),
+    ).not.toBeInTheDocument();
+  });
+
+  // Pre-landing review I8b — composition-list chip derivation: the chip is a
+  // projection of the row's `enabled` (selected axis) + the threaded
+  // coverageEligible map. An enabled+eligible added row reads "In blend"; a
+  // manually-toggled-off row reads "Excluded" (the sticky manual state, never
+  // the amber auto-excluded chip).
+  it("composition list: an enabled+eligible added row shows the 'In blend' chip; toggling it off flips the chip to 'Excluded'", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-i8b-chips`}
+        allocatorMandate={null}
+      />,
+    );
+    // Add a strategy whose id matches an adapter strategy (REF_WIN_A) so the
+    // row's coverageEligible entry is real. Enabled by default → "In blend".
+    addStrategy({
+      id: REF_WIN_A,
+      name: REF_WIN_A,
+      markets: [],
+      strategy_types: [],
+    });
+    const row = document.querySelector(
+      `[data-scope-ref="${REF_WIN_A}"]`,
+    ) as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(within(row).getByText("In blend")).toBeInTheDocument();
+    expect(within(row).queryByText("Excluded")).not.toBeInTheDocument();
+
+    // Toggle the row off (a MUTATING gesture — per-test allocator key above):
+    // the chip flips to the sticky manual "Excluded" state.
+    fireEvent.click(
+      within(row).getByRole("switch", {
+        name: `Toggle ${REF_WIN_A} on/off in scenario`,
+      }),
+    );
+    expect(within(row).getByText("Excluded")).toBeInTheDocument();
+    expect(within(row).queryByText("In blend")).not.toBeInTheDocument();
+  });
 });
 
 // ===========================================================================

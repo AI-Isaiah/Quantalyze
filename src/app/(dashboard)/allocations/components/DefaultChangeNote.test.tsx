@@ -131,11 +131,17 @@ describe("DefaultChangeNote (POLISH-03)", () => {
 
     // Remount with the SAME truncation condition: the persisted dismissal wins,
     // the note never reappears (no flash-of-note for a returning user).
+    localStorageMock.getItem.mockClear();
     act(() => {
       renderNote({ intersectionTruncatesUnion: true });
     });
-    // Give deferred hydration a tick to adopt the stored "true".
-    await new Promise((r) => setTimeout(r, 50));
+    // POSITIVE hydration oracle (pre-landing review I6): wait until the
+    // remounted hook has actually READ the stored dismissal key — deferred
+    // hydration runs in an effect, and a bare sleep could elapse before it,
+    // making the negative assertion below prove nothing.
+    await waitFor(() =>
+      expect(localStorageMock.getItem).toHaveBeenCalledWith(KEY),
+    );
     expect(
       screen.queryByText(/Now showing the common period/),
     ).not.toBeInTheDocument();
