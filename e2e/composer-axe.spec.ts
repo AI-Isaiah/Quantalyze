@@ -47,6 +47,7 @@
 import { test, expect } from "@playwright/test";
 import { buildAxe } from "./helpers/axe";
 import {
+  cleanupStrategiesByNamePrefix,
   seedTestAllocator,
   seedStrategyWithHistory,
 } from "./helpers/seed-test-project";
@@ -84,12 +85,16 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     // Seed a PUBLISHED strategy with enough history (>warm-up + rolling window)
     // so the Browse drawer has a row to add and the blend has a full-length
     // series (the Phase-30 card BODIES still gate on their own sample floors —
-    // see the gate comment below). The name is UNIQUE PER RUN: the shared test
-    // DB accumulates leave-around fixtures (helper contract: cleanup is the
-    // caller's), and prior runs left same-named rows seeded WITHOUT
-    // daily_returns — a name-tie could make the drawer add a windowless
-    // strategy and fail the unconditional Phase-58 anchors below.
-    const fixtureName = `Composer Axe Fixture ${Math.random()
+    // see the gate comment below). The name is UNIQUE PER RUN (stale same-name
+    // rows without daily_returns could otherwise tie) and starts with "0" so
+    // it sorts FIRST in the browse catalog: the route caps at 200 rows ordered
+    // by raw name over a shared test DB with 5,000+ accumulated leave-around
+    // strategies (a 'Composer…' name landed beyond the cap and failed CI run
+    // 28594573435 — no client-side search can find a row the payload never
+    // contained). The prefix niche is garbage-collected below so this spec's
+    // own leave-arounds can never push it out either.
+    await cleanupStrategiesByNamePrefix("0 Composer Axe Fixture");
+    const fixtureName = `0 Composer Axe Fixture ${Math.random()
       .toString(36)
       .slice(2, 8)}`;
     const fixtureId = await seedStrategyWithHistory({

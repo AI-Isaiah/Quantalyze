@@ -307,6 +307,32 @@ export async function seedBridgeCandidate(opts?: {
  * Phase 14b-07 — replaces the placeholder helper that lived at the bottom
  * of e2e/strategy-v2-partial-data.spec.ts.
  */
+/**
+ * Phase 60 — best-effort garbage collection for a spec's OWN leave-around
+ * fixtures. The shared test project accumulates seeded strategies (5,153
+ * published rows as of 2026-07-02) because "cleanup is the caller's
+ * responsibility" and no caller cleans; the browse route caps its catalog at
+ * 200 rows ordered by raw name, so a spec that must FIND its own fixture must
+ * both (a) name it to sort inside the cap and (b) stop its own prefix niche
+ * from silting up. Deletes strategies whose raw `name` starts with `prefix`
+ * (strategy_analytics cascades via FK). Best-effort: a failure logs and
+ * returns — stale rows degrade nothing when the caller uses unique names.
+ */
+export async function cleanupStrategiesByNamePrefix(
+  prefix: string,
+): Promise<void> {
+  const admin = getAdmin();
+  const { error } = await admin
+    .from("strategies")
+    .delete()
+    .like("name", `${prefix}%`);
+  if (error) {
+    console.warn(
+      `[seed] cleanupStrategiesByNamePrefix("${prefix}") failed (non-fatal): ${error.message}`,
+    );
+  }
+}
+
 export async function seedStrategyWithHistory(opts: {
   days: number;
   name?: string;
