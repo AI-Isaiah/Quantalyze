@@ -52,7 +52,8 @@ Workflow default: `permissions: contents: read`
 | `secret-scan` | `contents: read` + `pull-requests: write` | gitleaks-action posts finding summaries as PR comments so the author sees the diagnostic without digging into the workflow log. |
 | `docs-link-check` | (inherits default) | Runs lychee against checked-out docs. No GitHub API. |
 | `python` | (inherits default) | Runs pytest + mypy against the analytics-service tree. No GitHub API. |
-| `e2e` | (inherits default) | Runs Playwright against a local `next start`. Artifact download uses same-run GITHUB_TOKEN. |
+| `e2e` | (inherits default) | Runs the PUBLIC/smoke Playwright batch against a local `next start` of the placeholder-env artifact. Holds NO test-Supabase secrets (pinned by critical-regressions.test.ts), so its on-failure playwright-report upload is placeholder-only. |
+| `e2e-seeded` | (inherits default) | Runs the seed-gated Playwright batch. Holds `secrets.TEST_SUPABASE_URL/ANON_KEY/SERVICE_ROLE_KEY`, builds `.next/` locally with them inlined, and uploads NO playwright-report artifact (pinned) — the C-0293(c) trace-zip exfil closure, encoded structurally since the 2026-07-02 e2e split. |
 
 ### `nightly.yml`
 
@@ -129,8 +130,8 @@ regression class at the test layer — no CI runner round-trip needed.
 | Workflow-level `permissions: contents: read` | retro-PR179-H2 | A new workflow inherits the repo default (write-on-everything). |
 | `frontend-build` env uses placeholder NEXT_PUBLIC_* values | retro-PR179-H3 | A "re-optimize" PR re-adds the seed-aware ternary that uploads real creds. |
 | `frontend-build` env contains no `secrets.TEST_SUPABASE_*` | retro-PR188-F1 | URL banned originally; ANON_KEY + SERVICE_ROLE_KEY now also banned (F1 widened the prefix). |
-| Seed-gated rebuild step has its required shape | retro-PR179-H4 | A drift in the wipe list or env wiring silently breaks Path 2. |
-| `Upload Playwright report on failure` is gated against seed-gated | retro-PR188-F2 | A "let me see traces on every failure" revert re-opens the trace-zip exfil pivot. |
+| `e2e-seeded` job has its required shape (job-level vars gate, real-secrets build, no nextjs-build download, inline-URL verify) | retro-PR179-H4 (re-baselined 2026-07-02) | A drift in the gate or env wiring silently breaks Path 2. |
+| `e2e-seeded` has NO playwright-report upload; `e2e` smoke holds no `secrets.TEST_SUPABASE_*` | retro-PR188-F2 (re-baselined 2026-07-02) | A "let me see traces on every failure" addition to the seeded job re-opens the trace-zip exfil pivot. |
 | Every `actions/checkout` sets `persist-credentials: false` | retro-PR188-F3 | A new checkout step inherits the persisted GITHUB_TOKEN attack surface. |
 | `supabase-migrate.yml` plan + apply both set `environment: Production` | retro-PR188-F4 | A rebase drops the plan-side env gate; SUPABASE_DB_PASSWORD bypasses approval. |
 | No YAML anchors/aliases at value position in workflow files | retro-PR188-F8 | A future PR uses `&name` / `*name` to indirect a `uses:` past the SHA-pin regex. |
