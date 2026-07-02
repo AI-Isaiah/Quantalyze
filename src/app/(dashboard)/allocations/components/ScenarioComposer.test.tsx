@@ -6791,4 +6791,44 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
       screen.queryByTestId("scenario-provenance-note"),
     ).not.toBeInTheDocument();
   });
+
+  it("review WR-01: Reset clears the reopened scenario's window — the fresh live-book draft re-seeds the intersection default, not the prior open's window", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-reset-window`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    // Open a saved scenario whose window is NARROWER than the intersection
+    // default — a value only the saved draft can produce.
+    act(() => {
+      openSaved?.({
+        id: "saved-v3-win-reset",
+        name: "V3 with window",
+        draft: v3DraftWithWindow({ start: "2026-01-02", end: "2026-01-05" }),
+      });
+    });
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-02 → 2026-01-05");
+
+    // Reset (footer Reset → confirm). The fresh draft is a v3 live book — the
+    // prior open's FOREIGN window must not linger (the Phase-57 "sticky by
+    // design" rationale covers deselect, NOT reset): the auto-default re-seeds
+    // the intersection [2026-01-01, 2026-01-06] like any other fresh open.
+    fireEvent.click(screen.getByTestId("scenario-footer-reset"));
+    fireEvent.click(screen.getByRole("button", { name: /Discard draft/i }));
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+  });
 });

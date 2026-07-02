@@ -1070,6 +1070,15 @@ export function ScenarioComposer({
     // v1.5 PERSIST-01 — a reset leaves the upgraded-v2 provenance context; the
     // fresh draft is a v3 live book, so the note must not linger.
     setShowProvenanceNote(false);
+    // Review WR-01 — clear the window state too: a reopened scenario's saved
+    // window (applied via seedWindowLocal, windowTouchedRef=true) is
+    // prior-open context and must not narrow the fresh live-book draft.
+    // Releasing the gate lets the WINDOW-01 auto-default effect re-seed the
+    // intersection for the fresh draft — the same rule as any other fresh
+    // open. (The DRAFT's persisted window is already gone: scenario.reset()
+    // replaced the draft with the windowless default.) The Phase-57 "sticky by
+    // design" rationale covers deselect, not reset.
+    resetWindowToDefaultOnReopen();
     // Review WR-02 — clear the ephemeral per-source include map on every reset /
     // saved-scenario open. The toggle is NOT persisted to the draft, so a freshly
     // opened scenario must start with every data source included; without this a
