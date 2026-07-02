@@ -7423,6 +7423,55 @@ describe("ScenarioComposer — P61-BUG-1: added strategies join the per-key book
     });
   });
 
+  // Red-team F1 — pre-fix, `allDataSourcesExcluded` only checked the key
+  // toggles, which was truthful while added strategies were inert. Post-merge,
+  // excluding every key with a weighted added strategy is a LEGITIMATE
+  // added-only projection ("what if I dropped my whole book and ran this CSV
+  // strategy"), and the "nothing to project" card contradicting the live chart
+  // below it is a fabricated absence.
+  it("excluding every key with a LIVE weighted added strategy projects added-only — never the 'nothing to project' card over a live blend", async () => {
+    stubLazyReturns(P61_ADDED_SERIES);
+    render(
+      <ScenarioComposer
+        payload={p61Payload()}
+        allocatorId={`${ALLOCATOR_A}-p61-allexcl`}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: P61_ADDED_ID,
+      name: "P61 Added CSV Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await waitFor(() => {
+      expect(lastScenarioMetrics()?.member_count).toBe(3);
+    });
+    // Give the added leg real mass so the added-only blend is a live number.
+    fireEvent.change(screen.getByLabelText("P61 Added CSV Strat weight"), {
+      target: { value: "0.5" },
+    });
+
+    // Exclude EVERY data source (both keys).
+    const group = screen.getByRole("group", { name: "Data sources" });
+    for (const sw of within(group).getAllByRole("switch")) {
+      fireEvent.click(sw);
+    }
+
+    // The engine keeps a live added-only projection…
+    await waitFor(() => {
+      const sm = lastScenarioMetrics();
+      expect(sm?.member_count).toBe(1);
+      expect(sm?.member_ids).toEqual([P61_ADDED_ID]);
+      const kpi = vi.mocked(KpiStrip).mock.calls.at(-1)?.[0]?.scenarioMetrics;
+      expect(kpi?.twr).not.toBeNull();
+    });
+    // …so the DSRC-03 honest-empty card must NOT render above it.
+    expect(
+      screen.queryByTestId("scenario-data-sources-empty"),
+    ).not.toBeInTheDocument();
+  });
+
   it("the added member's weight MOVES the blend numbers (0 → 0.5 changes the equity curve)", async () => {
     stubLazyReturns(P61_ADDED_SERIES);
     render(

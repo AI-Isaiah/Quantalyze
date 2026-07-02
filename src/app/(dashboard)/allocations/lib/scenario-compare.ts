@@ -96,8 +96,10 @@ export interface ScenarioCompareInputs {
    * the composer projects), NOT on the holdings-snapshot units — whose spans
    * differ from the series the draft was authored on, which made every saved
    * book draft compute EMPTY under its persisted window ("0 overlapping
-   * days"). All four fields come verbatim from the live payload; absent →
-   * the legacy holdings path runs unchanged.
+   * days"). Three fields come verbatim from the live payload;
+   * `equityByApiKeyId` is derived by the panel from the payload's holdings
+   * rows (mirroring the composer's memo). Absent → the legacy holdings path
+   * runs unchanged.
    */
   perKeyReturnsByApiKeyId?: Record<string, DailyPoint[]>;
   eligibleApiKeyIds?: string[];
@@ -126,10 +128,14 @@ export interface ComputeMetricsForDraftOptions {
  * `computeScenario`, returning the SAME `ComputedMetrics` the composer shows
  * for that draft over the same live inputs.
  *
- * The chain is the composer's verbatim (no new math):
- *   buildStrategyForBuilderSet → overlay draft toggle/weight into projectionState
- *   (NO leverage) → collapseAliasedHoldingStrategies → buildDateMapCache →
- *   computeScenario.
+ * The chain is the composer's verbatim (no new math). Which builder runs
+ * mirrors the composer's engine-set selection (P61-BUG-2):
+ *   - per-key gate satisfied → buildPerKeyStrategyForBuilderSet →
+ *     mergeAddedIntoPerKeySet (per-key units + the draft's added strategies)
+ *   - otherwise → buildStrategyForBuilderSet (holdings-snapshot units)
+ * then in both cases: overlay draft toggle/weight into projectionState
+ * (NO leverage) → collapseAliasedHoldingStrategies → buildDateMapCache →
+ * computeScenario.
  */
 export function computeMetricsForDraft(
   draft: ScenarioDraft,
@@ -269,9 +275,12 @@ export function computeMetricsForDraft(
 }
 
 /**
- * Build the synthetic "live book" draft: ALL live holdings enabled,
- * equity-weight (the adapter's value-proportional default), no added
- * strategies, no toggle/weight overrides, no leverage. Fed through
+ * Build the synthetic "live book" draft: the WHOLE live book enabled at its
+ * natural weights, no added strategies, no toggle/weight overrides, no
+ * leverage. With the per-key gate satisfied that is the per-key blend at
+ * equity shares (P61-BUG-2 — the same Phase-36 per-key basis as
+ * liveBaselineMetrics); otherwise all live holdings at the adapter's
+ * value-proportional default. Fed through
  * `computeMetricsForDraft` it computes all six metrics through the SAME engine
  * path so the live-book compare column populates honestly — rather than the
  * thin `payload.liveBaselineMetrics` shape (RESOLVED decision).

@@ -1739,11 +1739,20 @@ export function ScenarioComposer({
     return (payload.apiKeys ?? []).filter((k) => eligible.includes(k.id));
   }, [payload.apiKeys, payload.eligibleApiKeyIds]);
 
-  // All-excluded honest-empty trigger (DSRC-03): every eligible key toggled off.
+  // All-excluded honest-empty trigger (DSRC-03): every eligible key toggled off
+  // AND no live added strategy. Since P61-BUG-1 the merged engine set carries
+  // the draft's added strategies, so all-keys-excluded with a live (toggled-on)
+  // added leg is a legitimate added-only projection — the "nothing to project"
+  // card must not contradict the live chart below it (red-team F1). The added
+  // liveness check mirrors projectionState's draft-toggle rule (absent → on).
   // Derived from the ephemeral include map (default included), so re-including
   // any source instantly flips this back to false and restores the projection.
+  const hasLiveAddedStrategy = scenario.draft.addedStrategies.some(
+    (s) => scenario.draft.toggleByScopeRef[s.id] !== false,
+  );
   const allDataSourcesExcluded =
     showDataSources &&
+    !hasLiveAddedStrategy &&
     dataSourceKeys.length > 0 &&
     dataSourceKeys.every((k) => includeByApiKeyId[k.id] === false);
 

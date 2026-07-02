@@ -321,6 +321,75 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
   });
 
   // -------------------------------------------------------------------------
+  // T_CP8 — P61-BUG-2 wiring: the per-key channel REACHES the engine. The
+  //         engine-side behavior is real-engine-tested in scenario-compare.test.ts,
+  //         but that suite calls computeMetricsForDraft with hand-built inputs —
+  //         dropping any of the four fields from deriveCompareInputs would keep
+  //         it green while book drafts silently compute empty again (the exact
+  //         "helper tested, call site not" gap this project's retros pin).
+  // -------------------------------------------------------------------------
+  it("T_CP8 threads the per-key channel (gate, series, eligibility, DERIVED equity shares) into the engine inputs", () => {
+    mockComputeMetricsForDraft.mockReturnValue(metrics({}));
+
+    const perKeySeries = {
+      "key-A": [{ date: "2026-01-01", value: 0.002 }],
+      "key-B": [{ date: "2026-01-01", value: -0.001 }],
+    };
+    const perKeyPayload = {
+      ...(PAYLOAD as Record<string, unknown>),
+      holdingsSummary: [
+        // Spot → value_usd counts toward key-A.
+        {
+          symbol: "BTC",
+          venue: "binance",
+          holding_type: "spot",
+          value_usd: 60_000,
+          api_key_id: "key-A",
+        },
+        // Derivative → unrealized_pnl_usd counts (value_usd is leveraged
+        // NOTIONAL and must NOT be summed) — also key-A.
+        {
+          symbol: "ETH-PERP",
+          venue: "binance",
+          holding_type: "derivative",
+          value_usd: 100_000,
+          unrealized_pnl_usd: 500,
+          api_key_id: "key-A",
+        },
+        { symbol: "SOL", venue: "okx", holding_type: "spot", value_usd: 30_000, api_key_id: "key-B" },
+        // No api_key_id → contributes to NO key bucket.
+        { symbol: "DOGE", venue: "okx", holding_type: "spot", value_usd: 9_999 },
+      ],
+      perKeyReturnsByApiKeyId: perKeySeries,
+      eligibleApiKeyIds: ["key-A", "key-B"],
+      perKeyDailiesGateSatisfied: true,
+    } as unknown as ScenarioComparePanelProps["payload"];
+
+    render(
+      <ScenarioComparePanel
+        selectedRows={[
+          row("a", "Alpha", v2Draft("fp-a")),
+          row("b", "Beta", v2Draft("fp-b")),
+        ]}
+        includeLiveBook={false}
+        payload={perKeyPayload}
+      />,
+    );
+
+    const inputs = mockComputeMetricsForDraft.mock
+      .calls[0][1] as ScenarioCompareInputs;
+    expect(inputs.perKeyDailiesGateSatisfied).toBe(true);
+    expect(inputs.perKeyReturnsByApiKeyId).toEqual(perKeySeries);
+    expect(inputs.eligibleApiKeyIds).toEqual(["key-A", "key-B"]);
+    // Derived per-key equity: key-A = 60 000 spot + 500 unrealized (NOT the
+    // 100 000 notional); key-B = 30 000; the keyless holding lands nowhere.
+    expect(inputs.equityByApiKeyId).toEqual({
+      "key-A": 60_500,
+      "key-B": 30_000,
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // T_CP7 — A THROWING compute for one column does NOT crash the tab: that
   //         column falls back to a NULL-metrics ("—") column and the others
   //         still render. The panel is mounted outside an error boundary, so an
