@@ -201,10 +201,16 @@ describe("Phase 29 frozen-spine exit-gate guards", () => {
 
   it("exit gate (share SECDEF not loosened): the shares leak-scan's negative over-return guard is still present and unweakened", () => {
     // Additive extension is allowed (v1.5 PERSIST-02 window round-trip); a
-    // LOOSENING of the negative over-return guard is not. Pin the exact
-    // forbidden-field regex the leak-scan uses so any weakening (dropping a
-    // field from the alternation, deleting the guard) goes red here even though
-    // the file is no longer byte-frozen.
+    // LOOSENING of the negative over-return guard is not.
+    //
+    // Review CR-02: the pinned substring occurs in THREE places in the SQL file
+    // — the header comment, the operative `IF payload_text ~ '...' THEN` guard,
+    // and the RAISE EXCEPTION message. A bare-alternation `.toContain` is
+    // satisfied by the comment alone, so weakening or deleting the guard line
+    // stayed GREEN (a vacuous pin). Pin the OPERATIVE guard line verbatim —
+    // comments and messages cannot satisfy it — and belt-and-braces the
+    // occurrence count so deleting ANY of the three (comment, guard, message)
+    // is a reviewed act.
     const sharesSql = readFileSync(
       path.resolve(CWD, RLS_SQL_SHARES),
       "utf8",
@@ -212,11 +218,26 @@ describe("Phase 29 frozen-spine exit-gate guards", () => {
     expect(
       sharesSql,
       `Phase 29/59 exit gate VIOLATED — the ${RLS_SQL_SHARES} negative ` +
-        "over-return guard (api_key|allocated_amount|account_balance|value_usd) " +
+        "over-return guard (the operative `IF payload_text ~ " +
+        "'api_key|allocated_amount|account_balance|value_usd' THEN` line) " +
         "is missing or weakened. That guard is the SOLE content-level proof the " +
         "`get_shared_scenario` SECURITY DEFINER read path was not loosened into " +
         "a live-book over-return leak. It must stay intact; PERSIST-02 may only " +
         "ADD assertions around it.",
-    ).toContain("api_key|allocated_amount|account_balance|value_usd");
+    ).toContain(
+      "IF payload_text ~ 'api_key|allocated_amount|account_balance|value_usd' THEN",
+    );
+    const alternationOccurrences = (
+      sharesSql.match(
+        /api_key\|allocated_amount\|account_balance\|value_usd/g,
+      ) ?? []
+    ).length;
+    expect(
+      alternationOccurrences,
+      `Phase 29/59 exit gate VIOLATED — the forbidden-field alternation ` +
+        `appears ${alternationOccurrences}x in ${RLS_SQL_SHARES} (expected >= 3: ` +
+        "header comment, operative IF guard, RAISE EXCEPTION message). An " +
+        "occurrence was removed — deleting any of them must be a reviewed act.",
+    ).toBeGreaterThanOrEqual(3);
   });
 });
