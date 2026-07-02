@@ -4151,11 +4151,15 @@ function AutoExcludedRow({
           // (WR-01/WR-02): a tail move "shortens window to {end}", a head move
           // "moves window start to {start}", a both-ends move names both dates so
           // the shown date(s) and the `−{N} mo` cost always reconcile.
+          // `min-h-6 inline-flex items-center` = the F1 tap-target idiom
+          // (WCAG 2.5.8 24px minimum — a bare text button at the 11px tier
+          // renders ~15px); gap-1 restores the inter-fragment spacing flex
+          // layout collapses; flex-wrap lets the label break on narrow phones.
           <button
             type="button"
             data-testid={`auto-excluded-include-${id}`}
             onClick={onInclude}
-            className="rounded-sm text-fixed-11 font-medium text-accent transition-colors duration-150 ease-out hover:text-accent-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 motion-reduce:transition-none"
+            className="min-h-6 inline-flex flex-wrap items-center gap-1 rounded-sm text-fixed-11 font-medium text-accent transition-colors duration-150 ease-out hover:text-accent-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 motion-reduce:transition-none"
           >
             {includeCost.movedBound === "start" ? (
               <>

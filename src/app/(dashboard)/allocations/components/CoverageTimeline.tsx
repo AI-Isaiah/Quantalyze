@@ -140,15 +140,22 @@ export function CoverageTimeline({
                       style={{ left: `${bandLeft}%`, width: `${bandWidth}%` }}
                     />
                   )}
-                  {/* The strategy's coverage bar. */}
+                  {/* The strategy's coverage bar. role="img" makes the div a
+                      real accessibility node so the aria-label is actually
+                      announced (a role-less div's label is ignored — the text
+                      restatement would otherwise be color-only in practice).
+                      The auto-excluded bar borders with the SOLID `warning`
+                      amber (#B45309, ≥3:1 against the bg-track rail) — the
+                      pale warning-border token is ~1:1 vs the rail there. */}
                   <div
                     data-testid={`coverage-bar-${row.id}`}
+                    role="img"
                     aria-label={ariaLabel}
                     className={cn(
                       "absolute inset-y-0 rounded-sm",
                       row.inBlend
                         ? "bg-accent"
-                        : "bg-warning-bg border border-warning-border",
+                        : "border border-warning bg-warning-bg",
                     )}
                     style={{ left: `${left}%`, width: `${width}%` }}
                   />

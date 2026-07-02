@@ -56,6 +56,38 @@ const CONTROLS: { label: string; path: string; mustContain: string }[] = [
     ),
     mustContain: "inline-flex items-center min-h-[44px] text-sm text-text-muted",
   },
+  // Phase 58/59 pre-landing review (2026-07-02) — three coverage-surface
+  // controls found below the 24px minimum, fixed with the same two idioms:
+  {
+    label:
+      "DefaultChangeNote dismiss × (F2a idiom: fixed 32×32, shrink-0 pinned)",
+    path: join(
+      REPO,
+      "src/app/(dashboard)/allocations/components/DefaultChangeNote.tsx",
+    ),
+    mustContain:
+      "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-sm",
+  },
+  {
+    label:
+      "ProvenanceNote dismiss × (F2a idiom — identical twin of DefaultChangeNote's)",
+    path: join(
+      REPO,
+      "src/app/(dashboard)/allocations/components/ProvenanceNote.tsx",
+    ),
+    mustContain:
+      "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-sm",
+  },
+  {
+    label:
+      "ScenarioComposer auto-excluded Include text-button (F1 idiom: min-h-6 = 24px)",
+    path: join(
+      REPO,
+      "src/app/(dashboard)/allocations/components/ScenarioComposer.tsx",
+    ),
+    mustContain:
+      "min-h-6 inline-flex flex-wrap items-center gap-1 rounded-sm text-fixed-11",
+  },
 ];
 
 describe("tap-target minimums — WCAG 2.5.8 (device-profile sweep 2026-06-30)", () => {

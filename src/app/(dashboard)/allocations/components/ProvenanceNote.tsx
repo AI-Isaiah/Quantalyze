@@ -62,7 +62,7 @@ export function ProvenanceNote({ onShowFullRange }: ProvenanceNoteProps) {
         type="button"
         aria-label="Dismiss"
         onClick={() => setDismissed(true)}
-        className="shrink-0 rounded-sm px-1 text-fixed-13 text-text-muted transition-colors duration-150 ease-out hover:text-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 motion-reduce:transition-none"
+        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-sm text-fixed-13 text-text-muted transition-colors duration-150 ease-out hover:text-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 motion-reduce:transition-none"
       >
         ×
       </button>

@@ -97,8 +97,12 @@ describe("CoverageTimeline (COVERAGE-01)", () => {
     ) as HTMLElement;
     // In-blend bar carries an accent fill.
     expect(inBlend.className).toContain("bg-accent");
-    // Auto-excluded bar is the amber DESIGN.md warning token (never red).
+    // Auto-excluded bar is the amber DESIGN.md warning token (never red). The
+    // border uses the SOLID `warning` amber (≥3:1 against the bg-track rail) —
+    // the pale warning-border token is near-invisible on the rail (~1:1).
     expect(autoExcluded.className).toContain("bg-warning-bg");
+    expect(autoExcluded.className).toContain("border-warning ");
+    expect(autoExcluded.className).not.toContain("border-warning-border");
     expect(autoExcluded.className).not.toContain("bg-negative");
   });
 
@@ -117,6 +121,10 @@ describe("CoverageTimeline (COVERAGE-01)", () => {
     const autoExcluded = container.querySelector(
       "[data-testid='coverage-bar-b']",
     ) as HTMLElement;
+    // role="img" makes each bar a REAL accessibility node — a role-less div's
+    // aria-label is ignored by screen readers (the label would be decorative).
+    expect(inBlend).toHaveAttribute("role", "img");
+    expect(autoExcluded).toHaveAttribute("role", "img");
     const inLabel = inBlend.getAttribute("aria-label") ?? "";
     const outLabel = autoExcluded.getAttribute("aria-label") ?? "";
     // Coverage dates present in both.
