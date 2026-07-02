@@ -460,3 +460,105 @@ describe("buildLiveBookDraft", () => {
     expect(m.sharpe).not.toBe(0);
   });
 });
+
+// =========================================================================
+// P61-BUG-2 (prod canary 2026-07-02) — book drafts must compute on PER-KEY
+// units when the D3 gate is satisfied. Before this, computeMetricsForDraft
+// always rebuilt drafts on the holdings-snapshot path, whose series spans
+// differ from the per-key series the draft was authored (and windowed) on —
+// so every saved book draft computed EMPTY under its persisted window
+// ("0 overlapping days") in both the compare table and the share view.
+// =========================================================================
+describe("computeMetricsForDraft — per-key channel (P61-BUG-2)", () => {
+  const PK_DATES = buildDates("2026-02-02", 40);
+  const KEY_A = altReturns(PK_DATES, 0.004, -0.002);
+  const KEY_B = altReturns(PK_DATES, -0.001, 0.003);
+
+  /** Per-key live inputs: gate satisfied, two eligible keys, NO holding
+   *  series at all (the exact prod shape that computed empty pre-fix). */
+  function perKeyInputs(): ScenarioCompareInputs {
+    return {
+      holdingsSummary: [],
+      holdingReturnsByScopeRef: {},
+      addedStrategyReturnsLookup: {},
+      addedStrategyMetadataLookup: {},
+      symbolByHoldingId: new Map(),
+      perKeyReturnsByApiKeyId: { "key-A": KEY_A, "key-B": KEY_B },
+      eligibleApiKeyIds: ["key-A", "key-B"],
+      equityByApiKeyId: { "key-A": 70_000, "key-B": 30_000 },
+      perKeyDailiesGateSatisfied: true,
+    };
+  }
+
+  it("a saved book draft (no added strategies) computes a NON-empty per-key blend at its persisted window", () => {
+    const win = { start: PK_DATES[5], end: PK_DATES[30] };
+    const m = computeMetricsForDraft(
+      draft({ window: win }),
+      perKeyInputs(),
+    );
+    // Pre-fix: the holdings path had zero units → member_count 0, all null.
+    expect(m.member_count).toBe(2);
+    expect(m.member_ids).toEqual(
+      expect.arrayContaining(["key-A", "key-B"]),
+    );
+    expect(m.n).toBeGreaterThan(0);
+    expect(m.twr).not.toBeNull();
+    // The persisted window is honored (engine clamps to it).
+    expect(m.effective_start).toBe(win.start);
+    expect(m.effective_end).toBe(win.end);
+  });
+
+  it("a book draft WITH an added strategy blends per-key units + the added unit (weight override honored)", () => {
+    const ADDED = altReturns(PK_DATES, 0.01, -0.006);
+    const inputs: ScenarioCompareInputs = {
+      ...perKeyInputs(),
+      addedStrategyReturnsLookup: { "added-1": ADDED },
+      addedStrategyMetadataLookup: {
+        "added-1": { disclosure_tier: "public", cagr: null, sharpe: null },
+      },
+    };
+    const withAdded = computeMetricsForDraft(
+      draft({
+        addedStrategies: [
+          {
+            id: "added-1" as AddedStrategy["id"],
+            name: "Added CSV Strat",
+            markets: [],
+            strategy_types: [],
+          },
+        ],
+        weightOverrides: { "added-1": 0.5 },
+      }),
+      inputs,
+    );
+    expect(withAdded.member_count).toBe(3);
+    expect(withAdded.member_ids).toEqual(expect.arrayContaining(["added-1"]));
+
+    // Non-vacuous: the added 0.5 sleeve MOVES the numbers vs keys-only.
+    const keysOnly = computeMetricsForDraft(draft(), perKeyInputs());
+    expect(withAdded.twr).not.toBeNull();
+    expect(keysOnly.twr).not.toBeNull();
+    expect(withAdded.twr).not.toBe(keysOnly.twr);
+  });
+
+  it("gate ABSENT → the legacy holdings path runs unchanged (per-key fields ignored)", () => {
+    const inputs: ScenarioCompareInputs = {
+      ...perKeyInputs(),
+      perKeyDailiesGateSatisfied: false,
+    };
+    const m = computeMetricsForDraft(draft(), inputs);
+    // No holdings series → honest empty (the pre-existing legacy behavior).
+    expect(m.member_count).toBe(0);
+  });
+
+  it("only ELIGIBLE keys blend (a leftover series for an ineligible key is filtered)", () => {
+    const inputs = perKeyInputs();
+    inputs.perKeyReturnsByApiKeyId = {
+      ...inputs.perKeyReturnsByApiKeyId,
+      "key-GHOST": altReturns(PK_DATES, 0.02, -0.02),
+    };
+    const m = computeMetricsForDraft(draft(), inputs);
+    expect(m.member_count).toBe(2);
+    expect(m.member_ids).not.toEqual(expect.arrayContaining(["key-GHOST"]));
+  });
+});
