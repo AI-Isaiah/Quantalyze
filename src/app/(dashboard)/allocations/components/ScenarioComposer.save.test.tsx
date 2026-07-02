@@ -105,6 +105,10 @@ vi.mock("../lib/scenario-adapter", () => {
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer, type SavedScenarioRow } from "./ScenarioComposer";
+// The MOCKED builder (factory above) — the review-CR-01 windowed-save tests
+// point it at a two-strategy unequal-span book so the coverage-window control
+// mounts and the REAL preset-gesture → Save path can be driven end-to-end.
+import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 
 // --- localStorage mock ----------------------------------------------------
 
@@ -639,5 +643,210 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     expect(
       screen.getByRole("button", { name: /Update portfolio/i }),
     ).toBeInTheDocument();
+  });
+});
+
+// ===========================================================================
+// Phase 59 review CR-01 (PERSIST-01 write path) — the composer's APPLIED
+// coverage window must be persisted inside the SAVED draft.
+//
+// Every pre-existing Phase-59 test exercised externally-crafted windowed
+// fixtures and stopped at the route boundary; none drove "apply a window →
+// Save → the POSTed draft carries it". These tests drive the REAL gesture →
+// save path:
+//   • a preset click (applyWindow write-through) → POST body draft.window
+//     equals EXACTLY the applied window;
+//   • a never-touched window (only the WINDOW-01 intersection auto-default
+//     seeded) → the POSTed draft carries NO window key (the default is
+//     re-derived on reopen, never force-persisted);
+//   • Update (PUT) of a reopened v3-with-window row round-trips the saved
+//     window verbatim.
+//
+// The adapter mock is pointed at a two-strategy unequal-span book (A:
+// 2026-01-01…01-12, B: 2026-01-01…01-06) so windowBounds is non-null (the
+// control mounts), the auto-default intersection is [01-01, 01-06], and the
+// Full-range preset target is the DISTINCT union [01-01, 01-12] — proving the
+// saved value is the applied window, not the default.
+// ===========================================================================
+describe("ScenarioComposer — review CR-01: the applied coverage window is persisted in the save payload", () => {
+  const WIN_DATES = Array.from({ length: 12 }, (_, i) =>
+    `2026-01-${String(i + 1).padStart(2, "0")}`,
+  );
+
+  function mkWinStrat(id: string, dates: string[]) {
+    return {
+      id,
+      name: id,
+      codename: null,
+      disclosure_tier: "public",
+      strategy_types: [],
+      markets: [],
+      start_date: dates[0],
+      daily_returns: dates.map((date, i) => ({
+        date,
+        value: [0.01, -0.008, 0.012, -0.005, 0.006][i % 5],
+      })),
+      cagr: null,
+      sharpe: null,
+      volatility: null,
+      max_drawdown: null,
+    };
+  }
+
+  /** Point the mocked adapter at the unequal-span two-strategy book. */
+  function mountUnequalSpanBook(): void {
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat("strat-window-A", WIN_DATES), // 2026-01-01 … 2026-01-12
+        mkWinStrat("strat-window-B", WIN_DATES.slice(0, 6)), // … 2026-01-06
+      ],
+      state: {
+        selected: { "strat-window-A": true, "strat-window-B": true },
+        weights: { "strat-window-A": 0.5, "strat-window-B": 0.5 },
+        startDates: {},
+      },
+    } as unknown as ReturnType<typeof buildStrategyForBuilderSet>);
+  }
+
+  // WINDOW-06 flake lesson (72dc23a4): the 150ms draft-autosave debounce can
+  // leak a pending write across tests sharing an allocator key — every test in
+  // this describe renders with its OWN allocator id.
+  function renderWindowedComposer(allocatorId: string) {
+    return render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={allocatorId}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          registeredOpen = open;
+        }}
+      />,
+    );
+  }
+
+  afterEach(() => {
+    // Restore the factory's empty projection so this describe's fixture can
+    // never bleed into another suite in this file.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    } as unknown as ReturnType<typeof buildStrategyForBuilderSet>);
+  });
+
+  it("T_WIN_SAVE1 applying a window (Full-range preset) then Save → the POSTed draft carries EXACTLY the applied window", async () => {
+    mountUnequalSpanBook();
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "Windowed" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWindowedComposer(`${ALLOCATOR_A}-cr01-post-window`);
+
+    // Sanity: the control mounted and the auto-default seeded the intersection.
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+
+    // REAL gesture: the Full-range preset applies the union [01-01, 01-12] — a
+    // value the intersection default can never produce.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Full range \(some drop out\)/i }),
+    );
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-12");
+
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Windowed" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe("/api/allocator/scenario/saved");
+    expect((init as RequestInit).method).toBe("POST");
+    const body = JSON.parse((init as RequestInit).body as string);
+    // THE CR-01 pin: the persisted draft carries the applied window verbatim.
+    expect(body.draft.window).toEqual({
+      start: "2026-01-01",
+      end: "2026-01-12",
+    });
+  });
+
+  it("T_WIN_SAVE2 a never-touched window saves a WINDOWLESS draft — the intersection auto-default is NOT force-persisted", async () => {
+    mountUnequalSpanBook();
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "Untouched" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWindowedComposer(`${ALLOCATOR_A}-cr01-post-windowless`);
+
+    // The auto-default IS showing (the user sees the intersection) …
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Untouched" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [, init] = saveCalls(fetchMock)[0];
+    const body = JSON.parse((init as RequestInit).body as string);
+    // … but the DRAFT stays windowless: reopen re-derives the default, so a
+    // windowless save never freezes today's intersection against future
+    // coverage growth.
+    expect("window" in body.draft).toBe(false);
+  });
+
+  it("T_WIN_SAVE3 Update (PUT) of a reopened v3-with-window row round-trips the saved window verbatim", async () => {
+    mountUnequalSpanBook();
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: SAVED_ID, name: "Saved windowed" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWindowedComposer(`${ALLOCATOR_A}-cr01-put-window`);
+    const savedWindow = { start: "2026-01-02", end: "2026-01-05" };
+    openRow({
+      id: SAVED_ID,
+      name: "Saved windowed",
+      draft: { ...okDraft(), window: savedWindow },
+    });
+
+    // The reopened window is applied to the view …
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-02 → 2026-01-05");
+
+    const updateBtn = await screen.findByRole("button", {
+      name: /Update portfolio/i,
+    });
+    fireEvent.click(updateBtn);
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe(`/api/allocator/scenario/saved/${SAVED_ID}`);
+    expect((init as RequestInit).method).toBe("PUT");
+    const body = JSON.parse((init as RequestInit).body as string);
+    // … and the PUT body's draft still carries it (no silent window drop on
+    // the update boundary).
+    expect(body.draft.window).toEqual(savedWindow);
   });
 });

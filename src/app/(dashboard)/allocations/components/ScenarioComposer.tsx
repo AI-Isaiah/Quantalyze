@@ -877,11 +877,14 @@ export function ScenarioComposer({
   // view pan, persist=false), and per-strategy `startDates` (legacy include-from).
   // POLISH-01 (LOCKED) forbids conflating any of them.
   //
-  // EPHEMERAL by design (persistence is Phase 59): plain composer useState, NOT
-  // in useScenarioState / ScenarioDraft — so NO SCENARIO_SCHEMA_VERSION bump. The
-  // values are ISO "YYYY-MM-DD" strings (the engine + scenario-window helpers all
-  // compare lexicographically); Date conversion happens ONLY at the
-  // CustomRangePicker boundary via dateday helpers.
+  // VIEW-SEED state (Phase 59 / review CR-01 split): winStart/winEnd carry the
+  // NON-persisted intersection auto-default (WINDOW-01) and the reopen seed.
+  // The EXPLICITLY-applied window is persisted in `scenario.draft.window` (the
+  // v3 draft field) via the applyWindow write-through; `coverageWindow` below
+  // prefers the draft's window over this local seed. The values are ISO
+  // "YYYY-MM-DD" strings (the engine + scenario-window helpers all compare
+  // lexicographically); Date conversion happens ONLY at the CustomRangePicker
+  // boundary via dateday helpers.
   //
   // Null default: an empty intersection (`defaultWindowFor` === null) seeds no
   // window, leaving the engine on the union-when-absent path (the WINDOW-06
@@ -1160,12 +1163,14 @@ export function ScenarioComposer({
         // opened scenario starts with every data source included.
         setIncludeByApiKeyId({});
         // v1.5 PERSIST-01 — seed the coverage window from the saved draft. A
-        // newer-version blob may carry a window; apply it verbatim so the
+        // newer-version blob may carry a window; seed it verbatim so the
         // read-only view recomputes at the owner's saved window. If absent (a
         // future version that dropped it, or a windowless save), fall back to
         // the intersection default. A readonly blob is NOT the upgraded-v2 path,
-        // so the provenance note never shows here (Pitfall 3).
-        if (decoded.value.window) applyWindow(decoded.value.window);
+        // so the provenance note never shows here (Pitfall 3). LOCAL seed only
+        // (review CR-01): the window is already in the hydrated draft; the
+        // write-through mutator would rebase a drifted draft onto the default.
+        if (decoded.value.window) seedWindowLocal(decoded.value.window);
         else resetWindowToDefaultOnReopen();
         setShowProvenanceNote(false);
         setLoadedScenarioId(row.id);
@@ -1188,16 +1193,18 @@ export function ScenarioComposer({
       // v1.5 PERSIST-01 — seed the coverage window from the reopened draft, then
       // let the existing engineState memo recompute TODAY's numbers at it (no
       // stored series is replayed — no-invented-data lock).
-      //   • v3 draft WITH a window → applyWindow(...) VERBATIM (this sets
+      //   • v3 draft WITH a window → seedWindowLocal(...) VERBATIM (this sets
       //     windowTouchedRef so the auto-default effect stays inert and does NOT
-      //     override the reopened window). Provenance note stays hidden.
+      //     override the reopened window; the window itself is already in the
+      //     hydrated draft — review CR-01 — so no draft write happens here).
+      //     Provenance note stays hidden.
       //   • upgraded-v2 draft (decode reason "upgraded_v2_windowless", window
       //     absent) → release the window gate so the auto-default effect seeds
       //     the intersection ("common period"), AND raise the provenance note.
       //   • any other windowless "ok" (a v3 saved before a window was chosen) →
       //     intersection default, no note.
       if (decoded.value.window) {
-        applyWindow(decoded.value.window);
+        seedWindowLocal(decoded.value.window);
         setShowProvenanceNote(false);
       } else {
         resetWindowToDefaultOnReopen();
@@ -1209,8 +1216,8 @@ export function ScenarioComposer({
       setOpenNotice(null);
       setNameInputOpen(false);
     },
-    // hydrateFromSaved/reset/applyWindow/resetWindowToDefaultOnReopen are stable
-    // useCallbacks; the setters are stable; holdingsSummary is the only
+    // hydrateFromSaved/reset/seedWindowLocal/resetWindowToDefaultOnReopen are
+    // stable useCallbacks; the setters are stable; holdingsSummary is the only
     // render-varying input.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [holdingsSummary, scenario.hydrateFromSaved],
@@ -1819,9 +1826,20 @@ export function ScenarioComposer({
   // The applied coverage window, or null when unset / empty-intersection. Null
   // means "no window key" — the engine stays on its own-book union-when-absent
   // path, byte-unchanged for every non-scenario caller.
+  //
+  // Review CR-01 (v1.5 PERSIST-01) — the draft's PERSISTED window is the first
+  // source of truth: an explicitly-applied window is written through into
+  // `scenario.draft` (applyWindow below), so after a tab reload or a cross-tab
+  // draft adoption the recomputed view and the payload the save handlers
+  // POST/PUT can never diverge. The composer-local seed (winStart/winEnd) is
+  // the fallback: it carries the NON-persisted intersection auto-default
+  // (WINDOW-01) and the owner's window on a drifted reopen (where the working
+  // draft is the default and therefore windowless).
   const coverageWindow = useMemo(
-    () => (winStart && winEnd ? { start: winStart, end: winEnd } : null),
-    [winStart, winEnd],
+    () =>
+      scenario.draft.window ??
+      (winStart && winEnd ? { start: winStart, end: winEnd } : null),
+    [scenario.draft.window, winStart, winEnd],
   );
 
   // WINDOW mount bounds — the union span of the selected set gives the picker's
@@ -1840,11 +1858,40 @@ export function ScenarioComposer({
     return { min, max: unionMax > today ? unionMax : today };
   }, [selectedSpans]);
 
-  const applyWindow = useCallback((range: { start: string; end: string }) => {
-    windowTouchedRef.current = true;
-    setWinStart(range.start);
-    setWinEnd(range.end);
-  }, []);
+  // Seed the composer-local window VIEW state only (NO draft write). Used by
+  // the reopen path (openSavedScenario), where the saved window is ALREADY in
+  // the hydrated draft — routing the reopen through the write-through mutator
+  // would rebase a DRIFTED (fingerprint-mismatched) draft onto the default via
+  // `baseOf` and clobber the just-opened scenario. Gesture call sites use
+  // applyWindow (below) instead.
+  const seedWindowLocal = useCallback(
+    (range: { start: string; end: string }) => {
+      windowTouchedRef.current = true;
+      setWinStart(range.start);
+      setWinEnd(range.end);
+    },
+    [],
+  );
+
+  // Review CR-01 (v1.5 PERSIST-01) — the USER-GESTURE window setter: the
+  // presets, the custom picker, and the notes' "Show full range" all route
+  // here. Writes the view state AND writes the window through into
+  // `scenario.draft` (scenario.setWindow), so the localStorage autosave, the
+  // save handlers' POST/PUT payload, a minted share, and compare all carry the
+  // applied window. The WINDOW-01 intersection auto-default (effect above)
+  // deliberately does NOT write the draft — a never-touched window saves a
+  // WINDOWLESS draft, and reopen re-derives the default.
+  const applyWindow = useCallback(
+    (range: { start: string; end: string }) => {
+      seedWindowLocal(range);
+      scenario.setWindow(range);
+    },
+    // scenario.setWindow is a stable useCallback from the hook; depending on the
+    // whole `scenario` object (rebuilt every render) would destabilize this
+    // callback and, transitively, openSavedScenario (same idiom as handleReset).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [seedWindowLocal, scenario.setWindow],
+  );
 
   // v1.5 PERSIST-01 — reopen an UPGRADED-v2 (windowless) draft. Clearing the
   // window state AND un-touching the ref lets the WINDOW-01 auto-default effect

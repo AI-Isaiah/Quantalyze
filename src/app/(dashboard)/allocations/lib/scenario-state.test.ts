@@ -26,6 +26,7 @@ import {
   addStrategyBridge,
   removeAddedStrategy,
   setWeightOverride,
+  setWindow,
   renormalizeWeights,
   scenarioDraftCodec,
   SCENARIO_SCHEMA_VERSION,
@@ -364,6 +365,51 @@ describe("setWeightOverride", () => {
       toggleHolding(initial, "holding:binance:BTC:spot").userWeightOverrides,
     ).toBeUndefined();
     expect(addStrategyBrowse(initial, STRAT_A).userWeightOverrides).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setWindow — v1.5 PERSIST-01 (review CR-01): the ONE production writer of
+// draft.window. A user-applied coverage window must land IN the draft (so
+// autosave / save / share / compare carry it), while a never-touched window
+// stays absent — the transform is only ever invoked from the gesture path.
+// ---------------------------------------------------------------------------
+describe("setWindow", () => {
+  const WINDOW = { start: "2026-01-02", end: "2026-01-05" };
+
+  it("writes the window onto the draft (new object, input not mutated) and stamps lastEditedAt", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    expect(initial.window).toBeUndefined();
+    const out = setWindow(initial, WINDOW);
+    expect(out).not.toBe(initial);
+    expect(out.window).toEqual(WINDOW);
+    // Defensive copy — mutating the caller's range object later can't reach in.
+    expect(out.window).not.toBe(WINDOW);
+    // The input draft is untouched (immutability contract of every transform).
+    expect(initial.window).toBeUndefined();
+    // lastEditedAt is refreshed (an applied window is a real draft edit).
+    expect(out.lastEditedAt >= initial.lastEditedAt).toBe(true);
+  });
+
+  it("M9-style no-op: setting the SAME window returns the SAME draft reference (no autosave churn)", () => {
+    const withWindow = setWindow(defaultDraftFromHoldings(HOLDINGS_2), WINDOW);
+    const again = setWindow(withWindow, { ...WINDOW });
+    expect(again).toBe(withWindow);
+  });
+
+  it("replaces a previously-set window (a second gesture wins)", () => {
+    const first = setWindow(defaultDraftFromHoldings(HOLDINGS_2), WINDOW);
+    const second = setWindow(first, { start: "2026-01-01", end: "2026-01-12" });
+    expect(second.window).toEqual({ start: "2026-01-01", end: "2026-01-12" });
+  });
+
+  it("the windowed draft round-trips the codec at the current schema version", () => {
+    const def = defaultDraftFromHoldings(HOLDINGS_2);
+    const withWindow = setWindow(def, WINDOW);
+    const codec = scenarioDraftCodec(def);
+    const r = codec.decode(codec.encode(withWindow));
+    expect(r.outcome).toBe("ok");
+    expect(r.value.window).toEqual(WINDOW);
   });
 });
 

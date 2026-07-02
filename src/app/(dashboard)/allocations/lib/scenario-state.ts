@@ -543,6 +543,40 @@ export function applyWeightOverrides(
   };
 }
 
+/**
+ * v1.5 PERSIST-01 (review CR-01) — set the draft's saved coverage window.
+ *
+ * This is the ONE production writer of `draft.window`: the composer's
+ * `applyWindow` (user gesture — preset / custom picker / "Show full range")
+ * writes through here so the localStorage autosave, the save routes' POST/PUT
+ * payload, a minted share, and compare all carry the applied window. The
+ * WINDOW-01 intersection auto-default deliberately does NOT route here — a
+ * never-touched window stays absent so a windowless draft saves windowless and
+ * reopen re-derives the default (force-persisting the default would freeze it
+ * against future coverage growth). Clearing happens by draft REPLACEMENT
+ * (reset / hydrateFromSaved), never by a clear-gesture, so no undefined arm.
+ *
+ * M9-style no-op: setting the SAME window returns the SAME draft reference
+ * (no lastEditedAt churn, no autosave write).
+ */
+export function setWindow(
+  draft: ScenarioDraft,
+  window: CoverageWindow,
+): ScenarioDraft {
+  if (
+    draft.window &&
+    draft.window.start === window.start &&
+    draft.window.end === window.end
+  ) {
+    return draft;
+  }
+  return {
+    ...draft,
+    window: { start: window.start, end: window.end },
+    lastEditedAt: new Date().toISOString(),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // B7 cross-tab storage codec — zod-validated parse + version trichotomy.
 // The cross-tab primitive (useCrossTabStorage) owns the localStorage
