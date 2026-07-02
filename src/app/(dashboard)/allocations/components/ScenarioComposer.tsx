@@ -1182,6 +1182,25 @@ export function ScenarioComposer({
       // dismissed note on the next render.
       provenanceOpenNonceRef.current += 1;
 
+      // Re-review WR-01 — drift is decided SYNCHRONOUSLY here, with the same
+      // predicate the hook's storedMismatch derives on the next render: the
+      // saved draft's fingerprint vs the LIVE holdings' (defaultDraft carries
+      // the live fingerprint by construction). On a drifted open the hook's
+      // working draft falls back to the windowless default — the saved draft,
+      // window included, is NOT applied — so seeding the owner's window would
+      // display/compute at a window the working draft does not carry, and a
+      // save ("Update portfolio" is deliberately ungated on drift) would
+      // persist something OTHER than what is shown. The owner's window is
+      // seeded ONLY on the same condition that applies the saved draft's
+      // strategies/weights: no drift. On drift the window view state is left
+      // UNTOUCHED — the working draft did not change, so its window context
+      // (the intersection auto-default, or the user's own applied window via
+      // the seed-invalidation effect below coverageWindow) must not change
+      // either.
+      const drifted =
+        decoded.value.init_holdings_fingerprint !==
+        defaultDraft.init_holdings_fingerprint;
+
       if (decoded.outcome === "readonly") {
         // Newer-version blob: hydrate the user's real data but block edits.
         scenario.hydrateFromSaved(decoded.value);
@@ -1197,8 +1216,13 @@ export function ScenarioComposer({
         // so the provenance note never shows here (Pitfall 3). LOCAL seed only
         // (review CR-01): the window is already in the hydrated draft; the
         // write-through mutator would rebase a drifted draft onto the default.
-        if (decoded.value.window) seedWindowLocal(decoded.value.window);
-        else resetWindowToDefaultOnReopen();
+        // Re-review WR-01: on drift the hydrated draft is NOT the working draft
+        // (the hook falls back to the windowless default), so neither seed nor
+        // reset — the window view state tracks the unchanged working draft.
+        if (!drifted) {
+          if (decoded.value.window) seedWindowLocal(decoded.value.window);
+          else resetWindowToDefaultOnReopen();
+        }
         setShowProvenanceNote(false);
         setLoadedScenarioId(row.id);
         setLoadedScenarioName(row.name);
@@ -1220,6 +1244,15 @@ export function ScenarioComposer({
       // v1.5 PERSIST-01 — seed the coverage window from the reopened draft, then
       // let the existing engineState memo recompute TODAY's numbers at it (no
       // stored series is replayed — no-invented-data lock).
+      //   • DRIFTED open (re-review WR-01) → the saved draft is NOT applied
+      //     (the working draft is the windowless default), so its window must
+      //     not be seeded either: displaying/computing at the owner's window
+      //     while "Update portfolio" persists the windowless default would
+      //     save something other than what is shown. The window view state is
+      //     left untouched (it tracks the unchanged working draft); the
+      //     provenance note is suppressed — a note explaining a draft that was
+      //     not applied would be dishonest, and the drift banner is already
+      //     the honest signal.
       //   • v3 draft WITH a window → seedWindowLocal(...) VERBATIM (this sets
       //     windowTouchedRef so the auto-default effect stays inert and does NOT
       //     override the reopened window; the window itself is already in the
@@ -1230,7 +1263,9 @@ export function ScenarioComposer({
       //     the intersection ("common period"), AND raise the provenance note.
       //   • any other windowless "ok" (a v3 saved before a window was chosen) →
       //     intersection default, no note.
-      if (decoded.value.window) {
+      if (drifted) {
+        setShowProvenanceNote(false);
+      } else if (decoded.value.window) {
         seedWindowLocal(decoded.value.window);
         setShowProvenanceNote(false);
       } else {
@@ -1825,6 +1860,32 @@ export function ScenarioComposer({
     return spans;
   }, [selectedSpanById]);
 
+  // Re-review WR-01 — the composer-local seed (winStart/winEnd) is a cached
+  // mirror of the applied window; INVALIDATE it when `draft.window` disappears
+  // out from under it. Reachable without any local gesture: another tab resets
+  // and then edits (the cross-tab sync adopts its WINDOWLESS draft here), a
+  // drifted saved-scenario open replaces a windowed working draft with the
+  // windowless default, or a live-holdings change flips the working draft to
+  // the default. Without invalidation, `coverageWindow` falls back to the
+  // stale seed and this tab displays/computes at a window no save would
+  // persist (the displayed-vs-persisted divergence the CR-01 fix exists to
+  // prevent). Clearing the seed + un-touching the gate hands the window back
+  // to the WINDOW-01 auto-default below — MUST run BEFORE that effect (React
+  // runs effects in definition order) so the re-seed lands in the SAME commit,
+  // exactly like handleReset. Local view state only (never writes the draft),
+  // so it cannot feed back into the applyWindow write-through (CR-01 scrutiny
+  // point b: nothing reactively writes `draft.window`).
+  const prevDraftWindowRef = useRef(scenario.draft.window);
+  useEffect(() => {
+    const prev = prevDraftWindowRef.current;
+    prevDraftWindowRef.current = scenario.draft.window;
+    if (prev && !scenario.draft.window) {
+      windowTouchedRef.current = false;
+      setWinStart(null);
+      setWinEnd(null);
+    }
+  }, [scenario.draft.window]);
+
   // WINDOW-01 — seed the default window ONCE from the intersection of the
   // selected spans (Pitfall 3: a one-time seed + preset target, NEVER a
   // controlled value that re-snaps a user narrow). `windowTouchedRef` gates
@@ -1859,9 +1920,11 @@ export function ScenarioComposer({
   // `scenario.draft` (applyWindow below), so after a tab reload or a cross-tab
   // draft adoption the recomputed view and the payload the save handlers
   // POST/PUT can never diverge. The composer-local seed (winStart/winEnd) is
-  // the fallback: it carries the NON-persisted intersection auto-default
-  // (WINDOW-01) and the owner's window on a drifted reopen (where the working
-  // draft is the default and therefore windowless).
+  // the fallback: it carries ONLY the NON-persisted intersection auto-default
+  // (WINDOW-01). Re-review WR-01 closed the two leaks where the fallback could
+  // claim a window the draft does not carry: a drifted reopen no longer seeds
+  // the owner's window (openSavedScenario), and the invalidation effect above
+  // clears a stale seed whenever `draft.window` disappears out from under it.
   const coverageWindow = useMemo(
     () =>
       scenario.draft.window ??
