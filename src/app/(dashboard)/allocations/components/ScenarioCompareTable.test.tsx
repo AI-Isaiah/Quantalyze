@@ -24,6 +24,14 @@ import { ScenarioCompareTable, type ScenarioColumn } from "./ScenarioCompareTabl
  *   6. A whole below-floor column (n < 60) is gated to neutral sample-floor
  *      copy (no red/amber, no role="alert").
  *   7. Under-selection (< 2 columns) renders the UI-SPEC hint.
+ *
+ * v1.5 PERSIST-03 adds the per-column effective-window label pins:
+ *   8. A verdict.ok column AUGMENTS its day-count stamp with the effective
+ *      {start}–{end} window (engine-emitted bounds, font-mono tabular-nums,
+ *      en-dash) — quiet text-text-muted caption, never accent/warning.
+ *   9. Two columns with different windows render DIFFERENT ranges (heterogeneous).
+ *  10. Undecodable + below-floor columns SUPPRESS the range (no honest window);
+ *      a verdict.ok column with null bounds shows just the day-count stamp.
  */
 
 // =========================================================================
@@ -132,10 +140,13 @@ describe("ScenarioCompareTable", () => {
       />,
     );
 
-    // Distinct per-column stamps, NOT one shared-window header.
-    expect(screen.getByText(methodologyLine(120))).toBeInTheDocument();
-    expect(screen.getByText(methodologyLine(65))).toBeInTheDocument();
-    expect(screen.getByText(methodologyLine(90))).toBeInTheDocument();
+    // Distinct per-column stamps, NOT one shared-window header. The day-count
+    // caption is now AUGMENTED with the effective window (PERSIST-03), so the
+    // methodologyLine text is one node among several in the stamp <span> — match
+    // it as a substring (exact:false) rather than an exact single-node match.
+    expect(screen.getByText(methodologyLine(120), { exact: false })).toBeInTheDocument();
+    expect(screen.getByText(methodologyLine(65), { exact: false })).toBeInTheDocument();
+    expect(screen.getByText(methodologyLine(90), { exact: false })).toBeInTheDocument();
     // These three stamps are different strings — proves no single header.
     expect(methodologyLine(120)).not.toBe(methodologyLine(65));
   });
@@ -203,9 +214,10 @@ describe("ScenarioCompareTable", () => {
     expect(thinStamp.querySelector('[role="alert"]')).toBeNull();
     expect(thinStamp.innerHTML).not.toMatch(/text-negative|text-warning|border-negative|border-warning/);
 
-    // A healthy column keeps its window stamp, not the floor copy.
+    // A healthy column keeps its window stamp, not the floor copy. The stamp is
+    // AUGMENTED with the effective window (PERSIST-03), so match as a substring.
     const healthyStamp = screen.getByTestId("stamp-Healthy");
-    expect(within(healthyStamp).getByText(methodologyLine(120))).toBeInTheDocument();
+    expect(within(healthyStamp).getByText(methodologyLine(120), { exact: false })).toBeInTheDocument();
   });
 
   it("suppresses the winner ✓ when only one column has a real value for a metric", () => {
@@ -247,6 +259,117 @@ describe("ScenarioCompareTable", () => {
     expect(winner.className).toContain("text-accent");
     // And the Sharpe-leader callout names the leader.
     expect(screen.getByTestId("sharpe-leader")).toHaveTextContent("High");
+  });
+
+  // =======================================================================
+  // v1.5 PERSIST-03 — per-column effective-window label in the <tfoot> Window row
+  // WHY: compare shows 2+ scenarios each at its OWN persisted window. The Window
+  // row must display both HOW MANY days (methodologyLine) and OVER WHICH window
+  // ({start}–{end}) per column, so heterogeneous windows read honestly. The label
+  // reads engine-emitted effective bounds only (never re-derives) and is
+  // suppressed where there is no honest window: undecodable + below-floor columns.
+  // =======================================================================
+
+  it("appends the column's effective {start}–{end} window to the verdict.ok stamp", () => {
+    render(
+      <ScenarioCompareTable
+        columns={[
+          col("Alpha", healthy(120, { effective_start: "2024-01-02", effective_end: "2024-06-01" })),
+          col("Beta", healthy(120, { effective_start: "2024-01-02", effective_end: "2024-06-01" })),
+        ]}
+        liveBook={null}
+      />,
+    );
+
+    const alphaStamp = screen.getByTestId("stamp-Alpha");
+    // The day-count stamp is preserved (augmented, not replaced) — the
+    // methodologyLine text is now one node among several, so match as substring.
+    expect(within(alphaStamp).getByText(methodologyLine(120), { exact: false })).toBeInTheDocument();
+    // Both effective bounds render, joined by an en-dash, after a " · " separator.
+    expect(alphaStamp.textContent).toContain("2024-01-02");
+    expect(alphaStamp.textContent).toContain("2024-06-01");
+    expect(alphaStamp.textContent).toMatch(/·\s*2024-01-02–2024-06-01/);
+    // Dates use the BlendHeader font-mono tabular-nums treatment.
+    const dateSpans = alphaStamp.querySelectorAll("span.font-mono.tabular-nums");
+    expect(dateSpans.length).toBe(2);
+    // The label stays the quiet honesty caption — never accent/warning/winner.
+    expect(alphaStamp.innerHTML).not.toMatch(/text-accent|text-negative|text-warning/);
+  });
+
+  it("renders DIFFERENT date ranges for two columns with heterogeneous windows", () => {
+    render(
+      <ScenarioCompareTable
+        columns={[
+          col("Early", healthy(80, { effective_start: "2023-01-02", effective_end: "2023-06-01" })),
+          col("Late", healthy(80, { effective_start: "2024-01-02", effective_end: "2024-06-03" })),
+        ]}
+        liveBook={null}
+      />,
+    );
+
+    const earlyStamp = screen.getByTestId("stamp-Early");
+    const lateStamp = screen.getByTestId("stamp-Late");
+    // Heterogeneous windows are visible — each column shows its OWN range.
+    expect(earlyStamp.textContent).toMatch(/2023-01-02–2023-06-01/);
+    expect(lateStamp.textContent).toMatch(/2024-01-02–2024-06-03/);
+    // They are DIFFERENT — not force-aligned to a shared window.
+    expect(earlyStamp.textContent).not.toBe(lateStamp.textContent);
+  });
+
+  it("suppresses the date range on an undecodable (older-format) column", () => {
+    render(
+      <ScenarioCompareTable
+        columns={[
+          col("Healthy", healthy(120)),
+          { ...col("Older", degenerate(0)), undecodable: true },
+        ]}
+        liveBook={null}
+      />,
+    );
+
+    const olderStamp = screen.getByTestId("stamp-Older");
+    // Only the older-format stamp — no date range (no honest window to show).
+    expect(
+      within(olderStamp).getByText(/Saved in an older format — can't be compared/),
+    ).toBeInTheDocument();
+    expect(olderStamp.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(olderStamp.querySelector("span.font-mono.tabular-nums")).toBeNull();
+  });
+
+  it("suppresses the date range on a below-sample-floor column", () => {
+    render(
+      <ScenarioCompareTable
+        columns={[col("Healthy", healthy(120)), col("Thin", healthy(30))]}
+        liveBook={null}
+      />,
+    );
+
+    const thinStamp = screen.getByTestId("stamp-Thin");
+    // Below-floor column shows only the neutral sample-floor copy — no date range.
+    expect(
+      within(thinStamp).getByText(/Not enough history for this estimate/),
+    ).toBeInTheDocument();
+    expect(thinStamp.textContent).not.toMatch(/·\s*\d{4}-\d{2}-\d{2}–/);
+    expect(thinStamp.querySelector("span.font-mono.tabular-nums")).toBeNull();
+  });
+
+  it("omits the date range when a verdict.ok column has null effective bounds (degenerate but usable)", () => {
+    // A column that clears the sample floor (n >= 60) but whose engine returned
+    // null effective bounds shows just the day-count stamp — no fabricated range.
+    render(
+      <ScenarioCompareTable
+        columns={[
+          col("Healthy", healthy(120)),
+          col("NoBounds", healthy(80, { effective_start: null, effective_end: null })),
+        ]}
+        liveBook={null}
+      />,
+    );
+
+    const stamp = screen.getByTestId("stamp-NoBounds");
+    // The day-count stamp still renders; no date range.
+    expect(within(stamp).getByText(methodologyLine(80))).toBeInTheDocument();
+    expect(stamp.querySelector("span.font-mono.tabular-nums")).toBeNull();
   });
 
   it("renders the under-selection hint with fewer than 2 columns", () => {

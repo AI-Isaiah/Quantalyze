@@ -17,8 +17,9 @@ import {
  * `ComputedMetrics` (the scenario engine output) and carries ONE load-bearing
  * divergence: each column stamps its OWN `methodologyLine(n)` caption over its
  * OWN coverage window — heterogeneous windows are correct, there is NO single
- * shared-window header. Shared-window compare alignment is Phase 59
- * (PERSIST-03), not this component.
+ * shared-window header. v1.5 PERSIST-03 AUGMENTS that per-column stamp with the
+ * column's effective `{start}–{end}` window (read from the engine output, never
+ * re-derived) so heterogeneous windows are visible and honest per column.
  *
  * Honesty invariants (test-pinned in ScenarioCompareTable.test.tsx):
  *   - A null/degenerate metric renders "—" via formatPercent/formatNumber —
@@ -264,8 +265,30 @@ export function ScenarioCompareTable({
                         {OLDER_FORMAT_STAMP}
                       </span>
                     ) : verdict.ok ? (
+                      // v1.5 PERSIST-03 — AUGMENT (do NOT replace) the day-count
+                      // stamp with the column's OWN effective window, read from
+                      // the engine output (NEVER re-derived). Each compared
+                      // scenario computes at its own persisted draft.window, so
+                      // heterogeneous windows read honestly per column. The dates
+                      // mirror BlendHeader's treatment (font-mono tabular-nums,
+                      // en-dash, lexicographic YYYY-MM-DD); the label stays the
+                      // quiet text-text-muted honesty caption — never accent/
+                      // warning/winner. Omitted when either bound is null
+                      // (degenerate) — show just the day-count stamp.
                       <span className="text-xs font-metric text-text-muted">
                         {methodologyLine(c.metrics.n)}
+                        {c.metrics.effective_start && c.metrics.effective_end ? (
+                          <>
+                            {" · "}
+                            <span className="font-mono tabular-nums">
+                              {c.metrics.effective_start}
+                            </span>
+                            {"–"}
+                            <span className="font-mono tabular-nums">
+                              {c.metrics.effective_end}
+                            </span>
+                          </>
+                        ) : null}
                       </span>
                     ) : (
                       <span className="block text-xs text-text-muted">
