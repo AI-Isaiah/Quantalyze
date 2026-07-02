@@ -82,9 +82,29 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     page,
   }) => {
     // Seed a PUBLISHED strategy with enough history (>warm-up + rolling window)
-    // so the Browse drawer has a row to add and the resulting single-strategy
-    // blend computes real (non-degenerate) Phase-30 graphs.
-    await seedStrategyWithHistory({ days: 400, name: "Composer Axe Fixture" });
+    // so the Browse drawer has a row to add and the blend has a full-length
+    // series (the Phase-30 card BODIES still gate on their own sample floors —
+    // see the gate comment below). The name is UNIQUE PER RUN: the shared test
+    // DB accumulates leave-around fixtures (helper contract: cleanup is the
+    // caller's), and prior runs left same-named rows seeded WITHOUT
+    // daily_returns — a name-tie could make the drawer add a windowless
+    // strategy and fail the unconditional Phase-58 anchors below.
+    const fixtureName = `Composer Axe Fixture ${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    const fixtureId = await seedStrategyWithHistory({
+      days: 400,
+      name: fixtureName,
+      // The fixture is exploratory-tier (seed leaves the DB default), so the
+      // browse wire masks the raw `name` behind displayStrategyName — the
+      // CODENAME is what the drawer renders AND what its search matches
+      // (red-team catch: searching the raw name can never find the row).
+      codename: fixtureName,
+      // Phase 60 — daily_returns is what the composer's lazy returns fetch
+      // serves; with it the blend + Phase-58 coverage surface render
+      // deterministically (see the unconditional anchors below).
+      withDailyReturns: true,
+    });
 
     // /allocations is auth-gated by middleware AND by the universal approval
     // gate (src/lib/approval.ts) — an un-verified profile redirects to
@@ -113,10 +133,20 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     await expect(
       page.locator('[role="dialog"][aria-label="Browse strategies"]'),
     ).toBeVisible({ timeout: 5_000 });
-    // Wait for the lazy-loaded catalog, then add the first available strategy.
-    const firstAdd = page.locator('[data-testid^="browse-add-"]').first();
-    await expect(firstAdd).toBeVisible({ timeout: 10_000 });
-    await firstAdd.click();
+    // Add THIS RUN's fixture by id — never `.first()`: the catalog is
+    // name-ordered over the shared leave-around test DB (browse route caps at
+    // 200 rows), so the first row can be a stale strategy without
+    // daily_returns. The client-side search matches the fixture's CODENAME
+    // (the wire `name` is the masked exploratory label); the id-targeted
+    // click fails loudly (here, not at the anchors) if the fixture ever
+    // falls outside the 200-row alphabetical cap.
+    await page.fill(
+      'input[placeholder="Search by name or codename"]',
+      fixtureName,
+    );
+    const fixtureAdd = page.locator(`[data-testid="browse-add-${fixtureId}"]`);
+    await expect(fixtureAdd).toBeVisible({ timeout: 10_000 });
+    await fixtureAdd.click();
     // handleAdd() does NOT close the drawer (it tracks a dim effect), so close
     // it explicitly to expose the composed surface behind it.
     await page.click('[aria-label="Close drawer"]');
@@ -133,9 +163,10 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     // scanning — adapt the strategy-v2-axe scroll-each-card-ready idiom. We gate
     // on the card WRAPPERS (data-panel), which prove the composed surface (not a
     // 404 / empty <main> / login chrome) rendered the Phase-30 cards. We do NOT
-    // require the non-degenerate chart body: a single seeded strategy's blend is
-    // not guaranteed non-degenerate in the seeded CI env (lazy-returns + blend
-    // timing), and either body — the chart OR the honest "Awaiting more data"
+    // pin the chart body's exact state: the seed's daily_returns
+    // (withDailyReturns, Phase 60) makes the blend series real, but the
+    // Phase-30 card bodies additionally gate on their own sample floors, and
+    // either body — the chart OR the honest "Awaiting more data"
     // banner — is a real composer-surface element worth scanning. The chart-SVG
     // leaf a11y (ReturnHistogram / RollingMetrics) is independently covered by
     // strategy-v2-axe.spec.ts; this spec's JOURNEY-03 job is the COMPOSER
@@ -196,52 +227,48 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     // --- Phase 58 / COVERAGE-01/03: gate on the new disclosure surfaces ---
     // The blend header + coverage timeline live inside the composer's
     // `windowBounds`-gated block: they render iff the selected set has derivable
-    // coverage SPANS (daily returns loaded). At the single-strategy CI seed the
-    // blend "is not guaranteed non-degenerate ... (lazy-returns + blend timing)"
-    // — the same documented idiom as the Phase-30 cards above — so the honest
-    // ABSENCE of the whole window surface is a legitimate render, not a hollow
-    // page. Key the anchors on the composer's own gate (the coverage-window
-    // control): if the window surface rendered, the header + timeline MUST be
-    // there (hard assert — anti-false-green); if it did not appear within the
-    // wait, annotate loudly and let analyze() scan what rendered. Phase 60's
-    // e2e re-bake establishes a deterministically non-degenerate seeded state
-    // and can promote these back to unconditional.
+    // coverage SPANS (daily returns loaded). The seed writes
+    // `strategy_analytics.daily_returns` (`withDailyReturns: true`), which is
+    // exactly what the composer's lazy GET /api/strategies/[id]/returns serves —
+    // so the seeded blend has a real coverage span DETERMINISTICALLY and the
+    // whole Phase-58 surface must mount. UNCONDITIONAL anchors (Phase 60
+    // VERIFY-01 restored the net the ced581e0 land-fix had made conditional):
+    // an absent window surface here is a real regression, not seed noise.
     const windowControl = page.locator(
       '[data-testid="scenario-coverage-window"]',
     );
-    const hasWindowSurface = await windowControl
-      .waitFor({ state: "visible", timeout: 15_000 })
-      .then(() => true)
-      .catch(() => false);
+    await windowControl.scrollIntoViewIfNeeded();
+    await expect(windowControl).toBeVisible({ timeout: 15_000 });
 
-    if (hasWindowSurface) {
-      // (d) The honest blend header (COVERAGE-03) — the PRIMARY anchor of the
-      // Phase-58 legibility surface. Gating on it before analyze() means the
-      // WCAG-AA scan covers its polite live region + mono numerals.
-      const blendHeader = page.locator('[data-testid="scenario-blend-header"]');
-      await blendHeader.scrollIntoViewIfNeeded();
-      await expect(blendHeader).toBeVisible({ timeout: 10_000 });
+    // The window value must be a REAL derived ISO range (rendered as
+    // "{start} → {end}") — proves the WINDOW-01 intersection default derived
+    // from the seeded series (coverageSpanOf), not merely that the container
+    // mounted with its "All history" fallback.
+    await expect(
+      page.locator('[data-testid="scenario-coverage-window-value"]'),
+    ).toHaveText(/\d{4}-\d{2}-\d{2}\s*→\s*\d{4}-\d{2}-\d{2}/, {
+      timeout: 10_000,
+    });
 
-      // (e) The coverage timeline (COVERAGE-01) mounts COLLAPSED by default.
-      // Expand it so the mini-gantt bars (their aria-labels + amber/accent
-      // encoding) are in the accessible tree the single analyze() then scans.
-      const timelineToggle = page.locator("summary", {
-        hasText: "Coverage timeline",
-      });
-      await timelineToggle.scrollIntoViewIfNeeded();
-      await expect(timelineToggle).toBeVisible({ timeout: 10_000 });
-      await timelineToggle.click();
-      await expect(
-        page.locator('[data-testid="scenario-coverage-timeline-body"]'),
-      ).toBeVisible({ timeout: 5_000 });
-    } else {
-      console.warn(
-        "[composer-axe] coverage-window surface absent at the seeded " +
-          "single-strategy state (degenerate blend — lazy-returns); " +
-          "Phase-58 header/timeline anchors skipped this run. Phase 60 " +
-          "re-bake makes the seeded state deterministic.",
-      );
-    }
+    // (d) The honest blend header (COVERAGE-03) — the PRIMARY anchor of the
+    // Phase-58 legibility surface. Gating on it before analyze() means the
+    // WCAG-AA scan covers its polite live region + mono numerals.
+    const blendHeader = page.locator('[data-testid="scenario-blend-header"]');
+    await blendHeader.scrollIntoViewIfNeeded();
+    await expect(blendHeader).toBeVisible({ timeout: 10_000 });
+
+    // (e) The coverage timeline (COVERAGE-01) mounts COLLAPSED by default.
+    // Expand it so the mini-gantt bars (their aria-labels + amber/accent
+    // encoding) are in the accessible tree the single analyze() then scans.
+    const timelineToggle = page.locator("summary", {
+      hasText: "Coverage timeline",
+    });
+    await timelineToggle.scrollIntoViewIfNeeded();
+    await expect(timelineToggle).toBeVisible({ timeout: 10_000 });
+    await timelineToggle.click();
+    await expect(
+      page.locator('[data-testid="scenario-coverage-timeline-body"]'),
+    ).toBeVisible({ timeout: 5_000 });
 
     // The composed surface EMBEDS the real factsheet body (Phase 40-43), whose own
     // internal complementary/region landmarks (the MetricsColumn <aside>, etc.) are
