@@ -14,8 +14,9 @@ import type { CoverageSpan, CoverageWindow } from "@/lib/scenario-window";
  *
  * Membership is threaded in (`inBlend` per row) from the SINGLE engine axis
  * (`coverageEligible`) — this component NEVER calls `covers()` locally, so the
- * gantt can never desync from the blend divisor (the :1813 guard reconciles the
- * same axis). Bars agree with the row chips by construction.
+ * gantt can never desync from the blend divisor (the coverageEligible↔
+ * member_ids dev cross-check in ScenarioComposer reconciles the same axis).
+ * Bars agree with the row chips by construction.
  *
  * Timezone rule (Pitfall 2 / H-1224): the date→x scale is built with
  * `utcEpoch(parseIsoDay(...))` ONLY — never a raw JS Date from an ISO string,
@@ -25,9 +26,9 @@ import type { CoverageSpan, CoverageWindow } from "@/lib/scenario-window";
  * WCAG-AA: color is never the sole signal — every bar carries an `aria-label`
  * restating coverage dates + membership as TEXT, and each row shows the strategy
  * name. Auto-excluded bars use the amber DESIGN.md warning tokens (transient-
- * recoverable), NEVER negative/red. No icons and no charting dependency (a static
- * div-bar timeline needs neither — Rule 2). Motion, where present, uses the valid
- * Tailwind v4 250ms duration tier + `motion-reduce:transition-none`.
+ * recoverable), NEVER negative/red. No icons, no charting dependency, and NO
+ * motion — the bars are static positioned divs (a static div-bar timeline needs
+ * none of the three — Rule 2).
  */
 export interface CoverageTimelineRow {
   id: string;
@@ -111,9 +112,10 @@ export function CoverageTimeline({
                 ? clampPct(rightRaw - leftRaw)
                 : 0;
 
-            // In-window vs out-of-window split for an in-blend bar: the accent
-            // slice is the portion inside the active window; the remainder is
-            // muted track. For an auto-excluded bar the whole bar is amber.
+            // Each bar renders as ONE solid block — accent when in-blend,
+            // amber when auto-excluded. The active window is conveyed by the
+            // separate band overlay on the track, NOT by splitting the bar
+            // into in-window/out-of-window slices.
             const membershipWord = row.inBlend ? "in blend" : "auto-excluded";
             const coverage =
               first != null && last != null

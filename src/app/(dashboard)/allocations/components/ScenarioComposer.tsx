@@ -460,7 +460,9 @@ function coverageDropReason(
 
 /** The include-cost of narrowing the window to re-admit an auto-excluded row. */
 interface IncludeCost {
-  /** The exact window to apply so the strategy becomes a member. */
+  /** The exact window to apply so the strategy becomes a member. The disclosed
+   *  date(s) are read from here (`target.start` / `target.end`) at the label
+   *  call sites — no duplicate fields. */
   target: CoverageWindow;
   /**
    * Which window bound(s) actually move when the strategy is re-admitted. The
@@ -470,10 +472,6 @@ interface IncludeCost {
    * ends — both bounds are named so the `{N} mo` cost reconciles with the dates).
    */
   movedBound: "start" | "end" | "both";
-  /** The moved start bound (`target.start`) — disclosed when `start`/`both` move. */
-  start: string;
-  /** The moved end bound (`target.end`) — disclosed when `end`/`both` move. */
-  end: string;
   /** Whole-month cost of the narrow vs the current window (the `−{N} mo`). */
   months: number;
 }
@@ -541,7 +539,7 @@ function includeCostFor(
   let months = Math.round(shrinkDays / AVG_DAYS_PER_MONTH);
   if (months === 0 && shrinkDays > 0) months = 1;
 
-  return { target, movedBound, start: target.start, end: target.end, months };
+  return { target, movedBound, months };
 }
 
 
@@ -2110,7 +2108,8 @@ export function ScenarioComposer({
 
   // Phase 58 (COVERAGE-01) — the mini-gantt rows: one per SELECTED strategy,
   // carrying its coverage span + the in-blend/auto-excluded flag read from the
-  // SAME engine axis (`coverageEligible`) the :1813 desync guard reconciles.
+  // SAME engine axis (`coverageEligible`) the coverageEligible↔member_ids dev
+  // cross-check below reconciles.
   // Membership is NEVER re-derived here — CoverageTimeline receives `inBlend` as
   // a prop and never runs the containment predicate locally, so the gantt bars
   // agree with the row chips and the divisor by construction. Spans come from the
@@ -2150,7 +2149,8 @@ export function ScenarioComposer({
     );
   }, [coverageWindow, commonPeriodWindow, fullRangeWindow]);
 
-  // Dev-mode cross-check (Pitfall 2): on the passthrough (non-aliased) scenario
+  // The coverageEligible↔member_ids dev cross-check (Pitfall 2) — the anchor
+  // other comments reference by name: on the passthrough (non-aliased) scenario
   // path the UI's in-blend set { selected && coverageEligible } must equal the
   // engine's `member_ids`. A mismatch means the UI group and the divisor have
   // desynced — surface it loudly in dev (never in prod). The aliased-collapse
@@ -3210,8 +3210,9 @@ export function ScenarioComposer({
           member_count · effective window ABOVE the coverage-window control, so
           the allocator reads the honest N/window before steering membership.
           Reads scenarioMetrics.member_count / effective_* + fullRangeWindow ONLY
-          — never re-derives the blend (the :1813 desync guard reconciles the same
-          axis). Mounts alongside the window control (a selected set to describe). */}
+          — never re-derives the blend (the coverageEligible↔member_ids dev
+          cross-check reconciles the same axis). Mounts alongside the window
+          control (a selected set to describe). */}
       {windowBounds && (
         <div className="mt-6">
           <BlendHeader metrics={scenarioMetrics} unionSpan={fullRangeWindow} />
@@ -4179,21 +4180,21 @@ function AutoExcludedRow({
               <>
                 Include → moves window start to{" "}
                 <span className="font-mono tabular-nums">
-                  {includeCost.start}
+                  {includeCost.target.start}
                 </span>{" "}
               </>
             ) : includeCost.movedBound === "both" ? (
               <>
                 Include → shortens window to{" "}
                 <span className="font-mono tabular-nums">
-                  {includeCost.start}–{includeCost.end}
+                  {includeCost.target.start}–{includeCost.target.end}
                 </span>{" "}
               </>
             ) : (
               <>
                 Include → shortens window to{" "}
                 <span className="font-mono tabular-nums">
-                  {includeCost.end}
+                  {includeCost.target.end}
                 </span>{" "}
               </>
             )}
@@ -4224,11 +4225,12 @@ interface CompositionListProps {
   onRemoveAdded: (id: string) => void;
   onCompare: (scopeRef: string, candidateId: string) => void;
   /**
-   * Phase 58 COVERAGE-02 — the coverage-eligibility axis (`coverageEligible`
-   * memo, ScenarioComposer.tsx:1762). Threaded READ-ONLY so each added-strategy
-   * row can render its three-state chip from the SAME axis the engine's divisor
-   * and the :1813 desync guard read. The chip state is NOT re-derived here —
-   * it is a projection of `selected` (row `enabled`) + this map.
+   * Phase 58 COVERAGE-02 — the coverage-eligibility axis (the `coverageEligible`
+   * memo in ScenarioComposer). Threaded READ-ONLY so each added-strategy row
+   * can render its three-state chip from the SAME axis the engine's divisor
+   * and the coverageEligible↔member_ids dev cross-check read. The chip state
+   * is NOT re-derived here — it is a projection of `selected` (row `enabled`)
+   * + this map.
    */
   coverageEligible: Record<string, boolean>;
 }

@@ -5316,7 +5316,8 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
   // Phase 58 (COVERAGE-03) — the BlendHeader N is not an independent count; it
   // IS the engine's member_count. Prove the header text and the divisor move
   // together as the window drops a member. The header reads the SAME axis the
-  // :1813 desync guard reconciles, so this is the single-source guarantee under
+  // coverageEligible↔member_ids dev cross-check in ScenarioComposer
+  // reconciles, so this is the single-source guarantee under
   // test — if BlendHeader ever recomputed membership, N would diverge here.
   it("COVERAGE-03: BlendHeader N === engine member_count, and the header degrades in lockstep when the window drops a member", () => {
     mountUnequalSpanBook();

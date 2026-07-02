@@ -8,8 +8,8 @@ import type { CoverageWindow } from "@/lib/scenario-window";
  * (`member_count` / `effective_start` / `effective_end`) and states the blend
  * plainly. It NEVER counts the coverage-eligible axis or re-derives membership —
  * the divisor is `member_count` by construction (BLEND-06); recounting would
- * risk a divisor desync (Pitfall 1), which the dev guard at
- * ScenarioComposer.tsx:1813 exists to catch.
+ * risk a divisor desync (Pitfall 1), which the coverageEligible↔member_ids
+ * dev cross-check in ScenarioComposer exists to catch.
  *
  * Honest degrade order (LOCKED, 58-UI-SPEC §Copywriting Contract — verbatim):
  *   N === 0 → "No strategies span the selected window"
