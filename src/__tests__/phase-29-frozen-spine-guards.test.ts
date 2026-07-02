@@ -48,6 +48,8 @@
  */
 import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 const CWD = process.cwd();
 
@@ -175,9 +177,19 @@ describe("Phase 29 frozen-spine exit-gate guards", () => {
   // that goes red on every future phase branch once this merges and the
   // merge-base advances past the edit (scenario.ts naturally leaves each later
   // delta). scenario.ts is now protected by scenario.test.ts's own pins + the
-  // BLEND-07 numpy gate. The RLS + no-schema-change assertions — the real
-  // protective value of THIS guard — stay UNCHANGED.
-  it("exit gate (RLS untouched): the scenarios + scenario_shares RLS sql tests are byte-unchanged", () => {
+  // BLEND-07 numpy gate.
+  //
+  // v1.5 Phase 59 (PERSIST-02) re-baseline: the `test_scenario_shares_rls.sql`
+  // BYTE-UNCHANGED pin is likewise RETIRED as a reviewed act. Phase 59 persists
+  // the coverage window inside the shared `draft` JSONB and must ADDITIVELY
+  // extend this leak-scan (seed a windowed draft + a POSITIVE round-trip
+  // assertion). The real protective value of the gate — proof the SECDEF read
+  // path was NOT LOOSENED into an over-return leak — is preserved by pinning
+  // the file's NEGATIVE content-by-field over-return guard regex as
+  // still-present-and-unweakened, rather than the whole file's bytes. The
+  // `test_scenarios_rls.sql` byte-unchanged pin (a file this phase does NOT
+  // touch) stays intact.
+  it("exit gate (scenarios RLS untouched): test_scenarios_rls.sql is byte-unchanged", () => {
     expect(
       CHANGED,
       `Phase 29 exit gate VIOLATED — ${RLS_SQL_SCENARIOS} changed in the ` +
@@ -185,12 +197,26 @@ describe("Phase 29 frozen-spine exit-gate guards", () => {
         "RLS predicate was not loosened (it FAILS SILENTLY otherwise). It " +
         "must stay byte-unchanged this phase.",
     ).not.toContain(RLS_SQL_SCENARIOS);
+  });
+
+  it("exit gate (share SECDEF not loosened): the shares leak-scan's negative over-return guard is still present and unweakened", () => {
+    // Additive extension is allowed (v1.5 PERSIST-02 window round-trip); a
+    // LOOSENING of the negative over-return guard is not. Pin the exact
+    // forbidden-field regex the leak-scan uses so any weakening (dropping a
+    // field from the alternation, deleting the guard) goes red here even though
+    // the file is no longer byte-frozen.
+    const sharesSql = readFileSync(
+      path.resolve(CWD, RLS_SQL_SHARES),
+      "utf8",
+    );
     expect(
-      CHANGED,
-      `Phase 29 exit gate VIOLATED — ${RLS_SQL_SHARES} changed in the phase ` +
-        "delta. That file is the SOLE honesty proof the `scenario_shares` " +
-        "RLS + the `get_shared_scenario` SECURITY DEFINER read path were not " +
-        "loosened. It must stay byte-unchanged this phase.",
-    ).not.toContain(RLS_SQL_SHARES);
+      sharesSql,
+      `Phase 29/59 exit gate VIOLATED — the ${RLS_SQL_SHARES} negative ` +
+        "over-return guard (api_key|allocated_amount|account_balance|value_usd) " +
+        "is missing or weakened. That guard is the SOLE content-level proof the " +
+        "`get_shared_scenario` SECURITY DEFINER read path was not loosened into " +
+        "a live-book over-return leak. It must stay intact; PERSIST-02 may only " +
+        "ADD assertions around it.",
+    ).toContain("api_key|allocated_amount|account_balance|value_usd");
   });
 });
