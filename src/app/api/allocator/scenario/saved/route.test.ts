@@ -314,6 +314,39 @@ describe("POST /api/allocator/scenario/saved", () => {
     expect(res.status).toBe(500);
     expect(logAuditEventMock).not.toHaveBeenCalled();
   });
+
+  // v1.5 PERSIST-01 — the coverage window is saved as part of a scenario.
+  // The route persists `parsed.data.draft` WHOLE (route.ts:137) and sources
+  // schema_version from the draft (route.ts:138), so once scenarioDraftSchema
+  // accepts the additive-optional `window` field the value round-trips to the
+  // DB insert untouched. These two cases pin that observable at the route
+  // boundary: (a) a v3 draft carrying a window inserts with draft.window intact
+  // and schema_version 3 — the window is NOT stripped/re-projected by the route;
+  // (b) a windowless v3 draft still validates + inserts (the optional field did
+  // not break the existing save contract).
+  it("T_S19 — a v3 draft with a window round-trips WHOLE through the insert (window not stripped)", async () => {
+    const window = { start: "2024-01-01", end: "2024-12-31" };
+    const V3_WITH_WINDOW = { ...VALID_DRAFT, schema_version: 3, window };
+    const res = await POST(mkPost({ name: "Windowed", draft: V3_WITH_WINDOW }));
+    expect(res.status).toBe(200);
+    expect(lastInsertPayload).not.toBeNull();
+    // The window survived the route verbatim inside the persisted draft.
+    const insertedDraft = lastInsertPayload!.draft as { window?: unknown };
+    expect(insertedDraft.window).toEqual(window);
+    // schema_version is sourced from the draft (=== 3), used as the row column.
+    expect(lastInsertPayload!.schema_version).toBe(3);
+  });
+
+  it("T_S20 — a windowless v3 draft still validates + inserts (additive-optional window)", async () => {
+    const V3_NO_WINDOW = { ...VALID_DRAFT, schema_version: 3 };
+    const res = await POST(mkPost({ name: "No window", draft: V3_NO_WINDOW }));
+    expect(res.status).toBe(200);
+    expect(lastInsertPayload).not.toBeNull();
+    const insertedDraft = lastInsertPayload!.draft as { window?: unknown };
+    // Optional field absent — the draft inserts cleanly with no window key.
+    expect(insertedDraft.window).toBeUndefined();
+    expect(lastInsertPayload!.schema_version).toBe(3);
+  });
 });
 
 // ===========================================================================
