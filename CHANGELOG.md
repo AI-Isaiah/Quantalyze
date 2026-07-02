@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.35.0.28] - 2026-07-02
+### Changed
+- **Coverage-surface e2e safety net restored (v1.5 phase 60, VERIFY-01)** — the composer accessibility e2e now proves the coverage window control, honest blend header, and coverage timeline actually render (unconditionally, with the derived window range pinned), instead of skipping them when the seeded blend happened to be degenerate. The e2e seed now writes the strategy's daily-returns series (opt-in, so the visual golden fixtures stay byte-identical), making the seeded composer state deterministic.
+- No visual golden was re-baked — audited: no golden baseline renders the blend series, all baselines stayed green through the v1.5 math change with zero snapshot updates, so there was nothing to re-bake and nothing a bake could mask.
+
 ## [0.35.0.27] - 2026-07-02
 ### Added — coverage legibility & durable windows (v1.5 phases 58-59)
 Allocators can now **see, at a glance, which strategies are in the blend and why** — and the coverage window now **follows a scenario wherever it goes**: saved, shared, or compared.
