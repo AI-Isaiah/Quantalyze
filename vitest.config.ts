@@ -45,9 +45,11 @@ export default defineConfig({
     ],
     setupFiles: ["src/test-setup.ts"],
     // Coverage tracking — GATED in CI by the `frontend-coverage` job
-    // (.github/workflows/ci.yml), which runs the full (non-sharded) suite
-    // with --coverage and fails if any metric drops below the thresholds
-    // below. Thresholds are a RATCHET: set a few points under measured
+    // (.github/workflows/ci.yml), which since 2026-07-02 MERGES the two
+    // vitest shards' blob reports (`vitest run --merge-reports --coverage`)
+    // and fails if any full-suite metric drops below the thresholds below
+    // (the shards themselves run with these thresholds zeroed on the CLI —
+    // a lone shard sees only half the files). Thresholds are a RATCHET: set a few points under measured
     // actual (2026-06-20: lines 85.2 / statements 83.3 / functions 77.4 /
     // branches 75.5) so a real regression trips the gate but normal noise
     // does not. When actual climbs durably, raise these to match. See the

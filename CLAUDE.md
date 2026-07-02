@@ -16,10 +16,13 @@ summary in `coverage/`).
   already clear it; functions and branches are the next ratchet.
 
 Coverage is **a blocking CI gate** as of tech-debt #11 (2026-06-20): the
-`frontend-coverage` job in `.github/workflows/ci.yml` runs the full suite with
-`--coverage` and the aggregator `frontend` check gates branch protection on it.
-(The prior 60% floor was enforced nowhere — CI ran vitest sharded without
-`--coverage`.)
+vitest shards in `.github/workflows/ci.yml` run with `--coverage` and emit
+blob reports, and the `frontend-coverage` job merges them (`vitest run
+--merge-reports --coverage`) and enforces the thresholds on the full-suite
+numbers; the aggregator `frontend` check gates branch protection on it.
+(Since 2026-07-02 the suite executes once, sharded — the old separate
+full-suite coverage run is gone. The prior 60% floor was enforced nowhere —
+CI ran vitest sharded without `--coverage`.)
 
 ## Design System
 Always read DESIGN.md before making any visual or UI decisions.
