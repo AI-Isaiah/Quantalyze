@@ -732,6 +732,12 @@ export function scenarioDraftCodec(
       // reset (schema_invalid). `window` is left undefined so consumers default
       // it via defaultWindowFor() on open; the marker is read (not persisted)
       // by hydrate / share-resolve to render the provenance note (Pitfall 3).
+      // Ship-review RT-4 (accepted rollout transient): during a mixed-version
+      // deploy, an OLD-code tab's in-flight 150ms debounced v2 write can flush
+      // over a just-written v3 blob before that tab adopts readonly
+      // (cross-tab flush-before-adopt), reverting a just-applied window to the
+      // auto-default ONCE — bounded, self-healing (the next v3 write wins),
+      // localStorage-only.
       if (rawVersion === SCENARIO_SCHEMA_VERSION_PREV) {
         const safe = scenarioDraftSchema.safeParse(parsed);
         if (safe.success) {
