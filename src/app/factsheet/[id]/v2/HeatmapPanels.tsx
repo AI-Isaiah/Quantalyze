@@ -56,7 +56,14 @@ export function MonthlyReturnsHeatmap() {
         </p>
       </header>
 
-      <div className="overflow-x-auto">
+      {/* Focusable labeled scroll region (ResponsiveTable idiom) — same
+          scrollable-region-focusable class as the daily calendar below. */}
+      <div
+        className="overflow-x-auto"
+        role="region"
+        aria-label="Monthly returns: table scrolls horizontally. Swipe or use arrow keys to see more columns."
+        tabIndex={0}
+      >
         <table className="w-full border-separate" style={{ borderSpacing: 2, fontFamily: "var(--font-mono)" }}>
           <colgroup>
             <col style={{ width: 44 }} />
@@ -178,8 +185,18 @@ export function DailyReturnsHeatmap() {
 
       {/* overflow-x-auto on the year stack: on narrow viewports cells stay
           legible (each row keeps its natural ≥530px width) and the user
-          horizontally scrolls. -webkit-overflow-scrolling for smooth iOS. */}
-      <div className="flex flex-col gap-4 -mx-2 px-2 overflow-x-auto" style={{ WebkitOverflowScrolling: "touch" }}>
+          horizontally scrolls. -webkit-overflow-scrolling for smooth iOS.
+          Focusable labeled region (the ResponsiveTable idiom): a genuinely
+          scrollable box with no focusable children fails axe
+          scrollable-region-focusable (serious) — first hit in CI run
+          28609918423 once a real seeded series made the stack overflow. */}
+      <div
+        className="flex flex-col gap-4 -mx-2 px-2 overflow-x-auto"
+        style={{ WebkitOverflowScrolling: "touch" }}
+        role="region"
+        aria-label="Daily returns calendar: scrolls horizontally. Swipe or use arrow keys to see more days."
+        tabIndex={0}
+      >
         {years.map(y => <YearCalendar key={y.year} year={y} maxAbs={maxAbs} palette={palette} />)}
       </div>
 
