@@ -5618,6 +5618,59 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     expect(lastScenarioMetrics()?.member_ids).toEqual([REF_WIN_A]);
   });
 
+  // Pre-landing review I3/I7 — composer-level DefaultChangeNote wiring. The
+  // locked "Now showing the common period…" copy may render ONLY while the
+  // ACTIVE window IS the common period AND that period truncates the union
+  // (the honest showingCommonPeriodTruncated gate). A custom window narrower
+  // than the union also truncates it — the old truncation-only gate rendered
+  // the common-period copy over it (a lie); this pins the fix falsifiably.
+  it("DefaultChangeNote: renders at the intersection default, is SUPPRESSED over a custom window (even one that truncates the union), and disappears on Full range", async () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-i7-note`}
+        allocatorMandate={null}
+      />,
+    );
+    // Default window = the intersection [01-01, 01-06], truncating the union
+    // ([01-01, 01-12]) → the note renders once storage hydration settles.
+    expect(
+      await screen.findByTestId("scenario-default-change-note"),
+    ).toBeInTheDocument();
+
+    // Apply a CUSTOM window [01-02, 01-12]: it truncates the union but is NOT
+    // the common period — the honest gate suppresses the note (the truncation-
+    // only gate would have kept showing the common-period copy here).
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-02", end: "2026-01-12" });
+    });
+    expect(
+      screen.queryByTestId("scenario-default-change-note"),
+    ).not.toBeInTheDocument();
+
+    // Snap back to the common period → the note is meaningful again.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Common period \(all in\)/i }),
+    );
+    expect(
+      await screen.findByTestId("scenario-default-change-note"),
+    ).toBeInTheDocument();
+
+    // Full-range preset → the union window truncates nothing → note gone.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Full range \(some drop out\)/i }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("scenario-default-change-note"),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
   it("window: when the intersection is empty, the engine receives a state WITHOUT a window key (union path preserved)", () => {
     // Two DISJOINT spans → defaultWindowFor(spans) === null → nothing to seed →
     // engineState === deAliased.state (no `window` key added; union-when-absent).

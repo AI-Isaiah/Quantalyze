@@ -2128,17 +2128,27 @@ export function ScenarioComposer({
     [deAliased, selectedSpanById, coverageEligible],
   );
 
-  // Phase 58 (POLISH-03) — the note's visibility gate: does the active coverage
-  // window truncate the union of the selected set? Lexicographic "YYYY-MM-DD"
-  // compare (never JS Date), the SAME truncation shape BlendHeader uses. Null
-  // window (union path) or no union → no truncation → no note.
-  const intersectionTruncatesUnion = useMemo(() => {
-    if (!coverageWindow || !fullRangeWindow) return false;
+  // Phase 58 (POLISH-03) — the note's visibility gate, HONEST version (pre-
+  // landing review I3): DefaultChangeNote's locked copy says "Now showing the
+  // common period…", so it may render ONLY while the active window IS the
+  // common period (=== commonPeriodWindow) AND that period truncates the union.
+  // Gating on truncation alone rendered the "common period" copy over a user's
+  // CUSTOM window (any window narrower than the union truncates it).
+  // Lexicographic "YYYY-MM-DD" compare (never JS Date), the SAME truncation
+  // shape BlendHeader uses. Null window (union path) or no union → no note.
+  const showingCommonPeriodTruncated = useMemo(() => {
+    if (!coverageWindow || !fullRangeWindow || !commonPeriodWindow) return false;
+    if (
+      coverageWindow.start !== commonPeriodWindow.start ||
+      coverageWindow.end !== commonPeriodWindow.end
+    ) {
+      return false; // a custom window is active — the copy would lie
+    }
     return (
       coverageWindow.start > fullRangeWindow.start ||
       coverageWindow.end < fullRangeWindow.end
     );
-  }, [coverageWindow, fullRangeWindow]);
+  }, [coverageWindow, commonPeriodWindow, fullRangeWindow]);
 
   // Dev-mode cross-check (Pitfall 2): on the passthrough (non-aliased) scenario
   // path the UI's in-blend set { selected && coverageEligible } must equal the
@@ -3179,14 +3189,18 @@ export function ScenarioComposer({
 
       {/* Phase 58 (POLISH-03) — the one-time union→intersection default-change
           note. Placed ABOVE the blend header / window control (58-UI-SPEC
-          placement). Self-gates: it renders only when the active window truly
-          truncates the union AND the user has not dismissed it, and it is
-          SSR-safe (no flash). "Show full range" reuses the existing Full-range
-          preset via applyWindow(fullRangeWindow) — no new window logic. */}
-      {windowBounds && (
+          placement). Self-gates: it renders only while the ACTIVE window is the
+          common period AND that period truly truncates the union (the honest
+          showingCommonPeriodTruncated gate — never over a custom window) AND
+          the user has not dismissed it; SSR-safe (no flash). Suppressed while
+          the ProvenanceNote is up (pre-landing review I4): on first reopen of
+          an upgraded-v2 draft both notes would otherwise stack with duplicate
+          "common period" messaging. "Show full range" reuses the existing
+          Full-range preset via applyWindow(fullRangeWindow) — no new logic. */}
+      {windowBounds && !showProvenanceNote && (
         <DefaultChangeNote
           memberCount={scenarioMetrics.member_count ?? 0}
-          intersectionTruncatesUnion={intersectionTruncatesUnion}
+          intersectionTruncatesUnion={showingCommonPeriodTruncated}
           onShowFullRange={() => fullRangeWindow && applyWindow(fullRangeWindow)}
         />
       )}

@@ -30,8 +30,12 @@ export interface DefaultChangeNoteProps {
   /** N = the engine member count; interpolated into the verbatim copy. */
   memberCount: number;
   /**
-   * True when the effective/intersection window is narrower than the union of
-   * the selected set — the only condition under which the note is meaningful.
+   * True ONLY while the ACTIVE coverage window IS the common-period
+   * (intersection) window AND that period is narrower than the union of the
+   * selected set — the composer computes this honest gate
+   * (`showingCommonPeriodTruncated`). The locked "Now showing the common
+   * period…" copy must never render over a user's custom window, so mere
+   * truncation is NOT sufficient.
    */
   intersectionTruncatesUnion: boolean;
   /** The escape hatch — apply the existing Full-range preset. */
