@@ -191,6 +191,52 @@ describe("useScenarioState — hydrateFromSaved reopen seam (Phase 23 Plan 04)",
     expect(store.has(scopedKey)).toBe(true);
   });
 
+  it("T_HYD5 (PERSIST-01) hydrating a v3 draft that CARRIES a coverage window adopts window verbatim on the working draft — the reopen seam surfaces draft.window to the composer", () => {
+    // The window is Phase-57 composer-LOCAL state, seeded FROM draft.window on
+    // reopen (ScenarioComposer.openSavedScenario). The hook's contract here is
+    // narrow but load-bearing: hydrateFromSaved must pass the saved draft
+    // THROUGH verbatim (setValue), so `draft.window` is present on the working
+    // draft for the composer to read and applyWindow() from. A hook that
+    // stripped unknown/new fields would break the reopen-at-saved-window path.
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
+
+    const windowedDraft: ScenarioDraft = {
+      ...matchingSavedDraft(),
+      window: { start: "2024-02-01", end: "2024-11-30" },
+    };
+
+    act(() => {
+      result.current.hydrateFromSaved(windowedDraft);
+    });
+
+    // The saved window rides through onto the working draft VERBATIM (no
+    // re-derivation, no strip) so the composer can seed winStart/winEnd from it.
+    expect(result.current.draft.window).toEqual({
+      start: "2024-02-01",
+      end: "2024-11-30",
+    });
+    // Fingerprint matches → no banner, and the rest of the draft is adopted.
+    expect(result.current.fingerprintMismatch).toBe(false);
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(false);
+  });
+
+  it("T_HYD6 (PERSIST-01) hydrating a windowless draft leaves draft.window undefined — the composer defaults it via the intersection on open", () => {
+    // A v2 (upgraded) or a fresh windowless v3 draft carries no window. The hook
+    // adopts it as-is; the composer's auto-default effect (defaultWindowFor)
+    // supplies the intersection default. The seam must NOT invent a window here.
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
+
+    act(() => {
+      result.current.hydrateFromSaved(matchingSavedDraft());
+    });
+
+    expect(result.current.draft.window).toBeUndefined();
+  });
+
   it("T_HYD4 a freshly-opened scenario un-dismisses the mismatch banner (mismatchDismissed → false)", () => {
     // Seed a mismatched stored draft so the banner shows on mount.
     store.set(

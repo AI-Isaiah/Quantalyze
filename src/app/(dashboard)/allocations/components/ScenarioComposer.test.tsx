@@ -6556,3 +6556,239 @@ describe("ScenarioComposer — Phase 57 Plan 03 empty-intersection banner (WINDO
     expect(cls).not.toMatch(/\[\d+px\]/);
   });
 });
+
+// ===========================================================================
+// Phase 59 Plan 02 (PERSIST-01) — reopen seeds the coverage window from the
+// saved draft, and the provenance note is shown ONLY for an upgraded-v2 draft.
+//
+// The window is Phase-57 composer-LOCAL state (winStart/winEnd → coverageWindow),
+// seeded on mount from the intersection of the selected spans. On reopen:
+//   • a v3 draft WITH a window applies it VERBATIM (windowTouchedRef stays true →
+//     the auto-default effect never overrides it) — recompute at the saved
+//     window, no stored series replayed;
+//   • an upgraded-v2 (windowless) draft releases the window gate so the effect
+//     re-seeds the intersection ("common period") AND raises the provenance note
+//     (decode reason "upgraded_v2_windowless");
+//   • a fresh v3 draft with no window defaults to the intersection but NEVER
+//     shows the note.
+// The unequal-span book (A: 01-01…01-12, B: 01-01…01-06) gives a non-null
+// windowBounds (so the control + note slot mount) and a known intersection
+// [2026-01-01, 2026-01-06].
+// ===========================================================================
+describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
+    cleanup();
+  });
+
+  /** A v3 draft carrying an explicit coverage window (owner's saved window). */
+  function v3DraftWithWindow(window: { start: string; end: string }) {
+    return {
+      ...defaultDraftFromHoldings([
+        HOLDING_BTC,
+        HOLDING_ETH,
+      ] as Parameters<typeof defaultDraftFromHoldings>[0]),
+      window,
+    };
+  }
+
+  /** A pre-v1.5 v2 draft (no window). The codec upgrades it on read to outcome
+   *  "ok" + reason "upgraded_v2_windowless". Built by taking a valid current
+   *  draft and stamping schema_version back to the prior version. */
+  function upgradedV2Draft() {
+    return {
+      ...defaultDraftFromHoldings([
+        HOLDING_BTC,
+        HOLDING_ETH,
+      ] as Parameters<typeof defaultDraftFromHoldings>[0]),
+      schema_version: 2,
+    };
+  }
+
+  /** A fresh v3 draft with no window (a v3 saved before a window was chosen). */
+  function freshV3Windowless() {
+    return defaultDraftFromHoldings([
+      HOLDING_BTC,
+      HOLDING_ETH,
+    ] as Parameters<typeof defaultDraftFromHoldings>[0]);
+  }
+
+  it("PERSIST-01: reopening a v3 draft WITH a window seeds the composer window VERBATIM (readout shows the saved window, not the intersection default), no provenance note", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-v3win`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    // Baseline: the mount auto-default seeded the intersection [01-01, 01-06].
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+
+    // Reopen a v3 draft whose SAVED window is a NARROWER [01-02, 01-05] — a value
+    // the intersection default would never produce, so it can only be the applied
+    // saved window (proving reopen seeds from draft.window, not a re-derivation).
+    act(() => {
+      openSaved?.({
+        id: "saved-v3-win",
+        name: "V3 with window",
+        draft: v3DraftWithWindow({ start: "2026-01-02", end: "2026-01-05" }),
+      });
+    });
+
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-02 → 2026-01-05");
+    // No provenance note for a fresh v3-with-window open.
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("PERSIST-01: reopening an upgraded-v2 (windowless) draft defaults the window to the intersection AND shows the provenance note", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-v2up`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    // First narrow the window to prove the reopen RESETS it to the intersection
+    // default (not merely inherits the mount seed).
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply?.({ start: "2026-01-03", end: "2026-01-04" });
+    });
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-03 → 2026-01-04");
+    // No note yet — this is a live edit, not an upgraded-v2 reopen.
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+
+    // Reopen a pre-v1.5 v2 draft — the codec upgrades it (ok + provenance) and
+    // the composer defaults the window to the intersection [01-01, 01-06].
+    act(() => {
+      openSaved?.({
+        id: "saved-v2",
+        name: "Pre-window scenario",
+        draft: upgradedV2Draft(),
+      });
+    });
+
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+    // The provenance note appears with the locked copy + the escape hatch.
+    const note = screen.getByTestId("scenario-provenance-note");
+    expect(note.textContent).toMatch(/predates coverage windows/);
+    expect(
+      within(note).getByRole("button", { name: /Show full range/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("PERSIST-01: reopening a fresh v3 draft with no window defaults to the intersection but NEVER shows the provenance note", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-v3fresh`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    act(() => {
+      openSaved?.({
+        id: "saved-v3-fresh",
+        name: "Fresh v3 windowless",
+        draft: freshV3Windowless(),
+      });
+    });
+
+    // Intersection default applies (windowless v3 → same rule) …
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+    // … but a fresh v3 is NOT a pre-window upgrade, so no provenance note.
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("PERSIST-01: the provenance note is EPHEMERAL — opening a fresh v3 after an upgraded-v2 open clears it", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-ephemeral`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    // Upgraded-v2 open → note shows.
+    act(() => {
+      openSaved?.({
+        id: "saved-v2-a",
+        name: "Old A",
+        draft: upgradedV2Draft(),
+      });
+    });
+    expect(
+      screen.getByTestId("scenario-provenance-note"),
+    ).toBeInTheDocument();
+
+    // Now open a fresh v3-with-window scenario → the note must clear (it does not
+    // persist across opens — a per-scenario provenance signal, Pitfall 3).
+    act(() => {
+      openSaved?.({
+        id: "saved-v3-b",
+        name: "Fresh B",
+        draft: v3DraftWithWindow({ start: "2026-01-02", end: "2026-01-05" }),
+      });
+    });
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+  });
+});

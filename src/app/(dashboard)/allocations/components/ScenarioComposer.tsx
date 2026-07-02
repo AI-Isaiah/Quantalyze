@@ -147,6 +147,7 @@ import { CoverageStateChip } from "./CoverageStateChip";
 import type { CoverageState } from "./CoverageStateChip";
 import { CoverageTimeline } from "./CoverageTimeline";
 import { DefaultChangeNote } from "./DefaultChangeNote";
+import { ProvenanceNote } from "./ProvenanceNote";
 import { BridgeDrawer } from "./BridgeDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { ScenarioFooter } from "./ScenarioFooter";
@@ -829,6 +830,15 @@ export function ScenarioComposer({
   const [loadedReadonly, setLoadedReadonly] = useState(false);
   // The honest reopen notice (reset → "older format"; readonly → "read-only").
   const [openNotice, setOpenNotice] = useState<string | null>(null);
+  // v1.5 PERSIST-01 — the EPHEMERAL provenance flag. True only right after
+  // reopening a pre-v1.5 (v2, windowless) saved draft that the codec upgraded on
+  // read (decode `reason === "upgraded_v2_windowless"`) and whose window
+  // therefore defaulted to the intersection. Gates the ProvenanceNote (below the
+  // POLISH-03 placement). Set ONLY on the upgraded-v2 open path and cleared on
+  // every other open (fresh v3, readonly, reset) so it never persists across
+  // opens — a per-scenario data-provenance signal, NOT a global one-time flag
+  // (Phase-59 Pitfall 3). Never persisted into the draft.
+  const [showProvenanceNote, setShowProvenanceNote] = useState(false);
   // Inline name input (NOT a modal). Opened by "Save scenario" (first save) and
   // by "Save as new scenario" (fork) — both POST a new row, so no mode flag is
   // needed; the success handler adopts the returned id either way.
@@ -1054,6 +1064,9 @@ export function ScenarioComposer({
     setOpenNotice(null);
     setNameInputOpen(false);
     setSaveError(null);
+    // v1.5 PERSIST-01 — a reset leaves the upgraded-v2 provenance context; the
+    // fresh draft is a v3 live book, so the note must not linger.
+    setShowProvenanceNote(false);
     // Review WR-02 — clear the ephemeral per-source include map on every reset /
     // saved-scenario open. The toggle is NOT persisted to the draft, so a freshly
     // opened scenario must start with every data source included; without this a
@@ -1146,6 +1159,15 @@ export function ScenarioComposer({
         // the ephemeral per-source include map (it is not persisted) → the
         // opened scenario starts with every data source included.
         setIncludeByApiKeyId({});
+        // v1.5 PERSIST-01 — seed the coverage window from the saved draft. A
+        // newer-version blob may carry a window; apply it verbatim so the
+        // read-only view recomputes at the owner's saved window. If absent (a
+        // future version that dropped it, or a windowless save), fall back to
+        // the intersection default. A readonly blob is NOT the upgraded-v2 path,
+        // so the provenance note never shows here (Pitfall 3).
+        if (decoded.value.window) applyWindow(decoded.value.window);
+        else resetWindowToDefaultOnReopen();
+        setShowProvenanceNote(false);
         setLoadedScenarioId(row.id);
         setLoadedScenarioName(row.name);
         setLoadedReadonly(true);
@@ -1163,14 +1185,33 @@ export function ScenarioComposer({
       // Review WR-02 — clear the ephemeral per-source include map on open (it is
       // not persisted) → the opened scenario starts with every source included.
       setIncludeByApiKeyId({});
+      // v1.5 PERSIST-01 — seed the coverage window from the reopened draft, then
+      // let the existing engineState memo recompute TODAY's numbers at it (no
+      // stored series is replayed — no-invented-data lock).
+      //   • v3 draft WITH a window → applyWindow(...) VERBATIM (this sets
+      //     windowTouchedRef so the auto-default effect stays inert and does NOT
+      //     override the reopened window). Provenance note stays hidden.
+      //   • upgraded-v2 draft (decode reason "upgraded_v2_windowless", window
+      //     absent) → release the window gate so the auto-default effect seeds
+      //     the intersection ("common period"), AND raise the provenance note.
+      //   • any other windowless "ok" (a v3 saved before a window was chosen) →
+      //     intersection default, no note.
+      if (decoded.value.window) {
+        applyWindow(decoded.value.window);
+        setShowProvenanceNote(false);
+      } else {
+        resetWindowToDefaultOnReopen();
+        setShowProvenanceNote(decoded.reason === "upgraded_v2_windowless");
+      }
       setLoadedScenarioId(row.id);
       setLoadedScenarioName(row.name);
       setLoadedReadonly(false);
       setOpenNotice(null);
       setNameInputOpen(false);
     },
-    // hydrateFromSaved/reset are stable useCallbacks; holdingsSummary is the
-    // only render-varying input.
+    // hydrateFromSaved/reset/applyWindow/resetWindowToDefaultOnReopen are stable
+    // useCallbacks; the setters are stable; holdingsSummary is the only
+    // render-varying input.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [holdingsSummary, scenario.hydrateFromSaved],
   );
@@ -1803,6 +1844,19 @@ export function ScenarioComposer({
     windowTouchedRef.current = true;
     setWinStart(range.start);
     setWinEnd(range.end);
+  }, []);
+
+  // v1.5 PERSIST-01 — reopen an UPGRADED-v2 (windowless) draft. Clearing the
+  // window state AND un-touching the ref lets the WINDOW-01 auto-default effect
+  // (above) re-fire once the newly-hydrated draft's `selectedSpans` recompute,
+  // seeding the intersection ("common period") — exactly the default rule the
+  // provenance note explains. This is the mirror of applyWindow: applyWindow
+  // pins an explicit (v3) window and BLOCKS the auto-default; this releases the
+  // gate so the intersection default takes over for a pre-window draft.
+  const resetWindowToDefaultOnReopen = useCallback(() => {
+    windowTouchedRef.current = false;
+    setWinStart(null);
+    setWinEnd(null);
   }, []);
 
   // WINDOW-04/05 — the two preset targets over the selected spans. "Common
@@ -2961,6 +3015,22 @@ export function ScenarioComposer({
             ))}
           </div>
         </div>
+      )}
+
+      {/* v1.5 PERSIST-01 — the pre-coverage-window provenance note. Shown ONLY
+          right after reopening a pre-v1.5 (v2, windowless) saved draft that the
+          codec upgraded on read and whose window defaulted to the intersection
+          (showProvenanceNote). SAME placement slot as the POLISH-03 note, above
+          the blend header / window control. Dismissal is EPHEMERAL per-open
+          (component-local useState); keying on loadedScenarioId forces a remount
+          — and thus a fresh, un-dismissed note — when ANOTHER old draft is
+          reopened (Phase-59 Pitfall 3). "Show full range" reuses the existing
+          Full-range preset. */}
+      {windowBounds && showProvenanceNote && (
+        <ProvenanceNote
+          key={loadedScenarioId ?? "provenance"}
+          onShowFullRange={() => fullRangeWindow && applyWindow(fullRangeWindow)}
+        />
       )}
 
       {/* Phase 58 (POLISH-03) — the one-time union→intersection default-change
