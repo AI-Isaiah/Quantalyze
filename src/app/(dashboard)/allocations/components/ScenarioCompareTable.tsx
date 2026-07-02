@@ -275,7 +275,7 @@ export function ScenarioCompareTable({
                       // quiet text-text-muted honesty caption — never accent/
                       // warning/winner. Omitted when either bound is null
                       // (degenerate) — show just the day-count stamp.
-                      <span className="text-xs font-metric text-text-muted">
+                      <span className="text-fixed-11 text-text-muted">
                         {methodologyLine(c.metrics.n)}
                         {c.metrics.effective_start && c.metrics.effective_end ? (
                           <>
