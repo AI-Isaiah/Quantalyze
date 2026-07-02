@@ -839,6 +839,16 @@ export function ScenarioComposer({
   // opens — a per-scenario data-provenance signal, NOT a global one-time flag
   // (Phase-59 Pitfall 3). Never persisted into the draft.
   const [showProvenanceNote, setShowProvenanceNote] = useState(false);
+  // Review WR-02 — the per-OPEN nonce for the ProvenanceNote's remount key.
+  // Keying on loadedScenarioId alone fails the A→dismiss→reopen-A case: the
+  // same id means the same key, the component stays mounted (rendering null),
+  // and its component-local `dismissed` state survives — the note never
+  // re-shows despite the per-open contract. Bumped on every COMPLETED open
+  // (openSavedScenario, after the reset-outcome refusal) so reopening even the
+  // SAME scenario remounts the note fresh. A ref (not state): the open path
+  // already re-renders via its setStates, and a bare bump without a completed
+  // open must not remount anything.
+  const provenanceOpenNonceRef = useRef(0);
   // Inline name input (NOT a modal). Opened by "Save scenario" (first save) and
   // by "Save as new scenario" (fork) — both POST a new row, so no mode flag is
   // needed; the success handler adopts the returned id either way.
@@ -1163,6 +1173,14 @@ export function ScenarioComposer({
         );
         return;
       }
+
+      // Review WR-02 — every COMPLETED open (readonly or ok, below) is a new
+      // per-open context for the ProvenanceNote: bump the nonce so the note's
+      // key changes and it remounts un-dismissed, even when the SAME upgraded-v2
+      // scenario is reopened back-to-back. Deliberately AFTER the reset-outcome
+      // refusal above: a refused open changes nothing and must not resurrect a
+      // dismissed note on the next render.
+      provenanceOpenNonceRef.current += 1;
 
       if (decoded.outcome === "readonly") {
         // Newer-version blob: hydrate the user's real data but block edits.
@@ -3078,13 +3096,20 @@ export function ScenarioComposer({
           codec upgraded on read and whose window defaulted to the intersection
           (showProvenanceNote). SAME placement slot as the POLISH-03 note, above
           the blend header / window control. Dismissal is EPHEMERAL per-open
-          (component-local useState); keying on loadedScenarioId forces a remount
-          — and thus a fresh, un-dismissed note — when ANOTHER old draft is
-          reopened (Phase-59 Pitfall 3). "Show full range" reuses the existing
-          Full-range preset. */}
-      {windowBounds && showProvenanceNote && (
+          (component-local useState); the key combines loadedScenarioId with the
+          per-open nonce (review WR-02) so EVERY completed open — including
+          reopening the SAME old draft after a dismissal — remounts a fresh,
+          un-dismissed note (Phase-59 Pitfall 3). Gated on commonPeriodWindow
+          (review WR-03): when the reopened draft's selected set has NO common
+          period, the auto-default seeds nothing and the engine runs the UNION
+          path — the note's locked "showing the common period" copy would be
+          false, so it is honestly suppressed (the windowless upgrade then shows
+          exactly what the pre-window scenario always showed, and the Phase-57
+          empty-intersection banner guides the user). "Show full range" reuses
+          the existing Full-range preset. */}
+      {windowBounds && showProvenanceNote && commonPeriodWindow && (
         <ProvenanceNote
-          key={loadedScenarioId ?? "provenance"}
+          key={`${loadedScenarioId ?? "provenance"}-${provenanceOpenNonceRef.current}`}
           onShowFullRange={() => fullRangeWindow && applyWindow(fullRangeWindow)}
         />
       )}

@@ -6831,4 +6831,101 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
       screen.getByTestId("scenario-coverage-window-value").textContent,
     ).toContain("2026-01-01 → 2026-01-06");
   });
+
+  it("review WR-02: dismissing the note then reopening the SAME upgraded-v2 scenario re-shows it (dismissal is per-OPEN, not per-scenario-id)", async () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-reopen-same`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    const sameRow = {
+      id: "saved-v2-same",
+      name: "Old same",
+      draft: upgradedV2Draft(),
+    };
+
+    // Open the upgraded-v2 scenario → note shows; dismiss it.
+    act(() => {
+      openSaved?.(sameRow);
+    });
+    const note = screen.getByTestId("scenario-provenance-note");
+    fireEvent.click(within(note).getByRole("button", { name: /Dismiss/i }));
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("scenario-provenance-note"),
+      ).not.toBeInTheDocument();
+    });
+
+    // Reopen the SAME scenario (same id, same draft). The loadedScenarioId key
+    // alone would not remount the (still-mounted, null-rendering) note — the
+    // per-open nonce must, so the note re-shows fresh (Pitfall-3 contract:
+    // "remounting the component (a fresh reopen) re-shows it").
+    act(() => {
+      openSaved?.({ ...sameRow, draft: upgradedV2Draft() });
+    });
+    expect(
+      screen.getByTestId("scenario-provenance-note"),
+    ).toBeInTheDocument();
+  });
+
+  it("review WR-03: an upgraded-v2 reopen whose selected set has NO common period suppresses the note — the engine runs the union path and the 'common period' copy would be false", () => {
+    // Two DISJOINT spans → defaultWindowFor === null → the auto-default seeds
+    // nothing → the engine stays on the union-when-absent path.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 4)), // 01-01 … 01-04
+        mkWinStrat(REF_WIN_B, WIN_DATES.slice(8, 12)), // 01-09 … 01-12
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+        startDates: {},
+      },
+    });
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-disjoint-v2`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    act(() => {
+      openSaved?.({
+        id: "saved-v2-disjoint",
+        name: "Old disjoint",
+        draft: upgradedV2Draft(),
+      });
+    });
+
+    // The engine is on the union path (no window seeded) — the readout says so.
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("All history");
+    // The note would claim "showing the common period" — a false statement with
+    // no common period — so it is honestly suppressed …
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+    // … while the Phase-57 empty-intersection banner still guides the user.
+    expect(
+      screen.getByTestId("scenario-empty-intersection-banner"),
+    ).toBeInTheDocument();
+  });
 });
