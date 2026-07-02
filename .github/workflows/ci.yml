@@ -268,42 +268,60 @@ jobs:
           key: ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts') }}-${{ hashFiles('src/**', 'tests/**') }}
           restore-keys: |
             ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts') }}-
-      - name: Run vitest shard ${{ matrix.shard }}/2
-        run: npx vitest run --shard=${{ matrix.shard }}/2 --reporter=dot
+      # CI speed (2026-07-02): the shards now ALSO emit v8 coverage + a blob
+      # report, and the frontend-coverage job merges the blobs and enforces
+      # the vitest.config.ts thresholds — deleting the duplicate full-suite
+      # coverage run (~8m). Threshold flags are ZEROED here because a lone
+      # shard sees only half the files and would spuriously fail the ratchet;
+      # the merge job is where the real gate fires (locally proven: shard
+      # alone FAILS thresholds, merged run passes at the full-suite numbers).
+      # --test-timeout=20000 adopts the old coverage job's contention
+      # rationale: v8 coverage adds per-worker load, and the documented
+      # worker-contention flake (vitest.config.ts:6-16) turns that into
+      # spurious 5s timeouts on a busy runner.
+      #
+      # DO NOT add NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY env to
+      # this job: that would un-skip ~284 live-DB tests (src/lib/test-helpers/
+      # live-db.ts), shifting the coverage denominator and invalidating the
+      # ratchet baseline (which was measured with those tests skipped).
+      - name: Run vitest shard ${{ matrix.shard }}/2 (blob + coverage, thresholds deferred to merge)
+        run: >-
+          npx vitest run --shard=${{ matrix.shard }}/2
+          --reporter=dot --reporter=blob
+          --coverage --test-timeout=20000
+          --coverage.thresholds.lines=0
+          --coverage.thresholds.statements=0
+          --coverage.thresholds.functions=0
+          --coverage.thresholds.branches=0
+      - name: Upload blob report for coverage merge
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vitest-blob-${{ matrix.shard }}
+          path: .vitest-reports/
+          if-no-files-found: error
+          retention-days: 7
 
   frontend-coverage:
-    # tech-debt #11: coverage is now a CI GATE (was measurement-only with a
-    # 60% floor enforced nowhere). Runs the FULL suite non-sharded with
-    # --coverage — sharded runs each see only half the files, so coverage
-    # has to be its own job. The vitest.config.ts thresholds (ratcheted to a
-    # few points under measured actual) fail this job on a real regression.
-    # Runs in parallel with the python critical path (~5m), so it does not
-    # extend wall-clock.
+    # tech-debt #11: coverage is a CI GATE (the vitest.config.ts thresholds,
+    # ratcheted a few points under measured actual, fail this job on a real
+    # regression).
     #
-    # WHY --test-timeout=20000 (not the 5s default the shards use): the
-    # frontend-test shards avoid the documented worker-contention timeout
-    # flake (see vitest.config.ts:6-16) by splitting the file set in half.
-    # This job can't shard (coverage needs the whole suite in one run), so it
-    # runs the full set through the maxWorkers=cpus-1 pool PLUS v8 coverage
-    # overhead — heavier per-worker load than a shard. A generous timeout
-    # absorbs the contention stalls so an innocent PR is never blocked by a
-    # spurious 5s timeout; the shards keep the tight 5s for fast real-hang
-    # feedback. This job is off the critical path, so the slack costs nothing.
-    #
-    # DO NOT add NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY env to
-    # this job: that would un-skip ~284 live-DB tests (src/lib/test-helpers/
-    # live-db.ts), shifting the coverage denominator and invalidating the
-    # ratchet baseline (which was measured with those tests skipped).
+    # CI speed (2026-07-02): this job no longer RE-RUNS the full suite — the
+    # frontend-test shards above emit v8 coverage into blob reports, and this
+    # job downloads both blobs and replays them with `--merge-reports
+    # --coverage`, which merges coverage across shards and enforces the
+    # config thresholds on the FULL-suite numbers. Locally proven equivalent:
+    # merged coverage matches the old single-run numbers, a lone shard fails
+    # the ratchet (so the gate genuinely fires), and the merged run passes.
+    # Same job NAME kept so the `frontend` aggregator's needs/result-check
+    # wiring is untouched. No tests execute here → shallow checkout is fine
+    # (the frozen-spine guards run in the shards, not in a report replay).
     runs-on: ubuntu-latest
+    needs:
+      - frontend-test
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
-          # fetch-depth: 0 — this job runs the full suite, including the
-          # phase-29/30 frozen-spine guards, which resolve a diff baseline from
-          # git history; a shallow clone makes the fail-loud guard throw at
-          # module load. Full history makes the baseline resolvable (matches the
-          # frontend-test shards above).
-          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
@@ -325,17 +343,14 @@ jobs:
             echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
             sleep $((n*5))
           done
-      # Restore-ONLY (the frontend-test shards own the write of this key) so
-      # all three vitest jobs don't race the write-once cache key.
-      - name: Restore vitest transform (node_modules/.vite)
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+      - name: Download shard blob reports
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          path: node_modules/.vite
-          key: ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts') }}-${{ hashFiles('src/**', 'tests/**') }}
-          restore-keys: |
-            ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts') }}-
-      - name: Run vitest with coverage (full suite, gated thresholds)
-        run: npx vitest run --coverage --test-timeout=20000 --reporter=dot
+          pattern: vitest-blob-*
+          path: .vitest-reports
+          merge-multiple: true
+      - name: Merge shard reports + enforce coverage thresholds
+        run: npx vitest run --merge-reports --coverage
 
   frontend-policy:
     # Banned-package check + GDPR export coverage. PR-C moved npm audit
@@ -969,12 +984,16 @@ jobs:
           CI: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && 'true' || '' }}
 
   e2e:
-    # Runs a small Playwright suite against a placeholder-env Next.js build.
-    # Scope: auth, smoke, and the public /demo specs (demo-public +
-    # demo-founder-view). The full match-queue.spec.ts requires a seeded
-    # staging Supabase and hard-coded test credentials that CI does not
-    # have access to — expand the spec list below once a seeded CI
-    # Supabase is available.
+    # Runs the PUBLIC/smoke Playwright suite against a placeholder-env
+    # Next.js build. Scope: auth, smoke, and the public /demo specs
+    # (demo-public + demo-founder-view) plus the public sweep specs.
+    #
+    # CI speed (2026-07-02): the seed-gated batch that used to run
+    # SEQUENTIALLY after this one (4.8m after a 6.1m smoke pass) moved to
+    # the parallel `e2e-seeded` job below — e2e wall clock drops from ~13m
+    # to the slower of the two (~8-9m). This job never sees the real
+    # test-Supabase env, so its artifacts are C-0293(c)-safe by
+    # construction.
     #
     # demo-screenshot.spec.ts: its chromium-linux baseline PNGs are now
     # committed (generated in the Playwright Linux Docker image), so its 3
@@ -1086,18 +1105,17 @@ jobs:
         # a failed one) keeps success() true, so seed/rebuild/bake still run.
         # Normal push/PR (and non-bake dispatches) are unaffected — the step runs.
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.bake_svg_goldens) }}
-        # continue-on-error generalises the v0.35.0.16 bake-skip fix to EVERY run.
-        # The same success()-gating that skipped the bake also skips the seeded
-        # MA-8 specs below (seed → rebuild → verify → run) on normal push/PR
-        # whenever this placeholder-env step flakes (getaddrinfo ENOTFOUND
-        # placeholder.supabase.co) — so composer-axe / strategy-v2 / axe-app-wide
-        # AUTHED+SEEDED rows silently never ran. With continue-on-error the step's
-        # conclusion is `success` even on a flake, so success() stays true and the
-        # seeded specs always run and become the real e2e signal. This step's own
-        # public-route specs are advisory (e2e is not in the `frontend` aggregator
-        # gate); a genuine regression here still shows as a failed-step annotation
-        # + log, just not a red job. ponytail: one line; if public-route signal
-        # ever needs to be hard, split these specs into their own non-seeded job.
+        # continue-on-error KEPT after the 2026-07-02 e2e split (reviewer
+        # CR-3): its original success()-gating rationale (protecting the
+        # downstream seeded step) is gone — the seeded batch is its own
+        # parallel job now — but the placeholder-env flake itself
+        # (getaddrinfo ENOTFOUND placeholder.supabase.co) was never fixed,
+        # only masked, and a red job on a MAIN merge commit makes Railway
+        # silently skip the analytics deploy (deploy-on-green-CI, no
+        # auto-recover on rerun-green). Signal is preserved by the red-step
+        # annotation + the failure-report upload below. Flip this off only
+        # after fixing the placeholder flake at the root.
+        id: smoke
         continue-on-error: true
         run: |
           npm run start &
@@ -1117,12 +1135,11 @@ jobs:
           # HAS_SEED_ENV const) and run in the seeded MA-8 list below. Adding a
           # spec? Update BOTH lists or the gate silently never runs (burned >=3x).
           # Capture the test exit code WITHOUT aborting the script (default
-          # shell is `bash -e`). The port-3000 cleanup below is a FINALLY: it
-          # must run even when these public specs fail, or the orphaned server
-          # is never reaped and the seeded step's WR-04 guard fail-fasts on the
-          # still-bound port. Pre-continue-on-error this was masked — a step-9
-          # failure skipped the seeded step entirely; now that the seeded specs
-          # run regardless (continue-on-error), the leftover listener trips them.
+          # shell is `bash -e`). The port-3000 cleanup below is a FINALLY so a
+          # failing spec never leaves an orphaned next-server bound to :3000
+          # (runner hygiene for the upload steps that follow; the seeded batch
+          # now runs on its own runner in the parallel e2e-seeded job, so this
+          # is no longer protecting a downstream WR-04 guard in THIS job).
           set +e
           if [ "${BAKE_DEMO_SCREENSHOTS}" = "true" ]; then
             # One-shot baseline bake (workflow_dispatch input bake_demo_screenshots).
@@ -1180,9 +1197,10 @@ jobs:
           done
           echo "[port-cleanup] after: $(lsof -ti:3000 2>/dev/null | tr '\n' ' '),ss:$(ss -ltn 2>/dev/null | grep ':3000\b' || echo none)"
           # Re-surface the test result as the step's exit code now that the
-          # port is freed. continue-on-error tolerates it (conclusion=success),
-          # so the seeded step still runs; the advisory public-route failures
-          # stay visible as a red step + log.
+          # port is freed. continue-on-error tolerates it (conclusion=success,
+          # outcome=failure) so the job stays green on the known placeholder
+          # flake (Railway deploy-on-green-CI); the red step annotation + the
+          # outcome-gated report upload below keep the failure visible.
           exit $PW_EXIT
         env:
           # workflow_dispatch one-shot baseline-bake toggle (drives the if/else
@@ -1215,23 +1233,94 @@ jobs:
           path: e2e/demo-screenshot.spec.ts-snapshots/**/*.png
           if-no-files-found: error
           retention-days: 7
-      # Plan 11-07 / BLOCK-3: gated step runs the full onboarding-funnel
-      # spec against a dedicated test Supabase project. Gate uses the repo
-      # VARIABLE `E2E_TEST_DB_CONFIGURED` (NOT `secrets.X != ''`) — vars
-      # are exposed in PR contexts so a typo in the variable name surfaces
-      # in the workflow log. A `secrets.X != ''` gate would mask typos
-      # behind redaction and silently disable the spec. See nightly.yml:17
-      # for the analogous precedent. When the variable is unset (fork PRs,
-      # repos without test-DB setup), the seed + spec steps skip silently.
-      # CI speedup PR-A v0.22.1.0+: the build above is now seed-aware via
-      # ternary expressions, so the previously-duplicated test-env build was
-      # removed (saved 60-120s per seed-gated run).
-      - name: Seed demo data into test Supabase (gated on vars.E2E_TEST_DB_CONFIGURED)
+      # This job never carries real test-Supabase env (the seeded batch is
+      # its own job below), so a failure report here can only embed
+      # placeholder values — the C-0293(c) artifact-leak concern does not
+      # apply. Gate on the smoke step's OUTCOME (pre-continue-on-error
+      # result): with continue-on-error the job-level failure() never
+      # becomes true, so a plain `if: failure()` would never fire.
+      - name: Upload Playwright report on failure
+        if: ${{ steps.smoke.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: playwright-report-smoke
+          path: playwright-report/
+          retention-days: 7
+
+  e2e-seeded:
+    # Plan 11-07 / BLOCK-3 + CI speed (2026-07-02): the seed-gated Playwright
+    # batch in its OWN job, so it runs in PARALLEL with the placeholder smoke
+    # batch above instead of sequentially after it (~13m job → two ~8-9m
+    # jobs). Gate uses the repo VARIABLE `E2E_TEST_DB_CONFIGURED` (NOT
+    # `secrets.X != ''`) — vars are exposed in PR contexts so a typo in the
+    # variable name surfaces in the workflow log; a `secrets.X != ''` gate
+    # would mask typos behind redaction and silently disable the spec. When
+    # the variable is unset (fork PRs, repos without test-DB setup) the whole
+    # job skips silently.
+    #
+    # C-0293(c): this job BUILDS Next.js itself with the real test env
+    # (NEXT_PUBLIC_* inline at build time) instead of downloading the
+    # placeholder nextjs-build artifact and rebuilding over it — the rebuilt
+    # `.next/` stays on this ephemeral runner and is NEVER uploaded. That
+    # also means needs: only typecheck (F2 rationale: don't burn minutes on
+    # an already-doomed PR; e2e validity depends on types, not unit tests).
+    runs-on: ubuntu-latest
+    # Fork-PR composition (same as sql-tests): repo VARIABLES are readable in
+    # fork-PR runs while secrets are withheld, so the vars gate alone would
+    # start the job on a fork and die at the seed step with empty secrets.
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true' }}
+    needs:
+      - frontend-typecheck
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          # retro-PR179-M-persist-chain: drop the default persisted
+          # GITHUB_TOKEN cred from .git/config (same rationale as the e2e
+          # smoke job above).
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 20
+          cache: npm
+      - name: Restore node_modules
+        id: node_modules_cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+      - name: npm ci (cache miss; retry transient network failures)
+        if: steps.node_modules_cache.outputs.cache-hit != 'true'
+        run: |
+          n=0
+          until npm ci --prefer-offline --no-audit --no-fund; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then echo "npm ci failed after $n attempts"; exit 1; fi
+            echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
+            sleep $((n*5))
+          done
+      # Same Playwright browser cache as the smoke job (keyed on the
+      # Playwright package version). Restore-only here — the smoke job owns
+      # the write so the two parallel jobs never race the save.
+      - name: Restore Playwright browsers
+        id: playwright-cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('node_modules/@playwright/test/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+      - name: Install Playwright (browser bundle from cache when available)
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            echo "Cache hit — chromium bundle restored. Runner image has system libs; skipping apt install."
+          else
+            npx playwright install --with-deps chromium
+          fi
+      - name: Seed demo data into test Supabase
         # Populates the 8-strategy demo set the seed-gated specs require.
         # Defense-in-depth against running this against prod by accident:
         # the SEED_CONFIRM_STAGING interlock + the script's prod-URL probe
         # both fail loudly if a secret is misrouted.
-        if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
         run: SEED_CONFIRM_STAGING=true npx tsx scripts/seed-demo-data.ts
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
@@ -1252,44 +1341,25 @@ jobs:
       # addressed, so the prefix-only restore-keys fallback handles the
       # case where frontend-build's cache step hashed src/** to a
       # different bucket than this e2e job sees.
-      - name: Restore .next/cache for rebuild (read-only)
-        if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
+      - name: Restore .next/cache for the test-env build (read-only)
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: .next/cache
           key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-${{ hashFiles('src/**') }}
           restore-keys: |
             ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-
-      - name: Rebuild Next.js with real test-Supabase env (C-0293(c))
-        # The artifact downloaded above was built with PLACEHOLDER
-        # NEXT_PUBLIC_* values so the uploaded `.next/**` artifact never
-        # contains the test-Supabase URL/anon key. The seed-gated specs
-        # (onboarding-funnel, discovery, strategy-v2) need the real
-        # URL/anon key INLINED into the browser bundle (Next.js
-        # evaluates NEXT_PUBLIC_* at build time, not runtime), so we
-        # rebuild locally in this job with the real env. This rebuilt
-        # `.next/` stays on the runner FS — it is NEVER uploaded as
-        # an artifact, so the test-DB credentials never leave the
-        # ephemeral runner.
-        #
-        # Cost: ~30-60s only when E2E_TEST_DB_CONFIGURED == 'true'.
-        # For fork PRs and repos without the test-DB wired, this step
-        # skips entirely. On a warm cache (frontend-build wrote .next/cache
-        # on the same lockfile+config+src hash), the rebuild becomes
-        # genuinely incremental — the previous "incremental" comment
-        # was aspirational because .next/cache was not restored. With
-        # the restore step above the comment now matches observed
-        # behavior.
-        if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
-        run: |
-          # Wipe the placeholder-built artifact manifests + chunks so
-          # the rebuild has nothing stale to merge against. We leave
-          # .next/cache (restored above by actions/cache/restore) so
-          # the rebuild can re-use the per-module webpack cache from
-          # the placeholder run — DefinePlugin re-bakes the NEXT_PUBLIC_*
-          # literals on the second pass, the rest is incremental.
-          rm -rf .next/server .next/static .next/build-manifest.json .next/prerender-manifest.json .next/required-server-files.json 2>/dev/null || true
-          npm run build
+      - name: Build Next.js with real test-Supabase env (C-0293(c))
+        # The seed-gated specs (onboarding-funnel, discovery, strategy-v2,
+        # composer-axe, …) need the real URL/anon key INLINED into the
+        # browser bundle (Next.js evaluates NEXT_PUBLIC_* at build time,
+        # not runtime). This job builds from a clean workspace — no
+        # placeholder artifact to wipe/merge against (that dance lived in
+        # the old single e2e job) — and the built `.next/` stays on the
+        # runner FS: it is NEVER uploaded as an artifact, so the test-DB
+        # credentials never leave the ephemeral runner. On a warm
+        # .next/cache (frontend-build writes the same key) the build is
+        # genuinely incremental.
+        run: npm run build
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
@@ -1299,17 +1369,16 @@ jobs:
           PLATFORM_EMAIL: test@quantalyze.com
       # retro-PR188-D4 (pr-test-analyzer #36, HIGH/8): assert the rebuild
       # actually produced a bundle inlined with the REAL test-Supabase
-      # URL. If the `rm -rf` list above ever drifts (Next.js emits a new
-      # manifest that overrides static at runtime) the build could
-      # short-circuit silently, the seed-gated specs would self-skip via
-      # HAS_SEED_ENV checks, and CI would still report green — but the
-      # seed-gated spec coverage would be a no-op. The grep is read-only,
+      # URL. If the build ever short-circuits silently (e.g. a restored
+      # .next/cache satisfying a stale manifest, or an env plumbing drift),
+      # the seed-gated specs would self-skip via HAS_SEED_ENV checks and CI
+      # would still report green — but the seed-gated spec coverage would
+      # be a no-op. The grep is read-only,
       # touches only the local FS (the rebuilt `.next/` is never
       # uploaded), and uses the secret only via the variable expansion
       # GitHub Actions already redacts in logs. The exit code IS the
       # signal: zero hits = build did not inline = fail.
-      - name: Verify rebuild inlined real test-Supabase URL
-        if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
+      - name: Verify build inlined real test-Supabase URL
         env:
           TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
         run: |
@@ -1325,8 +1394,7 @@ jobs:
             exit 1
           fi
           echo "Rebuild inlined real test-Supabase URL into .next/ — proceeding to seed-gated specs."
-      - name: Run seed-gated specs (MA-8 / BLOCK-3 gated on vars.E2E_TEST_DB_CONFIGURED)
-        if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
+      - name: Run seed-gated specs (MA-8 / BLOCK-3)
         run: |
           # Phase 11 review fix WR-04: defense-in-depth port-bind guard.
           # The previous unconditional smoke step kills+waits its own server,
@@ -1465,41 +1533,19 @@ jobs:
           path: e2e/svg-chart-parity.spec.ts-snapshots/**/*.png
           if-no-files-found: error
           retention-days: 7
-      # retro-PR179-H1 / C-0293(c) extension: skip the playwright-report
-      # upload on the SEED-GATED code path. When E2E_TEST_DB_CONFIGURED is
-      # 'true', a failed run could be against the REAL-env rebuild (see
-      # the "Rebuild Next.js with real test-Supabase env" step above),
-      # and Playwright's trace.zip + on-failure screenshots embed
-      # NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY from
-      # the rebuilt bundle's .next/static/chunks/*.js it captured. The
-      # uploaded artifact would then sit in actions storage for 7 days
-      # with actions:read scope — re-opening the same exfil pivot path
-      # the C-0293(c) artifact-leak fix closed for nextjs-build.
-      #
-      # The unconditional spec set (auth/smoke/demo-public/demo-founder-view)
-      # runs against the PLACEHOLDER artifact and is safe to upload; we
-      # cannot easily distinguish which spec failed at this step, so we
-      # take the conservative cut: when the seed-gated path is wired,
-      # skip the upload entirely. Recovery: re-run locally with
-      # PWDEBUG=1 + the test-DB env in the developer's shell.
-      #
-      # retro-PR188-F6 (red-team #37, HIGH/8): the prior gate was
-      # `!= 'true'` (fail-OPEN). Any non-`'true'` value — case mismatch
-      # ('True', 'TRUE'), '1', 'yes', a workflow_dispatch typo'd
-      # `'false'` — would fire the upload while the upstream rebuild
-      # step's `== 'true'` check might still treat the same value as
-      # truthy (GH expressions are case-sensitive for == but the
-      # operator skew amplifies any typo). Tighten to an EXPLICIT
-      # allow-list: upload ONLY when the variable is empty or the
-      # literal string 'false'. Every other value (including the
-      # documented 'true') keeps the artifact off the runner.
-      - name: Upload Playwright report on failure
-        if: failure() && (vars.E2E_TEST_DB_CONFIGURED == '' || vars.E2E_TEST_DB_CONFIGURED == 'false')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: playwright-report
-          path: playwright-report/
-          retention-days: 7
+      # retro-PR179-H1 / C-0293(c): NO playwright-report upload from this
+      # job, ever. Every spec here runs against the REAL-env build, and
+      # Playwright's trace.zip + on-failure screenshots embed
+      # NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY from the
+      # bundle's .next/static/chunks/*.js — an uploaded artifact would sit
+      # in actions storage for 7 days with actions:read scope, re-opening
+      # the exfil pivot the C-0293(c) artifact-leak fix closed for
+      # nextjs-build. (The old single e2e job expressed this as a
+      # vars-allow-listed gate — retro-PR188-F6 — because it mixed
+      # placeholder and real-env specs; this job is real-env only, so the
+      # honest encoding is simply no upload step.) Recovery on failure:
+      # re-run locally with PWDEBUG=1 + the test-DB env in the developer's
+      # shell; the smoke job's placeholder-env report still uploads.
 
   lighthouse-mobile:
     # Phase 48-05 / A11Y-03: mobile Lighthouse performance budget gating the

@@ -12,6 +12,8 @@
 
 # testing
 /coverage
+# vitest blob reports (sharded coverage merge — CI artifact, never committed)
+/.vitest-reports
 
 # next.js
 /.next/
