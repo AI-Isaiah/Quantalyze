@@ -56,7 +56,14 @@ export function MonthlyReturnsHeatmap() {
         </p>
       </header>
 
-      <div className="overflow-x-auto">
+      {/* Focusable labeled scroll region (ResponsiveTable idiom) — same
+          scrollable-region-focusable class as the daily calendar below. */}
+      <div
+        className="overflow-x-auto"
+        role="region"
+        aria-label="Monthly returns: table scrolls horizontally. Swipe or use arrow keys to see more columns."
+        tabIndex={0}
+      >
         <table className="w-full border-separate" style={{ borderSpacing: 2, fontFamily: "var(--font-mono)" }}>
           <colgroup>
             <col style={{ width: 44 }} />
@@ -178,8 +185,18 @@ export function DailyReturnsHeatmap() {
 
       {/* overflow-x-auto on the year stack: on narrow viewports cells stay
           legible (each row keeps its natural ≥530px width) and the user
-          horizontally scrolls. -webkit-overflow-scrolling for smooth iOS. */}
-      <div className="flex flex-col gap-4 -mx-2 px-2 overflow-x-auto" style={{ WebkitOverflowScrolling: "touch" }}>
+          horizontally scrolls. -webkit-overflow-scrolling for smooth iOS.
+          Focusable labeled region (the ResponsiveTable idiom): a genuinely
+          scrollable box with no focusable children fails axe
+          scrollable-region-focusable (serious) — first hit in CI run
+          28609918423 once a real seeded series made the stack overflow. */}
+      <div
+        className="flex flex-col gap-4 -mx-2 px-2 overflow-x-auto"
+        style={{ WebkitOverflowScrolling: "touch" }}
+        role="region"
+        aria-label="Daily returns calendar: scrolls horizontally. Swipe or use arrow keys to see more days."
+        tabIndex={0}
+      >
         {years.map(y => <YearCalendar key={y.year} year={y} maxAbs={maxAbs} palette={palette} />)}
       </div>
 
@@ -564,32 +581,67 @@ function DailyHeatmapLegend({ maxAbs, palette }: { maxAbs: number; palette: { ba
  * zero. `maxAbs` is the clamping magnitude (typically the 95th-percentile |v|
  * of the dataset, so a single outlier doesn't wash everything else).
  *
- * Returns both background and a foreground hint — foreground darkens for high
- * intensity cells so the label inside stays AA-legible.
+ * Returns both background and a foreground chosen by COMPUTED WCAG contrast
+ * (not an intensity threshold): the mid-saturation band of the mix curve
+ * (a ≈ 0.55–0.95 toward #DC2626) is too light for white text at 4.5:1 —
+ * axe measured 3.62:1 on a −19% month cell (CI run 28608544275), a latent
+ * violation the golden fixtures' near-zero cells never exercised. When
+ * NEITHER candidate passes (a narrow luminance dead zone), the cell deepens
+ * toward the full palette color until one does, so pixels only change where
+ * AA was already being violated.
+ *
+ * Exported for the colocated contrast-sweep regression test only.
  */
-function tintFor(
+export function tintFor(
   v: number,
   maxAbs: number,
   palette: { base: string; accent: string; negative: string } = { base: "#FFFFFF", accent: "#1B6B5A", negative: "#DC2626" },
 ): { bg: string; fg: string } {
   if (maxAbs <= 0 || !Number.isFinite(v)) return { bg: "var(--color-surface-subtle, #FBFCFD)", fg: "var(--color-text-muted)" };
   const t = Math.max(-1, Math.min(1, v / maxAbs));
-  // Foreground: text-primary for low-intensity cells (legible on near-base bg),
-  // base color (white in light, slate in dark) for high-intensity cells.
+  // Foreground candidates: text-primary-ish for low-intensity cells (legible
+  // on near-base bg), base color (white in light, slate in dark) for
+  // high-intensity cells.
   const isDark = palette.base !== "#FFFFFF";
   const lowFg = isDark ? "#F1F5F9" : "#1A1A2E";
   const highFg = palette.base === "#FFFFFF" ? "#FFFFFF" : "#0F172A";
   if (t === 0) return { bg: palette.base, fg: "var(--color-text-muted)" };
-  if (t > 0) {
-    const a = Math.pow(t, 0.75);
-    const bg = mixHex(palette.base, palette.accent, a);
-    const fg = a > 0.55 ? highFg : lowFg;
-    return { bg, fg };
+  const target = t > 0 ? palette.accent : palette.negative;
+  let a = Math.pow(Math.abs(t), 0.75);
+  // AA floor (heatmap labels are text-micro/normal → 4.5:1 required). Deepen
+  // the mix — bounded, terminal: at a=1 the full accent/negative passes with
+  // at least one candidate in both light and dark palettes — until the
+  // better-contrast candidate clears the floor, then use that candidate.
+  for (let i = 0; i < 8; i++) {
+    const bg = mixHex(palette.base, target, a);
+    const cLow = contrastRatio(bg, lowFg);
+    const cHigh = contrastRatio(bg, highFg);
+    const fg = cHigh >= cLow ? highFg : lowFg;
+    if (Math.max(cLow, cHigh) >= 4.5 || a >= 1) return { bg, fg };
+    a = Math.min(1, a + 0.08);
   }
-  const a = Math.pow(-t, 0.75);
-  const bg = mixHex(palette.base, palette.negative, a);
-  const fg = a > 0.55 ? highFg : lowFg;
-  return { bg, fg };
+  // Unreachable (a hits 1 within the loop), kept for type-narrowing honesty.
+  return { bg: mixHex(palette.base, target, 1), fg: highFg };
+}
+
+/** WCAG 2.x relative luminance of an sRGB color ("#RRGGBB" or "rgb(r, g, b)"). */
+function relativeLuminance(color: string): number {
+  const [r, g, b] = color.startsWith("rgb")
+    ? (color.match(/\d+/g)?.map(Number) as [number, number, number])
+    : parseHex(color);
+  const lin = (c: number) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+/** WCAG 2.x contrast ratio between two sRGB colors. */
+function contrastRatio(c1: string, c2: string): number {
+  const l1 = relativeLuminance(c1);
+  const l2 = relativeLuminance(c2);
+  const [hi, lo] = l1 >= l2 ? [l1, l2] : [l2, l1];
+  return (hi + 0.05) / (lo + 0.05);
 }
 
 function mixHex(a: string, b: string, t: number): string {

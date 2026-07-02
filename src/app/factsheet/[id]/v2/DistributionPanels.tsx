@@ -471,7 +471,16 @@ export function CorrelationsMatrixPanel() {
           Pearson ρ on aligned daily returns · diagonal = 1.00 · pairwise off-diagonal
         </p>
       </header>
-      <div className="overflow-x-auto">
+      {/* Focusable labeled scroll region (ResponsiveTable idiom): a scrollable
+          box whose only child is a non-focusable SVG fails axe
+          scrollable-region-focusable (serious) once it actually overflows —
+          the same class CI run 28609918423 caught on the daily calendar. */}
+      <div
+        className="overflow-x-auto"
+        role="region"
+        aria-label="Correlation matrix: chart scrolls horizontally. Swipe or use arrow keys to see more columns."
+        tabIndex={0}
+      >
         {/* CHART-03 keep-all-cells: the matrix stays a horizontally-scrolling SVG
             (minWidth=W inside overflow-x-auto) rather than a fit-to-width chart,
             so no row/col is ever dropped at 320px. The responsive style keys are
