@@ -52,7 +52,15 @@ export function ProvenanceNote({ onShowFullRange }: ProvenanceNoteProps) {
         This saved scenario predates coverage windows — showing the common period ·{" "}
         <button
           type="button"
-          onClick={onShowFullRange}
+          // Ship-review RT-2 — taking the escape hatch DISMISSES the note: after
+          // "Show full range" the window is the union, so leaving the banner up
+          // would keep claiming "showing the common period" over a full-range
+          // window (stale-dishonest copy). Belt to the composer's
+          // active-window-is-common-period render gate (braces).
+          onClick={() => {
+            setDismissed(true);
+            onShowFullRange();
+          }}
           className="rounded-sm font-medium text-accent transition-colors duration-150 ease-out hover:text-accent-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 motion-reduce:transition-none"
         >
           Show full range

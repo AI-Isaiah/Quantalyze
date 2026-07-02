@@ -1981,6 +1981,22 @@ export function ScenarioComposer({
     [seedWindowLocal, scenario.setWindow],
   );
 
+  // Ship-review RT-5 — focus management for the auto-excluded Include click.
+  // Clicking Include narrows the window, which re-admits the strategy: its row
+  // (and possibly the whole auto-excluded group) UNMOUNTS with the focused
+  // button, dropping keyboard focus to <body>. The include handler flags a
+  // pending focus move; the effect below runs AFTER the re-render that removed
+  // the row and lands focus deterministically on the coverage-window control —
+  // the element whose value the click just changed (tabIndex={-1}: reachable
+  // programmatically, never added to the tab order).
+  const coverageWindowControlRef = useRef<HTMLDivElement | null>(null);
+  const pendingWindowFocusRef = useRef(false);
+  useEffect(() => {
+    if (!pendingWindowFocusRef.current) return;
+    pendingWindowFocusRef.current = false;
+    coverageWindowControlRef.current?.focus();
+  });
+
   // v1.5 PERSIST-01 — reopen an UPGRADED-v2 (windowless) draft. Clearing the
   // window state AND un-touching the ref lets the WINDOW-01 auto-default effect
   // (above) re-fire once the newly-hydrated draft's `selectedSpans` recompute,
@@ -2127,27 +2143,38 @@ export function ScenarioComposer({
     [deAliased, selectedSpanById, coverageEligible],
   );
 
+  // The ONE "active window IS the common period" equality — lexicographic
+  // "YYYY-MM-DD" compare (never JS Date). Both "common period" notes gate on
+  // it: the POLISH-03 DefaultChangeNote (via showingCommonPeriodTruncated
+  // below) and, since ship-review RT-2, the PERSIST-01 ProvenanceNote — each
+  // carries locked "showing the common period" copy that would lie over any
+  // other window (Show full range / custom picker / Include all move the
+  // window off the common period). Null active window (union path) or no
+  // common period → false.
+  const activeWindowIsCommonPeriod = useMemo(() => {
+    if (!coverageWindow || !commonPeriodWindow) return false;
+    return (
+      coverageWindow.start === commonPeriodWindow.start &&
+      coverageWindow.end === commonPeriodWindow.end
+    );
+  }, [coverageWindow, commonPeriodWindow]);
+
   // Phase 58 (POLISH-03) — the note's visibility gate, HONEST version (pre-
   // landing review I3): DefaultChangeNote's locked copy says "Now showing the
   // common period…", so it may render ONLY while the active window IS the
-  // common period (=== commonPeriodWindow) AND that period truncates the union.
-  // Gating on truncation alone rendered the "common period" copy over a user's
-  // CUSTOM window (any window narrower than the union truncates it).
-  // Lexicographic "YYYY-MM-DD" compare (never JS Date), the SAME truncation
-  // shape BlendHeader uses. Null window (union path) or no union → no note.
+  // common period (activeWindowIsCommonPeriod above) AND that period truncates
+  // the union. Gating on truncation alone rendered the "common period" copy
+  // over a user's CUSTOM window (any window narrower than the union truncates
+  // it). The SAME truncation shape BlendHeader uses. No union → no note.
   const showingCommonPeriodTruncated = useMemo(() => {
-    if (!coverageWindow || !fullRangeWindow || !commonPeriodWindow) return false;
-    if (
-      coverageWindow.start !== commonPeriodWindow.start ||
-      coverageWindow.end !== commonPeriodWindow.end
-    ) {
-      return false; // a custom window is active — the copy would lie
+    if (!activeWindowIsCommonPeriod || !coverageWindow || !fullRangeWindow) {
+      return false;
     }
     return (
       coverageWindow.start > fullRangeWindow.start ||
       coverageWindow.end < fullRangeWindow.end
     );
-  }, [coverageWindow, commonPeriodWindow, fullRangeWindow]);
+  }, [activeWindowIsCommonPeriod, coverageWindow, fullRangeWindow]);
 
   // The coverageEligible↔member_ids dev cross-check (Pitfall 2) — the anchor
   // other comments reference by name: on the passthrough (non-aliased) scenario
@@ -3172,15 +3199,19 @@ export function ScenarioComposer({
           (component-local useState); the key combines loadedScenarioId with the
           per-open nonce (review WR-02) so EVERY completed open — including
           reopening the SAME old draft after a dismissal — remounts a fresh,
-          un-dismissed note (Phase-59 Pitfall 3). Gated on commonPeriodWindow
-          (review WR-03): when the reopened draft's selected set has NO common
-          period, the auto-default seeds nothing and the engine runs the UNION
-          path — the note's locked "showing the common period" copy would be
-          false, so it is honestly suppressed (the windowless upgrade then shows
-          exactly what the pre-window scenario always showed, and the Phase-57
-          empty-intersection banner guides the user). "Show full range" reuses
-          the existing Full-range preset. */}
-      {windowBounds && showProvenanceNote && commonPeriodWindow && (
+          un-dismissed note (Phase-59 Pitfall 3). Gated on
+          activeWindowIsCommonPeriod (review WR-03 + ship-review RT-2): the
+          note's locked copy claims "showing the common period", so it renders
+          ONLY while the ACTIVE window IS the common period — the same equality
+          the DefaultChangeNote honest-gate uses. This covers BOTH honesty
+          holes: a reopened set with NO common period (WR-03 — the auto-default
+          seeds nothing, the engine runs the UNION path, the Phase-57
+          empty-intersection banner guides the user) AND any window move AFTER
+          the note showed (RT-2 — Show full range / Full-range preset / custom
+          picker / Include all leave the common period; the stale banner would
+          lie over the new window). "Show full range" reuses the existing
+          Full-range preset and also self-dismisses inside ProvenanceNote. */}
+      {windowBounds && showProvenanceNote && activeWindowIsCommonPeriod && (
         <ProvenanceNote
           key={`${loadedScenarioId ?? "provenance"}-${provenanceOpenNonceRef.current}`}
           onShowFullRange={() => fullRangeWindow && applyWindow(fullRangeWindow)}
@@ -3228,6 +3259,9 @@ export function ScenarioComposer({
           Presets + DESIGN.md styling land in the Task-2 pass. */}
       {windowBounds && (
         <div
+          // RT-5 — the Include-click focus target (see pendingWindowFocusRef).
+          ref={coverageWindowControlRef}
+          tabIndex={-1}
           className="mt-6 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-4 py-3"
           data-testid="scenario-coverage-window"
         >
@@ -3267,7 +3301,17 @@ export function ScenarioComposer({
             {/* WINDOW-05 — "Full range (some drop out)" widens to the union;
                 non-covering strategies auto-drop via the engine's coverage gate.
                 A union always exists for a non-empty set, so this stays enabled
-                even when the intersection is empty. */}
+                even when the intersection is empty.
+
+                Ship-review RT-3 (accepted): applying Full range persists
+                TODAY's union VERBATIM via applyWindow — a {start,end} SNAPSHOT,
+                not a "full range" mode. New data tomorrow extends spans past
+                the frozen end, so on reopen/share/compare the saved window is
+                NARROWER than the new union and later data is excluded —
+                disclosed by BlendHeader's "window truncated from full range"
+                suffix. Deliberate: the window is an explicit compute input
+                everywhere (locked v1.5 design); a window-MODE variant was
+                considered and rejected at ship review (schema ripple). */}
             <button
               type="button"
               onClick={() => fullRangeWindow && applyWindow(fullRangeWindow)}
@@ -3968,7 +4012,14 @@ export function ScenarioComposer({
                 // presets (no bespoke undo needed).
                 onInclude={
                   row.includeCost
-                    ? () => applyWindow(row.includeCost!.target)
+                    ? () => {
+                        // RT-5 — the clicked button unmounts with its row once
+                        // the narrowed window re-admits the strategy; flag the
+                        // post-render focus move to the coverage-window
+                        // control (effect by pendingWindowFocusRef).
+                        pendingWindowFocusRef.current = true;
+                        applyWindow(row.includeCost!.target);
+                      }
                     : undefined
                 }
               />

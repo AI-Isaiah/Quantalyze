@@ -51,6 +51,23 @@ describe("ProvenanceNote (PERSIST-01)", () => {
     expect(onShowFullRange).toHaveBeenCalledTimes(1);
   });
 
+  it("ship-review RT-2: 'Show full range' DISMISSES the note — the banner may not keep claiming 'showing the common period' over a full-range window", async () => {
+    // WHY: the escape hatch applies the UNION window. If the note survived the
+    // click, its locked "showing the common period" copy would be false over
+    // the new window — stale-dishonest copy. Taking the action dismisses it
+    // (belt), alongside the composer's active-window-is-common-period render
+    // gate (braces).
+    const onShowFullRange = vi.fn();
+    render(<ProvenanceNote onShowFullRange={onShowFullRange} />);
+    fireEvent.click(screen.getByRole("button", { name: /Show full range/i }));
+    expect(onShowFullRange).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("scenario-provenance-note"),
+      ).not.toBeInTheDocument();
+    });
+  });
+
   it("the × dismiss hides the note", async () => {
     render(<ProvenanceNote onShowFullRange={() => {}} />);
     const dismiss = screen.getByRole("button", { name: /Dismiss/i });

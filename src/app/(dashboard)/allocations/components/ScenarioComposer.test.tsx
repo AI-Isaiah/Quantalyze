@@ -7075,4 +7075,131 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
       screen.getByTestId("scenario-empty-intersection-banner"),
     ).toBeInTheDocument();
   });
+
+  it("ship-review RT-2: clicking the note's 'Show full range' applies the union AND removes the note — no stale 'showing the common period' banner over a full-range window", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-rt2-fullrange`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    // Upgraded-v2 open → the note shows over the intersection default.
+    act(() => {
+      openSaved?.({
+        id: "saved-v2-rt2a",
+        name: "Old RT2a",
+        draft: upgradedV2Draft(),
+      });
+    });
+    const note = screen.getByTestId("scenario-provenance-note");
+
+    // Take the escape hatch. The window becomes the UNION [01-01, 01-12] — the
+    // note's locked "showing the common period" copy is now false, so BOTH the
+    // component's dismiss-on-action and the composer's
+    // activeWindowIsCommonPeriod gate must drop it.
+    act(() => {
+      fireEvent.click(
+        within(note).getByRole("button", { name: /Show full range/i }),
+      );
+    });
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-12");
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("ship-review RT-2: a custom-window apply while the note is up removes it (the active window is no longer the common period)", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-rt2-custom`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    act(() => {
+      openSaved?.({
+        id: "saved-v2-rt2b",
+        name: "Old RT2b",
+        draft: upgradedV2Draft(),
+      });
+    });
+    expect(
+      screen.getByTestId("scenario-provenance-note"),
+    ).toBeInTheDocument();
+
+    // Apply a CUSTOM window (narrower than the common period). The component's
+    // own dismissal never fired — ONLY the composer's honest render gate
+    // (activeWindowIsCommonPeriod, the same equality the DefaultChangeNote
+    // gate uses) can remove the note here.
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply?.({ start: "2026-01-02", end: "2026-01-05" });
+    });
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-02 → 2026-01-05");
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("ship-review RT-5: after an Include click the focus lands on the coverage-window control (never dropped to <body> with the unmounted row)", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-rt5-focus`}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Widen past B's last day → B is auto-excluded and its row carries the
+    // cost-disclosing Include button (the COVERAGE-04 flow).
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    const includeBtn = screen.getByTestId(
+      `auto-excluded-include-${REF_WIN_B}`,
+    );
+    includeBtn.focus();
+    expect(document.activeElement).toBe(includeBtn);
+
+    // Include narrows the window → B re-admitted → the focused button (and its
+    // row) unmounts. Without explicit focus management, focus falls to <body>;
+    // the RT-5 handler moves it deterministically to the coverage-window
+    // control — the element whose value the click just changed.
+    act(() => {
+      fireEvent.click(includeBtn);
+    });
+    expect(
+      screen.queryByTestId(`auto-excluded-row-${REF_WIN_B}`),
+    ).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(
+      screen.getByTestId("scenario-coverage-window"),
+    );
+  });
 });
