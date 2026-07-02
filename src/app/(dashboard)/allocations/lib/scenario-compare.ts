@@ -24,11 +24,14 @@
  *     that null flow straight through — NO `?? 0` — so the render layer shows an
  *     honest em-dash, never a fabricated 0.
  *
- *   - Heterogeneous windows. Each draft runs the engine's UNION-when-absent path
- *     (no `state.window` is passed here) and reports its OWN overlap `n`; the
- *     helper does not force a shared window across drafts. Per-persisted-window
- *     compare alignment is Phase 59 (PERSIST-03), which will wire the saved window
- *     in through the same `defaultWindowFor()` helper.
+ *   - Heterogeneous windows (v1.5 PERSIST-03). Each draft is computed at its OWN
+ *     persisted `draft.window` (injected POST-collapse onto `deAliased.state` —
+ *     Pitfall 4). Two drafts with DIFFERENT windows compute independently; the
+ *     helper never force-aligns a shared window across drafts. A draft with NO
+ *     `window` (a pre-v1.5 v2 draft, or the synthetic live-book draft) runs the
+ *     engine's UNION-when-absent path unchanged and reports its OWN overlap `n` —
+ *     the Phase-55 own-book union lock. The window is threaded as an engine
+ *     COMPUTE input, never as a factsheet view-clamp.
  *
  *   - Live-book column computed through the SAME engine path over a synthetic
  *     "all live holdings, equity-weight" draft (`buildLiveBookDraft`) — NOT the
@@ -149,10 +152,23 @@ export function computeMetricsForDraft(
   );
   const dateMapCache = buildDateMapCache(deAliased.strategies);
 
+  // v1.5 PERSIST-03 — inject the draft's persisted window POST-collapse
+  // (Pitfall 4). `collapseAliasedHoldingStrategies` reconstructs `state` and
+  // silently drops any `window` set on the PRE-collapse `projectionState`, so
+  // the window MUST be spread onto `deAliased.state` here (the canonical
+  // engineState idiom, mirroring ScenarioComposer's `engineState` memo). When
+  // `draft.window` is falsy — a pre-v1.5 v2 draft or the synthetic live-book
+  // draft (`buildLiveBookDraft` omits `window`) — no window key is set and the
+  // engine stays on its UNION-when-absent path, byte-identical to before
+  // (Phase-55 own-book union lock).
+  const engineState = draft.window
+    ? { ...deAliased.state, window: draft.window }
+    : deAliased.state;
+
   // Degenerate sets (empty active set, n < 10, NaN-poisoned) return null-metric
   // ComputedMetrics — flow it straight through, NO `?? 0`. The caller renders
   // an honest em-dash via formatPercent/formatNumber.
-  return computeScenario(deAliased.strategies, deAliased.state, dateMapCache);
+  return computeScenario(deAliased.strategies, engineState, dateMapCache);
 }
 
 /**
