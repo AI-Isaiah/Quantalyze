@@ -290,11 +290,14 @@ export async function seedBridgeCandidate(opts?: {
  *  - one row in `strategy_analytics` with `computation_status='complete'`,
  *    a deterministic `returns_series` of length `days`, plus minimal
  *    scalars + JSONB blobs to drive eager panels 1-3 (and panels 4-7
- *    where the eager analytics blob is sufficient).
+ *    where the eager analytics blob is sufficient); optionally
+ *    `daily_returns` when `withDailyReturns: true` (Phase 60).
  *
  * Heavy series (sibling-table contract per migration 087 — daily_returns_grid,
  * exposure_series, turnover_series, rolling_*_series, log_returns_series)
- * are NOT seeded here. Lazy panels 4-7 fall through to their empty-payload
+ * are NOT seeded here. (`daily_returns` — the analytics COLUMN, distinct from
+ * the `daily_returns_grid` sibling table — IS seedable via the opt-in above.)
+ * Lazy panels 4-7 fall through to their empty-payload
  * sub-banners gracefully — that's the partial-data path the spec asserts.
  *
  * Returns the strategy id. Cleanup is the caller's responsibility (mirrors
@@ -319,6 +322,26 @@ export async function seedStrategyWithHistory(opts: {
    * constant close → zero variance → NaN ρ → the correlation panels render null.
    */
   anchorMs?: number;
+  /**
+   * Phase 60 — optional pseudonym written to `strategies.codename`. The seed
+   * leaves `disclosure_tier` at its DB default ('exploratory'), and every
+   * exploratory surface (browse drawer, match queue) masks the raw `name`
+   * behind `displayStrategyName` — codename if present, else a synthetic
+   * `Strategy #<id-prefix>` (T12 pseudonymity). A spec that must FIND its own
+   * fixture by text (drawer search matches wire name + codename only) needs a
+   * codename; searching the raw seeded name can never match.
+   */
+  codename?: string;
+  /**
+   * Phase 60 (VERIFY-01) — also write `strategy_analytics.daily_returns`.
+   * The scenario composer lazy-fetches GET /api/strategies/[id]/returns,
+   * which serves EXACTLY this column; without it every seeded strategy has an
+   * empty series → no coverage span → `windowBounds` is null → the whole
+   * Phase-58 coverage surface (window control, BlendHeader, CoverageTimeline)
+   * deterministically never mounts. OPT-IN so the svg-chart-parity /
+   * strategy-v2 golden fixtures (which share this helper) stay byte-identical.
+   */
+  withDailyReturns?: boolean;
 }): Promise<string> {
   const admin = getAdmin();
   // Date anchor — see `anchorMs` doc above. Default keeps the historical
@@ -366,6 +389,7 @@ export async function seedStrategyWithHistory(opts: {
       strategy_types: ["spot"],
       subtypes: [],
       markets: ["BTC"],
+      ...(opts.codename ? { codename: opts.codename } : {}),
     })
     .select("id")
     .single();
@@ -458,11 +482,22 @@ export async function seedStrategyWithHistory(opts: {
         }
       : null;
 
+  // Phase 60 — deterministic small daily returns on the same date axis as
+  // `returns_series` (sin-based, finite, no RNG). Shape matches DailyPoint
+  // ({date, value}) as normalizeDailyReturns expects on the returns route.
+  const dailyReturns = opts.withDailyReturns
+    ? series.map((p, i) => ({
+        date: p.date,
+        value: Math.sin(i / 15) * 0.01,
+      }))
+    : null;
+
   const { error: aErr } = await admin.from("strategy_analytics").insert({
     strategy_id: strategy.id,
     computation_status: "complete",
     benchmark: "BTC",
     returns_series: series,
+    ...(dailyReturns ? { daily_returns: dailyReturns } : {}),
     cumulative_return: series[series.length - 1].value - 1,
     cagr: 0.12,
     sharpe: 1.4,
