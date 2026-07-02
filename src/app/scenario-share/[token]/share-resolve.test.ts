@@ -314,3 +314,88 @@ describe("resolveSharedScenario — owner-projection parity (WR-05)", () => {
     expect(recipient.metrics.twr).toEqual(aOnly.metrics.twr);
   });
 });
+
+// ===========================================================================
+// PERSIST-02 — the recipient recomputes at the OWNER's saved coverage window,
+// VERBATIM. The window rides in the returned `draft` JSONB (get_shared_scenario
+// returns it whole — no RPC/SQL change) and share-resolve threads draft.window
+// onto the engine state before computeScenario. The recipient does NOT re-derive
+// a fresh intersection (which could differ from the owner's snapshot → divergent
+// membership; Phase-59 Pitfall 5). A windowless (upgraded-v2) draft resolves ok
+// after the non-destructive 2→3 upgrade and runs the union path.
+// ===========================================================================
+describe("resolveSharedScenario — owner coverage window verbatim (PERSIST-02)", () => {
+  it("a v3 shared draft carrying a window resolves ok with effective bounds == the owner's saved window (recipient == owner, no re-derivation)", () => {
+    // Both series span 2023-01-01 … 2023-02-09 (40 days). A window strictly
+    // inside that span is covered by both strategies → member_count 2, and the
+    // engine sets effective_start/effective_end to the WINDOW bounds verbatim.
+    const savedWindow = { start: "2023-01-05", end: "2023-02-05" };
+    const windowedDraft: ScenarioDraft = {
+      ...okDraft(),
+      schema_version: SCENARIO_SCHEMA_VERSION, // 3 — a v3 save carrying a window
+      window: savedWindow,
+    };
+
+    const result = resolveSharedScenario({
+      name: "Windowed blend",
+      draft: windowedDraft,
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: okSeriesRows(),
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    // The recipient's effective bounds ARE the owner's saved window — proving the
+    // window threaded through verbatim (not the union/full-series bounds, which
+    // would be 2023-01-01 … 2023-02-09).
+    expect(result.metrics.effective_start).toBe(savedWindow.start);
+    expect(result.metrics.effective_end).toBe(savedWindow.end);
+    // Both strategies cover the window → the windowed blend is a real 2-member
+    // projection (the honest recompute-at-owner's-window observable).
+    expect(result.metrics.member_count).toBe(2);
+  });
+
+  it("a v3 windowless shared draft runs the union path (effective bounds = the full common series, NOT a window)", () => {
+    // A v3 save made before a window was chosen → no window key → union path.
+    const windowlessV3: ScenarioDraft = {
+      ...okDraft(),
+      schema_version: SCENARIO_SCHEMA_VERSION,
+    };
+    const result = resolveSharedScenario({
+      name: "Windowless v3",
+      draft: windowlessV3,
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: okSeriesRows(),
+    });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    // Union path → the effective bounds are the full common series span, not a
+    // window. (This is the byte-compat pre-window behavior.)
+    expect(result.metrics.effective_start).toBe("2023-01-01");
+  });
+
+  it("a pre-v1.5 v2 (windowless) shared draft resolves ok (NOT honest-absence) after the non-destructive upgrade, and runs the union path", () => {
+    // Wave 1 added the non-destructive v2→v3 codec branch: a valid v2 draft now
+    // decodes outcome:"ok" (reason "upgraded_v2_windowless"), so share-resolve
+    // reaches the compute path instead of honest-absencing every pre-v1.5 share.
+    const v2Draft: ScenarioDraft = {
+      ...okDraft(),
+      schema_version: 2, // pre-v1.5, windowless
+    };
+
+    const result = resolveSharedScenario({
+      name: "Legacy v2 share",
+      draft: v2Draft,
+      schema_version: 2,
+      series: okSeriesRows(),
+    });
+
+    // MUST be ok — resetting/honest-absencing here would silently 404 every
+    // pre-window shared scenario (Phase-59 Pitfall 1 in the share path).
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.metrics.n).toBeGreaterThanOrEqual(10);
+    // Windowless → union path, effective bounds are the full series span.
+    expect(result.metrics.effective_start).toBe("2023-01-01");
+  });
+});

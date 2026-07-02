@@ -180,7 +180,23 @@ export function resolveSharedScenario(
   // No leverage is persisted in the draft schema (it is transient UI state), so
   // the shared projection runs at the persisted weights with default 1.0
   // leverage — the honest reflection of what was saved.
-  const state: ScenarioState = { selected, weights, startDates };
+  //
+  // v1.5 PERSIST-02 — thread the OWNER's saved coverage window VERBATIM. The
+  // window rides in the returned `draft` JSONB (get_shared_scenario returns the
+  // draft whole; no RPC/SQL change). The recipient reads it directly onto the
+  // engine state — it does NOT re-derive an intersection from its own visible
+  // published series (which may have drifted since save → divergent membership;
+  // Phase-59 Pitfall 5). So the recipient view == the owner view, deterministic.
+  // There is NO collapseAliasedHoldingStrategies here (strategies are built
+  // straight from addedStrategies), so `state` IS the engine state — inject
+  // directly (Pitfall 4 N/A). A windowless (upgraded-v2) draft has no `window`
+  // key → the engine's union-when-absent path (correct for a pre-window save).
+  const state: ScenarioState = {
+    selected,
+    weights,
+    startDates,
+    ...(draft.window ? { window: draft.window } : {}),
+  };
   const dateMapCache = buildDateMapCache(strategies);
   const metrics = computeScenario(strategies, state, dateMapCache);
 
