@@ -83,14 +83,21 @@ function okSeriesRows() {
 
 describe("resolveSharedScenario — DI-23-01 honest-absence (SHARE-02)", () => {
   it("version-ahead draft (schema_version > live SCENARIO_SCHEMA_VERSION) → honest-absence, NEVER a curve", () => {
-    // schema_version = 3 is strictly ahead of the live constant (2). The codec
-    // returns outcome:"readonly" with value=defaultDraft — reading that here
-    // would leak a live-book-shaped object. The helper must honest-absence it.
-    expect(SCENARIO_SCHEMA_VERSION).toBe(2); // pin against the live constant, not "1"
+    // SCENARIO_SCHEMA_VERSION + 1 is strictly ahead of the live constant. The
+    // codec returns outcome:"readonly" with value=defaultDraft — reading that
+    // here would leak a live-book-shaped object. The helper must honest-absence
+    // it. (v1.5: the constant bumped 2→3, so this fixture self-adjusts to 4 and
+    // keeps exercising the forward-compat readonly path — Pitfall 2.)
+    expect(SCENARIO_SCHEMA_VERSION).toBe(3); // pin against the live constant
     const aheadDraft = { ...okDraft(), schema_version: SCENARIO_SCHEMA_VERSION + 1 };
 
     const result = resolveSharedScenario(
-      { name: "Future scenario", draft: aheadDraft, schema_version: 3, series: okSeriesRows() },
+      {
+        name: "Future scenario",
+        draft: aheadDraft,
+        schema_version: SCENARIO_SCHEMA_VERSION + 1,
+        series: okSeriesRows(),
+      },
     );
 
     expect(result.kind).toBe("honest-absence");

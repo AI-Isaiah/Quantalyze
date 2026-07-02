@@ -32,6 +32,7 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import {
   computeHoldingsFingerprint,
   SCENARIO_SCHEMA_VERSION,
+  SCENARIO_SCHEMA_VERSION_PREV,
   type ScenarioDraft,
 } from "../lib/scenario-state";
 
@@ -471,18 +472,22 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
   it("T_SAVE6 Open(reset row, older incompatible schema) → renders the relabeled 'older format' notice and does NOT hydrate (codec trichotomy non-regression; never a silent empty composer)", () => {
     renderComposer();
 
-    // schema_version below the current → codec returns "reset". A "reset" must
-    // NEVER silently load the saved draft (no hydrate). We plant a DISTINCTIVE
-    // added strategy in the reset draft: if the reset branch wrongly hydrated,
-    // that strategy's name would render in the composition list. Its ABSENCE is
-    // the non-vacuous proof that hydrateFromSaved was NOT called on the reset
-    // branch (Task 3 acceptance: trichotomy preserved, reset does not hydrate).
+    // A schema_version BELOW the non-destructive-upgrade window (< PREV) is a
+    // genuinely-incompatible legacy shape → codec returns "reset". (v1.5: the
+    // v2→v3 transition is non-destructive, so PREV (2) now upgrades to "ok"; a
+    // truly-old version must be < PREV to still reset. Using PREV - 1 keeps this
+    // fixture self-adjusting to the version constants.) A "reset" must NEVER
+    // silently load the saved draft (no hydrate). We plant a DISTINCTIVE added
+    // strategy in the reset draft: if the reset branch wrongly hydrated, that
+    // strategy's name would render in the composition list. Its ABSENCE is the
+    // non-vacuous proof that hydrateFromSaved was NOT called on the reset branch
+    // (Task 3 acceptance: trichotomy preserved, reset does not hydrate).
     const olderRow: SavedScenarioRow = {
       id: SAVED_ID,
       name: "Ancient",
       draft: {
         ...okDraft(),
-        schema_version: SCENARIO_SCHEMA_VERSION - 1,
+        schema_version: SCENARIO_SCHEMA_VERSION_PREV - 1,
         addedStrategies: [
           {
             id: "reset-marker-strat",
