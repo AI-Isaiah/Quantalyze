@@ -149,7 +149,10 @@ export const POST = withAllocatorAuth(
     // RPC body, so this write-time check cannot be the only gate.
     const { data: ownedScenario, error: ownershipError } = await supabase
       .from("scenarios")
-      .select("id")
+      // P61-BUG-2: `draft` is read alongside `id` so the book-only gate below
+      // can inspect addedStrategies without a second query. Owner-scoped RLS
+      // read of the caller's own row — no new disclosure.
+      .select("id, draft")
       .eq("id", scenarioId)
       .maybeSingle();
 
@@ -171,6 +174,28 @@ export const POST = withAllocatorAuth(
       return NextResponse.json(
         { error: "Scenario not found" },
         { status: 404, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    // P61-BUG-2 — refuse to mint a share for a BOOK-ONLY draft (no added
+    // strategies). The public share page resolves ONLY published added-strategy
+    // series (the live-book boundary: the owner's private per-key book series
+    // are deliberately never exposed there), so a book-only share is a dead
+    // link by construction. Fail loud at the source with the reason instead of
+    // minting it. Defensive JSONB read: a missing/misshapen draft also has
+    // nothing resolvable to share, so it takes the same branch.
+    const draftAdded = (
+      ownedScenario as { draft?: { addedStrategies?: unknown } | null }
+    ).draft?.addedStrategies;
+    if (!Array.isArray(draftAdded) || draftAdded.length === 0) {
+      return NextResponse.json(
+        {
+          error: "Nothing shareable",
+          code: "book_only_draft",
+          message:
+            "This scenario is built only on your private book sources, which are never shown on a public link. Add catalog strategies to share a computable projection.",
+        },
+        { status: 409, headers: NO_STORE_HEADERS },
       );
     }
 

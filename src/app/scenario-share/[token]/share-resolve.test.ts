@@ -147,7 +147,16 @@ describe("resolveSharedScenario — DI-23-01 honest-absence (SHARE-02)", () => {
     expect(result.portfolioDaily.length).toBeGreaterThan(0);
   });
 
-  it("ok draft with EMPTY addedStrategies (series=[]) → kind:'ok' with the degenerate all-null shape", () => {
+  it("ok draft with EMPTY addedStrategies (series=[]) → honest-absence with reason 'book-only' (RE-BASELINED, P61-BUG-2)", () => {
+    // RE-BASELINED 2026-07-02 (reviewed act, P61-BUG-2): this test previously
+    // pinned kind:"ok" with the degenerate all-null metrics shape ("the
+    // components render their honest empty states"). The Phase-61 authed prod
+    // canary proved that shape renders as a DEAD share page — "0 overlapping
+    // days", every metric an em-dash — indistinguishable from a broken link.
+    // A holdings/book-only draft has nothing this page is ALLOWED to compute
+    // (the live-book boundary never resolves the owner's private series here),
+    // so the honest state is the designed honest-absence card with the
+    // book-only reason, not a computed-looking shell of nulls.
     const emptyDraft: ScenarioDraft = {
       ...okDraft(),
       toggleByScopeRef: {},
@@ -159,16 +168,10 @@ describe("resolveSharedScenario — DI-23-01 honest-absence (SHARE-02)", () => {
       { name: "Holdings reweight only", draft: emptyDraft, schema_version: 2, series: [] },
     );
 
-    // series=[] is the EXPECTED state for a holdings-only reweight, not a bug:
-    // still kind:"ok", but the engine returns the all-null degenerate shape so
-    // the components render their honest empty states.
-    expect(result.kind).toBe("ok");
-    if (result.kind !== "ok") throw new Error("expected ok");
-    expect(result.metrics.n).toBe(0);
-    expect(result.metrics.twr).toBeNull();
-    expect(result.metrics.correlation_matrix).toBeNull();
-    expect(result.metrics.equity_curve).toEqual([]);
-    expect(result.portfolioDaily).toEqual([]);
+    expect(result.kind).toBe("honest-absence");
+    expect(
+      result.kind === "honest-absence" ? result.reason : undefined,
+    ).toBe("book-only");
   });
 
   it("returns the strategy name map for the resolved series (de-aliased labels for the heatmap)", () => {
@@ -503,5 +506,43 @@ describe("resolveSharedScenario — owner coverage window verbatim (PERSIST-02)"
     // contract — it never invents bounds derived from data it didn't blend.
     expect(result.metrics.effective_start).toBe("2023-02-05");
     expect(result.metrics.effective_end).toBe("2023-01-05");
+  });
+});
+
+// P61-BUG-2 (prod canary 2026-07-02) — a BOOK-ONLY draft (zero added
+// strategies; its projection units are the owner's private per-key book
+// series, which the live-book boundary never resolves here) must surface the
+// designed honest-absence state with the "book-only" reason — not compute an
+// empty set into a dead em-dash shell ("0 overlapping days", all metrics "—").
+describe("resolveSharedScenario — book-only draft honest-absence (P61-BUG-2)", () => {
+  it("a valid draft with ZERO added strategies → honest-absence with reason 'book-only', never a metrics shell", () => {
+    const bookOnly: ScenarioDraft = {
+      ...okDraft(),
+      toggleByScopeRef: {},
+      addedStrategies: [],
+      weightOverrides: {},
+    };
+    const result = resolveSharedScenario({
+      name: "Book-only scenario",
+      draft: bookOnly,
+      schema_version: 2,
+      series: [], // the RPC resolves no series for book refs (live-book boundary)
+    });
+    expect(result.kind).toBe("honest-absence");
+    expect(
+      result.kind === "honest-absence" ? result.reason : undefined,
+    ).toBe("book-only");
+    // Structurally NOT a computed shell: no metrics/portfolioDaily leak out.
+    expect("metrics" in result).toBe(false);
+  });
+
+  it("a draft WITH added strategies still resolves ok (the new branch never over-fires)", () => {
+    const result = resolveSharedScenario({
+      name: "Real share",
+      draft: okDraft(),
+      schema_version: 2,
+      series: okSeriesRows(),
+    });
+    expect(result.kind).toBe("ok");
   });
 });
