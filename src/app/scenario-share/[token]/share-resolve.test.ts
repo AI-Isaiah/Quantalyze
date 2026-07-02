@@ -398,4 +398,36 @@ describe("resolveSharedScenario — owner coverage window verbatim (PERSIST-02)"
     // Windowless → union path, effective bounds are the full series span.
     expect(result.metrics.effective_start).toBe("2023-01-01");
   });
+
+  // Pre-landing review I5 pin (b), share path — an INVERTED (start > end)
+  // owner window is well-formed for the codec (deliberately NO start<=end
+  // refine: a refine failure would honest-absence/404 a live share over a
+  // cosmetic field). The share path must NEVER throw and NEVER fabricate
+  // bounds — the engine degrades honestly: zero days fall inside an inverted
+  // window, so the blend is the n=0 all-null degenerate shape.
+  it("an INVERTED (start > end) owner window resolves ok without throwing, all-null degenerate metrics, no fabricated bounds", () => {
+    const invertedDraft: ScenarioDraft = {
+      ...okDraft(),
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      window: { start: "2023-02-05", end: "2023-01-05" }, // inverted, in-range days
+    };
+    const result = resolveSharedScenario({
+      name: "Inverted window",
+      draft: invertedDraft,
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: okSeriesRows(),
+    });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    // Honest degrade: no overlapping day satisfies start<=d<=end → n=0,
+    // null metrics, empty curve — never a fabricated curve.
+    expect(result.metrics.n).toBe(0);
+    expect(result.metrics.twr).toBeNull();
+    expect(result.metrics.equity_curve).toEqual([]);
+    // The (frozen) engine echoes the APPLIED window verbatim as the effective
+    // bounds — the owner's own saved value, per the PERSIST-02 verbatim
+    // contract — it never invents bounds derived from data it didn't blend.
+    expect(result.metrics.effective_start).toBe("2023-02-05");
+    expect(result.metrics.effective_end).toBe("2023-01-05");
+  });
 });

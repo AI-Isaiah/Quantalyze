@@ -559,6 +559,37 @@ describe("scenarioDraftCodec", () => {
     expect(r.value.window).toEqual(window);
   });
 
+  // Pre-landing review I5 — the window shape pins. DECISION: the codec keeps
+  // its established corrupt-v3 handling for a malformed window (regex-fail →
+  // safeParse fail → reset). Every first-party writer emits exact `YYYY-MM-DD`
+  // bounds, so a non-ISO window only exists via corruption/tampering — resetting
+  // it is consistent with the M-0153 schema_invalid path, not destructive to
+  // any draft our own code can produce. (The rejected alternative — keep
+  // .max(32) + a normalizing decode — would silently adopt garbage bounds.)
+  it("I5 pin (a) — a v3 draft with a NON-ISO window string → reset(schema_invalid), the codec's corrupt-v3 path", () => {
+    const badWindow = {
+      ...validV1(),
+      window: { start: "not-a-date", end: "2024-12-31" },
+    };
+    const r = codec.decode(JSON.stringify(badWindow));
+    expect(r.outcome).toBe("reset");
+    expect(r.reason).toBe("schema_invalid");
+    expect(r.value).toBe(def);
+  });
+
+  // Deliberately NO start<=end refine: a refine failure on a v3 draft would
+  // route to reset and could DELETE a user's draft over an inverted-but-well-
+  // formed window. The codec adopts it verbatim; the ENGINE degrades honestly
+  // downstream (no strategy covers an inverted window → member_count 0 class,
+  // never a fabricated curve).
+  it("I5 pin (b) — an INVERTED (start > end) well-formed window decodes ok and round-trips verbatim (engine degrades honestly downstream)", () => {
+    const inverted = { start: "2024-12-31", end: "2024-01-01" };
+    const r = codec.decode(JSON.stringify({ ...validV1(), window: inverted }));
+    expect(r.outcome).toBe("ok");
+    expect(r.reason).toBeNull();
+    expect(r.value.window).toEqual(inverted);
+  });
+
   // Review-hardening (pr-test-analyzer) — pin every non-canonical schema_version
   // branch. Only a legit higher INTEGER version is forward-compat (readonly);
   // a string / 0 / negative / float / NaN version is malformed → reset, NOT

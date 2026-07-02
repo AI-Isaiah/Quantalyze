@@ -639,10 +639,21 @@ export const scenarioDraftSchema = z.object({
   weightOverrides: boundedRecord(z.number(), "weightOverrides"),
   userWeightOverrides: boundedRecord(z.number(), "userWeightOverrides").optional(),
   // v1.5 PERSIST-01 — the saved coverage window. Optional so v2 (windowless)
-  // drafts still validate. `.max(32)` bounds each ISO date string per the FIX A
-  // storage-poison convention above (an ISO date is <=24 chars; 32 is generous);
-  // MAX_DRAFT_BODY_BYTES backstops the whole draft.
-  window: z.object({ start: z.string().max(32), end: z.string().max(32) }).optional(),
+  // drafts still validate. Each bound must be an exact `YYYY-MM-DD` ISO day
+  // (pre-landing review I5): every first-party writer emits that shape, so a
+  // non-ISO bound is corruption/tampering and fails safeParse → the codec's
+  // established corrupt-v3 reset path (the regex subsumes the old `.max(32)`
+  // FIX A storage-poison bound). Deliberately NO `start <= end` refine — a
+  // refine failure on a v3 draft would route to reset and could DELETE a
+  // user's draft over an inverted-but-well-formed window; the engine degrades
+  // honestly on inversion instead (member_count 0 class, never a fabricated
+  // curve).
+  window: z
+    .object({
+      start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    })
+    .optional(),
   // ISO-8601 timestamp (`new Date().toISOString()` is 24 chars); 64 is generous.
   lastEditedAt: z.string().max(64),
 });
