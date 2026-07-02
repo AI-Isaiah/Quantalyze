@@ -46,10 +46,12 @@ import {
   removeAddedStrategy as removePure,
   setWeightOverride as setWeightPure,
   applyWeightOverrides as applyWeightsPure,
+  setWindow as setWindowPure,
   type ScenarioDraft,
   type AddedStrategy,
   type HoldingForDefault,
 } from "../lib/scenario-state";
+import type { CoverageWindow } from "@/lib/scenario-window";
 import { useCrossTabStorage } from "@/lib/storage/cross-tab";
 
 export interface UseScenarioStateOptions {
@@ -80,6 +82,16 @@ export interface UseScenarioStateReturn {
   removeAddedStrategy: (id: string) => void;
   setWeightOverride: (scopeRef: string, weight: number) => void;
   applyWeightOverrides: (weights: Record<string, number>) => void;
+  /**
+   * v1.5 PERSIST-01 (review CR-01) — write the composer's APPLIED coverage
+   * window through into the draft, so autosave / save / share / compare all
+   * carry it. Only the user-gesture path (`applyWindow`) calls this; the
+   * intersection auto-default never does (a never-touched window persists as
+   * ABSENT, and reopen re-derives the default). Rebases via `baseOf` like every
+   * other mutator, so a window applied during the fingerprint-mismatch banner
+   * operates on the default draft the user actually sees.
+   */
+  setWindow: (window: CoverageWindow) => void;
   reset: () => void;
   dismissFingerprintMismatchBanner: () => void;
   /**
@@ -251,6 +263,12 @@ export function useScenarioState(
     },
     [setValue, baseOf],
   );
+  const setWindow = useCallback(
+    (window: CoverageWindow) => {
+      setValue((prev) => setWindowPure(baseOf(prev), window));
+    },
+    [setValue, baseOf],
+  );
   const reset = useCallback(() => {
     // removeStored: removeItem the scoped key + set in-memory to the default
     // WITHOUT re-persisting it (the next user edit persists). Clears the banner.
@@ -317,6 +335,7 @@ export function useScenarioState(
     removeAddedStrategy,
     setWeightOverride,
     applyWeightOverrides,
+    setWindow,
     reset,
     dismissFingerprintMismatchBanner,
     hydrateFromSaved,

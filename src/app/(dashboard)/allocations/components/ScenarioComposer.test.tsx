@@ -5258,6 +5258,13 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     );
   });
 
+  // WINDOW-06 flake class (H-0125 / 72dc23a4): applyWindow now WRITE-THROUGHS
+  // setWindow into the draft, whose autosave is a 150ms debounce that is not
+  // cancelled on unmount — a leaked write from any window-mutating test can
+  // pollute a later test sharing the allocator key on slower CI. Every test in
+  // this file that applies a window (pickerOnApply / preset click / Include)
+  // therefore renders with its OWN `${ALLOCATOR_A}-<test>` key (the
+  // ScenarioComposer.save.test.tsx CR-01 idiom).
   it("window: MANDATORY member_count changes when the window moves — widening past B's last day drops it (2 → 1), narrowing restores it (1 → 2)", () => {
     mountUnequalSpanBook();
     render(
@@ -5265,7 +5272,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
         payload={makePayload({
           holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
         })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w01-move`}
         allocatorMandate={null}
       />,
     );
@@ -5304,6 +5311,365 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
       pickerOnApply!({ start: "2026-01-01", end: "2026-01-06" });
     });
     expect(lastScenarioMetrics()?.member_count).toBe(2);
+  });
+
+  // Phase 58 (COVERAGE-03) — the BlendHeader N is not an independent count; it
+  // IS the engine's member_count. Prove the header text and the divisor move
+  // together as the window drops a member. The header reads the SAME axis the
+  // coverageEligible↔member_ids dev cross-check in ScenarioComposer
+  // reconciles, so this is the single-source guarantee under
+  // test — if BlendHeader ever recomputed membership, N would diverge here.
+  it("COVERAGE-03: BlendHeader N === engine member_count, and the header degrades in lockstep when the window drops a member", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={`${ALLOCATOR_A}-cov03-lockstep`}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Baseline: intersection default → both A and B are members (member_count 2).
+    // The header must read the REAL engine divisor, not a local recount.
+    const baseN = lastScenarioMetrics()?.member_count;
+    expect(baseN).toBe(2);
+    const header = screen.getByTestId("scenario-blend-header");
+    expect(header).toHaveTextContent(`Mean of ${baseN} strategies ·`);
+    // Non-blocking live region — announced politely, never assertively.
+    expect(header).toHaveAttribute("role", "status");
+
+    // Widen the window PAST B's last day → the engine drops B (member_count 1) and
+    // the header must degrade IN LOCKSTEP to the "not a blend" copy. Same axis.
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+    expect(screen.getByTestId("scenario-blend-header")).toHaveTextContent(
+      "1 strategy — not a blend",
+    );
+  });
+
+  // Phase 58 (COVERAGE-04) — the include-cost affordance. Widening past B's last
+  // day auto-excludes B; its row must carry the amber "Outside window" chip AND a
+  // cost-disclosing include button. The load-bearing oracle is the REAL engine
+  // member_count: clicking Include must RAISE it (B becomes a member again) and B
+  // must leave the auto-excluded group. The button reuses the same applyWindow
+  // path as the presets, so this proves the disclosed cost reaches the engine.
+  it("COVERAGE-04: an auto-excluded row shows the amber chip + a cost-disclosing include button, and clicking it raises the engine member_count (B re-admitted)", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={`${ALLOCATOR_A}-cov04-include`}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Widen the window PAST B's last day → the engine drops B (member_count 2→1)
+    // and B relocates to the auto-excluded group.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+
+    // B's auto-excluded row carries BOTH the amber chip ("Outside window") and the
+    // cost-disclosing include button. The button label discloses the moved bound
+    // date (the intersection end = B's last day, 2026-01-06) + a whole-month cost
+    // ("−…mo") BEFORE applying — no modal.
+    const bRow = screen.getByTestId(`auto-excluded-row-${REF_WIN_B}`);
+    expect(within(bRow).getByText("Outside window")).toBeInTheDocument();
+    const includeBtn = within(bRow).getByTestId(
+      `auto-excluded-include-${REF_WIN_B}`,
+    );
+    expect(includeBtn).toHaveTextContent("Include → shortens window to");
+    // The disclosed bound (2026-01-06) + a "−N mo" delta are both in the label.
+    expect(includeBtn).toHaveTextContent("2026-01-06");
+    expect(includeBtn.textContent).toMatch(/−\d+ mo/);
+
+    // Click Include → narrows the window to the intersection that re-admits B.
+    // The REAL engine member_count RISES back to 2 (B is a member again) — the
+    // load-bearing oracle that the disclosed cost genuinely reached the engine.
+    act(() => {
+      fireEvent.click(includeBtn);
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+    expect(lastScenarioMetrics()?.member_ids).toEqual(
+      expect.arrayContaining([REF_WIN_A, REF_WIN_B]),
+    );
+    // B has left the auto-excluded group (it is a member again).
+    expect(
+      screen.queryByTestId(`auto-excluded-row-${REF_WIN_B}`),
+    ).not.toBeInTheDocument();
+    // The applied window is exactly the intersection [2026-01-01, 2026-01-06].
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+  });
+
+  // WR-01 — the HEAD-ragged branch. The tail case above only moves the END
+  // bound, so `movedBound === "end"` and the label reads "shortens window to
+  // {end}". A strategy that STARTS after the window start (span.first >
+  // window.start) moves only the START bound instead; disclosing that start
+  // date with end-bound phrasing ("shortens window to {start}") would tell the
+  // allocator they are trading away RECENT history when they are actually
+  // trading away EARLY history. The label must read "moves window start to
+  // {start}" and the disclosed date must be the moved START (the intersection
+  // start = LATE's first day), with a reconcilable month cost.
+  it("COVERAGE-04: a ragged-HEAD auto-excluded row discloses the moved START bound ('moves window start to {start}'), not end-bound phrasing (WR-01)", () => {
+    const REF_WIN_LATE = "strat-window-late";
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
+        mkWinStrat(REF_WIN_LATE, WIN_DATES.slice(3)), // 2026-01-04 … 2026-01-12 (ragged HEAD)
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_LATE]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_LATE]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={`${ALLOCATOR_A}-wr01-head`}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Default window = defaultWindowFor(spans) = [2026-01-04, 2026-01-12]
+    // (max firsts / min lasts) → both A and LATE are members.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+
+    // Widen the window START back to 2026-01-01 (BEFORE LATE's first day). LATE's
+    // span [01-04, 01-12] no longer covers [01-01, 01-12] → LATE is dropped for a
+    // HEAD reason (starts too late). A is the sole member.
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+    expect(lastScenarioMetrics()?.member_ids).toEqual([REF_WIN_A]);
+
+    // The include button discloses the moved START bound with start-bound
+    // phrasing — NOT "shortens window to" (which reads as an end move). The
+    // disclosed date is the intersection start (LATE's first day, 2026-01-04).
+    const lateRow = screen.getByTestId(`auto-excluded-row-${REF_WIN_LATE}`);
+    const includeBtn = within(lateRow).getByTestId(
+      `auto-excluded-include-${REF_WIN_LATE}`,
+    );
+    expect(includeBtn).toHaveTextContent("Include → moves window start to");
+    expect(includeBtn).not.toHaveTextContent("shortens window");
+    expect(includeBtn).toHaveTextContent("2026-01-04");
+    // The month cost is reconcilable with the shown (start) bound: the head
+    // pulls forward 3 days (01-01 → 01-04), which floors to a "−1 mo" delta.
+    expect(includeBtn.textContent).toMatch(/−1 mo/);
+
+    // Clicking Include narrows the window to the intersection that re-admits LATE
+    // (the START moves to 2026-01-04); the REAL engine member_count rises to 2.
+    act(() => {
+      fireEvent.click(includeBtn);
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+    expect(lastScenarioMetrics()?.member_ids).toEqual(
+      expect.arrayContaining([REF_WIN_A, REF_WIN_LATE]),
+    );
+    expect(
+      screen.queryByTestId(`auto-excluded-row-${REF_WIN_LATE}`),
+    ).not.toBeInTheDocument();
+    // The applied window is exactly the intersection [2026-01-04, 2026-01-12] —
+    // the disclosed start bound is the one that actually moved.
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-04 → 2026-01-12");
+  });
+
+  // WR-02 — the BOTH-ends-ragged branch. When a strategy begins after the window
+  // start AND ends before the window end, both bounds move; a single-date label
+  // ("shortens window to {end}") with a two-ended month cost cannot be
+  // reconciled (the head shift is silent). The label must name BOTH moved dates
+  // so the shown span and the "−{N} mo" cost agree.
+  it("COVERAGE-04: a BOTH-ends-ragged auto-excluded row discloses both moved bounds ('shortens window to {start}–{end}') so the month cost reconciles (WR-02)", () => {
+    const REF_WIN_MID = "strat-window-mid";
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
+        mkWinStrat(REF_WIN_MID, WIN_DATES.slice(3, 9)), // 2026-01-04 … 2026-01-09 (ragged BOTH ends)
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_MID]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_MID]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={`${ALLOCATOR_A}-wr02-both`}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Default window = [2026-01-04, 2026-01-09] (max firsts / min lasts) → both
+    // A and MID are members.
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+
+    // Widen the window to the full range [2026-01-01, 2026-01-12]. MID's span
+    // [01-04, 01-09] falls INSIDE on both ends → MID is dropped (ragged both
+    // ends). A is the sole member.
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+    expect(lastScenarioMetrics()?.member_ids).toEqual([REF_WIN_A]);
+
+    // The include button names BOTH moved bounds (start–end) — not a single date
+    // — so the "−{N} mo" cost (head + tail shift) reconciles against what is
+    // shown. The intersection that re-admits MID is [2026-01-04, 2026-01-09].
+    const midRow = screen.getByTestId(`auto-excluded-row-${REF_WIN_MID}`);
+    const includeBtn = within(midRow).getByTestId(
+      `auto-excluded-include-${REF_WIN_MID}`,
+    );
+    expect(includeBtn).toHaveTextContent("Include → shortens window to");
+    expect(includeBtn).toHaveTextContent("2026-01-04–2026-01-09");
+    // Head +3 days (01-01 → 01-04) and tail −3 days (01-12 → 01-09) = 6 days →
+    // floors to "−1 mo". The single number now names a span, not one bound.
+    expect(includeBtn.textContent).toMatch(/−1 mo/);
+
+    // Clicking Include narrows to the both-ends intersection; member_count rises.
+    act(() => {
+      fireEvent.click(includeBtn);
+    });
+    expect(lastScenarioMetrics()?.member_count).toBe(2);
+    expect(lastScenarioMetrics()?.member_ids).toEqual(
+      expect.arrayContaining([REF_WIN_A, REF_WIN_MID]),
+    );
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-04 → 2026-01-09");
+  });
+
+  it("COVERAGE-04: applying a window (the include path) NEVER reselects a manually-off strategy — manual-off stays sticky (T-58-05)", () => {
+    // Mount B as MANUALLY-OFF (selected: false). A stays selected. Because B is
+    // not selected it never appears in the auto-excluded group (that group is
+    // coverage-drops of SELECTED strategies only) — so it carries no include
+    // button. The invariant under test: the applyWindow path the include button
+    // uses NEVER flips `selected`, so no window move can silently re-admit B.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
+        mkWinStrat(REF_WIN_B, WIN_DATES.slice(0, 6)), // 2026-01-01 … 2026-01-06
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: false }, // B manually OFF
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+        })}
+        allocatorId={`${ALLOCATOR_A}-t5805-sticky`}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Only A is a member (B is manually off — never in the blend, never
+    // auto-excluded). B has no include button.
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+    expect(lastScenarioMetrics()?.member_ids).toEqual([REF_WIN_A]);
+    expect(
+      screen.queryByTestId(`auto-excluded-row-${REF_WIN_B}`),
+    ).not.toBeInTheDocument();
+
+    // Apply a window (the same setter the include button uses) whose bounds B
+    // WOULD cover if it were selected ([2026-01-01, 2026-01-06] = B's own span).
+    // The window-move MUST NOT flip B back on — applyWindow only moves the window,
+    // it never touches `selected` (WINDOW-03 subset-only / T-58-05). B stays off.
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-06" });
+    });
+    // Divisor stays 1 (A only) — B was NOT silently re-admitted by the window
+    // move; the manually-off strategy is sticky.
+    expect(lastScenarioMetrics()?.member_count).toBe(1);
+    expect(lastScenarioMetrics()?.member_ids).toEqual([REF_WIN_A]);
+  });
+
+  // Pre-landing review I3/I7 — composer-level DefaultChangeNote wiring. The
+  // locked "Now showing the common period…" copy may render ONLY while the
+  // ACTIVE window IS the common period AND that period truncates the union
+  // (the honest showingCommonPeriodTruncated gate). A custom window narrower
+  // than the union also truncates it — the old truncation-only gate rendered
+  // the common-period copy over it (a lie); this pins the fix falsifiably.
+  it("DefaultChangeNote: renders at the intersection default, is SUPPRESSED over a custom window (even one that truncates the union), and disappears on Full range", async () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-i7-note`}
+        allocatorMandate={null}
+      />,
+    );
+    // Default window = the intersection [01-01, 01-06], truncating the union
+    // ([01-01, 01-12]) → the note renders once storage hydration settles.
+    expect(
+      await screen.findByTestId("scenario-default-change-note"),
+    ).toBeInTheDocument();
+
+    // Apply a CUSTOM window [01-02, 01-12]: it truncates the union but is NOT
+    // the common period — the honest gate suppresses the note (the truncation-
+    // only gate would have kept showing the common-period copy here).
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-02", end: "2026-01-12" });
+    });
+    expect(
+      screen.queryByTestId("scenario-default-change-note"),
+    ).not.toBeInTheDocument();
+
+    // Snap back to the common period → the note is meaningful again.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Common period \(all in\)/i }),
+    );
+    expect(
+      await screen.findByTestId("scenario-default-change-note"),
+    ).toBeInTheDocument();
+
+    // Full-range preset → the union window truncates nothing → note gone.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Full range \(some drop out\)/i }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("scenario-default-change-note"),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("window: when the intersection is empty, the engine receives a state WITHOUT a window key (union path preserved)", () => {
@@ -5393,7 +5759,7 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w04-common`}
         allocatorMandate={null}
       />,
     );
@@ -5421,7 +5787,7 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w05-full`}
         allocatorMandate={null}
       />,
     );
@@ -5597,7 +5963,7 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-p01-brush`}
         allocatorMandate={null}
       />,
     );
@@ -5673,7 +6039,7 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-p01-axes`}
         allocatorMandate={null}
       />,
     );
@@ -5753,7 +6119,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w02-widen`}
         allocatorMandate={null}
       />,
     );
@@ -5777,7 +6143,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w03-narrow`}
         allocatorMandate={null}
       />,
     );
@@ -5821,7 +6187,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w03-subset`}
         allocatorMandate={null}
       />,
     );
@@ -5851,7 +6217,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w03-devinv`}
         allocatorMandate={null}
       />,
     );
@@ -5872,7 +6238,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-w03-selected`}
         allocatorMandate={null}
       />,
     );
@@ -5933,7 +6299,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-p02-reason`}
         allocatorMandate={null}
       />,
     );
@@ -5982,7 +6348,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-p02-head`}
         allocatorMandate={null}
       />,
     );
@@ -6004,7 +6370,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-p02-motion`}
         allocatorMandate={null}
       />,
     );
@@ -6084,7 +6450,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     render(
       <ScenarioComposer
         payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        allocatorId={ALLOCATOR_A}
+        allocatorId={`${ALLOCATOR_A}-p02-tokens`}
         allocatorMandate={null}
       />,
     );
@@ -6098,6 +6464,92 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     expect(cls).toMatch(/warning/);
     expect(cls).not.toMatch(/#[0-9a-fA-F]{6}/);
     expect(cls).not.toMatch(/\[\d+px\]/);
+  });
+
+  // Pre-landing review I8a — the includeCost===null branch: a SELECTED strategy
+  // whose span has NO intersection with the current window is auto-excluded
+  // with chip + honest reason, but there is NO window that could re-admit it,
+  // so the cost-disclosing include button must NOT render (a dead-end button
+  // would disclose a window the apply path cannot produce).
+  it("auto-excluded: a row with NO intersection with the current window shows chip + reason but NO include button (includeCost === null)", () => {
+    const REF_WIN_SHORT = "strat-window-short-head";
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
+        mkWinStrat(REF_WIN_SHORT, WIN_DATES.slice(0, 3)), // 01-01 … 01-03
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_SHORT]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_SHORT]: 0.5 },
+        startDates: {},
+      },
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-i8a-nocost`}
+        allocatorMandate={null}
+      />,
+    );
+    // Apply a window DISJOINT from SHORT's span ([01-05, 01-12] vs 01-01…01-03):
+    // SHORT is coverage-dropped and no intersection can re-admit it.
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-05", end: "2026-01-12" });
+    });
+    const row = screen.getByTestId(`auto-excluded-row-${REF_WIN_SHORT}`);
+    // Chip + honest reason still render (never color-only, never a dead end
+    // without explanation) …
+    expect(within(row).getByText("Outside window")).toBeInTheDocument();
+    expect(
+      within(row).getByTestId("auto-excluded-reason").textContent,
+    ).toMatch(/outside window/);
+    // … but the include affordance is honestly absent.
+    expect(
+      within(row).queryByTestId(`auto-excluded-include-${REF_WIN_SHORT}`),
+    ).not.toBeInTheDocument();
+  });
+
+  // Pre-landing review I8b — composition-list chip derivation: the chip is a
+  // projection of the row's `enabled` (selected axis) + the threaded
+  // coverageEligible map. An enabled+eligible added row reads "In blend"; a
+  // manually-toggled-off row reads "Excluded" (the sticky manual state, never
+  // the amber auto-excluded chip).
+  it("composition list: an enabled+eligible added row shows the 'In blend' chip; toggling it off flips the chip to 'Excluded'", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-i8b-chips`}
+        allocatorMandate={null}
+      />,
+    );
+    // Add a strategy whose id matches an adapter strategy (REF_WIN_A) so the
+    // row's coverageEligible entry is real. Enabled by default → "In blend".
+    addStrategy({
+      id: REF_WIN_A,
+      name: REF_WIN_A,
+      markets: [],
+      strategy_types: [],
+    });
+    const row = document.querySelector(
+      `[data-scope-ref="${REF_WIN_A}"]`,
+    ) as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(within(row).getByText("In blend")).toBeInTheDocument();
+    expect(within(row).queryByText("Excluded")).not.toBeInTheDocument();
+
+    // Toggle the row off (a MUTATING gesture — per-test allocator key above):
+    // the chip flips to the sticky manual "Excluded" state.
+    fireEvent.click(
+      within(row).getByRole("switch", {
+        name: `Toggle ${REF_WIN_A} on/off in scenario`,
+      }),
+    );
+    expect(within(row).getByText("Excluded")).toBeInTheDocument();
+    expect(within(row).queryByText("In blend")).not.toBeInTheDocument();
   });
 });
 
@@ -6249,5 +6701,505 @@ describe("ScenarioComposer — Phase 57 Plan 03 empty-intersection banner (WINDO
     expect(cls).toMatch(/warning/);
     expect(cls).not.toMatch(/#[0-9a-fA-F]{6}/);
     expect(cls).not.toMatch(/\[\d+px\]/);
+  });
+});
+
+// ===========================================================================
+// Phase 59 Plan 02 (PERSIST-01) — reopen seeds the coverage window from the
+// saved draft, and the provenance note is shown ONLY for an upgraded-v2 draft.
+//
+// The window is Phase-57 composer-LOCAL state (winStart/winEnd → coverageWindow),
+// seeded on mount from the intersection of the selected spans. On reopen:
+//   • a v3 draft WITH a window applies it VERBATIM (windowTouchedRef stays true →
+//     the auto-default effect never overrides it) — recompute at the saved
+//     window, no stored series replayed;
+//   • an upgraded-v2 (windowless) draft releases the window gate so the effect
+//     re-seeds the intersection ("common period") AND raises the provenance note
+//     (decode reason "upgraded_v2_windowless");
+//   • a fresh v3 draft with no window defaults to the intersection but NEVER
+//     shows the note.
+// The unequal-span book (A: 01-01…01-12, B: 01-01…01-06) gives a non-null
+// windowBounds (so the control + note slot mount) and a known intersection
+// [2026-01-01, 2026-01-06].
+// ===========================================================================
+describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)", () => {
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    browseOnAdd = null;
+    pickerOnApply = null;
+    lastPickerProps = null;
+    cleanup();
+  });
+
+  /** A v3 draft carrying an explicit coverage window (owner's saved window). */
+  function v3DraftWithWindow(window: { start: string; end: string }) {
+    return {
+      ...defaultDraftFromHoldings([
+        HOLDING_BTC,
+        HOLDING_ETH,
+      ] as Parameters<typeof defaultDraftFromHoldings>[0]),
+      window,
+    };
+  }
+
+  /** A pre-v1.5 v2 draft (no window). The codec upgrades it on read to outcome
+   *  "ok" + reason "upgraded_v2_windowless". Built by taking a valid current
+   *  draft and stamping schema_version back to the prior version. */
+  function upgradedV2Draft() {
+    return {
+      ...defaultDraftFromHoldings([
+        HOLDING_BTC,
+        HOLDING_ETH,
+      ] as Parameters<typeof defaultDraftFromHoldings>[0]),
+      schema_version: 2,
+    };
+  }
+
+  /** A fresh v3 draft with no window (a v3 saved before a window was chosen). */
+  function freshV3Windowless() {
+    return defaultDraftFromHoldings([
+      HOLDING_BTC,
+      HOLDING_ETH,
+    ] as Parameters<typeof defaultDraftFromHoldings>[0]);
+  }
+
+  it("PERSIST-01: reopening a v3 draft WITH a window seeds the composer window VERBATIM (readout shows the saved window, not the intersection default), no provenance note", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-v3win`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    // Baseline: the mount auto-default seeded the intersection [01-01, 01-06].
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+
+    // Reopen a v3 draft whose SAVED window is a NARROWER [01-02, 01-05] — a value
+    // the intersection default would never produce, so it can only be the applied
+    // saved window (proving reopen seeds from draft.window, not a re-derivation).
+    act(() => {
+      openSaved?.({
+        id: "saved-v3-win",
+        name: "V3 with window",
+        draft: v3DraftWithWindow({ start: "2026-01-02", end: "2026-01-05" }),
+      });
+    });
+
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-02 → 2026-01-05");
+    // No provenance note for a fresh v3-with-window open.
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("PERSIST-01: reopening an upgraded-v2 (windowless) draft defaults the window to the intersection AND shows the provenance note", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-v2up`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    // First narrow the window to prove the reopen RESETS it to the intersection
+    // default (not merely inherits the mount seed).
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply?.({ start: "2026-01-03", end: "2026-01-04" });
+    });
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-03 → 2026-01-04");
+    // No note yet — this is a live edit, not an upgraded-v2 reopen.
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+
+    // Reopen a pre-v1.5 v2 draft — the codec upgrades it (ok + provenance) and
+    // the composer defaults the window to the intersection [01-01, 01-06].
+    act(() => {
+      openSaved?.({
+        id: "saved-v2",
+        name: "Pre-window scenario",
+        draft: upgradedV2Draft(),
+      });
+    });
+
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+    // The provenance note appears with the locked copy + the escape hatch.
+    const note = screen.getByTestId("scenario-provenance-note");
+    expect(note.textContent).toMatch(/predates coverage windows/);
+    expect(
+      within(note).getByRole("button", { name: /Show full range/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("PERSIST-01: reopening a fresh v3 draft with no window defaults to the intersection but NEVER shows the provenance note", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-v3fresh`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    act(() => {
+      openSaved?.({
+        id: "saved-v3-fresh",
+        name: "Fresh v3 windowless",
+        draft: freshV3Windowless(),
+      });
+    });
+
+    // Intersection default applies (windowless v3 → same rule) …
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+    // … but a fresh v3 is NOT a pre-window upgrade, so no provenance note.
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("PERSIST-01: the provenance note is EPHEMERAL — opening a fresh v3 after an upgraded-v2 open clears it", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-ephemeral`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    // Upgraded-v2 open → note shows.
+    act(() => {
+      openSaved?.({
+        id: "saved-v2-a",
+        name: "Old A",
+        draft: upgradedV2Draft(),
+      });
+    });
+    expect(
+      screen.getByTestId("scenario-provenance-note"),
+    ).toBeInTheDocument();
+
+    // Now open a fresh v3-with-window scenario → the note must clear (it does not
+    // persist across opens — a per-scenario provenance signal, Pitfall 3).
+    act(() => {
+      openSaved?.({
+        id: "saved-v3-b",
+        name: "Fresh B",
+        draft: v3DraftWithWindow({ start: "2026-01-02", end: "2026-01-05" }),
+      });
+    });
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("review WR-01: Reset clears the reopened scenario's window — the fresh live-book draft re-seeds the intersection default, not the prior open's window", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-reset-window`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    // Open a saved scenario whose window is NARROWER than the intersection
+    // default — a value only the saved draft can produce.
+    act(() => {
+      openSaved?.({
+        id: "saved-v3-win-reset",
+        name: "V3 with window",
+        draft: v3DraftWithWindow({ start: "2026-01-02", end: "2026-01-05" }),
+      });
+    });
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-02 → 2026-01-05");
+
+    // Reset (footer Reset → confirm). The fresh draft is a v3 live book — the
+    // prior open's FOREIGN window must not linger (the Phase-57 "sticky by
+    // design" rationale covers deselect, NOT reset): the auto-default re-seeds
+    // the intersection [2026-01-01, 2026-01-06] like any other fresh open.
+    fireEvent.click(screen.getByTestId("scenario-footer-reset"));
+    fireEvent.click(screen.getByRole("button", { name: /Discard draft/i }));
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+  });
+
+  it("review WR-02: dismissing the note then reopening the SAME upgraded-v2 scenario re-shows it (dismissal is per-OPEN, not per-scenario-id)", async () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-reopen-same`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    const sameRow = {
+      id: "saved-v2-same",
+      name: "Old same",
+      draft: upgradedV2Draft(),
+    };
+
+    // Open the upgraded-v2 scenario → note shows; dismiss it.
+    act(() => {
+      openSaved?.(sameRow);
+    });
+    const note = screen.getByTestId("scenario-provenance-note");
+    fireEvent.click(within(note).getByRole("button", { name: /Dismiss/i }));
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("scenario-provenance-note"),
+      ).not.toBeInTheDocument();
+    });
+
+    // Reopen the SAME scenario (same id, same draft). The loadedScenarioId key
+    // alone would not remount the (still-mounted, null-rendering) note — the
+    // per-open nonce must, so the note re-shows fresh (Pitfall-3 contract:
+    // "remounting the component (a fresh reopen) re-shows it").
+    act(() => {
+      openSaved?.({ ...sameRow, draft: upgradedV2Draft() });
+    });
+    expect(
+      screen.getByTestId("scenario-provenance-note"),
+    ).toBeInTheDocument();
+  });
+
+  it("review WR-03: an upgraded-v2 reopen whose selected set has NO common period suppresses the note — the engine runs the union path and the 'common period' copy would be false", () => {
+    // Two DISJOINT spans → defaultWindowFor === null → the auto-default seeds
+    // nothing → the engine stays on the union-when-absent path.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 4)), // 01-01 … 01-04
+        mkWinStrat(REF_WIN_B, WIN_DATES.slice(8, 12)), // 01-09 … 01-12
+      ],
+      state: {
+        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
+        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
+        startDates: {},
+      },
+    });
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-disjoint-v2`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    act(() => {
+      openSaved?.({
+        id: "saved-v2-disjoint",
+        name: "Old disjoint",
+        draft: upgradedV2Draft(),
+      });
+    });
+
+    // The engine is on the union path (no window seeded) — the readout says so.
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("All history");
+    // The note would claim "showing the common period" — a false statement with
+    // no common period — so it is honestly suppressed …
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+    // … while the Phase-57 empty-intersection banner still guides the user.
+    expect(
+      screen.getByTestId("scenario-empty-intersection-banner"),
+    ).toBeInTheDocument();
+  });
+
+  it("ship-review RT-2: clicking the note's 'Show full range' applies the union AND removes the note — no stale 'showing the common period' banner over a full-range window", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-rt2-fullrange`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    // Upgraded-v2 open → the note shows over the intersection default.
+    act(() => {
+      openSaved?.({
+        id: "saved-v2-rt2a",
+        name: "Old RT2a",
+        draft: upgradedV2Draft(),
+      });
+    });
+    const note = screen.getByTestId("scenario-provenance-note");
+
+    // Take the escape hatch. The window becomes the UNION [01-01, 01-12] — the
+    // note's locked "showing the common period" copy is now false, so BOTH the
+    // component's dismiss-on-action and the composer's
+    // activeWindowIsCommonPeriod gate must drop it.
+    act(() => {
+      fireEvent.click(
+        within(note).getByRole("button", { name: /Show full range/i }),
+      );
+    });
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-12");
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("ship-review RT-2: a custom-window apply while the note is up removes it (the active window is no longer the common period)", () => {
+    mountUnequalSpanBook();
+    let openSaved:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-rt2-custom`}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          openSaved = open;
+        }}
+      />,
+    );
+
+    act(() => {
+      openSaved?.({
+        id: "saved-v2-rt2b",
+        name: "Old RT2b",
+        draft: upgradedV2Draft(),
+      });
+    });
+    expect(
+      screen.getByTestId("scenario-provenance-note"),
+    ).toBeInTheDocument();
+
+    // Apply a CUSTOM window (narrower than the common period). The component's
+    // own dismissal never fired — ONLY the composer's honest render gate
+    // (activeWindowIsCommonPeriod, the same equality the DefaultChangeNote
+    // gate uses) can remove the note here.
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply?.({ start: "2026-01-02", end: "2026-01-05" });
+    });
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-02 → 2026-01-05");
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("ship-review RT-5: after an Include click the focus lands on the coverage-window control (never dropped to <body> with the unmounted row)", () => {
+    mountUnequalSpanBook();
+    render(
+      <ScenarioComposer
+        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        allocatorId={`${ALLOCATOR_A}-p59-rt5-focus`}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Widen past B's last day → B is auto-excluded and its row carries the
+    // cost-disclosing Include button (the COVERAGE-04 flow).
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+    const includeBtn = screen.getByTestId(
+      `auto-excluded-include-${REF_WIN_B}`,
+    );
+    includeBtn.focus();
+    expect(document.activeElement).toBe(includeBtn);
+
+    // Include narrows the window → B re-admitted → the focused button (and its
+    // row) unmounts. Without explicit focus management, focus falls to <body>;
+    // the RT-5 handler moves it deterministically to the coverage-window
+    // control — the element whose value the click just changed.
+    act(() => {
+      fireEvent.click(includeBtn);
+    });
+    expect(
+      screen.queryByTestId(`auto-excluded-row-${REF_WIN_B}`),
+    ).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(
+      screen.getByTestId("scenario-coverage-window"),
+    );
   });
 });

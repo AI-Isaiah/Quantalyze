@@ -26,6 +26,7 @@ import {
   addStrategyBridge,
   removeAddedStrategy,
   setWeightOverride,
+  setWindow,
   renormalizeWeights,
   scenarioDraftCodec,
   SCENARIO_SCHEMA_VERSION,
@@ -368,6 +369,51 @@ describe("setWeightOverride", () => {
 });
 
 // ---------------------------------------------------------------------------
+// setWindow — v1.5 PERSIST-01 (review CR-01): the ONE production writer of
+// draft.window. A user-applied coverage window must land IN the draft (so
+// autosave / save / share / compare carry it), while a never-touched window
+// stays absent — the transform is only ever invoked from the gesture path.
+// ---------------------------------------------------------------------------
+describe("setWindow", () => {
+  const WINDOW = { start: "2026-01-02", end: "2026-01-05" };
+
+  it("writes the window onto the draft (new object, input not mutated) and stamps lastEditedAt", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    expect(initial.window).toBeUndefined();
+    const out = setWindow(initial, WINDOW);
+    expect(out).not.toBe(initial);
+    expect(out.window).toEqual(WINDOW);
+    // Defensive copy — mutating the caller's range object later can't reach in.
+    expect(out.window).not.toBe(WINDOW);
+    // The input draft is untouched (immutability contract of every transform).
+    expect(initial.window).toBeUndefined();
+    // lastEditedAt is refreshed (an applied window is a real draft edit).
+    expect(out.lastEditedAt >= initial.lastEditedAt).toBe(true);
+  });
+
+  it("M9-style no-op: setting the SAME window returns the SAME draft reference (no autosave churn)", () => {
+    const withWindow = setWindow(defaultDraftFromHoldings(HOLDINGS_2), WINDOW);
+    const again = setWindow(withWindow, { ...WINDOW });
+    expect(again).toBe(withWindow);
+  });
+
+  it("replaces a previously-set window (a second gesture wins)", () => {
+    const first = setWindow(defaultDraftFromHoldings(HOLDINGS_2), WINDOW);
+    const second = setWindow(first, { start: "2026-01-01", end: "2026-01-12" });
+    expect(second.window).toEqual({ start: "2026-01-01", end: "2026-01-12" });
+  });
+
+  it("the windowed draft round-trips the codec at the current schema version", () => {
+    const def = defaultDraftFromHoldings(HOLDINGS_2);
+    const withWindow = setWindow(def, WINDOW);
+    const codec = scenarioDraftCodec(def);
+    const r = codec.decode(codec.encode(withWindow));
+    expect(r.outcome).toBe("ok");
+    expect(r.value.window).toEqual(WINDOW);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // scenarioDraftCodec — B7a-2 zod parse + version trichotomy (M-0153)
 // ---------------------------------------------------------------------------
 describe("scenarioDraftCodec", () => {
@@ -434,6 +480,114 @@ describe("scenarioDraftCodec", () => {
   it("encode is byte-compatible with the pre-B7 JSON.stringify(draft)", () => {
     const d = validV1();
     expect(codec.encode(d)).toBe(JSON.stringify(d));
+  });
+
+  // -------------------------------------------------------------------------
+  // v1.5 PERSIST-01 — the NON-DESTRUCTIVE v2→v3 upgrade (Phase 59 Plan 01).
+  //
+  // WHY these tests exist (Rule 9 — intent, not behavior): the 2→3 version
+  // bump collides with the codec's reset-on-mismatch trichotomy. A naive bump
+  // makes EVERY stored v2 (pre-v1.5, windowless) draft fall into the final
+  // `reset` return (scenario-state.ts:653) → the user's saved scenario is
+  // SILENTLY DELETED (reopen → fresh live book; share → honest-absence/404;
+  // compare → older-format stamp + NULL_METRICS). Test A pins "no saved
+  // scenario is dropped on the bump"; Test C pins "forward-compat is not
+  // collateral damage of the bump". Written RED-first — Test A FAILS against
+  // the un-bumped (constant=2) code because a schema_version:2 blob decodes
+  // `ok` today (it equals the current version) rather than carrying the
+  // `upgraded_v2_windowless` provenance marker.
+  // -------------------------------------------------------------------------
+
+  // A windowless v2 draft: a valid ScenarioDraft shape hard-coded at the PRIOR
+  // schema_version (2, NOT relative to the constant) with NO `window` field.
+  // Hard-coded 2 because the test targets the specific pre-v1.5 stored version.
+  const windowlessV2 = () => ({
+    schema_version: 2,
+    init_holdings_fingerprint: "fp",
+    toggleByScopeRef: { "holding:binance:BTC:spot": true },
+    addedStrategies: [],
+    weightOverrides: { "holding:binance:BTC:spot": 1 },
+    lastEditedAt: "2026-04-25T00:00:00.000Z",
+  });
+
+  it("PERSIST-01 Test A — v2 windowless draft decodes ok (NEVER reset) with the upgraded_v2_windowless provenance marker", () => {
+    const r = codec.decode(JSON.stringify(windowlessV2()));
+    // The load-bearing assertion: a valid v2 draft must NOT be dropped.
+    expect(r.outcome).toBe("ok");
+    expect(r.reason).toBe("upgraded_v2_windowless");
+    // Upgraded in-memory to the current version; next save re-persists at 3.
+    expect(r.value.schema_version).toBe(SCENARIO_SCHEMA_VERSION);
+    // Window intentionally left undefined — consumers default it via
+    // defaultWindowFor() on open (the provenance note then renders).
+    expect(r.value.window).toBeUndefined();
+    // The draft's real content survived the upgrade unchanged.
+    expect(r.value.weightOverrides["holding:binance:BTC:spot"]).toBe(1);
+  });
+
+  it("PERSIST-01 Test B — genuinely-corrupt v2 blob still resets (schema_invalid), NOT ok", () => {
+    // A v2 draft whose shape fails scenarioDraftSchema.safeParse (toggleByScopeRef
+    // is an array, mirroring the M-0153 corruption case). Malformed data must
+    // NOT be adopted by the non-destructive branch — it falls through to reset.
+    const corruptV2 = { ...windowlessV2(), toggleByScopeRef: ["not", "an", "object"] };
+    const r = codec.decode(JSON.stringify(corruptV2));
+    expect(r.outcome).toBe("reset");
+    expect(r.reason).toBe("schema_invalid");
+    expect(r.value).toBe(def);
+  });
+
+  it("PERSIST-01 Test C — a current+1 (==4) draft still decodes readonly(version_ahead) after the bump", () => {
+    // Pitfall 2: the trichotomy is relative to SCENARIO_SCHEMA_VERSION, so the
+    // existing `ahead` fixture at SCENARIO_SCHEMA_VERSION + 1 self-adjusts to 4.
+    // Assert the explicit 4 too so the forward-compat path is pinned by value.
+    const ahead = { ...validV1(), schema_version: SCENARIO_SCHEMA_VERSION + 1 };
+    expect(SCENARIO_SCHEMA_VERSION + 1).toBe(4);
+    const r = codec.decode(JSON.stringify(ahead));
+    expect(r.outcome).toBe("readonly");
+    expect(r.reason).toBe("version_ahead");
+    expect(r.value.weightOverrides["holding:binance:BTC:spot"]).toBe(1);
+  });
+
+  it("PERSIST-01 Test D — a fresh v3 draft WITH a window decodes ok(reason null) and round-trips the window", () => {
+    // A genuine current-version draft carrying a window: the provenance marker
+    // is v2-UPGRADE-ONLY, so a v3-with-window decodes reason:null, NOT the
+    // marker. The window value survives verbatim.
+    const window = { start: "2024-01-01", end: "2024-12-31" };
+    const v3WithWindow: ScenarioDraft = { ...validV1(), window };
+    const r = codec.decode(JSON.stringify(v3WithWindow));
+    expect(r.outcome).toBe("ok");
+    expect(r.reason).toBeNull();
+    expect(r.value.window).toEqual(window);
+  });
+
+  // Pre-landing review I5 — the window shape pins. DECISION: the codec keeps
+  // its established corrupt-v3 handling for a malformed window (regex-fail →
+  // safeParse fail → reset). Every first-party writer emits exact `YYYY-MM-DD`
+  // bounds, so a non-ISO window only exists via corruption/tampering — resetting
+  // it is consistent with the M-0153 schema_invalid path, not destructive to
+  // any draft our own code can produce. (The rejected alternative — keep
+  // .max(32) + a normalizing decode — would silently adopt garbage bounds.)
+  it("I5 pin (a) — a v3 draft with a NON-ISO window string → reset(schema_invalid), the codec's corrupt-v3 path", () => {
+    const badWindow = {
+      ...validV1(),
+      window: { start: "not-a-date", end: "2024-12-31" },
+    };
+    const r = codec.decode(JSON.stringify(badWindow));
+    expect(r.outcome).toBe("reset");
+    expect(r.reason).toBe("schema_invalid");
+    expect(r.value).toBe(def);
+  });
+
+  // Deliberately NO start<=end refine: a refine failure on a v3 draft would
+  // route to reset and could DELETE a user's draft over an inverted-but-well-
+  // formed window. The codec adopts it verbatim; the ENGINE degrades honestly
+  // downstream (no strategy covers an inverted window → member_count 0 class,
+  // never a fabricated curve).
+  it("I5 pin (b) — an INVERTED (start > end) well-formed window decodes ok and round-trips verbatim (engine degrades honestly downstream)", () => {
+    const inverted = { start: "2024-12-31", end: "2024-01-01" };
+    const r = codec.decode(JSON.stringify({ ...validV1(), window: inverted }));
+    expect(r.outcome).toBe("ok");
+    expect(r.reason).toBeNull();
+    expect(r.value.window).toEqual(inverted);
   });
 
   // Review-hardening (pr-test-analyzer) — pin every non-canonical schema_version

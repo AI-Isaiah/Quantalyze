@@ -24,6 +24,7 @@ import { z } from "zod";
 import { holdingScopeKey } from "@/lib/keys";
 import type { DecodeResult, StorageCodec } from "@/lib/storage/cross-tab";
 import { stripPoisonKeys } from "@/lib/storage/codecs";
+import type { CoverageWindow } from "@/lib/scenario-window";
 
 /**
  * H5 — phantom branded type. At runtime this is just a string; at compile time
@@ -53,8 +54,23 @@ export const SCENARIO_STORAGE_KEY_BASE = "allocations.scenario_v0_15";
  *  and a diffCount that enables Commit while handleCommit produces nothing). The
  *  bump drops those legacy drafts on load so every draft starts from the current
  *  holdings with all holdings included — the clean root fix, not a per-consumer
- *  guard against legacy toggle state. */
-export const SCENARIO_SCHEMA_VERSION = 2;
+ *  guard against legacy toggle state.
+ *
+ *  v2 → v3 (v1.5 PERSIST-01, coverage window): adds an OPTIONAL, additive
+ *  `window?: CoverageWindow` field. Unlike v1→v2, this transition is
+ *  NON-DESTRUCTIVE — a v2 draft is fully valid, just windowless, so it MUST
+ *  upgrade on read (outcome "ok" + a transient provenance marker), never reset.
+ *  See the `SCENARIO_SCHEMA_VERSION_PREV` branch in scenarioDraftCodec.decode:
+ *  reusing the reset-on-mismatch path here would SILENTLY DELETE every saved
+ *  scenario (Phase-59 Pitfall 1). */
+export const SCENARIO_SCHEMA_VERSION = 3;
+
+/** The immediately-prior schema version. Keys the NON-DESTRUCTIVE v2→v3 upgrade
+ *  branch in the codec (a named constant is clearer than a bare
+ *  `SCENARIO_SCHEMA_VERSION - 1` and documents WHY that branch exists). Bump
+ *  this to the old CURRENT whenever SCENARIO_SCHEMA_VERSION is bumped and the
+ *  transition is non-destructive. */
+export const SCENARIO_SCHEMA_VERSION_PREV = 2;
 
 /** N1 — eliminates cross-tenant collision at the persistence layer. Returns
  *  "allocations.scenario_v0_15.{allocatorId}". */
@@ -92,6 +108,14 @@ export interface ScenarioDraft {
    * load unchanged; the zod codec marks it optional so no schema_version bump.
    */
   userWeightOverrides?: Record<string, number>;
+  /**
+   * v1.5 PERSIST-01 — the saved coverage window (the honest co-live blend
+   * window). Optional + additive: a v2 (pre-v1.5) draft omits it and defaults
+   * to the intersection via `defaultWindowFor()` on open. Same `CoverageWindow`
+   * shape as `ScenarioState.window` so the value threads unchanged into the
+   * engine. Left undefined by the non-destructive v2→v3 upgrade branch.
+   */
+  window?: CoverageWindow;
   lastEditedAt: string;
 }
 
@@ -519,6 +543,40 @@ export function applyWeightOverrides(
   };
 }
 
+/**
+ * v1.5 PERSIST-01 (review CR-01) — set the draft's saved coverage window.
+ *
+ * This is the ONE production writer of `draft.window`: the composer's
+ * `applyWindow` (user gesture — preset / custom picker / "Show full range")
+ * writes through here so the localStorage autosave, the save routes' POST/PUT
+ * payload, a minted share, and compare all carry the applied window. The
+ * WINDOW-01 intersection auto-default deliberately does NOT route here — a
+ * never-touched window stays absent so a windowless draft saves windowless and
+ * reopen re-derives the default (force-persisting the default would freeze it
+ * against future coverage growth). Clearing happens by draft REPLACEMENT
+ * (reset / hydrateFromSaved), never by a clear-gesture, so no undefined arm.
+ *
+ * M9-style no-op: setting the SAME window returns the SAME draft reference
+ * (no lastEditedAt churn, no autosave write).
+ */
+export function setWindow(
+  draft: ScenarioDraft,
+  window: CoverageWindow,
+): ScenarioDraft {
+  if (
+    draft.window &&
+    draft.window.start === window.start &&
+    draft.window.end === window.end
+  ) {
+    return draft;
+  }
+  return {
+    ...draft,
+    window: { start: window.start, end: window.end },
+    lastEditedAt: new Date().toISOString(),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // B7 cross-tab storage codec — zod-validated parse + version trichotomy.
 // The cross-tab primitive (useCrossTabStorage) owns the localStorage
@@ -580,6 +638,22 @@ export const scenarioDraftSchema = z.object({
   addedStrategies: z.array(addedStrategySchema).max(200),
   weightOverrides: boundedRecord(z.number(), "weightOverrides"),
   userWeightOverrides: boundedRecord(z.number(), "userWeightOverrides").optional(),
+  // v1.5 PERSIST-01 — the saved coverage window. Optional so v2 (windowless)
+  // drafts still validate. Each bound must be an exact `YYYY-MM-DD` ISO day
+  // (pre-landing review I5): every first-party writer emits that shape, so a
+  // non-ISO bound is corruption/tampering and fails safeParse → the codec's
+  // established corrupt-v3 reset path (the regex subsumes the old `.max(32)`
+  // FIX A storage-poison bound). Deliberately NO `start <= end` refine — a
+  // refine failure on a v3 draft would route to reset and could DELETE a
+  // user's draft over an inverted-but-well-formed window; the engine degrades
+  // honestly on inversion instead (member_count 0 class, never a fabricated
+  // curve).
+  window: z
+    .object({
+      start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    })
+    .optional(),
   // ISO-8601 timestamp (`new Date().toISOString()` is 24 chars); 64 is generous.
   lastEditedAt: z.string().max(64),
 });
@@ -644,12 +718,47 @@ export function scenarioDraftCodec(
         return { value: defaultDraft, outcome: "reset", reason: "schema_invalid" };
       }
 
-      // Missing / lower / non-integer / non-numeric version — no legacy
-      // migration exists (CURRENT === 1, no prior persisted shape). A
-      // non-integer like 1.5 reaches here too (the readonly guard above requires
-      // Number.isInteger). Reset, mirroring the pre-B7 strict
-      // `schema_version !== 1 → null` behavior, but fail-loud (the primitive
-      // emits a console.warn + Sentry breadcrumb on "reset").
+      // v1.5 PERSIST-01 — NON-DESTRUCTIVE v2→v3 upgrade. This is the ONE
+      // genuinely-new decode branch in Phase 59. A v2 (pre-window) draft is
+      // FULLY VALID, just windowless — `window?` is optional so it safeParses
+      // against the current schema. Return "ok" (NOT reset): resetting here
+      // would DELETE the user's saved scenario (Phase-59 Pitfall 1 — in reopen
+      // it becomes a fresh live book, in share honest-absence/404, in compare
+      // the older-format stamp + NULL_METRICS). Structurally mirrors the
+      // `version_ahead → readonly` branch's safeParse-then-return shape, but
+      // returns "ok" + a transient provenance marker. This branch MUST land in
+      // the SAME change as the 2→3 version bump — the bump without it drops
+      // every stored v2 scenario. A genuinely-corrupt v2 blob still falls to
+      // reset (schema_invalid). `window` is left undefined so consumers default
+      // it via defaultWindowFor() on open; the marker is read (not persisted)
+      // by hydrate / share-resolve to render the provenance note (Pitfall 3).
+      // Ship-review RT-4 (accepted rollout transient): during a mixed-version
+      // deploy, an OLD-code tab's in-flight 150ms debounced v2 write can flush
+      // over a just-written v3 blob before that tab adopts readonly
+      // (cross-tab flush-before-adopt), reverting a just-applied window to the
+      // auto-default ONCE — bounded, self-healing (the next v3 write wins),
+      // localStorage-only.
+      if (rawVersion === SCENARIO_SCHEMA_VERSION_PREV) {
+        const safe = scenarioDraftSchema.safeParse(parsed);
+        if (safe.success) {
+          return {
+            value: {
+              ...(safe.data as unknown as ScenarioDraft),
+              // Upgrade in-memory; the next save re-serializes at v3.
+              schema_version: SCENARIO_SCHEMA_VERSION,
+            },
+            outcome: "ok",
+            reason: "upgraded_v2_windowless",
+          };
+        }
+        return { value: defaultDraft, outcome: "reset", reason: "schema_invalid" };
+      }
+
+      // Missing / lower (< PREV) / non-integer / non-numeric version — no legacy
+      // migration exists for those shapes. A non-integer like 1.5 reaches here
+      // too (the readonly guard above requires Number.isInteger). Reset,
+      // fail-loud (the primitive emits a console.warn + Sentry breadcrumb on
+      // "reset").
       return { value: defaultDraft, outcome: "reset", reason: "version_mismatch" };
     },
     encode(value: ScenarioDraft): string {

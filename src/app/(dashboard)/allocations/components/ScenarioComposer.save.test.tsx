@@ -31,7 +31,9 @@ import { render, screen, fireEvent, act, cleanup, waitFor } from "@testing-libra
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import {
   computeHoldingsFingerprint,
+  scenarioStorageKey,
   SCENARIO_SCHEMA_VERSION,
+  SCENARIO_SCHEMA_VERSION_PREV,
   type ScenarioDraft,
 } from "../lib/scenario-state";
 
@@ -104,6 +106,10 @@ vi.mock("../lib/scenario-adapter", () => {
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer, type SavedScenarioRow } from "./ScenarioComposer";
+// The MOCKED builder (factory above) — the review-CR-01 windowed-save tests
+// point it at a two-strategy unequal-span book so the coverage-window control
+// mounts and the REAL preset-gesture → Save path can be driven end-to-end.
+import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 
 // --- localStorage mock ----------------------------------------------------
 
@@ -471,18 +477,22 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
   it("T_SAVE6 Open(reset row, older incompatible schema) → renders the relabeled 'older format' notice and does NOT hydrate (codec trichotomy non-regression; never a silent empty composer)", () => {
     renderComposer();
 
-    // schema_version below the current → codec returns "reset". A "reset" must
-    // NEVER silently load the saved draft (no hydrate). We plant a DISTINCTIVE
-    // added strategy in the reset draft: if the reset branch wrongly hydrated,
-    // that strategy's name would render in the composition list. Its ABSENCE is
-    // the non-vacuous proof that hydrateFromSaved was NOT called on the reset
-    // branch (Task 3 acceptance: trichotomy preserved, reset does not hydrate).
+    // A schema_version BELOW the non-destructive-upgrade window (< PREV) is a
+    // genuinely-incompatible legacy shape → codec returns "reset". (v1.5: the
+    // v2→v3 transition is non-destructive, so PREV (2) now upgrades to "ok"; a
+    // truly-old version must be < PREV to still reset. Using PREV - 1 keeps this
+    // fixture self-adjusting to the version constants.) A "reset" must NEVER
+    // silently load the saved draft (no hydrate). We plant a DISTINCTIVE added
+    // strategy in the reset draft: if the reset branch wrongly hydrated, that
+    // strategy's name would render in the composition list. Its ABSENCE is the
+    // non-vacuous proof that hydrateFromSaved was NOT called on the reset branch
+    // (Task 3 acceptance: trichotomy preserved, reset does not hydrate).
     const olderRow: SavedScenarioRow = {
       id: SAVED_ID,
       name: "Ancient",
       draft: {
         ...okDraft(),
-        schema_version: SCENARIO_SCHEMA_VERSION - 1,
+        schema_version: SCENARIO_SCHEMA_VERSION_PREV - 1,
         addedStrategies: [
           {
             id: "reset-marker-strat",
@@ -634,5 +644,335 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     expect(
       screen.getByRole("button", { name: /Update portfolio/i }),
     ).toBeInTheDocument();
+  });
+});
+
+// ===========================================================================
+// Phase 59 review CR-01 (PERSIST-01 write path) — the composer's APPLIED
+// coverage window must be persisted inside the SAVED draft.
+//
+// Every pre-existing Phase-59 test exercised externally-crafted windowed
+// fixtures and stopped at the route boundary; none drove "apply a window →
+// Save → the POSTed draft carries it". These tests drive the REAL gesture →
+// save path:
+//   • a preset click (applyWindow write-through) → POST body draft.window
+//     equals EXACTLY the applied window;
+//   • a never-touched window (only the WINDOW-01 intersection auto-default
+//     seeded) → the POSTed draft carries NO window key (the default is
+//     re-derived on reopen, never force-persisted);
+//   • Update (PUT) of a reopened v3-with-window row round-trips the saved
+//     window verbatim.
+//
+// The adapter mock is pointed at a two-strategy unequal-span book (A:
+// 2026-01-01…01-12, B: 2026-01-01…01-06) so windowBounds is non-null (the
+// control mounts), the auto-default intersection is [01-01, 01-06], and the
+// Full-range preset target is the DISTINCT union [01-01, 01-12] — proving the
+// saved value is the applied window, not the default.
+// ===========================================================================
+describe("ScenarioComposer — review CR-01: the applied coverage window is persisted in the save payload", () => {
+  const WIN_DATES = Array.from({ length: 12 }, (_, i) =>
+    `2026-01-${String(i + 1).padStart(2, "0")}`,
+  );
+
+  function mkWinStrat(id: string, dates: string[]) {
+    return {
+      id,
+      name: id,
+      codename: null,
+      disclosure_tier: "public",
+      strategy_types: [],
+      markets: [],
+      start_date: dates[0],
+      daily_returns: dates.map((date, i) => ({
+        date,
+        value: [0.01, -0.008, 0.012, -0.005, 0.006][i % 5],
+      })),
+      cagr: null,
+      sharpe: null,
+      volatility: null,
+      max_drawdown: null,
+    };
+  }
+
+  /** Point the mocked adapter at the unequal-span two-strategy book. */
+  function mountUnequalSpanBook(): void {
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [
+        mkWinStrat("strat-window-A", WIN_DATES), // 2026-01-01 … 2026-01-12
+        mkWinStrat("strat-window-B", WIN_DATES.slice(0, 6)), // … 2026-01-06
+      ],
+      state: {
+        selected: { "strat-window-A": true, "strat-window-B": true },
+        weights: { "strat-window-A": 0.5, "strat-window-B": 0.5 },
+        startDates: {},
+      },
+    } as unknown as ReturnType<typeof buildStrategyForBuilderSet>);
+  }
+
+  // WINDOW-06 flake lesson (72dc23a4): the 150ms draft-autosave debounce can
+  // leak a pending write across tests sharing an allocator key — every test in
+  // this describe renders with its OWN allocator id.
+  function renderWindowedComposer(allocatorId: string) {
+    return render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={allocatorId}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          registeredOpen = open;
+        }}
+      />,
+    );
+  }
+
+  afterEach(() => {
+    // Restore the factory's empty projection so this describe's fixture can
+    // never bleed into another suite in this file.
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    } as unknown as ReturnType<typeof buildStrategyForBuilderSet>);
+  });
+
+  it("T_WIN_SAVE1 applying a window (Full-range preset) then Save → the POSTed draft carries EXACTLY the applied window", async () => {
+    mountUnequalSpanBook();
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "Windowed" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWindowedComposer(`${ALLOCATOR_A}-cr01-post-window`);
+
+    // Sanity: the control mounted and the auto-default seeded the intersection.
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+
+    // REAL gesture: the Full-range preset applies the union [01-01, 01-12] — a
+    // value the intersection default can never produce.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Full range \(some drop out\)/i }),
+    );
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-12");
+
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Windowed" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe("/api/allocator/scenario/saved");
+    expect((init as RequestInit).method).toBe("POST");
+    const body = JSON.parse((init as RequestInit).body as string);
+    // THE CR-01 pin: the persisted draft carries the applied window verbatim.
+    expect(body.draft.window).toEqual({
+      start: "2026-01-01",
+      end: "2026-01-12",
+    });
+  });
+
+  it("T_WIN_SAVE2 a never-touched window saves a WINDOWLESS draft — the intersection auto-default is NOT force-persisted", async () => {
+    mountUnequalSpanBook();
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "Untouched" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWindowedComposer(`${ALLOCATOR_A}-cr01-post-windowless`);
+
+    // The auto-default IS showing (the user sees the intersection) …
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Untouched" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [, init] = saveCalls(fetchMock)[0];
+    const body = JSON.parse((init as RequestInit).body as string);
+    // … but the DRAFT stays windowless: reopen re-derives the default, so a
+    // windowless save never freezes today's intersection against future
+    // coverage growth.
+    expect("window" in body.draft).toBe(false);
+  });
+
+  it("T_WIN_SAVE3 Update (PUT) of a reopened v3-with-window row round-trips the saved window verbatim", async () => {
+    mountUnequalSpanBook();
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: SAVED_ID, name: "Saved windowed" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWindowedComposer(`${ALLOCATOR_A}-cr01-put-window`);
+    const savedWindow = { start: "2026-01-02", end: "2026-01-05" };
+    openRow({
+      id: SAVED_ID,
+      name: "Saved windowed",
+      draft: { ...okDraft(), window: savedWindow },
+    });
+
+    // The reopened window is applied to the view …
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-02 → 2026-01-05");
+
+    const updateBtn = await screen.findByRole("button", {
+      name: /Update portfolio/i,
+    });
+    fireEvent.click(updateBtn);
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe(`/api/allocator/scenario/saved/${SAVED_ID}`);
+    expect((init as RequestInit).method).toBe("PUT");
+    const body = JSON.parse((init as RequestInit).body as string);
+    // … and the PUT body's draft still carries it (no silent window drop on
+    // the update boundary).
+    expect(body.draft.window).toEqual(savedWindow);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Re-review WR-01 — displayed window must never diverge from the window a
+  // save would persist. Two reachable divergence states are pinned:
+  //   • T_WIN_SAVE4: a DRIFTED (fingerprint-mismatched) reopen must NOT seed
+  //     the owner's saved window — the working draft is the windowless default
+  //     (the saved draft is not applied), so displaying/computing at the
+  //     owner's window while "Update portfolio" PUTs the windowless default
+  //     would save something other than what is shown.
+  //   • T_WIN_SAVE5: adopting a cross-tab WINDOWLESS draft (tab B reset +
+  //     edit) must invalidate this tab's stale local window seed — otherwise
+  //     coverageWindow falls back to a window no save would persist.
+  // ---------------------------------------------------------------------------
+
+  it("T_WIN_SAVE4 (re-review WR-01) a DRIFTED reopen of a v3-with-window row does NOT display the owner's window — the working draft is the default, the display stays on the intersection default, and Update persists exactly what is shown (windowless)", async () => {
+    mountUnequalSpanBook();
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: SAVED_ID, name: "Drifted windowed" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWindowedComposer(`${ALLOCATOR_A}-wr01-drifted-window`);
+
+    // Mount sanity: the auto-default seeded the intersection.
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-06");
+
+    // Reopen a v3 row that carries a window ONLY the saved draft can produce
+    // ([01-02, 01-05], strictly inside the intersection) but whose fingerprint
+    // drifted — the hook's working draft falls back to the windowless default.
+    openRow({
+      id: SAVED_ID,
+      name: "Drifted windowed",
+      draft: {
+        ...driftedDraft(),
+        window: { start: "2026-01-02", end: "2026-01-05" },
+      },
+    });
+
+    // The drift banner is up (the saved draft was NOT applied) …
+    expect(
+      document.getElementById("scenario-fingerprint-mismatch-banner"),
+    ).toBeInTheDocument();
+    // … so the owner's window must NOT be displayed/computed: the readout
+    // stays on the working draft's intersection default. (Pre-fix, the seed
+    // showed 01-02 → 01-05 while the draft was windowless — the divergence.)
+    const readout = screen.getByTestId(
+      "scenario-coverage-window-value",
+    ).textContent;
+    expect(readout).toContain("2026-01-01 → 2026-01-06");
+    expect(readout).not.toContain("2026-01-02 → 2026-01-05");
+
+    // "Update portfolio" (deliberately ungated on drift) persists EXACTLY what
+    // is shown: the windowless default draft. The intersection default is
+    // never force-persisted (T_WIN_SAVE2 contract) — reopen re-derives it.
+    const updateBtn = await screen.findByRole("button", {
+      name: /Update portfolio/i,
+    });
+    fireEvent.click(updateBtn);
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe(`/api/allocator/scenario/saved/${SAVED_ID}`);
+    expect((init as RequestInit).method).toBe("PUT");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect("window" in body.draft).toBe(false);
+  });
+
+  it("T_WIN_SAVE5 (re-review WR-01) adopting a cross-tab WINDOWLESS draft invalidates the stale local window seed — the display falls back to the intersection default, never a window no save would persist", async () => {
+    mountUnequalSpanBook();
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const allocatorId = `${ALLOCATOR_A}-wr01-crosstab-window`;
+    renderWindowedComposer(allocatorId);
+
+    // Apply the union window via the REAL preset gesture (seed + draft
+    // write-through) — a value the intersection default can never produce.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Full range \(some drop out\)/i }),
+    );
+    expect(
+      screen.getByTestId("scenario-coverage-window-value").textContent,
+    ).toContain("2026-01-01 → 2026-01-12");
+
+    // Let the 150ms autosave debounce settle BEFORE dispatching the foreign
+    // event: the primitive's flush-before-adopt would otherwise cement OUR
+    // pending write and ignore the foreign value (that race is its own tested
+    // contract; this test targets the adoption path).
+    const key = scenarioStorageKey(allocatorId);
+    await waitFor(() => {
+      expect(lsStore.get(key) ?? "").toContain("2026-01-12");
+    });
+
+    // Tab B reset + edited: its autosave persisted a WINDOWLESS
+    // fingerprint-current draft; the storage event syncs it into this tab.
+    // (A bare reset's removeItem is a null-newValue clear the primitive
+    // ignores — the divergence arises on the follow-up windowless write.)
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key,
+          newValue: JSON.stringify(okDraft()),
+        }),
+      );
+    });
+
+    // The adopted draft carries NO window → the stale union seed must not
+    // survive as the displayed window (a save here would persist windowless).
+    // The invalidation hands the window back to the WINDOW-01 auto-default,
+    // which re-seeds the intersection in the same commit — like a reset.
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("scenario-coverage-window-value").textContent,
+      ).toContain("2026-01-01 → 2026-01-06");
+    });
   });
 });

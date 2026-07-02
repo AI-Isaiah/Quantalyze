@@ -35,8 +35,13 @@ vi.mock("../lib/scenario-compare", async (importOriginal) => {
     await importOriginal<typeof import("../lib/scenario-compare")>();
   return {
     ...actual,
-    computeMetricsForDraft: (draft: ScenarioDraft, inputs: ScenarioCompareInputs) =>
-      mockComputeMetricsForDraft(draft, inputs),
+    // Forward the RT-1 options third arg so the liveBook structural-exception
+    // wiring is assertable below.
+    computeMetricsForDraft: (
+      draft: ScenarioDraft,
+      inputs: ScenarioCompareInputs,
+      opts?: { liveBook?: boolean },
+    ) => mockComputeMetricsForDraft(draft, inputs, opts),
     buildLiveBookDraft: () => mockBuildLiveBookDraft(),
   };
 });
@@ -184,6 +189,16 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
     expect(mockBuildLiveBookDraft).toHaveBeenCalledTimes(1);
     // 1 selection + the live book = 2 compute calls.
     expect(mockComputeMetricsForDraft).toHaveBeenCalledTimes(2);
+    // Ship-review RT-1 — the STRUCTURAL live-book exception: the saved-row
+    // column is a saved scenario (no liveBook flag → a windowless draft gets
+    // the intersection default inside the engine helper), while the live-book
+    // column declares `{ liveBook: true }` so the allocator's own book stays
+    // on the Phase-55 union path. WHY this matters: without the flag the live
+    // column would silently adopt the saved-scenario divisor rule.
+    const savedCall = mockComputeMetricsForDraft.mock.calls[0];
+    const liveCall = mockComputeMetricsForDraft.mock.calls[1];
+    expect(savedCall[2]).toBeUndefined();
+    expect(liveCall[2]).toEqual({ liveBook: true });
     // The live-book column header is labeled "Live book".
     expect(screen.getByText("Live book")).toBeInTheDocument();
     expect(screen.getByText("Alpha")).toBeInTheDocument();

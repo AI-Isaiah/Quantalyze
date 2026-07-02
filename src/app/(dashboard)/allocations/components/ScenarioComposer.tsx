@@ -80,12 +80,18 @@ import {
   coverageSpanOf,
   covers,
   defaultWindowFor,
+  intersectionOf,
   outlierIdsFor,
   unionOf,
   type CoverageSpan,
   type CoverageWindow,
 } from "@/lib/scenario-window";
-import { localMidnight, localMidnightToday, parseIsoDay } from "@/lib/dateday";
+import {
+  diffDays,
+  localMidnight,
+  localMidnightToday,
+  parseIsoDay,
+} from "@/lib/dateday";
 import type {
   OwnBookDeltaPayload,
   PeerPercentilePayload,
@@ -136,6 +142,12 @@ import { toWealth } from "../widgets/performance/EquityChart";
 import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { CustomRangePicker } from "./CustomRangePicker";
+import { BlendHeader } from "./BlendHeader";
+import { CoverageStateChip } from "./CoverageStateChip";
+import type { CoverageState } from "./CoverageStateChip";
+import { CoverageTimeline } from "./CoverageTimeline";
+import { DefaultChangeNote } from "./DefaultChangeNote";
+import { ProvenanceNote } from "./ProvenanceNote";
 import { BridgeDrawer } from "./BridgeDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { ScenarioFooter } from "./ScenarioFooter";
@@ -446,6 +458,90 @@ function coverageDropReason(
   return "outside window";
 }
 
+/** The include-cost of narrowing the window to re-admit an auto-excluded row. */
+interface IncludeCost {
+  /** The exact window to apply so the strategy becomes a member. The disclosed
+   *  date(s) are read from here (`target.start` / `target.end`) at the label
+   *  call sites — no duplicate fields. */
+  target: CoverageWindow;
+  /**
+   * Which window bound(s) actually move when the strategy is re-admitted. The
+   * label MUST phrase the disclosed date(s) to agree with this (WR-01/WR-02):
+   * `"end"` (tail-ragged, the window shortens to a new end), `"start"`
+   * (head-ragged, the window start moves forward), or `"both"` (ragged on both
+   * ends — both bounds are named so the `{N} mo` cost reconciles with the dates).
+   */
+  movedBound: "start" | "end" | "both";
+  /** Whole-month cost of the narrow vs the current window (the `−{N} mo`). */
+  months: number;
+}
+
+/**
+ * Phase 58 (COVERAGE-04) — the cost of INCLUDING a coverage-auto-excluded
+ * strategy: narrow the current window to the intersection that re-admits it, and
+ * disclose that cost (the moved bound + whole-month delta) BEFORE applying.
+ *
+ * The target window is `intersectionOf([currentWindow-as-span, strategySpan])` —
+ * the bound math is DELEGATED to scenario-window.ts (Rule 2: never hand-roll
+ * min/max interval math over date strings). `movedBound` names which bound(s)
+ * actually move so the caller can phrase the disclosure honestly (WR-01/WR-02):
+ * a tail-ragged strategy moves the `end` only (window shortens to a new end), a
+ * head-ragged strategy moves the `start` only (window start slides forward — NOT
+ * a shortening of the end), and a both-ends-ragged strategy moves `both` (the
+ * label names both dates so `{months}` reconciles against what is shown).
+ * `{months}` = the whole-month cost across ALL moved bounds (head-forward days +
+ * tail-back days, summed then folded: round-to-nearest, floored at 1 when the
+ * delta is > 0 but < 1 month — A3).
+ *
+ * Returns `null` when the strategy has no data (null span) or the intersection is
+ * empty (`intersectionOf === null`) — there is then no window that re-admits it,
+ * so no include button is offered. Never mutates its inputs; string compare only.
+ */
+function includeCostFor(
+  span: CoverageSpan | null,
+  window: CoverageWindow,
+): IncludeCost | null {
+  if (!span) return null;
+  const target = intersectionOf([
+    { first: window.start, last: window.end },
+    span,
+  ]);
+  if (!target) return null;
+
+  const startMoved = target.start !== window.start;
+  const endMoved = target.end !== window.end;
+  // No bound moved → the strategy already covers the window (not auto-excluded);
+  // there is nothing to include.
+  if (!startMoved && !endMoved) return null;
+
+  // Which bound(s) actually moved. The label phrases the disclosed date(s) to
+  // match this so the shown date and the `−{N} mo` cost always reconcile
+  // (WR-01: a head-ragged strategy moves the START, never the end; WR-02: a
+  // both-ends-ragged strategy names BOTH dates against the two-ended cost).
+  const movedBound: IncludeCost["movedBound"] =
+    startMoved && endMoved ? "both" : endMoved ? "end" : "start";
+
+  // Net whole-month cost across the moved span. The narrowed window is
+  // [target.start, target.end] ⊆ [window.start, window.end]; the total shrink is
+  // the head shift + the tail shift, summed as calendar days then folded to
+  // whole months. Timezone-free via parseIsoDay + diffDays (never new Date(iso)).
+  const oldStart = parseIsoDay(window.start);
+  const oldEnd = parseIsoDay(window.end);
+  const newStart = parseIsoDay(target.start);
+  const newEnd = parseIsoDay(target.end);
+  let shrinkDays = 0;
+  if (oldStart && newStart) shrinkDays += diffDays(oldStart, newStart); // head pulled forward (≥ 0)
+  if (oldEnd && newEnd) shrinkDays += diffDays(newEnd, oldEnd); // tail pulled back (≥ 0)
+
+  // Fold days → whole months: round to nearest, but floor at 1 when the shrink is
+  // > 0 but rounds to 0 (a sub-month narrow still costs "1 mo" honestly — A3).
+  const AVG_DAYS_PER_MONTH = 30.437;
+  let months = Math.round(shrinkDays / AVG_DAYS_PER_MONTH);
+  if (months === 0 && shrinkDays > 0) months = 1;
+
+  return { target, movedBound, months };
+}
+
 
 /**
  * WR-05 (Phase 29 review) — book-returns boundary normalizer.
@@ -732,6 +828,25 @@ export function ScenarioComposer({
   const [loadedReadonly, setLoadedReadonly] = useState(false);
   // The honest reopen notice (reset → "older format"; readonly → "read-only").
   const [openNotice, setOpenNotice] = useState<string | null>(null);
+  // v1.5 PERSIST-01 — the EPHEMERAL provenance flag. True only right after
+  // reopening a pre-v1.5 (v2, windowless) saved draft that the codec upgraded on
+  // read (decode `reason === "upgraded_v2_windowless"`) and whose window
+  // therefore defaulted to the intersection. Gates the ProvenanceNote (below the
+  // POLISH-03 placement). Set ONLY on the upgraded-v2 open path and cleared on
+  // every other open (fresh v3, readonly, reset) so it never persists across
+  // opens — a per-scenario data-provenance signal, NOT a global one-time flag
+  // (Phase-59 Pitfall 3). Never persisted into the draft.
+  const [showProvenanceNote, setShowProvenanceNote] = useState(false);
+  // Review WR-02 — the per-OPEN nonce for the ProvenanceNote's remount key.
+  // Keying on loadedScenarioId alone fails the A→dismiss→reopen-A case: the
+  // same id means the same key, the component stays mounted (rendering null),
+  // and its component-local `dismissed` state survives — the note never
+  // re-shows despite the per-open contract. Bumped on every COMPLETED open
+  // (openSavedScenario, after the reset-outcome refusal) so reopening even the
+  // SAME scenario remounts the note fresh. A ref (not state): the open path
+  // already re-renders via its setStates, and a bare bump without a completed
+  // open must not remount anything.
+  const provenanceOpenNonceRef = useRef(0);
   // Inline name input (NOT a modal). Opened by "Save scenario" (first save) and
   // by "Save as new scenario" (fork) — both POST a new row, so no mode flag is
   // needed; the success handler adopts the returned id either way.
@@ -770,11 +885,14 @@ export function ScenarioComposer({
   // view pan, persist=false), and per-strategy `startDates` (legacy include-from).
   // POLISH-01 (LOCKED) forbids conflating any of them.
   //
-  // EPHEMERAL by design (persistence is Phase 59): plain composer useState, NOT
-  // in useScenarioState / ScenarioDraft — so NO SCENARIO_SCHEMA_VERSION bump. The
-  // values are ISO "YYYY-MM-DD" strings (the engine + scenario-window helpers all
-  // compare lexicographically); Date conversion happens ONLY at the
-  // CustomRangePicker boundary via dateday helpers.
+  // VIEW-SEED state (Phase 59 / review CR-01 split): winStart/winEnd carry the
+  // NON-persisted intersection auto-default (WINDOW-01) and the reopen seed.
+  // The EXPLICITLY-applied window is persisted in `scenario.draft.window` (the
+  // v3 draft field) via the applyWindow write-through; `coverageWindow` below
+  // prefers the draft's window over this local seed. The values are ISO
+  // "YYYY-MM-DD" strings (the engine + scenario-window helpers all compare
+  // lexicographically); Date conversion happens ONLY at the CustomRangePicker
+  // boundary via dateday helpers.
   //
   // Null default: an empty intersection (`defaultWindowFor` === null) seeds no
   // window, leaving the engine on the union-when-absent path (the WINDOW-06
@@ -957,6 +1075,18 @@ export function ScenarioComposer({
     setOpenNotice(null);
     setNameInputOpen(false);
     setSaveError(null);
+    // v1.5 PERSIST-01 — a reset leaves the upgraded-v2 provenance context; the
+    // fresh draft is a v3 live book, so the note must not linger.
+    setShowProvenanceNote(false);
+    // Review WR-01 — clear the window state too: a reopened scenario's saved
+    // window (applied via seedWindowLocal, windowTouchedRef=true) is
+    // prior-open context and must not narrow the fresh live-book draft.
+    // Releasing the gate lets the WINDOW-01 auto-default effect re-seed the
+    // intersection for the fresh draft — the same rule as any other fresh
+    // open. (The DRAFT's persisted window is already gone: scenario.reset()
+    // replaced the draft with the windowless default.) The Phase-57 "sticky by
+    // design" rationale covers deselect, not reset.
+    resetWindowToDefaultOnReopen();
     // Review WR-02 — clear the ephemeral per-source include map on every reset /
     // saved-scenario open. The toggle is NOT persisted to the draft, so a freshly
     // opened scenario must start with every data source included; without this a
@@ -1042,6 +1172,33 @@ export function ScenarioComposer({
         return;
       }
 
+      // Review WR-02 — every COMPLETED open (readonly or ok, below) is a new
+      // per-open context for the ProvenanceNote: bump the nonce so the note's
+      // key changes and it remounts un-dismissed, even when the SAME upgraded-v2
+      // scenario is reopened back-to-back. Deliberately AFTER the reset-outcome
+      // refusal above: a refused open changes nothing and must not resurrect a
+      // dismissed note on the next render.
+      provenanceOpenNonceRef.current += 1;
+
+      // Re-review WR-01 — drift is decided SYNCHRONOUSLY here, with the same
+      // predicate the hook's storedMismatch derives on the next render: the
+      // saved draft's fingerprint vs the LIVE holdings' (defaultDraft carries
+      // the live fingerprint by construction). On a drifted open the hook's
+      // working draft falls back to the windowless default — the saved draft,
+      // window included, is NOT applied — so seeding the owner's window would
+      // display/compute at a window the working draft does not carry, and a
+      // save ("Update portfolio" is deliberately ungated on drift) would
+      // persist something OTHER than what is shown. The owner's window is
+      // seeded ONLY on the same condition that applies the saved draft's
+      // strategies/weights: no drift. On drift the window view state is left
+      // UNTOUCHED — the working draft did not change, so its window context
+      // (the intersection auto-default, or the user's own applied window via
+      // the seed-invalidation effect below coverageWindow) must not change
+      // either.
+      const drifted =
+        decoded.value.init_holdings_fingerprint !==
+        defaultDraft.init_holdings_fingerprint;
+
       if (decoded.outcome === "readonly") {
         // Newer-version blob: hydrate the user's real data but block edits.
         scenario.hydrateFromSaved(decoded.value);
@@ -1049,6 +1206,22 @@ export function ScenarioComposer({
         // the ephemeral per-source include map (it is not persisted) → the
         // opened scenario starts with every data source included.
         setIncludeByApiKeyId({});
+        // v1.5 PERSIST-01 — seed the coverage window from the saved draft. A
+        // newer-version blob may carry a window; seed it verbatim so the
+        // read-only view recomputes at the owner's saved window. If absent (a
+        // future version that dropped it, or a windowless save), fall back to
+        // the intersection default. A readonly blob is NOT the upgraded-v2 path,
+        // so the provenance note never shows here (Pitfall 3). LOCAL seed only
+        // (review CR-01): the window is already in the hydrated draft; the
+        // write-through mutator would rebase a drifted draft onto the default.
+        // Re-review WR-01: on drift the hydrated draft is NOT the working draft
+        // (the hook falls back to the windowless default), so neither seed nor
+        // reset — the window view state tracks the unchanged working draft.
+        if (!drifted) {
+          if (decoded.value.window) seedWindowLocal(decoded.value.window);
+          else resetWindowToDefaultOnReopen();
+        }
+        setShowProvenanceNote(false);
         setLoadedScenarioId(row.id);
         setLoadedScenarioName(row.name);
         setLoadedReadonly(true);
@@ -1066,14 +1239,46 @@ export function ScenarioComposer({
       // Review WR-02 — clear the ephemeral per-source include map on open (it is
       // not persisted) → the opened scenario starts with every source included.
       setIncludeByApiKeyId({});
+      // v1.5 PERSIST-01 — seed the coverage window from the reopened draft, then
+      // let the existing engineState memo recompute TODAY's numbers at it (no
+      // stored series is replayed — no-invented-data lock).
+      //   • DRIFTED open (re-review WR-01) → the saved draft is NOT applied
+      //     (the working draft is the windowless default), so its window must
+      //     not be seeded either: displaying/computing at the owner's window
+      //     while "Update portfolio" persists the windowless default would
+      //     save something other than what is shown. The window view state is
+      //     left untouched (it tracks the unchanged working draft); the
+      //     provenance note is suppressed — a note explaining a draft that was
+      //     not applied would be dishonest, and the drift banner is already
+      //     the honest signal.
+      //   • v3 draft WITH a window → seedWindowLocal(...) VERBATIM (this sets
+      //     windowTouchedRef so the auto-default effect stays inert and does NOT
+      //     override the reopened window; the window itself is already in the
+      //     hydrated draft — review CR-01 — so no draft write happens here).
+      //     Provenance note stays hidden.
+      //   • upgraded-v2 draft (decode reason "upgraded_v2_windowless", window
+      //     absent) → release the window gate so the auto-default effect seeds
+      //     the intersection ("common period"), AND raise the provenance note.
+      //   • any other windowless "ok" (a v3 saved before a window was chosen) →
+      //     intersection default, no note.
+      if (drifted) {
+        setShowProvenanceNote(false);
+      } else if (decoded.value.window) {
+        seedWindowLocal(decoded.value.window);
+        setShowProvenanceNote(false);
+      } else {
+        resetWindowToDefaultOnReopen();
+        setShowProvenanceNote(decoded.reason === "upgraded_v2_windowless");
+      }
       setLoadedScenarioId(row.id);
       setLoadedScenarioName(row.name);
       setLoadedReadonly(false);
       setOpenNotice(null);
       setNameInputOpen(false);
     },
-    // hydrateFromSaved/reset are stable useCallbacks; holdingsSummary is the
-    // only render-varying input.
+    // hydrateFromSaved/reset/seedWindowLocal/resetWindowToDefaultOnReopen are
+    // stable useCallbacks; the setters are stable; holdingsSummary is the only
+    // render-varying input.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [holdingsSummary, scenario.hydrateFromSaved],
   );
@@ -1653,6 +1858,32 @@ export function ScenarioComposer({
     return spans;
   }, [selectedSpanById]);
 
+  // Re-review WR-01 — the composer-local seed (winStart/winEnd) is a cached
+  // mirror of the applied window; INVALIDATE it when `draft.window` disappears
+  // out from under it. Reachable without any local gesture: another tab resets
+  // and then edits (the cross-tab sync adopts its WINDOWLESS draft here), a
+  // drifted saved-scenario open replaces a windowed working draft with the
+  // windowless default, or a live-holdings change flips the working draft to
+  // the default. Without invalidation, `coverageWindow` falls back to the
+  // stale seed and this tab displays/computes at a window no save would
+  // persist (the displayed-vs-persisted divergence the CR-01 fix exists to
+  // prevent). Clearing the seed + un-touching the gate hands the window back
+  // to the WINDOW-01 auto-default below — MUST run BEFORE that effect (React
+  // runs effects in definition order) so the re-seed lands in the SAME commit,
+  // exactly like handleReset. Local view state only (never writes the draft),
+  // so it cannot feed back into the applyWindow write-through (CR-01 scrutiny
+  // point b: nothing reactively writes `draft.window`).
+  const prevDraftWindowRef = useRef(scenario.draft.window);
+  useEffect(() => {
+    const prev = prevDraftWindowRef.current;
+    prevDraftWindowRef.current = scenario.draft.window;
+    if (prev && !scenario.draft.window) {
+      windowTouchedRef.current = false;
+      setWinStart(null);
+      setWinEnd(null);
+    }
+  }, [scenario.draft.window]);
+
   // WINDOW-01 — seed the default window ONCE from the intersection of the
   // selected spans (Pitfall 3: a one-time seed + preset target, NEVER a
   // controlled value that re-snaps a user narrow). `windowTouchedRef` gates
@@ -1681,9 +1912,22 @@ export function ScenarioComposer({
   // The applied coverage window, or null when unset / empty-intersection. Null
   // means "no window key" — the engine stays on its own-book union-when-absent
   // path, byte-unchanged for every non-scenario caller.
+  //
+  // Review CR-01 (v1.5 PERSIST-01) — the draft's PERSISTED window is the first
+  // source of truth: an explicitly-applied window is written through into
+  // `scenario.draft` (applyWindow below), so after a tab reload or a cross-tab
+  // draft adoption the recomputed view and the payload the save handlers
+  // POST/PUT can never diverge. The composer-local seed (winStart/winEnd) is
+  // the fallback: it carries ONLY the NON-persisted intersection auto-default
+  // (WINDOW-01). Re-review WR-01 closed the two leaks where the fallback could
+  // claim a window the draft does not carry: a drifted reopen no longer seeds
+  // the owner's window (openSavedScenario), and the invalidation effect above
+  // clears a stale seed whenever `draft.window` disappears out from under it.
   const coverageWindow = useMemo(
-    () => (winStart && winEnd ? { start: winStart, end: winEnd } : null),
-    [winStart, winEnd],
+    () =>
+      scenario.draft.window ??
+      (winStart && winEnd ? { start: winStart, end: winEnd } : null),
+    [scenario.draft.window, winStart, winEnd],
   );
 
   // WINDOW mount bounds — the union span of the selected set gives the picker's
@@ -1702,10 +1946,68 @@ export function ScenarioComposer({
     return { min, max: unionMax > today ? unionMax : today };
   }, [selectedSpans]);
 
-  const applyWindow = useCallback((range: { start: string; end: string }) => {
-    windowTouchedRef.current = true;
-    setWinStart(range.start);
-    setWinEnd(range.end);
+  // Seed the composer-local window VIEW state only (NO draft write). Used by
+  // the reopen path (openSavedScenario), where the saved window is ALREADY in
+  // the hydrated draft — routing the reopen through the write-through mutator
+  // would rebase a DRIFTED (fingerprint-mismatched) draft onto the default via
+  // `baseOf` and clobber the just-opened scenario. Gesture call sites use
+  // applyWindow (below) instead.
+  const seedWindowLocal = useCallback(
+    (range: { start: string; end: string }) => {
+      windowTouchedRef.current = true;
+      setWinStart(range.start);
+      setWinEnd(range.end);
+    },
+    [],
+  );
+
+  // Review CR-01 (v1.5 PERSIST-01) — the USER-GESTURE window setter: the
+  // presets, the custom picker, and the notes' "Show full range" all route
+  // here. Writes the view state AND writes the window through into
+  // `scenario.draft` (scenario.setWindow), so the localStorage autosave, the
+  // save handlers' POST/PUT payload, a minted share, and compare all carry the
+  // applied window. The WINDOW-01 intersection auto-default (effect above)
+  // deliberately does NOT write the draft — a never-touched window saves a
+  // WINDOWLESS draft, and reopen re-derives the default.
+  const applyWindow = useCallback(
+    (range: { start: string; end: string }) => {
+      seedWindowLocal(range);
+      scenario.setWindow(range);
+    },
+    // scenario.setWindow is a stable useCallback from the hook; depending on the
+    // whole `scenario` object (rebuilt every render) would destabilize this
+    // callback and, transitively, openSavedScenario (same idiom as handleReset).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [seedWindowLocal, scenario.setWindow],
+  );
+
+  // Ship-review RT-5 — focus management for the auto-excluded Include click.
+  // Clicking Include narrows the window, which re-admits the strategy: its row
+  // (and possibly the whole auto-excluded group) UNMOUNTS with the focused
+  // button, dropping keyboard focus to <body>. The include handler flags a
+  // pending focus move; the effect below runs AFTER the re-render that removed
+  // the row and lands focus deterministically on the coverage-window control —
+  // the element whose value the click just changed (tabIndex={-1}: reachable
+  // programmatically, never added to the tab order).
+  const coverageWindowControlRef = useRef<HTMLDivElement | null>(null);
+  const pendingWindowFocusRef = useRef(false);
+  useEffect(() => {
+    if (!pendingWindowFocusRef.current) return;
+    pendingWindowFocusRef.current = false;
+    coverageWindowControlRef.current?.focus();
+  });
+
+  // v1.5 PERSIST-01 — reopen an UPGRADED-v2 (windowless) draft. Clearing the
+  // window state AND un-touching the ref lets the WINDOW-01 auto-default effect
+  // (above) re-fire once the newly-hydrated draft's `selectedSpans` recompute,
+  // seeding the intersection ("common period") — exactly the default rule the
+  // provenance note explains. This is the mirror of applyWindow: applyWindow
+  // pins an explicit (v3) window and BLOCKS the auto-default; this releases the
+  // gate so the intersection default takes over for a pre-window draft.
+  const resetWindowToDefaultOnReopen = useCallback(() => {
+    windowTouchedRef.current = false;
+    setWinStart(null);
+    setWinEnd(null);
   }, []);
 
   // WINDOW-04/05 — the two preset targets over the selected spans. "Common
@@ -1784,27 +2086,98 @@ export function ScenarioComposer({
   // carries a minimal honest reason derived from its span vs the window. Empty
   // when nothing is coverage-dropped (the group is then absent, not an empty
   // shell) and on the union path (coverageWindow === null → no drops).
+  //
+  // Phase 58 (COVERAGE-04) — each row also carries its `includeCost`: the window
+  // to apply (`intersectionOf([currentWindow, span])`, delegated to
+  // scenario-window.ts) plus the disclosed cost (moved bound date + whole-month
+  // delta) the include text-button shows in its label BEFORE applying. Null when
+  // there is no window that re-admits the strategy (no data / empty intersection)
+  // — that row then offers no include button.
   const autoExcluded = useMemo<
-    Array<{ id: string; name: string; reason: string }>
+    Array<{
+      id: string;
+      name: string;
+      reason: string;
+      includeCost: IncludeCost | null;
+    }>
   >(() => {
     if (!coverageWindow) return [];
-    const out: Array<{ id: string; name: string; reason: string }> = [];
+    const out: Array<{
+      id: string;
+      name: string;
+      reason: string;
+      includeCost: IncludeCost | null;
+    }> = [];
     for (const s of deAliased.strategies) {
       if (!deAliased.state.selected[s.id]) continue; // manual-off is NOT here
       if (coverageEligible[s.id]) continue; // in-blend
+      const span = selectedSpanById.get(s.id) ?? null;
       out.push({
         id: s.id,
         name: s.name,
-        reason: coverageDropReason(
-          selectedSpanById.get(s.id) ?? null,
-          coverageWindow,
-        ),
+        reason: coverageDropReason(span, coverageWindow),
+        includeCost: includeCostFor(span, coverageWindow),
       });
     }
     return out;
   }, [deAliased, coverageWindow, coverageEligible, selectedSpanById]);
 
-  // Dev-mode cross-check (Pitfall 2): on the passthrough (non-aliased) scenario
+  // Phase 58 (COVERAGE-01) — the mini-gantt rows: one per SELECTED strategy,
+  // carrying its coverage span + the in-blend/auto-excluded flag read from the
+  // SAME engine axis (`coverageEligible`) the coverageEligible↔member_ids dev
+  // cross-check below reconciles.
+  // Membership is NEVER re-derived here — CoverageTimeline receives `inBlend` as
+  // a prop and never runs the containment predicate locally, so the gantt bars
+  // agree with the row chips and the divisor by construction. Spans come from the
+  // shared `selectedSpanById` scan (Rule 2: computed once).
+  const timelineRows = useMemo(
+    () =>
+      deAliased.strategies
+        .filter((s) => deAliased.state.selected[s.id])
+        .map((s) => ({
+          id: s.id,
+          name: s.name,
+          span: selectedSpanById.get(s.id) ?? null,
+          inBlend: coverageEligible[s.id] === true,
+        })),
+    [deAliased, selectedSpanById, coverageEligible],
+  );
+
+  // The ONE "active window IS the common period" equality — lexicographic
+  // "YYYY-MM-DD" compare (never JS Date). Both "common period" notes gate on
+  // it: the POLISH-03 DefaultChangeNote (via showingCommonPeriodTruncated
+  // below) and, since ship-review RT-2, the PERSIST-01 ProvenanceNote — each
+  // carries locked "showing the common period" copy that would lie over any
+  // other window (Show full range / custom picker / Include all move the
+  // window off the common period). Null active window (union path) or no
+  // common period → false.
+  const activeWindowIsCommonPeriod = useMemo(() => {
+    if (!coverageWindow || !commonPeriodWindow) return false;
+    return (
+      coverageWindow.start === commonPeriodWindow.start &&
+      coverageWindow.end === commonPeriodWindow.end
+    );
+  }, [coverageWindow, commonPeriodWindow]);
+
+  // Phase 58 (POLISH-03) — the note's visibility gate, HONEST version (pre-
+  // landing review I3): DefaultChangeNote's locked copy says "Now showing the
+  // common period…", so it may render ONLY while the active window IS the
+  // common period (activeWindowIsCommonPeriod above) AND that period truncates
+  // the union. Gating on truncation alone rendered the "common period" copy
+  // over a user's CUSTOM window (any window narrower than the union truncates
+  // it). The SAME truncation shape BlendHeader uses. No union → no note.
+  const showingCommonPeriodTruncated = useMemo(() => {
+    if (!activeWindowIsCommonPeriod || !coverageWindow || !fullRangeWindow) {
+      return false;
+    }
+    return (
+      coverageWindow.start > fullRangeWindow.start ||
+      coverageWindow.end < fullRangeWindow.end
+    );
+  }, [activeWindowIsCommonPeriod, coverageWindow, fullRangeWindow]);
+
+  // The coverageEligible↔member_ids dev cross-check (Pitfall 2) — the anchor
+  // other comments reference by name: on the passthrough (non-aliased) scenario
   // path the UI's in-blend set { selected && coverageEligible } must equal the
   // engine's `member_ids`. A mismatch means the UI group and the divisor have
   // desynced — surface it loudly in dev (never in prod). The aliased-collapse
@@ -2818,6 +3191,65 @@ export function ScenarioComposer({
         </div>
       )}
 
+      {/* v1.5 PERSIST-01 — the pre-coverage-window provenance note. Shown ONLY
+          right after reopening a pre-v1.5 (v2, windowless) saved draft that the
+          codec upgraded on read and whose window defaulted to the intersection
+          (showProvenanceNote). SAME placement slot as the POLISH-03 note, above
+          the blend header / window control. Dismissal is EPHEMERAL per-open
+          (component-local useState); the key combines loadedScenarioId with the
+          per-open nonce (review WR-02) so EVERY completed open — including
+          reopening the SAME old draft after a dismissal — remounts a fresh,
+          un-dismissed note (Phase-59 Pitfall 3). Gated on
+          activeWindowIsCommonPeriod (review WR-03 + ship-review RT-2): the
+          note's locked copy claims "showing the common period", so it renders
+          ONLY while the ACTIVE window IS the common period — the same equality
+          the DefaultChangeNote honest-gate uses. This covers BOTH honesty
+          holes: a reopened set with NO common period (WR-03 — the auto-default
+          seeds nothing, the engine runs the UNION path, the Phase-57
+          empty-intersection banner guides the user) AND any window move AFTER
+          the note showed (RT-2 — Show full range / Full-range preset / custom
+          picker / Include all leave the common period; the stale banner would
+          lie over the new window). "Show full range" reuses the existing
+          Full-range preset and also self-dismisses inside ProvenanceNote. */}
+      {windowBounds && showProvenanceNote && activeWindowIsCommonPeriod && (
+        <ProvenanceNote
+          key={`${loadedScenarioId ?? "provenance"}-${provenanceOpenNonceRef.current}`}
+          onShowFullRange={() => fullRangeWindow && applyWindow(fullRangeWindow)}
+        />
+      )}
+
+      {/* Phase 58 (POLISH-03) — the one-time union→intersection default-change
+          note. Placed ABOVE the blend header / window control (58-UI-SPEC
+          placement). Self-gates: it renders only while the ACTIVE window is the
+          common period AND that period truly truncates the union (the honest
+          showingCommonPeriodTruncated gate — never over a custom window) AND
+          the user has not dismissed it; SSR-safe (no flash). Suppressed while
+          the ProvenanceNote is up (pre-landing review I4): on first reopen of
+          an upgraded-v2 draft both notes would otherwise stack with duplicate
+          "common period" messaging. "Show full range" reuses the existing
+          Full-range preset via applyWindow(fullRangeWindow) — no new logic. */}
+      {windowBounds && !showProvenanceNote && (
+        <DefaultChangeNote
+          memberCount={scenarioMetrics.member_count ?? 0}
+          intersectionTruncatesUnion={showingCommonPeriodTruncated}
+          onShowFullRange={() => fullRangeWindow && applyWindow(fullRangeWindow)}
+        />
+      )}
+
+      {/* Phase 58 (COVERAGE-03) — the honest blend header is the PRIMARY visual
+          anchor of this surface (58-UI-SPEC §Interaction): it states the engine's
+          member_count · effective window ABOVE the coverage-window control, so
+          the allocator reads the honest N/window before steering membership.
+          Reads scenarioMetrics.member_count / effective_* + fullRangeWindow ONLY
+          — never re-derives the blend (the coverageEligible↔member_ids dev
+          cross-check reconciles the same axis). Mounts alongside the window
+          control (a selected set to describe). */}
+      {windowBounds && (
+        <div className="mt-6">
+          <BlendHeader metrics={scenarioMetrics} unionSpan={fullRangeWindow} />
+        </div>
+      )}
+
       {/* Phase 57 (WINDOW-01/04/05) — coverage-window control. The ANALYTICAL
           blend window is set HERE, above the KPIs, so the allocator steers
           membership before reading the blend (mirrors how the rolling-window
@@ -2827,6 +3259,9 @@ export function ScenarioComposer({
           Presets + DESIGN.md styling land in the Task-2 pass. */}
       {windowBounds && (
         <div
+          // RT-5 — the Include-click focus target (see pendingWindowFocusRef).
+          ref={coverageWindowControlRef}
+          tabIndex={-1}
           className="mt-6 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-4 py-3"
           data-testid="scenario-coverage-window"
         >
@@ -2866,7 +3301,17 @@ export function ScenarioComposer({
             {/* WINDOW-05 — "Full range (some drop out)" widens to the union;
                 non-covering strategies auto-drop via the engine's coverage gate.
                 A union always exists for a non-empty set, so this stays enabled
-                even when the intersection is empty. */}
+                even when the intersection is empty.
+
+                Ship-review RT-3 (accepted): applying Full range persists
+                TODAY's union VERBATIM via applyWindow — a {start,end} SNAPSHOT,
+                not a "full range" mode. New data tomorrow extends spans past
+                the frozen end, so on reopen/share/compare the saved window is
+                NARROWER than the new union and later data is excluded —
+                disclosed by BlendHeader's "window truncated from full range"
+                suffix. Deliberate: the window is an explicit compute input
+                everywhere (locked v1.5 design); a window-MODE variant was
+                considered and rejected at ship review (schema ripple). */}
             <button
               type="button"
               onClick={() => fullRangeWindow && applyWindow(fullRangeWindow)}
@@ -2898,6 +3343,23 @@ export function ScenarioComposer({
               initialRange={coverageWindow}
             />
           )}
+        </div>
+      )}
+
+      {/* Phase 58 (COVERAGE-01) — the collapsed-by-default coverage timeline
+          (tertiary disclosure, 58-UI-SPEC §Interaction): within/after the window
+          control so the allocator can reveal "why did X drop / how much history
+          keeps it?" on demand. Rows carry the in-blend/auto-excluded flag from
+          the SAME `coverageEligible` axis (never re-derived); the bars agree with
+          the row chips by construction. Only mounts when there is a windowed set
+          to plot. */}
+      {windowBounds && (
+        <div className="mt-6">
+          <CoverageTimeline
+            rows={timelineRows}
+            unionWindow={fullRangeWindow}
+            activeWindow={coverageWindow}
+          />
         </div>
       )}
 
@@ -3503,6 +3965,7 @@ export function ScenarioComposer({
               `/compare?ids=${encodeURIComponent(scopeRef)},${candidateId}`,
             )
           }
+          coverageEligible={coverageEligible}
         />
       </CollapsibleSection>
 
@@ -3540,6 +4003,25 @@ export function ScenarioComposer({
                 id={row.id}
                 name={row.name}
                 reason={row.reason}
+                includeCost={row.includeCost}
+                // COVERAGE-04 — one reversible click narrows the window to the
+                // intersection that re-admits this strategy. onInclude MUST call
+                // ONLY applyWindow — it never touches `selected`, so a
+                // manually-off strategy is never reselected (T-58-05). The
+                // window-move is reversible via the Common-period / Full-range
+                // presets (no bespoke undo needed).
+                onInclude={
+                  row.includeCost
+                    ? () => {
+                        // RT-5 — the clicked button unmounts with its row once
+                        // the narrowed window re-admits the strategy; flag the
+                        // post-render focus move to the coverage-window
+                        // control (effect by pendingWindowFocusRef).
+                        pendingWindowFocusRef.current = true;
+                        applyWindow(row.includeCost!.target);
+                      }
+                    : undefined
+                }
               />
             ))}
           </ul>
@@ -3674,15 +4156,29 @@ export function ScenarioComposer({
  * honours prefers-reduced-motion on the SINGLE transition-carrying element
  * (Pitfall 5 — no residual transition elsewhere). The reason is real text
  * (never color-only), read out with the strategy name for the group's a11y.
+ *
+ * Phase 58 (COVERAGE-02, COVERAGE-04) — additively gains (Rule 3, surgical):
+ *   - the amber `CoverageStateChip state="auto-excluded"` ("Outside window") next
+ *     to the existing reason text — the third visually-distinct state; and
+ *   - a one-click "Include → shortens window to {date} (−{N} mo)" accent
+ *     text-button that DISCLOSES the cost in its label before applying and, on
+ *     click, narrows the window via the composer's `applyWindow` path (`onInclude`)
+ *     so the strategy becomes a member. The button is omitted when there is no
+ *     window that re-admits the row (`includeCost === null`). Never reselects a
+ *     manually-off strategy — `onInclude` only moves the window (T-58-05).
  */
 function AutoExcludedRow({
   id,
   name,
   reason,
+  includeCost,
+  onInclude,
 }: {
   id: string;
   name: string;
   reason: string;
+  includeCost: IncludeCost | null;
+  onInclude?: () => void;
 }) {
   const [entered, setEntered] = useState(false);
   useEffect(() => {
@@ -3696,17 +4192,69 @@ function AutoExcludedRow({
   return (
     <li
       data-testid={`auto-excluded-row-${id}`}
-      className={`flex items-center justify-between gap-3 rounded-md border border-warning-border bg-surface p-3 transition-all duration-300 ease-out motion-reduce:transition-none ${
+      className={`flex items-start justify-between gap-3 rounded-md border border-warning-border bg-surface p-3 transition-all duration-300 ease-out motion-reduce:transition-none ${
         entered ? "translate-y-0 opacity-100" : "translate-y-1 opacity-0"
       }`}
     >
-      <span className="truncate text-sm text-text-primary">{name}</span>
-      <span
-        data-testid="auto-excluded-reason"
-        className="shrink-0 text-fixed-11 font-medium text-warning"
-      >
-        {reason}
-      </span>
+      <span className="mt-0.5 truncate text-sm text-text-primary">{name}</span>
+      <div className="flex shrink-0 flex-col items-end gap-1">
+        <div className="flex items-center gap-2">
+          {/* COVERAGE-02 — the amber "Outside window" chip (the third state),
+              alongside the existing honest reason text (never color-only). */}
+          <CoverageStateChip state="auto-excluded" />
+          <span
+            data-testid="auto-excluded-reason"
+            className="text-fixed-11 font-medium text-warning"
+          >
+            {reason}
+          </span>
+        </div>
+        {includeCost && onInclude && (
+          // COVERAGE-04 — the cost-disclosing include text-button. The disclosed
+          // date(s) + `−{N} mo` render in font-mono tabular-nums (DESIGN.md
+          // numbers). No modal — the cost is in the label and the apply is
+          // reversible. The verb agrees with the bound(s) that actually move
+          // (WR-01/WR-02): a tail move "shortens window to {end}", a head move
+          // "moves window start to {start}", a both-ends move names both dates so
+          // the shown date(s) and the `−{N} mo` cost always reconcile.
+          // `min-h-6 inline-flex items-center` = the F1 tap-target idiom
+          // (WCAG 2.5.8 24px minimum — a bare text button at the 11px tier
+          // renders ~15px); gap-1 restores the inter-fragment spacing flex
+          // layout collapses; flex-wrap lets the label break on narrow phones.
+          <button
+            type="button"
+            data-testid={`auto-excluded-include-${id}`}
+            onClick={onInclude}
+            className="min-h-6 inline-flex flex-wrap items-center gap-1 rounded-sm text-fixed-11 font-medium text-accent transition-colors duration-150 ease-out hover:text-accent-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 motion-reduce:transition-none"
+          >
+            {includeCost.movedBound === "start" ? (
+              <>
+                Include → moves window start to{" "}
+                <span className="font-mono tabular-nums">
+                  {includeCost.target.start}
+                </span>{" "}
+              </>
+            ) : includeCost.movedBound === "both" ? (
+              <>
+                Include → shortens window to{" "}
+                <span className="font-mono tabular-nums">
+                  {includeCost.target.start}–{includeCost.target.end}
+                </span>{" "}
+              </>
+            ) : (
+              <>
+                Include → shortens window to{" "}
+                <span className="font-mono tabular-nums">
+                  {includeCost.target.end}
+                </span>{" "}
+              </>
+            )}
+            <span className="font-mono tabular-nums">
+              (−{includeCost.months} mo)
+            </span>
+          </button>
+        )}
+      </div>
     </li>
   );
 }
@@ -3727,6 +4275,15 @@ interface CompositionListProps {
   onSetLeverage: (scopeRef: string, leverage: number) => void;
   onRemoveAdded: (id: string) => void;
   onCompare: (scopeRef: string, candidateId: string) => void;
+  /**
+   * Phase 58 COVERAGE-02 — the coverage-eligibility axis (the `coverageEligible`
+   * memo in ScenarioComposer). Threaded READ-ONLY so each added-strategy row
+   * can render its three-state chip from the SAME axis the engine's divisor
+   * and the coverageEligible↔member_ids dev cross-check read. The chip state
+   * is NOT re-derived here — it is a projection of `selected` (row `enabled`)
+   * + this map.
+   */
+  coverageEligible: Record<string, boolean>;
 }
 
 function CompositionList({
@@ -3740,6 +4297,7 @@ function CompositionList({
   onSetLeverage,
   onRemoveAdded,
   onCompare,
+  coverageEligible,
 }: CompositionListProps) {
   const flaggedByRef = useMemo(() => {
     const map = new Map<string, FlaggedHolding>();
@@ -3838,6 +4396,19 @@ function CompositionList({
         {draft.addedStrategies.map((a) => {
           const enabled = draft.toggleByScopeRef[a.id] !== false;
           const weight = draft.weightOverrides[a.id] ?? 0;
+          // Phase 58 COVERAGE-02 — three-state chip, derived (NOT re-computed)
+          // from the row's `enabled` (the `selected` axis) + the threaded
+          // `coverageEligible` map, exactly the two states the plan wires here:
+          //   enabled === false            → manually-excluded
+          //   enabled && coverageEligible  → in-blend
+          // The enabled-but-not-eligible (auto-excluded, amber) state is rendered
+          // by its own group + Plan 02 — no chip here for it, so the main list
+          // never mislabels an outside-window row as in-blend.
+          const chipState: CoverageState | null = !enabled
+            ? "manually-excluded"
+            : coverageEligible[a.id]
+              ? "in-blend"
+              : null;
           return (
             <li
               key={a.id}
@@ -3865,6 +4436,9 @@ function CompositionList({
                   />
                 </button>
                 <span className="text-sm text-text-primary">{a.name}</span>
+                {chipState && (
+                  <CoverageStateChip state={chipState} className="shrink-0" />
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <label className="sr-only" htmlFor={`weight-${a.id}`}>

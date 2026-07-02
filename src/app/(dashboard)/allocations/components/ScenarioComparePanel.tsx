@@ -222,12 +222,16 @@ export function ScenarioComparePanel({
 
   // The live-book column — synthetic all-on draft through the SAME engine path.
   // Same crash exposure as the per-selection columns above → same guard.
+  // `liveBook: true` (ship-review RT-1) declares the STRUCTURAL Phase-55
+  // own-book exception: the allocator's own book stays on the union path,
+  // while windowless SAVED columns get the intersection default.
   const liveBook: ScenarioColumn | null = useMemo(() => {
     if (!includeLiveBook) return null;
     try {
       const metrics = computeMetricsForDraft(
         buildLiveBookDraft(),
         liveInputs,
+        { liveBook: true },
       );
       return { name: "Live book", metrics };
     } catch (err) {

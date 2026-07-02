@@ -24,11 +24,20 @@
  *     that null flow straight through — NO `?? 0` — so the render layer shows an
  *     honest em-dash, never a fabricated 0.
  *
- *   - Heterogeneous windows. Each draft runs the engine's UNION-when-absent path
- *     (no `state.window` is passed here) and reports its OWN overlap `n`; the
- *     helper does not force a shared window across drafts. Per-persisted-window
- *     compare alignment is Phase 59 (PERSIST-03), which will wire the saved window
- *     in through the same `defaultWindowFor()` helper.
+ *   - Heterogeneous windows (v1.5 PERSIST-03). Each draft is computed at its OWN
+ *     persisted `draft.window` (injected POST-collapse onto `deAliased.state` —
+ *     Pitfall 4). Two drafts with DIFFERENT windows compute independently; the
+ *     helper never force-aligns a shared window across drafts. A SAVED draft
+ *     with NO `window` (a pre-v1.5 v2 draft, or a v3 saved before a window was
+ *     chosen) defaults to the INTERSECTION of its selected spans via the shared
+ *     scenario-window helpers — the same rule the composer's WINDOW-01
+ *     auto-default and share-resolve apply (ship-review RT-1; 59-CONTEXT Area 3
+ *     Q4: "A windowless v2 draft in a compare set → intersection default (same
+ *     rule everywhere)"). The ONE structural exception is the live-book column
+ *     (`opts.liveBook`): the allocator's own book is NOT a saved scenario and
+ *     stays on the engine's UNION-when-absent path — the Phase-55 own-book
+ *     union lock. The window is threaded as an engine COMPUTE input, never as
+ *     a factsheet view-clamp.
  *
  *   - Live-book column computed through the SAME engine path over a synthetic
  *     "all live holdings, equity-weight" draft (`buildLiveBookDraft`) — NOT the
@@ -47,11 +56,12 @@ import {
   type StrategyForBuilder,
 } from "@/lib/scenario";
 import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
+import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 import {
   buildStrategyForBuilderSet,
   type StrategyForBuilderId,
 } from "./scenario-adapter";
-import type { ScenarioDraft } from "./scenario-state";
+import { SCENARIO_SCHEMA_VERSION, type ScenarioDraft } from "./scenario-state";
 
 /**
  * The slice of the composer's live payload the compare engine needs. Mirrors
@@ -80,6 +90,22 @@ export interface ScenarioCompareInputs {
 }
 
 /**
+ * Options for `computeMetricsForDraft`. Ship-review RT-1 — the live-book
+ * exception is STRUCTURAL (an explicit compute input the caller declares),
+ * never inferred from draft contents / name matching.
+ */
+export interface ComputeMetricsForDraftOptions {
+  /**
+   * Phase-55 own-book union lock: the live-book column is the allocator's own
+   * book, NOT a saved scenario, so a windowless live-book draft must NOT get
+   * the saved-scenario intersection default — it stays on the engine's
+   * UNION-when-absent path. Set by ScenarioComparePanel for the
+   * `buildLiveBookDraft()` column ONLY.
+   */
+  liveBook?: boolean;
+}
+
+/**
  * Re-resolve a saved `draft`'s series from `liveInputs` and run the frozen
  * `computeScenario`, returning the SAME `ComputedMetrics` the composer shows
  * for that draft over the same live inputs.
@@ -92,6 +118,7 @@ export interface ScenarioCompareInputs {
 export function computeMetricsForDraft(
   draft: ScenarioDraft,
   liveInputs: ScenarioCompareInputs,
+  opts: ComputeMetricsForDraftOptions = {},
 ): ComputedMetrics {
   // Read-only-tokens model: live holdings are FIXED context — no per-holding
   // toggle exists, so a current-schema (v2) draft never disables a holding.
@@ -149,10 +176,46 @@ export function computeMetricsForDraft(
   );
   const dateMapCache = buildDateMapCache(deAliased.strategies);
 
+  // v1.5 PERSIST-03 — inject the engine window POST-collapse (Pitfall 4).
+  // `collapseAliasedHoldingStrategies` reconstructs `state` and silently drops
+  // any `window` set on the PRE-collapse `projectionState`, so the window MUST
+  // be spread onto `deAliased.state` here (the canonical engineState idiom,
+  // mirroring ScenarioComposer's `engineState` memo). Precedence:
+  //
+  //   1. `draft.window` — the persisted window, verbatim.
+  //   2. Windowless SAVED draft (ship-review RT-1) — the INTERSECTION default,
+  //      derived from the post-collapse selected strategies via the ONE shared
+  //      helper chain (coverageSpanOf → defaultWindowFor), the same rule the
+  //      composer's WINDOW-01 auto-default and share-resolve apply (locked
+  //      59-CONTEXT Area 3 Q4: "A windowless v2 draft in a compare set →
+  //      intersection default (same rule everywhere)"). No spans / empty
+  //      intersection → null → no window key (engine union guard, matching the
+  //      composer's WINDOW-06 behavior).
+  //   3. `opts.liveBook` — the live-book column stays WINDOWLESS (Phase-55
+  //      own-book union lock): the allocator's own book is not a saved
+  //      scenario, so no intersection default is derived for it.
+  const engineWindow =
+    draft.window ??
+    (opts.liveBook
+      ? null
+      : defaultWindowFor(
+          deAliased.strategies.flatMap((s) => {
+            // Spans of SELECTED strategies only — the composer's
+            // `selectedSpanById` rule (`selected === false` is skipped;
+            // absent counts as selected).
+            if (deAliased.state.selected[s.id] === false) return [];
+            const span = coverageSpanOf(s.daily_returns);
+            return span ? [span] : [];
+          }),
+        ));
+  const engineState = engineWindow
+    ? { ...deAliased.state, window: engineWindow }
+    : deAliased.state;
+
   // Degenerate sets (empty active set, n < 10, NaN-poisoned) return null-metric
   // ComputedMetrics — flow it straight through, NO `?? 0`. The caller renders
   // an honest em-dash via formatPercent/formatNumber.
-  return computeScenario(deAliased.strategies, deAliased.state, dateMapCache);
+  return computeScenario(deAliased.strategies, engineState, dateMapCache);
 }
 
 /**
@@ -166,10 +229,18 @@ export function computeMetricsForDraft(
  * An empty `toggleByScopeRef` + `weightOverrides` makes `computeMetricsForDraft`
  * fall back to the adapter defaults (every holding selected, value-proportional
  * weights), which IS the live book.
+ *
+ * Ship-review RT-1: callers computing THIS draft must pass
+ * `{ liveBook: true }` to `computeMetricsForDraft` so the own-book column stays
+ * on the union path (Phase-55 lock) instead of the saved-scenario intersection
+ * default — the exception is declared at the call site, never name-matched.
  */
 export function buildLiveBookDraft(): ScenarioDraft {
   return {
-    schema_version: 2,
+    // The synthetic draft never round-trips the codec (computeMetricsForDraft
+    // consumes it directly), but pin the CURRENT version constant so a future
+    // bump can never leave this literal behind as a stale-looking v2.
+    schema_version: SCENARIO_SCHEMA_VERSION,
     init_holdings_fingerprint: "live-book",
     toggleByScopeRef: {},
     addedStrategies: [],
