@@ -298,6 +298,10 @@ jobs:
         with:
           name: vitest-blob-${{ matrix.shard }}
           path: .vitest-reports/
+          # .vitest-reports is a dot-directory; upload-artifact excludes
+          # hidden paths by default (a v4.4+ security change), so without
+          # this the step uploads nothing and if-no-files-found fails it.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
