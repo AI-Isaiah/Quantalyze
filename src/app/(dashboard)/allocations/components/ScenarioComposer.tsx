@@ -689,8 +689,15 @@ export function ScenarioComposer({
   // initial draft renders by gating which holdings flow into the hook/adapter/
   // composition below. The frozen adapter + engine path is untouched.
   const hasLiveBook = rawHoldingsSummary.length > 0;
+  // ENGINE-03 (Phase 63) — book mode requires BOTH a live book AND the per-key
+  // dailies gate. A gate=false holder has no per-source engine behind a book
+  // mode, so book entry is unavailable and the composer initializes to BLANK
+  // (added-only) with the DSRC-02 note repointed below so it still renders (D1
+  // locked; Pitfall 2). Landing this before the ENGINE-01 holdings-path deletion
+  // means no intermediate state ever shows a gate=false book mode with no engine.
+  const canEnterBook = hasLiveBook && payload.perKeyDailiesGateSatisfied;
   const [entryMode, setEntryMode] = useState<"book" | "blank">(
-    hasLiveBook ? "book" : "blank",
+    canEnterBook ? "book" : "blank",
   );
 
   // The holdings the composer actually presents this render. In "blank" mode we
@@ -1126,6 +1133,11 @@ export function ScenarioComposer({
   const handleEntryModeSelect = useCallback(
     (mode: "book" | "blank") => {
       if (mode === entryMode) return;
+      // ENGINE-03 — refuse book entry when the per-key gate is not satisfied.
+      // The book segment is hidden in that case (see the radiogroup below), so
+      // this is defense-in-depth: no code path (arrow-key, a future re-show)
+      // can land the composer in an engineless book mode.
+      if (mode === "book" && !payload.perKeyDailiesGateSatisfied) return;
       if (scenario.diffCount > 0) {
         setPendingMode(mode);
         setResetModalOpen(true);
@@ -1133,7 +1145,7 @@ export function ScenarioComposer({
       }
       setEntryMode(mode);
     },
-    [entryMode, scenario.diffCount],
+    [entryMode, scenario.diffCount, payload.perKeyDailiesGateSatisfied],
   );
 
   // Open a saved scenario. The row's persisted draft is decoded through the
@@ -1148,8 +1160,17 @@ export function ScenarioComposer({
   const openSavedScenario = useCallback(
     (row: SavedScenarioRow) => {
       setSaveError(null);
+      // ENGINE-03 (Phase 63) — drift is "does the saved draft match the LIVE
+      // book?", so the reference draft MUST carry the LIVE holdings fingerprint
+      // (see the drift derivation below, which documents exactly this intent).
+      // Use rawHoldingsSummary, NOT the presentation-gated `holdingsSummary`
+      // memo: a gate=false holder now initializes to BLANK, which switches
+      // `holdingsSummary` to [] (empty fingerprint) and would make EVERY reopen
+      // look drifted — falsely suppressing the MEMBER-04 ineligible disclosure
+      // for a book draft the live book still matches. In book mode the two are
+      // identical, so this is a no-op there.
       const defaultDraft = defaultDraftFromHoldings(
-        holdingsSummary as Parameters<typeof defaultDraftFromHoldings>[0],
+        rawHoldingsSummary as Parameters<typeof defaultDraftFromHoldings>[0],
       );
       // WR-04 (Phase 29 review): `row.draft` is `unknown`. The stringify→parse
       // roundtrip re-serializes data that was already a parsed object; a value
@@ -1337,13 +1358,15 @@ export function ScenarioComposer({
       setNameInputOpen(false);
     },
     // hydrateFromSaved/reset/seedWindowLocal/resetWindowToDefaultOnReopen are
-    // stable useCallbacks; the setters are stable; holdingsSummary is the primary
-    // render-varying input. v1.6 MEMBER-04 also reads the live gate + eligible
-    // set (DERIVE-AND-STAMP + ineligible disclosure), so re-create the callback
-    // when they change — a stale eligible set would misjudge dropped members.
+    // stable useCallbacks; the setters are stable; rawHoldingsSummary is the
+    // primary render-varying input (the drift reference is the LIVE book, not
+    // the presentation-gated `holdingsSummary` — ENGINE-03). v1.6 MEMBER-04 also
+    // reads the live gate + eligible set (DERIVE-AND-STAMP + ineligible
+    // disclosure), so re-create the callback when they change — a stale eligible
+    // set would misjudge dropped members.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
-      holdingsSummary,
+      rawHoldingsSummary,
       scenario.hydrateFromSaved,
       payload.perKeyDailiesGateSatisfied,
       payload.eligibleApiKeyIds,
@@ -1808,8 +1831,14 @@ export function ScenarioComposer({
   // (e.g. keys removed but a holdings snapshot remains) has nothing to model per
   // source, so suppress the note there rather than show the misleading
   // "connected keys don't have a per-key series yet" copy (review WR-01).
+  // ENGINE-03 (Pitfall 2) — repointed from `entryMode === "book"` to
+  // `hasLiveBook`. A gate=false book holder now initializes to BLANK mode, so
+  // keying the note on `entryMode === "book"` would silently kill it exactly
+  // when it is most needed. Keying on the RAW book (hasLiveBook) keeps the calm
+  // note rendered for the forced-blank holder while the `!gate && eligible > 0`
+  // conjuncts still suppress it for gate-satisfied books and no-key books.
   const showDataSourcesFallback =
-    entryMode === "book" &&
+    hasLiveBook &&
     !payload.perKeyDailiesGateSatisfied &&
     (payload.eligibleApiKeyIds ?? []).length > 0;
 
@@ -2989,12 +3018,16 @@ export function ScenarioComposer({
           className="inline-flex items-center gap-1 rounded-md border border-border p-0.5"
           onKeyDown={(e) => {
             if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-            if (!hasLiveBook) return; // only one option — nothing to arrow to
+            // ENGINE-03 — only arrow between segments when book entry is
+            // actually available (live book AND per-key gate). Otherwise Blank
+            // slate is the only option — nothing to arrow to, and an arrow must
+            // never land focus in the (hidden, engineless) book mode.
+            if (!canEnterBook) return;
             e.preventDefault();
             handleEntryModeSelect(entryMode === "book" ? "blank" : "book");
           }}
         >
-          {hasLiveBook && (
+          {canEnterBook && (
             <button
               type="button"
               role="radio"
@@ -3015,7 +3048,7 @@ export function ScenarioComposer({
             type="button"
             role="radio"
             aria-checked={entryMode === "blank"}
-            tabIndex={entryMode === "blank" || !hasLiveBook ? 0 : -1}
+            tabIndex={entryMode === "blank" || !canEnterBook ? 0 : -1}
             data-testid="scenario-entry-mode-blank"
             onClick={() => handleEntryModeSelect("blank")}
             className={`rounded-sm px-3 py-1 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
