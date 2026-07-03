@@ -158,7 +158,18 @@ describe("Bridge → composer seam (JOURNEY-01)", () => {
     const draft = defaultDraftFromHoldings(HOLDINGS_2);
     const btcWeightBefore = draft.weightOverrides[REF_BTC];
     expect(btcWeightBefore).toBeCloseTo(0.6, 9);
-    const baseline = computeMetricsForDraft(draft, liveInputs);
+    // WR-01 rebase (phase 62): `defaultDraftFromHoldings` seeds `memberKeyIds: []`,
+    // so in the compare engine this is an empty-membership draft. After WR-01
+    // (3f16cd85) the holdings else-branch blends the live book ONLY on the
+    // own-book column (`opts.liveBook`) — every OTHER empty-membership column is
+    // added-only. This test uses `computeMetricsForDraft` as a proxy for the
+    // COMPOSER's live projection, which (ScenarioComposer.tsx:1765) blends live
+    // holdings by `entryMode`, i.e. the allocator's OWN book. `{ liveBook: true }`
+    // is that own-book union basis — the honest proxy for the composer here — and
+    // keeps the holdings-vehicle non-degenerate so the seam's projection move
+    // (assertion (d)) stays testable. The draft-object weight assertions (b)/(c)
+    // are independent of this opt.
+    const baseline = computeMetricsForDraft(draft, liveInputs, { liveBook: true });
     // Sanity: the baseline is a real (non-degenerate) projection — otherwise a
     // null→null comparison below would be a false "no movement".
     expect(baseline.n).toBe(80);
@@ -167,7 +178,10 @@ describe("Bridge → composer seam (JOURNEY-01)", () => {
 
     // The seam under test: carry the Bridge candidate into the composer draft.
     const next = addStrategyBridge(draft, REF_BTC, STRAT_B);
-    const after = computeMetricsForDraft(next, liveInputs);
+    // Same own-book proxy basis as the baseline (WR-01 rebase) — the seam adds
+    // the candidate on top of the live book, so both projections compute on the
+    // identical `{ liveBook: true }` footing and the delta is purely the bridge.
+    const after = computeMetricsForDraft(next, liveInputs, { liveBook: true });
 
     // (a) MEMBERSHIP — the candidate lands in the draft. FAILS when the seam is
     // neutered to `return draft` (the candidate is never pushed).
