@@ -168,7 +168,7 @@ export default async function ScenarioSharePage({
     );
   }
 
-  const { name, metrics, portfolioDaily, strategyNames } = resolved;
+  const { name, metrics, portfolioDaily, strategyNames, isMixed } = resolved;
   const btcAvailable = btcDaily.length > 0;
 
   // EquityChart needs cumulative-WEALTH form (start ~1.0). The engine's
@@ -212,6 +212,15 @@ export default async function ScenarioSharePage({
           Shared scenario · {PROJECTED_LABEL}
         </p>
         <p className="mt-1 text-xs text-text-muted">{methodologyLine(metrics.n)}</p>
+        {/* PRESENT-03 — a MIXED draft (persisted book members + catalog adds)
+            can only be computed on its catalog legs here; this quiet one-line
+            honesty caption says so. Renders in the muted note register only —
+            never an emphasis/warning color, no role (static prose). */}
+        {isMixed && (
+          <p data-testid="scenario-mixed-caption" className="mt-1 text-xs text-text-muted">
+            computed from this scenario&apos;s catalog strategies only
+          </p>
+        )}
       </header>
 
       {/* KPI strip — return/percentage form, em-dash on degenerate. */}

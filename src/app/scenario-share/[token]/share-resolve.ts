@@ -69,6 +69,16 @@ export interface ResolvedOk {
   portfolioDaily: DailyPoint[];
   /** De-aliased strategy-id → name map for the correlation heatmap labels. */
   strategyNames: Record<string, string>;
+  /**
+   * PRESENT-03 / red-team F3 — the shared draft blends the owner's PERSISTED
+   * book members (`memberKeyIds`) with catalog adds; only the catalog legs are
+   * publicly computable here (the live-book boundary never resolves the owner's
+   * per-key book series), so the rendered projection is the renormalized added
+   * legs. `true` when the draft is MIXED, driving the public page's one-line
+   * honesty caption. Computed from the already-decoded draft JSONB ONLY — no
+   * RPC/SQL change, zero private data.
+   */
+  isMixed: boolean;
 }
 
 /** Undecodable / version-ahead / unparseable draft — render the honest-absence
@@ -270,5 +280,14 @@ export function resolveSharedScenario(
     metrics,
     portfolioDaily,
     strategyNames,
+    // PRESENT-03 — the draft is MIXED when it carries persisted book members.
+    // The addedStrategies-non-empty half of MIXED is guaranteed BY CONSTRUCTION
+    // here: the :214 `strategies.length === 0` book-only guard already
+    // honest-absenced a zero-added draft, so the ok branch needs only the
+    // membership check. Null-safe `?? []` (the Phase-62 isBookOnlyDraft
+    // precedent): a pre-v4 decode leaves membership undefined at runtime despite
+    // the required-at-v4 type → falsy → false → no caption for unknown
+    // membership.
+    isMixed: (draft.memberKeyIds ?? []).length > 0,
   };
 }
