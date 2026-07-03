@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 /**
  * ProvenanceNote (v1.5 PERSIST-01) — the pre-coverage-window upgrade note.
@@ -30,11 +30,30 @@ import { useState } from "react";
  * No icons — the `×` is a text glyph. Only DESIGN.md tokens; no raw font px.
  */
 export interface ProvenanceNoteProps {
-  /** The escape hatch — apply the existing Full-range preset (union). */
-  onShowFullRange: () => void;
+  /**
+   * The escape hatch — apply the existing Full-range preset (union). OPTIONAL:
+   * the v1.6 MEMBER-04 membership variant passes no action (a dropped data
+   * source has no "full range" to restore), so the inline button is omitted and
+   * only the message + dismiss render.
+   */
+  onShowFullRange?: () => void;
+  /**
+   * Message override. Defaults to the window-provenance copy (with the inline
+   * "Show full range" action). The membership variant passes a plain message.
+   */
+  message?: ReactNode;
+  /**
+   * Testid override so a second variant is queryable distinctly (the membership
+   * note uses `scenario-membership-note`). Defaults to the window-note id.
+   */
+  testId?: string;
 }
 
-export function ProvenanceNote({ onShowFullRange }: ProvenanceNoteProps) {
+export function ProvenanceNote({
+  onShowFullRange,
+  message,
+  testId = "scenario-provenance-note",
+}: ProvenanceNoteProps) {
   // EPHEMERAL per-open dismissal — component-local ONLY. A fresh reopen remounts
   // this component (or re-gates its render on the composer's per-open provenance
   // flag), so an old draft opened after a dismissal shows the note again.
@@ -46,26 +65,34 @@ export function ProvenanceNote({ onShowFullRange }: ProvenanceNoteProps) {
     <div
       role="status"
       aria-live="polite"
-      data-testid="scenario-provenance-note"
+      data-testid={testId}
       className="mt-6 flex items-start justify-between gap-3 rounded-md border border-border bg-surface-subtle px-4 py-3"
     >
       <p className="text-fixed-13 leading-relaxed text-text-secondary">
-        This saved scenario predates coverage windows — showing the common period ·{" "}
-        <button
-          type="button"
-          // Ship-review RT-2 — taking the escape hatch DISMISSES the note: after
-          // "Show full range" the window is the union, so leaving the banner up
-          // would keep claiming "showing the common period" over a full-range
-          // window (stale-dishonest copy). Belt to the composer's
-          // active-window-is-common-period render gate (braces).
-          onClick={() => {
-            setDismissed(true);
-            onShowFullRange();
-          }}
-          className="rounded-sm font-medium text-accent transition-colors duration-150 ease-out hover:text-accent-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 motion-reduce:transition-none"
-        >
-          Show full range
-        </button>
+        {message ?? (
+          <>
+            This saved scenario predates coverage windows — showing the common
+            period ·{" "}
+            {/* The action renders ONLY when an escape hatch is provided (the
+                window variant). Ship-review RT-2 — taking it DISMISSES the note:
+                after "Show full range" the window is the union, so leaving the
+                banner up would keep claiming "showing the common period" over a
+                full-range window (stale-dishonest copy). Belt to the composer's
+                active-window-is-common-period render gate (braces). */}
+            {onShowFullRange && (
+              <button
+                type="button"
+                onClick={() => {
+                  setDismissed(true);
+                  onShowFullRange();
+                }}
+                className="rounded-sm font-medium text-accent transition-colors duration-150 ease-out hover:text-accent-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 motion-reduce:transition-none"
+              >
+                Show full range
+              </button>
+            )}
+          </>
+        )}
       </p>
       <button
         type="button"

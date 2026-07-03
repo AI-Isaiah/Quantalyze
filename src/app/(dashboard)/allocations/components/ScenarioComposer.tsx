@@ -841,6 +841,13 @@ export function ScenarioComposer({
   // opens — a per-scenario data-provenance signal, NOT a global one-time flag
   // (Phase-59 Pitfall 3). Never persisted into the draft.
   const [showProvenanceNote, setShowProvenanceNote] = useState(false);
+  // v1.6 MEMBER-04 — the EPHEMERAL ineligible-member disclosure flag. True right
+  // after reopening a genuine-v4 draft whose PERSISTED membership includes ≥1 id
+  // no longer in the SSR-eligible set (that member drops at compute; the drop is
+  // DISCLOSED, never silent). Parallel to showProvenanceNote: set per open,
+  // cleared on every other path (drift, readonly, reset), keyed on the same
+  // per-open nonce so it re-shows for each affected draft. Never persisted.
+  const [showMembershipNote, setShowMembershipNote] = useState(false);
   // Review WR-02 — the per-OPEN nonce for the ProvenanceNote's remount key.
   // Keying on loadedScenarioId alone fails the A→dismiss→reopen-A case: the
   // same id means the same key, the component stays mounted (rendering null),
@@ -1082,6 +1089,9 @@ export function ScenarioComposer({
     // v1.5 PERSIST-01 — a reset leaves the upgraded-v2 provenance context; the
     // fresh draft is a v3 live book, so the note must not linger.
     setShowProvenanceNote(false);
+    // v1.6 MEMBER-04 — a reset drops the reopened membership too, so the
+    // ineligible-member disclosure must not linger onto the fresh live book.
+    setShowMembershipNote(false);
     // Review WR-01 — clear the window state too: a reopened scenario's saved
     // window (applied via seedWindowLocal, windowTouchedRef=true) is
     // prior-open context and must not narrow the fresh live-book draft.
@@ -1203,9 +1213,29 @@ export function ScenarioComposer({
         decoded.value.init_holdings_fingerprint !==
         defaultDraft.init_holdings_fingerprint;
 
+      // v1.6 MEMBER-04 (DERIVE-AND-STAMP, gate-only). An UPGRADED (v2/v3) or an
+      // underived-v4 round-tripped draft decodes with `memberKeyIds === undefined`.
+      // Resolve it from the live gate + eligible set and STAMP it into the WORKING
+      // draft so the draft is self-describing IMMEDIATELY: the next localStorage
+      // persist writes a v4-with-membership blob and `entryMode` stops being a
+      // load-bearing signal (the blocker's spirit-of-(b) fix). A genuine-v4 draft
+      // (membership already defined) hydrates UNCHANGED — its dropped members are
+      // intersected out at compute and disclosed below. This is the gate-only
+      // DERIVE, distinct from the entryMode-aware STAMP on the SAVE path.
+      const hydratedValue =
+        decoded.value.memberKeyIds === undefined
+          ? setMemberKeyIds(
+              decoded.value,
+              deriveMembershipFromGate(
+                payload.perKeyDailiesGateSatisfied ?? false,
+                payload.eligibleApiKeyIds ?? [],
+              ),
+            )
+          : decoded.value;
+
       if (decoded.outcome === "readonly") {
         // Newer-version blob: hydrate the user's real data but block edits.
-        scenario.hydrateFromSaved(decoded.value);
+        scenario.hydrateFromSaved(hydratedValue);
         // Review WR-02 — opening a saved scenario replaces the draft, so clear
         // the ephemeral per-source include map (it is not persisted) → the
         // opened scenario starts with every data source included.
@@ -1226,6 +1256,9 @@ export function ScenarioComposer({
           else resetWindowToDefaultOnReopen();
         }
         setShowProvenanceNote(false);
+        // A readonly (newer-version) open is not an ineligible-member disclosure
+        // path; clear any lingering flag from a prior open.
+        setShowMembershipNote(false);
         setLoadedScenarioId(row.id);
         setLoadedScenarioName(row.name);
         setLoadedReadonly(true);
@@ -1239,7 +1272,9 @@ export function ScenarioComposer({
       // ok — adopt the draft + id; clear any prior notice / readonly flag. The
       // fingerprint-mismatch banner (drift) derives automatically from the
       // hydrated draft's fingerprint vs current holdings — no special-casing.
-      scenario.hydrateFromSaved(decoded.value);
+      // hydratedValue carries the DERIVE-AND-STAMP for an underived draft so the
+      // reopened working draft is self-describing (v1.6 MEMBER-04).
+      scenario.hydrateFromSaved(hydratedValue);
       // Review WR-02 — clear the ephemeral per-source include map on open (it is
       // not persisted) → the opened scenario starts with every source included.
       setIncludeByApiKeyId({});
@@ -1272,12 +1307,28 @@ export function ScenarioComposer({
       //     note. Only a genuinely pre-window v2 draft shows the note.
       if (drifted) {
         setShowProvenanceNote(false);
-      } else if (decoded.value.window) {
-        seedWindowLocal(decoded.value.window);
-        setShowProvenanceNote(false);
+        // On drift the saved draft is NOT applied (the working draft is the
+        // windowless default), so its persisted membership is not in play — no
+        // ineligible-member disclosure either.
+        setShowMembershipNote(false);
       } else {
-        resetWindowToDefaultOnReopen();
-        setShowProvenanceNote(decoded.reason === "upgraded_v2_chain");
+        if (decoded.value.window) {
+          seedWindowLocal(decoded.value.window);
+          setShowProvenanceNote(false);
+        } else {
+          resetWindowToDefaultOnReopen();
+          setShowProvenanceNote(decoded.reason === "upgraded_v2_chain");
+        }
+        // v1.6 MEMBER-04 ineligible disclosure — a PERSISTED member id no longer
+        // in the SSR-eligible set drops at compute; disclose it (never silent).
+        // Read the RAW decoded membership (not hydratedValue): an underived draft
+        // has no persisted membership, so its derived set is eligible-only and
+        // yields no dropped members (no false note).
+        const eligibleSet = new Set(payload.eligibleApiKeyIds ?? []);
+        const droppedMembers = (decoded.value.memberKeyIds ?? []).filter(
+          (id) => !eligibleSet.has(id),
+        );
+        setShowMembershipNote(droppedMembers.length > 0);
       }
       setLoadedScenarioId(row.id);
       setLoadedScenarioName(row.name);
@@ -1286,10 +1337,17 @@ export function ScenarioComposer({
       setNameInputOpen(false);
     },
     // hydrateFromSaved/reset/seedWindowLocal/resetWindowToDefaultOnReopen are
-    // stable useCallbacks; the setters are stable; holdingsSummary is the only
-    // render-varying input.
+    // stable useCallbacks; the setters are stable; holdingsSummary is the primary
+    // render-varying input. v1.6 MEMBER-04 also reads the live gate + eligible
+    // set (DERIVE-AND-STAMP + ineligible disclosure), so re-create the callback
+    // when they change — a stale eligible set would misjudge dropped members.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [holdingsSummary, scenario.hydrateFromSaved],
+    [
+      holdingsSummary,
+      scenario.hydrateFromSaved,
+      payload.perKeyDailiesGateSatisfied,
+      payload.eligibleApiKeyIds,
+    ],
   );
 
   // Register the imperative Open handler with the parent (the saved-scenarios
@@ -3283,12 +3341,35 @@ export function ScenarioComposer({
           picker / Include all leave the common period; the stale banner would
           lie over the new window). "Show full range" reuses the existing
           Full-range preset and also self-dismisses inside ProvenanceNote. */}
-      {windowBounds && showProvenanceNote && activeWindowIsCommonPeriod && (
+      {/* v1.6 MEMBER-04 — ineligible persisted-member disclosure. A DISTINCT
+          ephemeral note (reusing the parameterized ProvenanceNote shell) shown
+          when a reopened v4 draft carries a member id no longer eligible; that
+          member drops at compute and the recompute over the remainder proceeds
+          WITH this note visible (MEMBER-04 forbids the silence, not the
+          recompute). Keyed on the same loadedScenarioId-nonce as the window note
+          so it re-shows per affected draft (component-local dismissal remounts
+          fresh). Independent of windowBounds — a dropped data source is
+          orthogonal to coverage windows. Takes PRIORITY over / suppresses the
+          window + default notes (below, gated on !showMembershipNote) so the two
+          note families never stack. NO action prop (a dropped source has no
+          "full range" to restore). */}
+      {showMembershipNote && (
         <ProvenanceNote
-          key={`${loadedScenarioId ?? "provenance"}-${provenanceOpenNonceRef.current}`}
-          onShowFullRange={() => fullRangeWindow && applyWindow(fullRangeWindow)}
+          key={`membership-${loadedScenarioId ?? "note"}-${provenanceOpenNonceRef.current}`}
+          testId="scenario-membership-note"
+          message="A data source saved with this scenario is no longer available — showing the remaining sources."
         />
       )}
+
+      {windowBounds &&
+        showProvenanceNote &&
+        activeWindowIsCommonPeriod &&
+        !showMembershipNote && (
+          <ProvenanceNote
+            key={`${loadedScenarioId ?? "provenance"}-${provenanceOpenNonceRef.current}`}
+            onShowFullRange={() => fullRangeWindow && applyWindow(fullRangeWindow)}
+          />
+        )}
 
       {/* Phase 58 (POLISH-03) — the one-time union→intersection default-change
           note. Placed ABOVE the blend header / window control (58-UI-SPEC
@@ -3300,7 +3381,7 @@ export function ScenarioComposer({
           an upgraded-v2 draft both notes would otherwise stack with duplicate
           "common period" messaging. "Show full range" reuses the existing
           Full-range preset via applyWindow(fullRangeWindow) — no new logic. */}
-      {windowBounds && !showProvenanceNote && (
+      {windowBounds && !showProvenanceNote && !showMembershipNote && (
         <DefaultChangeNote
           memberCount={scenarioMetrics.member_count ?? 0}
           intersectionTruncatesUnion={showingCommonPeriodTruncated}
