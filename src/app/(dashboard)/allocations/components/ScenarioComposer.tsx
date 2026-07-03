@@ -27,12 +27,15 @@
  *   7. "Add more strategies" CTA row → opens StrategyBrowseDrawer
  *   8. ScenarioFooter (sticky)
  *
- * Adapter signature is B4-pinned: `buildStrategyForBuilderSet` is called
- * with `addedStrategies: AddedStrategy[]` (lightweight) plus two lookup
- * maps `addedStrategyReturnsLookup` + `addedStrategyMetadataLookup`
- * constructed from `payload.strategies`. The composer NEVER hand-rolls a
- * `StrategyForBuilder`-shaped object at the call site (no pre-casting,
- * no inline disclosure-tier literals).
+ * Engine set is series-space only (Phase 63 ENGINE-01): book+gate blends the
+ * per-key set with added units (`mergeAddedIntoPerKeySet`); blank / gate=false
+ * is added-only (`buildAddedOnlySet`). Both take `addedStrategies:
+ * AddedStrategy[]` (lightweight) plus the `addedStrategyReturnsLookup` +
+ * `addedStrategyMetadataLookup` maps constructed from `payload.strategies`. The
+ * composer NEVER hand-rolls a `StrategyForBuilder`-shaped object at the call
+ * site (no pre-casting, no inline disclosure-tier literals). The former
+ * holdings snapshot path (the symbol-keyed builder + its alias collapse) was
+ * removed here — no aliasing source reaches the engine any more.
  *
  * Pitfall 1 — `computeScenario().equity_curve` returns cumulative RETURN
  * (e.g. 0.18 = +18%). The composer converts to cumulative WEALTH (start
@@ -50,9 +53,10 @@
  * and the composer body renders with an empty live baseline.
  *
  * M5 — multi-venue caveat tooltip on composition rows where the symbol
- * is shared across venues. Surfaces the holdingReturnsByScopeRef
- * symbol-keyed merge that produces identical return series for
- * BTC@binance + BTC@okx.
+ * is shared across venues (e.g. BTC@binance + BTC@okx), a presentational cue
+ * derived from `holdingsSummary`. It no longer feeds the engine: the
+ * symbol-keyed holdings return merge was removed with the snapshot path
+ * (Phase 63 ENGINE-01).
  *
  * Plan 07 wires `onCommitRequested` to the actual ScenarioCommitDrawer +
  * POST /api/allocator/scenario/commit. This plan ships the Commit BUTTON
@@ -70,10 +74,6 @@ import {
   type DailyPoint,
   type StrategyForBuilder,
 } from "@/lib/scenario";
-import {
-  collapseAliasedHoldingStrategies,
-  mapDeAliasedWeightsToRawBasis,
-} from "@/lib/scenario-dealias";
 import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
 import {
@@ -127,7 +127,7 @@ import {
 } from "../lib/scenario-state";
 import { useScenarioState } from "../hooks/useScenarioState";
 import {
-  buildStrategyForBuilderSet,
+  buildAddedOnlySet,
   buildPerKeyStrategyForBuilderSet,
   mergeAddedIntoPerKeySet,
 } from "../lib/scenario-adapter";
@@ -669,7 +669,6 @@ export function ScenarioComposer({
     existingOutcomesByHoldingRef,
     strategies,
     equityDailyPoints,
-    holdingReturnsByScopeRef,
     snapshotCount,
     allKeysStale,
     minHistoryDepthMonths,
@@ -1690,56 +1689,19 @@ export function ScenarioComposer({
   }, [scenario.draft.addedStrategies, strategyById]);
 
   // -------------------------------------------------------------------------
-  // Build scenario projection via adapter + frozen scenario.ts engine
-  // (B4-pinned positional signature).
+  // Build scenario projection via the series-space adapter + frozen scenario.ts
+  // engine. Read-only-tokens model: live holdings are FIXED context with no
+  // per-holding toggle, and the holdings snapshot engine path was removed in
+  // Phase 63 (ENGINE-01) — the engine set is per-key + added units only.
   // -------------------------------------------------------------------------
-  // Read-only-tokens model: live holdings are FIXED context — there is no
-  // per-holding toggle in the UI, so in a current-schema (v2) draft a holding is
-  // never disabled. Legacy v1 drafts that disabled a holding are dropped on load
-  // by the SCENARIO_SCHEMA_VERSION bump, not papered over here — so this set is
-  // genuinely always empty (the adapter path stays neutral too).
-  // ponytail: empty set, not a derived memo — holdings are never disabled here.
-  const disabledHoldingRefs = useMemo(() => new Set<string>(), []);
-
-  const adapterOutput = useMemo(
-    () =>
-      buildStrategyForBuilderSet(
-        holdingsSummary as Array<{
-          symbol: string;
-          venue: string;
-          holding_type: "spot" | "derivative";
-          value_usd: number;
-        }>,
-        disabledHoldingRefs,
-        scenario.draft.addedStrategies,
-        holdingReturnsByScopeRef,
-        addedStrategyReturnsLookup as Record<
-          import("../lib/scenario-adapter").StrategyForBuilderId,
-          DailyPoint[]
-        >,
-        addedStrategyMetadataLookup as Record<
-          import("../lib/scenario-adapter").StrategyForBuilderId,
-          Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
-        >,
-      ),
-    [
-      holdingsSummary,
-      disabledHoldingRefs,
-      scenario.draft.addedStrategies,
-      holdingReturnsByScopeRef,
-      addedStrategyReturnsLookup,
-      addedStrategyMetadataLookup,
-    ],
-  );
 
   // -------------------------------------------------------------------------
   // DSRC-01/02/03 — per-data-source projection units (one per connected
   // exchange api_key) built from Plan-01's payload via the Plan-02 sibling
   // builder. This path is selected ONLY in book mode when the Phase-36 D3
-  // per-key-dailies gate is satisfied; otherwise the existing holdings
-  // `adapterOutput` path above is used unchanged (snapshot fallback — both
-  // paths coexist, RESEARCH §State-of-the-Art). The frozen
-  // collapse→computeScenario pipeline below is shared by both.
+  // per-key-dailies gate is satisfied; otherwise the composer builds an
+  // added-only set (blank / gate=false). The frozen computeScenario pipeline
+  // below is shared by both — the engine set is series-space only (ENGINE-01).
   // -------------------------------------------------------------------------
   // Per-key equity share (D2): Σ holdingEquityContribution grouped by
   // api_key_id (mirror queries.ts:2303-2310). Uses the EXPORTED contribution
@@ -1755,9 +1717,9 @@ export function ScenarioComposer({
     return out;
   }, [rawHoldingsSummary]);
 
-  // Per-key strategy set — wrapped in a useMemo on its inputs exactly like
-  // `adapterOutput`. One StrategyForBuilder per api_key_id (id === api_key_id),
-  // RAW equity-share weights, default selected=true.
+  // Per-key strategy set — wrapped in a useMemo on its inputs. One
+  // StrategyForBuilder per api_key_id (id === api_key_id), RAW equity-share
+  // weights, default selected=true.
   const perKeyAdapterOutput = useMemo(() => {
     // `?? {}` — fail safe if the payload omits the per-key channel (a partial/
     // legacy payload). An empty map yields zero per-key units (the per-key path
@@ -1783,13 +1745,14 @@ export function ScenarioComposer({
   ]);
 
   // The per-key path is active only in book mode + D3 gate satisfied. When
-  // active, the per-key strategy set feeds the projectionState/collapse/engine
-  // pipeline; otherwise the holdings `adapterOutput` set does.
+  // active, the per-key strategy set feeds the projectionState/engine pipeline;
+  // otherwise the added-only set does.
   const usePerKeySources =
     entryMode === "book" && payload.perKeyDailiesGateSatisfied;
 
   // The strategy set actually fed to the engine this render — the per-key units
-  // when the per-source path is active, else the holdings/added units.
+  // (merged with added units) when the per-source path is active, else the
+  // added-only units.
   //
   // P61-BUG-1 fix: the per-key set is MERGED with the draft's added-strategy
   // units (mergeAddedIntoPerKeySet — per-key USD weights normalized to shares
@@ -1798,9 +1761,25 @@ export function ScenarioComposer({
   // book mode rendered a live-looking weight row while contributing NOTHING to
   // member_count / timeline / KPIs (the CSV-strategies + API-keys blend path).
   const activeAdapterOutput = useMemo(() => {
-    if (!usePerKeySources) return adapterOutput;
-    return mergeAddedIntoPerKeySet(
-      perKeyAdapterOutput,
+    if (usePerKeySources) {
+      return mergeAddedIntoPerKeySet(
+        perKeyAdapterOutput,
+        scenario.draft.addedStrategies,
+        addedStrategyReturnsLookup as Record<
+          import("../lib/scenario-adapter").StrategyForBuilderId,
+          DailyPoint[]
+        >,
+        addedStrategyMetadataLookup as Record<
+          import("../lib/scenario-adapter").StrategyForBuilderId,
+          Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+        >,
+      );
+    }
+    // ENGINE-01 (Phase 63) — blank / gate=false is added-only. The holdings
+    // snapshot branch (the removed symbol-keyed builder) is gone; the shared
+    // added-only construction is the empty-per-key reduction of the merge above,
+    // so book+gate and blank differ only by the per-key units they start from.
+    return buildAddedOnlySet(
       scenario.draft.addedStrategies,
       addedStrategyReturnsLookup as Record<
         import("../lib/scenario-adapter").StrategyForBuilderId,
@@ -1813,7 +1792,6 @@ export function ScenarioComposer({
     );
   }, [
     usePerKeySources,
-    adapterOutput,
     perKeyAdapterOutput,
     scenario.draft.addedStrategies,
     addedStrategyReturnsLookup,
@@ -1867,24 +1845,6 @@ export function ScenarioComposer({
     dataSourceKeys.length > 0 &&
     dataSourceKeys.every((k) => includeByApiKeyId[k.id] === false);
 
-  // H-0487/H-0493 — map each holding scopeRef to its bare symbol so aliased
-  // multi-venue/instrument holdings (identical symbol-keyed series) can be
-  // collapsed before computeScenario, keeping avg_pairwise_correlation honest.
-  // ONLY holdings populate this map — per-key UUID unit ids are NOT in it, so
-  // they pass through collapseAliasedHoldingStrategies untouched (Pitfall 3),
-  // keeping avg-ρ across data sources honest.
-  const symbolByHoldingId = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const h of holdingsSummary as Array<{
-      venue: string;
-      symbol: string;
-      holding_type: "spot" | "derivative";
-    }>) {
-      map.set(buildHoldingRef(h), h.symbol);
-    }
-    return map;
-  }, [holdingsSummary]);
-
   // -------------------------------------------------------------------------
   // H-0133 — wire the draft's weight + toggle state INTO the projection.
   // The adapter computes value-proportional default weights and marks every
@@ -1892,17 +1852,16 @@ export function ScenarioComposer({
   // `scenario.draft.weightOverrides` and only ever reached the COMMIT diff, so
   // "the slider did not move the projection" (reweighting silently no-op'd).
   // Overlay the draft state — the canonical sum-to-1 map the CompositionList
-  // input already DISPLAYS — onto the adapter strategies BEFORE the collapse so
-  // computeScenario reflects exactly what the UI shows. `selected` reads the
-  // toggle map for ALL refs; in the read-only-tokens model holdings have no
-  // toggle UI, so a current-schema (v2) draft never carries a disabled holding
-  // (legacy v1 drafts that did are dropped on load by the SCENARIO_SCHEMA_VERSION
-  // bump) — a holding therefore resolves selected=true, and only ADDED strategies
-  // can be toggled off, which now actually excludes them (they carry a real weight
-  // post-fix). R4 leverage rides the SAME projection state; holdings have no
-  // leverage UI so their multiplier is always 1, while an added strategy's
-  // multiplier flows through here. The collapse weight-averages leverage across
-  // aliased venues and computeScenario applies `wᵢ·Lᵢ·rᵢ`.
+  // input already DISPLAYS — onto the adapter strategies so computeScenario
+  // reflects exactly what the UI shows. `selected` reads the toggle map for ALL
+  // refs; in the read-only-tokens model holdings have no toggle UI, so a
+  // current-schema (v2) draft never carries a disabled holding (legacy v1 drafts
+  // that did are dropped on load by the SCENARIO_SCHEMA_VERSION bump) — a holding
+  // therefore resolves selected=true, and only ADDED strategies can be toggled
+  // off, which now actually excludes them (they carry a real weight post-fix).
+  // R4 leverage rides the SAME projection state; holdings have no leverage UI so
+  // their multiplier is always 1, while an added strategy's multiplier flows
+  // through here, and computeScenario applies `wᵢ·Lᵢ·rᵢ` over the engine set.
   // P61-BUG-1: the ids of the draft's added strategies — the per-key branch
   // below needs this to tell an ADDED unit (draft toggle/weight semantics)
   // apart from a per-key unit (ephemeral include map). Also consumed by the
@@ -1967,31 +1926,27 @@ export function ScenarioComposer({
     leverageByRef,
   ]);
 
-  // M-0102: hoist the de-alias collapse and the per-strategy date→index cache
-  // into their own memos. Previously buildDateMapCache ran inside the
-  // scenarioMetrics body, rebuilding the cache on every recompute. Each memo is
-  // keyed on the exact value it derives from, so the cache can never go stale
-  // relative to the strategies computeScenario receives (worst case it rebuilds
-  // as often as before; it never returns a cache mismatched to its strategies).
-  const deAliased = useMemo(
-    () =>
-      collapseAliasedHoldingStrategies(
-        activeAdapterOutput.strategies,
-        projectionState,
-        symbolByHoldingId,
-      ),
-    [activeAdapterOutput.strategies, projectionState, symbolByHoldingId],
+  // ENGINE-01 (Phase 63) — the engine set is the identity pair over the active
+  // adapter output: strategies as-built, state = projectionState. The former
+  // symbol-keyed alias collapse over holdings is gone — no holdings units reach
+  // the engine any more, so there is nothing to collapse (every unit is a
+  // distinct api_key or added-strategy id). projectionState already covers
+  // selected/weights/leverage/startDates for every unit id, so this is a
+  // byte-faithful passthrough of what computeScenario blends.
+  const engineSet = useMemo(
+    () => ({ strategies: activeAdapterOutput.strategies, state: projectionState }),
+    [activeAdapterOutput.strategies, projectionState],
   );
   const dateMapCache = useMemo(
-    () => buildDateMapCache(deAliased.strategies),
-    [deAliased],
+    () => buildDateMapCache(engineSet.strategies),
+    [engineSet],
   );
 
   // Phase 57 (WINDOW-01) — coverage spans of the strategies actually fed to the
-  // engine this render (the SELECTED, post-collapse set). Deriving spans from
-  // `deAliased.strategies` — the exact set computeScenario blends — keeps the
+  // engine this render (the SELECTED set). Deriving spans from
+  // `engineSet.strategies` — the exact set computeScenario blends — keeps the
   // UI's window derivation and the engine's membership on the SAME strategy set
-  // (RESEARCH Pitfall 2: pre/post-collapse desync). All interval math delegates
+  // (no derivation may drift off the blended set). All interval math delegates
   // to scenario-window.ts (Rule 2: never re-derive coverage math here).
   //
   // `selectedSpanById` is the ONE coverage-span scan per selected strategy,
@@ -2004,12 +1959,12 @@ export function ScenarioComposer({
   // before the lookup, so the map is a safe superset.
   const selectedSpanById = useMemo(() => {
     const m = new Map<string, CoverageSpan | null>();
-    for (const s of deAliased.strategies) {
-      if (deAliased.state.selected[s.id] === false) continue;
+    for (const s of engineSet.strategies) {
+      if (engineSet.state.selected[s.id] === false) continue;
       m.set(s.id, coverageSpanOf(s.daily_returns));
     }
     return m;
-  }, [deAliased]);
+  }, [engineSet]);
 
   const selectedSpans = useMemo<CoverageSpan[]>(() => {
     const spans: CoverageSpan[] = [];
@@ -2184,26 +2139,28 @@ export function ScenarioComposer({
   );
   const fullRangeWindow = useMemo(() => unionOf(selectedSpans), [selectedSpans]);
 
-  // ⚠️ HAZARD FIX (RESEARCH Pitfall 1): collapseAliasedHoldingStrategies
-  // reconstructs the ScenarioState and SILENTLY DROPS `state.window`. Setting
-  // the window on projectionState (pre-collapse) would never reach the engine.
-  // Inject it onto deAliased.state POST-collapse. This memo is the SINGLE "state
-  // the engine sees": BOTH computeScenario (below) AND alignConstituentReturns
-  // (the diversification panel — CORR-02/05/06) consume it, so the windowed
-  // member set / axis can never desync between the blend metrics and DR/ENB/PCR.
-  // Only the scenario-tab composed path attaches a window — own-book callers
-  // stay on the union-when-absent path (coverageWindow === null → no window key).
+  // Coverage window injection. With the alias-collapse removed (Phase 63
+  // ENGINE-01) the engine set is the identity pair, so the window spreads
+  // DIRECTLY onto `engineSet.state` (== projectionState) — there is no longer a
+  // collapse step that reconstructs the state and drops a pre-set window, so no
+  // post-collapse re-injection dance is needed. This memo remains the SINGLE
+  // "state the engine sees": BOTH computeScenario (below) AND
+  // alignConstituentReturns (the diversification panel — CORR-02/05/06) consume
+  // it, so the windowed member set / axis can never desync between the blend
+  // metrics and DR/ENB/PCR. Only the scenario-tab composed path attaches a
+  // window — own-book callers stay on the union-when-absent path
+  // (coverageWindow === null → no window key).
   const engineState = useMemo(
     () =>
       coverageWindow
-        ? { ...deAliased.state, window: coverageWindow }
-        : deAliased.state,
-    [deAliased, coverageWindow],
+        ? { ...engineSet.state, window: coverageWindow }
+        : engineSet.state,
+    [engineSet, coverageWindow],
   );
 
   const scenarioMetrics = useMemo(
-    () => computeScenario(deAliased.strategies, engineState, dateMapCache),
-    [deAliased, engineState, dateMapCache],
+    () => computeScenario(engineSet.strategies, engineState, dateMapCache),
+    [engineSet, engineState, dateMapCache],
   );
 
   // Phase 57 Plan 03 (WINDOW-02/03, ADR §"UI state machine") — the pure
@@ -2221,11 +2178,11 @@ export function ScenarioComposer({
   //     every selected strategy is eligible (the engine runs its union path, no
   //     drops) — mirrors the absent-window branch of the engine.
   // Never re-derives interval math (Rule 2): delegates to scenario-window.ts.
-  // Keyed on `deAliased` (the post-collapse set the engine blends) + the window.
+  // Keyed on `engineSet` (the set the engine blends) + the window.
   const coverageEligible = useMemo<Record<string, boolean>>(() => {
     const eligible: Record<string, boolean> = {};
-    for (const s of deAliased.strategies) {
-      if (!deAliased.state.selected[s.id]) continue; // subset-only (activeStrategies)
+    for (const s of engineSet.strategies) {
+      if (!engineSet.state.selected[s.id]) continue; // subset-only (activeStrategies)
       if (!coverageWindow) {
         eligible[s.id] = true; // union path — no coverage drops
         continue;
@@ -2238,7 +2195,7 @@ export function ScenarioComposer({
       eligible[s.id] = span !== null && covers(span, coverageWindow);
     }
     return eligible;
-  }, [deAliased, coverageWindow, selectedSpanById]);
+  }, [engineSet, coverageWindow, selectedSpanById]);
 
   // Phase 57 Plan 03 Task 2 (POLISH-02) — the coverage-auto-excluded rows:
   // SELECTED (in the subset) but NOT eligible for the current window. These are
@@ -2269,8 +2226,8 @@ export function ScenarioComposer({
       reason: string;
       includeCost: IncludeCost | null;
     }> = [];
-    for (const s of deAliased.strategies) {
-      if (!deAliased.state.selected[s.id]) continue; // manual-off is NOT here
+    for (const s of engineSet.strategies) {
+      if (!engineSet.state.selected[s.id]) continue; // manual-off is NOT here
       if (coverageEligible[s.id]) continue; // in-blend
       const span = selectedSpanById.get(s.id) ?? null;
       out.push({
@@ -2281,7 +2238,7 @@ export function ScenarioComposer({
       });
     }
     return out;
-  }, [deAliased, coverageWindow, coverageEligible, selectedSpanById]);
+  }, [engineSet, coverageWindow, coverageEligible, selectedSpanById]);
 
   // Phase 58 (COVERAGE-01) — the mini-gantt rows: one per SELECTED strategy,
   // carrying its coverage span + the in-blend/auto-excluded flag read from the
@@ -2293,15 +2250,15 @@ export function ScenarioComposer({
   // shared `selectedSpanById` scan (Rule 2: computed once).
   const timelineRows = useMemo(
     () =>
-      deAliased.strategies
-        .filter((s) => deAliased.state.selected[s.id])
+      engineSet.strategies
+        .filter((s) => engineSet.state.selected[s.id])
         .map((s) => ({
           id: s.id,
           name: s.name,
           span: selectedSpanById.get(s.id) ?? null,
           inBlend: coverageEligible[s.id] === true,
         })),
-    [deAliased, selectedSpanById, coverageEligible],
+    [engineSet, selectedSpanById, coverageEligible],
   );
 
   // The ONE "active window IS the common period" equality — lexicographic
@@ -2349,8 +2306,8 @@ export function ScenarioComposer({
     if (!coverageWindow) return;
     const memberIds = scenarioMetrics.member_ids;
     if (!memberIds) return;
-    const uiInBlend = deAliased.strategies
-      .filter((s) => deAliased.state.selected[s.id] && coverageEligible[s.id])
+    const uiInBlend = engineSet.strategies
+      .filter((s) => engineSet.state.selected[s.id] && coverageEligible[s.id])
       .map((s) => s.id)
       .sort();
     const engineMembers = [...memberIds].sort();
@@ -2363,7 +2320,7 @@ export function ScenarioComposer({
         { uiInBlend, engineMembers },
       );
     }
-  }, [deAliased, coverageWindow, coverageEligible, scenarioMetrics.member_ids]);
+  }, [engineSet, coverageWindow, coverageEligible, scenarioMetrics.member_ids]);
 
   // Phase 57 Plan 03 Task 3 (WINDOW-06) — empty-intersection outlier detection.
   // When the SELECTED set shares no common window (defaultWindowFor === null),
@@ -2387,8 +2344,8 @@ export function ScenarioComposer({
     if (commonPeriodWindow !== null) return [];
     const spansById: Record<string, CoverageSpan> = {};
     const nameById: Record<string, string> = {};
-    for (const s of deAliased.strategies) {
-      if (!deAliased.state.selected[s.id]) continue; // subset-only
+    for (const s of engineSet.strategies) {
+      if (!engineSet.state.selected[s.id]) continue; // subset-only
       const span = selectedSpanById.get(s.id) ?? null;
       if (span) spansById[s.id] = span;
       nameById[s.id] = s.name;
@@ -2398,7 +2355,7 @@ export function ScenarioComposer({
       name: nameById[id] ?? id,
       isAdded: addedIdSet.has(id),
     }));
-  }, [deAliased, commonPeriodWindow, selectedSpanById, addedIdSet]);
+  }, [engineSet, commonPeriodWindow, selectedSpanById, addedIdSet]);
 
   // The deselect action for a WINDOW-06 outlier: an added strategy is removed
   // from the subset (handleRemoveAdded); a live holding is toggled off
@@ -2519,21 +2476,21 @@ export function ScenarioComposer({
 
   // PEER-04 (Phase 42) — per-constituent mandate chips for the blend. Built ONLY
   // from genuinely-available `StrategyForBuilder` fields (`strategy_types`,
-  // `markets`) + the per-constituent leverage from `deAliased.state.leverage`
+  // `markets`) + the per-constituent leverage from `engineSet.state.leverage`
   // (id → L; default 1.0). NO fabricated aggregate; NOT leverage_range/description
   // (not on this type / free-text — out of v1.2.2 chip scope per CONTEXT D-07).
-  // Honest-empty per constituent is the panel's job. Keyed on `deAliased` so a
+  // Honest-empty per constituent is the panel's job. Keyed on `engineSet` so a
   // weight/leverage scrub or a constituent add re-derives. Always non-empty when
   // the blend has constituents (the panel handles the all-empty-metadata case).
   const scenarioMandate = useMemo<ScenarioMandatePayload | undefined>(() => {
-    const constituents = deAliased.strategies.map((s) => ({
+    const constituents = engineSet.strategies.map((s) => ({
       name: s.name,
       strategy_types: s.strategy_types ?? [],
       markets: s.markets ?? [],
-      leverage: deAliased.state.leverage?.[s.id] ?? 1.0,
+      leverage: engineSet.state.leverage?.[s.id] ?? 1.0,
     }));
     return constituents.length > 0 ? { constituents } : undefined;
-  }, [deAliased]);
+  }, [engineSet]);
 
   // PEER-05 (Phase 42) — the blend-vs-live-book signed delta on the SAME
   // sample/252 basis as the peer rank (T-42-15). The own-book leg recomputes the
@@ -2589,36 +2546,36 @@ export function ScenarioComposer({
     scenarioMetrics.max_drawdown,
   ]);
 
-  // CORR-01 — de-aliased axis labels for the CorrelationHeatmap. Keyed on the
-  // SAME de-aliased set computeScenario consumes, so the heatmap labels always
-  // match the matrix the engine produced (no stale alias surviving the collapse).
+  // CORR-01 — axis labels for the CorrelationHeatmap. Keyed on the SAME engine
+  // set computeScenario consumes, so the heatmap labels always match the matrix
+  // the engine produced (label and matrix membership can never desync).
   const strategyNames = useMemo(() => {
     const out: Record<string, string> = {};
-    for (const s of deAliased.strategies) out[s.id] = s.name;
+    for (const s of engineSet.strategies) out[s.id] = s.name;
     return out;
-  }, [deAliased]);
+  }, [engineSet]);
 
   // CORR-02/05/06 — the constituent diversification result (Plan 41-01 lib).
-  // Re-aligns the de-aliased per-constituent returns the FROZEN engine discards
+  // Re-aligns the per-constituent returns the FROZEN engine discards
   // (mirroring scenario.ts:199-236 inside `alignConstituentReturns`), normalizes
   // the ACTIVE weights to sum→1 (mirroring the engine's per-day renormalization
   // at scenario.ts:243-254), and feeds the engine's READ-ONLY `correlation_matrix`
   // / `n` / `portfolio_daily_returns` into `computeDiversification`. The lib owns
   // the global gate (ids<2 / n<10 / null matrix → all-null), so a degenerate or
   // zero-sum-weight blend returns a null DR/ENB/PCR and the section renders its
-  // honest empty state, never NaN. Keyed on the de-aliased set + the engine output.
+  // honest empty state, never NaN. Keyed on the engine set + the engine output.
   const diversification = useMemo(() => {
-    // engineState (NOT the raw deAliased.state) so the constituent set + axis
+    // engineState (NOT the raw engineSet.state) so the constituent set + axis
     // match the windowed correlation_matrix / n the engine emits — a window-
     // excluded strategy must not dilute DR/ENB/PCR or the cluster order.
-    const aligned = alignConstituentReturns(deAliased.strategies, engineState);
+    const aligned = alignConstituentReturns(engineSet.strategies, engineState);
     // Normalize the active weights to sum→1 (engine renormalizes by the active
     // weight mass; a zero/negative total yields all-zero weights → the lib's PCR
     // guard nulls the result → honest empty).
     const rawWeights: Record<string, number> = {};
     let weightSum = 0;
     for (const id of aligned.ids) {
-      const w = deAliased.state.weights[id] ?? 0;
+      const w = engineSet.state.weights[id] ?? 0;
       rawWeights[id] = w;
       weightSum += w;
     }
@@ -2630,18 +2587,18 @@ export function ScenarioComposer({
       ids: aligned.ids,
       returnsById: aligned.returnsById,
       weights,
-      // CR-01/WR-01 — thread the de-aliased per-constituent leverage (Lᵢ,
+      // CR-01/WR-01 — thread the per-constituent leverage (Lᵢ,
       // default 1) so DR/PCR are computed on the SAME levered basis as the
       // engine's `portfolio_daily_returns` (`Σ ŵᵢ·Lᵢ·rᵢ`). Absent → all-1, i.e.
       // a correct un-levered computation. The ρ matrix stays leverage-invariant.
-      leverage: deAliased.state.leverage,
+      leverage: engineSet.state.leverage,
       portfolioDailyReturns: (
         scenarioMetrics.portfolio_daily_returns ?? []
       ).map((p) => p.value),
       correlationMatrix: scenarioMetrics.correlation_matrix,
       n: scenarioMetrics.n,
     });
-  }, [deAliased, engineState, scenarioMetrics]);
+  }, [engineSet, engineState, scenarioMetrics]);
 
   // CORR-06 — the cluster-reordered matrix the (UNCHANGED) CorrelationHeatmap
   // receives. The heatmap renders axis/cell order from `Object.keys(matrix)` and
@@ -2668,10 +2625,10 @@ export function ScenarioComposer({
 
   // IMPACT-01 — the shortest-history strategy name for the coverage caveat.
   // Pure helper (unit-tested in scenario-history.test.ts); reads only the
-  // de-aliased set the composer already holds. null when the set is empty.
+  // engine set the composer already holds. null when the set is empty.
   const coverageShortestName = useMemo(
-    () => shortestHistoryName(deAliased.strategies),
-    [deAliased],
+    () => shortestHistoryName(engineSet.strategies),
+    [engineSet],
   );
 
   // R4 — show the leverage caveat only when a non-default multiplier ACTUALLY
@@ -3178,7 +3135,7 @@ export function ScenarioComposer({
           (scenarioMetrics.n) AND the shortest-history strategy via the
           unit-tested shortestHistoryName helper — no invented numbers, no
           re-implemented helper. Reuses the leverage-caveat typography. The
-          "Shortest history" half is omitted when the de-aliased set is empty
+          "Shortest history" half is omitted when the engine set is empty
           (helper → null), so the caveat never names a phantom strategy. */}
       <p
         data-testid="scenario-coverage-caveat"
@@ -3691,7 +3648,7 @@ export function ScenarioComposer({
           btcDaily={btcDaily}
           btcAvailable={btcAvailable}
           n={scenarioMetrics.n}
-          strategyCount={deAliased.strategies.length}
+          strategyCount={engineSet.strategies.length}
         />
       </Card>
 
@@ -3708,40 +3665,34 @@ export function ScenarioComposer({
         <MonteCarloSection
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
           n={scenarioMetrics.n}
-          strategyCount={deAliased.strategies.length}
+          strategyCount={engineSet.strategies.length}
         />
       </Card>
 
       {/* OPT-01 / OPT-02 (Plan 28-02) — the "Suggested weights" optimizer on the
           own-book scenario surface. Allocates long-only across the ACTIVE
-          de-aliased strategies (the same set the projection blends) via the
-          Python analytics-service (min-vol default / max-Sharpe gated, Ledoit-Wolf
+          strategies (the same set the projection blends) via the Python
+          analytics-service (min-vol default / max-Sharpe gated, Ledoit-Wolf
           shrinkage). Suggested weights write to the editable DRAFT only on an
           explicit Apply (via scenario.setWeightOverride) — never auto-committed.
           Own-book composer ONLY; the example-universe Sandbox optimizer is
           deferred. */}
       <Card className="mt-6">
         <WeightOptimizerSection
-          strategies={deAliased.strategies
-            .filter((s) => deAliased.state.selected[s.id])
+          strategies={engineSet.strategies
+            .filter((s) => engineSet.state.selected[s.id])
             .map((s) => ({ id: s.id, name: s.name, dailyReturns: s.daily_returns }))}
           onApply={(weights) => {
-            // The optimizer saw the DE-ALIASED universe, so `weights` is keyed
-            // by each aliased symbol-group's representative. Map it back onto the
-            // raw per-venue basis BEFORE applying, else applyWeightOverrides
-            // renormalizes a collapsed-away venue duplicate's stale weight back
-            // in and the committed blend drifts off the suggestion (multi-venue
-            // books only; identity for one-venue-per-symbol). See
-            // mapDeAliasedWeightsToRawBasis.
-            const rawBasis = mapDeAliasedWeightsToRawBasis(
-              weights,
-              projectionState,
-              symbolByHoldingId,
-            );
-            // Atomic full-vector apply — NOT a loop of setWeightOverride (which
-            // renormalizes the others on each call and would land a different
-            // allocation than the optimizer suggested).
-            scenario.applyWeightOverrides(rawBasis);
+            // ENGINE-01 (Phase 63) — with the alias-collapse removed the engine
+            // universe IS the raw per-unit basis (no collapsed-away venue
+            // duplicates), so the optimizer's weight vector maps 1:1 onto the
+            // applied basis. Apply it directly. The universe above is filtered to
+            // the SELECTED ids, matching applyWeightOverrides' zero-then-overwrite
+            // semantics (#528 apply-back drift unchanged). Atomic full-vector
+            // apply — NOT a loop of setWeightOverride (which renormalizes the
+            // others on each call and would land a different allocation than the
+            // optimizer suggested).
+            scenario.applyWeightOverrides(weights);
           }}
         />
       </Card>
@@ -3790,7 +3741,7 @@ export function ScenarioComposer({
                 </div>
               )}
 
-              {/* CORR-01/06 — the cluster-reordered heatmap (de-aliased labels).
+              {/* CORR-01/06 — the cluster-reordered heatmap (engine-set labels).
                   The heatmap's reason-routed empties (n<10 / non-finite), its
                   missing-cell "—", and its single-sourced Avg |ρ| caption are ALL
                   inherited; do NOT duplicate empty logic or recompute the average. */}
