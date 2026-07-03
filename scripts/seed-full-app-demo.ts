@@ -33,6 +33,25 @@
  * UUIDs before re-inserting), and wipes the legacy /demo-page seed (persona
  * portfolios + is_example strategies) so the old and new datasets don't
  * collide in the match engine's ranking universe.
+ *
+ * /demo personas (task #7, 2026-07-03)
+ * ------------------------------------
+ * The public /demo route (src/lib/personas.ts + src/lib/demo.ts) renders three
+ * editorial personas by FIXED allocator/portfolio UUIDs. The original persona
+ * seed (scripts/seed-demo-data.ts) is staging-only, and an earlier version of
+ * THIS script wiped its data without replacement — leaving prod /demo in a
+ * permanent "Demo data is loading" empty state. The personas are now recreated
+ * HERE (step 12), composed from this seed's own 15 strategies:
+ *   - same fixed ids → zero app-code churn (personas.ts / demo.ts / PDF
+ *     allowlist / e2e all unchanged),
+ *   - no new strategies → no match-engine ranking-universe pollution (the
+ *     reason the legacy seed was wiped in the first place),
+ *   - portfolio_analytics computed from the REAL daily series via
+ *     buildPortfolioAnalytics → each persona's editorial copy is backed by
+ *     data ("over-diversified, low correlation, mediocre return" is TRUE).
+ * Note: match_batches are NOT seeded (never were) — populate recommendations
+ * post-seed via POST /api/admin/match/recompute per allocator, or the page
+ * renders its honest empty recommendations state.
  */
 
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
@@ -79,18 +98,20 @@ const SEED_END = new Date("2026-04-08T00:00:00Z");
 const SEED_START_EARLIEST = new Date("2022-01-03T00:00:00Z"); // Monday
 
 // =========================================================================
-// Legacy /demo seed UUIDs to wipe (from scripts/seed-demo-data.ts)
+// /demo persona UUIDs (from src/lib/personas.ts + src/lib/demo.ts — these
+// MUST stay in lockstep with the app; they double as the wipe list AND the
+// recreate list, so a seed run is a clean delete→recreate for the personas)
 // =========================================================================
 
 const LEGACY_ALLOCATOR_IDS = [
-  "aaaaaaaa-0001-4000-8000-000000000001",
-  "aaaaaaaa-0001-4000-8000-000000000002",
-  "aaaaaaaa-0001-4000-8000-000000000003",
+  "aaaaaaaa-0001-4000-8000-000000000001", // cold    (PERSONAS.cold)
+  "aaaaaaaa-0001-4000-8000-000000000002", // active  (PERSONAS.active)
+  "aaaaaaaa-0001-4000-8000-000000000003", // stalled (PERSONAS.stalled)
 ];
 const LEGACY_PORTFOLIO_IDS = [
-  "dddddddd-0001-4000-8000-000000000001",
-  "dddddddd-0001-4000-8000-000000000002",
-  "dddddddd-0001-4000-8000-000000000003",
+  "dddddddd-0001-4000-8000-000000000001", // active's portfolio (demo.ts ACTIVE_PORTFOLIO_ID)
+  "dddddddd-0001-4000-8000-000000000002", // cold's portfolio   (COLD_PORTFOLIO_ID)
+  "dddddddd-0001-4000-8000-000000000003", // stalled's portfolio (STALLED_PORTFOLIO_ID)
 ];
 
 // =========================================================================
@@ -1236,22 +1257,40 @@ async function wipeLegacySeed(admin: SupabaseClient) {
     .delete()
     .in("user_id", legacyAllocators);
 
-  // Delete legacy is_example=true strategies + their analytics
+  // Delete legacy is_example=true strategies + their analytics.
+  //
+  // 2026-07-03: `allocation_events.strategy_id` is ON DELETE NO ACTION, so a
+  // previous full-app run's lifecycle events block the strategies delete —
+  // clear them first. The deletes below also now FAIL LOUDLY: they used to
+  // discard the supabase-js error object, so this exact 23503 was silently
+  // swallowed here while the legacy seeder (which checks its errors) crashed
+  // CI on the same shared test DB (e2e-seeded run 28644250376).
   const { data: legacyStrategies } = await admin
     .from("strategies")
     .select("id")
     .eq("is_example", true);
   const legacyStrategyIds = (legacyStrategies ?? []).map((s) => s.id);
   if (legacyStrategyIds.length > 0) {
-    await admin
+    const { error: aeErr } = await admin
+      .from("allocation_events")
+      .delete()
+      .in("strategy_id", legacyStrategyIds);
+    if (aeErr) throw new Error(`legacy wipe allocation_events: ${aeErr.message}`);
+    const { error: saErr } = await admin
       .from("strategy_analytics")
       .delete()
       .in("strategy_id", legacyStrategyIds);
-    await admin
+    if (saErr) throw new Error(`legacy wipe strategy_analytics: ${saErr.message}`);
+    const { error: psWipeErr } = await admin
       .from("portfolio_strategies")
       .delete()
       .in("strategy_id", legacyStrategyIds);
-    await admin.from("strategies").delete().in("id", legacyStrategyIds);
+    if (psWipeErr) throw new Error(`legacy wipe portfolio_strategies: ${psWipeErr.message}`);
+    const { error: stErr } = await admin
+      .from("strategies")
+      .delete()
+      .in("id", legacyStrategyIds);
+    if (stErr) throw new Error(`legacy wipe strategies: ${stErr.message}`);
   }
 
   // Delete legacy allocator profiles, then their auth.users entries.
@@ -1753,6 +1792,162 @@ async function main() {
     .upsert(favoriteRows);
   if (favErr) throw new Error(`user_favorites: ${favErr.message}`);
 
+  // ========= 12. /demo persona books =========
+  // See header § "/demo personas". wipeLegacySeed() above already deleted the
+  // persona allocators (auth + profiles + portfolios + analytics), so this is
+  // the recreate half of a clean delete→recreate. Compositions are chosen so
+  // each persona's editorial copy on /demo is TRUE of its data:
+  //   active  — 3 institutional strategies, diversified, healthy book.
+  //   cold    — 6 near-equal market-neutral-heavy slices → genuinely low
+  //             pairwise correlation and a mediocre blended return (the
+  //             "over-diversification trap").
+  //   stalled — 2 concentrated holdings led by short-vol carry → great Sharpe
+  //             with real tail/drawdown risk ("one drawdown away").
+  // All archetypes referenced here start on/before 2023-11-01, safely ahead of
+  // buildPortfolioAnalytics' fixed 2024-06-03 portfolio window.
+  console.log("[seed] Recreating /demo persona books...");
+  interface PersonaDef {
+    allocatorId: string;
+    email: string;
+    displayName: string;
+    description: string;
+    aumRange: string;
+    portfolioId: string;
+    portfolioName: string;
+    portfolioDescription: string;
+    createdAt: string;
+    holdings: HoldingSpec[];
+  }
+  const PERSONA_PASSWORD = "DemoPersona2026!";
+  const PERSONA_DEFS: PersonaDef[] = [
+    {
+      allocatorId: "aaaaaaaa-0001-4000-8000-000000000002", // PERSONAS.active
+      email: "demo-active@example.com",
+      displayName: "Active Allocator LP",
+      description:
+        "Institutional LP with a working allocation process — reviews the book monthly and acts on recommendations.",
+      aumRange: "$10M-$50M",
+      portfolioId: "dddddddd-0001-4000-8000-000000000001",
+      portfolioName: "Active Allocator Portfolio",
+      portfolioDescription:
+        "Three institutional strategies, diversified across carry, market-neutral alpha, and trend.",
+      createdAt: "2024-06-01T12:00:00Z",
+      holdings: [
+        { idx: IDX.POLARIS_BASIS, weight: 0.4, initialUsd: 4_000_000 },
+        { idx: IDX.MERIDIAN_PAIRS, weight: 0.35, initialUsd: 3_500_000 },
+        { idx: IDX.REDLINE_TREND, weight: 0.25, initialUsd: 2_500_000 },
+      ],
+    },
+    {
+      allocatorId: "aaaaaaaa-0001-4000-8000-000000000001", // PERSONAS.cold
+      email: "demo-cold@example.com",
+      displayName: "Cold Start Capital",
+      description:
+        "Diversified into six low-correlation strategies — and earning a mediocre blended return for it.",
+      aumRange: "$1M-$10M",
+      portfolioId: "dddddddd-0001-4000-8000-000000000002",
+      portfolioName: "Cold Start Capital — Discovery Book",
+      portfolioDescription:
+        "Six strategies, low correlation, mediocre return. The over-diversification trap.",
+      createdAt: "2024-06-01T12:00:00Z",
+      // Realized over the 2024-06-03→SEED_END window (computed from the
+      // actual generated series): cum ≈ +15%, Sharpe ≈ 0.9 — LESS return
+      // than the 3-strategy active book despite twice the names, which is
+      // exactly the over-diversification trap the copy claims. The drag
+      // legs (on-chain alpha, short vol, trend) are deliberate.
+      holdings: [
+        { idx: IDX.DRIFT_ONCHAIN, weight: 0.18, initialUsd: 1_080_000 },
+        { idx: IDX.ASTRA_SHORTVOL, weight: 0.17, initialUsd: 1_020_000 },
+        { idx: IDX.MERIDIAN_STATARB, weight: 0.17, initialUsd: 1_020_000 },
+        { idx: IDX.REDLINE_TREND, weight: 0.16, initialUsd: 960_000 },
+        { idx: IDX.ASTRA_CONDOR, weight: 0.16, initialUsd: 960_000 },
+        { idx: IDX.POLARIS_BASIS, weight: 0.16, initialUsd: 960_000 },
+      ],
+    },
+    {
+      allocatorId: "aaaaaaaa-0001-4000-8000-000000000003", // PERSONAS.stalled
+      email: "demo-stalled@example.com",
+      displayName: "Stalled Diligence Fund",
+      description:
+        "Two strategies carrying the whole book — concentrated, confident, one drawdown away from a problem.",
+      aumRange: "$1M-$10M",
+      portfolioId: "dddddddd-0001-4000-8000-000000000003",
+      portfolioName: "Stalled Diligence Fund — Concentrated Book",
+      portfolioDescription:
+        "Two strategies, concentrated, high Sharpe, real tail risk. Stuck in due diligence.",
+      createdAt: "2024-06-01T12:00:00Z",
+      // Realized over the window: cum ≈ +57%, Sharpe ≈ 2.1 — the book LOOKS
+      // brilliant, which is the point: two strategies, one of them carrying
+      // a −15% standalone drawdown tail (ML factor). "Sharpe is great until
+      // it isn't."
+      holdings: [
+        { idx: IDX.MIDAS_ML, weight: 0.65, initialUsd: 3_250_000 },
+        { idx: IDX.POLARIS_ARB, weight: 0.35, initialUsd: 1_750_000 },
+      ],
+    },
+  ];
+
+  for (const p of PERSONA_DEFS) {
+    const weightSum = p.holdings.reduce((s, h) => s + h.weight, 0);
+    if (Math.abs(weightSum - 1) > 1e-9) {
+      throw new Error(
+        `[seed] Persona ${p.displayName} weights sum to ${weightSum}, expected 1.0 — fix the composition.`,
+      );
+    }
+
+    await ensureAuthUser(admin, p.allocatorId, p.email, PERSONA_PASSWORD, {
+      display_name: p.displayName,
+      role: "allocator",
+    });
+
+    const { error: profErr } = await admin.from("profiles").upsert({
+      id: p.allocatorId,
+      display_name: p.displayName,
+      company: p.displayName,
+      description: p.description,
+      email: p.email,
+      role: "allocator",
+      manager_status: "newbie",
+      allocator_status: "verified",
+      is_admin: false,
+      aum_range: p.aumRange,
+    });
+    if (profErr)
+      throw new Error(`persona profile ${p.displayName}: ${profErr.message}`);
+
+    const { error: portErr } = await admin.from("portfolios").upsert({
+      id: p.portfolioId,
+      user_id: p.allocatorId,
+      name: p.portfolioName,
+      description: p.portfolioDescription,
+      created_at: p.createdAt,
+      is_test: false,
+    });
+    if (portErr)
+      throw new Error(`persona portfolio ${p.displayName}: ${portErr.message}`);
+
+    const { error: memErr } = await admin.from("portfolio_strategies").upsert(
+      p.holdings.map((h) => makeHolding(p.portfolioId, h, "manual")),
+    );
+    if (memErr)
+      throw new Error(`persona holdings ${p.displayName}: ${memErr.message}`);
+
+    // wipeLegacySeed cascaded/deleted prior analytics; single INSERT per run.
+    const personaAnalytics = buildPortfolioAnalytics(
+      p.portfolioId,
+      p.holdings,
+      p.portfolioName,
+      strategyAnalyticsMap,
+    );
+    const { error: personaPaErr } = await admin
+      .from("portfolio_analytics")
+      .insert([{ portfolio_id: p.portfolioId, ...personaAnalytics }]);
+    if (personaPaErr)
+      throw new Error(
+        `persona analytics ${p.displayName}: ${personaPaErr.message}`,
+      );
+  }
+
   console.log("[seed] ✅ Full-app demo seed complete.");
   console.log(`  - 1 allocator (${ALLOCATOR_EMAIL} / ${ALLOCATOR_PASSWORD})`);
   console.log(`  - ${MANAGER_IDS.length} managers`);
@@ -1760,6 +1955,9 @@ async function main() {
   console.log(`  - 3 portfolios (1 real + 2 scenarios)`);
   console.log(`  - ${events.length} allocation events`);
   console.log(`  - ${favoriteRows.length} user_favorites`);
+  console.log(
+    `  - ${PERSONA_DEFS.length} /demo personas (active/cold/stalled) — run POST /api/admin/match/recompute per persona allocator to populate recommendations`,
+  );
 }
 
 main().catch((err) => {

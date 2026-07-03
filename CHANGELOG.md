@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.35.0.32] - 2026-07-03
+### Fixed
+- **The public /demo page renders again** (was a permanent "Demo data is loading" empty state since the full-app demo seed wiped the legacy persona data): the three editorial personas (Active / Cold / Stalled) are recreated by the full-app seeder from its own strategy set, with portfolio analytics computed from the real daily series so each persona's copy is true of its data — active +26%/Sharpe 1.2 over 3 strategies; cold +15%/Sharpe 0.9 over 6 (the over-diversification trap); stalled +57%/Sharpe 2.1 over 2 concentrated names. Same fixed ids, so the app code, PDF allowlist, and e2e specs are untouched.
+- **Server-PDF generation works on prod again** (demo + authed portfolio PDFs, factsheet PDF + tearsheet — all 500'd at Chromium launch): `@sparticuz/chromium`'s `bin/**` payload is assets, not traced imports, and shipped missing from the Vercel function bundles; `outputFileTracingIncludes` now adds it to exactly the four routes that launch a browser.
+
 ## [0.35.0.31] - 2026-07-02
 ### Fixed
 - **Added strategies now actually join a book-based scenario blend** (P61-BUG-1, found by the Phase-61 authed prod canary): in book mode with per-key data sources active — every real book, and exactly the CSV-strategies-plus-API-keys mixed setup — a strategy added from the browse drawer rendered a live-looking weight row while contributing nothing to the blend, the coverage timeline, or any KPI. The per-key engine set now merges the added units (per-key equity weights normalized to shares so fractional weights are commensurable; the keys-only blend is numerically unchanged).
