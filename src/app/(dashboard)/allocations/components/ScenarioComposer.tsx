@@ -120,7 +120,9 @@ import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { Button } from "@/components/ui/Button";
 import {
   defaultDraftFromHoldings,
+  deriveMembershipFromGate,
   scenarioDraftCodec,
+  setMemberKeyIds,
   type AddedStrategy,
 } from "../lib/scenario-state";
 import { useScenarioState } from "../hooks/useScenarioState";
@@ -1370,6 +1372,19 @@ export function ScenarioComposer({
     return trimmed;
   }
 
+  // MEMBER-04 (STAMP — entryMode-aware). The membership a NEW save persists.
+  // Book mode + the per-key gate satisfied ⇒ the eligible per-key ids; anything
+  // else (blank mode, OR a book without the gate) ⇒ [] EVEN when the gate is
+  // true — the F5 STAMP closure: a blank draft must never inherit the book
+  // members. This is DELIBERATELY the entryMode-aware rule, NOT the gate-only
+  // `deriveMembershipFromGate` (which ignores entryMode and is the upgrade-READ
+  // rule); using derive here would re-open F5 by stamping book members onto a
+  // blank draft whenever the live gate happens to be satisfied.
+  const memberKeyIdsForSave =
+    entryMode === "book" && payload.perKeyDailiesGateSatisfied
+      ? (payload.eligibleApiKeyIds ?? [])
+      : [];
+
   // POST a new scenario (first save OR "save as new"). On success adopt the
   // returned id as the loaded scenario (editable, not readonly).
   async function postNewScenario(name: string) {
@@ -1379,7 +1394,10 @@ export function ScenarioComposer({
       const res = await fetch("/api/allocator/scenario/saved", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, draft: scenario.draft }),
+        body: JSON.stringify({
+          name,
+          draft: setMemberKeyIds(scenario.draft, memberKeyIdsForSave),
+        }),
       });
       if (!res.ok) {
         setSaveError(
@@ -1421,7 +1439,7 @@ export function ScenarioComposer({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             name: loadedScenarioName ?? "Scenario",
-            draft: scenario.draft,
+            draft: setMemberKeyIds(scenario.draft, memberKeyIdsForSave),
           }),
         },
       );
