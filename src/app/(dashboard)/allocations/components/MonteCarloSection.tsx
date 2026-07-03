@@ -65,7 +65,7 @@ interface MonteCarloSectionProps {
    */
   n: number;
   /**
-   * The active de-aliased strategy count. The floor gate (a pure check) cannot
+   * The active engine-set strategy count. The floor gate (a pure check) cannot
    * see this; the call site supplies it so a 0/1-strategy set routes to the
    * "add at least 2 strategies" body instead of naming a meaningless overlap N.
    */

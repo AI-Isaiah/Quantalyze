@@ -2,7 +2,7 @@
  * Constituent diversification math (Phase 41) — pure TS, zero dependency.
  *
  * Consumes the FROZEN scenario engine's already-emitted `correlation_matrix`
- * (read-only) plus the de-aliased per-constituent return series + normalized
+ * (read-only) plus the per-constituent return series + normalized
  * weights, and derives the diversification view's numbers: per-constituent
  * re-alignment (mirroring the engine), a SAMPLE covariance matrix, per-
  * constituent σ, the Choueifaty Diversification Ratio, per-constituent
@@ -87,7 +87,7 @@ export interface DiversificationInput {
   /** Normalized (sum→1) over the active set. UN-levered weights ŵᵢ. */
   weights: Record<string, number>;
   /** Per-constituent leverage Lᵢ (default 1 when absent). Threaded from the
-   *  composer's `deAliased.state.leverage` so DR/PCR are computed on the SAME
+   *  composer's `engineSet.state.leverage` so DR/PCR are computed on the SAME
    *  levered basis as `portfolioDailyReturns` (CR-01/WR-01). An all-1 map is
    *  byte-identical to a correct un-levered computation. */
   leverage?: Record<string, number>;

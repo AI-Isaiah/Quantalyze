@@ -110,7 +110,7 @@ export interface ScenarioFactsheetChartProps {
    * (strategy_types + markets + per-constituent leverage), flowed onto the synth
    * csv payload. Additive + optional: omitted → byte-identical payload (the
    * ConstituentMandatePanel renders nothing). Composer-supplied from
-   * `deAliased.strategies` + `deAliased.state.leverage`.
+   * `engineSet.strategies` + `engineSet.state.leverage`.
    */
   scenarioMandate?: ScenarioMandatePayload;
   /**

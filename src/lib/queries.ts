@@ -1724,8 +1724,12 @@ export interface MyAllocationDashboardPayload {
    *
    * M5 multi-venue caveat: breakdown JSONB is keyed by SYMBOL only —
    * holdings sharing the same symbol across venues (BTC@binance + BTC@okx)
-   * map to IDENTICAL return series. The composer in Plan 06b surfaces a
-   * tooltip on holding rows when scope_ref shares a series with another row.
+   * map to IDENTICAL return series.
+   *
+   * NO PRODUCTION CONSUMER (as of v1.6 phase 63): nothing in the component
+   * tree reads this field any more. It is retained per a deferred-cleanup
+   * decision — see the "queries / SSR payload" P1 entry in TODOS.md for the
+   * removal plan (reconstruct helper + payload field + orphaned tests).
    */
   holdingReturnsByScopeRef: Record<string, DailyPoint[]>;
   /**
@@ -3007,8 +3011,10 @@ export const getMyAllocationDashboard = cache(
     // AUM stays from holdings on BOTH branches (D2). The liveBaselineMetrics
     // OUTPUT shape is byte-identical between branches (the SSR payload + the
     // composer baseline depend on it). holdingReturnsByScopeRef (above) is a
-    // SEPARATE payload field consumed elsewhere and is left unchanged — only
-    // the liveBaselineMetrics SOURCE is repointed here. The holdings read
+    // SEPARATE payload field with NO production consumer (v1.6 phase 63) and is
+    // left unchanged — only the liveBaselineMetrics SOURCE is repointed here.
+    // See the queries/SSR-payload P1 entry in TODOS.md for its removal. The
+    // holdings read
     // (derivePhase07Fields) is untouched (UNIFY-03).
     const perKeyReturnsByApiKeyId = buildPerKeyReturnsByApiKeyId(
       (phase36PerKeyDailiesRes.data ?? []) as Array<{
