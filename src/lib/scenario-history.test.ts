@@ -6,9 +6,8 @@ import { shortestHistoryName } from "@/lib/scenario-history";
  * Unit tests for the coverage-caveat `shortestHistoryName` helper.
  *
  * The fixtures use the REAL `StrategyForBuilder` element type — the element
- * type of `deAliased.strategies`, i.e. the output of
- * `collapseAliasedHoldingStrategies` (scenario-dealias.ts) that the composer
- * and builder call sites actually pass. The helper must exercise that exact
+ * type of the engine strategy set that the composer and builder call sites
+ * actually pass. The helper must exercise that exact
  * shape, not a hand-rolled `{ name, days }` struct.
  */
 
