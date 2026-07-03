@@ -20,7 +20,7 @@ import {
   reconstructHoldingReturnsByScopeRef,
   holdingEquityContribution,
   partitionTrustworthyEquitySnapshots,
-  liveBaselineMetricsFromHoldings,
+  emptyLiveBaselineMetrics,
   liveBaselineMetricsFromPerKeyDailies,
   type MyAllocationDashboardPayload,
 } from "../queries";
@@ -587,15 +587,14 @@ describe("Phase 36 — liveBaselineMetrics shape-identity (per-key branch vs fal
     expect(Array.isArray(m.drawdown)).toBe(true);
   }
 
-  it("both branches produce the identical liveBaselineMetrics shape (non-empty curves)", () => {
+  it("the per-key branch and the gate=false emptyDefault share the identical liveBaselineMetrics shape", () => {
     const perKey = liveBaselineMetricsFromPerKeyDailies(holdings, {
       "key-A": series(RET_A),
       "key-B": series(RET_B),
     });
-    const fallback = liveBaselineMetricsFromHoldings(holdings, {
-      "holding:binance:BTC:spot": series(RET_A),
-      "holding:okx:ETH:spot": series(RET_B),
-    });
+    // Phase 63 ENGINE-04 — the gate=false SSR arm is now the honest emptyDefault
+    // (AUM preserved, all metrics null), NOT a holdings-snapshot reconstruction.
+    const fallback = emptyLiveBaselineMetrics(holdings);
 
     assertShape(perKey);
     assertShape(fallback);
@@ -604,14 +603,16 @@ describe("Phase 36 — liveBaselineMetrics shape-identity (per-key branch vs fal
     // AUM is unchanged (D2): summed from holdings on both branches.
     expect(perKey.aum).toBe(100_000);
     expect(fallback.aum).toBe(100_000);
-    // Both branches produced a real curve.
+    // The per-key branch produces a real curve; the emptyDefault fallback is
+    // honestly empty (metrics null → KpiStrip "—").
     expect(perKey.equity.length).toBeGreaterThan(0);
-    expect(fallback.equity.length).toBeGreaterThan(0);
+    expect(fallback.equity).toEqual([]);
+    expect(fallback.sharpe).toBeNull();
   });
 
-  it("empty-default shape is identical on both branches (no usable series)", () => {
+  it("empty-default shape is identical on both branches (no usable series → emptyDefault)", () => {
     const perKey = liveBaselineMetricsFromPerKeyDailies(holdings, {});
-    const fallback = liveBaselineMetricsFromHoldings(holdings, {});
+    const fallback = emptyLiveBaselineMetrics(holdings);
     assertShape(perKey);
     assertShape(fallback);
     expect(perKey).toEqual(fallback);

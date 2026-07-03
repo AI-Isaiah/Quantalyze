@@ -22,7 +22,7 @@
  * points the allocator at the most likely limiting record without inventing a
  * precise per-strategy overlap attribution the client data can't support.
  *
- * Mirrors the location/export convention of its sibling `scenario-dealias.ts`
+ * Mirrors the location/export convention of the pure lib helpers in `src/lib/`
  * and the pure-reduce shape of the `pickTopTenByAvgCorr` fn it replaces.
  */
 import type { StrategyForBuilder } from "@/lib/scenario";
@@ -46,9 +46,9 @@ export function methodologyLine(n: number): string {
  * Return the NAME of the strategy with the shortest return history (fewest
  * `daily_returns` points) in the de-aliased strategy set.
  *
- * Accepts the `StrategyForBuilder` element type of `deAliased.strategies` (the
- * output of `collapseAliasedHoldingStrategies`) that the composer/builder call
- * sites already hold — reads ONLY `name` + `daily_returns.length`.
+ * Accepts the `StrategyForBuilder` element type of the engine strategy set that
+ * the composer/builder call sites already hold — reads ONLY `name` +
+ * `daily_returns.length`.
  *
  * Tiebreak: deterministic — the first strategy by input order wins, so equal
  * window lengths never produce a non-deterministic name.

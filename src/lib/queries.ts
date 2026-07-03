@@ -34,7 +34,6 @@ import type {
 } from "./types";
 import { SUPPORTED_EXCHANGES, type SupportedExchange } from "./utils";
 import { holdingScopeKey } from "./keys";
-import { collapseAliasedHoldingStrategies } from "./scenario-dealias";
 import { getOwnPreferences, type AllocatorOwnPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -2076,23 +2075,6 @@ export function reconstructHoldingReturnsByScopeRef(
 }
 
 /**
- * Phase 10 / M4 — Compute the live-baseline `ComputedMetrics`-shaped object
- * ONCE at SSR. The composer (Plan 06b) consumes this instead of re-deriving
- * the live baseline on every render. The scenario projection adapter still
- * runs client-side because it depends on toggle state (client-only).
- *
- * The function inlines the StrategyForBuilder set construction that Plan
- * 01's `scenario-adapter.ts::buildStrategyForBuilderSet` will eventually
- * own. Inlining is intentional: Plan 01 ships in the same wave (wave 1)
- * and is not yet present on this branch, so importing from it would be a
- * compile-time blocker. Once Plan 01 lands the helper can be swapped in
- * with no behavioral change — the contract (StrategyForBuilder[] + all-
- * selected ScenarioState + computeScenario) is identical.
- *
- * Returns the empty-default shape when no holdings have ≥2 returns
- * (warm-up case).
- */
-/**
  * NEW-C03-01: Equity contribution by holding type.
  *
  *   - Spot: `value_usd` (marked fair value — this IS the equity contribution).
@@ -2123,21 +2105,31 @@ export function holdingEquityContribution(h: MyAllocationDashboardPayload["holdi
 }
 
 /**
- * @internal Exported for unit testing only (H-0487/H-0493 de-alias wiring
- * regression). Guards that this SSR call site actually invokes
- * collapseAliasedHoldingStrategies — reverting the collapse here must fail a
- * test rather than silently re-poisoning the live-baseline avgRho.
+ * Phase 63 ENGINE-04 — the honest gate=false SSR live baseline. AUM is
+ * preserved from holdings equity contribution (the Holdings tab + commit sizing
+ * still consume it via `holdingsSummary`); every metric field is null so the
+ * KpiStrip renders the "—" honest-absence convention.
+ *
+ * This replaces the retired holdings-snapshot baseline, whose
+ * reconstruction — symbol-keyed series + a required
+ * alias-collapse before `computeScenario` — was the machinery this phase
+ * removes. That reconstruction re-poisoned avgRho with a fabricated ρ=1.0 from
+ * symbol-alias duplicates (the H-0487/H-0493 class), and the gate=false
+ * population is 0 real users (D1; the 2 prod residue rows GUARD-01 deletes).
+ * There is deliberately NO holdings-snapshot reconstruction here.
+ *
+ * @internal Exported for the gate=false baseline test (queries.my-allocation).
  */
-export function liveBaselineMetricsFromHoldings(
+export function emptyLiveBaselineMetrics(
   holdingsSummary: MyAllocationDashboardPayload["holdingsSummary"],
-  holdingReturnsByScopeRef: Record<string, DailyPoint[]>,
 ): MyAllocationDashboardPayload["liveBaselineMetrics"] {
-  // NEW-C03-01: Use equity contribution (not notional) for AUM and weights.
+  // NEW-C03-01: AUM uses equity contribution (not notional), identical to the
+  // per-key baseline's D2 rule so the AUM is byte-consistent across branches.
   const totalAum = holdingsSummary.reduce(
     (s, h) => s + holdingEquityContribution(h),
     0,
   );
-  const emptyDefault: MyAllocationDashboardPayload["liveBaselineMetrics"] = {
+  return {
     aum: totalAum,
     ytdTwr: null,
     sharpe: null,
@@ -2145,98 +2137,6 @@ export function liveBaselineMetricsFromHoldings(
     avgRho: null,
     equity: [],
     drawdown: [],
-  };
-
-  // Build the StrategyForBuilder set: each holding becomes a "strategy"
-  // whose daily_returns series is its scope_ref entry in the per-holding
-  // returns map. Holdings without returns are excluded — they cannot
-  // contribute to the live baseline.
-  const strategies: StrategyForBuilder[] = [];
-  for (const h of holdingsSummary) {
-    const scopeRef = holdingScopeKey(h);
-    const returns = holdingReturnsByScopeRef[scopeRef];
-    if (!returns || returns.length === 0) continue;
-    strategies.push({
-      id: scopeRef,
-      name: `${h.venue} ${h.symbol}`,
-      codename: null,
-      disclosure_tier: "exploratory",
-      strategy_types: [],
-      markets: [],
-      start_date: null,
-      daily_returns: returns,
-      cagr: null,
-      sharpe: null,
-      volatility: null,
-      max_drawdown: null,
-    });
-  }
-  if (strategies.length === 0) return emptyDefault;
-
-  // All-enabled, equity-weighted live set (mirrors the all-on default the
-  // composer shows on first paint). Weights normalize inside computeScenario.
-  // NEW-C03-01: use holdingEquityContribution (not value_usd) so derivatives
-  // are weighted by unrealized_pnl_usd rather than notional contract size.
-  // We clamp negative equity (deeply-losing short) to 0 for the weight so
-  // the composite curve isn't distorted by negative-weight slots — the short's
-  // daily returns already reflect its P&L direction in the equity curve.
-  const selected: Record<string, boolean> = {};
-  const weights: Record<string, number> = {};
-  const startDates: Record<string, string> = {};
-  for (const h of holdingsSummary) {
-    const scopeRef = holdingScopeKey(h);
-    if (!holdingReturnsByScopeRef[scopeRef]) continue;
-    selected[scopeRef] = true;
-    weights[scopeRef] = Math.max(0, holdingEquityContribution(h));
-  }
-  const state: ScenarioState = { selected, weights, startDates };
-  // H-0487/H-0493 — collapse multi-venue/instrument aliases of one symbol
-  // (identical reconstructed series, because breakdown JSONB is symbol-keyed)
-  // into a single representative before computeScenario, so the engine does
-  // not fold a fabricated rho=1.0 into avg_pairwise_correlation (avgRho). The
-  // summed-weight merge is weight-equivalent for the equity curve / Sharpe /
-  // TWR / max-DD; only the spurious self-correlation pair is removed.
-  const symbolByHoldingId = new Map<string, string>(
-    holdingsSummary.map((h) => [holdingScopeKey(h), h.symbol]),
-  );
-  const deAliased = collapseAliasedHoldingStrategies(
-    strategies,
-    state,
-    symbolByHoldingId,
-  );
-  const cache = buildDateMapCache(deAliased.strategies);
-  const liveCM = computeScenario(deAliased.strategies, deAliased.state, cache);
-
-  if (liveCM.n === 0 || liveCM.equity_curve.length === 0) return emptyDefault;
-
-  // Pitfall 1: scenario.ts emits cumulative RETURN values (0.18 = +18%).
-  // Convert to cumulative WEALTH (1.0 starting value) before storing — the
-  // EquityChart widget expects wealth-form points.
-  const equity: DailyPoint[] = liveCM.equity_curve.map((p) => ({
-    date: p.date,
-    value: p.value + 1,
-  }));
-  // Drawdown: derive once from wealth-scaled USD series (deriveSnapshotDrawdowns
-  // expects cumulative USD values, NOT 1.0-based wealth or cumulative return).
-  const drawdown = totalAum > 0
-    ? deriveSnapshotDrawdowns(
-        liveCM.equity_curve.map((p) => ({
-          date: p.date,
-          value: (p.value + 1) * totalAum,
-        })),
-      )
-    : [];
-
-  return {
-    aum: totalAum,
-    ytdTwr: liveCM.twr,
-    sharpe: liveCM.sharpe,
-    maxDd: liveCM.max_drawdown,
-    // ComputedMetrics field is `avg_pairwise_correlation` — surface it as
-    // `avgRho` on the payload to match the composer's render contract.
-    avgRho: liveCM.avg_pairwise_correlation,
-    equity,
-    drawdown,
   };
 }
 
@@ -2253,36 +2153,40 @@ export function liveBaselineMetricsFromHoldings(
 //        the equity-curve SHAPE + KPIs come from the per-key blend.
 //   D3 — the per-key blend is used IFF EVERY active key has a non-empty
 //        per-key series; otherwise the WHOLE allocator falls back to the
-//        snapshot reconstruction (liveBaselineMetricsFromHoldings). A mixed
-//        population (one key with dailies, one without) → fallback, never a
+//        honest emptyDefault baseline (`emptyLiveBaselineMetrics`): AUM
+//        preserved from holdings, all metrics null (→ KpiStrip "—"), NO
+//        holdings-snapshot reconstruction. Phase 63 ENGINE-04 retired the old
+//        snapshot-reconstruction fallback (0 real users, D1); a mixed
+//        population (one key with dailies, one without) → emptyDefault, never a
 //        half-per-key/half-snapshot curve.
 //
-// `liveBaselineMetricsFromPerKeyDailies` mirrors liveBaselineMetricsFromHoldings
-// EXACTLY (same computeScenario → wealth-conversion → deriveSnapshotDrawdowns
-// post-processing, same empty-default) so the liveBaselineMetrics OUTPUT
-// contract is byte-identical on both branches (the SSR payload + scenario
-// composer baseline depend on it). The frozen `computeScenario` engine
-// (SCENARIO-05) is reused, never forked. Per-key strategies are already
-// one-per-key, so there is no multi-venue alias to collapse (the de-alias
-// step that liveBaselineMetricsFromHoldings runs guards against a fabricated
-// rho=1.0 from symbol-keyed breakdown duplicates — that risk does not arise
-// here) — but avgRho is still sourced from computeScenario's
-// avg_pairwise_correlation so the contract field is populated.
+// `liveBaselineMetricsFromPerKeyDailies` produces the SAME liveBaselineMetrics
+// OUTPUT shape as the emptyDefault branch (same empty-default when degenerate;
+// full computeScenario → wealth-conversion → deriveSnapshotDrawdowns
+// post-processing when the blend is live) so the contract is byte-identical on
+// both branches (the SSR payload + scenario composer baseline depend on it).
+// The frozen `computeScenario` engine (SCENARIO-05) is reused, never forked.
+// Per-key strategies are already one-per-key, so there is no multi-venue alias
+// to collapse — the symbol-keyed-alias ρ=1.0 fabrication that the retired
+// holdings path had to guard against does not arise here — but avgRho is still
+// sourced from computeScenario's avg_pairwise_correlation so the contract field
+// is populated.
 // ─────────────────────────────────────────────────────────────────────────
 
 /**
  * @internal Exported for unit testing only (Phase 36 per-key blend +
  * shape-identity regression). Builds the live-baseline metrics from a
  * per-`api_key_id` blend of csv_daily_returns, weighted by each key's current
- * equity share from holdings (D1/D2). Returns the SAME shape as
- * liveBaselineMetricsFromHoldings — only the SOURCE of the curve/KPIs differs.
+ * equity share from holdings (D1/D2). Returns the SAME liveBaselineMetrics
+ * shape as the gate=false emptyDefault branch — only the SOURCE of the
+ * curve/KPIs differs.
  */
 export function liveBaselineMetricsFromPerKeyDailies(
   holdingsSummary: MyAllocationDashboardPayload["holdingsSummary"],
   perKeyReturnsByApiKeyId: Record<string, DailyPoint[]>,
 ): MyAllocationDashboardPayload["liveBaselineMetrics"] {
   // D2: AUM is unchanged — summed from holdings equity contribution, identical
-  // to liveBaselineMetricsFromHoldings.
+  // to the gate=false emptyDefault branch (`emptyLiveBaselineMetrics`).
   const totalAum = holdingsSummary.reduce(
     (s, h) => s + holdingEquityContribution(h),
     0,
@@ -2336,14 +2240,13 @@ export function liveBaselineMetricsFromPerKeyDailies(
     });
     selected[apiKeyId] = true;
     // Clamp negative equity (deeply-losing derivative) to 0 for the weight so
-    // the composite curve isn't distorted by negative-weight slots — identical
-    // to liveBaselineMetricsFromHoldings. A key with no holdings equity share
+    // the composite curve isn't distorted by negative-weight slots. A key with
+    // no holdings equity share
     // (e.g. a connected key holding nothing) gets weight 0, so it contributes
     // nothing to the WEIGHTED return / equity curve / Sharpe. (Note: a weight-0
     // key is still `selected`, so its series still enters computeScenario's
     // avg_pairwise_correlation → avgRho — avgRho is a correlation across all
-    // keys-with-a-series, not weight-filtered. Same behaviour as the holdings
-    // path's de-aliased strategies.)
+    // keys-with-a-series, not weight-filtered.)
     weights[apiKeyId] = Math.max(0, equityByApiKeyId.get(apiKeyId) ?? 0);
   }
   if (strategies.length === 0) return emptyDefault;
@@ -2358,8 +2261,8 @@ export function liveBaselineMetricsFromPerKeyDailies(
   if (liveCM.n === 0 || liveCM.equity_curve.length === 0) return emptyDefault;
 
   // Pitfall 1: scenario.ts emits cumulative RETURN values (0.18 = +18%).
-  // Convert to cumulative WEALTH (1.0 starting value) — identical to
-  // liveBaselineMetricsFromHoldings.
+  // Convert to cumulative WEALTH (1.0 starting value) — the EquityChart widget
+  // expects wealth-form points.
   const equity: DailyPoint[] = liveCM.equity_curve.map((p) => ({
     date: p.date,
     value: p.value + 1,
@@ -2928,8 +2831,8 @@ export const getMyAllocationDashboard = cache(
     // garbage absolute levels — the dashboard's level/return-derived surfaces
     // (equity curve, drawdown, TWR, Sharpe, per-holding returns, warm-up gate)
     // must exclude them. Filter ONCE here so EVERY consumer downstream OF THIS
-    // read (derivePhase07Fields, reconstructHoldingReturnsByScopeRef,
-    // liveBaselineMetricsFromHoldings) reads the filtered array — no need to
+    // read (derivePhase07Fields, reconstructHoldingReturnsByScopeRef, the
+    // per-key baseline blend) reads the filtered array — no need to
     // touch each derivation. (Other read boundaries on this table — the
     // /compare adapter, and the server-side match.py scorer — apply / will
     // apply the same predicate at their own query; see the
@@ -3148,15 +3051,17 @@ export const getMyAllocationDashboard = cache(
         eligibleKeyIdSet.has(id),
       ),
     );
+    // Phase 63 ENGINE-04 — the gate=false SSR baseline is now the honest
+    // emptyDefault (AUM preserved from holdings, all metrics null → KpiStrip
+    // "—"), NOT a holdings-snapshot reconstruction. The old collapse-based path
+    // served 0 real users (D1) and re-poisoned avgRho with fabricated ρ=1.0. The
+    // gate=true per-key branch is byte-untouched.
     const liveBaselineMetrics = perKeyDailiesGateSatisfied
       ? liveBaselineMetricsFromPerKeyDailies(
           phase07.holdingsSummary,
           eligiblePerKeyReturns,
         )
-      : liveBaselineMetricsFromHoldings(
-          phase07.holdingsSummary,
-          holdingReturnsByScopeRef,
-        );
+      : emptyLiveBaselineMetrics(phase07.holdingsSummary);
 
     // Phase 10 / H3 — Propagate the authenticated allocator's user.id so
     // consumers (Plan 06a localStorage scoping, Plan 07 ownership probe)
