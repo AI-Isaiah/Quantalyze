@@ -254,15 +254,14 @@ import { KpiStrip } from "./KpiStrip";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 // Phase 37 / DSRC-03 — the REAL per-key builder + REAL engine for the independent
-// two→one recompute oracle. The adapter mock keeps buildPerKeyStrategyForBuilderSet
-// real via importOriginal, and @/lib/scenario + @/lib/scenario-dealias are never
-// mocked, so these are the genuine functions (the same ones the composer runs).
+// two→one recompute oracle. The adapter is used REAL (importOriginal), and
+// @/lib/scenario is never mocked, so these are the genuine functions the composer
+// runs. ENGINE-01: no alias collapse is involved — the engine set is series-space.
 import { buildPerKeyStrategyForBuilderSet } from "../lib/scenario-adapter";
 import {
   computeScenario as realComputeScenario,
   buildDateMapCache as realBuildDateMapCache,
 } from "@/lib/scenario";
-import { collapseAliasedHoldingStrategies as realCollapse } from "@/lib/scenario-dealias";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
 // IMPACT-02 — imported REAL (never mocked) so the R3 guard's positive control
 // renders a genuine PercentileRankBadge in isolation, proving the testid query
@@ -4315,10 +4314,12 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
       startDates: built.state.startDates,
       leverage,
     };
-    // Per-key UUID units are NOT in any symbol map → pass through collapse.
-    const deAliased = realCollapse(built.strategies, state, new Map());
-    const cache = realBuildDateMapCache(deAliased.strategies);
-    return realComputeScenario(deAliased.strategies, deAliased.state, cache);
+    // ENGINE-01 (Phase 63): the composer's engine set is the identity pair (no
+    // alias collapse — per-key UUID units are non-aliasing by construction), so
+    // the independent oracle mirrors that exactly.
+    const engineSet = { strategies: built.strategies, state };
+    const cache = realBuildDateMapCache(engineSet.strategies);
+    return realComputeScenario(engineSet.strategies, engineSet.state, cache);
   }
 
   // -------------------------------------------------------------------------
@@ -4948,11 +4949,11 @@ describe("ScenarioComposer — Phase 43 GUARD-01 static guard + assembled degene
 // ===========================================================================
 // Phase 57 Plan 02 — Coverage-window control (WINDOW-01/04/05, POLISH-01)
 //
-// The adapter is mocked but `@/lib/scenario` (computeScenario) and
-// `@/lib/scenario-dealias` (the collapse) are REAL, so `member_count` on the
-// scenarioMetrics the composer feeds KpiStrip is the genuine engine membership.
-// That is the load-bearing oracle here: the window is proven to reach the engine
-// (post-collapse) ONLY if member_count moves when the window moves.
+// The adapter + `@/lib/scenario` (computeScenario) are REAL (series-space engine,
+// ENGINE-01 — no collapse), so `member_count` on the scenarioMetrics the composer
+// feeds KpiStrip is the genuine engine membership. That is the load-bearing oracle
+// here: the window is proven to reach the engine ONLY if member_count moves when
+// the window moves.
 // ===========================================================================
 
 // Two strategies with UNEQUAL spans, both added as toggle-able rows so they ride
@@ -5962,8 +5963,8 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
 //
 // The auto-excluded GROUP (Task 2) is the UI proof of coverage-off; here the
 // oracle is the ENGINE membership (`member_count`/`member_ids` on the real
-// computeScenario — @/lib/scenario + @/lib/scenario-dealias are un-mocked). The
-// composer's coverageEligible memo uses the SAME `covers(coverageSpanOf(...))`
+// computeScenario — @/lib/scenario is un-mocked; series-space engine, ENGINE-01).
+// The composer's coverageEligible memo uses the SAME `covers(coverageSpanOf(...))`
 // predicate the engine applies, so the UI group and the engine divisor can
 // never disagree — and `selected` (the manual subset axis) is never mutated by
 // a coverage change.
