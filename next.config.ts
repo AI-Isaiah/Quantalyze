@@ -1,6 +1,23 @@
 import type { NextConfig } from "next";
 
+// Every server-PDF route boots headless Chromium via src/lib/puppeteer.ts →
+// @sparticuz/chromium. The package itself is externalized by Next's default
+// serverExternalPackages list, but its `bin/**` brotli payload is ASSETS, not
+// traced imports — the Vercel function bundle shipped without them and every
+// PDF route 500'd at launch with "input directory .../bin does not exist"
+// (found 2026-07-03 via the /demo "Download IC Report" button; affects the
+// demo + authed portfolio PDFs and both factsheet PDFs alike). Keys are
+// picomatch route globs with dynamic segments escaped; scoped per-route
+// because the payload is ~70MB — a broad glob would bloat every function.
+const CHROMIUM_BIN = ["./node_modules/@sparticuz/chromium/bin/**/*"];
+
 const nextConfig: NextConfig = {
+  outputFileTracingIncludes: {
+    "/api/demo/portfolio-pdf/\\[id\\]": CHROMIUM_BIN,
+    "/api/portfolio-pdf/\\[id\\]": CHROMIUM_BIN,
+    "/api/factsheet/\\[id\\]/pdf": CHROMIUM_BIN,
+    "/api/factsheet/\\[id\\]/tearsheet.pdf": CHROMIUM_BIN,
+  },
   async redirects() {
     return [
       // Phase 51 NAV-01 (FLOW-02 follow-through): the legacy Strategy-Sandbox
