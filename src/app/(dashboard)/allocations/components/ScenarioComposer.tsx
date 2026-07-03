@@ -27,12 +27,15 @@
  *   7. "Add more strategies" CTA row → opens StrategyBrowseDrawer
  *   8. ScenarioFooter (sticky)
  *
- * Adapter signature is B4-pinned: `buildStrategyForBuilderSet` is called
- * with `addedStrategies: AddedStrategy[]` (lightweight) plus two lookup
- * maps `addedStrategyReturnsLookup` + `addedStrategyMetadataLookup`
- * constructed from `payload.strategies`. The composer NEVER hand-rolls a
- * `StrategyForBuilder`-shaped object at the call site (no pre-casting,
- * no inline disclosure-tier literals).
+ * Engine set is series-space only (Phase 63 ENGINE-01): book+gate blends the
+ * per-key set with added units (`mergeAddedIntoPerKeySet`); blank / gate=false
+ * is added-only (`buildAddedOnlySet`). Both take `addedStrategies:
+ * AddedStrategy[]` (lightweight) plus the `addedStrategyReturnsLookup` +
+ * `addedStrategyMetadataLookup` maps constructed from `payload.strategies`. The
+ * composer NEVER hand-rolls a `StrategyForBuilder`-shaped object at the call
+ * site (no pre-casting, no inline disclosure-tier literals). The former
+ * holdings snapshot path (the symbol-keyed builder + its alias collapse) was
+ * removed here — no aliasing source reaches the engine any more.
  *
  * Pitfall 1 — `computeScenario().equity_curve` returns cumulative RETURN
  * (e.g. 0.18 = +18%). The composer converts to cumulative WEALTH (start
@@ -50,9 +53,10 @@
  * and the composer body renders with an empty live baseline.
  *
  * M5 — multi-venue caveat tooltip on composition rows where the symbol
- * is shared across venues. Surfaces the holdingReturnsByScopeRef
- * symbol-keyed merge that produces identical return series for
- * BTC@binance + BTC@okx.
+ * is shared across venues (e.g. BTC@binance + BTC@okx), a presentational cue
+ * derived from `holdingsSummary`. It no longer feeds the engine: the
+ * symbol-keyed holdings return merge was removed with the snapshot path
+ * (Phase 63 ENGINE-01).
  *
  * Plan 07 wires `onCommitRequested` to the actual ScenarioCommitDrawer +
  * POST /api/allocator/scenario/commit. This plan ships the Commit BUTTON
@@ -70,10 +74,6 @@ import {
   type DailyPoint,
   type StrategyForBuilder,
 } from "@/lib/scenario";
-import {
-  collapseAliasedHoldingStrategies,
-  mapDeAliasedWeightsToRawBasis,
-} from "@/lib/scenario-dealias";
 import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
 import {
@@ -119,13 +119,17 @@ import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { Button } from "@/components/ui/Button";
 import {
+  computeHoldingsFingerprint,
   defaultDraftFromHoldings,
+  deriveMembershipFromGate,
+  isDraftDrifted,
   scenarioDraftCodec,
+  setMemberKeyIds,
   type AddedStrategy,
 } from "../lib/scenario-state";
 import { useScenarioState } from "../hooks/useScenarioState";
 import {
-  buildStrategyForBuilderSet,
+  buildAddedOnlySet,
   buildPerKeyStrategyForBuilderSet,
   mergeAddedIntoPerKeySet,
 } from "../lib/scenario-adapter";
@@ -667,7 +671,6 @@ export function ScenarioComposer({
     existingOutcomesByHoldingRef,
     strategies,
     equityDailyPoints,
-    holdingReturnsByScopeRef,
     snapshotCount,
     allKeysStale,
     minHistoryDepthMonths,
@@ -687,8 +690,15 @@ export function ScenarioComposer({
   // initial draft renders by gating which holdings flow into the hook/adapter/
   // composition below. The frozen adapter + engine path is untouched.
   const hasLiveBook = rawHoldingsSummary.length > 0;
+  // ENGINE-03 (Phase 63) — book mode requires BOTH a live book AND the per-key
+  // dailies gate. A gate=false holder has no per-source engine behind a book
+  // mode, so book entry is unavailable and the composer initializes to BLANK
+  // (added-only) with the DSRC-02 note repointed below so it still renders (D1
+  // locked; Pitfall 2). Landing this before the ENGINE-01 holdings-path deletion
+  // means no intermediate state ever shows a gate=false book mode with no engine.
+  const canEnterBook = hasLiveBook && payload.perKeyDailiesGateSatisfied;
   const [entryMode, setEntryMode] = useState<"book" | "blank">(
-    hasLiveBook ? "book" : "blank",
+    canEnterBook ? "book" : "blank",
   );
 
   // The holdings the composer actually presents this render. In "blank" mode we
@@ -717,6 +727,11 @@ export function ScenarioComposer({
 
   const scenario = useScenarioState({
     holdingsSummary: holdingsSummary as { symbol: string; venue: string; holding_type: string; value_usd: number }[],
+    // CR-01 (Phase 63 review) — the drift reference is the mode-UNgated LIVE
+    // book, so the hook's storedMismatch agrees with openSavedScenario's drift
+    // check even when a gate=false holder is forced into blank mode (which gates
+    // holdingsSummary to []). SEEDING still uses the gated holdingsSummary above.
+    driftReferenceHoldings: rawHoldingsSummary as { symbol: string; venue: string; holding_type: string; value_usd: number }[],
     allocatorId,
   });
 
@@ -831,13 +846,21 @@ export function ScenarioComposer({
   const [openNotice, setOpenNotice] = useState<string | null>(null);
   // v1.5 PERSIST-01 — the EPHEMERAL provenance flag. True only right after
   // reopening a pre-v1.5 (v2, windowless) saved draft that the codec upgraded on
-  // read (decode `reason === "upgraded_v2_windowless"`) and whose window
+  // read (decode `reason === "upgraded_v2_chain"`, renamed from
+  // "upgraded_v2_windowless" by the v1.6 MEMBER-01 double bump) and whose window
   // therefore defaulted to the intersection. Gates the ProvenanceNote (below the
   // POLISH-03 placement). Set ONLY on the upgraded-v2 open path and cleared on
   // every other open (fresh v3, readonly, reset) so it never persists across
   // opens — a per-scenario data-provenance signal, NOT a global one-time flag
   // (Phase-59 Pitfall 3). Never persisted into the draft.
   const [showProvenanceNote, setShowProvenanceNote] = useState(false);
+  // v1.6 MEMBER-04 — the EPHEMERAL ineligible-member disclosure flag. True right
+  // after reopening a genuine-v4 draft whose PERSISTED membership includes ≥1 id
+  // no longer in the SSR-eligible set (that member drops at compute; the drop is
+  // DISCLOSED, never silent). Parallel to showProvenanceNote: set per open,
+  // cleared on every other path (drift, readonly, reset), keyed on the same
+  // per-open nonce so it re-shows for each affected draft. Never persisted.
+  const [showMembershipNote, setShowMembershipNote] = useState(false);
   // Review WR-02 — the per-OPEN nonce for the ProvenanceNote's remount key.
   // Keying on loadedScenarioId alone fails the A→dismiss→reopen-A case: the
   // same id means the same key, the component stays mounted (rendering null),
@@ -1079,6 +1102,9 @@ export function ScenarioComposer({
     // v1.5 PERSIST-01 — a reset leaves the upgraded-v2 provenance context; the
     // fresh draft is a v3 live book, so the note must not linger.
     setShowProvenanceNote(false);
+    // v1.6 MEMBER-04 — a reset drops the reopened membership too, so the
+    // ineligible-member disclosure must not linger onto the fresh live book.
+    setShowMembershipNote(false);
     // Review WR-01 — clear the window state too: a reopened scenario's saved
     // window (applied via seedWindowLocal, windowTouchedRef=true) is
     // prior-open context and must not narrow the fresh live-book draft.
@@ -1113,6 +1139,11 @@ export function ScenarioComposer({
   const handleEntryModeSelect = useCallback(
     (mode: "book" | "blank") => {
       if (mode === entryMode) return;
+      // ENGINE-03 — refuse book entry when the per-key gate is not satisfied.
+      // The book segment is hidden in that case (see the radiogroup below), so
+      // this is defense-in-depth: no code path (arrow-key, a future re-show)
+      // can land the composer in an engineless book mode.
+      if (mode === "book" && !payload.perKeyDailiesGateSatisfied) return;
       if (scenario.diffCount > 0) {
         setPendingMode(mode);
         setResetModalOpen(true);
@@ -1120,7 +1151,7 @@ export function ScenarioComposer({
       }
       setEntryMode(mode);
     },
-    [entryMode, scenario.diffCount],
+    [entryMode, scenario.diffCount, payload.perKeyDailiesGateSatisfied],
   );
 
   // Open a saved scenario. The row's persisted draft is decoded through the
@@ -1135,8 +1166,17 @@ export function ScenarioComposer({
   const openSavedScenario = useCallback(
     (row: SavedScenarioRow) => {
       setSaveError(null);
+      // ENGINE-03 (Phase 63) — drift is "does the saved draft match the LIVE
+      // book?", so the reference draft MUST carry the LIVE holdings fingerprint
+      // (see the drift derivation below, which documents exactly this intent).
+      // Use rawHoldingsSummary, NOT the presentation-gated `holdingsSummary`
+      // memo: a gate=false holder now initializes to BLANK, which switches
+      // `holdingsSummary` to [] (empty fingerprint) and would make EVERY reopen
+      // look drifted — falsely suppressing the MEMBER-04 ineligible disclosure
+      // for a book draft the live book still matches. In book mode the two are
+      // identical, so this is a no-op there.
       const defaultDraft = defaultDraftFromHoldings(
-        holdingsSummary as Parameters<typeof defaultDraftFromHoldings>[0],
+        rawHoldingsSummary as Parameters<typeof defaultDraftFromHoldings>[0],
       );
       // WR-04 (Phase 29 review): `row.draft` is `unknown`. The stringify→parse
       // roundtrip re-serializes data that was already a parsed object; a value
@@ -1196,13 +1236,92 @@ export function ScenarioComposer({
       // (the intersection auto-default, or the user's own applied window via
       // the seed-invalidation effect below coverageWindow) must not change
       // either.
-      const drifted =
-        decoded.value.init_holdings_fingerprint !==
-        defaultDraft.init_holdings_fingerprint;
+      // CR-01 (Phase 63 review) — drift via the SHARED `isDraftDrifted`
+      // predicate, the SAME helper (and the same two fingerprints) the hook's
+      // storedMismatch consumes, so the reopen decision and the hook's
+      // apply/discard decision can never diverge. `defaultDraft` above carries
+      // the LIVE-book fingerprint (built from rawHoldingsSummary); the gated
+      // default carries the fingerprint of what the composer presents THIS
+      // render (`[]` in forced-blank). A saved draft that matches EITHER is not
+      // drifted → applied, its window seeded, its membership disclosed — all
+      // consistently.
+      // v1.6 MEMBER-04 (DERIVE-AND-STAMP, gate-only). An UPGRADED (v2/v3) or an
+      // underived-v4 round-tripped draft decodes with `memberKeyIds === undefined`.
+      // Resolve it from the live gate + eligible set and STAMP it into the WORKING
+      // draft so the draft is self-describing IMMEDIATELY: the next localStorage
+      // persist writes a v4-with-membership blob and `entryMode` stops being a
+      // load-bearing signal (the blocker's spirit-of-(b) fix). A genuine-v4 draft
+      // (membership already defined) hydrates UNCHANGED — its dropped members are
+      // intersected out at compute and disclosed below. This is the gate-only
+      // DERIVE, distinct from the entryMode-aware STAMP on the SAVE path.
+      const hydratedValue =
+        decoded.value.memberKeyIds === undefined
+          ? setMemberKeyIds(
+              decoded.value,
+              deriveMembershipFromGate(
+                payload.perKeyDailiesGateSatisfied ?? false,
+                payload.eligibleApiKeyIds ?? [],
+              ),
+            )
+          : decoded.value;
+
+      // F-1 (red-team) — the entry mode the OPENED draft itself implies, keyed on
+      // its OWN authored holdings basis (its `init_holdings_fingerprint`), NOT the
+      // stale session mode. A draft whose fingerprint matches the LIVE book was
+      // authored in book mode (seeded from holdings); one carrying the empty-
+      // holdings fingerprint was authored blank (added-only, `[]` seed). Book is
+      // only representable when the per-key gate is satisfied (it needs a per-
+      // source engine), so a book-authored draft under a gate-off session stays
+      // blank — the pinned forced-blank reopen (CR-01 case (a)) — and its
+      // persisted membership is then protected on save by `memberKeyIdsForUpdate`.
+      //
+      // Keyed on the FINGERPRINT, deliberately NOT the membership: a book draft
+      // can legitimately carry EMPTY membership (a pre-STAMP save, or a book save
+      // made while the gate was off) yet must still reopen as book — keying on
+      // membership would misclassify it as blank and strip its holdings basis
+      // (regressing the Phase-59 reopen-window suite). Syncing the session to
+      // THIS (below, on a non-drifted open) makes the engine basis
+      // (`usePerKeySources`) and the save-time membership stamp both track what is
+      // ACTUALLY modeled on screen, closing BOTH the composer-vs-compare number
+      // divergence AND the silent membership wipe/stamp on "Update portfolio".
+      const liveBookFingerprint = defaultDraft.init_holdings_fingerprint;
+      const draftIsBookAuthored =
+        liveBookFingerprint !== "" &&
+        decoded.value.init_holdings_fingerprint === liveBookFingerprint;
+      const targetEntryMode: "book" | "blank" =
+        draftIsBookAuthored && (payload.perKeyDailiesGateSatisfied ?? false)
+          ? "book"
+          : "blank";
+
+      // Re-review WR-01 / CR-01 (Phase 63) — drift is decided against the mode we
+      // are about to ADOPT, not the current session mode, so the reopen decision
+      // and the hook's next-render `storedMismatch` (which recomputes at the
+      // synced entryMode) can never diverge. The gated fingerprint for the target
+      // mode: book → the LIVE-book fingerprint; blank → the empty-holdings
+      // fingerprint (the composer seeds `[]` in blank mode). The live-book
+      // fingerprint stays the second predicate arm, so a book draft matching the
+      // live book is applied regardless of the mode we land in.
+      const targetGatedFingerprint =
+        targetEntryMode === "book"
+          ? liveBookFingerprint
+          : computeHoldingsFingerprint([]);
+      const drifted = isDraftDrifted(
+        decoded.value.init_holdings_fingerprint,
+        targetGatedFingerprint,
+        liveBookFingerprint,
+      );
+
+      // Sync the session mode to the opened draft — ONLY on a non-drifted open
+      // (the saved draft is actually applied). On drift the working draft falls
+      // back to the current-mode default (the saved draft is NOT applied), so its
+      // mode must not change. React batches this with the hydrateFromSaved
+      // setValue below into a single re-render, so `storedMismatch` recomputes at
+      // the adopted mode in the same commit — no transient drift/apply flicker.
+      if (!drifted) setEntryMode(targetEntryMode);
 
       if (decoded.outcome === "readonly") {
         // Newer-version blob: hydrate the user's real data but block edits.
-        scenario.hydrateFromSaved(decoded.value);
+        scenario.hydrateFromSaved(hydratedValue);
         // Review WR-02 — opening a saved scenario replaces the draft, so clear
         // the ephemeral per-source include map (it is not persisted) → the
         // opened scenario starts with every data source included.
@@ -1223,6 +1342,9 @@ export function ScenarioComposer({
           else resetWindowToDefaultOnReopen();
         }
         setShowProvenanceNote(false);
+        // A readonly (newer-version) open is not an ineligible-member disclosure
+        // path; clear any lingering flag from a prior open.
+        setShowMembershipNote(false);
         setLoadedScenarioId(row.id);
         setLoadedScenarioName(row.name);
         setLoadedReadonly(true);
@@ -1236,7 +1358,9 @@ export function ScenarioComposer({
       // ok — adopt the draft + id; clear any prior notice / readonly flag. The
       // fingerprint-mismatch banner (drift) derives automatically from the
       // hydrated draft's fingerprint vs current holdings — no special-casing.
-      scenario.hydrateFromSaved(decoded.value);
+      // hydratedValue carries the DERIVE-AND-STAMP for an underived draft so the
+      // reopened working draft is self-describing (v1.6 MEMBER-04).
+      scenario.hydrateFromSaved(hydratedValue);
       // Review WR-02 — clear the ephemeral per-source include map on open (it is
       // not persisted) → the opened scenario starts with every source included.
       setIncludeByApiKeyId({});
@@ -1257,19 +1381,40 @@ export function ScenarioComposer({
       //     override the reopened window; the window itself is already in the
       //     hydrated draft — review CR-01 — so no draft write happens here).
       //     Provenance note stays hidden.
-      //   • upgraded-v2 draft (decode reason "upgraded_v2_windowless", window
+      //   • upgraded-v2 draft (decode reason "upgraded_v2_chain", window
       //     absent) → release the window gate so the auto-default effect seeds
       //     the intersection ("common period"), AND raise the provenance note.
-      //   • any other windowless "ok" (a v3 saved before a window was chosen) →
-      //     intersection default, no note.
+      //     (v1.6 MEMBER-01 renamed the v2-upgrade reason from
+      //     "upgraded_v2_windowless" to "upgraded_v2_chain" when the double
+      //     schema bump added a second non-destructive branch.)
+      //   • any other windowless "ok" — a current-version draft saved before a
+      //     window was chosen, OR an "upgraded_v3_membership" upgrade (v3 has
+      //     windows, so it does NOT predate them) → intersection default, no
+      //     note. Only a genuinely pre-window v2 draft shows the note.
       if (drifted) {
         setShowProvenanceNote(false);
-      } else if (decoded.value.window) {
-        seedWindowLocal(decoded.value.window);
-        setShowProvenanceNote(false);
+        // On drift the saved draft is NOT applied (the working draft is the
+        // windowless default), so its persisted membership is not in play — no
+        // ineligible-member disclosure either.
+        setShowMembershipNote(false);
       } else {
-        resetWindowToDefaultOnReopen();
-        setShowProvenanceNote(decoded.reason === "upgraded_v2_windowless");
+        if (decoded.value.window) {
+          seedWindowLocal(decoded.value.window);
+          setShowProvenanceNote(false);
+        } else {
+          resetWindowToDefaultOnReopen();
+          setShowProvenanceNote(decoded.reason === "upgraded_v2_chain");
+        }
+        // v1.6 MEMBER-04 ineligible disclosure — a PERSISTED member id no longer
+        // in the SSR-eligible set drops at compute; disclose it (never silent).
+        // Read the RAW decoded membership (not hydratedValue): an underived draft
+        // has no persisted membership, so its derived set is eligible-only and
+        // yields no dropped members (no false note).
+        const eligibleSet = new Set(payload.eligibleApiKeyIds ?? []);
+        const droppedMembers = (decoded.value.memberKeyIds ?? []).filter(
+          (id) => !eligibleSet.has(id),
+        );
+        setShowMembershipNote(droppedMembers.length > 0);
       }
       setLoadedScenarioId(row.id);
       setLoadedScenarioName(row.name);
@@ -1278,10 +1423,22 @@ export function ScenarioComposer({
       setNameInputOpen(false);
     },
     // hydrateFromSaved/reset/seedWindowLocal/resetWindowToDefaultOnReopen are
-    // stable useCallbacks; the setters are stable; holdingsSummary is the only
-    // render-varying input.
+    // stable useCallbacks; the setters are stable; rawHoldingsSummary is the
+    // LIVE-book drift reference. CR-01 — `holdingsSummary` (the presentation-
+    // gated memo, `[]` in blank mode) is the GATED half of the shared drift
+    // predicate, so the callback must re-create when the entry mode flips it,
+    // else a forced-blank reopen would judge drift against a stale gated
+    // fingerprint. v1.6 MEMBER-04 also reads the live gate + eligible set
+    // (DERIVE-AND-STAMP + ineligible disclosure), so re-create when they change —
+    // a stale eligible set would misjudge dropped members.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [holdingsSummary, scenario.hydrateFromSaved],
+    [
+      rawHoldingsSummary,
+      holdingsSummary,
+      scenario.hydrateFromSaved,
+      payload.perKeyDailiesGateSatisfied,
+      payload.eligibleApiKeyIds,
+    ],
   );
 
   // Register the imperative Open handler with the parent (the saved-scenarios
@@ -1364,6 +1521,39 @@ export function ScenarioComposer({
     return trimmed;
   }
 
+  // MEMBER-04 (STAMP — entryMode-aware). The membership a NEW save persists.
+  // Book mode + the per-key gate satisfied ⇒ the eligible per-key ids; anything
+  // else (blank mode, OR a book without the gate) ⇒ [] EVEN when the gate is
+  // true — the F5 STAMP closure: a blank draft must never inherit the book
+  // members. This is DELIBERATELY the entryMode-aware rule, NOT the gate-only
+  // `deriveMembershipFromGate` (which ignores entryMode and is the upgrade-READ
+  // rule); using derive here would re-open F5 by stamping book members onto a
+  // blank draft whenever the live gate happens to be satisfied.
+  const memberKeyIdsForSave =
+    entryMode === "book" && payload.perKeyDailiesGateSatisfied
+      ? (payload.eligibleApiKeyIds ?? [])
+      : [];
+
+  // F-1 (red-team) — the membership an UPDATE (PUT) of the loaded scenario
+  // persists. After `openSavedScenario` syncs the session mode to the reopened
+  // draft, `memberKeyIdsForSave` (the entryMode-aware stamp) already matches
+  // what is modeled, so an Update round-trips membership faithfully. The ONE
+  // exception is the ~0-user edge the mode-sync cannot represent: a reopened
+  // BOOK draft whose per-key gate is NOT satisfied. Book mode is unrenderable
+  // (no per-source engine), so the session is forced to blank and the blank
+  // stamp would be `[]` — silently converting the persisted book draft to
+  // blank-authored. Preserve the working draft's OWN existing membership
+  // instead: silent membership destruction must be impossible. Guarded on the
+  // gate (not on entryMode) so a genuinely blank-authored draft in a gate-off
+  // session — existing membership `[]` — still saves `[]`, never resurrecting
+  // members. NEW saves (POST) keep using `memberKeyIdsForSave` (MEMBER-04's
+  // entryMode-aware STAMP contract); this only affects the reopen→Update seam.
+  const memberKeyIdsForUpdate =
+    (scenario.draft.memberKeyIds ?? []).length > 0 &&
+    !payload.perKeyDailiesGateSatisfied
+      ? (scenario.draft.memberKeyIds ?? [])
+      : memberKeyIdsForSave;
+
   // POST a new scenario (first save OR "save as new"). On success adopt the
   // returned id as the loaded scenario (editable, not readonly).
   async function postNewScenario(name: string) {
@@ -1373,7 +1563,10 @@ export function ScenarioComposer({
       const res = await fetch("/api/allocator/scenario/saved", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, draft: scenario.draft }),
+        body: JSON.stringify({
+          name,
+          draft: setMemberKeyIds(scenario.draft, memberKeyIdsForSave),
+        }),
       });
       if (!res.ok) {
         setSaveError(
@@ -1415,7 +1608,7 @@ export function ScenarioComposer({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             name: loadedScenarioName ?? "Scenario",
-            draft: scenario.draft,
+            draft: setMemberKeyIds(scenario.draft, memberKeyIdsForUpdate),
           }),
         },
       );
@@ -1585,59 +1778,22 @@ export function ScenarioComposer({
   }, [scenario.draft.addedStrategies, strategyById]);
 
   // -------------------------------------------------------------------------
-  // Build scenario projection via adapter + frozen scenario.ts engine
-  // (B4-pinned positional signature).
+  // Build scenario projection via the series-space adapter + frozen scenario.ts
+  // engine. Read-only-tokens model: live holdings are FIXED context with no
+  // per-holding toggle, and the holdings snapshot engine path was removed in
+  // Phase 63 (ENGINE-01) — the engine set is per-key + added units only.
   // -------------------------------------------------------------------------
-  // Read-only-tokens model: live holdings are FIXED context — there is no
-  // per-holding toggle in the UI, so in a current-schema (v2) draft a holding is
-  // never disabled. Legacy v1 drafts that disabled a holding are dropped on load
-  // by the SCENARIO_SCHEMA_VERSION bump, not papered over here — so this set is
-  // genuinely always empty (the adapter path stays neutral too).
-  // ponytail: empty set, not a derived memo — holdings are never disabled here.
-  const disabledHoldingRefs = useMemo(() => new Set<string>(), []);
-
-  const adapterOutput = useMemo(
-    () =>
-      buildStrategyForBuilderSet(
-        holdingsSummary as Array<{
-          symbol: string;
-          venue: string;
-          holding_type: "spot" | "derivative";
-          value_usd: number;
-        }>,
-        disabledHoldingRefs,
-        scenario.draft.addedStrategies,
-        holdingReturnsByScopeRef,
-        addedStrategyReturnsLookup as Record<
-          import("../lib/scenario-adapter").StrategyForBuilderId,
-          DailyPoint[]
-        >,
-        addedStrategyMetadataLookup as Record<
-          import("../lib/scenario-adapter").StrategyForBuilderId,
-          Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
-        >,
-      ),
-    [
-      holdingsSummary,
-      disabledHoldingRefs,
-      scenario.draft.addedStrategies,
-      holdingReturnsByScopeRef,
-      addedStrategyReturnsLookup,
-      addedStrategyMetadataLookup,
-    ],
-  );
 
   // -------------------------------------------------------------------------
   // DSRC-01/02/03 — per-data-source projection units (one per connected
   // exchange api_key) built from Plan-01's payload via the Plan-02 sibling
   // builder. This path is selected ONLY in book mode when the Phase-36 D3
-  // per-key-dailies gate is satisfied; otherwise the existing holdings
-  // `adapterOutput` path above is used unchanged (snapshot fallback — both
-  // paths coexist, RESEARCH §State-of-the-Art). The frozen
-  // collapse→computeScenario pipeline below is shared by both.
+  // per-key-dailies gate is satisfied; otherwise the composer builds an
+  // added-only set (blank / gate=false). The frozen computeScenario pipeline
+  // below is shared by both — the engine set is series-space only (ENGINE-01).
   // -------------------------------------------------------------------------
   // Per-key equity share (D2): Σ holdingEquityContribution grouped by
-  // api_key_id (mirror queries.ts:2303-2310). Uses the EXPORTED contribution
+  // api_key_id (mirror queries.ts:2207-2215). Uses the EXPORTED contribution
   // helper — never re-derives equity from value_usd (derivative notional ≠
   // equity). This is the RAW weight source; the engine renormalizes (Pitfall 1).
   const equityByApiKeyId = useMemo(() => {
@@ -1650,9 +1806,9 @@ export function ScenarioComposer({
     return out;
   }, [rawHoldingsSummary]);
 
-  // Per-key strategy set — wrapped in a useMemo on its inputs exactly like
-  // `adapterOutput`. One StrategyForBuilder per api_key_id (id === api_key_id),
-  // RAW equity-share weights, default selected=true.
+  // Per-key strategy set — wrapped in a useMemo on its inputs. One
+  // StrategyForBuilder per api_key_id (id === api_key_id), RAW equity-share
+  // weights, default selected=true.
   const perKeyAdapterOutput = useMemo(() => {
     // `?? {}` — fail safe if the payload omits the per-key channel (a partial/
     // legacy payload). An empty map yields zero per-key units (the per-key path
@@ -1678,13 +1834,14 @@ export function ScenarioComposer({
   ]);
 
   // The per-key path is active only in book mode + D3 gate satisfied. When
-  // active, the per-key strategy set feeds the projectionState/collapse/engine
-  // pipeline; otherwise the holdings `adapterOutput` set does.
+  // active, the per-key strategy set feeds the projectionState/engine pipeline;
+  // otherwise the added-only set does.
   const usePerKeySources =
     entryMode === "book" && payload.perKeyDailiesGateSatisfied;
 
   // The strategy set actually fed to the engine this render — the per-key units
-  // when the per-source path is active, else the holdings/added units.
+  // (merged with added units) when the per-source path is active, else the
+  // added-only units.
   //
   // P61-BUG-1 fix: the per-key set is MERGED with the draft's added-strategy
   // units (mergeAddedIntoPerKeySet — per-key USD weights normalized to shares
@@ -1693,9 +1850,25 @@ export function ScenarioComposer({
   // book mode rendered a live-looking weight row while contributing NOTHING to
   // member_count / timeline / KPIs (the CSV-strategies + API-keys blend path).
   const activeAdapterOutput = useMemo(() => {
-    if (!usePerKeySources) return adapterOutput;
-    return mergeAddedIntoPerKeySet(
-      perKeyAdapterOutput,
+    if (usePerKeySources) {
+      return mergeAddedIntoPerKeySet(
+        perKeyAdapterOutput,
+        scenario.draft.addedStrategies,
+        addedStrategyReturnsLookup as Record<
+          import("../lib/scenario-adapter").StrategyForBuilderId,
+          DailyPoint[]
+        >,
+        addedStrategyMetadataLookup as Record<
+          import("../lib/scenario-adapter").StrategyForBuilderId,
+          Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+        >,
+      );
+    }
+    // ENGINE-01 (Phase 63) — blank / gate=false is added-only. The holdings
+    // snapshot branch (the removed symbol-keyed builder) is gone; the shared
+    // added-only construction is the empty-per-key reduction of the merge above,
+    // so book+gate and blank differ only by the per-key units they start from.
+    return buildAddedOnlySet(
       scenario.draft.addedStrategies,
       addedStrategyReturnsLookup as Record<
         import("../lib/scenario-adapter").StrategyForBuilderId,
@@ -1708,7 +1881,6 @@ export function ScenarioComposer({
     );
   }, [
     usePerKeySources,
-    adapterOutput,
     perKeyAdapterOutput,
     scenario.draft.addedStrategies,
     addedStrategyReturnsLookup,
@@ -1726,8 +1898,14 @@ export function ScenarioComposer({
   // (e.g. keys removed but a holdings snapshot remains) has nothing to model per
   // source, so suppress the note there rather than show the misleading
   // "connected keys don't have a per-key series yet" copy (review WR-01).
+  // ENGINE-03 (Pitfall 2) — repointed from `entryMode === "book"` to
+  // `hasLiveBook`. A gate=false book holder now initializes to BLANK mode, so
+  // keying the note on `entryMode === "book"` would silently kill it exactly
+  // when it is most needed. Keying on the RAW book (hasLiveBook) keeps the calm
+  // note rendered for the forced-blank holder while the `!gate && eligible > 0`
+  // conjuncts still suppress it for gate-satisfied books and no-key books.
   const showDataSourcesFallback =
-    entryMode === "book" &&
+    hasLiveBook &&
     !payload.perKeyDailiesGateSatisfied &&
     (payload.eligibleApiKeyIds ?? []).length > 0;
 
@@ -1756,24 +1934,6 @@ export function ScenarioComposer({
     dataSourceKeys.length > 0 &&
     dataSourceKeys.every((k) => includeByApiKeyId[k.id] === false);
 
-  // H-0487/H-0493 — map each holding scopeRef to its bare symbol so aliased
-  // multi-venue/instrument holdings (identical symbol-keyed series) can be
-  // collapsed before computeScenario, keeping avg_pairwise_correlation honest.
-  // ONLY holdings populate this map — per-key UUID unit ids are NOT in it, so
-  // they pass through collapseAliasedHoldingStrategies untouched (Pitfall 3),
-  // keeping avg-ρ across data sources honest.
-  const symbolByHoldingId = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const h of holdingsSummary as Array<{
-      venue: string;
-      symbol: string;
-      holding_type: "spot" | "derivative";
-    }>) {
-      map.set(buildHoldingRef(h), h.symbol);
-    }
-    return map;
-  }, [holdingsSummary]);
-
   // -------------------------------------------------------------------------
   // H-0133 — wire the draft's weight + toggle state INTO the projection.
   // The adapter computes value-proportional default weights and marks every
@@ -1781,17 +1941,16 @@ export function ScenarioComposer({
   // `scenario.draft.weightOverrides` and only ever reached the COMMIT diff, so
   // "the slider did not move the projection" (reweighting silently no-op'd).
   // Overlay the draft state — the canonical sum-to-1 map the CompositionList
-  // input already DISPLAYS — onto the adapter strategies BEFORE the collapse so
-  // computeScenario reflects exactly what the UI shows. `selected` reads the
-  // toggle map for ALL refs; in the read-only-tokens model holdings have no
-  // toggle UI, so a current-schema (v2) draft never carries a disabled holding
-  // (legacy v1 drafts that did are dropped on load by the SCENARIO_SCHEMA_VERSION
-  // bump) — a holding therefore resolves selected=true, and only ADDED strategies
-  // can be toggled off, which now actually excludes them (they carry a real weight
-  // post-fix). R4 leverage rides the SAME projection state; holdings have no
-  // leverage UI so their multiplier is always 1, while an added strategy's
-  // multiplier flows through here. The collapse weight-averages leverage across
-  // aliased venues and computeScenario applies `wᵢ·Lᵢ·rᵢ`.
+  // input already DISPLAYS — onto the adapter strategies so computeScenario
+  // reflects exactly what the UI shows. `selected` reads the toggle map for ALL
+  // refs; in the read-only-tokens model holdings have no toggle UI, so a
+  // current-schema (v2) draft never carries a disabled holding (legacy v1 drafts
+  // that did are dropped on load by the SCENARIO_SCHEMA_VERSION bump) — a holding
+  // therefore resolves selected=true, and only ADDED strategies can be toggled
+  // off, which now actually excludes them (they carry a real weight post-fix).
+  // R4 leverage rides the SAME projection state; holdings have no leverage UI so
+  // their multiplier is always 1, while an added strategy's multiplier flows
+  // through here, and computeScenario applies `wᵢ·Lᵢ·rᵢ` over the engine set.
   // P61-BUG-1: the ids of the draft's added strategies — the per-key branch
   // below needs this to tell an ADDED unit (draft toggle/weight semantics)
   // apart from a per-key unit (ephemeral include map). Also consumed by the
@@ -1856,31 +2015,31 @@ export function ScenarioComposer({
     leverageByRef,
   ]);
 
-  // M-0102: hoist the de-alias collapse and the per-strategy date→index cache
-  // into their own memos. Previously buildDateMapCache ran inside the
-  // scenarioMetrics body, rebuilding the cache on every recompute. Each memo is
-  // keyed on the exact value it derives from, so the cache can never go stale
-  // relative to the strategies computeScenario receives (worst case it rebuilds
-  // as often as before; it never returns a cache mismatched to its strategies).
-  const deAliased = useMemo(
-    () =>
-      collapseAliasedHoldingStrategies(
-        activeAdapterOutput.strategies,
-        projectionState,
-        symbolByHoldingId,
-      ),
-    [activeAdapterOutput.strategies, projectionState, symbolByHoldingId],
+  // ENGINE-01 (Phase 63) — the engine set is the identity pair over the active
+  // adapter output: strategies as-built, state = projectionState. The former
+  // symbol-keyed alias collapse over holdings is gone — no holdings units reach
+  // the engine any more, so there is nothing to collapse (every unit is a
+  // distinct api_key or added-strategy id). projectionState already covers
+  // selected/weights/leverage/startDates for every unit id, so this is a
+  // byte-faithful passthrough of what computeScenario blends.
+  const engineSet = useMemo(
+    () => ({ strategies: activeAdapterOutput.strategies, state: projectionState }),
+    [activeAdapterOutput.strategies, projectionState],
   );
   const dateMapCache = useMemo(
-    () => buildDateMapCache(deAliased.strategies),
-    [deAliased],
+    // Reads ONLY strategies.daily_returns — key on the referentially-stable
+    // `engineSet.strategies` (=== activeAdapterOutput.strategies) so a
+    // weight/leverage/selection scrub (which rebuilds `engineSet` via
+    // projectionState) does NOT rescan every series.
+    () => buildDateMapCache(engineSet.strategies),
+    [engineSet.strategies],
   );
 
   // Phase 57 (WINDOW-01) — coverage spans of the strategies actually fed to the
-  // engine this render (the SELECTED, post-collapse set). Deriving spans from
-  // `deAliased.strategies` — the exact set computeScenario blends — keeps the
+  // engine this render (the SELECTED set). Deriving spans from
+  // `engineSet.strategies` — the exact set computeScenario blends — keeps the
   // UI's window derivation and the engine's membership on the SAME strategy set
-  // (RESEARCH Pitfall 2: pre/post-collapse desync). All interval math delegates
+  // (no derivation may drift off the blended set). All interval math delegates
   // to scenario-window.ts (Rule 2: never re-derive coverage math here).
   //
   // `selectedSpanById` is the ONE coverage-span scan per selected strategy,
@@ -1893,12 +2052,12 @@ export function ScenarioComposer({
   // before the lookup, so the map is a safe superset.
   const selectedSpanById = useMemo(() => {
     const m = new Map<string, CoverageSpan | null>();
-    for (const s of deAliased.strategies) {
-      if (deAliased.state.selected[s.id] === false) continue;
+    for (const s of engineSet.strategies) {
+      if (engineSet.state.selected[s.id] === false) continue;
       m.set(s.id, coverageSpanOf(s.daily_returns));
     }
     return m;
-  }, [deAliased]);
+  }, [engineSet]);
 
   const selectedSpans = useMemo<CoverageSpan[]>(() => {
     const spans: CoverageSpan[] = [];
@@ -2073,26 +2232,28 @@ export function ScenarioComposer({
   );
   const fullRangeWindow = useMemo(() => unionOf(selectedSpans), [selectedSpans]);
 
-  // ⚠️ HAZARD FIX (RESEARCH Pitfall 1): collapseAliasedHoldingStrategies
-  // reconstructs the ScenarioState and SILENTLY DROPS `state.window`. Setting
-  // the window on projectionState (pre-collapse) would never reach the engine.
-  // Inject it onto deAliased.state POST-collapse. This memo is the SINGLE "state
-  // the engine sees": BOTH computeScenario (below) AND alignConstituentReturns
-  // (the diversification panel — CORR-02/05/06) consume it, so the windowed
-  // member set / axis can never desync between the blend metrics and DR/ENB/PCR.
-  // Only the scenario-tab composed path attaches a window — own-book callers
-  // stay on the union-when-absent path (coverageWindow === null → no window key).
+  // Coverage window injection. With the alias-collapse removed (Phase 63
+  // ENGINE-01) the engine set is the identity pair, so the window spreads
+  // DIRECTLY onto `engineSet.state` (== projectionState) — there is no longer a
+  // collapse step that reconstructs the state and drops a pre-set window, so no
+  // post-collapse re-injection dance is needed. This memo remains the SINGLE
+  // "state the engine sees": BOTH computeScenario (below) AND
+  // alignConstituentReturns (the diversification panel — CORR-02/05/06) consume
+  // it, so the windowed member set / axis can never desync between the blend
+  // metrics and DR/ENB/PCR. Only the scenario-tab composed path attaches a
+  // window — own-book callers stay on the union-when-absent path
+  // (coverageWindow === null → no window key).
   const engineState = useMemo(
     () =>
       coverageWindow
-        ? { ...deAliased.state, window: coverageWindow }
-        : deAliased.state,
-    [deAliased, coverageWindow],
+        ? { ...engineSet.state, window: coverageWindow }
+        : engineSet.state,
+    [engineSet, coverageWindow],
   );
 
   const scenarioMetrics = useMemo(
-    () => computeScenario(deAliased.strategies, engineState, dateMapCache),
-    [deAliased, engineState, dateMapCache],
+    () => computeScenario(engineSet.strategies, engineState, dateMapCache),
+    [engineSet, engineState, dateMapCache],
   );
 
   // Phase 57 Plan 03 (WINDOW-02/03, ADR §"UI state machine") — the pure
@@ -2110,11 +2271,11 @@ export function ScenarioComposer({
   //     every selected strategy is eligible (the engine runs its union path, no
   //     drops) — mirrors the absent-window branch of the engine.
   // Never re-derives interval math (Rule 2): delegates to scenario-window.ts.
-  // Keyed on `deAliased` (the post-collapse set the engine blends) + the window.
+  // Keyed on `engineSet` (the set the engine blends) + the window.
   const coverageEligible = useMemo<Record<string, boolean>>(() => {
     const eligible: Record<string, boolean> = {};
-    for (const s of deAliased.strategies) {
-      if (!deAliased.state.selected[s.id]) continue; // subset-only (activeStrategies)
+    for (const s of engineSet.strategies) {
+      if (!engineSet.state.selected[s.id]) continue; // subset-only (activeStrategies)
       if (!coverageWindow) {
         eligible[s.id] = true; // union path — no coverage drops
         continue;
@@ -2127,7 +2288,7 @@ export function ScenarioComposer({
       eligible[s.id] = span !== null && covers(span, coverageWindow);
     }
     return eligible;
-  }, [deAliased, coverageWindow, selectedSpanById]);
+  }, [engineSet, coverageWindow, selectedSpanById]);
 
   // Phase 57 Plan 03 Task 2 (POLISH-02) — the coverage-auto-excluded rows:
   // SELECTED (in the subset) but NOT eligible for the current window. These are
@@ -2158,8 +2319,8 @@ export function ScenarioComposer({
       reason: string;
       includeCost: IncludeCost | null;
     }> = [];
-    for (const s of deAliased.strategies) {
-      if (!deAliased.state.selected[s.id]) continue; // manual-off is NOT here
+    for (const s of engineSet.strategies) {
+      if (!engineSet.state.selected[s.id]) continue; // manual-off is NOT here
       if (coverageEligible[s.id]) continue; // in-blend
       const span = selectedSpanById.get(s.id) ?? null;
       out.push({
@@ -2170,7 +2331,7 @@ export function ScenarioComposer({
       });
     }
     return out;
-  }, [deAliased, coverageWindow, coverageEligible, selectedSpanById]);
+  }, [engineSet, coverageWindow, coverageEligible, selectedSpanById]);
 
   // Phase 58 (COVERAGE-01) — the mini-gantt rows: one per SELECTED strategy,
   // carrying its coverage span + the in-blend/auto-excluded flag read from the
@@ -2182,15 +2343,15 @@ export function ScenarioComposer({
   // shared `selectedSpanById` scan (Rule 2: computed once).
   const timelineRows = useMemo(
     () =>
-      deAliased.strategies
-        .filter((s) => deAliased.state.selected[s.id])
+      engineSet.strategies
+        .filter((s) => engineSet.state.selected[s.id])
         .map((s) => ({
           id: s.id,
           name: s.name,
           span: selectedSpanById.get(s.id) ?? null,
           inBlend: coverageEligible[s.id] === true,
         })),
-    [deAliased, selectedSpanById, coverageEligible],
+    [engineSet, selectedSpanById, coverageEligible],
   );
 
   // The ONE "active window IS the common period" equality — lexicographic
@@ -2238,8 +2399,8 @@ export function ScenarioComposer({
     if (!coverageWindow) return;
     const memberIds = scenarioMetrics.member_ids;
     if (!memberIds) return;
-    const uiInBlend = deAliased.strategies
-      .filter((s) => deAliased.state.selected[s.id] && coverageEligible[s.id])
+    const uiInBlend = engineSet.strategies
+      .filter((s) => engineSet.state.selected[s.id] && coverageEligible[s.id])
       .map((s) => s.id)
       .sort();
     const engineMembers = [...memberIds].sort();
@@ -2252,7 +2413,7 @@ export function ScenarioComposer({
         { uiInBlend, engineMembers },
       );
     }
-  }, [deAliased, coverageWindow, coverageEligible, scenarioMetrics.member_ids]);
+  }, [engineSet, coverageWindow, coverageEligible, scenarioMetrics.member_ids]);
 
   // Phase 57 Plan 03 Task 3 (WINDOW-06) — empty-intersection outlier detection.
   // When the SELECTED set shares no common window (defaultWindowFor === null),
@@ -2276,8 +2437,8 @@ export function ScenarioComposer({
     if (commonPeriodWindow !== null) return [];
     const spansById: Record<string, CoverageSpan> = {};
     const nameById: Record<string, string> = {};
-    for (const s of deAliased.strategies) {
-      if (!deAliased.state.selected[s.id]) continue; // subset-only
+    for (const s of engineSet.strategies) {
+      if (!engineSet.state.selected[s.id]) continue; // subset-only
       const span = selectedSpanById.get(s.id) ?? null;
       if (span) spansById[s.id] = span;
       nameById[s.id] = s.name;
@@ -2287,7 +2448,7 @@ export function ScenarioComposer({
       name: nameById[id] ?? id,
       isAdded: addedIdSet.has(id),
     }));
-  }, [deAliased, commonPeriodWindow, selectedSpanById, addedIdSet]);
+  }, [engineSet, commonPeriodWindow, selectedSpanById, addedIdSet]);
 
   // The deselect action for a WINDOW-06 outlier: an added strategy is removed
   // from the subset (handleRemoveAdded); a live holding is toggled off
@@ -2408,21 +2569,21 @@ export function ScenarioComposer({
 
   // PEER-04 (Phase 42) — per-constituent mandate chips for the blend. Built ONLY
   // from genuinely-available `StrategyForBuilder` fields (`strategy_types`,
-  // `markets`) + the per-constituent leverage from `deAliased.state.leverage`
+  // `markets`) + the per-constituent leverage from `engineSet.state.leverage`
   // (id → L; default 1.0). NO fabricated aggregate; NOT leverage_range/description
   // (not on this type / free-text — out of v1.2.2 chip scope per CONTEXT D-07).
-  // Honest-empty per constituent is the panel's job. Keyed on `deAliased` so a
+  // Honest-empty per constituent is the panel's job. Keyed on `engineSet` so a
   // weight/leverage scrub or a constituent add re-derives. Always non-empty when
   // the blend has constituents (the panel handles the all-empty-metadata case).
   const scenarioMandate = useMemo<ScenarioMandatePayload | undefined>(() => {
-    const constituents = deAliased.strategies.map((s) => ({
+    const constituents = engineSet.strategies.map((s) => ({
       name: s.name,
       strategy_types: s.strategy_types ?? [],
       markets: s.markets ?? [],
-      leverage: deAliased.state.leverage?.[s.id] ?? 1.0,
+      leverage: engineSet.state.leverage?.[s.id] ?? 1.0,
     }));
     return constituents.length > 0 ? { constituents } : undefined;
-  }, [deAliased]);
+  }, [engineSet]);
 
   // PEER-05 (Phase 42) — the blend-vs-live-book signed delta on the SAME
   // sample/252 basis as the peer rank (T-42-15). The own-book leg recomputes the
@@ -2478,36 +2639,38 @@ export function ScenarioComposer({
     scenarioMetrics.max_drawdown,
   ]);
 
-  // CORR-01 — de-aliased axis labels for the CorrelationHeatmap. Keyed on the
-  // SAME de-aliased set computeScenario consumes, so the heatmap labels always
-  // match the matrix the engine produced (no stale alias surviving the collapse).
+  // CORR-01 — axis labels for the CorrelationHeatmap. Keyed on the SAME engine
+  // set computeScenario consumes, so the heatmap labels always match the matrix
+  // the engine produced (label and matrix membership can never desync).
   const strategyNames = useMemo(() => {
     const out: Record<string, string> = {};
-    for (const s of deAliased.strategies) out[s.id] = s.name;
+    for (const s of engineSet.strategies) out[s.id] = s.name;
     return out;
-  }, [deAliased]);
+    // Reads ONLY strategies (id/name) — key on `engineSet.strategies` so a
+    // weight/leverage scrub does not rebuild the label map.
+  }, [engineSet.strategies]);
 
   // CORR-02/05/06 — the constituent diversification result (Plan 41-01 lib).
-  // Re-aligns the de-aliased per-constituent returns the FROZEN engine discards
+  // Re-aligns the per-constituent returns the FROZEN engine discards
   // (mirroring scenario.ts:199-236 inside `alignConstituentReturns`), normalizes
   // the ACTIVE weights to sum→1 (mirroring the engine's per-day renormalization
   // at scenario.ts:243-254), and feeds the engine's READ-ONLY `correlation_matrix`
   // / `n` / `portfolio_daily_returns` into `computeDiversification`. The lib owns
   // the global gate (ids<2 / n<10 / null matrix → all-null), so a degenerate or
   // zero-sum-weight blend returns a null DR/ENB/PCR and the section renders its
-  // honest empty state, never NaN. Keyed on the de-aliased set + the engine output.
+  // honest empty state, never NaN. Keyed on the engine set + the engine output.
   const diversification = useMemo(() => {
-    // engineState (NOT the raw deAliased.state) so the constituent set + axis
+    // engineState (NOT the raw engineSet.state) so the constituent set + axis
     // match the windowed correlation_matrix / n the engine emits — a window-
     // excluded strategy must not dilute DR/ENB/PCR or the cluster order.
-    const aligned = alignConstituentReturns(deAliased.strategies, engineState);
+    const aligned = alignConstituentReturns(engineSet.strategies, engineState);
     // Normalize the active weights to sum→1 (engine renormalizes by the active
     // weight mass; a zero/negative total yields all-zero weights → the lib's PCR
     // guard nulls the result → honest empty).
     const rawWeights: Record<string, number> = {};
     let weightSum = 0;
     for (const id of aligned.ids) {
-      const w = deAliased.state.weights[id] ?? 0;
+      const w = engineSet.state.weights[id] ?? 0;
       rawWeights[id] = w;
       weightSum += w;
     }
@@ -2519,18 +2682,18 @@ export function ScenarioComposer({
       ids: aligned.ids,
       returnsById: aligned.returnsById,
       weights,
-      // CR-01/WR-01 — thread the de-aliased per-constituent leverage (Lᵢ,
+      // CR-01/WR-01 — thread the per-constituent leverage (Lᵢ,
       // default 1) so DR/PCR are computed on the SAME levered basis as the
       // engine's `portfolio_daily_returns` (`Σ ŵᵢ·Lᵢ·rᵢ`). Absent → all-1, i.e.
       // a correct un-levered computation. The ρ matrix stays leverage-invariant.
-      leverage: deAliased.state.leverage,
+      leverage: engineSet.state.leverage,
       portfolioDailyReturns: (
         scenarioMetrics.portfolio_daily_returns ?? []
       ).map((p) => p.value),
       correlationMatrix: scenarioMetrics.correlation_matrix,
       n: scenarioMetrics.n,
     });
-  }, [deAliased, engineState, scenarioMetrics]);
+  }, [engineSet, engineState, scenarioMetrics]);
 
   // CORR-06 — the cluster-reordered matrix the (UNCHANGED) CorrelationHeatmap
   // receives. The heatmap renders axis/cell order from `Object.keys(matrix)` and
@@ -2557,10 +2720,12 @@ export function ScenarioComposer({
 
   // IMPACT-01 — the shortest-history strategy name for the coverage caveat.
   // Pure helper (unit-tested in scenario-history.test.ts); reads only the
-  // de-aliased set the composer already holds. null when the set is empty.
+  // engine set the composer already holds. null when the set is empty.
   const coverageShortestName = useMemo(
-    () => shortestHistoryName(deAliased.strategies),
-    [deAliased],
+    // Reads ONLY strategies (daily_returns spans) — key on
+    // `engineSet.strategies` so a weight/leverage scrub does not rescan.
+    () => shortestHistoryName(engineSet.strategies),
+    [engineSet.strategies],
   );
 
   // R4 — show the leverage caveat only when a non-default multiplier ACTUALLY
@@ -2907,12 +3072,16 @@ export function ScenarioComposer({
           className="inline-flex items-center gap-1 rounded-md border border-border p-0.5"
           onKeyDown={(e) => {
             if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-            if (!hasLiveBook) return; // only one option — nothing to arrow to
+            // ENGINE-03 — only arrow between segments when book entry is
+            // actually available (live book AND per-key gate). Otherwise Blank
+            // slate is the only option — nothing to arrow to, and an arrow must
+            // never land focus in the (hidden, engineless) book mode.
+            if (!canEnterBook) return;
             e.preventDefault();
             handleEntryModeSelect(entryMode === "book" ? "blank" : "book");
           }}
         >
-          {hasLiveBook && (
+          {canEnterBook && (
             <button
               type="button"
               role="radio"
@@ -2933,7 +3102,7 @@ export function ScenarioComposer({
             type="button"
             role="radio"
             aria-checked={entryMode === "blank"}
-            tabIndex={entryMode === "blank" || !hasLiveBook ? 0 : -1}
+            tabIndex={entryMode === "blank" || !canEnterBook ? 0 : -1}
             data-testid="scenario-entry-mode-blank"
             onClick={() => handleEntryModeSelect("blank")}
             className={`rounded-sm px-3 py-1 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
@@ -3063,7 +3232,7 @@ export function ScenarioComposer({
           (scenarioMetrics.n) AND the shortest-history strategy via the
           unit-tested shortestHistoryName helper — no invented numbers, no
           re-implemented helper. Reuses the leverage-caveat typography. The
-          "Shortest history" half is omitted when the de-aliased set is empty
+          "Shortest history" half is omitted when the engine set is empty
           (helper → null), so the caveat never names a phantom strategy. */}
       <p
         data-testid="scenario-coverage-caveat"
@@ -3259,12 +3428,35 @@ export function ScenarioComposer({
           picker / Include all leave the common period; the stale banner would
           lie over the new window). "Show full range" reuses the existing
           Full-range preset and also self-dismisses inside ProvenanceNote. */}
-      {windowBounds && showProvenanceNote && activeWindowIsCommonPeriod && (
+      {/* v1.6 MEMBER-04 — ineligible persisted-member disclosure. A DISTINCT
+          ephemeral note (reusing the parameterized ProvenanceNote shell) shown
+          when a reopened v4 draft carries a member id no longer eligible; that
+          member drops at compute and the recompute over the remainder proceeds
+          WITH this note visible (MEMBER-04 forbids the silence, not the
+          recompute). Keyed on the same loadedScenarioId-nonce as the window note
+          so it re-shows per affected draft (component-local dismissal remounts
+          fresh). Independent of windowBounds — a dropped data source is
+          orthogonal to coverage windows. Takes PRIORITY over / suppresses the
+          window + default notes (below, gated on !showMembershipNote) so the two
+          note families never stack. NO action prop (a dropped source has no
+          "full range" to restore). */}
+      {showMembershipNote && (
         <ProvenanceNote
-          key={`${loadedScenarioId ?? "provenance"}-${provenanceOpenNonceRef.current}`}
-          onShowFullRange={() => fullRangeWindow && applyWindow(fullRangeWindow)}
+          key={`membership-${loadedScenarioId ?? "note"}-${provenanceOpenNonceRef.current}`}
+          testId="scenario-membership-note"
+          message="A data source saved with this scenario is no longer available — showing the remaining sources."
         />
       )}
+
+      {windowBounds &&
+        showProvenanceNote &&
+        activeWindowIsCommonPeriod &&
+        !showMembershipNote && (
+          <ProvenanceNote
+            key={`${loadedScenarioId ?? "provenance"}-${provenanceOpenNonceRef.current}`}
+            onShowFullRange={() => fullRangeWindow && applyWindow(fullRangeWindow)}
+          />
+        )}
 
       {/* Phase 58 (POLISH-03) — the one-time union→intersection default-change
           note. Placed ABOVE the blend header / window control (58-UI-SPEC
@@ -3276,7 +3468,7 @@ export function ScenarioComposer({
           an upgraded-v2 draft both notes would otherwise stack with duplicate
           "common period" messaging. "Show full range" reuses the existing
           Full-range preset via applyWindow(fullRangeWindow) — no new logic. */}
-      {windowBounds && !showProvenanceNote && (
+      {windowBounds && !showProvenanceNote && !showMembershipNote && (
         <DefaultChangeNote
           memberCount={scenarioMetrics.member_count ?? 0}
           intersectionTruncatesUnion={showingCommonPeriodTruncated}
@@ -3418,7 +3610,6 @@ export function ScenarioComposer({
           liveMetrics={liveMetricsForKpi}
           metrics={liveMetricsForKpi}
           analytics={{}}
-          aum={scenarioAum}
           snapshotCount={snapshotCount}
           allKeysStale={allKeysStale}
           minHistoryDepthMonths={minHistoryDepthMonths}
@@ -3553,7 +3744,7 @@ export function ScenarioComposer({
           btcDaily={btcDaily}
           btcAvailable={btcAvailable}
           n={scenarioMetrics.n}
-          strategyCount={deAliased.strategies.length}
+          strategyCount={engineSet.strategies.length}
         />
       </Card>
 
@@ -3570,40 +3761,40 @@ export function ScenarioComposer({
         <MonteCarloSection
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
           n={scenarioMetrics.n}
-          strategyCount={deAliased.strategies.length}
+          strategyCount={engineSet.strategies.length}
         />
       </Card>
 
       {/* OPT-01 / OPT-02 (Plan 28-02) — the "Suggested weights" optimizer on the
           own-book scenario surface. Allocates long-only across the ACTIVE
-          de-aliased strategies (the same set the projection blends) via the
-          Python analytics-service (min-vol default / max-Sharpe gated, Ledoit-Wolf
+          strategies (the same set the projection blends) via the Python
+          analytics-service (min-vol default / max-Sharpe gated, Ledoit-Wolf
           shrinkage). Suggested weights write to the editable DRAFT only on an
           explicit Apply (via scenario.setWeightOverride) — never auto-committed.
           Own-book composer ONLY; the example-universe Sandbox optimizer is
           deferred. */}
       <Card className="mt-6">
         <WeightOptimizerSection
-          strategies={deAliased.strategies
-            .filter((s) => deAliased.state.selected[s.id])
+          strategies={engineSet.strategies
+            .filter((s) => engineSet.state.selected[s.id])
             .map((s) => ({ id: s.id, name: s.name, dailyReturns: s.daily_returns }))}
           onApply={(weights) => {
-            // The optimizer saw the DE-ALIASED universe, so `weights` is keyed
-            // by each aliased symbol-group's representative. Map it back onto the
-            // raw per-venue basis BEFORE applying, else applyWeightOverrides
-            // renormalizes a collapsed-away venue duplicate's stale weight back
-            // in and the committed blend drifts off the suggestion (multi-venue
-            // books only; identity for one-venue-per-symbol). See
-            // mapDeAliasedWeightsToRawBasis.
-            const rawBasis = mapDeAliasedWeightsToRawBasis(
-              weights,
-              projectionState,
-              symbolByHoldingId,
-            );
-            // Atomic full-vector apply — NOT a loop of setWeightOverride (which
-            // renormalizes the others on each call and would land a different
-            // allocation than the optimizer suggested).
-            scenario.applyWeightOverrides(rawBasis);
+            // WR-01 (Phase 63 review) — renormalize the applied vector over the
+            // ENGINE universe, NOT the draft's `holding:` toggle basis. In
+            // book+gate mode the engine units are the per-key api_key ids + added
+            // ids; `applyWeightOverrides`'s default basis (enabledIdsOf(draft)) is
+            // the toggle map (`holding:` refs + added ids), which still carries
+            // the stale value-proportional holding overrides — renormalizing over
+            // it dilutes the added sleeve (#528). Pass the SELECTED engine ids —
+            // the same universe fed to WeightOptimizerSection above — so the
+            // applied blend reproduces the suggestion exactly. Atomic full-vector
+            // apply — NOT a loop of setWeightOverride (which renormalizes the
+            // others on each call and would land a different allocation than the
+            // optimizer suggested).
+            const basisIds = engineSet.strategies
+              .filter((s) => engineSet.state.selected[s.id])
+              .map((s) => s.id);
+            scenario.applyWeightOverrides(weights, basisIds);
           }}
         />
       </Card>
@@ -3652,7 +3843,7 @@ export function ScenarioComposer({
                 </div>
               )}
 
-              {/* CORR-01/06 — the cluster-reordered heatmap (de-aliased labels).
+              {/* CORR-01/06 — the cluster-reordered heatmap (engine-set labels).
                   The heatmap's reason-routed empties (n<10 / non-finite), its
                   missing-cell "—", and its single-sourced Avg |ρ| caption are ALL
                   inherited; do NOT duplicate empty logic or recompute the average. */}

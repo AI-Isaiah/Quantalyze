@@ -9,10 +9,11 @@ import {
 } from "../lib/scenario-compare";
 import {
   defaultDraftFromHoldings,
+  deriveMembershipFromGate,
   scenarioDraftCodec,
+  setMemberKeyIds,
   type ScenarioDraft,
 } from "../lib/scenario-state";
-import { buildHoldingRef } from "../lib/holding-outcome-adapter";
 import {
   ScenarioCompareTable,
   type ScenarioColumn,
@@ -63,13 +64,13 @@ export interface ScenarioComparePanelProps {
       unrealized_pnl_usd?: number | null;
     }>;
     strategies: ComparePayloadStrategy[];
-    holdingReturnsByScopeRef: Record<string, DailyPoint[]>;
     /**
      * P61-BUG-2 — the per-key channel (the same fields the composer's
      * book-mode engine selection reads). The AllocationsTabs call site passes
      * the WHOLE dashboard payload, so these exist at runtime; typed optional
-     * so a narrow test payload still type-checks and falls back to the
-     * legacy holdings path.
+     * so a narrow test payload still type-checks. An absent per-key channel
+     * yields empty lookups → an honest em-dash column, NOT a holdings fallback
+     * (the legacy holdings path is deleted, Phase 63 ENGINE-02).
      */
     perKeyReturnsByApiKeyId?: Record<string, DailyPoint[]>;
     eligibleApiKeyIds?: string[];
@@ -120,10 +121,13 @@ const NULL_METRICS: ComputedMetrics = {
 
 /**
  * Build the `ScenarioCompareInputs` from the live payload — mirrors the
- * composer's derivation (ScenarioComposer.tsx:686-790):
+ * composer's series-space derivation (ScenarioComposer.tsx:1588-1608 lookups,
+ * :1710-1718 equityByApiKeyId):
  *   - addedStrategy{Returns,Metadata}Lookup keyed by strategy id (over the union
  *     of every decoded draft's added strategies);
- *   - symbolByHoldingId via buildHoldingRef over the live holdings.
+ *   - equityByApiKeyId — per-key equity shares grouped from the live holdings
+ *     (the per-key WEIGHT basis; series-space, not a holdings-snapshot engine
+ *     input).
  * No leverage, no fetch.
  */
 function deriveCompareInputs(
@@ -153,11 +157,6 @@ function deriveCompareInputs(
     };
   }
 
-  const symbolByHoldingId = new Map<string, string>();
-  for (const h of payload.holdingsSummary) {
-    symbolByHoldingId.set(buildHoldingRef(h), h.symbol);
-  }
-
   // P61-BUG-2 — per-key equity shares, grouped by api_key_id. Mirrors the
   // composer's `equityByApiKeyId` memo (and the SSR holdingEquityContribution,
   // queries.ts): derivative → unrealized_pnl_usd (value_usd is leveraged
@@ -179,11 +178,8 @@ function deriveCompareInputs(
   }
 
   return {
-    holdingsSummary: payload.holdingsSummary,
-    holdingReturnsByScopeRef: payload.holdingReturnsByScopeRef,
     addedStrategyReturnsLookup,
     addedStrategyMetadataLookup,
-    symbolByHoldingId,
     perKeyReturnsByApiKeyId: payload.perKeyReturnsByApiKeyId,
     eligibleApiKeyIds: payload.eligibleApiKeyIds,
     equityByApiKeyId,
@@ -244,8 +240,27 @@ export function ScenarioComparePanel({
         // would conflate older-format with insufficient-history, the #509 class).
         if (draft === null)
           return { name: row.name, metrics: NULL_METRICS, undecodable: true };
+        // v1.6 MEMBER-02 — normalize UNDERIVED membership at the single
+        // per-column compute seam. A codec-decoded upgraded v2/v3 draft (or a
+        // round-tripped underived-v4 blob) arrives with `memberKeyIds ===
+        // undefined`; derive it here from the live gate + eligible ids and stamp
+        // it, so old/underived columns compute IDENTICALLY to today (the Atlas
+        // golden is preserved) and the membership selector never sees undefined.
+        // A column that already carries explicit membership (genuine v4) passes
+        // through unchanged — its since-removed members are intersected out at
+        // compute (scenario-compare.ts MEMBER-04 drop).
+        const normalized =
+          draft.memberKeyIds === undefined
+            ? setMemberKeyIds(
+                draft,
+                deriveMembershipFromGate(
+                  payload.perKeyDailiesGateSatisfied ?? false,
+                  payload.eligibleApiKeyIds ?? [],
+                ),
+              )
+            : draft;
         try {
-          return { name: row.name, metrics: computeMetricsForDraft(draft, liveInputs) };
+          return { name: row.name, metrics: computeMetricsForDraft(normalized, liveInputs) };
         } catch (err) {
           warnAudit("scenario_compare_compute_failed", {
             id: row.id,
@@ -254,7 +269,7 @@ export function ScenarioComparePanel({
           return { name: row.name, metrics: NULL_METRICS };
         }
       }),
-    [selectedRows, defaultDraft, liveInputs],
+    [selectedRows, defaultDraft, liveInputs, payload],
   );
 
   // The live-book column — synthetic all-on draft through the SAME engine path.
@@ -266,7 +281,10 @@ export function ScenarioComparePanel({
     if (!includeLiveBook) return null;
     try {
       const metrics = computeMetricsForDraft(
-        buildLiveBookDraft(),
+        buildLiveBookDraft(
+          payload.perKeyDailiesGateSatisfied ?? false,
+          payload.eligibleApiKeyIds ?? [],
+        ),
         liveInputs,
         { liveBook: true },
       );
@@ -278,7 +296,7 @@ export function ScenarioComparePanel({
       });
       return { name: "Live book", metrics: NULL_METRICS };
     }
-  }, [includeLiveBook, liveInputs]);
+  }, [includeLiveBook, liveInputs, payload]);
 
   return (
     <section className="space-y-3" aria-labelledby="scenario-compare-heading">

@@ -81,7 +81,7 @@ const FALLBACK_EMPTY = {
 };
 
 interface WeightOptimizerSectionProps {
-  /** The active de-aliased strategies the optimizer allocates across. */
+  /** The active engine-set strategies the optimizer allocates across. */
   strategies: OptimizerStrategy[];
   /** Apply suggested weights to the editable draft (id -> weight). DRAFT ONLY. */
   onApply: (weights: Record<string, number>) => void;

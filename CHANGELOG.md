@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.36.0.0] - 2026-07-03
+### Added — scenario membership & series-space purification (v1.6 phases 62-64)
+Book-based scenarios now **remember exactly which API keys they were built from** — saved, shared, and compared scenarios all compute on that persisted membership instead of re-guessing from whatever keys happen to be eligible today.
+
+- **Persisted membership** — saving a book scenario stamps the API keys in the blend into the draft (schema v2/v3 → v4, non-destructive: every existing saved scenario loads unchanged and derives its membership on first reopen). A blank-slate scenario honestly persists *no* membership.
+- **Compare uses the scenario's own membership** — a saved book scenario's compare column computes on the keys it was saved with (plus its added strategies), not on a fresh holdings snapshot, so the column matches what the composer showed at save time.
+- **Ineligible-member disclosure** — reopening a scenario whose member keys have since been revoked or lost data says so inline instead of silently computing on a smaller book.
+- **Mixed-share honesty caption** — a public share of a book+added scenario now carries "computed from this scenario's catalog strategies only", so recipients know the private book series are not part of what they see. Membership never leaks: the share page exposes only a derived mixed/not-mixed flag, pinned by leak tests at both the resolve and render layers.
+
+### Changed
+- **One engine, one series space** — the scenario composer, compare, and share surfaces all compute on the single per-key + added-strategy engine set; the legacy holdings-snapshot and de-alias code paths are gone (guarded by a source-scan test so they cannot creep back). The weight optimizer's apply-back renormalizes over that same engine universe.
+- **The scenario KPI strip is return-form only** — the AUM cell is removed (matching the share page's "no USD, no AUM" contract); commit sizing (weight × AUM in the commit modal) is unchanged.
+- **Excluding all data sources starts an honest blank slate** — with the per-key gate off, the scenario tab initializes blank instead of resurrecting a holdings snapshot.
+- Weight/leverage scrubbing no longer recomputes date-map and name caches that don't depend on it (composer interaction stays smooth on large blends).
+
+### Fixed
+- **Opening a saved book scenario from a blank-slate session no longer mis-computes it — or destroys it** (red-team find): the session now adopts the opened scenario's own authored mode, so the composer and compare agree on the engine basis, and "Update portfolio" preserves the draft's persisted membership instead of silently wiping it to blank-authored.
+- A blank-slate draft never merges the live book into its compare column, and the live-book compare column respects the per-key-dailies gate.
+
 ## [0.35.0.32] - 2026-07-03
 ### Fixed
 - **The public /demo page renders again** (was a permanent "Demo data is loading" empty state since the full-app demo seed wiped the legacy persona data): the three editorial personas (Active / Cold / Stalled) are recreated by the full-app seeder from its own strategy set, with portfolio analytics computed from the real daily series so each persona's copy is true of its data — active +26%/Sharpe 1.2 over 3 strategies; cold +15%/Sharpe 0.9 over 6 (the over-diversification trap); stalled +57%/Sharpe 2.1 over 2 concentrated names. Same fixed ids, so the app code, PDF allowlist, and e2e specs are untouched.

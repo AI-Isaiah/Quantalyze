@@ -213,7 +213,7 @@ describe("computeScenario — edge cases", () => {
 
   // M-0481 — Pitfall 1 contract pin (cumulative-RETURN vs wealth form).
   //
-  // queries.ts::liveBaselineMetricsFromHoldings feeds per-holding returns into
+  // queries.ts::liveBaselineMetricsFromPerKeyDailies feeds per-key returns into
   // computeScenario and then converts the result to wealth form with
   // `value: p.value + 1` (the "EquityChart expects wealth-form" fix). That +1
   // is correct ONLY because computeScenario emits cumulative RETURN values

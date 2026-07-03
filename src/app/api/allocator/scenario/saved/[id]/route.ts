@@ -47,7 +47,7 @@ import {
 } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { isUuid } from "@/lib/utils";
-import { scenarioDraftSchema } from "@/app/(dashboard)/allocations/lib/scenario-state";
+import { scenarioDraftSaveSchema } from "@/app/(dashboard)/allocations/lib/scenario-state";
 import { MAX_DRAFT_BODY_BYTES } from "../route";
 
 export const runtime = "nodejs";
@@ -75,7 +75,14 @@ const NameSchema = z
   .max(120, { message: "Scenario names are limited to 120 characters." });
 
 const RenameBodySchema = z.object({ name: NameSchema });
-const UpdateBodySchema = z.object({ name: NameSchema, draft: scenarioDraftSchema });
+// v1.6 MEMBER-01 (checker W-A) — the PUT draft validator is the SAVE variant
+// too, so a v4 body persisted via update is symmetrically held to the
+// membership contract server-side. Pre-v4 fixtures still pass (the >=4 refine
+// skips). The codec-decode path keeps the tolerant `scenarioDraftSchema`.
+const UpdateBodySchema = z.object({
+  name: NameSchema,
+  draft: scenarioDraftSaveSchema,
+});
 
 function badId(): NextResponse {
   return NextResponse.json(

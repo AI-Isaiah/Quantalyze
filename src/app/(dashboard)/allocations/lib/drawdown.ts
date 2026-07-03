@@ -1,7 +1,7 @@
 /**
  * Server-safe drawdown derivation. Extracted from DrawdownChart.tsx
  * (a "use client" module) so the SSR path in src/lib/queries.ts
- * (`liveBaselineMetricsFromHoldings`) can call this without
+ * (`liveBaselineMetricsFromPerKeyDailies`) can call this without
  * tripping React's server/client boundary.
  *
  * Pure function — no DOM, no React, no client-only imports.

@@ -489,7 +489,7 @@ describe("getMyAllocationDashboard", () => {
   it("M-0480: returns the SSR-lifted liveBaselineMetrics shape (empty-default when no holdings)", async () => {
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
-    // No holdings ⇒ liveBaselineMetricsFromHoldings returns the empty default.
+    // No holdings ⇒ the emptyDefault baseline (gate=false → emptyLiveBaselineMetrics).
     // The exact field set is the SSR contract the composer consumes.
     expect(result.liveBaselineMetrics).toEqual({
       aum: 0,
@@ -1489,10 +1489,16 @@ describe("NEW-C09-08 — current_weight clamped through safeFraction", () => {
 // Silence unused-var for DAY_MS helper (kept for future TC authors).
 void DAY_MS;
 
-describe("liveBaselineMetricsFromHoldings — multi-venue de-alias wiring (H-0487/H-0493)", () => {
-  // Guards the SSR call site of collapseAliasedHoldingStrategies: reverting the
-  // collapse inside liveBaselineMetricsFromHoldings must FAIL this test rather
-  // than silently re-folding a fabricated rho=1.0 into the live-baseline avgRho.
+describe("emptyLiveBaselineMetrics — the honest gate=false SSR baseline (ENGINE-04)", () => {
+  // Phase 63 ENGINE-04 RETIRED the holdings-snapshot baseline (whose
+  // alias-collapse existed only to stop a
+  // fabricated ρ=1.0 for symbol-aliased BTC@binance + BTC@okx duplicates —
+  // H-0487/H-0493). The gate=false SSR arm now calls this helper directly: AUM
+  // preserved from holdings equity contribution, EVERY metric null → KpiStrip
+  // "—". The H-0487/H-0493 class can no longer arise because no holdings series
+  // ever reaches computeScenario here. This is the replacement pin for the
+  // retired collapse-wiring guard (the SSR-integration half lives in the
+  // "fallback branch → emptyDefault" test below).
   function mkHolding(venue: string, symbol: string, value_usd: number) {
     return {
       symbol,
@@ -1507,50 +1513,41 @@ describe("liveBaselineMetricsFromHoldings — multi-venue de-alias wiring (H-048
       unrealized_pnl_usd: null,
     };
   }
-  const DATES = Array.from({ length: 12 }, (_, i) =>
-    `2026-01-${String(i + 2).padStart(2, "0")}`,
-  );
-  const BTC = [
-    0.02, -0.01, 0.03, -0.02, 0.01, 0.0, 0.015, -0.005, 0.02, -0.01, 0.005, 0.01,
-  ];
-  const ETH = [
-    -0.01, 0.02, -0.015, 0.025, -0.005, 0.01, -0.02, 0.015, -0.01, 0.02, -0.008,
-    0.012,
-  ];
-  const series = (vals: number[]) =>
-    vals.map((value, i) => ({ date: DATES[i], value }));
 
-  it("collapses BTC@binance + BTC@okx so the live-baseline avgRho is not the fabricated 1.0", async () => {
-    const { liveBaselineMetricsFromHoldings } = await import("./queries");
+  it("preserves AUM (Σ equity contribution) and nulls every metric — never a fabricated avgRho", async () => {
+    const { emptyLiveBaselineMetrics } = await import("./queries");
+    // The exact multi-venue aliased shape the retired collapse path had to
+    // guard against: BTC split 30k/20k across two venues + ETH 50k.
+    const metrics = emptyLiveBaselineMetrics([
+      mkHolding("binance", "BTC", 30_000),
+      mkHolding("okx", "BTC", 20_000),
+      mkHolding("binance", "ETH", 50_000),
+    ]);
+    // AUM is preserved from holdings (Holdings tab + commit sizing still read it).
+    expect(metrics.aum).toBe(100_000);
+    // Every metric is null — the honest em-dash, NOT a snapshot-derived value,
+    // and in particular NOT the fabricated ρ=1.0 the retired collapse path
+    // produced for the aliased BTC pair. A regression that re-introduced any
+    // holdings-snapshot computation here would make one of these non-null.
+    expect(metrics.ytdTwr).toBeNull();
+    expect(metrics.sharpe).toBeNull();
+    expect(metrics.maxDd).toBeNull();
+    expect(metrics.avgRho).toBeNull();
+    expect(metrics.equity).toEqual([]);
+    expect(metrics.drawdown).toEqual([]);
+  });
 
-    // Honest reference: one BTC exposure (50k) + ETH (50k), no aliased duplicate.
-    const reference = liveBaselineMetricsFromHoldings(
-      [mkHolding("binance", "BTC", 50_000), mkHolding("binance", "ETH", 50_000)],
-      {
-        "holding:binance:BTC:spot": series(BTC),
-        "holding:binance:ETH:spot": series(ETH),
-      },
-    );
-    expect(reference.avgRho).not.toBeNull();
-    expect(reference.avgRho).not.toBe(1);
-
-    // Multi-venue: BTC split 30k/20k across two venues (identical symbol-keyed
-    // series) + ETH 50k. The collapse makes this exactly equivalent to the
-    // reference (BTC merged to 50k), so avgRho must match. Without the collapse
-    // wiring, the aliased BTC pair folds a fabricated 1.0 into avgRho → mismatch.
-    const live = liveBaselineMetricsFromHoldings(
-      [
-        mkHolding("binance", "BTC", 30_000),
-        mkHolding("okx", "BTC", 20_000),
-        mkHolding("binance", "ETH", 50_000),
-      ],
-      {
-        "holding:binance:BTC:spot": series(BTC),
-        "holding:okx:BTC:spot": series(BTC),
-        "holding:binance:ETH:spot": series(ETH),
-      },
-    );
-    expect(live.avgRho).toBe(reference.avgRho);
+  it("empty holdings → AUM 0 and null metrics (the degenerate SSR contract)", async () => {
+    const { emptyLiveBaselineMetrics } = await import("./queries");
+    expect(emptyLiveBaselineMetrics([])).toEqual({
+      aum: 0,
+      ytdTwr: null,
+      sharpe: null,
+      maxDd: null,
+      avgRho: null,
+      equity: [],
+      drawdown: [],
+    });
   });
 });
 
@@ -1665,46 +1662,44 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
     expect(result.liveBaselineMetrics.ytdTwr).toBe(expectedPerKey.ytdTwr);
     expect(result.liveBaselineMetrics.equity).toEqual(expectedPerKey.equity);
 
-    // Falsifiable: the per-key blend must DIFFER from the snapshot-fallback
-    // metrics for this divergent fixture. A revert to the unconditional
-    // snapshot path would make the dashboard equal the snapshot reconstruction
-    // and this assertion would fail.
-    const { liveBaselineMetricsFromHoldings, reconstructHoldingReturnsByScopeRef } =
-      await import("./queries");
-    const snapMetrics = liveBaselineMetricsFromHoldings(
-      result.holdingsSummary,
-      reconstructHoldingReturnsByScopeRef(
-        state.allocatorEquitySnapshots,
-        result.holdingsSummary,
-      ),
-    );
-    expect(result.liveBaselineMetrics.sharpe).not.toBe(snapMetrics.sharpe);
+    // Falsifiable (Phase 63 ENGINE-04 emptyDefault contrast): the PER-KEY branch
+    // must produce REAL non-null metrics — i.e. NOT the gate=false emptyDefault
+    // shape (`emptyLiveBaselineMetrics`: all metrics null). A revert that dropped
+    // the per-key fetch and fell through to the gate=false arm would null these
+    // out and this assertion would fail. This proves the per-key branch, not the
+    // fallback, produced the curve.
+    expect(result.liveBaselineMetrics.sharpe).not.toBeNull();
+    expect(result.liveBaselineMetrics.ytdTwr).not.toBeNull();
+    expect(result.liveBaselineMetrics.equity.length).toBeGreaterThan(0);
   });
 
-  it("fallback branch: no per-key rows → stats derive from the snapshot reconstruction (existing behavior pinned)", async () => {
+  it("fallback branch: no per-key rows → gate=false → the honest emptyDefault (AUM preserved, all metrics null) — ENGINE-04", async () => {
     activeKeyA();
     seedHoldingsKeyA();
     seedSnapshotsBTC();
-    // No csvDailyReturns seeded → fallback.
+    // No csvDailyReturns seeded → gate=false → emptyDefault branch.
 
-    const {
-      getMyAllocationDashboard,
-      liveBaselineMetricsFromHoldings,
-      reconstructHoldingReturnsByScopeRef,
-    } = await import("./queries");
+    const { getMyAllocationDashboard, emptyLiveBaselineMetrics } =
+      await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    const snapMetrics = liveBaselineMetricsFromHoldings(
-      result.holdingsSummary,
-      reconstructHoldingReturnsByScopeRef(
-        state.allocatorEquitySnapshots,
-        result.holdingsSummary,
-      ),
-    );
-    expect(result.liveBaselineMetrics.sharpe).toBe(snapMetrics.sharpe);
-    expect(result.liveBaselineMetrics.equity).toEqual(snapMetrics.equity);
-    // Sanity: the fallback actually produced a real (non-empty) curve here.
-    expect(result.liveBaselineMetrics.equity.length).toBeGreaterThan(0);
+    // Phase 63 ENGINE-04 — the gate=false SSR arm no longer reconstructs a
+    // holdings-snapshot curve (0 real users, D1; the collapse machinery is
+    // deleted). It returns the honest emptyDefault: AUM preserved from holdings,
+    // every metric null → KpiStrip "—". This is the SSR-integration half of the
+    // gate=false pin (the direct-helper half is the emptyLiveBaselineMetrics
+    // describe above).
+    const expected = emptyLiveBaselineMetrics(result.holdingsSummary);
+    expect(result.liveBaselineMetrics).toEqual(expected);
+    // Explicit field-level pin: AUM preserved (non-zero here) AND the four
+    // metric fields null — the honest em-dash contract.
+    expect(result.liveBaselineMetrics.aum).toBe(expected.aum);
+    expect(result.liveBaselineMetrics.aum).toBeGreaterThan(0);
+    expect(result.liveBaselineMetrics.ytdTwr).toBeNull();
+    expect(result.liveBaselineMetrics.sharpe).toBeNull();
+    expect(result.liveBaselineMetrics.maxDd).toBeNull();
+    expect(result.liveBaselineMetrics.avgRho).toBeNull();
+    expect(result.liveBaselineMetrics.equity).toEqual([]);
   });
 
   it("RT1 parity: a revoked key with STALE per-key dailies + holdings is EXCLUDED from the live-book baseline blend (composer baseline-vs-blend eligibility parity)", async () => {
@@ -1963,23 +1958,22 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
 
     const {
       getMyAllocationDashboard,
-      liveBaselineMetricsFromHoldings,
-      reconstructHoldingReturnsByScopeRef,
+      emptyLiveBaselineMetrics,
       liveBaselineMetricsFromPerKeyDailies,
     } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    // Must equal the SNAPSHOT FALLBACK (key-B has no series → whole allocator
-    // falls back). Honesty: never a blended half-per-key/half-snapshot curve.
-    const snapMetrics = liveBaselineMetricsFromHoldings(
-      result.holdingsSummary,
-      reconstructHoldingReturnsByScopeRef(
-        state.allocatorEquitySnapshots,
-        result.holdingsSummary,
-      ),
-    );
-    expect(result.liveBaselineMetrics.sharpe).toBe(snapMetrics.sharpe);
-    expect(result.liveBaselineMetrics.equity).toEqual(snapMetrics.equity);
+    // The honesty truth this pins SURVIVES Phase 63 ENGINE-04: a mixed
+    // population (key-B has no per-key series → whole allocator gate=false) is
+    // NEVER a blended half-per-key/half-snapshot curve. Only the expected result
+    // changed — the gate=false arm now returns the honest emptyDefault (AUM
+    // preserved from holdings, all metrics null) instead of a snapshot
+    // reconstruction. A per-key-partial gate that blended key-A alone would break
+    // BOTH this equality and the not-equal below.
+    const expected = emptyLiveBaselineMetrics(result.holdingsSummary);
+    expect(result.liveBaselineMetrics).toEqual(expected);
+    expect(result.liveBaselineMetrics.aum).toBeGreaterThan(0); // AUM preserved
+    expect(result.liveBaselineMetrics.sharpe).toBeNull();
 
     // Falsifiable: it must NOT equal the per-key-only blend (which a naive
     // per-key-partial gate would have produced from key-A alone).
@@ -2059,8 +2053,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
     const {
       getMyAllocationDashboard,
       liveBaselineMetricsFromPerKeyDailies,
-      liveBaselineMetricsFromHoldings,
-      reconstructHoldingReturnsByScopeRef,
     } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
@@ -2073,17 +2065,13 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
     expect(result.liveBaselineMetrics.sharpe).toBe(expectedPerKey.sharpe);
     expect(result.liveBaselineMetrics.equity).toEqual(expectedPerKey.equity);
 
-    // Falsifiable: the OLD bare-is_active gate counted key-B as active, found no
-    // series for it, and fell back to the snapshot reconstruction. Assert we did
-    // NOT take that path.
-    const snapMetrics = liveBaselineMetricsFromHoldings(
-      result.holdingsSummary,
-      reconstructHoldingReturnsByScopeRef(
-        state.allocatorEquitySnapshots,
-        result.holdingsSummary,
-      ),
-    );
-    expect(result.liveBaselineMetrics.sharpe).not.toBe(snapMetrics.sharpe);
+    // Falsifiable (Phase 63 ENGINE-04 emptyDefault contrast): the OLD bare-
+    // is_active gate counted key-B as active, found no series for it, and fell
+    // through to the gate=false arm — which now returns the honest emptyDefault
+    // (all metrics null). Assert we did NOT take that path: the per-key branch
+    // produced REAL non-null metrics, NOT the emptyDefault shape.
+    expect(result.liveBaselineMetrics.sharpe).not.toBeNull();
+    expect(result.liveBaselineMetrics.equity.length).toBeGreaterThan(0);
 
     // AUM still includes the revoked key's frozen holdings (D2 unchanged).
     expect(result.liveBaselineMetrics.aum).toBe(50_000);

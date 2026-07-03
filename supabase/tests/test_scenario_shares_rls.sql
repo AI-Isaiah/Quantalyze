@@ -153,7 +153,14 @@ BEGIN
       ),
       'toggleByScopeRef', jsonb_build_object('holding:binance:BTC:spot', true),
       'weightOverrides',  jsonb_build_object('holding:binance:BTC:spot', 0.5),
-      'window', jsonb_build_object('start', '2024-01-01', 'end', '2024-12-31')
+      'window', jsonb_build_object('start', '2024-01-01', 'end', '2024-12-31'),
+      -- v1.6 MEMBER-03 — A's draft carries explicit book membership (per-key
+      -- api-key UUIDs, the SAME class as the strategy ids already in the
+      -- payload — never per-key series/AUM). It must survive the SECDEF RPC
+      -- whole, exactly like `window`, and must NOT trip the negative
+      -- over-return guard (a UUID is not api_key|allocated_amount|
+      -- account_balance|value_usd). Assertion 1 pins the positive round-trip.
+      'memberKeyIds', jsonb_build_array('11111111-1111-1111-1111-111111111111')
     ),
     2
   ) RETURNING id INTO scen_a_id;
@@ -164,7 +171,10 @@ BEGIN
     uid_a, 'tenant a empty scenario',
     jsonb_build_object(
       'addedStrategies', jsonb_build_array(),
-      'toggleByScopeRef', jsonb_build_object('holding:binance:ETH:spot', true)
+      'toggleByScopeRef', jsonb_build_object('holding:binance:ETH:spot', true),
+      -- v1.6 MEMBER-03 — a book-only draft carries membership too; it rides the
+      -- draft jsonb whole through the RPC (over-return guard byte-intact).
+      'memberKeyIds', jsonb_build_array('11111111-1111-1111-1111-111111111111')
     ),
     2
   ) RETURNING id INTO scen_a_empty_id;
@@ -197,7 +207,9 @@ BEGIN
       'addedStrategies', jsonb_build_array(
         jsonb_build_object('id', strat_b_id::text, 'name', 'B strat',
                            'markets', jsonb_build_array(), 'strategy_types', jsonb_build_array())
-      )
+      ),
+      -- v1.6 MEMBER-03 — B's draft carries membership too (same class as A's).
+      'memberKeyIds', jsonb_build_array('11111111-1111-1111-1111-111111111111')
     ),
     2
   ) RETURNING id INTO scen_b_id;
@@ -258,7 +270,20 @@ BEGIN
       'TEST FAILED (Assertion 1): draft.window did not round-trip through get_shared_scenario (start=%, end=%) — the owner''s coverage window was stripped/re-projected',
       r.draft->'window'->>'start', r.draft->'window'->>'end';
   END IF;
-  RAISE NOTICE 'Assertion 1 OK: A''s token returns A''s scenario + only A''s published series; no forbidden live-book field; draft.window round-trips.';
+
+  -- v1.6 MEMBER-03 — POSITIVE round-trip: A's persisted book membership must
+  -- survive the SECDEF RPC intact, exactly like `window` above (it rides inside
+  -- the already-leak-scoped `draft` JSONB; no RPC change threads it). This proves
+  -- memberKeyIds carries through get_shared_scenario WITHOUT tripping the negative
+  -- over-return guard (the member is an api-key UUID — the same class as the
+  -- strategy ids already round-tripping — never api_key|allocated_amount|
+  -- account_balance|value_usd). Additive to — never a weakening of — that guard.
+  IF (r.draft->'memberKeyIds'->>0) IS DISTINCT FROM '11111111-1111-1111-1111-111111111111' THEN
+    RAISE EXCEPTION
+      'TEST FAILED (Assertion 1): draft.memberKeyIds did not round-trip through get_shared_scenario (member[0]=%) — the owner''s persisted book membership was stripped/re-projected',
+      r.draft->'memberKeyIds'->>0;
+  END IF;
+  RAISE NOTICE 'Assertion 1 OK: A''s token returns A''s scenario + only A''s published series; no forbidden live-book field; draft.window + draft.memberKeyIds round-trip.';
 
   -- ----- ASSERTION 2: EMPTY addedStrategies → series = [] (no holdings) ---
   SELECT * INTO r FROM public.get_shared_scenario(hash_a_empty);

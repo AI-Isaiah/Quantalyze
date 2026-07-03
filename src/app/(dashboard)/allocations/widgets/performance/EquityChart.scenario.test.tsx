@@ -272,9 +272,9 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
 //       Pitfall-1 footgun) breaks this test.
 //
 // The actual load-bearing +1 conversion for the live baseline lives in
-// `liveBaselineMetricsFromHoldings` (queries.ts:1706,1716). That function is
-// NOT exported, so a regression test on it would require a production export
-// change — FLAGGED as out of scope for this test-only task.
+// `liveBaselineMetricsFromPerKeyDailies` (queries.ts:2266-2269). That function
+// IS exported (`@internal` for unit testing), so a direct regression test on it
+// is writable against that successor.
 // ---------------------------------------------------------------------------
 
 describe("EquityChart — H-0165 Pitfall 1 scenario overlay anchoring", () => {

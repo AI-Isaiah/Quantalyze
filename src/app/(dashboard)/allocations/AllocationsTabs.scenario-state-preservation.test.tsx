@@ -124,8 +124,8 @@ vi.mock("./ScenarioFlaggedHoldingsList", () => ({
 // Pure scenario-adapter mocked to a deterministic empty projection so
 // computeScenario short-circuits — the composer's chart math is irrelevant to
 // the draft-preservation contract under test. Phase 37: the per-key path is
-// inactive in this suite (perKeyDailiesGateSatisfied=false), so BOTH builders
-// are stubbed to the empty projection. We deliberately do NOT importOriginal:
+// inactive in this suite (perKeyDailiesGateSatisfied=false), so the series-space
+// builders are stubbed to the empty projection. We deliberately do NOT importOriginal:
 // loading the real adapter's transitive graph (frozen engine + scenario-state +
 // dealias) made the composer's first render heavier and flaked this suite under
 // full-suite worker contention (it passes in isolation — see the vitest.config
@@ -138,8 +138,12 @@ vi.mock("./lib/scenario-adapter", () => {
     state: { selected: {}, weights: {}, startDates: {} },
   });
   return {
-    buildStrategyForBuilderSet: vi.fn(emptyProjection),
     buildPerKeyStrategyForBuilderSet: vi.fn(emptyProjection),
+    // ENGINE-01 (Phase 63): the composer's series-space engine set is built from
+    // these two — provide empty-projection stand-ins so this draft-persistence
+    // suite stays engine-agnostic (it tests localStorage survival, not metrics).
+    mergeAddedIntoPerKeySet: vi.fn(emptyProjection),
+    buildAddedOnlySet: vi.fn(emptyProjection),
   };
 });
 

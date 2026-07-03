@@ -62,15 +62,30 @@ export const SCENARIO_STORAGE_KEY_BASE = "allocations.scenario_v0_15";
  *  upgrade on read (outcome "ok" + a transient provenance marker), never reset.
  *  See the `SCENARIO_SCHEMA_VERSION_PREV` branch in scenarioDraftCodec.decode:
  *  reusing the reset-on-mismatch path here would SILENTLY DELETE every saved
- *  scenario (Phase-59 Pitfall 1). */
-export const SCENARIO_SCHEMA_VERSION = 3;
+ *  scenario (Phase-59 Pitfall 1).
+ *
+ *  v3 → v4 (v1.6 MEMBER-01, explicit series membership): adds a REQUIRED-at-v4
+ *  `memberKeyIds: string[]` field. Like v2→v3 this transition is
+ *  NON-DESTRUCTIVE — a v3 draft is fully valid, just membership-less, so it
+ *  upgrades on read (outcome "ok" + reason "upgraded_v3_membership", membership
+ *  left UNDERIVED), never reset. Because the bump is a DOUBLE bump (PREV also
+ *  moves 2→3), a two-versions-back v2 draft would otherwise fall to the final
+ *  reset — so the codec carries a SECOND, literal-`rawVersion === 2` chain
+ *  branch (reason "upgraded_v2_chain") alongside the PREV (v3) branch. Both
+ *  decode "ok"; neither drops a stored draft. The v4 membership CONTRACT is
+ *  fail-loud at the SAVE boundary only (`scenarioDraftSaveSchema`), never in the
+ *  codec — an underived-v4 draft that round-trips through the localStorage codec
+ *  MUST decode "ok" or every upgraded draft is silently dropped (the blocker). */
+export const SCENARIO_SCHEMA_VERSION = 4;
 
-/** The immediately-prior schema version. Keys the NON-DESTRUCTIVE v2→v3 upgrade
+/** The immediately-prior schema version. Keys the NON-DESTRUCTIVE v3→v4 upgrade
  *  branch in the codec (a named constant is clearer than a bare
  *  `SCENARIO_SCHEMA_VERSION - 1` and documents WHY that branch exists). Bump
  *  this to the old CURRENT whenever SCENARIO_SCHEMA_VERSION is bumped and the
- *  transition is non-destructive. */
-export const SCENARIO_SCHEMA_VERSION_PREV = 2;
+ *  transition is non-destructive. NOTE: because the v3→v4 bump is a DOUBLE bump,
+ *  the codec ALSO carries a literal-`rawVersion === 2` chain branch below PREV
+ *  (reason "upgraded_v2_chain") so a two-versions-back v2 draft is not dropped. */
+export const SCENARIO_SCHEMA_VERSION_PREV = 3;
 
 /** N1 — eliminates cross-tenant collision at the persistence layer. Returns
  *  "allocations.scenario_v0_15.{allocatorId}". */
@@ -116,6 +131,19 @@ export interface ScenarioDraft {
    * engine. Left undefined by the non-destructive v2→v3 upgrade branch.
    */
   window?: CoverageWindow;
+  /**
+   * v1.6 MEMBER-01 — the EXPLICIT saved series membership: the api_key ids whose
+   * strategies constitute this draft's book. REQUIRED at schema_version 4; an
+   * empty array means blank-authored (no book members). The non-destructive
+   * upgrade branches (v2-chain, v3-membership) leave it UNDERIVED (absent) — an
+   * older draft predates the field, so the codec never fabricates membership;
+   * plan 04 derives + stamps it on reopen. An underived-v4 blob that round-trips
+   * through the localStorage codec also legitimately reaches the v4 branch with
+   * this field absent, which is why the codec-decode schema is TOLERANT (see
+   * scenarioDraftSchema). The v4 REQUIRED contract is enforced only at the save
+   * boundary via `scenarioDraftSaveSchema`, never by the codec.
+   */
+  memberKeyIds: string[];
   lastEditedAt: string;
 }
 
@@ -182,6 +210,34 @@ export function computeHoldingsFingerprint(
 }
 
 /**
+ * CR-01 (Phase 63 review) — the SINGLE drift predicate both the reopen path
+ * (`ScenarioComposer.openSavedScenario`) and the hook (`useScenarioState`'s
+ * `storedMismatch` / `baseOf`) consume, so the two decisions can never diverge.
+ *
+ * A draft is "drifted" (its saved holdings basis is stale relative to what the
+ * composer now presents) IFF its fingerprint matches NEITHER:
+ *   - the GATED default (`gatedFingerprint`) — the holdings the composer seeds
+ *     THIS render (`[]` in blank mode), so a fresh blank-authored draft is never
+ *     drifted; NOR
+ *   - the LIVE book (`liveBookFingerprint`) — the mode-UNgated live holdings, so
+ *     a book draft that still matches the live book is never drifted even when a
+ *     gate=false holder is forced into blank mode (the CR-01 case-(a) hole).
+ *
+ * In book mode `gatedFingerprint === liveBookFingerprint`, so this reduces to
+ * the pre-Phase-63 single-fingerprint check (book-mode behavior is unchanged).
+ */
+export function isDraftDrifted(
+  draftFingerprint: string,
+  gatedFingerprint: string,
+  liveBookFingerprint: string,
+): boolean {
+  return (
+    draftFingerprint !== gatedFingerprint &&
+    draftFingerprint !== liveBookFingerprint
+  );
+}
+
+/**
  * Renormalize weights so that the sum over `enabledIds` === 1.0. When the sum
  * of the input weights over the enabled subset is 0, fall back to equal
  * distribution. Disabled ids are excluded from the output entirely.
@@ -229,6 +285,10 @@ export function defaultDraftFromHoldings(
     toggleByScopeRef,
     addedStrategies: [],
     weightOverrides: clampAllWeights(weightOverrides),
+    // v1.6 MEMBER-01 — a fresh holdings-seeded draft has no explicit book
+    // members yet (only `holdings` is in scope here); the composer stamps real
+    // membership via setMemberKeyIds on save (plan 04).
+    memberKeyIds: [],
     lastEditedAt: new Date().toISOString(),
   };
 }
@@ -507,14 +567,19 @@ export function setWeightOverride(
  * over a vector is WRONG — each call re-scales the weights written by the
  * previous calls, so the draft lands at a DIFFERENT allocation than the one
  * supplied (only the last ref is exact). This writes every provided ref in ONE
- * pass and renormalizes over the enabled set exactly once, so applying an
- * optimizer's sum-to-1 vector reproduces it (within float error). Non-finite /
- * negative / empty input is a no-op (defensive). Every provided ref is recorded
- * as a user-explicit override (the allocator clicked Apply).
+ * pass and renormalizes over the BASIS set exactly once, so applying an
+ * optimizer's sum-to-1 vector reproduces it (within float error). `basisIds`
+ * selects that renormalization basis: omit it for the draft's enabled toggle set
+ * (legacy), or pass the engine unit ids (WR-01 — the composer's optimizer
+ * apply-back does this so the mixed per-key + added path is not diluted by stale
+ * `holding:` override mass). Non-finite / negative / empty input is a no-op
+ * (defensive). Every provided ref is recorded as a user-explicit override (the
+ * allocator clicked Apply).
  */
 export function applyWeightOverrides(
   draft: ScenarioDraft,
   weights: Record<string, number>,
+  basisIds?: ReadonlyArray<string>,
 ): ScenarioDraft {
   const refs = Object.keys(weights);
   if (refs.length === 0) return draft;
@@ -522,14 +587,24 @@ export function applyWeightOverrides(
     return draft;
   }
 
-  const enabledIds = enabledIdsOf(draft);
+  // WR-01 (Phase 63 review) — the renormalization basis. By default the DRAFT's
+  // enabled toggle set (`holding:` refs + added ids). But in book+gate mode the
+  // ENGINE universe is the per-key units (api_key UUIDs) + added ids, which
+  // never enter the toggle map — so renormalizing an optimizer suggestion over
+  // the toggle basis leaves the stale holding-override mass in the denominator
+  // and silently dilutes the added sleeve (#528 apply-back drift). The composer
+  // therefore passes the optimizer's ENGINE unit ids as `basisIds` so the
+  // applied blend reproduces the suggestion exactly. When omitted (non-optimizer
+  // callers), the legacy enabled-set basis is preserved.
+  const normBasis = basisIds ? [...basisIds] : enabledIdsOf(draft);
   // Start from the current map, overwrite the provided refs, then renormalize
-  // ONCE over the enabled set (a single normalization, NOT the per-ref rebalance
-  // setWeightOverride does). renormalizeWeights only writes enabled ids, so a
-  // disabled ref keeps its prior stored weight (restored if toggled back on).
+  // ONCE over the basis set (a single normalization, NOT the per-ref rebalance
+  // setWeightOverride does). renormalizeWeights only writes the basis ids, so a
+  // ref outside the basis keeps its prior stored weight (restored if it re-enters
+  // the basis).
   const merged: Record<string, number> = { ...draft.weightOverrides };
   for (const r of refs) merged[r] = clampWeight(weights[r]);
-  const normalized = renormalizeWeights(merged, enabledIds);
+  const normalized = renormalizeWeights(merged, normBasis);
   const nextWeights: Record<string, number> = { ...merged, ...normalized };
 
   return {
@@ -575,6 +650,57 @@ export function setWindow(
     window: { start: window.start, end: window.end },
     lastEditedAt: new Date().toISOString(),
   };
+}
+
+// ---------------------------------------------------------------------------
+// v1.6 MEMBER-01 — the three SHARED membership functions the rest of Phase 62
+// consumes. Kept as pure exported definitions here (the ONE source of truth) so
+// plans 02/03/04 import them rather than re-deriving membership divergently.
+// ---------------------------------------------------------------------------
+
+/**
+ * The ONE upgrade-read derivation rule: given the runtime include-gate and the
+ * currently-eligible api_key ids, return the explicit membership an upgraded
+ * (pre-v4) draft SHOULD carry. Gate on → a COPY of the eligible ids; gate off →
+ * empty. Returns a FRESH array (never the input reference) so a caller cannot
+ * alias the source list into persisted draft state. Deliberately does NOT read
+ * `entryMode` — old drafts predate it, so membership derives from the gate +
+ * eligibility alone (plan 04 stamps the result via setMemberKeyIds on reopen).
+ */
+export function deriveMembershipFromGate(
+  gate: boolean,
+  eligibleApiKeyIds: string[],
+): string[] {
+  return gate ? [...eligibleApiKeyIds] : [];
+}
+
+/**
+ * NULL-SAFE book-only predicate: true iff the draft has ≥1 explicit book member
+ * AND zero added strategies. `?? []` guards the UNDERIVED case — a codec-decoded
+ * draft upgraded from v2/v3 (or an underived-v4 round-trip blob) has
+ * `memberKeyIds === undefined`, and plan 03 calls this on raw decoded drafts, so
+ * reading `.length` off undefined must NOT throw (it returns false instead).
+ */
+export function isBookOnlyDraft(draft: ScenarioDraft): boolean {
+  return (
+    (draft.memberKeyIds ?? []).length >= 1 &&
+    (draft.addedStrategies ?? []).length === 0
+  );
+}
+
+/**
+ * The new-save STAMP transform: return a copy of `draft` with `memberKeyIds`
+ * replaced by `ids` (pure — never mutates the input). DISTINCT from
+ * `deriveMembershipFromGate` (which COMPUTES the ids from the gate); this only
+ * writes an already-computed membership into a draft. The composer invokes it on
+ * save (plan 04) so the persisted localStorage blob converges to a proper
+ * v4-with-membership draft.
+ */
+export function setMemberKeyIds(
+  draft: ScenarioDraft,
+  ids: string[],
+): ScenarioDraft {
+  return { ...draft, memberKeyIds: ids };
 }
 
 // ---------------------------------------------------------------------------
@@ -654,9 +780,44 @@ export const scenarioDraftSchema = z.object({
       end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     })
     .optional(),
+  // v1.6 MEMBER-01 — the explicit series membership. `.optional()` (Pitfall 3)
+  // and DELIBERATELY NO superRefine on THIS shared schema: the codec safeParses
+  // it in EVERY decode branch, so a v2/v3 upgrade blob (membership absent) AND
+  // an underived-v4 round-trip blob (membership absent after the in-memory
+  // upgrade re-serializes) both MUST safeParse clean — a required field or a
+  // v4-membership superRefine here would fail safeParse and route those blobs to
+  // reset, SILENTLY DELETING every upgraded draft on the localStorage round-trip
+  // (the blocker). The v4 REQUIRED contract lives on `scenarioDraftSaveSchema`
+  // below. Bounds (T-62-02 DoS): ≤64 ids, each ≤MAX_DRAFT_KEY_LENGTH chars,
+  // under the route-level MAX_DRAFT_BODY_BYTES cap.
+  memberKeyIds: z.array(z.string().max(MAX_DRAFT_KEY_LENGTH)).max(64).optional(),
   // ISO-8601 timestamp (`new Date().toISOString()` is 24 chars); 64 is generous.
   lastEditedAt: z.string().max(64),
 });
+
+/**
+ * v1.6 MEMBER-01 — the SAVE-BOUNDARY-ONLY refined schema. Identical to the
+ * tolerant `scenarioDraftSchema` PLUS a superRefine that requires `memberKeyIds`
+ * once `schema_version >= 4` (a direct v4 POST without membership is rejected
+ * fail-loud at the save route). This refine is deliberately kept OFF the shared
+ * `scenarioDraftSchema` because the codec reuses that schema on EVERY decode
+ * branch, including the underived-v4 localStorage round-trip that MUST decode
+ * "ok" (never reset). A schema_version < 4 blob still passes (the refine skips),
+ * so pre-v4 save/update fixtures are unaffected. Used ONLY by the two save
+ * routes (saved/route.ts POST + saved/[id]/route.ts PUT); the codec-decode path
+ * keeps using the tolerant schema.
+ */
+export const scenarioDraftSaveSchema = scenarioDraftSchema.superRefine(
+  (draft, ctx) => {
+    if (draft.schema_version >= 4 && draft.memberKeyIds === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["memberKeyIds"],
+        message: "memberKeyIds required at schema_version >= 4",
+      });
+    }
+  },
+);
 
 /**
  * Build the {@link StorageCodec} for a per-allocator scenario draft.
@@ -705,7 +866,13 @@ export function scenarioDraftCodec(
         };
       }
 
-      // Exact version — whole-shape validate (M-0153) and adopt.
+      // Exact version — whole-shape validate (M-0153) and adopt. Because the
+      // schema is TOLERANT, a v4 blob WITHOUT memberKeyIds safeParses clean and
+      // decodes "ok" with membership UNDERIVED (NOT reset) — this is the
+      // underived-v4 localStorage round-trip survival the blocker requires (an
+      // in-memory-upgraded v2/v3 draft re-serialized by useCrossTabStorage
+      // re-enters HERE). The v4 membership contract is enforced at the save
+      // boundary (scenarioDraftSaveSchema), never here.
       if (rawVersion === SCENARIO_SCHEMA_VERSION) {
         const safe = scenarioDraftSchema.safeParse(parsed);
         if (safe.success) {
@@ -744,17 +911,47 @@ export function scenarioDraftCodec(
           return {
             value: {
               ...(safe.data as unknown as ScenarioDraft),
-              // Upgrade in-memory; the next save re-serializes at v3.
+              // Upgrade in-memory; the next save re-serializes at v4. The
+              // `...safe.data` spread carries NO memberKeyIds (the tolerant
+              // schema omits the absent optional), so membership is left
+              // UNDERIVED — plan 04 derives + stamps it on reopen.
               schema_version: SCENARIO_SCHEMA_VERSION,
             },
             outcome: "ok",
-            reason: "upgraded_v2_windowless",
+            reason: "upgraded_v3_membership",
           };
         }
         return { value: defaultDraft, outcome: "reset", reason: "schema_invalid" };
       }
 
-      // Missing / lower (< PREV) / non-integer / non-numeric version — no legacy
+      // v1.6 MEMBER-01 — the SECOND non-destructive branch (the double-bump
+      // chain). Because v3→v4 also moved PREV 2→3, a two-versions-back v2 draft
+      // (pre-window AND pre-membership) is no longer caught by the PREV branch
+      // above and would otherwise fall to the final reset — SILENTLY DELETING
+      // every stored v2 draft (Pitfall 1). A v2 draft is FULLY VALID against the
+      // tolerant schema (both `window?` and `memberKeyIds?` are optional), so it
+      // safeParses clean and upgrades to "ok" with a DISTINCT reason. Keyed on
+      // the LITERAL 2 (not a named constant — this is a fixed historical version
+      // the chain must always span, not a sliding "prev-prev"). A genuinely
+      // corrupt v2 blob still falls to reset(schema_invalid). Window + membership
+      // are left undefined (underived); consumers default the window via
+      // defaultWindowFor() and plan 04 stamps membership on reopen.
+      if (rawVersion === 2) {
+        const safe = scenarioDraftSchema.safeParse(parsed);
+        if (safe.success) {
+          return {
+            value: {
+              ...(safe.data as unknown as ScenarioDraft),
+              schema_version: SCENARIO_SCHEMA_VERSION,
+            },
+            outcome: "ok",
+            reason: "upgraded_v2_chain",
+          };
+        }
+        return { value: defaultDraft, outcome: "reset", reason: "schema_invalid" };
+      }
+
+      // Missing / lower (< 2) / non-integer / non-numeric version — no legacy
       // migration exists for those shapes. A non-integer like 1.5 reaches here
       // too (the readonly guard above requires Number.isInteger). Reset,
       // fail-loud (the primitive emits a console.warn + Sentry breadcrumb on
@@ -791,6 +988,15 @@ export function scenarioDraftCodec(
 
 /** SSR-safe localStorage read. Returns null on SSR, missing key, schema-version
  *  mismatch, or any parse/access error.
+ *
+ *  ⚠️ IN-02 — DESTRUCTIVE on pre-v4 blobs. This helper returns null whenever
+ *  `parsed.schema_version !== SCENARIO_SCHEMA_VERSION`, i.e. it SILENTLY DROPS
+ *  any upgraded v2/v3 (or underived-v4 round-trip) draft — the exact opposite
+ *  of the codec's non-destructive upgrade trichotomy (`scenarioDraftCodec`).
+ *  It is retained for back-compat and is currently used ONLY by
+ *  `scenario-state.localStorage.test.ts` (no production caller). It MUST NOT be
+ *  used on the reopen/hydrate path — route hydration through `scenarioDraftCodec`
+ *  so an upgraded/underived draft is preserved, never nulled to a fresh default.
  *
  *  Mock-surface note: we use bare `localStorage` (not `window.localStorage`)
  *  inside the function body so test mocks installed via

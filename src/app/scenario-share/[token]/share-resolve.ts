@@ -69,6 +69,16 @@ export interface ResolvedOk {
   portfolioDaily: DailyPoint[];
   /** De-aliased strategy-id → name map for the correlation heatmap labels. */
   strategyNames: Record<string, string>;
+  /**
+   * PRESENT-03 / red-team F3 — the shared draft blends the owner's PERSISTED
+   * book members (`memberKeyIds`) with catalog adds; only the catalog legs are
+   * publicly computable here (the live-book boundary never resolves the owner's
+   * per-key book series), so the rendered projection is the renormalized added
+   * legs. `true` when the draft is MIXED, driving the public page's one-line
+   * honesty caption. Computed from the already-decoded draft JSONB ONLY — no
+   * RPC/SQL change, zero private data.
+   */
+  isMixed: boolean;
 }
 
 /** Undecodable / version-ahead / unparseable draft — render the honest-absence
@@ -102,6 +112,10 @@ function neutralDefaultDraft(): ScenarioDraft {
     toggleByScopeRef: {},
     addedStrategies: [],
     weightOverrides: {},
+    // v1.6 MEMBER-01 — neutral/empty; this default is discarded on every
+    // non-"ok" outcome (never read), so empty membership keeps the no-leak
+    // guarantee intact.
+    memberKeyIds: [],
     lastEditedAt: "",
   };
 }
@@ -173,7 +187,7 @@ export function resolveSharedScenario(
     // (scenario-compare.ts computeMetricsForDraft): take the explicit override
     // ONLY when it is a finite number, else fall back to the engine default for
     // an un-overridden ADDED strategy, which is 0 (the deliberate, test-pinned
-    // invariant in scenario-adapter.ts buildStrategyForBuilderSet — a non-zero
+    // invariant in scenario-adapter.ts buildAddedUnits — a non-zero
     // default would let a never-weighted add slip a fabricated size past the
     // commit gate). The prior `?? 0` diverged from the owner in two ways: it
     // passed a NaN/Infinity override straight through to computeScenario (the
@@ -192,8 +206,21 @@ export function resolveSharedScenario(
   // never resolves here. Rendering the metrics of an empty set produced a
   // dead em-dash shell ("0 overlapping days", every metric "—") that read as
   // a broken link. Surface the designed honest-absence state instead, with
-  // the reason so the page can say why. (The share-mint route now also
-  // rejects minting these — this branch keeps ALREADY-MINTED links honest.)
+  // the reason so the page can say why. (The share-mint route now also rejects
+  // minting these via the shared null-safe `isBookOnlyDraft` predicate — this
+  // branch keeps ALREADY-MINTED links honest.)
+  //
+  // MEMBER-03 (unified book-only definition) — detection stays on the RESOLVED
+  // `strategies.length`, NEVER `draft.memberKeyIds.length`. This is the ONE
+  // public-page module: it has no owner gate / eligible-ids server-side, so it
+  // must NOT run any gate-based membership derivation here. A pre-v4 /
+  // v2 / v3 share arrives with membership UNDERIVED (undefined); keying the
+  // branch on the strategies count means such a share is still surfaced
+  // honestly and the code is never forced to read `.length` off an undefined
+  // membership. Any draft with zero added series — WITH or WITHOUT book
+  // members — is honest-absence "book-only" (no RPC expansion). The mint gate's
+  // `isBookOnlyDraft` is the same null-safe predicate; this branch is its
+  // resolved-projection counterpart.
   if (strategies.length === 0) {
     return { kind: "honest-absence", reason: "book-only" };
   }
@@ -224,7 +251,7 @@ export function resolveSharedScenario(
   // window key, and the engine's union-when-absent guard applies (matching the
   // composer's WINDOW-06 empty-intersection behavior).
   //
-  // There is NO collapseAliasedHoldingStrategies here (strategies are built
+  // There is NO alias-collapse step here (strategies are built
   // straight from addedStrategies), so `state` IS the engine state — inject
   // directly (Pitfall 4 N/A).
   const window =
@@ -253,5 +280,14 @@ export function resolveSharedScenario(
     metrics,
     portfolioDaily,
     strategyNames,
+    // PRESENT-03 — the draft is MIXED when it carries persisted book members.
+    // The addedStrategies-non-empty half of MIXED is guaranteed BY CONSTRUCTION
+    // here: the :214 `strategies.length === 0` book-only guard already
+    // honest-absenced a zero-added draft, so the ok branch needs only the
+    // membership check. Null-safe `?? []` (the Phase-62 isBookOnlyDraft
+    // precedent): a pre-v4 decode leaves membership undefined at runtime despite
+    // the required-at-v4 type → falsy → false → no caption for unknown
+    // membership.
+    isMixed: (draft.memberKeyIds ?? []).length > 0,
   };
 }

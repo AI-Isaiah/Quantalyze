@@ -7,7 +7,7 @@
  *   "Projected from {n} overlapping days. Shortest history: {name}. Not a forecast."
  *
  * `n` is `scenarioMetrics.n` (the overlapping-day count, scenario.ts:191). This
- * helper supplies the `{name}` half: the de-aliased strategy with the least
+ * helper supplies the `{name}` half: the engine strategy with the least
  * history. Both halves are derived from data already present client-side — no
  * new server field (Assumption A1).
  *
@@ -22,7 +22,7 @@
  * points the allocator at the most likely limiting record without inventing a
  * precise per-strategy overlap attribution the client data can't support.
  *
- * Mirrors the location/export convention of its sibling `scenario-dealias.ts`
+ * Mirrors the location/export convention of the pure lib helpers in `src/lib/`
  * and the pure-reduce shape of the `pickTopTenByAvgCorr` fn it replaces.
  */
 import type { StrategyForBuilder } from "@/lib/scenario";
@@ -35,7 +35,7 @@ import type { StrategyForBuilder } from "@/lib/scenario";
  * ACTUAL method ("Historical realized"), names the live overlapping-day count,
  * and the honest horizon ("not a forecast"). Each call site appends its own
  * "Shortest history: {name}." clause (from `shortestHistoryName`) where the
- * de-aliased set is in scope; this builder owns only the invariant prefix so
+ * engine strategy set is in scope; this builder owns only the invariant prefix so
  * the two surfaces cannot drift.
  */
 export function methodologyLine(n: number): string {
@@ -44,11 +44,11 @@ export function methodologyLine(n: number): string {
 
 /**
  * Return the NAME of the strategy with the shortest return history (fewest
- * `daily_returns` points) in the de-aliased strategy set.
+ * `daily_returns` points) in the engine strategy set.
  *
- * Accepts the `StrategyForBuilder` element type of `deAliased.strategies` (the
- * output of `collapseAliasedHoldingStrategies`) that the composer/builder call
- * sites already hold — reads ONLY `name` + `daily_returns.length`.
+ * Accepts the `StrategyForBuilder` element type of the engine strategy set that
+ * the composer/builder call sites already hold — reads ONLY `name` +
+ * `daily_returns.length`.
  *
  * Tiebreak: deterministic — the first strategy by input order wins, so equal
  * window lengths never produce a non-deterministic name.

@@ -31,19 +31,7 @@
  * literal cannot pass through as an AddedStrategy at compile time.
  */
 import type { DailyPoint, ScenarioState, StrategyForBuilder } from "@/lib/scenario";
-import { buildHoldingRef, type HoldingType } from "./holding-outcome-adapter";
-
-/** Narrow holding shape for buildHoldingRef. The state-layer HoldingForDefault
- *  carries `holding_type: string` (it's the persisted draft type, intentionally
- *  loose so localStorage round-trip never narrows). The adapter narrows it to
- *  the `HoldingType` union here at the boundary so buildHoldingRef can accept
- *  the value without a cast. Production callers always pass spot|derivative;
- *  any other value would already be invalid upstream. */
-type HoldingRefInput = { venue: string; symbol: string; holding_type: HoldingType };
-import {
-  type AddedStrategy,
-  type HoldingForDefault,
-} from "./scenario-state";
+import { type AddedStrategy } from "./scenario-state";
 
 /**
  * H5 — phantom branded type. Re-exported here so adapter callers can use it
@@ -62,31 +50,9 @@ export type StrategyForBuilderId = string & {
 };
 
 /**
- * Optional inputs object alias for callers preferring object-spread. The
- * canonical export is the positional-args function.
- */
-export interface ScenarioAdapterInputs {
-  holdings: HoldingForDefault[];
-  disabledHoldingRefs: Set<string>;
-  addedStrategies: AddedStrategy[];
-  holdingReturnsByScopeRef: Record<string, DailyPoint[]>;
-  addedStrategyReturnsLookup: Record<StrategyForBuilderId, DailyPoint[]>;
-  addedStrategyMetadataLookup: Record<
-    StrategyForBuilderId,
-    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
-  >;
-  minReturnDays?: number;
-}
-
-/**
- * B4-pinned function signature — positional args. Returns the unified
- * `StrategyForBuilder[]` and a `ScenarioState` ready for `computeScenario()`.
- *
- * Default `minReturnDays` = 30 (Phase 07 D-03 warmup-gate mirror).
- */
-/**
- * The added-strategy unit construction shared by `buildStrategyForBuilderSet`
- * (the holdings path) and `mergeAddedIntoPerKeySet` (the per-key path). One
+ * The added-strategy unit construction shared by the surviving series-space
+ * builders — `mergeAddedIntoPerKeySet` (the per-key path) and `buildAddedOnlySet`
+ * (the added-only path). One
  * `StrategyForBuilder` per added strategy: real series from the returns
  * lookup (or [] — warm-up-gated out, never a fabricated series), metadata
  * from the metadata lookup with the public/null default.
@@ -123,94 +89,6 @@ function buildAddedUnits(
   });
 }
 
-export function buildStrategyForBuilderSet(
-  holdings: HoldingForDefault[],
-  disabledHoldingRefs: Set<string>,
-  addedStrategies: AddedStrategy[],
-  holdingReturnsByScopeRef: Record<string, DailyPoint[]>,
-  addedStrategyReturnsLookup: Record<StrategyForBuilderId, DailyPoint[]>,
-  addedStrategyMetadataLookup: Record<
-    StrategyForBuilderId,
-    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
-  >,
-  minReturnDays: number = 30,
-): { strategies: StrategyForBuilder[]; state: ScenarioState } {
-  // Holdings → StrategyForBuilder via flatMap; warm-up gate excludes < minReturnDays.
-  const holdingStrategies: StrategyForBuilder[] = holdings.flatMap((h) => {
-    const scopeRef = buildHoldingRef(h as HoldingRefInput);
-    const dailyReturns = holdingReturnsByScopeRef[scopeRef] ?? [];
-    if (dailyReturns.length < minReturnDays) return [];
-    return [
-      {
-        id: scopeRef, // "holding:{venue}:{symbol}:{holding_type}"
-        name: h.symbol,
-        codename: null,
-        disclosure_tier: "public",
-        strategy_types: [],
-        markets: [h.venue],
-        start_date: dailyReturns[0]?.date ?? null,
-        daily_returns: dailyReturns,
-        cagr: null,
-        sharpe: null,
-        volatility: null,
-        max_drawdown: null,
-      },
-    ];
-  });
-
-  // Added strategies — built INSIDE the adapter from the lookup maps.
-  const addedAsBuilder = buildAddedUnits(
-    addedStrategies,
-    addedStrategyReturnsLookup,
-    addedStrategyMetadataLookup,
-  );
-
-  const allStrategies = [...holdingStrategies, ...addedAsBuilder];
-
-  // Σ value_usd for default holding weights. NOTE (F9 H-0133): "overrides
-  // applied post-adapter" is true only for the COMMIT path — the live
-  // projection consumes these defaults verbatim.
-  const totalValue = holdings.reduce(
-    (s, h) => s + (Number.isFinite(h.value_usd) ? h.value_usd : 0),
-    0,
-  );
-
-  const selected: Record<string, boolean> = {};
-  const weights: Record<string, number> = {};
-  const startDates: Record<string, string> = {};
-
-  // Index holdings by scopeRef for O(1) value_usd lookup when computing default weights.
-  const holdingByRef = new Map<string, HoldingForDefault>();
-  for (const h of holdings) holdingByRef.set(buildHoldingRef(h as HoldingRefInput), h);
-
-  for (const s of allStrategies) {
-    const isHolding = holdingByRef.has(s.id);
-    selected[s.id] = isHolding ? !disabledHoldingRefs.has(s.id) : true;
-    if (isHolding) {
-      const h = holdingByRef.get(s.id)!;
-      weights[s.id] = totalValue > 0 ? h.value_usd / totalValue : 0;
-    } else {
-      // F9 H-0133 — DELIBERATE weight-0 default for added strategies (pinned by
-      // scenario-adapter.test.ts). See the file header: a non-zero default would
-      // let a never-weighted add past handleCommit's per-row size gate.
-      weights[s.id] = 0;
-    }
-    // F9 H-0133 — the "2022-01-01" fallback is inert in practice: holdings are
-    // warm-up-gated above (start_date always non-null), and an added strategy
-    // has a null start_date ONLY when its return series is empty
-    // (`start_date: returns[0]?.date ?? null`) — i.e. it contributes nothing to
-    // the curve regardless of date. The fallback also mirrors the frozen
-    // scenario.ts engine's own `?? "2022-01-01"` (SCENARIO-05), so it never
-    // back-extrapolates a real series onto a fabricated inception.
-    startDates[s.id] = s.start_date ?? "2022-01-01";
-  }
-
-  return {
-    strategies: allStrategies,
-    state: { selected, weights, startDates },
-  };
-}
-
 /**
  * Phase 37 Plan 02 (DSRC-01) — SIBLING per-key builder. Emits one
  * `StrategyForBuilder` per `api_key_id` (the projection unit is the data source,
@@ -220,11 +98,11 @@ export function buildStrategyForBuilderSet(
  * own (date, daily_return) series, so excluding one re-blends the curve + every
  * KPI from the remaining keys via the frozen engine.
  *
- * This is a SIBLING of `buildStrategyForBuilderSet` (NOT a branch inside it) so
- * the B4 positional signature and the H-0132 commit-oracle tests stay
+ * This is a standalone per-key builder (NOT a branch inside a holdings path) so
+ * the positional signature stays
  * byte-identical (RESEARCH §Alternatives A4). The unit-construction loop mirrors
  * the verified SSR helper `liveBaselineMetricsFromPerKeyDailies`
- * (queries.ts:2321–2348) — one unit per key, `disclosure_tier: "exploratory"`,
+ * (queries.ts:2225-2251) — one unit per key, `disclosure_tier: "exploratory"`,
  * null scalar metrics, weight = the key's clamped equity share. The literal
  * shape is duplicated locally (not imported from queries.ts) to avoid a module
  * cycle, consistent with the existing per-key duplication noted in PATTERNS
@@ -255,7 +133,7 @@ export function buildPerKeyStrategyForBuilderSet(
 
   for (const [apiKeyId, returns] of Object.entries(perKeyReturnsByApiKeyId)) {
     // Skip empty/absent series — a key with no per-key history cannot contribute
-    // (mirrors liveBaselineMetricsFromPerKeyDailies, queries.ts:2322).
+    // (mirrors liveBaselineMetricsFromPerKeyDailies, queries.ts:2226).
     if (!returns || returns.length === 0) continue;
     strategies.push({
       id: apiKeyId, // id === api_key_id (DSRC-01: keyed per data source)
@@ -349,6 +227,57 @@ export function mergeAddedIntoPerKeySet(
 
   return {
     strategies: [...perKey.strategies, ...addedAsBuilder],
+    state: { selected, weights, startDates },
+  };
+}
+
+/**
+ * Phase 63 Plan 01 (ENGINE-04 precondition b, Wave-0) — the ONE shared
+ * added-only engine-set construction. This is the empty-per-key reduction of
+ * `mergeAddedIntoPerKeySet`, made greppable: with no per-key units to merge,
+ * the survivor's early-return and share-normalization drop out, leaving exactly
+ * the added trio (selected=true, weight-0 default, "2022-01-01" startDate
+ * sentinel). It therefore reproduces today's blank-mode output byte-for-byte —
+ * `mergeAddedIntoPerKeySet({ strategies: [], state: { selected: {}, weights: {},
+ * startDates: {} } }, added, ...)` — so the staged deletions (Plans 02–04) can
+ * swap every holdings path for this single wrapper without changing the
+ * gate=false / blank-mode numbers.
+ *
+ * Delegates unit construction to the private `buildAddedUnits` (shared with the
+ * builder + the merge survivor) — the weight-0 / warm-up / metadata defaults are
+ * F9 H-0133 test-pinned invariants; NEVER hand-roll an inline StrategyForBuilder
+ * literal here. Mirrors the signature/JSDoc convention of
+ * `buildPerKeyStrategyForBuilderSet`.
+ *
+ * @param addedStrategies  the draft's added strategies (branded AddedStrategy[]).
+ * @param addedStrategyReturnsLookup  strategy id → that strategy's DailyPoint[].
+ * @param addedStrategyMetadataLookup  strategy id → disclosure/cagr/sharpe meta.
+ */
+export function buildAddedOnlySet(
+  addedStrategies: AddedStrategy[],
+  addedStrategyReturnsLookup: Record<StrategyForBuilderId, DailyPoint[]>,
+  addedStrategyMetadataLookup: Record<
+    StrategyForBuilderId,
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+  >,
+): { strategies: StrategyForBuilder[]; state: ScenarioState } {
+  const addedAsBuilder = buildAddedUnits(
+    addedStrategies,
+    addedStrategyReturnsLookup,
+    addedStrategyMetadataLookup,
+  );
+
+  const selected: Record<string, boolean> = {};
+  const weights: Record<string, number> = {};
+  const startDates: Record<string, string> = {};
+  for (const s of addedAsBuilder) {
+    selected[s.id] = true;
+    weights[s.id] = 0; // F9 H-0133 deliberate 0 default (overlay downstream)
+    startDates[s.id] = s.start_date ?? "2022-01-01";
+  }
+
+  return {
+    strategies: addedAsBuilder,
     state: { selected, weights, startDates },
   };
 }

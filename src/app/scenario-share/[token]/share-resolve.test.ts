@@ -67,10 +67,10 @@ function makeSeriesFrom(
   return out;
 }
 
-/** A valid v2 draft with two added strategies at equal weight. */
+/** A valid current-version draft with two added strategies at equal weight. */
 function okDraft(): ScenarioDraft {
   return {
-    schema_version: SCENARIO_SCHEMA_VERSION, // 2 — the live constant
+    schema_version: SCENARIO_SCHEMA_VERSION, // the live constant (4 as of v1.6)
     init_holdings_fingerprint: "BTC:binance:spot",
     toggleByScopeRef: { [STRAT_A]: true, [STRAT_B]: true },
     addedStrategies: [
@@ -78,6 +78,8 @@ function okDraft(): ScenarioDraft {
       { id: STRAT_B as never, name: "Beta", markets: ["ETH"], strategy_types: ["mr"] },
     ],
     weightOverrides: { [STRAT_A]: 0.5, [STRAT_B]: 0.5 },
+    // v1.6 MEMBER-01 — a current-version draft carries explicit membership.
+    memberKeyIds: [],
     lastEditedAt: "2026-06-22T00:00:00.000Z",
   };
 }
@@ -97,9 +99,10 @@ describe("resolveSharedScenario — DI-23-01 honest-absence (SHARE-02)", () => {
     // SCENARIO_SCHEMA_VERSION + 1 is strictly ahead of the live constant. The
     // codec returns outcome:"readonly" with value=defaultDraft — reading that
     // here would leak a live-book-shaped object. The helper must honest-absence
-    // it. (v1.5: the constant bumped 2→3, so this fixture self-adjusts to 4 and
-    // keeps exercising the forward-compat readonly path — Pitfall 2.)
-    expect(SCENARIO_SCHEMA_VERSION).toBe(3); // pin against the live constant
+    // it. (v1.5: the constant bumped 2→3; v1.6 MEMBER-01: 3→4. This fixture uses
+    // SCENARIO_SCHEMA_VERSION + 1 so it self-adjusts to 5 and keeps exercising
+    // the forward-compat readonly path — Pitfall 2.)
+    expect(SCENARIO_SCHEMA_VERSION).toBe(4); // pin against the live constant
     const aheadDraft = { ...okDraft(), schema_version: SCENARIO_SCHEMA_VERSION + 1 };
 
     const result = resolveSharedScenario(
@@ -203,15 +206,14 @@ describe("resolveSharedScenario — owner-projection parity (WR-05)", () => {
   /** Build the owner-side ScenarioCompareInputs for a pure ADDED-strategies
    *  draft (no live holdings) — the recipient page only ever resolves added
    *  strategies (holdings refs are the allocator's live book and never in the
-   *  RPC series). With empty holdings the owner's adapter produces the same
+   *  RPC series). Phase 63 ENGINE-02: the holdings-snapshot inputs are deleted;
+   *  an empty-membership draft computes series-space added-only via
+   *  buildAddedOnlySet, so the owner's adapter still produces the same
    *  StrategyForBuilder set the recipient builds directly. */
   function ownerInputsFor(seriesById: Record<string, DailyPoint[]>): ScenarioCompareInputs {
     return {
-      holdingsSummary: [],
-      holdingReturnsByScopeRef: {},
       addedStrategyReturnsLookup: seriesById as Record<StrategyForBuilderId, DailyPoint[]>,
       addedStrategyMetadataLookup: {},
-      symbolByHoldingId: new Map<string, string>(),
     };
   }
 
@@ -231,6 +233,7 @@ describe("resolveSharedScenario — owner-projection parity (WR-05)", () => {
         { id: STRAT_B as never, name: "Beta", markets: ["ETH"], strategy_types: ["mr"] },
       ],
       weightOverrides: { [STRAT_A]: 0.7 }, // B intentionally absent
+      memberKeyIds: [],
       lastEditedAt: "2026-06-22T00:00:00.000Z",
     };
     const seriesA = makeSeries(0);
@@ -276,6 +279,7 @@ describe("resolveSharedScenario — owner-projection parity (WR-05)", () => {
         { id: STRAT_B as never, name: "Beta", markets: ["ETH"], strategy_types: ["mr"] },
       ],
       weightOverrides: { [STRAT_A]: 1 }, // B intentionally has no entry
+      memberKeyIds: [],
       lastEditedAt: "2026-06-22T00:00:00.000Z",
     };
     const seriesA = makeSeries(2);
@@ -412,9 +416,11 @@ describe("resolveSharedScenario — owner coverage window verbatim (PERSIST-02)"
   });
 
   it("a pre-v1.5 v2 (windowless) shared draft resolves ok (NOT honest-absence) after the non-destructive upgrade, at the intersection default", () => {
-    // Wave 1 added the non-destructive v2→v3 codec branch: a valid v2 draft now
-    // decodes outcome:"ok" (reason "upgraded_v2_windowless"), so share-resolve
-    // reaches the compute path instead of honest-absencing every pre-v1.5 share.
+    // Wave 1 added the non-destructive v2→v3 codec branch; v1.6 MEMBER-01's
+    // double bump moved v2 handling to the literal-2 chain branch: a valid v2
+    // draft now decodes outcome:"ok" (reason "upgraded_v2_chain"), so
+    // share-resolve reaches the compute path instead of honest-absencing every
+    // pre-v1.5 share.
     // RE-BASELINED (ship-review RT-1, deliberate contract correction — locked
     // 59-CONTEXT Area 2 Q4: "recipient defaults to intersection, same rule as
     // owner reopen"): the ragged fixture proves the intersection rule, where
@@ -544,5 +550,147 @@ describe("resolveSharedScenario — book-only draft honest-absence (P61-BUG-2)",
       series: okSeriesRows(),
     });
     expect(result.kind).toBe("ok");
+  });
+
+  // MEMBER-03 (null-safe unification) — a PRE-v4 / v2 / v3 share arrives with
+  // membership UNDERIVED (memberKeyIds ABSENT, not []). Book-only detection here
+  // stays on the RESOLVED `strategies.length` (never `draft.memberKeyIds.length`)
+  // precisely so this common path is surfaced honestly and the code never reads
+  // .length off undefined. This fixture OMITS memberKeyIds entirely to exercise
+  // the undefined-membership path — it must honest-absence "book-only", not throw.
+  it("a v2 share with UNDEFINED membership (pre-v4) + zero added → honest-absence 'book-only', never throws", () => {
+    const preV4BookOnly = {
+      schema_version: 2, // pre-v4 — membership underived (undefined)
+      init_holdings_fingerprint: "BTC:binance:spot",
+      toggleByScopeRef: {},
+      addedStrategies: [],
+      weightOverrides: {},
+      // memberKeyIds intentionally OMITTED — the null-safe path under test.
+      // `as unknown as ScenarioDraft`: a pre-v4 blob genuinely lacks the
+      // required-at-v4 field, which is exactly the underived-membership case.
+      lastEditedAt: "2026-06-22T00:00:00.000Z",
+    } as unknown as ScenarioDraft;
+
+    const result = resolveSharedScenario({
+      name: "Pre-v4 book-only",
+      draft: preV4BookOnly,
+      schema_version: 2,
+      series: [],
+    });
+    expect(result.kind).toBe("honest-absence");
+    expect(
+      result.kind === "honest-absence" ? result.reason : undefined,
+    ).toBe("book-only");
+  });
+});
+
+// ===========================================================================
+// Phase 64 / PRESENT-03 — isMixed (mixed-share caption condition).
+//
+// A MIXED shared draft blends the owner's PERSISTED book members
+// (memberKeyIds) with catalog adds (addedStrategies). Only the catalog legs are
+// publicly computable here (the live-book boundary never resolves the owner's
+// per-key book series), so the rendered projection is the renormalized added
+// legs — and the public page owes a one-line honesty caption saying exactly
+// that. `resolveSharedScenario` exposes the render condition as a boolean
+// `isMixed` on the kind:"ok" return, computed NULL-SAFELY from the already-
+// decoded draft JSONB ONLY (no new RPC/SQL/query, zero private data).
+//
+// Render condition = memberKeyIds non-empty AND addedStrategies non-empty. The
+// addedStrategies-non-empty half is GUARANTEED BY CONSTRUCTION on the ok branch
+// (the :214 `strategies.length === 0` book-only guard already honest-absences a
+// zero-added draft), so the ok-branch live gate is exactly the membership
+// check — hence isMixed needs NO book-only case (a book-only-with-members draft
+// never reaches the ok branch).
+// ===========================================================================
+describe("Phase 64 / PRESENT-03 — isMixed (mixed-share caption condition)", () => {
+  // An api-key UUID (same id class as membership) — a persisted book member.
+  const MEMBER_KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+  it("a MIXED draft (memberKeyIds non-empty + added strategies) → kind:'ok' AND isMixed === true", () => {
+    // Persisted membership (a book key) PLUS catalog adds with their series —
+    // the F3 red-team case. Only the catalog legs are computable → the caption
+    // must fire, so isMixed is true.
+    const mixedDraft: ScenarioDraft = { ...okDraft(), memberKeyIds: [MEMBER_KEY] };
+
+    const result = resolveSharedScenario({
+      name: "Mixed share",
+      draft: mixedDraft,
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: okSeriesRows(),
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.isMixed).toBe(true);
+  });
+
+  it("MEMBER-03 leak guard — a MIXED ResolvedOk strips memberKeyIds to the isMixed boolean; the raw api-key UUIDs NEVER reach the public projection", () => {
+    // The RPC row's draft.memberKeyIds legitimately carries the owner's persisted
+    // book membership (api-key UUIDs) — the SQL leak test's Assertion 1 pins that
+    // POSITIVE round-trip through get_shared_scenario BY DESIGN (the draft rides
+    // whole; the member is the same id class as the strategy ids already in the
+    // payload, so it never trips the byte-frozen over-return guard). The honest
+    // stripping to `isMixed` happens HERE, in the pure resolve layer the anonymous
+    // page consumes: ResolvedOk exposes ONLY the derived boolean, never the raw
+    // ids. Grep the serialized resolved object for the seeded member UUID — it
+    // must be absent. RED-provable: exposing `memberKeyIds` on ResolvedOk (or
+    // spreading the decoded draft into the return) reintroduces the UUID and
+    // fails this. This is the vitest counterpart the SQL nuance calls for — the
+    // over-return guard stays byte-intact; this pins the layer that CAN honestly
+    // assert the strip (the RPC payload legitimately holds the ids).
+    const mixedDraft: ScenarioDraft = { ...okDraft(), memberKeyIds: [MEMBER_KEY] };
+
+    const result = resolveSharedScenario({
+      name: "Mixed share",
+      draft: mixedDraft,
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: okSeriesRows(),
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    // The membership is reflected ONLY as the boolean signal…
+    expect(result.isMixed).toBe(true);
+    // …and the raw api-key UUID is nowhere in the resolved projection the page
+    // consumes (name / metrics / portfolioDaily / strategyNames / isMixed).
+    expect(JSON.stringify(result)).not.toContain(MEMBER_KEY);
+  });
+
+  it("a CATALOG-ONLY draft (memberKeyIds []) → kind:'ok' AND isMixed === false (no caption)", () => {
+    // okDraft() carries memberKeyIds: [] — a pure catalog blend, no book member.
+    // Nothing to disclose → isMixed false → NO caption.
+    const result = resolveSharedScenario({
+      name: "Catalog-only share",
+      draft: okDraft(),
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: okSeriesRows(),
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.isMixed).toBe(false);
+  });
+
+  it("a PRE-v4 draft (membership OMITTED → undefined at runtime) → kind:'ok' AND isMixed === false (never invent a caption for unknown membership)", () => {
+    // Copies the :556-568 omitted-membership idiom: a lower-schema-version draft
+    // WITH catalog adds whose decode upgrades to ok, but whose memberKeyIds is
+    // undefined at runtime (required-at-v4, absent in a pre-v4 blob). The
+    // null-safe `(draft.memberKeyIds ?? []).length > 0` idiom must read falsy →
+    // isMixed false → NO caption. We NEVER invent a caption for a draft whose
+    // membership is unknown (honest-absence-of-membership unchanged).
+    const preV4: Partial<ScenarioDraft> = { ...okDraft(), schema_version: 2 };
+    delete preV4.memberKeyIds; // membership genuinely absent (undefined) at runtime
+
+    const result = resolveSharedScenario({
+      name: "Pre-v4 catalog share",
+      draft: preV4 as ScenarioDraft,
+      schema_version: 2,
+      series: okSeriesRows(),
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.isMixed).toBe(false);
   });
 });

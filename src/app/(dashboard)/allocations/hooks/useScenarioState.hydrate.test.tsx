@@ -79,6 +79,7 @@ function matchingSavedDraft(): ScenarioDraft {
     toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: true },
     addedStrategies: [],
     weightOverrides: { [REF_BTC]: 0.6, [REF_ETH]: 1.0 },
+    memberKeyIds: [],
     lastEditedAt: "2026-06-01T00:00:00.000Z",
   };
 }
@@ -92,6 +93,7 @@ function mismatchedSavedDraft(): ScenarioDraft {
     toggleByScopeRef: { [REF_BTC]: true },
     addedStrategies: [],
     weightOverrides: { [REF_BTC]: 1.0 },
+    memberKeyIds: [],
     lastEditedAt: "2026-01-01T00:00:00.000Z",
   };
 }
@@ -169,6 +171,7 @@ describe("useScenarioState — hydrateFromSaved reopen seam (Phase 23 Plan 04)",
       toggleByScopeRef: { [REF_BTC]: true, [REF_ETH]: true },
       addedStrategies: [],
       weightOverrides: { [REF_BTC]: 0.6, [REF_ETH]: 0.4 },
+      memberKeyIds: [],
       lastEditedAt: "2026-05-01T00:00:00.000Z",
     };
     const scopedKey = scenarioStorageKey(ALLOCATOR_A);
@@ -262,5 +265,117 @@ describe("useScenarioState — hydrateFromSaved reopen seam (Phase 23 Plan 04)",
       result.current.hydrateFromSaved(mismatchedSavedDraft());
     });
     expect(result.current.fingerprintMismatch).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CR-01 (Phase 63 review) — driftReferenceHoldings: the shared drift predicate.
+//
+// In forced-blank mode the composer gates holdingsSummary to [] but passes the
+// LIVE book as driftReferenceHoldings. `storedMismatch` (and `baseOf`) must
+// then treat a draft as drifted ONLY when it matches NEITHER the gated default
+// NOR the live book — so the hook's apply/discard decision agrees with
+// openSavedScenario's drift check. Pre-fix (single gated fingerprint) a book
+// draft reopened in forced-blank looked mismatched and fell back to the blank
+// default (false banner + saved-draft overwrite).
+// ---------------------------------------------------------------------------
+
+describe("useScenarioState — CR-01 driftReferenceHoldings shared drift predicate", () => {
+  beforeEach(() => {
+    store.clear();
+    vi.clearAllMocks();
+  });
+
+  it("case (a): blank-gated hook with a live-book drift reference APPLIES a book-fingerprint draft and does NOT fire the banner", () => {
+    // Forced-blank: gated holdingsSummary=[], drift reference = the live book.
+    const { result } = renderHook(() =>
+      useScenarioState({
+        holdingsSummary: [],
+        driftReferenceHoldings: HOLDINGS_2,
+        allocatorId: ALLOCATOR_A,
+      }),
+    );
+
+    act(() => {
+      // matchingSavedDraft carries fp(HOLDINGS_2) — matches the LIVE book.
+      result.current.hydrateFromSaved(matchingSavedDraft());
+    });
+
+    // Applied (the saved book toggles/weights are the working draft), NOT the
+    // blank default the pre-fix gated-only predicate fell back to.
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(false);
+    expect(result.current.draft.toggleByScopeRef[REF_ETH]).toBe(true);
+    expect(result.current.draft.weightOverrides[REF_ETH]).toBeCloseTo(1.0, 9);
+    // Matches the live book → no false "holdings changed" banner.
+    expect(result.current.fingerprintMismatch).toBe(false);
+  });
+
+  it("case (a) cont.: an edit after the applied book draft does NOT rebase to the blank default (baseOf honors the live book)", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({
+        holdingsSummary: [],
+        driftReferenceHoldings: HOLDINGS_2,
+        allocatorId: ALLOCATOR_A,
+      }),
+    );
+    act(() => {
+      result.current.hydrateFromSaved(matchingSavedDraft());
+    });
+    // Editing must operate on the APPLIED book draft, not a blank rebase — the
+    // BTC toggle-off survives the edit (a blank default has no such entry).
+    act(() => {
+      result.current.addStrategyBrowse({
+        id: "added-x",
+        name: "Added X",
+        markets: [],
+        strategy_types: [],
+      } as unknown as Parameters<typeof result.current.addStrategyBrowse>[0]);
+    });
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBe(false);
+    expect(
+      result.current.draft.addedStrategies.some((a) => a.id === "added-x"),
+    ).toBe(true);
+    expect(result.current.fingerprintMismatch).toBe(false);
+  });
+
+  it("case (b) / fresh blank: a blank-authored draft (fp of []) matches the gated default → applied, no banner", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({
+        holdingsSummary: [],
+        driftReferenceHoldings: HOLDINGS_2,
+        allocatorId: ALLOCATOR_A,
+      }),
+    );
+    const blankAuthored: ScenarioDraft = {
+      ...defaultDraftFromHoldings([]),
+      addedStrategies: [
+        { id: "added-y", name: "Added Y", markets: [], strategy_types: [] },
+      ] as unknown as ScenarioDraft["addedStrategies"],
+    };
+    act(() => {
+      result.current.hydrateFromSaved(blankAuthored);
+    });
+    // Matches the gated ([]) default → applied, NOT flagged as drifted just
+    // because the live book is non-empty.
+    expect(
+      result.current.draft.addedStrategies.some((a) => a.id === "added-y"),
+    ).toBe(true);
+    expect(result.current.fingerprintMismatch).toBe(false);
+  });
+
+  it("stale: a draft matching NEITHER the gated default NOR the live book fires the banner and falls back to the default", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({
+        holdingsSummary: [],
+        driftReferenceHoldings: HOLDINGS_2,
+        allocatorId: ALLOCATOR_A,
+      }),
+    );
+    act(() => {
+      result.current.hydrateFromSaved(mismatchedSavedDraft());
+    });
+    // Matches neither → drifted → banner + working draft is the (blank) default.
+    expect(result.current.fingerprintMismatch).toBe(true);
+    expect(result.current.draft.toggleByScopeRef[REF_BTC]).toBeUndefined();
   });
 });

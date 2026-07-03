@@ -1,13 +1,14 @@
 "use client";
 
 import type React from "react";
-import { formatPercent, formatNumber, formatCurrency } from "@/lib/utils";
+import { formatPercent, formatNumber } from "@/lib/utils";
 import type { ComputedMetrics } from "@/lib/scenario";
 
 /**
- * Phase 09.1 / Plan 06 (D-09): designer-aligned 5-cell KPI strip.
+ * Phase 09.1 / Plan 06 (D-09): designer-aligned KPI strip.
+ * Phase 64 / PRESENT-01: return-form only — the AUM cell is gone (4 cells).
  *
- * Shape (left → right): AUM / YTD TWR / Sharpe / Max DD 12m / Avg |ρ|.
+ * Shape (left → right): YTD TWR / Sharpe / Max DD 12m / Avg |ρ|.
  * Each cell renders { label, formatted value, sub helper line }.
  *
  * **Phase 07 / 07-03 invariants preserved verbatim:**
@@ -45,7 +46,6 @@ import type { ComputedMetrics } from "@/lib/scenario";
  * via the `analytics?.field ?? metrics?.fallback ?? null` chain.
  */
 export interface KpiStripAnalytics {
-  total_aum?: number | null;
   ytd_twr?: number | null;
   sharpe?: number | null;
   max_drawdown_12m?: number | null;
@@ -57,11 +57,10 @@ interface KpiStripProps {
   metrics: ComputedMetrics;
   /**
    * Selected timeframe label. Retained for forward-compat with callers that
-   * still pass it; not currently rendered in the 5-cell shape (the designer
+   * still pass it; not currently rendered in the 4-cell shape (the designer
    * panel surfaces timeframe at the page header instead).
    */
   timeframe?: string;
-  aum: number | null;
   /**
    * Phase 07 / 07-03. When the allocator has < 30 snapshot rows and is
    * NOT stale, render the warm-up helper sub-line beneath every null KPI
@@ -119,8 +118,8 @@ interface Cell {
   /**
    * Phase 10 / 10-04. Metric key used to look up the corresponding value
    * on a `ComputedMetrics` object for scenario-mode delta computation.
-   * `null` for cells with no `ComputedMetrics` field (currently AUM —
-   * sourced from `analytics.total_aum`, not the scenario engine).
+   * Nullable defensively; every current cell is a return-form metric with a
+   * real key (Phase 64 / PRESENT-01 removed the only metricKey:null cell, AUM).
    */
   metricKey: string | null;
 }
@@ -170,7 +169,7 @@ function valueColorClass(raw: number | null): string {
 
 /**
  * Phase 10 / 10-04 D-16. Per-KPI improvement direction.
- *   - "up-good": higher is better (TWR, CAGR, Sharpe, Sortino, AUM, score)
+ *   - "up-good": higher is better (TWR, CAGR, Sharpe, Sortino, score)
  *   - "down-good": lower is better (Volatility, Avg |ρ| — diversification)
  *
  * **Deviation from 10-04 plan (Rule 1 — bug fix):** the plan listed
@@ -188,7 +187,6 @@ const KPI_DIRECTION: Record<string, KpiDirection> = {
   cagr: "up-good",
   sharpe: "up-good",
   sortino: "up-good",
-  aum: "up-good",
   score: "up-good",
   max_drawdown: "up-good", // see deviation note above
   volatility: "down-good",
@@ -212,7 +210,6 @@ const KPI_NOISE_FLOOR: Record<string, number> = {
   cagr: 0.01,
   max_drawdown: 0.01,
   volatility: 0.01,
-  aum: 0.01,
 };
 
 /** Phase 10 / 10-04. Direction-aware delta pill color token. */
@@ -242,7 +239,6 @@ function deltaSign(
  * AND for the aria-label. Mirrors the per-cell formatter shape:
  *   - Sharpe / Sortino / score / Avg |ρ| → unitless 2-decimal number
  *   - twr / cagr / max_drawdown / volatility → percent with sign
- *   - aum → currency
  */
 function formatSignedDelta(delta: number | null, key: string): string {
   if (delta == null) return "—";
@@ -256,9 +252,6 @@ function formatSignedDelta(delta: number | null, key: string): string {
     key === "avg_pairwise_correlation"
   ) {
     return `${sign}${abs.toFixed(2)}`;
-  }
-  if (key === "aum") {
-    return `${sign}${formatCurrency(abs)}`;
   }
   // Default: percent (twr, cagr, max_drawdown, volatility)
   return `${sign}${(abs * 100).toFixed(1)}%`;
@@ -276,9 +269,6 @@ function formatLiveValue(value: number | null, key: string): string {
   ) {
     return formatNumber(value, 2);
   }
-  if (key === "aum") {
-    return formatCurrency(value);
-  }
   // Default: percent (twr, cagr, max_drawdown, volatility)
   return formatPercent(value);
 }
@@ -286,7 +276,6 @@ function formatLiveValue(value: number | null, key: string): string {
 export function KpiStrip({
   analytics,
   metrics,
-  aum,
   snapshotCount = 30,
   allKeysStale = false,
   minHistoryDepthMonths = null,
@@ -304,9 +293,8 @@ export function KpiStrip({
     ? warmupCopy(snapshotCount, minHistoryDepthMonths, activeVenues)
     : null;
 
-  // 5-cell sources (D-09):
-  //  - AUM: caller's `aum` prop (server-provided), falling back to a
-  //    legacy analytics.total_aum path if present.
+  // 4-cell return-form sources (D-09 · Phase 64 / PRESENT-01 removed the AUM
+  // cell — a position-space dollar figure — so the strip is return-form only):
   //  - YTD TWR: prefer analytics.ytd_twr; fall back to ComputedMetrics.twr
   //    so the existing legacy caller's `metrics` payload still wires in.
   //  - Sharpe: prefer analytics.sharpe; fall back to metrics.sharpe.
@@ -321,7 +309,6 @@ export function KpiStrip({
   //    doesn't carry analytics.avg_correlation yet; the metrics fallback
   //    surfaces the engine-computed value when present, otherwise both
   //    paths resolve to null → honest pending-copy below.
-  const aumValue: number | null = aum ?? analytics?.total_aum ?? null;
   const ytdValue: number | null =
     analytics?.ytd_twr ?? metrics?.twr ?? null;
   const sharpeValue: number | null =
@@ -334,20 +321,20 @@ export function KpiStrip({
   /**
    * Resolve the sub-copy for a single cell with the documented precedence:
    *   1. allKeysStale → STALE_SUB (every cell)
-   *   2. warmupHelper && raw == null && !isAum → warmupHelper
+   *   2. warmupHelper && raw == null → warmupHelper
    *   3. cell-specific default
    *
-   * AUM is exempt from the warm-up helper (Phase 07 / 07-03 f9) because
-   * AUM is a dollar figure, not annualised — it's almost always present
-   * even during warm-up.
+   * Phase 64 / PRESENT-01: the AUM warm-up exemption param is gone — its
+   * only subject was the AUM cell (a dollar figure, almost always present
+   * during warm-up), which no longer exists. Every surviving cell is a
+   * return-form metric that takes the standard warm-up copy when null.
    */
   function resolveSub(
     raw: number | null,
-    isAum: boolean,
     defaultSub: string | null,
   ): string | null {
     if (allKeysStale) return STALE_SUB;
-    if (warmupHelper && raw == null && !isAum) return warmupHelper;
+    if (warmupHelper && raw == null) return warmupHelper;
     return defaultSub;
   }
 
@@ -371,31 +358,10 @@ export function KpiStrip({
   // previous KpiStrip (formatters return "—" for null).
   const cells: Cell[] = [
     {
-      label: "AUM",
-      raw: allKeysStale ? null : aumValue,
-      formatted: formatCurrency(allKeysStale ? null : aumValue),
-      // WR-02 (Phase 21 review): in scenario mode the AUM is the projected sum
-      // of toggled-ON holdings, not live AUM, and the cell has no delta pill
-      // (metricKey: null). Disclose that it is projected so a shrunk number
-      // isn't mistaken for the allocator's real book size.
-      sub: resolveSub(
-        aumValue,
-        true,
-        mode === "scenario" ? "Projected — sum of enabled holdings" : null,
-      ),
-      // AUM is sourced from analytics.total_aum, NOT the scenario engine.
-      // ComputedMetrics has no AUM field; suppress scenario rendering.
-      metricKey: null,
-    },
-    {
       label: "YTD TWR",
       raw: allKeysStale ? null : ytdValue,
       formatted: formatPercent(allKeysStale ? null : ytdValue),
-      sub: resolveSub(
-        ytdValue,
-        false,
-        "year-to-date time-weighted return",
-      ),
+      sub: resolveSub(ytdValue, "year-to-date time-weighted return"),
       metricKey: "twr",
     },
     {
@@ -406,18 +372,14 @@ export function KpiStrip({
       // over the SELECTED timeframe / full holdings history (scenario.ts), NOT
       // a fixed trailing 12 months — the prior "12-month" sub-copy was a lie.
       // Honest window-copy, parallel to the Avg |ρ| honest-pending fix.
-      sub: resolveSub(sharpeValue, false, "risk-adjusted return (selected period)"),
+      sub: resolveSub(sharpeValue, "risk-adjusted return (selected period)"),
       metricKey: "sharpe",
     },
     {
       label: "Max DD 12m",
       raw: allKeysStale ? null : maxDdValue,
       formatted: formatPercent(allKeysStale ? null : maxDdValue),
-      sub: resolveSub(
-        maxDdValue,
-        false,
-        "worst peak-to-trough in last 12 months",
-      ),
+      sub: resolveSub(maxDdValue, "worst peak-to-trough in last 12 months"),
       metricKey: "max_drawdown",
     },
     {
@@ -466,14 +428,14 @@ export function KpiStrip({
     // (Pitfall 2 / 52-01 tabular-nums contract).
     <div className="@container">
       <div
-        className="grid grid-cols-1 gap-3 @sm:grid-cols-2 @lg:grid-cols-5"
+        className="grid grid-cols-1 gap-3 @sm:grid-cols-2 @lg:grid-cols-4"
         role="group"
         aria-label="Portfolio KPIs"
       >
       {cells.map(({ label, raw, formatted, sub, metricKey }) => {
         // Resolve scenario primary + delta for this cell when the gate
-        // is open AND the cell has a metricKey (AUM has none → falls
-        // back to the live path).
+        // is open AND the cell has a metricKey (all 4 return-form cells
+        // carry one since Phase 64 removed the metricKey-less AUM cell).
         const scenVal: number | null =
           scenarioActive && metricKey
             ? // ComputedMetrics is a plain record of nullable numbers — index
@@ -526,7 +488,7 @@ export function KpiStrip({
                 plan literal suggested it; serif is reserved for display /
                 page titles per DESIGN.md typography section. */}
             <div
-              className={`mt-1 font-mono text-lg font-medium tabular-nums ${valueColorClass(label === "AUM" ? null : primaryRaw)}`}
+              className={`mt-1 font-mono text-lg font-medium tabular-nums ${valueColorClass(primaryRaw)}`}
             >
               {primaryFormatted}
             </div>

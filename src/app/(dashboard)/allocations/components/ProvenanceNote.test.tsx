@@ -96,6 +96,35 @@ describe("ProvenanceNote (PERSIST-01)", () => {
     expect(screen.getByText(LOCKED_COPY)).toBeInTheDocument();
   });
 
+  it("MEMBER-04 membership variant: a `message` + `testId` render a plain note with NO 'Show full range' action; the × still dismisses ephemerally", async () => {
+    // The v1.6 membership variant reuses the ephemeral shell but passes a plain
+    // message and NO onShowFullRange — a dropped data source has no "full range"
+    // to restore, so the inline action must be absent.
+    render(
+      <ProvenanceNote
+        testId="scenario-membership-note"
+        message="A data source saved with this scenario is no longer available — showing the remaining sources."
+      />,
+    );
+    const note = screen.getByTestId("scenario-membership-note");
+    expect(note).toBeInTheDocument();
+    expect(note.textContent).toContain("no longer available");
+    // No escape-hatch action in this variant.
+    expect(
+      screen.queryByRole("button", { name: /Show full range/i }),
+    ).not.toBeInTheDocument();
+    // The window-note copy must NOT bleed into the membership variant.
+    expect(note.textContent).not.toMatch(LOCKED_COPY);
+
+    // Dismissal is ephemeral component-local state (same shell).
+    fireEvent.click(screen.getByRole("button", { name: /Dismiss/i }));
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("scenario-membership-note"),
+      ).not.toBeInTheDocument();
+    });
+  });
+
   it("STATIC GUARD: ephemeral dismissal — no useCrossTabStorage, no POLISH-03 key, no raw localStorage; verbatim copy; role=status", () => {
     const src = readFileSync(
       path.resolve(

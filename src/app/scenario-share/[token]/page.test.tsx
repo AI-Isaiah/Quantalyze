@@ -128,6 +128,7 @@ function okDraft(): ScenarioDraft {
       { id: STRAT_A as never, name: "Momentum Alpha", markets: ["BTC"], strategy_types: ["trend"] },
     ],
     weightOverrides: { [STRAT_A]: 1 },
+    memberKeyIds: [],
     lastEditedAt: "2026-06-22T00:00:00.000Z",
   };
 }
@@ -136,6 +137,32 @@ function okRow() {
   return {
     name: "My Q3 Blend",
     draft: okDraft(),
+    schema_version: 2,
+    series: [{ strategy_id: STRAT_A, daily_returns: makeSeries() }],
+  };
+}
+
+// Phase 64 / PRESENT-03 — a MIXED share: persisted book membership
+// (memberKeyIds non-empty) PLUS catalog adds (addedStrategies non-empty). Only
+// the catalog legs are publicly computable → the honesty caption must fire.
+const MEMBER_KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+function mixedRow() {
+  return {
+    name: "My Q3 Blend",
+    draft: { ...okDraft(), memberKeyIds: [MEMBER_KEY] },
+    schema_version: 2,
+    series: [{ strategy_id: STRAT_A, daily_returns: makeSeries() }],
+  };
+}
+
+// A PRE-v4 share whose membership is OMITTED (undefined at runtime) — the
+// null-safe path: no caption for unknown membership.
+function preV4Row() {
+  const draft = { ...okDraft(), schema_version: 2 } as Partial<ScenarioDraft>;
+  delete draft.memberKeyIds;
+  return {
+    name: "My Q3 Blend",
+    draft: draft as ScenarioDraft,
     schema_version: 2,
     series: [{ strategy_id: STRAT_A, daily_returns: makeSeries() }],
   };
@@ -257,6 +284,62 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     // NEVER a rendered curve / KPI strip / live-book substitution.
     expect(html).not.toContain("equity-chart");
     expect(html).not.toContain("correlation-heatmap");
+  });
+
+  it("PRESENT-03 — a MIXED share renders the verbatim honesty caption in the note register", async () => {
+    // Persisted book membership + catalog adds → only the catalog legs are
+    // publicly computable → the caption must fire. This is the genuine RED
+    // anchor pre-implementation (the testid + copy do not yet exist).
+    rpcMock.mockResolvedValueOnce({ data: [mixedRow()], error: null });
+
+    const html = await renderPage("mixed-token");
+
+    // The caption <p> is present with its stable testid.
+    expect(html).toContain('data-testid="scenario-mixed-caption"');
+
+    // Verbatim copy — React escapes the apostrophe in static markup (as
+    // &#x27;), so assert with an entity-tolerant regex, never a raw toContain.
+    expect(html).toMatch(
+      /computed from this scenario(?:&#x27;|&apos;|')s catalog strategies only/,
+    );
+
+    // Isolate the caption's opening tag to pin the exact register classes and
+    // prove it carries NO role attribute (honesty-color rule: static prose, not
+    // a state transition — never role="alert"/"status").
+    const captionTag = html.match(/<p data-testid="scenario-mixed-caption"[^>]*>/);
+    expect(captionTag).not.toBeNull();
+    expect(captionTag![0]).toContain('class="mt-1 text-xs text-text-muted"');
+    expect(captionTag![0]).not.toContain("role=");
+
+    // The caption introduces no USD — the existing no-"$" invariant holds on the
+    // mixed render.
+    expect(html).not.toMatch(/\$\d/);
+
+    // MEMBER-03 leak guard — the mixed fixture's draft.memberKeyIds carries
+    // MEMBER_KEY (an api-key UUID, the owner's persisted book membership). The
+    // public projection strips it to the isMixed caption above; the RAW id must
+    // NEVER reach the anonymous recipient. Grep the rendered HTML for the seeded
+    // UUID — absent. The RPC payload legitimately holds it (SQL Assertion 1's
+    // by-design round-trip), so the rendered-HTML layer is the honest place to
+    // pin the strip. RED-provable: rendering the membership (or exposing it via
+    // ResolvedOk) reintroduces the UUID here. Falsifiable — the caption assertion
+    // above proves the mixed branch DID render, so this is not a vacuous pass.
+    expect(html).not.toContain(MEMBER_KEY);
+  });
+
+  it("PRESENT-03 — a CATALOG-ONLY share and a PRE-v4 (omitted-membership) share render NO caption", async () => {
+    // Catalog-only (memberKeyIds []) → no caption.
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    const catalogHtml = await renderPage("catalog-token");
+    expect(catalogHtml).toContain("My Q3 Blend"); // it DID render (falsifiable)
+    expect(catalogHtml).not.toContain("scenario-mixed-caption");
+
+    // Pre-v4, membership undefined → no caption (never invented for unknown
+    // membership).
+    rpcMock.mockResolvedValueOnce({ data: [preV4Row()], error: null });
+    const preV4Html = await renderPage("prev4-token");
+    expect(preV4Html).toContain("My Q3 Blend");
+    expect(preV4Html).not.toContain("scenario-mixed-caption");
   });
 
   it("RPC error → notFound() (no schema leak to the recipient)", async () => {
