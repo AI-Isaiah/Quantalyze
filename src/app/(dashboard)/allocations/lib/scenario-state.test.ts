@@ -29,6 +29,10 @@ import {
   setWindow,
   renormalizeWeights,
   scenarioDraftCodec,
+  scenarioDraftSaveSchema,
+  deriveMembershipFromGate,
+  isBookOnlyDraft,
+  setMemberKeyIds,
   SCENARIO_SCHEMA_VERSION,
   type ScenarioDraft,
   type AddedStrategy,
@@ -620,6 +624,224 @@ describe("scenarioDraftCodec", () => {
     expect(r.value.userWeightOverrides).toEqual({
       "holding:binance:BTC:spot": 0.8,
     });
+  });
+});
+
+// ===========================================================================
+// MEMBER-01 (Phase 62) — v4 EXPLICIT DRAFT SERIES MEMBERSHIP.
+//
+// WHY these tests exist (Rule 9 — intent, not behavior): Phase 62 bumps the
+// draft schema TWICE (SCENARIO_SCHEMA_VERSION 3→4, PREV 2→3) and adds a
+// required-at-v4 `memberKeyIds` field. The single highest risk is the double
+// bump SILENTLY DELETING every stored v2 draft (Pitfall 1) — so the codec must
+// carry a SECOND non-destructive branch (literal v2) alongside the PREV (v3)
+// branch, both decoding "ok" and never reset. The subtler blocker: a v2/v3
+// draft upgrades in-memory to {schema_version:4, memberKeyIds:undefined}, is
+// re-persisted by useCrossTabStorage, and on the NEXT decode reaches the v4
+// EXACT-version branch UNDERIVED — so the codec-decode schema MUST be TOLERANT
+// (a v4 blob without membership decodes ok/underived, never reset) or every
+// upgraded draft is dropped on the localStorage round-trip. The v4 fail-loud
+// enforcement lives on a SEPARATE `scenarioDraftSaveSchema` used ONLY by the
+// save route. Plus the three shared helpers the other Phase-62 plans consume.
+//
+// Written RED-first against the v3 code: the four new exports do not exist and
+// there is no v4 handling, so this whole block fails (unresolved imports + the
+// v2-decodes-ok + the encode→decode round-trip regression) until Task 2 lands.
+// ===========================================================================
+describe("MEMBER-01 v4 codec + membership helpers", () => {
+  const def = defaultDraftFromHoldings(HOLDINGS_2);
+  const codec = scenarioDraftCodec(def);
+
+  // A valid draft shape at an ARBITRARY schema_version, membership/window
+  // optionally injected. Version-relative fixtures use SCENARIO_SCHEMA_VERSION
+  // (current) / SCENARIO_SCHEMA_VERSION + 1 (current+1); the v3 and v2 upgrade
+  // fixtures pin the LITERAL integers 3 and 2 — they test absolute
+  // two-version-span survival, not "prev".
+  const rawDraftAt = (
+    version: number,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    schema_version: version,
+    init_holdings_fingerprint: "fp",
+    toggleByScopeRef: { "holding:binance:BTC:spot": true },
+    addedStrategies: [] as AddedStrategy[],
+    weightOverrides: { "holding:binance:BTC:spot": 1 },
+    lastEditedAt: "2026-04-25T00:00:00.000Z",
+    ...extra,
+  });
+
+  // ---- codec decode trichotomy across the double bump ----
+
+  it("a v3 blob (no memberKeyIds) → ok/upgraded_v3_membership, bumped to current in-memory, membership left UNDERIVED", () => {
+    const r = codec.decode(JSON.stringify(rawDraftAt(3)));
+    expect(r.outcome).toBe("ok");
+    expect(r.reason).toBe("upgraded_v3_membership");
+    expect(r.value.schema_version).toBe(SCENARIO_SCHEMA_VERSION);
+    // Underived: the non-destructive branch never fabricates membership.
+    expect(r.value.memberKeyIds).toBeUndefined();
+    expect(r.value.weightOverrides["holding:binance:BTC:spot"]).toBe(1);
+  });
+
+  it("a v2 blob (no window, no memberKeyIds) → ok/upgraded_v2_chain (distinct reason), NEVER reset (Pitfall 1)", () => {
+    const r = codec.decode(JSON.stringify(rawDraftAt(2)));
+    expect(r.outcome).toBe("ok");
+    expect(r.reason).toBe("upgraded_v2_chain");
+    expect(r.value.schema_version).toBe(SCENARIO_SCHEMA_VERSION);
+    expect(r.value.memberKeyIds).toBeUndefined();
+    expect(r.value.window).toBeUndefined();
+  });
+
+  it("a v5 (current+1) blob → readonly/version_ahead (forward-compat unchanged)", () => {
+    const r = codec.decode(
+      JSON.stringify(rawDraftAt(SCENARIO_SCHEMA_VERSION + 1)),
+    );
+    expect(r.outcome).toBe("readonly");
+    expect(r.reason).toBe("version_ahead");
+  });
+
+  it("a v4 blob WITH memberKeyIds → ok/null (exact-version adopt) and round-trips membership", () => {
+    const r = codec.decode(
+      JSON.stringify(
+        rawDraftAt(SCENARIO_SCHEMA_VERSION, { memberKeyIds: ["k"] }),
+      ),
+    );
+    expect(r.outcome).toBe("ok");
+    expect(r.reason).toBeNull();
+    expect(r.value.memberKeyIds).toEqual(["k"]);
+  });
+
+  it("a v4 blob LACKING memberKeyIds → ok with membership UNDERIVED (tolerant codec), NEVER reset — the underived-v4 case (blocker)", () => {
+    const r = codec.decode(JSON.stringify(rawDraftAt(SCENARIO_SCHEMA_VERSION)));
+    expect(r.outcome).toBe("ok");
+    expect(r.outcome).not.toBe("reset");
+    expect(r.value.memberKeyIds).toBeUndefined();
+  });
+
+  // ---- the blocker regression: an upgraded working draft persisted to
+  // localStorage (encode) and re-read (decode) must never be dropped ----
+
+  it("ROUND-TRIP (blocker) — v3 → decode → encode → decode stays ok (the upgraded draft is never silently dropped on the localStorage round-trip)", () => {
+    const first = codec.decode(JSON.stringify(rawDraftAt(3)));
+    expect(first.outcome).toBe("ok");
+    // The upgraded value is schema_version:4 WITHOUT memberKeyIds — exactly the
+    // blob useCrossTabStorage re-persists and re-reads on the next tab.
+    const second = codec.decode(codec.encode(first.value));
+    expect(second.outcome).toBe("ok");
+    expect(second.outcome).not.toBe("reset");
+  });
+
+  it("ROUND-TRIP (blocker) — v2 → decode → encode → decode stays ok", () => {
+    const first = codec.decode(JSON.stringify(rawDraftAt(2)));
+    expect(first.outcome).toBe("ok");
+    const second = codec.decode(codec.encode(first.value));
+    expect(second.outcome).toBe("ok");
+    expect(second.outcome).not.toBe("reset");
+  });
+
+  // ---- scenarioDraftSaveSchema: fail-loud at the SAVE boundary only ----
+
+  it("scenarioDraftSaveSchema REJECTS a v4 draft lacking memberKeyIds (fail-loud at the save boundary, NOT the codec)", () => {
+    const parsed = scenarioDraftSaveSchema.safeParse(
+      rawDraftAt(SCENARIO_SCHEMA_VERSION),
+    );
+    expect(parsed.success).toBe(false);
+  });
+
+  it("scenarioDraftSaveSchema ACCEPTS a v4 draft WITH memberKeyIds", () => {
+    const parsed = scenarioDraftSaveSchema.safeParse(
+      rawDraftAt(SCENARIO_SCHEMA_VERSION, { memberKeyIds: ["k"] }),
+    );
+    expect(parsed.success).toBe(true);
+  });
+
+  it("scenarioDraftSaveSchema ACCEPTS a schema_version < 4 blob (the >=4 refine skips) — proving the refine is on the SAVE schema, not the codec schema", () => {
+    expect(scenarioDraftSaveSchema.safeParse(rawDraftAt(2)).success).toBe(true);
+    expect(scenarioDraftSaveSchema.safeParse(rawDraftAt(3)).success).toBe(true);
+  });
+
+  // ---- deriveMembershipFromGate: the ONE upgrade-read derivation rule ----
+
+  it("deriveMembershipFromGate(true, ids) returns a COPY of ids; (false, ids) returns []", () => {
+    const ids = ["a", "b"];
+    const on = deriveMembershipFromGate(true, ids);
+    expect(on).toEqual(["a", "b"]);
+    expect(on).not.toBe(ids); // fresh array, not the same reference
+    expect(deriveMembershipFromGate(false, ids)).toEqual([]);
+  });
+
+  // ---- isBookOnlyDraft: NULL-SAFE book-only predicate ----
+
+  it.each([
+    ["members + no strategies → true", ["k"], [] as AddedStrategy[], true],
+    [
+      "no members + no strategies → false",
+      [] as string[],
+      [] as AddedStrategy[],
+      false,
+    ],
+    ["members + strategies → false", ["k"], [STRAT_A], false],
+    ["no members + strategies → false", [] as string[], [STRAT_A], false],
+  ])(
+    "isBookOnlyDraft: %s",
+    (_label, memberKeyIds, addedStrategies, expected) => {
+      const draft = {
+        ...defaultDraftFromHoldings(HOLDINGS_2),
+        memberKeyIds,
+        addedStrategies,
+      } as unknown as ScenarioDraft;
+      expect(isBookOnlyDraft(draft)).toBe(expected);
+    },
+  );
+
+  it("isBookOnlyDraft is NULL-SAFE — an underived (undefined-membership) decoded draft returns false, never throws", () => {
+    const underived = {
+      ...defaultDraftFromHoldings(HOLDINGS_2),
+      memberKeyIds: undefined,
+      addedStrategies: [],
+    } as unknown as ScenarioDraft;
+    expect(() => isBookOnlyDraft(underived)).not.toThrow();
+    expect(isBookOnlyDraft(underived)).toBe(false);
+  });
+
+  // ---- setMemberKeyIds: the pure new-save STAMP transform ----
+
+  it("setMemberKeyIds returns { ...draft, memberKeyIds } WITHOUT mutating the input", () => {
+    const draft = defaultDraftFromHoldings(HOLDINGS_2);
+    const before = JSON.stringify(draft);
+    const stamped = setMemberKeyIds(draft, ["x", "y"]);
+    expect(stamped.memberKeyIds).toEqual(["x", "y"]);
+    expect(stamped).not.toBe(draft);
+    expect(JSON.stringify(draft)).toBe(before); // input unmutated
+  });
+
+  // ---- defaultDraftFromHoldings carries an empty membership ----
+
+  it("defaultDraftFromHoldings carries memberKeyIds: []", () => {
+    expect(defaultDraftFromHoldings(HOLDINGS_2).memberKeyIds).toEqual([]);
+  });
+
+  // ---- spread-preservation: every mutator preserves pre-existing membership ----
+
+  it("toggleHolding / addStrategyBrowse / removeAddedStrategy / setWeightOverride / setWindow all PRESERVE the pre-existing memberKeyIds", () => {
+    const base = setMemberKeyIds(defaultDraftFromHoldings(HOLDINGS_2), [
+      "m1",
+      "m2",
+    ]);
+    const ref = "holding:binance:BTC:spot";
+    expect(toggleHolding(base, ref).memberKeyIds).toEqual(["m1", "m2"]);
+    const added = addStrategyBrowse(base, STRAT_A);
+    expect(added.memberKeyIds).toEqual(["m1", "m2"]);
+    expect(removeAddedStrategy(added, STRAT_A.id).memberKeyIds).toEqual([
+      "m1",
+      "m2",
+    ]);
+    expect(setWeightOverride(base, ref, 0.5).memberKeyIds).toEqual([
+      "m1",
+      "m2",
+    ]);
+    expect(
+      setWindow(base, { start: "2024-01-01", end: "2024-12-31" }).memberKeyIds,
+    ).toEqual(["m1", "m2"]);
   });
 });
 
