@@ -117,7 +117,13 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
     expect(sharpeDelta!.className).toMatch(/text-positive/);
   });
 
-  it("WR-02: mode='scenario' AUM cell discloses it is the projected enabled-holdings sum", () => {
+  // Phase 64 / PRESENT-01 — RETIRED the WR-02 pair ("AUM cell discloses it is
+  // the projected enabled-holdings sum" + "live mode does NOT show the
+  // disclosure"). The disclosed cell no longer exists: AUM (a position-space
+  // dollar figure) is removed from the scenario strip. In its place, a
+  // negative pin proves scenario mode renders no AUM cell and no dollar value.
+  // Red pre-implementation — the AUM cell and its "$650K" value currently render.
+  it("PRESENT-01: scenario mode renders no AUM cell and no dollar-formatted value", () => {
     render(
       <KpiStrip
         analytics={{
@@ -135,32 +141,18 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         liveMetrics={LIVE_METRICS}
       />,
     );
-    // The AUM cell in scenario mode is the toggled-on projected sum, not live
-    // AUM, and has no delta pill (metricKey: null) — it must disclose it is
-    // projected so the shrunk number isn't read as the allocator's real book.
-    expect(
-      screen.getByText("Projected — sum of enabled holdings"),
-    ).toBeInTheDocument();
-  });
-
-  it("WR-02: mode='live' AUM cell does NOT show the projected disclosure", () => {
-    render(
-      <KpiStrip
-        analytics={{
-          ytd_twr: 0.15,
-          sharpe: 1.2,
-          max_drawdown_12m: -0.08,
-          avg_correlation: 0.42,
-        }}
-        metrics={LIVE_METRICS}
-        timeframe="ALL"
-        aum={1_000_000}
-        snapshotCount={30}
-      />,
-    );
+    expect(screen.queryByText("AUM")).toBeNull();
+    // No cell renders the projected-AUM disclosure any more, either.
     expect(
       screen.queryByText("Projected — sum of enabled holdings"),
     ).toBeNull();
+    const group = screen.getByRole("group", { name: "Portfolio KPIs" });
+    const valueDivs = Array.from(
+      group.querySelectorAll<HTMLDivElement>("div.font-mono"),
+    );
+    for (const v of valueDivs) {
+      expect(v.textContent ?? "").not.toMatch(/\$/);
+    }
   });
 
   it("T3: mode='scenario' Max DD improvement → '-4.00%' primary + positive delta pill (down-good direction)", () => {

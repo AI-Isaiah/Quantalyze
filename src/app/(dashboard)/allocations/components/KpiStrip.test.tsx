@@ -1,15 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { KpiStrip } from "./KpiStrip";
 import type { ComputedMetrics } from "@/lib/scenario";
 
 /**
- * Phase 09.1 / Plan 06 (D-09) — KpiStrip 5-cell shape tests.
+ * Phase 09.1 / Plan 06 (D-09) — KpiStrip shape tests.
+ * Phase 64 / PRESENT-01 — re-pointed from the 5-cell (AUM-led) shape to the
+ * 4-cell return-form shape (AUM removed from presentation).
  *
  * Sister suite to `KpiStrip.warmup.test.tsx` (Phase 07 invariants), which
  * is preserved verbatim and must continue passing in parallel. This file
- * locks the new designer shape:
- *   1. 5 cells in order: AUM / YTD TWR / Sharpe / Max DD 12m / Avg |ρ|
+ * locks the designer shape:
+ *   1. 4 cells in order: YTD TWR / Sharpe / Max DD 12m / Avg |ρ|
  *   2. Numeric formatting via formatPercent / formatNumber / formatCurrency
  *   3. R4 honest Avg |ρ| null-path: "Requires per-holding correlation data
  *      (pending)" when analytics.avg_correlation is null
@@ -37,8 +39,12 @@ const EMPTY_METRICS: ComputedMetrics = {
   effective_end: null,
 };
 
-describe("KpiStrip — designer 5-cell shape (D-09)", () => {
-  it("renders exactly 5 cells with the labels in canonical order", () => {
+describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESENT-01)", () => {
+  // Phase 64 / PRESENT-01: the AUM cell left the strip (a position-space dollar
+  // figure removed from presentation — the scenario-tab analog of the share
+  // page's existing "No USD, no AUM" contract). The strip is now return-form
+  // only: YTD TWR / Sharpe / Max DD 12m / Avg |ρ|, in that order.
+  it("renders exactly 4 cells with the labels in canonical order (no AUM)", () => {
     render(
       <KpiStrip
         analytics={null}
@@ -49,14 +55,40 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
       />,
     );
 
-    const labels = ["AUM", "YTD TWR", "Sharpe", "Max DD 12m", "Avg |ρ|"];
+    const labels = ["YTD TWR", "Sharpe", "Max DD 12m", "Avg |ρ|"];
     const group = screen.getByRole("group", { name: "Portfolio KPIs" });
-    // Each cell renders its label as the first child of the cell wrapper;
-    // we assert order by mapping over the rendered label nodes.
-    const renderedLabels = labels.map((l) =>
-      within(group).getAllByText(l).length > 0 ? l : null,
+    // The grid maps exactly one wrapper <div> per cell; count them directly so
+    // the 4-cell contract fails loud against a 5-cell strip (the RED anchor).
+    const cells = Array.from(group.children);
+    expect(cells.length).toBe(4);
+    // Order is asserted off each cell's first descendant div (the label div).
+    const renderedLabels = cells.map(
+      (c) => c.querySelector("div")?.textContent ?? null,
     );
     expect(renderedLabels).toEqual(labels);
+  });
+
+  // Phase 64 / PRESENT-01 negative pin: no cell is labeled "AUM" and no
+  // dollar-formatted value renders in live mode. Red pre-implementation —
+  // the AUM cell and its "$1.0M" value currently render.
+  it("renders no AUM cell and no dollar-formatted value (live mode)", () => {
+    render(
+      <KpiStrip
+        analytics={null}
+        metrics={EMPTY_METRICS}
+        timeframe="ALL"
+        aum={1_000_000}
+        snapshotCount={30}
+      />,
+    );
+    expect(screen.queryByText("AUM")).toBeNull();
+    const group = screen.getByRole("group", { name: "Portfolio KPIs" });
+    const valueDivs = Array.from(
+      group.querySelectorAll<HTMLDivElement>("div.font-mono"),
+    );
+    for (const v of valueDivs) {
+      expect(v.textContent ?? "").not.toMatch(/\$/);
+    }
   });
 
   it("formats YTD TWR via formatPercent (0.12 → '+12.00%')", () => {
@@ -174,12 +206,13 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
         allKeysStale={true}
       />,
     );
-    // 5 cells, each showing em-dash via the formatter null-input branch.
-    expect(screen.getAllByText("—").length).toBe(5);
-    // Stale sub-copy appears on every cell (5 instances).
+    // Phase 64 / PRESENT-01: 4 return-form cells (AUM removed), each showing
+    // em-dash via the formatter null-input branch.
+    expect(screen.getAllByText("—").length).toBe(4);
+    // Stale sub-copy appears on every cell (4 instances after the AUM removal).
     expect(
       screen.getAllByText("Last sync stale — awaiting next update").length,
-    ).toBe(5);
+    ).toBe(4);
     // Stale precedence beats the Avg |ρ| pending copy.
     expect(
       screen.queryByText("Requires per-holding correlation data (pending)"),
@@ -287,46 +320,19 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
     },
   );
 
-  it(
-    "M-0085: AUM with NaN SHOULD degrade to em-dash but formatCurrency leaks '$NaN' — fix in follow-up (guard formatCurrency for non-finite in src/lib/utils.ts)",
-    () => {
-      render(
-        <KpiStrip
-          analytics={null}
-          metrics={EMPTY_METRICS}
-          timeframe="ALL"
-          aum={NaN}
-          snapshotCount={30}
-        />,
-      );
-      expect(screen.queryByText(/NaN/)).toBeNull();
-    },
-  );
+  // Phase 64 / PRESENT-01 — RETIRED "M-0085: AUM with NaN … formatCurrency
+  // leaks '$NaN'". Its premise (an AUM cell rendered through formatCurrency)
+  // dies with PRESENT-01: no cell renders a dollar figure any more. The
+  // formatCurrency non-finite guard follow-up moves to utils-level if ever
+  // needed. The Sharpe/Avg |ρ| (formatNumber) + YTD/Max DD (formatPercent)
+  // NaN tests above are kept byte-unchanged — those cells survive.
 
-  it("AUM is exempt from warmup helper (Phase 07 / 07-03 f9 invariant)", () => {
-    render(
-      <KpiStrip
-        analytics={null}
-        metrics={EMPTY_METRICS}
-        timeframe="ALL"
-        aum={1_000_000}
-        snapshotCount={10}
-        allKeysStale={false}
-        minHistoryDepthMonths={null}
-        activeVenues={[]}
-      />,
-    );
-    // AUM has a real value → its cell shows neither warmup helper nor
-    // any sub-line. The other 4 cells (null raw) carry the warmup copy.
-    const warmupNodes = screen.getAllByText(
-      "Warming up — need 20 more days of synced data.",
-    );
-    // 4 null-value cells × 1 warmup line = 4 instances. AUM cell is the
-    // exempt one (and AUM has a real value here so the warmup branch
-    // wouldn't have fired anyway — this asserts the count, not the
-    // exemption directly).
-    expect(warmupNodes.length).toBe(4);
-  });
+  // Phase 64 / PRESENT-01 — RETIRED "AUM is exempt from warmup helper (f9)".
+  // The exemption's ONLY subject was the AUM cell (a dollar figure, almost
+  // always present during warm-up). With the cell gone, all four surviving
+  // cells are non-exempt return-form metrics — the warm-up count for a
+  // null-metric strip is now 4/4, pinned by the warm-up precedence tests
+  // above (which use ≥1 assertions) and KpiStrip.warmup.test.tsx.
 
   // ---------------------------------------------------------------------------
   // Phase 52-02 / TYPE-04 — @container migration. The strip must respond to ITS
@@ -391,12 +397,13 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
       // Each cell's primary value div is `font-mono … tabular-nums`. Query the
       // value divs directly (font-mono is the value-cell marker) and assert
       // EVERY one keeps both classes so a future refactor can't silently drop
-      // the fixed-glyph advance that keeps the 5 columns aligned.
+      // the fixed-glyph advance that keeps the 4 columns aligned.
       const valueCells = Array.from(
         group.querySelectorAll<HTMLDivElement>("div.font-mono"),
       );
-      // Non-vacuity: the 5-cell strip renders 5 value divs.
-      expect(valueCells.length).toBeGreaterThanOrEqual(5);
+      // Phase 64 / PRESENT-01: non-vacuity — the 4-cell return-form strip
+      // renders 4 value divs (AUM removed).
+      expect(valueCells.length).toBeGreaterThanOrEqual(4);
       for (const cell of valueCells) {
         expect(cell.className).toContain("font-mono");
         expect(cell.className).toContain("tabular-nums");
@@ -404,9 +411,9 @@ describe("KpiStrip — designer 5-cell shape (D-09)", () => {
       // And the real formatted KPI values are the ones carrying the classes —
       // prove the cells we asserted on are the actual numeric values, not chrome.
       const rendered = valueCells.map((c) => c.textContent?.trim());
-      // formatCurrency renders compact notation ($1.0M), the others are the
-      // exact formatPercent / formatNumber outputs.
-      for (const v of ["$1.0M", "+12.00%", "1.73", "-8.00%", "0.42"]) {
+      // Phase 64 / PRESENT-01: the "$1.0M" AUM value is gone; the four
+      // return-form values are the exact formatPercent / formatNumber outputs.
+      for (const v of ["+12.00%", "1.73", "-8.00%", "0.42"]) {
         expect(rendered).toContain(v);
       }
     });
