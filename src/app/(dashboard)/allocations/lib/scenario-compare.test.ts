@@ -103,6 +103,35 @@ function liveInputs(
   };
 }
 
+/**
+ * Per-key live inputs — the prod SAVED-book path (MEMBER-02). Gate satisfied,
+ * `returnsByKey` keyed by api_key_id, `equityByKey` the per-key equity shares,
+ * NO holdings (a saved book draft computes on PER-KEY units, not the
+ * holdings-snapshot — P61-BUG-2). `eligible` defaults to every key present.
+ * A saved draft selects this path via `memberKeyIds` (non-empty). This is the
+ * intent-preserving vehicle for "a saved draft computing over a real book":
+ * after MEMBER-02 a blank draft (memberKeyIds=[]) NEVER inherits the live
+ * holdings, so the holdings else-branch is reachable only by the live-book
+ * own-book column (`{ liveBook: true }`), not by a saved book draft.
+ */
+function perKeyLiveInputs(
+  returnsByKey: Record<string, DailyPoint[]>,
+  equityByKey: Record<string, number>,
+  eligible?: string[],
+): ScenarioCompareInputs {
+  return {
+    holdingsSummary: [],
+    holdingReturnsByScopeRef: {},
+    addedStrategyReturnsLookup: {},
+    addedStrategyMetadataLookup: {},
+    symbolByHoldingId: new Map(),
+    perKeyReturnsByApiKeyId: returnsByKey,
+    eligibleApiKeyIds: eligible ?? Object.keys(returnsByKey),
+    equityByApiKeyId: equityByKey,
+    perKeyDailiesGateSatisfied: true,
+  };
+}
+
 /** A minimal saved draft (current schema). Toggles/weights default empty so the
  *  adapter defaults (all holdings included, value-proportional) flow through. */
 function draft(overrides: Partial<ScenarioDraft> = {}): ScenarioDraft {
@@ -123,18 +152,25 @@ function draft(overrides: Partial<ScenarioDraft> = {}): ScenarioDraft {
 // =========================================================================
 
 describe("computeMetricsForDraft", () => {
-  it("round-trips a saved draft to real metrics over a healthy live book", () => {
+  it("round-trips a saved book draft to real metrics over a healthy per-key book", () => {
+    // MEMBER-02 rebase: a SAVED book draft computes over PER-KEY units selected
+    // by its persisted membership (P61-BUG-2), not the holdings snapshot. A
+    // blank draft (memberKeyIds=[]) would compute added-only and never inherit
+    // the live book — so a real "book over live data" round-trip is a per-key
+    // membership draft.
     const dates = buildDates("2024-01-02", 80);
-    const holdings: HoldingFixture[] = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 6000 },
-      { symbol: "ETH", venue: "binance", holding_type: "spot", value_usd: 4000 },
-    ];
-    const returnsByRef = {
-      [holdingRef("binance", "BTC", "spot")]: altReturns(dates, 0.01, -0.008),
-      [holdingRef("binance", "ETH", "spot")]: altReturns(dates, 0.012, -0.009),
-    };
+    const inputs = perKeyLiveInputs(
+      {
+        "key-A": altReturns(dates, 0.01, -0.008),
+        "key-B": altReturns(dates, 0.012, -0.009),
+      },
+      { "key-A": 6000, "key-B": 4000 },
+    );
 
-    const m = computeMetricsForDraft(draft(), liveInputs(holdings, returnsByRef));
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A", "key-B"] }),
+      inputs,
+    );
 
     expect(m.n).toBe(80);
     expect(m.twr).not.toBeNull();
@@ -145,20 +181,18 @@ describe("computeMetricsForDraft", () => {
     expect(m.volatility).not.toBeNull();
   });
 
-  it("yields NULL metrics for a degenerate draft — never coerces to 0", () => {
-    // Only 6 overlapping days — below the engine's n<10 usable floor, BUT the
-    // adapter's warm-up gate (minReturnDays=30) drops a sub-30-day holding, so
-    // we give a 6-day window AND lower nothing: the result is an empty active
-    // set → engine returns null metrics with n=0.
+  it("yields NULL metrics for a degenerate book draft — never coerces to 0", () => {
+    // Only 6 overlapping days — below the engine's n<10 usable floor, so the
+    // blend is degenerate and the engine returns null metrics. Honesty
+    // invariant: null, never a fabricated 0. (Per-key vehicle — the SAVED book
+    // path after MEMBER-02.)
     const shortDates = buildDates("2024-01-02", 6);
-    const holdings: HoldingFixture[] = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 1000 },
-    ];
-    const returnsByRef = {
-      [holdingRef("binance", "BTC", "spot")]: altReturns(shortDates, 0.01, -0.01),
-    };
+    const inputs = perKeyLiveInputs(
+      { "key-A": altReturns(shortDates, 0.01, -0.01) },
+      { "key-A": 1000 },
+    );
 
-    const m = computeMetricsForDraft(draft(), liveInputs(holdings, returnsByRef));
+    const m = computeMetricsForDraft(draft({ memberKeyIds: ["key-A"] }), inputs);
 
     // Honesty invariant: the metric fields are NULL, not a fabricated 0.
     expect(m.twr).toBeNull();
@@ -170,22 +204,27 @@ describe("computeMetricsForDraft", () => {
     expect(m.volatility).not.toBe(0);
   });
 
-  it("two drafts with heterogeneous overlap windows each report their OWN n", () => {
+  it("two book drafts with heterogeneous overlap windows each report their OWN n", () => {
     const longDates = buildDates("2024-01-02", 90);
     const shortDates = buildDates("2024-01-02", 60);
-    const holdings: HoldingFixture[] = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 5000 },
-    ];
 
-    const longInputs = liveInputs(holdings, {
-      [holdingRef("binance", "BTC", "spot")]: altReturns(longDates, 0.01, -0.008),
-    });
-    const shortInputs = liveInputs(holdings, {
-      [holdingRef("binance", "BTC", "spot")]: altReturns(shortDates, 0.01, -0.008),
-    });
+    const longInputs = perKeyLiveInputs(
+      { "key-A": altReturns(longDates, 0.01, -0.008) },
+      { "key-A": 5000 },
+    );
+    const shortInputs = perKeyLiveInputs(
+      { "key-A": altReturns(shortDates, 0.01, -0.008) },
+      { "key-A": 5000 },
+    );
 
-    const mLong = computeMetricsForDraft(draft(), longInputs);
-    const mShort = computeMetricsForDraft(draft(), shortInputs);
+    const mLong = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A"] }),
+      longInputs,
+    );
+    const mShort = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A"] }),
+      shortInputs,
+    );
 
     // The helper does NOT force a common window — each reports its own n.
     expect(mLong.n).toBe(90);
@@ -207,34 +246,44 @@ describe("computeMetricsForDraft", () => {
   // the same rule the composer's WINDOW-01 auto-default and share-resolve
   // apply. ONLY the live-book column (`{ liveBook: true }`, a structural
   // compute input) stays on the union path (Phase-55 own-book lock).
+  //
+  // MEMBER-02 rebase: the SAVED-draft vehicle is now a per-key membership draft
+  // (the blank/holdings-snapshot path is added-only after F5 closure), so these
+  // ragged-span pins use per-key series keyed by api_key_id.
   // =======================================================================
 
   it("a windowed draft narrows effective bounds to the window (distinct from the windowless default)", () => {
-    // Two holdings with DIFFERENT coverage spans:
-    //   BTC — the full ~140-day span (2024-01-02 → ~2024-07-16)
-    //   ETH — a LATE-starting span that begins ~2024-04-01.
-    // A window pinned to a LATER sub-range strictly inside ETH's coverage is
+    // Two per-key members with DIFFERENT coverage spans:
+    //   key-BTC — the full ~140-day span (2024-01-02 → ~2024-07-16)
+    //   key-ETH — a LATE-starting span that begins ~2024-04-01.
+    // A window pinned to a LATER sub-range strictly inside key-ETH's coverage is
     // covered by BOTH, so the windowed blend keeps both members but its
     // effective bounds are the explicit window — NOT the windowless
-    // intersection default (which starts at ETH's first date).
+    // intersection default (which starts at key-ETH's first date).
     const btcDates = buildDates("2024-01-02", 140);
     const ethDates = buildDates("2024-04-01", 80);
-    const holdings: HoldingFixture[] = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 5000 },
-      { symbol: "ETH", venue: "binance", holding_type: "spot", value_usd: 5000 },
-    ];
-    const inputs = liveInputs(holdings, {
-      [holdingRef("binance", "BTC", "spot")]: altReturns(btcDates, 0.01, -0.008),
-      [holdingRef("binance", "ETH", "spot")]: altReturns(ethDates, 0.012, -0.009),
-    });
+    const inputs = perKeyLiveInputs(
+      {
+        "key-BTC": altReturns(btcDates, 0.01, -0.008),
+        "key-ETH": altReturns(ethDates, 0.012, -0.009),
+      },
+      { "key-BTC": 5000, "key-ETH": 5000 },
+    );
+    const members = ["key-BTC", "key-ETH"];
 
-    // A window inside ETH's coverage (both members cover it).
+    // A window inside key-ETH's coverage (both members cover it).
     const window = { start: ethDates[10], end: ethDates[60] };
 
     // RT-1 re-baseline: the windowless baseline is now the INTERSECTION default
-    // (ETH's span here — the latest start), no longer the legacy union.
-    const defaulted = computeMetricsForDraft(draft(), inputs);
-    const windowed = computeMetricsForDraft(draft({ window }), inputs);
+    // (key-ETH's span here — the latest start), no longer the legacy union.
+    const defaulted = computeMetricsForDraft(
+      draft({ memberKeyIds: members }),
+      inputs,
+    );
+    const windowed = computeMetricsForDraft(
+      draft({ memberKeyIds: members, window }),
+      inputs,
+    );
 
     // The explicit window is honored verbatim — its bounds differ from the
     // intersection default's (which starts at ethDates[0], not ethDates[10]).
@@ -250,47 +299,54 @@ describe("computeMetricsForDraft", () => {
   });
 
   it("a windowed draft drops members that do not cover the window (member_count reflects the window)", () => {
-    // BTC covers the full range; ETH only covers a LATE sub-range. A window over
-    // the EARLY range (before ETH exists) is covered by BTC ONLY → ETH is dropped
-    // from the windowed blend, so member_count reflects window membership (< the
-    // full selected set), while the union path counts both.
+    // key-BTC covers the full range; key-ETH only covers a LATE sub-range. A
+    // window over the EARLY range (before key-ETH exists) is covered by key-BTC
+    // ONLY → key-ETH is dropped from the windowed blend, so member_count
+    // reflects window membership (< the full selected set), while the union
+    // path counts both.
     const btcDates = buildDates("2024-01-02", 200);
     const ethDates = buildDates("2024-06-03", 60);
-    const holdings: HoldingFixture[] = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 5000 },
-      { symbol: "ETH", venue: "binance", holding_type: "spot", value_usd: 5000 },
-    ];
-    const inputs = liveInputs(holdings, {
-      [holdingRef("binance", "BTC", "spot")]: altReturns(btcDates, 0.01, -0.008),
-      [holdingRef("binance", "ETH", "spot")]: altReturns(ethDates, 0.012, -0.009),
-    });
+    const inputs = perKeyLiveInputs(
+      {
+        "key-BTC": altReturns(btcDates, 0.01, -0.008),
+        "key-ETH": altReturns(ethDates, 0.012, -0.009),
+      },
+      { "key-BTC": 5000, "key-ETH": 5000 },
+    );
 
-    // An EARLY window — inside BTC's span but BEFORE ETH starts. Only BTC covers it.
+    // An EARLY window — inside key-BTC's span but BEFORE key-ETH starts.
     const earlyWindow = { start: btcDates[5], end: btcDates[70] };
-    const windowed = computeMetricsForDraft(draft({ window: earlyWindow }), inputs);
+    const windowed = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-BTC", "key-ETH"], window: earlyWindow }),
+      inputs,
+    );
 
-    // ETH does not cover the early window → only 1 member survives the window.
+    // key-ETH does not cover the early window → only 1 member survives.
     expect(windowed.member_count).toBe(1);
-    expect(windowed.member_ids).toEqual([holdingRef("binance", "BTC", "spot")]);
+    expect(windowed.member_ids).toEqual(["key-BTC"]);
   });
 
   it("two drafts with DIFFERENT windows compute independently (heterogeneous, not force-aligned)", () => {
     // The compare invariant: each column is at its OWN window. Two windows over
-    // NON-OVERLAPPING sub-ranges of the same live book produce independent
+    // NON-OVERLAPPING sub-ranges of the same book produce independent
     // effective bounds — neither is aligned to the other.
     const dates = buildDates("2024-01-02", 200);
-    const holdings: HoldingFixture[] = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 5000 },
-    ];
-    const inputs = liveInputs(holdings, {
-      [holdingRef("binance", "BTC", "spot")]: altReturns(dates, 0.01, -0.008),
-    });
+    const inputs = perKeyLiveInputs(
+      { "key-BTC": altReturns(dates, 0.01, -0.008) },
+      { "key-BTC": 5000 },
+    );
 
     const earlyWindow = { start: dates[5], end: dates[70] };
     const lateWindow = { start: dates[120], end: dates[190] };
 
-    const early = computeMetricsForDraft(draft({ window: earlyWindow }), inputs);
-    const late = computeMetricsForDraft(draft({ window: lateWindow }), inputs);
+    const early = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-BTC"], window: earlyWindow }),
+      inputs,
+    );
+    const late = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-BTC"], window: lateWindow }),
+      inputs,
+    );
 
     // Each computes at its OWN window — the bounds are independent, NOT aligned.
     expect(early.effective_start).not.toBe(late.effective_start);
@@ -300,67 +356,64 @@ describe("computeMetricsForDraft", () => {
 
   it("the live-book column ({ liveBook: true }) stays on the UNION path while a windowless SAVED draft gets the intersection default (Phase-55 lock, structural exception)", () => {
     // RT-1 re-baseline of the Phase-55 own-book union lock pin. Over a RAGGED
-    // book (BTC full 120 days, ETH starting ~30 trading days later) the two
-    // rules are observably different:
-    //   - the live-book column (buildLiveBookDraft + { liveBook: true }) is the
-    //     allocator's OWN book, not a saved scenario → union-when-absent path,
-    //     byte-identical to the pre-RT-1 behavior (full BTC-driven bounds, all
-    //     120 trading days);
+    // per-key book (key-BTC full 120 days, key-ETH starting ~30 trading days
+    // later) the two rules are observably different:
+    //   - the live-book column (buildLiveBookDraft(eligible) + { liveBook: true })
+    //     is the allocator's OWN book, not a saved scenario → union-when-absent
+    //     path (full key-BTC-driven bounds, all 120 trading days);
     //   - a windowless SAVED draft over the SAME book defaults to the
-    //     intersection (ETH's late start clamps it).
-    const dates = buildDates("2024-01-02", 120);
-    const ethDates = dates.slice(30);
-    const holdings: HoldingFixture[] = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 6000 },
-      { symbol: "ETH", venue: "binance", holding_type: "spot", value_usd: 4000 },
-    ];
-    const inputs = liveInputs(holdings, {
-      [holdingRef("binance", "BTC", "spot")]: altReturns(dates, 0.01, -0.008),
-      [holdingRef("binance", "ETH", "spot")]: altReturns(ethDates, 0.012, -0.009),
-    });
+    //     intersection (key-ETH's late start clamps it).
+    const btcDates = buildDates("2024-01-02", 120);
+    const ethDates = btcDates.slice(30);
+    const eligible = ["key-BTC", "key-ETH"];
+    const inputs = perKeyLiveInputs(
+      {
+        "key-BTC": altReturns(btcDates, 0.01, -0.008),
+        "key-ETH": altReturns(ethDates, 0.012, -0.009),
+      },
+      { "key-BTC": 6000, "key-ETH": 4000 },
+      eligible,
+    );
 
-    // MEMBER-02 signature change: buildLiveBookDraft now takes the eligible
-    // api-key ids. This is a holdings-only book (no per-key keys) → [] → empty
-    // membership → the holdings union path (unchanged behavior).
-    const liveDraft = buildLiveBookDraft([]);
+    // buildLiveBookDraft stamps membership = derived(gate=true, eligible) so the
+    // own-book column keeps selecting the per-key set; { liveBook: true } holds
+    // it on the union path (Phase-55 lock) with NO window.
+    const liveDraft = buildLiveBookDraft(eligible);
     expect(liveDraft.window).toBeUndefined(); // never carries a window
 
     const live = computeMetricsForDraft(liveDraft, inputs, { liveBook: true });
-    // Union path — the full blended span, from BTC's first day, all 120 days.
-    expect(live.effective_start).toBe(dates[0]);
+    // Union path — the full blended span, from key-BTC's first day, all 120 days.
+    expect(live.effective_start).toBe(btcDates[0]);
     expect(live.n).toBe(120);
 
-    // The SAME windowless draft as a SAVED column → intersection default:
-    // clamped to ETH's late start, fewer days than the union.
-    const saved = computeMetricsForDraft(draft(), inputs);
+    // The SAME book as a windowless SAVED column → intersection default:
+    // clamped to key-ETH's late start, fewer days than the union.
+    const saved = computeMetricsForDraft(
+      draft({ memberKeyIds: eligible }),
+      inputs,
+    );
     expect(saved.effective_start).toBe(ethDates[0]);
     expect(saved.n).toBeLessThan(live.n);
   });
 
-  it("a windowless (v2) SAVED draft defaults to the INTERSECTION of its selected spans — same rule as the composer + share (RT-1 contract correction)", () => {
+  it("a windowless SAVED draft defaults to the INTERSECTION of its selected spans — same rule as the composer + share (RT-1 contract correction)", () => {
     // RE-BASELINED (ship-review RT-1, DELIBERATE contract correction — locked
     // 59-CONTEXT Area 3 Q4: "A windowless v2 draft in a compare set →
-    // intersection default (same rule everywhere)"): this pin previously
-    // asserted the legacy union path for a windowless saved draft, which made
-    // the SAME scenario compute under a different divisor rule in compare than
-    // in the owner's composer. The ragged book proves the intersection rule
-    // and the determinism of the shared helper chain (coverageSpanOf →
-    // defaultWindowFor — the SAME helpers the composer's WINDOW-01 default and
-    // share-resolve use), which is the oracle below.
+    // intersection default (same rule everywhere)"): this pin proves the
+    // intersection rule and the determinism of the shared helper chain
+    // (coverageSpanOf → defaultWindowFor — the SAME helpers the composer's
+    // WINDOW-01 default and share-resolve use), which is the oracle below. The
+    // SAVED-draft vehicle is a per-key membership book (MEMBER-02).
     const btcDates = buildDates("2024-01-02", 90);
     const ethDates = buildDates("2024-03-01", 50); // ragged head, later tail
-    const holdings: HoldingFixture[] = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 5000 },
-      { symbol: "ETH", venue: "binance", holding_type: "spot", value_usd: 5000 },
-    ];
     const btcReturns = altReturns(btcDates, 0.01, -0.008);
     const ethReturns = altReturns(ethDates, 0.012, -0.009);
-    const inputs = liveInputs(holdings, {
-      [holdingRef("binance", "BTC", "spot")]: btcReturns,
-      [holdingRef("binance", "ETH", "spot")]: ethReturns,
-    });
+    const inputs = perKeyLiveInputs(
+      { "key-BTC": btcReturns, "key-ETH": ethReturns },
+      { "key-BTC": 5000, "key-ETH": 5000 },
+    );
 
-    const windowlessDraft = draft();
+    const windowlessDraft = draft({ memberKeyIds: ["key-BTC", "key-ETH"] });
     expect(windowlessDraft.window).toBeUndefined();
 
     // The composer-side default for the same book, via the shared helpers.
@@ -375,23 +428,21 @@ describe("computeMetricsForDraft", () => {
     // window on every surface (compare == composer == share).
     expect(m.effective_start).toBe(composerDefault!.start);
     expect(m.effective_end).toBe(composerDefault!.end);
-    // Both holdings cover the intersection by construction → both are members.
+    // Both members cover the intersection by construction → both are members.
     expect(m.member_count).toBe(2);
   });
 
   it("a windowless SAVED draft over a single-span book is numerically unchanged (intersection of one span == its full span)", () => {
     // Back-compat note for the RT-1 re-baseline: for a book whose selected
-    // spans all coincide (here: ONE holding), intersection == union — the
+    // spans all coincide (here: ONE member), intersection == union — the
     // default-window change is observable only on ragged books.
     const dates = buildDates("2024-01-02", 90);
-    const holdings: HoldingFixture[] = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 5000 },
-    ];
-    const inputs = liveInputs(holdings, {
-      [holdingRef("binance", "BTC", "spot")]: altReturns(dates, 0.01, -0.008),
-    });
+    const inputs = perKeyLiveInputs(
+      { "key-BTC": altReturns(dates, 0.01, -0.008) },
+      { "key-BTC": 5000 },
+    );
 
-    const m = computeMetricsForDraft(draft(), inputs);
+    const m = computeMetricsForDraft(draft({ memberKeyIds: ["key-BTC"] }), inputs);
     // Full span, all trading days — nothing clamped.
     expect(m.n).toBe(90);
     expect(m.effective_start).not.toBeNull();
@@ -402,21 +453,21 @@ describe("computeMetricsForDraft", () => {
     // A saved draft carries no leverage field. Even if a caller smuggles one
     // onto the draft object, the helper must never consult it: a 2x leg would
     // double the curve, so TWR with vs without the smuggled field must match.
+    // Non-vacuous: a per-key member yields REAL (non-null) metrics.
     const dates = buildDates("2024-01-02", 80);
-    const holdings: HoldingFixture[] = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 5000 },
-    ];
-    const inputs = liveInputs(holdings, {
-      [holdingRef("binance", "BTC", "spot")]: altReturns(dates, 0.01, -0.008),
-    });
+    const inputs = perKeyLiveInputs(
+      { "key-A": altReturns(dates, 0.01, -0.008) },
+      { "key-A": 5000 },
+    );
 
-    const base = computeMetricsForDraft(draft(), inputs);
+    const base = computeMetricsForDraft(draft({ memberKeyIds: ["key-A"] }), inputs);
     const smuggled = computeMetricsForDraft(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      { ...draft(), leverage: { [holdingRef("binance", "BTC", "spot")]: 2 } } as any,
+      { ...draft({ memberKeyIds: ["key-A"] }), leverage: { "key-A": 2 } } as any,
       inputs,
     );
 
+    expect(base.twr).not.toBeNull();
     expect(smuggled.twr).toBe(base.twr);
     expect(smuggled.volatility).toBe(base.volatility);
   });
@@ -424,6 +475,9 @@ describe("computeMetricsForDraft", () => {
 
 describe("buildLiveBookDraft", () => {
   it("produces an all-on, equity-weight draft so all six metrics populate", () => {
+    // The live-book own-book column blends the live holdings on the union path.
+    // It is the ONE structural exception that still computes over
+    // holdingsSummary — declared at the call site via { liveBook: true }.
     const dates = buildDates("2024-01-02", 80);
     const holdings: HoldingFixture[] = [
       { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 6000 },
@@ -439,7 +493,7 @@ describe("buildLiveBookDraft", () => {
     // No added strategies, no leverage on the synthetic draft.
     expect(liveDraft.addedStrategies).toHaveLength(0);
 
-    const m = computeMetricsForDraft(liveDraft, inputs);
+    const m = computeMetricsForDraft(liveDraft, inputs, { liveBook: true });
     expect(m.n).toBe(80);
     expect(m.twr).not.toBeNull();
     expect(m.cagr).not.toBeNull();
@@ -451,6 +505,7 @@ describe("buildLiveBookDraft", () => {
 
   it("a genuinely degenerate live book still renders null (honest em-dash), not a 0", () => {
     // A live book with a single sub-warm-up holding → empty active set → null.
+    // The own-book column feeds holdings on the union path via { liveBook: true }.
     const shortDates = buildDates("2024-01-02", 6);
     const holdings: HoldingFixture[] = [
       { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 1000 },
@@ -459,7 +514,9 @@ describe("buildLiveBookDraft", () => {
       [holdingRef("binance", "BTC", "spot")]: altReturns(shortDates, 0.01, -0.01),
     });
 
-    const m = computeMetricsForDraft(buildLiveBookDraft([]), inputs);
+    const m = computeMetricsForDraft(buildLiveBookDraft([]), inputs, {
+      liveBook: true,
+    });
     expect(m.sharpe).toBeNull();
     expect(m.sharpe).not.toBe(0);
   });
@@ -634,6 +691,47 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
     );
     expect(m.member_count).toBe(0);
     // Honest absence, never a fabricated live-book blend.
+    expect(m.member_ids).toEqual([]);
+    expect(m.twr).toBeNull();
+  });
+
+  it("F5 (prod shape): a blank-membership draft over a NON-EMPTY live book computes added-only — never blends the live holdings", () => {
+    // WR-01 regression. The masked-bug shape: the live book HAS holdings (the
+    // real prod case) and the per-key gate is satisfied, but the saved draft is
+    // blank (memberKeyIds=[], no added strategies). The composer renders THIS
+    // draft with holdingsSummary=[] (blank mode → added-only), so the compare
+    // column MUST NOT inherit the live holdings. Pre-fix the else-branch fed
+    // `liveInputs.holdingsSummary` unconditionally and the overlay defaulted
+    // every unseeded holding to selected=true → the blank column silently
+    // blended the WHOLE live book (member_count 2). The earlier F5 pin masked
+    // this by passing holdingsSummary:[] — this one carries a non-empty book.
+    const dates = buildDates("2026-02-02", 40);
+    const inputs: ScenarioCompareInputs = {
+      holdingsSummary: [
+        { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 6000 },
+        { symbol: "ETH", venue: "binance", holding_type: "spot", value_usd: 4000 },
+      ],
+      holdingReturnsByScopeRef: {
+        [holdingRef("binance", "BTC", "spot")]: altReturns(dates, 0.01, -0.008),
+        [holdingRef("binance", "ETH", "spot")]: altReturns(dates, 0.012, -0.009),
+      },
+      addedStrategyReturnsLookup: {},
+      addedStrategyMetadataLookup: {},
+      symbolByHoldingId: new Map([
+        [holdingRef("binance", "BTC", "spot"), "BTC"],
+        [holdingRef("binance", "ETH", "spot"), "ETH"],
+      ]),
+      perKeyReturnsByApiKeyId: {},
+      eligibleApiKeyIds: [],
+      equityByApiKeyId: {},
+      perKeyDailiesGateSatisfied: true,
+    };
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: [], addedStrategies: [] }),
+      inputs,
+    );
+    // Added-only over an EMPTY added set → honest empty, NOT the 2-holding book.
+    expect(m.member_count).toBe(0);
     expect(m.member_ids).toEqual([]);
     expect(m.twr).toBeNull();
   });

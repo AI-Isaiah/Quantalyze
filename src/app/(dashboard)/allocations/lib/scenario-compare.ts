@@ -197,8 +197,21 @@ export function computeMetricsForDraft(
       >,
     );
   } else {
+    // MEMBER-02 F5 closure: a SAVED draft that reaches the holdings/added path
+    // has EMPTY membership. A blank-authored draft (memberKeyIds=[]) must
+    // compute ADDED-ONLY — the composer renders it with holdingsSummary=[]
+    // (blank mode, ScenarioComposer.tsx:702-704), so its compare column must
+    // NEVER inherit the live book's holdings (the overlay would otherwise
+    // default every unseeded live holding to selected=true and silently blend
+    // the whole book). The ONE structural exception is the live-book own-book
+    // column: `opts.liveBook` (Phase-55 union lock) feeds the real live
+    // holdings. Every other empty-membership column is added-only. This mirrors
+    // the composer's entryMode split without persisting entryMode: membership
+    // is the selector, `opts.liveBook` declares the own-book exception at the
+    // call site (never name-matched).
+    const holdingsForDraft = opts.liveBook ? liveInputs.holdingsSummary : [];
     adapterOutput = buildStrategyForBuilderSet(
-      liveInputs.holdingsSummary,
+      holdingsForDraft,
       disabledHoldingRefs,
       draft.addedStrategies,
       liveInputs.holdingReturnsByScopeRef,
