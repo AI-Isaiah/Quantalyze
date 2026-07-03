@@ -253,7 +253,10 @@ vi.mock("./CustomRangePicker", () => ({
 import { ScenarioComposer } from "./ScenarioComposer";
 // Real (un-mocked) — used to build a valid current-schema draft so the
 // onRegisterOpen handler decodes "ok" in the WR-02 regression test below.
-import { defaultDraftFromHoldings } from "../lib/scenario-state";
+import {
+  defaultDraftFromHoldings,
+  type ScenarioDraft,
+} from "../lib/scenario-state";
 import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { KpiStrip } from "./KpiStrip";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
@@ -7506,5 +7509,302 @@ describe("ScenarioComposer — P61-BUG-1: added strategies join the per-key book
       // Non-vacuous: a 50% sleeve of a distinct series must move the numbers.
       expect(after?.twr).not.toBe(before?.twr);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MEMBER-04 (Phase 62 Plan 04) — membership stamping + reopen derive + ineligible
+// disclosure.
+//
+// Three contracts:
+//  (1) STAMP (entryMode-aware) — a NEW save persists real membership: book mode +
+//      per-key gate ⇒ the eligible ids; blank mode ⇒ [] EVEN when the gate is
+//      true (the F5 STAMP closure — a blank draft never inherits book members);
+//      book without the gate ⇒ [] (holdings-fallback has no per-key membership).
+//  (2) DERIVE-AND-STAMP on reopen — an UPGRADED / underived draft (memberKeyIds
+//      undefined) becomes self-describing: reopening derives membership from the
+//      gate + eligible set and stamps it into the WORKING draft, so an immediate
+//      save (no further edits) POSTs the derived ids (not undefined/empty).
+//  (3) INELIGIBLE DISCLOSURE — reopening a genuine v4 draft whose persisted
+//      membership includes an id no longer eligible raises a DISTINCT ephemeral
+//      provenance note (`scenario-membership-note`); the drop is never silent.
+//      Dismissal is ephemeral (component-local), re-shows per affected draft.
+//
+// These FAIL against the pre-plan-04 composer (save sends memberKeyIds straight
+// from the working draft; reopen never derives/stamps; no membership note).
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + ineligible disclosure", () => {
+  const M4_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-02-${String(i + 1).padStart(2, "0")}`,
+  );
+  const M4_SERIES_A = M4_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const M4_SERIES_B = M4_DATES.map((date, i) => ({
+    date,
+    value: [-0.03, 0.04, -0.05, 0.02, -0.01][i % 5],
+  }));
+
+  const M4_KEY_A = {
+    id: "key-A",
+    exchange: "binance",
+    label: "Main desk",
+    is_active: true,
+    sync_status: null,
+    last_sync_at: null,
+    account_balance_usdt: null,
+    created_at: "2026-01-01T00:00:00Z",
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
+  };
+  const M4_KEY_B = { ...M4_KEY_A, id: "key-B", exchange: "okx", label: "" };
+
+  // Holdings grouped by api_key_id supply the per-key equity weights. Key A
+  // $70k, key B $30k — a genuinely weighted per-key blend.
+  const M4_HOLDING_A = {
+    ...HOLDING_BTC,
+    symbol: "BTC",
+    venue: "binance",
+    value_usd: 70_000,
+    api_key_id: "key-A",
+  };
+  const M4_HOLDING_B = {
+    ...HOLDING_ETH,
+    symbol: "ETH",
+    venue: "okx",
+    value_usd: 30_000,
+    api_key_id: "key-B",
+  };
+  const M4_HOLDINGS = [M4_HOLDING_A, M4_HOLDING_B];
+
+  /** Book-mode payload, per-key gate satisfied, two eligible sources. */
+  function m4Payload(
+    overrides: Partial<MyAllocationDashboardPayload> = {},
+  ): MyAllocationDashboardPayload {
+    return makePayload({
+      apiKeys: [M4_KEY_A, M4_KEY_B],
+      holdingsSummary: M4_HOLDINGS,
+      perKeyReturnsByApiKeyId: {
+        "key-A": M4_SERIES_A,
+        "key-B": M4_SERIES_B,
+      },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: ["key-A", "key-B"],
+      ...overrides,
+    });
+  }
+
+  const SAVE_URL_RE = /\/api\/allocator\/scenario\/saved/;
+  function saveCalls(
+    fetchMock: ReturnType<typeof vi.fn>,
+  ): Array<[string, RequestInit | undefined]> {
+    return fetchMock.mock.calls.filter((c) =>
+      SAVE_URL_RE.test(String(c[0])),
+    ) as Array<[string, RequestInit | undefined]>;
+  }
+  /** The parsed draft on the first captured save request body. */
+  function savedDraft(fetchMock: ReturnType<typeof vi.fn>): ScenarioDraft {
+    const init = saveCalls(fetchMock)[0][1] as RequestInit;
+    return JSON.parse(init.body as string).draft as ScenarioDraft;
+  }
+  /** Benchmark GET degrades to []; every save URL answers `response()`. */
+  function makeSaveFetchMock(
+    response: () => {
+      ok: boolean;
+      status: number;
+      json: () => Promise<unknown>;
+    },
+  ): ReturnType<typeof vi.fn> {
+    return vi.fn(async (url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      return response();
+    });
+  }
+  const okSave = () =>
+    makeSaveFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: "m4-new-id", name: "M4" }),
+    }));
+
+  let registeredOpen:
+    | ((row: { id: string; name: string; draft: unknown }) => void)
+    | null = null;
+
+  function renderM4(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          registeredOpen = open as typeof registeredOpen;
+        }}
+      />,
+    );
+  }
+
+  /** Save a brand-new scenario through the real toolbar → name → Save gesture. */
+  async function saveNew(name: string, fetchMock: ReturnType<typeof vi.fn>) {
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Save portfolio$/i }),
+    );
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: name },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    registeredOpen = null;
+    browseOnAdd = null;
+    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+      strategies: [],
+      state: { selected: {}, weights: {}, startDates: {} },
+    });
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  // --- (1) STAMP -----------------------------------------------------------
+
+  it("STAMP: a new BOOK save with the gate satisfied persists memberKeyIds = the eligible per-key ids", async () => {
+    const fetchMock = okSave();
+    vi.stubGlobal("fetch", fetchMock);
+    renderM4(m4Payload());
+    await saveNew("Book blend", fetchMock);
+    expect(savedDraft(fetchMock).memberKeyIds).toEqual(["key-A", "key-B"]);
+  });
+
+  it("STAMP (F5 closure): a new BLANK save persists memberKeyIds = [] EVEN when the gate is true", async () => {
+    const fetchMock = okSave();
+    vi.stubGlobal("fetch", fetchMock);
+    renderM4(m4Payload());
+    // Clean draft → switching to Blank slate is lossless/immediate.
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    await saveNew("Blank draft", fetchMock);
+    // A blank draft must never inherit the book members, gate notwithstanding.
+    expect(savedDraft(fetchMock).memberKeyIds).toEqual([]);
+  });
+
+  it("STAMP: a BOOK save WITHOUT the per-key gate persists memberKeyIds = [] (holdings fallback has no per-key membership)", async () => {
+    const fetchMock = okSave();
+    vi.stubGlobal("fetch", fetchMock);
+    renderM4(m4Payload({ perKeyDailiesGateSatisfied: false }));
+    await saveNew("Holdings book", fetchMock);
+    expect(savedDraft(fetchMock).memberKeyIds).toEqual([]);
+  });
+
+  // --- (2) DERIVE-AND-STAMP on reopen -------------------------------------
+
+  it("REOPEN derive-and-stamp: reopening an UPGRADED/underived draft makes it self-describing — an immediate save POSTs the derived membership", async () => {
+    const fetchMock = okSave();
+    vi.stubGlobal("fetch", fetchMock);
+    renderM4(m4Payload());
+    expect(registeredOpen).not.toBeNull();
+    // A decoded draft whose memberKeyIds is UNDERIVED (undefined) — the shape a
+    // v2/v3 upgrade or an underived-v4 round-trip decodes to. Fingerprint
+    // matches the live book → decode "ok", not drifted.
+    const underived = {
+      ...defaultDraftFromHoldings(M4_HOLDINGS),
+      memberKeyIds: undefined,
+    };
+    act(() => {
+      registeredOpen!({ id: "upgraded-row", name: "Upgraded", draft: underived });
+    });
+    // Update the reopened scenario with NO further edits — the working draft
+    // must already carry the derived membership (self-describing).
+    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    expect(savedDraft(fetchMock).memberKeyIds).toEqual(["key-A", "key-B"]);
+  });
+
+  // --- (3) INELIGIBLE DISCLOSURE ------------------------------------------
+
+  it("REOPEN ineligible: reopening a v4 draft with a persisted member no longer eligible SHOWS the membership provenance note (never silent)", () => {
+    renderM4(m4Payload({ eligibleApiKeyIds: ["key-A"] }));
+    const v4 = {
+      ...defaultDraftFromHoldings(M4_HOLDINGS),
+      memberKeyIds: ["key-A", "key-gone"],
+    };
+    act(() => {
+      registeredOpen!({ id: "ineligible-row", name: "Ineligible", draft: v4 });
+    });
+    const note = screen.getByTestId("scenario-membership-note");
+    expect(note).toBeInTheDocument();
+    // Distinct from the window-provenance note.
+    expect(
+      screen.queryByTestId("scenario-provenance-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("REOPEN all-eligible: reopening a v4 draft whose members are all still eligible shows NO membership note", () => {
+    renderM4(m4Payload({ eligibleApiKeyIds: ["key-A", "key-B"] }));
+    const v4 = {
+      ...defaultDraftFromHoldings(M4_HOLDINGS),
+      memberKeyIds: ["key-A", "key-B"],
+    };
+    act(() => {
+      registeredOpen!({ id: "eligible-row", name: "Eligible", draft: v4 });
+    });
+    expect(
+      screen.queryByTestId("scenario-membership-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("REOPEN ephemeral: dismissing the membership note then reopening ANOTHER affected draft re-shows it (nonce-keyed remount)", async () => {
+    renderM4(m4Payload({ eligibleApiKeyIds: ["key-A"] }));
+    const affected = (id: string) => ({
+      id,
+      name: id,
+      draft: {
+        ...defaultDraftFromHoldings(M4_HOLDINGS),
+        memberKeyIds: ["key-A", "key-gone"],
+      },
+    });
+
+    act(() => {
+      registeredOpen!(affected("affected-1"));
+    });
+    const first = screen.getByTestId("scenario-membership-note");
+    fireEvent.click(within(first).getByRole("button", { name: /Dismiss/i }));
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("scenario-membership-note"),
+      ).not.toBeInTheDocument();
+    });
+
+    // Reopen a DIFFERENT affected draft — component-local dismissal must not
+    // carry over (fresh id + bumped nonce remounts un-dismissed).
+    act(() => {
+      registeredOpen!(affected("affected-2"));
+    });
+    expect(
+      screen.getByTestId("scenario-membership-note"),
+    ).toBeInTheDocument();
   });
 });
