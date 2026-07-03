@@ -128,6 +128,7 @@ function okDraft(): ScenarioDraft {
       { id: STRAT_A as never, name: "Momentum Alpha", markets: ["BTC"], strategy_types: ["trend"] },
     ],
     weightOverrides: { [STRAT_A]: 1 },
+    memberKeyIds: [],
     lastEditedAt: "2026-06-22T00:00:00.000Z",
   };
 }

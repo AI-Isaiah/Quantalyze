@@ -67,10 +67,10 @@ function makeSeriesFrom(
   return out;
 }
 
-/** A valid v2 draft with two added strategies at equal weight. */
+/** A valid current-version draft with two added strategies at equal weight. */
 function okDraft(): ScenarioDraft {
   return {
-    schema_version: SCENARIO_SCHEMA_VERSION, // 2 — the live constant
+    schema_version: SCENARIO_SCHEMA_VERSION, // the live constant (4 as of v1.6)
     init_holdings_fingerprint: "BTC:binance:spot",
     toggleByScopeRef: { [STRAT_A]: true, [STRAT_B]: true },
     addedStrategies: [
@@ -78,6 +78,8 @@ function okDraft(): ScenarioDraft {
       { id: STRAT_B as never, name: "Beta", markets: ["ETH"], strategy_types: ["mr"] },
     ],
     weightOverrides: { [STRAT_A]: 0.5, [STRAT_B]: 0.5 },
+    // v1.6 MEMBER-01 — a current-version draft carries explicit membership.
+    memberKeyIds: [],
     lastEditedAt: "2026-06-22T00:00:00.000Z",
   };
 }
@@ -97,9 +99,10 @@ describe("resolveSharedScenario — DI-23-01 honest-absence (SHARE-02)", () => {
     // SCENARIO_SCHEMA_VERSION + 1 is strictly ahead of the live constant. The
     // codec returns outcome:"readonly" with value=defaultDraft — reading that
     // here would leak a live-book-shaped object. The helper must honest-absence
-    // it. (v1.5: the constant bumped 2→3, so this fixture self-adjusts to 4 and
-    // keeps exercising the forward-compat readonly path — Pitfall 2.)
-    expect(SCENARIO_SCHEMA_VERSION).toBe(3); // pin against the live constant
+    // it. (v1.5: the constant bumped 2→3; v1.6 MEMBER-01: 3→4. This fixture uses
+    // SCENARIO_SCHEMA_VERSION + 1 so it self-adjusts to 5 and keeps exercising
+    // the forward-compat readonly path — Pitfall 2.)
+    expect(SCENARIO_SCHEMA_VERSION).toBe(4); // pin against the live constant
     const aheadDraft = { ...okDraft(), schema_version: SCENARIO_SCHEMA_VERSION + 1 };
 
     const result = resolveSharedScenario(
@@ -231,6 +234,7 @@ describe("resolveSharedScenario — owner-projection parity (WR-05)", () => {
         { id: STRAT_B as never, name: "Beta", markets: ["ETH"], strategy_types: ["mr"] },
       ],
       weightOverrides: { [STRAT_A]: 0.7 }, // B intentionally absent
+      memberKeyIds: [],
       lastEditedAt: "2026-06-22T00:00:00.000Z",
     };
     const seriesA = makeSeries(0);
@@ -276,6 +280,7 @@ describe("resolveSharedScenario — owner-projection parity (WR-05)", () => {
         { id: STRAT_B as never, name: "Beta", markets: ["ETH"], strategy_types: ["mr"] },
       ],
       weightOverrides: { [STRAT_A]: 1 }, // B intentionally has no entry
+      memberKeyIds: [],
       lastEditedAt: "2026-06-22T00:00:00.000Z",
     };
     const seriesA = makeSeries(2);
@@ -412,9 +417,11 @@ describe("resolveSharedScenario — owner coverage window verbatim (PERSIST-02)"
   });
 
   it("a pre-v1.5 v2 (windowless) shared draft resolves ok (NOT honest-absence) after the non-destructive upgrade, at the intersection default", () => {
-    // Wave 1 added the non-destructive v2→v3 codec branch: a valid v2 draft now
-    // decodes outcome:"ok" (reason "upgraded_v2_windowless"), so share-resolve
-    // reaches the compute path instead of honest-absencing every pre-v1.5 share.
+    // Wave 1 added the non-destructive v2→v3 codec branch; v1.6 MEMBER-01's
+    // double bump moved v2 handling to the literal-2 chain branch: a valid v2
+    // draft now decodes outcome:"ok" (reason "upgraded_v2_chain"), so
+    // share-resolve reaches the compute path instead of honest-absencing every
+    // pre-v1.5 share.
     // RE-BASELINED (ship-review RT-1, deliberate contract correction — locked
     // 59-CONTEXT Area 2 Q4: "recipient defaults to intersection, same rule as
     // owner reopen"): the ragged fixture proves the intersection rule, where

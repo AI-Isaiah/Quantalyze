@@ -304,6 +304,10 @@ export function buildLiveBookDraft(): ScenarioDraft {
     toggleByScopeRef: {},
     addedStrategies: [],
     weightOverrides: {},
+    // v1.6 MEMBER-01 — the synthetic live-book draft has no explicit book
+    // members (it IS the union own-book path, not a saved series); empty is the
+    // honest value.
+    memberKeyIds: [],
     lastEditedAt: new Date(0).toISOString(),
   };
 }

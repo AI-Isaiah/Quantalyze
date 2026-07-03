@@ -79,6 +79,7 @@ function matchingSavedDraft(): ScenarioDraft {
     toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: true },
     addedStrategies: [],
     weightOverrides: { [REF_BTC]: 0.6, [REF_ETH]: 1.0 },
+    memberKeyIds: [],
     lastEditedAt: "2026-06-01T00:00:00.000Z",
   };
 }
@@ -92,6 +93,7 @@ function mismatchedSavedDraft(): ScenarioDraft {
     toggleByScopeRef: { [REF_BTC]: true },
     addedStrategies: [],
     weightOverrides: { [REF_BTC]: 1.0 },
+    memberKeyIds: [],
     lastEditedAt: "2026-01-01T00:00:00.000Z",
   };
 }
@@ -169,6 +171,7 @@ describe("useScenarioState — hydrateFromSaved reopen seam (Phase 23 Plan 04)",
       toggleByScopeRef: { [REF_BTC]: true, [REF_ETH]: true },
       addedStrategies: [],
       weightOverrides: { [REF_BTC]: 0.6, [REF_ETH]: 0.4 },
+      memberKeyIds: [],
       lastEditedAt: "2026-05-01T00:00:00.000Z",
     };
     const scopedKey = scenarioStorageKey(ALLOCATOR_A);

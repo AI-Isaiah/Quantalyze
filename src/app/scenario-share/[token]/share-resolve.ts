@@ -102,6 +102,10 @@ function neutralDefaultDraft(): ScenarioDraft {
     toggleByScopeRef: {},
     addedStrategies: [],
     weightOverrides: {},
+    // v1.6 MEMBER-01 — neutral/empty; this default is discarded on every
+    // non-"ok" outcome (never read), so empty membership keeps the no-leak
+    // guarantee intact.
+    memberKeyIds: [],
     lastEditedAt: "",
   };
 }

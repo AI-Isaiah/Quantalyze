@@ -33,7 +33,6 @@ import {
   computeHoldingsFingerprint,
   scenarioStorageKey,
   SCENARIO_SCHEMA_VERSION,
-  SCENARIO_SCHEMA_VERSION_PREV,
   type ScenarioDraft,
 } from "../lib/scenario-state";
 
@@ -177,6 +176,7 @@ function okDraft(): ScenarioDraft {
     toggleByScopeRef: { [REF_BTC]: true, [REF_ETH]: true },
     addedStrategies: [],
     weightOverrides: { [REF_BTC]: 0.6, [REF_ETH]: 0.4 },
+    memberKeyIds: [],
     lastEditedAt: "2026-06-01T00:00:00.000Z",
   };
 }
@@ -477,22 +477,26 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
   it("T_SAVE6 Open(reset row, older incompatible schema) → renders the relabeled 'older format' notice and does NOT hydrate (codec trichotomy non-regression; never a silent empty composer)", () => {
     renderComposer();
 
-    // A schema_version BELOW the non-destructive-upgrade window (< PREV) is a
-    // genuinely-incompatible legacy shape → codec returns "reset". (v1.5: the
-    // v2→v3 transition is non-destructive, so PREV (2) now upgrades to "ok"; a
-    // truly-old version must be < PREV to still reset. Using PREV - 1 keeps this
-    // fixture self-adjusting to the version constants.) A "reset" must NEVER
-    // silently load the saved draft (no hydrate). We plant a DISTINCTIVE added
-    // strategy in the reset draft: if the reset branch wrongly hydrated, that
-    // strategy's name would render in the composition list. Its ABSENCE is the
-    // non-vacuous proof that hydrateFromSaved was NOT called on the reset branch
-    // (Task 3 acceptance: trichotomy preserved, reset does not hydrate).
+    // A schema_version BELOW the non-destructive-upgrade window is a
+    // genuinely-incompatible legacy shape → codec returns "reset". v1.6
+    // MEMBER-01's DOUBLE bump (SCENARIO_SCHEMA_VERSION 3→4, PREV 2→3) added a
+    // SECOND non-destructive branch keyed on the LITERAL version 2 (the v2-chain
+    // branch), so BOTH v2 and v3 (=PREV) now upgrade to "ok". The floor of the
+    // upgrade window is therefore the literal 2; a truly-old shape must be < 2
+    // (i.e. v1, the original destructive-reset version) to still reset. Pinned
+    // to the literal 1 (was PREV - 1, which now equals 2 and would upgrade — the
+    // Pitfall-2 rebase). A "reset" must NEVER silently load the saved draft (no
+    // hydrate). We plant a DISTINCTIVE added strategy in the reset draft: if the
+    // reset branch wrongly hydrated, that strategy's name would render in the
+    // composition list. Its ABSENCE is the non-vacuous proof that
+    // hydrateFromSaved was NOT called on the reset branch (Task 3 acceptance:
+    // trichotomy preserved, reset does not hydrate).
     const olderRow: SavedScenarioRow = {
       id: SAVED_ID,
       name: "Ancient",
       draft: {
         ...okDraft(),
-        schema_version: SCENARIO_SCHEMA_VERSION_PREV - 1,
+        schema_version: 1,
         addedStrategies: [
           {
             id: "reset-marker-strat",

@@ -134,6 +134,7 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
       toggleByScopeRef: {},
       addedStrategies: [],
       weightOverrides: {},
+      memberKeyIds: [],
       lastEditedAt: "1970-01-01T00:00:00.000Z",
     } satisfies ScenarioDraft);
     // No real fetch is used; assert none is issued.

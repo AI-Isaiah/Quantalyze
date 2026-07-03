@@ -274,6 +274,7 @@ describe("SSR guard", () => {
       toggleByScopeRef: {},
       addedStrategies: [],
       weightOverrides: {},
+      memberKeyIds: [],
       lastEditedAt: new Date().toISOString(),
     };
     let threw = false;

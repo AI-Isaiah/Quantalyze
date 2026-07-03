@@ -357,6 +357,7 @@ describe("mapDeAliasedWeightsToRawBasis — optimizer apply on multi-venue books
       toggleByScopeRef: toggles,
       addedStrategies: [],
       weightOverrides,
+      memberKeyIds: [],
       lastEditedAt: "2024-01-01T00:00:00.000Z",
     };
   }

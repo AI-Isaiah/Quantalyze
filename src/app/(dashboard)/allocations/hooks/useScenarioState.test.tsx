@@ -127,6 +127,7 @@ describe("useScenarioState", () => {
       toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: true },
       addedStrategies: [],
       weightOverrides: { [REF_BTC]: 0.6, [REF_ETH]: 1.0 },
+      memberKeyIds: [],
       lastEditedAt: "2026-04-25T00:00:00.000Z",
     };
     store.set(scenarioStorageKey(ALLOCATOR_A), JSON.stringify(persisted));
@@ -149,6 +150,7 @@ describe("useScenarioState", () => {
       toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: true },
       addedStrategies: [],
       weightOverrides: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
+      memberKeyIds: [],
       lastEditedAt: "2026-01-01T00:00:00.000Z",
     };
     store.set(scenarioStorageKey(ALLOCATOR_A), JSON.stringify(persisted));
@@ -313,6 +315,7 @@ describe("useScenarioState", () => {
       toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: true },
       addedStrategies: [],
       weightOverrides: { [REF_BTC]: 0.0, [REF_ETH]: 1.0 },
+      memberKeyIds: [],
       lastEditedAt: "2026-01-01T00:00:00.000Z",
     };
     const scopedKey = scenarioStorageKey(ALLOCATOR_A);
@@ -345,6 +348,7 @@ describe("useScenarioState", () => {
       toggleByScopeRef: { [REF_BTC]: true, [REF_ETH]: true },
       addedStrategies: [],
       weightOverrides: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
+      memberKeyIds: [],
       lastEditedAt: "2026-01-01T00:00:00.000Z",
     };
     store.set(scenarioStorageKey(ALLOCATOR_A), JSON.stringify(persisted));
@@ -475,6 +479,7 @@ describe("useScenarioState", () => {
       },
       addedStrategies: [],
       weightOverrides: { "holding:kraken:DOGE:spot": 1.0 },
+      memberKeyIds: [],
       lastEditedAt: "2026-01-01T00:00:00.000Z",
     };
     store.set(scenarioStorageKey(ALLOCATOR_B), JSON.stringify(draftB_stale));
@@ -588,6 +593,7 @@ describe("useScenarioState", () => {
       toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: false },
       addedStrategies: [],
       weightOverrides: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
+      memberKeyIds: [],
       lastEditedAt: "2026-01-01T00:00:00.000Z",
     };
     store.set(scenarioStorageKey(ALLOCATOR_A), JSON.stringify(persisted));
@@ -728,6 +734,7 @@ describe("useScenarioState", () => {
       toggleByScopeRef: { [REF_BTC]: false, [REF_ETH]: false },
       addedStrategies: [],
       weightOverrides: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
+      memberKeyIds: [],
       lastEditedAt: "2026-01-01T00:00:00.000Z",
     };
     act(() => {

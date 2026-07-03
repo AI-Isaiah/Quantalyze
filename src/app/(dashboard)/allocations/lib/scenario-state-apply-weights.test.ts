@@ -17,6 +17,7 @@ function draft(overrides: Record<string, number>): ScenarioDraft {
     toggleByScopeRef,
     addedStrategies: [],
     weightOverrides: overrides,
+    memberKeyIds: [],
     lastEditedAt: "2024-01-01T00:00:00.000Z",
   };
 }

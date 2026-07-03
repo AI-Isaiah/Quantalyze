@@ -112,6 +112,7 @@ function draft(overrides: Partial<ScenarioDraft> = {}): ScenarioDraft {
     toggleByScopeRef: {},
     addedStrategies: [] as AddedStrategy[],
     weightOverrides: {},
+    memberKeyIds: [],
     lastEditedAt: "2024-01-01T00:00:00.000Z",
     ...overrides,
   };
