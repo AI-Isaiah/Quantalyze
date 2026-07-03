@@ -27,8 +27,10 @@
  *   - EquityChart / DrawdownChart / KpiStrip / StrategyBrowseDrawer / BridgeDrawer
  *     are mocked to inert spies so the composer's prop wiring is asserted via
  *     mock.calls without exercising the chart / drawer internals.
- *   - scenario-adapter is module-mocked so the composer's adapter-arg shape is
- *     observable via the REAL engine set the composer builds.
+ *   - scenario-adapter is used REAL (ENGINE-01, Phase 63) so the composer's
+ *     engine set exercises the genuine per-key + added series-space pipeline
+ *     (the former holdings-snapshot builder spy was removed with the holdings
+ *     path — see the :140 note).
  *
  * The full vitest suite (1973 baseline) must continue green; downstream
  * ScenarioStub / ScenarioFlaggedHoldingsList / AllocationDashboardV2 tests
