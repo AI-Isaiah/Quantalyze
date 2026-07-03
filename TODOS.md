@@ -954,3 +954,19 @@ Fix path: key the map by `(venue, symbol, holding_type)` instead of `symbol`. Th
 
 Blast radius if it bites: an allocator with leveraged BTC perp + spot BTC sees only one of the two rows on the dashboard. Equity curve is still correct (computed server-side from full `allocator_equity_snapshots`).
 
+---
+
+## queries / SSR payload
+
+### P1 — Remove dead `holdingReturnsByScopeRef` SSR pipeline
+
+Remove `reconstructHoldingReturnsByScopeRef` (`src/lib/queries.ts:2994`) and the
+`holdingReturnsByScopeRef` payload field (`:1730` type + `:3101`/`:3411`
+construction sites) plus the orphaned tests that pin it. The field has had **zero
+production consumers since v1.6 phase 63** — nothing in the component tree reads
+it, so it is pure per-request compute plus dead RSC payload weight on every
+allocator SSR render.
+
+Deferred at ship 2026-07-03 (user decision, planning-locked — LEAVE IT for now).
+Documented here so the removal is a deliberate follow-up, not silently lost.
+
