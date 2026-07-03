@@ -64,13 +64,13 @@ export interface ScenarioComparePanelProps {
       unrealized_pnl_usd?: number | null;
     }>;
     strategies: ComparePayloadStrategy[];
-    holdingReturnsByScopeRef: Record<string, DailyPoint[]>;
     /**
      * P61-BUG-2 — the per-key channel (the same fields the composer's
      * book-mode engine selection reads). The AllocationsTabs call site passes
      * the WHOLE dashboard payload, so these exist at runtime; typed optional
-     * so a narrow test payload still type-checks and falls back to the
-     * legacy holdings path.
+     * so a narrow test payload still type-checks. An absent per-key channel
+     * yields empty lookups → an honest em-dash column, NOT a holdings fallback
+     * (the legacy holdings path is deleted, Phase 63 ENGINE-02).
      */
     perKeyReturnsByApiKeyId?: Record<string, DailyPoint[]>;
     eligibleApiKeyIds?: string[];
