@@ -140,6 +140,11 @@ vi.mock("./lib/scenario-adapter", () => {
   return {
     buildStrategyForBuilderSet: vi.fn(emptyProjection),
     buildPerKeyStrategyForBuilderSet: vi.fn(emptyProjection),
+    // ENGINE-01 (Phase 63): the composer's series-space engine set is built from
+    // these two — provide empty-projection stand-ins so this draft-persistence
+    // suite stays engine-agnostic (it tests localStorage survival, not metrics).
+    mergeAddedIntoPerKeySet: vi.fn(emptyProjection),
+    buildAddedOnlySet: vi.fn(emptyProjection),
   };
 });
 

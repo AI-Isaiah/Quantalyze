@@ -84,31 +84,22 @@ vi.mock("./ScenarioCommitDrawer", () => ({
 vi.mock("../ScenarioFlaggedHoldingsList", () => ({
   ScenarioFlaggedHoldingsList: vi.fn(() => <div data-testid="flagged-list-mock" />),
 }));
-// Phase 37: the per-key path is inactive in this suite (perKeyDailiesGateSatisfied
-// defaults false), so BOTH builders are stubbed to the empty projection. We
-// deliberately do NOT importOriginal: loading the real adapter's transitive graph
-// (frozen engine + scenario-state + dealias) made the composer's first render
-// heavier and is a needless flake vector under full-suite worker contention. The
-// composer's perKeyAdapterOutput memo still calls buildPerKeyStrategyForBuilderSet
-// on every render, so the stub must return a valid { strategies, state } shape.
-vi.mock("../lib/scenario-adapter", () => {
-  const emptyProjection = () => ({
-    strategies: [],
-    state: { selected: {}, weights: {}, startDates: {} },
-  });
-  return {
-    buildStrategyForBuilderSet: vi.fn(emptyProjection),
-    buildPerKeyStrategyForBuilderSet: vi.fn(emptyProjection),
-  };
+// ENGINE-01 (Phase 63): the composer builds its series-space engine set from the
+// REAL per-key + added constructions, so this suite keeps them genuine via
+// importOriginal. The windowed-save (review-CR-01) tests drive their two-strategy
+// unequal-span book through the real per-key path (book+gate payload fixtures).
+vi.mock("../lib/scenario-adapter", async (importOriginal) => {
+  const actualAdapter =
+    await importOriginal<typeof import("../lib/scenario-adapter")>();
+  // ENGINE-01 (Phase 63): the composer builds its series-space engine set from
+  // the REAL per-key + added constructions, so keep them genuine. The former
+  // holdings-snapshot builder was removed from the composer — nothing to stub.
+  return { ...actualAdapter };
 });
 
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer, type SavedScenarioRow } from "./ScenarioComposer";
-// The MOCKED builder (factory above) — the review-CR-01 windowed-save tests
-// point it at a two-strategy unequal-span book so the coverage-window control
-// mounts and the REAL preset-gesture → Save path can be driven end-to-end.
-import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 
 // --- localStorage mock ----------------------------------------------------
 
@@ -698,19 +689,24 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
     };
   }
 
-  /** Point the mocked adapter at the unequal-span two-strategy book. */
-  function mountUnequalSpanBook(): void {
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkWinStrat("strat-window-A", WIN_DATES), // 2026-01-01 … 2026-01-12
-        mkWinStrat("strat-window-B", WIN_DATES.slice(0, 6)), // … 2026-01-06
+  /** ENGINE-01 (Phase 63) repoint: deliver the unequal-span two-strategy book as
+   *  REAL book+gate per-key sources (unit id === api_key_id, series verbatim from
+   *  mkWinStrat) so the coverage-window control mounts on the genuine series-space
+   *  engine. The former holdings-snapshot mock injection is gone. */
+  function unequalSpanBook(): Partial<MyAllocationDashboardPayload> {
+    return {
+      holdingsSummary: [
+        { ...HOLDING_BTC, symbol: "BTC", api_key_id: "strat-window-A", value_usd: 50_000 },
+        { ...HOLDING_BTC, symbol: "ETH", api_key_id: "strat-window-B", value_usd: 50_000 },
       ],
-      state: {
-        selected: { "strat-window-A": true, "strat-window-B": true },
-        weights: { "strat-window-A": 0.5, "strat-window-B": 0.5 },
-        startDates: {},
+      perKeyReturnsByApiKeyId: {
+        "strat-window-A": mkWinStrat("strat-window-A", WIN_DATES).daily_returns,
+        "strat-window-B": mkWinStrat("strat-window-B", WIN_DATES.slice(0, 6))
+          .daily_returns,
       },
-    } as unknown as ReturnType<typeof buildStrategyForBuilderSet>);
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: ["strat-window-A", "strat-window-B"],
+    };
   }
 
   // WINDOW-06 flake lesson (72dc23a4): the 150ms draft-autosave debounce can
@@ -719,7 +715,7 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
   function renderWindowedComposer(allocatorId: string) {
     return render(
       <ScenarioComposer
-        payload={makePayload()}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={allocatorId}
         allocatorMandate={null}
         onRegisterOpen={(open) => {
@@ -729,17 +725,7 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
     );
   }
 
-  afterEach(() => {
-    // Restore the factory's empty projection so this describe's fixture can
-    // never bleed into another suite in this file.
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    } as unknown as ReturnType<typeof buildStrategyForBuilderSet>);
-  });
-
   it("T_WIN_SAVE1 applying a window (Full-range preset) then Save → the POSTed draft carries EXACTLY the applied window", async () => {
-    mountUnequalSpanBook();
     const fetchMock = makeFetchMock(() => ({
       ok: true,
       status: 200,
@@ -784,7 +770,6 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
   });
 
   it("T_WIN_SAVE2 a never-touched window saves a WINDOWLESS draft — the intersection auto-default is NOT force-persisted", async () => {
-    mountUnequalSpanBook();
     const fetchMock = makeFetchMock(() => ({
       ok: true,
       status: 200,
@@ -817,7 +802,6 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
   });
 
   it("T_WIN_SAVE3 Update (PUT) of a reopened v3-with-window row round-trips the saved window verbatim", async () => {
-    mountUnequalSpanBook();
     const fetchMock = makeFetchMock(() => ({
       ok: true,
       status: 200,
@@ -869,7 +853,6 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
   // ---------------------------------------------------------------------------
 
   it("T_WIN_SAVE4 (re-review WR-01) a DRIFTED reopen of a v3-with-window row does NOT display the owner's window — the working draft is the default, the display stays on the intersection default, and Update persists exactly what is shown (windowless)", async () => {
-    mountUnequalSpanBook();
     const fetchMock = makeFetchMock(() => ({
       ok: true,
       status: 200,
@@ -927,7 +910,6 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
   });
 
   it("T_WIN_SAVE5 (re-review WR-01) adopting a cross-tab WINDOWLESS draft invalidates the stale local window seed — the display falls back to the intersection default, never a window no save would persist", async () => {
-    mountUnequalSpanBook();
     const fetchMock = makeFetchMock(() => ({
       ok: true,
       status: 200,
