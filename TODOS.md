@@ -12,6 +12,35 @@
 
 ---
 
+## v1.6 membership-schema-v4 red-team follow-ups (deferred from pre-landing review, 2026-07-03)
+
+### P2: share-mint gate — the `isBookOnlyDraft` disjunct is dead code (red-team F-3)
+The scenario share-mint gate `OR`s `isBookOnlyDraft(draft)` into its "nothing
+shareable" check, but the other disjunct (`addedStrategies.length === 0`) already
+forces `nothingShareable` for exactly the book-only shape, so the `isBookOnlyDraft`
+branch can never change the outcome. Either make the predicate the REAL gate (so a
+book-only draft is share-eligible on its own terms) or drop it and delete the
+overstated "the ONE definition of shareable" comment — right now the comment claims
+a single source of truth that the dead branch quietly contradicts.
+
+### P3: memberKeyIds save-stamp is unbounded but the schema caps at 64 (red-team F-5)
+The save-time membership stamp writes every eligible api_key id with no ceiling, but
+`scenarioDraftSaveSchema` caps `memberKeyIds` at `.max(64)`. An allocator with >64
+eligible keys has every save 400'd, and the composer surfaces the generic "Couldn't
+save this portfolio. Check your connection and try again." copy — a misleading
+network-error message for a validation ceiling. Clamp the stamp (or raise the cap to
+match the real eligible-key ceiling) AND give the >cap case an honest error.
+
+### P3: deploy-skew window can silently downgrade v4 rows to v3 (red-team F-4)
+During a mixed-version deploy, old serverless code (zod strip mode) drops
+`memberKeyIds` from a v4 save body, so a stale client can round-trip a v4 row back to
+a v3-shaped row. It degrades gracefully (reopen re-derives from the gate) but silently
+loses the share-caption honesty the persisted membership was meant to guarantee.
+Consider a post-deploy backfill / re-derive sweep once all serverless instances are on
+the v4 code, to re-stamp any rows downgraded in the window.
+
+---
+
 ## v1.3 phase 45 nav follow-ups (deferred from /ship pre-landing review, 2026-06-27)
 
 ### ~~P2: "Bridge" mobile-nav item lands on a tab with no bridge surface~~ — ✅ DONE (2026-06-27)
