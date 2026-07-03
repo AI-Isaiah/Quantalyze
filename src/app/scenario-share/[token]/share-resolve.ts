@@ -196,8 +196,21 @@ export function resolveSharedScenario(
   // never resolves here. Rendering the metrics of an empty set produced a
   // dead em-dash shell ("0 overlapping days", every metric "—") that read as
   // a broken link. Surface the designed honest-absence state instead, with
-  // the reason so the page can say why. (The share-mint route now also
-  // rejects minting these — this branch keeps ALREADY-MINTED links honest.)
+  // the reason so the page can say why. (The share-mint route now also rejects
+  // minting these via the shared null-safe `isBookOnlyDraft` predicate — this
+  // branch keeps ALREADY-MINTED links honest.)
+  //
+  // MEMBER-03 (unified book-only definition) — detection stays on the RESOLVED
+  // `strategies.length`, NEVER `draft.memberKeyIds.length`. This is the ONE
+  // public-page module: it has no owner gate / eligible-ids server-side, so it
+  // must NOT derive membership here (no `deriveMembershipFromGate`). A pre-v4 /
+  // v2 / v3 share arrives with membership UNDERIVED (undefined); keying the
+  // branch on the strategies count means such a share is still surfaced
+  // honestly and the code is never forced to read `.length` off an undefined
+  // membership. Any draft with zero added series — WITH or WITHOUT book
+  // members — is honest-absence "book-only" (no RPC expansion). The mint gate's
+  // `isBookOnlyDraft` is the same null-safe predicate; this branch is its
+  // resolved-projection counterpart.
   if (strategies.length === 0) {
     return { kind: "honest-absence", reason: "book-only" };
   }
