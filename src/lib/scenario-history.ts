@@ -7,7 +7,7 @@
  *   "Projected from {n} overlapping days. Shortest history: {name}. Not a forecast."
  *
  * `n` is `scenarioMetrics.n` (the overlapping-day count, scenario.ts:191). This
- * helper supplies the `{name}` half: the de-aliased strategy with the least
+ * helper supplies the `{name}` half: the engine strategy with the least
  * history. Both halves are derived from data already present client-side — no
  * new server field (Assumption A1).
  *
@@ -35,7 +35,7 @@ import type { StrategyForBuilder } from "@/lib/scenario";
  * ACTUAL method ("Historical realized"), names the live overlapping-day count,
  * and the honest horizon ("not a forecast"). Each call site appends its own
  * "Shortest history: {name}." clause (from `shortestHistoryName`) where the
- * de-aliased set is in scope; this builder owns only the invariant prefix so
+ * engine strategy set is in scope; this builder owns only the invariant prefix so
  * the two surfaces cannot drift.
  */
 export function methodologyLine(n: number): string {
@@ -44,7 +44,7 @@ export function methodologyLine(n: number): string {
 
 /**
  * Return the NAME of the strategy with the shortest return history (fewest
- * `daily_returns` points) in the de-aliased strategy set.
+ * `daily_returns` points) in the engine strategy set.
  *
  * Accepts the `StrategyForBuilder` element type of the engine strategy set that
  * the composer/builder call sites already hold — reads ONLY `name` +
