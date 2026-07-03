@@ -583,3 +583,82 @@ describe("resolveSharedScenario — book-only draft honest-absence (P61-BUG-2)",
     ).toBe("book-only");
   });
 });
+
+// ===========================================================================
+// Phase 64 / PRESENT-03 — isMixed (mixed-share caption condition).
+//
+// A MIXED shared draft blends the owner's PERSISTED book members
+// (memberKeyIds) with catalog adds (addedStrategies). Only the catalog legs are
+// publicly computable here (the live-book boundary never resolves the owner's
+// per-key book series), so the rendered projection is the renormalized added
+// legs — and the public page owes a one-line honesty caption saying exactly
+// that. `resolveSharedScenario` exposes the render condition as a boolean
+// `isMixed` on the kind:"ok" return, computed NULL-SAFELY from the already-
+// decoded draft JSONB ONLY (no new RPC/SQL/query, zero private data).
+//
+// Render condition = memberKeyIds non-empty AND addedStrategies non-empty. The
+// addedStrategies-non-empty half is GUARANTEED BY CONSTRUCTION on the ok branch
+// (the :214 `strategies.length === 0` book-only guard already honest-absences a
+// zero-added draft), so the ok-branch live gate is exactly the membership
+// check — hence isMixed needs NO book-only case (a book-only-with-members draft
+// never reaches the ok branch).
+// ===========================================================================
+describe("Phase 64 / PRESENT-03 — isMixed (mixed-share caption condition)", () => {
+  // An api-key UUID (same id class as membership) — a persisted book member.
+  const MEMBER_KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+  it("a MIXED draft (memberKeyIds non-empty + added strategies) → kind:'ok' AND isMixed === true", () => {
+    // Persisted membership (a book key) PLUS catalog adds with their series —
+    // the F3 red-team case. Only the catalog legs are computable → the caption
+    // must fire, so isMixed is true.
+    const mixedDraft: ScenarioDraft = { ...okDraft(), memberKeyIds: [MEMBER_KEY] };
+
+    const result = resolveSharedScenario({
+      name: "Mixed share",
+      draft: mixedDraft,
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: okSeriesRows(),
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.isMixed).toBe(true);
+  });
+
+  it("a CATALOG-ONLY draft (memberKeyIds []) → kind:'ok' AND isMixed === false (no caption)", () => {
+    // okDraft() carries memberKeyIds: [] — a pure catalog blend, no book member.
+    // Nothing to disclose → isMixed false → NO caption.
+    const result = resolveSharedScenario({
+      name: "Catalog-only share",
+      draft: okDraft(),
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: okSeriesRows(),
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.isMixed).toBe(false);
+  });
+
+  it("a PRE-v4 draft (membership OMITTED → undefined at runtime) → kind:'ok' AND isMixed === false (never invent a caption for unknown membership)", () => {
+    // Copies the :556-568 omitted-membership idiom: a lower-schema-version draft
+    // WITH catalog adds whose decode upgrades to ok, but whose memberKeyIds is
+    // undefined at runtime (required-at-v4, absent in a pre-v4 blob). The
+    // null-safe `(draft.memberKeyIds ?? []).length > 0` idiom must read falsy →
+    // isMixed false → NO caption. We NEVER invent a caption for a draft whose
+    // membership is unknown (honest-absence-of-membership unchanged).
+    const preV4: Partial<ScenarioDraft> = { ...okDraft(), schema_version: 2 };
+    delete preV4.memberKeyIds; // membership genuinely absent (undefined) at runtime
+
+    const result = resolveSharedScenario({
+      name: "Pre-v4 catalog share",
+      draft: preV4 as ScenarioDraft,
+      schema_version: 2,
+      series: okSeriesRows(),
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.isMixed).toBe(false);
+  });
+});
