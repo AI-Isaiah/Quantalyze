@@ -2,8 +2,8 @@
  * Pure TypeScript — no fetch, no side effects, no DOM/time reads.
  *
  * Plan 23-03 (PERSIST-04) — the compare engine. Extracts the composer's
- * adapter → projectionState → de-alias → computeScenario chain
- * (the composer's `projectionState` memo) into a testable pure helper so a SAVED
+ * adapter → projectionState → computeScenario chain (the composer's
+ * `projectionState` memo) into a testable pure helper so a SAVED
  * draft re-resolves its return series from the live payload and runs the
  * FROZEN `computeScenario` (SCENARIO-05) — yielding the SAME `ComputedMetrics`
  * the composer would show for that draft over the same live inputs. No new
@@ -25,8 +25,8 @@
  *     honest em-dash, never a fabricated 0.
  *
  *   - Heterogeneous windows (v1.5 PERSIST-03). Each draft is computed at its OWN
- *     persisted `draft.window` (injected POST-collapse onto `deAliased.state` —
- *     Pitfall 4). Two drafts with DIFFERENT windows compute independently; the
+ *     persisted `draft.window` (injected onto `projectionState`). Two drafts
+ *     with DIFFERENT windows compute independently; the
  *     helper never force-aligns a shared window across drafts. A SAVED draft
  *     with NO `window` (a pre-v1.5 v2 draft, or a v3 saved before a window was
  *     chosen) defaults to the INTERSECTION of its selected spans via the shared
@@ -55,11 +55,10 @@ import {
   type ScenarioState,
   type StrategyForBuilder,
 } from "@/lib/scenario";
-import { collapseAliasedHoldingStrategies } from "@/lib/scenario-dealias";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 import {
+  buildAddedOnlySet,
   buildPerKeyStrategyForBuilderSet,
-  buildStrategyForBuilderSet,
   mergeAddedIntoPerKeySet,
   type StrategyForBuilderId,
 } from "./scenario-adapter";
@@ -71,39 +70,26 @@ import {
 
 /**
  * The slice of the composer's live payload the compare engine needs. Mirrors
- * the inputs the composer assembles before its `buildStrategyForBuilderSet`
- * adapter call:
- *   - holdingsSummary            — the live holdings (symbol/venue/type/value)
- *   - holdingReturnsByScopeRef   — reconstructed per-holding series, keyed by ref
+ * the series-space inputs the composer assembles before its per-key / added-only
+ * adapter call (Phase 63 ENGINE-02 — the three legacy holdings-snapshot input
+ * fields are deleted; compute is series-space only):
  *   - addedStrategyReturnsLookup — payload.strategies → daily_returns, by id
  *   - addedStrategyMetadataLookup— payload.strategies → tier/cagr/sharpe, by id
- *   - symbolByHoldingId          — ref → bare symbol (the de-alias collapse key)
  */
 export interface ScenarioCompareInputs {
-  holdingsSummary: Array<{
-    symbol: string;
-    venue: string;
-    holding_type: "spot" | "derivative";
-    value_usd: number;
-  }>;
-  holdingReturnsByScopeRef: Record<string, DailyPoint[]>;
   addedStrategyReturnsLookup: Record<string, DailyPoint[]>;
   addedStrategyMetadataLookup: Record<
     string,
     Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
   >;
-  symbolByHoldingId: ReadonlyMap<string, string>;
   /**
    * P61-BUG-2 — the per-key channel. When a SAVED draft's persisted membership
    * selects the per-key path (`(draft.memberKeyIds ?? []).length > 0`, the
    * MEMBER-02 selector), the draft computes on PER-KEY units merged with its
-   * added strategies (the same set the composer projects), NOT on the
-   * holdings-snapshot units — whose spans differ from the series the draft was
-   * authored on, which made every saved book draft compute EMPTY under its
-   * persisted window ("0 overlapping days"). Two fields come verbatim from the
-   * live payload; `equityByApiKeyId` is derived by the panel from the payload's
-   * holdings rows (mirroring the composer's memo). Empty membership → the
-   * added-only / holdings path.
+   * added strategies (the same set the composer projects). Empty membership →
+   * the added-only path (series-space; no holdings snapshot). Two fields come
+   * verbatim from the live payload; `equityByApiKeyId` is derived by the panel
+   * from the payload's holdings rows (mirroring the composer's memo).
    */
   perKeyReturnsByApiKeyId?: Record<string, DailyPoint[]>;
   eligibleApiKeyIds?: string[];
@@ -143,29 +129,22 @@ export interface ComputeMetricsForDraftOptions {
  * for that draft over the same live inputs.
  *
  * The chain is the composer's verbatim (no new math). Which builder runs
- * mirrors the composer's engine-set selection (P61-BUG-2):
- *   - per-key gate satisfied → buildPerKeyStrategyForBuilderSet →
+ * mirrors the composer's series-space engine-set selection (P61-BUG-2):
+ *   - persisted membership present → buildPerKeyStrategyForBuilderSet →
  *     mergeAddedIntoPerKeySet (per-key units + the draft's added strategies)
- *   - otherwise → buildStrategyForBuilderSet (holdings-snapshot units)
+ *   - otherwise → buildAddedOnlySet (added strategies only; no holdings snapshot)
  * then in both cases: overlay draft toggle/weight into projectionState
- * (NO leverage) → collapseAliasedHoldingStrategies → buildDateMapCache →
- * computeScenario.
+ * (NO leverage) → buildDateMapCache → computeScenario.
  */
 export function computeMetricsForDraft(
   draft: ScenarioDraft,
   liveInputs: ScenarioCompareInputs,
   opts: ComputeMetricsForDraftOptions = {},
 ): ComputedMetrics {
-  // Read-only-tokens model: live holdings are FIXED context — no per-holding
-  // toggle exists, so a current-schema (v2) draft never disables a holding.
-  // The disabled set is genuinely always empty (matches the composer's
-  // `disabledHoldingRefs` memo).
-  const disabledHoldingRefs = new Set<string>();
-
   // v1.6 MEMBER-02 — the SAVED draft's PERSISTED membership drives per-key
   // selection, NOT the live gate (F5 closure). A blank-authored draft
-  // (memberKeyIds=[]) computes the added-only holdings path even when the live
-  // gate is satisfied, so it never inherits the live book; a book draft selects
+  // (memberKeyIds=[]) computes the series-space added-only path even when the
+  // live gate is satisfied, so it never inherits the live book; a book draft selects
   // the per-key engine set from its persisted members. `entryMode` is no longer
   // load-bearing for saved drafts. The `?? []` is DEFENSIVE only — the panel
   // derives membership for any UNDERIVED column (upgraded v2/v3, or a
@@ -207,24 +186,20 @@ export function computeMetricsForDraft(
       >,
     );
   } else {
-    // MEMBER-02 F5 closure: a SAVED draft that reaches the holdings/added path
-    // has EMPTY membership. A blank-authored draft (memberKeyIds=[]) must
-    // compute ADDED-ONLY — the composer renders it with holdingsSummary=[]
-    // (blank mode, ScenarioComposer.tsx:702-704), so its compare column must
-    // NEVER inherit the live book's holdings (the overlay would otherwise
-    // default every unseeded live holding to selected=true and silently blend
-    // the whole book). The ONE structural exception is the live-book own-book
-    // column: `opts.liveBook` (Phase-55 union lock) feeds the real live
-    // holdings. Every other empty-membership column is added-only. This mirrors
-    // the composer's entryMode split without persisting entryMode: membership
-    // is the selector, `opts.liveBook` declares the own-book exception at the
-    // call site (never name-matched).
-    const holdingsForDraft = opts.liveBook ? liveInputs.holdingsSummary : [];
-    adapterOutput = buildStrategyForBuilderSet(
-      holdingsForDraft,
-      disabledHoldingRefs,
+    // Phase 63 ENGINE-02 — the legacy holdings-snapshot path is deleted. A SAVED
+    // draft with EMPTY membership computes SERIES-SPACE ADDED-ONLY via the ONE
+    // shared `buildAddedOnlySet` wrapper (no holdings snapshot, no inline unit
+    // loop). A blank-authored draft (memberKeyIds=[]) therefore renders exactly
+    // as the composer does in blank mode (ScenarioComposer.tsx:702-704) — its
+    // added strategies only, never the live book's holdings. The former
+    // `opts.liveBook` structural exception now degenerates: the gate=false
+    // live-book column resolves to an EMPTY added-only set → computeScenario
+    // null metrics → an honest em-dash column (D1-consistent; affects only
+    // gate=false books, 0 real users after GUARD-01). Membership stays the
+    // selector; `opts.liveBook` is still declared at the call site but no longer
+    // reaches a holdings source (there is none).
+    adapterOutput = buildAddedOnlySet(
       draft.addedStrategies,
-      liveInputs.holdingReturnsByScopeRef,
       liveInputs.addedStrategyReturnsLookup as Record<
         StrategyForBuilderId,
         DailyPoint[]
@@ -264,18 +239,17 @@ export function computeMetricsForDraft(
     startDates: adapterOutput.state.startDates,
   };
 
-  const deAliased = collapseAliasedHoldingStrategies(
-    adapterOutput.strategies,
-    projectionState,
-    liveInputs.symbolByHoldingId,
-  );
-  const dateMapCache = buildDateMapCache(deAliased.strategies);
+  // Phase 63 ENGINE-02 — the alias collapse is retired with the holdings path.
+  // Per-key ids (`api_keys.id`) and added ids (`strategies.id`) are disjoint
+  // UUIDs with no symbol aliasing, so the collapse was already a passthrough
+  // here; the engine set IS the identity pair
+  // `{ strategies: adapterOutput.strategies, state: projectionState }`.
+  const dateMapCache = buildDateMapCache(adapterOutput.strategies);
 
-  // v1.5 PERSIST-03 — inject the engine window POST-collapse (Pitfall 4).
-  // `collapseAliasedHoldingStrategies` reconstructs `state` and silently drops
-  // any `window` set on the PRE-collapse `projectionState`, so the window MUST
-  // be spread onto `deAliased.state` here (the canonical engineState idiom,
-  // mirroring ScenarioComposer's `engineState` memo). Precedence:
+  // v1.5 PERSIST-03 — inject the engine window onto `projectionState` (the
+  // canonical engineState idiom, mirroring ScenarioComposer's `engineState`
+  // memo). With the collapse gone the window is spread directly onto the
+  // projection state — no post-collapse re-application is needed. Precedence:
   //
   //   1. `draft.window` — the persisted window, verbatim.
   //   2. Windowless SAVED draft (ship-review RT-1) — the INTERSECTION default,
@@ -294,23 +268,23 @@ export function computeMetricsForDraft(
     (opts.liveBook
       ? null
       : defaultWindowFor(
-          deAliased.strategies.flatMap((s) => {
+          adapterOutput.strategies.flatMap((s) => {
             // Spans of SELECTED strategies only — the composer's
             // `selectedSpanById` rule (`selected === false` is skipped;
             // absent counts as selected).
-            if (deAliased.state.selected[s.id] === false) return [];
+            if (projectionState.selected[s.id] === false) return [];
             const span = coverageSpanOf(s.daily_returns);
             return span ? [span] : [];
           }),
         ));
   const engineState = engineWindow
-    ? { ...deAliased.state, window: engineWindow }
-    : deAliased.state;
+    ? { ...projectionState, window: engineWindow }
+    : projectionState;
 
   // Degenerate sets (empty active set, n < 10, NaN-poisoned) return null-metric
   // ComputedMetrics — flow it straight through, NO `?? 0`. The caller renders
   // an honest em-dash via formatPercent/formatNumber.
-  return computeScenario(deAliased.strategies, engineState, dateMapCache);
+  return computeScenario(adapterOutput.strategies, engineState, dateMapCache);
 }
 
 /**

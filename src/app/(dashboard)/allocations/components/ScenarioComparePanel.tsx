@@ -14,7 +14,6 @@ import {
   setMemberKeyIds,
   type ScenarioDraft,
 } from "../lib/scenario-state";
-import { buildHoldingRef } from "../lib/holding-outcome-adapter";
 import {
   ScenarioCompareTable,
   type ScenarioColumn,
@@ -122,10 +121,12 @@ const NULL_METRICS: ComputedMetrics = {
 
 /**
  * Build the `ScenarioCompareInputs` from the live payload — mirrors the
- * composer's derivation (ScenarioComposer.tsx:686-790):
+ * composer's series-space derivation (ScenarioComposer.tsx:686-790):
  *   - addedStrategy{Returns,Metadata}Lookup keyed by strategy id (over the union
  *     of every decoded draft's added strategies);
- *   - symbolByHoldingId via buildHoldingRef over the live holdings.
+ *   - equityByApiKeyId — per-key equity shares grouped from the live holdings
+ *     (the per-key WEIGHT basis; series-space, not a holdings-snapshot engine
+ *     input).
  * No leverage, no fetch.
  */
 function deriveCompareInputs(
@@ -155,11 +156,6 @@ function deriveCompareInputs(
     };
   }
 
-  const symbolByHoldingId = new Map<string, string>();
-  for (const h of payload.holdingsSummary) {
-    symbolByHoldingId.set(buildHoldingRef(h), h.symbol);
-  }
-
   // P61-BUG-2 — per-key equity shares, grouped by api_key_id. Mirrors the
   // composer's `equityByApiKeyId` memo (and the SSR holdingEquityContribution,
   // queries.ts): derivative → unrealized_pnl_usd (value_usd is leveraged
@@ -181,11 +177,8 @@ function deriveCompareInputs(
   }
 
   return {
-    holdingsSummary: payload.holdingsSummary,
-    holdingReturnsByScopeRef: payload.holdingReturnsByScopeRef,
     addedStrategyReturnsLookup,
     addedStrategyMetadataLookup,
-    symbolByHoldingId,
     perKeyReturnsByApiKeyId: payload.perKeyReturnsByApiKeyId,
     eligibleApiKeyIds: payload.eligibleApiKeyIds,
     equityByApiKeyId,
