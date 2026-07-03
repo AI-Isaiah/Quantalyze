@@ -763,8 +763,10 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // scenarioAum with no affordance to re-enable it. Pins the
   // SCENARIO_SCHEMA_VERSION 1→2 bump as the fix for the stale-draft silent-drop
   // bug (caught by adversarial review). Discriminator: with the bump, scenarioAum
-  // is the full portfolio (100k, BTC included) → KpiStrip.aum=100000; WITHOUT it
-  // the adopted v1 draft would exclude the toggled-off BTC (aum 40k).
+  // is the full portfolio (100k, BTC included) → ScenarioCommitDrawer.scenarioAum
+  // =100000; WITHOUT it the adopted v1 draft would exclude the toggled-off BTC
+  // (aum 40k). (Phase 64 / PRESENT-01 re-pointed this off the removed KpiStrip
+  // `aum` prop onto the same scenarioAum value at its commit-boundary consumer.)
   // -------------------------------------------------------------------------
   it("legacy v1 draft with a holding toggled off is dropped on load (holding not stuck-excluded)", () => {
     lsStore.set(
@@ -792,9 +794,13 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
     // Legacy draft dropped (schema mismatch) → fresh default with ALL holdings
-    // included; scenarioAum flows to KpiStrip.aum = full portfolio (60+30+10k).
-    const kpiProps = vi.mocked(KpiStrip).mock.calls.at(-1)?.[0];
-    expect(kpiProps?.aum).toBe(100_000);
+    // included; scenarioAum = the full portfolio (60+30+10k). Phase 64 /
+    // PRESENT-01: the AUM KPI left the strip, so KpiStrip no longer receives an
+    // `aum` prop. Read the SAME scenarioAum off its surviving commit-boundary
+    // consumer (ScenarioCommitDrawer) — an equivalent observable of the identical
+    // reset behavior; the oracle value (100_000, BTC restored) is unchanged.
+    const commitProps = vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0];
+    expect(commitProps?.scenarioAum).toBe(100_000);
   });
 
   // -------------------------------------------------------------------------

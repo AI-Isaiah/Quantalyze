@@ -81,7 +81,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         analytics={{ ytd_twr: 0.15, sharpe: 1.2, max_drawdown_12m: -0.08 }}
         metrics={LIVE_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
       />,
     );
@@ -101,7 +100,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         }}
         metrics={LIVE_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
         mode="scenario"
         scenarioMetrics={SCENARIO_IMPROVEMENT}
@@ -134,7 +132,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         }}
         metrics={LIVE_METRICS}
         timeframe="ALL"
-        aum={650_000}
         snapshotCount={30}
         mode="scenario"
         scenarioMetrics={SCENARIO_IMPROVEMENT}
@@ -166,7 +163,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         }}
         metrics={LIVE_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
         mode="scenario"
         scenarioMetrics={SCENARIO_IMPROVEMENT}
@@ -193,7 +189,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         }}
         metrics={LIVE_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
         mode="scenario"
         scenarioMetrics={SCENARIO_REGRESSION}
@@ -224,7 +219,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         }}
         metrics={noiseLive}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
         mode="scenario"
         scenarioMetrics={noiseScenario}
@@ -245,7 +239,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         analytics={null}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={null}
         snapshotCount={10}
         allKeysStale={false}
         mode="scenario"
@@ -276,7 +269,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         }}
         metrics={LIVE_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
         mode="scenario"
         scenarioMetrics={null}
@@ -298,7 +290,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         }}
         metrics={LIVE_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
         mode="scenario"
         scenarioMetrics={SCENARIO_IMPROVEMENT}
@@ -320,7 +311,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         }}
         metrics={LIVE_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
         mode="scenario"
         scenarioMetrics={SCENARIO_IMPROVEMENT}
@@ -347,7 +337,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         }}
         metrics={LIVE_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
         mode="scenario"
         scenarioMetrics={SCENARIO_IMPROVEMENT}
@@ -380,7 +369,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         }}
         metrics={LIVE_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
         // mode omitted → defaults to "live". Scenario props are deliberately
         // passed to prove they do NOT bleed into the live render.
@@ -421,7 +409,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         }}
         metrics={noiseLive}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
         mode="scenario"
         scenarioMetrics={noiseScenario}
@@ -452,7 +439,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         }}
         metrics={noiseLive}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
         mode="scenario"
         scenarioMetrics={noiseScenario}
@@ -473,7 +459,6 @@ describe("KpiStrip — mode='scenario' delta pills (D-13 + D-16)", () => {
         analytics={null}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={null}
         snapshotCount={10}
         allKeysStale={false}
         minHistoryDepthMonths={null}

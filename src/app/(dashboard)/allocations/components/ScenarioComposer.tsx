@@ -3536,7 +3536,6 @@ export function ScenarioComposer({
           liveMetrics={liveMetricsForKpi}
           metrics={liveMetricsForKpi}
           analytics={{}}
-          aum={scenarioAum}
           snapshotCount={snapshotCount}
           allKeysStale={allKeysStale}
           minHistoryDepthMonths={minHistoryDepthMonths}

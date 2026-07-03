@@ -50,7 +50,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         analytics={null}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
       />,
     );
@@ -77,7 +76,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         analytics={null}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
       />,
     );
@@ -97,7 +95,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         analytics={{ ytd_twr: 0.12 }}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
       />,
     );
@@ -110,7 +107,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         analytics={{ sharpe: 1.73 }}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
       />,
     );
@@ -127,7 +123,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         analytics={{ sharpe: 1.5 }}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
       />,
     );
@@ -149,7 +144,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         }}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
       />,
     );
@@ -177,7 +171,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         }}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
       />,
     );
@@ -201,7 +194,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         }}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={45}
         allKeysStale={true}
       />,
@@ -225,7 +217,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         analytics={null}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={null}
         snapshotCount={10}
         allKeysStale={false}
         minHistoryDepthMonths={3}
@@ -250,7 +241,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         analytics={null}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={null}
         snapshotCount={10}
         allKeysStale={false}
         minHistoryDepthMonths={24}
@@ -282,7 +272,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         analytics={{ sharpe: NaN, avg_correlation: NaN }}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
       />,
     );
@@ -295,7 +284,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         analytics={{ sharpe: Infinity, avg_correlation: Infinity }}
         metrics={EMPTY_METRICS}
         timeframe="ALL"
-        aum={1_000_000}
         snapshotCount={30}
       />,
     );
@@ -310,7 +298,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
           analytics={{ ytd_twr: NaN, max_drawdown_12m: NaN }}
           metrics={EMPTY_METRICS}
           timeframe="ALL"
-          aum={1_000_000}
           snapshotCount={30}
         />,
       );
@@ -348,7 +335,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
           analytics={{ ytd_twr: 0.12 }}
           metrics={EMPTY_METRICS}
           timeframe="ALL"
-          aum={1_000_000}
           snapshotCount={30}
         />,
       );
@@ -389,7 +375,6 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
           }}
           metrics={EMPTY_METRICS}
           timeframe="ALL"
-          aum={1_000_000}
           snapshotCount={30}
         />,
       );
