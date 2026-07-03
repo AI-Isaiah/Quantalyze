@@ -94,20 +94,30 @@ export interface ScenarioCompareInputs {
   >;
   symbolByHoldingId: ReadonlyMap<string, string>;
   /**
-   * P61-BUG-2 — the per-key channel, mirroring the composer's book-mode
-   * engine selection. When `perKeyDailiesGateSatisfied` is true the draft
-   * computes on PER-KEY units merged with its added strategies (the same set
-   * the composer projects), NOT on the holdings-snapshot units — whose spans
-   * differ from the series the draft was authored on, which made every saved
-   * book draft compute EMPTY under its persisted window ("0 overlapping
-   * days"). Three fields come verbatim from the live payload;
-   * `equityByApiKeyId` is derived by the panel from the payload's holdings
-   * rows (mirroring the composer's memo). Absent → the legacy holdings path
-   * runs unchanged.
+   * P61-BUG-2 — the per-key channel. When a SAVED draft's persisted membership
+   * selects the per-key path (`(draft.memberKeyIds ?? []).length > 0`, the
+   * MEMBER-02 selector), the draft computes on PER-KEY units merged with its
+   * added strategies (the same set the composer projects), NOT on the
+   * holdings-snapshot units — whose spans differ from the series the draft was
+   * authored on, which made every saved book draft compute EMPTY under its
+   * persisted window ("0 overlapping days"). Two fields come verbatim from the
+   * live payload; `equityByApiKeyId` is derived by the panel from the payload's
+   * holdings rows (mirroring the composer's memo). Empty membership → the
+   * added-only / holdings path.
    */
   perKeyReturnsByApiKeyId?: Record<string, DailyPoint[]>;
   eligibleApiKeyIds?: string[];
   equityByApiKeyId?: Record<string, number>;
+  /**
+   * WR-03 — carried for PARITY with the live payload only. `computeMetricsForDraft`
+   * does NOT read this field: after MEMBER-02 the per-key-vs-holdings SELECTOR is
+   * the draft's persisted `memberKeyIds` (see `usePerKeySources`), never the gate.
+   * The gate is consulted ONLY at the panel boundary (ScenarioComparePanel), which
+   * reads `payload.perKeyDailiesGateSatisfied` to (a) DERIVE membership for an
+   * underived/upgraded column via `deriveMembershipFromGate` + `setMemberKeyIds`,
+   * and (b) stamp the live-book own-book column via `buildLiveBookDraft(gate, …)`
+   * (WR-02). Do NOT wire compute off this flag — membership is the selector.
+   */
   perKeyDailiesGateSatisfied?: boolean;
 }
 
