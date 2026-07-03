@@ -7656,7 +7656,7 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
 
   // --- (2) DERIVE-AND-STAMP on reopen -------------------------------------
 
-  it("REOPEN derive-and-stamp: reopening an UPGRADED/underived draft makes it self-describing — an immediate save POSTs the derived membership", async () => {
+  it("REOPEN derive-and-stamp: reopening an UPGRADED/underived draft makes the WORKING draft self-describing (persisted membership) — and an immediate save round-trips it", async () => {
     const fetchMock = okSave();
     vi.stubGlobal("fetch", fetchMock);
     renderM4(m4Payload());
@@ -7671,8 +7671,22 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
     act(() => {
       registeredOpen!({ id: "upgraded-row", name: "Upgraded", draft: underived });
     });
-    // Update the reopened scenario with NO further edits — the working draft
-    // must already carry the derived membership (self-describing).
+    // F-2 (red-team) non-vacuity — the derive-and-stamp writes the derived
+    // membership into the WORKING draft, so it round-trips to localStorage
+    // BEFORE any save. Assert that persisted blob DIRECTLY. This is the reopen
+    // stamp's REAL observable: deleting the derive-and-stamp in
+    // openSavedScenario leaves the working draft's memberKeyIds UNDERIVED
+    // (undefined) here → JSON.stringify drops it → this fails. (The prior
+    // save-only assertion was vacuous: the entryMode-aware SAVE stamp produced
+    // the same book membership regardless of whether the reopen stamped it.)
+    await waitFor(() => {
+      const raw = lsStore.get(`allocations.scenario_v0_15.${ALLOCATOR_A}`);
+      expect(raw).toBeTruthy();
+      expect(
+        (JSON.parse(raw as string) as ScenarioDraft).memberKeyIds,
+      ).toEqual(["key-A", "key-B"]);
+    });
+    // …and an immediate save (no further edits) round-trips it end-to-end.
     fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
     await waitFor(() => {
       expect(saveCalls(fetchMock)).toHaveLength(1);
