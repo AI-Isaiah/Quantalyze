@@ -1707,6 +1707,157 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // ENGINE-03 (Phase 63 Plan 01) — gate=false book holders initialize to BLANK
+  //   mode (added-only) with the DSRC-02 note repointed so it still renders,
+  //   and book entry is UNREACHABLE (no engineless book mode). Landing this
+  //   BEFORE the ENGINE-01 holdings-path deletion means no intermediate state
+  //   ever shows a gate=false book mode with no engine behind it (D1 locked).
+  //
+  //   Pitfall 2: the init flip and the note repoint are pinned as a PAIR — the
+  //   first test asserts blank-init AND note-present, so flipping the init
+  //   without repointing the note (old condition `entryMode === "book"` would
+  //   kill it once blank is forced) fails this test.
+  // -------------------------------------------------------------------------
+  it("ENGINE-03 gate=false book holder → initial mode is BLANK and the DSRC-02 note still renders (Pitfall 2 pair)", () => {
+    const payload = makePayload({
+      // hasLiveBook (default 3 holdings) + gate NOT satisfied + eligible keys.
+      perKeyDailiesGateSatisfied: false,
+      eligibleApiKeyIds: ["key-binance"],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Init is BLANK (added-only), NOT book — no engine-less book mode.
+    expect(
+      screen.getByRole("radio", { name: /Blank slate/i }),
+    ).toHaveAttribute("aria-checked", "true");
+    // The calm DSRC-02 note still renders (repointed to hasLiveBook, so forcing
+    // blank does NOT silently drop it) — never a broken or empty book UI.
+    const fallback = screen.getByTestId("scenario-data-sources-fallback");
+    expect(fallback).toBeInTheDocument();
+    expect(
+      screen.getByText(/Per-source modeling needs per-key history\./i),
+    ).toBeInTheDocument();
+  });
+
+  it("ENGINE-03 gate=false book holder → 'From my book' segment is ABSENT and an arrow-key cannot enter book mode", () => {
+    const payload = makePayload({
+      perKeyDailiesGateSatisfied: false,
+      eligibleApiKeyIds: ["key-binance"],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Book entry is unreachable — the segment is not rendered at all.
+    expect(
+      screen.queryByRole("radio", { name: /From my book/i }),
+    ).not.toBeInTheDocument();
+    // Arrow-key navigation must not conjure or enter the (engineless) book mode.
+    const group = screen.getByRole("radiogroup", {
+      name: /Composition entry mode/i,
+    });
+    fireEvent.keyDown(group, { key: "ArrowRight" });
+    expect(
+      screen.getByRole("radio", { name: /Blank slate/i }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.queryByRole("radio", { name: /From my book/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("ENGINE-03 gate=TRUE book holder → initial mode is BOOK and the note does NOT render (gate=true byte-identical)", () => {
+    const payload = makePayload({
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: ["key-binance"],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.getByRole("radio", { name: /From my book/i }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.queryByTestId("scenario-data-sources-fallback"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("ENGINE-03 no live book → blank init, DSRC-02 note absent (no book, existing behavior preserved)", () => {
+    const payload = makePayload({
+      holdingsSummary: [],
+      holdingReturnsByScopeRef: {},
+      perKeyDailiesGateSatisfied: false,
+      eligibleApiKeyIds: [],
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // No live book → the note (which needs hasLiveBook + eligible keys) is absent.
+    expect(
+      screen.queryByTestId("scenario-data-sources-fallback"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("ENGINE-03 reopen edge: opening a saved BOOK draft (memberKeyIds non-empty) under gate=false renders forced-blank without throwing; MEMBER-04 disclosure intact", () => {
+    const payload = makePayload({
+      perKeyDailiesGateSatisfied: false,
+      // key-binance eligible; a persisted member "key-gone" is no longer eligible.
+      eligibleApiKeyIds: ["key-binance"],
+    });
+    let registeredOpen:
+      | ((row: { id: string; name: string; draft: unknown }) => void)
+      | null = null;
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          registeredOpen = open as typeof registeredOpen;
+        }}
+      />,
+    );
+    expect(registeredOpen).not.toBeNull();
+    const savedBook = {
+      ...defaultDraftFromHoldings([
+        HOLDING_BTC,
+        HOLDING_ETH,
+        HOLDING_SOL,
+      ] as Parameters<typeof defaultDraftFromHoldings>[0]),
+      memberKeyIds: ["key-binance", "key-gone"],
+    };
+    // The forced-blank composer must hydrate the saved book draft without throwing.
+    expect(() =>
+      act(() => {
+        registeredOpen!({ id: "book-row", name: "Saved book", draft: savedBook });
+      }),
+    ).not.toThrow();
+    // Still forced blank (init gate=false), and the MEMBER-04 ineligible
+    // disclosure machinery (untouched) surfaces the dropped "key-gone" member.
+    expect(
+      screen.getByRole("radio", { name: /Blank slate/i }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.getByTestId("scenario-membership-note"),
+    ).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
   // T_C15 — Fingerprint mismatch banner
   // -------------------------------------------------------------------------
   it("T_C15 fingerprintMismatch=true → banner visible with copy + 2 buttons; default-focus on Keep my draft", () => {
