@@ -287,7 +287,10 @@ export function ScenarioComparePanel({
     if (!includeLiveBook) return null;
     try {
       const metrics = computeMetricsForDraft(
-        buildLiveBookDraft(payload.eligibleApiKeyIds ?? []),
+        buildLiveBookDraft(
+          payload.perKeyDailiesGateSatisfied ?? false,
+          payload.eligibleApiKeyIds ?? [],
+        ),
         liveInputs,
         { liveBook: true },
       );

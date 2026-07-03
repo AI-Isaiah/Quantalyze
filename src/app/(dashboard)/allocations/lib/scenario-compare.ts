@@ -322,8 +322,22 @@ export function computeMetricsForDraft(
  * `{ liveBook: true }` to `computeMetricsForDraft` so the own-book column stays
  * on the union path (Phase-55 lock) instead of the saved-scenario intersection
  * default — the exception is declared at the call site, never name-matched.
+ *
+ * WR-02: the live-book column respects the REAL per-key-dailies gate, exactly
+ * like the composer's own baseline (ScenarioComposer.tsx:1765 —
+ * `usePerKeySources = book && gate`) and the panel's underived-column
+ * normalization (deriveMembershipFromGate(payload.perKeyDailiesGateSatisfied,
+ * …)). The gate is threaded in as a parameter (never hardcoded true): with the
+ * gate SATISFIED the derived membership is the eligible key set → the per-key
+ * union own-book blend; with the gate OFF membership is empty → the holdings
+ * union path (opts.liveBook) — the same basis every sibling column runs on, so
+ * the "Live book" column can never diverge to the per-key basis (or an
+ * empty-per-key em-dash, P61-BUG-2) while the rest of the table is on holdings.
  */
-export function buildLiveBookDraft(eligibleApiKeyIds: string[]): ScenarioDraft {
+export function buildLiveBookDraft(
+  perKeyDailiesGateSatisfied: boolean,
+  eligibleApiKeyIds: string[],
+): ScenarioDraft {
   return {
     // The synthetic draft never round-trips the codec (computeMetricsForDraft
     // consumes it directly), but pin the CURRENT version constant so a future
@@ -333,14 +347,18 @@ export function buildLiveBookDraft(eligibleApiKeyIds: string[]): ScenarioDraft {
     toggleByScopeRef: {},
     addedStrategies: [],
     weightOverrides: {},
-    // v1.6 MEMBER-02 — the live-book column is the allocator's OWN book: stamp
-    // membership = the derived eligible set (deriveMembershipFromGate(true, …))
-    // so it selects the per-key engine set (the union own-book blend) under the
-    // membership selector. `{ liveBook: true }` at the call site holds it on the
-    // union path (Phase-55 own-book lock). An empty eligible set → empty
-    // membership → the legacy holdings path (a holdings-only book), matching the
-    // pre-membership gate-off behavior.
-    memberKeyIds: deriveMembershipFromGate(true, eligibleApiKeyIds),
+    // v1.6 MEMBER-02 / WR-02 — the live-book column is the allocator's OWN book:
+    // stamp membership = the gate-derived eligible set
+    // (deriveMembershipFromGate(gate, eligible)) so it selects the per-key
+    // engine set (the union own-book blend) ONLY when the gate is satisfied,
+    // matching every other surface. `{ liveBook: true }` at the call site holds
+    // it on the union path (Phase-55 own-book lock). Gate OFF or an empty
+    // eligible set → empty membership → the holdings union path (a holdings-only
+    // book), matching the sibling columns' gate-off basis.
+    memberKeyIds: deriveMembershipFromGate(
+      perKeyDailiesGateSatisfied,
+      eligibleApiKeyIds,
+    ),
     lastEditedAt: new Date(0).toISOString(),
   };
 }

@@ -375,10 +375,10 @@ describe("computeMetricsForDraft", () => {
       eligible,
     );
 
-    // buildLiveBookDraft stamps membership = derived(gate=true, eligible) so the
-    // own-book column keeps selecting the per-key set; { liveBook: true } holds
-    // it on the union path (Phase-55 lock) with NO window.
-    const liveDraft = buildLiveBookDraft(eligible);
+    // buildLiveBookDraft stamps membership = derived(gate, eligible) so the
+    // own-book column keeps selecting the per-key set (gate satisfied here);
+    // { liveBook: true } holds it on the union path (Phase-55 lock) with NO window.
+    const liveDraft = buildLiveBookDraft(true, eligible);
     expect(liveDraft.window).toBeUndefined(); // never carries a window
 
     const live = computeMetricsForDraft(liveDraft, inputs, { liveBook: true });
@@ -489,7 +489,9 @@ describe("buildLiveBookDraft", () => {
     };
     const inputs = liveInputs(holdings, returnsByRef);
 
-    const liveDraft = buildLiveBookDraft([]); // holdings-only book (no per-key keys)
+    // Holdings-only book: no per-key gate, no eligible keys → empty membership
+    // → the holdings union path under { liveBook: true }.
+    const liveDraft = buildLiveBookDraft(false, []);
     // No added strategies, no leverage on the synthetic draft.
     expect(liveDraft.addedStrategies).toHaveLength(0);
 
@@ -514,7 +516,7 @@ describe("buildLiveBookDraft", () => {
       [holdingRef("binance", "BTC", "spot")]: altReturns(shortDates, 0.01, -0.01),
     });
 
-    const m = computeMetricsForDraft(buildLiveBookDraft([]), inputs, {
+    const m = computeMetricsForDraft(buildLiveBookDraft(false, []), inputs, {
       liveBook: true,
     });
     expect(m.sharpe).toBeNull();
@@ -795,7 +797,7 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
     // union path — effective bounds + n + twr identical to the golden blend.
     const eligible = ["key-A", "key-B"];
     const live = computeMetricsForDraft(
-      buildLiveBookDraft(eligible),
+      buildLiveBookDraft(true, eligible),
       perKeyInputs(eligible),
       { liveBook: true },
     );
@@ -803,5 +805,33 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
     expect(live.member_count).toBe(2);
     expect(live.effective_start).toBe(PK_DATES[0]);
     expect(live.twr).toBeCloseTo(0.04074, 4);
+  });
+
+  it("WR-02: the live-book column RESPECTS the gate — gate OFF with eligible keys → empty membership (holdings basis), not the per-key blend", () => {
+    // buildLiveBookDraft threads the REAL gate. With the gate OFF the derived
+    // membership is empty even though eligible keys exist, so the own-book
+    // column runs the holdings union path (opts.liveBook) — the SAME basis as
+    // its sibling columns when the gate is off — instead of silently diverging
+    // onto the per-key blend (or an empty-per-key em-dash, P61-BUG-2). Here the
+    // inputs carry ONLY per-key series (no holdings), so gate-off → empty
+    // membership → holdings path → honest empty (member_count 0), whereas
+    // gate-on → the 2-key blend.
+    const eligible = ["key-A", "key-B"];
+
+    const gateOff = computeMetricsForDraft(
+      buildLiveBookDraft(false, eligible),
+      perKeyInputs(eligible),
+      { liveBook: true },
+    );
+    // Gate off ⇒ empty membership ⇒ holdings path over an empty book ⇒ no members.
+    expect(gateOff.member_count).toBe(0);
+
+    const gateOn = computeMetricsForDraft(
+      buildLiveBookDraft(true, eligible),
+      perKeyInputs(eligible),
+      { liveBook: true },
+    );
+    // Gate on ⇒ the per-key blend selects both eligible keys.
+    expect(gateOn.member_count).toBe(2);
   });
 });
