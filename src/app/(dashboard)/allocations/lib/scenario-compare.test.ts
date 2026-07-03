@@ -474,6 +474,15 @@ describe("computeMetricsForDraft — per-key channel (P61-BUG-2)", () => {
   const PK_DATES = buildDates("2026-02-02", 40);
   const KEY_A = altReturns(PK_DATES, 0.004, -0.002);
   const KEY_B = altReturns(PK_DATES, -0.001, 0.003);
+  // MEMBER-02 intent-preserving rebase: under the persisted-membership selector
+  // (plan 62-02) a book column selects the per-key engine set from its SAVED
+  // `memberKeyIds`, not the live gate. These fixtures are BOOK columns whose two
+  // eligible keys ARE their persisted membership — so they stay on the per-key
+  // path (mirroring how the panel derives membership = eligible ids for an
+  // upgraded/underived column). A book fixture that instead defaulted to `[]`
+  // would silently flip to the added-only holdings path (F5) and break these
+  // per-key oracles + the Atlas-class 40-day golden.
+  const BOOK_MEMBERS = ["key-A", "key-B"];
 
   /** Per-key live inputs: gate satisfied, two eligible keys, NO holding
    *  series at all (the exact prod shape that computed empty pre-fix). */
@@ -494,7 +503,7 @@ describe("computeMetricsForDraft — per-key channel (P61-BUG-2)", () => {
   it("a saved book draft (no added strategies) computes a NON-empty per-key blend at its persisted window", () => {
     const win = { start: PK_DATES[5], end: PK_DATES[30] };
     const m = computeMetricsForDraft(
-      draft({ window: win }),
+      draft({ window: win, memberKeyIds: BOOK_MEMBERS }),
       perKeyInputs(),
     );
     // Pre-fix: the holdings path had zero units → member_count 0, all null.
@@ -520,6 +529,7 @@ describe("computeMetricsForDraft — per-key channel (P61-BUG-2)", () => {
     };
     const withAdded = computeMetricsForDraft(
       draft({
+        memberKeyIds: BOOK_MEMBERS,
         addedStrategies: [
           {
             id: "added-1" as AddedStrategy["id"],
@@ -536,30 +546,161 @@ describe("computeMetricsForDraft — per-key channel (P61-BUG-2)", () => {
     expect(withAdded.member_ids).toEqual(expect.arrayContaining(["added-1"]));
 
     // Non-vacuous: the added 0.5 sleeve MOVES the numbers vs keys-only.
-    const keysOnly = computeMetricsForDraft(draft(), perKeyInputs());
+    const keysOnly = computeMetricsForDraft(
+      draft({ memberKeyIds: BOOK_MEMBERS }),
+      perKeyInputs(),
+    );
     expect(withAdded.twr).not.toBeNull();
     expect(keysOnly.twr).not.toBeNull();
     expect(withAdded.twr).not.toBe(keysOnly.twr);
   });
 
-  it("gate ABSENT → the legacy holdings path runs unchanged (per-key fields ignored)", () => {
+  it("EMPTY membership → the legacy holdings/added path runs (per-key fields ignored), even with the gate set", () => {
+    // MEMBER-02: the gate is no longer the selector — membership is. An empty
+    // `memberKeyIds` computes the added-only holdings path REGARDLESS of the
+    // gate (this is the F5 mechanism at the compute unit). Gate left true to
+    // prove it is not load-bearing.
     const inputs: ScenarioCompareInputs = {
       ...perKeyInputs(),
-      perKeyDailiesGateSatisfied: false,
+      perKeyDailiesGateSatisfied: true,
     };
-    const m = computeMetricsForDraft(draft(), inputs);
-    // No holdings series → honest empty (the pre-existing legacy behavior).
+    const m = computeMetricsForDraft(draft(), inputs); // memberKeyIds []
+    // No holdings series + empty membership → honest empty (added-only path).
     expect(m.member_count).toBe(0);
   });
 
-  it("only ELIGIBLE keys blend (a leftover series for an ineligible key is filtered)", () => {
+  it("only MEMBER keys still eligible blend (a leftover series for a non-member/ineligible key is filtered)", () => {
     const inputs = perKeyInputs();
     inputs.perKeyReturnsByApiKeyId = {
       ...inputs.perKeyReturnsByApiKeyId,
       "key-GHOST": altReturns(PK_DATES, 0.02, -0.02),
     };
-    const m = computeMetricsForDraft(draft(), inputs);
+    // Membership = the two real keys; key-GHOST is neither a member nor eligible.
+    const m = computeMetricsForDraft(draft({ memberKeyIds: BOOK_MEMBERS }), inputs);
     expect(m.member_count).toBe(2);
     expect(m.member_ids).not.toEqual(expect.arrayContaining(["key-GHOST"]));
+  });
+});
+
+// =========================================================================
+// MEMBER-02 membership selector (F5 closure) — plan 62-02.
+//
+// compare must select its per-key engine set from the draft's PERSISTED
+// `memberKeyIds`, NOT the live gate. This closes red-team F5 by construction:
+// a blank-authored saved draft (memberKeyIds=[]) must NEVER inherit the live
+// book in its compare column even when the live gate is satisfied. The eligible-
+// set intersection is also the MEMBER-04 compute-time drop point: a persisted
+// member id that is no longer eligible is dropped, never blended (T-62-04/-05).
+//
+// The Atlas-class book-only golden (a 40-day per-key blend) must compute
+// IDENTICALLY for an upgraded/underived book column — which the panel models by
+// deriving membership = all eligible ids before compute. Modelling that column
+// with memberKeyIds=[] would flip it to the added-only path and break the golden.
+// =========================================================================
+describe("MEMBER-02 membership selector (F5 closure)", () => {
+  const PK_DATES = buildDates("2026-02-02", 40);
+  const KEY_A = altReturns(PK_DATES, 0.004, -0.002);
+  const KEY_B = altReturns(PK_DATES, -0.001, 0.003);
+
+  /** Per-key live inputs: gate satisfied, two eligible keys, NO holding series
+   *  (the prod book shape). `eligible` overrides the eligible-key set. */
+  function perKeyInputs(
+    eligible: string[] = ["key-A", "key-B"],
+  ): ScenarioCompareInputs {
+    return {
+      holdingsSummary: [],
+      holdingReturnsByScopeRef: {},
+      addedStrategyReturnsLookup: {},
+      addedStrategyMetadataLookup: {},
+      symbolByHoldingId: new Map(),
+      perKeyReturnsByApiKeyId: { "key-A": KEY_A, "key-B": KEY_B },
+      eligibleApiKeyIds: eligible,
+      equityByApiKeyId: { "key-A": 70_000, "key-B": 30_000 },
+      perKeyDailiesGateSatisfied: true,
+    };
+  }
+
+  it("F5: a blank-membership draft (memberKeyIds=[], no added) computes added-only even when the live gate is TRUE — never the live book", () => {
+    // The red-team F5 case: a saved blank draft with the per-key gate satisfied.
+    // The gate-only selector would merge the WHOLE live book into this column
+    // (member_count 2); the membership selector computes the added-only (here
+    // empty) result — member_count 0. RED against the current gate-only code.
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: [], addedStrategies: [] }),
+      perKeyInputs(),
+    );
+    expect(m.member_count).toBe(0);
+    // Honest absence, never a fabricated live-book blend.
+    expect(m.member_ids).toEqual([]);
+    expect(m.twr).toBeNull();
+  });
+
+  it("a saved book draft selects the per-key set from its PERSISTED members (gate true)", () => {
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A", "key-B"] }),
+      perKeyInputs(),
+    );
+    expect(m.member_count).toBe(2);
+    expect(m.member_ids).toEqual(expect.arrayContaining(["key-A", "key-B"]));
+    expect(m.twr).not.toBeNull();
+  });
+
+  it("membership is a strict SUBSET of eligible → only the persisted members blend (not the whole eligible set)", () => {
+    // Membership names ONE key while TWO are eligible + gate=true. The gate-only
+    // selector blends BOTH eligible keys (member_count 2); the membership
+    // selector blends ONLY the persisted member (member_count 1). RED against
+    // the current gate-only code.
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A"] }),
+      perKeyInputs(["key-A", "key-B"]),
+    );
+    expect(m.member_count).toBe(1);
+    expect(m.member_ids).toEqual(["key-A"]);
+  });
+
+  it("MEMBER-04 drop: a persisted member that is no longer eligible is intersected out at compute (honest, no throw)", () => {
+    // memberKeyIds names a key that has since become ineligible ("key-gone");
+    // the intersection with the SSR-computed eligible set drops it — the column
+    // computes on the remaining still-eligible member, never throwing (T-62-04/-05).
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A", "key-gone"] }),
+      perKeyInputs(["key-A"]),
+    );
+    expect(m.member_count).toBe(1);
+    expect(m.member_ids).toEqual(["key-A"]);
+  });
+
+  it("golden: the Atlas-class book-only 40-day blend is preserved for an upgraded/derived-membership column", () => {
+    // The upgraded-book column the panel models by deriving membership = all
+    // eligible ids. Its metrics must equal the pre-change per-key blend byte for
+    // byte — the regression the naive `?? []` default would break. (Synthetic
+    // stand-in for the prod Atlas golden Cum/Sharpe @ 40-day book-only window.)
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A", "key-B"] }),
+      perKeyInputs(),
+    );
+    expect(m.n).toBe(40);
+    expect(m.member_count).toBe(2);
+    expect(m.effective_start).toBe(PK_DATES[0]);
+    expect(m.effective_end).toBe(PK_DATES[39]);
+    expect(m.twr).toBeCloseTo(0.04074, 4);
+    expect(m.sharpe).toBeCloseTo(10.45, 1);
+  });
+
+  it("live-book union lock: buildLiveBookDraft(eligibleApiKeyIds) with { liveBook: true } stays byte-identical on the union path", () => {
+    // The live-book column is the allocator's own book (Phase-55 union lock).
+    // buildLiveBookDraft stamps membership = derived(gate, eligible ids) so it
+    // keeps selecting the per-key set, and { liveBook: true } holds it on the
+    // union path — effective bounds + n + twr identical to the golden blend.
+    const eligible = ["key-A", "key-B"];
+    const live = computeMetricsForDraft(
+      buildLiveBookDraft(eligible),
+      perKeyInputs(eligible),
+      { liveBook: true },
+    );
+    expect(live.n).toBe(40);
+    expect(live.member_count).toBe(2);
+    expect(live.effective_start).toBe(PK_DATES[0]);
+    expect(live.twr).toBeCloseTo(0.04074, 4);
   });
 });
