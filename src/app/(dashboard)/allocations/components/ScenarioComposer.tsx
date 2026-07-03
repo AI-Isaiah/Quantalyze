@@ -119,6 +119,7 @@ import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { Button } from "@/components/ui/Button";
 import {
+  computeHoldingsFingerprint,
   defaultDraftFromHoldings,
   deriveMembershipFromGate,
   isDraftDrifted,
@@ -1244,15 +1245,6 @@ export function ScenarioComposer({
       // render (`[]` in forced-blank). A saved draft that matches EITHER is not
       // drifted → applied, its window seeded, its membership disclosed — all
       // consistently.
-      const gatedDefaultFingerprint = defaultDraftFromHoldings(
-        holdingsSummary as Parameters<typeof defaultDraftFromHoldings>[0],
-      ).init_holdings_fingerprint;
-      const drifted = isDraftDrifted(
-        decoded.value.init_holdings_fingerprint,
-        gatedDefaultFingerprint,
-        defaultDraft.init_holdings_fingerprint,
-      );
-
       // v1.6 MEMBER-04 (DERIVE-AND-STAMP, gate-only). An UPGRADED (v2/v3) or an
       // underived-v4 round-tripped draft decodes with `memberKeyIds === undefined`.
       // Resolve it from the live gate + eligible set and STAMP it into the WORKING
@@ -1272,6 +1264,60 @@ export function ScenarioComposer({
               ),
             )
           : decoded.value;
+
+      // F-1 (red-team) — the entry mode the OPENED draft itself implies, keyed on
+      // its OWN authored holdings basis (its `init_holdings_fingerprint`), NOT the
+      // stale session mode. A draft whose fingerprint matches the LIVE book was
+      // authored in book mode (seeded from holdings); one carrying the empty-
+      // holdings fingerprint was authored blank (added-only, `[]` seed). Book is
+      // only representable when the per-key gate is satisfied (it needs a per-
+      // source engine), so a book-authored draft under a gate-off session stays
+      // blank — the pinned forced-blank reopen (CR-01 case (a)) — and its
+      // persisted membership is then protected on save by `memberKeyIdsForUpdate`.
+      //
+      // Keyed on the FINGERPRINT, deliberately NOT the membership: a book draft
+      // can legitimately carry EMPTY membership (a pre-STAMP save, or a book save
+      // made while the gate was off) yet must still reopen as book — keying on
+      // membership would misclassify it as blank and strip its holdings basis
+      // (regressing the Phase-59 reopen-window suite). Syncing the session to
+      // THIS (below, on a non-drifted open) makes the engine basis
+      // (`usePerKeySources`) and the save-time membership stamp both track what is
+      // ACTUALLY modeled on screen, closing BOTH the composer-vs-compare number
+      // divergence AND the silent membership wipe/stamp on "Update portfolio".
+      const liveBookFingerprint = defaultDraft.init_holdings_fingerprint;
+      const draftIsBookAuthored =
+        liveBookFingerprint !== "" &&
+        decoded.value.init_holdings_fingerprint === liveBookFingerprint;
+      const targetEntryMode: "book" | "blank" =
+        draftIsBookAuthored && (payload.perKeyDailiesGateSatisfied ?? false)
+          ? "book"
+          : "blank";
+
+      // Re-review WR-01 / CR-01 (Phase 63) — drift is decided against the mode we
+      // are about to ADOPT, not the current session mode, so the reopen decision
+      // and the hook's next-render `storedMismatch` (which recomputes at the
+      // synced entryMode) can never diverge. The gated fingerprint for the target
+      // mode: book → the LIVE-book fingerprint; blank → the empty-holdings
+      // fingerprint (the composer seeds `[]` in blank mode). The live-book
+      // fingerprint stays the second predicate arm, so a book draft matching the
+      // live book is applied regardless of the mode we land in.
+      const targetGatedFingerprint =
+        targetEntryMode === "book"
+          ? liveBookFingerprint
+          : computeHoldingsFingerprint([]);
+      const drifted = isDraftDrifted(
+        decoded.value.init_holdings_fingerprint,
+        targetGatedFingerprint,
+        liveBookFingerprint,
+      );
+
+      // Sync the session mode to the opened draft — ONLY on a non-drifted open
+      // (the saved draft is actually applied). On drift the working draft falls
+      // back to the current-mode default (the saved draft is NOT applied), so its
+      // mode must not change. React batches this with the hydrateFromSaved
+      // setValue below into a single re-render, so `storedMismatch` recomputes at
+      // the adopted mode in the same commit — no transient drift/apply flicker.
+      if (!drifted) setEntryMode(targetEntryMode);
 
       if (decoded.outcome === "readonly") {
         // Newer-version blob: hydrate the user's real data but block edits.
@@ -1488,6 +1534,26 @@ export function ScenarioComposer({
       ? (payload.eligibleApiKeyIds ?? [])
       : [];
 
+  // F-1 (red-team) — the membership an UPDATE (PUT) of the loaded scenario
+  // persists. After `openSavedScenario` syncs the session mode to the reopened
+  // draft, `memberKeyIdsForSave` (the entryMode-aware stamp) already matches
+  // what is modeled, so an Update round-trips membership faithfully. The ONE
+  // exception is the ~0-user edge the mode-sync cannot represent: a reopened
+  // BOOK draft whose per-key gate is NOT satisfied. Book mode is unrenderable
+  // (no per-source engine), so the session is forced to blank and the blank
+  // stamp would be `[]` — silently converting the persisted book draft to
+  // blank-authored. Preserve the working draft's OWN existing membership
+  // instead: silent membership destruction must be impossible. Guarded on the
+  // gate (not on entryMode) so a genuinely blank-authored draft in a gate-off
+  // session — existing membership `[]` — still saves `[]`, never resurrecting
+  // members. NEW saves (POST) keep using `memberKeyIdsForSave` (MEMBER-04's
+  // entryMode-aware STAMP contract); this only affects the reopen→Update seam.
+  const memberKeyIdsForUpdate =
+    (scenario.draft.memberKeyIds ?? []).length > 0 &&
+    !payload.perKeyDailiesGateSatisfied
+      ? (scenario.draft.memberKeyIds ?? [])
+      : memberKeyIdsForSave;
+
   // POST a new scenario (first save OR "save as new"). On success adopt the
   // returned id as the loaded scenario (editable, not readonly).
   async function postNewScenario(name: string) {
@@ -1542,7 +1608,7 @@ export function ScenarioComposer({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             name: loadedScenarioName ?? "Scenario",
-            draft: setMemberKeyIds(scenario.draft, memberKeyIdsForSave),
+            draft: setMemberKeyIds(scenario.draft, memberKeyIdsForUpdate),
           }),
         },
       );

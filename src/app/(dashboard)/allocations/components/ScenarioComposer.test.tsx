@@ -7680,6 +7680,92 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
     expect(savedDraft(fetchMock).memberKeyIds).toEqual(["key-A", "key-B"]);
   });
 
+  // --- F-1 (red-team) reopen mode-sync + membership preservation -----------
+  //
+  // The session entryMode governs BOTH the engine basis (usePerKeySources) and
+  // the save-time membership stamp. Pre-fix, openSavedScenario never synced the
+  // session mode to the OPENED draft, so a book draft opened in a blank session
+  // (a) computed added-only while compare computed per-key (divergent numbers on
+  // one screen) and (b) an Update wiped the persisted membership to []. The
+  // symmetric direction (book session opening a blank-authored draft) stamped
+  // eligible ids into it. These pin the mode-sync fix.
+
+  it("F-1 (a): a BLANK-mode session opening a saved v4 BOOK draft PRESERVES its members on Update (pre-fix wipes to [])", async () => {
+    const fetchMock = okSave();
+    vi.stubGlobal("fetch", fetchMock);
+    renderM4(m4Payload()); // gate true, eligible [key-A, key-B]; starts in book
+    // Switch the SESSION to blank (clean draft → immediate, lossless).
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(
+      screen.getByRole("radio", { name: /Blank slate/i }),
+    ).toHaveAttribute("aria-checked", "true");
+    // Open the allocator's saved BOOK portfolio (real members, gate satisfied,
+    // members all still eligible → membership round-trips 1:1).
+    const savedBook = {
+      ...defaultDraftFromHoldings(M4_HOLDINGS),
+      memberKeyIds: ["key-A", "key-B"],
+    };
+    act(() => {
+      registeredOpen!({ id: "book-row", name: "My book", draft: savedBook });
+    });
+    // Update with NO edits. The PUT must PRESERVE the book membership — pre-fix
+    // the blank-session stamp overwrote it with [] (silent book→blank wipe).
+    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    expect(savedDraft(fetchMock).memberKeyIds).toEqual(["key-A", "key-B"]);
+  });
+
+  it("F-1 (b): opening a saved BOOK draft in a BLANK session syncs the engine basis to per-key (Data sources control + book segment)", () => {
+    renderM4(m4Payload());
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    // Pre-fix: session stays blank → added-only engine → NO Data sources control.
+    expect(
+      screen.queryByTestId("scenario-data-sources"),
+    ).not.toBeInTheDocument();
+    const savedBook = {
+      ...defaultDraftFromHoldings(M4_HOLDINGS),
+      memberKeyIds: ["key-A", "key-B"],
+    };
+    act(() => {
+      registeredOpen!({ id: "book-row", name: "My book", draft: savedBook });
+    });
+    // Post-fix: the open syncs the session to book → the per-key engine basis
+    // (usePerKeySources), the SAME basis compare shows. The per-key "Data
+    // sources" control now renders and the "From my book" segment is selected.
+    expect(screen.getByTestId("scenario-data-sources")).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /From my book/i }),
+    ).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("F-1 (c): a BOOK-mode session opening a saved BLANK-authored draft KEEPS [] on Update (pre-fix stamps eligible ids)", async () => {
+    const fetchMock = okSave();
+    vi.stubGlobal("fetch", fetchMock);
+    renderM4(m4Payload()); // starts in book mode
+    // A genuine blank-authored draft: empty-holdings fingerprint, no members.
+    const savedBlank = {
+      ...defaultDraftFromHoldings([]),
+      memberKeyIds: [],
+    };
+    act(() => {
+      registeredOpen!({ id: "blank-row", name: "Blank", draft: savedBlank });
+    });
+    // Sync flipped the session to blank (empty membership) → the added-only
+    // engine, so the save stamp is [] — the draft stays blank-authored.
+    expect(
+      screen.getByRole("radio", { name: /Blank slate/i }),
+    ).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    // Pre-fix the book-session stamp overwrote [] with the eligible ids (silent
+    // blank→book conversion); post-fix the mode-sync keeps it blank.
+    expect(savedDraft(fetchMock).memberKeyIds).toEqual([]);
+  });
+
   // --- (3) INELIGIBLE DISCLOSURE ------------------------------------------
 
   it("REOPEN ineligible: reopening a v4 draft with a persisted member no longer eligible SHOWS the membership provenance note (never silent)", () => {
