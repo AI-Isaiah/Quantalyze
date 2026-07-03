@@ -34,7 +34,7 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
-import { scenarioDraftSchema } from "@/app/(dashboard)/allocations/lib/scenario-state";
+import { scenarioDraftSaveSchema } from "@/app/(dashboard)/allocations/lib/scenario-state";
 
 export const runtime = "nodejs";
 
@@ -52,11 +52,14 @@ export const runtime = "nodejs";
 export const MAX_DRAFT_BODY_BYTES = 256_000;
 
 // Reuse the canonical draft contract (scenario-state.ts) for the `draft`
-// field — do NOT author a second validator. `name` mirrors the SQL CHECK
-// `length(btrim(name)) between 1 and 120`.
+// field — do NOT author a second validator. v1.6 MEMBER-01: use the SAVE
+// variant (`scenarioDraftSaveSchema`) so a v4 draft POSTed without
+// `memberKeyIds` is rejected fail-loud at the save boundary (the codec-decode
+// path stays tolerant so upgraded localStorage round-trips are never dropped).
+// `name` mirrors the SQL CHECK `length(btrim(name)) between 1 and 120`.
 const SaveScenarioBodySchema = z.object({
   name: z.string().trim().min(1).max(120),
-  draft: scenarioDraftSchema,
+  draft: scenarioDraftSaveSchema,
 });
 
 // ---------------------------------------------------------------------------

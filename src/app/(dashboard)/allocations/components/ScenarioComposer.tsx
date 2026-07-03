@@ -831,7 +831,8 @@ export function ScenarioComposer({
   const [openNotice, setOpenNotice] = useState<string | null>(null);
   // v1.5 PERSIST-01 — the EPHEMERAL provenance flag. True only right after
   // reopening a pre-v1.5 (v2, windowless) saved draft that the codec upgraded on
-  // read (decode `reason === "upgraded_v2_windowless"`) and whose window
+  // read (decode `reason === "upgraded_v2_chain"`, renamed from
+  // "upgraded_v2_windowless" by the v1.6 MEMBER-01 double bump) and whose window
   // therefore defaulted to the intersection. Gates the ProvenanceNote (below the
   // POLISH-03 placement). Set ONLY on the upgraded-v2 open path and cleared on
   // every other open (fresh v3, readonly, reset) so it never persists across
@@ -1257,11 +1258,16 @@ export function ScenarioComposer({
       //     override the reopened window; the window itself is already in the
       //     hydrated draft — review CR-01 — so no draft write happens here).
       //     Provenance note stays hidden.
-      //   • upgraded-v2 draft (decode reason "upgraded_v2_windowless", window
+      //   • upgraded-v2 draft (decode reason "upgraded_v2_chain", window
       //     absent) → release the window gate so the auto-default effect seeds
       //     the intersection ("common period"), AND raise the provenance note.
-      //   • any other windowless "ok" (a v3 saved before a window was chosen) →
-      //     intersection default, no note.
+      //     (v1.6 MEMBER-01 renamed the v2-upgrade reason from
+      //     "upgraded_v2_windowless" to "upgraded_v2_chain" when the double
+      //     schema bump added a second non-destructive branch.)
+      //   • any other windowless "ok" — a current-version draft saved before a
+      //     window was chosen, OR an "upgraded_v3_membership" upgrade (v3 has
+      //     windows, so it does NOT predate them) → intersection default, no
+      //     note. Only a genuinely pre-window v2 draft shows the note.
       if (drifted) {
         setShowProvenanceNote(false);
       } else if (decoded.value.window) {
@@ -1269,7 +1275,7 @@ export function ScenarioComposer({
         setShowProvenanceNote(false);
       } else {
         resetWindowToDefaultOnReopen();
-        setShowProvenanceNote(decoded.reason === "upgraded_v2_windowless");
+        setShowProvenanceNote(decoded.reason === "upgraded_v2_chain");
       }
       setLoadedScenarioId(row.id);
       setLoadedScenarioName(row.name);

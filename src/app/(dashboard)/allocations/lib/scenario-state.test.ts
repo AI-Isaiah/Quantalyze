@@ -429,6 +429,8 @@ describe("scenarioDraftCodec", () => {
     toggleByScopeRef: { "holding:binance:BTC:spot": true },
     addedStrategies: [],
     weightOverrides: { "holding:binance:BTC:spot": 1 },
+    // v1.6 MEMBER-01 — a current-version draft carries explicit membership.
+    memberKeyIds: [],
     lastEditedAt: "2026-04-25T00:00:00.000Z",
   });
 
@@ -514,11 +516,14 @@ describe("scenarioDraftCodec", () => {
     lastEditedAt: "2026-04-25T00:00:00.000Z",
   });
 
-  it("PERSIST-01 Test A — v2 windowless draft decodes ok (NEVER reset) with the upgraded_v2_windowless provenance marker", () => {
+  it("PERSIST-01 Test A — v2 windowless draft decodes ok (NEVER reset) with the upgraded_v2_chain provenance marker (v1.6: the double bump renamed the v2 reason and moved it to the literal-2 chain branch)", () => {
     const r = codec.decode(JSON.stringify(windowlessV2()));
-    // The load-bearing assertion: a valid v2 draft must NOT be dropped.
+    // The load-bearing assertion: a valid v2 draft must NOT be dropped. After
+    // the v1.6 MEMBER-01 double bump (PREV 2→3), a schema_version:2 blob is
+    // handled by the SECOND non-destructive branch (literal rawVersion === 2),
+    // reason "upgraded_v2_chain" (was "upgraded_v2_windowless" when v2 was PREV).
     expect(r.outcome).toBe("ok");
-    expect(r.reason).toBe("upgraded_v2_windowless");
+    expect(r.reason).toBe("upgraded_v2_chain");
     // Upgraded in-memory to the current version; next save re-persists at 3.
     expect(r.value.schema_version).toBe(SCENARIO_SCHEMA_VERSION);
     // Window intentionally left undefined — consumers default it via
@@ -539,12 +544,13 @@ describe("scenarioDraftCodec", () => {
     expect(r.value).toBe(def);
   });
 
-  it("PERSIST-01 Test C — a current+1 (==4) draft still decodes readonly(version_ahead) after the bump", () => {
+  it("PERSIST-01 Test C — a current+1 (==5) draft still decodes readonly(version_ahead) after the bump", () => {
     // Pitfall 2: the trichotomy is relative to SCENARIO_SCHEMA_VERSION, so the
-    // existing `ahead` fixture at SCENARIO_SCHEMA_VERSION + 1 self-adjusts to 4.
-    // Assert the explicit 4 too so the forward-compat path is pinned by value.
+    // existing `ahead` fixture at SCENARIO_SCHEMA_VERSION + 1 self-adjusts to 5
+    // after the v1.6 MEMBER-01 bump (3→4). Assert the explicit 5 too so the
+    // forward-compat path is pinned by value.
     const ahead = { ...validV1(), schema_version: SCENARIO_SCHEMA_VERSION + 1 };
-    expect(SCENARIO_SCHEMA_VERSION + 1).toBe(4);
+    expect(SCENARIO_SCHEMA_VERSION + 1).toBe(5);
     const r = codec.decode(JSON.stringify(ahead));
     expect(r.outcome).toBe("readonly");
     expect(r.reason).toBe("version_ahead");

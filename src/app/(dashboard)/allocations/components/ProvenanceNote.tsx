@@ -6,7 +6,8 @@ import { useState } from "react";
  * ProvenanceNote (v1.5 PERSIST-01) — the pre-coverage-window upgrade note.
  *
  * Shown ONLY when reopening a pre-v1.5 (v2, windowless) saved scenario that the
- * codec upgraded on read (decode `reason === "upgraded_v2_windowless"`) and whose
+ * codec upgraded on read (decode `reason === "upgraded_v2_chain"`, renamed from
+ * "upgraded_v2_windowless" by the v1.6 MEMBER-01 double bump) and whose
  * coverage window therefore defaulted to the intersection ("common period"). It
  * tells the allocator plainly that this saved scenario predates coverage windows
  * and is being shown at the common period, with a one-click escape hatch back to
