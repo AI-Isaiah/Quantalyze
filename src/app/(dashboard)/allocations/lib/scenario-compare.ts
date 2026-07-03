@@ -190,7 +190,7 @@ export function computeMetricsForDraft(
     // draft with EMPTY membership computes SERIES-SPACE ADDED-ONLY via the ONE
     // shared `buildAddedOnlySet` wrapper (no holdings snapshot, no inline unit
     // loop). A blank-authored draft (memberKeyIds=[]) therefore renders exactly
-    // as the composer does in blank mode (ScenarioComposer.tsx:702-704) — its
+    // as the composer does in blank mode (ScenarioComposer.tsx:708-711) — its
     // added strategies only, never the live book's holdings. The former
     // `opts.liveBook` structural exception now degenerates: the gate=false
     // live-book column resolves to an EMPTY added-only set → computeScenario

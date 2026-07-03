@@ -102,7 +102,7 @@ function buildAddedUnits(
  * the positional signature stays
  * byte-identical (RESEARCH §Alternatives A4). The unit-construction loop mirrors
  * the verified SSR helper `liveBaselineMetricsFromPerKeyDailies`
- * (queries.ts:2321–2348) — one unit per key, `disclosure_tier: "exploratory"`,
+ * (queries.ts:2225-2251) — one unit per key, `disclosure_tier: "exploratory"`,
  * null scalar metrics, weight = the key's clamped equity share. The literal
  * shape is duplicated locally (not imported from queries.ts) to avoid a module
  * cycle, consistent with the existing per-key duplication noted in PATTERNS
@@ -133,7 +133,7 @@ export function buildPerKeyStrategyForBuilderSet(
 
   for (const [apiKeyId, returns] of Object.entries(perKeyReturnsByApiKeyId)) {
     // Skip empty/absent series — a key with no per-key history cannot contribute
-    // (mirrors liveBaselineMetricsFromPerKeyDailies, queries.ts:2322).
+    // (mirrors liveBaselineMetricsFromPerKeyDailies, queries.ts:2226).
     if (!returns || returns.length === 0) continue;
     strategies.push({
       id: apiKeyId, // id === api_key_id (DSRC-01: keyed per data source)

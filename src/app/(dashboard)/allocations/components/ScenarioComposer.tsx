@@ -1704,7 +1704,7 @@ export function ScenarioComposer({
   // below is shared by both — the engine set is series-space only (ENGINE-01).
   // -------------------------------------------------------------------------
   // Per-key equity share (D2): Σ holdingEquityContribution grouped by
-  // api_key_id (mirror queries.ts:2303-2310). Uses the EXPORTED contribution
+  // api_key_id (mirror queries.ts:2207-2215). Uses the EXPORTED contribution
   // helper — never re-derives equity from value_usd (derivative notional ≠
   // equity). This is the RAW weight source; the engine renormalizes (Pitfall 1).
   const equityByApiKeyId = useMemo(() => {

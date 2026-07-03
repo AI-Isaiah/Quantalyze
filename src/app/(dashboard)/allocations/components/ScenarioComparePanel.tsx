@@ -121,7 +121,8 @@ const NULL_METRICS: ComputedMetrics = {
 
 /**
  * Build the `ScenarioCompareInputs` from the live payload — mirrors the
- * composer's series-space derivation (ScenarioComposer.tsx:686-790):
+ * composer's series-space derivation (ScenarioComposer.tsx:1588-1608 lookups,
+ * :1710-1718 equityByApiKeyId):
  *   - addedStrategy{Returns,Metadata}Lookup keyed by strategy id (over the union
  *     of every decoded draft's added strategies);
  *   - equityByApiKeyId — per-key equity shares grouped from the live holdings
