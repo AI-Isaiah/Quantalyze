@@ -210,6 +210,34 @@ export function computeHoldingsFingerprint(
 }
 
 /**
+ * CR-01 (Phase 63 review) — the SINGLE drift predicate both the reopen path
+ * (`ScenarioComposer.openSavedScenario`) and the hook (`useScenarioState`'s
+ * `storedMismatch` / `baseOf`) consume, so the two decisions can never diverge.
+ *
+ * A draft is "drifted" (its saved holdings basis is stale relative to what the
+ * composer now presents) IFF its fingerprint matches NEITHER:
+ *   - the GATED default (`gatedFingerprint`) — the holdings the composer seeds
+ *     THIS render (`[]` in blank mode), so a fresh blank-authored draft is never
+ *     drifted; NOR
+ *   - the LIVE book (`liveBookFingerprint`) — the mode-UNgated live holdings, so
+ *     a book draft that still matches the live book is never drifted even when a
+ *     gate=false holder is forced into blank mode (the CR-01 case-(a) hole).
+ *
+ * In book mode `gatedFingerprint === liveBookFingerprint`, so this reduces to
+ * the pre-Phase-63 single-fingerprint check (book-mode behavior is unchanged).
+ */
+export function isDraftDrifted(
+  draftFingerprint: string,
+  gatedFingerprint: string,
+  liveBookFingerprint: string,
+): boolean {
+  return (
+    draftFingerprint !== gatedFingerprint &&
+    draftFingerprint !== liveBookFingerprint
+  );
+}
+
+/**
  * Renormalize weights so that the sum over `enabledIds` === 1.0. When the sum
  * of the input weights over the enabled subset is 0, fall back to equal
  * distribution. Disabled ids are excluded from the output entirely.

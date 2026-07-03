@@ -1759,7 +1759,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("ENGINE-03 reopen edge: opening a saved BOOK draft (memberKeyIds non-empty) under gate=false renders forced-blank without throwing; MEMBER-04 disclosure intact", () => {
+  it("CR-01 case (a): forced-blank gate=false reopen of a BOOK draft matching the live book APPLIES the draft — no false drift banner, Commit reflects the applied draft, MEMBER-04 disclosure intact", () => {
     const payload = makePayload({
       perKeyDailiesGateSatisfied: false,
       // key-binance eligible; a persisted member "key-gone" is no longer eligible.
@@ -1779,6 +1779,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       />,
     );
     expect(registeredOpen).not.toBeNull();
+    // A saved BOOK draft whose fingerprint matches the live book
+    // ([BTC,ETH,SOL] = the makePayload holdingsSummary). Under gate=false the
+    // composer initializes to forced-blank (holdingsSummary gated to []).
     const savedBook = {
       ...defaultDraftFromHoldings([
         HOLDING_BTC,
@@ -1793,14 +1796,34 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         registeredOpen!({ id: "book-row", name: "Saved book", draft: savedBook });
       }),
     ).not.toThrow();
-    // Still forced blank (init gate=false), and the MEMBER-04 ineligible
-    // disclosure machinery (untouched) surfaces the dropped "key-gone" member.
+    // Still forced blank (init gate=false) …
     expect(
       screen.getByRole("radio", { name: /Blank slate/i }),
     ).toHaveAttribute("aria-checked", "true");
+    // … and the MEMBER-04 ineligible disclosure surfaces the dropped "key-gone".
     expect(
       screen.getByTestId("scenario-membership-note"),
     ).toBeInTheDocument();
+
+    // CR-01 root cause: openSavedScenario's drift base and the hook's
+    // storedMismatch base must AGREE. The saved book draft matches the LIVE
+    // book, so it is NOT drifted — the draft must be APPLIED, not fall back to
+    // the blank default.
+    //
+    // (1) No false "your live holdings have changed" banner — holdings did not
+    //     change; pre-fix the hook fingerprinted the gated [] against fp(book)
+    //     and raised this banner spuriously.
+    expect(
+      screen.queryByText(/Your live holdings have changed/i),
+    ).not.toBeInTheDocument();
+    // (2) The working draft carries the saved book (3 holdings toggled on) — the
+    //     diff-count footer reflects the APPLIED draft (Commit enabled), NOT the
+    //     empty blank default (Commit disabled) the pre-fix hook fell back to.
+    //     This is the "Update persists what is shown" oracle: the working draft
+    //     is the saved book, so a save round-trips the book — no blank-default
+    //     overwrite / silent data loss.
+    expect(screen.getByTestId("scenario-footer-commit")).not.toBeDisabled();
+    expect(screen.getByText(/3 changes/i)).toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------

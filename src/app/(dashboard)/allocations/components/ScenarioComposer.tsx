@@ -121,6 +121,7 @@ import { Button } from "@/components/ui/Button";
 import {
   defaultDraftFromHoldings,
   deriveMembershipFromGate,
+  isDraftDrifted,
   scenarioDraftCodec,
   setMemberKeyIds,
   type AddedStrategy,
@@ -725,6 +726,11 @@ export function ScenarioComposer({
 
   const scenario = useScenarioState({
     holdingsSummary: holdingsSummary as { symbol: string; venue: string; holding_type: string; value_usd: number }[],
+    // CR-01 (Phase 63 review) — the drift reference is the mode-UNgated LIVE
+    // book, so the hook's storedMismatch agrees with openSavedScenario's drift
+    // check even when a gate=false holder is forced into blank mode (which gates
+    // holdingsSummary to []). SEEDING still uses the gated holdingsSummary above.
+    driftReferenceHoldings: rawHoldingsSummary as { symbol: string; venue: string; holding_type: string; value_usd: number }[],
     allocatorId,
   });
 
@@ -1229,9 +1235,23 @@ export function ScenarioComposer({
       // (the intersection auto-default, or the user's own applied window via
       // the seed-invalidation effect below coverageWindow) must not change
       // either.
-      const drifted =
-        decoded.value.init_holdings_fingerprint !==
-        defaultDraft.init_holdings_fingerprint;
+      // CR-01 (Phase 63 review) — drift via the SHARED `isDraftDrifted`
+      // predicate, the SAME helper (and the same two fingerprints) the hook's
+      // storedMismatch consumes, so the reopen decision and the hook's
+      // apply/discard decision can never diverge. `defaultDraft` above carries
+      // the LIVE-book fingerprint (built from rawHoldingsSummary); the gated
+      // default carries the fingerprint of what the composer presents THIS
+      // render (`[]` in forced-blank). A saved draft that matches EITHER is not
+      // drifted → applied, its window seeded, its membership disclosed — all
+      // consistently.
+      const gatedDefaultFingerprint = defaultDraftFromHoldings(
+        holdingsSummary as Parameters<typeof defaultDraftFromHoldings>[0],
+      ).init_holdings_fingerprint;
+      const drifted = isDraftDrifted(
+        decoded.value.init_holdings_fingerprint,
+        gatedDefaultFingerprint,
+        defaultDraft.init_holdings_fingerprint,
+      );
 
       // v1.6 MEMBER-04 (DERIVE-AND-STAMP, gate-only). An UPGRADED (v2/v3) or an
       // underived-v4 round-tripped draft decodes with `memberKeyIds === undefined`.
@@ -1358,14 +1378,17 @@ export function ScenarioComposer({
     },
     // hydrateFromSaved/reset/seedWindowLocal/resetWindowToDefaultOnReopen are
     // stable useCallbacks; the setters are stable; rawHoldingsSummary is the
-    // primary render-varying input (the drift reference is the LIVE book, not
-    // the presentation-gated `holdingsSummary` — ENGINE-03). v1.6 MEMBER-04 also
-    // reads the live gate + eligible set (DERIVE-AND-STAMP + ineligible
-    // disclosure), so re-create the callback when they change — a stale eligible
-    // set would misjudge dropped members.
+    // LIVE-book drift reference. CR-01 — `holdingsSummary` (the presentation-
+    // gated memo, `[]` in blank mode) is the GATED half of the shared drift
+    // predicate, so the callback must re-create when the entry mode flips it,
+    // else a forced-blank reopen would judge drift against a stale gated
+    // fingerprint. v1.6 MEMBER-04 also reads the live gate + eligible set
+    // (DERIVE-AND-STAMP + ineligible disclosure), so re-create when they change —
+    // a stale eligible set would misjudge dropped members.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       rawHoldingsSummary,
+      holdingsSummary,
       scenario.hydrateFromSaved,
       payload.perKeyDailiesGateSatisfied,
       payload.eligibleApiKeyIds,

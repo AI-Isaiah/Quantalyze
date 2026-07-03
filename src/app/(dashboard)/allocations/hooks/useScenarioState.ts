@@ -36,6 +36,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   computeHoldingsFingerprint,
+  isDraftDrifted,
   defaultDraftFromHoldings,
   scenarioDraftCodec,
   scenarioStorageKey,
@@ -56,6 +57,18 @@ import { useCrossTabStorage } from "@/lib/storage/cross-tab";
 
 export interface UseScenarioStateOptions {
   holdingsSummary: HoldingForDefault[];
+  /**
+   * CR-01 (Phase 63 review) — the drift REFERENCE holdings: the mode-UNgated
+   * live book. `storedMismatch` (and `baseOf`) decide drift against BOTH the
+   * gated `holdingsSummary` default AND this live-book fingerprint, so the
+   * hook's apply/discard decision agrees with `openSavedScenario`'s drift check
+   * in every blank-mode-with-live-book state (no seeded-window / disclosure /
+   * drift-banner divergence, no saved-draft overwrite). SEEDING the default
+   * draft still uses the gated `holdingsSummary`. Defaults to `holdingsSummary`
+   * (book mode / no live book), which makes the predicate reduce to the
+   * pre-Phase-63 single-fingerprint check.
+   */
+  driftReferenceHoldings?: HoldingForDefault[];
   /**
    * T-10-02 + N1 — scopes the localStorage key per allocator. Pass the
    * authenticated user's id (allocator id). Two allocators in the same
@@ -123,11 +136,21 @@ export interface UseScenarioStateReturn {
 export function useScenarioState(
   opts: UseScenarioStateOptions,
 ): UseScenarioStateReturn {
-  const { holdingsSummary, allocatorId } = opts;
+  const { holdingsSummary, driftReferenceHoldings, allocatorId } = opts;
 
   const fingerprint = useMemo(
     () => computeHoldingsFingerprint(holdingsSummary),
     [holdingsSummary],
+  );
+
+  // CR-01 — the LIVE-book drift fingerprint. Defaults to the gated
+  // `holdingsSummary` (book mode / no live book) so the drift predicate reduces
+  // to the single-fingerprint check; in blank mode the composer passes the raw
+  // live book, so a book draft that still matches it is not seen as drifted.
+  const driftReference = driftReferenceHoldings ?? holdingsSummary;
+  const driftFingerprint = useMemo(
+    () => computeHoldingsFingerprint(driftReference),
+    [driftReference],
   );
 
   // H-0127 — the default draft is memoized once per (holdings, fingerprint).
@@ -173,11 +196,13 @@ export function useScenarioState(
   // only at event time, by which point the effect has run and they are current.
   // useRef's initializer seeds them correctly for the first render too.
   const fingerprintRef = useRef(fingerprint);
+  const driftFingerprintRef = useRef(driftFingerprint);
   const defaultDraftRef = useRef(defaultDraft);
   useEffect(() => {
     fingerprintRef.current = fingerprint;
+    driftFingerprintRef.current = driftFingerprint;
     defaultDraftRef.current = defaultDraft;
-  }, [fingerprint, defaultDraft]);
+  }, [fingerprint, driftFingerprint, defaultDraft]);
 
   // Fingerprint-mismatch is PURE derived state, not an effect: a stored draft
   // whose fingerprint differs from current holdings means the draft was built
@@ -192,10 +217,15 @@ export function useScenarioState(
   // on `isHydrated` and is only advisory (mutators rebase via `baseOf`, the
   // banner is dismissable), so a transient read is benign and self-corrects on
   // the re-hydration render.
+  // CR-01 — drift against the SHARED predicate: a stored draft is "mismatched"
+  // (stale for this holdings set) IFF its fingerprint matches neither the gated
+  // default nor the live book. `openSavedScenario` computes `drifted` from the
+  // same `isDraftDrifted` helper with the same two fingerprints, so the hook's
+  // apply/discard decision and the reopen path can never diverge.
   const storedMismatch =
     isHydrated &&
     Boolean(allocatorId) &&
-    value.init_holdings_fingerprint !== fingerprint;
+    isDraftDrifted(value.init_holdings_fingerprint, fingerprint, driftFingerprint);
 
   const [mismatchDismissed, setMismatchDismissed] = useState(false);
   // A new allocator gets a fresh banner — un-dismiss when the allocator
@@ -232,7 +262,15 @@ export function useScenarioState(
   // operates on the default the user actually sees — and the resulting write,
   // carrying the current fingerprint, clears the mismatch.
   const baseOf = useCallback((prev: ScenarioDraft): ScenarioDraft => {
-    return prev.init_holdings_fingerprint !== fingerprintRef.current
+    // CR-01 — rebase onto the (gated) default only when `prev` is genuinely
+    // drifted (matches neither the gated default nor the live book). An applied
+    // book draft that still matches the live book is NOT rebased away on edit,
+    // so a forced-blank reopen of a matching book draft survives the first edit.
+    return isDraftDrifted(
+      prev.init_holdings_fingerprint,
+      fingerprintRef.current,
+      driftFingerprintRef.current,
+    )
       ? defaultDraftRef.current
       : prev;
   }, []);
