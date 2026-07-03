@@ -2291,8 +2291,9 @@ export function liveBaselineMetricsFromPerKeyDailies(
  * @internal Exported for unit testing only (Phase 36 D3 honesty guard). The
  * all-or-nothing predicate: returns true IFF EVERY active key id has a
  * non-empty per-key series. Any active key with 0 per-key rows → false → the
- * whole allocator falls back to the snapshot reconstruction (never a mixed
- * annualization basis inside one curve).
+ * whole allocator falls back to the honest emptyDefault baseline
+ * (`emptyLiveBaselineMetrics`) (never a mixed annualization basis inside one
+ * curve).
  */
 export function allActiveKeysHavePerKeyDailies(
   activeKeyIds: ReadonlyArray<string>,
@@ -2324,8 +2325,9 @@ export function allActiveKeysHavePerKeyDailies(
  * WITHOUT deactivating). A bare `is_active` filter would therefore count such a
  * key as "active" while the backfill NEVER derives a series for it →
  * `allActiveKeysHavePerKeyDailies` would return false FOREVER and the whole
- * allocator would be silently pinned to the snapshot fallback, defeating the
- * repoint for anyone who has ever revoked or disconnected a key. Mirroring the
+ * allocator would be silently pinned to the honest emptyDefault baseline
+ * (`emptyLiveBaselineMetrics`), defeating the repoint for anyone who has ever
+ * revoked or disconnected a key. Mirroring the
  * predicate keeps the gate honest. (Cross-language SoT: the Python backfill is
  * authoritative; this TS predicate is its mirror — keep them in lockstep.)
  */
@@ -2999,8 +3001,9 @@ export const getMyAllocationDashboard = cache(
     // metrics (UNIFY-01/02/03). When EVERY active key has a non-empty per-key
     // csv_daily_returns series, derive the curve SHAPE + KPIs from the per-key
     // blend through computeScenario (D1, the realized+funding / unified-252
-    // basis); otherwise fall back to the snapshot reconstruction for the WHOLE
-    // allocator (never a mixed annualization basis — honesty over coverage).
+    // basis); otherwise fall back to the honest emptyDefault baseline
+    // (`emptyLiveBaselineMetrics`) for the WHOLE allocator (never a mixed
+    // annualization basis — honesty over coverage).
     // AUM stays from holdings on BOTH branches (D2). The liveBaselineMetrics
     // OUTPUT shape is byte-identical between branches (the SSR payload + the
     // composer baseline depend on it). holdingReturnsByScopeRef (above) is a
