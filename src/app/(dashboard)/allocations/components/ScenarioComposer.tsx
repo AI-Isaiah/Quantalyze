@@ -1961,8 +1961,12 @@ export function ScenarioComposer({
     [activeAdapterOutput.strategies, projectionState],
   );
   const dateMapCache = useMemo(
+    // Reads ONLY strategies.daily_returns — key on the referentially-stable
+    // `engineSet.strategies` (=== activeAdapterOutput.strategies) so a
+    // weight/leverage/selection scrub (which rebuilds `engineSet` via
+    // projectionState) does NOT rescan every series.
     () => buildDateMapCache(engineSet.strategies),
-    [engineSet],
+    [engineSet.strategies],
   );
 
   // Phase 57 (WINDOW-01) — coverage spans of the strategies actually fed to the
@@ -2576,7 +2580,9 @@ export function ScenarioComposer({
     const out: Record<string, string> = {};
     for (const s of engineSet.strategies) out[s.id] = s.name;
     return out;
-  }, [engineSet]);
+    // Reads ONLY strategies (id/name) — key on `engineSet.strategies` so a
+    // weight/leverage scrub does not rebuild the label map.
+  }, [engineSet.strategies]);
 
   // CORR-02/05/06 — the constituent diversification result (Plan 41-01 lib).
   // Re-aligns the per-constituent returns the FROZEN engine discards
@@ -2650,8 +2656,10 @@ export function ScenarioComposer({
   // Pure helper (unit-tested in scenario-history.test.ts); reads only the
   // engine set the composer already holds. null when the set is empty.
   const coverageShortestName = useMemo(
+    // Reads ONLY strategies (daily_returns spans) — key on
+    // `engineSet.strategies` so a weight/leverage scrub does not rescan.
     () => shortestHistoryName(engineSet.strategies),
-    [engineSet],
+    [engineSet.strategies],
   );
 
   // R4 — show the leverage caveat only when a non-default multiplier ACTUALLY
