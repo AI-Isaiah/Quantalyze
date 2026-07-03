@@ -292,15 +292,16 @@ export function computeMetricsForDraft(
  * natural weights, no added strategies, no toggle/weight overrides, no
  * leverage. With the per-key gate satisfied that is the per-key blend at
  * equity shares (P61-BUG-2 — the same Phase-36 per-key basis as
- * liveBaselineMetrics); otherwise all live holdings at the adapter's
- * value-proportional default. Fed through
- * `computeMetricsForDraft` it computes all six metrics through the SAME engine
- * path so the live-book compare column populates honestly — rather than the
- * thin `payload.liveBaselineMetrics` shape (RESOLVED decision).
+ * liveBaselineMetrics); with the gate OFF the derived membership is empty → an
+ * empty added-only set → `computeScenario` NULL metrics → an honest em-dash
+ * column (the legacy holdings-union path is deleted, Phase 63 ENGINE-02). Fed
+ * through `computeMetricsForDraft` it computes all six metrics through the SAME
+ * engine path so the live-book compare column populates honestly — rather than
+ * the thin `payload.liveBaselineMetrics` shape (RESOLVED decision).
  *
  * An empty `toggleByScopeRef` + `weightOverrides` makes `computeMetricsForDraft`
- * fall back to the adapter defaults (every holding selected, value-proportional
- * weights), which IS the live book.
+ * fall back to the adapter defaults (every engine unit selected at its natural
+ * weight), which — gate ON — IS the live book's per-key blend.
  *
  * Ship-review RT-1: callers computing THIS draft must pass
  * `{ liveBook: true }` to `computeMetricsForDraft` so the own-book column stays
@@ -308,15 +309,15 @@ export function computeMetricsForDraft(
  * default — the exception is declared at the call site, never name-matched.
  *
  * WR-02: the live-book column respects the REAL per-key-dailies gate, exactly
- * like the composer's own baseline (ScenarioComposer.tsx:1765 —
+ * like the composer's own baseline (ScenarioComposer.tsx:1750-1751 —
  * `usePerKeySources = book && gate`) and the panel's underived-column
  * normalization (deriveMembershipFromGate(payload.perKeyDailiesGateSatisfied,
  * …)). The gate is threaded in as a parameter (never hardcoded true): with the
  * gate SATISFIED the derived membership is the eligible key set → the per-key
- * union own-book blend; with the gate OFF membership is empty → the holdings
- * union path (opts.liveBook) — the same basis every sibling column runs on, so
- * the "Live book" column can never diverge to the per-key basis (or an
- * empty-per-key em-dash, P61-BUG-2) while the rest of the table is on holdings.
+ * union own-book blend; with the gate OFF the derived membership is empty → an
+ * empty added-only set → `computeScenario` NULL metrics → an honest em-dash
+ * column (D1-consistent, matching every sibling column's gate-off basis), NOT
+ * the deleted holdings-union path.
  */
 export function buildLiveBookDraft(
   perKeyDailiesGateSatisfied: boolean,
@@ -337,8 +338,8 @@ export function buildLiveBookDraft(
     // engine set (the union own-book blend) ONLY when the gate is satisfied,
     // matching every other surface. `{ liveBook: true }` at the call site holds
     // it on the union path (Phase-55 own-book lock). Gate OFF or an empty
-    // eligible set → empty membership → the holdings union path (a holdings-only
-    // book), matching the sibling columns' gate-off basis.
+    // eligible set → empty membership → an empty added-only set → NULL metrics
+    // (an honest em-dash column), matching the sibling columns' gate-off basis.
     memberKeyIds: deriveMembershipFromGate(
       perKeyDailiesGateSatisfied,
       eligibleApiKeyIds,
