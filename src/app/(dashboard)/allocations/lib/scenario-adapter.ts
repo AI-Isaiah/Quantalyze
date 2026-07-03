@@ -352,3 +352,54 @@ export function mergeAddedIntoPerKeySet(
     state: { selected, weights, startDates },
   };
 }
+
+/**
+ * Phase 63 Plan 01 (ENGINE-04 precondition b, Wave-0) — the ONE shared
+ * added-only engine-set construction. This is the empty-per-key reduction of
+ * `mergeAddedIntoPerKeySet`, made greppable: with no per-key units to merge,
+ * the survivor's early-return and share-normalization drop out, leaving exactly
+ * the added trio (selected=true, weight-0 default, "2022-01-01" startDate
+ * sentinel). It therefore reproduces today's blank-mode output byte-for-byte —
+ * `mergeAddedIntoPerKeySet({ strategies: [], state: { selected: {}, weights: {},
+ * startDates: {} } }, added, ...)` — so the staged deletions (Plans 02–04) can
+ * swap every holdings path for this single wrapper without changing the
+ * gate=false / blank-mode numbers.
+ *
+ * Delegates unit construction to the private `buildAddedUnits` (shared with the
+ * builder + the merge survivor) — the weight-0 / warm-up / metadata defaults are
+ * F9 H-0133 test-pinned invariants; NEVER hand-roll an inline StrategyForBuilder
+ * literal here. Mirrors the signature/JSDoc convention of
+ * `buildPerKeyStrategyForBuilderSet`.
+ *
+ * @param addedStrategies  the draft's added strategies (branded AddedStrategy[]).
+ * @param addedStrategyReturnsLookup  strategy id → that strategy's DailyPoint[].
+ * @param addedStrategyMetadataLookup  strategy id → disclosure/cagr/sharpe meta.
+ */
+export function buildAddedOnlySet(
+  addedStrategies: AddedStrategy[],
+  addedStrategyReturnsLookup: Record<StrategyForBuilderId, DailyPoint[]>,
+  addedStrategyMetadataLookup: Record<
+    StrategyForBuilderId,
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+  >,
+): { strategies: StrategyForBuilder[]; state: ScenarioState } {
+  const addedAsBuilder = buildAddedUnits(
+    addedStrategies,
+    addedStrategyReturnsLookup,
+    addedStrategyMetadataLookup,
+  );
+
+  const selected: Record<string, boolean> = {};
+  const weights: Record<string, number> = {};
+  const startDates: Record<string, string> = {};
+  for (const s of addedAsBuilder) {
+    selected[s.id] = true;
+    weights[s.id] = 0; // F9 H-0133 deliberate 0 default (overlay downstream)
+    startDates[s.id] = s.start_date ?? "2022-01-01";
+  }
+
+  return {
+    strategies: addedAsBuilder,
+    state: { selected, weights, startDates },
+  };
+}
