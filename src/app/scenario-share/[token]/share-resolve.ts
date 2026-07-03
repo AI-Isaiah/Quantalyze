@@ -203,7 +203,7 @@ export function resolveSharedScenario(
   // MEMBER-03 (unified book-only definition) — detection stays on the RESOLVED
   // `strategies.length`, NEVER `draft.memberKeyIds.length`. This is the ONE
   // public-page module: it has no owner gate / eligible-ids server-side, so it
-  // must NOT derive membership here (no `deriveMembershipFromGate`). A pre-v4 /
+  // must NOT run any gate-based membership derivation here. A pre-v4 /
   // v2 / v3 share arrives with membership UNDERIVED (undefined); keying the
   // branch on the strategies count means such a share is still surfaced
   // honestly and the code is never forced to read `.length` off an undefined
