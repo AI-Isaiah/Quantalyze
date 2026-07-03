@@ -5,9 +5,10 @@ import { formatPercent, formatNumber } from "@/lib/utils";
 import type { ComputedMetrics } from "@/lib/scenario";
 
 /**
- * Phase 09.1 / Plan 06 (D-09): designer-aligned 5-cell KPI strip.
+ * Phase 09.1 / Plan 06 (D-09): designer-aligned KPI strip.
+ * Phase 64 / PRESENT-01: return-form only — the AUM cell is gone (4 cells).
  *
- * Shape (left → right): AUM / YTD TWR / Sharpe / Max DD 12m / Avg |ρ|.
+ * Shape (left → right): YTD TWR / Sharpe / Max DD 12m / Avg |ρ|.
  * Each cell renders { label, formatted value, sub helper line }.
  *
  * **Phase 07 / 07-03 invariants preserved verbatim:**
@@ -433,8 +434,8 @@ export function KpiStrip({
       >
       {cells.map(({ label, raw, formatted, sub, metricKey }) => {
         // Resolve scenario primary + delta for this cell when the gate
-        // is open AND the cell has a metricKey (AUM has none → falls
-        // back to the live path).
+        // is open AND the cell has a metricKey (all 4 return-form cells
+        // carry one since Phase 64 removed the metricKey-less AUM cell).
         const scenVal: number | null =
           scenarioActive && metricKey
             ? // ComputedMetrics is a plain record of nullable numbers — index
