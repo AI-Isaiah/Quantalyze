@@ -181,6 +181,19 @@ let lastPickerProps: {
   max: Date;
   initialRange?: { start: string; end: string } | null;
 } | null = null;
+// Item 1 (WR-01 wiring regression) — capturing WeightOptimizerSection mock. The
+// composer mounts the REAL optimizer section; here it is replaced by an inert
+// spy that records `onApply` + the `strategies` prop (the ENGINE basis the
+// optimizer allocates over — `engineSet.strategies.filter(selected)`), mirroring
+// the CustomRangePicker/browse-drawer capture pattern. No existing test asserts
+// the real optimizer's render (it owns a Python-worker lifecycle), so the inert
+// stub is safe and lets the wiring test drive the optimizer's onApply directly
+// and prove the CALL SITE renormalizes over the engine basis (not the toggle
+// basis) — the "helper tested ≠ wiring tested" gap the pure helper test can't see.
+let optimizerOnApply: ((weights: Record<string, number>) => void) | null = null;
+let optimizerStrategies:
+  | Array<{ id: string; name: string; dailyReturns: unknown }>
+  | null = null;
 // Phase 57 — engine-arg recorder. `@/lib/scenario` stays REAL (computeScenario
 // still computes genuine metrics — the member_count oracle depends on it), but
 // `computeScenario` is wrapped so each invocation's `state` arg is captured. The
@@ -238,6 +251,19 @@ vi.mock("./CustomRangePicker", () => ({
       return props.isOpen ? (
         <div data-testid="custom-range-picker-mock" />
       ) : null;
+    },
+  ),
+}));
+
+vi.mock("./WeightOptimizerSection", () => ({
+  WeightOptimizerSection: vi.fn(
+    (props: {
+      strategies: Array<{ id: string; name: string; dailyReturns: unknown }>;
+      onApply: (weights: Record<string, number>) => void;
+    }) => {
+      optimizerOnApply = props.onApply;
+      optimizerStrategies = props.strategies;
+      return <div data-testid="weight-optimizer-mock" />;
     },
   ),
 }));
@@ -7335,6 +7361,94 @@ describe("ScenarioComposer — P61-BUG-1: added strategies join the per-key book
       expect(after?.member_count).toBe(3);
       // Non-vacuous: a 50% sleeve of a distinct series must move the numbers.
       expect(after?.twr).not.toBe(before?.twr);
+    });
+  });
+
+  // WR-01 WIRING regression (Phase 63 review / ship item 1) — the composer's
+  // WeightOptimizerSection.onApply CALL SITE must renormalize the applied vector
+  // over the ENGINE basis (the per-key api_key ids + added ids — the same set the
+  // projection blends), NOT the draft's `holding:`-toggle basis. The PURE helper
+  // `applyWeightOverrides(weights, basisIds)` is unit-tested in
+  // scenario-state-apply-weights.test.ts, but NOTHING pinned that the composer
+  // call site actually PASSES basisIds — the memory-class "helper tested ≠ wiring
+  // tested" gap that shipped the #528 apply-back dilution. This drives the REAL
+  // optimizer section's captured onApply in book+gate+1-added mode and proves the
+  // engine sees the suggestion reproduced EXACTLY over the mixed basis.
+  //
+  // RED-VERIFIED: dropping `basisIds` at the call site
+  // (ScenarioComposer.tsx:3723 → `scenario.applyWeightOverrides(weights)`)
+  // renormalizes over the draft's holding-toggle basis instead — the added sleeve
+  // then lands at ~0.231 (the stale holding-override mass sits in the denominator),
+  // turning the `toBeCloseTo(0.2)` discriminator red.
+  it("WR-01 wiring — the optimizer onApply renormalizes over the ENGINE basis (mixed per-key + added), reproducing the suggestion exactly", async () => {
+    stubLazyReturns(P61_ADDED_SERIES);
+    render(
+      <ScenarioComposer
+        payload={p61Payload()}
+        allocatorId={`${ALLOCATOR_A}-p61-optwire`}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: P61_ADDED_ID,
+      name: "P61 Added CSV Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    // The added leg is a live engine member: 3 units (2 per-key + 1 added).
+    await waitFor(() => {
+      expect(lastScenarioMetrics()?.member_count).toBe(3);
+    });
+
+    // The optimizer section received the ENGINE basis — the two per-key units +
+    // the added leg (`engineSet.strategies.filter(selected)`), the exact universe
+    // the projection blends. This is what makes the wiring meaningful: the
+    // suggestion is keyed by engine ids, so the call site MUST renormalize over
+    // those ids (per-key api_key UUIDs never enter the draft toggle map).
+    expect(optimizerOnApply).not.toBeNull();
+    expect(optimizerStrategies).not.toBeNull();
+    const basis = optimizerStrategies!.map((s) => s.id);
+    expect(basis).toEqual(
+      expect.arrayContaining(["p61-key-A", "p61-key-B", P61_ADDED_ID]),
+    );
+    expect(basis).toHaveLength(3);
+
+    // A long-only suggestion summing to 1 over the engine basis: 0.4 / 0.4 to the
+    // two per-key units, 0.2 to the added leg. The ADDED sleeve is the
+    // discriminator — the correct engine-basis renormalization lands it at 0.2
+    // exactly; renormalizing over the draft's holding-toggle basis (the
+    // basisIds-dropped path) leaves the stale holding-override mass in the
+    // denominator and shifts it off 0.2 (~0.231, observed RED).
+    const suggestion: Record<string, number> = {
+      "p61-key-A": 0.4,
+      "p61-key-B": 0.4,
+      [P61_ADDED_ID]: 0.2,
+    };
+
+    // Isolate the computeScenario calls the apply produces.
+    computeScenarioStateArgs.length = 0;
+    act(() => {
+      optimizerOnApply!(suggestion);
+    });
+
+    // The engine's blended state.weights reproduce the suggestion over the mixed
+    // basis. draft.weightOverrides[id] flows verbatim into projectionState.weights
+    // (ScenarioComposer.tsx:1928) and thence into engineState — so the recorded
+    // computeScenario `state.weights` is the faithful observable of the applied
+    // overrides over the ENGINE basis.
+    await waitFor(() => {
+      const composed = computeScenarioStateArgs.filter((a) =>
+        a.strategyIds.includes(P61_ADDED_ID),
+      );
+      expect(composed.length).toBeGreaterThan(0);
+      const weights = composed.at(-1)!.state.weights as Record<string, number>;
+      // DISCRIMINATOR — the added sleeve is 0.2, NOT the ~0.167 the holding-basis
+      // renormalization (basisIds dropped) would produce.
+      expect(weights[P61_ADDED_ID]).toBeCloseTo(0.2, 6);
+      // The per-key legs reproduce their suggested share too (0.8 total across
+      // the book, split 0.4 / 0.4).
+      expect(weights["p61-key-A"]).toBeCloseTo(0.4, 6);
+      expect(weights["p61-key-B"]).toBeCloseTo(0.4, 6);
     });
   });
 });
