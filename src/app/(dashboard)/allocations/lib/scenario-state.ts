@@ -946,6 +946,15 @@ export function scenarioDraftCodec(
 /** SSR-safe localStorage read. Returns null on SSR, missing key, schema-version
  *  mismatch, or any parse/access error.
  *
+ *  ⚠️ IN-02 — DESTRUCTIVE on pre-v4 blobs. This helper returns null whenever
+ *  `parsed.schema_version !== SCENARIO_SCHEMA_VERSION`, i.e. it SILENTLY DROPS
+ *  any upgraded v2/v3 (or underived-v4 round-trip) draft — the exact opposite
+ *  of the codec's non-destructive upgrade trichotomy (`scenarioDraftCodec`).
+ *  It is retained for back-compat and is currently used ONLY by
+ *  `scenario-state.localStorage.test.ts` (no production caller). It MUST NOT be
+ *  used on the reopen/hydrate path — route hydration through `scenarioDraftCodec`
+ *  so an upgraded/underived draft is preserved, never nulled to a fresh default.
+ *
  *  Mock-surface note: we use bare `localStorage` (not `window.localStorage`)
  *  inside the function body so test mocks installed via
  *  `vi.stubGlobal("localStorage", mock)` actually intercept the calls.
