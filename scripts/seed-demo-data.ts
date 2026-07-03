@@ -698,6 +698,26 @@ async function main() {
     );
   if (mdWipeErr) throw mdWipeErr;
 
+  // Full-app-seed coexistence (2026-07-03): `allocation_events.strategy_id`
+  // is ON DELETE NO ACTION, and scripts/seed-full-app-demo.ts seeds lifecycle
+  // events referencing ITS is_example strategies on the same shared test DB.
+  // The blanket is_example wipe below therefore 23503s unless the events are
+  // cleared first (exact CI failure: e2e-seeded run 28644250376). Enumerate
+  // the is_example ids and clear their events explicitly.
+  const { data: exampleStrats, error: exListErr } = await supabase
+    .from("strategies")
+    .select("id")
+    .eq("is_example", true);
+  if (exListErr) throw exListErr;
+  const exampleIds = (exampleStrats ?? []).map((s) => s.id);
+  if (exampleIds.length > 0) {
+    const { error: aeWipeErr } = await supabase
+      .from("allocation_events")
+      .delete()
+      .in("strategy_id", exampleIds);
+    if (aeWipeErr) throw aeWipeErr;
+  }
+
   // Delete analytics first (FK cascade would also work, but being explicit
   // keeps the logs readable). strategy_analytics has a UNIQUE FK so we
   // cascade via strategies anyway.

@@ -1257,22 +1257,40 @@ async function wipeLegacySeed(admin: SupabaseClient) {
     .delete()
     .in("user_id", legacyAllocators);
 
-  // Delete legacy is_example=true strategies + their analytics
+  // Delete legacy is_example=true strategies + their analytics.
+  //
+  // 2026-07-03: `allocation_events.strategy_id` is ON DELETE NO ACTION, so a
+  // previous full-app run's lifecycle events block the strategies delete —
+  // clear them first. The deletes below also now FAIL LOUDLY: they used to
+  // discard the supabase-js error object, so this exact 23503 was silently
+  // swallowed here while the legacy seeder (which checks its errors) crashed
+  // CI on the same shared test DB (e2e-seeded run 28644250376).
   const { data: legacyStrategies } = await admin
     .from("strategies")
     .select("id")
     .eq("is_example", true);
   const legacyStrategyIds = (legacyStrategies ?? []).map((s) => s.id);
   if (legacyStrategyIds.length > 0) {
-    await admin
+    const { error: aeErr } = await admin
+      .from("allocation_events")
+      .delete()
+      .in("strategy_id", legacyStrategyIds);
+    if (aeErr) throw new Error(`legacy wipe allocation_events: ${aeErr.message}`);
+    const { error: saErr } = await admin
       .from("strategy_analytics")
       .delete()
       .in("strategy_id", legacyStrategyIds);
-    await admin
+    if (saErr) throw new Error(`legacy wipe strategy_analytics: ${saErr.message}`);
+    const { error: psWipeErr } = await admin
       .from("portfolio_strategies")
       .delete()
       .in("strategy_id", legacyStrategyIds);
-    await admin.from("strategies").delete().in("id", legacyStrategyIds);
+    if (psWipeErr) throw new Error(`legacy wipe portfolio_strategies: ${psWipeErr.message}`);
+    const { error: stErr } = await admin
+      .from("strategies")
+      .delete()
+      .in("id", legacyStrategyIds);
+    if (stErr) throw new Error(`legacy wipe strategies: ${stErr.message}`);
   }
 
   // Delete legacy allocator profiles, then their auth.users entries.
