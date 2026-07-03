@@ -348,6 +348,13 @@ describe("scenario/share generate route — static security guards", () => {
     expect(routeSrc).toContain("mintShareToken");
   });
 
+  // MEMBER-03 — the book-only mint gate reads the SHARED null-safe predicate
+  // (one definition of book-only across mint/resolve/compare), not an ad-hoc
+  // inline addedStrategies-empty check that could drift from the other surfaces.
+  it("gates book-only mint via the shared isBookOnlyDraft predicate", () => {
+    expect(routeSrc).toContain("isBookOnlyDraft");
+  });
+
   it("imports the user-scoped client from @/lib/supabase/server (RLS is the tenant gate)", () => {
     expect(routeSrc).toContain('from "@/lib/supabase/server"');
   });
@@ -375,6 +382,43 @@ describe("scenario/share generate route — static security guards", () => {
 
   it("T_SH14 — a missing/misshapen draft takes the same 409 branch (nothing resolvable to share)", async () => {
     ownershipResult = { data: { id: "scen-1", draft: null }, error: null };
+    const res = await POST(mkPost({ scenario_id: SCENARIO_ID }));
+    expect(res.status).toBe(409);
+    expect(rpcSpy).not.toHaveBeenCalled();
+  });
+
+  // MEMBER-03 — the mint gate reads the SAME null-safe isBookOnlyDraft predicate
+  // the compare/share surfaces use (one definition of book-only across
+  // mint/resolve/compare). A draft that is book-only BY THAT PREDICATE (explicit
+  // book members, zero added strategies) is rejected at the source with the same
+  // 409 + code:"book_only_draft".
+  it("T_SH15 — a book-only-BY-MEMBERSHIP draft (memberKeyIds set, no added) → 409 book_only_draft, NO share minted", async () => {
+    ownershipResult = {
+      data: {
+        id: "scen-1",
+        draft: {
+          addedStrategies: [],
+          memberKeyIds: ["11111111-1111-1111-1111-111111111111"],
+        },
+      },
+      error: null,
+    };
+    const res = await POST(mkPost({ scenario_id: SCENARIO_ID }));
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe("book_only_draft");
+    expect(rpcSpy).not.toHaveBeenCalled();
+  });
+
+  // Null-safe: a PRE-v4 owner draft has memberKeyIds ABSENT (undefined) — every
+  // draft minted before schema v4. The predicate must NOT throw reading .length
+  // off undefined; it returns false, and the defensive empty-added branch still
+  // yields the same 409 (nothing resolvable to share). No throw, no 500.
+  it("T_SH16 — a pre-v4 draft with UNDEFINED membership + empty added → 409, never throws", async () => {
+    ownershipResult = {
+      data: { id: "scen-1", draft: { addedStrategies: [] } }, // no memberKeyIds
+      error: null,
+    };
     const res = await POST(mkPost({ scenario_id: SCENARIO_ID }));
     expect(res.status).toBe(409);
     expect(rpcSpy).not.toHaveBeenCalled();

@@ -552,4 +552,35 @@ describe("resolveSharedScenario — book-only draft honest-absence (P61-BUG-2)",
     });
     expect(result.kind).toBe("ok");
   });
+
+  // MEMBER-03 (null-safe unification) — a PRE-v4 / v2 / v3 share arrives with
+  // membership UNDERIVED (memberKeyIds ABSENT, not []). Book-only detection here
+  // stays on the RESOLVED `strategies.length` (never `draft.memberKeyIds.length`)
+  // precisely so this common path is surfaced honestly and the code never reads
+  // .length off undefined. This fixture OMITS memberKeyIds entirely to exercise
+  // the undefined-membership path — it must honest-absence "book-only", not throw.
+  it("a v2 share with UNDEFINED membership (pre-v4) + zero added → honest-absence 'book-only', never throws", () => {
+    const preV4BookOnly = {
+      schema_version: 2, // pre-v4 — membership underived (undefined)
+      init_holdings_fingerprint: "BTC:binance:spot",
+      toggleByScopeRef: {},
+      addedStrategies: [],
+      weightOverrides: {},
+      // memberKeyIds intentionally OMITTED — the null-safe path under test.
+      // `as unknown as ScenarioDraft`: a pre-v4 blob genuinely lacks the
+      // required-at-v4 field, which is exactly the underived-membership case.
+      lastEditedAt: "2026-06-22T00:00:00.000Z",
+    } as unknown as ScenarioDraft;
+
+    const result = resolveSharedScenario({
+      name: "Pre-v4 book-only",
+      draft: preV4BookOnly,
+      schema_version: 2,
+      series: [],
+    });
+    expect(result.kind).toBe("honest-absence");
+    expect(
+      result.kind === "honest-absence" ? result.reason : undefined,
+    ).toBe("book-only");
+  });
 });
