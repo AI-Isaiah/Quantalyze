@@ -28,7 +28,7 @@
  *     are mocked to inert spies so the composer's prop wiring is asserted via
  *     mock.calls without exercising the chart / drawer internals.
  *   - scenario-adapter is module-mocked so the composer's adapter-arg shape is
- *     observable via vi.mocked(buildStrategyForBuilderSet).mock.calls.
+ *     observable via the REAL engine set the composer builds.
  *
  * The full vitest suite (1973 baseline) must continue green; downstream
  * ScenarioStub / ScenarioFlaggedHoldingsList / AllocationDashboardV2 tests
@@ -137,28 +137,12 @@ vi.mock("../ScenarioFlaggedHoldingsList", () => ({
   )),
 }));
 
-// Mock the scenario-adapter so the composer's call-site shape is observable.
-// The mock returns a deterministic { strategies: [], state } so computeScenario
-// short-circuits to the n=0 branch (returns empty equity_curve) — that's
-// fine for prop-spy assertions.
-//
-// Phase 37 / DSRC-03: ONLY `buildStrategyForBuilderSet` (the holdings path) is
-// spied. The sibling `buildPerKeyStrategyForBuilderSet` is kept REAL via
-// importOriginal so the per-source honesty tests drive the genuine per-key unit
-// construction → frozen `computeScenario` recompute (computeScenario itself is
-// never mocked). A spied per-key builder would defeat the load-bearing DSRC-03
-// assertion that the KPI/curve NUMBERS move on exclusion.
-vi.mock("../lib/scenario-adapter", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../lib/scenario-adapter")>();
-  return {
-    ...actual,
-    buildStrategyForBuilderSet: vi.fn(() => ({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    })),
-  };
-});
+// ENGINE-01 (Phase 63): the scenario-adapter is used REAL (no mock). The
+// composer's engine set is built from the genuine per-key + added constructions
+// (mergeAddedIntoPerKeySet / buildAddedOnlySet / buildPerKeyStrategyForBuilderSet)
+// feeding the frozen `computeScenario` (also never mocked), so every KPI / curve /
+// window / correlation oracle exercises the real series-space pipeline. The
+// former holdings-snapshot builder spy was removed with the holdings path.
 
 // Phase 30 — mock the five blend-graph LEAF charts to inert spies (same :70-127
 // precedent as EquityChart/DrawdownChart/KpiStrip). This keeps the unit-under-
@@ -202,6 +186,11 @@ let lastPickerProps: {
 // the "no window key when empty-intersection" assertion reads its state arg.
 const computeScenarioStateArgs: Array<{
   strategyIds: string[];
+  // ENGINE-01 (Phase 63): the per-strategy series the REAL engine set carries
+  // into computeScenario. With the holdings-snapshot builder deleted, this is
+  // the faithful observable of "what series reached the engine for id X" that
+  // the old holdings-snapshot returns-lookup arg used to provide.
+  returnsById: Record<string, Array<{ date: string; value: number }>>;
   state: Record<string, unknown>;
 }> = [];
 vi.mock("@/lib/scenario", async (importOriginal) => {
@@ -216,6 +205,9 @@ vi.mock("@/lib/scenario", async (importOriginal) => {
       ) => {
         computeScenarioStateArgs.push({
           strategyIds: strategies.map((s) => s.id),
+          returnsById: Object.fromEntries(
+            strategies.map((s) => [s.id, s.daily_returns]),
+          ) as Record<string, Array<{ date: string; value: number }>>,
           state: state as unknown as Record<string, unknown>,
         });
         return actual.computeScenario(strategies, state, cache);
@@ -261,7 +253,6 @@ import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheet
 import { KpiStrip } from "./KpiStrip";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
-import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 // Phase 37 / DSRC-03 — the REAL per-key builder + REAL engine for the independent
 // two→one recompute oracle. The adapter mock keeps buildPerKeyStrategyForBuilderSet
 // real via importOriginal, and @/lib/scenario + @/lib/scenario-dealias are never
@@ -462,10 +453,16 @@ function makePayload(
         { date: "2026-01-02", value: 0 },
       ],
     },
-    // Phase 37 / DSRC-01 — per-key channel additive fields. Default to no
-    // per-key coverage (empty/false); per-key tests override these.
+    // Phase 37 / DSRC-01 — per-key channel additive fields.
+    // ENGINE-03 repoint (Phase 63): the default payload is a gate-SATISFIED book
+    // holder so the composer initializes to BOOK mode — the historical default
+    // every pre-Phase-63 book test assumed (before ENGINE-03 made book entry
+    // gate-dependent). Tests exercising the gate=false forced-blank path set
+    // `perKeyDailiesGateSatisfied: false` explicitly (e.g. the ENGINE-03 suite).
+    // The per-key returns map stays empty by default (no per-key engine units
+    // unless a test supplies fixtures); per-key metric tests override it.
     perKeyReturnsByApiKeyId: {},
-    perKeyDailiesGateSatisfied: false,
+    perKeyDailiesGateSatisfied: true,
     eligibleApiKeyIds: [],
     // Phase 11 / 11-05 — onboarding visibility predicate inputs. The
     // composer fixture assumes a connected allocator (synced holdings),
@@ -485,10 +482,6 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     lsStore.clear();
     vi.clearAllMocks();
     // Reset adapter mock to default deterministic return
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    });
     // Capturing browse-drawer mock — records onAdd so `addStrategy` can inject
     // an added strategy. Same render output as the factory default (isOpen ? div
     // : null); tests that need a custom drawer still override it inline.
@@ -633,68 +626,17 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // H-0487/H-0493 — guards the CLIENT call site of collapseAliasedHoldingStrategies.
-  // Two same-symbol multi-venue BTC holdings (identical symbol-keyed series)
-  // must be merged into ONE exposure BEFORE the (real) computeScenario, so it
-  // sees 2 distinct strategies (correlation_matrix has 2 keys, not 3) and avgRho
-  // is the genuine BTC↔ETH value, not a fabricated 1.0. Reverting the composer's
-  // collapse wiring leaves 3 strategies → this fails (the silent re-inert mode).
+  // H-0487/H-0493 RETIRED (Phase 63 ENGINE-01): this guarded the composer's
+  // CLIENT call site of the symbol-keyed alias collapse — two same-symbol
+  // multi-venue BTC holdings merged into ONE exposure before computeScenario so
+  // avg-ρ was not fabricated 1.0. That premise (holdings units reaching the
+  // engine via the composer) DIES with the holdings-snapshot path removal: the
+  // aliasing source (symbol-keyed holdings series) no longer reaches any engine,
+  // so the fabricated-ρ hazard it guarded is structurally impossible. RESEARCH
+  // nominally allocated this retirement to the ENGINE-04 re-baseline, but a green
+  // wave gate requires retiring it here, as its own reviewed act; the Pitfall-3
+  // count-preserved block (~:4839) remains the living avg-ρ honesty pin.
   // -------------------------------------------------------------------------
-  it("H-0487 multi-venue BTC collapses before computeScenario (scenario avgRho not fabricated 1.0)", () => {
-    const dates = Array.from({ length: 12 }, (_, i) =>
-      `2026-01-${String(i + 1).padStart(2, "0")}`,
-    );
-    const btcSeries = dates.map((date, i) => ({
-      date,
-      value: [0.02, -0.01, 0.03, -0.02, 0.01][i % 5],
-    }));
-    const ethSeries = dates.map((date, i) => ({
-      date,
-      value: [-0.01, 0.02, -0.015][i % 3],
-    }));
-    const mkStrat = (id: string, returns: typeof btcSeries) => ({
-      id,
-      name: id,
-      codename: null,
-      disclosure_tier: "public",
-      strategy_types: [] as string[],
-      markets: [] as string[],
-      start_date: dates[0],
-      daily_returns: returns,
-      cagr: null,
-      sharpe: null,
-      volatility: null,
-      max_drawdown: null,
-    });
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkStrat(REF_BTC, btcSeries),
-        mkStrat(REF_BTC_OKX, btcSeries), // identical series (symbol-keyed alias)
-        mkStrat(REF_ETH, ethSeries),
-      ],
-      state: {
-        selected: { [REF_BTC]: true, [REF_BTC_OKX]: true, [REF_ETH]: true },
-        weights: { [REF_BTC]: 0.4, [REF_BTC_OKX]: 0.3, [REF_ETH]: 0.3 },
-        startDates: {},
-      },
-    });
-
-    const payload = makePayload({
-      holdingsSummary: [HOLDING_BTC, HOLDING_BTC_OKX, HOLDING_ETH],
-    });
-    render(
-      <ScenarioComposer
-        payload={payload}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    const props = vi.mocked(KpiStrip).mock.calls[0][0];
-    const sm = props.scenarioMetrics;
-    expect(Object.keys(sm?.correlation_matrix ?? {})).toHaveLength(2);
-    expect(sm?.avg_pairwise_correlation).not.toBeNull();
-    expect(sm?.avg_pairwise_correlation).not.toBe(1);
-  });
 
   // -------------------------------------------------------------------------
   // T_C4 — ScenarioFactsheetChart receives scenarioSeries
@@ -976,7 +918,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // -------------------------------------------------------------------------
   // T_C_LAZY1 — UNIFY-04 (TDD): adding a catalog strategy NOT in the book
   //   lazy-fetches /api/strategies/<id>/returns; once resolved, the series
-  //   passed to buildStrategyForBuilderSet's returns-lookup (arg index 4)
+  //   passed to the engine set as its returns-lookup
   //   carries the non-empty daily_returns for the added id, so the projection
   //   recomputes through the frozen engine. NON-VACUOUS: BEFORE the fetch
   //   resolves the lookup is [] (warm-up-gated — no fabricated series); a
@@ -989,11 +931,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     { date: "2026-02-03", value: 0.02 },
   ];
 
-  /** Latest returns-lookup (4th positional arg) the adapter was called with. */
+  /** The per-id series the REAL engine set last carried into computeScenario —
+   *  ENGINE-01 repoint of the old holdings-snapshot returns-lookup arg
+   *  (arg index 4). An added strategy whose lazy series has NOT resolved carries
+   *  [] here (warm-up-gated); once resolved it carries the real daily_returns. */
   function latestReturnsLookup(): Record<string, unknown[]> {
-    const calls = vi.mocked(buildStrategyForBuilderSet).mock.calls;
-    expect(calls.length).toBeGreaterThan(0);
-    return calls[calls.length - 1][4] as Record<string, unknown[]>;
+    expect(computeScenarioStateArgs.length).toBeGreaterThan(0);
+    return computeScenarioStateArgs[computeScenarioStateArgs.length - 1]
+      .returnsById as Record<string, unknown[]>;
   }
 
   it("T_C_LAZY1 add a catalog strategy → lazy GET /api/strategies/<id>/returns; once resolved the adapter's returns-lookup carries the non-empty series (and was [] before resolve)", async () => {
@@ -2175,16 +2120,10 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       volatility: 0.1,
       max_drawdown: -0.02,
     };
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [strat],
-      state: {
-        selected: { "strat-real-1": true },
-        weights: { "strat-real-1": 1 },
-        startDates: {},
-      },
-    });
-
-    const payload = makePayload();
+    // ENGINE-01 repoint: the single leg arrives as a REAL per-key source.
+    const payload = makePayload(
+      perKeyBook([{ id: strat.id, returns: strat.daily_returns }]),
+    );
     render(
       <ScenarioComposer
         payload={payload}
@@ -2239,16 +2178,10 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       volatility: 0.1,
       max_drawdown: -0.02,
     };
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [strat],
-      state: {
-        selected: { "strat-real-rets": true },
-        weights: { "strat-real-rets": 1 },
-        startDates: {},
-      },
-    });
-
-    const payload = makePayload();
+    // ENGINE-01 repoint: the sign-varying leg arrives as a REAL per-key source.
+    const payload = makePayload(
+      perKeyBook([{ id: strat.id, returns: strat.daily_returns }]),
+    );
     render(
       <ScenarioComposer
         payload={payload}
@@ -2398,216 +2331,26 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       (kpiProps.liveMetrics as unknown as { max_drawdown?: number | null })
         ?.max_drawdown,
     ).toBe(payload.liveBaselineMetrics.maxDd);
-    // Adapter call count: M4 — only the scenario-side call. The composer must
-    // NOT re-derive the live baseline by calling buildStrategyForBuilderSet
-    // a second time per render.
-    expect(vi.mocked(buildStrategyForBuilderSet).mock.calls.length).toBe(1);
+    // M4 — the composer must NOT re-derive the live baseline by re-running the
+    // engine per render; it reads payload.liveBaselineMetrics (asserted above).
+    // ENGINE-01: the old "adapter called exactly once" pin on
+    // that call-count pin is retired — the holdings builder is deleted, so a
+    // second holdings-path call is now structurally impossible, not merely
+    // asserted-against.
   });
 
   // -------------------------------------------------------------------------
-  // B4 — adapter signature pin tests
+  // B4 — adapter signature pin tests (T_C_ADAPT1/2/3) RETIRED (Phase 63
+  // ENGINE-01): these pinned the positional call contract of the deleted
+  // deleted holdings-snapshot builder — that the composer
+  // passed it a lightweight AddedStrategy[] plus the returns/metadata lookups
+  // constructed from payload.strategies. The composer no longer calls that
+  // builder at all (the engine set is series-space only), so the call contract
+  // they pinned has no subject. The surviving added-strategy invariants (returns
+  // lookup from payload.strategies, weight-0/warm-up defaults) are pinned on the
+  // real path by scenario-adapter.test.ts (buildAddedOnlySet) and the T_C_LAZY /
+  // WR-05 returns-lookup tests below.
   // -------------------------------------------------------------------------
-  it("T_C_ADAPT1 buildStrategyForBuilderSet receives addedStrategies of AddedStrategy[] shape (lightweight, no daily_returns at call site)", () => {
-    const payload = makePayload();
-    let capturedOnAdd: ((s: unknown) => void) | null = null;
-    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
-      isOpen: boolean;
-      onAdd: (s: unknown) => void;
-    }) => {
-      capturedOnAdd = props.onAdd;
-      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    }) as any);
-    render(
-      <ScenarioComposer
-        payload={payload}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    fireEvent.click(
-      screen.getByRole("button", { name: /^Browse strategies$/i }),
-    );
-    act(() => {
-      capturedOnAdd!({
-        id: "strat-uuid-ADAPT1",
-        name: "ADAPT1 Strategy",
-        markets: ["binance"],
-        strategy_types: ["momentum"],
-      });
-    });
-    const calls = vi.mocked(buildStrategyForBuilderSet).mock.calls;
-    expect(calls.length).toBeGreaterThan(0);
-    const lastCall = calls[calls.length - 1];
-    // Positional args: (holdings, disabledRefs, addedStrategies, holdingReturnsByScopeRef, returnsLookup, metadataLookup)
-    const addedStrategiesArg = lastCall[2];
-    expect(Array.isArray(addedStrategiesArg)).toBe(true);
-    if (addedStrategiesArg.length > 0) {
-      const a = addedStrategiesArg[0];
-      // Lightweight shape — only id/name/markets/strategy_types
-      expect(Object.keys(a).sort()).toEqual(
-        ["id", "markets", "name", "strategy_types"].sort(),
-      );
-      // No daily_returns / disclosure_tier on the added-strategy at the call site
-      expect("daily_returns" in a).toBe(false);
-      expect("disclosure_tier" in a).toBe(false);
-    }
-  });
-
-  it("T_C_ADAPT2 buildStrategyForBuilderSet receives addedStrategyReturnsLookup constructed from payload.strategies", () => {
-    const ADDED_ID = "strat-with-returns";
-    const payload = makePayload({
-      strategies: [
-        {
-          strategy_id: ADDED_ID,
-          current_weight: null,
-          allocated_amount: null,
-          alias: "Added Strategy A",
-          added_at: "2025-06-01T00:00:00Z",
-          eligible_for_outcome: false,
-          existing_outcome: null,
-          strategy: {
-            id: ADDED_ID,
-            name: "Added Strategy A",
-            codename: null,
-            disclosure_tier: "institutional",
-            strategy_types: ["momentum"],
-            markets: ["binance"],
-            start_date: "2025-01-01",
-            organization_name: null,
-            strategy_analytics: {
-              // The runtime payload from queries.ts surfaces daily_returns as a
-              // DailyPoint[] for the scenario sandbox path even though the
-              // upstream StrategyAnalytics TS type declares it as a year-keyed
-              // nested record. Cast keeps the test fixture honest about what
-              // the composer's adapter call site actually consumes.
-              daily_returns: [
-                { date: "2026-01-01", value: 0.002 },
-              ] as unknown as Record<string, Record<string, number>>,
-              cagr: 0.18,
-              sharpe: 1.4,
-              volatility: 0.12,
-              max_drawdown: -0.06,
-            },
-          },
-        },
-      ],
-    });
-    let capturedOnAdd: ((s: unknown) => void) | null = null;
-    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
-      isOpen: boolean;
-      onAdd: (s: unknown) => void;
-    }) => {
-      capturedOnAdd = props.onAdd;
-      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    }) as any);
-    render(
-      <ScenarioComposer
-        payload={payload}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    fireEvent.click(
-      screen.getByRole("button", { name: /^Browse strategies$/i }),
-    );
-    act(() => {
-      capturedOnAdd!({
-        id: ADDED_ID,
-        name: "Added Strategy A",
-        markets: ["binance"],
-        strategy_types: ["momentum"],
-      });
-    });
-    const calls = vi.mocked(buildStrategyForBuilderSet).mock.calls;
-    expect(calls.length).toBeGreaterThan(0);
-    const lastCall = calls[calls.length - 1];
-    // The adapter signature uses a phantom-branded `StrategyForBuilderId`
-    // key on the lookup map. Cast to `Record<string, DailyPoint[]>` so the
-    // raw string ADDED_ID indexes the runtime object cleanly.
-    const returnsLookup = lastCall[4] as unknown as Record<
-      string,
-      Array<{ date: string; value: number }>
-    >;
-    expect(returnsLookup[ADDED_ID]).toBeDefined();
-    expect(Array.isArray(returnsLookup[ADDED_ID])).toBe(true);
-    expect(returnsLookup[ADDED_ID][0].date).toBe("2026-01-01");
-    expect(returnsLookup[ADDED_ID][0].value).toBe(0.002);
-  });
-
-  it("T_C_ADAPT3 buildStrategyForBuilderSet receives addedStrategyMetadataLookup with disclosure_tier/cagr/sharpe", () => {
-    const ADDED_ID = "strat-with-meta";
-    const payload = makePayload({
-      strategies: [
-        {
-          strategy_id: ADDED_ID,
-          current_weight: null,
-          allocated_amount: null,
-          alias: "Meta Strategy",
-          added_at: "2025-06-01T00:00:00Z",
-          eligible_for_outcome: false,
-          existing_outcome: null,
-          strategy: {
-            id: ADDED_ID,
-            name: "Meta Strategy",
-            codename: null,
-            disclosure_tier: "institutional",
-            strategy_types: ["momentum"],
-            markets: ["binance"],
-            start_date: "2025-01-01",
-            organization_name: null,
-            strategy_analytics: {
-              daily_returns: {} as Record<string, Record<string, number>>,
-              cagr: 0.22,
-              sharpe: 1.55,
-              volatility: 0.15,
-              max_drawdown: -0.07,
-            },
-          },
-        },
-      ],
-    });
-    let capturedOnAdd: ((s: unknown) => void) | null = null;
-    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
-      isOpen: boolean;
-      onAdd: (s: unknown) => void;
-    }) => {
-      capturedOnAdd = props.onAdd;
-      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    }) as any);
-    render(
-      <ScenarioComposer
-        payload={payload}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    fireEvent.click(
-      screen.getByRole("button", { name: /^Browse strategies$/i }),
-    );
-    act(() => {
-      capturedOnAdd!({
-        id: ADDED_ID,
-        name: "Meta Strategy",
-        markets: ["binance"],
-        strategy_types: ["momentum"],
-      });
-    });
-    const calls = vi.mocked(buildStrategyForBuilderSet).mock.calls;
-    expect(calls.length).toBeGreaterThan(0);
-    const lastCall = calls[calls.length - 1];
-    // Cast through `unknown` for the same brand-key reason as T_C_ADAPT2.
-    const metadataLookup = lastCall[5] as unknown as Record<
-      string,
-      { disclosure_tier: string; cagr: number | null; sharpe: number | null }
-    >;
-    expect(metadataLookup[ADDED_ID]).toBeDefined();
-    expect(metadataLookup[ADDED_ID].disclosure_tier).toBe("institutional");
-    expect(metadataLookup[ADDED_ID].cagr).toBe(0.22);
-    expect(metadataLookup[ADDED_ID].sharpe).toBe(1.55);
-  });
 
   // -------------------------------------------------------------------------
   // Weight input fail-loud — typing Infinity in the weight input must surface
@@ -3222,28 +2965,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // -------------------------------------------------------------------------
   // H-0133 (P1 blocker) + R4 leverage — the projection must reflect the draft's
   // weight AND leverage edits, not just the commit diff. These drive the REAL
-  // computeScenario (adapter mocked to real series, like H-0487 above) so a
-  // regression that re-severs the call-site wiring fails here, not silently.
+  // computeScenario via the genuine per-key / added engine set (ENGINE-01), so a
+  // regression that re-severs the projection wiring fails here, not silently.
   // -------------------------------------------------------------------------
-  function mkRealStrat(
-    id: string,
-    returns: Array<{ date: string; value: number }>,
-  ) {
-    return {
-      id,
-      name: id,
-      codename: null,
-      disclosure_tier: "public",
-      strategy_types: [] as string[],
-      markets: [] as string[],
-      start_date: returns[0].date,
-      daily_returns: returns,
-      cagr: null,
-      sharpe: null,
-      volatility: null,
-      max_drawdown: null,
-    };
-  }
   // Read-only-tokens model: weight + leverage + toggle live ONLY on added
   // strategies. To drive the projection from the UI we mock the adapter to
   // return one fixed live holding (REF_BTC) plus one added strategy (STRAT_A);
@@ -3251,7 +2975,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // projectionState. Two distinct series → a real pairwise correlation exists
   // (so the toggle-off-collapses-to-null isolator works).
   const STRAT_A = "strat-proj-a";
-  function mockHoldingPlusStrategy() {
+  // ENGINE-01 repoint: REF_BTC is a REAL per-key source; STRAT_A is a catalog
+  // ADD (its weight/leverage/toggle inputs are added-strategy UI — per-key units
+  // have none), so H-0133/R4 drive the projection via the added leg exactly as
+  // before. The added series is supplied through payload.strategies (book wins,
+  // no lazy fetch) so `addStratA()` yields a non-empty engine leg immediately.
+  function mockHoldingPlusStrategy(): Partial<MyAllocationDashboardPayload> {
     const dates = Array.from({ length: 12 }, (_, i) =>
       `2026-01-${String(i + 1).padStart(2, "0")}`,
     );
@@ -3263,14 +2992,10 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       date,
       value: [-0.01, 0.005, -0.02][i % 3],
     }));
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [mkRealStrat(REF_BTC, btc), mkRealStrat(STRAT_A, strat)],
-      state: {
-        selected: { [REF_BTC]: true, [STRAT_A]: true },
-        weights: { [REF_BTC]: 0.5, [STRAT_A]: 0.5 },
-        startDates: {},
-      },
-    });
+    return {
+      ...perKeyBook([{ id: REF_BTC, returns: btc }]),
+      strategies: [catalogStrategy(STRAT_A, "Strat A", strat)],
+    };
   }
   /** Add STRAT_A so its row (weight + leverage + toggle inputs) renders. */
   function addStratA() {
@@ -3290,7 +3015,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // TWO active de-aliased strategies sharing 12 overlapping days (above the
   // <10-day correlation gate, below the 60-day distributional floor). Re-added
   // after the #507 merge dropped it (the merge took #507's top-of-file region).
-  function mockTwoStrategies() {
+  function mockTwoStrategies(): Partial<MyAllocationDashboardPayload> {
     const dates = Array.from({ length: 12 }, (_, i) =>
       `2026-01-${String(i + 1).padStart(2, "0")}`,
     );
@@ -3302,19 +3027,17 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       date,
       value: [-0.01, 0.005, -0.02][i % 3],
     }));
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [mkRealStrat(REF_BTC, btc), mkRealStrat(REF_ETH, eth)],
-      state: {
-        selected: { [REF_BTC]: true, [REF_ETH]: true },
-        weights: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
-        startDates: {},
-      },
-    });
+    // ENGINE-01 repoint: the two correlated legs arrive as REAL per-key sources
+    // (unit id === scopeRef, series verbatim) so the genuine engine matrix drives
+    // the heatmap/DR/PCR oracles unchanged.
+    return perKeyBook([
+      { id: REF_BTC, returns: btc },
+      { id: REF_ETH, returns: eth },
+    ]);
   }
 
   it("H-0133 — moving a weight slider MOVES the projection (reweighting changes scenarioMetrics, not just the commit diff)", () => {
-    mockHoldingPlusStrategy();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
+    const payload = makePayload(mockHoldingPlusStrategy());
     render(
       <ScenarioComposer
         payload={payload}
@@ -3337,8 +3060,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("R4 — a per-strategy leverage edit reaches the projection (2× changes vol) and surfaces the caveat", () => {
-    mockHoldingPlusStrategy();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
+    const payload = makePayload(mockHoldingPlusStrategy());
     render(
       <ScenarioComposer
         payload={payload}
@@ -3364,8 +3086,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("R4 — leverage clamps LOUDLY: a >MAX paste surfaces an error (never silently swallowed)", () => {
-    mockHoldingPlusStrategy();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
+    const payload = makePayload(mockHoldingPlusStrategy());
     render(
       <ScenarioComposer
         payload={payload}
@@ -3454,20 +3175,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
    * of length `nDays`. Deterministic (no Math.random) — a sign-varying series
    * so the histogram + rolling-Sortino downside arms are non-degenerate.
    */
-  function mockBlendSeries(nDays: number) {
+  function mockBlendSeries(nDays: number): Partial<MyAllocationDashboardPayload> {
     const start = new Date(2024, 0, 1).getTime();
     const series = Array.from({ length: nDays }, (_, i) => ({
       date: new Date(start + i * 86_400_000).toISOString().slice(0, 10),
       value: Math.sin(i / 7) * 0.01 + 0.0002,
     }));
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [mkRealStrat(REF_BTC, series)],
-      state: {
-        selected: { [REF_BTC]: true },
-        weights: { [REF_BTC]: 1 },
-        startDates: {},
-      },
-    });
+    // ENGINE-01 repoint: the single blended leg arrives as a REAL per-key source.
+    return perKeyBook([{ id: REF_BTC, returns: series }]);
   }
 
   it("blend panel empty branch — below the sample floor both panels render a role=status PartialDataBanner and NEVER role=alert", () => {
@@ -3517,8 +3232,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("blend panel disclosure — above floor each panel renders its own overlap-N + 'not a forecast' line, and the histogram is fed the CUMULATIVE-wealth series", () => {
     // 252 overlapping days clears every window floor (63/126/252) AND the
     // 10-point distribution floor, so both panels render their populated body.
-    mockBlendSeries(252);
-    const payload = makePayload();
+    const payload = makePayload(mockBlendSeries(252));
     render(
       <ScenarioComposer
         payload={payload}
@@ -3563,8 +3277,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // 126 days: the 6M (126) default renders, but 12M (252) is below floor.
     // The 12M toggle option is disabled; the panel body for the default window
     // renders. Assert the panel mounts with no role=alert regardless of window.
-    mockBlendSeries(126);
-    const payload = makePayload();
+    const payload = makePayload(mockBlendSeries(126));
     render(
       <ScenarioComposer
         payload={payload}
@@ -3602,8 +3315,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // adapter), not a broken populated body. Falsifiable: revert the gate back to
     // `portfolioDaily.length < 10` and the populated branch renders (the
     // sub-headings + leaf mocks appear, the banner does not) — this fails.
-    mockBlendSeries(50);
-    const payload = makePayload();
+    const payload = makePayload(mockBlendSeries(50));
     render(
       <ScenarioComposer
         payload={payload}
@@ -3667,8 +3379,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // no pairs, so avg_pairwise_correlation collapses to null. If the memo's
     // `toggle === undefined ? … : toggle` FALSE arm were re-severed, ETH would
     // stay in the active set and this would remain a number.
-    mockHoldingPlusStrategy();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
+    const payload = makePayload(mockHoldingPlusStrategy());
     render(
       <ScenarioComposer
         payload={payload}
@@ -3692,8 +3403,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("R4 — a NEGATIVE leverage clamps LOUDLY to 0 (shorting isn't modeled — never silently swallowed)", () => {
-    mockHoldingPlusStrategy();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
+    const payload = makePayload(mockHoldingPlusStrategy());
     render(
       <ScenarioComposer
         payload={payload}
@@ -3712,8 +3422,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("R4 — a non-finite leverage paste surfaces an inline error and KEEPS the prior value (fail-loud, no silent drop)", () => {
-    mockHoldingPlusStrategy();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
+    const payload = makePayload(mockHoldingPlusStrategy());
     render(
       <ScenarioComposer
         payload={payload}
@@ -3759,8 +3468,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // genuine presentational component fed by the composer's scenarioMetrics.
   // -------------------------------------------------------------------------
   it("CORR-01 — with ≥2 active de-aliased strategies (≥10 overlapping days) the composer renders the heatmap with de-aliased axis labels", () => {
-    mockTwoStrategies();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    const payload = makePayload(mockTwoStrategies());
     render(
       <ScenarioComposer
         payload={payload}
@@ -3771,8 +3479,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // The de-aliased strategy names (REF_BTC / REF_ETH = the holding scopeRefs,
     // which mkRealStrat sets as both id AND name) appear as heatmap axis labels.
     // Each name renders twice (column header + row header), so use getAllByText.
-    expect(screen.getAllByText(REF_BTC).length).toBeGreaterThanOrEqual(2);
-    expect(screen.getAllByText(REF_ETH).length).toBeGreaterThanOrEqual(2);
+    // ENGINE-01: per-key units render as `key {api_key_id}` (the id here is the
+    // scopeRef), so the heatmap axis labels carry that prefix.
+    expect(
+      screen.getAllByText(`key ${REF_BTC}`).length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.getAllByText(`key ${REF_ETH}`).length,
+    ).toBeGreaterThanOrEqual(2);
     // The heatmap figure is present (the real component's role="figure" wrapper).
     expect(
       screen.getByRole("figure", { name: /Pairwise correlation heatmap/i }),
@@ -3807,8 +3521,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("CORR-03 — the heatmap caption Avg |ρ| value is single-sourced: it equals scenarioMetrics.avg_pairwise_correlation passed to KpiStrip (no second average)", () => {
-    mockTwoStrategies();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    const payload = makePayload(mockTwoStrategies());
     render(
       <ScenarioComposer
         payload={payload}
@@ -3852,23 +3565,16 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // SOL: an independent zig-zag uncorrelated with `base`.
     const solSeries = [-0.01, 0.02, 0.005, -0.015, -0.02, 0.018, 0.022, -0.008, -0.012, 0.025, -0.004, 0.016];
     const sol = dates.map((date, i) => ({ date, value: solSeries[i] }));
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkRealStrat(REF_BTC, btc),
-        mkRealStrat(REF_ETH, eth),
-        mkRealStrat(REF_SOL, sol),
-      ],
-      state: {
-        selected: { [REF_BTC]: true, [REF_ETH]: true, [REF_SOL]: true },
-        weights: { [REF_BTC]: 0.4, [REF_ETH]: 0.3, [REF_SOL]: 0.3 },
-        startDates: {},
-      },
-    });
+    // ENGINE-01 repoint: three legs as REAL per-key sources (series verbatim).
+    return perKeyBook([
+      { id: REF_BTC, returns: btc },
+      { id: REF_ETH, returns: eth },
+      { id: REF_SOL, returns: sol },
+    ]);
   }
 
   it("CORR-02 — the DR + Effective-Bets headline renders real values (not 0.00) with the ENB formula disclosed", () => {
-    mockTwoStrategies();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    const payload = makePayload(mockTwoStrategies());
     render(
       <ScenarioComposer
         payload={payload}
@@ -3888,10 +3594,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("CORR-02 — the ρ≥0.85 'too similar' badge renders when a pair crosses the threshold", () => {
-    mockThreeStrategies();
-    const payload = makePayload({
-      holdingsSummary: [HOLDING_BTC, HOLDING_ETH, HOLDING_SOL],
-    });
+    const payload = makePayload(mockThreeStrategies());
     render(
       <ScenarioComposer
         payload={payload}
@@ -3912,8 +3615,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("CORR-02 — no too-similar badge when no pair reaches ρ≥0.85 (absence is the signal)", () => {
     // mockTwoStrategies: BTC vs ETH series are weakly/negatively correlated, far
     // below 0.85 → the badge must be ABSENT (no 'all clear' affirmative).
-    mockTwoStrategies();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    const payload = makePayload(mockTwoStrategies());
     render(
       <ScenarioComposer
         payload={payload}
@@ -3927,10 +3629,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("CORR-05 — the PCR list renders one role=listitem per constituent, de-aliased, sorted descending", () => {
-    mockThreeStrategies();
-    const payload = makePayload({
-      holdingsSummary: [HOLDING_BTC, HOLDING_ETH, HOLDING_SOL],
-    });
+    const payload = makePayload(mockThreeStrategies());
     render(
       <ScenarioComposer
         payload={payload}
@@ -3947,10 +3646,13 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       ?.querySelector('ul[role="list"]') as HTMLElement;
     expect(list).not.toBeNull();
     const items = within(list).getAllByRole("listitem");
-    // One row per active constituent (de-aliased names, not UUIDs).
+    // One row per active constituent (ENGINE-01: per-key units render as
+    // `key {api_key_id}`).
     expect(items.length).toBe(3);
     for (const ref of [REF_BTC, REF_ETH, REF_SOL]) {
-      expect(within(list).getAllByText(ref).length).toBeGreaterThanOrEqual(1);
+      expect(
+        within(list).getAllByText(`key ${ref}`).length,
+      ).toBeGreaterThanOrEqual(1);
     }
     // Descending sort: each row's signed % is ≥ the next row's %.
     const pcts = items.map((li) => {
@@ -3975,19 +3677,17 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const btc = dates.map((date, i) => ({ date, value: base[i] }));
     // ETH = −1.1 × BTC → ρ ≈ −1 (a hedge).
     const eth = dates.map((date, i) => ({ date, value: -1.1 * base[i] }));
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [mkRealStrat(REF_BTC, btc), mkRealStrat(REF_ETH, eth)],
-      state: {
-        selected: { [REF_BTC]: true, [REF_ETH]: true },
-        weights: { [REF_BTC]: 0.7, [REF_ETH]: 0.3 }, // BTC heavy, ETH light
-        startDates: {},
-      },
-    });
+    // ENGINE-01 repoint: hedge legs as REAL per-key sources with BTC heavy / ETH
+    // light (70k/30k equity → 0.7/0.3 weights, the shape that drives BTC's signed
+    // PCR past 100% and ENB < 1).
+    return perKeyBook([
+      { id: REF_BTC, returns: btc, valueUsd: 70_000 },
+      { id: REF_ETH, returns: eth, valueUsd: 30_000 },
+    ]);
   }
 
   it("WR-02 — the PCR bar track is overflow-hidden and the >100% fill is clamped to 100%", () => {
-    mockHedgeBlend();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    const payload = makePayload(mockHedgeBlend());
     render(
       <ScenarioComposer
         payload={payload}
@@ -4017,8 +3717,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("WR-03 — a negative-PCR (hedge) leg renders a 'risk-reducing' affordance, not a broken empty bar", () => {
-    mockHedgeBlend();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    const payload = makePayload(mockHedgeBlend());
     render(
       <ScenarioComposer
         payload={payload}
@@ -4053,8 +3752,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("IN-01 — ENB < 1 surfaces the 'below 1 — a hedge offsets risk' disclosure", () => {
-    mockHedgeBlend();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    const payload = makePayload(mockHedgeBlend());
     render(
       <ScenarioComposer
         payload={payload}
@@ -4071,7 +3769,6 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
 
   it("IN-01 — a non-hedged blend (ENB ≥ 1) does NOT render the sub-1 disclosure", () => {
     // Two mildly-positively-correlated legs (ρ≈0.2) → both PCR ≥ 0, ENB ≈ 1.68.
-    mockTwoStrategies();
     const payload = makePayload({
       holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
     });
@@ -4088,10 +3785,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("CORR-06 — the heatmap axis labels follow the cluster order (correlated legs adjacent, outlier separated)", () => {
-    mockThreeStrategies();
-    const payload = makePayload({
-      holdingsSummary: [HOLDING_BTC, HOLDING_ETH, HOLDING_SOL],
-    });
+    const payload = makePayload(mockThreeStrategies());
     render(
       <ScenarioComposer
         payload={payload}
@@ -4104,23 +3798,27 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const figure = screen.getByRole("figure", {
       name: /Pairwise correlation heatmap/i,
     });
+    // ENGINE-01: per-key units render as `key {api_key_id}`.
+    const kBtc = `key ${REF_BTC}`;
+    const kEth = `key ${REF_ETH}`;
+    const kSol = `key ${REF_SOL}`;
     const order = Array.from(
       figure.querySelectorAll<HTMLElement>('[class*="text-center"]'),
     )
       .map((el) => el.textContent?.trim() ?? "")
-      .filter((t) => t === REF_BTC || t === REF_ETH || t === REF_SOL);
+      .filter((t) => t === kBtc || t === kEth || t === kSol);
     expect(order.length).toBe(3);
     // The two correlated legs (BTC, ETH) must be ADJACENT; SOL is the outlier
     // (either end), never wedged between them.
-    const btcIdx = order.indexOf(REF_BTC);
-    const ethIdx = order.indexOf(REF_ETH);
+    const btcIdx = order.indexOf(kBtc);
+    const ethIdx = order.indexOf(kEth);
     expect(Math.abs(btcIdx - ethIdx)).toBe(1);
   });
 
   it("CORR-03 — a single-constituent blend renders the 'add a second strategy' empty state and NO DR/ENB headline", () => {
     // One active strategy → diversification.clusterOrderIds.length < 2 → the
     // CollapsibleSection body collapses to the honest EmptyStateCard.
-    function mockOneStrategy() {
+    function mockOneStrategy(): Partial<MyAllocationDashboardPayload> {
       const dates = Array.from({ length: 12 }, (_, i) =>
         `2026-01-${String(i + 1).padStart(2, "0")}`,
       );
@@ -4128,17 +3826,10 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         date,
         value: [0.02, -0.01, 0.03][i % 3],
       }));
-      vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-        strategies: [mkRealStrat(REF_BTC, btc)],
-        state: {
-          selected: { [REF_BTC]: true },
-          weights: { [REF_BTC]: 1 },
-          startDates: {},
-        },
-      });
+      // ENGINE-01 repoint: one leg as a REAL per-key source.
+      return perKeyBook([{ id: REF_BTC, returns: btc }]);
     }
-    mockOneStrategy();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
+    const payload = makePayload(mockOneStrategy());
     render(
       <ScenarioComposer
         payload={payload}
@@ -4161,7 +3852,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // Two active strategies but only 6 shared days → the engine nulls the matrix
     // (n<10) → computeDiversification returns all-null → the section shows the
     // heatmap's reason-routed empty, and the DR/ENB headline + PCR are hidden.
-    function mockShortOverlap() {
+    function mockShortOverlap(): Partial<MyAllocationDashboardPayload> {
       const dates = Array.from({ length: 6 }, (_, i) =>
         `2026-01-${String(i + 1).padStart(2, "0")}`,
       );
@@ -4173,17 +3864,13 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         date,
         value: [-0.01, 0.005, -0.02][i % 3],
       }));
-      vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-        strategies: [mkRealStrat(REF_BTC, btc), mkRealStrat(REF_ETH, eth)],
-        state: {
-          selected: { [REF_BTC]: true, [REF_ETH]: true },
-          weights: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
-          startDates: {},
-        },
-      });
+      // ENGINE-01 repoint: two 6-day legs as REAL per-key sources (n<10).
+      return perKeyBook([
+        { id: REF_BTC, returns: btc },
+        { id: REF_ETH, returns: eth },
+      ]);
     }
-    mockShortOverlap();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    const payload = makePayload(mockShortOverlap());
     render(
       <ScenarioComposer
         payload={payload}
@@ -4256,8 +3943,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   it("IMPACT-01 — the coverage caveat names the live N overlapping days AND the shortest-history strategy name", () => {
-    mockTwoStrategies();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] });
+    const payload = makePayload(mockTwoStrategies());
     render(
       <ScenarioComposer
         payload={payload}
@@ -4279,7 +3965,8 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(text).toContain(`Historical realized · ${n} overlapping days · not a forecast`);
     // The shortest-history strategy name (REF_BTC/REF_ETH share window length
     // 12, so first-by-input-order REF_BTC wins the deterministic tiebreak).
-    expect(text).toContain(`Shortest history: ${REF_BTC}.`);
+    // ENGINE-01: per-key units render as `key {api_key_id}`.
+    expect(text).toContain(`Shortest history: key ${REF_BTC}.`);
   });
 
   // -------------------------------------------------------------------------
@@ -4371,8 +4058,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // post-edit capture — never reverted to the default-weight projection).
   // -------------------------------------------------------------------------
   it("LAYOUT-02 collapsing the composition controls preserves in-progress weight + leverage edits and the projection still reflects them", () => {
-    mockHoldingPlusStrategy();
-    const payload = makePayload({ holdingsSummary: [HOLDING_BTC] });
+    const payload = makePayload(mockHoldingPlusStrategy());
     render(
       <ScenarioComposer
         payload={payload}
@@ -4483,7 +4169,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
 // include/exclude each connected exchange api_key from the projection; toggling
 // a source off must HONESTLY recompute the curve + every KPI from the remaining
 // per-key series (DSRC-03), never a cosmetic hide. These tests drive the REAL
-// per-key builder + REAL frozen computeScenario (only buildStrategyForBuilderSet
+// per-key builder + REAL frozen computeScenario (only the former holdings-snapshot builder
 // and the leaf charts are mocked), so a cosmetic-hide regression — wiring the
 // toggle to only dim a row without threading projectionState.selected — turns
 // the honesty oracle RED.
@@ -4491,10 +4177,6 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   beforeEach(() => {
     lsStore.clear();
     vi.clearAllMocks();
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    });
     browseOnAdd = null;
     vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
       isOpen: boolean;
@@ -5068,10 +4750,6 @@ describe("ScenarioComposer — Phase 43 GUARD-01 static guard + assembled degene
     // Default adapter mock → ZERO strategies → 0-constituent degenerate blend
     // (computeScenario short-circuits to its n=0 branch: empty equity_curve,
     // null scalars). This IS the most degenerate axis of the matrix.
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    });
     browseOnAdd = null;
     vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
       isOpen: boolean;
@@ -5122,13 +4800,13 @@ describe("ScenarioComposer — Phase 43 GUARD-01 static guard + assembled degene
   });
 
   it("assembled folded surface — own-book degenerate blend (0 constituents): Diversification honest-empty, blend panels honest banners, Data-sources fold absent, and the chart-bound Peer/Mandate/OwnBookDelta props degrade honestly — ALL co-exist, no NaN/Inf, no fabricated values", () => {
-    // The default payload: a connected book allocator (hasLiveBook → composed
-    // branch, NOT the empty-state) but ZERO blend constituents (default adapter
-    // returns strategies:[]). perKeyDailiesGateSatisfied=false +
-    // eligibleApiKeyIds=[] → the Data-sources fold honestly DISAPPEARS. This
-    // single render exercises the degenerate axes 0-constituent / n<10 / n<252 /
-    // no-mandate simultaneously on the assembled folded surface.
-    const payload = makePayload();
+    // A connected book allocator (hasLiveBook → composed branch, NOT the
+    // empty-state) but ZERO blend constituents. ENGINE-01: gate=false +
+    // eligibleApiKeyIds=[] → blank/added-only with NO engine units and the
+    // Data-sources fold honestly DISAPPEARS. This single render exercises the
+    // degenerate axes 0-constituent / n<10 / n<252 / no-mandate simultaneously on
+    // the assembled folded surface.
+    const payload = makePayload({ perKeyDailiesGateSatisfied: false });
     render(
       <ScenarioComposer
         payload={payload}
@@ -5207,31 +4885,10 @@ describe("ScenarioComposer — Phase 43 GUARD-01 static guard + assembled degene
       date: `2026-01-${String(i + 1).padStart(2, "0")}`,
       value: [-0.01, 0.005, -0.02][i % 3],
     }));
-    // The adapter returns the single added strategy as the only constituent.
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        {
-          id: "strat-solo",
-          name: "strat-solo",
-          codename: null,
-          disclosure_tier: "public",
-          strategy_types: [] as string[],
-          markets: [] as string[],
-          start_date: single[0].date,
-          daily_returns: single,
-          cagr: null,
-          sharpe: null,
-          volatility: null,
-          max_drawdown: null,
-        },
-      ],
-      state: {
-        selected: { "strat-solo": true },
-        weights: { "strat-solo": 1 },
-        startDates: {},
-      },
-    });
+    // ENGINE-01 repoint: the single added strategy is the only constituent; its
+    // series is supplied via the catalog (book wins, no lazy fetch).
     const payload = makePayload({
+      strategies: [catalogStrategy("strat-solo", "strat-solo", single)],
       // No live book: zero holdings + empty baseline equity. The own-book delta
       // keys off `equityDailyPoints` (→ baselineEquityDailyPoints) being empty;
       // liveBaselineMetrics is a separate field, set to its honest empty form
@@ -5344,19 +5001,115 @@ function mkWinStrat(
   };
 }
 
-/** Mount the adapter with A (full span) + B (short span), both selected. */
-function mountUnequalSpanBook(): void {
-  vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-    strategies: [
-      mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
-      mkWinStrat(REF_WIN_B, WIN_DATES.slice(0, 6)), // 2026-01-01 … 2026-01-06
-    ],
-    state: {
-      selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
-      weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
-      startDates: {},
+/** ENGINE-01 repoint (Phase 63): the WINDOW/POLISH/PERSIST oracles previously
+ *  received their engine set through the deleted holdings-snapshot mock. The
+ *  composer now builds its engine set from the REAL per-key path, so a set of
+ *  units is delivered as book+gate per-key sources — unit id === api_key_id,
+ *  series verbatim from `mkWinStrat` over the given dates, all selected by
+ *  default with equal equity-share weights. Ids / series / spans are preserved,
+ *  so every window/member_count oracle body downstream is byte-unchanged. */
+function perKeyBook(
+  units: {
+    id: string;
+    returns: { date: string; value: number }[];
+    valueUsd?: number;
+  }[],
+): Partial<MyAllocationDashboardPayload> {
+  const SYMS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOT"];
+  return {
+    holdingsSummary: units.map((u, idx) => ({
+      ...HOLDING_BTC,
+      // Distinct symbol per unit so the holdings composition list keeps unique
+      // scopeRefs (no duplicate-key collision); the engine keys on api_key_id.
+      symbol: SYMS[idx % SYMS.length],
+      api_key_id: u.id,
+      // Equity share (D2) → per-key engine weight after renormalization, so a
+      // test needing asymmetric weights sets valueUsd (default 50k = equal).
+      value_usd: u.valueUsd ?? 50_000,
+    })),
+    perKeyReturnsByApiKeyId: Object.fromEntries(
+      units.map((u) => [u.id, u.returns]),
+    ),
+    perKeyDailiesGateSatisfied: true,
+    eligibleApiKeyIds: units.map((u) => u.id),
+  };
+}
+
+/** A payload.strategies catalog row carrying a real daily_returns series so an
+ *  added strategy's engine leg resolves from the book (no lazy fetch) — the
+ *  `addedStrategyReturnsLookup` reads strategy_analytics.daily_returns. */
+function catalogStrategy(
+  id: string,
+  name: string,
+  returns: { date: string; value: number }[],
+) {
+  return {
+    strategy_id: id,
+    current_weight: null,
+    allocated_amount: null,
+    alias: name,
+    added_at: "2025-06-01T00:00:00Z",
+    eligible_for_outcome: false,
+    existing_outcome: null,
+    strategy: {
+      id,
+      name,
+      codename: null,
+      disclosure_tier: "public",
+      strategy_types: [],
+      markets: [],
+      start_date: returns[0]?.date ?? null,
+      organization_name: null,
+      strategy_analytics: {
+        daily_returns: returns as unknown as Record<
+          string,
+          Record<string, number>
+        >,
+        cagr: null,
+        sharpe: null,
+        volatility: null,
+        max_drawdown: null,
+      },
     },
-  });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any;
+}
+
+function winUnits(
+  units: { id: string; dates: string[] }[],
+): Partial<MyAllocationDashboardPayload> {
+  return perKeyBook(
+    units.map((u) => ({
+      id: u.id,
+      returns: mkWinStrat(u.id, u.dates).daily_returns,
+    })),
+  );
+}
+
+/** A minimal connected-key record so a per-key unit renders its data-source
+ *  toggle row (needed only where a test must manually exclude a source). */
+function winApiKey(id: string) {
+  return {
+    id,
+    exchange: "binance",
+    label: id,
+    is_active: true,
+    sync_status: null,
+    last_sync_at: null,
+    account_balance_usdt: null,
+    created_at: "2026-01-01T00:00:00Z",
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
+  };
+}
+
+/** The canonical A (full 12-day) + B (short 6-day) unequal-span pair. */
+function unequalSpanBook(): Partial<MyAllocationDashboardPayload> {
+  return winUnits([
+    { id: REF_WIN_A, dates: WIN_DATES },
+    { id: REF_WIN_B, dates: WIN_DATES.slice(0, 6) },
+  ]);
 }
 
 /** The latest scenarioMetrics the composer passed to KpiStrip this render. */
@@ -5374,10 +5127,6 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     lsStore.clear();
     vi.clearAllMocks();
     computeScenarioStateArgs.length = 0;
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    });
     browseOnAdd = null;
     pickerOnApply = null;
     lastPickerProps = null;
@@ -5401,26 +5150,23 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
   // the shared leave-around test DB could non-deterministically pick a
   // WITH-returns strategy and false-red.
   it("window: no derivable coverage spans → the whole window surface honestly does not mount", () => {
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        { ...mkWinStrat(REF_WIN_A, WIN_DATES), daily_returns: [] },
-        { ...mkWinStrat(REF_WIN_B, WIN_DATES), daily_returns: [] },
-      ],
-      state: {
-        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
-        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
-        startDates: {},
-      },
-    });
+    // ENGINE-01 repoint: two SELECTED added legs whose series are EMPTY (no
+    // coverage spans) — buildAddedOnlySet keeps them as units, so they are
+    // present-but-span-less, exactly the "selected set yields no spans" premise.
     render(
       <ScenarioComposer
         payload={makePayload({
-          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+          strategies: [
+            catalogStrategy(REF_WIN_A, REF_WIN_A, []),
+            catalogStrategy(REF_WIN_B, REF_WIN_B, []),
+          ],
         })}
         allocatorId={`${ALLOCATOR_A}-p60-no-spans`}
         allocatorMandate={null}
       />,
     );
+    addStrategy({ id: REF_WIN_A, name: REF_WIN_A, markets: [], strategy_types: [] });
+    addStrategy({ id: REF_WIN_B, name: REF_WIN_B, markets: [], strategy_types: [] });
     expect(
       screen.queryByTestId("scenario-coverage-window"),
     ).not.toBeInTheDocument();
@@ -5433,12 +5179,9 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
   });
 
   it("window: default seeds the intersection so both unequal-span strategies are members", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({
-          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
-        })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
       />,
@@ -5460,12 +5203,9 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
   // therefore renders with its OWN `${ALLOCATOR_A}-<test>` key (the
   // ScenarioComposer.save.test.tsx CR-01 idiom).
   it("window: MANDATORY member_count changes when the window moves — widening past B's last day drops it (2 → 1), narrowing restores it (1 → 2)", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({
-          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
-        })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-w01-move`}
         allocatorMandate={null}
       />,
@@ -5514,12 +5254,9 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
   // reconciles, so this is the single-source guarantee under
   // test — if BlendHeader ever recomputed membership, N would diverge here.
   it("COVERAGE-03: BlendHeader N === engine member_count, and the header degrades in lockstep when the window drops a member", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({
-          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
-        })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-cov03-lockstep`}
         allocatorMandate={null}
       />,
@@ -5555,12 +5292,9 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
   // must leave the auto-excluded group. The button reuses the same applyWindow
   // path as the presets, so this proves the disclosed cost reaches the engine.
   it("COVERAGE-04: an auto-excluded row shows the amber chip + a cost-disclosing include button, and clicking it raises the engine member_count (B re-admitted)", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({
-          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
-        })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-cov04-include`}
         allocatorMandate={null}
       />,
@@ -5622,22 +5356,14 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
   // start = LATE's first day), with a reconcilable month cost.
   it("COVERAGE-04: a ragged-HEAD auto-excluded row discloses the moved START bound ('moves window start to {start}'), not end-bound phrasing (WR-01)", () => {
     const REF_WIN_LATE = "strat-window-late";
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
-        mkWinStrat(REF_WIN_LATE, WIN_DATES.slice(3)), // 2026-01-04 … 2026-01-12 (ragged HEAD)
-      ],
-      state: {
-        selected: { [REF_WIN_A]: true, [REF_WIN_LATE]: true },
-        weights: { [REF_WIN_A]: 0.5, [REF_WIN_LATE]: 0.5 },
-        startDates: {},
-      },
-    });
     render(
       <ScenarioComposer
-        payload={makePayload({
-          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
-        })}
+        payload={makePayload(
+          winUnits([
+            { id: REF_WIN_A, dates: WIN_DATES }, // 2026-01-01 … 2026-01-12
+            { id: REF_WIN_LATE, dates: WIN_DATES.slice(3) }, // 2026-01-04 … 2026-01-12 (ragged HEAD)
+          ]),
+        )}
         allocatorId={`${ALLOCATOR_A}-wr01-head`}
         allocatorMandate={null}
       />,
@@ -5699,22 +5425,14 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
   // so the shown span and the "−{N} mo" cost agree.
   it("COVERAGE-04: a BOTH-ends-ragged auto-excluded row discloses both moved bounds ('shortens window to {start}–{end}') so the month cost reconciles (WR-02)", () => {
     const REF_WIN_MID = "strat-window-mid";
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
-        mkWinStrat(REF_WIN_MID, WIN_DATES.slice(3, 9)), // 2026-01-04 … 2026-01-09 (ragged BOTH ends)
-      ],
-      state: {
-        selected: { [REF_WIN_A]: true, [REF_WIN_MID]: true },
-        weights: { [REF_WIN_A]: 0.5, [REF_WIN_MID]: 0.5 },
-        startDates: {},
-      },
-    });
     render(
       <ScenarioComposer
-        payload={makePayload({
-          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
-        })}
+        payload={makePayload(
+          winUnits([
+            { id: REF_WIN_A, dates: WIN_DATES }, // 2026-01-01 … 2026-01-12
+            { id: REF_WIN_MID, dates: WIN_DATES.slice(3, 9) }, // 2026-01-04 … 2026-01-09 (ragged BOTH ends)
+          ]),
+        )}
         allocatorId={`${ALLOCATOR_A}-wr02-both`}
         allocatorMandate={null}
       />,
@@ -5763,31 +5481,31 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
   });
 
   it("COVERAGE-04: applying a window (the include path) NEVER reselects a manually-off strategy — manual-off stays sticky (T-58-05)", () => {
-    // Mount B as MANUALLY-OFF (selected: false). A stays selected. Because B is
-    // not selected it never appears in the auto-excluded group (that group is
-    // coverage-drops of SELECTED strategies only) — so it carries no include
+    // ENGINE-01 repoint: A + B arrive as REAL per-key sources; B is made
+    // MANUALLY-OFF by toggling its data-source switch off (the per-key
+    // equivalent of the old selected:false injection). A stays selected. Because
+    // B is not selected it never appears in the auto-excluded group (that group
+    // is coverage-drops of SELECTED strategies only) — so it carries no include
     // button. The invariant under test: the applyWindow path the include button
     // uses NEVER flips `selected`, so no window move can silently re-admit B.
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
-        mkWinStrat(REF_WIN_B, WIN_DATES.slice(0, 6)), // 2026-01-01 … 2026-01-06
-      ],
-      state: {
-        selected: { [REF_WIN_A]: true, [REF_WIN_B]: false }, // B manually OFF
-        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
-        startDates: {},
-      },
-    });
     render(
       <ScenarioComposer
         payload={makePayload({
-          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+          ...unequalSpanBook(),
+          apiKeys: [winApiKey(REF_WIN_A), winApiKey(REF_WIN_B)],
         })}
         allocatorId={`${ALLOCATOR_A}-t5805-sticky`}
         allocatorMandate={null}
       />,
     );
+    // Toggle B's data source OFF → B is manually excluded (selected:false).
+    act(() => {
+      fireEvent.click(
+        document.querySelector(
+          `[data-data-source-id="${REF_WIN_B}"] button[role="switch"]`,
+        ) as HTMLElement,
+      );
+    });
 
     // Only A is a member (B is manually off — never in the blend, never
     // auto-excluded). B has no include button.
@@ -5820,10 +5538,9 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
   // than the union also truncates it — the old truncation-only gate rendered
   // the common-period copy over it (a lie); this pins the fix falsifiably.
   it("DefaultChangeNote: renders at the intersection default, is SUPPRESSED over a custom window (even one that truncates the union), and disappears on Full range", async () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-i7-note`}
         allocatorMandate={null}
       />,
@@ -5868,23 +5585,15 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
 
   it("window: when the intersection is empty, the engine receives a state WITHOUT a window key (union path preserved)", () => {
     // Two DISJOINT spans → defaultWindowFor(spans) === null → nothing to seed →
-    // engineState === deAliased.state (no `window` key added; union-when-absent).
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 4)), // 01-01 … 01-04
-        mkWinStrat(REF_WIN_B, WIN_DATES.slice(8, 12)), // 01-09 … 01-12
-      ],
-      state: {
-        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
-        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
-        startDates: {},
-      },
-    });
+    // engineState === engineSet.state (no `window` key added; union-when-absent).
     render(
       <ScenarioComposer
-        payload={makePayload({
-          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
-        })}
+        payload={makePayload(
+          winUnits([
+            { id: REF_WIN_A, dates: WIN_DATES.slice(0, 4) }, // 01-01 … 01-04
+            { id: REF_WIN_B, dates: WIN_DATES.slice(8, 12) }, // 01-09 … 01-12
+          ]),
+        )}
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
       />,
@@ -5910,10 +5619,6 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
     lsStore.clear();
     vi.clearAllMocks();
     computeScenarioStateArgs.length = 0;
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    });
     browseOnAdd = null;
     pickerOnApply = null;
     lastPickerProps = null;
@@ -5929,10 +5634,9 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
   });
 
   it("preset: both preset buttons and the picker trigger have accessible names", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
       />,
@@ -5949,10 +5653,9 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
   });
 
   it("preset: 'Common period (all in)' snaps the window to the intersection — all selected strategies are members", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-w04-common`}
         allocatorMandate={null}
       />,
@@ -5977,10 +5680,9 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
   });
 
   it("preset: 'Full range (some drop out)' widens to the union — the short-span strategy drops (member_count < selected count)", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-w05-full`}
         allocatorMandate={null}
       />,
@@ -6002,20 +5704,14 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
 
   it("preset: 'Common period' is disabled on an empty intersection; 'Full range' stays enabled", () => {
     // Two DISJOINT spans → defaultWindowFor === null (empty intersection).
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 4)), // 01-01 … 01-04
-        mkWinStrat(REF_WIN_B, WIN_DATES.slice(8, 12)), // 01-09 … 01-12
-      ],
-      state: {
-        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
-        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
-        startDates: {},
-      },
-    });
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(
+          winUnits([
+            { id: REF_WIN_A, dates: WIN_DATES.slice(0, 4) }, // 01-01 … 01-04
+            { id: REF_WIN_B, dates: WIN_DATES.slice(8, 12) }, // 01-09 … 01-12
+          ]),
+        )}
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
       />,
@@ -6032,10 +5728,9 @@ describe("ScenarioComposer — Phase 57 coverage-window presets (WINDOW-04/05)",
   });
 
   it("preset: no separate picker component is forked — the reused CustomRangePicker carries min = union earliest first", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
       />,
@@ -6077,10 +5772,6 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
     lsStore.clear();
     vi.clearAllMocks();
     computeScenarioStateArgs.length = 0;
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    });
     browseOnAdd = null;
     pickerOnApply = null;
     lastPickerProps = null;
@@ -6096,20 +5787,14 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
   });
 
   it("POLISH-01: changing the rolling window (3M/6M/12M) does NOT change the state.window passed to computeScenario", () => {
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkWinStrat(REF_WIN_A, LONG_DATES),
-        mkWinStrat(REF_WIN_B, LONG_DATES),
-      ],
-      state: {
-        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
-        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
-        startDates: {},
-      },
-    });
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(
+          winUnits([
+            { id: REF_WIN_A, dates: LONG_DATES },
+            { id: REF_WIN_B, dates: LONG_DATES },
+          ]),
+        )}
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
       />,
@@ -6153,10 +5838,9 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
   });
 
   it("POLISH-01: ScenarioFactsheetChart's brush stays a VIEW axis — the mount receives NO coverage-window prop and no persist prop", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-p01-brush`}
         allocatorMandate={null}
       />,
@@ -6216,23 +5900,19 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
 
   it("POLISH-01: changing the coverage window leaves rollingWindow and per-strategy startDates untouched", () => {
     // Both strategies full 130-day spans so the default 6M (126) rolling window
-    // is ENABLED (usableN = 130 >= 126). A carries a legacy include-from
-    // startDate — the third distinct axis.
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkWinStrat(REF_WIN_A, LONG_DATES),
-        mkWinStrat(REF_WIN_B, LONG_DATES),
-      ],
-      state: {
-        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
-        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
-        // A per-strategy startDate on A — the legacy include-from axis.
-        startDates: { [REF_WIN_A]: LONG_DATES[5] },
-      },
-    });
+    // is ENABLED (usableN = 130 >= 126). ENGINE-01 repoint: A + B arrive as REAL
+    // per-key sources, so the per-strategy startDates are the series starts
+    // (LONG_DATES[0]) — the third distinct axis the coverage-window edit must
+    // leave untouched (the old holdings-path custom startDate injection has no
+    // per-key vehicle; the invariant it guarded is preserved on the real axis).
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(
+          winUnits([
+            { id: REF_WIN_A, dates: LONG_DATES },
+            { id: REF_WIN_B, dates: LONG_DATES },
+          ]),
+        )}
         allocatorId={`${ALLOCATOR_A}-p01-axes`}
         allocatorMandate={null}
       />,
@@ -6249,7 +5929,10 @@ describe("ScenarioComposer — Phase 57 POLISH-01 separation guard", () => {
     const startDatesBefore = computeScenarioStateArgs
       .filter((a) => a.strategyIds.includes(REF_WIN_A))
       .at(-1)?.state.startDates;
-    expect(startDatesBefore).toEqual({ [REF_WIN_A]: LONG_DATES[5] });
+    expect(startDatesBefore).toEqual({
+      [REF_WIN_A]: LONG_DATES[0],
+      [REF_WIN_B]: LONG_DATES[0],
+    });
 
     // Change the COVERAGE window via the picker (narrow it slightly, keeping
     // >=126 overlapping days so the 6M rolling option's ENABLED state is not a
@@ -6290,10 +5973,6 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     lsStore.clear();
     vi.clearAllMocks();
     computeScenarioStateArgs.length = 0;
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    });
     browseOnAdd = null;
     pickerOnApply = null;
     lastPickerProps = null;
@@ -6309,10 +5988,9 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
   });
 
   it("WINDOW-02: widening the window past B's last day auto-excludes B (member_count 2 → 1)", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-w02-widen`}
         allocatorMandate={null}
       />,
@@ -6333,10 +6011,9 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
   });
 
   it("WINDOW-03: narrowing back within B's coverage auto-restores it (member_count 1 → 2)", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-w03-narrow`}
         allocatorMandate={null}
       />,
@@ -6366,25 +6043,28 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     // (01-01…01-06). The default window is A's span; a narrow to A's span "covers"
     // B (B's span ⊇ [01-01,01-06]) — but B must stay OUT because it is not in the
     // selected subset. coverageEligible is consulted for SELECTED strategies only;
-    // in-blend = selected && coverageEligible.
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 6)), // 01-01 … 01-06 (selected)
-        mkWinStrat(REF_WIN_B, WIN_DATES), // 01-01 … 01-12 (UNSELECTED)
-      ],
-      state: {
-        selected: { [REF_WIN_A]: true, [REF_WIN_B]: false },
-        weights: { [REF_WIN_A]: 1, [REF_WIN_B]: 0 },
-        startDates: {},
-      },
-    });
+    // in-blend = selected && coverageEligible. ENGINE-01 repoint: A + B arrive as
+    // REAL per-key sources; B is made UNSELECTED by toggling its data source off.
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload({
+          ...winUnits([
+            { id: REF_WIN_A, dates: WIN_DATES.slice(0, 6) }, // 01-01 … 01-06 (selected)
+            { id: REF_WIN_B, dates: WIN_DATES }, // 01-01 … 01-12 (toggled OFF below)
+          ]),
+          apiKeys: [winApiKey(REF_WIN_A), winApiKey(REF_WIN_B)],
+        })}
         allocatorId={`${ALLOCATOR_A}-w03-subset`}
         allocatorMandate={null}
       />,
     );
+    act(() => {
+      fireEvent.click(
+        document.querySelector(
+          `[data-data-source-id="${REF_WIN_B}"] button[role="switch"]`,
+        ) as HTMLElement,
+      );
+    });
     // Only A is selected → only A is a member, even though B's span covers the
     // window. The engine's activeStrategies filter (selected truthy) already
     // excludes B; the UI never fabricates its inclusion.
@@ -6407,10 +6087,9 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     // engine's member_ids is the ground truth; the composer derives the same set
     // from selected && coverageEligible on the SAME deAliased strategies. On a
     // passthrough (non-aliased) book they align 1:1 — assert it directly.
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-w03-devinv`}
         allocatorMandate={null}
       />,
@@ -6428,10 +6107,9 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     // Widening past B for coverage must not flip B's `selected` (manual axis). The
     // engine state arg carries `selected`; assert B stays selected=true across the
     // widen (only coverageEligible, an ephemeral derivation, changes).
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-w03-selected`}
         allocatorMandate={null}
       />,
@@ -6470,10 +6148,6 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     lsStore.clear();
     vi.clearAllMocks();
     computeScenarioStateArgs.length = 0;
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    });
     browseOnAdd = null;
     pickerOnApply = null;
     lastPickerProps = null;
@@ -6489,10 +6163,9 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
   });
 
   it("auto-excluded: a coverage-dropped strategy renders in the group with an inline reason", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-p02-reason`}
         allocatorMandate={null}
       />,
@@ -6528,20 +6201,14 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     // first day 01-03 falls after winStart) → LATE is coverage-excluded and its
     // row must read "starts Jan 2026 — outside window", not the tail phrasing.
     const REF_WIN_LATE = "strat-window-late";
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkWinStrat(REF_WIN_A, WIN_DATES), // 01-01 … 01-12
-        mkWinStrat(REF_WIN_LATE, WIN_DATES.slice(2)), // 01-03 … 01-12 (ragged head)
-      ],
-      state: {
-        selected: { [REF_WIN_A]: true, [REF_WIN_LATE]: true },
-        weights: { [REF_WIN_A]: 0.5, [REF_WIN_LATE]: 0.5 },
-        startDates: {},
-      },
-    });
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(
+          winUnits([
+            { id: REF_WIN_A, dates: WIN_DATES }, // 01-01 … 01-12
+            { id: REF_WIN_LATE, dates: WIN_DATES.slice(2) }, // 01-03 … 01-12 (ragged head)
+          ]),
+        )}
         allocatorId={`${ALLOCATOR_A}-p02-head`}
         allocatorMandate={null}
       />,
@@ -6560,10 +6227,9 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
   });
 
   it("auto-excluded: the animated row uses duration-300 + ease-out + motion-reduce:transition-none on every transition-carrying element", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-p02-motion`}
         allocatorMandate={null}
       />,
@@ -6591,10 +6257,9 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
   });
 
   it("auto-excluded: the group is ABSENT when no strategy is coverage-dropped", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
       />,
@@ -6610,25 +6275,28 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     // A selected + short-span; B UNSELECTED (manual-off) + full-span. Narrow to
     // A's span so B WOULD be coverage-eligible — but B is manual-off, so it must
     // NOT appear in the coverage-auto-excluded group (and there is nothing
-    // coverage-dropped, so the group is absent entirely).
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 6)), // selected, 01-01…01-06
-        mkWinStrat(REF_WIN_B, WIN_DATES), // UNSELECTED, 01-01…01-12
-      ],
-      state: {
-        selected: { [REF_WIN_A]: true, [REF_WIN_B]: false },
-        weights: { [REF_WIN_A]: 1, [REF_WIN_B]: 0 },
-        startDates: {},
-      },
-    });
+    // coverage-dropped, so the group is absent entirely). ENGINE-01 repoint: A +
+    // B arrive as REAL per-key sources; B is made manual-off by toggling it off.
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload({
+          ...winUnits([
+            { id: REF_WIN_A, dates: WIN_DATES.slice(0, 6) }, // selected, 01-01…01-06
+            { id: REF_WIN_B, dates: WIN_DATES }, // toggled OFF below, 01-01…01-12
+          ]),
+          apiKeys: [winApiKey(REF_WIN_A), winApiKey(REF_WIN_B)],
+        })}
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
       />,
     );
+    act(() => {
+      fireEvent.click(
+        document.querySelector(
+          `[data-data-source-id="${REF_WIN_B}"] button[role="switch"]`,
+        ) as HTMLElement,
+      );
+    });
     // The manual-off B is never in the auto-excluded group.
     expect(
       screen.queryByTestId(`auto-excluded-row-${REF_WIN_B}`),
@@ -6640,10 +6308,9 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
   });
 
   it("auto-excluded: the group uses DESIGN.md warning tokens (no raw hex / px)", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-p02-tokens`}
         allocatorMandate={null}
       />,
@@ -6667,20 +6334,14 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
   // would disclose a window the apply path cannot produce).
   it("auto-excluded: a row with NO intersection with the current window shows chip + reason but NO include button (includeCost === null)", () => {
     const REF_WIN_SHORT = "strat-window-short-head";
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkWinStrat(REF_WIN_A, WIN_DATES), // 2026-01-01 … 2026-01-12
-        mkWinStrat(REF_WIN_SHORT, WIN_DATES.slice(0, 3)), // 01-01 … 01-03
-      ],
-      state: {
-        selected: { [REF_WIN_A]: true, [REF_WIN_SHORT]: true },
-        weights: { [REF_WIN_A]: 0.5, [REF_WIN_SHORT]: 0.5 },
-        startDates: {},
-      },
-    });
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(
+          winUnits([
+            { id: REF_WIN_A, dates: WIN_DATES }, // 2026-01-01 … 2026-01-12
+            { id: REF_WIN_SHORT, dates: WIN_DATES.slice(0, 3) }, // 01-01 … 01-03
+          ]),
+        )}
         allocatorId={`${ALLOCATOR_A}-i8a-nocost`}
         allocatorMandate={null}
       />,
@@ -6712,16 +6373,25 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
   // manually-toggled-off row reads "Excluded" (the sticky manual state, never
   // the amber auto-excluded chip).
   it("composition list: an enabled+eligible added row shows the 'In blend' chip; toggling it off flips the chip to 'Excluded'", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload({
+          // ENGINE-01 repoint: a catalog-backed added strategy (real series) so
+          // its coverageEligible entry is genuine once added.
+          strategies: [
+            catalogStrategy(
+              REF_WIN_A,
+              REF_WIN_A,
+              mkWinStrat(REF_WIN_A, WIN_DATES).daily_returns,
+            ),
+          ],
+        })}
         allocatorId={`${ALLOCATOR_A}-i8b-chips`}
         allocatorMandate={null}
       />,
     );
-    // Add a strategy whose id matches an adapter strategy (REF_WIN_A) so the
-    // row's coverageEligible entry is real. Enabled by default → "In blend".
+    // Add the strategy so its composition row renders. Enabled by default → "In
+    // blend" (its own span covers the auto-default window).
     addStrategy({
       id: REF_WIN_A,
       name: REF_WIN_A,
@@ -6762,10 +6432,6 @@ describe("ScenarioComposer — Phase 57 Plan 03 empty-intersection banner (WINDO
     lsStore.clear();
     vi.clearAllMocks();
     computeScenarioStateArgs.length = 0;
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    });
     browseOnAdd = null;
     pickerOnApply = null;
     lastPickerProps = null;
@@ -6780,37 +6446,40 @@ describe("ScenarioComposer — Phase 57 Plan 03 empty-intersection banner (WINDO
     cleanup();
   });
 
-  // Two DISJOINT-span HOLDINGS keyed on the REAL holding scopeRefs (REF_BTC /
-  // REF_ETH) so the deselect handler's `scenario.toggleHolding(scopeRef)` path is
-  // exercised faithfully — the draft (seeded by defaultDraftFromHoldings) carries
-  // these refs as toggle=true, so toggling flips them genuinely to false. ETH is
-  // the outlier (latest start: 01-09…01-12 pushes the overlap empty).
+  // ENGINE-01 repoint: two DISJOINT-span legs delivered as ADDED strategies
+  // (REF_BTC / REF_ETH as the added ids). The deselect handler routes an added
+  // outlier through `handleRemoveAdded` (per-key units have no toggle-off vehicle
+  // for the banner), so the guided-fix Deselect is exercised faithfully on the
+  // series-space engine. ETH is the outlier (latest start 01-09…01-12 pushes the
+  // overlap empty). The added-strategy NAME is the ref itself (no `key ` prefix),
+  // so the "Deselect {name}" oracle is byte-unchanged.
   const BTC_EARLY = WIN_DATES.slice(0, 4); // 01-01 … 01-04
   const ETH_LATE = WIN_DATES.slice(8, 12); // 01-09 … 01-12
-  /** Two DISJOINT-span holdings → empty intersection → outlier = REF_ETH. */
-  function mountDisjointBook(): void {
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
+  /** A payload whose catalog carries the two disjoint-span legs so `addStrategy`
+   *  resolves their series from the book (no lazy fetch). */
+  function disjointCatalog(): Partial<MyAllocationDashboardPayload> {
+    return {
       strategies: [
-        mkWinStrat(REF_BTC, BTC_EARLY),
-        mkWinStrat(REF_ETH, ETH_LATE),
+        catalogStrategy(REF_BTC, REF_BTC, mkWinStrat(REF_BTC, BTC_EARLY).daily_returns),
+        catalogStrategy(REF_ETH, REF_ETH, mkWinStrat(REF_ETH, ETH_LATE).daily_returns),
       ],
-      state: {
-        selected: { [REF_BTC]: true, [REF_ETH]: true },
-        weights: { [REF_BTC]: 0.5, [REF_ETH]: 0.5 },
-        startDates: {},
-      },
-    });
+    };
+  }
+  /** Add both disjoint legs so the SELECTED set has an empty intersection. */
+  function addDisjointPair(): void {
+    addStrategy({ id: REF_BTC, name: REF_BTC, markets: [], strategy_types: [] });
+    addStrategy({ id: REF_ETH, name: REF_ETH, markets: [], strategy_types: [] });
   }
 
   it("WINDOW-06: an empty-intersection selected set renders a warning banner naming the outlier + a Deselect button", () => {
-    mountDisjointBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(disjointCatalog())}
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
       />,
     );
+    addDisjointPair();
     const banner = screen.getByTestId("scenario-empty-intersection-banner");
     expect(banner).toBeInTheDocument();
     // role/aria for a NON-blocking guided fix: role=status + aria-live=polite per
@@ -6831,21 +6500,20 @@ describe("ScenarioComposer — Phase 57 Plan 03 empty-intersection banner (WINDO
   });
 
   it("WINDOW-06: clicking Deselect removes the outlier, the banner disappears, and a valid intersection is restored", () => {
-    mountDisjointBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
-        // Own allocatorId: this test MUTATES (Deselect → toggleHolding) and the
-        // draft hook persists on a 150ms debounce (H-0125) that is not cancelled
-        // on unmount. Under slower CI the leaked write lands after teardown and
-        // pollutes a later test that shares the key (ETH-deselected draft →
-        // BTC-only → no empty intersection → banner absent). A per-test key
+        payload={makePayload(disjointCatalog())}
+        // Own allocatorId: this test MUTATES (Deselect → handleRemoveAdded) and
+        // the draft hook persists on a 150ms debounce (H-0125) that is not
+        // cancelled on unmount. Under slower CI the leaked write lands after
+        // teardown and pollutes a later test that shares the key. A per-test key
         // isolates the write. (Deterministic in CI, green locally — this branch's
         // first CI run surfaced it.)
         allocatorId={`${ALLOCATOR_A}-w06-deselect`}
         allocatorMandate={null}
       />,
     );
+    addDisjointPair();
     const banner = screen.getByTestId("scenario-empty-intersection-banner");
     fireEvent.click(
       within(banner).getByRole("button", {
@@ -6865,10 +6533,9 @@ describe("ScenarioComposer — Phase 57 Plan 03 empty-intersection banner (WINDO
   });
 
   it("WINDOW-06: the banner is ABSENT when the selected set has a common window", () => {
-    mountUnequalSpanBook(); // A + B overlap on 01-01…01-06
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
       />,
@@ -6879,10 +6546,9 @@ describe("ScenarioComposer — Phase 57 Plan 03 empty-intersection banner (WINDO
   });
 
   it("WINDOW-06: the banner uses DESIGN.md warning tokens (no raw hex / px)", () => {
-    mountDisjointBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(disjointCatalog())}
         // Own allocatorId so a debounced draft write leaked from the mutating
         // Deselect test above (150ms, not cancelled on unmount) can never
         // hydrate here on slower CI and turn this disjoint book BTC-only.
@@ -6890,6 +6556,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 empty-intersection banner (WINDO
         allocatorMandate={null}
       />,
     );
+    addDisjointPair();
     const cls = screen.getByTestId("scenario-empty-intersection-banner")
       .className;
     expect(cls).toMatch(/warning/);
@@ -6921,10 +6588,6 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
     lsStore.clear();
     vi.clearAllMocks();
     computeScenarioStateArgs.length = 0;
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    });
     browseOnAdd = null;
     pickerOnApply = null;
     lastPickerProps = null;
@@ -6934,10 +6597,9 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
   /** A v3 draft carrying an explicit coverage window (owner's saved window). */
   function v3DraftWithWindow(window: { start: string; end: string }) {
     return {
-      ...defaultDraftFromHoldings([
-        HOLDING_BTC,
-        HOLDING_ETH,
-      ] as Parameters<typeof defaultDraftFromHoldings>[0]),
+      ...defaultDraftFromHoldings(
+        unequalSpanBook().holdingsSummary as Parameters<typeof defaultDraftFromHoldings>[0],
+      ),
       window,
     };
   }
@@ -6947,30 +6609,27 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
    *  draft and stamping schema_version back to the prior version. */
   function upgradedV2Draft() {
     return {
-      ...defaultDraftFromHoldings([
-        HOLDING_BTC,
-        HOLDING_ETH,
-      ] as Parameters<typeof defaultDraftFromHoldings>[0]),
+      ...defaultDraftFromHoldings(
+        unequalSpanBook().holdingsSummary as Parameters<typeof defaultDraftFromHoldings>[0],
+      ),
       schema_version: 2,
     };
   }
 
   /** A fresh v3 draft with no window (a v3 saved before a window was chosen). */
   function freshV3Windowless() {
-    return defaultDraftFromHoldings([
-      HOLDING_BTC,
-      HOLDING_ETH,
-    ] as Parameters<typeof defaultDraftFromHoldings>[0]);
+    return defaultDraftFromHoldings(
+      unequalSpanBook().holdingsSummary as Parameters<typeof defaultDraftFromHoldings>[0],
+    );
   }
 
   it("PERSIST-01: reopening a v3 draft WITH a window seeds the composer window VERBATIM (readout shows the saved window, not the intersection default), no provenance note", () => {
-    mountUnequalSpanBook();
     let openSaved:
       | ((row: { id: string; name: string; draft: unknown }) => void)
       | null = null;
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-p59-v3win`}
         allocatorMandate={null}
         onRegisterOpen={(open) => {
@@ -7005,13 +6664,12 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
   });
 
   it("PERSIST-01: reopening an upgraded-v2 (windowless) draft defaults the window to the intersection AND shows the provenance note", () => {
-    mountUnequalSpanBook();
     let openSaved:
       | ((row: { id: string; name: string; draft: unknown }) => void)
       | null = null;
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-p59-v2up`}
         allocatorMandate={null}
         onRegisterOpen={(open) => {
@@ -7058,13 +6716,12 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
   });
 
   it("PERSIST-01: reopening a fresh v3 draft with no window defaults to the intersection but NEVER shows the provenance note", () => {
-    mountUnequalSpanBook();
     let openSaved:
       | ((row: { id: string; name: string; draft: unknown }) => void)
       | null = null;
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-p59-v3fresh`}
         allocatorMandate={null}
         onRegisterOpen={(open) => {
@@ -7092,13 +6749,12 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
   });
 
   it("PERSIST-01: the provenance note is EPHEMERAL — opening a fresh v3 after an upgraded-v2 open clears it", () => {
-    mountUnequalSpanBook();
     let openSaved:
       | ((row: { id: string; name: string; draft: unknown }) => void)
       | null = null;
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-p59-ephemeral`}
         allocatorMandate={null}
         onRegisterOpen={(open) => {
@@ -7134,13 +6790,12 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
   });
 
   it("review WR-01: Reset clears the reopened scenario's window — the fresh live-book draft re-seeds the intersection default, not the prior open's window", () => {
-    mountUnequalSpanBook();
     let openSaved:
       | ((row: { id: string; name: string; draft: unknown }) => void)
       | null = null;
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-p59-reset-window`}
         allocatorMandate={null}
         onRegisterOpen={(open) => {
@@ -7174,13 +6829,12 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
   });
 
   it("review WR-02: dismissing the note then reopening the SAME upgraded-v2 scenario re-shows it (dismissal is per-OPEN, not per-scenario-id)", async () => {
-    mountUnequalSpanBook();
     let openSaved:
       | ((row: { id: string; name: string; draft: unknown }) => void)
       | null = null;
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-p59-reopen-same`}
         allocatorMandate={null}
         onRegisterOpen={(open) => {
@@ -7221,24 +6875,21 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
 
   it("review WR-03: an upgraded-v2 reopen whose selected set has NO common period suppresses the note — the engine runs the union path and the 'common period' copy would be false", () => {
     // Two DISJOINT spans → defaultWindowFor === null → the auto-default seeds
-    // nothing → the engine stays on the union-when-absent path.
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [
-        mkWinStrat(REF_WIN_A, WIN_DATES.slice(0, 4)), // 01-01 … 01-04
-        mkWinStrat(REF_WIN_B, WIN_DATES.slice(8, 12)), // 01-09 … 01-12
-      ],
-      state: {
-        selected: { [REF_WIN_A]: true, [REF_WIN_B]: true },
-        weights: { [REF_WIN_A]: 0.5, [REF_WIN_B]: 0.5 },
-        startDates: {},
-      },
-    });
+    // nothing → the engine stays on the union-when-absent path. ENGINE-01
+    // repoint: disjoint legs as REAL per-key sources (holdings identical to the
+    // standard book, so the upgraded-v2 draft's fingerprint still matches and the
+    // reopen is applied, not drifted).
     let openSaved:
       | ((row: { id: string; name: string; draft: unknown }) => void)
       | null = null;
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(
+          winUnits([
+            { id: REF_WIN_A, dates: WIN_DATES.slice(0, 4) }, // 01-01 … 01-04
+            { id: REF_WIN_B, dates: WIN_DATES.slice(8, 12) }, // 01-09 … 01-12
+          ]),
+        )}
         allocatorId={`${ALLOCATOR_A}-p59-disjoint-v2`}
         allocatorMandate={null}
         onRegisterOpen={(open) => {
@@ -7271,13 +6922,12 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
   });
 
   it("ship-review RT-2: clicking the note's 'Show full range' applies the union AND removes the note — no stale 'showing the common period' banner over a full-range window", () => {
-    mountUnequalSpanBook();
     let openSaved:
       | ((row: { id: string; name: string; draft: unknown }) => void)
       | null = null;
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-p59-rt2-fullrange`}
         allocatorMandate={null}
         onRegisterOpen={(open) => {
@@ -7314,13 +6964,12 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
   });
 
   it("ship-review RT-2: a custom-window apply while the note is up removes it (the active window is no longer the common period)", () => {
-    mountUnequalSpanBook();
     let openSaved:
       | ((row: { id: string; name: string; draft: unknown }) => void)
       | null = null;
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-p59-rt2-custom`}
         allocatorMandate={null}
         onRegisterOpen={(open) => {
@@ -7359,10 +7008,9 @@ describe("ScenarioComposer — Phase 59 reopen window + provenance (PERSIST-01)"
   });
 
   it("ship-review RT-5: after an Include click the focus lands on the coverage-window control (never dropped to <body> with the unmounted row)", () => {
-    mountUnequalSpanBook();
     render(
       <ScenarioComposer
-        payload={makePayload({ holdingsSummary: [HOLDING_BTC, HOLDING_ETH] })}
+        payload={makePayload(unequalSpanBook())}
         allocatorId={`${ALLOCATOR_A}-p59-rt5-focus`}
         allocatorMandate={null}
       />,
@@ -7501,10 +7149,6 @@ describe("ScenarioComposer — P61-BUG-1: added strategies join the per-key book
     // The holdings-path builder stays mocked-empty (this file's philosophy):
     // the fix must NOT depend on it — added units are built by the REAL
     // merge helper on the per-key path.
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    });
     vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
       isOpen: boolean;
       onAdd: (s: unknown) => void;
@@ -7819,10 +7463,6 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
     vi.clearAllMocks();
     registeredOpen = null;
     browseOnAdd = null;
-    vi.mocked(buildStrategyForBuilderSet).mockReturnValue({
-      strategies: [],
-      state: { selected: {}, weights: {}, startDates: {} },
-    });
     vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
       isOpen: boolean;
       onAdd: (s: unknown) => void;
