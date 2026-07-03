@@ -314,6 +314,17 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     // The caption introduces no USD — the existing no-"$" invariant holds on the
     // mixed render.
     expect(html).not.toMatch(/\$\d/);
+
+    // MEMBER-03 leak guard — the mixed fixture's draft.memberKeyIds carries
+    // MEMBER_KEY (an api-key UUID, the owner's persisted book membership). The
+    // public projection strips it to the isMixed caption above; the RAW id must
+    // NEVER reach the anonymous recipient. Grep the rendered HTML for the seeded
+    // UUID — absent. The RPC payload legitimately holds it (SQL Assertion 1's
+    // by-design round-trip), so the rendered-HTML layer is the honest place to
+    // pin the strip. RED-provable: rendering the membership (or exposing it via
+    // ResolvedOk) reintroduces the UUID here. Falsifiable — the caption assertion
+    // above proves the mixed branch DID render, so this is not a vacuous pass.
+    expect(html).not.toContain(MEMBER_KEY);
   });
 
   it("PRESENT-03 — a CATALOG-ONLY share and a PRE-v4 (omitted-membership) share render NO caption", async () => {

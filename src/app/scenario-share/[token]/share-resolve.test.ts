@@ -625,6 +625,38 @@ describe("Phase 64 / PRESENT-03 — isMixed (mixed-share caption condition)", ()
     expect(result.isMixed).toBe(true);
   });
 
+  it("MEMBER-03 leak guard — a MIXED ResolvedOk strips memberKeyIds to the isMixed boolean; the raw api-key UUIDs NEVER reach the public projection", () => {
+    // The RPC row's draft.memberKeyIds legitimately carries the owner's persisted
+    // book membership (api-key UUIDs) — the SQL leak test's Assertion 1 pins that
+    // POSITIVE round-trip through get_shared_scenario BY DESIGN (the draft rides
+    // whole; the member is the same id class as the strategy ids already in the
+    // payload, so it never trips the byte-frozen over-return guard). The honest
+    // stripping to `isMixed` happens HERE, in the pure resolve layer the anonymous
+    // page consumes: ResolvedOk exposes ONLY the derived boolean, never the raw
+    // ids. Grep the serialized resolved object for the seeded member UUID — it
+    // must be absent. RED-provable: exposing `memberKeyIds` on ResolvedOk (or
+    // spreading the decoded draft into the return) reintroduces the UUID and
+    // fails this. This is the vitest counterpart the SQL nuance calls for — the
+    // over-return guard stays byte-intact; this pins the layer that CAN honestly
+    // assert the strip (the RPC payload legitimately holds the ids).
+    const mixedDraft: ScenarioDraft = { ...okDraft(), memberKeyIds: [MEMBER_KEY] };
+
+    const result = resolveSharedScenario({
+      name: "Mixed share",
+      draft: mixedDraft,
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: okSeriesRows(),
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    // The membership is reflected ONLY as the boolean signal…
+    expect(result.isMixed).toBe(true);
+    // …and the raw api-key UUID is nowhere in the resolved projection the page
+    // consumes (name / metrics / portfolioDaily / strategyNames / isMixed).
+    expect(JSON.stringify(result)).not.toContain(MEMBER_KEY);
+  });
+
   it("a CATALOG-ONLY draft (memberKeyIds []) → kind:'ok' AND isMixed === false (no caption)", () => {
     // okDraft() carries memberKeyIds: [] — a pure catalog blend, no book member.
     // Nothing to disclose → isMixed false → NO caption.
