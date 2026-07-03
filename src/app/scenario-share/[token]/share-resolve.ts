@@ -177,7 +177,7 @@ export function resolveSharedScenario(
     // (scenario-compare.ts computeMetricsForDraft): take the explicit override
     // ONLY when it is a finite number, else fall back to the engine default for
     // an un-overridden ADDED strategy, which is 0 (the deliberate, test-pinned
-    // invariant in scenario-adapter.ts buildStrategyForBuilderSet — a non-zero
+    // invariant in scenario-adapter.ts buildAddedUnits — a non-zero
     // default would let a never-weighted add slip a fabricated size past the
     // commit gate). The prior `?? 0` diverged from the owner in two ways: it
     // passed a NaN/Infinity override straight through to computeScenario (the
@@ -241,7 +241,7 @@ export function resolveSharedScenario(
   // window key, and the engine's union-when-absent guard applies (matching the
   // composer's WINDOW-06 empty-intersection behavior).
   //
-  // There is NO collapseAliasedHoldingStrategies here (strategies are built
+  // There is NO alias-collapse step here (strategies are built
   // straight from addedStrategies), so `state` IS the engine state — inject
   // directly (Pitfall 4 N/A).
   const window =
