@@ -38,9 +38,10 @@ import {
  *      "same rule everywhere" contract (59-CONTEXT Area 3 Q4).
  *
  * Fixtures mirror `scenario.test.ts` style: business-day windows + a
- * constant/alternating return generator, fed through the SAME live-input
- * shape the composer builds (holdingsSummary + holdingReturnsByScopeRef +
- * the added-strategy lookups + symbolByHoldingId).
+ * constant/alternating return generator, fed through the SAME series-space
+ * live-input shape the composer builds (Phase 63 ENGINE-02 — the per-key
+ * channel + the added-strategy lookups; the legacy holdings-snapshot inputs
+ * are gone).
  */
 
 // =========================================================================
@@ -62,57 +63,19 @@ function buildDates(startDate: string, n: number): string[] {
   return out;
 }
 
-/** A holding scope_ref ("holding:{venue}:{symbol}:{holding_type}"). */
-function holdingRef(venue: string, symbol: string, type: string): string {
-  return `holding:${venue}:${symbol}:${type}`;
-}
-
 /** Alternating up/down daily-return window so vol/Sharpe/Sortino are non-zero. */
 function altReturns(dates: string[], up: number, down: number): DailyPoint[] {
   return dates.map((date, i) => ({ date, value: i % 2 === 0 ? up : down }));
 }
 
-interface HoldingFixture {
-  symbol: string;
-  venue: string;
-  holding_type: "spot" | "derivative";
-  value_usd: number;
-}
-
 /**
- * Build the `ScenarioCompareInputs` (the live payload the composer holds):
- *   - holdingsSummary    — the live holdings (symbol/venue/type/value)
- *   - holdingReturnsByScopeRef — reconstructed per-holding series, keyed by ref
- *   - added* lookups     — empty here (own-book holdings only)
- *   - symbolByHoldingId  — ref → bare symbol (for the de-alias collapse)
- */
-function liveInputs(
-  holdings: HoldingFixture[],
-  returnsByRef: Record<string, DailyPoint[]>,
-): ScenarioCompareInputs {
-  const symbolByHoldingId = new Map<string, string>();
-  for (const h of holdings) {
-    symbolByHoldingId.set(holdingRef(h.venue, h.symbol, h.holding_type), h.symbol);
-  }
-  return {
-    holdingsSummary: holdings,
-    holdingReturnsByScopeRef: returnsByRef,
-    addedStrategyReturnsLookup: {},
-    addedStrategyMetadataLookup: {},
-    symbolByHoldingId,
-  };
-}
-
-/**
- * Per-key live inputs — the prod SAVED-book path (MEMBER-02). Gate satisfied,
- * `returnsByKey` keyed by api_key_id, `equityByKey` the per-key equity shares,
- * NO holdings (a saved book draft computes on PER-KEY units, not the
- * holdings-snapshot — P61-BUG-2). `eligible` defaults to every key present.
- * A saved draft selects this path via `memberKeyIds` (non-empty). This is the
- * intent-preserving vehicle for "a saved draft computing over a real book":
- * after MEMBER-02 a blank draft (memberKeyIds=[]) NEVER inherits the live
- * holdings, so the holdings else-branch is reachable only by the live-book
- * own-book column (`{ liveBook: true }`), not by a saved book draft.
+ * Per-key live inputs — the prod SAVED-book path (MEMBER-02) and, after Phase 63
+ * ENGINE-02, the ONLY real-book vehicle: `returnsByKey` keyed by api_key_id,
+ * `equityByKey` the per-key equity shares, gate satisfied. There is no
+ * holdings-snapshot input any more — a book column computes on PER-KEY units
+ * (P61-BUG-2); a blank draft (memberKeyIds=[]) computes series-space added-only.
+ * `eligible` defaults to every key present. A saved draft selects the per-key
+ * set via `memberKeyIds` (non-empty).
  */
 function perKeyLiveInputs(
   returnsByKey: Record<string, DailyPoint[]>,
@@ -120,11 +83,8 @@ function perKeyLiveInputs(
   eligible?: string[],
 ): ScenarioCompareInputs {
   return {
-    holdingsSummary: [],
-    holdingReturnsByScopeRef: {},
     addedStrategyReturnsLookup: {},
     addedStrategyMetadataLookup: {},
-    symbolByHoldingId: new Map(),
     perKeyReturnsByApiKeyId: returnsByKey,
     eligibleApiKeyIds: eligible ?? Object.keys(returnsByKey),
     equityByApiKeyId: equityByKey,
@@ -474,24 +434,25 @@ describe("computeMetricsForDraft", () => {
 });
 
 describe("buildLiveBookDraft", () => {
-  it("produces an all-on, equity-weight draft so all six metrics populate", () => {
-    // The live-book own-book column blends the live holdings on the union path.
-    // It is the ONE structural exception that still computes over
-    // holdingsSummary — declared at the call site via { liveBook: true }.
+  it("produces an all-on, equity-weight per-key draft so all six metrics populate (gate satisfied)", () => {
+    // Phase 63 ENGINE-02 repoint (was: holdings-snapshot live book): with the
+    // holdings path deleted the healthy live-book own-book column IS the per-key
+    // union blend (gate satisfied), the same P61-BUG-2 per-key basis as
+    // liveBaselineMetrics. buildLiveBookDraft(true, eligible) stamps membership =
+    // the eligible key set; { liveBook: true } holds it on the union path
+    // (Phase-55 own-book lock). All six metrics populate over a healthy book.
     const dates = buildDates("2024-01-02", 80);
-    const holdings: HoldingFixture[] = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 6000 },
-      { symbol: "ETH", venue: "binance", holding_type: "spot", value_usd: 4000 },
-    ];
-    const returnsByRef = {
-      [holdingRef("binance", "BTC", "spot")]: altReturns(dates, 0.01, -0.008),
-      [holdingRef("binance", "ETH", "spot")]: altReturns(dates, 0.012, -0.009),
-    };
-    const inputs = liveInputs(holdings, returnsByRef);
+    const eligible = ["key-A", "key-B"];
+    const inputs = perKeyLiveInputs(
+      {
+        "key-A": altReturns(dates, 0.01, -0.008),
+        "key-B": altReturns(dates, 0.012, -0.009),
+      },
+      { "key-A": 6000, "key-B": 4000 },
+      eligible,
+    );
 
-    // Holdings-only book: no per-key gate, no eligible keys → empty membership
-    // → the holdings union path under { liveBook: true }.
-    const liveDraft = buildLiveBookDraft(false, []);
+    const liveDraft = buildLiveBookDraft(true, eligible);
     // No added strategies, no leverage on the synthetic draft.
     expect(liveDraft.addedStrategies).toHaveLength(0);
 
@@ -505,21 +466,28 @@ describe("buildLiveBookDraft", () => {
     expect(m.volatility).not.toBeNull();
   });
 
-  it("a genuinely degenerate live book still renders null (honest em-dash), not a 0", () => {
-    // A live book with a single sub-warm-up holding → empty active set → null.
-    // The own-book column feeds holdings on the union path via { liveBook: true }.
-    const shortDates = buildDates("2024-01-02", 6);
-    const holdings: HoldingFixture[] = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 1000 },
-    ];
-    const inputs = liveInputs(holdings, {
-      [holdingRef("binance", "BTC", "spot")]: altReturns(shortDates, 0.01, -0.01),
-    });
+  it("the gate=false live-book column is an honest null-metric em-dash (empty added-only set), never a fabricated 0", () => {
+    // Phase 63 ENGINE-02 repoint (was: a degenerate holdings book → null). With
+    // the holdings path deleted, a gate=false live-book column
+    // (buildLiveBookDraft(false, []) → empty derived membership) computes the
+    // series-space ADDED-ONLY set. With no added strategies that set is EMPTY →
+    // computeScenario returns null metrics → an honest em-dash. D1-consistent;
+    // affects only gate=false books (0 real users after GUARD-01). NULL, never 0.
+    const dates = buildDates("2024-01-02", 80);
+    const eligible = ["key-A"];
+    const inputs = perKeyLiveInputs(
+      { "key-A": altReturns(dates, 0.01, -0.008) },
+      { "key-A": 5000 },
+      eligible,
+    );
 
+    // Gate OFF ⇒ derived membership empty ⇒ added-only over an empty set ⇒ null.
     const m = computeMetricsForDraft(buildLiveBookDraft(false, []), inputs, {
       liveBook: true,
     });
+    expect(m.member_count).toBe(0);
     expect(m.sharpe).toBeNull();
+    expect(m.twr).toBeNull();
     expect(m.sharpe).not.toBe(0);
   });
 });
@@ -546,15 +514,12 @@ describe("computeMetricsForDraft — per-key channel (P61-BUG-2)", () => {
   // per-key oracles + the Atlas-class 40-day golden.
   const BOOK_MEMBERS = ["key-A", "key-B"];
 
-  /** Per-key live inputs: gate satisfied, two eligible keys, NO holding
-   *  series at all (the exact prod shape that computed empty pre-fix). */
+  /** Per-key live inputs: gate satisfied, two eligible keys. Series-space only
+   *  (Phase 63 ENGINE-02 — the holdings-snapshot inputs are deleted). */
   function perKeyInputs(): ScenarioCompareInputs {
     return {
-      holdingsSummary: [],
-      holdingReturnsByScopeRef: {},
       addedStrategyReturnsLookup: {},
       addedStrategyMetadataLookup: {},
-      symbolByHoldingId: new Map(),
       perKeyReturnsByApiKeyId: { "key-A": KEY_A, "key-B": KEY_B },
       eligibleApiKeyIds: ["key-A", "key-B"],
       equityByApiKeyId: { "key-A": 70_000, "key-B": 30_000 },
@@ -617,17 +582,18 @@ describe("computeMetricsForDraft — per-key channel (P61-BUG-2)", () => {
     expect(withAdded.twr).not.toBe(keysOnly.twr);
   });
 
-  it("EMPTY membership → the legacy holdings/added path runs (per-key fields ignored), even with the gate set", () => {
-    // MEMBER-02: the gate is no longer the selector — membership is. An empty
-    // `memberKeyIds` computes the added-only holdings path REGARDLESS of the
-    // gate (this is the F5 mechanism at the compute unit). Gate left true to
-    // prove it is not load-bearing.
+  it("EMPTY membership → the series-space added-only path runs (per-key fields ignored), even with the gate set", () => {
+    // Phase 63 ENGINE-02 repoint (was: "legacy holdings/added path runs"). Same
+    // oracle axis — WHICH builder path runs for an empty-membership draft — now
+    // that the holdings path is deleted: an empty `memberKeyIds` computes the
+    // added-only path REGARDLESS of the gate (the F5 mechanism at the compute
+    // unit). Gate left true to prove it is not load-bearing.
     const inputs: ScenarioCompareInputs = {
       ...perKeyInputs(),
       perKeyDailiesGateSatisfied: true,
     };
     const m = computeMetricsForDraft(draft(), inputs); // memberKeyIds []
-    // No holdings series + empty membership → honest empty (added-only path).
+    // Empty added set + empty membership → honest empty (series-space added-only).
     expect(m.member_count).toBe(0);
   });
 
@@ -664,17 +630,15 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
   const KEY_A = altReturns(PK_DATES, 0.004, -0.002);
   const KEY_B = altReturns(PK_DATES, -0.001, 0.003);
 
-  /** Per-key live inputs: gate satisfied, two eligible keys, NO holding series
-   *  (the prod book shape). `eligible` overrides the eligible-key set. */
+  /** Per-key live inputs: gate satisfied, two eligible keys. Series-space only
+   *  (Phase 63 ENGINE-02 — no holdings-snapshot inputs). `eligible` overrides
+   *  the eligible-key set. */
   function perKeyInputs(
     eligible: string[] = ["key-A", "key-B"],
   ): ScenarioCompareInputs {
     return {
-      holdingsSummary: [],
-      holdingReturnsByScopeRef: {},
       addedStrategyReturnsLookup: {},
       addedStrategyMetadataLookup: {},
-      symbolByHoldingId: new Map(),
       perKeyReturnsByApiKeyId: { "key-A": KEY_A, "key-B": KEY_B },
       eligibleApiKeyIds: eligible,
       equityByApiKeyId: { "key-A": 70_000, "key-B": 30_000 },
@@ -697,46 +661,19 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
     expect(m.twr).toBeNull();
   });
 
-  it("F5 (prod shape): a blank-membership draft over a NON-EMPTY live book computes added-only — never blends the live holdings", () => {
-    // WR-01 regression. The masked-bug shape: the live book HAS holdings (the
-    // real prod case) and the per-key gate is satisfied, but the saved draft is
-    // blank (memberKeyIds=[], no added strategies). The composer renders THIS
-    // draft with holdingsSummary=[] (blank mode → added-only), so the compare
-    // column MUST NOT inherit the live holdings. Pre-fix the else-branch fed
-    // `liveInputs.holdingsSummary` unconditionally and the overlay defaulted
-    // every unseeded holding to selected=true → the blank column silently
-    // blended the WHOLE live book (member_count 2). The earlier F5 pin masked
-    // this by passing holdingsSummary:[] — this one carries a non-empty book.
-    const dates = buildDates("2026-02-02", 40);
-    const inputs: ScenarioCompareInputs = {
-      holdingsSummary: [
-        { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 6000 },
-        { symbol: "ETH", venue: "binance", holding_type: "spot", value_usd: 4000 },
-      ],
-      holdingReturnsByScopeRef: {
-        [holdingRef("binance", "BTC", "spot")]: altReturns(dates, 0.01, -0.008),
-        [holdingRef("binance", "ETH", "spot")]: altReturns(dates, 0.012, -0.009),
-      },
-      addedStrategyReturnsLookup: {},
-      addedStrategyMetadataLookup: {},
-      symbolByHoldingId: new Map([
-        [holdingRef("binance", "BTC", "spot"), "BTC"],
-        [holdingRef("binance", "ETH", "spot"), "ETH"],
-      ]),
-      perKeyReturnsByApiKeyId: {},
-      eligibleApiKeyIds: [],
-      equityByApiKeyId: {},
-      perKeyDailiesGateSatisfied: true,
-    };
-    const m = computeMetricsForDraft(
-      draft({ memberKeyIds: [], addedStrategies: [] }),
-      inputs,
-    );
-    // Added-only over an EMPTY added set → honest empty, NOT the 2-holding book.
-    expect(m.member_count).toBe(0);
-    expect(m.member_ids).toEqual([]);
-    expect(m.twr).toBeNull();
-  });
+  // Phase 63 ENGINE-02 — the WR-01 "prod shape: blank draft over a NON-EMPTY
+  // holdings book must not blend the holdings" regression pin is RETIRED here.
+  // Its masked-bug premise (the else-branch fed `liveInputs.holdingsSummary`
+  // unconditionally) is now STRUCTURALLY IMPOSSIBLE: the holdings-snapshot
+  // fields are deleted from ScenarioCompareInputs, so there is no live-holdings
+  // channel a blank column could accidentally inherit. The series-space F5
+  // closure — a blank draft (memberKeyIds=[]) over a live book whose per-key
+  // data IS present + gate satisfied computes added-only, never the book — is
+  // fully pinned by the "F5: a blank-membership draft ... computes added-only
+  // even when the live gate is TRUE" test immediately above (perKeyInputs()
+  // carries non-empty per-key series + gate=true; member_count 0). Retirement
+  // mirrors the Wave-2 H-0487 precedent (a test whose holdings premise dies with
+  // the deletion). No coverage lost.
 
   it("a saved book draft selects the per-key set from its PERSISTED members (gate true)", () => {
     const m = computeMetricsForDraft(
@@ -807,15 +744,15 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
     expect(live.twr).toBeCloseTo(0.04074, 4);
   });
 
-  it("WR-02: the live-book column RESPECTS the gate — gate OFF with eligible keys → empty membership (holdings basis), not the per-key blend", () => {
-    // buildLiveBookDraft threads the REAL gate. With the gate OFF the derived
-    // membership is empty even though eligible keys exist, so the own-book
-    // column runs the holdings union path (opts.liveBook) — the SAME basis as
-    // its sibling columns when the gate is off — instead of silently diverging
-    // onto the per-key blend (or an empty-per-key em-dash, P61-BUG-2). Here the
-    // inputs carry ONLY per-key series (no holdings), so gate-off → empty
-    // membership → holdings path → honest empty (member_count 0), whereas
-    // gate-on → the 2-key blend.
+  it("WR-02 (ENGINE-02 repoint): gate OFF → empty membership → series-space added-only EMPTY set → an honest NULL-metric live-book column (never ?? 0)", () => {
+    // Phase 63 ENGINE-02 repoint (was: "gate OFF → holdings basis / union
+    // path"). buildLiveBookDraft still threads the REAL gate, so gate OFF still
+    // yields an empty derived membership even when eligible keys exist. But the
+    // holdings union path is DELETED — the empty-membership own-book column now
+    // computes the series-space ADDED-ONLY set. With no added strategies that
+    // set is EMPTY → computeScenario returns NULL metrics → an honest em-dash
+    // column (D1-consistent; 0 real users after GUARD-01). We assert the metrics
+    // are NULL, never a fabricated 0. Gate ON still selects the per-key blend.
     const eligible = ["key-A", "key-B"];
 
     const gateOff = computeMetricsForDraft(
@@ -823,8 +760,12 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
       perKeyInputs(eligible),
       { liveBook: true },
     );
-    // Gate off ⇒ empty membership ⇒ holdings path over an empty book ⇒ no members.
+    // Gate off ⇒ empty membership ⇒ added-only over an empty set ⇒ no members,
+    // NULL metrics (honest em-dash), never a fabricated 0.
     expect(gateOff.member_count).toBe(0);
+    expect(gateOff.twr).toBeNull();
+    expect(gateOff.sharpe).toBeNull();
+    expect(gateOff.twr).not.toBe(0);
 
     const gateOn = computeMetricsForDraft(
       buildLiveBookDraft(true, eligible),

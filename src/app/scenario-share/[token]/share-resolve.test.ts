@@ -206,15 +206,14 @@ describe("resolveSharedScenario — owner-projection parity (WR-05)", () => {
   /** Build the owner-side ScenarioCompareInputs for a pure ADDED-strategies
    *  draft (no live holdings) — the recipient page only ever resolves added
    *  strategies (holdings refs are the allocator's live book and never in the
-   *  RPC series). With empty holdings the owner's adapter produces the same
+   *  RPC series). Phase 63 ENGINE-02: the holdings-snapshot inputs are deleted;
+   *  an empty-membership draft computes series-space added-only via
+   *  buildAddedOnlySet, so the owner's adapter still produces the same
    *  StrategyForBuilder set the recipient builds directly. */
   function ownerInputsFor(seriesById: Record<string, DailyPoint[]>): ScenarioCompareInputs {
     return {
-      holdingsSummary: [],
-      holdingReturnsByScopeRef: {},
       addedStrategyReturnsLookup: seriesById as Record<StrategyForBuilderId, DailyPoint[]>,
       addedStrategyMetadataLookup: {},
-      symbolByHoldingId: new Map<string, string>(),
     };
   }
 

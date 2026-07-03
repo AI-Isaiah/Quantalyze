@@ -121,22 +121,11 @@ function sumEnabled(draft: ScenarioDraft): number {
  * holdings, so once `addStrategyBridge` gives it a non-zero bridged weight the
  * blended-curve projection provably differs from the holdings-only baseline.
  */
+/** The per-key stand-ins for the two-holding book (Phase 63 ENGINE-02). */
+const BOOK_KEYS = ["key-BTC", "key-ETH"];
+
 function buildLiveInputs(dates: string[]): ScenarioCompareInputs {
-  const symbolByHoldingId = new Map<string, string>([
-    [REF_BTC, "BTC"],
-    [REF_ETH, "ETH"],
-  ]);
   return {
-    holdingsSummary: HOLDINGS_2.map((h) => ({
-      symbol: h.symbol,
-      venue: h.venue,
-      holding_type: h.holding_type as "spot" | "derivative",
-      value_usd: h.value_usd,
-    })),
-    holdingReturnsByScopeRef: {
-      [REF_BTC]: altReturns(dates, 0.01, -0.008),
-      [REF_ETH]: altReturns(dates, 0.012, -0.009),
-    },
     // The Bridge candidate's series — distinct profile (larger swings, opposite
     // phase) so its contribution to the blend is unmistakable in the metrics.
     addedStrategyReturnsLookup: {
@@ -145,7 +134,17 @@ function buildLiveInputs(dates: string[]): ScenarioCompareInputs {
     addedStrategyMetadataLookup: {
       [STRAT_B.id]: { disclosure_tier: "public", cagr: null, sharpe: null },
     },
-    symbolByHoldingId,
+    // Phase 63 ENGINE-02 — series-space per-key book (the holdings-snapshot
+    // channel is deleted). Two eligible keys stand in for the BTC/ETH book at
+    // equity shares 0.6/0.4, each with a distinct alternating series, so a
+    // membership draft over them is a non-degenerate live-book proxy.
+    perKeyReturnsByApiKeyId: {
+      "key-BTC": altReturns(dates, 0.01, -0.008),
+      "key-ETH": altReturns(dates, 0.012, -0.009),
+    },
+    equityByApiKeyId: { "key-BTC": 60000, "key-ETH": 40000 },
+    eligibleApiKeyIds: BOOK_KEYS,
+    perKeyDailiesGateSatisfied: true,
   };
 }
 
@@ -158,18 +157,15 @@ describe("Bridge → composer seam (JOURNEY-01)", () => {
     const draft = defaultDraftFromHoldings(HOLDINGS_2);
     const btcWeightBefore = draft.weightOverrides[REF_BTC];
     expect(btcWeightBefore).toBeCloseTo(0.6, 9);
-    // WR-01 rebase (phase 62): `defaultDraftFromHoldings` seeds `memberKeyIds: []`,
-    // so in the compare engine this is an empty-membership draft. After WR-01
-    // (3f16cd85) the holdings else-branch blends the live book ONLY on the
-    // own-book column (`opts.liveBook`) — every OTHER empty-membership column is
-    // added-only. This test uses `computeMetricsForDraft` as a proxy for the
-    // COMPOSER's live projection, which (ScenarioComposer.tsx:1765) blends live
-    // holdings by `entryMode`, i.e. the allocator's OWN book. `{ liveBook: true }`
-    // is that own-book union basis — the honest proxy for the composer here — and
-    // keeps the holdings-vehicle non-degenerate so the seam's projection move
-    // (assertion (d)) stays testable. The draft-object weight assertions (b)/(c)
-    // are independent of this opt.
-    const baseline = computeMetricsForDraft(draft, liveInputs, { liveBook: true });
+    // Phase 63 ENGINE-02 rebase (was: WR-01 `{ liveBook: true }` holdings own-book
+    // proxy). The holdings else-branch is deleted, so a non-degenerate live-book
+    // proxy is now a PER-KEY MEMBERSHIP book: stamp membership = the two eligible
+    // keys and the compare engine blends the per-key units (the same series-space
+    // basis the composer projects). `{ liveBook: true }` is no longer needed —
+    // the per-key IF-branch runs on membership alone. The draft-object weight
+    // assertions (b)/(c) read holding-ref overrides and are independent of this.
+    const bookDraft: ScenarioDraft = { ...draft, memberKeyIds: BOOK_KEYS };
+    const baseline = computeMetricsForDraft(bookDraft, liveInputs);
     // Sanity: the baseline is a real (non-degenerate) projection — otherwise a
     // null→null comparison below would be a false "no movement".
     expect(baseline.n).toBe(80);
@@ -178,10 +174,11 @@ describe("Bridge → composer seam (JOURNEY-01)", () => {
 
     // The seam under test: carry the Bridge candidate into the composer draft.
     const next = addStrategyBridge(draft, REF_BTC, STRAT_B);
-    // Same own-book proxy basis as the baseline (WR-01 rebase) — the seam adds
-    // the candidate on top of the live book, so both projections compute on the
-    // identical `{ liveBook: true }` footing and the delta is purely the bridge.
-    const after = computeMetricsForDraft(next, liveInputs, { liveBook: true });
+    // Same per-key membership basis as the baseline — the seam adds the candidate
+    // on top of the live book, so both projections compute on the identical
+    // per-key footing and the delta is purely the bridged STRAT_B sleeve.
+    const nextBook: ScenarioDraft = { ...next, memberKeyIds: BOOK_KEYS };
+    const after = computeMetricsForDraft(nextBook, liveInputs);
 
     // (a) MEMBERSHIP — the candidate lands in the draft. FAILS when the seam is
     // neutered to `return draft` (the candidate is never pushed).

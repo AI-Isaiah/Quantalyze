@@ -312,13 +312,21 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
 
     const inputs = mockComputeMetricsForDraft.mock
       .calls[0][1] as ScenarioCompareInputs;
-    expect(inputs.holdingsSummary).toEqual(PAYLOAD.holdingsSummary);
-    expect(inputs.holdingReturnsByScopeRef).toEqual(
-      PAYLOAD.holdingReturnsByScopeRef,
+    // Phase 63 ENGINE-02 repoint: the legacy holdings-snapshot engine inputs
+    // (holdingsSummary / holdingReturnsByScopeRef / symbolByHoldingId) are
+    // deleted from ScenarioCompareInputs. The panel now derives the SERIES-SPACE
+    // shape — the added-strategy lookups + the per-key channel — from the same
+    // payload with no second fetch. Assert the derived shrunk shape.
+    expect(inputs.addedStrategyReturnsLookup).toBeDefined();
+    expect(inputs.addedStrategyMetadataLookup).toBeDefined();
+    expect(inputs.perKeyDailiesGateSatisfied).toBe(
+      PAYLOAD.perKeyDailiesGateSatisfied,
     );
-    // symbolByHoldingId is a Map keyed by the holding ref.
-    expect(inputs.symbolByHoldingId).toBeInstanceOf(Map);
-    expect(inputs.symbolByHoldingId.size).toBe(1);
+    expect(inputs.equityByApiKeyId).toBeDefined();
+    // The deleted holdings-snapshot fields are absent from the derived inputs.
+    const asRecord = inputs as unknown as Record<string, unknown>;
+    expect(asRecord.symbolByHoldingId).toBeUndefined();
+    expect(asRecord.holdingsSummary).toBeUndefined();
   });
 
   // -------------------------------------------------------------------------
