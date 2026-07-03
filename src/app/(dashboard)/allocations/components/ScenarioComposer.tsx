@@ -3683,16 +3683,22 @@ export function ScenarioComposer({
             .filter((s) => engineSet.state.selected[s.id])
             .map((s) => ({ id: s.id, name: s.name, dailyReturns: s.daily_returns }))}
           onApply={(weights) => {
-            // ENGINE-01 (Phase 63) — with the alias-collapse removed the engine
-            // universe IS the raw per-unit basis (no collapsed-away venue
-            // duplicates), so the optimizer's weight vector maps 1:1 onto the
-            // applied basis. Apply it directly. The universe above is filtered to
-            // the SELECTED ids, matching applyWeightOverrides' zero-then-overwrite
-            // semantics (#528 apply-back drift unchanged). Atomic full-vector
+            // WR-01 (Phase 63 review) — renormalize the applied vector over the
+            // ENGINE universe, NOT the draft's `holding:` toggle basis. In
+            // book+gate mode the engine units are the per-key api_key ids + added
+            // ids; `applyWeightOverrides`'s default basis (enabledIdsOf(draft)) is
+            // the toggle map (`holding:` refs + added ids), which still carries
+            // the stale value-proportional holding overrides — renormalizing over
+            // it dilutes the added sleeve (#528). Pass the SELECTED engine ids —
+            // the same universe fed to WeightOptimizerSection above — so the
+            // applied blend reproduces the suggestion exactly. Atomic full-vector
             // apply — NOT a loop of setWeightOverride (which renormalizes the
             // others on each call and would land a different allocation than the
             // optimizer suggested).
-            scenario.applyWeightOverrides(weights);
+            const basisIds = engineSet.strategies
+              .filter((s) => engineSet.state.selected[s.id])
+              .map((s) => s.id);
+            scenario.applyWeightOverrides(weights, basisIds);
           }}
         />
       </Card>

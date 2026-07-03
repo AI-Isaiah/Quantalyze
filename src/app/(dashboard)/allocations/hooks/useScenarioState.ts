@@ -81,7 +81,17 @@ export interface UseScenarioStateReturn {
   addStrategyBridge: (holdingScopeRef: string, s: AddedStrategy) => void;
   removeAddedStrategy: (id: string) => void;
   setWeightOverride: (scopeRef: string, weight: number) => void;
-  applyWeightOverrides: (weights: Record<string, number>) => void;
+  /**
+   * WR-01 (Phase 63 review) — `basisIds` is the optimizer apply-back's engine
+   * unit universe (per-key api_key ids + added ids). Passing it renormalizes the
+   * applied vector over the engine basis rather than the draft's `holding:`
+   * toggle basis, so the mixed per-key + added path reproduces the suggestion
+   * (no #528 dilution). Omitted by non-optimizer callers.
+   */
+  applyWeightOverrides: (
+    weights: Record<string, number>,
+    basisIds?: ReadonlyArray<string>,
+  ) => void;
   /**
    * v1.5 PERSIST-01 (review CR-01) — write the composer's APPLIED coverage
    * window through into the draft, so autosave / save / share / compare all
@@ -258,8 +268,8 @@ export function useScenarioState(
     [setValue, baseOf],
   );
   const applyWeightOverrides = useCallback(
-    (weights: Record<string, number>) => {
-      setValue((prev) => applyWeightsPure(baseOf(prev), weights));
+    (weights: Record<string, number>, basisIds?: ReadonlyArray<string>) => {
+      setValue((prev) => applyWeightsPure(baseOf(prev), weights, basisIds));
     },
     [setValue, baseOf],
   );

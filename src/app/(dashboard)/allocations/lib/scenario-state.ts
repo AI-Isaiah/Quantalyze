@@ -539,14 +539,19 @@ export function setWeightOverride(
  * over a vector is WRONG — each call re-scales the weights written by the
  * previous calls, so the draft lands at a DIFFERENT allocation than the one
  * supplied (only the last ref is exact). This writes every provided ref in ONE
- * pass and renormalizes over the enabled set exactly once, so applying an
- * optimizer's sum-to-1 vector reproduces it (within float error). Non-finite /
- * negative / empty input is a no-op (defensive). Every provided ref is recorded
- * as a user-explicit override (the allocator clicked Apply).
+ * pass and renormalizes over the BASIS set exactly once, so applying an
+ * optimizer's sum-to-1 vector reproduces it (within float error). `basisIds`
+ * selects that renormalization basis: omit it for the draft's enabled toggle set
+ * (legacy), or pass the engine unit ids (WR-01 — the composer's optimizer
+ * apply-back does this so the mixed per-key + added path is not diluted by stale
+ * `holding:` override mass). Non-finite / negative / empty input is a no-op
+ * (defensive). Every provided ref is recorded as a user-explicit override (the
+ * allocator clicked Apply).
  */
 export function applyWeightOverrides(
   draft: ScenarioDraft,
   weights: Record<string, number>,
+  basisIds?: ReadonlyArray<string>,
 ): ScenarioDraft {
   const refs = Object.keys(weights);
   if (refs.length === 0) return draft;
@@ -554,14 +559,24 @@ export function applyWeightOverrides(
     return draft;
   }
 
-  const enabledIds = enabledIdsOf(draft);
+  // WR-01 (Phase 63 review) — the renormalization basis. By default the DRAFT's
+  // enabled toggle set (`holding:` refs + added ids). But in book+gate mode the
+  // ENGINE universe is the per-key units (api_key UUIDs) + added ids, which
+  // never enter the toggle map — so renormalizing an optimizer suggestion over
+  // the toggle basis leaves the stale holding-override mass in the denominator
+  // and silently dilutes the added sleeve (#528 apply-back drift). The composer
+  // therefore passes the optimizer's ENGINE unit ids as `basisIds` so the
+  // applied blend reproduces the suggestion exactly. When omitted (non-optimizer
+  // callers), the legacy enabled-set basis is preserved.
+  const normBasis = basisIds ? [...basisIds] : enabledIdsOf(draft);
   // Start from the current map, overwrite the provided refs, then renormalize
-  // ONCE over the enabled set (a single normalization, NOT the per-ref rebalance
-  // setWeightOverride does). renormalizeWeights only writes enabled ids, so a
-  // disabled ref keeps its prior stored weight (restored if toggled back on).
+  // ONCE over the basis set (a single normalization, NOT the per-ref rebalance
+  // setWeightOverride does). renormalizeWeights only writes the basis ids, so a
+  // ref outside the basis keeps its prior stored weight (restored if it re-enters
+  // the basis).
   const merged: Record<string, number> = { ...draft.weightOverrides };
   for (const r of refs) merged[r] = clampWeight(weights[r]);
-  const normalized = renormalizeWeights(merged, enabledIds);
+  const normalized = renormalizeWeights(merged, normBasis);
   const nextWeights: Record<string, number> = { ...merged, ...normalized };
 
   return {
