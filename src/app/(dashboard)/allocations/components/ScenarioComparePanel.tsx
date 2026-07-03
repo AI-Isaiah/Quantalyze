@@ -9,7 +9,9 @@ import {
 } from "../lib/scenario-compare";
 import {
   defaultDraftFromHoldings,
+  deriveMembershipFromGate,
   scenarioDraftCodec,
+  setMemberKeyIds,
   type ScenarioDraft,
 } from "../lib/scenario-state";
 import { buildHoldingRef } from "../lib/holding-outcome-adapter";
@@ -244,8 +246,27 @@ export function ScenarioComparePanel({
         // would conflate older-format with insufficient-history, the #509 class).
         if (draft === null)
           return { name: row.name, metrics: NULL_METRICS, undecodable: true };
+        // v1.6 MEMBER-02 — normalize UNDERIVED membership at the single
+        // per-column compute seam. A codec-decoded upgraded v2/v3 draft (or a
+        // round-tripped underived-v4 blob) arrives with `memberKeyIds ===
+        // undefined`; derive it here from the live gate + eligible ids and stamp
+        // it, so old/underived columns compute IDENTICALLY to today (the Atlas
+        // golden is preserved) and the membership selector never sees undefined.
+        // A column that already carries explicit membership (genuine v4) passes
+        // through unchanged — its since-removed members are intersected out at
+        // compute (scenario-compare.ts MEMBER-04 drop).
+        const normalized =
+          draft.memberKeyIds === undefined
+            ? setMemberKeyIds(
+                draft,
+                deriveMembershipFromGate(
+                  payload.perKeyDailiesGateSatisfied ?? false,
+                  payload.eligibleApiKeyIds ?? [],
+                ),
+              )
+            : draft;
         try {
-          return { name: row.name, metrics: computeMetricsForDraft(draft, liveInputs) };
+          return { name: row.name, metrics: computeMetricsForDraft(normalized, liveInputs) };
         } catch (err) {
           warnAudit("scenario_compare_compute_failed", {
             id: row.id,
@@ -254,7 +275,7 @@ export function ScenarioComparePanel({
           return { name: row.name, metrics: NULL_METRICS };
         }
       }),
-    [selectedRows, defaultDraft, liveInputs],
+    [selectedRows, defaultDraft, liveInputs, payload],
   );
 
   // The live-book column — synthetic all-on draft through the SAME engine path.
@@ -266,7 +287,7 @@ export function ScenarioComparePanel({
     if (!includeLiveBook) return null;
     try {
       const metrics = computeMetricsForDraft(
-        buildLiveBookDraft(),
+        buildLiveBookDraft(payload.eligibleApiKeyIds ?? []),
         liveInputs,
         { liveBook: true },
       );
@@ -278,7 +299,7 @@ export function ScenarioComparePanel({
       });
       return { name: "Live book", metrics: NULL_METRICS };
     }
-  }, [includeLiveBook, liveInputs]);
+  }, [includeLiveBook, liveInputs, payload]);
 
   return (
     <section className="space-y-3" aria-labelledby="scenario-compare-heading">

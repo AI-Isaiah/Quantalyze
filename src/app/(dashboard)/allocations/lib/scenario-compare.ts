@@ -63,7 +63,11 @@ import {
   mergeAddedIntoPerKeySet,
   type StrategyForBuilderId,
 } from "./scenario-adapter";
-import { SCENARIO_SCHEMA_VERSION, type ScenarioDraft } from "./scenario-state";
+import {
+  SCENARIO_SCHEMA_VERSION,
+  deriveMembershipFromGate,
+  type ScenarioDraft,
+} from "./scenario-state";
 
 /**
  * The slice of the composer's live payload the compare engine needs. Mirrors
@@ -148,20 +152,32 @@ export function computeMetricsForDraft(
   // `disabledHoldingRefs` memo).
   const disabledHoldingRefs = new Set<string>();
 
-  // P61-BUG-2 — mirror the composer's engine-set selection (`usePerKeySources`):
-  // per-key units merged with the draft's added strategies when the D3 gate is
-  // satisfied, else the legacy holdings+added path. Same eligible-key filter
-  // as the composer (DSRC-03 honesty fix: blend ONLY the keys that get a
-  // toggle row). `includeByApiKeyId` is ephemeral UI state (never persisted),
-  // so a saved draft correctly computes with ALL eligible keys included.
-  const usePerKeySources = liveInputs.perKeyDailiesGateSatisfied === true;
+  // v1.6 MEMBER-02 — the SAVED draft's PERSISTED membership drives per-key
+  // selection, NOT the live gate (F5 closure). A blank-authored draft
+  // (memberKeyIds=[]) computes the added-only holdings path even when the live
+  // gate is satisfied, so it never inherits the live book; a book draft selects
+  // the per-key engine set from its persisted members. `entryMode` is no longer
+  // load-bearing for saved drafts. The `?? []` is DEFENSIVE only — the panel
+  // derives membership for any UNDERIVED column (upgraded v2/v3, or a
+  // round-tripped underived-v4) BEFORE this call, so this default never
+  // silently flips a book column to added-only. (P61-BUG-2 per-key units +
+  // added strategies still run through the same composer engine-set path.)
+  const usePerKeySources = (draft.memberKeyIds ?? []).length > 0;
   let adapterOutput: {
     strategies: StrategyForBuilder[];
     state: ScenarioState;
   };
   if (usePerKeySources) {
     const all = liveInputs.perKeyReturnsByApiKeyId ?? {};
-    const eligible = new Set(liveInputs.eligibleApiKeyIds ?? []);
+    // MEMBER-02 / MEMBER-04 compute-time drop: intersect the persisted
+    // membership with the SSR-computed live-eligible set. Only persisted members
+    // that are STILL eligible pass — a fabricated or since-removed member id
+    // simply drops (T-62-04/-05), never pulling in a per-key series the
+    // allocator is not eligible for.
+    const eligibleIds = new Set(liveInputs.eligibleApiKeyIds ?? []);
+    const eligible = new Set(
+      (draft.memberKeyIds ?? []).filter((id) => eligibleIds.has(id)),
+    );
     const eligibleOnly = Object.fromEntries(
       Object.entries(all).filter(([id]) => eligible.has(id)),
     );
@@ -294,7 +310,7 @@ export function computeMetricsForDraft(
  * on the union path (Phase-55 lock) instead of the saved-scenario intersection
  * default — the exception is declared at the call site, never name-matched.
  */
-export function buildLiveBookDraft(): ScenarioDraft {
+export function buildLiveBookDraft(eligibleApiKeyIds: string[]): ScenarioDraft {
   return {
     // The synthetic draft never round-trips the codec (computeMetricsForDraft
     // consumes it directly), but pin the CURRENT version constant so a future
@@ -304,10 +320,14 @@ export function buildLiveBookDraft(): ScenarioDraft {
     toggleByScopeRef: {},
     addedStrategies: [],
     weightOverrides: {},
-    // v1.6 MEMBER-01 — the synthetic live-book draft has no explicit book
-    // members (it IS the union own-book path, not a saved series); empty is the
-    // honest value.
-    memberKeyIds: [],
+    // v1.6 MEMBER-02 — the live-book column is the allocator's OWN book: stamp
+    // membership = the derived eligible set (deriveMembershipFromGate(true, …))
+    // so it selects the per-key engine set (the union own-book blend) under the
+    // membership selector. `{ liveBook: true }` at the call site holds it on the
+    // union path (Phase-55 own-book lock). An empty eligible set → empty
+    // membership → the legacy holdings path (a holdings-only book), matching the
+    // pre-membership gate-off behavior.
+    memberKeyIds: deriveMembershipFromGate(true, eligibleApiKeyIds),
     lastEditedAt: new Date(0).toISOString(),
   };
 }

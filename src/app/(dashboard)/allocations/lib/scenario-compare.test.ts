@@ -319,7 +319,10 @@ describe("computeMetricsForDraft", () => {
       [holdingRef("binance", "ETH", "spot")]: altReturns(ethDates, 0.012, -0.009),
     });
 
-    const liveDraft = buildLiveBookDraft();
+    // MEMBER-02 signature change: buildLiveBookDraft now takes the eligible
+    // api-key ids. This is a holdings-only book (no per-key keys) → [] → empty
+    // membership → the holdings union path (unchanged behavior).
+    const liveDraft = buildLiveBookDraft([]);
     expect(liveDraft.window).toBeUndefined(); // never carries a window
 
     const live = computeMetricsForDraft(liveDraft, inputs, { liveBook: true });
@@ -432,7 +435,7 @@ describe("buildLiveBookDraft", () => {
     };
     const inputs = liveInputs(holdings, returnsByRef);
 
-    const liveDraft = buildLiveBookDraft();
+    const liveDraft = buildLiveBookDraft([]); // holdings-only book (no per-key keys)
     // No added strategies, no leverage on the synthetic draft.
     expect(liveDraft.addedStrategies).toHaveLength(0);
 
@@ -456,7 +459,7 @@ describe("buildLiveBookDraft", () => {
       [holdingRef("binance", "BTC", "spot")]: altReturns(shortDates, 0.01, -0.01),
     });
 
-    const m = computeMetricsForDraft(buildLiveBookDraft(), inputs);
+    const m = computeMetricsForDraft(buildLiveBookDraft([]), inputs);
     expect(m.sharpe).toBeNull();
     expect(m.sharpe).not.toBe(0);
   });
