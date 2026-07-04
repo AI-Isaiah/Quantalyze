@@ -1,0 +1,65 @@
+{
+  "_evidence": "BYB-01 Bybit live reconciliation \u2014 milestone v1.7 phase 67 checkpoint 67-04",
+  "_generated": "2026-07-04T16:47:40.627645+00:00",
+  "_subject": {
+    "api_key": "***61a0",
+    "strategy": "Momentum Sphinx",
+    "exchange": "bybit",
+    "window_days": 180
+  },
+  "_history": {
+    "run1": "strategy resolution bug (api_keys.strategy_id) -> PR #574",
+    "run2": "PostgREST 1000-row truncation + 7d fills retention clamp -> PR #575",
+    "run3": "funding cursor bug (trades cursor reuse, backfill never fired) -> PR #576",
+    "run4": "BYB-02 discovered: 8h match_key bucket collapsed sub-8h settlements, >50% funding rows silently dropped (~32k USD/180d) -> PR #577 (1h cadence + re-key migration + 365d backfill)",
+    "run5": "this report \u2014 funding CLEAN"
+  },
+  "verdict_run5": {
+    "funding": {
+      "clean": true,
+      "db_bucket_count": 37334,
+      "fresh_bucket_count": 37334,
+      "missing_in_db": 0,
+      "extra_in_db": 0,
+      "days_beyond_tol": 0,
+      "tol": 1e-09
+    },
+    "fills": {
+      "count_delta": 4509,
+      "db_count": 0,
+      "discrepancy_count": 4509,
+      "effective_since": "2026-06-27T16:38:24.017412+00:00",
+      "exchange_count": 4509,
+      "id_drift_count": 0,
+      "provider_cap_note": "Bybit /v5/execution/list retains only ~7d of raw fills (#563 provider cap, not a P&L bug); both the exchange and DB fills sides were clamped to effective_since for a like-for-like compare.",
+      "status": "discrepancies",
+      "true_discrepancy_count": 4509,
+      "window_clamped": true
+    },
+    "dailies": {
+      "anchor_shift_beta": 5.03860540503333e-05,
+      "anchor_shift_consistent": false,
+      "anchor_shift_max_residual": 0.00045633944265268496,
+      "clean": false,
+      "max_abs_delta": 0.00045692650706905327,
+      "overlap_days": 164,
+      "tol": 1e-09
+    },
+    "dailies_dirty_dates": [
+      "2026-07-04"
+    ],
+    "run_meta": {
+      "axis_used": "api_key_id",
+      "balance_error": false,
+      "generated_at": "2026-07-04T16:47:40.627645+00:00",
+      "window_days": 180,
+      "window_end": "2026-07-04T16:38:24.017412+00:00",
+      "window_start": "2026-01-05T16:38:24.017412+00:00"
+    }
+  },
+  "_interpretation": {
+    "funding": "CLEAN \u2014 37,334 buckets exchange == DB, 0 missing, 0 extra, 0 days beyond 1e-9. BYB-01 funding parity holds after the BYB-02 1h-cadence fix + re-key + 365d backfill.",
+    "fills": "db_count=0 is a DOCUMENTED artifact: Bybit /v5/execution/list retains ~7d (provider cap #563) and API-key strategies do not persist raw fills until trades ingestion (phase 70). Not a P&L bug \u2014 dailies derive from closed-PnL + funding.",
+    "dailies": "163/164 overlap days byte-exact at 1e-9. The single dirty day is the run date itself (2026-07-04, delta 4.57e-4): stored dailies derived at 16:32 UTC, harness recomputed at 16:47 UTC with ~15 min more intraday data \u2014 the anchor-to-today partial day legitimately moves. Timing artifact, not a discrepancy."
+  }
+}

@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.37.1.1] - 2026-07-04
+### Added
+- **BYB-01 reconciliation evidence committed (`analytics-service/docs/evidence/byb01-bybit-reconcile-2026-07-04.json`).** Run 5 of the live Bybit exchange-vs-DB reconciliation, after the BYB-02 fix chain (#574–#577): funding CLEAN (37,334 buckets exchange == DB, 0 missing, 0 extra, 0 days beyond 1e-9), dailies 163/164 days byte-exact (the one dirty day is the run date itself — intraday timing between derive and recompute), fills db=0 documented as the #563 provider-cap / phase-70 artifact. Closes milestone v1.7 checkpoint 67-04.
+
 ## [0.37.1.0] - 2026-07-04
 ### Fixed
 - **Bybit/OKX funding no longer silently loses sub-8h settlements (BYB-02).** The funding dedup key bucketed every settlement to an 8-hour window, but Bybit runs dynamic 1h/4h/8h funding cadences per symbol (prod hour histogram peaks on the 4h grid) — so up to 8 real settlements per window collapsed onto one `match_key` and the `ON CONFLICT` upsert silently kept exactly one. For the live Bybit strategy this dropped >50% of funding rows (~$32k net over 180 days) with every dashboard green; only the exchange-vs-DB reconciliation harness (run 4) caught it. `_FUNDING_BUCKET_HOURS` now registers bybit and okx at 1h (binance already was, H-1099): settlements land on hour boundaries, so 1h is the widest bucket that can never merge two distinct events while still deduplicating refetches of the same one. Five regression tests, two proven to fail under the old 8h bucket, one pinning that exactly 1h (not 4h) is required.
