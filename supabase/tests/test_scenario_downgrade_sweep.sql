@@ -24,6 +24,12 @@
 --     = [the two eligible ids], sorted.
 --   - Allocator GF (gate FALSE): one eligible key with NO series -> gate false.
 --     Downgraded scenario -> expects memberKeyIds = [].
+--   - Allocator NF (gate FALSE, WR-01 regression): one eligible key whose ONLY
+--     csv_daily_returns rows are non-finite (NaN, +Infinity, -Infinity). The
+--     runtime's buildPerKeyReturnsByApiKeyId drops every non-finite row, so this
+--     key derives an EMPTY series -> gate false -> stamped []. A bare
+--     `EXISTS (SELECT 1 ...)` has_series would (wrongly) see rows exist and stamp
+--     the key's id — this case proves has_series now mirrors the finite filter.
 --   - Two GENUINE-v4 rows on allocator GT: memberKeyIds:[] (blank-save shape) and
 --     memberKeyIds:["genuine-fixed-id"] (book-save shape) — both must survive the
 --     sweep byte-identical (the discriminator keys on key PRESENCE, not the gate).
@@ -42,7 +48,8 @@
 DELETE FROM auth.users
   WHERE email IN (
     'test-f4-sweep-gate-true@quantalyze.test',
-    'test-f4-sweep-gate-false@quantalyze.test'
+    'test-f4-sweep-gate-false@quantalyze.test',
+    'test-f4-sweep-nonfinite@quantalyze.test'
   );
 
 DO $$
@@ -61,11 +68,16 @@ DECLARE
   uid_gf        UUID := gen_random_uuid();
   k_gf1         UUID := gen_random_uuid();  -- eligible, NO series -> gate false
   scen_gf_id    UUID;  -- downgraded, gate-false allocator
+  -- Allocator NF (non-finite series only -> WR-01 regression)
+  uid_nf        UUID := gen_random_uuid();
+  k_nf1         UUID := gen_random_uuid();  -- eligible, ONLY non-finite rows -> empty runtime series -> gate false
+  scen_nf_id    UUID;  -- downgraded, non-finite-series allocator
   -- Assertion scratch
   detect_cnt    INTEGER;
   expected_gt   JSONB;
   actual_gt     JSONB;
   actual_gf     JSONB;
+  actual_nf     JSONB;
   blank_before  JSONB;
   pop_before    JSONB;
   v3_before     JSONB;
@@ -145,6 +157,31 @@ BEGIN
           '{"addedStrategies": []}'::jsonb, 4)
   RETURNING id INTO scen_gf_id;
 
+  -- Allocator NF (WR-01): one eligible key whose ONLY series rows are non-finite.
+  -- daily_return is DOUBLE PRECISION with no finiteness CHECK, so NaN/±Infinity
+  -- are storable. The runtime drops every non-finite row -> empty series -> gate
+  -- false -> the downgraded row must be stamped [], NOT [k_nf1].
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid_nf, '00000000-0000-0000-0000-000000000000',
+          'test-f4-sweep-nonfinite@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid_nf, 'f4 sweep non-finite', 'test-f4-sweep-nonfinite@quantalyze.test', 'allocator')
+  ON CONFLICT (id) DO UPDATE
+    SET role = EXCLUDED.role, display_name = EXCLUDED.display_name;
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, sync_status, disconnected_at)
+  VALUES (k_nf1, uid_nf, 'binance', 'nf eligible nonfinite-only', 'enc', true, 'complete', NULL);
+  -- ONLY non-finite rows for k_nf1 -> runtime keeps none -> empty series.
+  INSERT INTO csv_daily_returns (strategy_id, api_key_id, allocator_id, date, daily_return)
+  VALUES
+    (NULL, k_nf1, uid_nf, DATE '2026-04-01', 'NaN'::float8),
+    (NULL, k_nf1, uid_nf, DATE '2026-04-02', 'Infinity'::float8),
+    (NULL, k_nf1, uid_nf, DATE '2026-04-03', '-Infinity'::float8);
+
+  INSERT INTO scenarios (allocator_id, name, draft, schema_version)
+  VALUES (uid_nf, 'nf downgraded',
+          '{"addedStrategies": []}'::jsonb, 4)
+  RETURNING id INTO scen_nf_id;
+
   -- Snapshot the genuine + v3 drafts BEFORE the sweep for byte-identity checks.
   SELECT draft INTO blank_before FROM scenarios WHERE id = scen_blank_id;
   SELECT draft INTO pop_before   FROM scenarios WHERE id = scen_pop_id;
@@ -159,12 +196,12 @@ BEGIN
   FROM scenarios
   WHERE schema_version >= 4
     AND NOT (draft ? 'memberKeyIds')
-    AND id IN (scen_gt_id, scen_blank_id, scen_pop_id, scen_v3_id, scen_gf_id);
-  IF detect_cnt <> 2 THEN
+    AND id IN (scen_gt_id, scen_blank_id, scen_pop_id, scen_v3_id, scen_gf_id, scen_nf_id);
+  IF detect_cnt <> 3 THEN
     RAISE EXCEPTION
-      'TEST FAILED (Assertion 1): discriminator flagged % seeded rows, expected 2 (the two downgraded rows)', detect_cnt;
+      'TEST FAILED (Assertion 1): discriminator flagged % seeded rows, expected 3 (the three downgraded rows)', detect_cnt;
   END IF;
-  -- And specifically: it flags the two downgraded ids, and NEITHER genuine row,
+  -- And specifically: it flags the three downgraded ids, and NEITHER genuine row,
   -- the blank-save row, NOR the pre-v4 row.
   IF NOT EXISTS (
     SELECT 1 FROM scenarios
@@ -178,6 +215,12 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'TEST FAILED (Assertion 1): GF downgraded row not flagged by discriminator';
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM scenarios
+    WHERE schema_version >= 4 AND NOT (draft ? 'memberKeyIds') AND id = scen_nf_id
+  ) THEN
+    RAISE EXCEPTION 'TEST FAILED (Assertion 1): NF downgraded row not flagged by discriminator';
+  END IF;
   IF EXISTS (
     SELECT 1 FROM scenarios
     WHERE schema_version >= 4 AND NOT (draft ? 'memberKeyIds')
@@ -185,7 +228,7 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'TEST FAILED (Assertion 1): discriminator flagged a genuine-v4 or pre-v4 row (false positive)';
   END IF;
-  RAISE NOTICE 'Assertion 1 OK: discriminator flags exactly the two downgraded rows.';
+  RAISE NOTICE 'Assertion 1 OK: discriminator flags exactly the three downgraded rows.';
 
   -- ----- RUN THE SWEEP TRANSFORM (copied verbatim from the sweep RESTAMP) ----
   UPDATE scenarios s
@@ -195,7 +238,7 @@ BEGIN
     (
       SELECT CASE
         -- gate = eligible set non-empty AND every eligible key has a series
-        -- (allActiveKeysHavePerKeyDailies, queries.ts:2302-2311)
+        -- (allActiveKeysHavePerKeyDailies, queries.ts:2205-2214)
         WHEN count(*) > 0 AND bool_and(ek.has_series)
           THEN COALESCE(
                  jsonb_agg(to_jsonb(ek.api_key_id::text) ORDER BY ek.api_key_id),
@@ -205,12 +248,20 @@ BEGIN
       END
       FROM (
         -- eligible keys for this allocator (isPerKeyDailiesEligibleKey,
-        -- queries.ts:2338-2346), each tagged with whether it has a non-empty
-        -- per-key csv_daily_returns series.
+        -- queries.ts:2241-2249), each tagged with whether it has a non-empty
+        -- per-key csv_daily_returns series. has_series mirrors
+        -- buildPerKeyReturnsByApiKeyId (queries.ts:2257-2271): count a row
+        -- ONLY when the runtime keeps it — daily_return finite
+        -- (Number.isFinite). Postgres treats NaN = NaN as TRUE, so the three
+        -- non-finite float8 literals are excluded explicitly, not via x = x.
         SELECT
           k.id AS api_key_id,
           EXISTS (
-            SELECT 1 FROM csv_daily_returns c WHERE c.api_key_id = k.id
+            SELECT 1 FROM csv_daily_returns c
+            WHERE c.api_key_id = k.id
+              AND c.daily_return <> 'NaN'::float8
+              AND c.daily_return <> 'Infinity'::float8
+              AND c.daily_return <> '-Infinity'::float8
           ) AS has_series
         FROM api_keys k
         WHERE k.user_id = s.allocator_id
@@ -264,6 +315,19 @@ BEGIN
   END IF;
   RAISE NOTICE 'Assertion 2b OK: gate-false row stamped [].';
 
+  -- ----- ASSERTION 2c: non-finite-series-only key -> gate false -> stamped [] -
+  -- WR-01 regression: k_nf1 is eligible and HAS csv_daily_returns rows, but every
+  -- row is non-finite (NaN/±Infinity). The runtime drops them all -> empty series
+  -- -> gate false. A bare `EXISTS (SELECT 1 ...)` has_series would see rows exist,
+  -- flip the gate TRUE, and stamp [k_nf1] — which a runtime reopen would NEVER
+  -- produce. The finite-filtered has_series must yield [] here.
+  SELECT draft -> 'memberKeyIds' INTO actual_nf FROM scenarios WHERE id = scen_nf_id;
+  IF actual_nf IS DISTINCT FROM '[]'::jsonb THEN
+    RAISE EXCEPTION
+      'TEST FAILED (Assertion 2c): NF downgraded memberKeyIds = %, expected [] (only non-finite rows -> empty runtime series -> gate false)', actual_nf;
+  END IF;
+  RAISE NOTICE 'Assertion 2c OK: non-finite-series-only key treated as no-series (stamped []).';
+
   -- ----- ASSERTION 3: genuine + pre-v4 rows are byte-identical ---------------
   IF (SELECT draft FROM scenarios WHERE id = scen_blank_id) IS DISTINCT FROM blank_before THEN
     RAISE EXCEPTION 'TEST FAILED (Assertion 3): blank-save genuine row (memberKeyIds:[]) was mutated by the sweep';
@@ -305,7 +369,11 @@ BEGIN
           SELECT
             k.id AS api_key_id,
             EXISTS (
-              SELECT 1 FROM csv_daily_returns c WHERE c.api_key_id = k.id
+              SELECT 1 FROM csv_daily_returns c
+              WHERE c.api_key_id = k.id
+                AND c.daily_return <> 'NaN'::float8
+                AND c.daily_return <> 'Infinity'::float8
+                AND c.daily_return <> '-Infinity'::float8
             ) AS has_series
           FROM api_keys k
           WHERE k.user_id = s.allocator_id
@@ -332,7 +400,7 @@ BEGIN
   FROM scenarios
   WHERE schema_version >= 4
     AND NOT (draft ? 'memberKeyIds')
-    AND id IN (scen_gt_id, scen_blank_id, scen_pop_id, scen_v3_id, scen_gf_id);
+    AND id IN (scen_gt_id, scen_blank_id, scen_pop_id, scen_v3_id, scen_gf_id, scen_nf_id);
   IF detect_cnt <> 0 THEN
     RAISE EXCEPTION
       'TEST FAILED (post-condition): % downgraded rows remain after the sweep, expected 0', detect_cnt;
@@ -342,7 +410,7 @@ BEGIN
   -- ----- TEARDOWN -----------------------------------------------------------
   -- ON DELETE CASCADE chains auth.users -> profiles -> {api_keys, scenarios} and
   -- api_keys -> csv_daily_returns. One delete per allocator cleans the subtree.
-  DELETE FROM auth.users WHERE id IN (uid_gt, uid_gf);
+  DELETE FROM auth.users WHERE id IN (uid_gt, uid_gf, uid_nf);
 
   RAISE NOTICE 'All F-4 sweep assertions passed (discriminator + re-derive transform proven).';
 END
@@ -356,5 +424,6 @@ $$;
 DELETE FROM auth.users
   WHERE email IN (
     'test-f4-sweep-gate-true@quantalyze.test',
-    'test-f4-sweep-gate-false@quantalyze.test'
+    'test-f4-sweep-gate-false@quantalyze.test',
+    'test-f4-sweep-nonfinite@quantalyze.test'
   );

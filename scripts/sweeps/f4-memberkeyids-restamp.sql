@@ -27,12 +27,20 @@
 --        : draft)
 --   - derive rule:               scenario-state.ts:670-675
 --     deriveMembershipFromGate(gate, eligibleIds) = gate ? [...eligibleIds] : []
---   - eligible-key predicate:    src/lib/queries.ts:2338-2346 (isPerKeyDailiesEligibleKey)
+--   - eligible-key predicate:    src/lib/queries.ts:2241-2249 (isPerKeyDailiesEligibleKey)
 --     is_active = true AND sync_status IS DISTINCT FROM 'revoked'
 --       AND disconnected_at IS NULL
---   - gate predicate:            src/lib/queries.ts:2302-2311 (allActiveKeysHavePerKeyDailies)
+--   - gate predicate:            src/lib/queries.ts:2205-2214 (allActiveKeysHavePerKeyDailies)
 --     eligible set non-empty AND EVERY eligible key has a non-empty per-key
 --     csv_daily_returns series
+--   - series-derive filter:      src/lib/queries.ts:2257-2271 (buildPerKeyReturnsByApiKeyId)
+--     "non-empty per-key series" is NOT "a row exists": the runtime KEEPS a
+--     row only when its api_key_id is non-null AND its daily_return is finite
+--     (Number.isFinite drops NaN/±Infinity). So has_series below MUST apply
+--     the same finite filter — otherwise a key whose only rows are non-finite
+--     would count as has_series=true here yet derive an EMPTY runtime series,
+--     and the sweep could stamp eligible ids where a reopen would stamp []
+--     (WR-01), breaking the byte-equal-to-a-reopen invariant.
 --
 -- The stamped id array is normalized ORDER BY api_key_id for determinism —
 -- caption honesty depends on the SET of member keys, not their order.
@@ -112,7 +120,7 @@ SET draft = jsonb_set(
   (
     SELECT CASE
       -- gate = eligible set non-empty AND every eligible key has a series
-      -- (allActiveKeysHavePerKeyDailies, queries.ts:2302-2311)
+      -- (allActiveKeysHavePerKeyDailies, queries.ts:2205-2214)
       WHEN count(*) > 0 AND bool_and(ek.has_series)
         THEN COALESCE(
                jsonb_agg(to_jsonb(ek.api_key_id::text) ORDER BY ek.api_key_id),
@@ -122,12 +130,26 @@ SET draft = jsonb_set(
     END
     FROM (
       -- eligible keys for this allocator (isPerKeyDailiesEligibleKey,
-      -- queries.ts:2338-2346), each tagged with whether it has a non-empty
+      -- queries.ts:2241-2249), each tagged with whether it has a non-empty
       -- per-key csv_daily_returns series.
       SELECT
         k.id AS api_key_id,
         EXISTS (
-          SELECT 1 FROM csv_daily_returns c WHERE c.api_key_id = k.id
+          -- Mirror buildPerKeyReturnsByApiKeyId's drop rule
+          -- (queries.ts:2257-2271): count a row ONLY when the runtime would
+          -- keep it. The api_key_id = k.id join already drops the
+          -- null-api_key_id rows the runtime skips. daily_return is
+          -- DOUBLE PRECISION NOT NULL, so no NULL guard is needed (the column
+          -- forbids NULL); but a float8 column with no finiteness CHECK CAN
+          -- hold NaN/±Infinity, which the runtime's Number.isFinite drops.
+          -- NOTE: Postgres treats NaN = NaN as TRUE (non-IEEE ordering for
+          -- float8), so the `x = x` NaN test does NOT work here — exclude the
+          -- three non-finite float8 literals explicitly.
+          SELECT 1 FROM csv_daily_returns c
+          WHERE c.api_key_id = k.id
+            AND c.daily_return <> 'NaN'::float8
+            AND c.daily_return <> 'Infinity'::float8
+            AND c.daily_return <> '-Infinity'::float8
         ) AS has_series
       FROM api_keys k
       WHERE k.user_id = s.allocator_id
