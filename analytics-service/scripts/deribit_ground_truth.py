@@ -696,14 +696,31 @@ async def run(
         try:
             subs = await ex.private_get_get_subaccounts({"with_portfolio": "false"})
             subs_result = subs.get("result", []) if isinstance(subs, dict) else []
-            for entry_obj in subs_result if isinstance(subs_result, list) else []:
-                if isinstance(entry_obj, dict) and isinstance(
-                    entry_obj.get("id"), int
-                ):
-                    sub_ids.append(int(entry_obj["id"]))
+            result_list = subs_result if isinstance(subs_result, list) else []
+            for entry_obj in result_list:
+                if not isinstance(entry_obj, dict):
+                    continue
+                # Deribit subaccount id is an int; tolerate a digit-string form.
+                raw_id = entry_obj.get("id")
+                if isinstance(raw_id, int):
+                    sub_ids.append(raw_id)
+                elif isinstance(raw_id, str) and raw_id.isdigit():
+                    sub_ids.append(int(raw_id))
+            # Diagnostic (structural only — field NAMES + top-level response keys,
+            # never any value): tells us the real shape when count looks wrong.
             evidence["subaccounts_observation"] = {
                 "count": len(sub_ids),
                 "sees_any": len(sub_ids) > 0,
+                "_diag_result_len": len(result_list),
+                "_diag_entry_keys": sorted(result_list[0].keys())
+                if result_list and isinstance(result_list[0], dict)
+                else [],
+                "_diag_id_type": type(result_list[0].get("id")).__name__
+                if result_list and isinstance(result_list[0], dict)
+                else None,
+                "_diag_response_keys": sorted(subs.keys())
+                if isinstance(subs, dict)
+                else [],
             }
         except Exception as exc:  # noqa: BLE001
             _record_exc("get_subaccounts", exc)
