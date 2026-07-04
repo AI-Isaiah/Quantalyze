@@ -209,12 +209,52 @@ def _to_dt(value: Any) -> datetime:
 # ---------------------------------------------------------------------------
 
 
+# BYB-01 FIX B: anchor-aware dailies gate.
+#
+# ``broker_dailies.py:26-36`` reconstructs the equity curve backward from
+# ``initial_capital = current_equity - total_pnl`` (anchor-to-today). Recomputing
+# that series at a LATER date than the stored snapshot shifts the initial-capital
+# anchor by a constant ``ΔC``, so EVERY overlapping day's denominator moves. To
+# first order the per-day delta is
+#
+#     delta_t = r_t^rec - r_t^stored ≈ -r_t^stored · (ΔC / E_t)      (∝ r_t)
+#
+# i.e. the delta is proportional to the stored return with a single best-fit
+# slope ``β = -ΔC/E``. A raw 1e-9 tolerance in RETURNS space is therefore invalid
+# by construction (cross-time equality is impossible) — it flags 100% of days on
+# any account older than the snapshot gap. We instead fit that one-parameter
+# anchor-shift model by least squares and treat the divergence as BENIGN when the
+# residuals collapse: a pure anchor shift leaves ~zero residual, whereas a GENUINE
+# single-day discrepancy (a dropped funding bucket, a real P&L disagreement) does
+# NOT fit ``β·r_t`` and leaves a large residual on that day. Raw ``max_abs_delta``
+# and every date are still reported as evidence.
+ANCHOR_MAX_ABS_DELTA: float = 0.01  # an anchor artifact never exceeds ~1% return
+ANCHOR_RESIDUAL_ABS: float = 1e-9  # float-noise floor (exact-fit synthetic passes)
+ANCHOR_RESIDUAL_REL: float = 0.10  # residuals must sit within 10% of max |delta|
+ANCHOR_RATIO_FLOOR: float = 1e-6  # skip ~zero-return days in the ratio evidence
+# A single-parameter model fits any 1 point perfectly, so the anchor-shift
+# EXEMPTION is only granted when at least this many non-trivial-return days
+# exist to falsify it. Below it, fall back to the strict tolerance so a lone
+# divergent overlap day is never explained away as "just an anchor shift".
+ANCHOR_MIN_SIGNAL_DAYS: int = 3
+
+
+def _median(values: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
 def compare_dailies(
     recomputed: Mapping[Any, Any],
     stored_rows: Sequence[Mapping[str, Any]],
     tol: float = 1e-9,
 ) -> dict[str, Any]:
-    """Compare a recomputed daily-return series against stored rows within ``tol``.
+    """Compare a recomputed daily-return series against stored rows, anchor-aware.
 
     ``recomputed`` is any ``.items()``-able mapping of date-key -> return; in
     production it is the ``pd.Series`` from ``combine_realized_and_funding``
@@ -222,10 +262,22 @@ def compare_dailies(
     Python 3.14 venv segfaults on pandas ops). ``stored_rows`` are
     ``csv_daily_returns`` rows (``date`` + ``daily_return``).
 
-    Only days present on BOTH sides enter the tolerance check — days present on
-    a single side (differing windows / the anchor-to-today most-recent day that
-    may legitimately move) are EXCLUDED and reported separately. ``clean`` iff
-    every overlapping delta is strictly below ``tol``.
+    Only days present on BOTH sides enter the check — days present on a single
+    side (differing windows / the anchor-to-today most-recent day that may
+    legitimately move) are EXCLUDED and reported separately.
+
+    ``clean`` is True when EITHER:
+      * every overlapping delta is strictly below ``tol`` (exact match), OR
+      * ``anchor_shift_consistent`` — the deltas fit the single-parameter
+        anchor-shift model ``delta_t ≈ β·r_t^stored`` (least-squares slope β,
+        residuals within ``max(ANCHOR_RESIDUAL_ABS, ANCHOR_RESIDUAL_REL·max|delta|)``)
+        AND the raw ``max_abs_delta`` stays under ``ANCHOR_MAX_ABS_DELTA``. This
+        is the documented ``broker_dailies.py:26-36`` anchor-to-today artifact,
+        not a real discrepancy.
+
+    A genuinely divergent single day breaks the proportional signature (its
+    delta is unrelated to that day's stored return), leaving a residual far
+    above the bound -> ``anchor_shift_consistent`` False -> ``clean`` False.
     """
     rec: dict[str, float] = {}
     for key, val in recomputed.items():
@@ -238,9 +290,35 @@ def compare_dailies(
     rec_days = set(rec)
     stored_days = set(stored)
     overlap = sorted(rec_days & stored_days)
-    deltas = {d: abs(rec[d] - stored[d]) for d in overlap}
+    signed = {d: rec[d] - stored[d] for d in overlap}
+    deltas = {d: abs(v) for d, v in signed.items()}
     beyond = sorted(d for d, delta in deltas.items() if delta >= tol)
     max_abs = max(deltas.values()) if deltas else 0.0
+
+    # Least-squares slope β of the no-intercept model delta_t = β·r_t^stored.
+    num = sum(stored[d] * signed[d] for d in overlap)
+    den = sum(stored[d] ** 2 for d in overlap)
+    beta = num / den if den > 0.0 else 0.0
+    residuals = {d: signed[d] - beta * stored[d] for d in overlap}
+    max_abs_residual = max((abs(r) for r in residuals.values()), default=0.0)
+
+    # Ratio evidence: delta_t / r_t^stored on non-tiny-return days should cluster
+    # around a single value (= β) when the divergence is a pure anchor shift.
+    ratios = [
+        signed[d] / stored[d]
+        for d in overlap
+        if abs(stored[d]) >= ANCHOR_RATIO_FLOOR
+    ]
+    ratio_median = _median(ratios)
+    ratio_spread = (max(ratios) - min(ratios)) if ratios else 0.0
+
+    residual_bound = max(ANCHOR_RESIDUAL_ABS, ANCHOR_RESIDUAL_REL * max_abs)
+    anchor_shift_consistent = (
+        den > 0.0
+        and len(ratios) >= ANCHOR_MIN_SIGNAL_DAYS
+        and max_abs < ANCHOR_MAX_ABS_DELTA
+        and max_abs_residual <= residual_bound
+    )
 
     return {
         "tol": tol,
@@ -249,7 +327,18 @@ def compare_dailies(
         "dates_beyond_tol": beyond,
         "only_in_recomputed": sorted(rec_days - stored_days),
         "only_in_stored": sorted(stored_days - rec_days),
-        "clean": len(beyond) == 0,
+        # Anchor-shift evidence (broker_dailies.py:26-36): β is the best-fit
+        # anchor slope, residual is what the single-parameter model cannot
+        # explain, ratio_spread is the raw dispersion of delta_t / r_t.
+        "anchor_shift_beta": beta,
+        "anchor_shift_max_residual": max_abs_residual,
+        "returns_delta_ratio_stats": {
+            "median": ratio_median,
+            "spread": ratio_spread,
+            "count": len(ratios),
+        },
+        "anchor_shift_consistent": anchor_shift_consistent,
+        "clean": len(beyond) == 0 or anchor_shift_consistent,
     }
 
 

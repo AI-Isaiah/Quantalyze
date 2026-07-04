@@ -1628,6 +1628,44 @@ async def run_compute_portfolio_job(job: dict[str, Any]) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+# BYB-01 FIX A: funding sync derives `since_ms` from the FUNDING table's own
+# cursor, re-fetching this many days of already-stored buckets on every run so a
+# settlement that landed between the previous cursor and the funding cron is
+# never permanently skipped. match_key + ignore_duplicates makes the overlap a
+# free no-op at upsert.
+FUNDING_CURSOR_OVERLAP_DAYS: Final[int] = 2
+
+
+def _funding_since_from_cursor(
+    max_ts: Any, overlap_days: int = FUNDING_CURSOR_OVERLAP_DAYS
+) -> int | None:
+    """Derive funding `since_ms` from the funding table's own newest timestamp.
+
+    ``max_ts`` is the newest ``funding_fees.timestamp`` already stored for the
+    strategy (ISO string), or None/absent when the table is empty for it.
+
+    Returns:
+      - ``None`` when ``max_ts`` is falsy or unparseable — callers fall through
+        to the 365-day first-sync backfill (``funding_fetch`` ``since_ms=None``
+        path). This is what lets keys that predate funding ingestion capture
+        their full pre-adoption history.
+      - otherwise ``max_ts`` minus ``overlap_days`` in epoch-milliseconds.
+
+    Root cause (BYB-01 FIX A): the handler previously derived ``since_ms`` from
+    ``api_keys.last_sync_at`` — the TRADES cursor advanced daily by cron sync —
+    so (1) the None-path 365-day backfill NEVER fired for a key that already had
+    a trades cursor set (its pre-adoption funding history was never captured),
+    and (2) buckets settling between the trade tick and the funding cron were
+    silently skipped forever (ignore_duplicates upsert with no lookback). This
+    helper is deliberately pure (no I/O, no pandas) so the cursor arithmetic is
+    unit-tested in isolation.
+    """
+    since_ms = parse_since_ms(max_ts if isinstance(max_ts, str) else None)
+    if since_ms is None:
+        return None
+    return since_ms - overlap_days * 24 * 60 * 60 * 1000
+
+
 async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
     """Fetch funding fees from the exchange and UPSERT into funding_fees.
 
@@ -1644,7 +1682,25 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
 
     strategy_id = job["strategy_id"]
     exchange_name = ctx.key_row["exchange"]
-    since_ms = parse_since_ms(ctx.key_row.get("last_sync_at"))
+
+    # BYB-01 FIX A: derive the funding cursor from the funding table itself
+    # (max stored funding_fees.timestamp for this strategy) — NOT the trades
+    # cursor api_keys.last_sync_at. An empty table -> max_ts None -> since_ms
+    # None -> the funding_fetch 365-day first-sync backfill path.
+    def _load_funding_cursor() -> APIResponse:
+        return (
+            ctx.supabase.table("funding_fees")
+            .select("timestamp")
+            .eq("strategy_id", strategy_id)
+            .order("timestamp", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+    cursor_res = await db_execute(_load_funding_cursor)
+    cursor_rows = getattr(cursor_res, "data", None) or []
+    max_ts = cursor_rows[0].get("timestamp") if cursor_rows else None
+    since_ms = _funding_since_from_cursor(max_ts)
 
     # Import inside function to avoid hard dependency at module load
     # (funding_fetch imports ccxt.async_support which is heavy).
