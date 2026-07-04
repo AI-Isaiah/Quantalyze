@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.37.0.2] - 2026-07-04
+### Fixed
+- **Bybit reconciliation harness — honest reads + fills-window clamp.** The first live worker run returned exactly 1000 rows from both DB loaders — a bare `.limit()` hit PostgREST's per-response ceiling and silently truncated reads against tables holding far more (3216 fills; 17374 funding buckets). Every DB read now paginates to completion via the shared `paginated_select` `.range()` idiom, ordered by a unique column. Separately, the exchange-fills half now clamps its window to Bybit's ~7-day `/v5/execution/list` retention (the #563 provider cap — not a P&L bug; dailies still derive from 365d closed-PnL), scoping the DB-fills side to the same effective window for a like-for-like compare and recording `window_clamped` / `effective_since` / a provider-cap note in the report. Read-only invariant and dailies tolerances unchanged.
+
 ## [0.37.0.1] - 2026-07-04
 ### Fixed
 - **Bybit reconciliation harness** — the first live worker run failed on a phantom `api_keys.strategy_id` column (42703); the strategy is now resolved through `strategies.api_key_id` with an exactly-one guard and a source-pin regression test.

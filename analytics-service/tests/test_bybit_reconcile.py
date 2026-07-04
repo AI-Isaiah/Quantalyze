@@ -38,6 +38,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from scripts.bybit_reconcile import (
+    BYBIT_EXECUTION_RETENTION_DAYS,
+    _effective_fills_since,
+    _load_db_fills,
+    _load_db_funding,
+    _load_stored_dailies,
     build_report,
     compare_dailies,
     db_trade_to_fill,
@@ -291,3 +296,130 @@ def test_strategy_resolved_via_strategies_api_key_id_not_api_keys_column():
     assert '.eq("api_key_id"' in strategies_block, (
         "strategy must be resolved via strategies.api_key_id"
     )
+
+
+# ---------------------------------------------------------------------------
+# Pagination — the DB loaders must drain past PostgREST's 1000-row ceiling
+# ---------------------------------------------------------------------------
+
+
+class _FakePage:
+    def __init__(self, data: list[dict[str, object]]) -> None:
+        self.data = data
+
+
+class _FakeBuilder:
+    """Minimal PostgREST builder double. Filter methods (``select``/``eq``/
+    ``gte``/``order``) are chainable no-ops that return ``self``; ``range``
+    slices the backing dataset so ``paginated_select`` sees real pages."""
+
+    def __init__(self, dataset: list[dict[str, object]]) -> None:
+        self._dataset = dataset
+
+    def select(self, *_a: object, **_k: object) -> "_FakeBuilder":
+        return self
+
+    def eq(self, *_a: object, **_k: object) -> "_FakeBuilder":
+        return self
+
+    def gte(self, *_a: object, **_k: object) -> "_FakeBuilder":
+        return self
+
+    def order(self, *_a: object, **_k: object) -> "_FakeBuilder":
+        return self
+
+    def range(self, start: int, end: int) -> "_FakeBuilder":
+        self._slice = self._dataset[start : end + 1]
+        return self
+
+    def execute(self) -> _FakePage:
+        return _FakePage(self._slice)
+
+
+class _FakeSupabase:
+    def __init__(self, dataset: list[dict[str, object]]) -> None:
+        self._dataset = dataset
+        self.tables_requested: list[str] = []
+
+    def table(self, name: str) -> _FakeBuilder:
+        self.tables_requested.append(name)
+        return _FakeBuilder(self._dataset)
+
+
+class TestLoadersPaginate:
+    """Live-run regression (67-04): both DB loaders returned EXACTLY 1000 rows —
+    PostgREST's default per-response ceiling silently truncated the reads. The
+    loaders must now drain to a short page via ``.range()``."""
+
+    def _dataset(self, n: int) -> list[dict[str, object]]:
+        return [{"id": f"row-{i:05d}"} for i in range(n)]
+
+    def test_fills_loader_drains_two_full_pages_plus_short_page(self) -> None:
+        # 2500 rows = page(1000) + page(1000) + short page(500).
+        data = self._dataset(2500)
+        got = _load_db_fills(_FakeSupabase(data), STRATEGY_ID, "2026-01-01T00:00:00+00:00")
+        assert len(got) == 2500, (
+            "fills loader stopped at PostgREST's 1000-row ceiling instead of "
+            "paginating to a short page"
+        )
+        assert [r["id"] for r in got] == [r["id"] for r in data]
+
+    def test_funding_loader_drains_past_1000(self) -> None:
+        data = self._dataset(2001)
+        got = _load_db_funding(_FakeSupabase(data), STRATEGY_ID, "2026-01-01T00:00:00+00:00")
+        assert len(got) == 2001
+
+    def test_stored_dailies_loader_drains_past_1000(self) -> None:
+        data = self._dataset(1500)
+        supa = _FakeSupabase(data)
+        got = _load_stored_dailies(supa, "api_key_id", API_KEY_ID)
+        assert len(got) == 1500
+        assert supa.tables_requested == ["csv_daily_returns"]
+
+
+# ---------------------------------------------------------------------------
+# Fills window clamp — Bybit only retains ~7d of raw fills (#563 provider cap)
+# ---------------------------------------------------------------------------
+
+
+class TestFillsWindowClamp:
+    def test_180d_request_clamps_effective_since_to_within_retention(self) -> None:
+        since, clamped = _effective_fills_since(NOW, 180)
+        assert clamped is True
+        assert since == NOW - timedelta(days=BYBIT_EXECUTION_RETENTION_DAYS)
+        # effective_since sits within the retention window, not 180d back.
+        assert (NOW - since) <= timedelta(days=BYBIT_EXECUTION_RETENTION_DAYS)
+
+    def test_short_request_within_retention_is_not_clamped(self) -> None:
+        since, clamped = _effective_fills_since(NOW, 3)
+        assert clamped is False
+        assert since == NOW - timedelta(days=3)
+
+    def test_report_carries_clamp_fields_and_provider_note(self) -> None:
+        since, _ = _effective_fills_since(NOW, 180)
+        fills = {
+            "exchange_count": 0,
+            "db_count": 42,
+            "count_delta": -42,
+            "status": "clean",
+            "id_drift_count": 0,
+            "true_discrepancy_count": 0,
+            "discrepancy_count": 0,
+            "discrepancies": [],
+            "window_clamped": True,
+            "effective_since": since.isoformat(),
+            "provider_cap_note": "Bybit retains ~7d of raw fills (#563)",
+        }
+        report = build_report(
+            api_key_id=API_KEY_ID,
+            exchange="bybit",
+            window=WINDOW,
+            fills=fills,
+            funding={"clean": True},
+            dailies={"clean": True},
+        )
+        assert report["fills"]["window_clamped"] is True
+        assert report["fills"]["effective_since"] == since.isoformat()
+        assert "provider_cap_note" in report["fills"]
+        # count_delta discipline: recorded even though it is negative/zero-ish.
+        assert report["fills"]["count_delta"] == -42
