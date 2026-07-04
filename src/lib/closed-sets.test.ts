@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   SUPPORTED_EXCHANGES,
   UI_EXCHANGE_CODES,
@@ -43,6 +45,32 @@ describe("closed-sets registry", () => {
       expect(FUNDING_EXCHANGES).toEqual(["binance", "okx", "bybit"]);
       expect((UI_EXCHANGE_CODES as readonly string[]).includes("deribit")).toBe(false);
       expect((FUNDING_EXCHANGES as readonly string[]).includes("deribit")).toBe(false);
+    });
+
+    // OQ4 chip-surface guard (Phase 68 code-review H1): the value-space pins
+    // above catch a re-widened CONST, but not a COMPONENT that imports the
+    // widened `SUPPORTED_EXCHANGES` to build rendered exchange chips/options.
+    // That is exactly how RequestIntroButton leaked a selectable "Deribit"
+    // chip. Pin every user-facing exchange-selection surface to the decoupled
+    // UI set: they must NOT import SUPPORTED_EXCHANGES (they use
+    // UI_EXCHANGE_CODES or the display EXCHANGES). A new chip surface added to
+    // this list, or an old one reverted to SUPPORTED_EXCHANGES, fails here.
+    it("user-facing exchange-chip components never import the widened SUPPORTED_EXCHANGES (OQ4)", () => {
+      const CHIP_SURFACES = [
+        "components/strategy/RequestIntroButton.tsx",
+        "components/landing/VerificationForm.tsx",
+      ];
+      for (const rel of CHIP_SURFACES) {
+        const src = readFileSync(join(__dirname, "..", rel), "utf8");
+        const importsWidened =
+          /import\s*\{[^}]*\bSUPPORTED_EXCHANGES\b[^}]*\}/.test(src);
+        expect(
+          importsWidened,
+          `${rel} imports SUPPORTED_EXCHANGES — a user-facing chip surface must ` +
+            `use UI_EXCHANGE_CODES so Deribit is not offered until Phase 69`,
+        ).toBe(false);
+        expect(/\bUI_EXCHANGE_CODES\b/.test(src)).toBe(true);
+      }
     });
 
     it("EXCHANGE_DISPLAY has a label for every supported code (satisfies guarantee, checked at runtime too)", () => {

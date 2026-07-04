@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Textarea } from "@/components/ui/Textarea";
-import { cn, SUPPORTED_EXCHANGES } from "@/lib/utils";
+import { cn, UI_EXCHANGE_CODES } from "@/lib/utils";
 
 type RequestStatus = "pending" | "intro_made" | "completed" | "declined";
 
@@ -18,7 +18,10 @@ const STATUS_MESSAGES: Record<RequestStatus, string> = {
 };
 
 const ASSET_CLASS_OPTIONS = ["Spot", "Perp", "Mixed"] as const;
-const EXCHANGE_OPTIONS = SUPPORTED_EXCHANGES.map((e) =>
+// UI_EXCHANGE_CODES (not SUPPORTED_EXCHANGES): this is a user-facing chip
+// group. Deribit is accepted at key-saving boundaries (Phase 68) but must
+// not appear in the UI until the wizard ships it (Phase 69) — OQ4 gate.
+const EXCHANGE_OPTIONS = UI_EXCHANGE_CODES.map((e) =>
   e === "okx" ? "OKX" : e[0].toUpperCase() + e.slice(1),
 );
 const AUM_RANGE_OPTIONS = ["<$500k", "$500k-$2M", "$2M-$10M", ">$10M"] as const;
