@@ -136,3 +136,42 @@ describe("Phase 11 / S4 — page is still public + indexable (UI-SPEC AC #10)", 
     expect(metadata.robots).toMatchObject({ index: true, follow: true });
   });
 });
+
+/**
+ * Phase 69 — Deribit readonly setup guide (UX-02, SC-2).
+ *
+ * A new #deribit-readonly SubAnchor inside the readonly-key section documents
+ * how to create a read-only Deribit key. SC-2 hard requirement: the block's
+ * scope checklist MUST literally name `account:read` and steer users away from
+ * write grants. The steer-away assertions match on GRANTING phrasing, never on
+ * the bare tokens Trade/Withdraw/:read_write — those tokens legitimately appear
+ * in steer-away language here and in the sibling blocks (UI-SPEC test trap).
+ *
+ * Revert-proof: deleting the SubAnchor turns Test 1 red; dropping account:read
+ * turns Test 2 red.
+ */
+describe("Phase 69 — Deribit readonly setup guide (UX-02)", () => {
+  it("renders a #deribit-readonly block titled Deribit", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("deribit-readonly");
+    expect(block).not.toBeNull();
+    expect(within(block as HTMLElement).getByRole("heading")).toHaveTextContent(
+      "Deribit",
+    );
+  });
+
+  it("names account:read literally in the scope checklist (SC-2)", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("deribit-readonly") as HTMLElement;
+    expect(within(block).getByText(/account:read/)).toBeInTheDocument();
+  });
+
+  it("steers away from write grants using granting phrasing (not bare tokens)", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("deribit-readonly") as HTMLElement;
+    // Assert on GRANTING phrasing — the bare tokens Trade/Withdraw/:read_write
+    // also live in steer-away language, so matching them would be a false pin.
+    expect(block.textContent).toMatch(/Do not enable Trade or Withdraw/);
+    expect(block.textContent).toMatch(/do not grant any :read_write scope/);
+  });
+});
