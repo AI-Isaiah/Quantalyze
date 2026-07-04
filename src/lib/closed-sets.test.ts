@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   SUPPORTED_EXCHANGES,
+  UI_EXCHANGE_CODES,
+  FUNDING_EXCHANGES,
   EXCHANGES,
   EXCHANGE_DISPLAY,
   exchangeEnum,
@@ -18,15 +22,55 @@ import { ROLES } from "./types";
 // set, wrong cap, casing mismatch) is exactly the class B8 closes.
 describe("closed-sets registry", () => {
   describe("exchanges (value-space A)", () => {
-    it("SUPPORTED_EXCHANGES is the canonical lowercase wire form", () => {
-      expect(SUPPORTED_EXCHANGES).toEqual(["binance", "okx", "bybit"]);
+    it("SUPPORTED_EXCHANGES is the canonical lowercase wire form (key-save boundary)", () => {
+      // Phase 68 (DRB-02): the key-save boundary admits deribit. This is the
+      // widened allowlist a key-save request clears at the TS layer.
+      expect(SUPPORTED_EXCHANGES).toEqual(["binance", "okx", "bybit", "deribit"]);
     });
 
-    it("EXCHANGES (display) is DERIVED from the base — byte-identical to the legacy hand-maintained tuple", () => {
-      // Regression: the UI chip-group importers rendered ["Binance","OKX","Bybit"];
-      // the derivation must produce the same values in the same order so no
-      // chip label changes.
+    it("EXCHANGES (display) is the 3-value UI-offered set — OQ4 Phase-69 gate pin", () => {
+      // Regression: the UI chip-group importers rendered ["Binance","OKX","Bybit"].
+      // OQ4 GATE: EXCHANGES derives from UI_EXCHANGE_CODES (NOT the widened
+      // SUPPORTED_EXCHANGES) so the marketing count + chips stay 3-exchange and
+      // "Deribit" is NOT offered until Phase 69 flips UI_EXCHANGE_CODES.
       expect(EXCHANGES).toEqual(["Binance", "OKX", "Bybit"]);
+    });
+
+    it("UI_EXCHANGE_CODES and FUNDING_EXCHANGES stay 3-value and exclude deribit (OQ4 + Pitfall 2)", () => {
+      // These two consts are DECOUPLED from the widened SUPPORTED_EXCHANGES on
+      // purpose: UI_EXCHANGE_CODES gates the public dropdown/marketing (Phase 69
+      // flips it) and FUNDING_EXCHANGES gates the sync-funding/reconcile crons
+      // (Phase 70 flips it). A deribit leak into either is exactly what this pins.
+      expect(UI_EXCHANGE_CODES).toEqual(["binance", "okx", "bybit"]);
+      expect(FUNDING_EXCHANGES).toEqual(["binance", "okx", "bybit"]);
+      expect((UI_EXCHANGE_CODES as readonly string[]).includes("deribit")).toBe(false);
+      expect((FUNDING_EXCHANGES as readonly string[]).includes("deribit")).toBe(false);
+    });
+
+    // OQ4 chip-surface guard (Phase 68 code-review H1): the value-space pins
+    // above catch a re-widened CONST, but not a COMPONENT that imports the
+    // widened `SUPPORTED_EXCHANGES` to build rendered exchange chips/options.
+    // That is exactly how RequestIntroButton leaked a selectable "Deribit"
+    // chip. Pin every user-facing exchange-selection surface to the decoupled
+    // UI set: they must NOT import SUPPORTED_EXCHANGES (they use
+    // UI_EXCHANGE_CODES or the display EXCHANGES). A new chip surface added to
+    // this list, or an old one reverted to SUPPORTED_EXCHANGES, fails here.
+    it("user-facing exchange-chip components never import the widened SUPPORTED_EXCHANGES (OQ4)", () => {
+      const CHIP_SURFACES = [
+        "components/strategy/RequestIntroButton.tsx",
+        "components/landing/VerificationForm.tsx",
+      ];
+      for (const rel of CHIP_SURFACES) {
+        const src = readFileSync(join(__dirname, "..", rel), "utf8");
+        const importsWidened =
+          /import\s*\{[^}]*\bSUPPORTED_EXCHANGES\b[^}]*\}/.test(src);
+        expect(
+          importsWidened,
+          `${rel} imports SUPPORTED_EXCHANGES — a user-facing chip surface must ` +
+            `use UI_EXCHANGE_CODES so Deribit is not offered until Phase 69`,
+        ).toBe(false);
+        expect(/\bUI_EXCHANGE_CODES\b/.test(src)).toBe(true);
+      }
     });
 
     it("EXCHANGE_DISPLAY has a label for every supported code (satisfies guarantee, checked at runtime too)", () => {
@@ -50,7 +94,7 @@ describe("closed-sets registry", () => {
       expect(isSupportedExchange("Binance")).toBe(true);
       expect(isSupportedExchange("BYBIT")).toBe(true);
       expect(isSupportedExchange("ftx")).toBe(false);
-      expect(isSupportedExchange("deribit")).toBe(false); // wider ccxt set, not the user allowlist
+      expect(isSupportedExchange("deribit")).toBe(true); // Phase 68: deribit is in the key-save allowlist
       expect(isSupportedExchange("")).toBe(false);
     });
   });

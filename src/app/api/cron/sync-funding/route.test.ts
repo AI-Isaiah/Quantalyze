@@ -422,12 +422,15 @@ describe.each([
     // revoked keys.
     expect(eqSpy).toHaveBeenCalledWith("api_keys.is_active", true);
 
-    // IN list MUST cover the supported perp exchanges. Widening it to an
-    // unsupported exchange would crash the downstream worker.
-    expect(inSpy).toHaveBeenCalledWith(
-      "api_keys.exchange",
-      expect.arrayContaining(["binance", "okx", "bybit"]),
-    );
+    // IN list MUST be EXACTLY the funding-eligible perp exchanges (Pitfall 2):
+    // an exact-set assertion (not arrayContaining) so a deribit leak into the
+    // cron filter — e.g. PERP_EXCHANGES re-derived from the widened
+    // SUPPORTED_EXCHANGES — FAILS here instead of passing silently. Widening it
+    // to deribit would crash the downstream worker (funding_fetch ValueError).
+    expect(inSpy).toHaveBeenCalledTimes(1);
+    const inCall = inSpy.mock.calls[0];
+    expect(inCall[0]).toBe("api_keys.exchange");
+    expect([...(inCall[1] as string[])].sort()).toEqual(["binance", "bybit", "okx"]);
 
     // The inner-join contract: a future drop of `!inner` (which would let
     // strategies without an active perp key through) must fail this.

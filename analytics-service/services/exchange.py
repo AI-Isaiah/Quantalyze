@@ -917,6 +917,11 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         "markets_error": None,
     }
 
+    # DRB-03: holds the deribit scope precheck result so the read_only
+    # derivation below can REUSE it instead of calling public/auth twice.
+    # Stays None for every non-deribit exchange (their path is unchanged).
+    deribit_perms: dict[str, object] | None = None
+
     try:
         try:
             await exchange.load_markets()
@@ -941,6 +946,33 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
             result["markets_error"] = (
                 f"{type(load_exc).__name__}: {_scrubbed_load}"
             )
+        # DRB-03: Deribit key validation MUST read the public/auth scope string
+        # BEFORE fetch_balance. ccxt's deribit fetch_balance
+        # (privateGetGetAccountSummaries) itself requires the account:read
+        # scope, so a key missing account:read would die in the generic
+        # PERMISSION_DENIED branch below and NEVER reach the scope probe —
+        # violating SC3 (honest per-scope naming). Running the probe first lets
+        # us name the exact offending/missing scope; the compliant/fail-CLOSED
+        # result is reused for the read_only derivation so public/auth is never
+        # called twice. (A1: exact live scope string re-verified when 67-03
+        # runs; Phase 72 acceptance gates re-verify end-to-end.)
+        if exchange.id == "deribit":
+            deribit_perms = await detect_permissions(exchange, api_key_id=None)
+            scope_detail = deribit_perms.get("scope_detail")
+            if scope_detail:
+                result["read_only"] = False
+                result["probe_error"] = bool(
+                    deribit_perms.get("probe_error", False)
+                )
+                result["error"] = scope_detail
+                # A write grant was found → TRADE_SCOPE (existing code); else a
+                # required read scope is missing → the NEW additive MISSING_SCOPE.
+                result["error_code"] = (
+                    "TRADE_SCOPE"
+                    if deribit_perms.get("trade")
+                    else "MISSING_SCOPE"
+                )
+                return result
         # Note: every other exception class (NetworkError, AuthenticationError,
         # ExchangeNotAvailable, etc.) is intentionally allowed to propagate
         # to the outer handler so it lands in the right error_code branch
@@ -1063,8 +1095,14 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         result["error_code"] = "UNSUPPORTED_EXCHANGE"
         return result
 
-    # Pre-store path: no api_key_id yet, bypass cache.
-    perms = await detect_permissions(exchange, api_key_id=None)
+    # Pre-store path: no api_key_id yet, bypass cache. For deribit we already
+    # ran the scope precheck above (compliant / fail-CLOSED path) — REUSE it so
+    # public/auth is probed exactly once, never twice.
+    perms = (
+        deribit_perms
+        if deribit_perms is not None
+        else await detect_permissions(exchange, api_key_id=None)
+    )
     has_withdraw = perms.get("withdraw", False)
     has_trade = perms.get("trade", False)
     has_read = perms.get("read", False)

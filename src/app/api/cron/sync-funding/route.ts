@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { safeCompare } from "@/lib/timing-safe-compare";
-import { SUPPORTED_EXCHANGES } from "@/lib/utils";
+import { FUNDING_EXCHANGES } from "@/lib/utils";
 import { getCorrelationId } from "@/lib/correlation-id";
 
 /**
@@ -37,9 +37,12 @@ export type SyncFundingResponse =
     };
 
 // Exchanges where perpetual funding applies and our analytics worker has a
-// funding_fetch normalizer. Sourced from src/lib/utils.ts SUPPORTED_EXCHANGES
-// (mirrors analytics-service/services/exchange.py EXCHANGE_CLASSES).
-const PERP_EXCHANGES = new Set(SUPPORTED_EXCHANGES);
+// funding_fetch normalizer. Sourced from the DECOUPLED FUNDING_EXCHANGES const
+// (closed-sets.ts), NOT the widened key-save SUPPORTED_EXCHANGES (Pitfall 2):
+// enrolling a deribit key here would hit funding_fetch.py raise ValueError every
+// cron tick. Mirrors _FUNDING_BUCKET_HOURS + funding_fees_exchange_check staying
+// 3-exchange; Phase 70 flips FUNDING_EXCHANGES together with those.
+const PERP_EXCHANGES = new Set(FUNDING_EXCHANGES);
 
 async function handle(req: NextRequest): Promise<NextResponse<SyncFundingResponse>> {
   const auth = req.headers.get("authorization") ?? "";

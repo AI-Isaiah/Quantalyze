@@ -25,11 +25,18 @@ import { z } from "zod";
 // DERIVED below — never hand-maintained.
 //
 // NOTE: this set is deliberately NARROWER than the ccxt PROVIDER set. The
-// worker (analytics-service/services/exchange.py EXCHANGE_CLASSES) adds deribit,
-// and the allocator badge map (AllocatorExchangeManager EXCHANGE_TAGS) adds
-// deribit/kraken/coinbase — providers a user can hold positions on but cannot
+// allocator badge map (AllocatorExchangeManager EXCHANGE_TAGS) adds
+// kraken/coinbase — providers a user can hold positions on but cannot
 // publish a verified strategy from. Do NOT collapse that wider set into this one.
-export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit"] as const;
+//
+// KEY-SAVING BOUNDARY (Phase 68, DRB-02): this is the closed-set allowlist a
+// key-save request must clear at the TS layer, in lockstep with the pydantic
+// Literals (schemas.py / debug_key_flow.py / adapter.py) and the SQL CHECK
+// constraints (api_keys_exchange_check et al.). "deribit" was added here so a
+// deribit key clears the allowlist; the FUNDING and USER-FACING UI surfaces are
+// DECOUPLED below (FUNDING_EXCHANGES / UI_EXCHANGE_CODES) and stay 3-exchange —
+// widening this base MUST NOT auto-widen those (OQ4 gate + Pitfall 2).
+export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit", "deribit"] as const;
 export type SupportedExchange = (typeof SUPPORTED_EXCHANGES)[number];
 export const exchangeEnum = z.enum(SUPPORTED_EXCHANGES);
 
@@ -42,16 +49,52 @@ export const EXCHANGE_DISPLAY = {
   binance: "Binance",
   okx: "OKX",
   bybit: "Bybit",
+  deribit: "Deribit",
 } as const satisfies Record<SupportedExchange, string>;
 export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
 
 /**
- * Display-case allowlist used by the UI chip groups. DERIVED from
- * SUPPORTED_EXCHANGES (the single base) so the two casings cannot drift.
- * `(typeof EXCHANGES)[number]` is the `ExchangeDisplay` union, preserving the
- * literal-narrowing that existing consumers (e.g. MandateForm) rely on.
+ * User-facing "offered" exchange codes — the set the public/marketing surfaces
+ * and the public VerificationForm dropdown may present. DECOUPLED from
+ * SUPPORTED_EXCHANGES on purpose (OQ4 gate): the key-save boundary admits
+ * deribit, but a user is not OFFERED deribit until Phase 69 ships the wizard
+ * card + the /security#deribit-readonly scope guide. Do NOT derive this from
+ * SUPPORTED_EXCHANGES — Phase 69 flips this const consciously.
  */
-export const EXCHANGES: readonly ExchangeDisplay[] = SUPPORTED_EXCHANGES.map(
+export const UI_EXCHANGE_CODES = [
+  "binance",
+  "okx",
+  "bybit",
+] as const satisfies readonly SupportedExchange[];
+
+/**
+ * Funding/reconcile-eligible exchange codes — the TS mirror of the SQL
+ * `funding_fees_exchange_check` and `_FUNDING_BUCKET_HOURS` (funding_fetch.py)
+ * both staying 3-exchange. DECOUPLED from SUPPORTED_EXCHANGES (Pitfall 2): a
+ * saved deribit key must NOT be enrolled into the sync-funding / reconcile
+ * crons, or every run would hit `funding_fetch.py raise ValueError`. Phase 70
+ * flips this TOGETHER with the SQL CHECK and a native-id/exact-ts dedup axis
+ * (BYB-02 — Deribit funding is continuous; a floor bucket would collapse
+ * distinct events). Do NOT derive from SUPPORTED_EXCHANGES.
+ */
+export const FUNDING_EXCHANGES = [
+  "binance",
+  "okx",
+  "bybit",
+] as const satisfies readonly SupportedExchange[];
+
+/**
+ * Display-case allowlist used by the UI chip groups. DERIVED from
+ * UI_EXCHANGE_CODES (the user-facing 3-value set — NOT the widened
+ * SUPPORTED_EXCHANGES) through EXCHANGE_DISPLAY so casing cannot drift. This
+ * keeps the marketing "{EXCHANGES.length} exchanges supported" count at 3 and
+ * every chip surface (MandateForm/StrategyFilters/PreferencesPanel/ApiKeyForm/
+ * StrategyForm/MetadataStep) 3-exchange with zero edits to those files (OQ4).
+ * `(typeof EXCHANGES)[number]` stays the `ExchangeDisplay` union — the TYPE now
+ * admits "Deribit" (ExchangeDisplay widened) while the runtime array is the
+ * 3-value UI-offered set. Literal-narrowing consumers (e.g. MandateForm) unaffected.
+ */
+export const EXCHANGES: readonly ExchangeDisplay[] = UI_EXCHANGE_CODES.map(
   (code) => EXCHANGE_DISPLAY[code],
 );
 

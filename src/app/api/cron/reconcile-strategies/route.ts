@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { safeCompare } from "@/lib/timing-safe-compare";
-import { SUPPORTED_EXCHANGES } from "@/lib/utils";
+import { FUNDING_EXCHANGES } from "@/lib/utils";
 import { getCorrelationId } from "@/lib/correlation-id";
 
 /**
@@ -29,9 +29,11 @@ export const dynamic = "force-dynamic";
 
 // Only strategies on exchanges we can actually reconcile against (the
 // Python handler uses ccxt fetch_my_trades, which is available for all
-// three supported exchanges). Avoids enqueuing jobs that would fail
-// permanent at the worker's "exchange not supported" check.
-const RECONCILABLE_EXCHANGES = new Set(SUPPORTED_EXCHANGES);
+// three supported exchanges). Sourced from the DECOUPLED FUNDING_EXCHANGES
+// const (closed-sets.ts), NOT the widened key-save SUPPORTED_EXCHANGES
+// (Pitfall 2): a deribit key enrolled here would fail permanent at the
+// worker's "exchange not supported" check. Phase 70 flips FUNDING_EXCHANGES.
+const RECONCILABLE_EXCHANGES = new Set(FUNDING_EXCHANGES);
 
 async function handle(req: NextRequest): Promise<NextResponse> {
   const auth = req.headers.get("authorization") ?? "";

@@ -20,13 +20,22 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.funding_fetch import _build_match_key
+from services.funding_fetch import _FUNDING_BUCKET_HOURS, _build_match_key
 
 _MIGRATION = (
     Path(__file__).resolve().parents[2]
     / "supabase"
     / "migrations"
     / "20260704150835_funding_match_key_1h_rekey.sql"
+)
+
+# The funding_fees.exchange CHECK that STAYS 3-exchange this phase (Phase 68 /
+# DRB-02 exclusion) — the SQL mirror of _FUNDING_BUCKET_HOURS excluding deribit.
+_FUNDING_CHECK_MIGRATION = (
+    Path(__file__).resolve().parents[2]
+    / "supabase"
+    / "migrations"
+    / "20260602180000_funding_fees_exchange_check.sql"
 )
 
 # The canonical stored format (verified against prod rows 2026-07-04):
@@ -99,3 +108,40 @@ class TestMatchKeySqlParity:
             "Step-2 hour-floor expression drifted from "
             "_bucket_for_exchange(hours=1) UTC flooring"
         )
+
+
+class TestFundingExcludesDeribit:
+    """Phase 68 (DRB-02) EXCLUDE-direction pin: the funding surface stays
+    3-exchange even though SUPPORTED_EXCHANGES gained 'deribit'.
+
+    BYB-02 (2026-07-04): Deribit funding is continuous — settlements land at
+    arbitrary intra-hour timestamps, so a floor-bucket entry in
+    _FUNDING_BUCKET_HOURS would silently collapse distinct events (the exact
+    loss class the 1h re-key just fixed). Phase 70 flips BOTH sides together
+    (the bucket registry AND the funding_fees_exchange_check) via a
+    native-id/exact-ts dedup axis — that flip must consciously edit THESE
+    failing pins, never drift green.
+    """
+
+    def test_funding_bucket_hours_excludes_deribit(self) -> None:
+        # Runtime mirror of the SQL exclusion. Phase 70 adds deribit here ONLY
+        # together with a native-id/exact-ts dedup axis (never a floor bucket).
+        assert "deribit" not in _FUNDING_BUCKET_HOURS, (
+            "_FUNDING_BUCKET_HOURS must NOT carry a deribit key — Deribit funding "
+            "is continuous (BYB-02); a floor bucket would collapse distinct "
+            "settlements. Phase 70 flips this with a native-id/exact-ts axis."
+        )
+
+    def test_funding_check_migration_stays_three_exchange(self) -> None:
+        # SQL mirror of the same exclusion: the funding_fees_exchange_check
+        # migration admits exactly binance/okx/bybit and contains no 'deribit'.
+        sql = _FUNDING_CHECK_MIGRATION.read_text(encoding="utf-8")
+        assert "deribit" not in sql, (
+            "the funding_fees_exchange_check migration must stay 3-exchange "
+            "(no 'deribit') until Phase 70 flips it together with "
+            "_FUNDING_BUCKET_HOURS."
+        )
+        for venue in ("binance", "okx", "bybit"):
+            assert f"'{venue}'" in sql, (
+                f"funding_fees_exchange_check migration must still admit '{venue}'"
+            )

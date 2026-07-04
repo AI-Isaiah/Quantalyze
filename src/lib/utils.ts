@@ -150,8 +150,18 @@ export type DocType = (typeof DOC_TYPES)[number];
  * B8: canonical definition is the closed-set registry; re-exported here so the
  * many `@/lib/utils` importers (routes, cron, queries, forms) are unchanged.
  * Must match the Python schema check (analytics-service schemas.py).
+ *
+ * Phase 68: SUPPORTED_EXCHANGES is the 4-value key-save boundary (admits
+ * deribit). UI_EXCHANGE_CODES (public "offered" set) and FUNDING_EXCHANGES
+ * (funding/reconcile-eligible set) are the DECOUPLED 3-value consts — re-exported
+ * here so the VerificationForm and cron importers keep their `@/lib/utils` path.
  */
-export { SUPPORTED_EXCHANGES, type SupportedExchange } from "./closed-sets";
+export {
+  SUPPORTED_EXCHANGES,
+  UI_EXCHANGE_CODES,
+  FUNDING_EXCHANGES,
+  type SupportedExchange,
+} from "./closed-sets";
 
 /** Supabase returns embedded relations as object (unique FK) or array. */
 export function extractAnalytics(raw: unknown): StrategyAnalytics | null {

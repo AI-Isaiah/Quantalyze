@@ -3,8 +3,16 @@ import type { AlertSeverity, DocType, SupportedExchange } from "./utils";
 import {
   SIGNUP_ROLES,
   exchangeEnum,
+  FUNDING_EXCHANGES,
   type StrategyAnalyticsComputationStatus,
 } from "./closed-sets";
+
+// Phase 68: the funding_fees surface stays 3-exchange (FUNDING_EXCHANGES) even
+// though the key-save `exchangeEnum` now admits deribit. `funding_fees_exchange_check`
+// stays 3-value in SQL, so a deribit funding row can never exist; validating the
+// FundingFee read schema against this 3-value enum keeps the discriminated-union
+// transform exhaustive. Phase 70 flips FUNDING_EXCHANGES + the SQL CHECK together.
+const fundingExchangeEnum = z.enum(FUNDING_EXCHANGES);
 
 // ---------------------------------------------------------------------------
 // audit-2026-05-07 H-0517 — branded identifier vocabulary
@@ -952,7 +960,7 @@ export const FundingFeeRowSchema = z
   .object({
     id: z.string(),
     strategy_id: z.string(),
-    exchange: exchangeEnum,
+    exchange: fundingExchangeEnum,
     symbol: z.string(),
     amount: _strictNumberOrStringNumeric,
     currency: z.string(),

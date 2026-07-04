@@ -42,6 +42,7 @@ vi.mock("server-only", () => ({}));
 import {
   STRATEGY_ANALYTICS_COMPUTATION_STATUSES,
   SUPPORTED_EXCHANGES,
+  FUNDING_EXCHANGES,
   SIGNUP_ROLES,
   LIQUIDITY_PREFERENCES,
 } from "@/lib/closed-sets";
@@ -224,15 +225,76 @@ const SPECS: Spec[] = [
   {
     // B9 H-1122: funding_fees was the lone exchange column with no CHECK. The
     // 20260602180000 migration adds it, mirroring the sibling exchange columns.
+    //
+    // Phase 68 (DRB-02) DECOUPLE: the funding CHECK deliberately STAYS 3-exchange
+    // even though SUPPORTED_EXCHANGES gained 'deribit'. Deribit funding is
+    // continuous (arbitrary intra-hour settlement timestamps, BYB-02 red-team
+    // 2026-07-04): a floor-bucket entry in _FUNDING_BUCKET_HOURS would silently
+    // collapse distinct events. So this spec pins the 3-value FUNDING_EXCHANGES
+    // const (NOT SUPPORTED_EXCHANGES) + rejects:['deribit'] — asserting the funding
+    // CHECK EXCLUDES deribit (the "both directions" CONTEXT requirement). Phase 70
+    // flips this spec TOGETHER with the SQL CHECK (20260602180000) and
+    // _FUNDING_BUCKET_HOURS via a native-id/exact-ts dedup axis — the flip must
+    // consciously edit THIS pinned spec, it can never drift green.
     column: "funding_fees.exchange",
-    ts: SUPPORTED_EXCHANGES,
+    ts: FUNDING_EXCHANGES,
+    rejects: ["deribit"],
     tsNote:
-      "SUPPORTED_EXCHANGES (closed-sets.ts); FundingFee.exchange discriminated union (types.ts) narrows to the 3. CHECK added by 20260602180000_funding_fees_exchange_check.sql.",
+      "FUNDING_EXCHANGES (closed-sets.ts) — the decoupled 3-value funding surface; NOT SUPPORTED_EXCHANGES. CHECK added by 20260602180000_funding_fees_exchange_check.sql, stays 3-exchange until Phase 70.",
     sql: () =>
       resolveColumnCheck(
         "funding_fees",
         "exchange",
         "20260602180000_funding_fees_exchange_check.sql",
+      ),
+  },
+  {
+    // Phase 68 (DRB-02): the key-save last-line-of-defense. Widened to admit
+    // 'deribit' by 20260704200446_deribit_exchange_boundary_checks.sql (named
+    // ADD CONSTRAINT api_keys_exchange_check, newest-wins). ts: SUPPORTED_EXCHANGES
+    // — the 4-value key-save allowlist. This is the CONTAIN direction of SC1.
+    column: "api_keys.exchange",
+    ts: SUPPORTED_EXCHANGES,
+    tsNote:
+      "SUPPORTED_EXCHANGES (closed-sets.ts) — the TS key-save allowlist; the api_keys.exchange CHECK is the SQL mirror, widened to deribit by 20260704200446.",
+    sql: () => resolveColumnCheck("api_keys", "exchange", "20260405061911_initial_schema.sql"),
+  },
+  {
+    // Phase 68 (DRB-02): the LIVE verify write path. Widened to admit 'deribit'
+    // by 20260704200446 (named strategy_verifications_source_check). The write
+    // path also stamps source='csv' (Phase 15), so the TS set is SUPPORTED_EXCHANGES
+    // + 'csv'. NOTE: the frozen verification_requests_legacy table (Phase 19; the
+    // public verification_requests is now a VIEW) is deliberately NOT covered —
+    // its CHECK is intentionally frozen and must never be DROPped.
+    column: "strategy_verifications.source",
+    ts: [...SUPPORTED_EXCHANGES, "csv"],
+    tsNote:
+      "SUPPORTED_EXCHANGES + 'csv' — the live strategy_verifications write path (source=exchange for key-verified, 'csv' for uploads); widened to deribit by 20260704200446.",
+    sql: () =>
+      resolveColumnCheck(
+        "strategy_verifications",
+        "source",
+        "20260501055202_strategy_verifications.sql",
+      ),
+  },
+  {
+    // Phase 68 (DRB-02) EXCLUSION pin: positions are Phase 71. The
+    // position_snapshots.exchange CHECK stays 3-exchange until the f3 Path-B
+    // DeribitNotSupportedError lifts (derivative positions). This spec pins an
+    // explicit 3-value literal (NOT FUNDING_EXCHANGES — a semantically distinct
+    // surface that happens to share the 3 codes) + rejects:['deribit'] so a future
+    // SUPPORTED_EXCHANGES edit cannot silently widen positions. Phase 71 flips this
+    // spec TOGETHER with the CHECK.
+    column: "position_snapshots.exchange",
+    ts: ["binance", "okx", "bybit"],
+    rejects: ["deribit"],
+    tsNote:
+      "explicit 3-value literal — positions surface (Phase 71); position_snapshots_exchange_check stays 3-exchange until DeribitNotSupportedError lifts.",
+    sql: () =>
+      resolveColumnCheck(
+        "position_snapshots",
+        "exchange",
+        "20260412094450_position_snapshots.sql",
       ),
   },
   {
@@ -321,6 +383,9 @@ describe("[B9] CHECK ↔ Zod parity matrix", () => {
       "compute_jobs.error_kind",
       "compute_jobs.exchange",
       "funding_fees.exchange",
+      "api_keys.exchange",
+      "strategy_verifications.source",
+      "position_snapshots.exchange",
       "profiles.role",
       "user_app_roles.role",
       "user_notes.scope_kind",
