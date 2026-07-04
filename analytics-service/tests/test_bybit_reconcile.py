@@ -265,3 +265,29 @@ class TestBuildReport:
         # api_key_id masked to ***last4 — raw UUID absent.
         assert API_KEY_ID not in blob
         assert report["api_key_id"] == "***6666"
+
+
+def test_strategy_resolved_via_strategies_api_key_id_not_api_keys_column():
+    """Live-run regression (67-04 first worker run, 42703): api_keys has NO
+    strategy_id column — the relationship is strategies.api_key_id ->
+    api_keys.id. The first deployed run failed fast on
+    `column api_keys.strategy_id does not exist` because the key SELECT
+    projected a nonexistent column. Pin the corrected wiring at source level:
+    the api_keys projection must not name strategy_id, and the strategy must
+    be resolved by querying strategies filtered on api_key_id.
+    """
+    import inspect
+
+    import scripts.bybit_reconcile as m
+
+    src = inspect.getsource(m)
+    key_select = src.split('supabase.table("api_keys")')[1].split(".execute()")[0]
+    assert "strategy_id" not in key_select, (
+        "api_keys SELECT projects strategy_id — that column does not exist "
+        "(42703 on the live worker)"
+    )
+    assert 'supabase.table("strategies")' in src
+    strategies_block = src.split('supabase.table("strategies")')[1].split(".execute()")[0]
+    assert '.eq("api_key_id"' in strategies_block, (
+        "strategy must be resolved via strategies.api_key_id"
+    )

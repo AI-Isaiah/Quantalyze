@@ -376,10 +376,13 @@ async def run(api_key_id: str, window_days: int) -> tuple[dict[str, Any], int]:
     masked_id = truncate_account_id(api_key_id)
 
     def _load_key() -> Any:
+        # api_keys has NO strategy_id column — the relationship is
+        # strategies.api_key_id -> api_keys.id (proven live: 42703 on the
+        # first worker run). The strategy is resolved separately below.
         return (
             supabase.table("api_keys")
             .select(
-                "id, strategy_id, exchange, api_key_encrypted, "
+                "id, exchange, api_key_encrypted, "
                 "dek_encrypted, kek_version"
             )
             .eq("id", api_key_id)
@@ -395,12 +398,22 @@ async def run(api_key_id: str, window_days: int) -> tuple[dict[str, Any], int]:
             f"api_key {masked_id} exchange is not bybit "
             f"(got {key_row.get('exchange')!r})"
         )
-    raw_strategy_id = key_row.get("strategy_id")
-    if raw_strategy_id is None:
-        raise ReconcileUsageError(
-            f"api_key {masked_id} has no strategy_id — cannot reconcile fills"
+
+    def _load_strategies() -> Any:
+        return (
+            supabase.table("strategies")
+            .select("id")
+            .eq("api_key_id", api_key_id)
+            .execute()
         )
-    strategy_id: str = str(raw_strategy_id)
+
+    strategy_rows = rows(await db_execute(_load_strategies))
+    if len(strategy_rows) != 1:
+        raise ReconcileUsageError(
+            f"api_key {masked_id} backs {len(strategy_rows)} strategies — "
+            "fills reconcile per-strategy; expected exactly 1"
+        )
+    strategy_id: str = str(strategy_rows[0]["id"])
 
     # Fails loud (InvalidToken naming the key id) on malformed rows — do NOT catch.
     api_key, api_secret, passphrase = decrypt_credentials(key_row, get_kek())
