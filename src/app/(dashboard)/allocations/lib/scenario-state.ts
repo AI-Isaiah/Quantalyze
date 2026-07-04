@@ -675,20 +675,6 @@ export function deriveMembershipFromGate(
 }
 
 /**
- * NULL-SAFE book-only predicate: true iff the draft has ≥1 explicit book member
- * AND zero added strategies. `?? []` guards the UNDERIVED case — a codec-decoded
- * draft upgraded from v2/v3 (or an underived-v4 round-trip blob) has
- * `memberKeyIds === undefined`, and plan 03 calls this on raw decoded drafts, so
- * reading `.length` off undefined must NOT throw (it returns false instead).
- */
-export function isBookOnlyDraft(draft: ScenarioDraft): boolean {
-  return (
-    (draft.memberKeyIds ?? []).length >= 1 &&
-    (draft.addedStrategies ?? []).length === 0
-  );
-}
-
-/**
  * The new-save STAMP transform: return a copy of `draft` with `memberKeyIds`
  * replaced by `ids` (pure — never mutates the input). DISTINCT from
  * `deriveMembershipFromGate` (which COMPUTES the ids from the gate); this only

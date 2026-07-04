@@ -31,7 +31,6 @@ import {
   scenarioDraftCodec,
   scenarioDraftSaveSchema,
   deriveMembershipFromGate,
-  isBookOnlyDraft,
   setMemberKeyIds,
   SCENARIO_SCHEMA_VERSION,
   type ScenarioDraft,
@@ -773,40 +772,6 @@ describe("MEMBER-01 v4 codec + membership helpers", () => {
     expect(on).toEqual(["a", "b"]);
     expect(on).not.toBe(ids); // fresh array, not the same reference
     expect(deriveMembershipFromGate(false, ids)).toEqual([]);
-  });
-
-  // ---- isBookOnlyDraft: NULL-SAFE book-only predicate ----
-
-  it.each([
-    ["members + no strategies → true", ["k"], [] as AddedStrategy[], true],
-    [
-      "no members + no strategies → false",
-      [] as string[],
-      [] as AddedStrategy[],
-      false,
-    ],
-    ["members + strategies → false", ["k"], [STRAT_A], false],
-    ["no members + strategies → false", [] as string[], [STRAT_A], false],
-  ])(
-    "isBookOnlyDraft: %s",
-    (_label, memberKeyIds, addedStrategies, expected) => {
-      const draft = {
-        ...defaultDraftFromHoldings(HOLDINGS_2),
-        memberKeyIds,
-        addedStrategies,
-      } as unknown as ScenarioDraft;
-      expect(isBookOnlyDraft(draft)).toBe(expected);
-    },
-  );
-
-  it("isBookOnlyDraft is NULL-SAFE — an underived (undefined-membership) decoded draft returns false, never throws", () => {
-    const underived = {
-      ...defaultDraftFromHoldings(HOLDINGS_2),
-      memberKeyIds: undefined,
-      addedStrategies: [],
-    } as unknown as ScenarioDraft;
-    expect(() => isBookOnlyDraft(underived)).not.toThrow();
-    expect(isBookOnlyDraft(underived)).toBe(false);
   });
 
   // ---- setMemberKeyIds: the pure new-save STAMP transform ----

@@ -54,10 +54,7 @@ import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/r
 import { logAuditEvent } from "@/lib/audit";
 import { isUuid } from "@/lib/utils";
 import { mintShareToken } from "@/lib/scenario-share-token";
-import {
-  isBookOnlyDraft,
-  type ScenarioDraft,
-} from "@/app/(dashboard)/allocations/lib/scenario-state";
+import type { ScenarioDraft } from "@/app/(dashboard)/allocations/lib/scenario-state";
 
 export const runtime = "nodejs";
 
@@ -188,19 +185,21 @@ export const POST = withAllocatorAuth(
     // link by construction. Fail loud at the source with the reason instead of
     // minting it. Defensive JSONB read: a missing/misshapen draft also has
     // nothing resolvable to share, so it takes the same branch.
-    // MEMBER-03 — ONE definition of book-only across mint/resolve/compare: the
-    // gate reads the SAME null-safe `isBookOnlyDraft` predicate the compare and
-    // share surfaces use (explicit book members + zero added strategies), never
-    // an ad-hoc inline check that could drift per-surface. The defensive
-    // "nothing resolvable" path (a null/misshapen/empty-added draft) is checked
-    // FIRST and short-circuits, so a null draft never reaches the predicate; and
-    // because `isBookOnlyDraft` is null-safe on undefined `memberKeyIds`, a
-    // pre-v4 owner blob (membership underived) returns false — not a throw — and
-    // is still caught by the same defensive branch.
+    // MEMBER-03 — ONE honest definition of book-only at the mint boundary:
+    // book-only ⇔ ZERO added strategies. A draft with no resolvable added
+    // series (null/misshapen draft, or an explicit empty `addedStrategies`) has
+    // nothing the public share page is allowed to compute — with OR without
+    // explicit book members — so it takes this branch. Keying purely on
+    // `addedStrategies` (via `nothingShareable`) means a pre-v4 owner blob with
+    // membership underived (undefined) is caught by the same check with no
+    // `.length`-off-undefined risk. This mirrors the share-resolve.ts
+    // counterpart (:224), which likewise keys the honest-absence "book-only"
+    // branch on the RESOLVED `strategies.length === 0`, never on
+    // `memberKeyIds` — one definition of book-only across mint and resolve.
     const draft = (ownedScenario as { draft?: ScenarioDraft | null }).draft ?? null;
     const draftAdded = draft?.addedStrategies;
     const nothingShareable = !Array.isArray(draftAdded) || draftAdded.length === 0;
-    if (nothingShareable || isBookOnlyDraft(draft as ScenarioDraft)) {
+    if (nothingShareable) {
       return NextResponse.json(
         {
           error: "Nothing shareable",
