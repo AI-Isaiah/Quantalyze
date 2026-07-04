@@ -68,12 +68,25 @@ class _StubDeribit:
         self._scope = scope
         self._raises = raises
         self.auth_calls = 0
+        self.fetch_balance_calls = 0
+        self.load_markets_calls = 0
 
     async def public_get_auth(self, params: dict[str, object]) -> dict[str, object]:
         self.auth_calls += 1
         if self._raises is not None:
             raise self._raises
         return {"result": {"scope": self._scope}}
+
+    async def load_markets(self) -> dict[str, object]:
+        self.load_markets_calls += 1
+        return {}
+
+    async def fetch_balance(self) -> dict[str, object]:
+        # DRB-03: must NEVER be reached on a scope-rejection path — the deribit
+        # precheck returns before this. If a test's rejection path calls this,
+        # the precheck ordering is broken (SC3 regression).
+        self.fetch_balance_calls += 1
+        return {"free": {}, "used": {}, "total": {}}
 
 
 # ---------------------------------------------------------------------------
@@ -184,3 +197,120 @@ class TestDispatchAndRelocation:
         assert harness_scope_is_read_only is scope_is_read_only
         for probe in (_LTP_SCOPE, "account:read trade:read_write", "", "custody"):
             assert scope_is_read_only(probe) == harness_scope_is_read_only(probe)
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — validate_key_permissions end-to-end (precheck before fetch_balance)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateKeyPermissionsDeribit:
+    async def test_write_scope_rejected_without_touching_fetch_balance(self):
+        """A write-scoped deribit key → error names the scope, error_code
+        TRADE_SCOPE, read_only False, and fetch_balance is NEVER awaited."""
+        from services.exchange import validate_key_permissions
+
+        ex = _StubDeribit("account:read trade:read wallet:read_write")
+        result = await validate_key_permissions(ex)
+        assert result["read_only"] is False
+        assert result["error_code"] == "TRADE_SCOPE"
+        assert (
+            result["error"]
+            == "key has write scope 'wallet:read_write' — create a read-only key"
+        )
+        assert ex.fetch_balance_calls == 0
+
+    async def test_missing_account_read_named_and_bypasses_fetch_balance(self):
+        """The load-bearing SC3 case: ccxt deribit fetch_balance needs
+        account:read, so a key missing it would die generically in
+        PERMISSION_DENIED. The precheck names it FIRST — MISSING_SCOPE — and
+        fetch_balance is never reached."""
+        from services.exchange import validate_key_permissions
+
+        ex = _StubDeribit("trade:read wallet:read")
+        result = await validate_key_permissions(ex)
+        assert result["error"] == "key is missing required scope 'account:read'"
+        assert result["error_code"] == "MISSING_SCOPE"
+        assert result["read_only"] is False
+        assert ex.fetch_balance_calls == 0
+
+    async def test_missing_trade_read_named(self):
+        from services.exchange import validate_key_permissions
+
+        ex = _StubDeribit("account:read wallet:read")
+        result = await validate_key_permissions(ex)
+        assert result["error"] == "key is missing required scope 'trade:read'"
+        assert result["error_code"] == "MISSING_SCOPE"
+        assert ex.fetch_balance_calls == 0
+
+    async def test_compliant_key_valid_read_only_probes_once(self):
+        """LTP-shaped read-only key (passphrase-less) → valid True, read_only
+        True, error None; fetch_balance IS called and public/auth probed
+        exactly ONCE (precheck result reused, no double probe)."""
+        from services.exchange import validate_key_permissions
+
+        ex = _StubDeribit(_LTP_SCOPE)
+        result = await validate_key_permissions(ex)
+        assert result["valid"] is True
+        assert result["read_only"] is True
+        assert result["error"] is None
+        assert ex.fetch_balance_calls == 1
+        assert ex.auth_calls == 1  # precheck reused — not probed twice
+
+    async def test_wiring_guard_deleting_dispatch_disables_rejection(
+        self, monkeypatch
+    ):
+        """WIRING-INVOCATION GUARD (memory F1-F12): remove _DISPATCH['deribit']
+        and the write-scoped key is NO LONGER rejected (error → None). Proves
+        the dispatch entry is the load-bearing invocation at the key-save path —
+        this end-to-end rejection test FAILS if the deribit branch is neutered,
+        rather than merely unit-testing the helper."""
+        from services.exchange import validate_key_permissions
+
+        # Sanity: with the entry present, the write scope IS rejected.
+        ex_present = _StubDeribit("account:read trade:read wallet:read_write")
+        rejected = await validate_key_permissions(ex_present)
+        assert rejected["error_code"] == "TRADE_SCOPE"
+
+        # Neuter the single wiring point.
+        monkeypatch.delitem(key_permissions._DISPATCH, "deribit")
+        ex_neutered = _StubDeribit("account:read trade:read wallet:read_write")
+        result = await validate_key_permissions(ex_neutered)
+        assert result["error"] is None, (
+            "Without _DISPATCH['deribit'] the write-scope rejection must vanish "
+            "— proving the dispatch entry is what invokes the validator."
+        )
+
+
+class TestValidateKeyPermissionsSiblingsUnchanged:
+    """Sibling exchanges keep byte-identical generic copy (additive change)."""
+
+    async def test_bybit_trade_scope_copy_unchanged(self, monkeypatch):
+        from services import exchange as exchange_mod
+        from services.exchange import validate_key_permissions
+
+        class _StubBybit:
+            id = "bybit"
+
+            async def load_markets(self):
+                return {}
+
+            async def fetch_balance(self):
+                return {}
+
+        ex = _StubBybit()
+        # bybit IS in EXCHANGE_CLASSES; force a trading-scope probe result.
+        async def _fake_detect(exchange, api_key_id=None, force_refresh=False):
+            return {
+                "read": True,
+                "trade": True,
+                "withdraw": False,
+                "probe_error": False,
+            }
+
+        monkeypatch.setattr(
+            "services.key_permissions.detect_permissions", _fake_detect
+        )
+        result = await validate_key_permissions(ex)
+        assert result["error"] == "Key has trading permissions. Please use a read-only key."
+        assert result["error_code"] == "TRADE_SCOPE"
