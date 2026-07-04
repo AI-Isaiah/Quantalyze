@@ -58,7 +58,7 @@ Observation: `funding_fees.raw_data JSONB` is unbounded with no retention policy
 **Do NOT add a retention/delete sweep.** `funding_fees` is deliberately
 PRESERVE/Historical (`sanitize_user.sql:132`) and feeds `positions.funding_pnl`;
 a time-based delete would **corrupt funding-P&L attribution**. At zero clients +
-8h-bucketed volume this is a non-issue; the only safe guard would be a per-row
+trivial funding volume (1h-bucketed since BYB-02) this is a non-issue; the only safe guard would be a per-row
 `pg_column_size` CHECK, which is speculative now. Defer as capacity-review.
 
 ---
