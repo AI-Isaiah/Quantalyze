@@ -130,3 +130,76 @@ describe("[H-0189] ConnectKeyStep — server code → wizard_error mapping", () 
     expect(errorCall).toBeUndefined();
   });
 });
+
+/**
+ * Phase 69 — Deribit wizard card (UX-01, SC-1).
+ *
+ * The wizard exposes Deribit as a fourth exchange card whose credential
+ * fields are labelled "Client ID"/"Client Secret" (Deribit issues an
+ * OAuth-style Client ID + Client Secret, NOT an API key/secret + passphrase).
+ * Selecting Deribit renders NO passphrase field (contrast: OKX renders one)
+ * and the setup-guide deep-link resolves to /security#deribit-readonly.
+ *
+ * Every assertion derives from the single `EXCHANGES` deribit entry + the
+ * per-exchange credential-label wiring, so deleting either turns the block
+ * red (wiring-invocation rule / D-09 revert-proof).
+ */
+describe("Phase 69 — Deribit wizard card (UX-01)", () => {
+  function renderStep() {
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+  }
+
+  it("renders a Deribit card with the pinned name + caption", () => {
+    renderStep();
+    const card = screen.getByTestId("wizard-exchange-deribit");
+    expect(card).toBeInTheDocument();
+    expect(card).toHaveTextContent("Deribit");
+    expect(card).toHaveTextContent(
+      "Spot + Inverse Perpetuals + Options supported.",
+    );
+  });
+
+  it("shows NO passphrase field for Deribit but DOES for OKX (contrast)", () => {
+    renderStep();
+    // Selecting Deribit: requiresPassphrase false → no passphrase field.
+    fireEvent.click(screen.getByTestId("wizard-exchange-deribit"));
+    expect(screen.queryByLabelText(/passphrase/i)).toBeNull();
+    // Contrast: OKX requires a passphrase → the assertion above can fail.
+    fireEvent.click(screen.getByTestId("wizard-exchange-okx"));
+    expect(screen.getByLabelText(/passphrase/i)).toBeInTheDocument();
+  });
+
+  it("swaps credential labels + placeholders per exchange (both directions)", () => {
+    renderStep();
+    // Default (binance) state: generic API Key / API Secret wiring.
+    expect(screen.getByLabelText("API Key")).toBeInTheDocument();
+    expect(screen.getByLabelText("API Secret")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("Paste the read-only key"),
+    ).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Paste the secret")).toBeInTheDocument();
+
+    // Deribit state: Client ID / Client Secret wiring.
+    fireEvent.click(screen.getByTestId("wizard-exchange-deribit"));
+    expect(screen.getByLabelText("Client ID")).toBeInTheDocument();
+    expect(screen.getByLabelText("Client Secret")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("Paste the Deribit Client ID"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("Paste the Deribit Client Secret"),
+    ).toBeInTheDocument();
+
+    // Revert direction: back to binance restores the generic labels.
+    fireEvent.click(screen.getByTestId("wizard-exchange-binance"));
+    expect(screen.getByLabelText("API Key")).toBeInTheDocument();
+    expect(screen.getByLabelText("API Secret")).toBeInTheDocument();
+  });
+
+  it("points the Deribit setup-guide link at /security#deribit-readonly", () => {
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-exchange-deribit"));
+    const link = screen.getByRole("link", { name: /Deribit setup guide/ });
+    expect(link).toHaveAttribute("href", "/security#deribit-readonly");
+  });
+});
