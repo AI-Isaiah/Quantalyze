@@ -50,6 +50,13 @@ interface ExchangeOption {
   name: string;
   caption: string;
   requiresPassphrase: boolean;
+  // Per-exchange, presentation-only overrides for the credential-field labels
+  // and placeholders. Defaults are "API Key"/"API Secret"; Deribit issues an
+  // OAuth-style Client ID + Client Secret. The submit payload keys
+  // (api_key/api_secret) and the generic storage columns are UNCHANGED — only
+  // the rendered label/placeholder text differs.
+  credentialLabels?: { key: string; secret: string };
+  credentialPlaceholders?: { key: string; secret: string };
 }
 
 const EXCHANGES: ExchangeOption[] = [
@@ -70,6 +77,17 @@ const EXCHANGES: ExchangeOption[] = [
     name: "Bybit",
     caption: "Spot + Linear + Inverse supported.",
     requiresPassphrase: false,
+  },
+  {
+    id: "deribit",
+    name: "Deribit",
+    caption: "Spot + Inverse Perpetuals + Options supported.",
+    requiresPassphrase: false,
+    credentialLabels: { key: "Client ID", secret: "Client Secret" },
+    credentialPlaceholders: {
+      key: "Paste the Deribit Client ID",
+      secret: "Paste the Deribit Client Secret",
+    },
   },
 ];
 
@@ -119,8 +137,17 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
   // ships first to avoid blocking on cross-wave merge ordering).
   const [correlationId] = useState<string>(() => readCorrelationId());
 
-  const requiresPassphrase =
-    EXCHANGES.find((e) => e.id === exchange)?.requiresPassphrase ?? false;
+  const activeExchange = EXCHANGES.find((e) => e.id === exchange);
+  const requiresPassphrase = activeExchange?.requiresPassphrase ?? false;
+  // Presentation-only credential labels/placeholders. Default to the generic
+  // "API Key"/"API Secret" wording; Deribit overrides to "Client ID"/"Client
+  // Secret" (D-03). Storage columns + payload keys are unchanged.
+  const keyLabel = activeExchange?.credentialLabels?.key ?? "API Key";
+  const secretLabel = activeExchange?.credentialLabels?.secret ?? "API Secret";
+  const keyPlaceholder =
+    activeExchange?.credentialPlaceholders?.key ?? "Paste the read-only key";
+  const secretPlaceholder =
+    activeExchange?.credentialPlaceholders?.secret ?? "Paste the secret";
 
   const onSelectExchange = useCallback((next: ExchangeId) => {
     setExchange(next);
@@ -257,10 +284,10 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
         </fieldset>
 
         <Input
-          label="API Key"
+          label={keyLabel}
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
-          placeholder="Paste the read-only key"
+          placeholder={keyPlaceholder}
           autoComplete="off"
           required
         />
@@ -271,7 +298,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
               htmlFor="wizard-api-secret"
               className="text-caption font-medium text-text-primary"
             >
-              API Secret
+              {secretLabel}
             </label>
             <button
               type="button"
@@ -286,7 +313,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
             type={showSecret ? "text" : "password"}
             value={apiSecret}
             onChange={(e) => setApiSecret(e.target.value)}
-            placeholder="Paste the secret"
+            placeholder={secretPlaceholder}
             autoComplete="off"
             required
             className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-body text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"

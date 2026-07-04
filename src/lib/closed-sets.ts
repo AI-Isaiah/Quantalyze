@@ -56,15 +56,17 @@ export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
 /**
  * User-facing "offered" exchange codes — the set the public/marketing surfaces
  * and the public VerificationForm dropdown may present. DECOUPLED from
- * SUPPORTED_EXCHANGES on purpose (OQ4 gate): the key-save boundary admits
- * deribit, but a user is not OFFERED deribit until Phase 69 ships the wizard
- * card + the /security#deribit-readonly scope guide. Do NOT derive this from
- * SUPPORTED_EXCHANGES — Phase 69 flips this const consciously.
+ * SUPPORTED_EXCHANGES on purpose (OQ4 gate): the key-save boundary admitted
+ * deribit in Phase 68, and Phase 69 consciously flipped this const to OFFER
+ * deribit once the wizard card + the /security#deribit-readonly scope guide
+ * shipped. Still NOT derived from SUPPORTED_EXCHANGES — this is a deliberate,
+ * per-phase widening (FUNDING_EXCHANGES stays 3-value until Phase 70).
  */
 export const UI_EXCHANGE_CODES = [
   "binance",
   "okx",
   "bybit",
+  "deribit",
 ] as const satisfies readonly SupportedExchange[];
 
 /**
@@ -85,14 +87,15 @@ export const FUNDING_EXCHANGES = [
 
 /**
  * Display-case allowlist used by the UI chip groups. DERIVED from
- * UI_EXCHANGE_CODES (the user-facing 3-value set — NOT the widened
- * SUPPORTED_EXCHANGES) through EXCHANGE_DISPLAY so casing cannot drift. This
- * keeps the marketing "{EXCHANGES.length} exchanges supported" count at 3 and
- * every chip surface (MandateForm/StrategyFilters/PreferencesPanel/ApiKeyForm/
- * StrategyForm/MetadataStep) 3-exchange with zero edits to those files (OQ4).
- * `(typeof EXCHANGES)[number]` stays the `ExchangeDisplay` union — the TYPE now
- * admits "Deribit" (ExchangeDisplay widened) while the runtime array is the
- * 3-value UI-offered set. Literal-narrowing consumers (e.g. MandateForm) unaffected.
+ * UI_EXCHANGE_CODES (the user-facing OFFERED set — NOT the widened
+ * SUPPORTED_EXCHANGES) through EXCHANGE_DISPLAY so casing cannot drift. The
+ * marketing "{EXCHANGES.length} exchanges supported" count follows the
+ * UI-offered set — 4 as of the Phase-69 deribit flip — and every chip surface
+ * (MandateForm/StrategyFilters/PreferencesPanel/ApiKeyForm/StrategyForm/
+ * MetadataStep) auto-widens with zero edits to those files (OQ4).
+ * `(typeof EXCHANGES)[number]` is the `ExchangeDisplay` union; both the type
+ * and the runtime array now include "Deribit". Literal-narrowing consumers
+ * (e.g. MandateForm) unaffected.
  */
 export const EXCHANGES: readonly ExchangeDisplay[] = UI_EXCHANGE_CODES.map(
   (code) => EXCHANGE_DISPLAY[code],

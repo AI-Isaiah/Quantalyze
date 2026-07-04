@@ -464,6 +464,25 @@ export default function SecurityPage() {
                     <li>Copy the key and secret into the wizard.</li>
                   </ol>
                 </SubAnchor>
+
+                <SubAnchor id="deribit-readonly" title="Deribit">
+                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-body text-text-secondary">
+                    <li>
+                      Go to Deribit Account → API and add a new API key.
+                      Deribit issues an OAuth-style credential — a Client ID
+                      and Client Secret, with no passphrase.
+                    </li>
+                    <li>
+                      Grant read-only scopes only. Enable{" "}
+                      <strong>account:read</strong> (and, where offered,
+                      trade:read and wallet:read). Do not enable Trade or
+                      Withdraw, and do not grant any :read_write scope.
+                    </li>
+                    <li>
+                      Copy the Client ID and Client Secret into the wizard.
+                    </li>
+                  </ol>
+                </SubAnchor>
               </div>
             </Section>
 

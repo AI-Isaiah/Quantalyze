@@ -153,8 +153,10 @@ export type DocType = (typeof DOC_TYPES)[number];
  *
  * Phase 68: SUPPORTED_EXCHANGES is the 4-value key-save boundary (admits
  * deribit). UI_EXCHANGE_CODES (public "offered" set) and FUNDING_EXCHANGES
- * (funding/reconcile-eligible set) are the DECOUPLED 3-value consts — re-exported
- * here so the VerificationForm and cron importers keep their `@/lib/utils` path.
+ * (funding/reconcile-eligible set) stay DECOUPLED from it: Phase 69 flipped
+ * UI_EXCHANGE_CODES to 4-value (offers deribit), while FUNDING_EXCHANGES stays
+ * 3-value until Phase 70. Re-exported here so the VerificationForm and cron
+ * importers keep their `@/lib/utils` path.
  */
 export {
   SUPPORTED_EXCHANGES,
