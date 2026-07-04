@@ -937,6 +937,23 @@ function ScenarioTabContent(props: MyAllocationDashboardPayload) {
     void refetchSaved();
   }, [refetchSaved]);
 
+  // CF-05 — the compare panel needs a NARROW slice of the dashboard payload
+  // (the same live fields the composer's book-mode engine reads). Construct it
+  // explicitly, sourced from `props`, and annotate with
+  // ScenarioComparePanelProps["payload"] so the compiler is the standing
+  // contract gate — deleting a required field here (or the panel widening its
+  // requirement) fails the build. Replaces the prior `props`→panel double-cast
+  // (an unchecked type erasure) that silently masked any payload/panel drift
+  // (T-66-08). No zod schema — the data is server-trusted
+  // SSR props, so a structural narrow is proportionate (Don't-Hand-Roll).
+  const comparePanelPayload: ScenarioComparePanelProps["payload"] = {
+    holdingsSummary: props.holdingsSummary,
+    strategies: props.strategies,
+    perKeyReturnsByApiKeyId: props.perKeyReturnsByApiKeyId,
+    eligibleApiKeyIds: props.eligibleApiKeyIds,
+    perKeyDailiesGateSatisfied: props.perKeyDailiesGateSatisfied,
+  };
+
   return (
     <div className="space-y-6">
       {/* H3 — allocator_id propagated from the SSR-lifted payload.
@@ -961,7 +978,7 @@ function ScenarioTabContent(props: MyAllocationDashboardPayload) {
         <ScenarioComparePanel
           selectedRows={compareSelection.rows}
           includeLiveBook={compareSelection.includeLiveBook}
-          payload={props as unknown as ScenarioComparePanelProps["payload"]}
+          payload={comparePanelPayload}
         />
       )}
     </div>
