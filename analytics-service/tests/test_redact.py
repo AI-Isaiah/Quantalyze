@@ -118,6 +118,36 @@ def test_scrub_freeform_string_key_value():
         assert REDACTED in out
 
 
+def test_scrub_freeform_string_compound_credential_keys():
+    """CR-1 regression: compound keys with a `[a-z0-9]_` prefix (client_secret,
+    access_token, db_password, x-api-key) must be redacted.
+
+    The bare `secret`/`token` alternates only matched at a `\\b` word boundary,
+    which the underscore/hyphen prefix suppressed — so `client_secret=VALUE`
+    leaked while `signature=VALUE` was caught. This asserts the whole CLASS is
+    closed. Values are obviously-synthetic (gitleaks-safe).
+    """
+    secret = "SYNTHETIC_NOT_A_REAL_SECRET_00000"
+    compound_lines = (
+        f"client_secret={secret}",
+        f"client_secret: {secret}",
+        f"access_token={secret}",
+        f"refresh_token: {secret}",
+        f"db_password={secret}",
+        f"aws_secret={secret}",
+        f"x-api-key: {secret}",
+    )
+    for line in compound_lines:
+        out = scrub_freeform_string(line)
+        assert secret not in out, f"compound key line {line!r} leaked secret: {out!r}"
+        assert REDACTED in out, f"compound key line {line!r} not redacted: {out!r}"
+
+    # Guard against over-redaction: a bare `key: value` benign log line must NOT
+    # be swallowed (we only generalized `key` behind the `api` anchor).
+    benign = scrub_freeform_string("sort key: name")
+    assert "name" in benign, f"benign 'sort key' line over-redacted: {benign!r}"
+
+
 def test_scrub_freeform_string_jwt_embedded():
     # Pass 3 — JWT_SUBSTRING redacts an embedded JWT shape mid-string.
     line = "Header: aaaaaaaaaa.bbbbbbbbbb.cccccccccc end"

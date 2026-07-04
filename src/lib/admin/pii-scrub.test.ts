@@ -195,6 +195,37 @@ describe("scrubFreeformString", () => {
     },
   );
 
+  // CR-1 regression: compound keys with a `[a-z0-9]_` prefix (client_secret,
+  // access_token, db_password, x-api-key) must redact their value. The bare
+  // `secret`/`token` alternates only matched at a `\b` word boundary, which
+  // the underscore/hyphen prefix suppressed — so `client_secret=VALUE` leaked
+  // while `signature=VALUE` was caught. Byte-parity with the pytest of the
+  // same name in analytics-service/tests/test_redact.py.
+  const COMPOUND_SHAPES: Array<[label: string, line: string]> = [
+    ["client_secret equals", `client_secret=${SECRET}`],
+    ["client_secret colon", `client_secret: ${SECRET}`],
+    ["access_token equals", `access_token=${SECRET}`],
+    ["refresh_token colon", `refresh_token: ${SECRET}`],
+    ["db_password", `db_password=${SECRET}`],
+    ["aws_secret", `aws_secret=${SECRET}`],
+    ["x-api-key", `x-api-key: ${SECRET}`],
+  ];
+
+  it.each(COMPOUND_SHAPES)(
+    "redacts the value of the compound key shape %s (CR-1)",
+    (_label, line) => {
+      const out = scrubFreeformString(line);
+      expect(out).not.toContain(SECRET);
+      expect(out).toContain("[REDACTED]");
+    },
+  );
+
+  it("does NOT over-redact a benign bare `key: value` line (CR-1)", () => {
+    // `key` was only generalized behind the `api` anchor, so a plain
+    // `sort key: name` log line must keep its value.
+    expect(scrubFreeformString("sort key: name")).toContain("name");
+  });
+
   it("redacts an embedded JWT inside an Authorization: Bearer line", () => {
     const jwt =
       "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";

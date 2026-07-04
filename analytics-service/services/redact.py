@@ -77,11 +77,22 @@ JWT_SUBSTRING: re.Pattern[str] = re.compile(
 # `sb-ec-` prefix — every one of which the TS `pii-scrub.ts` regex covers.
 # Mirrors the TS implementation so a freeform line like
 # "x-bapi-apikey: SECRET" is redacted on both runtimes.
+# CR-1 (2026-07-04): the bare `secret` / `token` alternates (the former from
+# DENYLIST_EXACT, the latter here) only match at a `\b` word boundary. A
+# compound key like `client_secret` / `access_token` / `db_password` has a
+# word-char `[a-z0-9]_` prefix immediately before the suffix, which SUPPRESSES
+# the `\b` — so `client_secret=VALUE` slipped through unredacted while
+# `signature=VALUE` (no prefix) was caught. Fix the CLASS by allowing an
+# optional vendor/scope prefix `(?:[a-z0-9]+[-_])?` on the credential-bearing
+# suffixes. Strictly a superset of the old alternates (prefix is optional), so
+# no benign line that was previously redacted stops being redacted. `key` is
+# only generalized behind the `api` anchor to avoid over-redacting benign
+# `key: value` log lines.
 _FREEFORM_KEY_ALTERNATES: tuple[str, ...] = (
-    r"api[-_]?key",
-    r"api[-_]?secret",
-    "password",
-    "token",
+    r"(?:[a-z0-9]+[-_])?api[-_]?key",
+    r"(?:[a-z0-9]+[-_])?secret",
+    r"(?:[a-z0-9]+[-_])?password",
+    r"(?:[a-z0-9]+[-_])?token",
     "credential",
     "cookie",
     "session",
