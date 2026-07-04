@@ -65,6 +65,15 @@ def _redact_secret_values(text: str, *secrets: str | None) -> str:
     for secret in secrets:
         if secret:
             out = out.replace(secret, "[REDACTED]")
+    # F3 belt: the evidence path re-checks with assert_sanitized; give the
+    # error path the same guarantee. Literal replacement misses encoded forms
+    # and the post-auth access_token (e.g. "Bearer <tok>" — the freeform value
+    # capture stops at the space). If a token-like run survives, withhold the
+    # text rather than leak it.
+    try:
+        assert_sanitized({"error": out})
+    except Exception:  # noqa: BLE001 - any unsanitized residue -> withhold
+        return "[error text withheld - unsanitized token detected]"
     return out
 
 # ---------------------------------------------------------------------------

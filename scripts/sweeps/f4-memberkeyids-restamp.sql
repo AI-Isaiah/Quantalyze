@@ -43,7 +43,9 @@
 --     (WR-01), breaking the byte-equal-to-a-reopen invariant.
 --   - series-fetch window:       src/lib/queries.ts:2571-2584 (.gte "date")
 --     the runtime fetches csv_daily_returns bounded to the last 730 days
---     (CURRENT_DATE - INTERVAL '730 days') BEFORE the gate runs, so rows older
+--     the last 730 days (UTC-pinned: the runtime bound is UTC-derived via
+--     Date.now(), and CURRENT_DATE would follow the SESSION timezone) BEFORE
+--     the gate runs, so rows older
 --     than the window are invisible to the runtime series. has_series below
 --     MUST apply the SAME 730-day date window — otherwise a key whose only
 --     finite rows are >730 days old counts as has_series=true here yet derives
@@ -162,7 +164,7 @@ SET draft = jsonb_set(
             -- (gate false). Without this bound the sweep would see has_series
             -- = true and stamp eligible ids where a reopen stamps [],
             -- breaking the byte-equal-to-a-reopen invariant.
-            AND c.date >= (CURRENT_DATE - INTERVAL '730 days')
+            AND c.date >= ((now() AT TIME ZONE 'UTC')::date - INTERVAL '730 days')
             AND c.daily_return <> 'NaN'::float8
             AND c.daily_return <> 'Infinity'::float8
             AND c.daily_return <> '-Infinity'::float8

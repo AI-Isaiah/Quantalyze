@@ -308,7 +308,7 @@ BEGIN
           EXISTS (
             SELECT 1 FROM csv_daily_returns c
             WHERE c.api_key_id = k.id
-              AND c.date >= (CURRENT_DATE - INTERVAL '730 days')
+              AND c.date >= ((now() AT TIME ZONE 'UTC')::date - INTERVAL '730 days')
               AND c.daily_return <> 'NaN'::float8
               AND c.daily_return <> 'Infinity'::float8
               AND c.daily_return <> '-Infinity'::float8
@@ -435,7 +435,7 @@ BEGIN
             EXISTS (
               SELECT 1 FROM csv_daily_returns c
               WHERE c.api_key_id = k.id
-                AND c.date >= (CURRENT_DATE - INTERVAL '730 days')
+                AND c.date >= ((now() AT TIME ZONE 'UTC')::date - INTERVAL '730 days')
                 AND c.daily_return <> 'NaN'::float8
                 AND c.daily_return <> 'Infinity'::float8
                 AND c.daily_return <> '-Infinity'::float8

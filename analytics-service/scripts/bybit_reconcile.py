@@ -61,6 +61,7 @@ from typing import Any, cast
 # funding, whose transaction ids rotate across responses.
 from services.funding_fetch import _build_match_key
 from services.redact import scrub_freeform_string, truncate_account_id
+from scripts.deribit_ground_truth import assert_sanitized
 
 # ---------------------------------------------------------------------------
 # Coercion helpers (pure, pandas-agnostic)
@@ -557,7 +558,14 @@ def main() -> int:
         # IN-6: an unexpected harness failure (network, DB, ccxt) is NOT a
         # verdict — return 3 ("harness error — rerun") so exit 1 stays
         # exclusively a confirmed discrepancy that `run()` deliberately returned.
-        print(scrub_freeform_string(f"{type(exc).__name__}: {exc}"), file=sys.stderr)
+        msg = str(scrub_freeform_string(f"{type(exc).__name__}: {exc}"))
+        # F3 belt (parity with deribit_ground_truth): withhold rather than leak
+        # if a token-like run survives the freeform scrub on this error path.
+        try:
+            assert_sanitized({"error": msg})
+        except Exception:  # noqa: BLE001
+            msg = f"{type(exc).__name__}: [error text withheld - unsanitized token detected]"
+        print(msg, file=sys.stderr)
         return 3
 
     print(json.dumps(report, indent=2, sort_keys=True, default=str))
