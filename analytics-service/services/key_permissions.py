@@ -33,14 +33,26 @@ from typing import Any, Optional
 
 import ccxt.async_support as ccxt
 
+from services.redact import scrub_freeform_string
+
 logger = logging.getLogger("quantalyze.analytics")
-
-
-PermissionDict = dict[str, bool]
 
 
 # Shape contract: detect_*_permissions return
 # {"read": bool, "trade": bool, "withdraw": bool, "probe_error": bool}.
+# DRB-03 (OQ1, 68-CONTEXT) widened the payload ADDITIVELY so the deribit
+# probe may carry an optional ``scope_detail: str`` naming the exact
+# offending/missing scope alongside the bool triple; sibling probes never
+# set it and existing callers ignore it. The value type is ``object`` (not a
+# TypedDict) deliberately: the three sibling detectors return
+# ``dict(_FAIL_CLOSED)`` on their exception path, and mypy --strict types that
+# copy as ``dict[str, object]`` — incompatible with a TypedDict return — so a
+# TypedDict would break the frozen sibling bodies. ``dict[str, object]``
+# carries the additive contract (bool keys + optional str scope_detail)
+# without touching them.
+PermissionDict = dict[str, object]
+
+
 # probe_error=True means we caught an exception and returned the
 # fail-CLOSED default (all scopes True so the wizard rejects). Callers
 # (and the cache layer) MUST NOT cache rows where probe_error is True —
@@ -244,6 +256,131 @@ async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
 
 
 # ---------------------------------------------------------------------------
+# Deribit read-only scope gate (DRB-03) — single definition.
+# ---------------------------------------------------------------------------
+#
+# Relocated verbatim from scripts/deribit_ground_truth.py so PRODUCTION key
+# validation does not depend on a scripts module (68-CONTEXT "reuse, do not
+# re-implement" — one definition). The harness re-imports these names from
+# here, keeping its call sites and tests valid.
+
+# Deribit exposes write capability as :read_write / :read_trade scope suffixes.
+# A read-only key carries only :read-suffixed grants (observed grounding fact:
+# "trade:read account:read wallet:read custody:read block_trade:read").
+_WRITE_SCOPE_SUFFIXES: tuple[str, ...] = (":read_write", ":read_trade")
+
+
+def scope_is_read_only(scope: str) -> bool:
+    """True iff a Deribit public/auth ``scope`` string is strictly read-only.
+
+    Rejects (returns False) if ANY whitespace-split token is a write grant
+    (ends with :read_write / :read_trade). Requires at least one :read-suffixed
+    token — a scope with zero read grants is not a usable read-only key and
+    must not silently pass the gate.
+    """
+    tokens = scope.split()
+    if any(tok.endswith(_WRITE_SCOPE_SUFFIXES) for tok in tokens):
+        return False
+    return any(tok.endswith(":read") for tok in tokens)
+
+
+# DRB-03 requires MORE than read-only: 'account:read' AND 'trade:read' must be
+# present BY NAME. Match is suffix/prefix-tolerant (caveat A1 — the exact live
+# scope string is 67-03-blocked on the founder key; Phase 72 acceptance gates
+# re-verify end-to-end), never exact-string equality on the whole scope blob.
+_DERIBIT_REQUIRED_SCOPES: tuple[str, ...] = ("account:read", "trade:read")
+
+
+def _deribit_scope_present(tokens: list[str], name: str) -> bool:
+    """True iff required scope ``name`` (e.g. ``account:read``) is granted.
+
+    Tolerant of provider prefixing (A1): matches an exact token OR any
+    ``<subsystem>:...:read`` token for the SAME subsystem. The subsystem
+    prefix guard stops ``trade:read`` from being satisfied by ``block_trade:read``.
+    """
+    prefix = name.split(":", 1)[0] + ":"
+    return any(
+        tok == name or (tok.startswith(prefix) and tok.endswith(":read"))
+        for tok in tokens
+    )
+
+
+async def detect_deribit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
+    """Deribit: ``public/auth`` (grant_type=client_credentials) returns a
+    ``result.scope`` string of whitespace-joined grant tokens (e.g.
+    ``"trade:read account:read wallet:read custody:read block_trade:read"``).
+
+    Unlike the three sibling exchanges there is no boolean permission object —
+    the scope STRING is the ground truth (67-01/67-02 harness). DRB-03 rejects
+    any write grant (:read_write / :read_trade) and requires ``account:read``
+    AND ``trade:read`` present BY NAME, naming the exact offending/missing scope
+    via the additive ``scope_detail`` field (OQ1). Sibling probes never set it.
+
+    Fail-CLOSED (all-True, probe_error=True) on ANY exception so an unreadable
+    auth response can never mark a trading key read-only (ASVS V4). The probe
+    exception path scrubs the message AND strips the literal apiKey/secret
+    values — a ccxt auth error may echo the credential (T-68-07). Scope strings
+    themselves are NOT secrets.
+    """
+    try:
+        response = await exchange.public_get_auth(
+            {
+                "grant_type": "client_credentials",
+                "client_id": exchange.apiKey,
+                "client_secret": exchange.secret,
+            }
+        )
+        result_obj = response.get("result", {}) if isinstance(response, dict) else {}
+        scope = (
+            str(result_obj.get("scope", "")) if isinstance(result_obj, dict) else ""
+        )
+    except Exception as exc:
+        # Credential-redaction (PATTERNS §shared): a ccxt auth error can echo
+        # client_id/client_secret. Scrub key:value shapes AND strip the literal
+        # credential values before logging.
+        message = str(scrub_freeform_string(str(exc)))
+        for secret in (exchange.apiKey, exchange.secret):
+            if secret:
+                message = message.replace(secret, "[REDACTED]")
+        logger.warning("Deribit permission probe failed: %s", message)
+        return dict(_FAIL_CLOSED)
+
+    tokens = scope.split()
+
+    # 1. Any write grant → reject, naming the first offending token.
+    for tok in tokens:
+        if tok.endswith(_WRITE_SCOPE_SUFFIXES):
+            return {
+                "read": True,
+                "trade": True,
+                "withdraw": False,
+                "probe_error": False,
+                "scope_detail": (
+                    f"key has write scope '{tok}' — create a read-only key"
+                ),
+            }
+
+    # 2. Required read scopes must each be present BY NAME (suffix-tolerant).
+    for required in _DERIBIT_REQUIRED_SCOPES:
+        if not _deribit_scope_present(tokens, required):
+            return {
+                "read": False,
+                "trade": False,
+                "withdraw": False,
+                "probe_error": False,
+                "scope_detail": f"key is missing required scope '{required}'",
+            }
+
+    # 3. Compliant read-only key.
+    return {
+        "read": True,
+        "trade": False,
+        "withdraw": False,
+        "probe_error": False,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher + cache
 # ---------------------------------------------------------------------------
 
@@ -252,6 +389,7 @@ _DISPATCH = {
     "binance": detect_binance_permissions,
     "okx": detect_okx_permissions,
     "bybit": detect_bybit_permissions,
+    "deribit": detect_deribit_permissions,
 }
 
 

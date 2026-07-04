@@ -48,7 +48,14 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from services.key_permissions import _WRITE_SCOPE_SUFFIXES, scope_is_read_only
 from services.redact import scrub_freeform_string, truncate_account_id
+
+# ``_WRITE_SCOPE_SUFFIXES`` is re-exported here (unused directly since DRB-03
+# relocated the gate to services.key_permissions) so the harness's public
+# surface and any importer of the name stay valid — single definition lives in
+# services.key_permissions now.
+_ = _WRITE_SCOPE_SUFFIXES
 
 
 def _redact_secret_values(text: str, *secrets: str | None) -> str:
@@ -79,25 +86,10 @@ def _redact_secret_values(text: str, *secrets: str | None) -> str:
 # ---------------------------------------------------------------------------
 # Read-only scope gate (T-67-02) — fail loud BEFORE any data fetch.
 # ---------------------------------------------------------------------------
-
-# Deribit exposes write capability as :read_write / :read_trade scope suffixes.
-# A read-only key carries only :read-suffixed grants (observed grounding fact:
-# "trade:read account:read wallet:read custody:read block_trade:read").
-_WRITE_SCOPE_SUFFIXES: tuple[str, ...] = (":read_write", ":read_trade")
-
-
-def scope_is_read_only(scope: str) -> bool:
-    """True iff a Deribit public/auth ``scope`` string is strictly read-only.
-
-    Rejects (returns False) if ANY whitespace-split token is a write grant
-    (ends with :read_write / :read_trade). Requires at least one :read-suffixed
-    token — a scope with zero read grants is not a usable read-only key and
-    must not silently pass the gate.
-    """
-    tokens = scope.split()
-    if any(tok.endswith(_WRITE_SCOPE_SUFFIXES) for tok in tokens):
-        return False
-    return any(tok.endswith(":read") for tok in tokens)
+# The scope gate (``_WRITE_SCOPE_SUFFIXES`` + ``scope_is_read_only``) now lives
+# in services.key_permissions as a SINGLE definition (DRB-03) — production key
+# validation must not depend on this scripts module. Both names are imported at
+# the top of this file and keep their original semantics/call sites here.
 
 
 # ---------------------------------------------------------------------------
