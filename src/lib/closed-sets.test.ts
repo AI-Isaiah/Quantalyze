@@ -28,22 +28,24 @@ describe("closed-sets registry", () => {
       expect(SUPPORTED_EXCHANGES).toEqual(["binance", "okx", "bybit", "deribit"]);
     });
 
-    it("EXCHANGES (display) is the 3-value UI-offered set — OQ4 Phase-69 gate pin", () => {
-      // Regression: the UI chip-group importers rendered ["Binance","OKX","Bybit"].
-      // OQ4 GATE: EXCHANGES derives from UI_EXCHANGE_CODES (NOT the widened
-      // SUPPORTED_EXCHANGES) so the marketing count + chips stay 3-exchange and
-      // "Deribit" is NOT offered until Phase 69 flips UI_EXCHANGE_CODES.
-      expect(EXCHANGES).toEqual(["Binance", "OKX", "Bybit"]);
+    it("EXCHANGES (display) is the 4-value UI-offered set — post-Phase-69 flip pin", () => {
+      // Phase 69 flipped UI_EXCHANGE_CODES to offer Deribit; EXCHANGES derives
+      // from it (NOT the widened SUPPORTED_EXCHANGES), so the marketing count +
+      // chips now render 4 exchanges incl. "Deribit". Reverting the flip fails here.
+      expect(EXCHANGES).toEqual(["Binance", "OKX", "Bybit", "Deribit"]);
     });
 
-    it("UI_EXCHANGE_CODES and FUNDING_EXCHANGES stay 3-value and exclude deribit (OQ4 + Pitfall 2)", () => {
-      // These two consts are DECOUPLED from the widened SUPPORTED_EXCHANGES on
-      // purpose: UI_EXCHANGE_CODES gates the public dropdown/marketing (Phase 69
-      // flips it) and FUNDING_EXCHANGES gates the sync-funding/reconcile crons
-      // (Phase 70 flips it). A deribit leak into either is exactly what this pins.
-      expect(UI_EXCHANGE_CODES).toEqual(["binance", "okx", "bybit"]);
+    it("UI_EXCHANGE_CODES offers deribit (Phase-69 flip DONE) while FUNDING_EXCHANGES stays 3-value (Phase-70 gate)", () => {
+      // Phase 69 consciously flipped UI_EXCHANGE_CODES to 4-value: the public
+      // dropdown/marketing now OFFER deribit (with its scope guide). This is the
+      // inverse of the Phase-68 pin — reverting the flip turns these red.
+      expect(UI_EXCHANGE_CODES).toEqual(["binance", "okx", "bybit", "deribit"]);
+      expect((UI_EXCHANGE_CODES as readonly string[]).includes("deribit")).toBe(true);
+      // FUNDING_EXCHANGES gates the sync-funding/reconcile crons and stays
+      // DECOUPLED at 3-value until Phase 70 (funding_fetch.py + SQL CHECK +
+      // native-id dedup land together). A deribit leak into funding is exactly
+      // what this remaining pin guards.
       expect(FUNDING_EXCHANGES).toEqual(["binance", "okx", "bybit"]);
-      expect((UI_EXCHANGE_CODES as readonly string[]).includes("deribit")).toBe(false);
       expect((FUNDING_EXCHANGES as readonly string[]).includes("deribit")).toBe(false);
     });
 

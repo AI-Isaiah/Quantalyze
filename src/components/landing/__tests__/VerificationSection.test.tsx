@@ -174,3 +174,45 @@ describe("VerificationSection polling (M-0409)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
+
+/**
+ * Phase 69 — Deribit offered on the public verify dropdown (SC-3).
+ *
+ * After the UI_EXCHANGE_CODES flip, the public VerificationForm dropdown must
+ * offer Deribit with a REAL "Deribit" label — no undefined/blank option (the
+ * Gap-1 silent-drift regression: a local EXCHANGE_LABELS map missing deribit
+ * would render an option with empty text). Deribit, like binance/bybit, needs
+ * no passphrase (OKX contrast proves the passphrase assertion can fail).
+ *
+ * The file mocks ../VerificationForm at module scope for the polling tests, so
+ * here we importActual to render the REAL component.
+ */
+describe("Phase 69 — Deribit offered on the public verify dropdown (SC-3)", () => {
+  async function renderRealForm() {
+    const { VerificationForm } = await vi.importActual<
+      typeof import("../VerificationForm")
+    >("../VerificationForm");
+    render(<VerificationForm onResult={() => {}} />);
+  }
+
+  it("renders a real 'Deribit' option (no undefined/blank labels)", async () => {
+    await renderRealForm();
+    expect(
+      screen.getByRole("option", { name: "Deribit" }),
+    ).toBeInTheDocument();
+    // Gap-1 revert-proof: every option must have non-empty trimmed text, so a
+    // missing label map entry (undefined) cannot slip through silently.
+    for (const opt of screen.getAllByRole("option")) {
+      expect((opt.textContent ?? "").trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it("shows NO passphrase for Deribit but DOES for OKX (contrast)", async () => {
+    await renderRealForm();
+    const select = screen.getByLabelText("Exchange");
+    fireEvent.change(select, { target: { value: "deribit" } });
+    expect(screen.queryByLabelText(/passphrase/i)).toBeNull();
+    fireEvent.change(select, { target: { value: "okx" } });
+    expect(screen.getByLabelText(/passphrase/i)).toBeInTheDocument();
+  });
+});

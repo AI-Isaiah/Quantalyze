@@ -5,22 +5,20 @@ import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
 import { UI_EXCHANGE_CODES } from "@/lib/utils";
+import { EXCHANGE_DISPLAY } from "@/lib/closed-sets";
 
 interface VerificationFormProps {
   onResult: (result: { public_token: string; verification_id: string }) => void;
 }
 
-const EXCHANGE_LABELS: Record<string, string> = {
-  binance: "Binance",
-  okx: "OKX",
-  bybit: "Bybit",
-};
-// OQ4 gate: the public verify dropdown offers only the user-facing
-// UI_EXCHANGE_CODES set (binance/okx/bybit), NOT the widened key-save
-// allowlist — deribit joins in Phase 69 with its scope guide.
+// OQ4 gate: the public verify dropdown offers the user-facing UI_EXCHANGE_CODES
+// set (Phase 69 flipped it to include deribit alongside its scope guide), NOT
+// the widened key-save allowlist. Labels come from the single-source
+// EXCHANGE_DISPLAY map — no local label record — so a new code cannot render a
+// blank/undefined option (Gap 1 drift fix).
 const EXCHANGE_OPTIONS = UI_EXCHANGE_CODES.map((value) => ({
   value,
-  label: EXCHANGE_LABELS[value],
+  label: EXCHANGE_DISPLAY[value],
 }));
 
 export function VerificationForm({ onResult }: VerificationFormProps) {
