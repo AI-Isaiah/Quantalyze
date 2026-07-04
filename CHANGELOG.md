@@ -6,7 +6,7 @@ Groundwork for Deribit track-record onboarding: two read-only evidence harnesses
 
 - **Deribit ground-truth harness** — authed, fully-paginated capture of real trades + transaction-log rows for one key (per-currency, `has_more`/`continuation` cursors, same-millisecond stall guard), recording the design-driving answers: how funding lands in realized PnL, the perp/future/option instrument mix, and any geo-block response marker. Enforces a read-only key scope before any data call and sanitizes every output byte (masked account ids, no key material) with a hard re-check on both the evidence and error paths.
 - **Bybit ground-truth reconciliation** — end-to-end proof of existing Bybit ingestion against fresh exchange data: fills by native execution id, funding by settlement bucket (Bybit rotates transaction ids), and per-key realized+funding dailies recomputed within 1e-9 of the stored series. Verdict-encoded exit codes keep "true discrepancy" distinct from usage or harness errors.
-- **Tracked answers doc** (`analytics-service/docs/deribit-ground-truth.md`) — the recorded answers ship in-repo as the design contract the next phases build against.
+- **Tracked answers template** (`analytics-service/docs/deribit-ground-truth.md`) — the answers template ships in-repo as the design contract the next phases build against; the live capture run (plan 67-03) records the answers.
 
 ### Fixed — v1.6 carry-forward debt burned down (v1.7 phase 66)
 - **Honest save-limit error** — saving a portfolio whose book membership exceeds the cap now explains the real ceiling (raised from an arbitrary 64 to a named 1,000) and the actual remediation, instead of a misleading "check your connection" message. Membership is never silently truncated.

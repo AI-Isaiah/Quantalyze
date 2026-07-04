@@ -1,7 +1,9 @@
 # Deribit Ground-Truth Answers (DRB-01)
 
-**Provenance:** Recorded from a live read-only LTP Deribit key via
-`scripts/deribit_ground_truth.py`, run on the Railway worker (Amsterdam egress):
+**Provenance:** To be recorded from a live read-only LTP Deribit key via
+`scripts/deribit_ground_truth.py`, run on the Railway worker (Amsterdam egress).
+The live capture run is Plan 67-03; until it lands, every answer below is
+`PENDING LIVE RUN`:
 
 ```
 railway ssh "cd /app && python -m scripts.deribit_ground_truth"

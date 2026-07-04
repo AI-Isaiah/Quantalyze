@@ -59,6 +59,8 @@ quantalyze/
   analytics-service/  # FastAPI backend (Python) — strategy + portfolio + match analytics
     services/         # metrics, portfolio_metrics, portfolio_risk, portfolio_optimizer, match_engine, match_eval
     routers/          # analytics, cron, exchange, portfolio, match
+    scripts/          # operational one-offs + read-only ground-truth harnesses (deribit_ground_truth, bybit_reconcile)
+    docs/             # tracked evidence docs (deribit-ground-truth.md answers template + evidence/)
   supabase/           # Database migrations (timestamp-named; auto-applied to prod on merge — see CONTRIBUTING.md)
   e2e/                # Playwright specs (auth, discovery, match-queue, demo-public, portfolio-pdf-demo, ...)
   .github/workflows/  # CI + nightly probes (demo PDF cold-start)
