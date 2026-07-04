@@ -5226,6 +5226,36 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     );
   });
 
+  // CF-05 — a per-key (book-member) gantt row must render the friendly
+  // exchange/account label the composer already shows in the "Data sources"
+  // control (dataSourceLabel), NOT the raw api_key_id that
+  // buildPerKeyStrategyForBuilderSet stamps as the unit `name` (`key <uuid>`).
+  // Fails against the pre-fix code, which carried the raw id into the gantt.
+  it("gantt: a per-key book-member row renders the friendly dataSourceLabel, never the raw api_key_id (CF-05)", () => {
+    const KEY_ID = "11111111-2222-3333-4444-555555555555";
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          ...winUnits([{ id: KEY_ID, dates: WIN_DATES }]),
+          apiKeys: [{ ...winApiKey(KEY_ID), exchange: "bybit", label: "Main" }],
+        })}
+        allocatorId={`${ALLOCATOR_A}-cf05-gantt-label`}
+        allocatorMandate={null}
+      />,
+    );
+    // The per-key unit is the sole book member this render (sanity: the row we
+    // assert on IS the real member, not a stray label).
+    expect(lastScenarioMetrics()?.member_ids).toContain(KEY_ID);
+    // The timeline row name cell (title === the rendered name). dataSourceLabel
+    // for {bybit, "Main"} → "Bybit — Main"; scoped to the gantt body so the
+    // assertion cannot accidentally match a Data-sources toggle row.
+    const body = screen.getByTestId("scenario-coverage-timeline-body");
+    const nameCell = within(body).getByTitle("Bybit — Main");
+    expect(nameCell).toHaveTextContent("Bybit — Main");
+    // The raw api_key_id never appears in the gantt row's user-facing text.
+    expect(nameCell.textContent ?? "").not.toContain(KEY_ID);
+  });
+
   // WINDOW-06 flake class (H-0125 / 72dc23a4): applyWindow now WRITE-THROUGHS
   // setWindow into the draft, whose autosave is a 150ms debounce that is not
   // cancelled on unmount — a leaked write from any window-mutating test can
