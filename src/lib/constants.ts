@@ -62,10 +62,12 @@ export const SUBTYPES = [
 
 export const MARKETS = ["Futures", "Spot"] as const;
 
-// B8: EXCHANGES (display case) is derived from the lowercase SUPPORTED_EXCHANGES
-// base in the closed-set registry (imported at the top of this file); re-exported
-// here so the UI chip-group importers keep the `@/lib/constants` path.
-// `(typeof EXCHANGES)[number]` stays the "Binance" | "OKX" | "Bybit" union.
+// B8: EXCHANGES (display case) is derived from the lowercase UI_EXCHANGE_CODES
+// user-facing set in the closed-set registry (imported at the top of this file);
+// re-exported here so the UI chip-group importers keep the `@/lib/constants` path.
+// Phase 68: the `(typeof EXCHANGES)[number]` TYPE is now "Binance"|"OKX"|"Bybit"|
+// "Deribit" (ExchangeDisplay widened with the key-save boundary), but the runtime
+// array stays the 3-value UI-offered set until Phase 69 flips UI_EXCHANGE_CODES.
 export { EXCHANGES };
 
 /**

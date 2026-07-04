@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
-import { SUPPORTED_EXCHANGES } from "@/lib/utils";
+import { UI_EXCHANGE_CODES } from "@/lib/utils";
 
 interface VerificationFormProps {
   onResult: (result: { public_token: string; verification_id: string }) => void;
@@ -15,13 +15,16 @@ const EXCHANGE_LABELS: Record<string, string> = {
   okx: "OKX",
   bybit: "Bybit",
 };
-const EXCHANGE_OPTIONS = SUPPORTED_EXCHANGES.map((value) => ({
+// OQ4 gate: the public verify dropdown offers only the user-facing
+// UI_EXCHANGE_CODES set (binance/okx/bybit), NOT the widened key-save
+// allowlist — deribit joins in Phase 69 with its scope guide.
+const EXCHANGE_OPTIONS = UI_EXCHANGE_CODES.map((value) => ({
   value,
   label: EXCHANGE_LABELS[value],
 }));
 
 export function VerificationForm({ onResult }: VerificationFormProps) {
-  const [exchange, setExchange] = useState<string>(SUPPORTED_EXCHANGES[0]);
+  const [exchange, setExchange] = useState<string>(UI_EXCHANGE_CODES[0]);
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [passphrase, setPassphrase] = useState("");
