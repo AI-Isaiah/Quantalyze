@@ -19,8 +19,10 @@ const STATUS_MESSAGES: Record<RequestStatus, string> = {
 
 const ASSET_CLASS_OPTIONS = ["Spot", "Perp", "Mixed"] as const;
 // UI_EXCHANGE_CODES (not SUPPORTED_EXCHANGES): this is a user-facing chip
-// group. Deribit is accepted at key-saving boundaries (Phase 68) but must
-// not appear in the UI until the wizard ships it (Phase 69) — OQ4 gate.
+// group showing the exchanges we OFFER. As of Phase 69 that set includes
+// Deribit (the wizard card + /security#deribit-readonly guide shipped); it
+// stays decoupled from SUPPORTED_EXCHANGES so funding-only/boundary surfaces
+// don't auto-widen — OQ4 gate.
 const EXCHANGE_OPTIONS = UI_EXCHANGE_CODES.map((e) =>
   e === "okx" ? "OKX" : e[0].toUpperCase() + e.slice(1),
 );

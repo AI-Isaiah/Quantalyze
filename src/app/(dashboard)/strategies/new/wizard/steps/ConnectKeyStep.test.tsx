@@ -202,4 +202,52 @@ describe("Phase 69 — Deribit wizard card (UX-01)", () => {
     const link = screen.getByRole("link", { name: /Deribit setup guide/ });
     expect(link).toHaveAttribute("href", "/security#deribit-readonly");
   });
+
+  it("submits Deribit with api_key/api_secret + passphrase:null (rename is label-only)", async () => {
+    // SC-1 invariant: the "Client ID"/"Client Secret" relabel is PRESENTATION
+    // ONLY. The POST body must still use the generic api_key/api_secret keys
+    // (the server + storage columns are exchange-agnostic) and Deribit carries
+    // NO passphrase. This is the revert-proof for the risk the production
+    // comment calls out: a future edit wiring the label rename through into the
+    // payload keys (client_id/client_secret) would break the server contract —
+    // and turn this test red.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        jsonResponse(
+          {
+            strategy_id: "55555555-5555-5555-5555-555555555555",
+            api_key_id: "66666666-6666-6666-6666-666666666666",
+          },
+          200,
+        ),
+      );
+    const onSuccess = vi.fn();
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    fireEvent.click(screen.getByTestId("wizard-exchange-deribit"));
+    fireEvent.change(
+      screen.getByPlaceholderText("Paste the Deribit Client ID"),
+      { target: { value: "DRB_CLIENT_ID_xxx" } },
+    );
+    fireEvent.change(
+      screen.getByPlaceholderText("Paste the Deribit Client Secret"),
+      { target: { value: "DRB_CLIENT_SECRET_xxx" } },
+    );
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    const body = JSON.parse(
+      (fetchSpy.mock.calls[0]![1] as RequestInit).body as string,
+    ) as Record<string, unknown>;
+    expect(body.exchange).toBe("deribit");
+    expect(body.api_key).toBe("DRB_CLIENT_ID_xxx");
+    expect(body.api_secret).toBe("DRB_CLIENT_SECRET_xxx");
+    expect(body.passphrase).toBeNull();
+    // The renamed field labels must NOT have leaked into the payload keys.
+    expect(body).not.toHaveProperty("client_id");
+    expect(body).not.toHaveProperty("client_secret");
+    expect(onSuccess).toHaveBeenCalledWith(
+      expect.objectContaining({ exchange: "deribit" }),
+    );
+  });
 });
