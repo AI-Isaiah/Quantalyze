@@ -42,8 +42,11 @@ count delta (late-arriving fills, id rotation). Verdicts:
 EXIT CODES
 ----------
   0  clean or id_drift_only
-  1  true discrepancy
+  1  true discrepancy (EXCLUSIVELY — a real fills/funding/dailies disagreement)
   2  usage / env / key error (no secrets printed on any path)
+  3  harness error — an unexpected failure (network, DB, ccxt). NOT a verdict;
+     rerun. Kept distinct from 1 so an infra hiccup is never misread as a
+     confirmed discrepancy (IN-6).
 """
 from __future__ import annotations
 
@@ -168,7 +171,8 @@ def _bucket_and_day_sums(
     by_day: dict[str, float] = {}
     for row in rows:
         amt = _as_float(row.get("amount"))
-        buckets[_row_bucket_key(row)] = buckets.get(_row_bucket_key(row), 0.0) + amt
+        key = _row_bucket_key(row)
+        buckets[key] = buckets.get(key, 0.0) + amt
         day = _iso_day(_to_dt(row.get("timestamp")))
         by_day[day] = by_day.get(day, 0.0) + amt
     return buckets, by_day
@@ -220,17 +224,17 @@ def funding_bucket_summary(
 def db_trade_to_fill(row: Mapping[str, Any]) -> dict[str, Any]:
     """Project a ``trades`` SELECT row onto the fill-dict shape
     ``services.reconciliation.diff_strategy_fills`` matches on. The native id
-    column is ``trades.exchange_fill_id`` (= Bybit ``execId``)."""
-    qty = row.get("quantity")
-    if qty is None:
-        qty = row.get("amount")
+    column is ``trades.exchange_fill_id`` (= Bybit ``execId``); when that is
+    NULL (legacy rows persisted before execId capture) the match falls back to
+    the DB primary key ``id`` so the row still reconciles by a stable key. The
+    ``_load_db_fills`` SELECT projects ``id`` so this fallback is LIVE (IN-7)."""
     return {
         "exchange": row.get("exchange"),
         "exchange_fill_id": row.get("exchange_fill_id") or row.get("id"),
         "symbol": row.get("symbol"),
         "side": row.get("side"),
         "price": _as_float(row.get("price")),
-        "quantity": _as_float(qty),
+        "quantity": _as_float(row.get("quantity")),
         "timestamp": row.get("timestamp"),
     }
 
@@ -414,7 +418,7 @@ async def run(api_key_id: str, window_days: int) -> tuple[dict[str, Any], int]:
             res = (
                 supabase.table("trades")
                 .select(
-                    "exchange, exchange_fill_id, symbol, side, "
+                    "id, exchange, exchange_fill_id, symbol, side, "
                     "price, quantity, timestamp"
                 )
                 .eq("strategy_id", strategy_id)
@@ -550,8 +554,11 @@ def main() -> int:
         print(scrub_freeform_string(str(exc)), file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001 - scrub every free-form message
+        # IN-6: an unexpected harness failure (network, DB, ccxt) is NOT a
+        # verdict — return 3 ("harness error — rerun") so exit 1 stays
+        # exclusively a confirmed discrepancy that `run()` deliberately returned.
         print(scrub_freeform_string(f"{type(exc).__name__}: {exc}"), file=sys.stderr)
-        return 1
+        return 3
 
     print(json.dumps(report, indent=2, sort_keys=True, default=str))
     return exit_code

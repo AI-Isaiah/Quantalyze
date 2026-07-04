@@ -183,6 +183,17 @@ class TestFillsWiring:
                     "quantity", "timestamp"):
             assert key in fill
 
+    def test_null_exchange_fill_id_falls_back_to_db_id(self) -> None:
+        # IN-7: legacy trades rows persisted before execId capture have a NULL
+        # exchange_fill_id. The _load_db_fills SELECT now projects `id`, so the
+        # projection must fall back to the DB primary key as the stable match
+        # key instead of collapsing every such row onto a shared None key.
+        row = self._db_row("")  # start from the full shape
+        row["exchange_fill_id"] = None
+        row["id"] = "db-pk-uuid-123"
+        fill = db_trade_to_fill(row)
+        assert fill["exchange_fill_id"] == "db-pk-uuid-123"
+
 
 # ---------------------------------------------------------------------------
 # build_report — verdict, count-delta discipline, sanitization
