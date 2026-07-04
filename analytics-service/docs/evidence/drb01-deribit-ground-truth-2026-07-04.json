@@ -1,0 +1,211 @@
+{
+  "_evidence": "DRB-01 Deribit ground-truth \u2014 v1.7 phase 67 checkpoint 67-03",
+  "_generated": "2026-07-04",
+  "_subject": "3 LTP Deribit read-only keys (account ids + balances/equity/positions masked)",
+  "_egress": "Railway worker, Amsterdam NL",
+  "_critical_finding": "main-account history queries return <2% of known totals; 2 subaccounts visible per key; trade_max_pages_hit=false \u2192 not a pagination cap. Phase 70 MUST iterate subaccounts.",
+  "accounts": {
+    "account_1": {
+      "scope_grants": [
+        "account:read",
+        "block_trade:read",
+        "custody:read",
+        "name:read_MP",
+        "trade:read",
+        "wallet:read"
+      ],
+      "scope_read_only": true,
+      "instrument_mix_counts": {},
+      "txn_log_type_counts": {
+        "trade": 650,
+        "transfer": 38,
+        "usdc_reward": 11,
+        "options_settlement_summary": 9,
+        "negative_balance_fee": 6,
+        "settlement": 4
+      },
+      "txn_log_instrument_samples": {
+        "trade": {
+          "type": "trade",
+          "amount": "7.0",
+          "balance": "***MASKED***",
+          "equity": "***MASKED***",
+          "cashflow": "-7.0",
+          "instrument_name": "USDC_USDT",
+          "side": "close sell",
+          "position": "***MASKED***",
+          "timestamp": "1747728721121",
+          "currency": "USDT"
+        },
+        "settlement": {
+          "type": "settlement",
+          "amount": "0",
+          "balance": "***MASKED***",
+          "equity": "***MASKED***",
+          "cashflow": "-344.97300927",
+          "instrument_name": "TRUMP_USDC-PERPETUAL",
+          "side": "-",
+          "position": "***MASKED***",
+          "timestamp": "1744358400261",
+          "currency": "USDC"
+        }
+      },
+      "history_completeness": {
+        "get_user_trades_returned": 0,
+        "txn_log_trade_rows": 650,
+        "expected_total_trades": 18778,
+        "pct_of_expected_captured": 3.46,
+        "trade_max_pages_hit": false
+      },
+      "subaccounts": {
+        "count": 2,
+        "sees_any": true
+      },
+      "currencies_held_count": 14,
+      "geo_block": {
+        "blocked": false,
+        "egress_country": "NL"
+      }
+    },
+    "account_2": {
+      "scope_grants": [
+        "account:read",
+        "block_rfq:read",
+        "block_trade:read",
+        "custody:read",
+        "name:read_MP",
+        "trade:read",
+        "wallet:read"
+      ],
+      "scope_read_only": true,
+      "instrument_mix_counts": {},
+      "txn_log_type_counts": {
+        "usdc_reward": 9,
+        "trade": 860,
+        "transfer": 8,
+        "options_settlement_summary": 4,
+        "settlement": 4,
+        "negative_balance_fee": 3
+      },
+      "txn_log_instrument_samples": {
+        "trade": {
+          "type": "trade",
+          "amount": "380.0478",
+          "balance": "***MASKED***",
+          "equity": "***MASKED***",
+          "cashflow": "380.0478",
+          "instrument_name": "BTC_USDC",
+          "side": "close buy",
+          "position": "***MASKED***",
+          "timestamp": "1761571275245",
+          "currency": "USDC"
+        },
+        "settlement": {
+          "type": "settlement",
+          "amount": "0",
+          "balance": "***MASKED***",
+          "equity": "***MASKED***",
+          "cashflow": "0.18739418",
+          "instrument_name": "ETH-PERPETUAL",
+          "side": "-",
+          "position": "***MASKED***",
+          "timestamp": "1763712000045",
+          "currency": "ETH"
+        }
+      },
+      "history_completeness": {
+        "get_user_trades_returned": 0,
+        "txn_log_trade_rows": 860,
+        "expected_total_trades": 21014,
+        "pct_of_expected_captured": 4.09,
+        "trade_max_pages_hit": false
+      },
+      "subaccounts": {
+        "count": 2,
+        "sees_any": true
+      },
+      "currencies_held_count": 14,
+      "geo_block": {
+        "blocked": false,
+        "egress_country": "NL"
+      }
+    },
+    "account_3": {
+      "scope_grants": [
+        "account:read",
+        "block_rfq:read",
+        "block_trade:read",
+        "name:RO",
+        "trade:read",
+        "wallet:read"
+      ],
+      "scope_read_only": true,
+      "instrument_mix_counts": {
+        "option": 192,
+        "inverse_perpetual": 167
+      },
+      "txn_log_type_counts": {
+        "transfer": 47,
+        "usdc_reward": 6,
+        "trade": 481,
+        "delivery": 21,
+        "settlement": 109,
+        "deposit": 3
+      },
+      "txn_log_instrument_samples": {
+        "trade": {
+          "type": "trade",
+          "amount": "408.2446",
+          "balance": "***MASKED***",
+          "equity": "***MASKED***",
+          "cashflow": "408.2446",
+          "instrument_name": "BTC_USDC",
+          "side": "close buy",
+          "position": "***MASKED***",
+          "timestamp": "1775463980587",
+          "currency": "USDC"
+        },
+        "delivery": {
+          "type": "delivery",
+          "amount": "1.0",
+          "balance": "***MASKED***",
+          "equity": "***MASKED***",
+          "cashflow": "0.0",
+          "instrument_name": "ETH-19JAN24-2800-C",
+          "side": "close buy",
+          "position": "***MASKED***",
+          "timestamp": "1705651200039",
+          "currency": "ETH"
+        },
+        "settlement": {
+          "type": "settlement",
+          "amount": "0",
+          "balance": "***MASKED***",
+          "equity": "***MASKED***",
+          "cashflow": "-5.032e-5",
+          "instrument_name": "ETH-PERPETUAL",
+          "side": "-",
+          "position": "***MASKED***",
+          "timestamp": "1703923200046",
+          "currency": "ETH"
+        }
+      },
+      "history_completeness": {
+        "get_user_trades_returned": 359,
+        "txn_log_trade_rows": 481,
+        "expected_total_trades": 61248,
+        "pct_of_expected_captured": 0.79,
+        "trade_max_pages_hit": false
+      },
+      "subaccounts": {
+        "count": 2,
+        "sees_any": true
+      },
+      "currencies_held_count": 14,
+      "geo_block": {
+        "blocked": false,
+        "egress_country": "NL"
+      }
+    }
+  }
+}
