@@ -82,7 +82,10 @@ BYBIT_FUNDING_DEFAULT_LOOKBACK_DAYS: int = 365
 
 # Batch size for UPSERT into funding_fees. Shared with job_worker.py and
 # scripts/backfill_funding.py to keep all three callers consistent.
-FUNDING_UPSERT_BATCH_SIZE = 100
+# 500 (was 100): the 1h match_key bucket persists up to 8x more rows for
+# sub-8h-cadence symbols, so the old size meant ~8x more round-trips on
+# first-sync/backfill; 500 rows is still far under PostgREST body limits.
+FUNDING_UPSERT_BATCH_SIZE = 500
 
 
 class FundingFetchCeilingExceeded(PaginationCeilingExceeded):
@@ -189,15 +192,31 @@ def _extract_raw_data(raw_item: dict[str, Any]) -> dict[str, Any]:
 
 # H-1099: Per-exchange funding cadence. Binance has been progressively
 # moving newer pairs to a 4-hour funding cycle (BTCDOMUSDT etc.), and a
-# single pair can switch cadence mid-history. OKX and Bybit retain a
-# documented 8-hour cycle for all perps. Bucketing every event to 8h
+# single pair can switch cadence mid-history. Bucketing every event to 8h
 # silently collapsed half of Binance 4h-cycle events onto the same
-# match_key, where ON CONFLICT DO NOTHING dropped the second one. Use a
-# tighter bucket for exchanges that can run sub-8h cycles.
+# match_key, where ON CONFLICT DO NOTHING dropped the second one.
+#
+# BYB-02 (2026-07-04, reconcile run 4): Bybit does the SAME — its perps run
+# dynamic 1h/4h/8h cadences per symbol (prod hour histogram peaks at the 4h
+# grid), and the 8h bucket silently dropped >half the funding rows for the
+# live Bybit strategy (~$32k net over 180d). OKX also supports dynamic
+# sub-8h cadences. The bucket only needs to be stable for the SAME
+# settlement refetched (dedup across archive/recent overlap and cursor
+# re-reads) — settlements land on hour boundaries, so 1h is the widest
+# bucket that can never collapse two distinct settlements.
+# Migration 20260704150835 re-keys existing bybit/okx rows to 1h.
+#
+# ⚠ The floor-bucket dedup axis is ONLY valid for exchanges whose
+# settlement timestamps are boundary-aligned. Continuous-funding venues
+# (Deribit accrues funding at position events with arbitrary intra-hour
+# timestamps) MUST NOT be registered here with any bucket width — they
+# need a different dedup axis (native record id or exact-timestamp key)
+# AND a funding_fees_exchange_check constraint update (20260602180000
+# admits only binance/okx/bybit).
 _FUNDING_BUCKET_HOURS: dict[str, int] = {
-    "binance": 1,  # honour any cadence >= 1h Binance publishes
-    "okx": 8,
-    "bybit": 8,
+    "binance": 1,
+    "okx": 1,
+    "bybit": 1,
 }
 
 
@@ -208,9 +227,12 @@ def _bucket_8h(ts: datetime) -> str:
     Returns an ISO-like string suitable for embedding in a match_key.
 
     Thin wrapper retained so the boundary-regression test
-    ``TestBucket8hBoundary`` can pin the 8h bucket arithmetic without
-    importing the per-exchange dispatcher. For match_key construction
-    prefer :func:`_bucket_for_exchange`.
+    ``TestBucket8hBoundary`` can pin the window-floor arithmetic without
+    importing the per-exchange dispatcher. Since BYB-02 no production
+    match_key path uses an 8h bucket (every exchange in
+    ``_FUNDING_BUCKET_HOURS`` is 1h) — this exists purely as historical
+    arithmetic coverage. For match_key construction prefer
+    :func:`_bucket_for_exchange`.
     """
     return _bucket_for_exchange(ts, hours=8)
 
