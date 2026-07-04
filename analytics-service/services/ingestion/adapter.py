@@ -20,7 +20,12 @@ from typing import Any, Literal
 # ---------------------------------------------------------------------------
 
 FlowType = Literal["teaser", "onboard", "internal_report", "csv", "resync"]
-Source = Literal["okx", "binance", "bybit", "csv"]
+# Phase 68 (OQ2): "deribit" widens the Source Literal for key-save boundary
+# type-consistency ONLY. The ingestion registry (``SUPPORTED_SOURCES`` in
+# services/ingestion/__init__.py) and the ``process_key`` per-flow sets
+# intentionally EXCLUDE deribit until Phase 70 ships the ingestion path — do
+# NOT add deribit there. Plan 68-03 pins this exclusion with a parity test.
+Source = Literal["okx", "binance", "bybit", "csv", "deribit"]
 TrustTier = Literal["api_verified", "csv_uploaded", "self_reported"]
 Status = Literal[
     "draft",

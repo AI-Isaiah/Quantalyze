@@ -199,15 +199,15 @@ class VerifyStrategyRequest(BaseModel):
     # key-encryption first. Validated at the service edge to mirror+harden the
     # TS ``isValidEmail`` boundary (defense-in-depth, no new dependency).
     email: str
-    # Audit H-0530: the three user-verifiable exchanges, matching the TS
-    # boundary ``SUPPORTED_EXCHANGES = ['binance','okx','bybit']``. A bare
-    # ``str`` let an out-of-domain value (e.g. ``deribit`` — which
-    # ``create_exchange`` accepts) clear Pydantic and reach a live exchange
-    # handshake before failing downstream. (The persisted store,
+    # Audit H-0530: the user-verifiable exchanges, pinned to the TS key-save
+    # boundary ``SUPPORTED_EXCHANGES`` (Phase 68: now 4-value incl. ``deribit``).
+    # A bare ``str`` let an out-of-domain value (e.g. ``kraken`` — which
+    # ``create_exchange`` also constructs) clear Pydantic and reach a live
+    # exchange handshake before failing downstream. (The persisted store,
     # ``strategy_verifications.source``, also admits ``csv`` for ingestion, but
     # that is not a user-submitted verify exchange.) The Literal 422s the bad
     # value at the boundary.
-    exchange: Literal["binance", "okx", "bybit"]
+    exchange: Literal["binance", "okx", "bybit", "deribit"]
     # Audit H-0535: wrap credentials in SecretStr so they never leak into
     # ``repr(req)``, FastAPI validation-error messages, Sentry breadcrumbs, or
     # tracebacks (a bare ``str`` prints verbatim). The consumers in

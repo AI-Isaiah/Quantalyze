@@ -757,15 +757,18 @@ class TestVerifyStrategyRequestValidation:
         for ex in ("binance", "okx", "bybit"):
             assert VerifyStrategyRequest(**{**self._BASE, "exchange": ex}).exchange == ex
 
-    def test_deribit_exchange_rejected(self):
-        # create_exchange() accepts 'deribit', but the TS SUPPORTED_EXCHANGES
-        # boundary does not. Without the Literal it clears Pydantic and reaches
-        # a live exchange handshake before failing downstream.
+    def test_deribit_exchange_accepted(self):
+        # Phase 68 (DRB-02): the key-save boundary now admits 'deribit' in
+        # lockstep with the TS SUPPORTED_EXCHANGES allowlist + the SQL CHECKs.
+        # A deribit verify request constructs without raising at the boundary.
         from models.schemas import VerifyStrategyRequest
-        with pytest.raises(ValidationError):
-            VerifyStrategyRequest(**{**self._BASE, "exchange": "deribit"})
+        r = VerifyStrategyRequest(**{**self._BASE, "exchange": "deribit"})
+        assert r.exchange == "deribit"
 
     def test_unknown_exchange_rejected(self):
+        # The closed-set gate itself is still proven: an out-of-domain value
+        # ('kraken' — which create_exchange also constructs) 422s at the Literal
+        # boundary before any live handshake, even though 'deribit' now clears it.
         from models.schemas import VerifyStrategyRequest
         with pytest.raises(ValidationError):
             VerifyStrategyRequest(**{**self._BASE, "exchange": "kraken"})
