@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.37.2.0] - 2026-07-04
+### Added
+- **Deribit is accepted at every key-saving boundary (DRB-02).** In lockstep, one PR: the TypeScript allowlist (`SUPPORTED_EXCHANGES` + display map), three pydantic `Literal`s (verify request, ingestion adapter, debug key-flow), and four SQL CHECK constraints (`api_keys`, `compute_jobs`, `strategies.source`, `strategy_verifications.source`) via a single self-verifying DROP/re-ADD migration. A read-only Deribit key can now be saved through the normal path; the wizard UI stays Phase-69-gated.
+- **Deribit read-only key validation with honest per-scope errors (DRB-03).** A new `detect_deribit_permissions` probe reads the `public/auth` scope string, requires `account:read` AND `trade:read` by name, and rejects any `:read_write` grant naming the offending scope — no generic "invalid key". The scope precheck runs before ccxt's `fetch_balance()` (which itself needs `account:read`), so a missing-scope key gets the honest error instead of dying in a generic permission failure.
+
+### Changed
+- **The exchange allowlist is now decoupled from its consumers.** The widened `SUPPORTED_EXCHANGES` (key-save boundary) no longer feeds the UI chip surfaces, the marketing count, or the funding/reconcile crons — those read new `UI_EXCHANGE_CODES` / `FUNDING_EXCHANGES` sets that stay 3-exchange until Phase 69/70 flip them consciously. A cross-runtime parity contract test pins both directions (deribit IN the key boundaries, OUT of funding/positions) so the exclusions can't silently drift.
+
+### Fixed
+- **The allocator intro-request modal no longer offers a "Deribit" chip.** `RequestIntroButton` mapped its "Preferred exchanges" chips over the widened allowlist, which would have surfaced Deribit in the UI before the wizard ships (caught in review). Repointed to `UI_EXCHANGE_CODES`, with a source guard pinning every user-facing exchange-chip surface to the decoupled UI set.
+
 ## [0.37.1.1] - 2026-07-04
 ### Added
 - **BYB-01 reconciliation evidence committed (`analytics-service/docs/evidence/byb01-bybit-reconcile-2026-07-04.json`).** Run 5 of the live Bybit exchange-vs-DB reconciliation, after the BYB-02 fix chain (#574–#577): funding CLEAN (37,334 buckets exchange == DB, 0 missing, 0 extra, 0 days beyond 1e-9), dailies 163/164 days byte-exact (the one dirty day is the run date itself — intraday timing between derive and recompute), fills db=0 documented as the #563 provider-cap / phase-70 artifact. Closes milestone v1.7 checkpoint 67-04.
