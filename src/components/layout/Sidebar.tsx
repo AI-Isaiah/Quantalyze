@@ -16,6 +16,21 @@ export interface NavItem {
 interface NavSubGroup { label: string; items: NavItem[] }
 interface NavSection { heading: string; items: NavItem[]; subGroups?: NavSubGroup[] }
 
+/**
+ * Phase 66 CF-06 — cap the flagged-count badge's DISPLAYED text at "99+".
+ *
+ * The badge is a fixed-min-width pill next to "My Allocation" on both the
+ * desktop rail (NavItemLink) and the mobile bottom nav (MobileNav). An
+ * unbounded count (>99) widens the pill enough to overlap the adjacent cell on
+ * a 320px 5-item admin layout (v1.3 P3 follow-up). Capping the visible text is
+ * the fix — the pill can never grow past three glyphs. Shared by both surfaces
+ * (MobileNav imports it) so the two navs can never drift. Display-only: the
+ * aria-label keeps the TRUE count for assistive tech.
+ */
+export function formatBadgeCount(count: number): string {
+  return count > 99 ? "99+" : String(count);
+}
+
 function buildNavSections(
   populatedSlugs?: string[],
   isAdmin?: boolean,
@@ -364,7 +379,7 @@ function NavItemLink({
             aria-label={`${badge} flagged holding${badge === 1 ? "" : "s"}`}
             className="ml-auto inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-fixed-10 font-medium text-white"
           >
-            {badge}
+            {formatBadgeCount(badge)}
           </span>
         )}
       </Link>

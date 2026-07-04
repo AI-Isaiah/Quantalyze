@@ -196,6 +196,31 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     expect(screen.getByLabelText("2 flagged holdings")).toBeInTheDocument();
   });
 
+  it("caps the badge TEXT at '99+' for counts over 99 (CF-06 — pill can't overflow its cell)", () => {
+    // v1.3 P3 follow-up: an unbounded count widened the pill enough to overlap
+    // the adjacent cell on a 320px 5-item admin layout. The DISPLAYED text is
+    // now capped at three glyphs; the aria-label keeps the TRUE count for AT.
+    pathnameMock.mockReturnValue("/allocations");
+    const { rerender } = render(<MobileNav isAllocator flaggedCount={150} />);
+    let nav = screen.getByRole("navigation", { name: "Primary mobile" });
+    // Visible pill text is capped — this FAILS against the pre-cap code (rendered "150").
+    expect(within(nav).getByText("99+")).toBeInTheDocument();
+    expect(within(nav).queryByText("150")).toBeNull();
+    // The aria-label still names the honest count for assistive tech.
+    expect(within(nav).getByLabelText("150 flagged holdings")).toBeInTheDocument();
+
+    // Boundary: exactly 99 is NOT capped.
+    rerender(<MobileNav isAllocator flaggedCount={99} />);
+    nav = screen.getByRole("navigation", { name: "Primary mobile" });
+    expect(within(nav).getByText("99")).toBeInTheDocument();
+    expect(within(nav).queryByText("99+")).toBeNull();
+
+    // Small counts render verbatim.
+    rerender(<MobileNav isAllocator flaggedCount={5} />);
+    nav = screen.getByRole("navigation", { name: "Primary mobile" });
+    expect(within(nav).getByText("5")).toBeInTheDocument();
+  });
+
   it("applies inert to the nav when the drawer is open (NAV-03 background containment)", () => {
     pathnameMock.mockReturnValue("/allocations");
     // inert={true}: the bottom nav (a sibling of the inert <main>) is removed

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { buildPrimaryMobileNav } from "./Sidebar";
+import { buildPrimaryMobileNav, formatBadgeCount } from "./Sidebar";
 
 /**
  * Phase 45 Plan 01 (NAV-01) — role-aware mobile bottom nav.
@@ -84,7 +84,7 @@ export function MobileNav({
                     aria-label={`${badge} flagged holding${badge === 1 ? "" : "s"}`}
                     className="absolute -right-2 -top-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-fixed-10 font-medium text-white"
                   >
-                    {badge}
+                    {formatBadgeCount(badge)}
                   </span>
                 )}
               </span>

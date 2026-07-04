@@ -271,6 +271,35 @@ describe("Sidebar ADMIN section RBAC gate (M-0414)", () => {
   });
 });
 
+/**
+ * Phase 66 CF-06 — the flagged-count badge is capped at "99+" on the desktop
+ * rail (the counterpart to the MobileNav.test.tsx cap). An unbounded count
+ * widened the pill enough to overlap the adjacent cell on the 320px 5-item
+ * admin layout (v1.3 P3 follow-up). Capping the DISPLAYED text is the fix; the
+ * aria-label keeps the true count for assistive tech.
+ */
+describe("Sidebar flagged-count badge cap (CF-06)", () => {
+  it("caps the badge TEXT at '99+' for counts over 99", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} flaggedCount={150} />);
+    // Visible pill text capped — FAILS against pre-cap code (rendered "150").
+    expect(screen.getByText("99+")).toBeInTheDocument();
+    expect(screen.queryByText("150")).toBeNull();
+    // aria-label keeps the honest count.
+    expect(screen.getByLabelText("150 flagged holdings")).toBeInTheDocument();
+  });
+
+  it("renders exactly '99' at the boundary (not capped)", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} flaggedCount={99} />);
+    expect(screen.getByText("99")).toBeInTheDocument();
+    expect(screen.queryByText("99+")).toBeNull();
+  });
+
+  it("renders a small count verbatim", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} flaggedCount={5} />);
+    expect(screen.getByText("5")).toBeInTheDocument();
+  });
+});
+
 describe("Sidebar workspace — no role flags (defense-in-depth)", () => {
   it("renders NO workspace items when isAllocator + isManager + isAdmin are all unset", () => {
     // Issue #8 follow-up: the workspace flags are now explicit. A user
