@@ -108,6 +108,63 @@ class TestCompareDailies:
         assert out["clean"] is True
         assert out["overlap_days"] == 2
 
+    # BYB-01 FIX B: the anchor-to-today reconstruction (broker_dailies.py:26-36)
+    # shifts EVERY overlapping day's denominator by a constant when the series is
+    # recomputed later than the stored snapshot, so delta_t ∝ r_t^stored. A raw
+    # 1e-9 returns-space tolerance is invalid by construction; the gate must
+    # accept a pure proportional (anchor) shift while still catching a genuine
+    # single-day break.
+    _ANCHORED_STORED = {
+        "2026-01-01": 0.01,
+        "2026-01-02": -0.02,
+        "2026-01-03": 0.005,
+        "2026-01-04": 0.008,
+        "2026-01-05": -0.011,
+    }
+
+    def test_pure_anchor_shift_is_clean_despite_deltas_beyond_1e9(self) -> None:
+        """recomputed = stored re-anchored by a constant C (delta_t = C·r_t):
+        every overlapping delta exceeds 1e-9, but the single-parameter
+        anchor-shift model fits with ~zero residual, so this is BENIGN."""
+        c = 0.001  # a 0.1% anchor shift
+        recomputed = {d: v * (1.0 + c) for d, v in self._ANCHORED_STORED.items()}
+        out = compare_dailies(recomputed, self._stored(dict(self._ANCHORED_STORED)))
+        # The raw divergence really does exceed strict tol on every day...
+        assert out["max_abs_delta"] >= 1e-9
+        assert out["dates_beyond_tol"]  # non-empty: strict tol IS breached
+        # ...but the divergence is explained as a pure anchor shift.
+        assert out["anchor_shift_consistent"] is True
+        assert out["clean"] is True
+        # β recovers the shift constant; residual collapses to float noise.
+        assert out["anchor_shift_beta"] == pytest.approx(c, rel=1e-6)
+        assert out["anchor_shift_max_residual"] < 1e-9
+
+    def test_single_divergent_day_breaks_the_anchor_signature(self) -> None:
+        """A genuine one-day discrepancy (dropped funding bucket / real P&L
+        break) does NOT fit delta_t = β·r_t, leaving a large residual on that
+        day -> not anchor-consistent -> dirty, even under the anchor-aware gate."""
+        c = 0.001
+        recomputed = {d: v * (1.0 + c) for d, v in self._ANCHORED_STORED.items()}
+        recomputed["2026-01-03"] = self._ANCHORED_STORED["2026-01-03"] + 0.004
+        out = compare_dailies(recomputed, self._stored(dict(self._ANCHORED_STORED)))
+        assert out["anchor_shift_consistent"] is False
+        assert out["clean"] is False
+        assert "2026-01-03" in out["dates_beyond_tol"]
+        # The break is well under the 1% anchor cap, so it is the RESIDUAL
+        # (not the max-delta ceiling) that rejects it — proving the signature
+        # test, not a magnitude cutoff, caught the real discrepancy.
+        assert out["max_abs_delta"] < 0.01
+
+    def test_single_overlap_day_is_not_excused_as_anchor_shift(self) -> None:
+        """A lone overlap day fits ANY 1-parameter model perfectly, so the
+        anchor exemption must NOT apply (min-signal guard) — a single-day
+        discrepancy stays dirty."""
+        out = compare_dailies(
+            {"2026-01-01": 0.01}, self._stored({"2026-01-01": 0.0105})
+        )
+        assert out["anchor_shift_consistent"] is False
+        assert out["clean"] is False
+
 
 # ---------------------------------------------------------------------------
 # funding_bucket_summary — bucket set, never native id
