@@ -136,6 +136,11 @@ def test_scrub_freeform_string_compound_credential_keys():
         f"db_password={secret}",
         f"aws_secret={secret}",
         f"x-api-key: {secret}",
+        # Re-verify caveat A: CONCATENATED spellings (no separator) were covered
+        # by the old `api[-_]?secret` alternate and must stay covered — the new
+        # prefixed-class alternate alone requires a separator and misses these.
+        f"apisecret={secret}",
+        f"apiSecret: {secret}",
     )
     for line in compound_lines:
         out = scrub_freeform_string(line)

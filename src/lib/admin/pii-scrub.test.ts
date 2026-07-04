@@ -209,6 +209,11 @@ describe("scrubFreeformString", () => {
     ["db_password", `db_password=${SECRET}`],
     ["aws_secret", `aws_secret=${SECRET}`],
     ["x-api-key", `x-api-key: ${SECRET}`],
+    // Re-verify caveat A: CONCATENATED spellings (no separator) were covered by
+    // the old `api[-_]?secret` alternate and must stay covered — the new
+    // prefixed-class alternate alone requires a separator and misses these.
+    ["apisecret concatenated", `apisecret=${SECRET}`],
+    ["apiSecret camelCase", `apiSecret: ${SECRET}`],
   ];
 
   it.each(COMPOUND_SHAPES)(

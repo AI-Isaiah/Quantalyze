@@ -91,6 +91,7 @@ JWT_SUBSTRING: re.Pattern[str] = re.compile(
 _FREEFORM_KEY_ALTERNATES: tuple[str, ...] = (
     r"(?:[a-z0-9]+[-_])?api[-_]?key",
     r"(?:[a-z0-9]+[-_])?secret",
+    r"api[-_]?secret",  # concatenated apisecret/apiSecret: the optional prefix above REQUIRES a separator
     r"(?:[a-z0-9]+[-_])?password",
     r"(?:[a-z0-9]+[-_])?token",
     "credential",

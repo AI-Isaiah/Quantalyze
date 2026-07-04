@@ -85,6 +85,7 @@ function escapeRegex(s: string): string {
 const FREEFORM_KEY_ALTERNATES: ReadonlyArray<string> = [
   "(?:[a-z0-9]+[-_])?api[-_]?key",
   "(?:[a-z0-9]+[-_])?secret",
+  "api[-_]?secret", // concatenated apisecret/apiSecret: the optional prefix above REQUIRES a separator
   "(?:[a-z0-9]+[-_])?password",
   "(?:[a-z0-9]+[-_])?token",
   "credential",
