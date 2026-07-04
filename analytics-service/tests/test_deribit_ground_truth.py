@@ -29,12 +29,81 @@ from __future__ import annotations
 import pytest
 
 from scripts.deribit_ground_truth import (
+    _paginate_trades,
+    _redact_secret_values,
     assert_sanitized,
     classify_instrument,
     sanitize_evidence,
     scope_is_read_only,
     summarize_txn_log,
 )
+
+
+# ---------------------------------------------------------------------------
+# _paginate_trades — IN-8 same-ms cluster stall guard
+# ---------------------------------------------------------------------------
+
+
+class _StallExchange:
+    """Fake exchange that always returns the SAME same-millisecond cluster with
+    has_more=True — the pathological shape where a cluster larger than `count`
+    pins the cursor and every page re-fetches identical rows."""
+
+    def __init__(self, ts_ms: int) -> None:
+        self.calls = 0
+        self._page = {
+            "result": {
+                "trades": [
+                    {"trade_id": "t1", "timestamp": ts_ms, "instrument_name": "BTC-PERPETUAL"},
+                    {"trade_id": "t2", "timestamp": ts_ms, "instrument_name": "BTC-PERPETUAL"},
+                ],
+                "has_more": True,
+            }
+        }
+
+    async def private_get_get_user_trades_by_currency_and_time(self, params: dict) -> dict:
+        self.calls += 1
+        return self._page
+
+
+async def test_paginate_trades_breaks_on_same_ms_cluster_stall() -> None:
+    ts = 1_600_000_000_000
+    ex = _StallExchange(ts)
+    out = await _paginate_trades(
+        ex, "BTC", start_ms=ts, end_ms=ts + 1, count=2, max_pages=500
+    )
+    # The stall is surfaced, NOT silently spun to max_pages.
+    assert out["boundary_overlap_stall"] is True
+    assert out["max_pages_hit"] is False
+    # Distinct ids only — the re-fetched duplicate page adds nothing.
+    assert out["trade_count"] == 2
+    # It broke on the 2nd page (page 1 = all-new, page 2 = zero-new stall),
+    # nowhere near the 500-page ceiling.
+    assert ex.calls == 2
+
+
+# ---------------------------------------------------------------------------
+# _redact_secret_values — CR-1 belt-and-braces credential redaction
+# ---------------------------------------------------------------------------
+
+
+def test_redact_secret_values_strips_bare_credential() -> None:
+    # A ccxt error can echo the raw client_secret with NO `client_secret=`
+    # prefix (e.g. inside a URL or JSON body). scrub_freeform_string alone
+    # would miss that shape; the literal-value substitution guarantees it is
+    # gone. Value is obviously-synthetic (gitleaks-safe).
+    secret = "SYNTHETIC_NOT_A_REAL_SECRET_00000"
+    client_id = "SYNTHETIC_CLIENT_ID_11111"
+    msg = f"400 Bad Request: {{\"grant\":\"{secret}\",\"id\":\"{client_id}\"}}"
+    out = _redact_secret_values(msg, client_id, secret)
+    assert secret not in out
+    assert client_id not in out
+    assert "[REDACTED]" in out
+
+
+def test_redact_secret_values_tolerates_none() -> None:
+    # None credentials (env unset) must not raise and must leave text intact.
+    assert _redact_secret_values("plain message", None, None) == "plain message"
 
 
 # ---------------------------------------------------------------------------

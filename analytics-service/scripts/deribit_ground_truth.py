@@ -45,9 +45,27 @@ EXIT CODES
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from services.redact import scrub_freeform_string, truncate_account_id
+
+
+def _redact_secret_values(text: str, *secrets: str | None) -> str:
+    """Belt-and-braces (CR-1): scrub the freeform text AND explicitly replace
+    the literal ``client_id`` / ``client_secret`` VALUES with ``[REDACTED]``.
+
+    ``scrub_freeform_string`` only redacts ``key: value`` / JWT shapes. A ccxt
+    error that echoes the raw credential inside a URL, JSON body, or bare token
+    (no ``client_secret=`` prefix) would slip through. Substituting the known
+    literal values first guarantees the credential never reaches stderr even if
+    the exception format is one the freeform regex does not recognize.
+    """
+    out = str(scrub_freeform_string(str(text)))
+    for secret in secrets:
+        if secret:
+            out = out.replace(secret, "[REDACTED]")
+    return out
 
 # ---------------------------------------------------------------------------
 # Read-only scope gate (T-67-02) — fail loud BEFORE any data fetch.
@@ -242,6 +260,11 @@ DEFAULT_START_MS: int = 1_420_070_400_000
 DEFAULT_MAX_PAGES: int = 500
 DEFAULT_COUNT: int = 1000
 
+# Per-instrument-kind cap on whitelisted sample rows kept in the evidence JSON
+# (IN-4). A handful per kind is enough to characterize the shape; the counts,
+# not the samples, answer THE phase question.
+MAX_SAMPLES_PER_KIND: int = 3
+
 
 class ScopeViolationError(RuntimeError):
     """Raised when the Deribit key scope exceeds read-only (exit code 2)."""
@@ -290,6 +313,7 @@ async def _paginate_trades(
     trade_count = 0
     pages_used = 0
     max_pages_hit = False
+    boundary_overlap_stall = False
     instrument_kinds: dict[str, int] = {}
     samples: dict[str, list[dict[str, Any]]] = {}
     seen: set[str] = set()
@@ -314,22 +338,35 @@ async def _paginate_trades(
         pages_used += 1
         if not trades:
             break
+        new_in_page = 0
         for trade in trades:
             trade_id = str(trade.get("trade_id", ""))
             if trade_id and trade_id in seen:
                 continue
             if trade_id:
                 seen.add(trade_id)
+            new_in_page += 1
             trade_count += 1
             kind = classify_instrument(str(trade.get("instrument_name", "")))
             instrument_kinds[kind] = instrument_kinds.get(kind, 0) + 1
             bucket = samples.setdefault(kind, [])
-            if len(bucket) < 3:
+            if len(bucket) < MAX_SAMPLES_PER_KIND:
                 bucket.append(
                     {f: trade[f] for f in _TXN_LOG_WHITELIST if f in trade}
                 )
         has_more = bool(result.get("has_more", False))
         last_ts = trades[-1].get("timestamp")
+        # IN-8 same-ms cluster stall guard: cursor advances to last_ts
+        # (inclusive), so a same-millisecond cluster LARGER than `count` pins
+        # last_ts == cursor and every page re-fetches the identical rows —
+        # ZERO new trade_ids — forever (until max_pages). If a full page adds
+        # no new ids yet the server still claims has_more and cannot advance
+        # the cursor, stop: advancing past last_ts would SKIP the rest of the
+        # cluster (a boundary-overlap data loss), so we surface the stall in
+        # the evidence rather than silently truncate or spin.
+        if has_more and new_in_page == 0 and last_ts == cursor:
+            boundary_overlap_stall = True
+            break
         if not has_more or not isinstance(last_ts, int) or last_ts < cursor:
             break
         cursor = last_ts
@@ -337,6 +374,7 @@ async def _paginate_trades(
         "trade_count": trade_count,
         "pages_used": pages_used,
         "max_pages_hit": max_pages_hit,
+        "boundary_overlap_stall": boundary_overlap_stall,
         "instrument_kinds": instrument_kinds,
         "instrument_samples": samples,
     }
@@ -449,13 +487,22 @@ async def run(
     ex: Any = create_exchange("deribit", client_id, client_secret)
     try:
         # 1. Read-only scope gate — FAIL LOUD before any private fetch.
-        auth = await ex.public_get_auth(
-            {
-                "grant_type": "client_credentials",
-                "client_id": client_id,
-                "client_secret": client_secret,
-            }
-        )
+        # CR-1 belt-and-braces: the auth call is the ONE place the raw
+        # credentials cross the wire, so an error here is the likeliest to echo
+        # them back. Re-raise with the literal client_id/client_secret values
+        # stripped so nothing downstream (incl. main()'s except) can leak them.
+        try:
+            auth = await ex.public_get_auth(
+                {
+                    "grant_type": "client_credentials",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                _redact_secret_values(str(exc), client_id, client_secret)
+            ) from None
         auth_result = auth.get("result", {}) if isinstance(auth, dict) else {}
         scope = str(auth_result.get("scope", ""))
         evidence["scope"] = scope
@@ -514,12 +561,15 @@ async def run(
                 entry["trade_count"] = trades["trade_count"]
                 entry["trade_pages_used"] = trades["pages_used"]
                 entry["trade_max_pages_hit"] = trades["max_pages_hit"]
+                entry["trade_boundary_overlap_stall"] = trades[
+                    "boundary_overlap_stall"
+                ]
                 for kind, kcount in trades["instrument_kinds"].items():
                     instrument_mix[kind] = instrument_mix.get(kind, 0) + kcount
                 for kind, kslist in trades["instrument_samples"].items():
                     dest = instrument_samples.setdefault(kind, [])
                     for sample in kslist:
-                        if len(dest) < 3:
+                        if len(dest) < MAX_SAMPLES_PER_KIND:
                             dest.append(sample)
             except Exception as exc:  # noqa: BLE001
                 _record_exc(f"user_trades:{ccy}", exc)
@@ -630,7 +680,12 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001
-        print("ERROR: " + str(scrub_freeform_string(str(exc))), file=sys.stderr)
+        # CR-1 belt-and-braces: scrub key:value shapes AND strip the literal
+        # client_id/client_secret values before anything reaches stderr.
+        print(
+            "ERROR: " + _redact_secret_values(str(exc), client_id, client_secret),
+            file=sys.stderr,
+        )
         return 1
 
     clean = sanitize_evidence(evidence)
