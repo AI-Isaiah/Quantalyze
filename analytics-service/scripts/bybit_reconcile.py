@@ -63,6 +63,108 @@ from services.funding_fetch import _build_match_key
 from services.redact import scrub_freeform_string, truncate_account_id
 from scripts.deribit_ground_truth import assert_sanitized
 
+# Bybit /v5/execution/list retains only ~7 days of raw fills. Per the #563
+# finding, the Bybit fills under-fetch is a PROVIDER retention cap, NOT a P&L
+# bug — dailies derive from 365d closed-PnL (which walks fine), so a 180d fills
+# request over-reaches the exchange side and yields exchange_count=0 vs a large
+# DB count. Clamp BOTH sides of the fills compare to this retention floor so
+# they reconcile like-for-like.
+BYBIT_EXECUTION_RETENTION_DAYS = 7
+
+# PostgREST returns at most 1000 rows per response on Supabase hosted; a bare
+# ``.limit(N)`` silently truncates beyond that (the first live run read exactly
+# 1000 fills / 1000 funding buckets against tables holding far more). Every DB
+# read below drains to completion via ``services.db.paginated_select`` — the
+# same ``.range()`` idiom the production reconciliation/broker-dailies seams use.
+_PAGE_SIZE = 1000
+
+
+def _effective_fills_since(now: datetime, window_days: int) -> tuple[datetime, bool]:
+    """Clamp the requested fills window to Bybit's ~7d execution-list retention.
+
+    Returns ``(effective_since, was_clamped)``. A request longer than
+    ``BYBIT_EXECUTION_RETENTION_DAYS`` over-reaches the exchange side (#563
+    provider cap), so ``effective_since`` is the LATER of the requested window
+    start and the retention floor; ``was_clamped`` is True iff the floor bit."""
+    window_start = now - timedelta(days=window_days)
+    floor = now - timedelta(days=BYBIT_EXECUTION_RETENTION_DAYS)
+    fills_since = max(window_start, floor)
+    return fills_since, fills_since > window_start
+
+
+def _load_db_fills(
+    supabase: Any, strategy_id: str, effective_since_iso: str
+) -> list[dict[str, Any]]:
+    """Drain the strategy's DB fills at/after the effective (clamped) window.
+
+    Paginated (``.range()`` to a short page) — a bare ``.limit()`` truncated the
+    read at PostgREST's 1000-row ceiling on the first live run. Ordered by the
+    unique primary key ``id`` so pagination cannot skip or duplicate rows across
+    page boundaries."""
+    from services.db import paginated_select
+
+    builder = (
+        supabase.table("trades")
+        .select(
+            "id, exchange, exchange_fill_id, symbol, side, price, quantity, timestamp"
+        )
+        .eq("strategy_id", strategy_id)
+        .eq("is_fill", True)
+        .gte("timestamp", effective_since_iso)
+    )
+    return paginated_select(
+        builder,
+        order_by=(("id", False),),
+        page_size=_PAGE_SIZE,
+        truncation_hint="bybit_reconcile db fills",
+    )
+
+
+def _load_db_funding(
+    supabase: Any, strategy_id: str, window_start_iso: str
+) -> list[dict[str, Any]]:
+    """Drain the strategy's DB funding rows over the funding window.
+
+    Paginated; ordered by the unique primary key ``id`` (added to the projection
+    solely to anchor a stable page order — the bucket/day aggregations ignore
+    it)."""
+    from services.db import paginated_select
+
+    builder = (
+        supabase.table("funding_fees")
+        .select(
+            "id, strategy_id, exchange, symbol, amount, currency, timestamp, match_key"
+        )
+        .eq("strategy_id", strategy_id)
+        .gte("timestamp", window_start_iso)
+    )
+    return paginated_select(
+        builder,
+        order_by=(("id", False),),
+        page_size=_PAGE_SIZE,
+        truncation_hint="bybit_reconcile db funding",
+    )
+
+
+def _load_stored_dailies(
+    supabase: Any, column: str, value: Any
+) -> list[dict[str, Any]]:
+    """Drain stored ``csv_daily_returns`` for the axis. Paginated; ordered by
+    ``date`` (one row per axis per day, so a stable unique page order)."""
+    from services.db import paginated_select
+
+    builder = (
+        supabase.table("csv_daily_returns")
+        .select("date, daily_return")
+        .eq(column, value)
+    )
+    return paginated_select(
+        builder,
+        order_by=(("date", False),),
+        page_size=_PAGE_SIZE,
+        truncation_hint="bybit_reconcile stored dailies",
+    )
+
 # ---------------------------------------------------------------------------
 # Coercion helpers (pure, pandas-agnostic)
 # ---------------------------------------------------------------------------
@@ -372,6 +474,14 @@ async def run(api_key_id: str, window_days: int) -> tuple[dict[str, Any], int]:
     window_start_iso = window_start.isoformat()
     window_start_ms = int(window_start.timestamp() * 1000)
 
+    # Fills window clamp (#563 provider cap): Bybit only retains ~7d of raw
+    # fills, so a longer request over-reaches. Fetch since max(window_start,
+    # retention_floor) and scope the DB-fills side to the SAME effective window
+    # so both sides compare like-for-like.
+    fills_since, fills_window_clamped = _effective_fills_since(now, window_days)
+    fills_since_ms = int(fills_since.timestamp() * 1000)
+    fills_since_iso = fills_since.isoformat()
+
     supabase = get_supabase()
     masked_id = truncate_account_id(api_key_id)
 
@@ -420,33 +530,20 @@ async def run(api_key_id: str, window_days: int) -> tuple[dict[str, Any], int]:
     ex = create_exchange("bybit", api_key, api_secret, passphrase)
 
     try:
-        # ---- Fills half (mirror run_reconcile_strategy_job, fixed window) ----
+        # ---- Fills half (mirror run_reconcile_strategy_job, clamped window) ----
         exchange_fills = await fetch_raw_trades(
-            ex, strategy_id, supabase, since_ms=window_start_ms
+            ex, strategy_id, supabase, since_ms=fills_since_ms
         )
         # Drain the per-task DQ buffer IMMEDIATELY (the #563 sync_truncated_bybit
         # signal). Recorded in the report; never persisted.
         dq_flags = get_and_clear_last_dq_flags()
 
-        def _load_db_fills() -> list[dict[str, Any]]:
-            res = (
-                supabase.table("trades")
-                .select(
-                    "id, exchange, exchange_fill_id, symbol, side, "
-                    "price, quantity, timestamp"
-                )
-                .eq("strategy_id", strategy_id)
-                .eq("is_fill", True)
-                .gte("timestamp", window_start_iso)
-                .limit(50_000)
-                .execute()
-            )
-            return rows(res)
-
-        db_fill_rows = await db_execute(_load_db_fills)
+        db_fill_rows = await db_execute(
+            lambda: _load_db_fills(supabase, strategy_id, fills_since_iso)
+        )
         report_fills = diff_strategy_fills(
             strategy_id=str(strategy_id),
-            date_range=(window_start, now),
+            date_range=(fills_since, now),
             exchange_fills=exchange_fills,
             db_fills=[db_trade_to_fill(r) for r in db_fill_rows],
         )
@@ -457,21 +554,9 @@ async def run(api_key_id: str, window_days: int) -> tuple[dict[str, Any], int]:
         # job_worker.py:1761). The reconcile normalizes the label out (_relabel).
         fresh_funding = await fetch_funding_bybit(ex, api_key_id, window_start_ms)
 
-        def _load_db_funding() -> list[dict[str, Any]]:
-            res = (
-                supabase.table("funding_fees")
-                .select(
-                    "strategy_id, exchange, symbol, amount, "
-                    "currency, timestamp, match_key"
-                )
-                .eq("strategy_id", strategy_id)
-                .gte("timestamp", window_start_iso)
-                .limit(50_000)
-                .execute()
-            )
-            return rows(res)
-
-        db_funding_rows = await db_execute(_load_db_funding)
+        db_funding_rows = await db_execute(
+            lambda: _load_db_funding(supabase, strategy_id, window_start_iso)
+        )
 
         # ---- Dailies half (mirror run_derive_broker_dailies_job) ----
         equity, balance_error = await fetch_account_equity_usd(ex, "bybit")
@@ -488,20 +573,14 @@ async def run(api_key_id: str, window_days: int) -> tuple[dict[str, Any], int]:
     )
 
     # Stored dailies axis: api_key_id first (A6), fallback strategy_id.
-    def _load_stored(column: str, value: Any) -> list[dict[str, Any]]:
-        res = (
-            supabase.table("csv_daily_returns")
-            .select("date, daily_return")
-            .eq(column, value)
-            .limit(100_000)
-            .execute()
-        )
-        return rows(res)
-
-    stored_rows = await db_execute(lambda: _load_stored("api_key_id", api_key_id))
+    stored_rows = await db_execute(
+        lambda: _load_stored_dailies(supabase, "api_key_id", api_key_id)
+    )
     dailies_axis = "api_key_id"
     if not stored_rows:
-        stored_rows = await db_execute(lambda: _load_stored("strategy_id", strategy_id))
+        stored_rows = await db_execute(
+            lambda: _load_stored_dailies(supabase, "strategy_id", strategy_id)
+        )
         dailies_axis = "strategy_id"
 
     funding_summary = funding_bucket_summary(
@@ -525,7 +604,18 @@ async def run(api_key_id: str, window_days: int) -> tuple[dict[str, Any], int]:
         "true_discrepancy_count": true_discrepancy_count,
         "discrepancy_count": report_fills.discrepancy_count,
         "discrepancies": report_fills.discrepancies,
+        # Fills-window clamp evidence (#563 provider cap). Both the exchange and
+        # DB sides above were scoped to this effective window.
+        "window_clamped": fills_window_clamped,
+        "effective_since": fills_since.isoformat(),
     }
+    if fills_window_clamped:
+        fills_section["provider_cap_note"] = (
+            "Bybit /v5/execution/list retains only ~"
+            f"{BYBIT_EXECUTION_RETENTION_DAYS}d of raw fills (#563 provider cap, "
+            "not a P&L bug); both the exchange and DB fills sides were clamped to "
+            "effective_since for a like-for-like compare."
+        )
 
     report = build_report(
         api_key_id=api_key_id,
