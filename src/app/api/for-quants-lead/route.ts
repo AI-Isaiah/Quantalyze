@@ -170,9 +170,12 @@ const WIZARD_CONTEXT_SCHEMA = z
     // bare min(8).max(64) accepted ANY characters (e.g. an injected
     // `"><script>…` payload), making it stored-XSS fuel if the founder CRM ever
     // renders wizard_context as HTML. Constrain it to the charset every real
-    // producer already emits — UUIDs (crypto.randomUUID), the literal
-    // "desktop-gate", and the `cid-<base36>-<base36>` non-secure-context
-    // fallback all match — so a hostile token is rejected (400) at the boundary.
+    // producer already emits — UUIDs (crypto.randomUUID) and the
+    // `cid-<base36>-<base36>` non-secure-context fallback both match — so a
+    // hostile token is rejected (400) at the boundary. The legacy literal
+    // "desktop-gate" token (emitted by the DesktopGate component that Phase 46
+    // removed) is also charset-valid, so any old draft/analytics rows carrying
+    // it still validate — back-compat only, no live producer emits it now.
     wizard_session_id: z
       .string()
       .min(8)
@@ -185,10 +188,11 @@ const WIZARD_CONTEXT_SCHEMA = z
   // — a `{ step }` with no session id is a lead the funnel can never join
   // back to its parent view/click events, so the contract is silently
   // broken. Tie the two: a present `step` requires `wizard_session_id`.
-  // Both in-app producers already satisfy this (RequestCallModal's
-  // RequestCallWizardContext always carries both; DesktopGate sends the
-  // literal "desktop-gate"), so the refine rejects only malformed or
-  // forged payloads — never legitimate traffic. The refine runs only on
+  // The live in-app producer already satisfies this (RequestCallModal's
+  // RequestCallWizardContext always carries both), so the refine rejects only
+  // malformed or forged payloads — never legitimate traffic. (The Phase-46-
+  // removed DesktopGate sent a bare "desktop-gate" session id with no `step`,
+  // so it never depended on this refine.) The refine runs only on
   // the object branch; `null`/missing short-circuit via nullable/optional.
   .refine((ctx) => !ctx.step || Boolean(ctx.wizard_session_id), {
     message: "wizard_session_id is required when step is set",
@@ -395,8 +399,8 @@ export async function POST(req: NextRequest) {
   // cheap layer; the rotation-proof control (Turnstile/hCaptcha, which
   // residential-proxy + Origin spoofing can't defeat) is deferred
   // pending Cloudflare infra. A legitimate caller that omits the field
-  // entirely (e.g. the wizard DesktopGate) is unaffected — `website` is
-  // optional and undefined never trips this branch.
+  // entirely (e.g. the RequestCallModal wizard flow) is unaffected — `website`
+  // is optional and undefined never trips this branch.
   if (parsed.website && parsed.website.trim().length > 0) {
     // Fail-loud for OPS (silent only to the bot): log enough forensic
     // context — email + IP + UA — that a real lead falsely dropped by an

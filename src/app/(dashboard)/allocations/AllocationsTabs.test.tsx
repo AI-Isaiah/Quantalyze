@@ -140,7 +140,6 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
   // Phase 10 / Plan 10-03 — additive payload fields. Empty defaults match
   // the !portfolio + no-snapshots branch so the V1 / Stub paths render
   // their empty states unchanged.
-  holdingReturnsByScopeRef: {},
   allocator_id: "00000000-0000-0000-0000-000000000000",
   liveBaselineMetrics: {
     aum: 0,

@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.37.0.0] - 2026-07-04
+### Added — Deribit ground-truth harnesses (v1.7 phase 67, wave 1)
+Groundwork for Deribit track-record onboarding: two read-only evidence harnesses that run from the analytics worker and prove ingestion against the exchange's own records before any feature code is built on top.
+
+- **Deribit ground-truth harness** — authed, fully-paginated capture of real trades + transaction-log rows for one key (per-currency, `has_more`/`continuation` cursors, same-millisecond stall guard), recording the design-driving answers: how funding lands in realized PnL, the perp/future/option instrument mix, and any geo-block response marker. Enforces a read-only key scope before any data call and sanitizes every output byte (masked account ids, no key material) with a hard re-check on both the evidence and error paths.
+- **Bybit ground-truth reconciliation** — end-to-end proof of existing Bybit ingestion against fresh exchange data: fills by native execution id, funding by settlement bucket (Bybit rotates transaction ids), and per-key realized+funding dailies recomputed within 1e-9 of the stored series. Verdict-encoded exit codes keep "true discrepancy" distinct from usage or harness errors.
+- **Tracked answers template** (`analytics-service/docs/deribit-ground-truth.md`) — the answers template ships in-repo as the design contract the next phases build against; the live capture run (plan 67-03) records the answers.
+
+### Fixed — v1.6 carry-forward debt burned down (v1.7 phase 66)
+- **Honest save-limit error** — saving a portfolio whose book membership exceeds the cap now explains the real ceiling (raised from an arbitrary 64 to a named 1,000) and the actual remediation, instead of a misleading "check your connection" message. Membership is never silently truncated.
+- **Share-mint gate simplified** — the dead `isBookOnlyDraft` disjunct is gone; book-only drafts are blocked by the one real check, with a regression test pinning the behavior and the overstated "ONE definition of shareable" comment corrected.
+- **Deploy-skew membership sweep** — a detection-first, idempotent re-stamp sweep (with a CI fixture proving its discriminator and transform byte-match the runtime re-derivation, including the finite-value filter, the 730-day UTC window, and a predicate-parity gate) closes the mixed-version downgrade window; production showed zero affected rows.
+- **Friendly gantt labels** — the scenario coverage timeline names each book source by exchange + nickname instead of a raw key id.
+- **Flagged-count badge caps at 99+** — an admin with more than 99 flagged holdings no longer overflows the nav badge; screen readers still hear the true count.
+- **Credential scrubber hardening** — compound credential keys (`client_secret`, `access_token`, `db_password`, concatenated `apiSecret`) are now redacted in both the Python and TypeScript scrubbers; harness error paths withhold text entirely if a token-like run survives scrubbing.
+
+### Removed
+- **Dead SSR pipeline** — the unused `holdingReturnsByScopeRef` per-request reconstruction (519 lines) is deleted end-to-end; the live holdings summary path is untouched and the full suite plus coverage ratchet stay green.
+- **Prod test residue** — eight synthetic `phase10-rpc-*` auth users (and their cascade) deleted from production with before/after evidence.
+
+### Changed
+- **TODOS.md triaged to live debt only** (1001 → 690 lines) — every surviving entry re-verified against the codebase; landed items deleted.
+- **Type-safe compare payload** — the scenario compare panel's payload cast replaced with a compiler-checked structural type.
+
 ## [0.36.0.0] - 2026-07-03
 ### Added — scenario membership & series-space purification (v1.6 phases 62-64)
 Book-based scenarios now **remember exactly which API keys they were built from** — saved, shared, and compared scenarios all compute on that persisted membership instead of re-guessing from whatever keys happen to be eligible today.

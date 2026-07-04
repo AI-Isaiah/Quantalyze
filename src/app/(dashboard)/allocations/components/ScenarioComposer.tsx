@@ -123,6 +123,7 @@ import {
   defaultDraftFromHoldings,
   deriveMembershipFromGate,
   isDraftDrifted,
+  MAX_MEMBER_KEY_IDS,
   scenarioDraftCodec,
   setMemberKeyIds,
   type AddedStrategy,
@@ -651,6 +652,68 @@ function dataSourceLabel(k: { exchange: string; label: string; id: string }): {
   };
 }
 
+/** The canonical connection-failure copy — honest for a genuine network drop
+ *  (the `catch` path) or an opaque non-400 server failure. */
+const SAVE_ERROR_GENERIC =
+  "Couldn't save this portfolio. Check your connection and try again.";
+
+/** A single zod issue as it arrives in the save route's 400 body
+ *  (`{ error: "Invalid request body", issues }` — saved/route.ts:102-106). */
+type SaveIssue = { code?: string; path?: (string | number)[] };
+
+/**
+ * CF-02 — the ONE save-error copy mapper (mirrors the `dataSourceLabel`
+ * one-small-pure-helper idiom; no inline per-site string logic across the four
+ * save sites). The over-cap failure is a 400 whose zod `issues` carry a
+ * `too_big` entry on the `memberKeyIds` path (the count exceeded
+ * MAX_MEMBER_KEY_IDS). That path was previously swallowed by the generic
+ * `!res.ok` branch, so an allocator over the cap saw a misleading "check your
+ * connection" message. Special-case ONLY that shape — honest copy naming the
+ * real ceiling (interpolated from the const, never a hard-coded literal) — and
+ * fall back to the generic string for every other failure. Scope-tight: a 400
+ * whose issues do not touch `memberKeyIds` still gets the generic copy.
+ */
+function saveErrorMessage(status: number, issues?: SaveIssue[]): string {
+  if (status === 400 && Array.isArray(issues)) {
+    const overCap = issues.some(
+      (iss) =>
+        iss?.code === "too_big" &&
+        Array.isArray(iss.path) &&
+        iss.path.includes("memberKeyIds"),
+    );
+    if (overCap) {
+      // IN-9: memberKeyIds is GATE-DERIVED from the allocator's connected
+      // exchange keys — it is NOT a set the allocator picks inside the
+      // composer, so "remove some sources" pointed at a control that does not
+      // exist here. The honest remediation is disconnecting an unused exchange
+      // connection. Ceiling stays interpolated from the const, never literal.
+      return `This portfolio spans more than ${MAX_MEMBER_KEY_IDS} connected exchange keys — the current save limit. Disconnect an unused exchange connection and try again.`;
+    }
+  }
+  return SAVE_ERROR_GENERIC;
+}
+
+/**
+ * Defensively read the zod `issues` array off a failed save response. The body
+ * may not be JSON (proxy error page, truncated stream) — on any parse failure
+ * return `undefined` so `saveErrorMessage` falls back to the generic copy.
+ */
+async function readSaveIssues(res: Response): Promise<SaveIssue[] | undefined> {
+  try {
+    const body: unknown = await res.json();
+    if (
+      body &&
+      typeof body === "object" &&
+      Array.isArray((body as { issues?: unknown }).issues)
+    ) {
+      return (body as { issues: SaveIssue[] }).issues;
+    }
+  } catch {
+    // Non-JSON / truncated body — generic copy is honest here.
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // ScenarioComposer
 // ---------------------------------------------------------------------------
@@ -793,6 +856,11 @@ export function ScenarioComposer({
   // existing `projectionState.selected` channel keyed by api_key_id so the frozen
   // engine honestly recomputes the curve + every KPI on exclusion (DSRC-03) —
   // never a cosmetic hide.
+  //
+  // D3 source-toggle persistence: DECIDED no persistence (YAGNI, Phase 66
+  // CF-05). The Phase-36 D3 toggle is deliberately TRANSIENT exploration UI
+  // state — resets on reload, out of the commit diff — and no user has asked to
+  // persist an exclusion set across sessions. Revisit only on real user demand.
   const [includeByApiKeyId, setIncludeByApiKeyId] = useState<
     Record<string, boolean>
   >({});
@@ -1569,9 +1637,7 @@ export function ScenarioComposer({
         }),
       });
       if (!res.ok) {
-        setSaveError(
-          "Couldn't save this portfolio. Check your connection and try again.",
-        );
+        setSaveError(saveErrorMessage(res.status, await readSaveIssues(res)));
         return;
       }
       const data: { id?: string; name?: string } = await res.json();
@@ -1586,9 +1652,8 @@ export function ScenarioComposer({
       // PERSIST-03 — let a host's saved-scenarios list refetch the new row.
       onScenarioSaved?.();
     } catch {
-      setSaveError(
-        "Couldn't save this portfolio. Check your connection and try again.",
-      );
+      // A thrown fetch is a genuine network failure — the generic copy is honest.
+      setSaveError(SAVE_ERROR_GENERIC);
     } finally {
       setSavePending(false);
     }
@@ -1613,17 +1678,14 @@ export function ScenarioComposer({
         },
       );
       if (!res.ok) {
-        setSaveError(
-          "Couldn't save this portfolio. Check your connection and try again.",
-        );
+        setSaveError(saveErrorMessage(res.status, await readSaveIssues(res)));
       } else {
         // PERSIST-03 — let a host's saved-scenarios list refetch (name/order).
         onScenarioSaved?.();
       }
     } catch {
-      setSaveError(
-        "Couldn't save this portfolio. Check your connection and try again.",
-      );
+      // A thrown fetch is a genuine network failure — the generic copy is honest.
+      setSaveError(SAVE_ERROR_GENERIC);
     } finally {
       setSavePending(false);
     }
@@ -2341,17 +2403,36 @@ export function ScenarioComposer({
   // a prop and never runs the containment predicate locally, so the gantt bars
   // agree with the row chips and the divisor by construction. Spans come from the
   // shared `selectedSpanById` scan (Rule 2: computed once).
+  // CF-05 — api_key_id → friendly exchange/account label, built from the SAME
+  // `payload.apiKeys` + `dataSourceLabel` idiom the "Data sources" control
+  // renders (`${Exchange} — ${nickname|••••tail}`). A per-key (book-member)
+  // unit carries the RAW api_key_id as its `name` from
+  // buildPerKeyStrategyForBuilderSet (scenario-adapter.ts: `key <uuid>`), so
+  // without this map the gantt would show a raw UUID. This is the ONE place the
+  // per-key row name is resolved before rows reach CoverageTimeline (which only
+  // renders `row.name` — it never derives labels). No second label formatter.
+  const apiKeyLabelById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const k of payload.apiKeys ?? []) {
+      const { exchange, nickname, maskedTail } = dataSourceLabel(k);
+      m.set(k.id, `${exchange} — ${nickname ?? maskedTail}`);
+    }
+    return m;
+  }, [payload.apiKeys]);
+
   const timelineRows = useMemo(
     () =>
       engineSet.strategies
         .filter((s) => engineSet.state.selected[s.id])
         .map((s) => ({
           id: s.id,
-          name: s.name,
+          // Per-key rows resolve to the friendly data-source label; strategy
+          // rows have no apiKeys entry and keep their own `s.name` unchanged.
+          name: apiKeyLabelById.get(s.id) ?? s.name,
           span: selectedSpanById.get(s.id) ?? null,
           inBlend: coverageEligible[s.id] === true,
         })),
-    [engineSet, selectedSpanById, coverageEligible],
+    [engineSet, selectedSpanById, coverageEligible, apiKeyLabelById],
   );
 
   // The ONE "active window IS the common period" equality — lexicographic

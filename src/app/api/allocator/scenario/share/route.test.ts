@@ -348,11 +348,13 @@ describe("scenario/share generate route — static security guards", () => {
     expect(routeSrc).toContain("mintShareToken");
   });
 
-  // MEMBER-03 — the book-only mint gate reads the SHARED null-safe predicate
-  // (one definition of book-only across mint/resolve/compare), not an ad-hoc
-  // inline addedStrategies-empty check that could drift from the other surfaces.
-  it("gates book-only mint via the shared isBookOnlyDraft predicate", () => {
-    expect(routeSrc).toContain("isBookOnlyDraft");
+  // CF-01 — the book-only mint gate keys PURELY on `addedStrategies` emptiness
+  // (via `nothingShareable`); the provably-dead `isBookOnlyDraft` disjunct was
+  // deleted (F-3). Pin that no reference to the removed predicate survives in
+  // the route — book-only ⇔ zero added strategies is the one honest definition.
+  it("gates book-only mint on addedStrategies emptiness alone — no isBookOnlyDraft disjunct", () => {
+    expect(routeSrc).not.toContain("isBookOnlyDraft");
+    expect(routeSrc).toContain("nothingShareable");
   });
 
   it("imports the user-scoped client from @/lib/supabase/server (RLS is the tenant gate)", () => {
@@ -387,11 +389,11 @@ describe("scenario/share generate route — static security guards", () => {
     expect(rpcSpy).not.toHaveBeenCalled();
   });
 
-  // MEMBER-03 — the mint gate reads the SAME null-safe isBookOnlyDraft predicate
-  // the compare/share surfaces use (one definition of book-only across
-  // mint/resolve/compare). A draft that is book-only BY THAT PREDICATE (explicit
-  // book members, zero added strategies) is rejected at the source with the same
-  // 409 + code:"book_only_draft".
+  // MEMBER-03 — the mint gate keys PURELY on `addedStrategies` emptiness (via
+  // `nothingShareable`); the `isBookOnlyDraft` disjunct was provably dead and
+  // was deleted (CF-01/F-3). A draft with explicit book members but ZERO added
+  // strategies is book-only, so `nothingShareable` rejects it at the source with
+  // a 409 + code:"book_only_draft" — no minted share.
   it("T_SH15 — a book-only-BY-MEMBERSHIP draft (memberKeyIds set, no added) → 409 book_only_draft, NO share minted", async () => {
     ownershipResult = {
       data: {
@@ -399,6 +401,33 @@ describe("scenario/share generate route — static security guards", () => {
         draft: {
           addedStrategies: [],
           memberKeyIds: ["11111111-1111-1111-1111-111111111111"],
+        },
+      },
+      error: null,
+    };
+    const res = await POST(mkPost({ scenario_id: SCENARIO_ID }));
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe("book_only_draft");
+    expect(rpcSpy).not.toHaveBeenCalled();
+  });
+
+  // CF-01 (F-3) neuter-check — after deleting the provably-dead `isBookOnlyDraft`
+  // disjunct, a book-only-BY-MEMBERSHIP draft (multiple explicit book members,
+  // ZERO added strategies) MUST still 409 via the SURVIVING `nothingShareable`
+  // (addedStrategies-empty) check ALONE. This is the regression that pins the
+  // fix: it fails if the `nothingShareable` block is removed, proving the
+  // deletion did not loosen the gate (T-66-04 — effective behavior unchanged).
+  it("T_SH17 — book-only-by-membership (2 memberKeyIds, no added) → 409 via nothingShareable alone", async () => {
+    ownershipResult = {
+      data: {
+        id: "scen-1",
+        draft: {
+          addedStrategies: [],
+          memberKeyIds: [
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+          ],
         },
       },
       error: null,

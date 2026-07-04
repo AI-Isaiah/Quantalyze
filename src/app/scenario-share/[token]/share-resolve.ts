@@ -207,8 +207,8 @@ export function resolveSharedScenario(
   // dead em-dash shell ("0 overlapping days", every metric "—") that read as
   // a broken link. Surface the designed honest-absence state instead, with
   // the reason so the page can say why. (The share-mint route now also rejects
-  // minting these via the shared null-safe `isBookOnlyDraft` predicate — this
-  // branch keeps ALREADY-MINTED links honest.)
+  // minting these on the same honest rule — book-only ⇔ zero added strategies —
+  // so this branch keeps ALREADY-MINTED links honest.)
   //
   // MEMBER-03 (unified book-only definition) — detection stays on the RESOLVED
   // `strategies.length`, NEVER `draft.memberKeyIds.length`. This is the ONE
@@ -218,8 +218,8 @@ export function resolveSharedScenario(
   // branch on the strategies count means such a share is still surfaced
   // honestly and the code is never forced to read `.length` off an undefined
   // membership. Any draft with zero added series — WITH or WITHOUT book
-  // members — is honest-absence "book-only" (no RPC expansion). The mint gate's
-  // `isBookOnlyDraft` is the same null-safe predicate; this branch is its
+  // members — is honest-absence "book-only" (no RPC expansion). The mint gate
+  // keys on the same honest rule (zero added strategies); this branch is its
   // resolved-projection counterpart.
   if (strategies.length === 0) {
     return { kind: "honest-absence", reason: "book-only" };
@@ -284,7 +284,7 @@ export function resolveSharedScenario(
     // The addedStrategies-non-empty half of MIXED is guaranteed BY CONSTRUCTION
     // here: the :214 `strategies.length === 0` book-only guard already
     // honest-absenced a zero-added draft, so the ok branch needs only the
-    // membership check. Null-safe `?? []` (the Phase-62 isBookOnlyDraft
+    // membership check. Null-safe `?? []` (the Phase-62 book-only-predicate
     // precedent): a pre-v4 decode leaves membership undefined at runtime despite
     // the required-at-v4 type → falsy → false → no caption for unknown
     // membership.

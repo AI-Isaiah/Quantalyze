@@ -31,6 +31,7 @@ import { render, screen, fireEvent, act, cleanup, waitFor } from "@testing-libra
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import {
   computeHoldingsFingerprint,
+  MAX_MEMBER_KEY_IDS,
   scenarioStorageKey,
   SCENARIO_SCHEMA_VERSION,
   type ScenarioDraft,
@@ -205,16 +206,6 @@ function makePayload(
     flaggedHoldings: [],
     matchDecisionsByHoldingRef: {},
     mandate: null,
-    holdingReturnsByScopeRef: {
-      [REF_BTC]: [
-        { date: "2026-01-01", value: 0.001 },
-        { date: "2026-01-02", value: 0.002 },
-      ],
-      [REF_ETH]: [
-        { date: "2026-01-01", value: 0.0015 },
-        { date: "2026-01-02", value: 0.001 },
-      ],
-    },
     allocator_id: ALLOCATOR_A,
     liveBaselineMetrics: {
       aum: 100_000,
@@ -598,6 +589,119 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     expect(
       screen.getByRole("button", { name: /^Save portfolio$/i }),
     ).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // T_SAVE9b (CF-02) — an OVER-CAP save (400 with a memberKeyIds/too_big issue)
+  //                    renders the HONEST ceiling copy naming MAX_MEMBER_KEY_IDS,
+  //                    NOT the misleading connection message. Fails-without-fix:
+  //                    the pre-change code showed the generic copy for all !res.ok.
+  // -------------------------------------------------------------------------
+  it("T_SAVE9b an over-cap save (400 memberKeyIds/too_big) shows the honest ceiling copy naming MAX_MEMBER_KEY_IDS, never 'Check your connection'", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        error: "Invalid request body",
+        issues: [
+          { code: "too_big", path: ["draft", "memberKeyIds"], maximum: MAX_MEMBER_KEY_IDS },
+        ],
+      }),
+    })) as unknown as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Too many books" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      // Honest copy names the real ceiling (interpolated from the const) and
+      // the correct remediation — disconnecting an exchange connection, since
+      // memberKeyIds is gate-derived, not user-selected in the composer (IN-9).
+      expect(
+        screen.getByText(
+          new RegExp(
+            `more than ${String(MAX_MEMBER_KEY_IDS)} connected exchange keys`,
+            "i",
+          ),
+        ),
+      ).toBeInTheDocument();
+    });
+    // The misleading connection copy is NOT shown for this over-cap 400.
+    expect(
+      screen.queryByText(/Check your connection/i),
+    ).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // T_SAVE9c (CF-02 scope) — a 400 whose issues do NOT touch memberKeyIds still
+  //                    renders the generic copy (the helper only special-cases the
+  //                    over-cap shape — no scope creep to other validation errors).
+  // -------------------------------------------------------------------------
+  it("T_SAVE9c a 400 whose issues do NOT touch memberKeyIds still shows the generic copy (no scope creep)", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        error: "Invalid request body",
+        issues: [{ code: "invalid_type", path: ["name"] }],
+      }),
+    })) as unknown as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Bad name shape" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Couldn't save this portfolio\./i),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText(/connected exchange keys/i),
+    ).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // T_SAVE9d (IN-5) — a 400 whose res.json() THROWS (non-JSON body: proxy error
+  //                    page, truncated stream) must fall back to the generic
+  //                    copy via readSaveIssues' catch — never the ceiling copy,
+  //                    and never an unhandled rejection that crashes the save.
+  // -------------------------------------------------------------------------
+  it("T_SAVE9d a 400 whose res.json() throws (SyntaxError) renders the generic copy, never the ceiling copy, and does not crash", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => {
+        throw new SyntaxError("Unexpected token < in JSON at position 0");
+      },
+    })) as unknown as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Non-JSON 400 body" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Couldn't save this portfolio\./i),
+      ).toBeInTheDocument();
+    });
+    // The over-cap ceiling copy must NOT appear — we could not parse issues, so
+    // the honest fallback is the generic copy, not a fabricated cap message.
+    expect(
+      screen.queryByText(/connected exchange keys/i),
+    ).not.toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------

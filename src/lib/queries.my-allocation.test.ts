@@ -2114,7 +2114,7 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
     );
   });
 
-  it("Phase 37: byte-identity — exposing the per-key channel does NOT alter liveBaselineMetrics or holdingReturnsByScopeRef (Pitfall 2)", async () => {
+  it("Phase 37: byte-identity — exposing the per-key channel does NOT alter liveBaselineMetrics (Pitfall 2)", async () => {
     activeKeyA();
     seedHoldingsKeyA();
     seedSnapshotsBTC();
@@ -2131,16 +2131,6 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
       result.perKeyReturnsByApiKeyId,
     );
     expect(result.liveBaselineMetrics).toEqual(expectedPerKey);
-
-    // holdingReturnsByScopeRef is the Phase-36 snapshot reconstruction,
-    // untouched by the new channel — keyed by scope_ref, not api_key_id.
-    expect(Object.keys(result.holdingReturnsByScopeRef)).toEqual([
-      "holding:binance:BTC:spot",
-    ]);
-    // The two channels are DISJOINT key spaces (no repoint cross-contamination).
-    for (const k of Object.keys(result.holdingReturnsByScopeRef)) {
-      expect(result.perKeyReturnsByApiKeyId).not.toHaveProperty(k);
-    }
   });
 
   it("Phase 37: cross-tenant guard — perKeyReturnsByApiKeyId keys are a SUBSET of the allocator's own apiKeys[].id (T-37-01-01)", async () => {

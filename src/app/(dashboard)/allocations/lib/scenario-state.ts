@@ -675,20 +675,6 @@ export function deriveMembershipFromGate(
 }
 
 /**
- * NULL-SAFE book-only predicate: true iff the draft has ≥1 explicit book member
- * AND zero added strategies. `?? []` guards the UNDERIVED case — a codec-decoded
- * draft upgraded from v2/v3 (or an underived-v4 round-trip blob) has
- * `memberKeyIds === undefined`, and plan 03 calls this on raw decoded drafts, so
- * reading `.length` off undefined must NOT throw (it returns false instead).
- */
-export function isBookOnlyDraft(draft: ScenarioDraft): boolean {
-  return (
-    (draft.memberKeyIds ?? []).length >= 1 &&
-    (draft.addedStrategies ?? []).length === 0
-  );
-}
-
-/**
  * The new-save STAMP transform: return a copy of `draft` with `memberKeyIds`
  * replaced by `ids` (pure — never mutates the input). DISTINCT from
  * `deriveMembershipFromGate` (which COMPUTES the ids from the gate); this only
@@ -739,6 +725,21 @@ const addedStrategySchema = z.object({
 const MAX_DRAFT_RECORD_ENTRIES = 2000;
 const MAX_DRAFT_KEY_LENGTH = 512;
 
+/**
+ * v1.6 CF-02 — the explicit-membership id-count cap. Raised from the arbitrary
+ * 64 (F-5: an allocator with more than 64 eligible book sources had membership
+ * SILENTLY rejected at save, and the composer showed a misleading connection
+ * error). No DB or product cap bounds the eligible `api_keys` per allocator, so
+ * the ceiling is a pure DoS bound: 1000 UUIDs ≈ 36KB, two orders of magnitude
+ * under the route-level `MAX_DRAFT_BODY_BYTES = 256_000` guard which — together
+ * with the per-id `.max(MAX_DRAFT_KEY_LENGTH)` below — remains the real DoS
+ * defense. Exported so the composer can name this exact ceiling in the honest
+ * over-cap error copy (CF-02 error surface) instead of hard-coding a literal.
+ * Fail-loud: over-cap drafts are REJECTED, never silently clamped (a clamped
+ * stamp would break share-caption membership honesty).
+ */
+export const MAX_MEMBER_KEY_IDS = 1000;
+
 const boundedRecord = <V extends z.ZodTypeAny>(value: V, label: string) =>
   z
     .record(z.string().max(MAX_DRAFT_KEY_LENGTH), value)
@@ -788,9 +789,15 @@ export const scenarioDraftSchema = z.object({
   // v4-membership superRefine here would fail safeParse and route those blobs to
   // reset, SILENTLY DELETING every upgraded draft on the localStorage round-trip
   // (the blocker). The v4 REQUIRED contract lives on `scenarioDraftSaveSchema`
-  // below. Bounds (T-62-02 DoS): ≤64 ids, each ≤MAX_DRAFT_KEY_LENGTH chars,
-  // under the route-level MAX_DRAFT_BODY_BYTES cap.
-  memberKeyIds: z.array(z.string().max(MAX_DRAFT_KEY_LENGTH)).max(64).optional(),
+  // below. Bounds (T-62-02 / CF-02 DoS): ≤MAX_MEMBER_KEY_IDS (1000) ids, each
+  // ≤MAX_DRAFT_KEY_LENGTH chars, under the route-level MAX_DRAFT_BODY_BYTES cap
+  // — the per-id length bound and the byte cap remain the real DoS guards (the
+  // count cap is generous headroom, not the defense; F-5: 64 was arbitrary and
+  // silently rejected legitimate large books).
+  memberKeyIds: z
+    .array(z.string().max(MAX_DRAFT_KEY_LENGTH))
+    .max(MAX_MEMBER_KEY_IDS)
+    .optional(),
   // ISO-8601 timestamp (`new Date().toISOString()` is 24 chars); 64 is generous.
   lastEditedAt: z.string().max(64),
 });

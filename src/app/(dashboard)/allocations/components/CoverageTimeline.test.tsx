@@ -181,6 +181,45 @@ describe("CoverageTimeline (COVERAGE-01)", () => {
     expect(bar.getAttribute("style") ?? "").not.toContain("NaN");
   });
 
+  it("CF-05: surfaces a friendly data-source label (not a raw id) in the row text, title, AND aria-label", () => {
+    // Per-key (book-member) gantt rows arrive with their `name` already
+    // resolved to the friendly exchange/account label upstream (the composer's
+    // dataSourceLabel idiom — CF-05). This pins CoverageTimeline's render
+    // CONTRACT: it surfaces whatever `name` it is handed in ALL THREE
+    // user-facing places (the truncated row text, its `title` tooltip, and the
+    // bar aria-label) and never re-derives or mangles it — so a friendly label
+    // reaches the user everywhere and a raw UUID never would.
+    const FRIENDLY = "Bybit — Main";
+    const RAW_ID = "11111111-2222-3333-4444-555555555555";
+    const { container } = render(
+      <CoverageTimeline
+        rows={[
+          {
+            id: RAW_ID,
+            name: FRIENDLY,
+            span: { first: "2022-01-01", last: "2024-12-31" },
+            inBlend: true,
+          },
+        ]}
+        unionWindow={UNION}
+        activeWindow={ACTIVE}
+      />,
+    );
+    expandPanel(container);
+    // Visible row text + its `title` tooltip both show the friendly label.
+    const nameCell = screen.getByTitle(FRIENDLY);
+    expect(nameCell).toHaveTextContent(FRIENDLY);
+    // The bar's aria-label restates the friendly label as TEXT (WCAG).
+    const bar = container.querySelector(
+      `[data-testid='coverage-bar-${RAW_ID}']`,
+    ) as HTMLElement;
+    expect(bar.getAttribute("aria-label") ?? "").toContain(FRIENDLY);
+    // The raw id never leaks into any user-facing text/attr (the `data-testid`
+    // is exempt — it is not surfaced to the user).
+    expect(nameCell.textContent ?? "").not.toContain(RAW_ID);
+    expect(bar.getAttribute("aria-label") ?? "").not.toContain(RAW_ID);
+  });
+
   it("STATIC GUARD: the source uses no `new Date(` (timezone rule — utcEpoch only)", () => {
     const src = readFileSync(
       path.resolve(

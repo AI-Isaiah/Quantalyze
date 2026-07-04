@@ -117,11 +117,6 @@ const PAYLOAD: ScenarioComparePanelProps["payload"] = {
     { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 60000 },
   ],
   strategies: [],
-  holdingReturnsByScopeRef: {
-    "holding:binance:BTC:spot": [
-      { date: "2026-01-01", value: 0.001 },
-    ],
-  },
 } as unknown as ScenarioComparePanelProps["payload"];
 
 describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
@@ -313,7 +308,7 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
     const inputs = mockComputeMetricsForDraft.mock
       .calls[0][1] as ScenarioCompareInputs;
     // Phase 63 ENGINE-02 repoint: the legacy holdings-snapshot engine inputs
-    // (holdingsSummary / holdingReturnsByScopeRef / symbolByHoldingId) are
+    // (holdingsSummary / symbolByHoldingId) are
     // deleted from ScenarioCompareInputs. The panel now derives the SERIES-SPACE
     // shape — the added-strategy lookups + the per-key channel — from the same
     // payload with no second fetch. Assert the derived shrunk shape.

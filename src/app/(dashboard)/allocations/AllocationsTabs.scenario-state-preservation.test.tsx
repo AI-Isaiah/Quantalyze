@@ -200,7 +200,6 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
   flaggedHoldings: [],
   matchDecisionsByHoldingRef: {},
   mandate: null,
-  holdingReturnsByScopeRef: {},
   allocator_id: ALLOCATOR_ID,
   liveBaselineMetrics: {
     aum: 100_000,
