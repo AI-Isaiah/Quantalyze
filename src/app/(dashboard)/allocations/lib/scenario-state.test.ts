@@ -30,6 +30,7 @@ import {
   renormalizeWeights,
   scenarioDraftCodec,
   scenarioDraftSaveSchema,
+  MAX_MEMBER_KEY_IDS,
   deriveMembershipFromGate,
   setMemberKeyIds,
   SCENARIO_SCHEMA_VERSION,
@@ -762,6 +763,49 @@ describe("MEMBER-01 v4 codec + membership helpers", () => {
   it("scenarioDraftSaveSchema ACCEPTS a schema_version < 4 blob (the >=4 refine skips) — proving the refine is on the SAVE schema, not the codec schema", () => {
     expect(scenarioDraftSaveSchema.safeParse(rawDraftAt(2)).success).toBe(true);
     expect(scenarioDraftSaveSchema.safeParse(rawDraftAt(3)).success).toBe(true);
+  });
+
+  // ---- CF-02 (F-5): the memberKeyIds count cap is MAX_MEMBER_KEY_IDS, not 64 ----
+  // The arbitrary .max(64) silently rejected an allocator with >64 eligible book
+  // sources. Cap raised to the named/exported MAX_MEMBER_KEY_IDS (1000). Tests
+  // build arrays FROM the const so they track it (never a hard-coded 1000). The
+  // 65-accepted test is the fails-without-fix regression: it fails against the
+  // pre-change .max(64) code.
+  const memberIds = (n: number): string[] =>
+    Array.from(
+      { length: n },
+      (_v, i) => `key-${String(i).padStart(6, "0")}`,
+    );
+
+  it("CF-02 — a draft with 65 memberKeyIds PASSES (fails-without-fix: .max(64) rejected it)", () => {
+    const parsed = scenarioDraftSaveSchema.safeParse(
+      rawDraftAt(SCENARIO_SCHEMA_VERSION, { memberKeyIds: memberIds(65) }),
+    );
+    expect(parsed.success).toBe(true);
+  });
+
+  it("CF-02 — a draft with exactly MAX_MEMBER_KEY_IDS memberKeyIds PASSES (the boundary is accepted)", () => {
+    const parsed = scenarioDraftSaveSchema.safeParse(
+      rawDraftAt(SCENARIO_SCHEMA_VERSION, {
+        memberKeyIds: memberIds(MAX_MEMBER_KEY_IDS),
+      }),
+    );
+    expect(parsed.success).toBe(true);
+  });
+
+  it("CF-02 — a draft with MAX_MEMBER_KEY_IDS + 1 memberKeyIds is REJECTED with a too_big issue on the memberKeyIds path (fail-loud, never clamped)", () => {
+    const parsed = scenarioDraftSaveSchema.safeParse(
+      rawDraftAt(SCENARIO_SCHEMA_VERSION, {
+        memberKeyIds: memberIds(MAX_MEMBER_KEY_IDS + 1),
+      }),
+    );
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      const overCap = parsed.error.issues.find(
+        (iss) => iss.code === "too_big" && iss.path.includes("memberKeyIds"),
+      );
+      expect(overCap).toBeDefined();
+    }
   });
 
   // ---- deriveMembershipFromGate: the ONE upgrade-read derivation rule ----
