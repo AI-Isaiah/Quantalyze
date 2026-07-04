@@ -41,6 +41,14 @@
 --     would count as has_series=true here yet derive an EMPTY runtime series,
 --     and the sweep could stamp eligible ids where a reopen would stamp []
 --     (WR-01), breaking the byte-equal-to-a-reopen invariant.
+--   - series-fetch window:       src/lib/queries.ts:2571-2584 (.gte "date")
+--     the runtime fetches csv_daily_returns bounded to the last 730 days
+--     (CURRENT_DATE - INTERVAL '730 days') BEFORE the gate runs, so rows older
+--     than the window are invisible to the runtime series. has_series below
+--     MUST apply the SAME 730-day date window — otherwise a key whose only
+--     finite rows are >730 days old counts as has_series=true here yet derives
+--     an EMPTY runtime series (CR-2), the same class of byte-equality break as
+--     WR-01 but on the time axis rather than the finiteness axis.
 --
 -- The stamped id array is normalized ORDER BY api_key_id for determinism —
 -- caption honesty depends on the SET of member keys, not their order.
@@ -147,6 +155,14 @@ SET draft = jsonb_set(
           -- three non-finite float8 literals explicitly.
           SELECT 1 FROM csv_daily_returns c
           WHERE c.api_key_id = k.id
+            -- CR-2: mirror the runtime's 730-day DATE WINDOW. The runtime
+            -- fetches csv_daily_returns with .gte("date", now-730d)
+            -- (queries.ts:2577) BEFORE the gate, so a key whose ONLY finite
+            -- rows are older than 730 days derives an EMPTY runtime series
+            -- (gate false). Without this bound the sweep would see has_series
+            -- = true and stamp eligible ids where a reopen stamps [],
+            -- breaking the byte-equal-to-a-reopen invariant.
+            AND c.date >= (CURRENT_DATE - INTERVAL '730 days')
             AND c.daily_return <> 'NaN'::float8
             AND c.daily_return <> 'Infinity'::float8
             AND c.daily_return <> '-Infinity'::float8

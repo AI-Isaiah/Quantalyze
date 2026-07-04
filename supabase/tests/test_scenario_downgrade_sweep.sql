@@ -30,6 +30,14 @@
 --     key derives an EMPTY series -> gate false -> stamped []. A bare
 --     `EXISTS (SELECT 1 ...)` has_series would (wrongly) see rows exist and stamp
 --     the key's id — this case proves has_series now mirrors the finite filter.
+--   - Allocator OLD (gate FALSE, CR-2 regression): one eligible key whose ONLY
+--     csv_daily_returns rows are FINITE but older than the runtime's 730-day
+--     fetch window (queries.ts:2577 bounds the series fetch with
+--     .gte("date", now-730d) BEFORE the gate). Those rows are invisible to the
+--     runtime, so the key derives an EMPTY series -> gate false -> stamped []. A
+--     has_series EXISTS WITHOUT the 730-day date window would (wrongly) see the
+--     finite rows and stamp the key's id — the time-axis analogue of the WR-01
+--     finite-filter break. This case proves has_series now mirrors the window.
 --   - Two GENUINE-v4 rows on allocator GT: memberKeyIds:[] (blank-save shape) and
 --     memberKeyIds:["genuine-fixed-id"] (book-save shape) — both must survive the
 --     sweep byte-identical (the discriminator keys on key PRESENCE, not the gate).
@@ -49,7 +57,8 @@ DELETE FROM auth.users
   WHERE email IN (
     'test-f4-sweep-gate-true@quantalyze.test',
     'test-f4-sweep-gate-false@quantalyze.test',
-    'test-f4-sweep-nonfinite@quantalyze.test'
+    'test-f4-sweep-nonfinite@quantalyze.test',
+    'test-f4-sweep-stale@quantalyze.test'
   );
 
 DO $$
@@ -72,12 +81,17 @@ DECLARE
   uid_nf        UUID := gen_random_uuid();
   k_nf1         UUID := gen_random_uuid();  -- eligible, ONLY non-finite rows -> empty runtime series -> gate false
   scen_nf_id    UUID;  -- downgraded, non-finite-series allocator
+  -- Allocator OLD (finite rows only OUTSIDE the 730-day window -> CR-2 regression)
+  uid_old       UUID := gen_random_uuid();
+  k_old1        UUID := gen_random_uuid();  -- eligible, ONLY rows >730d old -> empty runtime series -> gate false
+  scen_old_id   UUID;  -- downgraded, stale-series allocator
   -- Assertion scratch
   detect_cnt    INTEGER;
   expected_gt   JSONB;
   actual_gt     JSONB;
   actual_gf     JSONB;
   actual_nf     JSONB;
+  actual_old    JSONB;
   blank_before  JSONB;
   pop_before    JSONB;
   v3_before     JSONB;
@@ -182,6 +196,35 @@ BEGIN
           '{"addedStrategies": []}'::jsonb, 4)
   RETURNING id INTO scen_nf_id;
 
+  -- Allocator OLD (CR-2): one eligible key whose ONLY csv_daily_returns rows are
+  -- FINITE but older than the runtime's 730-day fetch window. The runtime bounds
+  -- the series fetch with .gte("date", now-730d) (queries.ts:2577) BEFORE the
+  -- gate, so these rows are invisible -> empty series -> gate false -> the
+  -- downgraded row must be stamped [], NOT [k_old1]. Without the 730-day window
+  -- on the sweep's has_series EXISTS, this key would (wrongly) count as
+  -- has_series=true and stamp its id — the time-axis analogue of the WR-01 break.
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid_old, '00000000-0000-0000-0000-000000000000',
+          'test-f4-sweep-stale@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid_old, 'f4 sweep stale-series', 'test-f4-sweep-stale@quantalyze.test', 'allocator')
+  ON CONFLICT (id) DO UPDATE
+    SET role = EXCLUDED.role, display_name = EXCLUDED.display_name;
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, sync_status, disconnected_at)
+  VALUES (k_old1, uid_old, 'binance', 'old eligible stale-only', 'enc', true, 'complete', NULL);
+  -- ONLY rows >730 days old for k_old1 -> outside the runtime window -> empty
+  -- series. Values are finite so ONLY the date window (not the finite filter)
+  -- can exclude them — this isolates the CR-2 window from the WR-01 finite fix.
+  INSERT INTO csv_daily_returns (strategy_id, api_key_id, allocator_id, date, daily_return)
+  VALUES
+    (NULL, k_old1, uid_old, (CURRENT_DATE - INTERVAL '800 days')::date, 0.001),
+    (NULL, k_old1, uid_old, (CURRENT_DATE - INTERVAL '801 days')::date, 0.002);
+
+  INSERT INTO scenarios (allocator_id, name, draft, schema_version)
+  VALUES (uid_old, 'old downgraded',
+          '{"addedStrategies": []}'::jsonb, 4)
+  RETURNING id INTO scen_old_id;
+
   -- Snapshot the genuine + v3 drafts BEFORE the sweep for byte-identity checks.
   SELECT draft INTO blank_before FROM scenarios WHERE id = scen_blank_id;
   SELECT draft INTO pop_before   FROM scenarios WHERE id = scen_pop_id;
@@ -196,10 +239,10 @@ BEGIN
   FROM scenarios
   WHERE schema_version >= 4
     AND NOT (draft ? 'memberKeyIds')
-    AND id IN (scen_gt_id, scen_blank_id, scen_pop_id, scen_v3_id, scen_gf_id, scen_nf_id);
-  IF detect_cnt <> 3 THEN
+    AND id IN (scen_gt_id, scen_blank_id, scen_pop_id, scen_v3_id, scen_gf_id, scen_nf_id, scen_old_id);
+  IF detect_cnt <> 4 THEN
     RAISE EXCEPTION
-      'TEST FAILED (Assertion 1): discriminator flagged % seeded rows, expected 3 (the three downgraded rows)', detect_cnt;
+      'TEST FAILED (Assertion 1): discriminator flagged % seeded rows, expected 4 (the four downgraded rows)', detect_cnt;
   END IF;
   -- And specifically: it flags the three downgraded ids, and NEITHER genuine row,
   -- the blank-save row, NOR the pre-v4 row.
@@ -221,6 +264,12 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'TEST FAILED (Assertion 1): NF downgraded row not flagged by discriminator';
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM scenarios
+    WHERE schema_version >= 4 AND NOT (draft ? 'memberKeyIds') AND id = scen_old_id
+  ) THEN
+    RAISE EXCEPTION 'TEST FAILED (Assertion 1): OLD downgraded row not flagged by discriminator';
+  END IF;
   IF EXISTS (
     SELECT 1 FROM scenarios
     WHERE schema_version >= 4 AND NOT (draft ? 'memberKeyIds')
@@ -228,7 +277,7 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'TEST FAILED (Assertion 1): discriminator flagged a genuine-v4 or pre-v4 row (false positive)';
   END IF;
-  RAISE NOTICE 'Assertion 1 OK: discriminator flags exactly the three downgraded rows.';
+  RAISE NOTICE 'Assertion 1 OK: discriminator flags exactly the four downgraded rows.';
 
   -- ----- RUN THE SWEEP TRANSFORM (copied verbatim from the sweep RESTAMP) ----
   UPDATE scenarios s
@@ -259,6 +308,7 @@ BEGIN
           EXISTS (
             SELECT 1 FROM csv_daily_returns c
             WHERE c.api_key_id = k.id
+              AND c.date >= (CURRENT_DATE - INTERVAL '730 days')
               AND c.daily_return <> 'NaN'::float8
               AND c.daily_return <> 'Infinity'::float8
               AND c.daily_return <> '-Infinity'::float8
@@ -328,6 +378,20 @@ BEGIN
   END IF;
   RAISE NOTICE 'Assertion 2c OK: non-finite-series-only key treated as no-series (stamped []).';
 
+  -- ----- ASSERTION 2d: stale-series-only key (>730d) -> gate false -> stamped [] -
+  -- CR-2 regression: k_old1 is eligible and HAS finite csv_daily_returns rows, but
+  -- every row is older than the runtime's 730-day fetch window. The runtime never
+  -- fetches them -> empty series -> gate false. Without the 730-day window on the
+  -- sweep's has_series EXISTS, has_series would be TRUE (finite rows exist), flip
+  -- the gate TRUE, and stamp [k_old1] — which a runtime reopen would NEVER produce.
+  -- The date-windowed has_series must yield [] here.
+  SELECT draft -> 'memberKeyIds' INTO actual_old FROM scenarios WHERE id = scen_old_id;
+  IF actual_old IS DISTINCT FROM '[]'::jsonb THEN
+    RAISE EXCEPTION
+      'TEST FAILED (Assertion 2d): OLD downgraded memberKeyIds = %, expected [] (only >730d-old rows -> empty runtime series -> gate false)', actual_old;
+  END IF;
+  RAISE NOTICE 'Assertion 2d OK: stale-series-only key (>730d) treated as no-series (stamped []).';
+
   -- ----- ASSERTION 3: genuine + pre-v4 rows are byte-identical ---------------
   IF (SELECT draft FROM scenarios WHERE id = scen_blank_id) IS DISTINCT FROM blank_before THEN
     RAISE EXCEPTION 'TEST FAILED (Assertion 3): blank-save genuine row (memberKeyIds:[]) was mutated by the sweep';
@@ -371,6 +435,7 @@ BEGIN
             EXISTS (
               SELECT 1 FROM csv_daily_returns c
               WHERE c.api_key_id = k.id
+                AND c.date >= (CURRENT_DATE - INTERVAL '730 days')
                 AND c.daily_return <> 'NaN'::float8
                 AND c.daily_return <> 'Infinity'::float8
                 AND c.daily_return <> '-Infinity'::float8
@@ -400,7 +465,7 @@ BEGIN
   FROM scenarios
   WHERE schema_version >= 4
     AND NOT (draft ? 'memberKeyIds')
-    AND id IN (scen_gt_id, scen_blank_id, scen_pop_id, scen_v3_id, scen_gf_id, scen_nf_id);
+    AND id IN (scen_gt_id, scen_blank_id, scen_pop_id, scen_v3_id, scen_gf_id, scen_nf_id, scen_old_id);
   IF detect_cnt <> 0 THEN
     RAISE EXCEPTION
       'TEST FAILED (post-condition): % downgraded rows remain after the sweep, expected 0', detect_cnt;
@@ -410,7 +475,7 @@ BEGIN
   -- ----- TEARDOWN -----------------------------------------------------------
   -- ON DELETE CASCADE chains auth.users -> profiles -> {api_keys, scenarios} and
   -- api_keys -> csv_daily_returns. One delete per allocator cleans the subtree.
-  DELETE FROM auth.users WHERE id IN (uid_gt, uid_gf, uid_nf);
+  DELETE FROM auth.users WHERE id IN (uid_gt, uid_gf, uid_nf, uid_old);
 
   RAISE NOTICE 'All F-4 sweep assertions passed (discriminator + re-derive transform proven).';
 END
@@ -425,5 +490,6 @@ DELETE FROM auth.users
   WHERE email IN (
     'test-f4-sweep-gate-true@quantalyze.test',
     'test-f4-sweep-gate-false@quantalyze.test',
-    'test-f4-sweep-nonfinite@quantalyze.test'
+    'test-f4-sweep-nonfinite@quantalyze.test',
+    'test-f4-sweep-stale@quantalyze.test'
   );
