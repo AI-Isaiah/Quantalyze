@@ -394,7 +394,6 @@ const FLAGGED_BTC: FlaggedHolding = {
 const REF_BTC = "holding:binance:BTC:spot";
 const REF_ETH = "holding:binance:ETH:spot";
 const REF_SOL = "holding:binance:SOL:spot";
-const REF_BTC_OKX = "holding:okx:BTC:spot";
 
 // Read-only-tokens model: live holdings are fixed context with NO per-holding
 // toggle / weight / leverage controls. Every interactive gesture (toggle,
@@ -450,20 +449,6 @@ function makePayload(
     flaggedHoldings: [],
     matchDecisionsByHoldingRef: {},
     mandate: null,
-    holdingReturnsByScopeRef: {
-      [REF_BTC]: [
-        { date: "2026-01-01", value: 0.001 },
-        { date: "2026-01-02", value: 0.002 },
-      ],
-      [REF_ETH]: [
-        { date: "2026-01-01", value: 0.0015 },
-        { date: "2026-01-02", value: 0.001 },
-      ],
-      [REF_SOL]: [
-        { date: "2026-01-01", value: 0.005 },
-        { date: "2026-01-02", value: -0.001 },
-      ],
-    },
     allocator_id: ALLOCATOR_A,
     liveBaselineMetrics: {
       aum: 100_000,
@@ -532,7 +517,6 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("T_C1 holdingsSummary=[] → renders EmptyState with dual CTA; clicking Browse opens StrategyBrowseDrawer", () => {
     const payload = makePayload({
       holdingsSummary: [],
-      holdingReturnsByScopeRef: {},
     });
     render(
       <ScenarioComposer
@@ -1574,7 +1558,6 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("T_C_MODE2 no live book → defaults to Blank slate, never a dead 'From my book' segment", () => {
     const payload = makePayload({
       holdingsSummary: [],
-      holdingReturnsByScopeRef: {},
     });
     render(
       <ScenarioComposer
@@ -1774,7 +1757,6 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("ENGINE-03 no live book → blank init, DSRC-02 note absent (no book, existing behavior preserved)", () => {
     const payload = makePayload({
       holdingsSummary: [],
-      holdingReturnsByScopeRef: {},
       perKeyDailiesGateSatisfied: false,
       eligibleApiKeyIds: [],
     });
@@ -2051,7 +2033,6 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // main body with scenarioAum === 0 (no live holdings contribute).
     const payload = makePayload({
       holdingsSummary: [],
-      holdingReturnsByScopeRef: {},
     });
     let capturedOnAdd: ((s: unknown) => void) | null = null;
     vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
@@ -2290,7 +2271,6 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("T_C_empty_to_composer (M3) holdingsSummary=[] → empty state → Browse → Add → composer body renders (no crash)", () => {
     const payload = makePayload({
       holdingsSummary: [],
-      holdingReturnsByScopeRef: {},
     });
     let capturedOnAdd: ((s: unknown) => void) | null = null;
     vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
@@ -2335,11 +2315,6 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("T_C_M5_multi_venue_tooltip / T03_multi_venue_correlation: multi-venue rows surface 'Returns merged with' tooltip; non-shared rows don't", () => {
     const payload = makePayload({
       holdingsSummary: [HOLDING_BTC, HOLDING_BTC_OKX, HOLDING_ETH],
-      holdingReturnsByScopeRef: {
-        [REF_BTC]: [{ date: "2026-01-01", value: 0.001 }],
-        [REF_BTC_OKX]: [{ date: "2026-01-01", value: 0.001 }],
-        [REF_ETH]: [{ date: "2026-01-01", value: 0.0015 }],
-      },
     });
     const { container } = render(
       <ScenarioComposer
@@ -2873,7 +2848,6 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // (which moves the composer out of the empty-state branch into the body).
     const payload = makePayload({
       holdingsSummary: [],
-      holdingReturnsByScopeRef: {},
     });
     render(
       <ScenarioComposer
@@ -4952,7 +4926,6 @@ describe("ScenarioComposer — Phase 43 GUARD-01 static guard + assembled degene
       // liveBaselineMetrics is a separate field, set to its honest empty form
       // (zero AUM, no equity) rather than removed (the field is required).
       holdingsSummary: [],
-      holdingReturnsByScopeRef: {},
       equityDailyPoints: [],
       liveBaselineMetrics: {
         aum: 0,

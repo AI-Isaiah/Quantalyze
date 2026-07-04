@@ -8,7 +8,7 @@
  *   - localStorage["allocations.ui_v2"]==="false" → legacy ScenarioStub path
  *     (rollback safety; the explicit opt-out keeps the legacy stub
  *     reachable in case a regression ships post-PR77)
- *   - ScenarioComposer receives the FULL payload (incl. holdingReturnsByScopeRef)
+ *   - ScenarioComposer receives the FULL payload
  *   - ScenarioComposer receives allocatorId = props.allocator_id (H3)
  *   - ScenarioComposer receives allocatorMandate = props.mandate
  *   - Performance / overview tab unchanged across the v2 branch
@@ -109,7 +109,7 @@ vi.mock("./ScenarioStub", () => ({
 vi.mock("./components/ScenarioComposer", () => ({
   ScenarioComposer: vi.fn(
     (props: {
-      payload: { holdingReturnsByScopeRef?: Record<string, unknown> };
+      payload: Record<string, unknown>;
       allocatorId: string;
       allocatorMandate: unknown;
       onRegisterOpen?: (open: (row: unknown) => void) => void;
@@ -124,9 +124,6 @@ vi.mock("./components/ScenarioComposer", () => ({
         <div
           data-testid="scenario-composer-body"
           data-allocator-id={props.allocatorId}
-          data-has-returns={
-            props.payload.holdingReturnsByScopeRef ? "true" : "false"
-          }
           data-has-mandate={props.allocatorMandate ? "true" : "false"}
           data-has-register-open={props.onRegisterOpen ? "true" : "false"}
         >
@@ -229,9 +226,6 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
     mandate_edited_at: null,
     scoring_weight_overrides: null,
   },
-  holdingReturnsByScopeRef: {
-    "holding:binance:BTC:spot": [{ date: "2026-01-01", value: 0.001 }],
-  },
   allocator_id: ALLOCATOR_ID,
   liveBaselineMetrics: {
     aum: 60_000,
@@ -302,23 +296,6 @@ describe("AllocationsTabs — scenario panel v2 branching (Plan 06b Task 2)", ()
     render(<AllocationsTabs {...STUB_PROPS} />);
     expect(screen.getByTestId("scenario-stub-body")).toBeInTheDocument();
     expect(screen.queryByTestId("scenario-composer-body")).toBeNull();
-  });
-
-  // -------------------------------------------------------------------------
-  // T_AT3 — Composer receives the FULL payload (incl. holdingReturnsByScopeRef)
-  // -------------------------------------------------------------------------
-  it("T_AT3 ScenarioComposer receives full payload including holdingReturnsByScopeRef", async () => {
-    setSearchParams("tab=scenario");
-    render(<AllocationsTabs {...STUB_PROPS} />);
-    const body = await screen.findByTestId("scenario-composer-body");
-    expect(body.getAttribute("data-has-returns")).toBe("true");
-    expect(ScenarioComposer).toHaveBeenCalled();
-    const props = vi.mocked(ScenarioComposer).mock.calls[0][0];
-    expect(props.payload).toBeDefined();
-    expect(
-      (props.payload as { holdingReturnsByScopeRef: unknown })
-        .holdingReturnsByScopeRef,
-    ).toEqual(STUB_PROPS.holdingReturnsByScopeRef);
   });
 
   // -------------------------------------------------------------------------

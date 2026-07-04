@@ -916,67 +916,6 @@ describe("getPortfolioDetail — audit-2026-05-07 L-0028 (PGRST116 silence)", ()
   });
 });
 
-// audit-2026-05-07 M-0553 — sort each symbol series ONCE outside the
-// per-holding loop so aliased holdings (BTC@binance + BTC@okx) share the same
-// pre-sorted array instead of re-cloning + re-sorting per holding. The
-// invariant we pin: aliased holdings produce identical ascending series, and
-// the per-symbol sort runs once per symbol rather than once per holding.
-describe("reconstructHoldingReturnsByScopeRef — audit-2026-05-07 M-0553", () => {
-  it("returns identical ascending series for two holdings sharing a symbol (reverse-order snapshots)", async () => {
-    const { reconstructHoldingReturnsByScopeRef } = await import("./queries");
-    // Snapshots seeded in REVERSE-CHRONOLOGICAL order to verify the helper
-    // sorts internally — DB queries are not guaranteed to return ascending
-    // by asof, and the per-symbol sort is the M-0553 invariant.
-    const equitySnapshots = [
-      { asof: "2026-04-03", breakdown: { BTC: 110 } },
-      { asof: "2026-04-01", breakdown: { BTC: 100 } },
-      { asof: "2026-04-02", breakdown: { BTC: 105 } },
-    ];
-    const holdingsSummary = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot" as const },
-      { symbol: "BTC", venue: "okx", holding_type: "spot" as const },
-    ];
-    const result = reconstructHoldingReturnsByScopeRef(
-      equitySnapshots,
-      holdingsSummary,
-    );
-    const binanceKey = "holding:binance:BTC:spot";
-    const okxKey = "holding:okx:BTC:spot";
-    expect(result[binanceKey]).toBeDefined();
-    expect(result[okxKey]).toBeDefined();
-    // Aliased holdings must produce the SAME derived series.
-    expect(result[binanceKey]).toEqual(result[okxKey]);
-    // Series must be ascending by date (proves the internal sort fired).
-    const dates = result[binanceKey].map((p) => p.date);
-    expect(dates).toEqual([...dates].sort((a, b) => a.localeCompare(b)));
-    expect(dates).toEqual(["2026-04-02", "2026-04-03"]);
-  });
-
-  it("sorts each symbol series exactly once (not once per holding)", async () => {
-    const sortSpy = vi.spyOn(Array.prototype, "sort");
-    const { reconstructHoldingReturnsByScopeRef } = await import("./queries");
-    const equitySnapshots = [
-      { asof: "2026-04-03", breakdown: { BTC: 110, ETH: 60 } },
-      { asof: "2026-04-01", breakdown: { BTC: 100, ETH: 50 } },
-      { asof: "2026-04-02", breakdown: { BTC: 105, ETH: 55 } },
-    ];
-    const holdingsSummary = [
-      { symbol: "BTC", venue: "binance", holding_type: "spot" as const },
-      { symbol: "BTC", venue: "okx", holding_type: "spot" as const },
-      { symbol: "BTC", venue: "bybit", holding_type: "spot" as const },
-      { symbol: "ETH", venue: "binance", holding_type: "spot" as const },
-      { symbol: "ETH", venue: "okx", holding_type: "spot" as const },
-    ];
-    const before = sortSpy.mock.calls.length;
-    reconstructHoldingReturnsByScopeRef(equitySnapshots, holdingsSummary);
-    const sortCalls = sortSpy.mock.calls.length - before;
-    // 2 unique symbols (BTC + ETH) → exactly 2 sort calls. The pre-M-0553
-    // implementation would have called sort 5x (once per holding).
-    expect(sortCalls).toBe(2);
-    sortSpy.mockRestore();
-  });
-});
-
 // audit-2026-05-07 M-0559 round-2 — pin `getPortfolioAnalyticsWithFallback`'s
 // 4-arm discriminated union. The helper picks `kind` based on whether a
 // latest row exists, whether the latest is `complete`, and whether a prior

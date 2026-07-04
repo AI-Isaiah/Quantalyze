@@ -206,16 +206,6 @@ function makePayload(
     flaggedHoldings: [],
     matchDecisionsByHoldingRef: {},
     mandate: null,
-    holdingReturnsByScopeRef: {
-      [REF_BTC]: [
-        { date: "2026-01-01", value: 0.001 },
-        { date: "2026-01-02", value: 0.002 },
-      ],
-      [REF_ETH]: [
-        { date: "2026-01-01", value: 0.0015 },
-        { date: "2026-01-02", value: 0.001 },
-      ],
-    },
     allocator_id: ALLOCATOR_A,
     liveBaselineMetrics: {
       aum: 100_000,

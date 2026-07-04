@@ -1716,23 +1716,6 @@ export interface MyAllocationDashboardPayload {
   // Phase 10 / Plan 10-03 (scenario builder + what-if)
   // ─────────────────────────────────────────────────────────────────────
   /**
-   * Phase 10 / D-04. Per-holding daily return series reconstructed from
-   * allocator_equity_snapshots.breakdown JSONB. Keyed by scope_ref
-   * "holding:{venue}:{symbol}:{holding_type}". Empty record when no
-   * snapshots exist or no breakdown data is available. One pass at SSR
-   * time — never recomputed in the component tree.
-   *
-   * M5 multi-venue caveat: breakdown JSONB is keyed by SYMBOL only —
-   * holdings sharing the same symbol across venues (BTC@binance + BTC@okx)
-   * map to IDENTICAL return series.
-   *
-   * NO PRODUCTION CONSUMER (as of v1.6 phase 63): nothing in the component
-   * tree reads this field any more. It is retained per a deferred-cleanup
-   * decision — see the "queries / SSR payload" P1 entry in TODOS.md for the
-   * removal plan (reconstruct helper + payload field + orphaned tests).
-   */
-  holdingReturnsByScopeRef: Record<string, DailyPoint[]>;
-  /**
    * Phase 10 / H3. The authenticated allocator's user.id, sourced from
    * supabase.auth.getUser() server-side. Consumed by Plan 06a's per-allocator
    * localStorage scoping (N1 defense-in-depth eliminates cross-tenant draft
@@ -1996,86 +1979,6 @@ export function partitionTrustworthyEquitySnapshots<
     }
   }
   return { trustworthy, baselineUnknown };
-}
-
-/**
- * Phase 10 / D-04 — Reconstruct per-holding daily-return series from
- * allocator_equity_snapshots.breakdown JSONB. Mirrors the Phase 09 Python
- * engine convention (analytics-service/routers/match.py::_load_allocator_context):
- * per-day per-symbol USD value differences → daily return series, ascending by asof.
- *
- * Caveats (per 10-RESEARCH.md Pattern 3):
- * - M5 multi-venue: breakdown JSONB is keyed by SYMBOL only — venue is not
- *   disambiguated. If an allocator holds BTC on both Binance and OKX, both
- *   scope_refs (the same symbol across venues) map to the same return
- *   series. Phase 09 Python engine accepts this approximation. (A real
- *   per-(venue,symbol) aliasing sentinel is deferred to a dedicated PR —
- *   it requires preserving venue granularity through the holdings collapse.)
- * - prev=0 days are skipped (avoids division by zero / non-finite values).
- * - Series with fewer than 2 snapshots produce no returns (a return is a
- *   difference; you need at least two values to subtract).
- * - L6 all-NULL breakdowns: when every snapshot's breakdown column is null
- *   the helper returns an empty record (no Object.entries on null; no crash).
- *
- * audit-2026-05-07 M-0554: input rows are aliased from the dashboard
- * payload contract (`ReconstructEquitySnapshot` / `ReconstructHoldingRow`
- * below) so schema drift on either side of the boundary — a new
- * discriminator on `holdingsSummary`, a renamed `breakdown` field —
- * surfaces as a TS error here instead of a structural subtype passing
- * silently. The previous anonymous-literal signature accepted any
- * structurally compatible row.
- */
-type ReconstructEquitySnapshot = Pick<
-  MyAllocationDashboardPayload["equitySnapshots"][number],
-  "asof" | "breakdown"
->;
-type ReconstructHoldingRow = Pick<
-  MyAllocationDashboardPayload["holdingsSummary"][number],
-  "symbol" | "venue" | "holding_type"
->;
-
-export function reconstructHoldingReturnsByScopeRef(
-  equitySnapshots: ReadonlyArray<ReconstructEquitySnapshot>,
-  holdingsSummary: ReadonlyArray<ReconstructHoldingRow>,
-): Record<string, DailyPoint[]> {
-  const symbolSeriesUSD = new Map<
-    string,
-    Array<{ asof: string; value: number }>
-  >();
-  for (const snap of equitySnapshots) {
-    if (!snap.breakdown) continue;
-    for (const [symbol, value] of Object.entries(snap.breakdown)) {
-      if (!Number.isFinite(value)) continue;
-      if (!symbolSeriesUSD.has(symbol)) symbolSeriesUSD.set(symbol, []);
-      symbolSeriesUSD.get(symbol)!.push({ asof: snap.asof, value });
-    }
-  }
-  // audit-2026-05-07 M-0553: sort each symbol series ONCE here instead of
-  // per-holding inside the loop below. With M5 multi-venue (BTC@binance +
-  // BTC@okx) sharing the same symbol series, the prior per-holding
-  // `[...series].sort()` re-cloned + re-sorted the same array for every
-  // aliased holding (O(H · S log S) on the SSR critical path). Sort in
-  // place — the map is local and the only later consumer is the loop below.
-  for (const series of symbolSeriesUSD.values()) {
-    series.sort((a, b) => a.asof.localeCompare(b.asof));
-  }
-  const result: Record<string, DailyPoint[]> = {};
-  for (const h of holdingsSummary) {
-    const scopeRef = holdingScopeKey(h);
-    const sorted = symbolSeriesUSD.get(h.symbol);
-    if (!sorted || sorted.length < 2) continue;
-    const dailyReturns: DailyPoint[] = [];
-    for (let i = 1; i < sorted.length; i++) {
-      const prev = sorted[i - 1].value;
-      const curr = sorted[i].value;
-      if (prev === 0) continue;
-      const ret = (curr - prev) / prev;
-      if (!Number.isFinite(ret)) continue;
-      dailyReturns.push({ date: sorted[i].asof, value: ret });
-    }
-    if (dailyReturns.length > 0) result[scopeRef] = dailyReturns;
-  }
-  return result;
 }
 
 /**
@@ -2459,7 +2362,7 @@ function derivePhase07Fields(
   // exchange's position could disappear from the dashboard and the
   // surviving venue could flip between page loads. The scope_ref keyspace
   // used everywhere else in the pipeline already uses this triple-key
-  // format (see reconstructHoldingReturnsByScopeRef, buildHoldingRef).
+  // format (see buildHoldingRef).
   const holdingsMap = new Map<string, (typeof holdingsRows)[number]>();
   for (const r of holdingsRows) {
     // B8: same canonical triple key as the scope_ref sites above
@@ -2837,8 +2740,8 @@ export const getMyAllocationDashboard = cache(
     // garbage absolute levels — the dashboard's level/return-derived surfaces
     // (equity curve, drawdown, TWR, Sharpe, per-holding returns, warm-up gate)
     // must exclude them. Filter ONCE here so EVERY consumer downstream OF THIS
-    // read (derivePhase07Fields, reconstructHoldingReturnsByScopeRef, the
-    // per-key baseline blend) reads the filtered array — no need to
+    // read (derivePhase07Fields, the per-key baseline blend) reads the
+    // filtered array — no need to
     // touch each derivation. (Other read boundaries on this table — the
     // /compare adapter, and the server-side match.py scorer — apply / will
     // apply the same predicate at their own query; see the
@@ -2992,14 +2895,6 @@ export const getMyAllocationDashboard = cache(
       }
     }
 
-    // Phase 10 / D-04 — Reconstruct per-holding daily-return series from
-    // allocator_equity_snapshots.breakdown JSONB. Reuses the equitySnapshots
-    // already fetched above; the helper is a pure JS transform (no I/O).
-    const holdingReturnsByScopeRef = reconstructHoldingReturnsByScopeRef(
-      equitySnapshots,
-      phase07.holdingsSummary,
-    );
-
     // ───────────────────────────────────────────────────────────────────────
     // Phase 36 / 36-03 — D3 all-or-nothing repoint of the Overview liveBaseline
     // metrics (UNIFY-01/02/03). When EVERY active key has a non-empty per-key
@@ -3010,12 +2905,9 @@ export const getMyAllocationDashboard = cache(
     // annualization basis — honesty over coverage).
     // AUM stays from holdings on BOTH branches (D2). The liveBaselineMetrics
     // OUTPUT shape is byte-identical between branches (the SSR payload + the
-    // composer baseline depend on it). holdingReturnsByScopeRef (above) is a
-    // SEPARATE payload field with NO production consumer (v1.6 phase 63) and is
-    // left unchanged — only the liveBaselineMetrics SOURCE is repointed here.
-    // See the queries/SSR-payload P1 entry in TODOS.md for its removal. The
-    // holdings read
-    // (derivePhase07Fields) is untouched (UNIFY-03).
+    // composer baseline depend on it) — only the liveBaselineMetrics SOURCE is
+    // repointed here. The holdings read (derivePhase07Fields) is untouched
+    // (UNIFY-03).
     const perKeyReturnsByApiKeyId = buildPerKeyReturnsByApiKeyId(
       (phase36PerKeyDailiesRes.data ?? []) as Array<{
         api_key_id: string | null;
@@ -3104,7 +2996,6 @@ export const getMyAllocationDashboard = cache(
         flaggedHoldings,
         matchDecisionsByHoldingRef,
         mandate,
-        holdingReturnsByScopeRef,
         allocator_id: allocator_id,
         liveBaselineMetrics,
         // Phase 37 / DSRC-01 — per-key channel (additive; real values, computed
@@ -3414,7 +3305,6 @@ export const getMyAllocationDashboard = cache(
       flaggedHoldings,
       matchDecisionsByHoldingRef,
       mandate,
-      holdingReturnsByScopeRef,
       allocator_id: allocator_id,
       liveBaselineMetrics,
       // Phase 37 / DSRC-01 — per-key channel (additive). This is the FULL

@@ -109,7 +109,6 @@ function basePayload(
     flaggedHoldings: [],
     matchDecisionsByHoldingRef: {},
     mandate: null,
-    holdingReturnsByScopeRef: {},
     allocator_id: "00000000-0000-0000-0000-000000000000",
     liveBaselineMetrics: {
       aum: 0,
