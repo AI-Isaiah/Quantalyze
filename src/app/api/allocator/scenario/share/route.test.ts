@@ -389,11 +389,11 @@ describe("scenario/share generate route — static security guards", () => {
     expect(rpcSpy).not.toHaveBeenCalled();
   });
 
-  // MEMBER-03 — the mint gate reads the SAME null-safe isBookOnlyDraft predicate
-  // the compare/share surfaces use (one definition of book-only across
-  // mint/resolve/compare). A draft that is book-only BY THAT PREDICATE (explicit
-  // book members, zero added strategies) is rejected at the source with the same
-  // 409 + code:"book_only_draft".
+  // MEMBER-03 — the mint gate keys PURELY on `addedStrategies` emptiness (via
+  // `nothingShareable`); the `isBookOnlyDraft` disjunct was provably dead and
+  // was deleted (CF-01/F-3). A draft with explicit book members but ZERO added
+  // strategies is book-only, so `nothingShareable` rejects it at the source with
+  // a 409 + code:"book_only_draft" — no minted share.
   it("T_SH15 — a book-only-BY-MEMBERSHIP draft (memberKeyIds set, no added) → 409 book_only_draft, NO share minted", async () => {
     ownershipResult = {
       data: {

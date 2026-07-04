@@ -682,7 +682,12 @@ function saveErrorMessage(status: number, issues?: SaveIssue[]): string {
         iss.path.includes("memberKeyIds"),
     );
     if (overCap) {
-      return `This portfolio references more than ${MAX_MEMBER_KEY_IDS} book sources — the current save limit. Remove some sources and try again.`;
+      // IN-9: memberKeyIds is GATE-DERIVED from the allocator's connected
+      // exchange keys — it is NOT a set the allocator picks inside the
+      // composer, so "remove some sources" pointed at a control that does not
+      // exist here. The honest remediation is disconnecting an unused exchange
+      // connection. Ceiling stays interpolated from the const, never literal.
+      return `This portfolio spans more than ${MAX_MEMBER_KEY_IDS} connected exchange keys — the current save limit. Disconnect an unused exchange connection and try again.`;
     }
   }
   return SAVE_ERROR_GENERIC;

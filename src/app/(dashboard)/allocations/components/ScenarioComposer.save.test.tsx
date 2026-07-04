@@ -618,10 +618,15 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
 
     await waitFor(() => {
-      // Honest copy names the real ceiling (interpolated from the const).
+      // Honest copy names the real ceiling (interpolated from the const) and
+      // the correct remediation — disconnecting an exchange connection, since
+      // memberKeyIds is gate-derived, not user-selected in the composer (IN-9).
       expect(
         screen.getByText(
-          new RegExp(`more than ${String(MAX_MEMBER_KEY_IDS)} book sources`, "i"),
+          new RegExp(
+            `more than ${String(MAX_MEMBER_KEY_IDS)} connected exchange keys`,
+            "i",
+          ),
         ),
       ).toBeInTheDocument();
     });
@@ -660,7 +665,42 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
       ).toBeInTheDocument();
     });
     expect(
-      screen.queryByText(/book sources/i),
+      screen.queryByText(/connected exchange keys/i),
+    ).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // T_SAVE9d (IN-5) — a 400 whose res.json() THROWS (non-JSON body: proxy error
+  //                    page, truncated stream) must fall back to the generic
+  //                    copy via readSaveIssues' catch — never the ceiling copy,
+  //                    and never an unhandled rejection that crashes the save.
+  // -------------------------------------------------------------------------
+  it("T_SAVE9d a 400 whose res.json() throws (SyntaxError) renders the generic copy, never the ceiling copy, and does not crash", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => {
+        throw new SyntaxError("Unexpected token < in JSON at position 0");
+      },
+    })) as unknown as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Non-JSON 400 body" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Couldn't save this portfolio\./i),
+      ).toBeInTheDocument();
+    });
+    // The over-cap ceiling copy must NOT appear — we could not parse issues, so
+    // the honest fallback is the generic copy, not a fabricated cap message.
+    expect(
+      screen.queryByText(/connected exchange keys/i),
     ).not.toBeInTheDocument();
   });
 
