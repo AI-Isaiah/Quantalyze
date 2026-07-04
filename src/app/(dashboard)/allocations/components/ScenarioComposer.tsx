@@ -851,6 +851,11 @@ export function ScenarioComposer({
   // existing `projectionState.selected` channel keyed by api_key_id so the frozen
   // engine honestly recomputes the curve + every KPI on exclusion (DSRC-03) —
   // never a cosmetic hide.
+  //
+  // D3 source-toggle persistence: DECIDED no persistence (YAGNI, Phase 66
+  // CF-05). The Phase-36 D3 toggle is deliberately TRANSIENT exploration UI
+  // state — resets on reload, out of the commit diff — and no user has asked to
+  // persist an exclusion set across sessions. Revisit only on real user demand.
   const [includeByApiKeyId, setIncludeByApiKeyId] = useState<
     Record<string, boolean>
   >({});
@@ -2393,17 +2398,36 @@ export function ScenarioComposer({
   // a prop and never runs the containment predicate locally, so the gantt bars
   // agree with the row chips and the divisor by construction. Spans come from the
   // shared `selectedSpanById` scan (Rule 2: computed once).
+  // CF-05 — api_key_id → friendly exchange/account label, built from the SAME
+  // `payload.apiKeys` + `dataSourceLabel` idiom the "Data sources" control
+  // renders (`${Exchange} — ${nickname|••••tail}`). A per-key (book-member)
+  // unit carries the RAW api_key_id as its `name` from
+  // buildPerKeyStrategyForBuilderSet (scenario-adapter.ts: `key <uuid>`), so
+  // without this map the gantt would show a raw UUID. This is the ONE place the
+  // per-key row name is resolved before rows reach CoverageTimeline (which only
+  // renders `row.name` — it never derives labels). No second label formatter.
+  const apiKeyLabelById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const k of payload.apiKeys ?? []) {
+      const { exchange, nickname, maskedTail } = dataSourceLabel(k);
+      m.set(k.id, `${exchange} — ${nickname ?? maskedTail}`);
+    }
+    return m;
+  }, [payload.apiKeys]);
+
   const timelineRows = useMemo(
     () =>
       engineSet.strategies
         .filter((s) => engineSet.state.selected[s.id])
         .map((s) => ({
           id: s.id,
-          name: s.name,
+          // Per-key rows resolve to the friendly data-source label; strategy
+          // rows have no apiKeys entry and keep their own `s.name` unchanged.
+          name: apiKeyLabelById.get(s.id) ?? s.name,
           span: selectedSpanById.get(s.id) ?? null,
           inBlend: coverageEligible[s.id] === true,
         })),
-    [engineSet, selectedSpanById, coverageEligible],
+    [engineSet, selectedSpanById, coverageEligible, apiKeyLabelById],
   );
 
   // The ONE "active window IS the common period" equality — lexicographic
