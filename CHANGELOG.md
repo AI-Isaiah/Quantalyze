@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.37.2.1] - 2026-07-04
+### Fixed
+- **CI green-up for the Deribit boundary widening (0.37.2.0 follow-up).** Two full-suite-only failures the targeted local runs couldn't surface: `test_ingestion_protocol.py::test_literal_types` still pinned the pre-widening `Source` Literal (stale assertion — now includes `deribit`, matching the intentional DRB-02 widening), and the new `test_deribit_scope_validation.py` mock-key fixtures tripped the gitleaks generic-api-key detector on the push-to-main full scan (allowlisted, same pattern as the other credential-redaction test fixtures).
+
 ## [0.37.2.0] - 2026-07-04
 ### Added
 - **Deribit is accepted at every key-saving boundary (DRB-02).** In lockstep, one PR: the TypeScript allowlist (`SUPPORTED_EXCHANGES` + display map), three pydantic `Literal`s (verify request, ingestion adapter, debug key-flow), and four SQL CHECK constraints (`api_keys`, `compute_jobs`, `strategies.source`, `strategy_verifications.source`) via a single self-verifying DROP/re-ADD migration. A read-only Deribit key can now be saved through the normal path; the wizard UI stays Phase-69-gated.

@@ -87,6 +87,12 @@ paths = [
   # this allowlist line also suppresses leftover historical commits.
   '''(^|/)fix-list\.md$''',
   '''(^|/)src/__tests__/gitleaks-allowlist\.test\.ts$''',
+  # Phase 68 (DRB-02) Deribit scope-validation tests: mock the public/auth
+  # response with deliberately key-shaped Client ID / Secret fixtures to
+  # assert detect_deribit_permissions rejects write scopes and validates
+  # read-only keys. Not real credentials — generic-api-key flags the fixture
+  # on the push-to-main full scan (the PR-diff scan did not).
+  '''(^|/)analytics-service/tests/test_deribit_scope_validation\.py$''',
   # H-0305 regression test (route.audit.test.ts): line 118 defines a
   # deliberately key-shaped fixture `secretContents` that the test injects into
   # a thrown upstream error to assert the create-with-key route STRIPS it from

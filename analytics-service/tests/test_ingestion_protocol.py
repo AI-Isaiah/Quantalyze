@@ -205,7 +205,10 @@ def test_literal_types() -> None:
         "csv",
         "resync",
     }
-    assert set(typing.get_args(Source)) == {"okx", "binance", "bybit", "csv"}
+    # Phase 68 (DRB-02): the Source Literal admits 'deribit' at the boundary
+    # in lockstep with the TS allowlist + SQL CHECKs (test_boundary_literals_parity
+    # pins this). SUPPORTED_SOURCES / process_key flow sets stay 3-exchange.
+    assert set(typing.get_args(Source)) == {"okx", "binance", "bybit", "csv", "deribit"}
     assert set(typing.get_args(TrustTier)) == {
         "api_verified",
         "csv_uploaded",
