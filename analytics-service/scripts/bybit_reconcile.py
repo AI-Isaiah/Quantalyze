@@ -47,8 +47,10 @@ EXIT CODES
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-from typing import Any, Mapping
+import sys
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, cast
 
 # _build_match_key is the SINGLE funding dedup axis (per-exchange bucket cadence,
 # H-1099). Import the private helper from our own package rather than
@@ -103,7 +105,7 @@ def _to_dt(value: Any) -> datetime:
 
 def compare_dailies(
     recomputed: Mapping[Any, Any],
-    stored_rows: list[Mapping[str, Any]],
+    stored_rows: Sequence[Mapping[str, Any]],
     tol: float = 1e-9,
 ) -> dict[str, Any]:
     """Compare a recomputed daily-return series against stored rows within ``tol``.
@@ -160,7 +162,7 @@ def _row_bucket_key(row: Mapping[str, Any]) -> str:
 
 
 def _bucket_and_day_sums(
-    rows: list[Mapping[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, float], dict[str, float]]:
     buckets: dict[str, float] = {}
     by_day: dict[str, float] = {}
@@ -173,8 +175,8 @@ def _bucket_and_day_sums(
 
 
 def funding_bucket_summary(
-    fresh_rows: list[Mapping[str, Any]],
-    db_rows: list[Mapping[str, Any]],
+    fresh_rows: Sequence[Mapping[str, Any]],
+    db_rows: Sequence[Mapping[str, Any]],
     tol: float = 1e-9,
 ) -> dict[str, Any]:
     """Reconcile fresh-from-exchange funding vs DB funding by ``match_key`` bucket.
@@ -314,4 +316,246 @@ def build_report(
         "verdict": verdict,
         "exit_code": _EXIT_FOR_VERDICT[verdict],
     }
-    return _sanitize(report)
+    # _sanitize preserves the dict container (only scrubs string leaves).
+    return cast("dict[str, Any]", _sanitize(report))
+
+
+# ---------------------------------------------------------------------------
+# Async reconciliation main (READ-ONLY) — worker-env gated
+# ---------------------------------------------------------------------------
+
+
+class ReconcileUsageError(RuntimeError):
+    """Usage / environment / key-selection error → exit code 2. Its message is
+    masked-id only and never carries secret material."""
+
+
+def _relabel(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize the funding ``strategy_id`` label OUT so both sides reconcile
+    on the true funding identity (exchange, symbol, time-bucket), independent of
+    whichever label the producer stored under."""
+    return [{**dict(r), "strategy_id": ""} for r in rows]
+
+
+async def run(api_key_id: str, window_days: int) -> tuple[dict[str, Any], int]:
+    """Reconcile one Bybit key against exchange ground truth, READ-ONLY.
+
+    Composes the EXACT production seams (``fetch_raw_trades`` /
+    ``fetch_funding_bybit`` / ``combine_realized_and_funding`` /
+    ``diff_strategy_fills``) so the run exercises the real #563 code paths.
+    Performs ZERO writes (no INSERT/UPDATE/UPSERT/DELETE) — recompute is
+    in-memory only. Returns ``(sanitized_report, exit_code)``.
+    """
+    # Lazy imports keep the pure-logic layer (and its unit tests) free of the
+    # ccxt / exchange I/O surface — mirrors scripts/deribit_ground_truth.py.
+    from services.broker_dailies import combine_realized_and_funding
+    from services.db import db_execute, get_supabase, one, rows
+    from services.encryption import decrypt_credentials, get_kek
+    from services.exchange import (
+        aclose_exchange,
+        create_exchange,
+        fetch_account_equity_usd,
+        fetch_all_trades,
+        fetch_raw_trades,
+        get_and_clear_last_dq_flags,
+    )
+    from services.funding_fetch import fetch_funding_bybit
+    from services.reconciliation import diff_strategy_fills
+
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(days=window_days)
+    window_start_iso = window_start.isoformat()
+    window_start_ms = int(window_start.timestamp() * 1000)
+
+    supabase = get_supabase()
+    masked_id = truncate_account_id(api_key_id)
+
+    def _load_key() -> Any:
+        return (
+            supabase.table("api_keys")
+            .select(
+                "id, strategy_id, exchange, api_key_encrypted, "
+                "dek_encrypted, kek_version"
+            )
+            .eq("id", api_key_id)
+            .maybe_single()
+            .execute()
+        )
+
+    key_row = one(await db_execute(_load_key))
+    if key_row is None:
+        raise ReconcileUsageError(f"api_key {masked_id} not found")
+    if key_row.get("exchange") != "bybit":
+        raise ReconcileUsageError(
+            f"api_key {masked_id} exchange is not bybit "
+            f"(got {key_row.get('exchange')!r})"
+        )
+    raw_strategy_id = key_row.get("strategy_id")
+    if raw_strategy_id is None:
+        raise ReconcileUsageError(
+            f"api_key {masked_id} has no strategy_id — cannot reconcile fills"
+        )
+    strategy_id: str = str(raw_strategy_id)
+
+    # Fails loud (InvalidToken naming the key id) on malformed rows — do NOT catch.
+    api_key, api_secret, passphrase = decrypt_credentials(key_row, get_kek())
+    ex = create_exchange("bybit", api_key, api_secret, passphrase)
+
+    try:
+        # ---- Fills half (mirror run_reconcile_strategy_job, fixed window) ----
+        exchange_fills = await fetch_raw_trades(
+            ex, strategy_id, supabase, since_ms=window_start_ms
+        )
+        # Drain the per-task DQ buffer IMMEDIATELY (the #563 sync_truncated_bybit
+        # signal). Recorded in the report; never persisted.
+        dq_flags = get_and_clear_last_dq_flags()
+
+        def _load_db_fills() -> list[dict[str, Any]]:
+            res = (
+                supabase.table("trades")
+                .select(
+                    "exchange, exchange_fill_id, symbol, side, "
+                    "price, quantity, timestamp"
+                )
+                .eq("strategy_id", strategy_id)
+                .eq("is_fill", True)
+                .gte("timestamp", window_start_iso)
+                .limit(50_000)
+                .execute()
+            )
+            return rows(res)
+
+        db_fill_rows = await db_execute(_load_db_fills)
+        report_fills = diff_strategy_fills(
+            strategy_id=str(strategy_id),
+            date_range=(window_start, now),
+            exchange_fills=exchange_fills,
+            db_fills=[db_trade_to_fill(r) for r in db_fill_rows],
+        )
+
+        # ---- Funding half (bucket reconcile, windowed) ----
+        # Second positional arg mirrors the derive_broker_dailies key-mode call
+        # site (a log/match-key label only; it never scopes the exchange call —
+        # job_worker.py:1761). The reconcile normalizes the label out (_relabel).
+        fresh_funding = await fetch_funding_bybit(ex, api_key_id, window_start_ms)
+
+        def _load_db_funding() -> list[dict[str, Any]]:
+            res = (
+                supabase.table("funding_fees")
+                .select(
+                    "strategy_id, exchange, symbol, amount, "
+                    "currency, timestamp, match_key"
+                )
+                .eq("strategy_id", strategy_id)
+                .gte("timestamp", window_start_iso)
+                .limit(50_000)
+                .execute()
+            )
+            return rows(res)
+
+        db_funding_rows = await db_execute(_load_db_funding)
+
+        # ---- Dailies half (mirror run_derive_broker_dailies_job) ----
+        equity, balance_error = await fetch_account_equity_usd(ex, "bybit")
+        realized = await fetch_all_trades(ex, since_ms=None)
+        funding_full = await fetch_funding_bybit(ex, api_key_id, None)
+    finally:
+        try:
+            await aclose_exchange(ex)
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
+
+    returns, _meta = combine_realized_and_funding(
+        realized, funding_full, account_balance=equity, balance_error=balance_error
+    )
+
+    # Stored dailies axis: api_key_id first (A6), fallback strategy_id.
+    def _load_stored(column: str, value: Any) -> list[dict[str, Any]]:
+        res = (
+            supabase.table("csv_daily_returns")
+            .select("date, daily_return")
+            .eq(column, value)
+            .limit(100_000)
+            .execute()
+        )
+        return rows(res)
+
+    stored_rows = await db_execute(lambda: _load_stored("api_key_id", api_key_id))
+    dailies_axis = "api_key_id"
+    if not stored_rows:
+        stored_rows = await db_execute(lambda: _load_stored("strategy_id", strategy_id))
+        dailies_axis = "strategy_id"
+
+    funding_summary = funding_bucket_summary(
+        _relabel(fresh_funding), _relabel(db_funding_rows)
+    )
+    dailies_summary = compare_dailies(returns, stored_rows)
+
+    id_drift_count = sum(
+        1 for d in report_fills.discrepancies if d.get("kind") == "id_drift"
+    )
+    true_discrepancy_count = report_fills.discrepancy_count - id_drift_count
+    exchange_count = len(exchange_fills)
+    db_count = len(db_fill_rows)
+    fills_section: dict[str, Any] = {
+        "exchange_count": exchange_count,
+        "db_count": db_count,
+        # #563 discipline: RECORDED even when zero.
+        "count_delta": exchange_count - db_count,
+        "status": report_fills.status,
+        "id_drift_count": id_drift_count,
+        "true_discrepancy_count": true_discrepancy_count,
+        "discrepancy_count": report_fills.discrepancy_count,
+        "discrepancies": report_fills.discrepancies,
+    }
+
+    report = build_report(
+        api_key_id=api_key_id,
+        exchange="bybit",
+        window=(window_start, now),
+        fills=fills_section,
+        funding=funding_summary,
+        dailies=dailies_summary,
+        dq_flags=dq_flags,
+        axis_used=dailies_axis,
+        run_meta={"window_days": window_days, "balance_error": balance_error},
+    )
+    return report, int(report["exit_code"])
+
+
+def main() -> int:
+    import argparse
+    import asyncio
+    import json
+
+    parser = argparse.ArgumentParser(
+        prog="python -m scripts.bybit_reconcile",
+        description="BYB-01 read-only Bybit ground-truth reconciliation harness.",
+    )
+    parser.add_argument(
+        "--api-key-id", required=True, help="api_keys.id (UUID) of the Bybit key"
+    )
+    parser.add_argument(
+        "--window-days",
+        type=int,
+        default=180,
+        help="fills/funding reconcile window in days (default 180)",
+    )
+    args = parser.parse_args()
+
+    try:
+        report, exit_code = asyncio.run(run(args.api_key_id, args.window_days))
+    except ReconcileUsageError as exc:
+        # Usage/env/key error — masked-id message only, never a secret.
+        print(scrub_freeform_string(str(exc)), file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - scrub every free-form message
+        print(scrub_freeform_string(f"{type(exc).__name__}: {exc}"), file=sys.stderr)
+        return 1
+
+    print(json.dumps(report, indent=2, sort_keys=True, default=str))
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
