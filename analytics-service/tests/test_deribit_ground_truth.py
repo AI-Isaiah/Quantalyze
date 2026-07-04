@@ -330,8 +330,8 @@ def test_type_samples_capped_at_5_and_kind_diverse() -> None:
 
 def test_summarize_txn_log_never_raises_on_malformed_rows() -> None:
     # Untrusted exchange input — a non-mapping row must be skipped, not crash.
-    rows = [None, 42, "junk", {"type": "trade"}]  # type: ignore[list-item]
-    summary = summarize_txn_log(rows)  # type: ignore[arg-type]
+    rows = [None, 42, "junk", {"type": "trade"}]
+    summary = summarize_txn_log(rows)
     assert summary["type_counts"] == {"trade": 1}
     assert summary["txn_trade_row_count"] == 1
 

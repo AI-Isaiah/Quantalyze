@@ -45,6 +45,7 @@ EXIT CODES
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
@@ -96,8 +97,13 @@ def _redact_secret_values(text: str, *secrets: str | None) -> str:
 # Transaction-log summary (THE phase question) — whitelisted fields only.
 # ---------------------------------------------------------------------------
 
-# Exactly the RESEARCH Pitfall 1 field set. Anything outside this set
-# (username, user_id, email, ...) MUST NOT enter a committed sample.
+# The RESEARCH Pitfall 1 field set + the Phase-70 Wave-0 widening
+# (index_price, mark_price, price, id, trade_id, user_seq — RESEARCH Pitfall 2/5):
+# index_price/mark_price answer A1 (event-time coin->USD price presence on
+# settlement rows), price/id/trade_id/user_seq expose the native funding-dedup
+# axis and cashflow composition. Anything OUTSIDE this set (username, user_id,
+# email, ...) MUST NOT enter a committed sample. "id" stays in _MASK_KEYS so it
+# is MASKED at the sanitization boundary — masked presence is all A1/A4 need.
 _TXN_LOG_WHITELIST: tuple[str, ...] = (
     "type",
     "amount",
@@ -109,28 +115,123 @@ _TXN_LOG_WHITELIST: tuple[str, ...] = (
     "position",
     "timestamp",
     "currency",
+    # Phase-70 Wave-0 additions:
+    "index_price",
+    "mark_price",
+    "price",
+    "id",
+    "trade_id",
+    "user_seq",
 )
+
+# Per-type cap on whitelisted sample rows kept in the evidence JSON. A handful
+# per type — kept kind-diverse — characterizes the row shape; the numeric stats
+# (not the samples) answer A1/A3.
+MAX_TXN_SAMPLES_PER_TYPE: int = 5
+
+
+def _sample_kind(sample: Mapping[str, Any]) -> str:
+    """Instrument kind of a whitelisted sample, derived from its own
+    ``instrument_name`` field (so page-merge can re-derive it without the raw
+    row). Never raises."""
+    return classify_instrument(str(sample.get("instrument_name", "")))
+
+
+def _add_kind_diverse_sample(
+    bucket: list[dict[str, Any]], sample: Mapping[str, Any], cap: int
+) -> None:
+    """Append ``sample`` to ``bucket`` in place, keeping at most ``cap`` entries
+    and preferring distinct instrument kinds.
+
+    While under the cap every sample is kept. Once full, a NEW-kind sample
+    displaces the first entry whose kind is duplicated — so a late-appearing
+    kind is never crowded out by a duplicate-kind flood and the evidence keeps
+    at least one sample per observed kind (when kinds <= cap). Kind is derived
+    from the sample's own whitelisted ``instrument_name``, so this is reusable
+    when merging per-page summaries. Pure/never-raising.
+    """
+    entry = dict(sample)
+    if len(bucket) < cap:
+        bucket.append(entry)
+        return
+    kind = _sample_kind(entry)
+    kinds = [_sample_kind(existing) for existing in bucket]
+    if kind in kinds:
+        return
+    duplicated = Counter(kinds)
+    for index, existing_kind in enumerate(kinds):
+        if duplicated[existing_kind] > 1:
+            bucket[index] = entry
+            return
 
 
 def summarize_txn_log(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
-    """Aggregate transaction-log rows into distinct ``type`` counts + one
-    whitelisted-field sample per type.
+    """Aggregate transaction-log rows into distinct ``type`` counts, capped
+    kind-diverse per-type samples, and the Wave-0 numeric stats.
 
-    The distinct ``type`` set + a per-type sample row is what resolves THE phase
-    question (is funding netted into realized PnL or a separate row?). Samples
-    carry ONLY the whitelisted fields so committing the evidence can never leak
-    username/user_id/email (T-67-01).
+    Returns:
+      - ``type_counts``: distinct ``type`` -> row count.
+      - ``type_samples``: ``type`` -> list of up to ``MAX_TXN_SAMPLES_PER_TYPE``
+        whitelisted-field samples (kind-diverse). Samples carry ONLY whitelisted
+        fields so committing the evidence can never leak username/user_id/email
+        (T-70-01).
+      - ``settlement_price_stats``: over ``type=settlement`` rows,
+        ``{total, index_price_present, mark_price_present}`` — the NUMERIC A1
+        answer (never trust a single sample for "is the field populated").
+      - ``trade_cashflow_stats``: per classify-kind over ``type=trade`` rows,
+        ``{total, cashflow_nonzero}`` — the NUMERIC A3 answer (inverse-perp
+        double-count risk).
+      - ``txn_trade_row_count``: count of ``type=="trade"`` rows — the txn-log
+        completeness stream (Pitfall 5: the honesty anchor, distinct from the
+        under-returning trades endpoint).
+
+    Pure and never-raising on malformed rows (untrusted exchange input).
     """
     type_counts: dict[str, int] = {}
-    type_samples: dict[str, dict[str, Any]] = {}
+    type_samples: dict[str, list[dict[str, Any]]] = {}
+    settlement_price_stats: dict[str, int] = {
+        "total": 0,
+        "index_price_present": 0,
+        "mark_price_present": 0,
+    }
+    trade_cashflow_stats: dict[str, dict[str, int]] = {}
+    txn_trade_row_count = 0
+
     for row in rows:
+        if not isinstance(row, Mapping):
+            continue
         row_type = str(row.get("type", "unknown"))
         type_counts[row_type] = type_counts.get(row_type, 0) + 1
-        if row_type not in type_samples:
-            type_samples[row_type] = {
-                field: row[field] for field in _TXN_LOG_WHITELIST if field in row
-            }
-    return {"type_counts": type_counts, "type_samples": type_samples}
+
+        sample = {field: row[field] for field in _TXN_LOG_WHITELIST if field in row}
+        _add_kind_diverse_sample(
+            type_samples.setdefault(row_type, []), sample, MAX_TXN_SAMPLES_PER_TYPE
+        )
+
+        if row_type == "settlement":
+            settlement_price_stats["total"] += 1
+            if row.get("index_price") is not None:
+                settlement_price_stats["index_price_present"] += 1
+            if row.get("mark_price") is not None:
+                settlement_price_stats["mark_price_present"] += 1
+        elif row_type == "trade":
+            txn_trade_row_count += 1
+            kind = classify_instrument(str(row.get("instrument_name", "")))
+            stats = trade_cashflow_stats.setdefault(
+                kind, {"total": 0, "cashflow_nonzero": 0}
+            )
+            stats["total"] += 1
+            cashflow = row.get("cashflow")
+            if isinstance(cashflow, (int, float)) and cashflow != 0:
+                stats["cashflow_nonzero"] += 1
+
+    return {
+        "type_counts": type_counts,
+        "type_samples": type_samples,
+        "settlement_price_stats": settlement_price_stats,
+        "trade_cashflow_stats": trade_cashflow_stats,
+        "txn_trade_row_count": txn_trade_row_count,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +396,20 @@ def _egress_country() -> tuple[str, int | None]:
         return "?", None
 
 
+def _build_history_params(
+    base: Mapping[str, Any], subaccount_id: int | None
+) -> dict[str, Any]:
+    """Return a copy of ``base`` request params, adding ``subaccount_id`` ONLY
+    when a non-None sub id is passed (the main scope omits it — Deribit rejects
+    a null subaccount_id). Pure/I/O-free so the A2 inclusion rule is unit-
+    testable without a network round-trip. Never mutates ``base``.
+    """
+    params = dict(base)
+    if subaccount_id is not None:
+        params["subaccount_id"] = subaccount_id
+    return params
+
+
 async def _paginate_trades(
     ex: Any,
     ccy: str,
@@ -303,6 +418,7 @@ async def _paginate_trades(
     end_ms: int,
     count: int,
     max_pages: int,
+    subaccount_id: int | None = None,
 ) -> dict[str, Any]:
     """Fully paginate user trades for one currency, following ``has_more``.
 
@@ -324,15 +440,18 @@ async def _paginate_trades(
             max_pages_hit = True
             break
         resp = await ex.private_get_get_user_trades_by_currency_and_time(
-            {
-                "currency": ccy,
-                "kind": "any",
-                "start_timestamp": cursor,
-                "end_timestamp": end_ms,
-                "count": count,
-                "include_old": "true",
-                "sorting": "asc",
-            }
+            _build_history_params(
+                {
+                    "currency": ccy,
+                    "kind": "any",
+                    "start_timestamp": cursor,
+                    "end_timestamp": end_ms,
+                    "count": count,
+                    "include_old": "true",
+                    "sorting": "asc",
+                },
+                subaccount_id,
+            )
         )
         result = resp.get("result", {}) if isinstance(resp, dict) else {}
         trades = result.get("trades", []) or []
@@ -389,15 +508,24 @@ async def _paginate_txn_log(
     end_ms: int,
     count: int,
     max_pages: int,
+    subaccount_id: int | None = None,
 ) -> dict[str, Any]:
     """Fully paginate the transaction log for one currency, following the
     ``continuation`` token, merging each page through ``summarize_txn_log``.
 
-    THE phase question falls out of the merged distinct ``type`` counts +
-    per-type whitelisted sample.
+    The realized/funding partition (A3), the event-time price presence (A1) and
+    the txn-log completeness stream (``txn_trade_row_count`` — the Pitfall 5
+    honesty anchor) all fall out of the merged per-page summaries.
     """
     type_counts: dict[str, int] = {}
-    type_samples: dict[str, dict[str, Any]] = {}
+    type_samples: dict[str, list[dict[str, Any]]] = {}
+    settlement_price_stats: dict[str, int] = {
+        "total": 0,
+        "index_price_present": 0,
+        "mark_price_present": 0,
+    }
+    trade_cashflow_stats: dict[str, dict[str, int]] = {}
+    txn_trade_row_count = 0
     pages_used = 0
     max_pages_hit = False
     continuation: str | None = None
@@ -405,12 +533,15 @@ async def _paginate_txn_log(
         if pages_used >= max_pages:
             max_pages_hit = True
             break
-        params: dict[str, Any] = {
-            "currency": ccy,
-            "start_timestamp": start_ms,
-            "end_timestamp": end_ms,
-            "count": count,
-        }
+        params = _build_history_params(
+            {
+                "currency": ccy,
+                "start_timestamp": start_ms,
+                "end_timestamp": end_ms,
+                "count": count,
+            },
+            subaccount_id,
+        )
         if continuation:
             params["continuation"] = continuation
         resp = await ex.private_get_get_transaction_log(params)
@@ -420,8 +551,19 @@ async def _paginate_txn_log(
         page = summarize_txn_log(logs)
         for row_type, row_count in page["type_counts"].items():
             type_counts[row_type] = type_counts.get(row_type, 0) + row_count
-        for row_type, sample in page["type_samples"].items():
-            type_samples.setdefault(row_type, sample)
+        for row_type, samples in page["type_samples"].items():
+            bucket = type_samples.setdefault(row_type, [])
+            for sample in samples:
+                _add_kind_diverse_sample(bucket, sample, MAX_TXN_SAMPLES_PER_TYPE)
+        for stat_key, stat_value in page["settlement_price_stats"].items():
+            settlement_price_stats[stat_key] += stat_value
+        for kind, kind_stats in page["trade_cashflow_stats"].items():
+            dest = trade_cashflow_stats.setdefault(
+                kind, {"total": 0, "cashflow_nonzero": 0}
+            )
+            dest["total"] += kind_stats["total"]
+            dest["cashflow_nonzero"] += kind_stats["cashflow_nonzero"]
+        txn_trade_row_count += page["txn_trade_row_count"]
         continuation = result.get("continuation")
         if not continuation or not logs:
             break
@@ -429,7 +571,10 @@ async def _paginate_txn_log(
         "txn_log_type_summary": {
             "type_counts": type_counts,
             "type_samples": type_samples,
+            "settlement_price_stats": settlement_price_stats,
+            "trade_cashflow_stats": trade_cashflow_stats,
         },
+        "txn_trade_row_count": txn_trade_row_count,
         "pages_used": pages_used,
         "max_pages_hit": max_pages_hit,
     }
@@ -543,74 +688,148 @@ async def run(
                 _record_exc(f"account_summary:{ccy}", exc)
         evidence["currencies"] = {"available": available, "held": held}
 
-        # 3. Per-currency full-pagination capture of trades + transaction log.
-        per_currency: dict[str, Any] = {}
-        instrument_mix: dict[str, int] = {}
-        instrument_samples: dict[str, list[dict[str, Any]]] = {}
-        capture_ccys = held or available
-        for ccy in capture_ccys:
-            entry: dict[str, Any] = {}
-            try:
-                trades = await _paginate_trades(
-                    ex,
-                    ccy,
-                    start_ms=start_ms,
-                    end_ms=end_ms,
-                    count=count,
-                    max_pages=max_pages,
-                )
-                entry["trade_count"] = trades["trade_count"]
-                entry["trade_pages_used"] = trades["pages_used"]
-                entry["trade_max_pages_hit"] = trades["max_pages_hit"]
-                entry["trade_boundary_overlap_stall"] = trades[
-                    "boundary_overlap_stall"
-                ]
-                for kind, kcount in trades["instrument_kinds"].items():
-                    instrument_mix[kind] = instrument_mix.get(kind, 0) + kcount
-                for kind, kslist in trades["instrument_samples"].items():
-                    dest = instrument_samples.setdefault(kind, [])
-                    for sample in kslist:
-                        if len(dest) < MAX_SAMPLES_PER_KIND:
-                            dest.append(sample)
-            except Exception as exc:  # noqa: BLE001
-                _record_exc(f"user_trades:{ccy}", exc)
-            try:
-                txn = await _paginate_txn_log(
-                    ex,
-                    ccy,
-                    start_ms=start_ms,
-                    end_ms=end_ms,
-                    count=count,
-                    max_pages=max_pages,
-                )
-                entry["txn_log_type_summary"] = txn["txn_log_type_summary"]
-                entry["txn_pages_used"] = txn["pages_used"]
-                entry["txn_max_pages_hit"] = txn["max_pages_hit"]
-            except Exception as exc:  # noqa: BLE001
-                _record_exc(f"transaction_log:{ccy}", exc)
-            per_currency[ccy] = entry
-        evidence["per_currency"] = per_currency
-        evidence["instrument_mix"] = {
-            "counts": instrument_mix,
-            "samples": instrument_samples,
-        }
-
-        # 4. Subaccount structure (bonus, Phase 72; count-only, masked).
+        # 3. Enumerate subaccounts (D-01) — the raw ids drive the fetch loop but
+        # NEVER enter the evidence (scopes are labelled by ordinal "main"/"sub_N"
+        # — defense in depth on top of masking). get_subaccounts requires only
+        # account:read; an error here IS a signal (record, continue main-only).
+        sub_ids: list[int] = []
         try:
-            subs = await ex.private_get_get_subaccounts({"with_portfolio": "true"})
+            subs = await ex.private_get_get_subaccounts({"with_portfolio": "false"})
             subs_result = subs.get("result", []) if isinstance(subs, dict) else []
-            sub_count = len(subs_result) if isinstance(subs_result, list) else 0
+            for entry_obj in subs_result if isinstance(subs_result, list) else []:
+                if isinstance(entry_obj, dict) and isinstance(
+                    entry_obj.get("id"), int
+                ):
+                    sub_ids.append(int(entry_obj["id"]))
             evidence["subaccounts_observation"] = {
-                "count": sub_count,
-                "sees_any": sub_count > 0,
+                "count": len(sub_ids),
+                "sees_any": len(sub_ids) > 0,
             }
         except Exception as exc:  # noqa: BLE001
+            _record_exc("get_subaccounts", exc)
             evidence["subaccounts_observation"] = {
                 "count": 0,
                 "sees_any": False,
                 "note": "not permitted",
                 "error": str(scrub_freeform_string(str(exc))),
             }
+
+        # scopes = main (None) + every enumerated subaccount, labelled by ordinal.
+        scopes: list[tuple[str, int | None]] = [("main", None)]
+        for ordinal, raw_sid in enumerate(sub_ids, start=1):
+            scopes.append((f"sub_{ordinal}", raw_sid))
+
+        # 4. Per-scope × per-currency full-pagination capture of BOTH streams
+        # (trades endpoint + txn-log) plus per-account equity. A2 (subaccount
+        # reach) and the Pitfall-5 honesty anchor both fall out of these counts.
+        capture_ccys = held or available
+        per_scope: dict[str, Any] = {}
+        instrument_mix: dict[str, int] = {}
+        instrument_samples: dict[str, list[dict[str, Any]]] = {}
+        account_equity: dict[str, Any] = {}
+        total_trades_all_scopes = 0
+        total_txn_trade_rows_all_scopes = 0
+
+        for scope_label, sid in scopes:
+            per_currency: dict[str, Any] = {}
+            scope_equity: dict[str, Any] = {}
+            scope_trade_total = 0
+            scope_txn_trade_total = 0
+
+            # Per-account USD equity anchor (numeric-only figures — the value
+            # 70-06's dailies anchor + revert-proof shape test rely on).
+            for ccy in capture_ccys:
+                try:
+                    summ = await ex.private_get_get_account_summary(
+                        _build_history_params({"currency": ccy}, sid)
+                    )
+                    summ_result = (
+                        summ.get("result", {}) if isinstance(summ, dict) else {}
+                    )
+                    figures = {
+                        field: summ_result[field]
+                        for field in (
+                            "equity",
+                            "equity_usd",
+                            "margin_balance",
+                            "balance",
+                        )
+                        if isinstance(summ_result.get(field), (int, float))
+                    }
+                    if figures:
+                        scope_equity[ccy] = figures
+                except Exception as exc:  # noqa: BLE001
+                    _record_exc(f"account_summary:{scope_label}:{ccy}", exc)
+            account_equity[scope_label] = scope_equity
+
+            for ccy in capture_ccys:
+                entry: dict[str, Any] = {}
+                try:
+                    trades = await _paginate_trades(
+                        ex,
+                        ccy,
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                        count=count,
+                        max_pages=max_pages,
+                        subaccount_id=sid,
+                    )
+                    entry["trade_count"] = trades["trade_count"]
+                    entry["trade_pages_used"] = trades["pages_used"]
+                    entry["trade_max_pages_hit"] = trades["max_pages_hit"]
+                    entry["trade_boundary_overlap_stall"] = trades[
+                        "boundary_overlap_stall"
+                    ]
+                    scope_trade_total += trades["trade_count"]
+                    total_trades_all_scopes += trades["trade_count"]
+                    for kind, kcount in trades["instrument_kinds"].items():
+                        instrument_mix[kind] = instrument_mix.get(kind, 0) + kcount
+                    for kind, kslist in trades["instrument_samples"].items():
+                        dest = instrument_samples.setdefault(kind, [])
+                        for sample in kslist:
+                            if len(dest) < MAX_SAMPLES_PER_KIND:
+                                dest.append(sample)
+                except Exception as exc:  # noqa: BLE001
+                    _record_exc(f"user_trades:{scope_label}:{ccy}", exc)
+                try:
+                    txn = await _paginate_txn_log(
+                        ex,
+                        ccy,
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                        count=count,
+                        max_pages=max_pages,
+                        subaccount_id=sid,
+                    )
+                    entry["txn_log_type_summary"] = txn["txn_log_type_summary"]
+                    entry["txn_trade_row_count"] = txn["txn_trade_row_count"]
+                    entry["txn_pages_used"] = txn["pages_used"]
+                    entry["txn_max_pages_hit"] = txn["max_pages_hit"]
+                    scope_txn_trade_total += txn["txn_trade_row_count"]
+                    total_txn_trade_rows_all_scopes += txn["txn_trade_row_count"]
+                except Exception as exc:  # noqa: BLE001
+                    _record_exc(f"transaction_log:{scope_label}:{ccy}", exc)
+                per_currency[ccy] = entry
+
+            per_scope[scope_label] = {
+                "per_currency": per_currency,
+                "scope_trade_total": scope_trade_total,
+                "scope_txn_trade_total": scope_txn_trade_total,
+            }
+
+        evidence["per_scope"] = per_scope
+        evidence["account_equity"] = account_equity
+        evidence["instrument_mix"] = {
+            "counts": instrument_mix,
+            "samples": instrument_samples,
+        }
+        # BOTH streams reconciled per-run: the trades endpoint under-returns vs
+        # the txn-log type=trade count (Pitfall 5), so the checkpoint records
+        # WHICH stream matches the known 18,778/21,014/61,248 as the D-02 anchor.
+        evidence["history_completeness"] = {
+            "total_trades_all_scopes": total_trades_all_scopes,
+            "total_txn_trade_rows_all_scopes": total_txn_trade_rows_all_scopes,
+        }
     finally:
         await aclose_exchange(ex)
 
