@@ -31,6 +31,7 @@ import { render, screen, fireEvent, act, cleanup, waitFor } from "@testing-libra
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import {
   computeHoldingsFingerprint,
+  MAX_MEMBER_KEY_IDS,
   scenarioStorageKey,
   SCENARIO_SCHEMA_VERSION,
   type ScenarioDraft,
@@ -598,6 +599,79 @@ describe("ScenarioComposer — Save/Update toolbar + codec Open (Phase 23 Plan 0
     expect(
       screen.getByRole("button", { name: /^Save portfolio$/i }),
     ).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // T_SAVE9b (CF-02) — an OVER-CAP save (400 with a memberKeyIds/too_big issue)
+  //                    renders the HONEST ceiling copy naming MAX_MEMBER_KEY_IDS,
+  //                    NOT the misleading connection message. Fails-without-fix:
+  //                    the pre-change code showed the generic copy for all !res.ok.
+  // -------------------------------------------------------------------------
+  it("T_SAVE9b an over-cap save (400 memberKeyIds/too_big) shows the honest ceiling copy naming MAX_MEMBER_KEY_IDS, never 'Check your connection'", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        error: "Invalid request body",
+        issues: [
+          { code: "too_big", path: ["draft", "memberKeyIds"], maximum: MAX_MEMBER_KEY_IDS },
+        ],
+      }),
+    })) as unknown as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Too many books" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      // Honest copy names the real ceiling (interpolated from the const).
+      expect(
+        screen.getByText(
+          new RegExp(`more than ${String(MAX_MEMBER_KEY_IDS)} book sources`, "i"),
+        ),
+      ).toBeInTheDocument();
+    });
+    // The misleading connection copy is NOT shown for this over-cap 400.
+    expect(
+      screen.queryByText(/Check your connection/i),
+    ).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // T_SAVE9c (CF-02 scope) — a 400 whose issues do NOT touch memberKeyIds still
+  //                    renders the generic copy (the helper only special-cases the
+  //                    over-cap shape — no scope creep to other validation errors).
+  // -------------------------------------------------------------------------
+  it("T_SAVE9c a 400 whose issues do NOT touch memberKeyIds still shows the generic copy (no scope creep)", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        error: "Invalid request body",
+        issues: [{ code: "invalid_type", path: ["name"] }],
+      }),
+    })) as unknown as typeof fetch;
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Bad name shape" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Couldn't save this portfolio\./i),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText(/book sources/i),
+    ).not.toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
