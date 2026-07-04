@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.37.0.1] - 2026-07-04
+### Fixed
+- **Bybit reconciliation harness** — the first live worker run failed on a phantom `api_keys.strategy_id` column (42703); the strategy is now resolved through `strategies.api_key_id` with an exactly-one guard and a source-pin regression test.
+
 ## [0.37.0.0] - 2026-07-04
 ### Added — Deribit ground-truth harnesses (v1.7 phase 67, wave 1)
 Groundwork for Deribit track-record onboarding: two read-only evidence harnesses that run from the analytics worker and prove ingestion against the exchange's own records before any feature code is built on top.
