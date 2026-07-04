@@ -1,0 +1,19 @@
+{
+  "probe": "P70 Wave-0 Deribit subaccount + txn-log probe",
+  "recorded": "2026-07-05",
+  "provenance": "widened deribit_ground_truth harness, run per-key on the Railway worker (Amsterdam), 3 read-only LTP keys. Sanitized: aggregate counts + A1/A2/A3 findings only; no raw rows, balances, ids, or emails.",
+  "answers": {
+    "A1_index_price_on_settlement": "POSITIVE — acct3: 218/218 settlement rows carry index_price (0 carry mark_price). Inverse coin->USD conversion uses the settlement row's own event-time index_price (D-07/D-08 valid).",
+    "A2_subaccount_reach_readonly": "POSITIVE — all 3 keys: get_subaccounts count=2, sees_any=true; subaccount_id loop returns history for read-only keys. (Fixed a harness bug: Deribit returns subaccount id as a STRING; int-only filter had dropped them.)",
+    "A3_cashflow_location": "trade rows carry ZERO cashflow (inverse/option/unknown cashflow_nonzero=0). Realized cashflow lives ONLY in settlement + delivery rows. On Deribit, perpetual funding is realized INSIDE the settlement session-PnL cashflow — likely NO separate funding stream (reshapes plan 70-04)."
+  },
+  "history_completeness_all_scopes": {
+    "note": "trades-endpoint = get_user_trades_by_currency_and_time (all scopes incl subaccounts); txnlog_type_trade = transaction-log type=trade rows (the dailies-realized-adjacent stream). Known totals are the founder-provided figures under reconciliation.",
+    "account_1": {"known_total": 18778, "trades_endpoint": 0, "txnlog_type_trade": 1300, "subaccounts": 2},
+    "account_2": {"known_total": 21014, "trades_endpoint": 0, "txnlog_type_trade": 1720, "subaccounts": 2},
+    "account_3": {"known_total": 61248, "trades_endpoint": 674, "txnlog_type_trade": 962, "subaccounts": 2}
+  },
+  "account_3_txn_log_type_counts_all_scopes": {"trade": 962, "settlement": 218, "transfer": 94, "delivery": 42, "usdc_reward": 12, "deposit": 6},
+  "history_span": "Multi-year, NOT a retention window. acct3 txn-log spans 2023-06 (deposits) .. 2026-06. Full history is returned; the event counts are simply far below the known totals.",
+  "BLOCKING_FINDING": "Neither the trades endpoint nor the txn-log type=trade count reconciles to the known totals (18,778/21,014/61,248) for ANY account, even with subaccounts — and the counts are INVERSELY correlated with the known totals (acct3 has the highest known total but the fewest txn-log trade rows). The D-02 count gate cannot use these as an honesty anchor. The known totals appear to count a different unit (likely individual fills/legs) than the API surfaces. Daily returns for a derivatives track record derive from realized PnL (settlement+delivery cashflow, funding-inclusive) NOT fill counts — so the count gate may be anchored on the wrong measure. Needs founder input before implementation waves proceed."
+}
