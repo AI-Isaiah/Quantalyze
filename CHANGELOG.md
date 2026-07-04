@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.37.3.0] - 2026-07-04
+### Added
+- **Deribit is now a self-serve onboarding option (UX-01, UX-02).** The strategy-connect wizard shows a fourth exchange card for Deribit with "Client ID"/"Client Secret" fields (Deribit issues an OAuth-style Client ID + Secret, not an API key + passphrase) and **no passphrase field**. `/security#deribit-readonly` renders a read-only-key setup guide whose scope checklist names `account:read` (plus `trade:read`/`wallet:read`) and steers users away from any `:read_write`/Trade/Withdraw scope, reinforcing the Phase-68 server-side scope gate. The credential relabel is presentation-only — a Deribit submit still POSTs the generic `api_key`/`api_secret` with `passphrase: null` (pinned by a revert-proof test).
+### Changed
+- **The user-facing "offered exchanges" set (`UI_EXCHANGE_CODES`) now includes Deribit.** This is the conscious flip Phase 68 reserved: every consumer of the offered set (the public verification-request dropdown, the intro-request chips, the marketing "N exchanges supported" count) now renders "Deribit" with no "unsupported exchange" fallback. `VerificationForm` previously carried its own local label map missing `deribit` (would have rendered a blank `<option>`); it now sources labels from the single-source `EXCHANGE_DISPLAY`. `FUNDING_EXCHANGES` stays 3-value — Deribit funding ingestion lands in Phase 70, and the parity contract test still pins that exclusion.
+
 ## [0.37.2.1] - 2026-07-04
 ### Fixed
 - **CI green-up for the Deribit boundary widening (0.37.2.0 follow-up).** Two full-suite-only failures the targeted local runs couldn't surface: `test_ingestion_protocol.py::test_literal_types` still pinned the pre-widening `Source` Literal (stale assertion — now includes `deribit`, matching the intentional DRB-02 widening), and the new `test_deribit_scope_validation.py` mock-key fixtures tripped the gitleaks generic-api-key detector on the push-to-main full scan (allowlisted, same pattern as the other credential-redaction test fixtures).
