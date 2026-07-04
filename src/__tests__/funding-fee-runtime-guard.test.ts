@@ -77,7 +77,7 @@ describe("parseFundingFeeRows — H-1116 trust-boundary guard", () => {
 });
 
 describe("buildFundingMatchKey — M-0909 canonical constructor", () => {
-  it("produces a stable key for the same 8-hour bucket", () => {
+  it("produces a stable key for the same 1-hour bucket", () => {
     const k1 = buildFundingMatchKey({
       strategy_id: "S",
       exchange: "binance",
@@ -88,25 +88,43 @@ describe("buildFundingMatchKey — M-0909 canonical constructor", () => {
       strategy_id: "S",
       exchange: "binance",
       symbol: "BTC-USDT",
-      timestamp: "2026-01-01T07:59:00Z",
+      timestamp: "2026-01-01T00:59:00Z",
     });
     expect(k1).toBe(k2);
   });
 
-  it("produces different keys across 8-hour bucket boundaries", () => {
+  it("keeps distinct settlements in adjacent hours distinct (BYB-02)", () => {
+    // The old 8h bucket collapsed sub-8h settlements onto one key — the
+    // exact silent funding-loss class prod reconciliation caught on Bybit.
     const k1 = buildFundingMatchKey({
       strategy_id: "S",
-      exchange: "binance",
+      exchange: "bybit",
       symbol: "BTC-USDT",
-      timestamp: "2026-01-01T07:59:00Z",
+      timestamp: "2026-01-01T00:59:00Z",
     });
     const k2 = buildFundingMatchKey({
       strategy_id: "S",
-      exchange: "binance",
+      exchange: "bybit",
       symbol: "BTC-USDT",
-      timestamp: "2026-01-01T08:01:00Z",
+      timestamp: "2026-01-01T01:01:00Z",
     });
     expect(k1).not.toBe(k2);
+  });
+
+  it("is byte-identical to the Python _build_match_key format", () => {
+    // Pins the cross-runtime parity anchor shared with
+    // analytics-service/tests/test_funding_match_key_sql_parity.py:
+    // same inputs must produce this exact string on all three sides
+    // (TS, Python, migration SQL).
+    const k = buildFundingMatchKey({
+      strategy_id: "fc1b4014-da41-49d7-8592-138be5a6fa12",
+      exchange: "bybit",
+      symbol: "BTCUSDT",
+      timestamp: "2026-07-04T08:37:12.500Z",
+    });
+    expect(k).toBe(
+      "fc1b4014-da41-49d7-8592-138be5a6fa12:bybit:BTCUSDT:2026-07-04T08:00:00+00:00",
+    );
   });
 
   it("brand prevents an arbitrary string from satisfying the type", () => {

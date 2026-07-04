@@ -111,7 +111,15 @@ async def test_empty_rows_noop() -> None:
 @pytest.mark.asyncio
 async def test_batching_respects_limit() -> None:
     """Rows are batched — the upsert is called in chunks so large backfills
-    don't blow the HTTP payload size."""
+    don't blow the HTTP payload size.
+
+    The row count derives from the live FUNDING_UPSERT_BATCH_SIZE constant
+    (not a hardcoded number) so the test pins the INTENT — batching exists
+    and no chunk exceeds the cap — and survives batch-size tuning
+    (100 -> 500 in BYB-02).
+    """
+    from services.funding_fetch import FUNDING_UPSERT_BATCH_SIZE
+
     backfill = _load_backfill_module()
 
     captured_batch_sizes: list[int] = []
@@ -128,7 +136,9 @@ async def test_batching_respects_limit() -> None:
     mock_table.upsert.side_effect = _upsert
     mock.table.return_value = mock_table
 
-    # 250 rows should be batched (default batch size expected ≤ 200).
+    # One full batch plus a remainder forces at least 2 chunks whatever
+    # the configured batch size is.
+    n_rows = FUNDING_UPSERT_BATCH_SIZE + 50
     many_rows = [
         {
             "strategy_id": STRATEGY_ID,
@@ -140,10 +150,10 @@ async def test_batching_respects_limit() -> None:
             "match_key": f"{STRATEGY_ID}:binance:BTCUSDT:bucket-{i}",
             "raw_data": None,
         }
-        for i in range(250)
+        for i in range(n_rows)
     ]
 
     await backfill.upsert_funding_rows(mock, many_rows)
-    # At least 2 batches
-    assert sum(captured_batch_sizes) == 250
+    assert sum(captured_batch_sizes) == n_rows
     assert len(captured_batch_sizes) >= 2
+    assert max(captured_batch_sizes) <= FUNDING_UPSERT_BATCH_SIZE

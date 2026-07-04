@@ -1,0 +1,19 @@
+-- Rollback for 20260704150835_funding_match_key_1h_rekey.sql
+--
+-- FORWARD-ONLY — there is no safe SQL reversal.
+--
+-- Reversing the re-key (1h -> 8h) would floor many distinct 1h keys back
+-- onto one 8h key: the reverse UPDATE itself hits UNIQUE(match_key)
+-- violations, and "resolving" them means deleting real settlement rows —
+-- reintroducing the exact silent funding loss BYB-02 fixed.
+--
+-- If the application change must be reverted:
+--   1. Revert the analytics worker FIRST (_FUNDING_BUCKET_HOURS bybit/okx
+--      back to 8) so no new 1h keys are written.
+--   2. Leave the 1h-keyed rows in place. The old code's 8h upserts will
+--      dedup against nothing and may re-insert 8h-keyed duplicates of
+--      existing 1h rows; dedup manually by
+--      (strategy_id, exchange, symbol, date_trunc('hour', timestamp)),
+--      keeping one row per group.
+-- There is deliberately no DDL/DML here.
+SELECT 1;

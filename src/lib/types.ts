@@ -804,29 +804,34 @@ export function parsePositionRows(rows: unknown[]): Position[] {
 
 /**
  * audit-2026-05-07 M-0909: branded MatchKey type for `funding_fees.match_key`.
- * The dedup contract is `strategy_id:exchange:symbol:8h-bucket(timestamp)` and
- * backs a UNIQUE constraint. Branding prevents arbitrary string concatenations
- * from flowing into `match_key` without going through `buildFundingMatchKey`,
- * which is the single place that knows the canonical format.
+ * The dedup contract is `strategy_id:exchange:symbol:1h-bucket(timestamp)`
+ * (BYB-02, 2026-07-04: was 8h — the coarse bucket silently collapsed
+ * distinct sub-8h settlements) and backs a UNIQUE constraint. Branding
+ * prevents arbitrary string concatenations from flowing into `match_key`
+ * without going through `buildFundingMatchKey`, which is the single place
+ * that knows the canonical format.
  */
 export type FundingFeeMatchKey = string & { readonly __brand: "FundingFeeMatchKey" };
 
 /**
  * Canonical match_key constructor. Floors the timestamp to its enclosing
- * 8-hour funding bucket (00:00 / 08:00 / 16:00 UTC) — the same shape the
- * Python `_build_match_key` writer emits.
+ * 1-hour funding bucket — byte-identical to what the Python
+ * `_build_match_key` writer emits (`%Y-%m-%dT%H:%M:%S+00:00`, NOT
+ * `Date.toISOString()`'s `.000Z` form). Parity with the Python/SQL sides
+ * is pinned by funding-fee-runtime-guard.test.ts and
+ * test_funding_match_key_sql_parity.py.
  */
 export function buildFundingMatchKey(parts: {
   strategy_id: string;
   exchange: SupportedExchange;
   symbol: string;
-  /** ISO-8601 UTC timestamp; floored to the 8h bucket. */
+  /** ISO-8601 UTC timestamp; floored to the 1h bucket. */
   timestamp: string;
 }): FundingFeeMatchKey {
   const t = new Date(parts.timestamp).getTime();
-  const bucketMs = 8 * 60 * 60 * 1000;
+  const bucketMs = 60 * 60 * 1000;
   const floored = Math.floor(t / bucketMs) * bucketMs;
-  const bucket = new Date(floored).toISOString();
+  const bucket = new Date(floored).toISOString().replace(/\.\d{3}Z$/, "+00:00");
   return `${parts.strategy_id}:${parts.exchange}:${parts.symbol}:${bucket}` as FundingFeeMatchKey;
 }
 
@@ -871,9 +876,9 @@ export interface BybitFundingRaw {
 }
 
 /**
- * funding_fees row — one per 8-hour funding window per
- * (strategy, exchange, symbol). Signed amount: positive = received,
- * negative = paid. See migration 044.
+ * funding_fees row — one per 1-hour funding window per
+ * (strategy, exchange, symbol) (BYB-02: was 8h). Signed amount:
+ * positive = received, negative = paid. See migration 044.
  *
  * audit-2026-05-07 M-0910: discriminated union on `exchange` so
  * `raw_data` narrows to the per-exchange raw shape automatically.

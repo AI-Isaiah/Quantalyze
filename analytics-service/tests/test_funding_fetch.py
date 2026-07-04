@@ -371,10 +371,14 @@ class TestFetchFundingDispatcher:
 
 class TestMatchKeyDeterminism:
     @pytest.mark.asyncio
-    async def test_okx_same_8h_bucket_same_key(self) -> None:
-        """OKX retains an 8h funding cadence, so two events 7h apart in
-        the same bucket collapse onto the same match_key. The 8h dedup is
-        the canonical archive+recent overlap defense.
+    async def test_okx_distinct_settlements_keep_distinct_keys(self) -> None:
+        """BYB-02 regression: OKX supports dynamic sub-8h funding cadences,
+        so two DISTINCT settlements hours apart must produce different
+        match_keys. The old 8h bucket collapsed them and the in-function
+        dedup dropped one — the same silent-loss class prod reconciliation
+        caught on Bybit (run 4, 2026-07-04). The archive+recent overlap
+        defense only needs the key stable for the SAME settlement (same
+        timestamp), which the 1h bucket preserves.
         """
         mock_exchange = AsyncMock()
         mock_exchange.id = "okx"
@@ -393,7 +397,7 @@ class TestMatchKeyDeterminism:
                     "type": "8",
                     "pnl": "-0.01",
                     "ccy": "USDT",
-                    "ts": "1700034000000",  # 07:40:00 UTC, same 00-08 bucket
+                    "ts": "1700034000000",  # 07:40:00 UTC, distinct settlement
                     "billId": "b",
                 },
             ]
@@ -406,9 +410,127 @@ class TestMatchKeyDeterminism:
         rows = await fetch_funding_okx(
             mock_exchange, STRATEGY_ID, since_ms=None
         )
-        # Producer-side both rows are emitted; the in-function dedup at
-        # the end of fetch_funding_okx collapses them to one.
+        assert len(rows) == 2
+        assert rows[0]["match_key"] != rows[1]["match_key"]
+
+    @pytest.mark.asyncio
+    async def test_okx_same_settlement_refetched_dedups(self) -> None:
+        """The overlap defense the old 8h bucket was credited with: the SAME
+        settlement returned by both the recent and archive endpoints (same
+        timestamp) still collapses onto one match_key at the 1h bucket.
+        """
+        event = {
+            "instId": "BTC-USDT-SWAP",
+            "type": "8",
+            "pnl": "-0.01",
+            "ccy": "USDT",
+            "ts": "1700006460000",
+            "billId": "a",
+        }
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_account_bills = AsyncMock(
+            return_value={"data": [event]}
+        )
+        mock_exchange.private_get_account_bills_archive = AsyncMock(
+            return_value={"data": [dict(event, billId="b")]}
+        )
+
+        rows = await fetch_funding_okx(
+            mock_exchange, STRATEGY_ID, since_ms=None
+        )
         assert len(rows) == 1
+
+    @pytest.mark.asyncio
+    async def test_bybit_4h_cycle_pairs_keep_distinct_keys(self) -> None:
+        """BYB-02 regression (reconcile run 4, 2026-07-04): Bybit runs
+        dynamic 1h/4h/8h funding cadences per symbol — the prod hour
+        histogram peaks on the 4h grid. With the old 8h bucket, two
+        settlements 4h apart shared a match_key and ON CONFLICT dropped
+        one at the DB upsert (>50% of funding rows lost, ~$32k net over
+        180d for the live Bybit strategy). With the 1h bucket they keep
+        distinct keys.
+        """
+        linear_page = {
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCDOMUSDT",
+                        "type": "SETTLEMENT",
+                        "funding": "-0.01",
+                        "currency": "USDT",
+                        "transactionTime": "1700006460000",  # 00:01:00 UTC
+                        "id": "a",
+                    },
+                    {
+                        "symbol": "BTCDOMUSDT",
+                        "type": "SETTLEMENT",
+                        "funding": "-0.01",
+                        "currency": "USDT",
+                        "transactionTime": "1700021400000",  # 04:10:00 UTC
+                        "id": "b",
+                    },
+                ],
+                "nextPageCursor": "",
+            }
+        }
+        inverse_page = {"result": {"list": [], "nextPageCursor": ""}}
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_account_transaction_log = (
+            _bybit_mock_with_fallback(linear_page, inverse_page)
+        )
+
+        rows = await fetch_funding_bybit(
+            mock_exchange, STRATEGY_ID, since_ms=1700000000000
+        )
+        assert len(rows) == 2
+        assert rows[0]["match_key"] != rows[1]["match_key"]
+
+    @pytest.mark.asyncio
+    async def test_bybit_1h_cycle_pairs_keep_distinct_keys(self) -> None:
+        """Pins the EXACT 1h bucket choice (not just '&lt;8h'): Bybit's most
+        aggressive dynamic cadence is 1h, so two settlements ~1h apart must
+        keep distinct keys. The 4h-apart test above would still pass under
+        a 4h bucket; this one fails for any bucket wider than 1h.
+        """
+        linear_page = {
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCDOMUSDT",
+                        "type": "SETTLEMENT",
+                        "funding": "-0.01",
+                        "currency": "USDT",
+                        "transactionTime": "1700006460000",  # 00:01:00 UTC
+                        "id": "a",
+                    },
+                    {
+                        "symbol": "BTCDOMUSDT",
+                        "type": "SETTLEMENT",
+                        "funding": "-0.01",
+                        "currency": "USDT",
+                        "transactionTime": "1700010300000",  # 01:05:00 UTC
+                        "id": "b",
+                    },
+                ],
+                "nextPageCursor": "",
+            }
+        }
+        inverse_page = {"result": {"list": [], "nextPageCursor": ""}}
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_account_transaction_log = (
+            _bybit_mock_with_fallback(linear_page, inverse_page)
+        )
+
+        rows = await fetch_funding_bybit(
+            mock_exchange, STRATEGY_ID, since_ms=1700000000000
+        )
+        assert len(rows) == 2
+        assert rows[0]["match_key"] != rows[1]["match_key"]
 
     @pytest.mark.asyncio
     async def test_binance_4h_cycle_pairs_keep_distinct_keys(self) -> None:
