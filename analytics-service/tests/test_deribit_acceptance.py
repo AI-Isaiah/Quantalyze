@@ -106,7 +106,8 @@ def test_date_coverage_empty_fails_loud() -> None:
 
 
 # ---------------------------------------------------------------------------
-# check_daily_reconcile — set equality of fresh-ledger vs persisted days.
+# check_daily_reconcile — NONZERO-P&L day equality (real realized cash) is the
+# gate; zero-value days differ harmlessly across crawls → advisory only.
 # REVERT-PROOF: dropped + injected each fail loud and name the date.
 # ---------------------------------------------------------------------------
 
@@ -115,7 +116,20 @@ def test_daily_reconcile_identical_sets_pass() -> None:
     days = {date(2025, 8, 1), date(2025, 8, 2), date(2025, 8, 3)}
     chk = check_daily_reconcile(days, set(days))
     assert chk.passed
-    assert "3 settlement-day(s) reconcile" in chk.detail
+    assert "3 nonzero-P&L day(s) reconcile exactly" in chk.detail
+
+
+def test_daily_reconcile_zero_day_delta_is_advisory_not_gated() -> None:
+    """The real finding from the LTP056 canary: nonzero-P&L days reconcile EXACTLY
+    but the two crawls emit a different set of cosmetic zero-value days. That must
+    PASS (real cash reconciles) with the zero-day delta reported advisory-only.
+    Revert-proof: gating on zero_day_delta (e.g. ``passed = ... and not
+    zero_day_delta``) would redden this."""
+    days = {date(2025, 6, 1), date(2025, 6, 2)}
+    chk = check_daily_reconcile(days, set(days), zero_day_delta=13)
+    assert chk.passed
+    assert "13 cosmetic zero-value day(s) differ" in chk.detail
+    assert "advisory" in chk.detail
 
 
 def test_daily_reconcile_dropped_day_fails_and_names_it() -> None:
