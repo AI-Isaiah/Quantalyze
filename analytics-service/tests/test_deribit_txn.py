@@ -31,9 +31,22 @@ from services.deribit_txn import (
     INFORMATIONAL_TYPES,
     LedgerValuationError,
     classify_instrument,
+    deribit_dated_external_flows_usd,
     inverse_days_needing_index,
     txn_change_to_usd,
     txn_rows_to_daily_records,
+)
+from services.external_flows import ExternalFlow
+from tests.fixtures.deribit_flow_fixtures import (
+    BTC_INDEX_2026_03_14,
+    BTC_INDEX_2026_03_17,
+    DAY_INVERSE_WITH_INDEX,
+    DAY_LINEAR,
+    DAY_PURE_FLOW,
+    inverse_flow_day_with_index_rows,
+    inverse_flow_day_without_index_rows,
+    linear_flow_day_rows,
+    pure_flow_no_trade_rows,
 )
 
 
@@ -781,3 +794,148 @@ def test_daily_record_shape_and_single_sum() -> None:
     assert day_a["price"] == pytest.approx(500.0, abs=1e-9)
     assert day_b["side"] == "sell"
     assert day_b["price"] == pytest.approx(1000.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Plan 75-02 Task 1 — deribit_dated_external_flows_usd: the ONE honest dated
+# per-UTC-day ExternalFlow producer (linear pass-through + inverse valued at the
+# same-day settlement index via txn_change_to_usd, fail-loud on a missing index).
+# Every proof below is mutation-honest: a wrong sign / wrong-day index / 1.0 /
+# dropped flow / neutered INFORMATIONAL skip turns it RED.
+# ---------------------------------------------------------------------------
+
+
+def test_dated_external_flow_sign_and_event_time_value() -> None:
+    """Sign + date + event-time value: an inverse BTC withdrawal (change=-0.5) on
+    a day whose OWN settlement row seeds the same-day BTC index (42000) emits ONE
+    ExternalFlow on the row's ACTUAL UTC day with usd_signed == -0.5 * 42000 ==
+    -21000 (NEGATIVE).
+
+    Mutation-honest: flipping the change sign, using a different-day index, a 1.0
+    unit price, or a current price all change the asserted -21000.0; dropping the
+    flow empties the list. The index comes from the batch's OWN index-bearing
+    settlement row (scenario 2), so no supplemental_index is needed."""
+    flows = deribit_dated_external_flows_usd(inverse_flow_day_with_index_rows())
+    assert len(flows) == 1
+    flow = flows[0]
+    assert flow.utc_day_iso == DAY_INVERSE_WITH_INDEX
+    assert flow.usd_signed == pytest.approx(-0.5 * BTC_INDEX_2026_03_14, abs=1e-9)
+    assert flow.usd_signed == pytest.approx(-21000.0, abs=1e-9)
+    assert flow.usd_signed < 0.0  # a withdrawal is capital OUT
+
+
+def test_flow_linear_vs_inverse_valuation() -> None:
+    """A LINEAR (USDC) deposit passes through as USD with NO index multiplication
+    (Pitfall 4: a USDC $50000 must not become $50000*index); an INVERSE (BTC) flow
+    IS index-multiplied. Same producer, two valuation paths — both via
+    txn_change_to_usd."""
+    linear = deribit_dated_external_flows_usd(linear_flow_day_rows())
+    assert len(linear) == 1
+    assert linear[0].utc_day_iso == DAY_LINEAR
+    # +50000 USDC passes through verbatim (NOT 50000 * any index).
+    assert linear[0].usd_signed == pytest.approx(50000.0, abs=1e-9)
+
+    inverse = deribit_dated_external_flows_usd(inverse_flow_day_with_index_rows())
+    # -0.5 BTC IS index-multiplied (-21000), proving the inverse branch fires.
+    assert inverse[0].usd_signed == pytest.approx(-21000.0, abs=1e-9)
+
+
+def test_dated_external_flow_via_supplemental_index() -> None:
+    """A quiet-day inverse withdrawal with NO own same-day index values via the
+    supplemental (C1-fetched) settlement index — the P72 quiet-day case
+    generalized to a flow row. -0.1 BTC * 41000 == -4100."""
+    flows = deribit_dated_external_flows_usd(
+        pure_flow_no_trade_rows(),
+        supplemental_index={(DAY_PURE_FLOW, "BTC"): BTC_INDEX_2026_03_17},
+    )
+    assert len(flows) == 1
+    assert flows[0].utc_day_iso == DAY_PURE_FLOW
+    assert flows[0].usd_signed == pytest.approx(-0.1 * BTC_INDEX_2026_03_17, abs=1e-9)
+    assert flows[0].usd_signed == pytest.approx(-4100.0, abs=1e-9)
+
+
+def test_flow_unvaluable_fails_loud() -> None:
+    """RISKY fail-loud: an inverse BTC withdrawal on a QUIET day with NO own index
+    AND no supplemental entry propagates LedgerValuationError (naming the row) from
+    txn_change_to_usd — NEVER a silent 0.0 / passthrough / 1.0 valuation. Providing
+    a same-day index is the ONLY way to value it."""
+    with pytest.raises(LedgerValuationError) as exc:
+        deribit_dated_external_flows_usd(inverse_flow_day_without_index_rows())
+    # the row id (75_3_001) is named in the raised error
+    assert "75" in str(exc.value)
+    assert "index" in str(exc.value).lower()
+
+
+def test_dated_external_flow_missing_change_fails_loud() -> None:
+    """W2 (RISKY discipline, option b): a flow row with NO `change` field fails
+    loud BEFORE valuation rather than coalescing an absent balance-delta to 0.0
+    (schema drift would silently zero a real capital flow and mis-anchor the TWR
+    base). This is a flow-producer guard that does NOT touch the shared
+    txn_change_to_usd coalesce (cash-bearing rows rely on it)."""
+    row_no_change = {
+        "type": "withdrawal",
+        "currency": "BTC",
+        "timestamp": _ms(_DAY_A),
+        "id": 7502001,
+    }
+    with pytest.raises(LedgerValuationError) as exc:
+        deribit_dated_external_flows_usd([row_no_change])
+    assert "change" in str(exc.value)
+    assert "7502001" in str(exc.value)
+
+
+def test_flow_count_once_excluded_from_realized_sum() -> None:
+    """Count-once: a flow row feeds the dated F_t list EXACTLY once and is ABSENT
+    from the realized sum (txn_rows_to_daily_records skips INFORMATIONAL_TYPES).
+
+    linear_flow_day_rows() carries a +50000 USDC deposit AND a -5.0 USDC trade fee
+    on the same day. The realized sum contains ONLY the -5.0 fee; the dated flow
+    list contains ONLY the +50000 deposit.
+
+    Mutation-honest: neutering the `if row_type in INFORMATIONAL_TYPES: continue`
+    skip in txn_rows_to_daily_records makes the +50000 deposit leak into the
+    realized sum (price ~49995, side buy) → RED."""
+    rows = linear_flow_day_rows()
+
+    realized = txn_rows_to_daily_records(rows)
+    assert len(realized) == 1
+    # realized = ONLY the -5.0 trade fee, NOT (50000 - 5) — the deposit is excluded
+    assert realized[0]["side"] == "sell"
+    assert realized[0]["price"] == pytest.approx(5.0, abs=1e-9)
+
+    flows = deribit_dated_external_flows_usd(rows)
+    assert len(flows) == 1
+    assert flows[0].usd_signed == pytest.approx(50000.0, abs=1e-9)
+
+
+def test_dated_external_flow_zero_change_dropped_and_sameday_summed() -> None:
+    """A zero-change flow row contributes NO entry (no spurious day); multiple
+    flows on the SAME UTC day sum into ONE ExternalFlow entry."""
+    zero = {"type": "deposit", "currency": "USDC", "change": 0.0,
+            "timestamp": _ms(_DAY_A), "id": 7502010}
+    assert deribit_dated_external_flows_usd([zero]) == []
+
+    d1 = {"type": "deposit", "currency": "USDC", "change": 1000.0,
+          "timestamp": _ms("2026-01-15T09:00:00+00:00"), "id": 7502011}
+    d2 = {"type": "deposit", "currency": "USDC", "change": 2500.0,
+          "timestamp": _ms("2026-01-15T18:00:00+00:00"), "id": 7502012}
+    flows = deribit_dated_external_flows_usd([d1, d2])
+    assert len(flows) == 1
+    assert flows[0].utc_day_iso == "2026-01-15"
+    assert flows[0].usd_signed == pytest.approx(3500.0, abs=1e-9)
+
+
+def test_dated_external_flow_returns_sorted_externalflow_list() -> None:
+    """Result-type: the return is a list[ExternalFlow] (positionally unpackable as
+    (day, usd) — the core's contract), sorted ascending by UTC day."""
+    later = {"type": "deposit", "currency": "USDC", "change": 100.0,
+             "timestamp": _ms("2026-02-10T12:00:00+00:00"), "id": 7502020}
+    earlier = {"type": "withdrawal", "currency": "USDC", "change": -40.0,
+               "timestamp": _ms("2026-02-01T12:00:00+00:00"), "id": 7502021}
+    flows = deribit_dated_external_flows_usd([later, earlier])
+    assert [f.utc_day_iso for f in flows] == ["2026-02-01", "2026-02-10"]
+    assert all(isinstance(f, ExternalFlow) for f in flows)
+    # positional unpack (matches the honest core's `day_raw, usd_raw = flow`)
+    day_raw, usd_raw = flows[0]
+    assert day_raw == "2026-02-01"
+    assert usd_raw == pytest.approx(-40.0, abs=1e-9)
