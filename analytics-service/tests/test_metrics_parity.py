@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
+import quantstats as qs
 
 from services.analytics_runner import (
     _compute_derived_trade_metrics,  # B-01 — extracted in Plan 12-05
@@ -1144,3 +1145,62 @@ def test_periods_param_rescales_365(golden_252d_input):
             f"rolling_volatility_3m[{d}] did not rescale by sqrt(365/252) — "
             "a threading hole in a rolling helper (np.sqrt(periods_per_year))"
         )
+
+
+# --- Phase 73 (TWR-05): the calendar-clock annualization split proof ---------
+#
+# test_periods_param_rescales_365 above proves the RISK metrics still thread
+# `periods_per_year` (sqrt-class rescale) AND that CAGR/Calmar are now INVARIANT
+# to it. This test proves the OTHER half of TWR-05: that the CAGR the split
+# actually emits is the CALENDAR-clock value (elapsed-days / 365), which DIFFERS
+# from the pre-split 252 `len/periods` CAGR — while Sharpe (a risk metric) is
+# byte-unchanged. Falsifiable both ways per the founder decision (2026-07-05):
+#   * revert CAGR to `qs.stats.cagr(returns, periods=252)` (the len/periods form)
+#     → the calendar-expectation assert AND the "differs from old" assert go RED;
+#   * change Sharpe onto the calendar clock → the Sharpe-unchanged assert goes RED.
+
+
+def test_twr05_annualization_split():
+    """TWR-05: CAGR is CALENDAR-clock (365/elapsed-days); Sharpe stays 252.
+
+    A dense 365-calendar-day series makes the two annualization clocks diverge
+    (calendar years ~= elapsed/365 vs the pre-split len/252 ~= 1.448 years), so
+    the CAGR the module emits provably differs from the old quantstats 252 CAGR
+    by the geometric calendar factor, while Sharpe is byte-identical to
+    `qs.stats.sharpe(returns, periods=252)`.
+    """
+    idx = pd.date_range("2024-01-01", periods=365, freq="D")
+    rng = np.random.default_rng(42)
+    r = pd.Series(rng.normal(0.0005, 0.01, size=365), index=idx, name="returns")
+
+    mj = compute_all_metrics(r).metrics_json
+    new_cagr = mj["cagr"]
+    new_sharpe = mj["sharpe"]
+
+    # 1) CAGR == the CALENDAR-clock expectation: years = elapsed-calendar-days/365,
+    #    base = total_return == comp(returns). This is the load-bearing formula.
+    total_return = float((1 + r).prod() - 1)
+    elapsed_days = (idx[-1] - idx[0]).days  # 364 for 365 dense daily points
+    years_calendar = elapsed_days / 365.0
+    expected_cagr = (1.0 + total_return) ** (1.0 / years_calendar) - 1.0
+    assert new_cagr == pytest.approx(expected_cagr, rel=1e-12), (
+        "CAGR is not the calendar-clock (elapsed-days/365) value — TWR-05 split "
+        "not applied at the cagr site"
+    )
+
+    # 2) It DIFFERS from the pre-split quantstats CAGR (years = len/252). If the
+    #    site is reverted to `qs.stats.cagr(returns, periods=252)`, new_cagr
+    #    collapses onto this value and the assert goes RED (mutation-verified).
+    old_cagr_252 = float(qs.stats.cagr(r, periods=252))
+    assert new_cagr != pytest.approx(old_cagr_252, rel=1e-6), (
+        "CAGR matched the old 252 len/periods computation — the calendar split "
+        "is a no-op (a 365-row dense series MUST annualize differently)"
+    )
+
+    # 3) Sharpe is UNCHANGED by the split — a risk metric still on periods=252.
+    #    Changing Sharpe onto the calendar clock turns this RED.
+    expected_sharpe = float(qs.stats.sharpe(r, periods=252))
+    assert new_sharpe == pytest.approx(expected_sharpe, rel=1e-12), (
+        "Sharpe drifted from qs.stats.sharpe(returns, periods=252) — the split "
+        "must leave risk metrics on the 252 clock (return and risk are orthogonal)"
+    )
