@@ -253,3 +253,145 @@ def test_chain_linked_twr_returns_named_series_and_flags() -> None:
     assert returns.name == "returns"
     assert isinstance(returns.index, pd.DatetimeIndex)
     assert flags == {}
+
+
+# ---------------------------------------------------------------------------
+# DQ-01 — fail-loud NAV-denominator guards (flag, never substitute) + SC-4 pin
+# ---------------------------------------------------------------------------
+
+
+def test_dq_guards_flag_not_substitute() -> None:
+    """Each of the three NAV-denominator guards breaks the chain-link for that
+    day (r_t = NaN) and raises ``complete_with_warnings`` — NEVER a fabricated
+    number. The ``estimated_start <= 0`` account FLAGS rather than silently
+    substituting today's balance (the intended divergence from transforms.py)."""
+
+    # --- dust guard: an interior NAV_{t-1} in (0, DUST_NAV_FLOOR) breaks. ---
+    ret_dust, meta_dust = reconstruct_nav_and_twr(
+        _pnl([0.0, -4500.0, 300.0]), anchor_nav=800.0
+    )
+    # nav = [5000, 500, 800]; day-2 prev NAV = 500 < 1000 -> dust
+    assert np.isnan(ret_dust.iloc[2])
+    assert meta_dust.get("dust_nav_guard") is True
+    assert meta_dust["computation_status_hint"] == "complete_with_warnings"
+
+    # --- flow-dominated guard: |F_t| >= FLOW_DOM_RATIO * NAV_{t-1} breaks even
+    # when the base NAV is healthy (> dust). ---
+    ret_fd, meta_fd = reconstruct_nav_and_twr(
+        _pnl([0.0, 50.0, 30.0]),
+        anchor_nav=4580.0,
+        external_flows=[("2026-01-02", 2500.0)],
+    )
+    # nav = [2000, 4550, 4580]; day-1 prev NAV = 2000, |flow|=2500 >= 2000 -> dom
+    assert np.isnan(ret_fd.iloc[1])
+    assert meta_fd.get("flow_dominated_guard") is True
+    assert meta_fd["computation_status_hint"] == "complete_with_warnings"
+
+    # --- negative reconstructed NAV (the estimated_start <= 0 bug case): the
+    # new core FLAGS instead of substituting account_balance. Anchor/balance =
+    # 1500 (> the $1000 dust floor so transforms takes the substitution branch,
+    # not the heuristic branch); pnl = 2000 => estimated_start = -500. ---
+    daily_pnl = _pnl([2000.0])
+    ret_neg, meta_neg = reconstruct_nav_and_twr(daily_pnl, anchor_nav=1500.0)
+    # NAV_{-1} = 1500 - 2000 = -500 <= 0 -> negative guard, r_0 = NaN
+    assert np.isnan(ret_neg.iloc[0])
+    assert meta_neg.get("negative_nav_guard") is True
+    assert meta_neg["computation_status_hint"] == "complete_with_warnings"
+
+    # Prove the divergence: transforms.py fabricates a number (substitutes the
+    # balance as the base) for the SAME input; the new core refuses.
+    from services.transforms import trades_to_daily_returns_with_status
+
+    trades = [
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "order_type": "daily_pnl",
+            "side": "buy",
+            "price": 2000.0,
+        }
+    ]
+    old_returns, _ = trades_to_daily_returns_with_status(
+        trades, account_balance=1500.0
+    )
+    # substituted base = 1500 -> fabricated r_0 = 2000/1500 = +133%
+    assert old_returns.iloc[0] == pytest.approx(2000.0 / 1500.0)
+    assert np.isnan(ret_neg.iloc[0])  # honest core -> flagged, not fabricated
+
+
+def test_no_forbidden_denominator_guards() -> None:
+    """Static source-scan: nav_twr.py contains NO clamp/floor/replace(0,...)/clip
+    on a NAV denominator — the forbidden silent-substitution class DQ-01 bans."""
+    src = _NAV_TWR_SRC.read_text()
+    forbidden = [
+        r"\.replace\(0",
+        r"\.clip\(",
+        r"np\.clip\(",
+        r"max\([^)]*floor",
+        r"np\.maximum\(",
+        r"\.fillna\([1-9]",
+    ]
+    offenders: list[str] = []
+    for line in src.splitlines():
+        if line.strip().startswith("#"):
+            continue  # prose describing the anti-pattern is allowed
+        for pat in forbidden:
+            if re.search(pat, line):
+                offenders.append(f"{pat!r} -> {line.strip()!r}")
+    assert offenders == [], f"forbidden denominator substitution(s): {offenders}"
+
+
+def test_zero_flow_byte_identical() -> None:
+    """SC-4: with external_flows=[] and open_unrealized_usd=0.0, for an account
+    with account_balance - Σpnl > $1000 (estimated_start > 0), the returns Series
+    is byte-identical to today's transforms.py daily_pnl branch."""
+    from services.transforms import trades_to_daily_returns_with_status
+
+    pnls = [500.0, -300.0, 800.0, -100.0, 400.0]  # Σ = 1300, base 100k => est_start>0
+    account_balance = 100_000.0
+
+    trades = []
+    for i, p in enumerate(pnls):
+        day = f"2026-01-0{i + 1}"
+        trades.append(
+            {
+                "timestamp": f"{day}T00:00:00+00:00",
+                "order_type": "daily_pnl",
+                "side": "buy" if p >= 0 else "sell",
+                "price": abs(p),
+            }
+        )
+    old_returns, old_meta = trades_to_daily_returns_with_status(
+        trades, account_balance=account_balance
+    )
+
+    new_returns, new_meta = reconstruct_nav_and_twr(
+        _pnl(pnls),
+        anchor_nav=account_balance,
+        external_flows=[],
+        open_unrealized_usd=0.0,
+    )
+
+    pd.testing.assert_series_equal(
+        new_returns,
+        old_returns,
+        check_exact=False,
+        rtol=1e-12,
+        check_freq=False,
+        check_names=False,  # index-name convention ("date" vs input) is cosmetic
+    )
+    # The honest path with a real balance and no guards fires: complete.
+    assert new_meta["computation_status_hint"] == "complete"
+    assert old_meta["computation_status_hint"] == "complete"
+
+
+def test_empty_inputs_degenerate_cleanly() -> None:
+    """Empty pnl produces empty Series (no crash); an all-broken series yields a
+    NaN cumulative rather than a fabricated 0.0."""
+    empty = pd.Series(dtype=float, name="daily_pnl")
+    assert reconstruct_nav(empty, 1000.0, _flows_to_daily_usd([])).empty
+    ret, meta = reconstruct_nav_and_twr(empty, anchor_nav=1000.0)
+    assert ret.empty
+    assert meta["computation_status_hint"] == "complete"
+    # A single-day series whose only day breaks -> cumulative is NaN, not 0.0.
+    ret_neg, _ = reconstruct_nav_and_twr(_pnl([2000.0]), anchor_nav=1500.0)
+    assert np.isnan(cumulative_twr(ret_neg))
