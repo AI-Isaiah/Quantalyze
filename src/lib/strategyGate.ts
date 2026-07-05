@@ -95,13 +95,20 @@ export function checkStrategyGate(input: StrategyGateInput): StrategyGateResult 
     };
   }
 
-  // CSV-sourced strategy (no key, no trades, but has daily-return rows): the
+  // Daily-returns-sourced strategy (no trades, but has daily-return rows): the
   // trade-count and trade-span thresholds don't apply — there are zero trades
-  // by construction. Gate on the daily-return row count instead, then fall
-  // through to the shared analytics-completeness checks below.
-  const isCsvSourced =
-    !input.apiKeyId && input.tradeCount === 0 && csvRowCount > 0;
-  if (isCsvSourced) {
+  // by construction. This covers BOTH keyless CSV uploads AND keyed ledger-
+  // backed exchanges (Deribit) whose returns are derived into `csv_daily_returns`
+  // and never write the `trades` table (P72). The `!apiKeyId` term is dropped
+  // here so a keyed Deribit strategy takes this branch instead of false-failing
+  // INSUFFICIENT_TRADES; the NO_DATA_SOURCE guard above still keys off
+  // `!apiKeyId`, so a keyed strategy always has a source. A keyed perp strategy
+  // WITH trades keeps `tradeCount > 0` → stays on the trade branch (no
+  // regression). Gate on the daily-return row count, then fall through to the
+  // shared analytics-completeness checks below.
+  const isDailyReturnsSourced =
+    input.tradeCount === 0 && csvRowCount > 0;
+  if (isDailyReturnsSourced) {
     if (csvRowCount < STRATEGY_GATE_MIN_CSV_ROWS) {
       return {
         passed: false,

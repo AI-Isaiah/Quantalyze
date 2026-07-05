@@ -391,6 +391,41 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     const res = await postApprove();
     expect(res.status).toBe(200);
   });
+
+  // --- P72: keyed ledger-backed (Deribit) strategies. A CONNECTED api key with
+  //     0 trades and a csv_daily_returns series must take the re-check's
+  //     daily-returns branch (not the trade-count branch). The `!api_key_id`
+  //     term was dropped from the mirror predicate to match the shared gate. ---
+
+  it("keyed Deribit PASSES the re-check: api key set + 0 trades + >=7 csv rows + complete -> 200", async () => {
+    // Pre-P72 the mirror predicate required !api_key_id, so a keyed Deribit
+    // strategy (0 trades by construction) fell to the trade branch and 409'd
+    // with "trade count fell below threshold". The dropped term routes it to
+    // the csv-row check (30 >= 7) and lets it publish.
+    mockAdminClient({
+      recheckApiKeyId: "key-deribit",
+      recheckTradeCount: 0,
+      recheckCsvCount: 30,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+  });
+
+  it("keyed Deribit below the CSV floor in the re-check -> 409 (CSV threshold, not trade count)", async () => {
+    mockAdminClient({
+      recheckApiKeyId: "key-deribit",
+      recheckTradeCount: 0,
+      recheckCsvCount: 3,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/CSV history fell below threshold/i);
+  });
 });
 
 /**

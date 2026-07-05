@@ -145,6 +145,55 @@ describe("checkStrategyGate", () => {
     expect(result.code).toBe("ANALYTICS_COMPUTING");
   });
 
+  // --- P72: keyed ledger-backed strategies (Deribit). Returns are derived into
+  //     csv_daily_returns and NEVER populate `trades`, so a keyed Deribit
+  //     strategy has tradeCount 0. The daily-returns branch must apply even
+  //     though apiKeyId is set — the `!apiKeyId` term was dropped from the
+  //     predicate. A keyed perp strategy WITH trades must NOT be diverted. ---
+
+  it("keyed Deribit PASSES: api key set, zero trades, enough csv rows, complete", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: "ak-deribit",
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: 30,
+    });
+    expect(result.passed).toBe(true);
+    expect(result.code).toBeNull();
+  });
+
+  it("keyed Deribit below the CSV floor → INSUFFICIENT_CSV_HISTORY (not INSUFFICIENT_TRADES)", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: "ak-deribit",
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: 3,
+    });
+    expect(result.passed).toBe(false);
+    // Pre-P72 a keyed + zero-trades strategy took the trade branch and reported
+    // INSUFFICIENT_TRADES; the daily-returns branch must own it now.
+    expect(result.code).toBe("INSUFFICIENT_CSV_HISTORY");
+    expect(result.detail).toEqual({ rows: 3, min: STRATEGY_GATE_MIN_CSV_ROWS });
+  });
+
+  it("keyed perp WITH trades stays on the trade branch (no regression)", () => {
+    // tradeCount > 0 → NOT daily-returns-sourced even if csvRowCount is set;
+    // the perp trade-count floor still governs.
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: "ak-perp",
+      tradeCount: 3,
+      csvRowCount: 0,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("INSUFFICIENT_TRADES");
+    expect(result.detail).toEqual({ trades: 3, min: STRATEGY_GATE_MIN_TRADES });
+  });
+
   it("rejects below the minimum trade count", () => {
     const result = checkStrategyGate({ ...BASE, tradeCount: 3 });
     expect(result.passed).toBe(false);

@@ -162,16 +162,14 @@ export async function POST(req: NextRequest) {
   // 'draft' is idempotent regardless of any intervening state.
   if (action === "approve") {
     const [
-      { data: recheckStrategy },
       { count: recheckTradeCount },
       { count: recheckCsvCount, error: recheckCsvError },
       { data: recheckAnalytics },
     ] = await Promise.all([
-      admin
-        .from("strategies")
-        .select("api_key_id")
-        .eq("id", id)
-        .single(),
+      // P72: the strategies `api_key_id` re-check was dropped — the
+      // daily-returns predicate below no longer keys off `!api_key_id`
+      // (keyed ledger-backed exchanges also route through csv_daily_returns),
+      // so the query fed nothing and is removed.
       admin
         .from("trades")
         .select("id", { count: "exact", head: true })
@@ -196,16 +194,17 @@ export async function POST(req: NextRequest) {
         { status: 503 },
       );
     }
-    // CSV-sourced strategies (no key, zero trades, history in csv_daily_returns)
-    // must re-check the CSV row count, not the trade count — the trade branch
-    // would 409 every CSV strategy on a `trades < 5` that is 0 by construction.
-    // Same predicate as the first-pass gate's isCsvSourced (no key + no trades
-    // + csv rows) so the two never diverge.
-    const isCsvSourced =
-      !recheckStrategy?.api_key_id &&
+    // Daily-returns-sourced strategies (zero trades, history in
+    // csv_daily_returns) must re-check the CSV row count, not the trade count —
+    // the trade branch would 409 every such strategy on a `trades < 5` that is 0
+    // by construction. This covers BOTH keyless CSV uploads AND keyed ledger-
+    // backed exchanges (Deribit), so the `!api_key_id` term is dropped here to
+    // match the first-pass gate's isDailyReturnsSourced predicate (P72) — the
+    // two must never diverge.
+    const isDailyReturnsSourced =
       (recheckTradeCount ?? 0) === 0 &&
       (recheckCsvCount ?? 0) > 0;
-    if (isCsvSourced) {
+    if (isDailyReturnsSourced) {
       if ((recheckCsvCount ?? 0) < STRATEGY_GATE_MIN_CSV_ROWS) {
         return NextResponse.json(
           { error: "Cannot approve: CSV history fell below threshold during review." },
