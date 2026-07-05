@@ -31,12 +31,23 @@ class TestTradesToDailyReturns:
         assert len(returns) == 1
 
     def test_returns_are_finite(self, sample_trades):
-        returns = trades_to_daily_returns(sample_trades)
+        # 74-02: sample_trades is a net-flat round-trip whose first-day net
+        # notional is ~$10; with no account_balance the honest core (dust floor
+        # $1000) correctly guards that sub-dust base to NaN. This test's intent
+        # is "real trades produce finite returns", so anchor it to a realistic
+        # institutional balance where estimated_start > dust and no guard fires.
+        returns = trades_to_daily_returns(sample_trades, account_balance=100_000.0)
         for val in returns.values:
             assert np.isfinite(val), f"Non-finite return: {val}"
 
     def test_fees_reduce_returns(self):
-        """Same trades with and without fees — fees should reduce net return."""
+        """Same trades with and without fees — fees should reduce net return.
+
+        74-02: anchored to a realistic $10k balance. Pre-wiring these fed the
+        individual-trades heuristic a ~$10 base (dust) and produced finite-but-
+        gibberish -100%/-200% returns; the honest core guards a sub-dust base to
+        NaN, so a real balance is required to compare the fee effect on the same
+        real base (fees enter the numerator PnL, so the fee series is lower)."""
         no_fee_trades = [
             {"timestamp": "2023-01-02T10:00:00Z", "symbol": "BTCUSDT", "side": "buy", "price": "100", "quantity": "1", "fee": "0", "order_type": "market"},
             {"timestamp": "2023-01-02T14:00:00Z", "symbol": "BTCUSDT", "side": "sell", "price": "110", "quantity": "1", "fee": "0", "order_type": "market"},
@@ -45,8 +56,8 @@ class TestTradesToDailyReturns:
             {"timestamp": "2023-01-02T10:00:00Z", "symbol": "BTCUSDT", "side": "buy", "price": "100", "quantity": "1", "fee": "5", "order_type": "market"},
             {"timestamp": "2023-01-02T14:00:00Z", "symbol": "BTCUSDT", "side": "sell", "price": "110", "quantity": "1", "fee": "5", "order_type": "market"},
         ]
-        r_no_fee = trades_to_daily_returns(no_fee_trades)
-        r_fee = trades_to_daily_returns(fee_trades)
+        r_no_fee = trades_to_daily_returns(no_fee_trades, account_balance=10_000.0)
+        r_fee = trades_to_daily_returns(fee_trades, account_balance=10_000.0)
         # The return with fees should be less
         assert float(r_fee.iloc[0]) < float(r_no_fee.iloc[0])
 

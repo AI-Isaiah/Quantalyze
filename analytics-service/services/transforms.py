@@ -204,52 +204,67 @@ def trades_to_daily_returns_with_status(
             balance_error=balance_error,
         )
 
+    # Individual trades: aggregate raw fills to a per-day realized-PnL Series
+    # (extract helper), then delegate to the SAME honest core as the daily_pnl
+    # branch. This is the ONLY way portfolio.py:2260 (real fills) reaches the
+    # honest path and satisfies TWR-03's :199 requirement.
+    daily_pnl_series, first_net_notional = _individual_trades_daily_pnl(df)
+
+    # audit-2026-05-07 C-0233 — fixed absolute dust floor (not PnL-scaled), same
+    # as the daily_pnl branch: one outlier day must not force the heuristic
+    # branch when the caller has a legitimate institutional balance.
+    min_balance_t = 1000.0  # USDT — fixed dust floor, matches daily_pnl path
+    if account_balance and account_balance > min_balance_t:
+        # Real anchor: today's balance is the terminal NAV (SC-4 byte-identity
+        # for estimated_start>0). A reconstructed non-positive base now FLAGS via
+        # the core's negative_nav_guard instead of the deleted substitution.
+        anchor_nav = float(account_balance)
     else:
-        # Individual trades: use account balance if available
-        df["notional"] = df["price"].astype(float) * df["quantity"].astype(float)
-        df.loc[df["side"] == "sell", "notional"] *= -1
-        df["fee_usd"] = df["fee"].fillna(0).astype(float)
+        # Audit-2026-05-07 #9: heuristic-capital surface for the individual path
+        # (samples one day's net notional — even less reliable than the daily_pnl
+        # heuristic). Surface it. Pass a synthetic terminal (base + total_pnl) so
+        # the core reconstructs the SAME base the old forward curve started from.
+        used_heuristic_capital = True
+        heuristic_base = abs(first_net_notional) or 10000.0
+        anchor_nav = heuristic_base + float(daily_pnl_series.sum())
 
-        daily_agg = df.groupby("date").agg(
-            net_notional=("notional", "sum"),
-            total_fees=("fee_usd", "sum"),
-        )
-        daily_agg["pnl"] = daily_agg["net_notional"] - daily_agg["total_fees"]
-
-        # audit-2026-05-07 C-0233 — same fixed-floor fix as the daily_pnl
-        # branch above. Pre-fix: `max(daily_agg["pnl"].abs().max(), 100)`
-        # scaled with the LARGEST single-day P&L; one outlier day inflated
-        # the threshold and forced the heuristic-capital branch even when
-        # the caller had a legitimate institutional balance.
-        min_balance_t = 1000.0  # USDT — fixed dust floor, matches daily_pnl path
-        if account_balance and account_balance > min_balance_t:
-            total_pnl = daily_agg["pnl"].sum()
-            estimated_start = account_balance - total_pnl
-            initial_capital = estimated_start if estimated_start > 0 else account_balance
-        else:
-            # Audit-2026-05-07 #9: same heuristic-capital surface for the
-            # individual-trades path. `abs(...).iloc[0]` is even less
-            # reliable than the daily_pnl heuristic above (samples one
-            # day's net notional), but the fallback contract is identical
-            # — the caller MUST treat the returns as approximate when
-            # this branch fires.
-            used_heuristic_capital = True
-            initial_capital = abs(daily_agg["net_notional"].iloc[0]) or 10000
-        equity = initial_capital + daily_agg["pnl"].cumsum()
-        prev_equity = equity.shift(1).fillna(initial_capital)
-        prev_equity = prev_equity.replace(0, initial_capital)
-        returns_values = daily_agg["pnl"] / prev_equity
-
-    returns = pd.Series(
-        returns_values.values,
-        index=pd.DatetimeIndex(returns_values.index),
-        name="returns",
+    core_input = pd.Series(
+        daily_pnl_series.to_numpy(),
+        index=pd.DatetimeIndex(daily_pnl_series.index),
+        name="daily_pnl",
     )
-
-    return returns, _build_meta(
+    returns, nav_meta = reconstruct_nav_and_twr(
+        core_input,
+        anchor_nav,
+        external_flows=None,
+        open_unrealized_usd=0.0,
+    )
+    return returns, _merge_status_meta(
+        nav_meta,
         used_heuristic_capital=used_heuristic_capital,
         balance_error=balance_error,
     )
+
+
+def _individual_trades_daily_pnl(df: pd.DataFrame) -> tuple[pd.Series, float]:
+    """Aggregate raw individual fills into a per-day realized-PnL Series for the
+    honest core. ``notional = price * quantity`` (sells negated), ``fee_usd``
+    subtracted: ``pnl_day = net_notional - total_fees``. Returns
+    ``(pnl_series, first_day_net_notional)`` — the second value seeds the
+    heuristic base (``abs(first net notional) or 10000``) when no account balance
+    is available. The returned Series is named to match the core's daily_pnl
+    input; the caller converts its index to a DatetimeIndex before delegating."""
+    df = df.copy()
+    df["notional"] = df["price"].astype(float) * df["quantity"].astype(float)
+    df.loc[df["side"] == "sell", "notional"] *= -1
+    df["fee_usd"] = df["fee"].fillna(0).astype(float)
+
+    daily_agg = df.groupby("date").agg(
+        net_notional=("notional", "sum"),
+        total_fees=("fee_usd", "sum"),
+    )
+    daily_agg["pnl"] = daily_agg["net_notional"] - daily_agg["total_fees"]
+    return daily_agg["pnl"], float(daily_agg["net_notional"].iloc[0])
 
 
 _GUARD_KEYS = ("dust_nav_guard", "negative_nav_guard", "flow_dominated_guard")
