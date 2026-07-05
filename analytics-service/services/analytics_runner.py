@@ -57,6 +57,7 @@ from services.db import (
 from services.metrics import _safe_float, compute_all_metrics
 from services.equity.fallback import merge_dq_flags
 from services.position_reconstruction import _normalize_side
+from services.nav_twr import NavReconstructionError
 from services.transforms import trades_to_daily_returns_with_status
 
 logger = logging.getLogger("quantalyze.analytics.runner")
@@ -1933,6 +1934,50 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             ).execute()
         )
         raise
+    except NavReconstructionError as exc:
+        # Phase 74 (v1.8 Flow-Aware TWR) — a NAV/TWR reconstruction failure
+        # (non-finite/non-numeric anchor or pnl, an undatable or orphan external
+        # flow) is a PERMANENT STRUCTURAL fault: the input can never
+        # reconstruct, so retrying only burns the dispatcher's retry budget. As
+        # a bare ValueError it would fall through to the generic `except
+        # Exception` below → HTTPException(500) → classify_exception 'unknown' →
+        # retried forever (T-74-02). Catch the TYPED subclass, stamp a terminal
+        # 'failed' (so the wizard reaches a gate instead of an infinite
+        # 'computing' spinner), and raise HTTPException(422) so
+        # classify_exception buckets it permanent (422 ∈ 400..499, not
+        # 408/429/403/404). Mirrors the LedgerValuationError catch at
+        # job_worker.py:1916-1941. Narrowed to NavReconstructionError so a
+        # transient ValueError escaping elsewhere still hits the generic handler
+        # and stays transient-retryable — never silently marked permanent.
+        # scrub_freeform_string strips any account-size USD / row repr from the
+        # message before it is stamped or surfaced (T-74-03 — never log raw
+        # NAV/flow magnitudes); detail carries only the scrubbed text and NO
+        # `from exc` chain so the unscrubbed repr cannot leak into
+        # classify_exception's __cause__ append.
+        from services.redact import scrub_freeform_string
+
+        scrubbed = str(scrub_freeform_string(str(exc)))
+        logger.error(
+            "Compute analytics: NAV/TWR reconstruction failed for %s: %s",
+            strategy_id, scrubbed,
+        )
+        await db_execute(
+            lambda: supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": strategy_id,
+                    "computation_status": "failed",
+                    "computation_error": (
+                        "NAV/TWR reconstruction failed (unusable return "
+                        "denominator or malformed input); operator "
+                        "intervention required. " + scrubbed
+                    ),
+                },
+                on_conflict="strategy_id",
+            ).execute()
+        )
+        raise HTTPException(
+            status_code=422, detail="NAV/TWR reconstruction failed"
+        )
     except Exception as e:
         logger.error(
             "Compute analytics failed for %s: %s", strategy_id, str(e)
