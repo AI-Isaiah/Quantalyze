@@ -10,6 +10,7 @@ import {
 import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import {
   checkStrategyGate,
+  isLedgerBackedExchange,
   type StrategyGateResult,
 } from "@/lib/strategyGate";
 import {
@@ -465,6 +466,10 @@ export function SyncPreviewStep({
             computationStatus: nextStatus,
             computationError: nextError,
             csvRowCount: csvRowCount ?? 0,
+            // P72 — only a ledger-backed (Deribit) keyed strategy may pass on a
+            // daily-returns series; a keyed perp with 0 fills must stay on the
+            // trade branch (its funding series has no completeness gate).
+            isLedgerBacked: isLedgerBackedExchange(keyRow?.exchange),
           });
 
           if (!gate.passed) {

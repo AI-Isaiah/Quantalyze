@@ -65,6 +65,11 @@ vi.mock("@/lib/email", () => ({
 
 vi.mock("@/lib/strategyGate", () => ({
   checkStrategyGate: () => ({ passed: true }),
+  // Real impl (exchange === "deribit") — the venue-aware re-check predicate
+  // depends on it, and the mockAdminClient `api_keys` route supplies the
+  // exchange, so mocking it faithfully keeps the ledger-vs-perp branch honest.
+  isLedgerBackedExchange: (exchange: string | null | undefined) =>
+    exchange === "deribit",
   STRATEGY_GATE_MIN_TRADES: 5,
   STRATEGY_GATE_MIN_CSV_ROWS: 7,
 }));
@@ -119,6 +124,10 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     recheckApiKeyId?: string | null;
     /** count returned by the re-check csv_daily_returns query (CSV path). */
     recheckCsvCount?: number;
+    /** exchange returned by the first-pass api_keys lookup (P72 venue gate).
+     *  Default "okx" (fill-based). Set "deribit" to exercise the keyed
+     *  ledger-backed daily-returns branch. Inert when recheckApiKeyId is null. */
+    mockKeyExchange?: string | null;
   };
 
   /**
@@ -191,6 +200,20 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
                   count: opts.recheckCsvCount ?? 0,
                   data: null,
                   error: null,
+                }),
+              }),
+            };
+          }
+          if (table === "api_keys") {
+            // P72 venue gate: first-pass exchange lookup
+            // (.select("exchange").eq("id").maybeSingle()).
+            return {
+              select: () => ({
+                eq: () => ({
+                  maybeSingle: async () => ({
+                    data: { exchange: opts.mockKeyExchange ?? "okx" },
+                    error: null,
+                  }),
                 }),
               }),
             };
@@ -392,18 +415,20 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(res.status).toBe(200);
   });
 
-  // --- P72: keyed ledger-backed (Deribit) strategies. A CONNECTED api key with
-  //     0 trades and a csv_daily_returns series must take the re-check's
-  //     daily-returns branch (not the trade-count branch). The `!api_key_id`
-  //     term was dropped from the mirror predicate to match the shared gate. ---
+  // --- P72: keyed ledger-backed (Deribit) strategies. A CONNECTED api key on a
+  //     ledger-backed venue with 0 trades and a csv_daily_returns series must
+  //     take the re-check's daily-returns branch (not the trade-count branch).
+  //     The mirror predicate uses `!api_key_id || isLedgerBacked` (venue-aware),
+  //     matching the shared gate — a keyed FILL-based venue must NOT be diverted. ---
 
-  it("keyed Deribit PASSES the re-check: api key set + 0 trades + >=7 csv rows + complete -> 200", async () => {
+  it("keyed Deribit PASSES the re-check: ledger-backed key + 0 trades + >=7 csv rows + complete -> 200", async () => {
     // Pre-P72 the mirror predicate required !api_key_id, so a keyed Deribit
-    // strategy (0 trades by construction) fell to the trade branch and 409'd
-    // with "trade count fell below threshold". The dropped term routes it to
-    // the csv-row check (30 >= 7) and lets it publish.
+    // strategy (0 trades by construction) fell to the trade branch and 409'd.
+    // The venue-aware term routes a LEDGER-BACKED key to the csv-row check
+    // (30 >= 7) and lets it publish.
     mockAdminClient({
       recheckApiKeyId: "key-deribit",
+      mockKeyExchange: "deribit",
       recheckTradeCount: 0,
       recheckCsvCount: 30,
       recheckStatus: "complete",
@@ -417,6 +442,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
   it("keyed Deribit below the CSV floor in the re-check -> 409 (CSV threshold, not trade count)", async () => {
     mockAdminClient({
       recheckApiKeyId: "key-deribit",
+      mockKeyExchange: "deribit",
       recheckTradeCount: 0,
       recheckCsvCount: 3,
       recheckStatus: "complete",
@@ -425,6 +451,24 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     const res = await postApprove();
     expect(res.status).toBe(409);
     expect((await res.json()).error).toMatch(/CSV history fell below threshold/i);
+  });
+
+  it("keyed FILL-based (perp) with 0 trades + csv series -> 409 trade count (Finding 1 regression guard)", async () => {
+    // A keyed perp (non-ledger-backed) with 0 fills in-window but a funding
+    // csv_daily_returns series must NOT be diverted to the csv branch and
+    // published — its series has no completeness gate. isLedgerBacked=false
+    // (exchange "okx") keeps it on the trade branch → 409 trade count.
+    mockAdminClient({
+      recheckApiKeyId: "key-perp",
+      mockKeyExchange: "okx",
+      recheckTradeCount: 0,
+      recheckCsvCount: 30,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/trade count fell below threshold/i);
   });
 });
 
@@ -532,6 +576,21 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
                             computation_status: fx.computationStatus,
                             computation_error: fx.computationError,
                           },
+                    error: null,
+                  }),
+                }),
+              }),
+            };
+          }
+          if (table === "api_keys") {
+            // P72 venue gate: first-pass exchange lookup. Non-ledger ("okx")
+            // keeps a keyed strategy on the trade branch, matching these gate
+            // fixtures' trade/analytics reason-string expectations.
+            return {
+              select: () => ({
+                eq: () => ({
+                  maybeSingle: async () => ({
+                    data: { exchange: "okx" },
                     error: null,
                   }),
                 }),

@@ -7,7 +7,7 @@ import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { notifyManagerApproved } from "@/lib/email";
-import { checkStrategyGate, STRATEGY_GATE_MIN_TRADES, STRATEGY_GATE_MIN_CSV_ROWS } from "@/lib/strategyGate";
+import { checkStrategyGate, isLedgerBackedExchange, STRATEGY_GATE_MIN_TRADES, STRATEGY_GATE_MIN_CSV_ROWS } from "@/lib/strategyGate";
 import { logAuditEventAsUser } from "@/lib/audit";
 
 // Handler body inlined (rather than wrapped via withAdminAuth) so we run a
@@ -86,6 +86,12 @@ export async function POST(req: NextRequest) {
   const admin = createAdminClient();
 
   let strategyData: { api_key_id: string | null; name: string; user_id: string } | null = null;
+  // P72 — the linked key's id + whether its exchange is ledger-backed (Deribit).
+  // Both are resolved in the first-pass approve block and reused by the TOCTOU
+  // re-check (immutable across the review window). Captured into plain locals so
+  // the re-check predicate does not depend on `strategyData`'s cross-block type.
+  let approveApiKeyId: string | null = null;
+  let isLedgerBacked = false;
 
   if (action === "approve") {
     const [
@@ -119,6 +125,22 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // P72 — resolve the linked key's exchange so the gate can distinguish a
+    // ledger-backed (Deribit) keyed strategy — which legitimately has zero
+    // `trades` and a `csv_daily_returns` series — from a keyed FILL-based (perp)
+    // strategy whose 0-trade + funding-series state must NOT publish (no
+    // completeness gate). Immutable across the review window, so fetched once
+    // and reused for the TOCTOU re-check below.
+    approveApiKeyId = strategy?.api_key_id ?? null;
+    if (approveApiKeyId) {
+      const { data: keyRow } = await admin
+        .from("api_keys")
+        .select("exchange")
+        .eq("id", approveApiKeyId)
+        .maybeSingle();
+      isLedgerBacked = isLedgerBackedExchange(keyRow?.exchange);
+    }
+
     const gate = checkStrategyGate({
       apiKeyId: strategy?.api_key_id ?? null,
       tradeCount: tradeCount ?? 0,
@@ -127,6 +149,7 @@ export async function POST(req: NextRequest) {
       computationStatus: analytics?.computation_status ?? null,
       computationError: analytics?.computation_error ?? null,
       csvRowCount: csvRowCount ?? 0,
+      isLedgerBacked,
     });
 
     if (!gate.passed) {
@@ -197,13 +220,15 @@ export async function POST(req: NextRequest) {
     // Daily-returns-sourced strategies (zero trades, history in
     // csv_daily_returns) must re-check the CSV row count, not the trade count —
     // the trade branch would 409 every such strategy on a `trades < 5` that is 0
-    // by construction. This covers BOTH keyless CSV uploads AND keyed ledger-
-    // backed exchanges (Deribit), so the `!api_key_id` term is dropped here to
-    // match the first-pass gate's isDailyReturnsSourced predicate (P72) — the
-    // two must never diverge.
+    // by construction. This covers keyless CSV uploads AND keyed LEDGER-BACKED
+    // exchanges (Deribit) — but NOT a keyed fill-based (perp) strategy whose
+    // 0-trade + funding-series state must stay on the trade branch. Mirrors the
+    // first-pass gate's isDailyReturnsSourced predicate EXACTLY (P72), including
+    // the `!api_key_id || isLedgerBacked` venue term — the two must never diverge.
     const isDailyReturnsSourced =
       (recheckTradeCount ?? 0) === 0 &&
-      (recheckCsvCount ?? 0) > 0;
+      (recheckCsvCount ?? 0) > 0 &&
+      (!approveApiKeyId || isLedgerBacked);
     if (isDailyReturnsSourced) {
       if ((recheckCsvCount ?? 0) < STRATEGY_GATE_MIN_CSV_ROWS) {
         return NextResponse.json(

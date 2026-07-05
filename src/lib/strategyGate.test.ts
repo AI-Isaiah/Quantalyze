@@ -147,14 +147,16 @@ describe("checkStrategyGate", () => {
 
   // --- P72: keyed ledger-backed strategies (Deribit). Returns are derived into
   //     csv_daily_returns and NEVER populate `trades`, so a keyed Deribit
-  //     strategy has tradeCount 0. The daily-returns branch must apply even
-  //     though apiKeyId is set — the `!apiKeyId` term was dropped from the
-  //     predicate. A keyed perp strategy WITH trades must NOT be diverted. ---
+  //     strategy has tradeCount 0. The daily-returns branch must apply — but
+  //     ONLY when the venue is ledger-backed (`isLedgerBacked: true`). A keyed
+  //     fill-based (perp) strategy with 0 trades + a funding series must stay on
+  //     the trade branch (its series has no completeness gate). ---
 
-  it("keyed Deribit PASSES: api key set, zero trades, enough csv rows, complete", () => {
+  it("keyed Deribit PASSES: ledger-backed, api key set, zero trades, enough csv rows, complete", () => {
     const result = checkStrategyGate({
       ...BASE,
       apiKeyId: "ak-deribit",
+      isLedgerBacked: true,
       tradeCount: 0,
       earliestTradeAt: null,
       latestTradeAt: null,
@@ -168,6 +170,7 @@ describe("checkStrategyGate", () => {
     const result = checkStrategyGate({
       ...BASE,
       apiKeyId: "ak-deribit",
+      isLedgerBacked: true,
       tradeCount: 0,
       earliestTradeAt: null,
       latestTradeAt: null,
@@ -175,9 +178,28 @@ describe("checkStrategyGate", () => {
     });
     expect(result.passed).toBe(false);
     // Pre-P72 a keyed + zero-trades strategy took the trade branch and reported
-    // INSUFFICIENT_TRADES; the daily-returns branch must own it now.
+    // INSUFFICIENT_TRADES; the ledger-backed daily-returns branch owns it now.
     expect(result.code).toBe("INSUFFICIENT_CSV_HISTORY");
     expect(result.detail).toEqual({ rows: 3, min: STRATEGY_GATE_MIN_CSV_ROWS });
+  });
+
+  it("keyed FILL-based (perp) with 0 trades + funding series must NOT publish → INSUFFICIENT_TRADES (Finding 1 regression guard)", () => {
+    // A keyed perp ALSO writes csv_daily_returns (funding series via
+    // derive_broker_dailies), so tradeCount 0 + csvRowCount >= floor is
+    // reachable. Without the venue term it would wrongly take the daily-returns
+    // branch and PUBLISH on a funding-only series that has no completeness gate.
+    // isLedgerBacked defaults false → must stay on the trade branch.
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: "ak-perp",
+      // isLedgerBacked omitted (undefined → false)
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: 30,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("INSUFFICIENT_TRADES");
   });
 
   it("keyed perp WITH trades stays on the trade branch (no regression)", () => {
