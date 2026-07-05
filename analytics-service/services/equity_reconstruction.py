@@ -443,9 +443,10 @@ else:
 class DeribitNotSupportedError(_DeribitNotSupportedBase):
     """Reconstruction does not support Deribit (spot-less derivative-only venue).
 
-    Mirrors allocator_positions.DeribitNotSupportedError — raised BEFORE any
-    fetch so the handler can map to sync_status='error' without phantom-zero
-    rows.
+    Raised BEFORE any fetch so the handler can map to sync_status='error'
+    without phantom-zero rows. (The allocator-side spot-deferral error was
+    removed in Phase 71 when Deribit derivative positions started rendering;
+    equity RECONSTRUCTION stays deferred — this class remains its signal.)
     """
 
 
@@ -2479,6 +2480,17 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
         for h in holdings:
             sym = (h.get("symbol") or "").upper()
             if not sym:
+                continue
+            # Phase 71 (SC-3): Deribit equity is DEFERRED. reconstruct skips
+            # venue=='deribit' (line ~2146); the daily refresh must too. A MIXED
+            # allocator (e.g. OKX + Deribit) reaches refresh because OKX gave it
+            # equity snapshots, and _fetch_today_holdings returns ALL venues'
+            # rows — so without this guard the Deribit derivative uPnL would leak
+            # into the equity curve (collateral-less: Deribit emits no spot rows,
+            # only derivative uPnL, so folding it in is incoherent). The Deribit
+            # positions still surface on the Holdings panel, which reads
+            # allocator_holdings directly rather than this snapshot.
+            if (h.get("venue") or "").lower() == "deribit":
                 continue
             htype = (h.get("holding_type") or "").lower()
             if htype == "derivative":

@@ -14,15 +14,14 @@ Key design decisions (from plan 06-02 + VOICES-ACCEPTED.md):
 * Derivative rows reuse services.positions.fetch_positions — the same shape
   the strategy-side worker produces — so the two pipelines stay aligned.
 
-* f3 Path B — Deribit spot is deferred. fetch_balance() on a Deribit
-  derivatives-only account returns {'total': {}} which would silently emit
-  zero spot rows. Instead we raise an explicit DeribitNotSupportedError
-  (subclass of ccxt.NotSupported) BEFORE fetch_balance is called.
-  _map_exception_to_sync_status routes it to sync_status='error' with the
-  message "Deribit spot ingestion not yet supported — derivatives still
-  sync." so the allocator sees the deferral rather than phantom-complete.
-  Tracked in PROJECT.md "Active — Inherited deferrals"; a Phase 06.x minor
-  can flip to Path A once a Deribit test key is provisioned.
+* Deribit spot is deferred, derivatives render (Phase 71 / DRB-09). Deribit is
+  a derivatives-first venue; fetch_balance() on a derivatives-only account
+  returns {'total': {}} which would silently emit zero spot rows. So for
+  Deribit the spot side returns [] (deferred — no spot path) WITHOUT erroring,
+  and the derivative side syncs normally so the allocator sees their Deribit
+  positions. (Phase 71 lifted the former f3 Path-B DeribitNotSupportedError,
+  which raised before fetch_balance and failed the whole sync — hiding the
+  derivatives too.) Deribit spot ingestion (Path A) stays deferred.
 
 * raw_payload cap — JSONB rows in allocator_holdings are capped at ~4KB
   via json.dumps length check; over-cap payloads are replaced with a
@@ -36,7 +35,7 @@ Key design decisions (from plan 06-02 + VOICES-ACCEPTED.md):
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import ccxt.async_support as ccxt
 from supabase import Client
@@ -106,27 +105,6 @@ def _extract_bybit_unified_walletbalances(info: dict[str, Any]) -> dict[str, flo
         return {}
 
 
-if TYPE_CHECKING:
-    # ccxt.async_support ships no py.typed, so ``ccxt.NotSupported`` is ``Any`` and
-    # subclassing it trips ``disallow_subclassing_any`` under ``--strict``. At
-    # RUNTIME this class MUST inherit ``ccxt.NotSupported`` so the
-    # ``except ccxt.NotSupported`` feature-detection handlers still catch it;
-    # for the type-checker we expose the concrete ``Exception`` base it derives from.
-    _DeribitNotSupportedBase = Exception
-else:
-    _DeribitNotSupportedBase = ccxt.NotSupported
-
-
-class DeribitNotSupportedError(_DeribitNotSupportedBase):
-    """f3 Path B: raised when the allocator worker is asked to fetch spot from Deribit.
-
-    Subclasses ccxt.NotSupported so any catch-all `except ccxt.NotSupported`
-    still works. _map_exception_to_sync_status maps it to 'error' (not
-    'revoked') so the API key is not invalidated — only the current sync
-    surfaces the deferral message; the derivative side continues to work.
-    """
-
-
 def _cap_raw_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Truncate a raw_payload JSON dict to fit the ~4KB JSONB cap.
 
@@ -147,11 +125,8 @@ def _map_exception_to_sync_status(exc: Exception) -> str:
     Table:
       AuthenticationError / PermissionDenied  → 'revoked'
       RateLimitExceeded                       → 'rate_limited'
-      everything else (Network, ExchangeNotAvailable, DeribitNotSupportedError,
+      everything else (Network, ExchangeNotAvailable,
         generic Exception, ...)               → 'error'
-
-    DeribitNotSupportedError maps to 'error' rather than 'revoked' so the
-    key stays usable for the derivative-side sync (f3 Path B).
     """
     if isinstance(exc, (ccxt.AuthenticationError, ccxt.PermissionDenied)):
         return "revoked"
@@ -163,19 +138,18 @@ def _map_exception_to_sync_status(exc: Exception) -> str:
 async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict[str, Any]]:
     """Build spot allocator_holdings rows from fetch_balance() + bulk fetch_tickers().
 
-    f3 Path B: if exchange.id == 'deribit', raise DeribitNotSupportedError
-    BEFORE any network call. The Unified CCXT shape for Deribit
-    derivatives-only accounts returns {'total': {}}, which would silently
-    emit zero spot rows.
+    Deribit: spot is deferred (Phase 71). Return [] BEFORE any network call —
+    the Unified CCXT shape for Deribit derivatives-only accounts returns
+    {'total': {}}, which would silently emit zero spot rows, and Deribit spot
+    ingestion (Path A) is out of scope. The derivative side still syncs, so the
+    allocator sees their Deribit positions.
 
     Stablecoin optimization: USDT/USDC/BUSD/DAI/TUSD/USD get mark_price=1.0
     without a ticker call.
     """
-    # f3 Path B — Deribit guard (BEFORE fetch_balance is called).
+    # Deribit — spot deferred (no spot path). Skip gracefully; derivatives sync.
     if getattr(exchange, "id", None) == "deribit":
-        raise DeribitNotSupportedError(
-            "Deribit spot ingestion not yet supported — derivatives still sync."
-        )
+        return []
 
     balance = await exchange.fetch_balance()
     totals = balance.get("total") or {}
@@ -262,8 +236,9 @@ async def _fetch_derivative_rows(exchange_name: str, exchange: Any) -> list[dict
     """Build derivative allocator_holdings rows by reusing positions.fetch_positions.
 
     Remaps the strategy-side snapshot shape to the allocator_holdings
-    column list (D-01 / D-05). Deribit derivative path IS supported —
-    f3 Path B only defers the spot side.
+    column list (D-01 / D-05). Deribit derivative path IS supported (Phase 71,
+    inverse contracts normalized in positions._normalize_deribit_position);
+    only the spot side is deferred.
     """
     snapshots = await fetch_positions(exchange_name, exchange)
     rows: list[dict[str, Any]] = []
@@ -300,11 +275,10 @@ async def fetch_allocator_holdings(
     non-auth / non-rate-limit exception but spot succeeded (partial
     success → the handler writes sync_status='complete_with_warnings').
 
-    On auth / rate-limit failures OR DeribitNotSupportedError the method
-    re-raises so the handler can map to sync_status ('revoked' /
-    'rate_limited' / 'error') per D-07. Deribit is NOT a partial-success
-    path: the whole sync is marked 'error' so the allocator sees the
-    deferral message (f3 Path B).
+    On auth / rate-limit failures the method re-raises so the handler can map
+    to sync_status ('revoked' / 'rate_limited' / 'error') per D-07. Deribit
+    completes normally: spot returns [] (deferred) and derivatives render
+    (Phase 71).
     """
     spot_rows: list[dict[str, Any]] = []
     deriv_rows: list[dict[str, Any]] = []

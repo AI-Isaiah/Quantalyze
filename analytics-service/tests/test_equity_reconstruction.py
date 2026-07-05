@@ -2867,6 +2867,97 @@ async def test_refresh_daily_uses_unrealized_pnl_for_perp_not_notional(monkeypat
     )
 
 
+@pytest.mark.asyncio
+async def test_refresh_daily_excludes_deribit_derivatives(monkeypatch):
+    """Phase 71 (SC-3): Deribit equity stays DEFERRED. reconstruct already
+    skips venue=='deribit'; the daily refresh must too. A MIXED allocator
+    (OKX + Deribit keys) reaches refresh (OKX gave it equity snapshots), and
+    _fetch_today_holdings returns ALL venues' rows — so without a guard the
+    Deribit derivative uPnL would leak into the allocator equity curve
+    (collateral-less, incoherent). Deribit derivative rows must be excluded
+    from BOTH the total and the breakdown; the OKX contribution is unaffected.
+    The Deribit positions still show on the Holdings panel (that reads
+    allocator_holdings directly, not this snapshot)."""
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_audit(monkeypatch)
+
+    today = date(2026, 7, 5)
+    y = today - timedelta(days=1)
+    fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, y.isoformat()))] = {
+        "allocator_id": ALLOCATOR_ID,
+        "asof": y.isoformat(),
+        "value_usd": 100_000.0,
+        "breakdown": {"USDT": 100_000.0},
+        "source": "exchange_primary",
+        "reconstructed_at": "2026-07-04T00:00:00Z",
+        "history_depth_months": 3,
+    }
+
+    # Today: OKX USDT spot + OKX ETH perp (uPnL 100) + a Deribit BTC perp
+    # (uPnL 2500 — must be EXCLUDED as deferred).
+    fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "USDT", today.isoformat()))] = {
+        "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+        "venue": "okx", "symbol": "USDT", "asof": today.isoformat(),
+        "quantity": 100_000.0, "mark_price": 1.0, "value_usd": 100_000.0,
+        "unrealized_pnl_usd": None, "holding_type": "spot",
+    }
+    fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "ETHUSDT", today.isoformat()))] = {
+        "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+        "venue": "okx", "symbol": "ETHUSDT", "asof": today.isoformat(),
+        "quantity": 1.0, "mark_price": 3000.0, "value_usd": 3000.0,
+        "unrealized_pnl_usd": 100.0, "holding_type": "derivative",
+    }
+    fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "deribit", "BTC-PERPETUAL", today.isoformat()))] = {
+        "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+        "venue": "deribit", "symbol": "BTC-PERPETUAL", "asof": today.isoformat(),
+        "quantity": 0.2, "mark_price": 49900.0, "value_usd": 10000.0,
+        "unrealized_pnl_usd": 2500.0, "holding_type": "derivative",
+    }
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.close = AsyncMock()
+    _install_fake_preflight(monkeypatch, "okx", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    today_dt = datetime(today.year, today.month, today.day, 5, 0, tzinfo=timezone.utc)
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return today_dt if tz else today_dt.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    result = await run_refresh_allocator_equity_daily_job(
+        {"id": "refresh-drb", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
+    )
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    written = [
+        r for r in fake_supabase.rows_for("allocator_equity_snapshots")
+        if r["asof"] == today.isoformat()
+    ]
+    assert len(written) == 1, written
+    row = written[0]
+    brk = row["breakdown"]
+
+    # Deribit uPnL (2500) MUST NOT appear anywhere; only USDT + OKX ETH perp.
+    expected_total = 100_000.0 + 100.0
+    assert row["value_usd"] == pytest.approx(expected_total, abs=0.05), (
+        f"Deribit derivative uPnL leaked into allocator equity — Deribit "
+        f"equity is deferred (SC-3). Expected {expected_total}; got {row['value_usd']}"
+    )
+    assert brk.get("USDT") == pytest.approx(100_000.0, abs=0.01)
+    assert brk.get("ETH:USDT:PERP") == pytest.approx(100.0, abs=0.01), brk
+    assert not any("BTC" in k for k in brk), (
+        f"Deribit BTC perp must be excluded from the equity breakdown; got {brk!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Defensive contract-size handler (/investigate 2026-04-24 — v0.15.4.2)
 # ---------------------------------------------------------------------------

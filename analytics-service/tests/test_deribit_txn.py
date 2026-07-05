@@ -237,6 +237,45 @@ def test_classify_never_raises_on_junk() -> None:
 
 
 # ---------------------------------------------------------------------------
+# classify_instrument_settlement — the single-source coin-vs-USD decision
+# shared by the ledger converter and the allocator position normalizer (P71).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        # coin-settled (inverse): perps, dated futures, options — all BTC/ETH.
+        ("BTC-PERPETUAL", (True, "BTC")),
+        ("ETH-PERPETUAL", (True, "ETH")),
+        ("BTC-27MAR26", (True, "BTC")),
+        ("BTC-27MAR26-60000-C", (True, "BTC")),
+        # linear (USD-family margin marker) → (False, "") for all kinds.
+        ("BTC_USDC-PERPETUAL", (False, "")),
+        ("ETH_USDT-PERPETUAL", (False, "")),
+        ("BTC_USDC-27MAR26-60000-C", (False, "")),
+    ],
+)
+def test_classify_instrument_settlement(name: str, expected: tuple) -> None:
+    from services.deribit_txn import classify_instrument_settlement
+
+    assert classify_instrument_settlement(name) == expected
+
+
+def test_classify_instrument_settlement_unknown_coin_fails_loud() -> None:
+    """A coin-margined instrument in an unknown currency (not BTC/ETH) must
+    FAIL LOUD — never blind-multiply by a USD index (mirrors txn_change_to_usd).
+    SOL on Deribit is USDC-linear, so a bare 'SOL-PERPETUAL' coin-margined
+    instrument is unknown/anomalous."""
+    from services.deribit_txn import classify_instrument_settlement
+
+    with pytest.raises(ValueError, match="coin-margined"):
+        classify_instrument_settlement("SOL-PERPETUAL")
+    with pytest.raises(ValueError, match="empty"):
+        classify_instrument_settlement("")
+
+
+# ---------------------------------------------------------------------------
 # Type-set partition — allow-list of return-bearing types (P70 re-probe +
 # Deribit official schema); the enum is extensible so unknowns fail loud.
 # ---------------------------------------------------------------------------
