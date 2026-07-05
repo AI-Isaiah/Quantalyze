@@ -424,3 +424,75 @@ def _apply(patchers: list):
     for p in patchers:
         stack.enter_context(p)
     return stack
+
+
+# --- DRB-08 ONE-path shape parity (deribit vs bybit through compute_all_metrics)
+
+
+def _deribit_multiday_ledger_records() -> list[dict]:
+    """Synthetic deribit ledger daily_records (>=2 days) incl one inverse
+    coin→USD settlement day and one option-delivery day."""
+    return txn_rows_to_daily_records(
+        [
+            # Day 1 — inverse (coin-margined) settlement: 0.002 BTC * 50,000 = +100 USD
+            {"type": "settlement", "currency": "BTC", "cashflow": 0.002,
+             "index_price": 50_000.0, "instrument_name": "BTC-PERPETUAL",
+             "timestamp": 1_714_521_600_000},
+            # Day 2 — option delivery, linear USDC settlement: +30 USD
+            {"type": "delivery", "currency": "USDC", "cashflow": 30.0,
+             "instrument_name": "BTC-9MAY25-60000-C",
+             "timestamp": 1_714_608_000_000},
+            # Day 3 — linear USDC perp settlement: -45 USD
+            {"type": "settlement", "currency": "USDC", "cashflow": -45.0,
+             "instrument_name": "BTC_USDC-PERPETUAL",
+             "timestamp": 1_714_694_400_000},
+        ]
+    )
+
+
+def test_deribit_one_path_shape():
+    """DRB-08 / D-15(e) pin: deribit ledger records + EMPTY funding flow through
+    combine_realized_and_funding → compute_all_metrics with a shape IDENTICAL to
+    the bybit fixture. The metrics dict key set must match exactly — a
+    Deribit-specific dailies/metrics path would diverge the keys and turn red."""
+    drb_records = _deribit_multiday_ledger_records()
+    drb_returns, _ = combine_realized_and_funding(
+        drb_records, [], account_balance=100_000.0
+    )
+    # compute_all_metrics' input contract: ascending gap-free DatetimeIndex, float64.
+    assert isinstance(drb_returns.index, pd.DatetimeIndex)
+    assert drb_returns.index.is_monotonic_increasing
+    assert pd.api.types.is_float_dtype(drb_returns)
+
+    # Equivalent bybit fixture through the SAME path (realized + funding).
+    days = ["2024-05-01", "2024-05-02", "2024-05-03"]
+    bybit_realized = [_realized_record(d, 60.0) for d in days]
+    bybit_funding = [_funding_row(d, 20.0) for d in days]
+    bybit_returns, _ = combine_realized_and_funding(
+        bybit_realized, bybit_funding, account_balance=100_000.0
+    )
+
+    drb_keys = set(compute_all_metrics(drb_returns).metrics_json.keys())
+    bybit_keys = set(compute_all_metrics(bybit_returns).metrics_json.keys())
+    assert drb_keys == bybit_keys, (
+        "deribit dailies must share the bybit metrics key set (ONE path, no fork); "
+        f"deribit-only={drb_keys - bybit_keys} bybit-only={bybit_keys - drb_keys}"
+    )
+
+
+def test_deribit_no_specific_metrics_path():
+    """Structural pin: deribit ledger daily_records are the SAME daily_pnl shape
+    bybit emits, so they go through combine_realized_and_funding unchanged (no
+    bespoke deribit function). A forked shape would break this parity."""
+    drb_records = _deribit_multiday_ledger_records()
+    bybit_record = _realized_record("2024-05-01", 60.0)
+    for rec in drb_records:
+        assert rec["order_type"] == "daily_pnl"
+        assert set(rec.keys()) == set(bybit_record.keys()), (
+            "deribit ledger record shape must equal bybit's daily_pnl record shape"
+        )
+    # Empty funding → combine emits exactly the realized day-buckets, no funding rows.
+    returns, _ = combine_realized_and_funding(
+        drb_records, [], account_balance=100_000.0
+    )
+    assert not returns.empty
