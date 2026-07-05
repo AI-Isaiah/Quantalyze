@@ -1908,6 +1908,7 @@ async def _run_and_get_success_upsert(
     daily_rows_count: int = 15,
     used_heuristic_capital: bool = False,
     balance_error: bool = False,
+    guard_flags: dict[str, bool] | None = None,
     benchmark_return: tuple | None = None,
 ) -> dict:
     """Invoke run_strategy_analytics with the standard patches and return
@@ -1939,7 +1940,7 @@ async def _run_and_get_success_upsert(
     dates = pd.bdate_range("2024-01-01", periods=daily_rows_count)
     mock_returns = pd.Series([0.001] * daily_rows_count, index=dates)
 
-    if used_heuristic_capital or balance_error:
+    if used_heuristic_capital or balance_error or guard_flags:
         hint = "complete_with_warnings"
     else:
         hint = "complete"
@@ -1948,6 +1949,12 @@ async def _run_and_get_success_upsert(
         "balance_error": balance_error,
         "computation_status_hint": hint,
     }
+    # Phase 74 (v1.8) — the NavTWRMeta the honest core now carries onto
+    # returns_meta (74-02) surfaces the three NAV-denominator guard keys
+    # (present only when they fired, total=False). Inject them here so the
+    # consumer-side DQF lift + status-promotion (74-03) can be exercised.
+    if guard_flags:
+        mock_meta.update(guard_flags)
 
     bench_return = benchmark_return if benchmark_return is not None else (None, True)
 
@@ -2351,6 +2358,124 @@ async def test_consumer_migration_fully_clean_run_status_complete_no_flags():
         "A fully clean run must carry zero data_quality_flags. "
         f"Got: {flags!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 74 (v1.8 Flow-Aware TWR) Plan 03 Task 1 — NAV-guard DQF lift + promotion
+# ---------------------------------------------------------------------------
+# The Phase-73 honest core (services/nav_twr.py) breaks a day's chain-link and
+# raises a NAV-denominator guard (dust / negative / flow-dominated) instead of
+# dividing by a fabricated base. 74-02 threads those guard keys onto the
+# NavTWRMeta returned by trades_to_daily_returns_with_status. This consumer
+# (analytics_runner) must lift each fired guard key into data_quality_flags and
+# promote computation_status to 'complete_with_warnings' — a guarded (NaN-day)
+# account must NOT render as canonical-'complete' on the public factsheet
+# (T-74-05). INVARIANT: a no-guard, flow-less account carries ZERO guard keys
+# and stays computation_status='complete' — status-identical to today so the 8
+# exact-string `=== "complete"` frontend consumers are unaffected.
+
+
+@pytest.mark.asyncio
+async def test_status_guard_promotion_negative_nav_guard_lifts_and_promotes():
+    """A negative_nav_guard on returns_meta (estimated_start<=0 account, whose
+    reconstructed pre-history NAV was non-positive) must (1) surface in
+    data_quality_flags and (2) promote computation_status to
+    'complete_with_warnings'. Fails today: the guard key is dropped from DQF and
+    the promotion predicate only ORs used_heuristic_capital / balance_error, so
+    status stays the un-promoted 'complete' — a broken NAV denominator rendered
+    as canonical."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        guard_flags={"negative_nav_guard": True},
+    )
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("negative_nav_guard") is True, (
+        f"negative_nav_guard must lift into data_quality_flags; got: {flags!r}"
+    )
+    assert upsert.get("computation_status") == "complete_with_warnings", (
+        "A fired NAV-denominator guard must promote computation_status to "
+        "'complete_with_warnings' (a NaN-denominator day is not canonical); "
+        f"got: {upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_status_guard_promotion_dust_and_flow_guards_both_surface():
+    """dust_nav_guard AND flow_dominated_guard both lift into DQF and each
+    promotes status. Pins that ALL three guard keys (not just negative) are
+    lifted and OR'd into the promotion predicate."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        guard_flags={"dust_nav_guard": True, "flow_dominated_guard": True},
+    )
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("dust_nav_guard") is True, (
+        f"dust_nav_guard must lift into data_quality_flags; got: {flags!r}"
+    )
+    assert flags.get("flow_dominated_guard") is True, (
+        f"flow_dominated_guard must lift into data_quality_flags; got: {flags!r}"
+    )
+    assert upsert.get("computation_status") == "complete_with_warnings", (
+        "A fired guard must promote computation_status; "
+        f"got: {upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_unchanged_no_guard_flow_less_stays_complete():
+    """GREEN-invariant (SC-4 status): a no-guard, flow-less, estimated_start>0
+    account (returns_meta carries NO guard key) stays
+    computation_status='complete' AND data_quality_flags carries no guard key —
+    STATUS-IDENTICAL to today. A regression that lifts a guard key or promotes
+    status unconditionally breaks the 8 exact-string `=== "complete"` frontend
+    consumers. Driven fully clean (valid non-stale benchmark) so the only thing
+    under test is the absence of guard promotion."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+    bench_dates = pd.bdate_range("2024-01-01", periods=15)
+    valid_benchmark = pd.Series([0.0005] * 15, index=bench_dates, name="BTC")
+
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        guard_flags=None,  # flow-less, estimated_start>0 → no guard fired
+        benchmark_return=(valid_benchmark, False),
+    )
+    assert upsert.get("computation_status") == "complete", (
+        "A no-guard flow-less account must stay 'complete' (status-identical); "
+        f"got: {upsert.get('computation_status')!r}"
+    )
+    flags = upsert.get("data_quality_flags")
+    for guard_key in (
+        "negative_nav_guard",
+        "dust_nav_guard",
+        "flow_dominated_guard",
+    ):
+        assert not (flags or {}).get(guard_key), (
+            f"No guard key must appear on a no-guard run; {guard_key} leaked "
+            f"into {flags!r}"
+        )
 
 
 def test_volume_metrics_no_longer_aliases_long_to_buy():
