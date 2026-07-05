@@ -263,3 +263,201 @@ async def test_enumerate_currencies_falls_back_to_get_currencies() -> None:
     main = di.Scope(label="main", subaccount_id=None, is_main=True)
     ccys = await di.enumerate_currencies(stub, main, {})
     assert ccys == ["BTC", "ETH"]
+
+
+# ===========================================================================
+# Task 2 — the scope×currency producer + the re-anchored D-02 completeness gate.
+# ===========================================================================
+
+# 2024-01-02 00:00:00 UTC in ms — a fixed "day D" for the cross-scope net test.
+_DAY_D_MS = 1_704_153_600_000
+
+
+def _patch_pipeline(
+    monkeypatch: Any,
+    *,
+    scopes: list[di.Scope],
+    currencies: dict[str, list[str]],
+    paginate: Callable[..., Awaitable[list[Any]]],
+    auth: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+) -> None:
+    """Monkeypatch the four I/O primitives the producer composes."""
+
+    async def _enumerate_scopes(_exchange: Any) -> list[di.Scope]:
+        return scopes
+
+    async def _resolve_scope_auth(_exchange: Any, scope: di.Scope) -> dict[str, Any]:
+        return {}
+
+    async def _enumerate_currencies(
+        _exchange: Any, scope: di.Scope, _auth: Any
+    ) -> list[str]:
+        return currencies[scope.label]
+
+    monkeypatch.setattr(di, "enumerate_scopes", _enumerate_scopes)
+    monkeypatch.setattr(di, "resolve_scope_auth", auth or _resolve_scope_auth)
+    monkeypatch.setattr(di, "enumerate_currencies", _enumerate_currencies)
+    monkeypatch.setattr(di, "paginate_txn_log", paginate)
+
+
+async def test_ledger_producer_loops_scope_x_currency(monkeypatch: Any) -> None:
+    scopes = [
+        di.Scope("main", None, True),
+        di.Scope("sub_1", "101", False),
+        di.Scope("sub_2", "102", False),
+    ]
+    calls: list[tuple[str, str]] = []
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        calls.append((scope_label, currency))
+        return [{"type": "settlement", "currency": "USDC", "cashflow": 1.0,
+                 "timestamp": _DAY_D_MS}]
+
+    _patch_pipeline(
+        monkeypatch,
+        scopes=scopes,
+        currencies={"main": ["BTC", "ETH"], "sub_1": ["BTC", "ETH"],
+                    "sub_2": ["BTC", "ETH"]},
+        paginate=_paginate,
+    )
+    records, report = await di.fetch_deribit_ledger_daily_records(object())
+    # paginate called once per (scope, currency) = 3 × 2 = 6.
+    assert len(calls) == 6
+    assert len(report.entries) == 6
+    assert all(e["reached_end"] for e in report.entries.values())
+    # daily_records accumulated from every scope×currency crawl.
+    assert records
+    # The gate passes when everything reached continuation=null.
+    di.assert_ledger_complete(report)
+
+
+async def test_cross_scope_opposite_sign_nets_signed(monkeypatch: Any) -> None:
+    from services.transforms import trades_to_daily_returns_with_status
+
+    scopes = [di.Scope("main", None, True), di.Scope("sub_1", "101", False)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        # Same UTC day D, opposite signs across scopes (linear/USD passthrough).
+        cash = 100.0 if scope_label == "main" else -30.0
+        return [{"type": "settlement", "currency": "USDC", "cashflow": cash,
+                 "timestamp": _DAY_D_MS}]
+
+    _patch_pipeline(
+        monkeypatch,
+        scopes=scopes,
+        currencies={"main": ["BTC"], "sub_1": ["BTC"]},
+        paginate=_paginate,
+    )
+    records, _report = await di.fetch_deribit_ledger_daily_records(object())
+    # CONCATENATED: two sign-encoded records for day D (+100 buy, −30 sell),
+    # NOT one abs-summed 130 record.
+    assert len(records) == 2
+    returns, _meta = trades_to_daily_returns_with_status(
+        records, account_balance=100_000.0
+    )
+    # Net signed day-D return is +70/(100000-70), NOT 130/(...). An abs-sum
+    # producer (single 130 record) turns this red.
+    assert returns.iloc[0] == pytest.approx(70.0 / (100_000.0 - 70.0))
+
+
+async def test_completeness_gate_passes_when_all_reached_end() -> None:
+    report = di.CompletenessReport(
+        expected={"main": ["BTC"], "sub_1": ["BTC"]},
+        entries={
+            ("main", "BTC"): {"reached_end": True, "rows": 3},
+            ("sub_1", "BTC"): {"reached_end": True, "rows": 2},
+        },
+    )
+    di.assert_ledger_complete(report)  # no raise
+
+
+async def test_completeness_gate_fails_loud_on_missing_scope() -> None:
+    # sub_1 is EXPECTED but its crawl never produced an entry (dropped scope) →
+    # the re-anchored D-02 gate raises, naming the missing scope×currency.
+    report = di.CompletenessReport(
+        expected={"main": ["BTC"], "sub_1": ["BTC"]},
+        entries={("main", "BTC"): {"reached_end": True, "rows": 3}},
+    )
+    with pytest.raises(di.LedgerCompletenessError) as exc:
+        di.assert_ledger_complete(report)
+    assert "sub_1" in str(exc.value) and "BTC" in str(exc.value)
+
+
+async def test_truncation_propagates_as_incomplete(monkeypatch: Any) -> None:
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "ETH":
+            raise di.LedgerTruncatedError("truncated main/ETH")
+        return [{"type": "settlement", "currency": "USDC", "cashflow": 1.0,
+                 "timestamp": _DAY_D_MS}]
+
+    _patch_pipeline(
+        monkeypatch,
+        scopes=scopes,
+        currencies={"main": ["BTC", "ETH"]},
+        paginate=_paginate,
+    )
+    _records, report = await di.fetch_deribit_ledger_daily_records(object())
+    # The truncated pair is recorded incomplete and the gate REFUSES to pass it.
+    assert report.entries[("main", "ETH")]["reached_end"] is False
+    with pytest.raises(di.LedgerCompletenessError):
+        di.assert_ledger_complete(report)
+
+
+async def test_minus_32602_skip_leaves_incomplete(monkeypatch: Any) -> None:
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "SOL":
+            raise _DeribitError(-32602, "not a margin currency")
+        return [{"type": "settlement", "currency": "USDC", "cashflow": 1.0,
+                 "timestamp": _DAY_D_MS}]
+
+    _patch_pipeline(
+        monkeypatch,
+        scopes=scopes,
+        currencies={"main": ["BTC", "SOL"]},
+        paginate=_paginate,
+    )
+    _records, report = await di.fetch_deribit_ledger_daily_records(object())
+    # A graceful -32602 currency skip is NOT complete — it cannot masquerade as
+    # a full crawl (D-14).
+    assert report.entries[("main", "SOL")]["reached_end"] is False
+    with pytest.raises(di.LedgerCompletenessError):
+        di.assert_ledger_complete(report)
+
+
+async def test_producer_reraises_unexpected_error(monkeypatch: Any) -> None:
+    # A non-10028, non-(-32602) error is NOT swallowed as a skip — it fails loud.
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(*_a: Any, **_k: Any) -> list[Any]:
+        raise _DeribitError(13004, "invalid credentials")
+
+    _patch_pipeline(
+        monkeypatch,
+        scopes=scopes,
+        currencies={"main": ["BTC"]},
+        paginate=_paginate,
+    )
+    with pytest.raises(_DeribitError):
+        await di.fetch_deribit_ledger_daily_records(object())
+
+
+def test_gate_is_not_fill_count_reconciliation() -> None:
+    # Structural: the gate takes ONLY the report — no fill-count total. The
+    # Wave-0 BLOCKING_FINDING proved 18,778/21,014/61,248 reconcile to no API
+    # surface, so completeness — not reconciliation — is the honesty anchor.
+    params = list(inspect.signature(di.assert_ledger_complete).parameters)
+    assert params == ["report"]
+    lowered = " ".join(params).lower()
+    assert "total" not in lowered and "count" not in lowered and "known" not in lowered
