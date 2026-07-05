@@ -149,3 +149,120 @@ def reconstruct_nav(
         nav[t - 1] = nav[t] - pnl[t] - flows[t]
 
     return pd.Series(nav, index=index, name="nav")
+
+
+def chain_linked_twr(
+    nav: pd.Series, daily_pnl: pd.Series, flows_by_day: pd.Series
+) -> tuple[pd.Series, dict[str, bool]]:
+    """Chain-link the daily time-weighted return from a reconstructed NAV series.
+
+    ``r_t = (NAV_t - NAV_{t-1} - F_t) / NAV_{t-1}`` — the external flow sits in
+    the NUMERATOR (end-of-day convention), never in the base. ``NAV_{t-1}`` is
+    the prior day's reconstructed closing NAV; for the first day it is the
+    reconstructed pre-history capital ``NAV_0 - pnl_0 - F_0``.
+
+    This function handles only the intrinsic zero-NAV break (a ``NAV_{t-1}`` of
+    exactly 0 would divide by zero): that day's return is omitted and the
+    ``negative_nav_guard`` flag is raised. The threshold-based dust / negative /
+    flow-dominated guards live in the fail-loud guard block (DQ-01) which
+    generalises this same break — see ``_guard_denominator``.
+
+    Returns ``(returns, flags)`` where ``returns`` is a ``"returns"``-named
+    Series on the NAV DatetimeIndex (broken days are NaN) and ``flags`` maps the
+    DQ flag keys that fired to ``True``.
+    """
+    index = nav.index
+    flows = _align_flows(flows_by_day, index).to_numpy(dtype=float)
+    nav_vals = nav.to_numpy(dtype=float)
+    pnl0 = _coerce_float(
+        daily_pnl.iloc[0], field="daily_pnl", row={"day": str(index[0])}
+    )
+
+    n = len(index)
+    flags: dict[str, bool] = {}
+    returns = np.full(n, np.nan)
+    for t in range(n):
+        cur = nav_vals[t]
+        flow_t = flows[t]
+        if t == 0:
+            prev = cur - pnl0 - flow_t  # reconstructed pre-history capital
+        else:
+            prev = nav_vals[t - 1]  # NAV_{t-1}
+
+        guard_key = _guard_denominator(prev, flow_t)
+        if guard_key is not None:
+            flags[guard_key] = True
+            continue  # break the chain-link for this day; NEVER substitute
+
+        returns[t] = (cur - prev - flow_t) / prev
+
+    return pd.Series(returns, index=index, name="returns"), flags
+
+
+def _guard_denominator(prev_nav: float, flow: float) -> str | None:
+    """Return the DQ flag key if ``prev_nav`` is not a usable denominator, else
+    None. Phase 73 (Task 2) intrinsic guard: a zero prior NAV would divide by
+    zero, so break the link and flag ``negative_nav_guard`` (a NAV of 0 is
+    non-positive). The dust / negative / flow-dominated threshold guards (DQ-01)
+    extend this in the fail-loud guard block."""
+    if prev_nav == 0:
+        return "negative_nav_guard"
+    return None
+
+
+def cumulative_twr(returns: pd.Series) -> float:
+    """Cumulative chain-linked return ``Π(1 + r) - 1`` over the retained
+    (non-broken) days. Returns NaN when no day survived the guards."""
+    retained = returns.dropna()
+    if retained.empty:
+        return float("nan")
+    return float((1.0 + retained).prod() - 1.0)
+
+
+def _build_nav_meta(flags: Mapping[str, bool]) -> dict[str, Any]:
+    """Build the returned meta. ``computation_status_hint`` is
+    ``complete_with_warnings`` when any DQ guard fired, else ``complete`` —
+    reusing the transforms.py convention. The two existing meta keys
+    (``used_heuristic_capital``, ``balance_error``) keep their semantics; the
+    core never uses heuristic capital (it reconstructs from the real anchor) and
+    does not read a balance, so both are False here. New guard flags are
+    ADDITIVE."""
+    warn = bool(flags)
+    meta: dict[str, Any] = {
+        "used_heuristic_capital": False,
+        "balance_error": False,
+        "computation_status_hint": (
+            "complete_with_warnings" if warn else "complete"
+        ),
+    }
+    meta.update(flags)
+    return meta
+
+
+def reconstruct_nav_and_twr(
+    daily_pnl: pd.Series,
+    anchor_nav: float,
+    *,
+    external_flows: Sequence[Any] | None = None,
+    open_unrealized_usd: float = 0.0,
+) -> tuple[pd.Series, dict[str, Any]]:
+    """Public entry: reconstruct the daily NAV backward from ``anchor_nav`` and
+    chain-link the daily time-weighted return.
+
+    ``terminal_nav = anchor_nav - open_unrealized_usd`` (realized basis; the
+    uPnL wedge defaults to 0.0 and is Phase 77's job to fill). With
+    ``external_flows`` empty and ``open_unrealized_usd == 0.0`` the returned
+    Series is byte-identical to the honest transforms.py daily_pnl path for an
+    ``estimated_start > 0`` account (SC-4).
+    """
+    flows_by_day = _flows_to_daily_usd(external_flows)
+    if daily_pnl.empty:
+        return pd.Series(dtype=float, name="returns"), _build_nav_meta({})
+
+    terminal_nav = _coerce_float(
+        anchor_nav, field="anchor_nav", row={}
+    ) - _coerce_float(open_unrealized_usd, field="open_unrealized_usd", row={})
+
+    nav = reconstruct_nav(daily_pnl, terminal_nav, flows_by_day)
+    returns, flags = chain_linked_twr(nav, daily_pnl, flows_by_day)
+    return returns, _build_nav_meta(flags)
