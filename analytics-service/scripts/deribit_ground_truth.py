@@ -444,10 +444,17 @@ async def _paginate_trades(
                 {
                     "currency": ccy,
                     "kind": "any",
+                    # Pass ONLY start_timestamp (ascending). Passing BOTH bounds
+                    # anchors the count-truncated page at end_timestamp (newest
+                    # `count`), so advancing start_timestamp=last_ts collapses the
+                    # window → has_more=false after ONE page (the BTC one-page
+                    # stall, P70 Wave-0 docs re-research). One bound + sorting=asc
+                    # walks forward from the cursor.
                     "start_timestamp": cursor,
-                    "end_timestamp": end_ms,
-                    "count": count,
-                    "include_old": "true",
+                    "count": min(count, 1000),
+                    # `historical=true` fetches full history; default (false)
+                    # returns ONLY the last 24h. `include_old` is a legacy no-op.
+                    "historical": "true",
                     "sorting": "asc",
                 },
                 subaccount_id,
@@ -474,6 +481,7 @@ async def _paginate_trades(
                 bucket.append(
                     {f: trade[f] for f in _TXN_LOG_WHITELIST if f in trade}
                 )
+        page_full = len(trades) >= min(count, 1000)
         has_more = bool(result.get("has_more", False))
         last_ts = trades[-1].get("timestamp")
         # IN-8 same-ms cluster stall guard: cursor advances to last_ts
@@ -484,10 +492,15 @@ async def _paginate_trades(
         # the cursor, stop: advancing past last_ts would SKIP the rest of the
         # cluster (a boundary-overlap data loss), so we surface the stall in
         # the evidence rather than silently truncate or spin.
-        if has_more and new_in_page == 0 and last_ts == cursor:
+        if (has_more or page_full) and new_in_page == 0 and last_ts == cursor:
             boundary_overlap_stall = True
             break
-        if not has_more or not isinstance(last_ts, int) or last_ts < cursor:
+        # `has_more` has no documented reliability guarantee and can come back
+        # false prematurely; also continue while a page came back FULL (docs
+        # re-research). Stop only on a genuinely short page.
+        if (not has_more and not page_full) or not isinstance(
+            last_ts, int
+        ) or last_ts < cursor:
             break
         cursor = last_ts
     return {
@@ -538,7 +551,11 @@ async def _paginate_txn_log(
                 "currency": ccy,
                 "start_timestamp": start_ms,
                 "end_timestamp": end_ms,
-                "count": count,
+                # get_transaction_log documented max count is 250; sending 1000
+                # over-caps and a client treating a short page as the last page
+                # stops early (the P70 Wave-0 under-fetch). Clamp to 250 and
+                # follow `continuation` to null.
+                "count": min(count, 250),
             },
             subaccount_id,
         )
