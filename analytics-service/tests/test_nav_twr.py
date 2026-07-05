@@ -318,6 +318,58 @@ def test_dq_guards_flag_not_substitute() -> None:
     assert np.isnan(ret_neg.iloc[0])  # honest core -> flagged, not fabricated
 
 
+def test_nonfinite_inputs_fail_loud() -> None:
+    """HIGH-1 regression: a NaN/Inf anchor, pnl, flow amount, or uPnL must raise
+    ``NavReconstructionError`` — it must NEVER sail past the DQ denominator
+    guards (every ``nan <op>`` comparison is False, so no guard fires) and emit a
+    silent NaN return series stamped ``complete``. Reverting the ``np.isfinite``
+    check in ``_coerce_float`` turns each case below RED (the call would return a
+    ``complete`` all-/partly-NaN series instead of raising)."""
+    good_pnl = _pnl([100.0, 50.0])
+
+    # NaN anchor -> was returns=[nan, nan] with hint='complete' before the fix.
+    with pytest.raises(NavReconstructionError):
+        reconstruct_nav_and_twr(good_pnl, anchor_nav=float("nan"))
+    # +Inf anchor -> reject (inf-inf arithmetic downstream would yield NaN).
+    with pytest.raises(NavReconstructionError):
+        reconstruct_nav_and_twr(good_pnl, anchor_nav=float("inf"))
+    # NaN interior pnl -> was silently corrupting two days' returns, still complete.
+    with pytest.raises(NavReconstructionError):
+        reconstruct_nav_and_twr(
+            _pnl([100.0, float("nan"), 50.0]), anchor_nav=10_000.0
+        )
+    # NaN external-flow amount.
+    with pytest.raises(NavReconstructionError):
+        reconstruct_nav_and_twr(
+            good_pnl,
+            anchor_nav=10_000.0,
+            external_flows=[("2026-01-02", float("nan"))],
+        )
+    # NaN open_unrealized_usd (folded into terminal_nav).
+    with pytest.raises(NavReconstructionError):
+        reconstruct_nav_and_twr(
+            good_pnl, anchor_nav=10_000.0, open_unrealized_usd=float("nan")
+        )
+
+
+def test_exactly_zero_prev_nav_flags_negative_guard() -> None:
+    """MEDIUM-2 regression: an exactly-0 reconstructed ``NAV_{t-1}`` must flag
+    ``negative_nav_guard`` (the ``prev_nav <= 0`` boundary), NOT
+    ``dust_nav_guard``. Phase 74 consumers read ``negative_nav_guard`` as the
+    honest ``estimated_start <= 0`` divergence signal; mutating the guard to
+    ``prev_nav < 0`` lets exactly-0 fall through to the dust guard and mislabels
+    the day — this assertion turns that mutation RED (the guard would otherwise
+    stay green because 0 is still caught by one guard or the other)."""
+    # nav = [1000, 0, 800]; day-2 prev NAV == 0 exactly.
+    ret, meta = reconstruct_nav_and_twr(
+        _pnl([0.0, -1000.0, 800.0]), anchor_nav=800.0
+    )
+    assert np.isnan(ret.iloc[2])
+    assert meta.get("negative_nav_guard") is True
+    assert meta.get("dust_nav_guard") is None  # exactly-0 is negative, not dust
+    assert meta["computation_status_hint"] == "complete_with_warnings"
+
+
 def test_no_forbidden_denominator_guards() -> None:
     """Static source-scan: nav_twr.py contains NO clamp/floor/replace(0,...)/clip
     on a NAV denominator — the forbidden silent-substitution class DQ-01 bans."""

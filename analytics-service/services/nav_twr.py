@@ -88,13 +88,24 @@ def _coerce_float(value: Any, *, field: str, row: Mapping[str, Any]) -> float:
 
     Raises ``NavReconstructionError`` (permanent, structural) rather than a bare
     ``ValueError``/``TypeError`` — mirrors ``deribit_txn._coerce_float`` so every
-    malformed pnl/flow value fails to a permanent gate, never a silent NaN."""
+    malformed pnl/flow value fails to a permanent gate, never a silent NaN.
+
+    NaN/Inf are rejected too: ``float('nan')`` parses without a ``ValueError``,
+    but a non-finite anchor/pnl/flow would sail past every DQ denominator guard
+    (all ``nan <op>`` comparisons are False) and emit a silent NaN return stamped
+    ``complete`` — the very "invalid presented as valid" harm this module exists
+    to prevent. Fail loud at the single input choke point instead."""
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError) as exc:
         raise NavReconstructionError(
             f"nav_twr non-numeric {field}={value!r} (row={dict(row)!r})"
         ) from exc
+    if not np.isfinite(result):
+        raise NavReconstructionError(
+            f"nav_twr non-finite {field}={value!r} (row={dict(row)!r})"
+        )
+    return result
 
 
 def _flows_to_daily_usd(external_flows: Sequence[Any] | None) -> pd.Series:

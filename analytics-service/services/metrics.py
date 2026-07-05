@@ -474,9 +474,15 @@ def compute_all_metrics(
     # return; a sparse CSV/MT5 series (rows < calendar-days) has the mirror bug.
     # The date-span basis is frequency-proof for BOTH dense crypto and sparse
     # CSV/MT5. `max(elapsed, 1)` guards a single-day/degenerate window against a
-    # divide-by-zero; the upstream sample-floor keeps noise on a days-old
-    # account from being annualized. This reuses `total_return` (== comp(returns))
-    # so the geometric base is exactly the value the module already computed.
+    # divide-by-zero. NOTE: the ONLY upstream floor is `len(returns) < 2`; a
+    # genuine 2-day window (elapsed_days==1) still annualizes with exponent 365,
+    # which explodes CAGR for a days-old account and is NOT yet flagged. That
+    # short-window over-annualization is a pre-existing class (the old len/252
+    # basis had the same shape) tracked for a DQ short-window flag behind the
+    # Phase 78 parity gate — deliberately not point-fixed here because a
+    # CAGR-status change is factsheet-wide blast radius (roadmap Pitfall #12).
+    # This reuses `total_return` (== comp(returns)) so the geometric base is
+    # exactly the value the module already computed.
     _cagr_index = returns.dropna().index
     if total_return is None or len(_cagr_index) < 2:
         cagr = _safe_float(float("nan"))
