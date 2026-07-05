@@ -1828,12 +1828,16 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     from services.broker_dailies import combine_realized_and_funding
     from services.nav_twr import NavReconstructionError
     from services.exchange import fetch_account_equity_usd
+    from services.external_flows import ExternalFlow
     from services.funding_fetch import (
         fetch_funding_binance,
         fetch_funding_okx,
         fetch_funding_bybit,
     )
 
+    # Dated external flows feed ONLY the core's F_t term (deribit branch sets them
+    # from the ledger crawl; other venues have no dated-flow adapter yet → None).
+    external_flows: list[ExternalFlow] | None = None
     try:
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
@@ -1965,18 +1969,14 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     ),
                     error_kind="permanent",
                 )
-            # F1 — correct the initial-capital anchor for net external flows. With
-            # the anchor-to-today identity (initial = equity_today − Σrealized) and
-            # Σrealized EXCLUDING transfers/deposits/withdrawals while equity_today
-            # REFLECTS them, the anchor is off by the net flow. Subtracting the net
-            # flow restores the true trading-capital base (e.g. acct3: equity ~219k
-            # − net flow −628k ⇒ ~847k). An unvalued INVERSE flow → flag heuristic
-            # rather than under-correct.
-            if equity is not None and not balance_error:
-                if _completeness.saw_unvalued_inverse_flow:
-                    balance_error = True  # cannot fully value flows → DQ flag
-                else:
-                    equity = equity - _completeness.net_external_flow_usd
+            # The equity anchor flows into the honest core UNADJUSTED. The dated
+            # external flows (_completeness.dated_external_flows) are threaded into
+            # combine_realized_and_funding below, where the core's backward NAV roll
+            # (NAV_{t-1} = NAV_t − pnl_t − F_t) performs the ONE honest flow
+            # correction — never a second scalar subtraction (count-once, no
+            # double-correction). An unvaluable inverse flow already failed loud as a
+            # permanent LedgerValuationError (caught above), never silently degraded.
+            external_flows = _completeness.dated_external_flows
             # Funding is inside the ledger settlement cash delta — pass EMPTY.
             funding: list[Any] = []
         else:
@@ -2011,6 +2011,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     try:
         returns, meta = combine_realized_and_funding(
             realized, funding, account_balance=equity, balance_error=balance_error,
+            external_flows=external_flows,
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL NAV/TWR reconstruction failure surfacing from the honest

@@ -639,62 +639,13 @@ async def test_deribit_material_equity_zero_rows_strategy_mode_stamps_failed():
     assert stamps[0][1]["computation_status"] == "failed"
 
 
-@pytest.mark.asyncio
-async def test_deribit_anchor_subtracts_net_external_flow():
-    """F1: the initial-capital anchor subtracts net external flows. equity 100k,
-    net flow −628k (net withdrawals) → account_balance passed to combine is
-    100k − (−628k) = 728k (the true trading-capital base). Reverting the
-    subtraction reddens this."""
-    ctx, _capture = _deribit_ctx()
-    combine_spy = MagicMock(
-        return_value=(
-            pd.Series([0.01, -0.02],
-                      index=pd.DatetimeIndex(["2024-05-01", "2024-05-02"])),
-            {"used_heuristic_capital": False},
-        )
-    )
-    patches, combine = _deribit_patches(
-        ctx,
-        records=_deribit_ledger_records(),
-        report=CompletenessReport(
-            total_return_rows=2, net_external_flow_usd=-628_000.0
-        ),
-        combine_spy=combine_spy,
-    )
-    with _apply(patches):
-        await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
-    # account_balance = equity(100k) − net_flow(−628k) = 728k.
-    _args, _kwargs = combine.call_args
-    account_balance = _kwargs.get("account_balance", _args[2] if len(_args) > 2 else None)
-    assert account_balance == pytest.approx(728_000.0)
-
-
-@pytest.mark.asyncio
-async def test_deribit_unvalued_inverse_flow_flags_heuristic():
-    """F1: if an INVERSE external flow could not be valued, the anchor is NOT
-    silently under-corrected — balance_error is forced True (heuristic capital
-    DQ flag) so the track record is flagged, not rendered clean-but-wrong."""
-    ctx, _capture = _deribit_ctx()
-    combine_spy = MagicMock(
-        return_value=(
-            pd.Series([0.01, -0.02],
-                      index=pd.DatetimeIndex(["2024-05-01", "2024-05-02"])),
-            {"used_heuristic_capital": True},
-        )
-    )
-    patches, combine = _deribit_patches(
-        ctx,
-        records=_deribit_ledger_records(),
-        report=CompletenessReport(
-            total_return_rows=2, saw_unvalued_inverse_flow=True
-        ),
-        combine_spy=combine_spy,
-    )
-    with _apply(patches):
-        await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
-    _args, _kwargs = combine.call_args
-    balance_error = _kwargs.get("balance_error", _args[3] if len(_args) > 3 else None)
-    assert balance_error is True
+# NOTE (75-03): the two former F1-scalar tests — `test_deribit_anchor_subtracts_
+# net_external_flow` and `test_deribit_unvalued_inverse_flow_flags_heuristic` —
+# were DELETED with the F1 scalar anchor correction they pinned. The equity anchor
+# now flows into the honest core UNADJUSTED and dated external flows feed ONLY the
+# core's F_t term (count-once, no double-correction). Their replacements live in
+# tests/test_job_worker_deribit.py (F1-deletion + threading + no-double-correction
+# + fail-loud-inheritance proofs).
 
 
 def test_deribit_equity_anchor_is_usd():
