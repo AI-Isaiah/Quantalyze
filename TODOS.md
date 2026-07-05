@@ -688,3 +688,11 @@ Fix path: mechanical refactor across `src/app/portfolio-pdf/[id]/page.tsx`, `src
 Fix path: add a Postgres migration `UNIQUE INDEX portfolio_analytics_one_computing_per_portfolio_idx ON portfolio_analytics(portfolio_id) WHERE computation_status='computing'`, then catch `UniqueViolation` in `_compute_portfolio_analytics`'s INSERT branch and map it to the same "skip — already in-flight" path the cron router uses. Alternative: `pg_try_advisory_xact_lock(hashtext(portfolio_id))` inside the compute. Either closes the gap cross-process; current state is "best-effort within-process throttle" and v0.22.39.0's comment says so honestly.
 
 Blast radius if it bites: two duplicate `portfolio_analytics` history rows for the same portfolio, two competing computes hitting Supabase, alert fan-out triggering twice. Hasn't been observed in prod, but the architectural seam is real.
+
+### v1.8 P73: short-window CAGR over-annualization DQ flag (red-team MEDIUM-1, 2026-07-05)
+
+**Priority:** P2 — pre-existing class, deferred behind the Phase 78 parity gate.
+
+`analytics-service/services/metrics.py` CAGR annualizes on the 365 calendar-day span (TWR-05). The only upstream floor is `len(returns) < 2`; a genuine 2-day window (`elapsed_days == 1`) still annualizes with exponent 365 → CAGR explodes (a `[0.0, 0.05]` 2-day series yields cagr ≈ 5.4e7) and is stamped `complete` with no DQ flag. This is the milestone's origin population (short-lived, flow-heavy accounts posting absurd CAGR). It is a *pre-existing* class — the old `len/252` basis had the same shape (a 2-day input gave ~456x) — so TWR-05 did not introduce it, but neither did it flag it. The false comment claiming an "upstream sample-floor" protects this was corrected in `f875ab63`.
+
+Fix path: add a short-window DQ flag (e.g. `elapsed_days < N` → `complete_with_warnings` / `insufficient_window`) at the CAGR site, WITHOUT changing the CAGR value. Deliberately deferred because a CAGR `computation_status` change is factsheet-wide blast radius (roadmap Pitfall #12) and must land behind the Phase 78 golden-parity gate with a threshold decision (what N, and whether magnitude is suppressed vs merely flagged). Interacts with the DQ NaN-break path: after guards NaN-break flow-heavy days, `returns.dropna().index` can collapse to a few far-apart survivors → same absurd annualization.
