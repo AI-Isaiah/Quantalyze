@@ -2478,6 +2478,118 @@ async def test_complete_unchanged_no_guard_flow_less_stays_complete():
         )
 
 
+# ---------------------------------------------------------------------------
+# Phase 74 (v1.8) Plan 03 Task 2 — NavReconstructionError permanent catch
+# ---------------------------------------------------------------------------
+# A NavReconstructionError (non-finite/non-numeric anchor or pnl, an undatable /
+# orphan external flow) is a PERMANENT STRUCTURAL fault — retrying cannot help.
+# As a bare ValueError it falls through to the generic `except Exception` at the
+# analytics_runner callsite, becomes HTTPException(500), and classify_exception
+# buckets 500 as 'unknown' → retried FOREVER on an input that can never succeed
+# (T-74-02 denial-of-service). The typed catch must stamp a terminal 'failed'
+# and raise a 4xx (422) so classify_exception buckets it permanent, mirroring
+# the LedgerValuationError catch at job_worker.py:1916-1941. The catch is narrow
+# to the typed subclass so a transient ValueError escaping elsewhere still hits
+# the generic handler and stays retryable.
+
+
+@pytest.mark.asyncio
+async def test_nav_error_permanent_stamps_failed_and_raises_4xx():
+    """A NavReconstructionError raised at the trades_to_daily_returns_with_status
+    callsite must (1) stamp strategy_analytics.computation_status='failed' and
+    (2) raise an HTTPException with a PERMANENT 4xx status (400<=s<500, not
+    408/429/403/404) so job_worker.classify_exception buckets it permanent — NOT
+    the retried-forever 500 'unknown' a bare ValueError produces today."""
+    from fastapi import HTTPException
+    from services.nav_twr import NavReconstructionError
+    from services.analytics_runner import run_strategy_analytics
+
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+
+    async def _mock_db_execute(fn):
+        return await asyncio.to_thread(fn)
+
+    def _raise_nav(*args, **kwargs):
+        # Message shape mirrors nav_twr._coerce_float — carries a row repr that
+        # scrub_freeform_string must strip before the message is stamped.
+        raise NavReconstructionError(
+            "nav_twr non-finite daily_pnl=nan (row={'day': '2024-01-01'})"
+        )
+
+    with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
+         patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
+         patch(
+             "services.analytics_runner.trades_to_daily_returns_with_status",
+             side_effect=_raise_nav,
+         ):
+        with pytest.raises(HTTPException) as ei:
+            await run_strategy_analytics("strat-test")
+
+    status = ei.value.status_code
+    assert 400 <= status < 500, (
+        "NavReconstructionError must surface as a 4xx so classify_exception "
+        f"buckets it permanent (not the retried 500 'unknown'); got {status}"
+    )
+    assert status not in (408, 429, 403, 404), (
+        "must be a PERMANENT 4xx (400/422 bucket), not a transient/unknown one; "
+        f"got {status}"
+    )
+    failed = [
+        u for u in sa_upsert_calls if u.get("computation_status") == "failed"
+    ]
+    assert failed, (
+        "NavReconstructionError must stamp a terminal computation_status='failed' "
+        f"(not leave the wizard on an infinite 'computing' spinner); "
+        f"upserts: {sa_upsert_calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_nav_error_permanent_catch_is_narrow_transient_valueerror_still_5xx():
+    """GREEN-invariant: the typed catch is NARROW. A generic ValueError (a
+    transient fault escaping elsewhere, NOT a NavReconstructionError) must still
+    fall through to the generic handler and raise HTTPException(500) so it stays
+    retryable — the typed catch must not over-broaden to every ValueError and
+    silently mark transient faults permanent."""
+    from fastapi import HTTPException
+    from services.analytics_runner import run_strategy_analytics
+
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+
+    async def _mock_db_execute(fn):
+        return await asyncio.to_thread(fn)
+
+    def _raise_generic(*args, **kwargs):
+        raise ValueError("transient blip unrelated to NAV reconstruction")
+
+    with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
+         patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
+         patch(
+             "services.analytics_runner.trades_to_daily_returns_with_status",
+             side_effect=_raise_generic,
+         ):
+        with pytest.raises(HTTPException) as ei:
+            await run_strategy_analytics("strat-test")
+
+    assert ei.value.status_code == 500, (
+        "A generic ValueError must fall through to the generic 500 handler "
+        "(stays retryable); the NavReconstructionError catch must not over-catch; "
+        f"got {ei.value.status_code}"
+    )
+
+
 def test_volume_metrics_no_longer_aliases_long_to_buy():
     """_compute_volume_metrics dropped the misleading long_volume_pct /
     short_volume_pct aliases that copied buy/sell percentages. Those
