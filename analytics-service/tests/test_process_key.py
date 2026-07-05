@@ -295,6 +295,58 @@ def test_process_key_h11_csv_source_blocked_for_teaser_flow(client):
 
 
 # ---------------------------------------------------------------------------
+# P72 — Deribit onboarding whitelist (Test A)
+# ---------------------------------------------------------------------------
+
+
+def test_p72_deribit_admitted_to_onboard_and_resync_only():
+    """P72 (Test A): `deribit` is admitted to the onboard + resync source
+    whitelists ONLY, and stays REJECTED for teaser/internal_report/csv.
+
+    Deribit returns are ledger-backed; its fill-based compute_metrics raises by
+    design, so the synchronous teaser preview cannot serve it. Only the async
+    onboard/resync flows route Deribit through the broker-dailies ledger path.
+    Pre-fix, EVERY flow_type excluded deribit → the wizard 'Verify data' step
+    422'd at the /process-key validator (canary SYNC_FAILED).
+    """
+    from pydantic import ValidationError
+
+    Body = process_key_router._ProcessKeyBody
+
+    # ACCEPTED: resync (no credential requirement — resolves stored key).
+    Body(flow_type="resync", source="deribit", context={"strategy_id": "s1"})
+    # ACCEPTED: onboard (creds supplied so the required-keys model_validator,
+    # which runs AFTER the source field_validator, does not mask the whitelist).
+    Body(
+        flow_type="onboard",
+        source="deribit",
+        context={"strategy_id": "s1", "api_key": "k", "api_secret": "s"},
+    )
+
+    # REJECTED: deribit on the fill-based / synchronous flows. The source
+    # field_validator raises BEFORE the required-keys model_validator, so the
+    # rejection holds regardless of context contents.
+    for flow in ("teaser", "internal_report", "csv"):
+        with pytest.raises(ValidationError, match="H-11"):
+            Body(
+                flow_type=flow,
+                source="deribit",
+                context={"strategy_id": "s1", "api_key": "k", "api_secret": "s"},
+            )
+
+    # H-11 otherwise intact: the perp sources still validate on onboard, and a
+    # non-whitelisted source (deribit on teaser above; okx on csv here) is
+    # still rejected — the fix did not widen any other cell.
+    Body(
+        flow_type="onboard",
+        source="okx",
+        context={"strategy_id": "s1", "api_key": "k", "api_secret": "s"},
+    )
+    with pytest.raises(ValidationError, match="H-11"):
+        Body(flow_type="csv", source="okx", context={"strategy_id": "s1"})
+
+
+# ---------------------------------------------------------------------------
 # H-12 regression smoke
 # ---------------------------------------------------------------------------
 

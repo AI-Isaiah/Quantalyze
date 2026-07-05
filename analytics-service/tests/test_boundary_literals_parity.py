@@ -138,9 +138,11 @@ class TestIngestionSurfacesExcludeDeribit:
 
     Phase 70 (DRB-08, 70-06) wires the ingestion CAPABILITY: the runtime
     registry gate (SUPPORTED_SOURCES) now ADMITS deribit so get_adapter
-    resolves a DeribitAdapter. The process_key per-flow onboarding allow-sets
-    intentionally STILL reject deribit — live LTP onboarding is Phase 72.
-    Flipping the onboarding pin requires editing it consciously — not drift.
+    resolves a DeribitAdapter. Phase 72 wires LTP onboarding: the process_key
+    per-flow allow-sets admit deribit to the QUEUED flows (onboard, resync)
+    only, and still reject it on the synchronous fill-based flows (teaser,
+    internal_report) whose compute_metrics raises for deribit, and on csv.
+    Flipping either pin requires editing it consciously — not drift.
     """
 
     def test_supported_sources_includes_deribit(self) -> None:
@@ -152,10 +154,13 @@ class TestIngestionSurfacesExcludeDeribit:
             "Phase 70 wires deribit ingestion — SUPPORTED_SOURCES must admit it."
         )
 
-    def test_process_key_flow_sets_exclude_deribit(self) -> None:
+    def test_process_key_flow_sets_admit_deribit_only_on_queued_flows(self) -> None:
         # process_key's per-flow allow-sets are a method-local dict literal (not
         # importable), so pin them via source-text read (68-PATTERNS idiom).
-        # Phase 70 flips these together with the ingestion pipeline (OQ2).
+        # Phase 72 wires deribit onboarding: it is admitted to the QUEUED flows
+        # (onboard, resync) that route through the broker-dailies ledger, and
+        # stays OUT of the synchronous fill-based flows (teaser, internal_report,
+        # whose compute_metrics raises for deribit) and csv.
         source = _PROCESS_KEY.read_text(encoding="utf-8")
         m = re.search(
             r"valid: dict\[str, set\[str\]\] = \{.*?\n        \}",
@@ -164,9 +169,25 @@ class TestIngestionSurfacesExcludeDeribit:
         )
         assert m is not None, (
             "could not locate the process_key per-flow allow-set dict — the "
-            "pin's anchor drifted; re-anchor before trusting this exclusion."
+            "pin's anchor drifted; re-anchor before trusting this pin."
         )
-        assert "deribit" not in m.group(0), (
-            "process_key per-flow allow-sets must not admit 'deribit' until "
-            "Phase 70 wires deribit ingestion."
-        )
+        block = m.group(0)
+
+        def _flow_members(flow: str) -> str:
+            fm = re.search(rf'"{flow}":\s*\{{([^}}]*)\}}', block)
+            assert fm is not None, (
+                f"flow '{flow}' not found in the process_key allow-set dict — "
+                "the pin's anchor drifted."
+            )
+            return fm.group(1)
+
+        for flow in ("onboard", "resync"):
+            assert "deribit" in _flow_members(flow), (
+                f"Phase 72 wires deribit onboarding — the queued '{flow}' flow "
+                "must admit 'deribit' (it routes through the ledger)."
+            )
+        for flow in ("teaser", "internal_report", "csv"):
+            assert "deribit" not in _flow_members(flow), (
+                f"'deribit' must stay OUT of the '{flow}' flow — the synchronous "
+                "fill-based compute_metrics raises for deribit by design."
+            )

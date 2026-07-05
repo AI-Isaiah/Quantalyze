@@ -237,6 +237,15 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
 
     adapter = get_adapter(source)
 
+    # P72 — Deribit returns are ledger-backed (txn-log settlement cash deltas),
+    # NOT fill-derived: DeribitAdapter.compute_metrics raises NotImplementedError
+    # by design. So the fill steps (fetch_raw → compute_metrics → fingerprint →
+    # reconstruct_positions) cannot serve Deribit. For a ledger-backed source we
+    # still run validate (the scope gate applies) + encrypt + advance the state
+    # machine, but the factsheet is produced by the derive_broker_dailies ledger
+    # job enqueued at the tail (the exact analogue of the perp sync_trades tail).
+    is_ledger_backed = source == "deribit"
+
     # 1. validate
     val = await adapter.validate(request)
 
@@ -359,18 +368,34 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     ).execute()
 
     # 2. fetch_raw — the long-fetch step (multi-year backfill)
-    trades = await adapter.fetch_raw(context)
-
     # 3. compute_metrics
-    metrics = adapter.compute_metrics(trades)
-    supabase.rpc(
-        "transition_strategy_verification",
-        {
-            "p_verification_id": verification_id,
-            "p_new_status": "metrics_captured",
-            "p_metadata": {"metrics_snapshot": _metrics_to_jsonb(metrics)},
-        },
-    ).execute()
+    #
+    # Skipped entirely for a ledger-backed source: fetch_raw would hit the
+    # fills endpoint and compute_metrics raises by design. metrics_captured is
+    # still emitted (empty metadata) so the state machine advances and the
+    # wizard poller sees forward progress.
+    if is_ledger_backed:
+        trades = None
+        metrics = None
+        supabase.rpc(
+            "transition_strategy_verification",
+            {
+                "p_verification_id": verification_id,
+                "p_new_status": "metrics_captured",
+                "p_metadata": {},
+            },
+        ).execute()
+    else:
+        trades = await adapter.fetch_raw(context)
+        metrics = adapter.compute_metrics(trades)
+        supabase.rpc(
+            "transition_strategy_verification",
+            {
+                "p_verification_id": verification_id,
+                "p_new_status": "metrics_captured",
+                "p_metadata": {"metrics_snapshot": _metrics_to_jsonb(metrics)},
+            },
+        ).execute()
 
     # 3.5 encrypt_credentials (API path only — CSV has no creds)
     encrypted: dict[str, Any] | None = None
@@ -395,21 +420,29 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     ).execute()
 
     # 4. compute_fingerprint + persist
-    fp = adapter.compute_fingerprint(trades, metrics)
-    strategy_id = context.get("strategy_id") or job.get("strategy_id")
-    if strategy_id:
-        try:
-            supabase.table("strategies").update(
-                {"fingerprint": fp.to_jsonb()}
-            ).eq("id", strategy_id).execute()
-        except Exception as exc:  # noqa: BLE001
-            # Fingerprint persistence is best-effort — a failure here doesn't
-            # block the rest of the pipeline. The state machine still advances
-            # and the row can be re-fingerprinted via a follow-up job.
-            log.warning(
-                "process_key_long.fingerprint_persist_failed",
-                error=str(exc)[:200],
-            )
+    #
+    # Skipped for a ledger-backed source: the fingerprint is fill-derived, so
+    # Deribit is deferred out of similarity matching until a follow-up (P72
+    # accepted risk 4). The state machine still advances to report_queued.
+    if not is_ledger_backed:
+        # Invariant: the fill branch above assigns trades + metrics whenever
+        # is_ledger_backed is False (they are only None on the ledger path).
+        assert trades is not None and metrics is not None
+        fp = adapter.compute_fingerprint(trades, metrics)
+        strategy_id = context.get("strategy_id") or job.get("strategy_id")
+        if strategy_id:
+            try:
+                supabase.table("strategies").update(
+                    {"fingerprint": fp.to_jsonb()}
+                ).eq("id", strategy_id).execute()
+            except Exception as exc:  # noqa: BLE001
+                # Fingerprint persistence is best-effort — a failure here doesn't
+                # block the rest of the pipeline. The state machine still advances
+                # and the row can be re-fingerprinted via a follow-up job.
+                log.warning(
+                    "process_key_long.fingerprint_persist_failed",
+                    error=str(exc)[:200],
+                )
 
     supabase.rpc(
         "transition_strategy_verification",
@@ -421,8 +454,12 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     ).execute()
 
     # 5. reconstruct_positions (BACKBONE-09 wiring) — runs after report_queued
-    # because positions are a derived view; trades are the SoT.
-    await adapter.reconstruct_positions(trades)
+    # because positions are a derived view; trades are the SoT. Skipped for a
+    # ledger-backed source: there are no reconstructed fills to derive from.
+    if not is_ledger_backed:
+        # Invariant: trades is non-None on the fill path (see above).
+        assert trades is not None
+        await adapter.reconstruct_positions(trades)
 
     # Final transition
     supabase.rpc(
@@ -438,11 +475,19 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     # the strategy_verifications state machine and captures a metrics_snapshot,
     # but it does NOT write `strategy_analytics` -- which is exactly what the
     # wizard's SyncPreviewStep polls (`computation_status='complete'`). Enqueue
-    # the proven sync_trades job: it persists trades and auto-chains to
-    # compute_analytics, which writes strategy_analytics; the dispatch loop's
+    # the proven tail job: it persists the return series and auto-chains to the
+    # analytics compute, which writes strategy_analytics; the dispatch loop's
     # sync_strategy_analytics_status bridge then flips computation_status to
-    # 'complete'. CSV has no broker fills, so it is excluded (csv analytics run
-    # via compute_analytics_from_csv on the synchronous path).
+    # 'complete'.
+    #
+    # - Fill-based sources (okx/binance/bybit): enqueue `sync_trades` — it
+    #   persists trades and auto-chains to compute_analytics.
+    # - Ledger-backed source (deribit): enqueue `derive_broker_dailies`
+    #   (strategy-mode, p_strategy_id) — it crawls the txn-log ledger, asserts
+    #   completeness (fails loud if partial), upserts csv_daily_returns and
+    #   auto-chains to compute_analytics_from_csv.
+    # CSV has no broker fills, so it is excluded (csv analytics run via
+    # compute_analytics_from_csv on the synchronous path).
     #
     # FOLLOW-UP (noted in QUEUED-PATH-COMPLETION-PLAN.md): sync_trades re-fetches
     # from the broker, duplicating this handler's fetch_raw above. The redundant
@@ -451,6 +496,7 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     # here to avoid changing the published/fingerprint behavior other code reads.
     analytics_strategy_id = context.get("strategy_id") or job.get("strategy_id")
     if source != "csv" and analytics_strategy_id:
+        tail_kind = "derive_broker_dailies" if is_ledger_backed else "sync_trades"
         # Best-effort, mirroring run_sync_trades_job's follow-on compute_analytics
         # enqueue (which is also wrapped). The verification is already 'published',
         # so a worker retry short-circuits on that status (idempotency check above)
@@ -462,17 +508,19 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
                 "enqueue_compute_job",
                 {
                     "p_strategy_id": analytics_strategy_id,
-                    "p_kind": "sync_trades",
+                    "p_kind": tail_kind,
                     "p_metadata": {"correlation_id": correlation_id},
                 },
             ).execute()
             log.info(
-                "process_key_long.enqueued_sync_trades",
+                "process_key_long.enqueued_tail",
+                tail_kind=tail_kind,
                 strategy_id=analytics_strategy_id,
             )
         except Exception as exc:  # noqa: BLE001
             log.error(
-                "process_key_long.enqueue_sync_trades_failed",
+                "process_key_long.enqueue_tail_failed",
+                tail_kind=tail_kind,
                 error=str(exc)[:200],
                 strategy_id=analytics_strategy_id,
                 verification_id=verification_id,

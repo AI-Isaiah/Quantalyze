@@ -314,6 +314,96 @@ async def test_long_fetch_enqueues_sync_trades_on_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_long_fetch_deribit_enqueues_derive_broker_dailies_and_skips_fills() -> None:
+    """P72 (Test B): a ledger-backed source (deribit) must route the queued
+    onboarding through the broker-dailies ledger path, NOT the fill-based
+    pipeline.
+
+    Deribit returns are ledger-backed and DeribitAdapter.compute_metrics raises
+    by design, so the handler must:
+      - NEVER call fetch_raw / compute_metrics / compute_fingerprint /
+        reconstruct_positions (those are fill-derived);
+      - still advance the state machine through 'published';
+      - enqueue `derive_broker_dailies` (strategy-mode) as the factsheet tail
+        instead of `sync_trades`.
+    Pre-fix (P70) deribit was excluded from every process_key flow and its
+    fill pipeline raised — the wizard 'Verify data' step 422'd / SYNC_FAILED.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-deribit",
+        "kind": "process_key_long",
+        "strategy_id": "s-deribit",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-deribit",
+            "source": "deribit",
+            "flow_type": "onboard",
+            "correlation_id": "cid-deribit",
+            "context": {"strategy_id": "s-deribit", "api_key": "k", "api_secret": "s"},
+        },
+    }
+
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=True,
+            error_code=None,
+            human_message=None,
+            debug_context={},
+        )
+    )
+    # These fill-based methods MUST NOT be called for a ledger-backed source.
+    adapter.fetch_raw = AsyncMock(side_effect=AssertionError("fetch_raw must not run for deribit"))
+    adapter.compute_metrics = MagicMock(
+        side_effect=AssertionError("compute_metrics must not run for deribit")
+    )
+    adapter.compute_fingerprint = MagicMock(
+        side_effect=AssertionError("compute_fingerprint must not run for deribit")
+    )
+    adapter.reconstruct_positions = AsyncMock(
+        side_effect=AssertionError("reconstruct_positions must not run for deribit")
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb), \
+         patch("services.encryption.encrypt_credentials", return_value={"v": 1}), \
+         patch("services.encryption.get_kek", return_value=b"0" * 32):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.DONE
+
+    # Fill methods were never awaited/called.
+    adapter.fetch_raw.assert_not_called()
+    adapter.compute_metrics.assert_not_called()
+    adapter.compute_fingerprint.assert_not_called()
+    adapter.reconstruct_positions.assert_not_called()
+
+    # State machine reached 'published'.
+    published = [
+        c for c in sb.rpc.call_args_list
+        if c.args and c.args[0] == "transition_strategy_verification"
+        and c.args[1].get("p_new_status") == "published"
+    ]
+    assert published, "deribit run must advance the verification to 'published'"
+
+    # The factsheet tail is the ledger job, NOT sync_trades.
+    enqueue = [
+        c for c in sb.rpc.call_args_list
+        if c.args and c.args[0] == "enqueue_compute_job"
+    ]
+    assert enqueue, "deribit success must enqueue a ledger factsheet tail"
+    assert enqueue[0].args[1]["p_kind"] == "derive_broker_dailies", (
+        "ledger-backed source must enqueue derive_broker_dailies, not sync_trades"
+    )
+    assert enqueue[0].args[1]["p_strategy_id"] == "s-deribit"
+
+
+@pytest.mark.asyncio
 async def test_drain_missing_metadata_treated_as_legacy():
     """When metadata is None or has no `unified_backbone_at_claim` key,
     handler treats it as a legacy claim → FAILED-permanent."""

@@ -10,6 +10,7 @@ import {
 import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import {
   checkStrategyGate,
+  isLedgerBackedExchange,
   type StrategyGateResult,
 } from "@/lib/strategyGate";
 import {
@@ -113,6 +114,11 @@ const MAX_CONSECUTIVE_POLL_ERRORS = 3;
 
 export interface SyncPreviewSnapshot {
   tradeCount: number;
+  /**
+   * `csv_daily_returns` row count. Non-zero for ledger-backed exchanges
+   * (Deribit) and CSV uploads, whose returns never populate `trades` (P72).
+   */
+  csvRowCount: number;
   earliestTradeAt: string | null;
   latestTradeAt: string | null;
   detectedMarkets: string[];
@@ -383,6 +389,7 @@ export function SyncPreviewStep({
             { data: earliest },
             { data: latest },
             { data: sample },
+            { count: csvRowCount },
             keyRowResult,
           ] = await Promise.all([
             supabase
@@ -421,6 +428,15 @@ export function SyncPreviewStep({
               // the sample biased toward real trading pairs.
               .neq("symbol", "PORTFOLIO")
               .limit(50),
+            // P72 — daily-return row count. Ledger-backed exchanges (Deribit)
+            // derive returns into `csv_daily_returns` and NEVER write `trades`,
+            // so a keyed Deribit strategy has tradeCount 0. The gate needs the
+            // csv row count to take its daily-returns branch instead of
+            // false-failing INSUFFICIENT_TRADES.
+            supabase
+              .from("csv_daily_returns")
+              .select("strategy_id", { count: "exact", head: true })
+              .eq("strategy_id", strategyId),
             apiKeyId
               ? supabase
                   .from("api_keys")
@@ -449,6 +465,11 @@ export function SyncPreviewStep({
               : null,
             computationStatus: nextStatus,
             computationError: nextError,
+            csvRowCount: csvRowCount ?? 0,
+            // P72 — only a ledger-backed (Deribit) keyed strategy may pass on a
+            // daily-returns series; a keyed perp with 0 fills must stay on the
+            // trade branch (its funding series has no completeness gate).
+            isLedgerBacked: isLedgerBackedExchange(keyRow?.exchange),
           });
 
           if (!gate.passed) {
@@ -486,6 +507,7 @@ export function SyncPreviewStep({
 
           const nextSnapshot: SyncPreviewSnapshot = {
             tradeCount: tradeCount ?? 0,
+            csvRowCount: csvRowCount ?? 0,
             earliestTradeAt: earliest?.[0]?.timestamp ?? null,
             latestTradeAt: latest?.[0]?.timestamp ?? null,
             detectedMarkets,
@@ -598,12 +620,24 @@ export function SyncPreviewStep({
           Your verified factsheet is ready
         </h2>
         <p className="mt-2 text-body text-text-secondary">
-          {snapshot.tradeCount} trade{snapshot.tradeCount === 1 ? "" : "s"} detected
-          across{" "}
-          {snapshot.detectedMarkets.length > 0
-            ? snapshot.detectedMarkets.join(", ")
-            : "your account"}
-          . Review the preview and continue to add metadata.
+          {snapshot.tradeCount > 0 ? (
+            <>
+              {snapshot.tradeCount} trade{snapshot.tradeCount === 1 ? "" : "s"}{" "}
+              detected across{" "}
+              {snapshot.detectedMarkets.length > 0
+                ? snapshot.detectedMarkets.join(", ")
+                : "your account"}
+              . Review the preview and continue to add metadata.
+            </>
+          ) : (
+            // Ledger-backed / CSV strategies have no trades — their history is a
+            // daily-return series (P72). Show the series length instead of a
+            // "0 trades detected" line.
+            <>
+              {snapshot.csvRowCount} day{snapshot.csvRowCount === 1 ? "" : "s"} of
+              returns detected. Review the preview and continue to add metadata.
+            </>
+          )}
         </p>
 
         {/*

@@ -119,6 +119,13 @@ class _ProcessKeyBody(BaseModel):
     # adapter whose fetch_raw expects raw_bytes context — producing 500 +
     # traceback noise that consumes the cron's error budget and triggers
     # auto-rollback (DoS).
+    #
+    # P72 — `deribit` is admitted to `onboard` and `resync` ONLY (not
+    # `teaser`/`internal_report`/`csv`). Deribit returns are ledger-backed and
+    # its fill-based `compute_metrics` raises NotImplementedError by design, so
+    # the synchronous teaser preview cannot serve it; the async onboard/resync
+    # flows route Deribit through the broker-dailies ledger path
+    # (run_process_key_long_job → derive_broker_dailies) instead.
     @field_validator("source")
     @classmethod
     def _validate_source_per_flow(cls, source: Source, info: ValidationInfo) -> Source:
@@ -129,9 +136,9 @@ class _ProcessKeyBody(BaseModel):
             return source
         valid: dict[str, set[str]] = {
             "teaser": {"okx", "binance", "bybit"},
-            "onboard": {"okx", "binance", "bybit"},
+            "onboard": {"okx", "binance", "bybit", "deribit"},
             "internal_report": {"okx", "binance", "bybit"},
-            "resync": {"okx", "binance", "bybit"},
+            "resync": {"okx", "binance", "bybit", "deribit"},
             "csv": {"csv"},
         }
         allowed = valid.get(flow_type, set())

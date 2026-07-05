@@ -48,6 +48,31 @@ export interface StrategyGateInput {
    * CSV strategy with NO_DATA_SOURCE and made CSV strategies un-approvable.
    */
   csvRowCount?: number;
+  /**
+   * True when the strategy's connected exchange is ledger-backed (Deribit):
+   * returns are derived into `csv_daily_returns` from the txn-log ledger and
+   * the `trades` table is NEVER populated (P72). This is what lets the gate
+   * admit a KEYED daily-returns strategy — WITHOUT it, dropping the `!apiKeyId`
+   * term would also admit a keyed FILL-based (perp) strategy that merely has 0
+   * trades in-window but a funding-derived `csv_daily_returns` series (which,
+   * unlike the Deribit ledger, has no fail-loud completeness gate). Compute via
+   * `isLedgerBackedExchange(api_keys.exchange)`. Undefined/false for fill-based
+   * exchanges and CSV uploads.
+   */
+  isLedgerBacked?: boolean;
+}
+
+/**
+ * Ledger-backed exchanges derive their return series into `csv_daily_returns`
+ * from a transaction-log ledger and never write the `trades` table. Mirrors the
+ * analytics-service `is_ledger_backed = source == "deribit"`
+ * (services/ingestion/long_fetch.py) — keep the two in lockstep. Deribit is the
+ * only such venue today.
+ */
+export function isLedgerBackedExchange(
+  exchange: string | null | undefined,
+): boolean {
+  return exchange === "deribit";
 }
 
 export interface StrategyGateResult {
@@ -95,13 +120,28 @@ export function checkStrategyGate(input: StrategyGateInput): StrategyGateResult 
     };
   }
 
-  // CSV-sourced strategy (no key, no trades, but has daily-return rows): the
+  // Daily-returns-sourced strategy (no trades, but has daily-return rows): the
   // trade-count and trade-span thresholds don't apply — there are zero trades
-  // by construction. Gate on the daily-return row count instead, then fall
+  // by construction. This covers BOTH keyless CSV uploads AND keyed ledger-
+  // backed exchanges (Deribit) whose returns are derived into `csv_daily_returns`
+  // and never write the `trades` table (P72).
+  //
+  // The `!input.apiKeyId || input.isLedgerBacked` term is load-bearing: a keyed
+  // FILL-based (perp) strategy ALSO writes `csv_daily_returns` (funding series
+  // via derive_broker_dailies), so `tradeCount === 0 && csvRowCount > 0` is
+  // reachable for a perp with an in-window fills gap. Admitting that perp here
+  // would publish it on a funding-only series that — unlike the Deribit ledger —
+  // has NO fail-loud completeness gate (understated track record). So a keyed
+  // strategy takes this branch ONLY when it is ledger-backed; a keyed perp with
+  // 0 trades stays on the trade branch → INSUFFICIENT_TRADES until fills land.
+  // The NO_DATA_SOURCE guard above still keys off `!apiKeyId`, so a keyed
+  // strategy always has a source. Gate on the daily-return row count, then fall
   // through to the shared analytics-completeness checks below.
-  const isCsvSourced =
-    !input.apiKeyId && input.tradeCount === 0 && csvRowCount > 0;
-  if (isCsvSourced) {
+  const isDailyReturnsSourced =
+    input.tradeCount === 0 &&
+    csvRowCount > 0 &&
+    (!input.apiKeyId || input.isLedgerBacked === true);
+  if (isDailyReturnsSourced) {
     if (csvRowCount < STRATEGY_GATE_MIN_CSV_ROWS) {
       return {
         passed: false,
