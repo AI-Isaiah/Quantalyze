@@ -3,7 +3,7 @@
 Phase 73 (v1.8 Flow-Aware TWR) core. This module is the honest replacement for
 the silent base substitution in ``transforms.trades_to_daily_returns_with_status``
 (``estimated_start <= 0 -> account_balance`` at L154-159, and the forbidden
-``prev_equity.replace(0, initial_capital)`` at L175). It NEVER fabricates a base:
+zero-to-initial base swap on prev_equity at L175). It NEVER fabricates a base:
 
   1. Reconstruct a per-day NAV series BACKWARD from the real exchange anchor:
      ``NAV_{t-1} = NAV_t - pnl_t - F_t`` (dated flows on their UTC days). The
@@ -42,6 +42,12 @@ import pandas as pd
 # the wrong day and silently mis-attribute a return (Pitfall #11).
 from services.deribit_txn import _row_utc_day
 
+# ReturnsComputationMeta is imported READ-ONLY — the core extends it additively
+# via NavTWRMeta (below); it does NOT modify the transforms.py contract. The two
+# existing keys keep their complete/complete_with_warnings semantics; Phase 74
+# wires these flags into strategy_analytics.computation_status + the 8 consumers.
+from services.transforms import ReturnsComputationMeta
+
 # Dust floor for a NAV denominator (USD). Matches transforms.py
 # ``_DUST_BALANCE_THRESHOLD`` — below this a percentage return is gibberish, so
 # the day is flagged, never divided.
@@ -53,6 +59,20 @@ DUST_NAV_FLOOR = 1000.0
 # conservative locked default (DQ-01); it only raises a WARNING, never alters a
 # computed return, and is tuned against real accounts at the Phase 78 gate.
 FLOW_DOM_RATIO = 1.0
+
+
+class NavTWRMeta(ReturnsComputationMeta, total=False):
+    """Extends ``ReturnsComputationMeta`` (read-only from transforms.py) with the
+    additive DQ-01 NAV-denominator guard flags. ``total=False`` so a guard key is
+    present only when it fired. The inherited keys keep their required semantics:
+    the core never uses heuristic capital and reads no balance, so
+    ``used_heuristic_capital``/``balance_error`` are always False here.
+    ``computation_status_hint`` is ``complete_with_warnings`` when any guard
+    fired, else ``complete`` (same convention as transforms._build_meta)."""
+
+    dust_nav_guard: bool
+    negative_nav_guard: bool
+    flow_dominated_guard: bool
 
 
 class NavReconstructionError(ValueError):
@@ -200,13 +220,28 @@ def chain_linked_twr(
 
 
 def _guard_denominator(prev_nav: float, flow: float) -> str | None:
-    """Return the DQ flag key if ``prev_nav`` is not a usable denominator, else
-    None. Phase 73 (Task 2) intrinsic guard: a zero prior NAV would divide by
-    zero, so break the link and flag ``negative_nav_guard`` (a NAV of 0 is
-    non-positive). The dust / negative / flow-dominated threshold guards (DQ-01)
-    extend this in the fail-loud guard block."""
-    if prev_nav == 0:
+    """Return the DQ-01 flag key if ``prev_nav`` is not a usable denominator,
+    else None. Three fail-loud guards, checked BEFORE the denominator divides —
+    each breaks the chain-link for that day and flags, NEVER substitutes a base:
+
+      * negative reconstructed NAV (``prev_nav <= 0``, incl. exactly 0 which
+        would divide-by-zero) -> ``negative_nav_guard``. This is the honest
+        divergence from transforms.py: the ``estimated_start <= 0`` account
+        flags here instead of silently substituting today's balance.
+      * dust NAV (``0 < prev_nav < DUST_NAV_FLOOR``) -> ``dust_nav_guard`` — a
+        percentage return on a sub-$1000 base is gibberish.
+      * flow-dominated (``|flow| >= FLOW_DOM_RATIO * prev_nav``) ->
+        ``flow_dominated_guard`` — the external flow dwarfs prior capital.
+
+    There is deliberately NO clamp/floor/replace here: a guarded day yields NaN
+    (a break), never a fabricated number (the forbidden substitution class the
+    source-scan test bans)."""
+    if prev_nav <= 0:
         return "negative_nav_guard"
+    if prev_nav < DUST_NAV_FLOOR:
+        return "dust_nav_guard"
+    if abs(flow) >= FLOW_DOM_RATIO * prev_nav:
+        return "flow_dominated_guard"
     return None
 
 
@@ -219,23 +254,28 @@ def cumulative_twr(returns: pd.Series) -> float:
     return float((1.0 + retained).prod() - 1.0)
 
 
-def _build_nav_meta(flags: Mapping[str, bool]) -> dict[str, Any]:
-    """Build the returned meta. ``computation_status_hint`` is
+def _build_nav_meta(flags: Mapping[str, bool]) -> NavTWRMeta:
+    """Build the returned ``NavTWRMeta``. ``computation_status_hint`` is
     ``complete_with_warnings`` when any DQ guard fired, else ``complete`` —
-    reusing the transforms.py convention. The two existing meta keys
+    reusing the transforms.py convention. The two inherited keys
     (``used_heuristic_capital``, ``balance_error``) keep their semantics; the
     core never uses heuristic capital (it reconstructs from the real anchor) and
-    does not read a balance, so both are False here. New guard flags are
-    ADDITIVE."""
+    does not read a balance, so both are False here. Guard flags are ADDITIVE and
+    present only when they fired (keys assigned explicitly for mypy)."""
     warn = bool(flags)
-    meta: dict[str, Any] = {
+    meta: NavTWRMeta = {
         "used_heuristic_capital": False,
         "balance_error": False,
         "computation_status_hint": (
             "complete_with_warnings" if warn else "complete"
         ),
     }
-    meta.update(flags)
+    if flags.get("dust_nav_guard"):
+        meta["dust_nav_guard"] = True
+    if flags.get("negative_nav_guard"):
+        meta["negative_nav_guard"] = True
+    if flags.get("flow_dominated_guard"):
+        meta["flow_dominated_guard"] = True
     return meta
 
 
@@ -245,7 +285,7 @@ def reconstruct_nav_and_twr(
     *,
     external_flows: Sequence[Any] | None = None,
     open_unrealized_usd: float = 0.0,
-) -> tuple[pd.Series, dict[str, Any]]:
+) -> tuple[pd.Series, NavTWRMeta]:
     """Public entry: reconstruct the daily NAV backward from ``anchor_nav`` and
     chain-link the daily time-weighted return.
 
