@@ -20,10 +20,13 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+import numpy as np
 import pandas as pd
 import pytest
 
 from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
+from services.nav_twr import NavReconstructionError
 
 
 def _two_day_returns() -> pd.Series:
@@ -269,3 +272,236 @@ class TestStrategyModeNonRegression:
         _name, payload, _oc = sa_upserts[0]
         assert payload["computation_status"] == "failed"
         assert payload["data_quality_flags"] == {"csv_source": True}
+
+
+def _patches_with_combine(
+    ctx: MagicMock, *, key_mode: bool, combine_mock: MagicMock
+) -> list:
+    """Like ``_patches`` but takes an explicit combine mock (return_value OR
+    side_effect) so a test can drive a NavReconstructionError raise or a
+    NaN-bearing return series through the ONE broker call site at
+    job_worker.py:2010."""
+    preflight_target = (
+        "services.job_worker._allocator_key_preflight"
+        if key_mode
+        else "services.job_worker._exchange_preflight"
+    )
+    return [
+        patch(preflight_target, new=AsyncMock(return_value=ctx)),
+        patch("services.job_worker.fetch_all_trades", new=AsyncMock(return_value=[])),
+        patch("services.job_worker.aclose_exchange", new=AsyncMock()),
+        patch(
+            "services.exchange.fetch_account_equity_usd",
+            new=AsyncMock(return_value=(10000.0, False)),
+        ),
+        patch(
+            "services.funding_fetch.fetch_funding_binance",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch("services.broker_dailies.combine_realized_and_funding", new=combine_mock),
+        patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ),
+    ]
+
+
+class TestNavReconstructionErrorPermanentCatch:
+    """Task 1 — a structural NAV/TWR reconstruction failure surfacing from
+    combine_realized_and_funding (job_worker.py:2010) must land a TERMINAL
+    permanent FAILED, not escape to the generic classifier and get retried
+    forever as `unknown`. Mirrors the deribit LedgerValuationError disposition
+    (:1916-1941). Strategy-mode stamps a scrubbed terminal `failed`; key-mode
+    skips the stamp (no per-key analytics row, like the <2 branch)."""
+
+    @pytest.mark.asyncio
+    async def test_nav_error_permanent_strategy_mode_stamps_failed(self) -> None:
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-nav", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-nav", "user_id": "user-1"},
+        )
+        job = {
+            "id": "j-nav",
+            "kind": "derive_broker_dailies",
+            "strategy_id": "strat-nav",
+        }
+        # The message carries a denylisted `secret=` key-value pair to prove the
+        # scrub_freeform_string pass actually runs before the stamp (T-74-03).
+        combine = MagicMock(
+            side_effect=NavReconstructionError(
+                "nav_twr non-finite pnl=42.0 secret=hunter2 (row={'i': 0})"
+            )
+        )
+        patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        # Terminal permanent failure — NOT a retried-forever unknown.
+        assert result.outcome == DispatchOutcome.FAILED, (
+            f"NavReconstructionError on the broker path must return FAILED; "
+            f"got {result.outcome!r}"
+        )
+        assert result.error_kind == "permanent", (
+            f"must be permanent (structural, non-retryable); got {result.error_kind!r}"
+        )
+
+        # Strategy-mode stamps a terminal 'failed' so the wizard poller reaches a
+        # gate instead of an infinite spinner.
+        sa_upserts = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+        assert len(sa_upserts) == 1, (
+            f"strategy-mode NAV fault must stamp strategy_analytics; got "
+            f"{capture['upserts']!r}"
+        )
+        _name, payload, _oc = sa_upserts[0]
+        assert payload["computation_status"] == "failed"
+        assert payload["data_quality_flags"] == {"csv_source": True}
+        # scrub_freeform_string redacts the denylisted `secret=` value.
+        assert "hunter2" not in payload["computation_error"], (
+            f"stamped computation_error must be scrubbed; got "
+            f"{payload['computation_error']!r}"
+        )
+        # No csv_daily_returns write — the failure is BEFORE the upsert.
+        assert [u for u in capture["upserts"] if u[0] == "csv_daily_returns"] == []
+        # No CSV-analytics enqueue on a structural failure.
+        assert capture["rpc_calls"] == []
+
+    @pytest.mark.asyncio
+    async def test_nav_error_permanent_key_mode_no_stamp(self) -> None:
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-navk", "exchange": "binance", "user_id": "alloc-1"},
+            strategy_row=None,
+        )
+        job = {
+            "id": "j-navk",
+            "kind": "derive_broker_dailies",
+            "api_key_id": "key-navk",
+        }
+        combine = MagicMock(
+            side_effect=NavReconstructionError("nav_twr non-finite pnl=7.0 (row={})")
+        )
+        patches = _patches_with_combine(ctx, key_mode=True, combine_mock=combine)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent"
+        # Key-mode has NO per-key analytics row — mirrors the <2 branch: no stamp,
+        # no csv write, no enqueue.
+        assert capture["upserts"] == [], (
+            f"key-mode NAV fault must not touch any table; got {capture['upserts']!r}"
+        )
+        assert capture["rpc_calls"] == []
+
+    @pytest.mark.asyncio
+    async def test_transient_valueerror_still_falls_through(self) -> None:
+        """Mutation-honesty: the catch is NARROW to NavReconstructionError. A
+        bare ValueError (transient network parse blip) must NOT be swallowed as
+        permanent — it escapes to the generic dispatcher classifier so it stays
+        retryable."""
+        ctx, _capture = _build_ctx(
+            key_row={"id": "key-t", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-t", "user_id": "user-1"},
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-t"}
+        combine = MagicMock(side_effect=ValueError("transient parse blip"))
+        patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            with pytest.raises(ValueError, match="transient parse blip"):
+                await run_derive_broker_dailies_job(job)
+
+
+class TestNaNSafeCsvDailyReturnsUpsert:
+    """Task 2 — the csv_daily_returns upsert applies the 74-01 sink-(b) finding:
+    a guarded-day NaN (estimated_start<=0 -> negative_nav_guard) is SKIPPED so
+    the day is honestly ABSENT (no fabricated 0.0 magnitude, and no crash at the
+    postgrest-py/httpx JSON encoder which rejects non-finite floats). Applied
+    identically to both is_key_mode and strategy-mode payload builders."""
+
+    @staticmethod
+    def _nan_bearing_returns() -> pd.Series:
+        """A >=2-day series in the exact shape the flow-aware core emits for an
+        estimated_start<=0 account: a LEADING guarded day (NaN), an INTERIOR
+        guarded day (NaN), and real returns on the rest."""
+        idx = pd.DatetimeIndex(
+            ["2024-05-01", "2024-05-02", "2024-05-03", "2024-05-04"]
+        )
+        return pd.Series(
+            [np.nan, 0.01, np.nan, -0.02], index=idx, dtype="float64"
+        )
+
+    def _assert_honest_payload(self, payload: list[dict]) -> None:
+        # Guarded days are ABSENT — only the 2 finite days survive.
+        assert len(payload) == 2, (
+            f"guarded-day NaN rows must be skipped (2 finite of 4 days); got "
+            f"{payload!r}"
+        )
+        dates = sorted(row["date"] for row in payload)
+        assert dates == ["2024-05-02", "2024-05-04"], (
+            f"only the finite days may persist; got {dates!r}"
+        )
+        for row in payload:
+            val = row["daily_return"]
+            assert np.isfinite(val), (
+                f"no NaN/inf may reach csv_daily_returns; got {val!r}"
+            )
+            # NEVER coerced to 0.0 — a guarded day is absent, not a fabricated
+            # flat return.
+            assert val != 0.0
+        # The payload must survive the real httpx JSON encoder that rejects
+        # non-finite floats (74-01 sink-(b) crash mechanism).
+        httpx.Request("POST", "http://csv-daily-returns.local", json=payload)
+
+    @pytest.mark.asyncio
+    async def test_nan_upsert_skips_guarded_days_strategy_mode(self) -> None:
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-n", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-n", "user_id": "user-1"},
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-n"}
+        combine = MagicMock(
+            return_value=(
+                self._nan_bearing_returns(),
+                {"used_heuristic_capital": False, "negative_nav_guard": True},
+            )
+        )
+        patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        csv_upserts = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
+        assert len(csv_upserts) == 1
+        _name, payload, _oc = csv_upserts[0]
+        self._assert_honest_payload(payload)
+        for row in payload:
+            assert row["strategy_id"] == "strat-n"
+        # The CSV-analytics enqueue still fires — the account is honest, not failed.
+        enqueues = [c for c in capture["rpc_calls"] if c[0] == "enqueue_compute_job"]
+        assert len(enqueues) == 1
+
+    @pytest.mark.asyncio
+    async def test_nan_upsert_skips_guarded_days_key_mode(self) -> None:
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-nk", "exchange": "binance", "user_id": "alloc-1"},
+            strategy_row=None,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "api_key_id": "key-nk"}
+        combine = MagicMock(
+            return_value=(
+                self._nan_bearing_returns(),
+                {"used_heuristic_capital": False, "negative_nav_guard": True},
+            )
+        )
+        patches = _patches_with_combine(ctx, key_mode=True, combine_mock=combine)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        csv_upserts = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
+        assert len(csv_upserts) == 1
+        _name, payload, _oc = csv_upserts[0]
+        self._assert_honest_payload(payload)
+        for row in payload:
+            assert row["api_key_id"] == "key-nk"
+            assert row["allocator_id"] == "alloc-1"
+            assert row["strategy_id"] is None
