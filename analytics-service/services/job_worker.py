@@ -1829,25 +1829,64 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     )
 
     try:
-        # Current total equity = the initial-capital anchor (anchor-to-today,
-        # reconstruct backward). OKX is read via raw totalEq inside
-        # fetch_account_equity_usd (ccxt fetch_balance crashes on OKX).
-        equity, balance_error = await fetch_account_equity_usd(ctx.exchange, venue)
-        # since_ms=None ⇒ ENTIRE account history (OKX inception via archive
-        # bills, Binance inception, Bybit last 365 days).
-        realized = await fetch_all_trades(ctx.exchange, since_ms=None)
-        if venue == "binance":
-            funding = await fetch_funding_binance(ctx.exchange, funding_label, None)
-        elif venue == "okx":
-            funding = await fetch_funding_okx(ctx.exchange, funding_label, None)
-        elif venue == "bybit":
-            funding = await fetch_funding_bybit(ctx.exchange, funding_label, None)
-        else:
-            return DispatchResult(
-                outcome=DispatchOutcome.FAILED,
-                error_message=f"derive_broker_dailies: venue {venue} not supported",
-                error_kind="permanent",
+        if venue == "deribit":
+            # D-08: realized returns come from the ONE txn-log ledger pass
+            # (funding-inclusive settlement cash deltas) — NEVER fetch_all_trades
+            # / the fills endpoint. Funding is INSIDE the settlement sum (A3/D-10)
+            # → EMPTY funding_rows, no funding_fees write (count-once, DRB-07).
+            from services.deribit_ingest import (
+                LedgerCompletenessError,
+                LedgerTruncatedError,
+                assert_ledger_complete,
+                fetch_deribit_account_equity_usd,
+                fetch_deribit_ledger_daily_records,
             )
+            from services.redact import scrub_freeform_string
+
+            # USD equity anchor — fetch_account_equity_usd does NOT cover deribit
+            # (coin-margined USDT balance is not USD equity); this converts each
+            # currency's coin equity at its event/mark index into USD.
+            equity, balance_error = await fetch_deribit_account_equity_usd(
+                ctx.exchange
+            )
+            try:
+                realized, _completeness = await fetch_deribit_ledger_daily_records(
+                    ctx.exchange, None
+                )
+                # Re-anchored D-02 gate: a silently-partial ledger FAILS LOUD
+                # BEFORE any upsert — no partial track record is ever written.
+                assert_ledger_complete(_completeness)
+            except (LedgerCompletenessError, LedgerTruncatedError) as exc:
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: deribit ledger incomplete — "
+                        + str(scrub_freeform_string(str(exc)))
+                    ),
+                    error_kind="permanent",
+                )
+            # Funding is inside the ledger settlement cash delta — pass EMPTY.
+            funding: list[Any] = []
+        else:
+            # Current total equity = the initial-capital anchor (anchor-to-today,
+            # reconstruct backward). OKX is read via raw totalEq inside
+            # fetch_account_equity_usd (ccxt fetch_balance crashes on OKX).
+            equity, balance_error = await fetch_account_equity_usd(ctx.exchange, venue)
+            # since_ms=None ⇒ ENTIRE account history (OKX inception via archive
+            # bills, Binance inception, Bybit last 365 days).
+            realized = await fetch_all_trades(ctx.exchange, since_ms=None)
+            if venue == "binance":
+                funding = await fetch_funding_binance(ctx.exchange, funding_label, None)
+            elif venue == "okx":
+                funding = await fetch_funding_okx(ctx.exchange, funding_label, None)
+            elif venue == "bybit":
+                funding = await fetch_funding_bybit(ctx.exchange, funding_label, None)
+            else:
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=f"derive_broker_dailies: venue {venue} not supported",
+                    error_kind="permanent",
+                )
     except ccxt.RateLimitExceeded as exc:
         await _stamp_429(ctx.supabase, ctx.key_row, exc)
         raise

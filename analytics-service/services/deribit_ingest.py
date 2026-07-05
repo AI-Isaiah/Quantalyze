@@ -417,6 +417,64 @@ async def fetch_deribit_ledger_daily_records(
     return daily_records, CompletenessReport(expected=expected, entries=entries)
 
 
+async def fetch_deribit_account_equity_usd(
+    exchange: Any,
+) -> tuple[float | None, bool]:
+    """Total Deribit account equity in USD (the initial-capital anchor).
+
+    Reads ``private/get_account_summaries``; each coin-margined currency's coin
+    equity is converted at its USD index price (``public/get_index_price`` with
+    ``index_name={ccy}_usd``) while USD-family currencies pass through. The
+    money math is the pure ``deribit_txn.deribit_equity_to_usd`` — NEVER anchor
+    to a raw coin quantity (the anchor-shift class mis-scales every return).
+
+    Returns ``(equity, balance_error)`` mirroring ``fetch_account_equity_usd``:
+    ``balance_error=True`` means the read failed (caller flags heuristic
+    capital). ``fetch_account_equity_usd`` (services.exchange) does NOT cover
+    deribit — coin-margined USDT balance is not USD equity — so this is the
+    deribit-specific anchor.
+    """
+    from services.deribit_txn import _LINEAR_CURRENCIES, deribit_equity_to_usd
+
+    try:
+        resp = await exchange.private_get_get_account_summaries({})
+    except Exception:  # noqa: BLE001 - a failed read is a DQ flag, not a crash
+        return None, True
+    result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
+    summaries = result.get("summaries", []) if isinstance(result, Mapping) else []
+    if not isinstance(summaries, Sequence) or not summaries:
+        return None, True
+
+    index_prices: dict[str, float] = {}
+    for summ in summaries:
+        if not isinstance(summ, Mapping):
+            continue
+        ccy = str(summ.get("currency", "")).upper()
+        if not ccy or ccy in _LINEAR_CURRENCIES:
+            continue
+        try:
+            ip = await exchange.public_get_get_index_price(
+                {"index_name": f"{ccy.lower()}_usd"}
+            )
+        except Exception:  # noqa: BLE001 - missing index → gate below fails loud
+            continue
+        ipr = ip.get("result", {}) if isinstance(ip, Mapping) else {}
+        price = ipr.get("index_price") if isinstance(ipr, Mapping) else None
+        if price is not None:
+            try:
+                index_prices[ccy] = float(price)
+            except (TypeError, ValueError):
+                continue
+
+    try:
+        equity = deribit_equity_to_usd(summaries, index_prices)
+    except ValueError:
+        # A coin-margined currency with no resolvable USD index → refuse a
+        # coin/non-USD anchor; flag heuristic capital rather than mis-scale.
+        return None, True
+    return equity, False
+
+
 def assert_ledger_complete(report: CompletenessReport) -> None:
     """The re-anchored D-02 honesty gate. Raise ``LedgerCompletenessError`` if
     ANY expected scope × currency did not reach ``continuation=null``.

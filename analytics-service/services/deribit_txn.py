@@ -121,6 +121,51 @@ def txn_cashflow_to_usd(row: Mapping[str, Any]) -> float:
 
 
 # ---------------------------------------------------------------------------
+# USD equity anchor (D-02 / anchor-shift class) — pure, I/O-free.
+# ---------------------------------------------------------------------------
+
+
+def deribit_equity_to_usd(
+    summaries: Sequence[Mapping[str, Any]],
+    index_prices: Mapping[str, float],
+) -> float:
+    """Sum per-currency Deribit account equity into a single USD figure — the
+    initial-capital anchor for the daily reconstruction.
+
+    * USD-family currencies (``USDC``/``USDT``/``USD``/``EURR``) pass through
+      unchanged (their equity is already USD).
+    * A coin-margined currency's coin equity is multiplied by its USD index
+      price (``index_prices[currency]``, the event/mark index → USD). If that
+      price is absent, raise ``ValueError`` naming the currency — NEVER fall back
+      to the raw coin quantity (a coin/non-USD base silently mis-scales EVERY
+      return: the ``broker_dailies`` anchor-shift class).
+
+    Returns the total account equity in USD. Never returns a raw coin quantity.
+    """
+    total = 0.0
+    for summ in summaries:
+        if not isinstance(summ, Mapping):
+            continue
+        ccy = str(summ.get("currency", "")).upper()
+        if not ccy:
+            continue
+        equity = float(summ.get("equity", 0.0) or 0.0)
+        if ccy in _LINEAR_CURRENCIES:
+            total += equity  # already USD
+            continue
+        price = index_prices.get(ccy)
+        if price is None:
+            raise ValueError(
+                "deribit equity anchor: missing USD index price for "
+                f"coin-margined currency {ccy!r}; refusing a coin/non-USD equity "
+                "anchor (the broker_dailies anchor-shift class mis-scales every "
+                "return when the base is a raw coin quantity)"
+            )
+        total += equity * float(price)
+    return total
+
+
+# ---------------------------------------------------------------------------
 # Cash-bearing single-sum partition -> daily_pnl records (A3 / D-10).
 # ---------------------------------------------------------------------------
 
