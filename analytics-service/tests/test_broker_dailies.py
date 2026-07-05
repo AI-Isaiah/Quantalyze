@@ -878,3 +878,38 @@ def test_byte_identical_combine_snapshot():
     # Real-balance path: no heuristic, no guard -> 'complete'.
     assert meta["used_heuristic_capital"] is False
     assert meta["computation_status_hint"] == "complete"
+
+
+def test_external_flows_param_threads_through_combine_to_core():
+    """74-02 Task 3: the external_flows kwarg passed to
+    combine_realized_and_funding must be THREADED all the way to the honest core
+    (trades_to_daily_returns_with_status -> reconstruct_nav_and_twr). We prove
+    the WIRE, not flow valuation (that is Phase 75): an orphan flow dated OUTSIDE
+    the realized/funding return window is rejected by the core's _align_flows
+    with NavReconstructionError. Pre-wiring this raised TypeError (unknown
+    kwarg); post-wiring it raises NavReconstructionError, proving the param
+    reaches the core. The default (external_flows=None) path is unchanged and
+    byte-identical (test_byte_identical_combine_snapshot)."""
+    from services.broker_dailies import combine_realized_and_funding
+    from services.nav_twr import NavReconstructionError
+
+    realized = [
+        {
+            "exchange": "", "symbol": "BTCUSDT", "side": "buy", "price": 500.0,
+            "quantity": 1, "fee": 0, "fee_currency": "USDT",
+            "timestamp": "2026-01-01T00:00:00+00:00", "order_type": "daily_pnl",
+        },
+        {
+            "exchange": "", "symbol": "BTCUSDT", "side": "buy", "price": 300.0,
+            "quantity": 1, "fee": 0, "fee_currency": "USDT",
+            "timestamp": "2026-01-02T00:00:00+00:00", "order_type": "daily_pnl",
+        },
+    ]
+    orphan_flow = [("2099-01-01", 5000.0)]  # dated far outside the window
+    with pytest.raises(NavReconstructionError):
+        combine_realized_and_funding(
+            realized,
+            [],
+            account_balance=100_000.0,
+            external_flows=orphan_flow,
+        )
