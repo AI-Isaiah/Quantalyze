@@ -1848,6 +1848,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 fetch_deribit_account_equity_usd,
                 fetch_deribit_ledger_daily_records,
             )
+            from services.deribit_txn import LedgerValuationError
             from services.redact import scrub_freeform_string
 
             # P72 — fail-loud analytics stamp. A deribit permanent-FAIL below
@@ -1909,6 +1910,32 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         "derive_broker_dailies: deribit ledger incomplete or "
                         "unenumerable — "
                         + str(scrub_freeform_string(str(exc)))
+                    ),
+                    error_kind="permanent",
+                )
+            except LedgerValuationError as exc:
+                # A row→USD STRUCTURAL conversion failure from
+                # txn_rows_to_daily_records (a coin cash row with no same-day index
+                # even after the settlement-index fallback, an undatable timestamp,
+                # schema drift, or an unknown type/currency) — retrying cannot help.
+                # It must fail PERMANENT (not the transient "unknown" that burns 3
+                # retries) AND stamp the analytics row so the wizard reaches a
+                # terminal gate instead of an infinite 'computing' spinner. Narrowed
+                # to the TYPED LedgerValuationError (a ValueError subclass) so a
+                # transient network ValueError/json.JSONDecodeError escaping the
+                # crawl falls through to the outer generic handler and stays
+                # transient-retryable — never silently marked permanent.
+                scrubbed = str(scrub_freeform_string(str(exc)))
+                await _stamp_deribit_analytics_failed(
+                    "Deribit ledger contained a transaction that could not be "
+                    "processed (unvaluable coin cash, undatable, or schema drift). "
+                    + scrubbed
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: deribit ledger row unvaluable — "
+                        + scrubbed
                     ),
                     error_kind="permanent",
                 )

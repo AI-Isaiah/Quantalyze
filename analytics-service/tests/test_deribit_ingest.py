@@ -562,6 +562,345 @@ def test_gate_is_not_fill_count_reconciliation() -> None:
 
 
 # ===========================================================================
+# P72 — same-day settlement index (public/get_delivery_prices) + crawl wiring.
+#
+# The quiet-day inverse fallback: an inverse (coin) cash row on a day the ledger
+# itself carries no index is valued via the SAME-DAY delivery-price mark (inside
+# D-07's event window, NOT a period-end price). fetch_deribit_settlement_index
+# pages the public endpoint newest-first; the producer fetches it once per inverse
+# currency and only for days inverse_days_needing_index flags.
+# ===========================================================================
+
+
+class _DeliveryPricesStub:
+    """Serves a scripted sequence of public/get_delivery_prices pages / errors."""
+
+    def __init__(self, script: list[Any]) -> None:
+        self._script = list(script)
+        self.calls: list[dict[str, Any]] = []
+
+    async def public_get_get_delivery_prices(self, params: dict[str, Any]) -> Any:
+        self.calls.append(dict(params))
+        item = self._script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _delivery_page(rows: list[tuple[str, float]]) -> dict[str, Any]:
+    return {
+        "result": {
+            "data": [{"date": d, "delivery_price": p} for d, p in rows],
+            "records_total": len(rows),
+        }
+    }
+
+
+async def test_fetch_settlement_index_accumulates_and_stops_at_exhaustion() -> None:
+    # Exhaustion is signalled by an EMPTY page — decoupled from the exact `count`
+    # ceiling (WR-01): a partial page still yields its rows, and the NEXT (empty)
+    # page terminates the crawl. So a 2-row page then an empty page → 2 calls,
+    # full accumulated map.
+    stub = _DeliveryPricesStub(
+        [
+            _delivery_page([("2026-01-17", 61000.0), ("2026-01-16", 60000.0)]),
+            _delivery_page([]),
+        ]
+    )
+    spy = _SleepSpy()
+    prices = await di.fetch_deribit_settlement_index(
+        stub, "BTC", oldest_day="2026-01-01", sleep=spy
+    )
+    assert prices == {"2026-01-17": 61000.0, "2026-01-16": 60000.0}
+    assert len(stub.calls) == 2  # page 1 (rows) + page 2 (empty → exhausted)
+    # index_name = {ccy}_usd, count 100, contiguous offsets (0, then 100).
+    assert stub.calls[0]["index_name"] == "btc_usd"
+    assert stub.calls[0]["count"] == 100
+    assert stub.calls[0]["offset"] == 0
+    assert stub.calls[1]["offset"] == 100
+
+
+async def test_fetch_settlement_index_stops_at_oldest_day() -> None:
+    # A FULL first page (100 rows) already reaching back past oldest_day → STOP;
+    # the (existing) second page must NOT be requested (min(dates) <= oldest_day).
+    from datetime import date, timedelta
+
+    base = date(2026, 4, 10)
+    page1 = _delivery_page(
+        [((base - timedelta(days=i)).isoformat(), 60000.0 + i) for i in range(100)]
+    )
+    page2 = _delivery_page([("2020-01-01", 7000.0)])
+    stub = _DeliveryPricesStub([page1, page2])
+    spy = _SleepSpy()
+    oldest = (base - timedelta(days=50)).isoformat()
+    prices = await di.fetch_deribit_settlement_index(
+        stub, "ETH", oldest_day=oldest, sleep=spy
+    )
+    assert len(stub.calls) == 1  # stopped after reaching oldest_day
+    assert stub.calls[0]["index_name"] == "eth_usd"
+    assert oldest in prices
+    assert "2020-01-01" not in prices
+    # A pacing wait would only appear between pages; a single page → no wait.
+    assert spy.waits == []
+
+
+async def test_fetch_settlement_index_skips_non_positive_prices() -> None:
+    stub = _DeliveryPricesStub(
+        [
+            _delivery_page(
+                [("2026-01-17", 61000.0), ("2026-01-16", 0.0), ("2026-01-15", -5.0)]
+            )
+        ]
+    )
+    prices = await di.fetch_deribit_settlement_index(
+        stub, "BTC", oldest_day="2026-01-01", sleep=_SleepSpy()
+    )
+    # Zero and negative delivery prices are dropped (never value coin cash at <=0).
+    assert prices == {"2026-01-17": 61000.0}
+
+
+async def test_fetch_settlement_index_returns_partial_on_fetch_error() -> None:
+    # A delivery-price read is NON-fatal to correctness (the aggregator still
+    # fails loud if a needed day stays unvalued). Page 1 FULL → paging continues;
+    # page 2 raises → return the page-1 map rather than crash the crawl.
+    from datetime import date, timedelta
+
+    base = date(2026, 4, 10)
+    page1 = _delivery_page(
+        [((base - timedelta(days=i)).isoformat(), 60000.0 + i) for i in range(100)]
+    )
+    stub = _DeliveryPricesStub([page1, RuntimeError("network down")])
+    spy = _SleepSpy()
+    # oldest_day far in the past forces a second page request (which errors).
+    prices = await di.fetch_deribit_settlement_index(
+        stub, "BTC", oldest_day="2000-01-01", sleep=spy
+    )
+    assert len(stub.calls) == 2  # attempted page 2
+    assert len(prices) == 100  # page-1 map preserved despite the error
+
+
+async def test_producer_values_quiet_inverse_day_via_settlement_index(
+    monkeypatch: Any,
+) -> None:
+    # Crawl wiring: the producer fetches the SAME-DAY settlement index for an
+    # inverse currency whose crawl carries a quiet-day cash row (no own index),
+    # so the row VALUES (change*price) instead of failing loud. Revert-proof:
+    # without the supplemental wiring the quiet BTC fee raises ValueError out of
+    # txn_rows_to_daily_records and this test errors instead of asserting -45.
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            # quiet BTC negative_balance_fee: nonzero change, NO own index_price.
+            return [{"type": "negative_balance_fee", "currency": "BTC",
+                     "change": -0.001, "timestamp": _DAY_D_MS}]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+
+    fetched: list[tuple[str, str]] = []
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        fetched.append((currency, oldest_day))
+        return {"2024-01-02": 45000.0}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    records, report = await di.fetch_deribit_ledger_daily_records(object())
+    # The settlement index was fetched for BTC anchored at the quiet day, and the
+    # fee valued at -0.001 * 45000 = -45 rather than failing loud.
+    assert fetched == [("BTC", "2024-01-02")]
+    assert len(records) == 1
+    assert records[0]["side"] == "sell"
+    assert records[0]["price"] == pytest.approx(45.0, abs=1e-9)
+    di.assert_ledger_complete(report)
+
+
+async def test_fetch_settlement_index_stops_at_max_pages() -> None:
+    # A misbehaving endpoint that serves ENDLESS full pages (never a short page,
+    # never reaching oldest_day) must not spin forever — the defensive
+    # DELIVERY_PRICES_MAX_PAGES cap stops it and returns the partial map. 61 full
+    # pages are scripted but only DELIVERY_PRICES_MAX_PAGES (60) are ever consumed.
+    from datetime import date, timedelta
+
+    base = date(2026, 4, 10)
+    full = di.DELIVERY_PRICES_PAGE_COUNT  # 100 rows → a FULL (non-terminal) page
+    pages = [
+        _delivery_page(
+            [
+                (
+                    (base - timedelta(days=pg * full + i)).isoformat(),
+                    60000.0 + pg * full + i,
+                )
+                for i in range(full)
+            ]
+        )
+        for pg in range(61)
+    ]
+    stub = _DeliveryPricesStub(pages)
+    spy = _SleepSpy()
+    prices = await di.fetch_deribit_settlement_index(
+        stub, "BTC", oldest_day="1970-01-01", sleep=spy
+    )
+    # Stopped at exactly the cap; the 61st page was never requested.
+    assert len(stub.calls) == di.DELIVERY_PRICES_MAX_PAGES == 60
+    # Partial map returned (every consumed page's rows), not a crash.
+    assert len(prices) == 60 * full
+
+
+async def test_fetch_settlement_index_paces_between_pages() -> None:
+    # A >=2-page crawl paces one LEDGER_PACE_SECONDS wait BETWEEN pages (mirrors
+    # paginate_txn_log): page 1 full → continue; page 2 empty → history exhausted,
+    # stop. Exactly one pacing wait fired (between the two page requests).
+    from datetime import date, timedelta
+
+    base = date(2026, 4, 10)
+    page1 = _delivery_page(
+        [((base - timedelta(days=i)).isoformat(), 60000.0 + i) for i in range(100)]
+    )
+    page2 = _delivery_page([])  # empty → history exhausted
+    stub = _DeliveryPricesStub([page1, page2])
+    spy = _SleepSpy()
+    prices = await di.fetch_deribit_settlement_index(
+        stub, "BTC", oldest_day="1970-01-01", sleep=spy
+    )
+    assert len(stub.calls) == 2
+    # One pace wait, between page 1 and page 2 — never before the first page.
+    assert spy.waits == [di.LEDGER_PACE_SECONDS]
+    assert len(prices) == 100  # page-1 map accumulated before the empty page
+
+
+async def test_producer_raises_when_settlement_index_missing_needed_day(
+    monkeypatch: Any,
+) -> None:
+    # Fail-loud: a quiet inverse day whose settlement fetch returns a map MISSING
+    # that exact day stays UNVALUED — the aggregator must raise
+    # LedgerValuationError (never silently emit / drop the coin cash), even though
+    # the fetch itself "succeeded".
+    from services.deribit_txn import LedgerValuationError
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [{"type": "negative_balance_fee", "currency": "BTC",
+                     "change": -0.001, "timestamp": _DAY_D_MS}]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        # A non-empty map that does NOT contain the needed 2024-01-02 quiet day.
+        return {"2099-12-31": 45000.0}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    with pytest.raises(LedgerValuationError):
+        await di.fetch_deribit_ledger_daily_records(object())
+
+
+async def test_producer_linear_currency_never_fetches_settlement_index(
+    monkeypatch: Any,
+) -> None:
+    # No-regression: a LINEAR (USD-family) currency crawl never needs a settlement
+    # index, so fetch_deribit_settlement_index must NOT be called at all — a
+    # needless public fetch for USDC/USDT would be pure waste.
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        return [{"type": "settlement", "currency": "USDC", "change": 10.0,
+                 "instrument_name": "BTC_USDC-PERPETUAL", "timestamp": _DAY_D_MS}]
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["USDC"]}, paginate=_paginate,
+    )
+
+    called: list[str] = []
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        called.append(currency)
+        return {}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    records, report = await di.fetch_deribit_ledger_daily_records(object())
+    assert called == [], "linear USDC crawl must never fetch a settlement index"
+    assert records  # the linear row still values (USD passthrough)
+    di.assert_ledger_complete(report)
+
+
+async def test_multi_scope_older_quiet_day_triggers_deeper_settlement_fetch(
+    monkeypatch: Any,
+) -> None:
+    # Fix 2 (cross-scope cache depth): scope A (main) carries a RECENT quiet BTC
+    # day; scope B (sub_1) an OLDER one. The per-currency settlement cache is first
+    # anchored on A's recent day (a SHALLOW map that does NOT reach B's older day);
+    # B must trigger a DEEPER re-fetch anchored on its older day rather than take a
+    # too-shallow cache hit and fail loud. Revert-proof: the pre-Fix cache guard
+    # (`if currency not in settlement_index_cache`, first-scope anchor) reuses A's
+    # shallow map for B → B's row raises LedgerValuationError and this test errors.
+    recent_ms = 1_717_200_000_000  # 2024-06-01 UTC
+    old_ms = _DAY_D_MS             # 2024-01-02 UTC
+    scopes = [di.Scope("main", None, True), di.Scope("sub_1", "101", False)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency != "BTC":
+            return []
+        ts = recent_ms if scope_label == "main" else old_ms
+        return [{"type": "negative_balance_fee", "currency": "BTC",
+                 "change": -0.001, "timestamp": ts}]
+
+    _patch_pipeline(
+        monkeypatch,
+        scopes=scopes,
+        currencies={"main": ["BTC"], "sub_1": ["BTC"]},
+        paginate=_paginate,
+    )
+
+    fetched_oldest: list[str] = []
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        fetched_oldest.append(oldest_day)
+        # A fetch anchored at the OLD day reaches BOTH days; a shallow fetch
+        # anchored at the recent day covers ONLY the recent day.
+        if oldest_day <= "2024-01-02":
+            return {"2024-01-02": 40000.0, "2024-06-01": 60000.0}
+        return {"2024-06-01": 60000.0}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    records, report = await di.fetch_deribit_ledger_daily_records(object())
+    # BOTH quiet-day rows valued (no raise): main -0.001*60000=-60,
+    # sub_1 -0.001*40000=-40.
+    prices = {r["timestamp"]: r["price"] for r in records}
+    assert prices["2024-06-01T00:00:00+00:00"] == pytest.approx(60.0, abs=1e-9)
+    assert prices["2024-01-02T00:00:00+00:00"] == pytest.approx(40.0, abs=1e-9)
+    # Re-fetched DEEPER for the older scope: two fetches, the 2nd anchored older.
+    assert fetched_oldest == ["2024-06-01", "2024-01-02"]
+    di.assert_ledger_complete(report)
+
+
+# ===========================================================================
 # 70-04 Task 1 — the SECONDARY trades axis: id-cursor fill fetch + FillRow map.
 #
 # This axis is execution detail + an ADVISORY fill-count cross-check — NOT the

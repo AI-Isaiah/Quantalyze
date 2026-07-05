@@ -29,7 +29,9 @@ from datetime import datetime
 from services.deribit_txn import (
     CASH_BEARING_TYPES,
     INFORMATIONAL_TYPES,
+    LedgerValuationError,
     classify_instrument,
+    inverse_days_needing_index,
     txn_change_to_usd,
     txn_rows_to_daily_records,
 )
@@ -475,6 +477,44 @@ def test_cash_bearing_row_missing_change_key_fails_loud() -> None:
     assert len(recs) == 1 and recs[0]["price"] == pytest.approx(0.0)
 
 
+def test_nonnumeric_change_fails_loud_as_permanent_valuation_error() -> None:
+    """WR-02: a cash-bearing row whose `change` schema-drifts to a NON-NUMERIC
+    value must raise ``LedgerValuationError`` (a permanent, stamped wizard gate),
+    NOT a bare ``ValueError``/``TypeError`` that the worker's narrowed
+    `except LedgerValuationError` lets fall through to transient → 3 retries →
+    infinite 'computing' spinner (the exact class this PR kills). Revert-proof:
+    unwrapping `_coerce_float` back to a bare `float(...)` makes the raise a bare
+    ValueError and this `LedgerValuationError` assertion reddens.
+
+    Both the cash-bearing path AND the unknown-type path coerce `change`; pin both.
+    """
+    cash = {"type": "settlement", "instrument_name": "BTC-PERPETUAL",
+            "currency": "BTC", "change": "not-a-number",
+            "index_price": 50000.0, "timestamp": _ms(_DAY_A), "id": 94}
+    with pytest.raises(LedgerValuationError) as exc:
+        txn_rows_to_daily_records([cash])
+    assert "non-numeric change" in str(exc.value)
+
+    # Unknown-type path (nonzero non-numeric change) also fails loud + permanent.
+    unknown = {"type": "some_new_admin_type", "currency": "USDC",
+               "change": {"unexpected": "object"}, "timestamp": _ms(_DAY_A),
+               "id": 95}
+    with pytest.raises(LedgerValuationError):
+        txn_rows_to_daily_records([unknown])
+
+    # And the txn_change_to_usd own-value coercions (change / index_price).
+    bad_change = {"type": "settlement", "instrument_name": "BTC-PERPETUAL",
+                  "currency": "BTC", "change": "x", "index_price": 50000.0,
+                  "id": 96}
+    with pytest.raises(LedgerValuationError):
+        txn_change_to_usd(bad_change)
+    bad_index = {"type": "settlement", "instrument_name": "BTC-PERPETUAL",
+                 "currency": "BTC", "change": -0.01, "index_price": "oops",
+                 "id": 97}
+    with pytest.raises(LedgerValuationError):
+        txn_change_to_usd(bad_index)
+
+
 def test_liquidation_change_is_summed() -> None:
     """liquidation is CASH_BEARING — its `change` (forced-close PnL/fees) flows
     into the day-sum. Removing it from the set would drop real cash (the set-pin
@@ -582,6 +622,116 @@ def test_option_enters_via_cash_delta_not_perp() -> None:
             name == forbidden or name.startswith(forbidden + ".")
             for name in imported
         ), f"deribit_txn must not import {forbidden}; imports={sorted(imported)}"
+
+
+# ---------------------------------------------------------------------------
+# P72 — quiet-day inverse rows valued via a SAME-DAY supplemental settlement
+# index (public/get_delivery_prices); own/ledger index always wins (Fix B).
+# ---------------------------------------------------------------------------
+
+
+def test_quiet_inverse_row_without_supplemental_fails_loud() -> None:
+    """PIN the P72 live finding: an inverse BTC negative_balance_fee (nonzero
+    change, no index_price) on a QUIET day (no other BTC index-bearing row) has
+    no own same-day fallback → txn_rows_to_daily_records raises ValueError. This
+    is the exact onboarding failure Fix B repairs."""
+    fee = {
+        "type": "negative_balance_fee",
+        "currency": "BTC",
+        "change": -0.001,
+        "timestamp": _ms(_DAY_A),
+        "id": 301,
+    }
+    with pytest.raises(ValueError) as exc:
+        txn_rows_to_daily_records([fee])
+    assert "301" in str(exc.value)
+
+
+def test_quiet_inverse_row_valued_via_supplemental_index() -> None:
+    """Fix B: with a SAME-DAY supplemental settlement index, the SAME quiet BTC
+    fee values at change*price and emits the right daily record.
+
+    Revert-proof: delete the `if fb is None and supplemental_index is not None:
+    fb = supplemental_index.get((day, ccy))` line in txn_rows_to_daily_records and
+    this reddens (the row falls back to None → the same ValueError as above)."""
+    fee = {
+        "type": "negative_balance_fee",
+        "currency": "BTC",
+        "change": -0.001,
+        "timestamp": _ms(_DAY_A),
+        "id": 302,
+    }
+    records = txn_rows_to_daily_records(
+        [fee], supplemental_index={("2026-01-15", "BTC"): 60000.0}
+    )
+    assert len(records) == 1
+    # -0.001 * 60000 == -60.0
+    assert records[0]["side"] == "sell"
+    assert records[0]["price"] == pytest.approx(60.0, abs=1e-9)
+    assert records[0]["timestamp"] == "2026-01-15T00:00:00+00:00"
+
+
+def test_own_row_index_beats_supplemental_index() -> None:
+    """Own/ledger same-day index ALWAYS wins over the supplemental settlement
+    index. A day carrying BOTH an own-row BTC index (50000, via a zero-cash
+    settlement that seeds the index without adding USD) AND a DIFFERENT
+    supplemental price (60000) values the fee at the OWN price.
+
+    Revert-proof: make the supplemental take precedence (e.g. consult
+    supplemental_index BEFORE day_ccy_index, or set `fb = supplemental_index.get(
+    (day, ccy))` unconditionally) and this reddens — the fee values at 60 not 50.
+    """
+    settlement = {
+        "type": "settlement",
+        "instrument_name": "BTC-PERPETUAL",
+        "currency": "BTC",
+        "change": 0.0,  # zero cash — seeds the OWN same-day index, adds no USD
+        "index_price": 50000.0,
+        "timestamp": _ms(_DAY_A),
+        "id": 303,
+    }
+    fee = {
+        "type": "negative_balance_fee",
+        "currency": "BTC",
+        "change": -0.001,
+        "timestamp": _ms(_DAY_A),
+        "id": 304,
+    }
+    records = txn_rows_to_daily_records(
+        [settlement, fee], supplemental_index={("2026-01-15", "BTC"): 60000.0}
+    )
+    assert len(records) == 1
+    # -0.001 * 50000 (OWN) == -50.0, NOT -0.001 * 60000 (supplemental) == -60.0.
+    assert records[0]["side"] == "sell"
+    assert records[0]["price"] == pytest.approx(50.0, abs=1e-9)
+
+
+def test_inverse_days_needing_index_identifies_only_quiet_inverse_days() -> None:
+    """inverse_days_needing_index returns EXACTLY the (day, ccy) pairs where an
+    inverse cash-bearing NONZERO-change row lacks any same-day OWN index. It
+    excludes: days that already have an own index, zero-change rows, and linear
+    currencies. This is what the crawl consults to decide which settlement days
+    to fetch."""
+    _day_c = "2026-01-17T08:00:00+00:00"
+    rows = [
+        # (A) quiet BTC fee — no own index that day → NEEDED.
+        {"type": "negative_balance_fee", "currency": "BTC", "change": -0.001,
+         "timestamp": _ms(_DAY_A), "id": 401},
+        # (B) BTC fee on a day that ALSO has an own BTC index → NOT needed.
+        {"type": "settlement", "instrument_name": "BTC-PERPETUAL",
+         "currency": "BTC", "change": 0.01, "index_price": 50000.0,
+         "timestamp": _ms(_DAY_B), "id": 402},
+        {"type": "negative_balance_fee", "currency": "BTC", "change": -0.002,
+         "timestamp": _ms(_DAY_B), "id": 403},
+        # (C) zero-change BTC fee on a quiet day → NOT needed (no cash to value).
+        {"type": "negative_balance_fee", "currency": "BTC", "change": 0.0,
+         "timestamp": _ms(_day_c), "id": 404},
+        # (D) linear USDC cash row on a quiet day → NOT needed (already USD).
+        {"type": "negative_balance_fee", "currency": "USDC", "change": -5.0,
+         "timestamp": _ms(_day_c), "id": 405},
+    ]
+    needed = inverse_days_needing_index(rows)
+    assert needed == {("2026-01-15", "BTC")}
 
 
 def test_daily_record_shape_and_single_sum() -> None:

@@ -9,6 +9,7 @@ ever drops funding from the combined stream.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -226,11 +227,13 @@ from services.deribit_ingest import (  # noqa: E402
     LedgerTruncatedError,
 )
 from services.deribit_txn import (  # noqa: E402
+    LedgerValuationError,
     deribit_equity_to_usd,
     txn_rows_to_daily_records,
 )
 from services.job_worker import (  # noqa: E402
     DispatchOutcome,
+    dispatch,
     run_derive_broker_dailies_job,
 )
 
@@ -505,6 +508,111 @@ async def test_deribit_strategy_mode_ledger_incomplete_stamps_failed():
     assert payload["computation_status"] == "failed"
     assert payload["data_quality_flags"] == {"csv_source": True}
     assert on_conflict == "strategy_id"
+
+
+@pytest.mark.asyncio
+async def test_deribit_ledger_valueerror_is_permanent_and_stamps_failed():
+    """Fix A (P72 canary): a row→USD conversion ValueError escaping the ledger
+    pass (a coin cash row still unvaluable after the settlement-index fallback,
+    schema drift, or an unknown type/currency) is STRUCTURAL — it must fail
+    PERMANENT (never the transient 'unknown' that burns 3 retries) AND stamp
+    strategy_analytics 'failed' so the wizard reaches a terminal gate instead of
+    an infinite 'computing' spinner.
+
+    Revert-proof: remove the new `except LedgerValuationError` clause in the
+    deribit branch (so the typed error escapes the narrow tuple except →
+    classified transient 'unknown', no analytics stamp) and this reddens on BOTH
+    the permanent-kind and the stamp assertions.
+    """
+    ctx, capture = _deribit_ctx()
+    patches, _ = _deribit_patches(
+        ctx,
+        records=[],
+        # A TYPED structural valuation failure (subclass of ValueError) — the
+        # permanent-and-stamp path is keyed on the TYPE, not on ValueError.
+        ledger_side_effect=LedgerValuationError(
+            "inverse Deribit row id=654 has no event-time index_price and no "
+            "same-day currency index fallback"
+        ),
+    )
+    with _apply(patches), patch(
+        "services.job_worker._exchange_preflight",
+        new=AsyncMock(return_value=ctx),
+    ):
+        result = await run_derive_broker_dailies_job({"strategy_id": "s-drb"})
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    # No partial track record.
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"]), (
+        "an unvaluable ledger row must NOT upsert csv_daily_returns"
+    )
+    # Terminal 'failed' analytics stamp so the wizard poller resolves.
+    stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+    assert stamps, (
+        "a ledger LedgerValuationError must stamp strategy_analytics so the wizard "
+        "poller reaches a terminal gate instead of spinning on 'computing'"
+    )
+    assert stamps[0][1]["computation_status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "network_exc",
+    [
+        RuntimeError("network down"),
+        # json.JSONDecodeError SUBCLASSES ValueError — a garbled-200 parse error
+        # escaping ccxt. The pre-Fix `except ValueError` would have caught it and
+        # marked the strategy PERMANENT (never retried) + stamped 'failed'; the
+        # narrowed `except LedgerValuationError` must let it fall through to the
+        # transient/unknown classifier so a transient blip is retried.
+        json.JSONDecodeError("Expecting value", "", 0),
+    ],
+    ids=["runtime_error", "json_decode_error"],
+)
+@pytest.mark.asyncio
+async def test_deribit_network_valueerror_is_not_permanent_and_no_stamp(
+    network_exc: Exception,
+) -> None:
+    """Fix 1 boundary: a NETWORK-style error from the ledger crawl that is NOT a
+    LedgerValuationError (a bare RuntimeError, or a json.JSONDecodeError — itself
+    a ValueError subclass) must NOT be caught by the deribit branch's narrowed
+    `except LedgerValuationError`. It falls through to the outer generic
+    classifier → transient/unknown (RETRIED), and writes NO strategy_analytics
+    'failed' stamp.
+
+    Routed through `dispatch` so the propagated error is classified into a
+    DispatchResult.error_kind (the classifier lives in dispatch, not the handler).
+
+    Revert-proof: widen the clause back to `except ValueError` and the
+    json.JSONDecodeError case reddens on BOTH assertions — it would be swallowed
+    as permanent and stamp 'failed'.
+    """
+    ctx, capture = _deribit_ctx()
+    patches, _ = _deribit_patches(
+        ctx,
+        records=[],
+        ledger_side_effect=network_exc,
+    )
+    with _apply(patches), patch(
+        "services.job_worker._exchange_preflight",
+        new=AsyncMock(return_value=ctx),
+    ), patch(
+        "services.job_worker.sync_strategy_analytics_status",
+        new=AsyncMock(),
+    ):
+        result = await dispatch(
+            {"kind": "derive_broker_dailies", "strategy_id": "s-drb"}
+        )
+
+    assert result.outcome == DispatchOutcome.FAILED
+    # NOT permanent — a transient/unknown network condition must be retried, never
+    # burned into a permanent strategy failure.
+    assert result.error_kind != "permanent"
+    # And NO terminal 'failed' analytics stamp — a transient blip must not render
+    # the strategy permanently failed to the wizard.
+    assert not any(u[0] == "strategy_analytics" for u in capture["upserts"]), (
+        "a transient network error must NOT stamp strategy_analytics 'failed'"
+    )
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.7.0] - 2026-07-05
+### Added
+- **Deribit acceptance-verification harness (Phase 72, SC-2).** `scripts/deribit_acceptance.py` independently re-crawls the live Deribit ledger for onboarded strategies and reconciles exchange truth against the persisted factsheet — completeness, date-coverage, per-day funding-inclusive reconcile, and the inverse-sign invariant (fill counts advisory-only, per P70). Read-only; runs via `railway ssh`.
+### Fixed
+- **Quiet-day inverse Deribit rows now value correctly instead of blocking onboarding (live SC-1 canary fix).** A `negative_balance_fee` in BTC (inverse) on a UTC day with no same-day ledger index previously made the ledger conversion raise, which was misclassified transient (retried) and left the wizard spinning on `computing`. Such rows are now valued at Deribit's **same-day settlement mark** (`public/get_delivery_prices`, D-07-compliant — the own-row/ledger index always takes precedence), fetched once per inverse currency with cross-scope depth coverage.
+- **Every structural ledger-row valuation failure fails loud as a permanent wizard gate.** A new `LedgerValuationError` is raised for unvaluable coin cash, undatable timestamps, schema drift (missing/non-numeric `change` or `index_price`), and unknown row types, and caught narrowly in `derive_broker_dailies` → `computation_status='failed'` + `error_kind='permanent'`. A genuinely transient network `ValueError`/`JSONDecodeError` still falls through to retryable, so a blip never permanently kills a strategy.
+
 ## [0.37.6.0] - 2026-07-05
 ### Added
 - **Strategy managers can onboard a Deribit key as a verified strategy (Phase 72, the kernel Phase 70 deferred).** Phase 70 shipped the Deribit ingestion engine but deliberately parked the onboarding wiring here ("live LTP onboarding is Phase 72"). A live prod canary confirmed the gap: the wizard's sync step 422'd because `/process-key` excluded Deribit. Now the wizard onboards a Deribit key end-to-end — the read-only scope gate, envelope encryption, and the async ledger factsheet all run — reusing the existing `pending_review`/poll machinery with no wizard redesign.
