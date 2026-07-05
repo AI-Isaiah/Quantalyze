@@ -40,6 +40,7 @@ from services.external_flows import ExternalFlow
 from tests.fixtures.deribit_flow_fixtures import (
     BTC_INDEX_2026_03_14,
     BTC_INDEX_2026_03_17,
+    DAY_INVERSE_NO_INDEX,
     DAY_INVERSE_WITH_INDEX,
     DAY_LINEAR,
     DAY_PURE_FLOW,
@@ -939,3 +940,57 @@ def test_dated_external_flow_returns_sorted_externalflow_list() -> None:
     day_raw, usd_raw = flows[0]
     assert day_raw == "2026-02-01"
     assert usd_raw == pytest.approx(-40.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Plan 75-02 Task 2 — Finding C1: inverse_days_needing_index must ALSO flag
+# inverse EXTERNAL-FLOW quiet days so the crawl fetches their settlement index.
+# Without the extension a real BTC withdrawal on a no-trade day is invisible to
+# the crawl → txn_change_to_usd fails loud downstream and sinks the whole job.
+# ---------------------------------------------------------------------------
+
+
+def test_c1_inverse_flow_quiet_day_needs_index() -> None:
+    """C1 index-fetch proof: a QUIET-day inverse BTC withdrawal (nonzero change,
+    no own same-day index) has its (day, "BTC") emitted by
+    inverse_days_needing_index so the crawl fetches a settlement index for it.
+
+    Mutation-honest: reverting the C1 extension (restoring the CASH_BEARING-only
+    gate) removes (day, "BTC") from the set → the withdrawal gets no fetch → it
+    fails loud downstream. This assertion goes RED without the extension."""
+    needed = inverse_days_needing_index(inverse_flow_day_without_index_rows())
+    assert (DAY_INVERSE_NO_INDEX, "BTC") in needed
+
+
+def test_c1_cash_bearing_quiet_day_still_needed_no_regression() -> None:
+    """No-regression: the pre-existing CASH_BEARING quiet-day emission (a
+    negative_balance_fee on a day with no own index) is STILL flagged — the C1
+    extension ADDS flow coverage, it does not replace cash-bearing coverage."""
+    fee = {"type": "negative_balance_fee", "currency": "BTC", "change": -0.001,
+           "timestamp": _ms(_DAY_A), "id": 501}
+    needed = inverse_days_needing_index([fee])
+    assert ("2026-01-15", "BTC") in needed
+
+
+def test_c1_inverse_flow_day_with_own_index_not_needed() -> None:
+    """Own-index dedupe: an inverse flow day that ALREADY carries a same-day OWN
+    index (scenario 2's paired settlement row) is NOT emitted — no redundant fetch.
+    The _day_ccy_own_index check still applies to flow rows."""
+    needed = inverse_days_needing_index(inverse_flow_day_with_index_rows())
+    assert (DAY_INVERSE_WITH_INDEX, "BTC") not in needed
+
+
+def test_c1_linear_flow_day_not_needed() -> None:
+    """Linear exclusion: a linear (USDC) external-flow day is NEVER emitted — a
+    USD-family flow needs no index."""
+    needed = inverse_days_needing_index(linear_flow_day_rows())
+    assert all(ccy != "USDC" for _day, ccy in needed)
+    assert (DAY_LINEAR, "USDC") not in needed
+
+
+def test_c1_zero_change_inverse_flow_not_needed() -> None:
+    """Zero-change exclusion: a zero-change inverse flow row is NOT emitted (no
+    cash to value → no index needed)."""
+    zero = {"type": "withdrawal", "currency": "BTC", "change": 0.0,
+            "timestamp": _ms(_DAY_A), "id": 502}
+    assert inverse_days_needing_index([zero]) == set()
