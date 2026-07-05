@@ -381,3 +381,152 @@ class TestCapDataPoints:
         # Should keep most recent (last 50)
         assert result[0] == 50
         assert result[-1] == 99
+
+
+# ---------------------------------------------------------------------------
+# Phase 74 Wave 0 — byte-identity SNAPSHOT pins (the revert-proof safety net)
+# ---------------------------------------------------------------------------
+# These freeze TODAY's EXACT returns Series (pre-refactor) for the flow-less,
+# estimated_start>0 input shapes that flow through
+# ``trades_to_daily_returns_with_status``. Wave 2 (plan 74-02) delegates the
+# daily_pnl path to ``nav_twr.reconstruct_nav_and_twr``; these pins are the
+# safety net that MUST STAY GREEN across the whole phase — a delegation diff
+# that changes any value on a flow-less / estimated_start>0 account fails here.
+#
+# The assertion pattern mirrors the SC-4 pin in test_nav_twr.py
+# (``test_zero_flow_byte_identical``): rtol 1e-12, index-name excluded (the
+# "returns" vs input index-name convention is cosmetic).
+#
+# Do NOT assert any NaN/guard behavior here — the estimated_start<=0 divergence
+# / fallback-deletion pins are authored RED->GREEN inside 74-02. Every fixture
+# here keeps estimated_start>0 (or is the heuristic branch) so NO guard fires.
+class TestByteIdentitySnapshotPins:
+    """Revert-proof byte-identity pins for the three flow-less input shapes."""
+
+    def test_byte_identical_daily_pnl_snapshot(self):
+        """Pin the daily_pnl branch (order_type='daily_pnl') on an
+        estimated_start>0 account. account_balance=250k, Σpnl=1800 ->
+        estimated_start=248,200 (>$1000 dust floor) so the real-balance path
+        is taken and NO heuristic/guard fires. Frozen to rtol 1e-12."""
+        pnls = [1200.0, -450.0, 900.0, -200.0, 650.0, -300.0]  # Σ = 1800
+        account_balance = 250_000.0
+        trades = [
+            {
+                "timestamp": f"2026-03-{i + 1:02d}T00:00:00+00:00",
+                "order_type": "daily_pnl",
+                "side": "buy" if p >= 0 else "sell",
+                "price": abs(p),
+            }
+            for i, p in enumerate(pnls)
+        ]
+        returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=account_balance
+        )
+
+        expected_index = pd.DatetimeIndex(
+            [f"2026-03-{i + 1:02d}" for i in range(len(pnls))]
+        )
+        expected_values = [
+            0.004834810636583401,
+            -0.0018043303929430633,
+            0.003615183771841735,
+            -0.0008004802881729037,
+            0.0026036451031444022,
+            -0.0011985617259288853,
+        ]
+        expected = pd.Series(expected_values, index=expected_index, name="returns")
+
+        pd.testing.assert_series_equal(
+            returns, expected, check_exact=False, rtol=1e-12,
+            check_freq=False, check_names=False,
+        )
+        # Real-balance path: no heuristic, no guard -> 'complete'.
+        assert meta["used_heuristic_capital"] is False
+        assert meta["computation_status_hint"] == "complete"
+
+    def test_byte_identical_individual_snapshot(self):
+        """Pin the individual-trades branch (raw buy/sell fills with
+        price/quantity/fee, NO order_type='daily_pnl') on an
+        estimated_start>0 account (account_balance=50k). This is the branch
+        Phase 73 SC-4 never covered (portfolio.py:2260 feeds it real fills).
+        Frozen to rtol 1e-12."""
+        fills = [
+            ("2026-05-01", "buy", 100.0, 10.0, 2.0),
+            ("2026-05-01", "sell", 105.0, 10.0, 2.0),
+            ("2026-05-02", "buy", 50.0, 20.0, 1.5),
+            ("2026-05-02", "sell", 52.0, 20.0, 1.5),
+            ("2026-05-03", "buy", 200.0, 5.0, 3.0),
+            ("2026-05-03", "sell", 190.0, 5.0, 3.0),
+        ]
+        trades = [
+            {
+                "timestamp": f"{d}T10:00:00+00:00",
+                "symbol": "BTCUSDT",
+                "side": s,
+                "price": str(price),
+                "quantity": str(qty),
+                "fee": str(fee),
+                "order_type": "market",
+            }
+            for (d, s, price, qty, fee) in fills
+        ]
+        returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=50_000.0
+        )
+
+        expected_index = pd.DatetimeIndex(["2026-05-01", "2026-05-02", "2026-05-03"])
+        expected_values = [
+            -0.0010788564122030646,
+            -0.0008600172003440069,
+            0.0008807750820722236,
+        ]
+        expected = pd.Series(expected_values, index=expected_index, name="returns")
+
+        pd.testing.assert_series_equal(
+            returns, expected, check_exact=False, rtol=1e-12,
+            check_freq=False, check_names=False,
+        )
+        assert meta["used_heuristic_capital"] is False
+        assert meta["computation_status_hint"] == "complete"
+
+    def test_byte_identical_heuristic_snapshot(self):
+        """HARDENING (plan-checker Warning 2): pin the HEURISTIC sub-branch
+        (account_balance=None -> transforms.py:160-169, the process_key:896
+        path) so the flow-less guarantee covers it too. This branch derives
+        initial_capital from the PnL magnitude (off by 5-10x by design), so it
+        is net-new to guard against 74-02 accidentally altering the fallback
+        that estimated_start<=0 currently shares. Frozen to rtol 1e-12."""
+        pnls = [1200.0, -450.0, 900.0, -200.0, 650.0, -300.0]
+        trades = [
+            {
+                "timestamp": f"2026-03-{i + 1:02d}T00:00:00+00:00",
+                "order_type": "daily_pnl",
+                "side": "buy" if p >= 0 else "sell",
+                "price": abs(p),
+            }
+            for i, p in enumerate(pnls)
+        ]
+        returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=None
+        )
+
+        expected_index = pd.DatetimeIndex(
+            [f"2026-03-{i + 1:02d}" for i in range(len(pnls))]
+        )
+        expected_values = [
+            0.019459459459459462,
+            -0.0071580063626723225,
+            0.014419225634178906,
+            -0.00315872598052119,
+            0.010298389226300502,
+            -0.004704652378463147,
+        ]
+        expected = pd.Series(expected_values, index=expected_index, name="returns")
+
+        pd.testing.assert_series_equal(
+            returns, expected, check_exact=False, rtol=1e-12,
+            check_freq=False, check_names=False,
+        )
+        # Heuristic fired: account_balance=None -> complete_with_warnings.
+        assert meta["used_heuristic_capital"] is True
+        assert meta["computation_status_hint"] == "complete_with_warnings"
