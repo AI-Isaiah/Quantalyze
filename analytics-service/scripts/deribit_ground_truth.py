@@ -49,6 +49,7 @@ from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
+from services.deribit_txn import classify_instrument
 from services.key_permissions import _WRITE_SCOPE_SUFFIXES, scope_is_read_only
 from services.redact import scrub_freeform_string, truncate_account_id
 
@@ -237,33 +238,12 @@ def summarize_txn_log(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Instrument classification — inverse / linear / option / future.
 # ---------------------------------------------------------------------------
-
-# Deribit linear (USDC/USDT-margined) instruments carry the quote currency via
-# an underscore segment (e.g. BTC_USDC-PERPETUAL); inverse (coin-margined) do
-# not (e.g. BTC-PERPETUAL).
-_LINEAR_MARGIN_MARKERS: tuple[str, ...] = ("_USDC", "_USDT", "_EURR")
-# A dated-expiry future tail, e.g. "-27MAR26".
-_FUTURE_EXPIRY_RE: re.Pattern[str] = re.compile(r"-\d{1,2}[A-Z]{3}\d{2}$")
-
-
-def classify_instrument(instrument_name: str) -> str:
-    """Classify a Deribit instrument name. Never raises on unknown input.
-
-    Returns one of: ``inverse_perpetual``, ``linear_perpetual``, ``option``,
-    ``future``, ``unknown``. Untrusted exchange input (T-67-04) is classified,
-    not crashed on.
-    """
-    if not isinstance(instrument_name, str) or not instrument_name:
-        return "unknown"
-    name = instrument_name.upper()
-    is_linear = any(marker in name for marker in _LINEAR_MARGIN_MARKERS)
-    if name.endswith(("-C", "-P")):
-        return "option"
-    if name.endswith("-PERPETUAL"):
-        return "linear_perpetual" if is_linear else "inverse_perpetual"
-    if _FUTURE_EXPIRY_RE.search(name):
-        return "future"
-    return "unknown"
+# `classify_instrument` (+ `_LINEAR_MARGIN_MARKERS` / `_FUTURE_EXPIRY_RE`) now
+# live as a SINGLE definition in services.deribit_txn (D-05) — the same
+# scope-gate lift already applied to services.key_permissions. Production
+# Deribit money-math (Phase 70) must not depend on this scripts module, so the
+# canonical classifier is imported at the top of this file; the harness keeps
+# its original call sites (_sample_kind, summarize_txn_log, _paginate_trades).
 
 
 # ---------------------------------------------------------------------------

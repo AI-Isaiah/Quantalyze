@@ -307,12 +307,23 @@ def test_option_enters_via_cash_delta_not_perp() -> None:
     assert records[0]["order_type"] == "daily_pnl"
     assert records[0]["side"] == "buy"
 
+    import ast
+
     import services.deribit_txn as mod
 
-    source = open(mod.__file__).read()
-    assert "services.exchange" not in source
-    assert "import ccxt" not in source
-    assert "pandas" not in source
+    tree = ast.parse(open(mod.__file__).read())
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    # Pure module: no I/O / perp-fill surface reachable through it.
+    for forbidden in ("services.exchange", "ccxt", "pandas", "supabase"):
+        assert not any(
+            name == forbidden or name.startswith(forbidden + ".")
+            for name in imported
+        ), f"deribit_txn must not import {forbidden}; imports={sorted(imported)}"
 
 
 def test_daily_record_shape_and_single_sum() -> None:

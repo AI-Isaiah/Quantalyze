@@ -355,35 +355,10 @@ def test_build_history_params_includes_subaccount_id_only_when_present() -> None
     assert "subaccount_id" not in base
 
 
-# ---------------------------------------------------------------------------
-# classify_instrument — inverse / linear / option / future
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "name,expected",
-    [
-        ("BTC-PERPETUAL", "inverse_perpetual"),
-        ("ETH-PERPETUAL", "inverse_perpetual"),
-        ("BTC_USDC-PERPETUAL", "linear_perpetual"),
-        ("ETH_USDC-PERPETUAL", "linear_perpetual"),
-        ("BTC-27MAR26-60000-C", "option"),
-        ("BTC-27MAR26-60000-P", "option"),
-        ("BTC-27MAR26", "future"),
-        ("SOMETHING-WEIRD", "unknown"),
-        ("", "unknown"),
-    ],
-)
-def test_instrument_classification(name: str, expected: str) -> None:
-    assert classify_instrument(name) == expected
-
-
-def test_instrument_classification_never_raises_on_junk() -> None:
-    # Untrusted exchange input — must classify, not crash (T-67-04).
-    for junk in ("---", "12345", "BTC-", "-PERPETUAL", "BTC_USDC-"):
-        assert classify_instrument(junk) == "unknown" or isinstance(
-            classify_instrument(junk), str
-        )
+# classify_instrument behavior tests now live in a single home in
+# tests/test_deribit_txn.py (the classifier was lifted to services.deribit_txn,
+# D-05). This module keeps only its own harness-specific use of the imported
+# classifier (the summarize_txn_log kind-diversity assertion above).
 
 
 # ---------------------------------------------------------------------------
