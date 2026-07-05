@@ -74,4 +74,40 @@ describe("parseHoldingScopeRef", () => {
   it("returns null when symbol contains '/' (Research Finding #9)", () => {
     expect(parseHoldingScopeRef("binance:BTC/USDT:derivative")).toBeNull();
   });
+
+  // Phase 71 (DRB-09): Deribit instrument_name symbols carry '-'/'_'. Before
+  // Phase 71 no Deribit row ever reached allocator_holdings (the sync erred),
+  // so these were unreachable; now the allocator sees the position and MUST be
+  // able to note it. A too-strict [A-Z0-9]+ symbol class 403'd the notes PATCH.
+  it("parses a Deribit inverse-perp derivative scope_ref", () => {
+    expect(parseHoldingScopeRef("deribit:BTC-PERPETUAL:derivative")).toEqual({
+      venue: "deribit",
+      symbol: "BTC-PERPETUAL",
+      holding_type: "derivative",
+    });
+  });
+
+  it("parses a Deribit linear-perp scope_ref (underscore + hyphen)", () => {
+    expect(
+      parseHoldingScopeRef("deribit:BTC_USDC-PERPETUAL:derivative"),
+    ).toEqual({
+      venue: "deribit",
+      symbol: "BTC_USDC-PERPETUAL",
+      holding_type: "derivative",
+    });
+  });
+
+  it("parses a Deribit option scope_ref", () => {
+    expect(
+      parseHoldingScopeRef("deribit:BTC-27DEC24-100000-C:derivative"),
+    ).toEqual({
+      venue: "deribit",
+      symbol: "BTC-27DEC24-100000-C",
+      holding_type: "derivative",
+    });
+  });
+
+  it("still returns null for a lowercase Deribit-shaped symbol", () => {
+    expect(parseHoldingScopeRef("deribit:btc-perpetual:derivative")).toBeNull();
+  });
 });
