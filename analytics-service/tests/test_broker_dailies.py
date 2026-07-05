@@ -263,9 +263,9 @@ def _deribit_ledger_records() -> list[dict]:
     """A >=2-day funding-inclusive ledger daily_pnl record set (70-03 shape)."""
     return txn_rows_to_daily_records(
         [
-            {"type": "settlement", "currency": "USDC", "cashflow": 120.0,
+            {"type": "settlement", "currency": "USDC", "change": 120.0,
              "instrument_name": "BTC_USDC-PERPETUAL", "timestamp": 1_714_521_600_000},
-            {"type": "settlement", "currency": "USDC", "cashflow": -40.0,
+            {"type": "settlement", "currency": "USDC", "change": -40.0,
              "instrument_name": "BTC_USDC-PERPETUAL", "timestamp": 1_714_608_000_000},
         ]
     )
@@ -293,7 +293,13 @@ def _deribit_patches(
         ledger_mock = AsyncMock(side_effect=ledger_side_effect)
     else:
         ledger_mock = AsyncMock(
-            return_value=(records, report or CompletenessReport())
+            return_value=(
+                records,
+                # Default report is consistent with `records`: a nonzero
+                # return-row count so the C2 equity-vs-activity floor does not
+                # trip when the fixture supplies realized records.
+                report or CompletenessReport(total_return_rows=len(records)),
+            )
         )
     return [
         patch(
@@ -400,6 +406,121 @@ async def test_deribit_ledger_truncation_fails_loud():
     assert capture["upserts"] == [], "a truncated ledger must NOT upsert dailies"
 
 
+@pytest.mark.asyncio
+async def test_deribit_currency_enumeration_fails_loud():
+    """pr-test #2: an unenumerable currency universe (CurrencyEnumerationError
+    from the producer) → job FAILED, no upsert — never a silently-empty track
+    record. Dropping it from the except tuple turns this red."""
+    from services.deribit_ingest import CurrencyEnumerationError
+
+    ctx, capture = _deribit_ctx()
+    patches, _ = _deribit_patches(
+        ctx,
+        records=[],
+        ledger_side_effect=CurrencyEnumerationError("get_currencies unreadable"),
+    )
+    with _apply(patches):
+        result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert capture["upserts"] == []
+
+
+@pytest.mark.asyncio
+async def test_deribit_scope_auth_error_is_clean_permanent_failed():
+    """W-1: a >1-funded-subaccount key raises ScopeAuthError out of
+    enumerate_scopes; the deribit branch must classify it as a clean
+    DispatchResult(FAILED, permanent) — never an unclassified propagation — and
+    write no partial track record."""
+    from services.deribit_ingest import ScopeAuthError
+
+    ctx, capture = _deribit_ctx()
+    patches, _ = _deribit_patches(
+        ctx,
+        records=[],
+        ledger_side_effect=ScopeAuthError("2 funded subaccounts — use per-sub keys"),
+    )
+    with _apply(patches):
+        result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    assert capture["upserts"] == []
+
+
+@pytest.mark.asyncio
+async def test_deribit_material_equity_zero_rows_fails_loud():
+    """C2: a materially-funded account (equity 100k) whose ledger produced ZERO
+    return-bearing rows is an empty-but-green ledger — fail loud, no upsert,
+    never a clean DONE. Neutering the floor turns this red."""
+    ctx, capture = _deribit_ctx()
+    patches, _ = _deribit_patches(
+        ctx,
+        records=[],  # zero realized records
+        report=CompletenessReport(total_return_rows=0),  # and zero return rows
+    )
+    with _apply(patches):
+        result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert capture["upserts"] == []
+
+
+@pytest.mark.asyncio
+async def test_deribit_anchor_subtracts_net_external_flow():
+    """F1: the initial-capital anchor subtracts net external flows. equity 100k,
+    net flow −628k (net withdrawals) → account_balance passed to combine is
+    100k − (−628k) = 728k (the true trading-capital base). Reverting the
+    subtraction reddens this."""
+    ctx, _capture = _deribit_ctx()
+    combine_spy = MagicMock(
+        return_value=(
+            pd.Series([0.01, -0.02],
+                      index=pd.DatetimeIndex(["2024-05-01", "2024-05-02"])),
+            {"used_heuristic_capital": False},
+        )
+    )
+    patches, combine = _deribit_patches(
+        ctx,
+        records=_deribit_ledger_records(),
+        report=CompletenessReport(
+            total_return_rows=2, net_external_flow_usd=-628_000.0
+        ),
+        combine_spy=combine_spy,
+    )
+    with _apply(patches):
+        await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
+    # account_balance = equity(100k) − net_flow(−628k) = 728k.
+    _args, _kwargs = combine.call_args
+    account_balance = _kwargs.get("account_balance", _args[2] if len(_args) > 2 else None)
+    assert account_balance == pytest.approx(728_000.0)
+
+
+@pytest.mark.asyncio
+async def test_deribit_unvalued_inverse_flow_flags_heuristic():
+    """F1: if an INVERSE external flow could not be valued, the anchor is NOT
+    silently under-corrected — balance_error is forced True (heuristic capital
+    DQ flag) so the track record is flagged, not rendered clean-but-wrong."""
+    ctx, _capture = _deribit_ctx()
+    combine_spy = MagicMock(
+        return_value=(
+            pd.Series([0.01, -0.02],
+                      index=pd.DatetimeIndex(["2024-05-01", "2024-05-02"])),
+            {"used_heuristic_capital": True},
+        )
+    )
+    patches, combine = _deribit_patches(
+        ctx,
+        records=_deribit_ledger_records(),
+        report=CompletenessReport(
+            total_return_rows=2, saw_unvalued_inverse_flow=True
+        ),
+        combine_spy=combine_spy,
+    )
+    with _apply(patches):
+        await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
+    _args, _kwargs = combine.call_args
+    balance_error = _kwargs.get("balance_error", _args[3] if len(_args) > 3 else None)
+    assert balance_error is True
+
+
 def test_deribit_equity_anchor_is_usd():
     """The equity anchor is USD-denominated: a coin-margined equity is scaled by
     its event/mark index into USD, NOT left as the raw coin quantity. Reverting
@@ -414,6 +535,35 @@ def test_deribit_equity_anchor_is_usd():
     # coin quantity (2.0) nor a coin/USDC-only partial.
     assert usd == pytest.approx(105_000.0)
     assert usd > 100.0, "anchor must be USD-scaled, never a raw coin quantity"
+
+
+def test_deribit_equity_anchor_values_any_resolvable_currency():
+    """F3: the EQUITY anchor (unlike the ledger cash conversion) values EVERY
+    held currency with a resolvable {ccy}_usd index — a live LTP account holds
+    e.g. SOL dust, and dropping it (or failing loud) would wrongly force
+    heuristic capital for the whole track record."""
+    usd = deribit_equity_to_usd(
+        [{"currency": "SOL", "equity": 10.0}, {"currency": "USDC", "equity": 5.0}],
+        {"SOL": 150.0},
+    )
+    assert usd == pytest.approx(10.0 * 150.0 + 5.0)
+
+
+def test_deribit_equity_anchor_missing_index_fails_loud():
+    """A nonzero coin equity with NO resolvable index MUST raise (→ heuristic
+    capital upstream), never anchor on a raw coin quantity. A zero balance in an
+    un-indexed currency is skipped (no index needed)."""
+    with pytest.raises(ValueError):
+        deribit_equity_to_usd([{"currency": "SOL", "equity": 0.004}], {})
+    # zero-equity un-indexed currency contributes 0, no raise:
+    assert deribit_equity_to_usd([{"currency": "SOL", "equity": 0.0}], {}) == 0.0
+
+
+def test_deribit_equity_anchor_rejects_non_positive_index():
+    """A zero/negative index price on a coin-margined equity MUST raise, never
+    value equity at <=0."""
+    with pytest.raises(ValueError):
+        deribit_equity_to_usd([{"currency": "BTC", "equity": 2.0}], {"BTC": 0.0})
 
 
 def _apply(patchers: list):
@@ -435,15 +585,15 @@ def _deribit_multiday_ledger_records() -> list[dict]:
     return txn_rows_to_daily_records(
         [
             # Day 1 — inverse (coin-margined) settlement: 0.002 BTC * 50,000 = +100 USD
-            {"type": "settlement", "currency": "BTC", "cashflow": 0.002,
+            {"type": "settlement", "currency": "BTC", "change": 0.002,
              "index_price": 50_000.0, "instrument_name": "BTC-PERPETUAL",
              "timestamp": 1_714_521_600_000},
             # Day 2 — option delivery, linear USDC settlement: +30 USD
-            {"type": "delivery", "currency": "USDC", "cashflow": 30.0,
+            {"type": "delivery", "currency": "USDC", "change": 30.0,
              "instrument_name": "BTC-9MAY25-60000-C",
              "timestamp": 1_714_608_000_000},
             # Day 3 — linear USDC perp settlement: -45 USD
-            {"type": "settlement", "currency": "USDC", "cashflow": -45.0,
+            {"type": "settlement", "currency": "USDC", "change": -45.0,
              "instrument_name": "BTC_USDC-PERPETUAL",
              "timestamp": 1_714_694_400_000},
         ]

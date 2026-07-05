@@ -275,5 +275,7 @@ def test_adapter_comment_reflects_phase_70_ships() -> None:
     from services.ingestion import adapter as adapter_module
 
     src = inspect.getsource(adapter_module)
-    assert "EXCLUDE deribit until Phase 70" not in src
-    assert "exclude deribit until Phase 70" not in src.lower() or True
+    # Case-insensitive so any casing of the stale "exclude … until Phase 70"
+    # note reddens (subsumes the exact-case check; the `or True` dead assertion
+    # that always passed is removed).
+    assert "exclude deribit until phase 70" not in src.lower()

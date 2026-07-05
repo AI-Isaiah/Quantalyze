@@ -123,12 +123,36 @@ _TXN_LOG_WHITELIST: tuple[str, ...] = (
     "id",
     "trade_id",
     "user_seq",
+    # Phase-70 re-probe (field-semantics): is realized cash in `cashflow` or in
+    # `change`? Fees booked into `change` while `cashflow==0` would be silently
+    # dropped by a cashflow-only sum. `fee` is the reconciler: if
+    # change == cashflow - fee, the fee lives in `change` (dropped by cashflow).
+    "change",
+    "fee",
+    "fee_balance",
 )
 
 # Per-type cap on whitelisted sample rows kept in the evidence JSON. A handful
 # per type — kept kind-diverse — characterizes the row shape; the numeric stats
 # (not the samples) answer A1/A3.
 MAX_TXN_SAMPLES_PER_TYPE: int = 5
+
+
+def _as_float(value: Any) -> float | None:
+    """Coerce a Deribit numeric field to float, or None if not numeric.
+
+    Deribit/ccxt returns amount/cashflow/change/index_price/etc. as STRINGS
+    (including scientific notation: "5.3e3", "-1.6328e-4"). ``float()`` parses
+    all of these — mirroring the production ``float(row.get(...) or 0.0)``
+    coercion so the harness stats measure the same values production sums.
+    Booleans are rejected (``float(True)`` would silently become 1.0).
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _sample_kind(sample: Mapping[str, Any]) -> str:
@@ -185,6 +209,14 @@ def summarize_txn_log(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
       - ``txn_trade_row_count``: count of ``type=="trade"`` rows — the txn-log
         completeness stream (Pitfall 5: the honesty anchor, distinct from the
         under-returning trades endpoint).
+      - ``per_type_field_stats``: per distinct ``type``,
+        ``{total, cashflow_nonzero, change_nonzero, cashflow_ne_change}`` — the
+        re-probe field-semantics answer. ``cashflow_ne_change`` counts rows
+        where BOTH ``cashflow`` and ``change`` are numeric and differ beyond a
+        tiny epsilon: if it is nonzero for a cash-bearing type (esp. ``trade``),
+        realized cash (fees) lives in ``change`` and a cashflow-only sum drops
+        it. Also settles ``negative_balance_fee`` / ``options_settlement_summary``
+        cash-bearing-vs-informational (nonzero counts ⇒ cash-bearing).
 
     Pure and never-raising on malformed rows (untrusted exchange input).
     """
@@ -196,6 +228,8 @@ def summarize_txn_log(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
         "mark_price_present": 0,
     }
     trade_cashflow_stats: dict[str, dict[str, int]] = {}
+    per_type_field_stats: dict[str, dict[str, float]] = {}
+    cashflow_ne_change_samples: dict[str, list[dict[str, Any]]] = {}
     txn_trade_row_count = 0
 
     for row in rows:
@@ -208,6 +242,49 @@ def summarize_txn_log(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
         _add_kind_diverse_sample(
             type_samples.setdefault(row_type, []), sample, MAX_TXN_SAMPLES_PER_TYPE
         )
+
+        # Re-probe: keep a few WHITELISTED samples of rows where cashflow != change
+        # so the divergence can be root-caused (is `change` == `cashflow - fee`?).
+        _cf = _as_float(row.get("cashflow"))
+        _ch = _as_float(row.get("change"))
+        if (
+            _cf is not None
+            and _ch is not None
+            and abs(_cf - _ch) > 1e-12
+            and len(cashflow_ne_change_samples.setdefault(row_type, [])) < 8
+        ):
+            cashflow_ne_change_samples[row_type].append(sample)
+
+        field_stats = per_type_field_stats.setdefault(
+            row_type,
+            {
+                "total": 0,
+                "cashflow_nonzero": 0,
+                "change_nonzero": 0,
+                "cashflow_ne_change": 0,
+                # Aggregate magnitudes: (change_sum - cashflow_sum) is the total
+                # FEE this row-type contributes — i.e. how much a cashflow-only
+                # daily sum OVER-states the return by dropping fees.
+                "cashflow_sum": 0.0,
+                "change_sum": 0.0,
+            },
+        )
+        field_stats["total"] += 1
+        # Deribit returns numeric fields as STRINGS (incl. sci-notation, e.g.
+        # "5.3e3", "-1.6328e-4"); coerce exactly as production float() does so the
+        # nonzero/differ counts reflect real cash, not a str-vs-number artifact.
+        cf = _as_float(row.get("cashflow"))
+        ch = _as_float(row.get("change"))
+        if cf is not None and cf != 0:
+            field_stats["cashflow_nonzero"] += 1
+        if ch is not None and ch != 0:
+            field_stats["change_nonzero"] += 1
+        if cf is not None and ch is not None and abs(cf - ch) > 1e-12:
+            field_stats["cashflow_ne_change"] += 1
+        if cf is not None:
+            field_stats["cashflow_sum"] += cf
+        if ch is not None:
+            field_stats["change_sum"] += ch
 
         if row_type == "settlement":
             settlement_price_stats["total"] += 1
@@ -231,6 +308,8 @@ def summarize_txn_log(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
         "type_samples": type_samples,
         "settlement_price_stats": settlement_price_stats,
         "trade_cashflow_stats": trade_cashflow_stats,
+        "per_type_field_stats": per_type_field_stats,
+        "cashflow_ne_change_samples": cashflow_ne_change_samples,
         "txn_trade_row_count": txn_trade_row_count,
     }
 
@@ -518,6 +597,8 @@ async def _paginate_txn_log(
         "mark_price_present": 0,
     }
     trade_cashflow_stats: dict[str, dict[str, int]] = {}
+    per_type_field_stats: dict[str, dict[str, float]] = {}
+    cashflow_ne_change_samples: dict[str, list[dict[str, Any]]] = {}
     txn_trade_row_count = 0
     pages_used = 0
     max_pages_hit = False
@@ -560,6 +641,25 @@ async def _paginate_txn_log(
             )
             dest["total"] += kind_stats["total"]
             dest["cashflow_nonzero"] += kind_stats["cashflow_nonzero"]
+        for row_type, fstats in page["per_type_field_stats"].items():
+            dest_f = per_type_field_stats.setdefault(
+                row_type,
+                {
+                    "total": 0,
+                    "cashflow_nonzero": 0,
+                    "change_nonzero": 0,
+                    "cashflow_ne_change": 0,
+                    "cashflow_sum": 0.0,
+                    "change_sum": 0.0,
+                },
+            )
+            for k, v in fstats.items():
+                dest_f[k] += v
+        for row_type, samples in page.get("cashflow_ne_change_samples", {}).items():
+            bucket = cashflow_ne_change_samples.setdefault(row_type, [])
+            for sample in samples:
+                if len(bucket) < 8:
+                    bucket.append(sample)
         txn_trade_row_count += page["txn_trade_row_count"]
         continuation = result.get("continuation")
         if not continuation or not logs:
@@ -570,6 +670,8 @@ async def _paginate_txn_log(
             "type_samples": type_samples,
             "settlement_price_stats": settlement_price_stats,
             "trade_cashflow_stats": trade_cashflow_stats,
+            "per_type_field_stats": per_type_field_stats,
+            "cashflow_ne_change_samples": cashflow_ne_change_samples,
         },
         "txn_trade_row_count": txn_trade_row_count,
         "pages_used": pages_used,

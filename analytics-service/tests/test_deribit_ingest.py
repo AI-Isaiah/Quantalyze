@@ -10,6 +10,7 @@ record. Every test below is RED-first + revert-proof against that failure.
 from __future__ import annotations
 
 import inspect
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
@@ -132,13 +133,14 @@ async def test_paginate_txn_log_truncation_fails_loud() -> None:
 
 
 async def test_paginate_txn_log_non_10028_error_propagates() -> None:
-    # A non-rate-limit error (e.g. -32602) is NOT backed off — it surfaces so the
-    # producer can decide (currency skip vs fail loud).
-    stub = _TxnLogStub([_DeribitError(-32602, "not a margin currency")])
+    # A non-rate-limit, non-(-32602-no-wallet) error (e.g. 13004 auth) is NOT
+    # backed off and NOT swallowed — it surfaces so the producer fails loud.
+    # (A first-page -32602 is separately absorbed as no-wallet → [].)
+    stub = _TxnLogStub([_DeribitError(13004, "invalid credentials")])
     spy = _SleepSpy()
     with pytest.raises(_DeribitError) as exc:
-        await di.paginate_txn_log(stub, "main", "SOL", 0, 100, {}, sleep=spy)
-    assert exc.value.code == -32602
+        await di.paginate_txn_log(stub, "main", "BTC", 0, 100, {}, sleep=spy)
+    assert exc.value.code == 13004
 
 
 async def test_paginate_txn_log_merges_scope_auth_into_params() -> None:
@@ -176,17 +178,50 @@ class _ScopeStub:
         return self._exchange_token
 
 
-async def test_enumerate_scopes_main_first_ids_are_strings() -> None:
+async def test_enumerate_scopes_is_single_key_own_account() -> None:
+    # P70 (drb03): each LTP key IS its own subaccount — a single "main" scope.
+    # get_subaccounts shows an empty parent + the key's OWN funded account
+    # (1 funded ≤ 1) → safe single-scope.
     stub = _ScopeStub(
-        subaccounts={"result": [{"id": "101"}, {"id": "102"}]}
+        subaccounts={
+            "result": [
+                {"id": "100", "type": "main", "portfolio": {}},
+                {"id": "101", "type": "subaccount",
+                 "portfolio": {"USDC": {"equity": 622923.41}}},
+            ]
+        }
     )
     scopes = await di.enumerate_scopes(stub)
+    assert len(scopes) == 1
     assert scopes[0].is_main is True
     assert scopes[0].subaccount_id is None
-    subs = scopes[1:]
-    assert [s.subaccount_id for s in subs] == ["101", "102"]
-    # ids preserved as STRINGS (Wave-0: get_subaccounts returns id as a string).
-    assert all(isinstance(s.subaccount_id, str) for s in subs)
+
+
+async def test_enumerate_scopes_fails_loud_on_multiple_funded_subaccounts() -> None:
+    # F-2/C1: a parent-account key seeing >1 FUNDED subaccount would silently
+    # miss the siblings (unreachable via exchange_token) → fail loud; provision
+    # one read-only key per subaccount instead.
+    stub = _ScopeStub(
+        subaccounts={
+            "result": [
+                {"id": "101", "portfolio": {"USDC": {"equity": 5000.0}}},
+                {"id": "102", "portfolio": {"BTC": {"equity": 0.5}}},
+            ]
+        }
+    )
+    with pytest.raises(di.ScopeAuthError):
+        await di.enumerate_scopes(stub)
+
+
+async def test_enumerate_scopes_get_subaccounts_error_proceeds_single_scope() -> None:
+    # The verification is best-effort: a get_subaccounts read error does not
+    # block the key's own crawl (the equity-vs-rows floor is the backstop).
+    class _Boom:
+        async def private_get_get_subaccounts(self, params: dict[str, Any]) -> Any:
+            raise RuntimeError("subaccounts unavailable")
+
+    scopes = await di.enumerate_scopes(_Boom())
+    assert len(scopes) == 1 and scopes[0].is_main
 
 
 async def test_resolve_scope_auth_main_uses_own_key() -> None:
@@ -236,33 +271,46 @@ class _CurrencyStub:
         return self._currencies
 
 
-async def test_enumerate_currencies_from_account_not_hardcoded() -> None:
+async def test_enumerate_currencies_is_full_public_universe_balance_independent() -> None:
+    # DISCRIMINATING fixture (pr-test #1): BTC is the ONLY held currency; ETH/USDC
+    # are UNHELD. The old held-based logic would return ["BTC"] and DROP ETH/USDC;
+    # the balance-INDEPENDENT full-universe logic returns all three. This is the
+    # crux of the self-referential-gate fix — a now-zero currency that HELD
+    # history must still be crawled, so reverting to held-derivation reddens this.
     stub = _CurrencyStub(
-        summaries={
-            "result": {
-                "summaries": [
-                    {"currency": "BTC", "equity": 0.5},
-                    {"currency": "ETH", "balance": 2.0},
-                    {"currency": "USDC", "equity": 0.0, "balance": 0.0},
-                ]
-            }
-        }
+        summaries={"result": {"summaries": [{"currency": "BTC", "equity": 0.5}]}},
+        currencies={
+            "result": [
+                {"currency": "BTC"},
+                {"currency": "ETH"},
+                {"currency": "USDC"},
+            ]
+        },
     )
     main = di.Scope(label="main", subaccount_id=None, is_main=True)
     ccys = await di.enumerate_currencies(stub, main, {})
-    # Only currencies with a nonzero held balance/equity; from the account, not
-    # a literal list. USDC (zero) is excluded.
-    assert ccys == ["BTC", "ETH"]
+    assert ccys == ["BTC", "ETH", "USDC"]
 
 
-async def test_enumerate_currencies_falls_back_to_get_currencies() -> None:
-    stub = _CurrencyStub(
-        summaries={"result": {"summaries": []}},
-        currencies={"result": [{"currency": "BTC"}, {"currency": "ETH"}]},
-    )
+async def test_enumerate_currencies_fails_loud_on_read_error() -> None:
+    # public/get_currencies raising must FAIL LOUD, never return [] — an empty
+    # authoritative set would let the gate pass while crawling nothing.
+    class _Boom:
+        async def public_get_get_currencies(self) -> Any:
+            raise RuntimeError("network down")
+
     main = di.Scope(label="main", subaccount_id=None, is_main=True)
-    ccys = await di.enumerate_currencies(stub, main, {})
-    assert ccys == ["BTC", "ETH"]
+    with pytest.raises(di.CurrencyEnumerationError):
+        await di.enumerate_currencies(_Boom(), main, {})
+
+
+async def test_enumerate_currencies_fails_loud_on_empty_universe() -> None:
+    stub = _CurrencyStub(currencies={"result": []})
+    main = di.Scope(label="main", subaccount_id=None, is_main=True)
+    with pytest.raises(di.CurrencyEnumerationError):
+        await di.enumerate_currencies(stub, main, {})
+
+
 
 
 # ===========================================================================
@@ -312,7 +360,7 @@ async def test_ledger_producer_loops_scope_x_currency(monkeypatch: Any) -> None:
         _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
     ) -> list[Any]:
         calls.append((scope_label, currency))
-        return [{"type": "settlement", "currency": "USDC", "cashflow": 1.0,
+        return [{"type": "settlement", "currency": "USDC", "change": 1.0,
                  "timestamp": _DAY_D_MS}]
 
     _patch_pipeline(
@@ -343,7 +391,7 @@ async def test_cross_scope_opposite_sign_nets_signed(monkeypatch: Any) -> None:
     ) -> list[Any]:
         # Same UTC day D, opposite signs across scopes (linear/USD passthrough).
         cash = 100.0 if scope_label == "main" else -30.0
-        return [{"type": "settlement", "currency": "USDC", "cashflow": cash,
+        return [{"type": "settlement", "currency": "USDC", "change": cash,
                  "timestamp": _DAY_D_MS}]
 
     _patch_pipeline(
@@ -395,7 +443,7 @@ async def test_truncation_propagates_as_incomplete(monkeypatch: Any) -> None:
     ) -> list[Any]:
         if currency == "ETH":
             raise di.LedgerTruncatedError("truncated main/ETH")
-        return [{"type": "settlement", "currency": "USDC", "cashflow": 1.0,
+        return [{"type": "settlement", "currency": "USDC", "change": 1.0,
                  "timestamp": _DAY_D_MS}]
 
     _patch_pipeline(
@@ -411,15 +459,19 @@ async def test_truncation_propagates_as_incomplete(monkeypatch: Any) -> None:
         di.assert_ledger_complete(report)
 
 
-async def test_minus_32602_skip_leaves_incomplete(monkeypatch: Any) -> None:
+async def test_no_wallet_empty_crawl_is_complete_empty(monkeypatch: Any) -> None:
+    # With the authoritative FULL public-currency universe, a currency the scope
+    # never funded surfaces at paginate_txn_log as an EMPTY crawl (a first-page
+    # -32602 is absorbed there → []). The producer records that COMPLETE-empty
+    # (nothing to crawl), NOT a gap; the gate PASSES.
     scopes = [di.Scope("main", None, True)]
 
     async def _paginate(
         _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
     ) -> list[Any]:
         if currency == "SOL":
-            raise _DeribitError(-32602, "not a margin currency")
-        return [{"type": "settlement", "currency": "USDC", "cashflow": 1.0,
+            return []  # paginator absorbed a first-page -32602 (no wallet)
+        return [{"type": "settlement", "currency": "USDC", "change": 1.0,
                  "timestamp": _DAY_D_MS}]
 
     _patch_pipeline(
@@ -429,11 +481,57 @@ async def test_minus_32602_skip_leaves_incomplete(monkeypatch: Any) -> None:
         paginate=_paginate,
     )
     _records, report = await di.fetch_deribit_ledger_daily_records(object())
-    # A graceful -32602 currency skip is NOT complete — it cannot masquerade as
-    # a full crawl (D-14).
-    assert report.entries[("main", "SOL")]["reached_end"] is False
-    with pytest.raises(di.LedgerCompletenessError):
-        di.assert_ledger_complete(report)
+    entry = report.entries[("main", "SOL")]
+    assert entry["reached_end"] is True and entry["rows"] == 0
+    # Both currencies accounted for → gate passes (no silent gap).
+    di.assert_ledger_complete(report)
+
+
+async def test_mid_crawl_minus_32602_fails_loud(monkeypatch: Any) -> None:
+    # F-3: a -32602 that escapes paginate_txn_log (i.e. raised AFTER rows were
+    # fetched — the paginator only absorbs it on page 1 with zero rows) must NOT
+    # be recorded complete-empty; it propagates out of the producer (fail loud),
+    # never dropping already-fetched rows.
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        raise _DeribitError(-32602, "invalid continuation")  # mid-crawl escape
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+    with pytest.raises(_DeribitError):
+        await di.fetch_deribit_ledger_daily_records(object())
+
+
+async def test_paginate_first_page_minus_32602_returns_empty() -> None:
+    # A first-page -32602 with an authoritative integer .code = "no wallet" → [].
+    stub = _TxnLogStub([_DeribitError(-32602, "not a margin currency")])
+    rows = await di.paginate_txn_log(
+        stub, "main", "SOL", 0, 1, {}, sleep=_SleepSpy()
+    )
+    assert rows == []
+
+
+async def test_paginate_minus_32602_after_rows_fails_loud() -> None:
+    # A -32602 on page 2 (after page-1 rows) must NOT be swallowed as no-wallet —
+    # it would drop the page-1 rows. It propagates.
+    page1 = {"result": {"logs": [{"type": "settlement", "change": 1.0}],
+                        "continuation": "cur2"}}
+    stub = _TxnLogStub([page1, _DeribitError(-32602, "invalid continuation")])
+    with pytest.raises(_DeribitError):
+        await di.paginate_txn_log(stub, "main", "BTC", 0, 1, {}, sleep=_SleepSpy())
+
+
+async def test_paginate_degraded_200_fails_loud() -> None:
+    # F-1: a structurally-degraded 200 (non-Mapping result / non-list logs) must
+    # NOT be read as end-of-history — it raises LedgerTruncatedError.
+    for bad in ({"result": "nope"}, {"result": {"logs": "notalist"}}, "notamapping"):
+        stub = _TxnLogStub([bad])
+        with pytest.raises(di.LedgerTruncatedError):
+            await di.paginate_txn_log(stub, "main", "BTC", 0, 1, {}, sleep=_SleepSpy())
 
 
 async def test_producer_reraises_unexpected_error(monkeypatch: Any) -> None:

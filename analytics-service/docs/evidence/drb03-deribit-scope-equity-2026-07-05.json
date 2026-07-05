@@ -1,0 +1,48 @@
+{
+ "_evidence": "drb03 Deribit scope+equity: key IS its own subaccount (single-scope)",
+ "_generated": "2026-07-05",
+ "_finding": "get_account_summaries on the key == the data-bearing subaccount portfolio (byte-identical); sibling subaccounts unreachable (exchange_token BadRequest). => single-scope crawl; main-scope equity anchor correct.",
+ "accounts": {
+  "account_1": {
+   "key_own_equity_nonzero": {
+    "BTC": 3.4e-05,
+    "SOL": 0.004,
+    "USDC": 380.502331,
+    "USDT": 0.9311
+   },
+   "data_subaccount_equity_nonzero": {
+    "BTC": 3.4e-05,
+    "USDC": 380.502331,
+    "USDT": 0.9311,
+    "SOL": 0.004
+   },
+   "match": true
+  },
+  "account_2": {
+   "key_own_equity_nonzero": {
+    "BTC": 0.048058,
+    "ETH": 8.2e-05,
+    "USDC": 622923.412913
+   },
+   "data_subaccount_equity_nonzero": {
+    "BTC": 0.048058,
+    "ETH": 8.2e-05,
+    "USDC": 622923.412913
+   },
+   "match": true
+  },
+  "account_3": {
+   "key_own_equity_nonzero": {
+    "BTC": -0.124456,
+    "USDC": 4.300609,
+    "USDT": 232500.0
+   },
+   "data_subaccount_equity_nonzero": {
+    "BTC": -0.124456,
+    "USDC": 4.300609,
+    "USDT": 232500.0
+   },
+   "match": true
+  }
+ }
+}

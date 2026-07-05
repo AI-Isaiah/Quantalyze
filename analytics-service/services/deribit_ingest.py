@@ -34,7 +34,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from services.deribit_txn import txn_rows_to_daily_records
+from services.deribit_txn import (
+    CASH_BEARING_TYPES,
+    deribit_linear_external_flow_usd,
+    txn_rows_to_daily_records,
+)
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger(__name__)
@@ -79,10 +83,18 @@ class ScopeAuthError(RuntimeError):
 
 class LedgerCompletenessError(RuntimeError):
     """The re-anchored D-02 honesty gate. Raised when ANY expected scope ×
-    currency did not reach ``continuation=null`` (a truncated crawl, a -32602
-    currency skip, or a dropped scope). This is LEDGER completeness — NOT a
-    reconciliation to the fill counts 18,778 / 21,014 / 61,248, which the Wave-0
-    probe (BLOCKING_FINDING) proved reconcile to no API surface."""
+    currency did not reach ``continuation=null`` (a truncated crawl or a dropped
+    scope). This is LEDGER completeness — NOT a reconciliation to the fill counts
+    18,778 / 21,014 / 61,248, which the Wave-0 probe (BLOCKING_FINDING) proved
+    reconcile to no API surface."""
+
+
+class CurrencyEnumerationError(RuntimeError):
+    """``public/get_currencies`` could not be read, so the authoritative,
+    balance-INDEPENDENT currency universe cannot be established. Enumerating from
+    held balances would drop any currency that HELD history but is now
+    zero-balance, and the gate graded against that set is blind to the drop — so
+    enumeration fails loud rather than under-anchor the expected coverage."""
 
 
 # 2015-01-01 UTC in ms — full Deribit history default (txn-log spans 2023→2026).
@@ -120,47 +132,101 @@ def _deribit_error_code(exc: BaseException) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _deribit_real_code(exc: BaseException) -> int | None:
+    """The Deribit error code from an authoritative ``.code`` INTEGER attribute
+    ONLY — never a regex-scraped message run. Used for the -32602 "no wallet"
+    reclassification (P70 review H1): treating a currency crawl as complete-empty
+    must not rest on a 4-5-digit substring that merely happens to appear in an
+    unrelated scrubbed message. ``bool`` is rejected (it is an ``int`` subclass)."""
+    code = getattr(exc, "code", None)
+    if isinstance(code, bool):
+        return None
+    return code if isinstance(code, int) else None
+
+
 # ---------------------------------------------------------------------------
 # Scope enumeration + per-scope auth.
 # ---------------------------------------------------------------------------
 
 
-async def enumerate_scopes(exchange: Any) -> list[Scope]:
-    """Enumerate account scopes from get_subaccounts, MAIN scope first.
+def _subaccount_is_funded(entry: Mapping[str, Any]) -> bool:
+    """True if a ``get_subaccounts(with_portfolio=true)`` entry holds ANY nonzero
+    equity in any currency. Never raises (untrusted exchange input; string-typed
+    numerics coerced)."""
+    portfolio = entry.get("portfolio")
+    if not isinstance(portfolio, Mapping):
+        return False
+    for pdata in portfolio.values():
+        if not isinstance(pdata, Mapping):
+            continue
+        raw = pdata.get("equity")
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            if float(raw) != 0.0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
-    Subaccount ids are kept as STRINGS (Wave-0 fixed the int-filter bug). An
-    error / empty result degrades to main-only (a subaccount we cannot see is
-    handled by the completeness gate at the currency layer, not silently)."""
-    scopes: list[Scope] = [Scope(label="main", subaccount_id=None, is_main=True)]
+
+async def enumerate_scopes(exchange: Any) -> list[Scope]:
+    """The scope set to crawl: the key's OWN authenticated account — a single
+    scope — with a runtime CHECK that the single-scope premise actually holds.
+
+    P70 live evidence (drb03, 2026-07-05): each LTP read-only key authenticates
+    AS one Deribit subaccount and its ``get_account_summaries`` / txn-log /
+    trades already return that account's COMPLETE data. ``get_subaccounts``
+    returns an empty ``type=main`` parent shell plus the key's own account, and
+    the key's own equity is byte-identical to that account's portfolio (acct2
+    USDC 622,923.41; acct3 USDT 232,500 — both match exactly). The sibling
+    subaccounts are NOT separately reachable (``public/exchange_token`` returns
+    BadRequest for client-credentials keys — it needs an OAuth refresh_token).
+
+    Review F-2/C1: rather than TRUST that provisioning contract silently, VERIFY
+    it. If ``get_subaccounts(with_portfolio=true)`` shows MORE THAN ONE funded
+    account, this key is a parent with separately-funded children a single-scope
+    crawl would silently miss → FAIL LOUD (``ScopeAuthError``): use one read-only
+    key per subaccount. ``<=1`` funded account (the key's own, or none) is the
+    safe single-scope case. A ``get_subaccounts`` read error is non-fatal — the
+    key's OWN account still crawls correctly and the equity-vs-rows floor
+    (job_worker) is the backstop; the check is skipped, not the crawl."""
+    scope = [Scope(label="main", subaccount_id=None, is_main=True)]
     try:
-        resp = await exchange.private_get_get_subaccounts({"with_portfolio": "false"})
-    except Exception:  # noqa: BLE001 - main-only degrade; never crash enumeration
-        return scopes
+        resp = await exchange.private_get_get_subaccounts({"with_portfolio": "true"})
+    except Exception as exc:  # noqa: BLE001 - verification only; crawl is unaffected
+        logger.warning(
+            "deribit enumerate_scopes: get_subaccounts check skipped (%s); "
+            "proceeding single-scope",
+            scrub_freeform_string(str(exc)),
+        )
+        return scope
     result = resp.get("result", []) if isinstance(resp, Mapping) else []
     if not isinstance(result, Sequence):
-        return scopes
-    ordinal = 0
-    for entry in result:
-        if not isinstance(entry, Mapping):
-            continue
-        raw_id = entry.get("id")
-        if raw_id is None:
-            continue
-        ordinal += 1
-        scopes.append(
-            Scope(
-                label=f"sub_{ordinal}",
-                subaccount_id=str(raw_id),
-                is_main=False,
-            )
+        return scope
+    funded = sum(
+        1 for e in result if isinstance(e, Mapping) and _subaccount_is_funded(e)
+    )
+    if funded > 1:
+        raise ScopeAuthError(
+            f"Deribit key sees {funded} FUNDED subaccounts — a single-scope crawl "
+            "would silently miss the siblings (they are not reachable via "
+            "exchange_token). Provision one read-only key PER subaccount (design "
+            "§Subaccounts / P72) rather than a parent-account key."
         )
-    return scopes
+    return scope
 
 
 async def mint_subaccount_token(exchange: Any, subject_id: str) -> str:
     """Mint a read-scoped token for a subaccount via ``public/exchange_token``
     (param ``subject_id`` — subaccount_id is refused on the read-only LTP keys,
-    design §Subaccounts). Raises ``ScopeAuthError`` if no token comes back."""
+    design §Subaccounts). Raises ``ScopeAuthError`` if no token comes back.
+
+    ⚠️ CURRENTLY UNREACHABLE under single-scope enumeration (``enumerate_scopes``
+    returns only the key's own ``main`` scope — the LTP key IS its own subaccount,
+    drb03). ``public/exchange_token`` was also live-proven to return BadRequest
+    for client-credentials keys (it needs an OAuth refresh_token). RETAINED for a
+    possible P72 provisioning revisit; kept tested so the contract stays valid."""
     try:
         resp = await exchange.public_get_exchange_token({"subject_id": subject_id})
     except Exception as exc:  # noqa: BLE001 - fail loud, scrubbed
@@ -200,39 +266,40 @@ async def resolve_scope_auth(exchange: Any, scope: Scope) -> dict[str, Any]:
 async def enumerate_currencies(
     exchange: Any, scope: Scope, scope_auth: Mapping[str, Any]
 ) -> list[str]:
-    """Enumerate the currencies to crawl for ``scope`` from the account's held
-    balances (nonzero equity/balance), falling back to ``public/get_currencies``
-    when no held balance is reported. NEVER a hard-coded currency list."""
-    held: list[str] = []
-    try:
-        resp = await exchange.private_get_get_account_summaries(dict(scope_auth))
-    except Exception:  # noqa: BLE001 - fall through to public currencies
-        resp = None
-    if isinstance(resp, Mapping):
-        result = resp.get("result", {})
-        summaries = result.get("summaries", []) if isinstance(result, Mapping) else []
-        if isinstance(summaries, Sequence):
-            for summ in summaries:
-                if not isinstance(summ, Mapping):
-                    continue
-                ccy = summ.get("currency")
-                equity = summ.get("equity") or 0
-                balance = summ.get("balance") or 0
-                if ccy and (equity or balance):
-                    held.append(str(ccy))
-    if held:
-        return held
-    # Fallback: every listed currency (public — no scope needed).
+    """The AUTHORITATIVE, balance-INDEPENDENT currency universe to crawl — every
+    wallet currency listed by ``public/get_currencies``.
+
+    Deliberately NOT derived from held balances: a currency that HELD history but
+    is now zero-balance would be dropped, and the completeness gate — graded
+    against the same held-derived set — would be blind to the gap (the
+    self-referential-gate class). Crawling the full public set instead, a
+    currency the account never funded surfaces at the crawl as empty (or a
+    per-currency ``-32602`` "no wallet") and is recorded complete-empty there.
+
+    A read error, a non-list result, or an empty list FAILS LOUD
+    (``CurrencyEnumerationError``): without the authoritative universe the gate
+    cannot prove completeness. ``public/get_currencies`` needs no scope/auth —
+    ``scope``/``scope_auth`` are kept for signature stability and are the SAME
+    set for every scope (the tradeable universe is account-wide)."""
     try:
         resp = await exchange.public_get_get_currencies()
-    except Exception:  # noqa: BLE001
-        return []
-    result = resp.get("result", []) if isinstance(resp, Mapping) else []
+    except Exception as exc:  # noqa: BLE001 - fail loud, never a silent []
+        raise CurrencyEnumerationError(
+            "Deribit public/get_currencies failed; cannot establish the "
+            f"authoritative currency universe: {scrub_freeform_string(str(exc))}."
+        ) from None
+    result = resp.get("result", []) if isinstance(resp, Mapping) else None
     out: list[str] = []
     if isinstance(result, Sequence):
         for entry in result:
             if isinstance(entry, Mapping) and entry.get("currency"):
                 out.append(str(entry["currency"]))
+    if not out:
+        raise CurrencyEnumerationError(
+            "Deribit public/get_currencies returned no currencies; refusing an "
+            "empty currency universe (the gate cannot prove completeness against "
+            "an empty expected set)."
+        )
     return out
 
 
@@ -259,9 +326,12 @@ async def paginate_txn_log(
     ~1 req/s (``sleep`` awaited between pages — injected for CI) and exponential-
     backoff on 10028 up to ``max_retries``. If the budget is exhausted before
     ``continuation=null`` → raise ``LedgerTruncatedError`` (scope + currency +
-    last continuation). NEVER returns a partial page set. Every ccxt error is
-    scrubbed before it can reach a log. Any non-10028 error propagates (the
-    producer decides currency-skip vs fail-loud).
+    last continuation). NEVER returns a partial page set: a structurally-degraded
+    200 (non-Mapping body/result or non-list ``logs``) raises rather than being
+    read as end-of-history (F-1). A FIRST-page ``-32602`` (no wallet for this
+    currency, authoritative ``.code`` only) returns ``[]``; a ``-32602`` after
+    rows were fetched propagates (fail loud — never drop real rows, F-3). Every
+    other non-10028 error propagates. All ccxt errors are scrubbed before logging.
     """
     rows: list[Mapping[str, Any]] = []
     continuation: Any = None
@@ -287,6 +357,19 @@ async def paginate_txn_log(
                 resp = await exchange.private_get_get_transaction_log(params)
                 break
             except Exception as exc:  # noqa: BLE001
+                # -32602 "no wallet for this currency" (F-3/H1): honor as an
+                # empty crawl ONLY on the FIRST page with zero rows fetched, and
+                # ONLY from an authoritative integer .code (never a regex-scraped
+                # one). A -32602 AFTER rows exist, or on a continuation page,
+                # would DROP already-fetched data → must fail loud. The full
+                # public-currency universe includes currencies never funded; those
+                # legitimately -32602 on page 1.
+                if (
+                    _deribit_real_code(exc) == _NON_MARGIN_CURRENCY_CODE
+                    and is_first_page
+                    and not rows
+                ):
+                    return []
                 if _deribit_error_code(exc) != _RATE_LIMIT_CODE:
                     # Non-rate-limit error: surface it (scrubbed) to the caller.
                     raise
@@ -301,10 +384,25 @@ async def paginate_txn_log(
                 await sleep(LEDGER_BACKOFF_BASE_SECONDS * (2 ** (retries - 1)))
 
         is_first_page = False
-        result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
-        logs = result.get("logs", []) or []
-        if isinstance(logs, Sequence):
-            rows.extend(r for r in logs if isinstance(r, Mapping))
+        # F-1: a well-formed done response is a Mapping result with a `logs` LIST
+        # and a (null/int) `continuation`. A STRUCTURALLY-DEGRADED 200 (non-Mapping
+        # body/result, or `logs` not a list — a proxy/gateway artifact or an API
+        # shape change) must NOT be read as end-of-history: that would silently
+        # truncate the ledger and pass the completeness gate. Fail loud instead.
+        if not isinstance(resp, Mapping) or not isinstance(resp.get("result"), Mapping):
+            raise LedgerTruncatedError(
+                f"ledger crawl for scope={scope_label!r} currency={currency!r} got a "
+                "structurally-degraded response (non-Mapping body/result) — refusing "
+                "to treat it as end-of-history"
+            )
+        result = resp["result"]
+        logs = result.get("logs", [])
+        if not isinstance(logs, Sequence) or isinstance(logs, (str, bytes)):
+            raise LedgerTruncatedError(
+                f"ledger crawl for scope={scope_label!r} currency={currency!r} got a "
+                "non-list `logs` field — refusing to treat a degraded page as done"
+            )
+        rows.extend(r for r in logs if isinstance(r, Mapping))
         continuation = result.get("continuation")
         if not continuation:
             break
@@ -325,10 +423,21 @@ class CompletenessReport:
     ``{reached_end, rows, error?}`` recorded by the crawl. The gate compares the
     two: a scope that was expected but never crawled (dropped loop) leaves its
     ``expected`` pairs without a ``reached_end=True`` entry and the gate raises.
+
+    ``net_external_flow_usd`` is the net USD of linear external-flow rows
+    (transfer/deposit/withdrawal/reward) — the equity anchor SUBTRACTS it (F1).
+    ``saw_unvalued_inverse_flow`` marks that a coin external-flow row could not be
+    valued here → the caller flags heuristic capital rather than under-correct.
+    ``total_return_rows`` is the count of return-bearing rows across the crawl —
+    used for the equity-vs-activity floor (C2: material equity + zero rows is a
+    silently-empty green ledger).
     """
 
     expected: dict[str, list[str]] = field(default_factory=dict)
     entries: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    net_external_flow_usd: float = 0.0
+    saw_unvalued_inverse_flow: bool = False
+    total_return_rows: int = 0
 
 
 def _now_ms() -> int:
@@ -357,9 +466,11 @@ async def fetch_deribit_ledger_daily_records(
 
     Crawl outcomes recorded in the report:
       * success → ``reached_end=True``;
-      * ``LedgerTruncatedError`` (10028 budget exhausted) → ``reached_end=False``;
-      * ``-32602`` (non-margin currency) → ``reached_end=False`` (a graceful skip
-        is NOT complete — it can never masquerade as a full crawl, D-14);
+      * ``LedgerTruncatedError`` (10028 budget exhausted) → ``reached_end=False``
+        (incomplete — the gate raises);
+      * ``-32602`` (no wallet for this currency) → ``reached_end=True, rows=0``
+        (complete-empty: the authoritative universe includes currencies this
+        scope never funded; a currency WITH history returns rows, not -32602);
       * any other error → RE-RAISED (fail loud; never swallowed as a skip).
 
     The LIVE multi-year crawl over real creds is 70-05/live-gated; the producer
@@ -369,17 +480,24 @@ async def fetch_deribit_ledger_daily_records(
     start_ms = since_ms if since_ms is not None else DEFAULT_START_MS
     end_ms = _now_ms()
 
-    # Pass 1 — resolve auth (fail loud) + enumerate the OWED coverage per scope.
+    # Pass 1 — the AUTHORITATIVE OWED coverage: the balance-independent public
+    # currency universe (enumerated ONCE — account-wide) crawled across EVERY
+    # enumerated scope. Both enumerations fail loud, so `expected` can never be a
+    # silently-truncated set the gate would then be blind to.
+    currencies = await enumerate_currencies(exchange, scopes[0], {})
     expected: dict[str, list[str]] = {}
     scope_auths: dict[str, dict[str, Any]] = {}
     for scope in scopes:
         auth = await resolve_scope_auth(exchange, scope)
         scope_auths[scope.label] = auth
-        expected[scope.label] = await enumerate_currencies(exchange, scope, auth)
+        expected[scope.label] = list(currencies)
 
     # Pass 2 — crawl every OWED (scope, currency), concatenating the records.
     daily_records: list[dict[str, Any]] = []
     entries: dict[tuple[str, str], dict[str, Any]] = {}
+    net_external_flow_usd = 0.0
+    saw_unvalued_inverse_flow = False
+    total_return_rows = 0
     for scope in scopes:
         auth = scope_auths[scope.label]
         for currency in expected[scope.label]:
@@ -401,20 +519,37 @@ async def fetch_deribit_ledger_daily_records(
                     "error": str(scrub_freeform_string(str(exc))),
                 }
                 continue
-            except Exception as exc:  # noqa: BLE001
-                if _deribit_error_code(exc) == _NON_MARGIN_CURRENCY_CODE:
-                    entries[key] = {
-                        "reached_end": False,
-                        "rows": 0,
-                        "error": "-32602 non-margin currency skip",
-                    }
-                    continue
-                raise
+            # Any other error propagates → fail loud (never a silent skip). A
+            # first-page -32602 "no wallet" is absorbed INSIDE paginate_txn_log
+            # (returns [] → recorded complete-empty below); a -32602 AFTER rows
+            # were fetched escapes here and fails loud (F-3: never drop real rows).
             records = txn_rows_to_daily_records(rows)
             daily_records.extend(records)
-            entries[key] = {"reached_end": True, "rows": len(rows)}
+            # F1: accumulate the net external capital flow (for the anchor) and
+            # the return-bearing row count (for the C2 equity-vs-activity floor).
+            flow, saw_inverse = deribit_linear_external_flow_usd(rows)
+            net_external_flow_usd += flow
+            saw_unvalued_inverse_flow = saw_unvalued_inverse_flow or saw_inverse
+            total_return_rows += sum(
+                1
+                for r in rows
+                if isinstance(r, Mapping)
+                and str(r.get("type", "")) in CASH_BEARING_TYPES
+            )
+            # An empty crawl (no-wallet currency) is legitimately complete-empty.
+            entries[key] = {
+                "reached_end": True,
+                "rows": len(rows),
+                **({"note": "no wallet for currency"} if not rows else {}),
+            }
 
-    return daily_records, CompletenessReport(expected=expected, entries=entries)
+    return daily_records, CompletenessReport(
+        expected=expected,
+        entries=entries,
+        net_external_flow_usd=net_external_flow_usd,
+        saw_unvalued_inverse_flow=saw_unvalued_inverse_flow,
+        total_return_rows=total_return_rows,
+    )
 
 
 async def fetch_deribit_account_equity_usd(
@@ -482,8 +617,10 @@ def assert_ledger_complete(report: CompletenessReport) -> None:
     Takes NO fill-count total: completeness over the date range — not a
     reconciliation to 18,778 / 21,014 / 61,248 (Wave-0 BLOCKING_FINDING: those
     fill-level totals reconcile to no API surface) — is the honesty anchor. A
-    truncated crawl, a -32602 skip, and a dropped scope all leave the gate
-    failing, so a silently-partial ledger can never render as complete."""
+    truncated crawl and a dropped scope leave the gate failing, so a silently-
+    partial ledger can never render as complete. ``expected`` is anchored on the
+    enumeration-INDEPENDENT truth (authoritative subaccount set + full public
+    currency universe, both fail-loud), so under-enumeration cannot slip past."""
     incomplete: list[str] = []
     for scope_label, currencies in report.expected.items():
         for currency in currencies:
@@ -493,7 +630,7 @@ def assert_ledger_complete(report: CompletenessReport) -> None:
     if incomplete:
         raise LedgerCompletenessError(
             "Deribit ledger is INCOMPLETE — these scope×currency crawls did not "
-            "reach continuation=null (truncation, -32602 skip, or dropped scope): "
+            "reach continuation=null (truncation or dropped scope): "
             + ", ".join(sorted(incomplete))
             + ". Refusing to render a silently-partial ledger as a complete track "
             "record (re-anchored D-02 gate)."
@@ -685,6 +822,12 @@ async def fetch_deribit_fills(
     fills: list[dict[str, Any]] = []
     for scope in scopes:
         auth = await resolve_scope_auth(exchange, scope)
+        # enumerate_currencies FAILS LOUD (CurrencyEnumerationError) on an
+        # unenumerable universe — intentional and consistent with the returns
+        # path: fills is an execution-detail / advisory-cross-check axis, and an
+        # unenumerable universe means we cannot honestly bound coverage, so it
+        # surfaces (classified by the ingestion dispatcher) rather than silently
+        # returning an empty fill set.
         currencies = await enumerate_currencies(exchange, scope, auth)
         for currency in currencies:
             try:

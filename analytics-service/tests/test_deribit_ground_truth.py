@@ -294,6 +294,53 @@ def test_trade_cashflow_stats_per_kind_is_the_a3_answer() -> None:
     assert sum(s["total"] for s in stats.values()) == 4
 
 
+def test_per_type_field_stats_is_the_cashflow_vs_change_reprobe_answer() -> None:
+    # Re-probe: does realized cash (esp. fees) live in `cashflow` or `change`?
+    # A cashflow-only sum silently drops any cash booked into `change`. The
+    # per-type stat must count, per distinct type: nonzero cashflow, nonzero
+    # change, and rows where the two DIFFER (the fee-in-change signal). It also
+    # settles negative_balance_fee / options_settlement_summary as
+    # cash-bearing-vs-informational.
+    # Deribit returns numeric fields as STRINGS (incl. sci-notation) — the stat
+    # must coerce them (float), else every count is a spurious zero.
+    rows = [
+        # trade with a fee booked ONLY in `change` (cashflow==0) — the exact
+        # dropped-fee case the re-probe exists to detect. Sci-notation string.
+        _txn_row("trade", cashflow="0.0", change="-3e-4"),
+        # trade where cashflow and change agree (no hidden cash), string-typed.
+        _txn_row("trade", cashflow="0.5", change="0.5"),
+        # a fee-type row: nonzero change, cashflow absent entirely.
+        {"type": "negative_balance_fee", "change": "-1.6328e-4"},
+        # an options settlement summary carrying NO cash (informational).
+        {"type": "options_settlement_summary", "cashflow": "0.0", "change": "0.0"},
+    ]
+    stats = summarize_txn_log(rows)["per_type_field_stats"]
+    assert stats["trade"] == {
+        "total": 2,
+        "cashflow_nonzero": 1,
+        "change_nonzero": 2,
+        "cashflow_ne_change": 1,
+        "cashflow_sum": pytest.approx(0.5),
+        "change_sum": pytest.approx(0.5 - 3e-4),
+    }
+    assert stats["negative_balance_fee"] == {
+        "total": 1,
+        "cashflow_nonzero": 0,
+        "change_nonzero": 1,
+        "cashflow_ne_change": 0,
+        "cashflow_sum": pytest.approx(0.0),
+        "change_sum": pytest.approx(-1.6328e-4),
+    }
+    assert stats["options_settlement_summary"] == {
+        "total": 1,
+        "cashflow_nonzero": 0,
+        "change_nonzero": 0,
+        "cashflow_ne_change": 0,
+        "cashflow_sum": pytest.approx(0.0),
+        "change_sum": pytest.approx(0.0),
+    }
+
+
 def test_txn_trade_row_count_is_the_honesty_anchor_stream() -> None:
     # Pitfall 5: the txn-log type=trade count is the completeness stream the
     # D-02 gate anchors to (the trades endpoint under-returns). It must be a
