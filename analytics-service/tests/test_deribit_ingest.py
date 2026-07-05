@@ -654,3 +654,65 @@ async def test_fetch_deribit_fills_reuses_scope_auth(monkeypatch: Any) -> None:
     fills = await di.fetch_deribit_fills(object(), None)
     assert seen_auth == [{"access_token": "tok_sub_101"}]
     assert len(fills) == 1
+
+
+# ===========================================================================
+# 70-04 Task 2 — fetch_raw_trades deribit dispatch + ADVISORY reconcile_fill_count.
+#
+# The fill-count cross-check is ADVISORY ONLY: the Wave-0 BLOCKING_FINDING proved
+# 18,778/21,014/61,248 reconcile to NO API surface (they count fills/legs, not
+# txn-log rows). The returns-completeness honesty gate is assert_ledger_complete
+# (70-03), NEVER this fill count — so reconcile_fill_count must never raise/gate.
+# ===========================================================================
+
+
+async def test_fetch_raw_trades_dispatches_deribit(monkeypatch: Any) -> None:
+    from services import exchange as ex
+
+    sentinel = [{"exchange": "deribit", "exchange_fill_id": "D-1"}]
+
+    async def _fake_fetch(_exchange: Any, _since_ms: Any = None, **_k: Any) -> Any:
+        return sentinel
+
+    monkeypatch.setattr(
+        "services.deribit_ingest.fetch_deribit_fills", _fake_fetch
+    )
+
+    class _Ex:
+        id = "deribit"
+
+    out = await ex.fetch_raw_trades(_Ex(), "strat-1", object(), None)
+    # The dispatch routed deribit to _fetch_raw_trades_deribit → fetch_deribit_fills.
+    assert out == sentinel
+
+
+def test_reconcile_fill_count_is_advisory_not_raising() -> None:
+    # A LARGE shortfall must NOT raise — it yields an advisory report. Structural:
+    # there is no count-gate exception type to raise.
+    assert not hasattr(di, "DeribitCountGateError")
+    report = di.reconcile_fill_count(674, 18_778)
+    assert isinstance(report, dict)
+    assert report["fetched_total"] == 674
+    assert report["known_total"] == 18_778
+    assert report["shortfall"] == 18_778 - 674
+    assert report["reconciles"] is False
+    assert report["advisory"] is True
+    # Never raises even on a total (0) shortfall — advisory, not a gate.
+    zero = di.reconcile_fill_count(0, 61_248)
+    assert zero["reconciles"] is False
+    # A perfect match reconciles with zero shortfall.
+    exact = di.reconcile_fill_count(21_014, 21_014)
+    assert exact["reconciles"] is True and exact["shortfall"] == 0
+
+
+def test_known_totals_documented_non_reconciling() -> None:
+    # KNOWN_TRADE_TOTALS carries the 3 LTP figures for cross-check bookkeeping
+    # ONLY — documented advisory + non-reconciling-to-API (Wave-0 finding).
+    totals = di.KNOWN_TRADE_TOTALS
+    assert len(totals) == 3
+    assert set(totals.values()) == {18_778, 21_014, 61_248}
+    # The advisory nature is documented (module/docstring/comment marks it).
+    import services.deribit_ingest as _mod
+
+    doc = (_mod.reconcile_fill_count.__doc__ or "").lower()
+    assert "advisory" in doc
