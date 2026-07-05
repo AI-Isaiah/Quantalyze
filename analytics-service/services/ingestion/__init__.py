@@ -90,7 +90,12 @@ class IngestionAdapter(Protocol):
 # adapter imports from .adapter, which is fine, but they also depend on
 # services.exchange / services.csv_validator which pull in chunks of
 # the wider analytics-service module graph).
-SUPPORTED_SOURCES: tuple[str, ...] = ("okx", "binance", "bybit", "csv")
+# Phase 70 (DRB-08, 70-06) widens the registry with "deribit" — the ingestion
+# CAPABILITY only. get_adapter("deribit") resolving does NOT enable onboarding
+# orchestration (Phase 72); Deribit returns flow through the broker-dailies
+# ONE-path (70-05, txn-log ledger), not process_key fill metrics
+# (DeribitAdapter.compute_metrics is intentionally fail-loud).
+SUPPORTED_SOURCES: tuple[str, ...] = ("okx", "binance", "bybit", "csv", "deribit")
 ADAPTERS: dict[str, IngestionAdapter] = {}
 
 
@@ -135,6 +140,12 @@ def _make_csv_adapter() -> IngestionAdapter:
     return CsvAdapter()
 
 
+def _make_deribit_adapter() -> IngestionAdapter:
+    from .deribit import DeribitAdapter
+
+    return DeribitAdapter()
+
+
 # M-11 — adapter factory registry. New adapters slot in here without
 # touching the dispatch chain.
 _FACTORIES: dict[str, "Callable[[], IngestionAdapter]"] = {
@@ -142,6 +153,7 @@ _FACTORIES: dict[str, "Callable[[], IngestionAdapter]"] = {
     "binance": _make_binance_adapter,
     "bybit": _make_bybit_adapter,
     "csv": _make_csv_adapter,
+    "deribit": _make_deribit_adapter,
 }
 
 
@@ -150,8 +162,9 @@ def get_adapter(source: str) -> IngestionAdapter:
 
     Raises ValueError on unknown source BEFORE attempting any import,
     so the unhappy path never triggers concrete-adapter module loads.
-    UC-B drops MT5/IBKR for v1.0.0; the supported allowlist is exactly
-    `okx, binance, bybit, csv`.
+    UC-B drops MT5/IBKR for v1.0.0; the supported allowlist is
+    `okx, binance, bybit, csv, deribit` (Phase 70 / DRB-08 added deribit
+    as the ingestion capability — onboarding orchestration is Phase 72).
     """
     if source not in SUPPORTED_SOURCES:
         raise ValueError(

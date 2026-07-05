@@ -1,0 +1,896 @@
+"""Deribit ledger I/O — the transaction-log cash-delta ledger backbone (P70 70-03).
+
+This module is the AUTHORITATIVE realized-cash source for Deribit daily returns
+(LOCKED design: ``analytics-service/docs/deribit-ingestion-design.md``). It owns
+the raw ``private/get_transaction_log`` crawl (count=250, ``continuation`` → null),
+per-scope auth (subaccount reads via ``public/exchange_token``), account-driven
+currency enumeration, and the re-anchored **D-02 honesty gate** — ledger
+COMPLETENESS over the date range, NOT reconciliation to the fill counts
+(18,778 / 21,014 / 61,248), which the Wave-0 probe proved reconcile to no API
+surface.
+
+Money math (coin→USD, funding-inclusive daily bucketing) is DELIBERATELY not
+here — that is ``services.deribit_txn`` (70-02, pure/I-O-free). This module only
+performs I/O and feeds the rows through ``txn_rows_to_daily_records``.
+
+The single corruption risk of the phase is a SILENTLY-PARTIAL ledger — an
+under-fetched crawl (rate-limit truncation or a skipped scope) that renders as a
+complete track record. Two guards make that impossible:
+
+* ``paginate_txn_log`` RAISES ``LedgerTruncatedError`` when the 10028 retry budget
+  is exhausted before ``continuation=null`` — it NEVER returns partial pages.
+* ``assert_ledger_complete`` RAISES ``LedgerCompletenessError`` if ANY expected
+  scope × currency did not reach ``continuation=null`` (truncation, a -32602 skip,
+  or a dropped scope all leave the gate failing).
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from services.deribit_txn import (
+    CASH_BEARING_TYPES,
+    deribit_linear_external_flow_usd,
+    txn_rows_to_daily_records,
+)
+from services.redact import scrub_freeform_string
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Rate-limit pacing / backoff constants (design §"Rate limits (10028)").
+# get_transaction_log is special: cost 10,000, pool 80,000, ~1 req/s, burst 8.
+# ---------------------------------------------------------------------------
+
+# Documented max page size — count=1000 over-caps and truncates (Wave-0 root cause).
+LEDGER_PAGE_COUNT: int = 250
+# Pace between successful pages (~1 req/s).
+LEDGER_PACE_SECONDS: float = 1.0
+# Exponential backoff base for 10028; wait = base * 2**(retry-1) → 1, 2, 4, …
+LEDGER_BACKOFF_BASE_SECONDS: float = 1.0
+# Max consecutive 10028 retries for a single page before failing loud.
+LEDGER_MAX_RETRIES: int = 8
+
+# Deribit error codes.
+_RATE_LIMIT_CODE: int = 10028
+_NON_MARGIN_CURRENCY_CODE: int = -32602
+
+SleepFn = Callable[[float], Awaitable[None]]
+
+
+# ---------------------------------------------------------------------------
+# Exceptions — every one is a FAIL-LOUD signal, never swallowed.
+# ---------------------------------------------------------------------------
+
+
+class LedgerTruncatedError(RuntimeError):
+    """A scope × currency crawl could not reach ``continuation=null`` before the
+    10028 retry budget was exhausted. Raised INSTEAD of returning partial pages
+    (the silent-under-fetch corruption risk the D-02 gate exists to catch)."""
+
+
+class ScopeAuthError(RuntimeError):
+    """A scope's read auth could not be resolved (no subaccount token could be
+    minted). A scope we cannot authenticate is a silent under-fetch, so this
+    fails loud rather than skipping the scope."""
+
+
+class LedgerCompletenessError(RuntimeError):
+    """The re-anchored D-02 honesty gate. Raised when ANY expected scope ×
+    currency did not reach ``continuation=null`` (a truncated crawl or a dropped
+    scope). This is LEDGER completeness — NOT a reconciliation to the fill counts
+    18,778 / 21,014 / 61,248, which the Wave-0 probe (BLOCKING_FINDING) proved
+    reconcile to no API surface."""
+
+
+class CurrencyEnumerationError(RuntimeError):
+    """``public/get_currencies`` could not be read, so the authoritative,
+    balance-INDEPENDENT currency universe cannot be established. Enumerating from
+    held balances would drop any currency that HELD history but is now
+    zero-balance, and the gate graded against that set is blind to the drop — so
+    enumeration fails loud rather than under-anchor the expected coverage."""
+
+
+# 2015-01-01 UTC in ms — full Deribit history default (txn-log spans 2023→2026).
+DEFAULT_START_MS: int = 1_420_070_400_000
+
+
+# ---------------------------------------------------------------------------
+# Scope model.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Scope:
+    """One account scope to crawl. ``subaccount_id`` is a STRING (Wave-0: Deribit
+    get_subaccounts returns id as a string); ``None`` for the main scope."""
+
+    label: str
+    subaccount_id: str | None
+    is_main: bool
+
+
+# ---------------------------------------------------------------------------
+# Error-code extraction — never leaks credentials into logs.
+# ---------------------------------------------------------------------------
+
+
+def _deribit_error_code(exc: BaseException) -> int | None:
+    """Best-effort Deribit error code from a ccxt exception. Checks a ``.code``
+    attribute first, then a numeric run in the (scrubbed) message. Never raises."""
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code
+    text = str(scrub_freeform_string(str(exc)))
+    match = re.search(r"(-?\d{4,5})", text)
+    return int(match.group(1)) if match else None
+
+
+def _deribit_real_code(exc: BaseException) -> int | None:
+    """The Deribit error code from an authoritative ``.code`` INTEGER attribute
+    ONLY — never a regex-scraped message run. Used for the -32602 "no wallet"
+    reclassification (P70 review H1): treating a currency crawl as complete-empty
+    must not rest on a 4-5-digit substring that merely happens to appear in an
+    unrelated scrubbed message. ``bool`` is rejected (it is an ``int`` subclass)."""
+    code = getattr(exc, "code", None)
+    if isinstance(code, bool):
+        return None
+    return code if isinstance(code, int) else None
+
+
+# ---------------------------------------------------------------------------
+# Scope enumeration + per-scope auth.
+# ---------------------------------------------------------------------------
+
+
+def _subaccount_is_funded(entry: Mapping[str, Any]) -> bool:
+    """True if a ``get_subaccounts(with_portfolio=true)`` entry holds ANY nonzero
+    equity in any currency. Never raises (untrusted exchange input; string-typed
+    numerics coerced)."""
+    portfolio = entry.get("portfolio")
+    if not isinstance(portfolio, Mapping):
+        return False
+    for pdata in portfolio.values():
+        if not isinstance(pdata, Mapping):
+            continue
+        raw = pdata.get("equity")
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            if float(raw) != 0.0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+async def enumerate_scopes(exchange: Any) -> list[Scope]:
+    """The scope set to crawl: the key's OWN authenticated account — a single
+    scope — with a runtime CHECK that the single-scope premise actually holds.
+
+    P70 live evidence (drb03, 2026-07-05): each LTP read-only key authenticates
+    AS one Deribit subaccount and its ``get_account_summaries`` / txn-log /
+    trades already return that account's COMPLETE data. ``get_subaccounts``
+    returns an empty ``type=main`` parent shell plus the key's own account, and
+    the key's own equity is byte-identical to that account's portfolio (acct2
+    USDC 622,923.41; acct3 USDT 232,500 — both match exactly). The sibling
+    subaccounts are NOT separately reachable (``public/exchange_token`` returns
+    BadRequest for client-credentials keys — it needs an OAuth refresh_token).
+
+    Review F-2/C1: rather than TRUST that provisioning contract silently, VERIFY
+    it. If ``get_subaccounts(with_portfolio=true)`` shows MORE THAN ONE funded
+    account, this key is a parent with separately-funded children a single-scope
+    crawl would silently miss → FAIL LOUD (``ScopeAuthError``): use one read-only
+    key per subaccount. ``<=1`` funded account (the key's own, or none) is the
+    safe single-scope case. A ``get_subaccounts`` read error is non-fatal — the
+    key's OWN account still crawls correctly and the equity-vs-rows floor
+    (job_worker) is the backstop; the check is skipped, not the crawl."""
+    scope = [Scope(label="main", subaccount_id=None, is_main=True)]
+    try:
+        resp = await exchange.private_get_get_subaccounts({"with_portfolio": "true"})
+    except Exception as exc:  # noqa: BLE001 - verification only; crawl is unaffected
+        logger.warning(
+            "deribit enumerate_scopes: get_subaccounts check skipped (%s); "
+            "proceeding single-scope",
+            scrub_freeform_string(str(exc)),
+        )
+        return scope
+    result = resp.get("result", []) if isinstance(resp, Mapping) else []
+    if not isinstance(result, Sequence):
+        return scope
+    funded = sum(
+        1 for e in result if isinstance(e, Mapping) and _subaccount_is_funded(e)
+    )
+    if funded > 1:
+        raise ScopeAuthError(
+            f"Deribit key sees {funded} FUNDED subaccounts — a single-scope crawl "
+            "would silently miss the siblings (they are not reachable via "
+            "exchange_token). Provision one read-only key PER subaccount (design "
+            "§Subaccounts / P72) rather than a parent-account key."
+        )
+    return scope
+
+
+async def mint_subaccount_token(exchange: Any, subject_id: str) -> str:
+    """Mint a read-scoped token for a subaccount via ``public/exchange_token``
+    (param ``subject_id`` — subaccount_id is refused on the read-only LTP keys,
+    design §Subaccounts). Raises ``ScopeAuthError`` if no token comes back.
+
+    ⚠️ CURRENTLY UNREACHABLE under single-scope enumeration (``enumerate_scopes``
+    returns only the key's own ``main`` scope — the LTP key IS its own subaccount,
+    drb03). ``public/exchange_token`` was also live-proven to return BadRequest
+    for client-credentials keys (it needs an OAuth refresh_token). RETAINED for a
+    possible P72 provisioning revisit; kept tested so the contract stays valid."""
+    try:
+        resp = await exchange.public_get_exchange_token({"subject_id": subject_id})
+    except Exception as exc:  # noqa: BLE001 - fail loud, scrubbed
+        raise ScopeAuthError(
+            f"exchange_token mint failed for subject_id={subject_id!r}: "
+            f"{scrub_freeform_string(str(exc))}"
+        ) from None
+    result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
+    token = result.get("access_token") if isinstance(result, Mapping) else None
+    if not token or not isinstance(token, str):
+        raise ScopeAuthError(
+            f"exchange_token returned no access_token for subject_id={subject_id!r}"
+        )
+    return token
+
+
+async def resolve_scope_auth(exchange: Any, scope: Scope) -> dict[str, Any]:
+    """Resolve the per-request auth params for ``scope``.
+
+    * main scope → ``{}`` (the key signs itself);
+    * subaccount scope → mint a read token via ``public/exchange_token`` and
+      pass it as an ``access_token`` request param.
+
+    A subaccount scope whose token cannot be minted FAILS LOUD (ScopeAuthError)
+    — a silently-skipped scope is a silent under-fetch (T-70-08)."""
+    if scope.is_main or scope.subaccount_id is None:
+        return {}
+    token = await mint_subaccount_token(exchange, scope.subaccount_id)
+    return {"access_token": token}
+
+
+# ---------------------------------------------------------------------------
+# Currency enumeration — from the account, never hard-coded.
+# ---------------------------------------------------------------------------
+
+
+async def enumerate_currencies(
+    exchange: Any, scope: Scope, scope_auth: Mapping[str, Any]
+) -> list[str]:
+    """The AUTHORITATIVE, balance-INDEPENDENT currency universe to crawl — every
+    wallet currency listed by ``public/get_currencies``.
+
+    Deliberately NOT derived from held balances: a currency that HELD history but
+    is now zero-balance would be dropped, and the completeness gate — graded
+    against the same held-derived set — would be blind to the gap (the
+    self-referential-gate class). Crawling the full public set instead, a
+    currency the account never funded surfaces at the crawl as empty (or a
+    per-currency ``-32602`` "no wallet") and is recorded complete-empty there.
+
+    A read error, a non-list result, or an empty list FAILS LOUD
+    (``CurrencyEnumerationError``): without the authoritative universe the gate
+    cannot prove completeness. ``public/get_currencies`` needs no scope/auth —
+    ``scope``/``scope_auth`` are kept for signature stability and are the SAME
+    set for every scope (the tradeable universe is account-wide)."""
+    try:
+        resp = await exchange.public_get_get_currencies()
+    except Exception as exc:  # noqa: BLE001 - fail loud, never a silent []
+        raise CurrencyEnumerationError(
+            "Deribit public/get_currencies failed; cannot establish the "
+            f"authoritative currency universe: {scrub_freeform_string(str(exc))}."
+        ) from None
+    result = resp.get("result", []) if isinstance(resp, Mapping) else None
+    out: list[str] = []
+    if isinstance(result, Sequence):
+        for entry in result:
+            if isinstance(entry, Mapping) and entry.get("currency"):
+                out.append(str(entry["currency"]))
+    if not out:
+        raise CurrencyEnumerationError(
+            "Deribit public/get_currencies returned no currencies; refusing an "
+            "empty currency universe (the gate cannot prove completeness against "
+            "an empty expected set)."
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The ledger paginator — count=250, continuation→null, pace + backoff, fail loud.
+# ---------------------------------------------------------------------------
+
+
+async def paginate_txn_log(
+    exchange: Any,
+    scope_label: str,
+    currency: str,
+    start_ms: int,
+    end_ms: int,
+    scope_auth: Mapping[str, Any],
+    *,
+    sleep: SleepFn = asyncio.sleep,
+    max_retries: int = LEDGER_MAX_RETRIES,
+    pace_seconds: float = LEDGER_PACE_SECONDS,
+) -> list[Mapping[str, Any]]:
+    """Fully crawl ``private/get_transaction_log`` for one scope × currency.
+
+    count=250, follow ``continuation`` to null, accumulate rows ONCE. Paced to
+    ~1 req/s (``sleep`` awaited between pages — injected for CI) and exponential-
+    backoff on 10028 up to ``max_retries``. If the budget is exhausted before
+    ``continuation=null`` → raise ``LedgerTruncatedError`` (scope + currency +
+    last continuation). NEVER returns a partial page set: a structurally-degraded
+    200 (non-Mapping body/result or non-list ``logs``) raises rather than being
+    read as end-of-history (F-1). A FIRST-page ``-32602`` (no wallet for this
+    currency, authoritative ``.code`` only) returns ``[]``; a ``-32602`` after
+    rows were fetched propagates (fail loud — never drop real rows, F-3). Every
+    other non-10028 error propagates. All ccxt errors are scrubbed before logging.
+    """
+    rows: list[Mapping[str, Any]] = []
+    continuation: Any = None
+    is_first_page = True
+    while True:
+        params: dict[str, Any] = {
+            "currency": currency,
+            "start_timestamp": start_ms,
+            "end_timestamp": end_ms,
+            "count": LEDGER_PAGE_COUNT,
+        }
+        params.update(scope_auth)
+        if continuation:
+            params["continuation"] = continuation
+
+        # Pace ~1 req/s between page requests (not before the first).
+        if not is_first_page:
+            await sleep(pace_seconds)
+
+        retries = 0
+        while True:
+            try:
+                resp = await exchange.private_get_get_transaction_log(params)
+                break
+            except Exception as exc:  # noqa: BLE001
+                # -32602 "no wallet for this currency" (F-3/H1): honor as an
+                # empty crawl ONLY on the FIRST page with zero rows fetched, and
+                # ONLY from an authoritative integer .code (never a regex-scraped
+                # one). A -32602 AFTER rows exist, or on a continuation page,
+                # would DROP already-fetched data → must fail loud. The full
+                # public-currency universe includes currencies never funded; those
+                # legitimately -32602 on page 1.
+                if (
+                    _deribit_real_code(exc) == _NON_MARGIN_CURRENCY_CODE
+                    and is_first_page
+                    and not rows
+                ):
+                    return []
+                if _deribit_error_code(exc) != _RATE_LIMIT_CODE:
+                    # Non-rate-limit error: surface it (scrubbed) to the caller.
+                    raise
+                retries += 1
+                if retries > max_retries:
+                    raise LedgerTruncatedError(
+                        f"ledger crawl truncated for scope={scope_label!r} "
+                        f"currency={currency!r} at continuation={continuation!r}: "
+                        f"10028 retry budget ({max_retries}) exhausted — refusing "
+                        f"a silently-partial ledger"
+                    ) from None
+                await sleep(LEDGER_BACKOFF_BASE_SECONDS * (2 ** (retries - 1)))
+
+        is_first_page = False
+        # F-1: a well-formed done response is a Mapping result with a `logs` LIST
+        # and a (null/int) `continuation`. A STRUCTURALLY-DEGRADED 200 (non-Mapping
+        # body/result, or `logs` not a list — a proxy/gateway artifact or an API
+        # shape change) must NOT be read as end-of-history: that would silently
+        # truncate the ledger and pass the completeness gate. Fail loud instead.
+        if not isinstance(resp, Mapping) or not isinstance(resp.get("result"), Mapping):
+            raise LedgerTruncatedError(
+                f"ledger crawl for scope={scope_label!r} currency={currency!r} got a "
+                "structurally-degraded response (non-Mapping body/result) — refusing "
+                "to treat it as end-of-history"
+            )
+        result = resp["result"]
+        logs = result.get("logs", [])
+        if not isinstance(logs, Sequence) or isinstance(logs, (str, bytes)):
+            raise LedgerTruncatedError(
+                f"ledger crawl for scope={scope_label!r} currency={currency!r} got a "
+                "non-list `logs` field — refusing to treat a degraded page as done"
+            )
+        rows.extend(r for r in logs if isinstance(r, Mapping))
+        continuation = result.get("continuation")
+        if not continuation:
+            break
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# The scope×currency producer + the re-anchored D-02 completeness gate.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CompletenessReport:
+    """Per (scope, currency) crawl status over the date range.
+
+    ``expected`` maps each enumerated scope label → its enumerated currencies
+    (the full coverage the crawl OWES). ``entries`` maps (scope, currency) →
+    ``{reached_end, rows, error?}`` recorded by the crawl. The gate compares the
+    two: a scope that was expected but never crawled (dropped loop) leaves its
+    ``expected`` pairs without a ``reached_end=True`` entry and the gate raises.
+
+    ``net_external_flow_usd`` is the net USD of linear external-flow rows
+    (transfer/deposit/withdrawal/reward) — the equity anchor SUBTRACTS it (F1).
+    ``saw_unvalued_inverse_flow`` marks that a coin external-flow row could not be
+    valued here → the caller flags heuristic capital rather than under-correct.
+    ``total_return_rows`` is the count of return-bearing rows across the crawl —
+    used for the equity-vs-activity floor (C2: material equity + zero rows is a
+    silently-empty green ledger).
+    """
+
+    expected: dict[str, list[str]] = field(default_factory=dict)
+    entries: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    net_external_flow_usd: float = 0.0
+    saw_unvalued_inverse_flow: bool = False
+    total_return_rows: int = 0
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+async def fetch_deribit_ledger_daily_records(
+    exchange: Any,
+    since_ms: int | None = None,
+    *,
+    sleep: SleepFn = asyncio.sleep,
+) -> tuple[list[dict[str, Any]], CompletenessReport]:
+    """Crawl the txn-log ledger across every scope × currency and return the
+    accumulated funding-inclusive ``daily_pnl`` records plus a
+    ``CompletenessReport``.
+
+    For each scope: resolve its auth (fail loud on an unresolvable scope) and
+    enumerate its currencies from the account. Then crawl every (scope, currency)
+    via ``paginate_txn_log``, feed the rows through ``txn_rows_to_daily_records``
+    (70-02, the funding-inclusive single sum), and CONCATENATE every scope's
+    records into ONE flat list — records are sign-encoded (``side`` = sign,
+    ``price`` = abs USD), so abs-summing opposite-sign same-day scopes would net
+    them WRONG (+100 and −30 → 130, not +70). ``trades_to_daily_returns_with_status``
+    decodes side→sign and bucket-sums per UTC day, so concatenation preserves
+    each record's signed contribution.
+
+    Crawl outcomes recorded in the report:
+      * success → ``reached_end=True``;
+      * ``LedgerTruncatedError`` (10028 budget exhausted) → ``reached_end=False``
+        (incomplete — the gate raises);
+      * ``-32602`` (no wallet for this currency) → ``reached_end=True, rows=0``
+        (complete-empty: the authoritative universe includes currencies this
+        scope never funded; a currency WITH history returns rows, not -32602);
+      * any other error → RE-RAISED (fail loud; never swallowed as a skip).
+
+    The LIVE multi-year crawl over real creds is 70-05/live-gated; the producer
+    LOGIC here is CI-provable via synthetic scope/currency stubs.
+    """
+    scopes = await enumerate_scopes(exchange)
+    start_ms = since_ms if since_ms is not None else DEFAULT_START_MS
+    end_ms = _now_ms()
+
+    # Pass 1 — the AUTHORITATIVE OWED coverage: the balance-independent public
+    # currency universe (enumerated ONCE — account-wide) crawled across EVERY
+    # enumerated scope. Both enumerations fail loud, so `expected` can never be a
+    # silently-truncated set the gate would then be blind to.
+    currencies = await enumerate_currencies(exchange, scopes[0], {})
+    expected: dict[str, list[str]] = {}
+    scope_auths: dict[str, dict[str, Any]] = {}
+    for scope in scopes:
+        auth = await resolve_scope_auth(exchange, scope)
+        scope_auths[scope.label] = auth
+        expected[scope.label] = list(currencies)
+
+    # Pass 2 — crawl every OWED (scope, currency), concatenating the records.
+    daily_records: list[dict[str, Any]] = []
+    entries: dict[tuple[str, str], dict[str, Any]] = {}
+    net_external_flow_usd = 0.0
+    saw_unvalued_inverse_flow = False
+    total_return_rows = 0
+    for scope in scopes:
+        auth = scope_auths[scope.label]
+        for currency in expected[scope.label]:
+            key = (scope.label, currency)
+            try:
+                rows = await paginate_txn_log(
+                    exchange,
+                    scope.label,
+                    currency,
+                    start_ms,
+                    end_ms,
+                    auth,
+                    sleep=sleep,
+                )
+            except LedgerTruncatedError as exc:
+                entries[key] = {
+                    "reached_end": False,
+                    "rows": 0,
+                    "error": str(scrub_freeform_string(str(exc))),
+                }
+                continue
+            # Any other error propagates → fail loud (never a silent skip). A
+            # first-page -32602 "no wallet" is absorbed INSIDE paginate_txn_log
+            # (returns [] → recorded complete-empty below); a -32602 AFTER rows
+            # were fetched escapes here and fails loud (F-3: never drop real rows).
+            records = txn_rows_to_daily_records(rows)
+            daily_records.extend(records)
+            # F1: accumulate the net external capital flow (for the anchor) and
+            # the return-bearing row count (for the C2 equity-vs-activity floor).
+            flow, saw_inverse = deribit_linear_external_flow_usd(rows)
+            net_external_flow_usd += flow
+            saw_unvalued_inverse_flow = saw_unvalued_inverse_flow or saw_inverse
+            total_return_rows += sum(
+                1
+                for r in rows
+                if isinstance(r, Mapping)
+                and str(r.get("type", "")) in CASH_BEARING_TYPES
+            )
+            # An empty crawl (no-wallet currency) is legitimately complete-empty.
+            entries[key] = {
+                "reached_end": True,
+                "rows": len(rows),
+                **({"note": "no wallet for currency"} if not rows else {}),
+            }
+
+    return daily_records, CompletenessReport(
+        expected=expected,
+        entries=entries,
+        net_external_flow_usd=net_external_flow_usd,
+        saw_unvalued_inverse_flow=saw_unvalued_inverse_flow,
+        total_return_rows=total_return_rows,
+    )
+
+
+async def fetch_deribit_account_equity_usd(
+    exchange: Any,
+) -> tuple[float | None, bool]:
+    """Total Deribit account equity in USD (the initial-capital anchor).
+
+    Reads ``private/get_account_summaries``; each coin-margined currency's coin
+    equity is converted at its USD index price (``public/get_index_price`` with
+    ``index_name={ccy}_usd``) while USD-family currencies pass through. The
+    money math is the pure ``deribit_txn.deribit_equity_to_usd`` — NEVER anchor
+    to a raw coin quantity (the anchor-shift class mis-scales every return).
+
+    Returns ``(equity, balance_error)`` mirroring ``fetch_account_equity_usd``:
+    ``balance_error=True`` means the read failed (caller flags heuristic
+    capital). ``fetch_account_equity_usd`` (services.exchange) does NOT cover
+    deribit — coin-margined USDT balance is not USD equity — so this is the
+    deribit-specific anchor.
+    """
+    from services.deribit_txn import _LINEAR_CURRENCIES, deribit_equity_to_usd
+
+    try:
+        resp = await exchange.private_get_get_account_summaries({})
+    except Exception:  # noqa: BLE001 - a failed read is a DQ flag, not a crash
+        return None, True
+    result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
+    summaries = result.get("summaries", []) if isinstance(result, Mapping) else []
+    if not isinstance(summaries, Sequence) or not summaries:
+        return None, True
+
+    index_prices: dict[str, float] = {}
+    for summ in summaries:
+        if not isinstance(summ, Mapping):
+            continue
+        ccy = str(summ.get("currency", "")).upper()
+        if not ccy or ccy in _LINEAR_CURRENCIES:
+            continue
+        try:
+            ip = await exchange.public_get_get_index_price(
+                {"index_name": f"{ccy.lower()}_usd"}
+            )
+        except Exception:  # noqa: BLE001 - missing index → gate below fails loud
+            continue
+        ipr = ip.get("result", {}) if isinstance(ip, Mapping) else {}
+        price = ipr.get("index_price") if isinstance(ipr, Mapping) else None
+        if price is not None:
+            try:
+                index_prices[ccy] = float(price)
+            except (TypeError, ValueError):
+                continue
+
+    try:
+        equity = deribit_equity_to_usd(summaries, index_prices)
+    except ValueError:
+        # A coin-margined currency with no resolvable USD index → refuse a
+        # coin/non-USD anchor; flag heuristic capital rather than mis-scale.
+        return None, True
+    return equity, False
+
+
+def assert_ledger_complete(report: CompletenessReport) -> None:
+    """The re-anchored D-02 honesty gate. Raise ``LedgerCompletenessError`` if
+    ANY expected scope × currency did not reach ``continuation=null``.
+
+    Takes NO fill-count total: completeness over the date range — not a
+    reconciliation to 18,778 / 21,014 / 61,248 (Wave-0 BLOCKING_FINDING: those
+    fill-level totals reconcile to no API surface) — is the honesty anchor. A
+    truncated crawl and a dropped scope leave the gate failing, so a silently-
+    partial ledger can never render as complete. ``expected`` is anchored on the
+    enumeration-INDEPENDENT truth (authoritative subaccount set + full public
+    currency universe, both fail-loud), so under-enumeration cannot slip past."""
+    incomplete: list[str] = []
+    for scope_label, currencies in report.expected.items():
+        for currency in currencies:
+            entry = report.entries.get((scope_label, currency))
+            if entry is None or not entry.get("reached_end"):
+                incomplete.append(f"{scope_label}×{currency}")
+    if incomplete:
+        raise LedgerCompletenessError(
+            "Deribit ledger is INCOMPLETE — these scope×currency crawls did not "
+            "reach continuation=null (truncation or dropped scope): "
+            + ", ".join(sorted(incomplete))
+            + ". Refusing to render a silently-partial ledger as a complete track "
+            "record (re-anchored D-02 gate)."
+        )
+
+
+# ===========================================================================
+# SECONDARY trades axis (70-04, DRB-04) — execution detail + an ADVISORY
+# fill-count cross-check. This is NOT the returns source and NOT the D-02
+# honesty gate: realized returns come from the txn-log ledger above
+# (fetch_deribit_ledger_daily_records / assert_ledger_complete). Fills are
+# fetched via the id-cursor ``private/get_user_trades_by_currency`` endpoint —
+# NOT ``_and_time`` (passing both bounds one-page-stalls; Wave-0 bug #2) — and
+# mapped to the shared ``FillRow`` with ``exchange_fill_id = trade_id`` so
+# ``diff_strategy_fills`` dedups on (exchange, exchange_fill_id) and re-fetch
+# is idempotent.
+# ===========================================================================
+
+# Documented max page size for the trades endpoint.
+TRADES_PAGE_COUNT: int = 1000
+# Non-matching reads pace ~20 req/s (cost 500, pool 50,000, refill 10,000/s).
+TRADES_PACE_SECONDS: float = 0.05
+# Exponential backoff base for 10028 on the trades endpoint.
+TRADES_BACKOFF_BASE_SECONDS: float = 1.0
+# Max consecutive 10028 retries for a single trades page before surfacing.
+TRADES_MAX_RETRIES: int = 8
+
+
+def _build_trades_params(
+    currency: str,
+    count: int,
+    *,
+    start_id: str | None = None,
+    historical: bool = True,
+    sorting: str = "asc",
+) -> dict[str, Any]:
+    """Pure params builder for ``private/get_user_trades_by_currency``.
+
+    ALWAYS sends ``historical=true`` (Wave-0 bug #1: without it the endpoint
+    caps at the last 24h — 674 vs 2,962 for acct3) and ``sorting=asc`` so the
+    id-cursor advances forward. ``start_id`` is present ONLY when advancing past
+    the first page — the initial page carries no cursor.
+    """
+    params: dict[str, Any] = {
+        "currency": currency,
+        "count": count,
+        "sorting": sorting,
+    }
+    if historical:
+        params["historical"] = "true"
+    if start_id is not None:
+        params["start_id"] = start_id
+    return params
+
+
+async def paginate_trades_id_cursor(
+    exchange: Any,
+    currency: str,
+    scope_auth: Mapping[str, Any],
+    *,
+    count: int = TRADES_PAGE_COUNT,
+    start_id: str | None = None,
+    sleep: SleepFn = asyncio.sleep,
+    max_retries: int = TRADES_MAX_RETRIES,
+    pace_seconds: float = TRADES_PACE_SECONDS,
+) -> list[dict[str, Any]]:
+    """Fetch all trades for one scope × currency via the id-cursor endpoint.
+
+    Advances ``start_id`` = last trade_id (EXCLUSIVE) each page and continues
+    while ``has_more`` OR the page is FULL (``len==count``) — ``has_more`` has no
+    documented reliability guarantee (Wave-0), so relying on it alone drops rows
+    on a full-but-``has_more=false`` page. Stops ONLY when a page is BOTH
+    not-full AND ``has_more=false``. Rows are accumulated once; a ``seen`` guard
+    drops any re-included boundary trade_id (start_id is exclusive but the API
+    may re-serve it). 10028 backs off up to ``max_retries``; any other error
+    propagates so the producer can decide currency-skip (-32602) vs fail-loud.
+    Every ccxt error is scrubbed before it can reach a log.
+    """
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    cursor = start_id
+    is_first_page = True
+    while True:
+        params = _build_trades_params(currency, count, start_id=cursor)
+        params.update(scope_auth)
+
+        if not is_first_page:
+            await sleep(pace_seconds)
+
+        retries = 0
+        while True:
+            try:
+                resp = await exchange.private_get_get_user_trades_by_currency(params)
+                break
+            except Exception as exc:  # noqa: BLE001
+                if _deribit_error_code(exc) != _RATE_LIMIT_CODE:
+                    raise
+                retries += 1
+                if retries > max_retries:
+                    raise
+                await sleep(TRADES_BACKOFF_BASE_SECONDS * (2 ** (retries - 1)))
+
+        is_first_page = False
+        result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
+        raw_trades = result.get("trades", []) or []
+        has_more = bool(result.get("has_more"))
+
+        page_trades = [t for t in raw_trades if isinstance(t, Mapping)]
+        page_len = len(page_trades)
+        last_id: str | None = None
+        for trade in page_trades:
+            tid = trade.get("trade_id")
+            tid_str = str(tid) if tid is not None else None
+            if tid_str is not None:
+                last_id = tid_str
+                if tid_str in seen:
+                    continue
+                seen.add(tid_str)
+            rows.append(dict(trade))
+
+        page_full = page_len == count
+        if not page_full and not has_more:
+            break
+        if last_id is None:
+            # No trade_id to advance on — refuse to spin forever on a full page
+            # that carries no cursor (defensive; a real page always has ids).
+            break
+        cursor = last_id
+    return rows
+
+
+def _trade_to_fillrow(trade: Mapping[str, Any]) -> dict[str, Any]:
+    """Map one raw Deribit trade → the shared ``FillRow`` (built via the
+    canonical ``_make_fill_dict`` factory, NEVER hand-rolled).
+
+    ``exchange_fill_id = trade_id`` is the primary dedup axis for
+    ``diff_strategy_fills``; ``side`` comes from Deribit's ``direction``. Money
+    fields flow through the factory's Decimal→exact-string chokepoint (H-0669).
+    """
+    from services.exchange import _make_fill_dict
+
+    trade_id = str(trade.get("trade_id", "") or "")
+    instrument = str(trade.get("instrument_name", "") or "")
+    side = str(trade.get("direction", "") or "").lower()
+    price = trade.get("price", 0) or 0
+    amount = trade.get("amount", 0) or 0
+    fee = trade.get("fee", 0) or 0
+    fee_currency = str(trade.get("fee_currency", "") or "")
+    ts_ms = int(trade.get("timestamp", 0) or 0)
+    ts_iso = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+    return dict(
+        _make_fill_dict(
+            exchange="deribit",
+            symbol=instrument,
+            side=side,
+            price=price,
+            quantity=amount,
+            fee=fee,
+            fee_currency=fee_currency,
+            timestamp=ts_iso,
+            exchange_order_id=str(trade.get("order_id", "") or ""),
+            exchange_fill_id=trade_id,
+            is_maker=bool(trade.get("post_only", False)),
+            raw_data=dict(trade),
+            position_direction=None,
+        )
+    )
+
+
+async def fetch_deribit_fills(
+    exchange: Any,
+    since_ms: int | None = None,
+    *,
+    sleep: SleepFn = asyncio.sleep,
+) -> list[dict[str, Any]]:
+    """Fetch execution-detail fills across every scope × currency (SECONDARY
+    axis). Reuses the 70-03 per-scope auth (``resolve_scope_auth`` → subaccount
+    reads via ``public/exchange_token``) so subaccount fills are reachable
+    despite ``subaccount_id`` being refused on the read-only LTP keys.
+
+    A ``-32602`` (non-margin currency for the wallet type) skips THAT currency
+    (scrubbed-logged, never swallowed silently) while other currencies still
+    fetch. Any other error propagates. ``since_ms`` is accepted for signature
+    parity with the other ``_fetch_raw_trades_*`` producers; the id-cursor crawl
+    is full-history (``historical=true``) and dedups downstream on
+    ``exchange_fill_id``. 70-06's adapter imports this.
+    """
+    scopes = await enumerate_scopes(exchange)
+    fills: list[dict[str, Any]] = []
+    for scope in scopes:
+        auth = await resolve_scope_auth(exchange, scope)
+        # enumerate_currencies FAILS LOUD (CurrencyEnumerationError) on an
+        # unenumerable universe — intentional and consistent with the returns
+        # path: fills is an execution-detail / advisory-cross-check axis, and an
+        # unenumerable universe means we cannot honestly bound coverage, so it
+        # surfaces (classified by the ingestion dispatcher) rather than silently
+        # returning an empty fill set.
+        currencies = await enumerate_currencies(exchange, scope, auth)
+        for currency in currencies:
+            try:
+                trades = await paginate_trades_id_cursor(
+                    exchange, currency, auth, sleep=sleep
+                )
+            except Exception as exc:  # noqa: BLE001
+                if _deribit_error_code(exc) == _NON_MARGIN_CURRENCY_CODE:
+                    logger.warning(
+                        "fetch_deribit_fills: skipping scope=%s currency=%s "
+                        "(-32602 non-margin currency): %s",
+                        scope.label,
+                        currency,
+                        scrub_freeform_string(str(exc)),
+                    )
+                    continue
+                raise
+            for trade in trades:
+                fills.append(_trade_to_fillrow(trade))
+    return fills
+
+
+# ---------------------------------------------------------------------------
+# ADVISORY fill-count cross-check — NOT the honesty gate.
+# ---------------------------------------------------------------------------
+
+# The three LTP account fill totals observed out-of-band. Wave-0 BLOCKING_FINDING:
+# these figures reconcile to NO API surface (they appear to count fills/legs, not
+# transaction-log rows), so they are an OPTIONAL cross-check ONLY. The
+# returns-completeness honesty gate is ``assert_ledger_complete`` (70-03), NEVER
+# this fill count. Keyed by account label for bookkeeping — do NOT wire any of
+# these into a fail-loud gate.
+KNOWN_TRADE_TOTALS: dict[str, int] = {
+    "ltp_1": 18_778,
+    "ltp_2": 21_014,
+    "ltp_3": 61_248,
+}
+
+
+def reconcile_fill_count(fetched_total: int, known_total: int) -> dict[str, Any]:
+    """ADVISORY fill-count cross-check — RETURNS a diff report and NEVER raises.
+
+    This is DELIBERATELY not a gate. The Wave-0 BLOCKING_FINDING proved the known
+    fill totals (18,778 / 21,014 / 61,248) reconcile to NO API surface, so a
+    shortfall here is advisory evidence only — it is emitted as a WARN-severity
+    report, never a ``DeribitCountGateError`` (no such type exists by design). The
+    returns-completeness honesty gate is ``assert_ledger_complete`` (70-03, ledger
+    COMPLETENESS over the date range), NOT this count. A caller may log/record the
+    report; it must never mistake a fill-count shortfall for the ledger gate.
+    """
+    shortfall = max(known_total - fetched_total, 0)
+    reconciles = fetched_total == known_total
+    return {
+        "fetched_total": fetched_total,
+        "known_total": known_total,
+        "diff": fetched_total - known_total,
+        "shortfall": shortfall,
+        "reconciles": reconciles,
+        "advisory": True,
+        "severity": "info" if reconciles else "warn",
+        "note": (
+            "ADVISORY ONLY — fill totals reconcile to no API surface (Wave-0 "
+            "BLOCKING_FINDING). The returns honesty gate is ledger completeness "
+            "(assert_ledger_complete, 70-03), NEVER this fill count."
+        ),
+    }

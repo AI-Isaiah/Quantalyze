@@ -29,6 +29,8 @@ from __future__ import annotations
 import pytest
 
 from scripts.deribit_ground_truth import (
+    MAX_TXN_SAMPLES_PER_TYPE,
+    _build_history_params,
     _paginate_trades,
     _redact_secret_values,
     assert_sanitized,
@@ -179,7 +181,9 @@ def test_txnlog_type_summary_counts_and_samples() -> None:
     # Distinct type -> count mapping.
     assert summary["type_counts"] == {"trade": 2, "settlement": 2, "deposit": 1}
 
-    # One sample per distinct type.
+    # Samples are now a LIST per type (capped, kind-diverse) — the widened
+    # harness keeps up to MAX_TXN_SAMPLES_PER_TYPE per type so the live evidence
+    # can characterize the row shape, not just a single sample.
     samples = summary["type_samples"]
     assert set(samples) == {"trade", "settlement", "deposit"}
 
@@ -194,50 +198,214 @@ def test_txnlog_type_summary_counts_and_samples() -> None:
         "position",
         "timestamp",
         "currency",
+        # widened Wave-0 field set:
+        "index_price",
+        "mark_price",
+        "price",
+        "id",
+        "trade_id",
+        "user_seq",
     }
-    for sample in samples.values():
-        # ONLY whitelisted fields — no PII keys leak into a committed sample.
-        assert set(sample).issubset(whitelist)
-        assert "username" not in sample
-        assert "user_id" not in sample
-        assert "email" not in sample
+    for sample_list in samples.values():
+        assert isinstance(sample_list, list)
+        assert len(sample_list) <= MAX_TXN_SAMPLES_PER_TYPE
+        for sample in sample_list:
+            # ONLY whitelisted fields — no PII keys leak into a committed sample.
+            assert set(sample).issubset(whitelist)
+            assert "username" not in sample
+            assert "user_id" not in sample
+            assert "email" not in sample
 
 
 def test_txnlog_summary_empty_rows() -> None:
     summary = summarize_txn_log([])
     assert summary["type_counts"] == {}
     assert summary["type_samples"] == {}
+    assert summary["txn_trade_row_count"] == 0
+    assert summary["settlement_price_stats"] == {
+        "total": 0,
+        "index_price_present": 0,
+        "mark_price_present": 0,
+    }
+    assert summary["trade_cashflow_stats"] == {}
+
+
+def test_txnlog_passes_through_new_whitelist_fields() -> None:
+    # The six Wave-0 fields (index_price/mark_price/price/id/trade_id/user_seq)
+    # must survive into the sample so A1 (event-time price presence) and the
+    # native `id` funding-dedup axis are OBSERVABLE in the committed evidence.
+    row = _txn_row(
+        "settlement",
+        index_price=61000.0,
+        mark_price=61010.0,
+        price=61005.0,
+        id=123456789,
+        trade_id="ETH-987654",
+        user_seq=42,
+    )
+    summary = summarize_txn_log([row])
+    sample = summary["type_samples"]["settlement"][0]
+    assert sample["index_price"] == 61000.0
+    assert sample["mark_price"] == 61010.0
+    assert sample["price"] == 61005.0
+    assert sample["id"] == 123456789
+    assert sample["trade_id"] == "ETH-987654"
+    assert sample["user_seq"] == 42
+
+
+def test_settlement_price_stats_counts_presence_not_a_single_sample() -> None:
+    # A1 is NUMERIC: over N type=settlement rows, how many carry index_price /
+    # mark_price. A single sample cannot answer "are these POPULATED"; the
+    # per-account presence counts can. K=2 carry index, M=1 carries mark.
+    rows = [
+        _txn_row("settlement", index_price=60000.0, mark_price=None),
+        _txn_row("settlement", index_price=61000.0, mark_price=61010.0),
+        _txn_row("settlement", index_price=None, mark_price=None),
+        # a non-settlement row must not be counted in settlement stats:
+        _txn_row("trade", index_price=99999.0, mark_price=99999.0),
+    ]
+    # drop the mark_price key entirely on one row (absent, not just None):
+    del rows[0]["mark_price"]
+    summary = summarize_txn_log(rows)
+    assert summary["settlement_price_stats"] == {
+        "total": 3,
+        "index_price_present": 2,
+        "mark_price_present": 1,
+    }
+
+
+def test_trade_cashflow_stats_per_kind_is_the_a3_answer() -> None:
+    # A3: do inverse-perp type=trade rows carry nonzero cashflow (double-count
+    # risk vs settlement)? The answer is per-classify-kind {total, nonzero}.
+    rows = [
+        _txn_row("trade", instrument_name="BTC-PERPETUAL", cashflow=0.0),
+        _txn_row("trade", instrument_name="BTC-PERPETUAL", cashflow=0.0),
+        _txn_row("trade", instrument_name="ETH-PERPETUAL", cashflow=0.5),
+        # linear-perp trade with cashflow — a distinct kind bucket:
+        _txn_row("trade", instrument_name="BTC_USDC-PERPETUAL", cashflow=1.0),
+        # a settlement row must NOT enter trade_cashflow_stats:
+        _txn_row("settlement", instrument_name="BTC-PERPETUAL", cashflow=2.0),
+    ]
+    summary = summarize_txn_log(rows)
+    stats = summary["trade_cashflow_stats"]
+    assert stats["inverse_perpetual"] == {"total": 3, "cashflow_nonzero": 1}
+    assert stats["linear_perpetual"] == {"total": 1, "cashflow_nonzero": 1}
+    # settlement rows are excluded from the trade cashflow partition entirely.
+    assert sum(s["total"] for s in stats.values()) == 4
+
+
+def test_per_type_field_stats_is_the_cashflow_vs_change_reprobe_answer() -> None:
+    # Re-probe: does realized cash (esp. fees) live in `cashflow` or `change`?
+    # A cashflow-only sum silently drops any cash booked into `change`. The
+    # per-type stat must count, per distinct type: nonzero cashflow, nonzero
+    # change, and rows where the two DIFFER (the fee-in-change signal). It also
+    # settles negative_balance_fee / options_settlement_summary as
+    # cash-bearing-vs-informational.
+    # Deribit returns numeric fields as STRINGS (incl. sci-notation) — the stat
+    # must coerce them (float), else every count is a spurious zero.
+    rows = [
+        # trade with a fee booked ONLY in `change` (cashflow==0) — the exact
+        # dropped-fee case the re-probe exists to detect. Sci-notation string.
+        _txn_row("trade", cashflow="0.0", change="-3e-4"),
+        # trade where cashflow and change agree (no hidden cash), string-typed.
+        _txn_row("trade", cashflow="0.5", change="0.5"),
+        # a fee-type row: nonzero change, cashflow absent entirely.
+        {"type": "negative_balance_fee", "change": "-1.6328e-4"},
+        # an options settlement summary carrying NO cash (informational).
+        {"type": "options_settlement_summary", "cashflow": "0.0", "change": "0.0"},
+    ]
+    stats = summarize_txn_log(rows)["per_type_field_stats"]
+    assert stats["trade"] == {
+        "total": 2,
+        "cashflow_nonzero": 1,
+        "change_nonzero": 2,
+        "cashflow_ne_change": 1,
+        "cashflow_sum": pytest.approx(0.5),
+        "change_sum": pytest.approx(0.5 - 3e-4),
+    }
+    assert stats["negative_balance_fee"] == {
+        "total": 1,
+        "cashflow_nonzero": 0,
+        "change_nonzero": 1,
+        "cashflow_ne_change": 0,
+        "cashflow_sum": pytest.approx(0.0),
+        "change_sum": pytest.approx(-1.6328e-4),
+    }
+    assert stats["options_settlement_summary"] == {
+        "total": 1,
+        "cashflow_nonzero": 0,
+        "change_nonzero": 0,
+        "cashflow_ne_change": 0,
+        "cashflow_sum": pytest.approx(0.0),
+        "change_sum": pytest.approx(0.0),
+    }
+
+
+def test_txn_trade_row_count_is_the_honesty_anchor_stream() -> None:
+    # Pitfall 5: the txn-log type=trade count is the completeness stream the
+    # D-02 gate anchors to (the trades endpoint under-returns). It must be a
+    # distinct count of type=="trade" rows, roll-up-able across scopes.
+    rows = [
+        _txn_row("trade"),
+        _txn_row("trade"),
+        _txn_row("settlement"),
+        _txn_row("deposit"),
+        _txn_row("trade"),
+    ]
+    assert summarize_txn_log(rows)["txn_trade_row_count"] == 3
+
+
+def test_type_samples_capped_at_5_and_kind_diverse() -> None:
+    # Under the cap the summary must keep at least one sample per observed
+    # instrument kind (so a late-appearing kind is never crowded out by a
+    # duplicate-kind flood — otherwise the evidence misrepresents the mix).
+    rows = [
+        _txn_row("trade", instrument_name="BTC-PERPETUAL"),  # inverse
+        _txn_row("trade", instrument_name="ETH-PERPETUAL"),  # inverse
+        _txn_row("trade", instrument_name="BTC-PERPETUAL"),  # inverse
+        _txn_row("trade", instrument_name="ETH-PERPETUAL"),  # inverse
+        _txn_row("trade", instrument_name="BTC-PERPETUAL"),  # inverse (fills 5)
+        _txn_row("trade", instrument_name="BTC_USDC-PERPETUAL"),  # linear (late)
+        _txn_row("trade", instrument_name="BTC-27MAR26-60000-C"),  # option (late)
+    ]
+    samples = summarize_txn_log(rows)["type_samples"]["trade"]
+    assert len(samples) <= MAX_TXN_SAMPLES_PER_TYPE
+    kinds = {classify_instrument(str(s["instrument_name"])) for s in samples}
+    # Every observed kind survived the cap (diversity preserved on replacement).
+    assert kinds == {"inverse_perpetual", "linear_perpetual", "option"}
+
+
+def test_summarize_txn_log_never_raises_on_malformed_rows() -> None:
+    # Untrusted exchange input — a non-mapping row must be skipped, not crash.
+    rows = [None, 42, "junk", {"type": "trade"}]
+    summary = summarize_txn_log(rows)
+    assert summary["type_counts"] == {"trade": 1}
+    assert summary["txn_trade_row_count"] == 1
 
 
 # ---------------------------------------------------------------------------
-# classify_instrument — inverse / linear / option / future
+# _build_history_params — subaccount_id inclusion rule (A2), I/O-free
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "name,expected",
-    [
-        ("BTC-PERPETUAL", "inverse_perpetual"),
-        ("ETH-PERPETUAL", "inverse_perpetual"),
-        ("BTC_USDC-PERPETUAL", "linear_perpetual"),
-        ("ETH_USDC-PERPETUAL", "linear_perpetual"),
-        ("BTC-27MAR26-60000-C", "option"),
-        ("BTC-27MAR26-60000-P", "option"),
-        ("BTC-27MAR26", "future"),
-        ("SOMETHING-WEIRD", "unknown"),
-        ("", "unknown"),
-    ],
-)
-def test_instrument_classification(name: str, expected: str) -> None:
-    assert classify_instrument(name) == expected
+def test_build_history_params_includes_subaccount_id_only_when_present() -> None:
+    base = {"currency": "BTC", "count": 1000}
+    # Main scope (None) — subaccount_id MUST be absent.
+    main = _build_history_params(base, None)
+    assert "subaccount_id" not in main
+    assert main == base
+    # Sub scope — subaccount_id present with the exact int.
+    sub = _build_history_params(base, 7)
+    assert sub["subaccount_id"] == 7
+    assert sub["currency"] == "BTC"
+    # Pure: the base dict is not mutated.
+    assert "subaccount_id" not in base
 
 
-def test_instrument_classification_never_raises_on_junk() -> None:
-    # Untrusted exchange input — must classify, not crash (T-67-04).
-    for junk in ("---", "12345", "BTC-", "-PERPETUAL", "BTC_USDC-"):
-        assert classify_instrument(junk) == "unknown" or isinstance(
-            classify_instrument(junk), str
-        )
+# classify_instrument behavior tests now live in a single home in
+# tests/test_deribit_txn.py (the classifier was lifted to services.deribit_txn,
+# D-05). This module keeps only its own harness-specific use of the imported
+# classifier (the summarize_txn_log kind-diversity assertion above).
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +446,17 @@ def test_evidence_is_masked() -> None:
 
     # &signature=<hex> is scrubbed out of freeform strings.
     assert "deadbeefdeadbeef" not in clean["note"]
+
+
+def test_sanitize_masks_id_key_after_whitelist_widening() -> None:
+    # The Wave-0 whitelist now lets an "id" field through summarize_txn_log; the
+    # sanitization boundary must still MASK a string "id" value (***last4) so the
+    # widened whitelist cannot defeat masking (T-70-01). "id" stays in _MASK_KEYS.
+    clean = sanitize_evidence({"id": "abcdef123456", "instrument_name": "BTC-PERPETUAL"})
+    assert clean["id"].startswith("***")
+    assert clean["id"] != "abcdef123456"
+    # Non-masked sibling data survives untouched.
+    assert clean["instrument_name"] == "BTC-PERPETUAL"
 
 
 def test_assert_sanitized_raises_on_deny_key() -> None:

@@ -1,0 +1,371 @@
+{
+ "_evidence": "drb02 Deribit txn-log field semantics (cashflow vs change vs fee)",
+ "_generated": "2026-07-05",
+ "_subject": "P70 re-probe: which field is the realized-return series",
+ "_method": "bounded live crawl --max-pages 12 --count 250, 3 LTP keys, Amsterdam egress",
+ "_finding": "change = fee-inclusive cash-balance delta (SUM THIS); cashflow = deferred fee-excluded session PnL (NEVER sum). No per-row fee field.",
+ "accounts": {
+  "account_1": {
+   "per_type_field_stats": {
+    "trade": {
+     "total": 1300,
+     "cashflow_nonzero": 888,
+     "change_nonzero": 1300,
+     "cashflow_ne_change": 444,
+     "cashflow_sum": -207049.6149,
+     "change_sum": -206454.0494,
+     "fee_from_change_minus_cashflow": 595.5655
+    },
+    "transfer": {
+     "total": 76,
+     "cashflow_nonzero": 76,
+     "change_nonzero": 76,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": 206204.888,
+     "change_sum": 206204.888,
+     "fee_from_change_minus_cashflow": 0.0
+    },
+    "usdc_reward": {
+     "total": 22,
+     "cashflow_nonzero": 22,
+     "change_nonzero": 22,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": 801.6416,
+     "change_sum": 801.6416,
+     "fee_from_change_minus_cashflow": 0.0
+    },
+    "options_settlement_summary": {
+     "total": 18,
+     "cashflow_nonzero": 0,
+     "change_nonzero": 0,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": 0.0,
+     "change_sum": 0.0,
+     "fee_from_change_minus_cashflow": 0.0
+    },
+    "negative_balance_fee": {
+     "total": 12,
+     "cashflow_nonzero": 12,
+     "change_nonzero": 12,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": -0.4421,
+     "change_sum": -0.4421,
+     "fee_from_change_minus_cashflow": 0.0
+    },
+    "settlement": {
+     "total": 8,
+     "cashflow_nonzero": 8,
+     "change_nonzero": 8,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": 210.8368,
+     "change_sum": 210.8368,
+     "fee_from_change_minus_cashflow": 0.0
+    }
+   },
+   "divergent_samples": [
+    {
+     "type": "trade",
+     "instrument_name": "SOL_USDC-25JUL25-155-C",
+     "side": "close buy",
+     "cashflow": "-2240.0",
+     "change": "-2241.758618",
+     "fee": null,
+     "currency": "USDC"
+    },
+    {
+     "type": "trade",
+     "instrument_name": "SOL_USDC-25JUL25-155-P",
+     "side": "close buy",
+     "cashflow": "-140.0",
+     "change": "-148.797205",
+     "fee": null,
+     "currency": "USDC"
+    },
+    {
+     "type": "trade",
+     "instrument_name": "SOL_USDC-29AUG25-155-P",
+     "side": "close sell",
+     "cashflow": "750.0",
+     "change": "748.240231",
+     "fee": null,
+     "currency": "USDC"
+    },
+    {
+     "type": "trade",
+     "instrument_name": "SOL_USDC-29AUG25-155-C",
+     "side": "close sell",
+     "cashflow": "2860.0",
+     "change": "2858.241835",
+     "fee": null,
+     "currency": "USDC"
+    },
+    {
+     "type": "trade",
+     "instrument_name": "SOL_USDC-29AUG25-155-C",
+     "side": "open buy",
+     "cashflow": "-1460.0",
+     "change": "-1464.633668",
+     "fee": null,
+     "currency": "USDC"
+    },
+    {
+     "type": "trade",
+     "instrument_name": "SOL_USDC-25JUL25-155-C",
+     "side": "open sell",
+     "cashflow": "740.0",
+     "change": "737.683205",
+     "fee": null,
+     "currency": "USDC"
+    }
+   ]
+  },
+  "account_2": {
+   "per_type_field_stats": {
+    "usdc_reward": {
+     "total": 18,
+     "cashflow_nonzero": 18,
+     "change_nonzero": 18,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": 28598.1548,
+     "change_sum": 28598.1548,
+     "fee_from_change_minus_cashflow": 0.0
+    },
+    "trade": {
+     "total": 1382,
+     "cashflow_nonzero": 1163,
+     "change_nonzero": 1382,
+     "cashflow_ne_change": 331,
+     "cashflow_sum": 987335.0196,
+     "change_sum": 987333.8146,
+     "fee_from_change_minus_cashflow": -1.205
+    },
+    "transfer": {
+     "total": 16,
+     "cashflow_nonzero": 16,
+     "change_nonzero": 16,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": 229910.0,
+     "change_sum": 229910.0,
+     "fee_from_change_minus_cashflow": 0.0
+    },
+    "options_settlement_summary": {
+     "total": 4,
+     "cashflow_nonzero": 0,
+     "change_nonzero": 0,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": 0.0,
+     "change_sum": 0.0,
+     "fee_from_change_minus_cashflow": 0.0
+    },
+    "settlement": {
+     "total": 4,
+     "cashflow_nonzero": 4,
+     "change_nonzero": 4,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": 4.8568,
+     "change_sum": 4.8568,
+     "fee_from_change_minus_cashflow": 0.0
+    },
+    "negative_balance_fee": {
+     "total": 3,
+     "cashflow_nonzero": 3,
+     "change_nonzero": 3,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": -0.0003,
+     "change_sum": -0.0003,
+     "fee_from_change_minus_cashflow": 0.0
+    }
+   },
+   "divergent_samples": [
+    {
+     "type": "trade",
+     "instrument_name": "ETH-PERPETUAL",
+     "side": "close buy",
+     "cashflow": "0.00943822",
+     "change": "-0.00270971",
+     "fee": null,
+     "currency": "ETH"
+    },
+    {
+     "type": "trade",
+     "instrument_name": "ETH-PERPETUAL",
+     "side": "close buy",
+     "cashflow": "0.00393562",
+     "change": "-0.00110667",
+     "fee": null,
+     "currency": "ETH"
+    },
+    {
+     "type": "trade",
+     "instrument_name": "ETH-PERPETUAL",
+     "side": "close buy",
+     "cashflow": "0.00414576",
+     "change": "-0.00111968",
+     "fee": null,
+     "currency": "ETH"
+    },
+    {
+     "type": "trade",
+     "instrument_name": "ETH-PERPETUAL",
+     "side": "close buy",
+     "cashflow": "0.00126189",
+     "change": "-3.342e-4",
+     "fee": null,
+     "currency": "ETH"
+    },
+    {
+     "type": "trade",
+     "instrument_name": "ETH-PERPETUAL",
+     "side": "close buy",
+     "cashflow": "4.4616e-4",
+     "change": "-1.1375e-4",
+     "fee": null,
+     "currency": "ETH"
+    },
+    {
+     "type": "trade",
+     "instrument_name": "ETH-PERPETUAL",
+     "side": "close buy",
+     "cashflow": "5.4534e-4",
+     "change": "-1.3904e-4",
+     "fee": null,
+     "currency": "ETH"
+    }
+   ]
+  },
+  "account_3": {
+   "per_type_field_stats": {
+    "transfer": {
+     "total": 94,
+     "cashflow_nonzero": 94,
+     "change_nonzero": 94,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": -628145.6813,
+     "change_sum": -628145.6813,
+     "fee_from_change_minus_cashflow": 0.0
+    },
+    "usdc_reward": {
+     "total": 12,
+     "cashflow_nonzero": 12,
+     "change_nonzero": 12,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": 32.023,
+     "change_sum": 32.023,
+     "fee_from_change_minus_cashflow": 0.0
+    },
+    "trade": {
+     "total": 962,
+     "cashflow_nonzero": 960,
+     "change_nonzero": 962,
+     "cashflow_ne_change": 76,
+     "cashflow_sum": 1092794.6987,
+     "change_sum": 1092794.6408,
+     "fee_from_change_minus_cashflow": -0.0579
+    },
+    "delivery": {
+     "total": 42,
+     "cashflow_nonzero": 12,
+     "change_nonzero": 12,
+     "cashflow_ne_change": 8,
+     "cashflow_sum": -1.9453,
+     "change_sum": -1.9569,
+     "fee_from_change_minus_cashflow": -0.0116
+    },
+    "settlement": {
+     "total": 218,
+     "cashflow_nonzero": 218,
+     "change_nonzero": 218,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": -0.0045,
+     "change_sum": -0.0045,
+     "fee_from_change_minus_cashflow": 0.0
+    },
+    "deposit": {
+     "total": 6,
+     "cashflow_nonzero": 6,
+     "change_nonzero": 6,
+     "cashflow_ne_change": 0,
+     "cashflow_sum": 329.5801,
+     "change_sum": 329.5801,
+     "fee_from_change_minus_cashflow": 0.0
+    }
+   },
+   "divergent_samples": [
+    {
+     "type": "delivery",
+     "instrument_name": "ETH-12JAN24-2600-C",
+     "side": "close buy",
+     "cashflow": "-0.0357887",
+     "change": "-0.0402623",
+     "fee": null,
+     "currency": "ETH"
+    },
+    {
+     "type": "delivery",
+     "instrument_name": "ETH-12JAN24-2250-C",
+     "side": "close buy",
+     "cashflow": "-0.81156368",
+     "change": "-0.81246368",
+     "fee": null,
+     "currency": "ETH"
+    },
+    {
+     "type": "delivery",
+     "instrument_name": "ETH-12JAN24-2400-C",
+     "side": "close buy",
+     "cashflow": "-0.07761132",
+     "change": "-0.07776132",
+     "fee": null,
+     "currency": "ETH"
+    },
+    {
+     "type": "delivery",
+     "instrument_name": "ETH-30JUN23-1875-C",
+     "side": "close buy",
+     "cashflow": "-0.00944848",
+     "change": "-0.00974848",
+     "fee": null,
+     "currency": "ETH"
+    },
+    {
+     "type": "trade",
+     "instrument_name": "ETH-12JAN24-2600-C",
+     "side": "open sell",
+     "cashflow": "0.1584",
+     "change": "0.14880096",
+     "fee": null,
+     "currency": "ETH"
+    },
+    {
+     "type": "trade",
+     "instrument_name": "ETH-8JAN24-2275-C",
+     "side": "open sell",
+     "cashflow": "0.039",
+     "change": "0.03860004",
+     "fee": null,
+     "currency": "ETH"
+    }
+   ]
+  }
+ },
+ "classification": {
+  "return_bearing_sum_change": [
+   "trade",
+   "settlement",
+   "delivery",
+   "liquidation",
+   "negative_balance_fee"
+  ],
+  "external_or_informational_exclude": [
+   "deposit",
+   "withdrawal",
+   "transfer",
+   "swap",
+   "correction",
+   "usdc_reward",
+   "options_settlement_summary"
+  ],
+  "options_settlement_summary_change_sum_all_accounts": 0.0,
+  "unknown_type_nonzero_change": "FAIL LOUD (enum is extensible)"
+ }
+}

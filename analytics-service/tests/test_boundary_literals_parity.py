@@ -134,19 +134,22 @@ class TestMigrationWidensEveryKeyBoundaryCheck:
 
 
 class TestIngestionSurfacesExcludeDeribit:
-    """EXCLUDE direction — ingestion registry + flow sets stay 3-exchange.
+    """Deribit ingestion-surface pins.
 
-    Phase 70 (OQ2) wires ingestion: the Source Literal is widened for
-    type-consistency ONLY, while the runtime registry gate (SUPPORTED_SOURCES)
-    and the process_key per-flow allow-sets intentionally still reject deribit.
-    Flipping either requires editing this failing pin — conscious, not drift.
+    Phase 70 (DRB-08, 70-06) wires the ingestion CAPABILITY: the runtime
+    registry gate (SUPPORTED_SOURCES) now ADMITS deribit so get_adapter
+    resolves a DeribitAdapter. The process_key per-flow onboarding allow-sets
+    intentionally STILL reject deribit — live LTP onboarding is Phase 72.
+    Flipping the onboarding pin requires editing it consciously — not drift.
     """
 
-    def test_supported_sources_excludes_deribit(self) -> None:
-        # Phase 70 flips this together with the ingestion pipeline (OQ2).
-        assert "deribit" not in SUPPORTED_SOURCES, (
-            "SUPPORTED_SOURCES must stay 3-exchange+csv until Phase 70 wires "
-            "deribit ingestion — the Source Literal widening is type-only."
+    def test_supported_sources_includes_deribit(self) -> None:
+        # Phase 70 (DRB-08, 70-06) flipped this: the ingestion registry now
+        # admits deribit (get_adapter("deribit") resolves a DeribitAdapter).
+        # This is the ingestion CAPABILITY only — onboarding orchestration is
+        # Phase 72, and the process_key per-flow sets below stay deribit-free.
+        assert "deribit" in SUPPORTED_SOURCES, (
+            "Phase 70 wires deribit ingestion — SUPPORTED_SOURCES must admit it."
         )
 
     def test_process_key_flow_sets_exclude_deribit(self) -> None:

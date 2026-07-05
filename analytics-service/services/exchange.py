@@ -1772,6 +1772,25 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
     return daily_pnl
 
 
+async def _fetch_raw_trades_deribit(
+    exchange: ccxt.Exchange,
+    since_ms: int | None,
+) -> list[dict[str, Any]]:
+    """Deribit fill fetch — the SECONDARY trades axis (P70 70-04, DRB-04).
+
+    Execution detail via the id-cursor ``private/get_user_trades_by_currency``
+    endpoint; this is NOT the returns source (realized returns come from the
+    txn-log ledger, 70-03/70-05). Thin delegate to
+    ``deribit_ingest.fetch_deribit_fills`` (imported at call time so the
+    ingestion module's I/O primitives stay monkeypatchable). Each fill carries
+    ``exchange_fill_id = trade_id`` so ``diff_strategy_fills`` dedups on
+    (exchange, exchange_fill_id) and overlap re-fetch is idempotent.
+    """
+    from services.deribit_ingest import fetch_deribit_fills
+
+    return await fetch_deribit_fills(exchange, since_ms)
+
+
 async def fetch_raw_trades(
     exchange: ccxt.Exchange,
     strategy_id: str,
@@ -1809,6 +1828,8 @@ async def fetch_raw_trades(
             fills = await _fetch_raw_trades_okx(exchange, effective_since)
         elif exchange.id == "bybit":
             fills = await _fetch_raw_trades_bybit(exchange, effective_since)
+        elif exchange.id == "deribit":
+            fills = await _fetch_raw_trades_deribit(exchange, effective_since)
         else:
             logger.warning("fetch_raw_trades: unsupported exchange %s", exchange.id)
     except Exception as e:

@@ -20,11 +20,14 @@ from typing import Any, Literal
 # ---------------------------------------------------------------------------
 
 FlowType = Literal["teaser", "onboard", "internal_report", "csv", "resync"]
-# Phase 68 (OQ2): "deribit" widens the Source Literal for key-save boundary
-# type-consistency ONLY. The ingestion registry (``SUPPORTED_SOURCES`` in
-# services/ingestion/__init__.py) and the ``process_key`` per-flow sets
-# intentionally EXCLUDE deribit until Phase 70 ships the ingestion path — do
-# NOT add deribit there. Plan 68-03 pins this exclusion with a parity test.
+# Phase 68 (OQ2): "deribit" widened the Source Literal for key-save boundary
+# type-consistency. Phase 70 (DRB-08, 70-06) now SHIPS the deribit ingestion
+# path: the ingestion registry (``SUPPORTED_SOURCES`` in
+# services/ingestion/__init__.py) admits deribit and get_adapter("deribit")
+# resolves a DeribitAdapter. This is the ingestion CAPABILITY only — the
+# ``process_key`` per-flow onboarding sets still exclude deribit (live LTP
+# onboarding is Phase 72), and Deribit returns flow through the broker-dailies
+# ONE-path (70-05, txn-log ledger), never fill-based process_key metrics.
 Source = Literal["okx", "binance", "bybit", "csv", "deribit"]
 TrustTier = Literal["api_verified", "csv_uploaded", "self_reported"]
 Status = Literal[
