@@ -162,6 +162,13 @@ class DataQualityFlags(TypedDict, total=False):
     no_linked_api_key: bool
     used_heuristic_capital: bool
     balance_error: bool
+    # --- Phase 74 (v1.8 Flow-Aware TWR): NAV-denominator guard keys lifted from
+    # the NavTWRMeta the honest core carries onto returns_meta. Each fires only
+    # when a day's chain-link BROKE (NaN) rather than divided by a fabricated
+    # base; each promotes computation_status to complete_with_warnings. ---
+    negative_nav_guard: bool
+    dust_nav_guard: bool
+    flow_dominated_guard: bool
     # --- sibling-table batch upsert ---
     sibling_kinds_failed: bool
     sibling_kinds_error: str
@@ -1712,6 +1719,27 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["balance_error"] = True
 
+        # Phase 74 (v1.8 Flow-Aware TWR) — lift the three NAV-denominator guard
+        # keys the Phase-73 honest core now carries onto returns_meta (via the
+        # NavTWRMeta contract, 74-02). A guard fires when a day's NAV
+        # denominator was not a usable base (dust / negative / flow-dominated),
+        # so the core BROKE that day's chain-link (NaN) instead of dividing by a
+        # fabricated floor — the very "invalid presented as valid" harm this
+        # milestone kills. These keys are additive and present on returns_meta
+        # ONLY when they fired (NavTWRMeta is total=False), so a no-guard
+        # flow-less / estimated_start>0 account carries NONE of them and stays
+        # status-identical to today (the 8 exact-string 'complete' consumers are
+        # unaffected — see the consumer_specific_flags block below). Same
+        # additive shape + None-vs-empty-dict guarding as used_heuristic_capital.
+        for _guard_key in (
+            "negative_nav_guard",
+            "dust_nav_guard",
+            "flow_dominated_guard",
+        ):
+            if returns_meta.get(_guard_key):
+                data_quality_flags = data_quality_flags or {}
+                data_quality_flags[_guard_key] = True
+
         # Audit-2026-05-07 round-2 / P1994+P1995 follow-up: lift inner
         # `data_quality_flags` from reconstruct_positions (breakeven_positions,
         # positions_missing_realized_pnl, plus pre-existing fills_dropped_no_symbol
@@ -1772,9 +1800,21 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # is its own follow-up PR (tracked in FIX-LIST follow-up backlog
         # alongside PR-7c). Until then, stay narrow: only the audit-#9
         # producer/consumer pair upgrades status.
+        #
+        # Phase 74 (v1.8) — the three NAV-denominator guard keys join the
+        # consumer-promoting set. A guard means a day's return was BROKEN (NaN),
+        # not merely approximated, so a guarded run is at least as degraded as a
+        # heuristic-capital run and MUST promote to complete_with_warnings for
+        # the same reason (SC-4 semantics preserved). They are consumer-safe:
+        # unlike the section-level flags above, a guard key appears ONLY when a
+        # real NAV fault fired, so a clean flow-less account never trips them and
+        # keeps its exact-string 'complete' the 8 consumers gate on.
         consumer_specific_flags = (
             (top_level_flags or {}).get("used_heuristic_capital")
             or (top_level_flags or {}).get("balance_error")
+            or (top_level_flags or {}).get("negative_nav_guard")
+            or (top_level_flags or {}).get("dust_nav_guard")
+            or (top_level_flags or {}).get("flow_dominated_guard")
         )
         # When the consumer flag is suppressed (because the upstream
         # account_balance_unavailable / no_linked_api_key already
