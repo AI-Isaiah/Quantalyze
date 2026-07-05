@@ -128,6 +128,9 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
      *  Default "okx" (fill-based). Set "deribit" to exercise the keyed
      *  ledger-backed daily-returns branch. Inert when recheckApiKeyId is null. */
     mockKeyExchange?: string | null;
+    /** when true, the first-pass api_keys exchange lookup returns an error, so
+     *  the route must fail loud (503) rather than coercing isLedgerBacked=false. */
+    mockKeyExchangeError?: boolean;
   };
 
   /**
@@ -210,10 +213,13 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
             return {
               select: () => ({
                 eq: () => ({
-                  maybeSingle: async () => ({
-                    data: { exchange: opts.mockKeyExchange ?? "okx" },
-                    error: null,
-                  }),
+                  maybeSingle: async () =>
+                    opts.mockKeyExchangeError
+                      ? { data: null, error: { message: "boom" } }
+                      : {
+                          data: { exchange: opts.mockKeyExchange ?? "okx" },
+                          error: null,
+                        },
                 }),
               }),
             };
@@ -469,6 +475,22 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     const res = await postApprove();
     expect(res.status).toBe(409);
     expect((await res.json()).error).toMatch(/trade count fell below threshold/i);
+  });
+
+  it("fails LOUD (503) when the api_keys exchange lookup errors (WR-01) — never coerces isLedgerBacked=false", async () => {
+    // A transient api_keys read error must not silently set isLedgerBacked=false
+    // and reject a legit Deribit onboarding with a misleading trade-count 400.
+    mockAdminClient({
+      recheckApiKeyId: "key-deribit",
+      mockKeyExchangeError: true,
+      recheckTradeCount: 0,
+      recheckCsvCount: 30,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(/verify strategy data source/i);
   });
 });
 

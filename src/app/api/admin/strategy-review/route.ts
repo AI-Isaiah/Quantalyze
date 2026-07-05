@@ -133,11 +133,22 @@ export async function POST(req: NextRequest) {
     // and reused for the TOCTOU re-check below.
     approveApiKeyId = strategy?.api_key_id ?? null;
     if (approveApiKeyId) {
-      const { data: keyRow } = await admin
+      const { data: keyRow, error: keyRowError } = await admin
         .from("api_keys")
         .select("exchange")
         .eq("id", approveApiKeyId)
         .maybeSingle();
+      // Fail LOUD (WR-01): a coerced `isLedgerBacked=false` on a transient read
+      // error would reject a legitimate Deribit onboarding with a misleading
+      // "0 trades / INSUFFICIENT_TRADES" 400. Mirror the csvCountError 503 guard
+      // above — never let an unread venue silently divert the gate branch.
+      if (keyRowError) {
+        console.error("[admin/strategy-review] api_keys exchange lookup failed:", keyRowError);
+        return NextResponse.json(
+          { error: "Cannot verify strategy data source. Please try again." },
+          { status: 503 },
+        );
+      }
       isLedgerBacked = isLedgerBackedExchange(keyRow?.exchange);
     }
 
