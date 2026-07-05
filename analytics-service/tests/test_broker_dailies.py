@@ -822,3 +822,59 @@ def test_deribit_no_specific_metrics_path():
         drb_records, [], account_balance=100_000.0
     )
     assert not returns.empty
+
+
+# --- Phase 74 Wave 0 byte-identity snapshot pin ------------------------------
+# Freeze TODAY's EXACT gap-filled returns Series for the broker realized+funding
+# combine path on a flow-less, estimated_start>0 fixture. This pins the broker
+# call site (broker_dailies.py:130 -> job_worker.py:2010) so Wave 2's param
+# threading is proven byte-identical. MUST stay GREEN across the whole phase.
+def test_byte_identical_combine_snapshot():
+    """combine_realized_and_funding byte-identity pin (rtol 1e-12).
+
+    Fixture: realized daily_pnl on 02-01/02-02/02-05 + funding on 02-01/02-03,
+    account_balance=180k (Σpnl well under it -> estimated_start>0, no
+    heuristic/guard). Asserts the exact gap-filled returns AND the gap-fill
+    invariant: every calendar day in [first,last] present (02-04 is inserted),
+    no-activity days == 0.0."""
+    realized = [
+        _realized_record("2026-02-01", 800.0),
+        _realized_record("2026-02-02", -350.0),
+        _realized_record("2026-02-05", 600.0),
+    ]
+    funding = [
+        _funding_row("2026-02-01", 120.0),
+        _funding_row("2026-02-03", -80.0),
+    ]
+    returns, meta = combine_realized_and_funding(
+        realized, funding, account_balance=180_000.0
+    )
+
+    expected_index = pd.DatetimeIndex(
+        ["2026-02-01", "2026-02-02", "2026-02-03", "2026-02-04", "2026-02-05"]
+    )
+    expected_values = [
+        0.005142250293443631,
+        -0.001946282600233554,
+        -0.0004457321149988857,
+        0.0,
+        0.0033444816053511705,
+    ]
+    expected = pd.Series(expected_values, index=expected_index)
+
+    pd.testing.assert_series_equal(
+        returns, expected, check_exact=False, rtol=1e-12,
+        check_freq=False, check_names=False,
+    )
+
+    # Gap-fill invariant: dense calendar over [first, last] with 02-04 present
+    # and equal to a flat 0.0 no-activity return.
+    assert list(returns.index) == list(expected_index), (
+        "gap_fill must produce a dense calendar over [first, last]"
+    )
+    assert float(returns.loc["2026-02-04"]) == 0.0, (
+        "a no-activity calendar day must gap-fill to a flat 0.0 return"
+    )
+    # Real-balance path: no heuristic, no guard -> 'complete'.
+    assert meta["used_heuristic_capital"] is False
+    assert meta["computation_status_hint"] == "complete"
