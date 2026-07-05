@@ -461,3 +461,195 @@ def test_gate_is_not_fill_count_reconciliation() -> None:
     assert params == ["report"]
     lowered = " ".join(params).lower()
     assert "total" not in lowered and "count" not in lowered and "known" not in lowered
+
+
+# ===========================================================================
+# 70-04 Task 1 — the SECONDARY trades axis: id-cursor fill fetch + FillRow map.
+#
+# This axis is execution detail + an ADVISORY fill-count cross-check — NOT the
+# returns source (returns come from the txn-log ledger above). Every test is
+# RED-first + revert-proof against the Wave-0 one-page-stall (bug #2) and the
+# 24h-cap (bug #1: without historical=true the endpoint returns only 24h).
+# ===========================================================================
+
+
+def _trades_page(trades: list[dict[str, Any]], has_more: bool) -> dict[str, Any]:
+    return {"result": {"trades": trades, "has_more": has_more}}
+
+
+class _TradesStub:
+    """Serves a scripted sequence of get_user_trades_by_currency pages / errors."""
+
+    def __init__(self, script: list[Any]) -> None:
+        self._script = list(script)
+        self.calls: list[dict[str, Any]] = []
+
+    async def private_get_get_user_trades_by_currency(
+        self, params: dict[str, Any]
+    ) -> Any:
+        self.calls.append(dict(params))
+        item = self._script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _trade(trade_id: str) -> dict[str, Any]:
+    return {
+        "trade_id": trade_id,
+        "instrument_name": "BTC-PERPETUAL",
+        "direction": "buy",
+        "price": 100.0,
+        "amount": 1.0,
+        "timestamp": 1_720_000_000_000,
+        "fee": 0.0,
+        "fee_currency": "BTC",
+        "order_id": "ord",
+    }
+
+
+async def test_id_cursor_advances_start_id() -> None:
+    # page1 FULL (len==count==2, last trade_id "T1"), page2 partial has_more=false
+    # → page2 requested with start_id="T1", then STOP. No dup, no re-fetch of T1.
+    stub = _TradesStub(
+        [
+            _trades_page([_trade("T0"), _trade("T1")], has_more=True),
+            _trades_page([_trade("T2")], has_more=False),
+        ]
+    )
+    spy = _SleepSpy()
+    rows = await di.paginate_trades_id_cursor(stub, "BTC", {}, count=2, sleep=spy)
+    assert [r["trade_id"] for r in rows] == ["T0", "T1", "T2"]
+    assert len(stub.calls) == 2
+    assert "start_id" not in stub.calls[0]  # initial page has no cursor
+    assert stub.calls[1]["start_id"] == "T1"  # advanced to last of page1
+
+
+async def test_id_cursor_continue_while_full_even_if_has_more_false() -> None:
+    # A FULL page (len==count) with has_more=false STILL fetches the next page —
+    # has_more has no documented reliability guarantee (Wave-0). Relying solely on
+    # has_more would drop A3 → this test goes red if the loop stops on has_more.
+    stub = _TradesStub(
+        [
+            _trades_page([_trade("A1"), _trade("A2")], has_more=False),
+            _trades_page([_trade("A3")], has_more=False),
+        ]
+    )
+    spy = _SleepSpy()
+    rows = await di.paginate_trades_id_cursor(stub, "ETH", {}, count=2, sleep=spy)
+    assert [r["trade_id"] for r in rows] == ["A1", "A2", "A3"]
+    assert len(stub.calls) == 2
+
+
+async def test_id_cursor_dedups_boundary_trade_id() -> None:
+    # start_id is EXCLUSIVE but Deribit may re-include the boundary trade — the
+    # paginator must not double-count it. page2 re-serves "B2" (the page1 last)
+    # plus a new "B3"; only one "B2" survives.
+    stub = _TradesStub(
+        [
+            _trades_page([_trade("B1"), _trade("B2")], has_more=True),
+            _trades_page([_trade("B2"), _trade("B3")], has_more=False),
+        ]
+    )
+    spy = _SleepSpy()
+    rows = await di.paginate_trades_id_cursor(stub, "BTC", {}, count=2, sleep=spy)
+    assert [r["trade_id"] for r in rows] == ["B1", "B2", "B3"]
+
+
+def test_history_true_param_present() -> None:
+    # historical=true + sorting=asc ALWAYS (omitting historical caps at 24h —
+    # Wave-0 bug #1); start_id present only when advancing.
+    params = di._build_trades_params("BTC", 1000)
+    assert params["historical"] == "true"
+    assert params["sorting"] == "asc"
+    assert params["currency"] == "BTC"
+    assert params["count"] == 1000
+    assert "start_id" not in params
+    advanced = di._build_trades_params("BTC", 1000, start_id="Z9")
+    assert advanced["start_id"] == "Z9"
+
+
+def test_trade_to_fillrow_sets_exchange_fill_id() -> None:
+    trade = {
+        "trade_id": "ETH-42",
+        "instrument_name": "ETH-PERPETUAL",
+        "direction": "sell",
+        "price": 2000.0,
+        "amount": 10.0,
+        "timestamp": 1_720_000_000_000,
+        "fee": 0.5,
+        "fee_currency": "ETH",
+        "order_id": "ord-1",
+    }
+    row = di._trade_to_fillrow(trade)
+    # exchange_fill_id = Deribit trade_id → diff_strategy_fills PK dedup axis.
+    assert row["exchange_fill_id"] == "ETH-42"
+    assert row["exchange"] == "deribit"
+    assert row["side"] == "sell"
+    # Monetary fields are EXACT numeric strings (H-0669), never floats.
+    assert row["price"] == "2000.0"
+    assert row["quantity"] == "10.0"
+    assert isinstance(row["price"], str) and isinstance(row["quantity"], str)
+    assert row["timestamp"].startswith("2024-")  # ISO event time
+    assert row["is_fill"] is True
+
+
+async def test_minus_32602_skips_currency(monkeypatch: Any) -> None:
+    # A -32602 "not supported for wallet type" on one currency is skipped (0 rows,
+    # scrubbed-logged) while others still fetch — never swallowed silently.
+    calls: list[str] = []
+
+    async def _enum_scopes(_ex: Any) -> list[di.Scope]:
+        return [di.Scope("main", None, True)]
+
+    async def _auth(_ex: Any, _s: di.Scope) -> dict[str, Any]:
+        return {}
+
+    async def _enum_ccy(_ex: Any, _s: di.Scope, _a: Any) -> list[str]:
+        return ["BTC", "SOL"]
+
+    async def _paginate(
+        _ex: Any, currency: str, _scope_auth: Any, **_k: Any
+    ) -> list[Any]:
+        calls.append(currency)
+        if currency == "SOL":
+            raise _DeribitError(-32602, "not supported for wallet type")
+        return [_trade("B1")]
+
+    monkeypatch.setattr(di, "enumerate_scopes", _enum_scopes)
+    monkeypatch.setattr(di, "resolve_scope_auth", _auth)
+    monkeypatch.setattr(di, "enumerate_currencies", _enum_ccy)
+    monkeypatch.setattr(di, "paginate_trades_id_cursor", _paginate)
+    fills = await di.fetch_deribit_fills(object(), None)
+    assert calls == ["BTC", "SOL"]  # SOL was attempted, not pre-filtered
+    assert len(fills) == 1  # only BTC produced a fill; SOL skipped gracefully
+    assert fills[0]["exchange_fill_id"] == "B1"
+
+
+async def test_fetch_deribit_fills_reuses_scope_auth(monkeypatch: Any) -> None:
+    # Subaccount fills are reachable because the fetch reuses the 70-03 per-scope
+    # auth (resolve_scope_auth) — the minted token flows into paginate.
+    seen_auth: list[Any] = []
+
+    async def _enum_scopes(_ex: Any) -> list[di.Scope]:
+        return [di.Scope("sub_1", "101", False)]
+
+    async def _auth(_ex: Any, scope: di.Scope) -> dict[str, Any]:
+        return {"access_token": "tok_sub_101"}
+
+    async def _enum_ccy(_ex: Any, _s: di.Scope, _a: Any) -> list[str]:
+        return ["BTC"]
+
+    async def _paginate(
+        _ex: Any, currency: str, scope_auth: Any, **_k: Any
+    ) -> list[Any]:
+        seen_auth.append(scope_auth)
+        return [_trade("S1")]
+
+    monkeypatch.setattr(di, "enumerate_scopes", _enum_scopes)
+    monkeypatch.setattr(di, "resolve_scope_auth", _auth)
+    monkeypatch.setattr(di, "enumerate_currencies", _enum_ccy)
+    monkeypatch.setattr(di, "paginate_trades_id_cursor", _paginate)
+    fills = await di.fetch_deribit_fills(object(), None)
+    assert seen_auth == [{"access_token": "tok_sub_101"}]
+    assert len(fills) == 1
