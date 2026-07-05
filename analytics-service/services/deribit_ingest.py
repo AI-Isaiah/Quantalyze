@@ -26,14 +26,18 @@ complete track record. Two guards make that impossible:
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from services.deribit_txn import txn_rows_to_daily_records
 from services.redact import scrub_freeform_string
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Rate-limit pacing / backoff constants (design §"Rate limits (10028)").
@@ -436,3 +440,210 @@ def assert_ledger_complete(report: CompletenessReport) -> None:
             + ". Refusing to render a silently-partial ledger as a complete track "
             "record (re-anchored D-02 gate)."
         )
+
+
+# ===========================================================================
+# SECONDARY trades axis (70-04, DRB-04) — execution detail + an ADVISORY
+# fill-count cross-check. This is NOT the returns source and NOT the D-02
+# honesty gate: realized returns come from the txn-log ledger above
+# (fetch_deribit_ledger_daily_records / assert_ledger_complete). Fills are
+# fetched via the id-cursor ``private/get_user_trades_by_currency`` endpoint —
+# NOT ``_and_time`` (passing both bounds one-page-stalls; Wave-0 bug #2) — and
+# mapped to the shared ``FillRow`` with ``exchange_fill_id = trade_id`` so
+# ``diff_strategy_fills`` dedups on (exchange, exchange_fill_id) and re-fetch
+# is idempotent.
+# ===========================================================================
+
+# Documented max page size for the trades endpoint.
+TRADES_PAGE_COUNT: int = 1000
+# Non-matching reads pace ~20 req/s (cost 500, pool 50,000, refill 10,000/s).
+TRADES_PACE_SECONDS: float = 0.05
+# Exponential backoff base for 10028 on the trades endpoint.
+TRADES_BACKOFF_BASE_SECONDS: float = 1.0
+# Max consecutive 10028 retries for a single trades page before surfacing.
+TRADES_MAX_RETRIES: int = 8
+
+
+def _build_trades_params(
+    currency: str,
+    count: int,
+    *,
+    start_id: str | None = None,
+    historical: bool = True,
+    sorting: str = "asc",
+) -> dict[str, Any]:
+    """Pure params builder for ``private/get_user_trades_by_currency``.
+
+    ALWAYS sends ``historical=true`` (Wave-0 bug #1: without it the endpoint
+    caps at the last 24h — 674 vs 2,962 for acct3) and ``sorting=asc`` so the
+    id-cursor advances forward. ``start_id`` is present ONLY when advancing past
+    the first page — the initial page carries no cursor.
+    """
+    params: dict[str, Any] = {
+        "currency": currency,
+        "count": count,
+        "sorting": sorting,
+    }
+    if historical:
+        params["historical"] = "true"
+    if start_id is not None:
+        params["start_id"] = start_id
+    return params
+
+
+async def paginate_trades_id_cursor(
+    exchange: Any,
+    currency: str,
+    scope_auth: Mapping[str, Any],
+    *,
+    count: int = TRADES_PAGE_COUNT,
+    start_id: str | None = None,
+    sleep: SleepFn = asyncio.sleep,
+    max_retries: int = TRADES_MAX_RETRIES,
+    pace_seconds: float = TRADES_PACE_SECONDS,
+) -> list[dict[str, Any]]:
+    """Fetch all trades for one scope × currency via the id-cursor endpoint.
+
+    Advances ``start_id`` = last trade_id (EXCLUSIVE) each page and continues
+    while ``has_more`` OR the page is FULL (``len==count``) — ``has_more`` has no
+    documented reliability guarantee (Wave-0), so relying on it alone drops rows
+    on a full-but-``has_more=false`` page. Stops ONLY when a page is BOTH
+    not-full AND ``has_more=false``. Rows are accumulated once; a ``seen`` guard
+    drops any re-included boundary trade_id (start_id is exclusive but the API
+    may re-serve it). 10028 backs off up to ``max_retries``; any other error
+    propagates so the producer can decide currency-skip (-32602) vs fail-loud.
+    Every ccxt error is scrubbed before it can reach a log.
+    """
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    cursor = start_id
+    is_first_page = True
+    while True:
+        params = _build_trades_params(currency, count, start_id=cursor)
+        params.update(scope_auth)
+
+        if not is_first_page:
+            await sleep(pace_seconds)
+
+        retries = 0
+        while True:
+            try:
+                resp = await exchange.private_get_get_user_trades_by_currency(params)
+                break
+            except Exception as exc:  # noqa: BLE001
+                if _deribit_error_code(exc) != _RATE_LIMIT_CODE:
+                    raise
+                retries += 1
+                if retries > max_retries:
+                    raise
+                await sleep(TRADES_BACKOFF_BASE_SECONDS * (2 ** (retries - 1)))
+
+        is_first_page = False
+        result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
+        raw_trades = result.get("trades", []) or []
+        has_more = bool(result.get("has_more"))
+
+        page_trades = [t for t in raw_trades if isinstance(t, Mapping)]
+        page_len = len(page_trades)
+        last_id: str | None = None
+        for trade in page_trades:
+            tid = trade.get("trade_id")
+            tid_str = str(tid) if tid is not None else None
+            if tid_str is not None:
+                last_id = tid_str
+                if tid_str in seen:
+                    continue
+                seen.add(tid_str)
+            rows.append(dict(trade))
+
+        page_full = page_len == count
+        if not page_full and not has_more:
+            break
+        if last_id is None:
+            # No trade_id to advance on — refuse to spin forever on a full page
+            # that carries no cursor (defensive; a real page always has ids).
+            break
+        cursor = last_id
+    return rows
+
+
+def _trade_to_fillrow(trade: Mapping[str, Any]) -> dict[str, Any]:
+    """Map one raw Deribit trade → the shared ``FillRow`` (built via the
+    canonical ``_make_fill_dict`` factory, NEVER hand-rolled).
+
+    ``exchange_fill_id = trade_id`` is the primary dedup axis for
+    ``diff_strategy_fills``; ``side`` comes from Deribit's ``direction``. Money
+    fields flow through the factory's Decimal→exact-string chokepoint (H-0669).
+    """
+    from services.exchange import _make_fill_dict
+
+    trade_id = str(trade.get("trade_id", "") or "")
+    instrument = str(trade.get("instrument_name", "") or "")
+    side = str(trade.get("direction", "") or "").lower()
+    price = trade.get("price", 0) or 0
+    amount = trade.get("amount", 0) or 0
+    fee = trade.get("fee", 0) or 0
+    fee_currency = str(trade.get("fee_currency", "") or "")
+    ts_ms = int(trade.get("timestamp", 0) or 0)
+    ts_iso = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+    return dict(
+        _make_fill_dict(
+            exchange="deribit",
+            symbol=instrument,
+            side=side,
+            price=price,
+            quantity=amount,
+            fee=fee,
+            fee_currency=fee_currency,
+            timestamp=ts_iso,
+            exchange_order_id=str(trade.get("order_id", "") or ""),
+            exchange_fill_id=trade_id,
+            is_maker=bool(trade.get("post_only", False)),
+            raw_data=dict(trade),
+            position_direction=None,
+        )
+    )
+
+
+async def fetch_deribit_fills(
+    exchange: Any,
+    since_ms: int | None = None,
+    *,
+    sleep: SleepFn = asyncio.sleep,
+) -> list[dict[str, Any]]:
+    """Fetch execution-detail fills across every scope × currency (SECONDARY
+    axis). Reuses the 70-03 per-scope auth (``resolve_scope_auth`` → subaccount
+    reads via ``public/exchange_token``) so subaccount fills are reachable
+    despite ``subaccount_id`` being refused on the read-only LTP keys.
+
+    A ``-32602`` (non-margin currency for the wallet type) skips THAT currency
+    (scrubbed-logged, never swallowed silently) while other currencies still
+    fetch. Any other error propagates. ``since_ms`` is accepted for signature
+    parity with the other ``_fetch_raw_trades_*`` producers; the id-cursor crawl
+    is full-history (``historical=true``) and dedups downstream on
+    ``exchange_fill_id``. 70-06's adapter imports this.
+    """
+    scopes = await enumerate_scopes(exchange)
+    fills: list[dict[str, Any]] = []
+    for scope in scopes:
+        auth = await resolve_scope_auth(exchange, scope)
+        currencies = await enumerate_currencies(exchange, scope, auth)
+        for currency in currencies:
+            try:
+                trades = await paginate_trades_id_cursor(
+                    exchange, currency, auth, sleep=sleep
+                )
+            except Exception as exc:  # noqa: BLE001
+                if _deribit_error_code(exc) == _NON_MARGIN_CURRENCY_CODE:
+                    logger.warning(
+                        "fetch_deribit_fills: skipping scope=%s currency=%s "
+                        "(-32602 non-margin currency): %s",
+                        scope.label,
+                        currency,
+                        scrub_freeform_string(str(exc)),
+                    )
+                    continue
+                raise
+            for trade in trades:
+                fills.append(_trade_to_fillrow(trade))
+    return fills

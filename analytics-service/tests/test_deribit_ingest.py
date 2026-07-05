@@ -543,17 +543,18 @@ async def test_id_cursor_continue_while_full_even_if_has_more_false() -> None:
 
 async def test_id_cursor_dedups_boundary_trade_id() -> None:
     # start_id is EXCLUSIVE but Deribit may re-include the boundary trade — the
-    # paginator must not double-count it. page2 re-serves "B2" (the page1 last)
-    # plus a new "B3"; only one "B2" survives.
+    # paginator must not double-count it. page1 FULL (count=3) last "B3"; page2
+    # re-serves "B3" (the boundary) plus a new "B4" and is short → only one "B3".
     stub = _TradesStub(
         [
-            _trades_page([_trade("B1"), _trade("B2")], has_more=True),
-            _trades_page([_trade("B2"), _trade("B3")], has_more=False),
+            _trades_page([_trade("B1"), _trade("B2"), _trade("B3")], has_more=True),
+            _trades_page([_trade("B3"), _trade("B4")], has_more=False),
         ]
     )
     spy = _SleepSpy()
-    rows = await di.paginate_trades_id_cursor(stub, "BTC", {}, count=2, sleep=spy)
-    assert [r["trade_id"] for r in rows] == ["B1", "B2", "B3"]
+    rows = await di.paginate_trades_id_cursor(stub, "BTC", {}, count=3, sleep=spy)
+    assert [r["trade_id"] for r in rows] == ["B1", "B2", "B3", "B4"]
+    assert stub.calls[1]["start_id"] == "B3"
 
 
 def test_history_true_param_present() -> None:
