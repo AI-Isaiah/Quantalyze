@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.37.5.0] - 2026-07-05
+### Added
+- **Allocators can connect a Deribit key and see their derivative positions (Phase 71, DRB-09).** The last deliberate block — the f3 Path-B `DeribitNotSupportedError` that failed a Deribit allocator sync outright — is lifted: Deribit spot returns `[]` (deferred, no spot path) instead of raising, so the derivative side syncs and the positions render. Inverse (coin-settled) contracts are normalized correctly by a new Deribit branch in `positions._normalize_ccxt_position` that reads the raw `info` fields (Deribit inverts the linear CCXT unified mapping: `size`=quote-ccy notional, `size_currency`=base coin, `floating_profit_loss`=settle ccy) and converts inverse PnL coin→USD at `index_price`; linear (USDC) PnL passes through.
+### Changed
+- **Coin-vs-USD settlement is single-sourced.** New `deribit_txn.classify_instrument_settlement` decides coin-settled vs linear from the instrument-name markers (`_USDC`/`_USDT`/`_EURR`) and **fails loud** on an unknown coin-margined currency — shared by the ledger cash converter and the position normalizer, so the two can't diverge. One un-normalizable position is skipped with a loud log rather than aborting the whole batch (an anomalous instrument can't hide every other position).
+- **Deribit equity stays deferred (SC-3).** `run_refresh_allocator_equity_daily_job` now skips `venue=='deribit'` holdings, mirroring the reconstruct-side skip, so a mixed (Deribit + supported-venue) allocator can't leak collateral-less Deribit derivative uPnL into the equity curve. Deribit positions still render on the Holdings panel (which reads `allocator_holdings` directly).
+### Fixed
+- **Holding notes on Deribit positions no longer 403.** `notes/scope-ref` `HOLDING_SCOPE_RE` admits `-`/`_` in the symbol so Deribit `instrument_name` shapes (`BTC-PERPETUAL`, `BTC_USDC-PERPETUAL`, `BTC-27DEC24-100000-C`) parse — newly reachable now that Deribit rows render.
+
 ## [0.37.4.0] - 2026-07-05
 ### Added
 - **Deribit realized daily returns from the transaction-log ledger (Phase 70, RISKY).** `private/get_transaction_log` is the authoritative realized-cash ledger; the daily return is the per-UTC-day sum of the **`change`** field (fee-inclusive cash-balance delta) over the return-bearing types `{trade, settlement, delivery, liquidation, negative_balance_fee}`, funnelled through the same `combine_realized_and_funding → compute_all_metrics` path as Bybit/OKX (`services/deribit_txn.py`, `services/deribit_ingest.py`, `job_worker` deribit branch). Funding is inside `settlement.change` (counted once — no separate funding stream, no `funding_fees` write). The read-only ground-truth harness (`scripts/deribit_ground_truth.py`) was widened to capture the field-semantics evidence.

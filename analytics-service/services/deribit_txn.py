@@ -102,6 +102,38 @@ def classify_instrument(instrument_name: str) -> str:
     return "unknown"
 
 
+def classify_instrument_settlement(instrument_name: str) -> tuple[bool, str]:
+    """Return ``(is_coin_settled, base_currency)`` for a Deribit instrument by
+    name — the single source of the coin-vs-USD settlement decision, shared by
+    the ledger cash converter (``txn_change_to_usd`` via ``_row_is_linear``) and
+    the allocator position normalizer (``positions._normalize_deribit_position``).
+
+    Linear (USD-margined) instruments carry a ``_USDC``/``_USDT``/``_EURR``
+    margin marker and settle in USD → ``(False, "")``. Everything else is
+    coin-margined (inverse); its base coin MUST be a known coin-margined
+    currency (BTC/ETH) or we FAIL LOUD — refusing to blind-multiply an unknown
+    coin by a USD index (mirrors ``txn_change_to_usd``'s unknown-currency guard,
+    the module's core silent-mis-scale defense). Handles perps, dated futures,
+    and options uniformly (all covered by the marker test, unlike
+    ``classify_instrument`` which collapses linear/inverse futures+options).
+    """
+    name = str(instrument_name or "").upper()
+    if not name:
+        raise ValueError(
+            "deribit instrument_name is empty; cannot classify settlement"
+        )
+    if any(marker in name for marker in _LINEAR_MARGIN_MARKERS):
+        return (False, "")
+    base = name.split("-", 1)[0].split("_", 1)[0]
+    if base not in _INVERSE_CURRENCIES:
+        raise ValueError(
+            f"deribit instrument {name!r}: coin-settled base {base!r} is not a "
+            f"known coin-margined currency {sorted(_INVERSE_CURRENCIES)}; "
+            "refusing to blind-multiply an unknown coin by a USD index"
+        )
+    return (True, base)
+
+
 # ---------------------------------------------------------------------------
 # Inverse coin->USD conversion at event-time index_price (D-07/D-08).
 # ---------------------------------------------------------------------------

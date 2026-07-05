@@ -27,9 +27,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import ccxt.async_support as ccxt
 import pytest
 
-# RED state on first run — this module does not exist yet. Task 2 creates it.
 from services.allocator_positions import (  # noqa: E402
-    DeribitNotSupportedError,
     _map_exception_to_sync_status,
     fetch_allocator_holdings,
     persist_allocator_holdings,
@@ -189,9 +187,7 @@ async def test_idempotent_upsert(api_key_row_factory):
 
 
 def test_error_status_mapping():
-    """INGEST-05 / D-07: CCXT exceptions map to api_keys.sync_status values.
-    Deribit's custom deferral error must map to 'error' (NOT 'revoked')
-    so the key stays usable for the derivative side."""
+    """INGEST-05 / D-07: CCXT exceptions map to api_keys.sync_status values."""
     cases: list[tuple[Exception, str]] = [
         (ccxt.AuthenticationError("401"), "revoked"),
         (ccxt.PermissionDenied("403"), "revoked"),
@@ -199,7 +195,6 @@ def test_error_status_mapping():
         (ccxt.NetworkError("timeout"), "error"),
         (ccxt.ExchangeNotAvailable("down"), "error"),
         (Exception("boom"), "error"),
-        (DeribitNotSupportedError("spot NYI"), "error"),
     ]
     for exc, expected in cases:
         got = _map_exception_to_sync_status(exc)
@@ -331,39 +326,71 @@ async def test_raw_payload_cap_4kb(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Test 7 — f3 Path B: Deribit spot raises DeribitNotSupportedError
+# Test 7 — Phase 71 (DRB-09): Deribit renders derivatives, spot deferred
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_deribit_balance_per_currency_shape(monkeypatch):
-    """f3 Path B — Deribit spot ingestion is deferred until a test key
-    is available. Rather than silently emit zero rows from {'total': {}},
-    the worker raises DeribitNotSupportedError BEFORE fetch_balance is
-    even called. _map_exception_to_sync_status routes this to 'error'
-    (NOT 'revoked') so the allocator sees the deferral and the
-    derivative side continues to sync."""
-    # Subclass check — this is the contract-level proof that Path B
-    # (not Path A: per-currency branch) was taken.
-    assert issubclass(DeribitNotSupportedError, ccxt.NotSupported)
+async def test_deribit_renders_derivatives_spot_deferred(monkeypatch):
+    """Phase 71 lifts f3 Path B. A Deribit allocator key no longer errors the
+    whole sync: spot is skipped gracefully (Deribit is derivatives-first; spot
+    ingestion stays deferred → empty), and the derivative side renders. The
+    sync completes cleanly (no exception, no warning), so the allocator sees
+    their Deribit positions instead of a deferral error.
+
+    Contract proof that spot was SKIPPED (not fetched): fetch_balance is never
+    called — there is no Deribit spot path."""
+    from services import allocator_positions as ap
 
     mock_exchange = AsyncMock()
     mock_exchange.id = "deribit"
-    # If fetch_balance gets called, Path A was taken — fail the test.
-    mock_exchange.fetch_balance = AsyncMock(return_value={
-        "total": {},
-        "info": {"result": {"BTC": {"balance": 0.5}, "ETH": {"balance": 2.0}}},
-    })
+    # If spot were attempted, fetch_balance would be called — it must NOT be.
+    mock_exchange.fetch_balance = AsyncMock(return_value={"total": {}})
 
-    with pytest.raises(DeribitNotSupportedError) as excinfo:
-        await fetch_allocator_holdings("deribit", mock_exchange)
+    async def _fake_fetch_positions(exchange_name, exchange):
+        return [
+            {
+                "symbol": "BTC-PERPETUAL",
+                "side": "short",
+                "size_base": 0.2,
+                "size_usd": 10000.0,
+                "entry_price": 48000.0,
+                "mark_price": 49900.0,
+                "unrealized_pnl": 2500.0,
+                "exchange": "deribit",
+            },
+        ]
 
-    assert "Deribit spot" in str(excinfo.value)
-    # fetch_balance MUST NOT be called — guard fires first
+    monkeypatch.setattr(ap, "fetch_positions", _fake_fetch_positions)
+
+    rows, warning = await fetch_allocator_holdings("deribit", mock_exchange)
+
+    assert warning is None
+    # Spot deferred → no spot rows; derivatives render.
+    spot = [r for r in rows if r["holding_type"] == "spot"]
+    deriv = [r for r in rows if r["holding_type"] == "derivative"]
+    assert spot == []
+    assert len(deriv) == 1
+    assert deriv[0]["symbol"] == "BTC-PERPETUAL"
+    assert deriv[0]["venue"] == "deribit"
+    assert deriv[0]["unrealized_pnl_usd"] == 2500.0
+    # No Deribit spot path — fetch_balance must never be called.
     mock_exchange.fetch_balance.assert_not_called()
 
-    # Mapping: error, not revoked (key stays usable for derivatives)
-    assert _map_exception_to_sync_status(excinfo.value) == "error"
+
+def test_deribit_error_class_removed():
+    """f3 Path B is lifted — the allocator-side DeribitNotSupportedError no
+    longer exists (its only purpose was to defer Deribit spot by raising).
+    The SEPARATE equity_reconstruction.DeribitNotSupportedError stays (that
+    deferral — reconstruction — is still in force, SC-3)."""
+    import services.allocator_positions as ap
+
+    assert not hasattr(ap, "DeribitNotSupportedError")
+    # Reconstruction deferral is untouched.
+    from services.equity_reconstruction import (
+        DeribitNotSupportedError as ReconDeferral,
+    )
+    assert issubclass(ReconDeferral, ccxt.NotSupported)
 
 
 # ---------------------------------------------------------------------------
