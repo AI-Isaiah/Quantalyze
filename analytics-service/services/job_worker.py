@@ -1850,6 +1850,32 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             )
             from services.redact import scrub_freeform_string
 
+            # P72 — fail-loud analytics stamp. A deribit permanent-FAIL below
+            # (ledger-incomplete/unenumerable/scope, or material-equity-empty)
+            # must leave the wizard's SyncPreviewStep poller a TERMINAL 'failed'
+            # gate instead of an infinitely-pending never-arriving 'complete' —
+            # mirroring the <2-days branch and run_csv_strategy_analytics. This
+            # is belt-and-suspenders vs the migration-038 status bridge; ship
+            # regardless. Strategy-mode only: key-mode has no per-key
+            # strategy_analytics row (per-key reads land in Phase 36).
+            async def _stamp_deribit_analytics_failed(message: str) -> None:
+                if is_key_mode:
+                    return
+                scrubbed = str(scrub_freeform_string(message))
+
+                def _upsert() -> None:
+                    ctx.supabase.table("strategy_analytics").upsert(
+                        {
+                            "strategy_id": strategy_id,
+                            "computation_status": "failed",
+                            "computation_error": scrubbed,
+                            "data_quality_flags": {"csv_source": True},
+                        },
+                        on_conflict="strategy_id",
+                    ).execute()
+
+                await db_execute(_upsert)
+
             # USD equity anchor — fetch_account_equity_usd does NOT cover deribit
             # (coin-margined USDT balance is not USD equity); this converts each
             # currency's coin equity at its event/mark index into USD.
@@ -1873,6 +1899,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # premise (>1 funded subaccount → ScopeAuthError), or a truncated
                 # crawl all mean we cannot PROVE coverage → clean permanent FAILED,
                 # never a silently-partial track record.
+                await _stamp_deribit_analytics_failed(
+                    "Deribit transaction history could not be verified as "
+                    "complete. " + str(scrub_freeform_string(str(exc)))
+                )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
                     error_message=(
@@ -1893,6 +1923,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 and abs(equity) > _DERIBIT_EMPTY_LEDGER_FLOOR_USD
                 and _completeness.total_return_rows == 0
             ):
+                await _stamp_deribit_analytics_failed(
+                    "Deribit account holds equity but the ledger produced no "
+                    "return-bearing activity in the window."
+                )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
                     error_message=(

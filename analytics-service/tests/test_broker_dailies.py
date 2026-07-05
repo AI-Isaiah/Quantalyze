@@ -464,6 +464,74 @@ async def test_deribit_material_equity_zero_rows_fails_loud():
 
 
 @pytest.mark.asyncio
+async def test_deribit_strategy_mode_ledger_incomplete_stamps_failed():
+    """P72 (Test C): in STRATEGY-mode a deribit ledger-incompleteness failure
+    must stamp strategy_analytics.computation_status='failed' BEFORE returning
+    FAILED/permanent.
+
+    The wizard's SyncPreviewStep polls strategy_analytics for a terminal state;
+    without the stamp the poller spins on a never-arriving 'complete' until it
+    times out to SYNC_FAILED. The stamp gives it a loud, terminal
+    GATE_ANALYTICS_FAILED gate instead. A partial ledger must still write NO
+    csv_daily_returns (no partial track record). Key-mode has no per-key
+    strategy_analytics row, so the stamp is strategy-mode only.
+    """
+    ctx, capture = _deribit_ctx()
+    patches, _ = _deribit_patches(
+        ctx,
+        records=[],
+        ledger_side_effect=LedgerCompletenessError("main×BTC incomplete"),
+    )
+    with _apply(patches), patch(
+        "services.job_worker._exchange_preflight",
+        new=AsyncMock(return_value=ctx),
+    ):
+        result = await run_derive_broker_dailies_job({"strategy_id": "s-drb"})
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    # No partial track record.
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"]), (
+        "a partial ledger must NOT upsert csv_daily_returns"
+    )
+    # But a terminal 'failed' analytics stamp so the wizard gate resolves.
+    stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+    assert stamps, (
+        "strategy-mode ledger-fail must stamp strategy_analytics so the wizard "
+        "poller reaches a terminal gate instead of spinning"
+    )
+    payload, on_conflict = stamps[0][1], stamps[0][2]
+    assert payload["strategy_id"] == "s-drb"
+    assert payload["computation_status"] == "failed"
+    assert payload["data_quality_flags"] == {"csv_source": True}
+    assert on_conflict == "strategy_id"
+
+
+@pytest.mark.asyncio
+async def test_deribit_material_equity_zero_rows_strategy_mode_stamps_failed():
+    """P72 (Test C, companion): the material-equity/zero-rows fail-loud branch
+    must ALSO stamp strategy_analytics='failed' in strategy-mode before returning
+    FAILED — same wizard-gate rationale as the ledger-incomplete branch."""
+    ctx, capture = _deribit_ctx()
+    patches, _ = _deribit_patches(
+        ctx,
+        records=[],  # zero realized records
+        report=CompletenessReport(total_return_rows=0),  # zero return rows
+    )
+    with _apply(patches), patch(
+        "services.job_worker._exchange_preflight",
+        new=AsyncMock(return_value=ctx),
+    ):
+        result = await run_derive_broker_dailies_job({"strategy_id": "s-drb"})
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"])
+    stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+    assert stamps, "material-equity-empty strategy-mode fail must stamp failed"
+    assert stamps[0][1]["computation_status"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_deribit_anchor_subtracts_net_external_flow():
     """F1: the initial-capital anchor subtracts net external flows. equity 100k,
     net flow −628k (net withdrawals) → account_balance passed to combine is
