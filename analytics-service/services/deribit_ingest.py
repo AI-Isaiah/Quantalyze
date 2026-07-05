@@ -37,10 +37,11 @@ from typing import Any
 from services.deribit_txn import (
     _INVERSE_CURRENCIES,
     CASH_BEARING_TYPES,
-    deribit_linear_external_flow_usd,
+    deribit_dated_external_flows_usd,
     inverse_days_needing_index,
     txn_rows_to_daily_records,
 )
+from services.external_flows import ExternalFlow
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger(__name__)
@@ -517,10 +518,15 @@ class CompletenessReport:
     two: a scope that was expected but never crawled (dropped loop) leaves its
     ``expected`` pairs without a ``reached_end=True`` entry and the gate raises.
 
-    ``net_external_flow_usd`` is the net USD of linear external-flow rows
-    (transfer/deposit/withdrawal/reward) — the equity anchor SUBTRACTS it (F1).
-    ``saw_unvalued_inverse_flow`` marks that a coin external-flow row could not be
-    valued here → the caller flags heuristic capital rather than under-correct.
+    ``dated_external_flows`` is the honest per-UTC-day ``list[ExternalFlow]`` of
+    every external-flow row (transfer/deposit/withdrawal/reward) valued at its
+    event-time USD (linear pass-through; inverse coin × same-day settlement index)
+    via ``deribit_dated_external_flows_usd`` — the ONE honest valuation path. It
+    feeds ONLY the NAV/TWR core's ``F_t`` term (never the realized sum, from which
+    ``_EXTERNAL_FLOW_TYPES`` are structurally excluded → count-once), replacing the
+    retired net-scalar anchor correction (F1). A withdrawal is NEGATIVE, a deposit
+    POSITIVE; an unvaluable inverse flow FAILS LOUD (LedgerValuationError) rather
+    than being silently degraded to heuristic capital.
     ``total_return_rows`` is the count of return-bearing rows across the crawl —
     used for the equity-vs-activity floor (C2: material equity + zero rows is a
     silently-empty green ledger).
@@ -528,8 +534,7 @@ class CompletenessReport:
 
     expected: dict[str, list[str]] = field(default_factory=dict)
     entries: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
-    net_external_flow_usd: float = 0.0
-    saw_unvalued_inverse_flow: bool = False
+    dated_external_flows: list[ExternalFlow] = field(default_factory=list)
     total_return_rows: int = 0
 
 
@@ -588,8 +593,7 @@ async def fetch_deribit_ledger_daily_records(
     # Pass 2 — crawl every OWED (scope, currency), concatenating the records.
     daily_records: list[dict[str, Any]] = []
     entries: dict[tuple[str, str], dict[str, Any]] = {}
-    net_external_flow_usd = 0.0
-    saw_unvalued_inverse_flow = False
+    dated_external_flows: list[ExternalFlow] = []
     total_return_rows = 0
     # Per-currency same-day settlement-index cache (fetched ONCE per inverse
     # currency, reused across every scope) — public/get_delivery_prices is
@@ -666,11 +670,18 @@ async def fetch_deribit_ledger_daily_records(
                 rows, supplemental_index=supplemental
             )
             daily_records.extend(records)
-            # F1: accumulate the net external capital flow (for the anchor) and
-            # the return-bearing row count (for the C2 equity-vs-activity floor).
-            flow, saw_inverse = deribit_linear_external_flow_usd(rows)
-            net_external_flow_usd += flow
-            saw_unvalued_inverse_flow = saw_unvalued_inverse_flow or saw_inverse
+            # Accumulate the honest DATED external flows (for the core's F_t term)
+            # and the return-bearing row count (for the C2 equity-vs-activity floor).
+            # The SAME `supplemental` settlement-index map built for
+            # txn_rows_to_daily_records feeds the dated producer — the 75-02 Finding
+            # C1 extension of inverse_days_needing_index already widened it to cover
+            # inverse external-flow quiet days, so a quiet-day coin withdrawal values
+            # against its same-day index instead of failing the whole job. Flow rows
+            # are _EXTERNAL_FLOW_TYPES (⊆ INFORMATIONAL_TYPES), so they are excluded
+            # from the realized `records` above — count-once by construction.
+            dated_external_flows.extend(
+                deribit_dated_external_flows_usd(rows, supplemental_index=supplemental)
+            )
             total_return_rows += sum(
                 1
                 for r in rows
@@ -687,8 +698,7 @@ async def fetch_deribit_ledger_daily_records(
     return daily_records, CompletenessReport(
         expected=expected,
         entries=entries,
-        net_external_flow_usd=net_external_flow_usd,
-        saw_unvalued_inverse_flow=saw_unvalued_inverse_flow,
+        dated_external_flows=dated_external_flows,
         total_return_rows=total_return_rows,
     )
 
