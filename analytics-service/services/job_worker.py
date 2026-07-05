@@ -1826,6 +1826,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     venue = ctx.key_row["exchange"]
 
     from services.broker_dailies import combine_realized_and_funding
+    from services.nav_twr import NavReconstructionError
     from services.exchange import fetch_account_equity_usd
     from services.funding_fetch import (
         fetch_funding_binance,
@@ -2007,9 +2008,51 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         except Exception:  # pragma: no cover
             pass
 
-    returns, meta = combine_realized_and_funding(
-        realized, funding, account_balance=equity, balance_error=balance_error,
-    )
+    try:
+        returns, meta = combine_realized_and_funding(
+            realized, funding, account_balance=equity, balance_error=balance_error,
+        )
+    except NavReconstructionError as exc:
+        # A STRUCTURAL NAV/TWR reconstruction failure surfacing from the honest
+        # core (services.nav_twr) via combine_realized_and_funding — a schema
+        # -drifted flow amount, an undatable/orphan flow, or a non-finite pnl.
+        # This call sits OUTSIDE the deribit LedgerValuationError try
+        # (:1916-1941), so without this typed catch the error escapes to the
+        # generic dispatcher classifier and is retried FOREVER as `unknown`
+        # (T-74-02 DoS). Mirror the LedgerValuationError disposition: a scrubbed
+        # terminal 'failed' stamp so the wizard poller reaches a gate instead of
+        # an infinite 'computing' spinner (strategy-mode only — key-mode has no
+        # per-key analytics row, exactly like the <2 branch below), then a
+        # PERMANENT FAILED. Narrowed to the TYPED subclass so a transient
+        # ValueError (network parse blip) still falls through to the generic
+        # handler and stays transient-retryable.
+        from services.redact import scrub_freeform_string
+        scrubbed = str(scrub_freeform_string(str(exc)))
+        if not is_key_mode:
+            def _stamp_nav_failed() -> None:
+                ctx.supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "computation_status": "failed",
+                        "computation_error": (
+                            "Broker return reconstruction failed on a structural "
+                            "input (schema drift, undatable/orphan flow, or a "
+                            "non-finite amount). " + scrubbed
+                        ),
+                        "data_quality_flags": {"csv_source": True},
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+
+            await db_execute(_stamp_nav_failed)
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "derive_broker_dailies: broker NAV/TWR reconstruction failed "
+                "structurally — " + scrubbed
+            ),
+            error_kind="permanent",
+        )
     if len(returns) < 2:
         # Brand-new / inactive account: not enough history to compile a
         # factsheet (compute_all_metrics needs >=2 days).
