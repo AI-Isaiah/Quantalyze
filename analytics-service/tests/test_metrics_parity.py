@@ -1002,8 +1002,11 @@ def test_golden_252d_expected_conftest_fixture_matches_committed_file(
 # Empirically-verified rescale relationships (quantstats 0.0.81, this session,
 # match < 1e-12) — the exact ratios are the load-bearing fact:
 #   sharpe / sortino / volatility / info_ratio : x sqrt(365/252) = x1.2035001863
-#   cagr (NONLINEAR — geometric on years=len/periods):
-#       cagr_365 == (1 + cagr_252) ** (365/252) - 1      (NOT x1.2035)
+#   cagr / calmar : INVARIANT to periods_per_year as of TWR-05 (2026-07-05).
+#       They now annualize on the CALENDAR clock (elapsed-calendar-days / 365),
+#       decoupled from `periods`. Pre-TWR-05 cagr rescaled GEOMETRICALLY
+#       ((1+cagr_252)**(365/252)-1) and calmar tracked it; that coupling is
+#       intentionally gone — return and risk are orthogonal clocks now.
 #   alpha (scalar greeks: alpha *= periods)    : x (365/252) = x1.4484126984  (linear)
 #   beta                                       : invariant (unitless ratio)
 #
@@ -1022,13 +1025,15 @@ _LINEAR_365_OVER_252 = 365 / 252  # 1.4484126984126984
 
 
 def test_periods_param_rescales_365(golden_252d_input):
-    """ANNUAL-04b: periods_per_year=365 rescales by the known relationships.
+    """ANNUAL-04b + TWR-05: periods_per_year=365 rescales the SQRT-class risk
+    scalars, while CAGR/Calmar are now INVARIANT to periods (calendar clock).
 
     Uses the SAME committed golden_252d input for the sqrt-class scalars + the
-    geometric CAGR (whose info_ratio/alpha are null in that fixture), then a
-    tiny aligned SYNTHETIC benchmark pair to exercise the greeks-alpha (#5) and
-    info_ratio (#7) sites that golden_252d cannot prove. Mutating any single
-    threaded site back to a literal 252 turns this RED (falsifiable both ways).
+    now-invariant CAGR/Calmar (whose info_ratio/alpha are null in that fixture),
+    then a tiny aligned SYNTHETIC benchmark pair to exercise the greeks-alpha
+    (#5) and info_ratio (#7) sites that golden_252d cannot prove. Mutating a
+    risk site back to a literal 252 — OR re-coupling CAGR/Calmar to periods —
+    turns this RED (falsifiable both ways).
     """
     r = golden_252d_input["returns"]
     b = golden_252d_input["benchmark"]
@@ -1046,26 +1051,34 @@ def test_periods_param_rescales_365(golden_252d_input):
             base_mj[key] * _SQRT_365_OVER_252, rel=1e-9
         ), f"{key} did not rescale by sqrt(365/252) — a threading hole at the {key} site"
 
-    # CAGR is geometric, NOT sqrt-scaled (34-RESEARCH Pitfall 1). Asserting
-    # x1.2035 here MUST fail; the geometric form is the correct relationship.
-    assert p365_mj["cagr"] == pytest.approx(
-        (1 + base_mj["cagr"]) ** (365 / 252) - 1, rel=1e-9
-    ), "cagr did not rescale GEOMETRICALLY (periods changes the years exponent)"
+    # TWR-05 (2026-07-05): CAGR now annualizes on the CALENDAR clock
+    # (elapsed-calendar-days / 365), INDEPENDENT of `periods_per_year`. So
+    # passing periods_per_year=365 no longer changes CAGR — base (252) and p365
+    # are identical. Reverting the CAGR site to
+    # `qs.stats.cagr(returns, periods=periods_per_year)` (the pre-split
+    # len/periods form) would make p365.cagr rescale geometrically again and
+    # turn THIS assertion RED (mutation-verified — the split is falsifiable).
+    assert p365_mj["cagr"] == pytest.approx(base_mj["cagr"], rel=1e-12), (
+        "cagr rescaled with periods_per_year — TWR-05 requires the CALENDAR-clock "
+        "(date-span) basis that is INVARIANT to periods_per_year"
+    )
 
-    # Falsifiable negative control: CAGR must NOT match the sqrt ratio (proves
-    # the geometric assertion above isn't accidentally satisfied by sqrt too).
+    # Falsifiable negative control: the PRE-TWR-05 geometric rescale must NOT
+    # hold any more (it did before the split). If this ever matches again, CAGR
+    # has silently regressed to the periods-dependent len/periods form.
     assert p365_mj["cagr"] != pytest.approx(
-        base_mj["cagr"] * _SQRT_365_OVER_252, rel=1e-6
-    ), "cagr matched the sqrt ratio — the geometric vs sqrt distinction is broken"
+        (1 + base_mj["cagr"]) ** (365 / 252) - 1, rel=1e-6
+    ), "cagr still rescales geometrically with periods — TWR-05 split not applied"
 
-    # calmar = CAGR / |max_drawdown|; max_drawdown is basis-invariant, so calmar
-    # rescales IDENTICALLY to CAGR. If `qs.stats.calmar` is left at a literal 252
-    # (the missed threading site — code-review C1), its internal CAGR leg stays
-    # 252 while this expected ratio tracks the threaded CAGR, turning this RED.
+    # calmar = CALENDAR-CAGR / |max_drawdown|; both legs are basis-invariant, so
+    # calmar is ALSO invariant to periods_per_year. If calmar were left routed
+    # through `qs.stats.calmar` (which recomputes its CAGR leg at len/periods),
+    # a non-252 caller would get a rescaled calmar and turn this RED.
     assert base_mj["calmar"] not in (None, 0), "golden calmar must be non-null for the proof"
-    assert p365_mj["calmar"] == pytest.approx(
-        base_mj["calmar"] * (p365_mj["cagr"] / base_mj["cagr"]), rel=1e-9
-    ), "calmar did not rescale with CAGR — qs.stats.calmar periods= not threaded (C1)"
+    assert p365_mj["calmar"] == pytest.approx(base_mj["calmar"], rel=1e-12), (
+        "calmar rescaled with periods_per_year — TWR-05 requires calmar to share "
+        "the calendar-CAGR basis (qs.stats.calmar no longer called)"
+    )
 
     # --- synthetic aligned pair: prove the greeks-alpha (#5) + info_ratio (#7)
     # sites thread, which golden_252d (alpha/info_ratio null) cannot. The inner
