@@ -465,28 +465,44 @@ def inverse_days_needing_index(
     rows: Sequence[Mapping[str, Any]],
 ) -> set[tuple[str, str]]:
     """The ``(UTC-day ISO, CURRENCY)`` pairs a settlement-index fetch must cover:
-    days on which an INVERSE (coin-margined) CASH_BEARING row with NONZERO
-    ``change`` exists but NO row in the batch supplies a same-day OWN
-    ``index_price`` for that currency.
+    days on which an INVERSE (coin-margined) row that will be VALUED against a
+    same-day index — a CASH_BEARING row OR an external-flow (``transfer``/
+    ``deposit``/``withdrawal``/``usdc_reward``) row — with NONZERO ``change``
+    exists but NO row in the batch supplies a same-day OWN ``index_price`` for
+    that currency.
 
-    These are exactly the "quiet day" rows (e.g. a ``negative_balance_fee`` on a
-    day with no index-bearing settlement) that would otherwise fail loud in
-    ``txn_change_to_usd`` for lack of any same-day index. The crawl consults this
-    to decide which days to fetch ``public/get_delivery_prices`` for; the fetched
-    prices feed back as ``txn_rows_to_daily_records(..., supplemental_index=...)``.
+    These are exactly the "quiet day" rows that would otherwise fail loud in
+    ``txn_change_to_usd`` for lack of any same-day index:
+      * a CASH_BEARING quiet day, e.g. a ``negative_balance_fee`` on a day with no
+        index-bearing settlement (the P72 live finding); and
+      * an INVERSE external-flow quiet day, e.g. a BTC ``withdrawal`` on a no-trade
+        day (Finding C1) — the flow producer
+        (``deribit_dated_external_flows_usd``) values it against a same-day index,
+        so an un-fetched inverse flow day sinks the whole job. BOTH must be
+        fetched; a deposit/withdrawal structurally carries no own ``index_price``.
 
-    Reuses ``_day_ccy_own_index`` (Pass 1) + the exact day/ccy computation of
-    ``txn_rows_to_daily_records`` so the two never disagree. Pure; never raises —
-    an undatable row is skipped here (it surfaces via the aggregator's fail-loud
-    path, not this planner). Excludes zero-change rows, linear currencies, and any
-    day already carrying an own index for that currency.
+    The crawl consults this to decide which days to fetch
+    ``public/get_delivery_prices`` for; the fetched prices feed back as the
+    ``supplemental_index`` of BOTH ``txn_rows_to_daily_records`` and
+    ``deribit_dated_external_flows_usd``.
+
+    Reuses ``_day_ccy_own_index`` (Pass 1) + the exact day/ccy computation of the
+    two valuers so all three never disagree. Pure; never raises — an undatable row
+    is skipped here (it surfaces via the aggregator's fail-loud path, not this
+    planner). Excludes zero-change rows, linear currencies, and any day already
+    carrying an own index for that currency.
     """
     own_index = _day_ccy_own_index(rows)
     needed: set[tuple[str, str]] = set()
     for row in rows:
         if not isinstance(row, Mapping):
             continue
-        if str(row.get("type", "")) not in CASH_BEARING_TYPES:
+        # Finding C1: BOTH cash-bearing rows AND inverse external-flow rows are
+        # valued against a same-day index, so BOTH quiet-day kinds need a fetch.
+        # (The linear-flow case is filtered out by the _INVERSE_CURRENCIES guard
+        # below — a USD-family flow never consumes an index.)
+        row_type = str(row.get("type", ""))
+        if row_type not in CASH_BEARING_TYPES and row_type not in _EXTERNAL_FLOW_TYPES:
             continue
         ccy = str(row.get("currency", "")).upper()
         if ccy not in _INVERSE_CURRENCIES:
