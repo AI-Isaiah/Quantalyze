@@ -793,6 +793,21 @@ describe("POST /api/admin/strategy-review — strategy.approve emission", () => 
               }),
             };
           }
+          if (table === "api_keys") {
+            // P72 venue gate: approve resolves the linked key's exchange.
+            // Non-ledger-backed ("okx") — this strategy has 100 trades so it
+            // takes the trade branch regardless; the lookup must just resolve.
+            return {
+              select: () => ({
+                eq: () => ({
+                  maybeSingle: async () => ({
+                    data: { exchange: "okx" },
+                    error: null,
+                  }),
+                }),
+              }),
+            };
+          }
           throw new Error(`unexpected from(${table})`);
         },
         // NEW-C10-01: strategy-review route switched to logAuditEventAsUser
@@ -806,6 +821,8 @@ describe("POST /api/admin/strategy-review — strategy.approve emission", () => 
     }));
     vi.doMock("@/lib/strategyGate", () => ({
       checkStrategyGate: () => ({ passed: true }),
+      isLedgerBackedExchange: (exchange: string | null | undefined) =>
+        exchange === "deribit",
       STRATEGY_GATE_MIN_TRADES: 5,
       STRATEGY_GATE_MIN_CSV_ROWS: 7,
     }));
