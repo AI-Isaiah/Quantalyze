@@ -48,6 +48,28 @@ from typing import Any
 # Sentinel distinguishing an ABSENT dict key from a present ``None``/``0`` value.
 _MISSING: Any = object()
 
+
+class LedgerValuationError(ValueError):
+    """A transaction-log row could not be structurally converted to USD —
+    permanent, never a transient network condition."""
+
+
+def _coerce_float(value: Any, *, field: str, row: Mapping[str, Any]) -> float:
+    """Coerce an untrusted transaction-log numeric field to ``float``, raising
+    ``LedgerValuationError`` (permanent, structural) — NOT a bare
+    ``ValueError``/``TypeError`` the worker's network over-catch would mistake
+    for transient — if the field schema-drifts to a non-numeric string or a
+    non-scalar type. Mirrors the undatable-timestamp wrap so EVERY structural
+    row→USD failure fails loud to a permanent wizard gate, never an infinite
+    'computing' spinner."""
+    try:
+        return float(value)
+    except (TypeError, ValueError) as e:
+        raise LedgerValuationError(
+            f"Deribit row id={row.get('id')!r} type={row.get('type')!r} has a "
+            f"non-numeric {field} {value!r}"
+        ) from e
+
 # ---------------------------------------------------------------------------
 # Instrument classification — inverse / linear / option / future (D-05).
 # Lifted verbatim from scripts.deribit_ground_truth; that harness now imports
@@ -172,7 +194,7 @@ def txn_change_to_usd(
     The ``change`` SIGN is trusted verbatim (credit +/debit -); it is NEVER
     re-derived from position side.
     """
-    change = float(row.get("change", 0.0) or 0.0)
+    change = _coerce_float(row.get("change", 0.0) or 0.0, field="change", row=row)
     if _row_is_linear(row):
         return change
     # Non-linear: it MUST be a known coin-margined currency (BTC/ETH). Any other
@@ -180,7 +202,7 @@ def txn_change_to_usd(
     # index multiply — fail loud rather than silently mis-scale.
     currency = str(row.get("currency", "")).upper()
     if currency not in _INVERSE_CURRENCIES:
-        raise ValueError(
+        raise LedgerValuationError(
             f"Deribit row id={row.get('id')!r} "
             f"instrument={row.get('instrument_name')!r} type={row.get('type')!r} "
             f"settles in {currency!r} which is neither USD-family (linear) nor a "
@@ -191,7 +213,7 @@ def txn_change_to_usd(
     if index_price is None:
         index_price = fallback_index
     if index_price is None:
-        raise ValueError(
+        raise LedgerValuationError(
             "inverse Deribit row "
             f"id={row.get('id')!r} instrument={row.get('instrument_name')!r} "
             f"type={row.get('type')!r} currency={currency!r} "
@@ -199,9 +221,9 @@ def txn_change_to_usd(
             "fallback; refusing a current/period-end or unit price fallback "
             "(D-07 cross-time conversion is category-invalid)"
         )
-    price = float(index_price)
+    price = _coerce_float(index_price, field="index_price", row=row)
     if price <= 0:
-        raise ValueError(
+        raise LedgerValuationError(
             f"inverse Deribit row id={row.get('id')!r} currency={currency!r} has a "
             f"non-positive index_price ({price}); refusing to value coin cash at "
             "<=0 (a silent zero/negative would corrupt the realized sum)"
@@ -397,8 +419,95 @@ def _row_utc_day(ts: Any) -> str:
     raise ValueError(f"uninterpretable transaction-log timestamp: {ts!r}")
 
 
+def _day_ccy_own_index(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[tuple[str, str], float]:
+    """Build the same-day per-(UTC-day, currency) event index from the batch's
+    OWN index-bearing rows — Pass 1 of ``txn_rows_to_daily_records``, factored so
+    ``inverse_days_needing_index`` consults the IDENTICAL map (they can never
+    diverge on which days already carry an own index).
+
+    Used ONLY as a fallback for cash-bearing rows lacking their own index_price;
+    never overrides a row's own event-time index. Same UTC day keeps it inside
+    D-07's event window (unlike a period-end index). Seeds ONLY for INVERSE
+    currencies (the only ones that ever consume the fallback) so a linear row —
+    e.g. BTC_USDC-PERPETUAL carries currency=USDC but a BTC index_price — can
+    never poison a USDC entry (M1); and the coercion is guarded so a malformed
+    index_price on any row cannot crash the whole job (untrusted input).
+    """
+    day_ccy_index: dict[tuple[str, str], float] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        index_price = row.get("index_price")
+        if index_price is None:
+            continue
+        ccy = str(row.get("currency", "")).upper()
+        if ccy not in _INVERSE_CURRENCIES:
+            continue
+        try:
+            day = _row_utc_day(row.get("timestamp"))
+            price = float(index_price)
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if price > 0:
+            day_ccy_index.setdefault((day, ccy), price)
+    return day_ccy_index
+
+
+def inverse_days_needing_index(
+    rows: Sequence[Mapping[str, Any]],
+) -> set[tuple[str, str]]:
+    """The ``(UTC-day ISO, CURRENCY)`` pairs a settlement-index fetch must cover:
+    days on which an INVERSE (coin-margined) CASH_BEARING row with NONZERO
+    ``change`` exists but NO row in the batch supplies a same-day OWN
+    ``index_price`` for that currency.
+
+    These are exactly the "quiet day" rows (e.g. a ``negative_balance_fee`` on a
+    day with no index-bearing settlement) that would otherwise fail loud in
+    ``txn_change_to_usd`` for lack of any same-day index. The crawl consults this
+    to decide which days to fetch ``public/get_delivery_prices`` for; the fetched
+    prices feed back as ``txn_rows_to_daily_records(..., supplemental_index=...)``.
+
+    Reuses ``_day_ccy_own_index`` (Pass 1) + the exact day/ccy computation of
+    ``txn_rows_to_daily_records`` so the two never disagree. Pure; never raises —
+    an undatable row is skipped here (it surfaces via the aggregator's fail-loud
+    path, not this planner). Excludes zero-change rows, linear currencies, and any
+    day already carrying an own index for that currency.
+    """
+    own_index = _day_ccy_own_index(rows)
+    needed: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) not in CASH_BEARING_TYPES:
+            continue
+        ccy = str(row.get("currency", "")).upper()
+        if ccy not in _INVERSE_CURRENCIES:
+            continue
+        raw_change = row.get("change", _MISSING)
+        if raw_change is _MISSING:
+            continue
+        try:
+            change = float(raw_change or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if change == 0.0:
+            continue
+        try:
+            day = _row_utc_day(row.get("timestamp"))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if (day, ccy) in own_index:
+            continue
+        needed.add((day, ccy))
+    return needed
+
+
 def txn_rows_to_daily_records(
     rows: Sequence[Mapping[str, Any]],
+    *,
+    supplemental_index: Mapping[tuple[str, str], float] | None = None,
 ) -> list[dict[str, Any]]:
     """Sum return-bearing transaction-log ``change`` deltas by UTC day into a
     SINGLE list of ``daily_pnl``-shaped records (mirrors
@@ -418,6 +527,12 @@ def txn_rows_to_daily_records(
     row-level ``index_price``; it is the SAME-DAY fallback for cash-bearing rows
     that structurally lack one (e.g. ``negative_balance_fee`` has no instrument).
 
+    ``supplemental_index`` is a SAME-DAY per-(UTC-day, currency) settlement-index
+    map (from ``public/get_delivery_prices``) used ONLY when the batch itself
+    carries no same-day index for a coin cash row — own-row/ledger index always
+    wins; still same-day, so D-07-compliant. Keys match ``_day_ccy_own_index``
+    EXACTLY (``(day_iso, CCY_UPPER)``).
+
     This is the single, count-once realized stream — funding is already inside
     ``settlement.change``, so there is NO separate funding return value. Emits ONE
     ``daily_pnl`` record per UTC day: ``side`` encodes the sign ("buy" for a
@@ -425,31 +540,9 @@ def txn_rows_to_daily_records(
     ``timestamp`` is ISO8601 UTC at 00:00:00. Consumed by
     ``trades_to_daily_returns_with_status``.
     """
-    # Pass 1: same-day per-currency event index from index-bearing rows. Used
-    # ONLY as a fallback for cash-bearing rows lacking their own index_price;
-    # never overrides a row's own event-time index. Same UTC day keeps it inside
-    # D-07's event window (unlike a period-end index). Seed ONLY for INVERSE
-    # currencies (the only ones that ever consume the fallback) so a linear row —
-    # e.g. BTC_USDC-PERPETUAL carries currency=USDC but a BTC index_price — can
-    # never poison a USDC entry (M1); and the coercion is guarded so a malformed
-    # index_price on any row cannot crash the whole job (untrusted input).
-    day_ccy_index: dict[tuple[str, str], float] = {}
-    for row in rows:
-        if not isinstance(row, Mapping):
-            continue
-        index_price = row.get("index_price")
-        if index_price is None:
-            continue
-        ccy = str(row.get("currency", "")).upper()
-        if ccy not in _INVERSE_CURRENCIES:
-            continue
-        try:
-            day = _row_utc_day(row.get("timestamp"))
-            price = float(index_price)
-        except (ValueError, TypeError, OverflowError):
-            continue
-        if price > 0:
-            day_ccy_index.setdefault((day, ccy), price)
+    # Pass 1: same-day per-currency event index from the batch's own index-
+    # bearing rows (see _day_ccy_own_index for the M1 / untrusted-input pins).
+    day_ccy_index = _day_ccy_own_index(rows)
 
     by_day: dict[str, float] = {}
     for row in rows:
@@ -465,30 +558,42 @@ def txn_rows_to_daily_records(
             # pass the completeness gate green. Distinguish absent from present-0.
             raw_change = row.get("change", _MISSING)
             if raw_change is _MISSING:
-                raise ValueError(
+                raise LedgerValuationError(
                     f"cash-bearing Deribit row id={row.get('id')!r} "
                     f"type={row_type!r} has NO `change` field — refusing to treat a "
                     "missing balance-delta as zero (schema drift would silently "
                     "zero realized cash and render a green-but-wrong track record)"
                 )
-            change = float(raw_change or 0.0)
-            day = _row_utc_day(row.get("timestamp"))
+            change = _coerce_float(raw_change or 0.0, field="change", row=row)
+            # An undatable cash-bearing row must fail loud as a STRUCTURAL
+            # valuation error (permanent), not a bare ValueError the network
+            # over-catch would mistake for transient. _row_utc_day is shared, so
+            # wrap at the aggregator call site rather than changing it.
+            try:
+                day = _row_utc_day(row.get("timestamp"))
+            except ValueError as e:
+                raise LedgerValuationError(str(e)) from e
             if change == 0.0:
                 # Zero-change row: observed activity, no cash, no index needed.
                 by_day.setdefault(day, 0.0)
                 continue
             ccy = str(row.get("currency", "")).upper()
-            usd = txn_change_to_usd(
-                row, fallback_index=day_ccy_index.get((day, ccy))
-            )
+            # Own-row/ledger same-day index ALWAYS wins; the supplemental
+            # settlement index (public/get_delivery_prices) is consulted ONLY when
+            # the batch carries no same-day index for this coin cash row. Both are
+            # same-day → D-07-compliant (never a period-end/current fallback).
+            fb = day_ccy_index.get((day, ccy))
+            if fb is None and supplemental_index is not None:
+                fb = supplemental_index.get((day, ccy))
+            usd = txn_change_to_usd(row, fallback_index=fb)
             by_day[day] = by_day.get(day, 0.0) + usd
             continue
         # Unknown type (incl. options_settlement_summary / correction, H3):
         # silence is unsafe both ways — fail loud on any cash, harmlessly ignore
         # a zero-change occurrence.
-        change = float(row.get("change", 0.0) or 0.0)
+        change = _coerce_float(row.get("change", 0.0) or 0.0, field="change", row=row)
         if change != 0.0:
-            raise ValueError(
+            raise LedgerValuationError(
                 f"unknown Deribit transaction-log type {row_type!r} carries "
                 f"nonzero change ({change}); it is in neither CASH_BEARING nor "
                 "INFORMATIONAL — classify it against fresh evidence before "

@@ -35,8 +35,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.deribit_txn import (
+    _INVERSE_CURRENCIES,
     CASH_BEARING_TYPES,
     deribit_linear_external_flow_usd,
+    inverse_days_needing_index,
     txn_rows_to_daily_records,
 )
 from services.redact import scrub_freeform_string
@@ -410,6 +412,97 @@ async def paginate_txn_log(
 
 
 # ---------------------------------------------------------------------------
+# Same-day settlement (delivery-price) index — the quiet-day inverse fallback.
+# public/get_delivery_prices publishes a SAME-DAY settlement mark per UTC day;
+# it is inside D-07's event window (NOT a period-end/current price), so it is a
+# legitimate same-time-basis fallback for a coin cash row on a day the ledger
+# itself carries no index (e.g. a negative_balance_fee on a quiet day).
+# ---------------------------------------------------------------------------
+
+# Documented max page size for get_delivery_prices (paginated newest-first by
+# offset; response result.data = [{date, delivery_price}], result.records_total).
+DELIVERY_PRICES_PAGE_COUNT: int = 100
+# ponytail: a defensive hard page cap so a delivery-price crawl can NEVER spin
+# forever on a misbehaving endpoint — 60×100 = 6,000 days (~16y) far exceeds
+# Deribit's history; we always stop far earlier at exhaustion or oldest_day.
+DELIVERY_PRICES_MAX_PAGES: int = 60
+
+
+async def fetch_deribit_settlement_index(
+    exchange: Any,
+    currency: str,
+    *,
+    oldest_day: str,
+    sleep: SleepFn = asyncio.sleep,
+) -> dict[str, float]:
+    """Per-UTC-day USD settlement index for ``currency`` from the PUBLIC
+    ``public/get_delivery_prices`` endpoint (``index_name={ccy}_usd``).
+
+    Pages by ``offset`` newest-first, accumulating ``{date_iso: delivery_price}``
+    for every ``delivery_price > 0``, and STOPS at the first of: a short page
+    (< ``count`` rows → history exhausted), the map reaching back to
+    ``oldest_day`` (``min(dates) <= oldest_day``), or the defensive
+    ``DELIVERY_PRICES_MAX_PAGES`` cap. Paces ``sleep`` between pages (mirrors
+    ``paginate_txn_log``'s ``LEDGER_PACE_SECONDS``).
+
+    This is a SAME-DAY settlement mark → D-07-compliant same-time-basis fallback,
+    NOT a period-end/current price. A failed public read is NON-fatal to
+    correctness — the aggregator still fails loud (Fix A) if a needed day stays
+    unvalued — so a fetch error returns whatever was accumulated rather than
+    crashing the crawl. Every ccxt error is scrubbed before logging.
+    """
+    index_name = f"{currency.lower()}_usd"
+    prices: dict[str, float] = {}
+    for page in range(DELIVERY_PRICES_MAX_PAGES):
+        if page:
+            await sleep(LEDGER_PACE_SECONDS)
+        params: dict[str, Any] = {
+            "index_name": index_name,
+            "offset": page * DELIVERY_PRICES_PAGE_COUNT,
+            "count": DELIVERY_PRICES_PAGE_COUNT,
+        }
+        try:
+            resp = await exchange.public_get_get_delivery_prices(params)
+        except Exception as exc:  # noqa: BLE001 - non-fatal; return partial map
+            logger.warning(
+                "deribit get_delivery_prices failed for index_name=%s offset=%s "
+                "(%s); returning %d accumulated day(s)",
+                index_name,
+                params["offset"],
+                scrub_freeform_string(str(exc)),
+                len(prices),
+            )
+            return prices
+        result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
+        data = result.get("data", []) if isinstance(result, Mapping) else []
+        if not isinstance(data, Sequence) or isinstance(data, (str, bytes)):
+            return prices
+        for entry in data:
+            if not isinstance(entry, Mapping):
+                continue
+            date = entry.get("date")
+            raw_price = entry.get("delivery_price")
+            if not date or raw_price is None:
+                continue
+            try:
+                price = float(raw_price)
+            except (TypeError, ValueError):
+                continue
+            if price > 0:
+                prices.setdefault(str(date), price)
+        # ponytail: gate exhaustion on a RAW empty page, not `< count` — decouples
+        # termination from the exact `count` ceiling (verified 100 live: count=1000
+        # clamps to 100, records_total ~2537) so a future page-size change can
+        # never truncate the crawl to page 1. The common case still stops early on
+        # the oldest-day / MAX_PAGES guards below.
+        if len(data) == 0:
+            break  # empty page — history exhausted
+        if prices and min(prices) <= oldest_day:
+            break  # accumulated back to the oldest needed day (newest-first)
+    return prices
+
+
+# ---------------------------------------------------------------------------
 # The scope×currency producer + the re-anchored D-02 completeness gate.
 # ---------------------------------------------------------------------------
 
@@ -498,6 +591,10 @@ async def fetch_deribit_ledger_daily_records(
     net_external_flow_usd = 0.0
     saw_unvalued_inverse_flow = False
     total_return_rows = 0
+    # Per-currency same-day settlement-index cache (fetched ONCE per inverse
+    # currency, reused across every scope) — public/get_delivery_prices is
+    # account-wide, so multiple scopes share the same {date: price} map.
+    settlement_index_cache: dict[str, dict[str, float]] = {}
     for scope in scopes:
         auth = scope_auths[scope.label]
         for currency in expected[scope.label]:
@@ -523,7 +620,51 @@ async def fetch_deribit_ledger_daily_records(
             # first-page -32602 "no wallet" is absorbed INSIDE paginate_txn_log
             # (returns [] → recorded complete-empty below); a -32602 AFTER rows
             # were fetched escapes here and fails loud (F-3: never drop real rows).
-            records = txn_rows_to_daily_records(rows)
+            #
+            # P72: an INVERSE (coin-margined) currency may carry a quiet-day cash
+            # row (e.g. a negative_balance_fee) on a day with no OWN same-day
+            # index — supply the SAME-DAY settlement index (public/get_delivery_
+            # prices) so it values D-07-compliantly instead of failing loud. Fetch
+            # ONCE per currency (cached across scopes) and only when such days
+            # exist; own-row/ledger index always wins inside the aggregator.
+            supplemental: dict[tuple[str, str], float] | None = None
+            ccy_upper = currency.upper()
+            if ccy_upper in _INVERSE_CURRENCIES:
+                needed = {
+                    (d, c)
+                    for (d, c) in inverse_days_needing_index(rows)
+                    if c == ccy_upper
+                }
+                if needed:
+                    needed_min = min(d for (d, _c) in needed)
+                    # (Re)fetch when the cache is absent, empty, or too SHALLOW for
+                    # this scope's oldest needed day. A later multi-subaccount scope
+                    # needing an OLDER quiet day than the first scope's anchor must
+                    # not get a too-shallow cache hit → its row would fail loud even
+                    # though the settlement history exists (M1 latent trap). A too-
+                    # shallow map is replaced by a deeper fetch from offset 0 (cheap);
+                    # the `not cached` guard keeps min({}) from ever running. The
+                    # cache is keyed by the UPPERCASED currency (FIX 3) so a lowercase
+                    # code can never cause a miss / duplicate fetch.
+                    cached = settlement_index_cache.get(ccy_upper)
+                    if cached is None or not cached or min(cached) > needed_min:
+                        settlement_index_cache[ccy_upper] = (
+                            await fetch_deribit_settlement_index(
+                                exchange,
+                                currency,
+                                oldest_day=needed_min,
+                                sleep=sleep,
+                            )
+                        )
+                    price_map = settlement_index_cache[ccy_upper]
+                    supplemental = {
+                        (d, c): price_map[d]
+                        for (d, c) in needed
+                        if d in price_map
+                    }
+            records = txn_rows_to_daily_records(
+                rows, supplemental_index=supplemental
+            )
             daily_records.extend(records)
             # F1: accumulate the net external capital flow (for the anchor) and
             # the return-bearing row count (for the C2 equity-vs-activity floor).
