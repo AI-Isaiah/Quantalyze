@@ -655,3 +655,132 @@ describe("[H-0197] SyncPreviewStep — persistent heavy-fetch fault escalates", 
     errSpy.mockRestore();
   });
 });
+
+// ---------------------------------------------------------------------------
+// P72 (Test E) — ledger-backed (Deribit) success path. A keyed strategy whose
+// returns live in csv_daily_returns (tradeCount 0, csvRowCount >= 7) must reach
+// the "passed" branch and render the FactsheetPreview + a days-of-returns line
+// (NOT "0 trades detected"). Pre-P72 the terminal Promise.all had no
+// csv_daily_returns query, so the gate saw csvRowCount 0 and false-failed
+// INSUFFICIENT_TRADES for a keyed Deribit strategy.
+// ---------------------------------------------------------------------------
+describe("[P72] SyncPreviewStep — ledger-backed (Deribit) success path", () => {
+  /**
+   * Install a mock whose terminal fetch reports 0 trades but `csvCount`
+   * csv_daily_returns rows, complete analytics, and a deribit key — the exact
+   * shape of a verified Deribit onboarding.
+   */
+  function installDeribitPassMock(csvCount: number) {
+    const thenable = (data: unknown, count: number) => ({
+      eq: () => thenable(data, count),
+      neq: () => thenable(data, count),
+      order: () => thenable(data, count),
+      limit: () => thenable(data, count),
+      maybeSingle: () => Promise.resolve({ data, error: null }),
+      then: (
+        resolve: (v: { data: unknown; count: number; error: null }) => void,
+      ) => resolve({ data, count, error: null }),
+    });
+
+    const client = {
+      from: (table: string) => ({
+        select: (cols: string) => {
+          if (cols === "computation_status, computed_at") {
+            // Stale complete freshness probe → kickoff POST still fires.
+            return {
+              eq: () => ({
+                maybeSingle: () =>
+                  Promise.resolve({
+                    data: {
+                      computation_status: "complete",
+                      computed_at: "2000-01-01T00:00:00.000Z",
+                    },
+                    error: null,
+                  }),
+              }),
+            };
+          }
+          if (cols === "computation_status, computation_error") {
+            return {
+              eq: () => ({
+                maybeSingle: () =>
+                  Promise.resolve({
+                    data: {
+                      computation_status: "complete",
+                      computation_error: null,
+                    },
+                    error: null,
+                  }),
+              }),
+            };
+          }
+          if (table === "csv_daily_returns") return thenable(null, csvCount);
+          if (table === "trades") return thenable(null, 0);
+          if (table === "api_keys") return thenable({ exchange: "deribit" }, 0);
+          // Heavy analytics-column row.
+          return thenable(
+            {
+              cagr: 0.12,
+              sharpe: 1.1,
+              sortino: 1.4,
+              max_drawdown: -0.08,
+              volatility: 0.2,
+              cumulative_return: 0.3,
+              sparkline_returns: [0.01, -0.02, 0.03],
+              computed_at: "2026-07-01T00:00:00.000Z",
+            },
+            0,
+          );
+        },
+      }),
+    };
+    currentClientFactory = () => client;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, { status: 200 }),
+    );
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+  });
+
+  it("keyed Deribit with 0 trades + >=7 csv rows + complete reaches the factsheet preview", async () => {
+    installDeribitPassMock(30);
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    // Reached the "passed" branch (FactsheetPreview header).
+    expect(
+      screen.getByRole("heading", { name: /your verified factsheet is ready/i }),
+    ).toBeInTheDocument();
+    // Days-of-returns copy, NOT a "0 trades detected" line.
+    expect(screen.getByText(/30 days of returns detected/i)).toBeInTheDocument();
+    expect(screen.queryByText(/0 trades detected/i)).not.toBeInTheDocument();
+    // The "use this key" affordance is present on the passed branch.
+    expect(screen.getByTestId("wizard-use-this-key")).toBeInTheDocument();
+  });
+});

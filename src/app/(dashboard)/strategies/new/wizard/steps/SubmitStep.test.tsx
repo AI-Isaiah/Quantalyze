@@ -29,6 +29,7 @@ vi.mock("@/lib/for-quants-analytics", () => ({
 
 const SNAPSHOT: SyncPreviewSnapshot = {
   tradeCount: 120,
+  csvRowCount: 0,
   earliestTradeAt: "2024-01-01T00:00:00Z",
   latestTradeAt: "2024-06-01T00:00:00Z",
   detectedMarkets: ["BTC", "ETH"],
