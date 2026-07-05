@@ -62,18 +62,24 @@ def _hand_sortino(returns: pd.Series, periods: int = 252, target: float = 0.0) -
 
 
 def _hand_cagr(returns: pd.Series) -> float:
-    """CAGR from daily returns series.
+    """CAGR from daily returns, annualized on the CALENDAR clock (TWR-05).
 
     total_return = prod(1 + r_i) - 1
-    years = n_days / 252
-    cagr = (1 + total_return)^(1/years) - 1
+    elapsed_days = (last_date - first_date).days over the DatetimeIndex
+    cagr = (1 + total_return)^(365 / elapsed_days) - 1
+
+    Mirrors services.metrics (founder decision 2026-07-05): the 365
+    calendar-day span replaced the old len/252 exponent so return magnitude
+    is honest for 24/7 crypto and sparse CSV/MT5 series alike. Recomputed
+    independently here (numpy/pandas only) — reverting metrics.py to the
+    len/252 basis makes this oracle diverge and the assertion fail.
     """
-    cumulative = (1 + returns).prod()
-    n_days = len(returns)
-    years = n_days / 252.0
-    if years == 0:
+    clean = returns.dropna()
+    if len(clean) < 2:
         return 0.0
-    return float(cumulative ** (1.0 / years) - 1)
+    cumulative = (1 + clean).prod()
+    elapsed_days = max((clean.index[-1] - clean.index[0]).days, 1)
+    return float(cumulative ** (365.0 / elapsed_days) - 1)
 
 
 def _hand_max_drawdown(returns: pd.Series) -> float:
