@@ -560,3 +560,161 @@ class TestNaNReturnsDownstreamTolerance:
         row_payload = {"strategy_id": "x", "date": "2026-01-01", "daily_return": float(val)}
         with pytest.raises(ValueError, match="not JSON compliant"):
             httpx.Request("POST", "http://csv-daily-returns.local", json=[row_payload])
+
+
+# ---------------------------------------------------------------------------
+# Phase 74 Plan 04 — estimated_start<=0 account renders honest end-to-end
+# ---------------------------------------------------------------------------
+class TestNaNAccountHonestEndToEnd:
+    """The full honest chain for an estimated_start<=0 broker account:
+
+      combine_realized_and_funding emits guarded-day NaN (the flow-aware core's
+      negative_nav_guard) -> the broker upsert (job_worker.py) SKIPS those days
+      so csv_daily_returns holds only the finite real days (guarded days ABSENT,
+      never a fabricated 0.0, never a crash at the httpx JSON encoder) ->
+      run_csv_strategy_analytics computes a FINITE factsheet on the surviving
+      days and completes without raising.
+
+    This is truth #3: an estimated_start<=0 account is honest end-to-end — no
+    fabricated magnitude, no exception — across the broker + CSV analytics path.
+
+    NOTE on status: the broker->CSV path stamps `complete` (with csv_source),
+    NOT `complete_with_warnings`. The NAV-denominator guard keys the honest core
+    carries on the meta are surfaced as complete_with_warnings only on the
+    run_strategy_analytics (stored-trades) callsite wired in 74-03; the CSV job
+    (run_csv_strategy_analytics) re-reads csv_daily_returns and has no access to
+    the guard meta, and its _mark_complete overwrites data_quality_flags with
+    {csv_source: True}. Carrying the guard flag through the CSV job would require
+    modifying analytics_runner.py (explicitly out of this plan's scope). The
+    honesty this plan guarantees for the CSV path is the absence of any
+    fabricated magnitude and the absence of a crash — asserted below.
+    """
+
+    @staticmethod
+    def _nan_bearing_returns() -> "pd.Series":
+        """estimated_start<=0 shape: leading + interior guarded-day NaN, real
+        returns on the rest."""
+        import numpy as np
+
+        idx = pd.DatetimeIndex(
+            ["2024-05-01", "2024-05-02", "2024-05-03",
+             "2024-05-04", "2024-05-05", "2024-05-06"]
+        )
+        return pd.Series(
+            [np.nan, 0.012, np.nan, -0.008, 0.021, 0.004],
+            index=idx, dtype="float64",
+        )
+
+    async def _run_broker_path(self) -> list[dict]:
+        """Stage 1 — run the REAL broker handler and capture the exact
+        csv_daily_returns rows it persists for an estimated_start<=0 account."""
+        from services.job_worker import (
+            DispatchOutcome,
+            run_derive_broker_dailies_job,
+        )
+
+        capture: dict = {"upserts": [], "rpc_calls": []}
+        ctx = MagicMock()
+        ctx.exchange = AsyncMock()
+        ctx.supabase = MagicMock()
+        ctx.key_row = {"id": "key-e2e", "exchange": "binance", "user_id": "user-1"}
+        ctx.strategy_row = {"id": "strat-e2e", "user_id": "user-1"}
+
+        def _table(name: str) -> MagicMock:
+            tbl = MagicMock()
+
+            def _upsert(payload: object, **kw: object) -> MagicMock:
+                capture["upserts"].append((name, payload, kw.get("on_conflict")))
+                stub = MagicMock()
+                stub.execute.return_value = MagicMock(data=1)
+                return stub
+
+            tbl.upsert.side_effect = _upsert
+            return tbl
+
+        ctx.supabase.table.side_effect = _table
+
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            capture["rpc_calls"].append((name, payload))
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=1)
+            return stub
+
+        ctx.supabase.rpc.side_effect = _rpc
+
+        combine = MagicMock(
+            return_value=(
+                self._nan_bearing_returns(),
+                {"used_heuristic_capital": False, "negative_nav_guard": True},
+            )
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-e2e"}
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades", new=AsyncMock(return_value=[])
+        ), patch(
+            "services.job_worker.aclose_exchange", new=AsyncMock()
+        ), patch(
+            "services.exchange.fetch_account_equity_usd",
+            new=AsyncMock(return_value=(10000.0, False)),
+        ), patch(
+            "services.funding_fetch.fetch_funding_binance",
+            new=AsyncMock(return_value=[]),
+        ), patch(
+            "services.broker_dailies.combine_realized_and_funding", new=combine
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ):
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        csv_upserts = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
+        assert len(csv_upserts) == 1
+        return csv_upserts[0][1]  # the rows payload
+
+    @pytest.mark.asyncio
+    async def test_nan_account_honest_end_to_end(self) -> None:
+        import httpx
+        import numpy as np
+
+        from services.analytics_runner import run_csv_strategy_analytics
+
+        # Stage 1 — broker path: guarded days ABSENT, only finite days persisted.
+        rows = await self._run_broker_path()
+        assert [r["date"] for r in rows] == [
+            "2024-05-02", "2024-05-04", "2024-05-05", "2024-05-06",
+        ], f"guarded-day NaN rows must be absent from csv_daily_returns; got {rows!r}"
+        for r in rows:
+            assert np.isfinite(r["daily_return"])
+        # The persisted payload survives the real httpx JSON encoder that rejects
+        # non-finite floats — the 74-01 sink-(b) crash cannot occur.
+        httpx.Request("POST", "http://csv-daily-returns.local", json=rows)
+
+        # Stage 2 — CSV analytics runs the REAL compute_all_metrics on the
+        # surviving finite days and renders a FINITE factsheet, no exception.
+        sb = _make_supabase_mock(rows)
+        with patch("services.analytics_runner.get_supabase", return_value=sb), \
+             patch("services.analytics_runner.get_benchmark_returns",
+                   new=AsyncMock(return_value=(None, True))):
+            result = await run_csv_strategy_analytics("strat-e2e")
+
+        assert result["status"] == "complete"
+
+        upsert_calls = sb.table.return_value.upsert.call_args_list
+        completed = [
+            c for c in upsert_calls
+            if c.args[0].get("computation_status") == "complete"
+        ]
+        assert len(completed) == 1, "estimated_start<=0 account must complete cleanly"
+        payload = completed[0].args[0]
+        # No fabricated / non-finite magnitude reaches the factsheet KPIs.
+        for key in ("cumulative_return", "cagr", "volatility", "max_drawdown"):
+            assert np.isfinite(payload[key]), (
+                f"{key} must be finite — a guarded day must never surface as a "
+                f"fabricated or NaN magnitude; got {payload[key]!r}"
+            )
+        assert payload["data_quality_flags"]["csv_source"] is True

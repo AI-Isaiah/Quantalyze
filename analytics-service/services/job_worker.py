@@ -2101,6 +2101,18 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # index (strategy_id,date) / (api_key_id,date) makes the re-derive
     # idempotent. Chunked so a long-history account can't exceed PostgREST's
     # request-size ceiling in a single upsert.
+    import pandas as pd
+
+    # 74-04 NaN policy (74-01 sink-(b) finding). The flow-aware core
+    # (services.nav_twr) emits np.nan for a GUARDED day (estimated_start<=0 ->
+    # negative_nav_guard, dust, or flow-dominated) rather than silently
+    # substituting a floor. csv_daily_returns is DOUBLE PRECISION (it *stores*
+    # NaN), but the postgrest-py/httpx JSON encoder raises "Out of range float
+    # values are not JSON compliant: nan" BEFORE the request is sent — so a NaN
+    # row would crash the upsert fail-loud. A guarded day has no interpretable
+    # return, so it must be honestly ABSENT: SKIP the NaN row (never coerce to
+    # 0.0, which would fabricate a flat return; never crash). Applied
+    # identically to both the is_key_mode and strategy-mode payload builders.
     if is_key_mode:
         rows_payload = [
             {
@@ -2111,6 +2123,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 "daily_return": float(val),
             }
             for ts, val in returns.items()
+            if pd.notna(val)
         ]
         _conflict = "api_key_id,date"
     else:
@@ -2121,6 +2134,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 "daily_return": float(val),
             }
             for ts, val in returns.items()
+            if pd.notna(val)
         ]
         _conflict = "strategy_id,date"
 
