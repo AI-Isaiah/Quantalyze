@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from services.deribit_txn import txn_rows_to_daily_records
@@ -70,6 +71,18 @@ class ScopeAuthError(RuntimeError):
     """A scope's read auth could not be resolved (no subaccount token could be
     minted). A scope we cannot authenticate is a silent under-fetch, so this
     fails loud rather than skipping the scope."""
+
+
+class LedgerCompletenessError(RuntimeError):
+    """The re-anchored D-02 honesty gate. Raised when ANY expected scope ×
+    currency did not reach ``continuation=null`` (a truncated crawl, a -32602
+    currency skip, or a dropped scope). This is LEDGER completeness — NOT a
+    reconciliation to the fill counts 18,778 / 21,014 / 61,248, which the Wave-0
+    probe (BLOCKING_FINDING) proved reconcile to no API surface."""
+
+
+# 2015-01-01 UTC in ms — full Deribit history default (txn-log spans 2023→2026).
+DEFAULT_START_MS: int = 1_420_070_400_000
 
 
 # ---------------------------------------------------------------------------
@@ -292,3 +305,134 @@ async def paginate_txn_log(
         if not continuation:
             break
     return rows
+
+
+# ---------------------------------------------------------------------------
+# The scope×currency producer + the re-anchored D-02 completeness gate.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CompletenessReport:
+    """Per (scope, currency) crawl status over the date range.
+
+    ``expected`` maps each enumerated scope label → its enumerated currencies
+    (the full coverage the crawl OWES). ``entries`` maps (scope, currency) →
+    ``{reached_end, rows, error?}`` recorded by the crawl. The gate compares the
+    two: a scope that was expected but never crawled (dropped loop) leaves its
+    ``expected`` pairs without a ``reached_end=True`` entry and the gate raises.
+    """
+
+    expected: dict[str, list[str]] = field(default_factory=dict)
+    entries: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+async def fetch_deribit_ledger_daily_records(
+    exchange: Any,
+    since_ms: int | None = None,
+    *,
+    sleep: SleepFn = asyncio.sleep,
+) -> tuple[list[dict[str, Any]], CompletenessReport]:
+    """Crawl the txn-log ledger across every scope × currency and return the
+    accumulated funding-inclusive ``daily_pnl`` records plus a
+    ``CompletenessReport``.
+
+    For each scope: resolve its auth (fail loud on an unresolvable scope) and
+    enumerate its currencies from the account. Then crawl every (scope, currency)
+    via ``paginate_txn_log``, feed the rows through ``txn_rows_to_daily_records``
+    (70-02, the funding-inclusive single sum), and CONCATENATE every scope's
+    records into ONE flat list — records are sign-encoded (``side`` = sign,
+    ``price`` = abs USD), so abs-summing opposite-sign same-day scopes would net
+    them WRONG (+100 and −30 → 130, not +70). ``trades_to_daily_returns_with_status``
+    decodes side→sign and bucket-sums per UTC day, so concatenation preserves
+    each record's signed contribution.
+
+    Crawl outcomes recorded in the report:
+      * success → ``reached_end=True``;
+      * ``LedgerTruncatedError`` (10028 budget exhausted) → ``reached_end=False``;
+      * ``-32602`` (non-margin currency) → ``reached_end=False`` (a graceful skip
+        is NOT complete — it can never masquerade as a full crawl, D-14);
+      * any other error → RE-RAISED (fail loud; never swallowed as a skip).
+
+    The LIVE multi-year crawl over real creds is 70-05/live-gated; the producer
+    LOGIC here is CI-provable via synthetic scope/currency stubs.
+    """
+    scopes = await enumerate_scopes(exchange)
+    start_ms = since_ms if since_ms is not None else DEFAULT_START_MS
+    end_ms = _now_ms()
+
+    # Pass 1 — resolve auth (fail loud) + enumerate the OWED coverage per scope.
+    expected: dict[str, list[str]] = {}
+    scope_auths: dict[str, dict[str, Any]] = {}
+    for scope in scopes:
+        auth = await resolve_scope_auth(exchange, scope)
+        scope_auths[scope.label] = auth
+        expected[scope.label] = await enumerate_currencies(exchange, scope, auth)
+
+    # Pass 2 — crawl every OWED (scope, currency), concatenating the records.
+    daily_records: list[dict[str, Any]] = []
+    entries: dict[tuple[str, str], dict[str, Any]] = {}
+    for scope in scopes:
+        auth = scope_auths[scope.label]
+        for currency in expected[scope.label]:
+            key = (scope.label, currency)
+            try:
+                rows = await paginate_txn_log(
+                    exchange,
+                    scope.label,
+                    currency,
+                    start_ms,
+                    end_ms,
+                    auth,
+                    sleep=sleep,
+                )
+            except LedgerTruncatedError as exc:
+                entries[key] = {
+                    "reached_end": False,
+                    "rows": 0,
+                    "error": str(scrub_freeform_string(str(exc))),
+                }
+                continue
+            except Exception as exc:  # noqa: BLE001
+                if _deribit_error_code(exc) == _NON_MARGIN_CURRENCY_CODE:
+                    entries[key] = {
+                        "reached_end": False,
+                        "rows": 0,
+                        "error": "-32602 non-margin currency skip",
+                    }
+                    continue
+                raise
+            records = txn_rows_to_daily_records(rows)
+            daily_records.extend(records)
+            entries[key] = {"reached_end": True, "rows": len(rows)}
+
+    return daily_records, CompletenessReport(expected=expected, entries=entries)
+
+
+def assert_ledger_complete(report: CompletenessReport) -> None:
+    """The re-anchored D-02 honesty gate. Raise ``LedgerCompletenessError`` if
+    ANY expected scope × currency did not reach ``continuation=null``.
+
+    Takes NO fill-count total: completeness over the date range — not a
+    reconciliation to 18,778 / 21,014 / 61,248 (Wave-0 BLOCKING_FINDING: those
+    fill-level totals reconcile to no API surface) — is the honesty anchor. A
+    truncated crawl, a -32602 skip, and a dropped scope all leave the gate
+    failing, so a silently-partial ledger can never render as complete."""
+    incomplete: list[str] = []
+    for scope_label, currencies in report.expected.items():
+        for currency in currencies:
+            entry = report.entries.get((scope_label, currency))
+            if entry is None or not entry.get("reached_end"):
+                incomplete.append(f"{scope_label}×{currency}")
+    if incomplete:
+        raise LedgerCompletenessError(
+            "Deribit ledger is INCOMPLETE — these scope×currency crawls did not "
+            "reach continuation=null (truncation, -32602 skip, or dropped scope): "
+            + ", ".join(sorted(incomplete))
+            + ". Refusing to render a silently-partial ledger as a complete track "
+            "record (re-anchored D-02 gate)."
+        )
