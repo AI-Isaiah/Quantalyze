@@ -647,3 +647,49 @@ async def fetch_deribit_fills(
             for trade in trades:
                 fills.append(_trade_to_fillrow(trade))
     return fills
+
+
+# ---------------------------------------------------------------------------
+# ADVISORY fill-count cross-check — NOT the honesty gate.
+# ---------------------------------------------------------------------------
+
+# The three LTP account fill totals observed out-of-band. Wave-0 BLOCKING_FINDING:
+# these figures reconcile to NO API surface (they appear to count fills/legs, not
+# transaction-log rows), so they are an OPTIONAL cross-check ONLY. The
+# returns-completeness honesty gate is ``assert_ledger_complete`` (70-03), NEVER
+# this fill count. Keyed by account label for bookkeeping — do NOT wire any of
+# these into a fail-loud gate.
+KNOWN_TRADE_TOTALS: dict[str, int] = {
+    "ltp_1": 18_778,
+    "ltp_2": 21_014,
+    "ltp_3": 61_248,
+}
+
+
+def reconcile_fill_count(fetched_total: int, known_total: int) -> dict[str, Any]:
+    """ADVISORY fill-count cross-check — RETURNS a diff report and NEVER raises.
+
+    This is DELIBERATELY not a gate. The Wave-0 BLOCKING_FINDING proved the known
+    fill totals (18,778 / 21,014 / 61,248) reconcile to NO API surface, so a
+    shortfall here is advisory evidence only — it is emitted as a WARN-severity
+    report, never a ``DeribitCountGateError`` (no such type exists by design). The
+    returns-completeness honesty gate is ``assert_ledger_complete`` (70-03, ledger
+    COMPLETENESS over the date range), NOT this count. A caller may log/record the
+    report; it must never mistake a fill-count shortfall for the ledger gate.
+    """
+    shortfall = max(known_total - fetched_total, 0)
+    reconciles = fetched_total == known_total
+    return {
+        "fetched_total": fetched_total,
+        "known_total": known_total,
+        "diff": fetched_total - known_total,
+        "shortfall": shortfall,
+        "reconciles": reconciles,
+        "advisory": True,
+        "severity": "info" if reconciles else "warn",
+        "note": (
+            "ADVISORY ONLY — fill totals reconcile to no API surface (Wave-0 "
+            "BLOCKING_FINDING). The returns honesty gate is ledger completeness "
+            "(assert_ledger_complete, 70-03), NEVER this fill count."
+        ),
+    }
