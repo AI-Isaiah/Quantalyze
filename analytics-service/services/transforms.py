@@ -1,6 +1,19 @@
-import pandas as pd
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, TypedDict
+
 import numpy as np
-from typing import Any, TypedDict
+import pandas as pd
+
+if TYPE_CHECKING:
+    # NavTWRMeta extends ReturnsComputationMeta with the additive DQ-01 guard
+    # keys. Imported under TYPE_CHECKING only: the runtime import of the core
+    # is lazy (inside trades_to_daily_returns_with_status) to break the
+    # transforms <-> nav_twr module cycle (nav_twr imports ReturnsComputationMeta
+    # from here). ``from __future__ import annotations`` makes every annotation a
+    # string so this type is never needed at runtime.
+    from services.nav_twr import NavTWRMeta
 
 
 class ReturnsComputationMeta(TypedDict):
@@ -71,7 +84,7 @@ def trades_to_daily_returns_with_status(
     trades: list[dict[str, Any]],
     account_balance: float | None = None,
     balance_error: bool = False,
-) -> tuple[pd.Series, ReturnsComputationMeta]:
+) -> tuple[pd.Series, "NavTWRMeta"]:
     """Audit-2026-05-07 #9 — same conversion as ``trades_to_daily_returns``
     but ALSO returns a ``ReturnsComputationMeta`` describing how
     initial_capital was derived. The caller propagates the flags into
@@ -93,10 +106,15 @@ def trades_to_daily_returns_with_status(
         ``(returns, meta)`` where ``meta`` is a ``ReturnsComputationMeta``
         dict with the three flags described in the TypedDict docstring.
     """
+    # Lazy import breaks the transforms <-> nav_twr module cycle: nav_twr imports
+    # ReturnsComputationMeta from this module at import time, so this module must
+    # not import nav_twr at module scope.
+    from services.nav_twr import reconstruct_nav_and_twr
+
     used_heuristic_capital = False
 
     if not trades:
-        return pd.Series(dtype=float), _build_meta(
+        return pd.Series(dtype=float, name="returns"), _build_meta(
             used_heuristic_capital=False,
             balance_error=balance_error,
         )
@@ -146,34 +164,45 @@ def trades_to_daily_returns_with_status(
         _DUST_BALANCE_THRESHOLD = 1000.0  # USDT — fixed, not PnL-scaled
         min_balance = _DUST_BALANCE_THRESHOLD
         if account_balance and account_balance > min_balance:
-            # Derive starting balance from current balance and cumulative PnL.
-            # current_balance = starting_balance + total_pnl, so:
-            # starting_balance = current_balance - total_pnl
-            total_pnl = daily_pnl.sum()
-            estimated_start = account_balance - total_pnl
-            if estimated_start > 0:
-                initial_capital = estimated_start
-            else:
-                # Account gained more than its starting balance (e.g., 10x return).
-                # Use current balance as a reasonable upper bound.
-                initial_capital = account_balance
+            # Real exchange anchor: today's balance IS the terminal NAV. The core
+            # rolls the NAV backward (NAV_{t-1} = NAV_t - pnl_t) so day 0's
+            # reconstructed pre-history base equals current_balance - total_pnl —
+            # algebraically identical to the old forward equity curve for an
+            # estimated_start>0 account (SC-4 byte-identity). The difference: a
+            # reconstructed NON-positive base is no longer silently swapped for
+            # today's balance; the core's negative_nav_guard FLAGS it (NaN).
+            anchor_nav = float(account_balance)
         else:
-            # Fallback heuristic for CSV uploads where no balance is available.
-            # This can be off by 5-10x for volatile strategies. Audit-2026-05-07
-            # #9: surface that we took this path so the caller can set
-            # data_quality_flags.heuristic_capital_used = True and bump
-            # computation_status to 'complete_with_warnings' on the
-            # public factsheet.
+            # Heuristic capital for CSV uploads with no balance (off by 5-10x on
+            # volatile strategies). Audit-2026-05-07 #9: surface the path so the
+            # caller sets data_quality_flags.heuristic_capital_used = True and
+            # bumps computation_status to 'complete_with_warnings'. Pass a
+            # synthetic terminal (base + total_pnl) so the core reconstructs the
+            # SAME base the old forward curve started from — byte-identical.
             used_heuristic_capital = True
             mean_abs_pnl = daily_pnl.abs().mean()
-            initial_capital = max(mean_abs_pnl * 100, abs(daily_pnl.sum()), 10000)
+            heuristic_base = max(mean_abs_pnl * 100, abs(daily_pnl.sum()), 10000)
+            anchor_nav = heuristic_base + daily_pnl.sum()
 
-        # Build equity curve and compute returns
-        equity = initial_capital + daily_pnl.cumsum()
-        prev_equity = equity.shift(1).fillna(initial_capital)
-        # Avoid division by zero
-        prev_equity = prev_equity.replace(0, initial_capital)
-        returns_values = daily_pnl / prev_equity
+        # Delegate to the Phase-73 honest core: reconstruct NAV backward from the
+        # anchor and chain-link the TWR. No forward equity curve, no
+        # prev_equity.replace(0, ...) base swap — a zeroed/negative base FLAGS.
+        core_input = pd.Series(
+            daily_pnl.to_numpy(),
+            index=pd.DatetimeIndex(daily_pnl.index),
+            name="daily_pnl",
+        )
+        returns, nav_meta = reconstruct_nav_and_twr(
+            core_input,
+            anchor_nav,
+            external_flows=None,
+            open_unrealized_usd=0.0,
+        )
+        return returns, _merge_status_meta(
+            nav_meta,
+            used_heuristic_capital=used_heuristic_capital,
+            balance_error=balance_error,
+        )
 
     else:
         # Individual trades: use account balance if available
@@ -223,9 +252,48 @@ def trades_to_daily_returns_with_status(
     )
 
 
+_GUARD_KEYS = ("dust_nav_guard", "negative_nav_guard", "flow_dominated_guard")
+
+
+def _merge_status_meta(
+    nav_meta: Mapping[str, Any],
+    *,
+    used_heuristic_capital: bool,
+    balance_error: bool,
+) -> "NavTWRMeta":
+    """Fold the core's ``NavTWRMeta`` (DQ-01 guard flags) together with the
+    transforms-side ``used_heuristic_capital`` / ``balance_error`` signals.
+
+    The core always yields ``used_heuristic_capital=False`` / ``balance_error=
+    False`` (it reconstructs from the real anchor and reads no balance), so this
+    function is the single place the two signal families combine:
+    ``complete_with_warnings`` iff the heuristic was used OR the balance read
+    errored OR any NAV-denominator guard fired. The additive guard keys
+    (dust/negative/flow-dominated) are carried THROUGH onto the returned meta so
+    74-03 can lift them into the data-quality flags."""
+    guard_fired = any(nav_meta.get(k) for k in _GUARD_KEYS)
+    warn = used_heuristic_capital or balance_error or guard_fired
+    meta: NavTWRMeta = {
+        "used_heuristic_capital": used_heuristic_capital,
+        "balance_error": balance_error,
+        "computation_status_hint": (
+            "complete_with_warnings" if warn else "complete"
+        ),
+    }
+    # Explicit assignments (not a loop) keep the TypedDict literal-key types
+    # checkable under mypy --strict, mirroring nav_twr._build_nav_meta.
+    if nav_meta.get("dust_nav_guard"):
+        meta["dust_nav_guard"] = True
+    if nav_meta.get("negative_nav_guard"):
+        meta["negative_nav_guard"] = True
+    if nav_meta.get("flow_dominated_guard"):
+        meta["flow_dominated_guard"] = True
+    return meta
+
+
 def _build_meta(
     *, used_heuristic_capital: bool, balance_error: bool
-) -> ReturnsComputationMeta:
+) -> "NavTWRMeta":
     """Build the ``ReturnsComputationMeta`` returned to the caller.
 
     The ``computation_status_hint`` is "complete_with_warnings" when

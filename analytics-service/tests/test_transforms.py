@@ -288,21 +288,30 @@ class TestDustThresholdC0233:
         ]
 
     def test_real_balance_below_pnl_spike_still_takes_real_capital_path(self):
-        """The headline case: account_balance = $500k (legitimate
+        """The headline case: account_balance = $1.5M (legitimate
         institutional), max daily PnL = $1M. Pre-fix, min_balance =
-        $1M × 2 = $2M and the heuristic branch fires. Post-fix, the
-        fixed $1k floor means real balance wins and the factsheet
-        renders accurate numbers."""
+        $1M × 2 = $2M so a $1.5M balance (< $2M) still fired the heuristic
+        branch. Post-fix, the fixed $1k floor means real balance wins and the
+        factsheet renders accurate numbers.
+
+        74-02 note: the balance was $500k pre-wiring, but $500k with a $1M
+        single-day PnL is physically impossible (it implies estimated_start =
+        500k - 1.005M = -505k, i.e. the account gained more than it ever held).
+        The old code SILENTLY substituted the balance as the base for that
+        impossible input; the honest core now flags it (negative_nav_guard),
+        which is the divergence the dedicated pins own. $1.5M keeps this
+        regression focused on the dust-decoupling it was written for (still
+        below the old $2M PnL-derived threshold) with a physically consistent
+        estimated_start = 1.5M - 1.005M = 495k > 0 (no guard)."""
         trades = self._outlier_day_trades()
         returns, meta = trades_to_daily_returns_with_status(
-            trades, account_balance=500_000.0, balance_error=False
+            trades, account_balance=1_500_000.0, balance_error=False
         )
         assert len(returns) == 2
         assert meta["used_heuristic_capital"] is False, (
-            "real institutional balance ($500k) MUST flow through the "
-            "real-capital branch even when one day's PnL exceeds the "
-            "balance — the fixed dust floor decouples the heuristic "
-            "trigger from PnL magnitude"
+            "real institutional balance ($1.5M, below the old $2M PnL-derived "
+            "threshold) MUST flow through the real-capital branch — the fixed "
+            "dust floor decouples the heuristic trigger from PnL magnitude"
         )
         assert meta["computation_status_hint"] == "complete"
 

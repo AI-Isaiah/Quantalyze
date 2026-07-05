@@ -298,8 +298,13 @@ def test_dq_guards_flag_not_substitute() -> None:
     assert meta_neg.get("negative_nav_guard") is True
     assert meta_neg["computation_status_hint"] == "complete_with_warnings"
 
-    # Prove the divergence: transforms.py fabricates a number (substitutes the
-    # balance as the base) for the SAME input; the new core refuses.
+    # Prove the CONVERGENCE: Phase 74 (74-02) wired
+    # transforms.trades_to_daily_returns_with_status THROUGH this core, so the
+    # old silent balance substitution is GONE. Pre-wiring transforms fabricated
+    # r_0 = 2000/1500 = +133% for this SAME estimated_start<=0 input; post-wiring
+    # it delegates and AGREES with the core (NaN + negative_nav_guard). This
+    # asserts the honesty the wiring delivered — reverting the delegation
+    # re-fabricates the magnitude and fails here.
     from services.transforms import trades_to_daily_returns_with_status
 
     trades = [
@@ -310,12 +315,14 @@ def test_dq_guards_flag_not_substitute() -> None:
             "price": 2000.0,
         }
     ]
-    old_returns, _ = trades_to_daily_returns_with_status(
+    wired_returns, wired_meta = trades_to_daily_returns_with_status(
         trades, account_balance=1500.0
     )
-    # substituted base = 1500 -> fabricated r_0 = 2000/1500 = +133%
-    assert old_returns.iloc[0] == pytest.approx(2000.0 / 1500.0)
-    assert np.isnan(ret_neg.iloc[0])  # honest core -> flagged, not fabricated
+    # transforms now delegates -> same honest NaN as the core, not 2000/1500.
+    assert np.isnan(wired_returns.iloc[0])
+    assert wired_meta.get("negative_nav_guard") is True
+    assert wired_meta["computation_status_hint"] == "complete_with_warnings"
+    assert np.isnan(ret_neg.iloc[0])  # core and transforms now agree
 
 
 def test_nonfinite_inputs_fail_loud() -> None:
