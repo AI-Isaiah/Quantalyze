@@ -530,3 +530,97 @@ class TestByteIdentitySnapshotPins:
         # Heuristic fired: account_balance=None -> complete_with_warnings.
         assert meta["used_heuristic_capital"] is True
         assert meta["computation_status_hint"] == "complete_with_warnings"
+
+
+# ---------------------------------------------------------------------------
+# Phase 74 Wave 2 (plan 74-02) — the HONEST divergence pins (RED -> GREEN)
+# ---------------------------------------------------------------------------
+# These are the behaviour-CHANGE pins the milestone exists for. Once
+# ``trades_to_daily_returns_with_status`` delegates to
+# ``nav_twr.reconstruct_nav_and_twr``, an ``estimated_start <= 0`` account (the
+# account whose current balance is LESS than its cumulative PnL — i.e. it gained
+# more than its whole starting capital) no longer has a base FABRICATED for it.
+# Pre-refactor: the ``else: initial_capital = account_balance`` substitution
+# (daily_pnl :154-159 / individual :196-199) invented today's balance as the
+# base and the ``prev_equity.replace(0, initial_capital)`` swap (:175 / :211)
+# invented a base for a zeroed day, both stamping the fabricated magnitude
+# ``complete``. Post-refactor the reconstructed non-positive base FLAGS via the
+# core's ``negative_nav_guard`` and that day's return is ``np.nan`` — flag, never
+# substitute (the harm class TWR-03/TWR-04 kill).
+#
+# Each pin is mutation-honest: it asserts the NaN-not-magnitude AND names the
+# exact fabricated value the deleted branch would have produced, so it fails if
+# the substitution is ever reintroduced. The source-scan pins statically ban the
+# token class so a revert cannot slip past even if a fixture stops covering it.
+class TestDailyPnlDelegationDivergence:
+    """daily_pnl branch: estimated_start<=0 flags NaN, no base substitution."""
+
+    def _estimated_start_nonpositive_daily_pnl(self) -> tuple[list[dict], float]:
+        """balance=1500, Σpnl=2000 (day0 +3000, day1 -1000) ->
+        estimated_start = 1500 - 2000 = -500 (<= 0). Real balance is above the
+        $1000 dust floor so the real-anchor sub-branch is taken; the divergence
+        is purely the deleted estimated_start<=0 substitution."""
+        trades = [
+            {
+                "timestamp": "2026-03-01T00:00:00+00:00",
+                "order_type": "daily_pnl",
+                "side": "buy",
+                "price": 3000,
+            },
+            {
+                "timestamp": "2026-03-02T00:00:00+00:00",
+                "order_type": "daily_pnl",
+                "side": "sell",
+                "price": 1000,
+            },
+        ]
+        return trades, 1500.0
+
+    def test_daily_pnl_estimated_start_nonpositive_flags_nan_not_magnitude(self):
+        """The core reconstructs prev-base = terminal-roll = -500 (<=0) on day 0
+        -> negative_nav_guard -> NaN + complete_with_warnings. Pre-refactor this
+        day fabricated 3000/1500 = 2.0 (200% daily) and rendered as canonical."""
+        trades, balance = self._estimated_start_nonpositive_daily_pnl()
+        returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=balance
+        )
+        assert np.isnan(returns.iloc[0]), (
+            "estimated_start<=0 day 0 MUST be np.nan (guarded), not a "
+            "fabricated magnitude"
+        )
+        assert meta.get("negative_nav_guard") is True
+        assert meta["computation_status_hint"] == "complete_with_warnings"
+        # Real balance read (not the heuristic): the warning is the GUARD.
+        assert meta["used_heuristic_capital"] is False
+
+    def test_daily_pnl_fallback_deletion_no_account_balance_substitution(self):
+        """Mutation-honest fallback-deletion pin: the DELETED ``else:
+        initial_capital = account_balance`` branch would have divided day-0 PnL
+        by the substituted balance-derived base and produced 3000/1500 == 2.0.
+        Assert that exact fabricated value is ABSENT (day 0 is NaN instead)."""
+        trades, balance = self._estimated_start_nonpositive_daily_pnl()
+        returns, _meta = trades_to_daily_returns_with_status(
+            trades, account_balance=balance
+        )
+        fabricated_day0 = 3000.0 / 1500.0  # what the deleted substitution yields
+        assert np.isnan(returns.iloc[0])
+        assert not np.isclose(
+            np.nan_to_num(returns.iloc[0], nan=-999.0), fabricated_day0
+        ), "the estimated_start<=0 -> account_balance substitution was reintroduced"
+
+    def test_forbidden_daily_pnl_base_substitution_token_absent(self):
+        """Source-scan (mutation-honest, revert-proof): the exact fabrication
+        token ``initial_capital = account_balance`` must NOT appear anywhere in
+        transforms.py source outside a full-line comment. Fails if the deleted
+        daily_pnl substitution is reintroduced even under a fixture that no
+        longer exercises it."""
+        from pathlib import Path
+        import services.transforms as transforms_mod
+
+        src = Path(transforms_mod.__file__).read_text()
+        code = "\n".join(
+            ln for ln in src.splitlines() if ln.lstrip()[:1] != "#"
+        )
+        assert "initial_capital = account_balance" not in code, (
+            "forbidden base-substitution token reintroduced in transforms.py"
+        )
