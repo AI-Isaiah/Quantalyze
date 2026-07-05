@@ -84,6 +84,9 @@ def trades_to_daily_returns_with_status(
     trades: list[dict[str, Any]],
     account_balance: float | None = None,
     balance_error: bool = False,
+    *,
+    external_flows: Sequence[Any] | None = None,
+    open_unrealized_usd: float = 0.0,
 ) -> tuple[pd.Series, "NavTWRMeta"]:
     """Audit-2026-05-07 #9 — same conversion as ``trades_to_daily_returns``
     but ALSO returns a ``ReturnsComputationMeta`` describing how
@@ -195,8 +198,8 @@ def trades_to_daily_returns_with_status(
         returns, nav_meta = reconstruct_nav_and_twr(
             core_input,
             anchor_nav,
-            external_flows=None,
-            open_unrealized_usd=0.0,
+            external_flows=external_flows,
+            open_unrealized_usd=open_unrealized_usd,
         )
         return returns, _merge_status_meta(
             nav_meta,
@@ -236,8 +239,8 @@ def trades_to_daily_returns_with_status(
     returns, nav_meta = reconstruct_nav_and_twr(
         core_input,
         anchor_nav,
-        external_flows=None,
-        open_unrealized_usd=0.0,
+        external_flows=external_flows,
+        open_unrealized_usd=open_unrealized_usd,
     )
     return returns, _merge_status_meta(
         nav_meta,
