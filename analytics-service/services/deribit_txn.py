@@ -45,6 +45,12 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
+# Pure, I/O-free venue-agnostic dated-flow contract (Plan 75-01). Importing it
+# here keeps the module network-free — external_flows.py imports stdlib + typing
+# ONLY (no ccxt/pandas/supabase/services.exchange), so the purity source-scan
+# guard (test_deribit_txn.py) still holds.
+from services.external_flows import ExternalFlow
+
 # Sentinel distinguishing an ABSENT dict key from a present ``None``/``0`` value.
 _MISSING: Any = object()
 
@@ -502,6 +508,84 @@ def inverse_days_needing_index(
             continue
         needed.add((day, ccy))
     return needed
+
+
+def deribit_dated_external_flows_usd(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    supplemental_index: Mapping[tuple[str, str], float] | None = None,
+) -> list[ExternalFlow]:
+    """The ONE honest dated external-flow producer: convert the in-band
+    ``_EXTERNAL_FLOW_TYPES`` rows into a per-UTC-day ``list[ExternalFlow]`` for the
+    flow-aware TWR core (FLOW-02).
+
+    Each ``transfer``/``deposit``/``withdrawal``/``usdc_reward`` row with a nonzero
+    ``change`` is valued via ``txn_change_to_usd`` — the SAME single honest
+    valuation path the realized sum uses (NO second inverse converter):
+
+      * LINEAR / USD-family (USDC/USDT/USD/EURR) -> ``change`` passes through as USD
+        (a $50k USDC deposit is $50k, never index-multiplied).
+      * INVERSE (BTC/ETH) -> ``change x same-day settlement index``. Deposit/
+        withdrawal rows structurally carry NO own ``index_price``, so the index is
+        resolved (identically to ``txn_rows_to_daily_records``) as: the batch's own
+        same-day index (``_day_ccy_own_index`` — a same-day index-bearing settlement
+        row) FIRST, else the ``supplemental_index`` (``public/get_delivery_prices``,
+        fetched for the days ``inverse_days_needing_index`` flags — Finding C1).
+        Both are SAME-day → D-07-compliant. If NEITHER exists,
+        ``txn_change_to_usd`` raises ``LedgerValuationError`` (fail loud) — a coin
+        flow is NEVER valued at 1.0 / a current price, nor silently dropped.
+
+    The ``change`` sign is trusted verbatim (a withdrawal -> NEGATIVE usd_signed).
+    A MISSING ``change`` field (schema drift) FAILS LOUD before valuation (RISKY
+    discipline): coalescing absent->0.0 would silently zero a real capital flow and
+    mis-anchor the TWR base. This guard is local to the flow producer and does NOT
+    alter the shared ``txn_change_to_usd`` coalesce that cash-bearing rows rely on.
+
+    Flow rows are ``_EXTERNAL_FLOW_TYPES`` (a subset of ``INFORMATIONAL_TYPES``),
+    so they are STRUCTURALLY excluded from ``txn_rows_to_daily_records``'s realized
+    sum — count-once: a flow feeds F_t here exactly once and never the realized
+    stream. Returns the per-day USD sums as ``ExternalFlow(utc_day_iso, usd_signed)``
+    entries, sorted ascending by day. Supersedes the linear-only scalar
+    ``deribit_linear_external_flow_usd`` (its sole consumer is removed in 75-03).
+    """
+    day_ccy_index = _day_ccy_own_index(rows)
+    by_day: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) not in _EXTERNAL_FLOW_TYPES:
+            continue
+        # A flow row MUST carry a `change` field. Absent (not merely zero) is
+        # schema drift — coalescing absent->0.0 would silently drop a real capital
+        # flow (the TWR-base mis-anchor class). Distinguish absent from present-0.
+        raw_change = row.get("change", _MISSING)
+        if raw_change is _MISSING:
+            raise LedgerValuationError(
+                f"external-flow Deribit row id={row.get('id')!r} "
+                f"type={row.get('type')!r} has NO `change` field — refusing to treat "
+                "a missing balance-delta as a zero flow (schema drift would silently "
+                "drop a real capital in/out and mis-anchor the flow-aware TWR base)"
+            )
+        change = _coerce_float(raw_change or 0.0, field="change", row=row)
+        if change == 0.0:
+            continue  # observed flow row, no cash — no entry, no index needed
+        # An undatable flow row must fail loud as a STRUCTURAL valuation error
+        # (permanent), not a bare ValueError the worker's network over-catch would
+        # mistake for transient (mirrors the aggregator's wrap of the shared helper).
+        try:
+            day = _row_utc_day(row.get("timestamp"))
+        except ValueError as e:
+            raise LedgerValuationError(str(e)) from e
+        ccy = str(row.get("currency", "")).upper()
+        # Own/ledger same-day index ALWAYS wins; the supplemental settlement index
+        # is consulted ONLY when the batch carries no same-day index for this coin
+        # flow — identical resolution order to txn_rows_to_daily_records so the two
+        # paths can never disagree on a day's index.
+        fb = day_ccy_index.get((day, ccy))
+        if fb is None and supplemental_index is not None:
+            fb = supplemental_index.get((day, ccy))
+        by_day[day] = by_day.get(day, 0.0) + txn_change_to_usd(row, fallback_index=fb)
+    return [ExternalFlow(day, usd) for day, usd in sorted(by_day.items())]
 
 
 def txn_rows_to_daily_records(
