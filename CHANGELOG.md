@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.37.7.1] - 2026-07-05
+### Changed
+- **Deribit acceptance harness reconciles on nonzero-P&L days, not cosmetic zero-days.** The live SC-1 canary showed two independent ledger crawls of the same account agree exactly on every realized-cash (nonzero) day but emit a different set of zero-value days (a settlement/fee day that nets to 0.0 — which quiet zero-days a crawl emits varies harmlessly with the `end_ms=now` boundary/pagination, carrying no P&L). `check_daily_reconcile` now gates on nonzero-day set equality and reports the zero-day delta advisory-only, matching the D-2 real-cash-reconciliation anchor.
+
 ## [0.37.7.0] - 2026-07-05
 ### Added
 - **Deribit acceptance-verification harness (Phase 72, SC-2).** `scripts/deribit_acceptance.py` independently re-crawls the live Deribit ledger for onboarded strategies and reconciles exchange truth against the persisted factsheet — completeness, date-coverage, per-day funding-inclusive reconcile, and the inverse-sign invariant (fill counts advisory-only, per P70). Read-only; runs via `railway ssh`.

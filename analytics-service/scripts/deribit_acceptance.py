@@ -188,34 +188,51 @@ def check_date_coverage(
 
 
 def check_daily_reconcile(
-    ledger_active_dates: set[date], persisted_dates: set[date]
+    ledger_nonzero_dates: set[date],
+    persisted_nonzero_dates: set[date],
+    *,
+    zero_day_delta: int = 0,
 ) -> Check:
-    """Structural funding→settlement reconcile: the set of settlement-bearing UTC
-    days from the FRESH ledger crawl must EQUAL the set of dates persisted in
-    ``csv_daily_returns`` — no dropped, no injected day. Deribit funding is
-    realized inside settlement ``change`` (there is no separate funding stream —
-    ``services/deribit_txn.py:35-39``), so this per-day set equality is the
-    correct funding-inclusive reconcile. Names the symmetric-difference dates."""
-    dropped = sorted(ledger_active_dates - persisted_dates)
-    injected = sorted(persisted_dates - ledger_active_dates)
+    """Funding→settlement reconcile GATED on the NONZERO-P&L days — the days that
+    carry real realized cash. These must match EXACTLY between the fresh ledger
+    crawl and the persisted ``csv_daily_returns``. Deribit funding is realized
+    inside settlement ``change`` (no separate funding stream —
+    ``services/deribit_txn.py:35-39``), so per-nonzero-day equality is the correct
+    funding-inclusive reconcile.
+
+    ``zero_day_delta`` = the count of ZERO-value days that differ between the two
+    crawls. Zero-cash days are emitted for a settlement/fee day that nets to 0.0;
+    which quiet zero-days a crawl emits varies harmlessly across crawl generations
+    (`end_ms=now` boundary, pagination) and carries NO P&L. So a zero-day set
+    difference is reported ADVISORY-ONLY, never gates — matching the D-2 anchor
+    (real cash reconciliation), not cosmetic bookkeeping. Names the nonzero
+    symmetric-difference dates."""
+    dropped = sorted(ledger_nonzero_dates - persisted_nonzero_dates)
+    injected = sorted(persisted_nonzero_dates - ledger_nonzero_dates)
+    zero_note = (
+        f" [{zero_day_delta} cosmetic zero-value day(s) differ — advisory, not gated]"
+        if zero_day_delta
+        else ""
+    )
     if not dropped and not injected:
         return Check(
             "daily_reconcile",
             True,
-            f"{len(ledger_active_dates)} settlement-day(s) reconcile exactly",
+            f"{len(ledger_nonzero_dates)} nonzero-P&L day(s) reconcile exactly"
+            + zero_note,
         )
     parts: list[str] = []
     if dropped:
         parts.append(
-            f"{len(dropped)} day(s) in fresh ledger but NOT persisted "
+            f"{len(dropped)} nonzero day(s) in fresh ledger but NOT persisted "
             f"(dropped): {_fmt_dates(dropped)}"
         )
     if injected:
         parts.append(
-            f"{len(injected)} day(s) persisted but NOT in fresh ledger "
+            f"{len(injected)} nonzero day(s) persisted but NOT in fresh ledger "
             f"(injected): {_fmt_dates(injected)}"
         )
-    return Check("daily_reconcile", False, "; ".join(parts))
+    return Check("daily_reconcile", False, "; ".join(parts) + zero_note)
 
 
 def check_inverse_signs(rows: Sequence[Mapping[str, Any]]) -> Check:
@@ -361,11 +378,32 @@ def _records_active_dates(records: Sequence[Mapping[str, Any]]) -> list[date]:
     return sorted(days)
 
 
+def _records_dates_by_value(
+    records: Sequence[Mapping[str, Any]],
+) -> tuple[set[date], set[date]]:
+    """Split the daily_pnl record days into ``(nonzero_days, zero_days)`` by their
+    ``price`` (abs USD magnitude; 0.0 = a settlement/fee day that netted to zero).
+    Nonzero days are the real realized-cash days the reconcile gates on; zero days
+    are cosmetic and reconciled advisory-only."""
+    nonzero: set[date] = set()
+    zero: set[date] = set()
+    for rec in records:
+        ts = rec.get("timestamp")
+        if not ts:
+            continue
+        day = date.fromisoformat(str(ts)[:10])
+        (nonzero if float(rec.get("price", 0.0) or 0.0) != 0.0 else zero).add(day)
+    # A day with both a nonzero and a (separate) zero record counts as nonzero.
+    return nonzero, zero - nonzero
+
+
 def _load_persisted(
     supabase: Any, strategy_id: str
-) -> tuple[str, dict[str, Any], set[date]]:
+) -> tuple[str, dict[str, Any], set[date], set[date]]:
     """Read the persisted factsheet state for ``strategy_id``:
-    ``(computation_status, data_quality_flags, persisted_csv_dates)``."""
+    ``(computation_status, data_quality_flags, nonzero_csv_dates, zero_csv_dates)``
+    — the csv dates split by ``daily_return`` so the reconcile gates on the
+    real realized-cash (nonzero) days and treats zero days advisory-only."""
     from services.db import paginated_select, rows
 
     sa = rows(
@@ -380,15 +418,19 @@ def _load_persisted(
 
     daily = paginated_select(
         supabase.table("csv_daily_returns")
-        .select("date")
+        .select("date, daily_return")
         .eq("strategy_id", strategy_id),
         order_by=(("date", False),),
         truncation_hint=f"deribit_acceptance csv_daily_returns sid={strategy_id}",
     )
-    persisted_dates = {
-        date.fromisoformat(str(r["date"])[:10]) for r in daily if r.get("date")
-    }
-    return status, flags, persisted_dates
+    nonzero: set[date] = set()
+    zero: set[date] = set()
+    for r in daily:
+        if not r.get("date"):
+            continue
+        day = date.fromisoformat(str(r["date"])[:10])
+        (nonzero if float(r.get("daily_return", 0.0) or 0.0) != 0.0 else zero).add(day)
+    return status, flags, nonzero, zero
 
 
 async def verify_account(spec: AccountSpec, supabase: Any) -> AccountAcceptance:
@@ -418,15 +460,22 @@ async def verify_account(spec: AccountSpec, supabase: Any) -> AccountAcceptance:
         checks.append(Check("ledger_completeness", False, str(exc)))
 
     active_dates = _records_active_dates(records)
-    status, flags, persisted_dates = _load_persisted(supabase, spec.strategy_id)
+    ledger_nonzero, ledger_zero = _records_dates_by_value(records)
+    status, flags, persisted_nonzero, persisted_zero = _load_persisted(
+        supabase, spec.strategy_id
+    )
+    zero_day_delta = len(ledger_zero ^ persisted_zero)
 
-    # 2-4. Factsheet status, date coverage, daily reconcile.
+    # 2-4. Factsheet status, date coverage, daily reconcile (gated on nonzero
+    # realized-cash days; cosmetic zero-day differences are advisory-only).
     checks.append(check_factsheet_status(status, flags))
     checks.append(
         check_date_coverage(active_dates, spec.window_start, spec.window_end)
     )
     checks.append(
-        check_daily_reconcile(set(active_dates), persisted_dates)
+        check_daily_reconcile(
+            ledger_nonzero, persisted_nonzero, zero_day_delta=zero_day_delta
+        )
     )
 
     # 5. Inverse signs — see the LIVE-driver note below.
