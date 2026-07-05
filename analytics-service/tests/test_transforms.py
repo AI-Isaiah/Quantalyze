@@ -633,3 +633,86 @@ class TestDailyPnlDelegationDivergence:
         assert "initial_capital = account_balance" not in code, (
             "forbidden base-substitution token reintroduced in transforms.py"
         )
+
+
+class TestIndividualTradesDelegationDivergence:
+    """individual-trades branch (raw fills, portfolio.py:2260 path):
+    estimated_start<=0 flags NaN via the delegated core, no base substitution."""
+
+    def _estimated_start_nonpositive_individual(self) -> tuple[list[dict], float]:
+        """Raw fills chosen so total_pnl > balance. Day 0 is a lone $2000 buy
+        (net_notional +2000 => pnl +2000); day 1 nets +10. total_pnl = 2010 vs
+        balance 1500 (> $1000 dust so the real-anchor sub-branch is taken) ->
+        estimated_start = 1500 - 2010 = -510 (<= 0)."""
+        fills = [
+            ("2026-06-01", "buy", 2000.0, 1.0, 0.0),
+            ("2026-06-02", "buy", 100.0, 1.0, 0.0),
+            ("2026-06-02", "sell", 90.0, 1.0, 0.0),
+        ]
+        trades = [
+            {
+                "timestamp": f"{d}T10:00:00+00:00",
+                "symbol": "BTCUSDT",
+                "side": s,
+                "price": str(price),
+                "quantity": str(qty),
+                "fee": str(fee),
+                "order_type": "market",
+            }
+            for (d, s, price, qty, fee) in fills
+        ]
+        return trades, 1500.0
+
+    def test_individual_estimated_start_nonpositive_flags_nan_not_magnitude(self):
+        """Delegated core reconstructs day-0 prev-base = -510 (<=0) ->
+        negative_nav_guard -> NaN + complete_with_warnings. Pre-refactor the
+        individual branch fabricated 2000/1500 == 1.333 for this same input."""
+        trades, balance = self._estimated_start_nonpositive_individual()
+        returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=balance
+        )
+        assert np.isnan(returns.iloc[0]), (
+            "individual-trades estimated_start<=0 day 0 MUST be np.nan (guarded)"
+        )
+        assert meta.get("negative_nav_guard") is True
+        assert meta["computation_status_hint"] == "complete_with_warnings"
+        assert meta["used_heuristic_capital"] is False
+
+    def test_individual_fallback_deletion_no_account_balance_substitution(self):
+        """Mutation-honest: the DELETED ``estimated_start if ... else
+        account_balance`` substitution (transforms.py:196-199) and the
+        ``prev_equity.replace(0, ...)`` swap (:211) would have divided day-0 PnL
+        by the substituted balance base and produced 2000/1500 == 1.333. Assert
+        that fabricated value is ABSENT (day 0 is NaN instead)."""
+        trades, balance = self._estimated_start_nonpositive_individual()
+        returns, _meta = trades_to_daily_returns_with_status(
+            trades, account_balance=balance
+        )
+        fabricated_day0 = 2000.0 / 1500.0
+        assert np.isnan(returns.iloc[0])
+        assert not np.isclose(
+            np.nan_to_num(returns.iloc[0], nan=-999.0), fabricated_day0
+        ), "the individual-branch estimated_start<=0 substitution was reintroduced"
+
+    def test_forbidden_base_substitution_tokens_absent_both_branches(self):
+        """Comprehensive revert-proof source-scan: NEITHER the
+        ``prev_equity.replace(0`` base swap NOR the ``else account_balance``
+        substitution may appear anywhere in transforms.py source outside a
+        full-line comment. Covers BOTH branches (daily_pnl :175 and individual
+        :211/:199) so a revert on either path fails here even without a fixture
+        that exercises it. Together with the daily_pnl token pin this bans the
+        entire fabrication token class (TWR-03: fallback gone EVERYWHERE)."""
+        from pathlib import Path
+        import services.transforms as transforms_mod
+
+        src = Path(transforms_mod.__file__).read_text()
+        code = "\n".join(
+            ln for ln in src.splitlines() if ln.lstrip()[:1] != "#"
+        )
+        assert ".replace(0" not in code, (
+            "forbidden prev_equity.replace(0, ...) base swap reintroduced"
+        )
+        assert "else account_balance" not in code, (
+            "forbidden estimated_start<=0 -> account_balance substitution "
+            "reintroduced on the individual-trades branch"
+        )
