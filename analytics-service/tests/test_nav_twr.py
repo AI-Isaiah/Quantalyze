@@ -30,8 +30,12 @@ from services.nav_twr import (
     DUST_NAV_FLOOR,
     NavReconstructionError,
     _flows_to_daily_usd,
+    chain_linked_twr,
+    cumulative_twr,
     reconstruct_nav,
+    reconstruct_nav_and_twr,
 )
+from services.portfolio_metrics import compute_twr
 
 
 # ---------------------------------------------------------------------------
@@ -154,3 +158,98 @@ def test_reconstruct_nav_rejects_orphan_flow_day() -> None:
     orphan = _flows_to_daily_usd([("2026-06-01", 100.0)])
     with pytest.raises(NavReconstructionError):
         reconstruct_nav(daily_pnl, 1000.0, orphan)
+
+
+# ---------------------------------------------------------------------------
+# TWR-02 — chain-linked r_t (flow in numerator) + cumulative + edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_twr_edge_cases() -> None:
+    """day-0 flow, same-day multi-flow, zero-NAV interior day, and a partial
+    window each produce the correct chain-linked series."""
+
+    # --- day-0 flow: the flow on the first day is subtracted from the
+    # numerator (end-of-day convention); r_0 is formed on the pre-flow base,
+    # never divided by a fabricated pre-history NAV. ---
+    ret0, meta0 = reconstruct_nav_and_twr(
+        _pnl([50.0, 30.0, 20.0]),
+        anchor_nav=11_000.0,
+        external_flows=[("2026-01-01", 1000.0)],
+    )
+    # NAV_{-1} = 10950 - 50 - 1000 = 9900; r_0 = (10950-9900-1000)/9900 = 50/9900
+    assert ret0.iloc[0] == pytest.approx(50.0 / 9900.0)
+    assert meta0["computation_status_hint"] == "complete"
+
+    # --- same-day multi-flow: two flows on 2026-01-02 sum to +200 before
+    # entering r_1 that day. ---
+    ret1, _ = reconstruct_nav_and_twr(
+        _pnl([10.0, 20.0, 30.0]),
+        anchor_nav=10_000.0,
+        external_flows=[("2026-01-02", 300.0), ("2026-01-02", -100.0)],
+    )
+    # nav = [9750, 9970, 10000]; r_1 = (9970-9750-200)/9750 = 20/9750
+    assert ret1.iloc[1] == pytest.approx(20.0 / 9750.0)
+
+    # --- zero-NAV interior day: NAV_{t-1}==0 breaks the chain-link (r omitted),
+    # NEVER a division by zero or a fabricated value. ---
+    ret2, meta2 = reconstruct_nav_and_twr(
+        _pnl([0.0, -1000.0, 800.0]), anchor_nav=800.0
+    )
+    # nav = [1000, 0, 800]; r_1 = -1000/1000 = -1.0; r_2 breaks (prev NAV == 0)
+    assert ret2.iloc[1] == pytest.approx(-1.0)
+    assert np.isnan(ret2.iloc[2])
+    assert meta2["computation_status_hint"] == "complete_with_warnings"
+
+    # --- partial window (3 days): correct chain-linked cumulative. ---
+    ret3, _ = reconstruct_nav_and_twr(
+        _pnl([100.0, -50.0, 25.0]), anchor_nav=10_000.0
+    )
+    # nav = [10025, 9975, 10000]
+    exp_cum = (
+        (1.0 + 100.0 / 9925.0)
+        * (1.0 - 50.0 / 10025.0)
+        * (1.0 + 25.0 / 9975.0)
+        - 1.0
+    )
+    assert cumulative_twr(ret3) == pytest.approx(exp_cum, rel=1e-12)
+
+
+def test_twr_agrees_with_compute_twr() -> None:
+    """On a shared synthetic fixture the nav_twr per-day chain-linked cumulative
+    agrees with the already-shipped forward scalar ``portfolio_metrics.compute_twr``
+    (same end-of-day flow numerator convention) to fp tolerance."""
+    # Equity (end-of-day) [1000, 1100, 1050, 1200] with a +100 deposit on
+    # 2026-01-03. Day 0 has zero pnl/flow so nav_twr's day-0 return is 0 and both
+    # methods start from the same base.
+    daily_pnl = _pnl([0.0, 100.0, -150.0, 150.0])  # 2026-01-01..04
+    returns, meta = reconstruct_nav_and_twr(
+        daily_pnl,
+        anchor_nav=1200.0,
+        external_flows=[("2026-01-03", 100.0)],
+    )
+    nav_twr_cum = cumulative_twr(returns)
+
+    equity = pd.Series(
+        [1000.0, 1100.0, 1050.0, 1200.0], index=_days(4, "2026-01-01")
+    )
+    events = [
+        {"event_date": "2026-01-03", "event_type": "deposit", "amount": 100.0}
+    ]
+    scalar = compute_twr(equity, events)
+
+    assert scalar is not None
+    assert nav_twr_cum == pytest.approx(scalar, rel=1e-12)
+    assert meta["computation_status_hint"] == "complete"
+
+
+def test_chain_linked_twr_returns_named_series_and_flags() -> None:
+    """chain_linked_twr returns a ``returns``-named Series on a DatetimeIndex and
+    a flags dict; a clean flow-less series produces no flags."""
+    daily_pnl = _pnl([100.0, 50.0, -25.0])
+    flows = _flows_to_daily_usd([])
+    nav = reconstruct_nav(daily_pnl, 10_000.0, flows)
+    returns, flags = chain_linked_twr(nav, daily_pnl, flows)
+    assert returns.name == "returns"
+    assert isinstance(returns.index, pd.DatetimeIndex)
+    assert flags == {}
