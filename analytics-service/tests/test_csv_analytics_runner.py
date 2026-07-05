@@ -448,3 +448,115 @@ async def test_csv_analytics_sparse_calendar_completes() -> None:
     upsert_calls = sb.table.return_value.upsert.call_args_list
     completed = [c for c in upsert_calls if c.args[0].get("computation_status") == "complete"]
     assert len(completed) >= 1, "Sparse-calendar series must complete cleanly"
+
+
+# ---------------------------------------------------------------------------
+# Phase 74 Wave 0 — NaN-tolerance characterization of the two downstream sinks
+# ---------------------------------------------------------------------------
+# RESEARCH A1 / Pitfall 3: the flow-aware core (nav_twr.chain_linked_twr) emits
+# np.nan on a guarded day (estimated_start<=0 -> negative_nav_guard, dust,
+# flow-dominated) instead of silently substituting a floor. Before 74-02 flips
+# the shared path, we must KNOW whether a returns Series carrying leading AND
+# interior NaN survives each downstream sink WITHOUT crashing and WITHOUT
+# fabricating a magnitude. This test pins TODAY's behavior of sink (a) — the
+# analytics_runner path (compute_all_metrics + compute_period_returns). The
+# sink (b) finding (the csv_daily_returns float(val) upsert) is asserted at the
+# JSON-transport boundary below. Both findings are written into 74-01-SUMMARY.md
+# as the authoritative input to plans 74-03 and 74-04.
+class TestNaNReturnsDownstreamTolerance:
+    """Characterization pins for a guarded-day NaN-bearing returns Series.
+
+    Sink (a) — compute_all_metrics / compute_period_returns: TOLERATES.
+        NaN days are honestly DROPPED from the headline scalars (dropna on the
+        cumulative_return, skipna .prod() for MTD/YTD) and treated as 0.0 for
+        chart-only equity (fillna(0)); a NaN LAST day nulls return_24h via
+        _safe_float. len() counts NaN entries so the `len(returns) < 2` guard is
+        not tripped by guarded days. No fabricated magnitude is ever produced.
+
+    Sink (b) — csv_daily_returns `float(val)` upsert (job_worker.py:2068/2078):
+        NEEDS-A-GUARD. The column is DOUBLE PRECISION (stores NaN fine), but the
+        postgrest-py/httpx JSON serializer raises on a non-finite float BEFORE
+        the request is sent, so a guarded-day NaN CRASHES the upsert fail-loud
+        rather than persisting silently. Guard: skip NaN rows in the upsert
+        list-comprehension at job_worker.py:2062-2082 (a guarded day has no
+        interpretable return -> it is ABSENT, not stored). Localizable there.
+    """
+
+    @staticmethod
+    def _nan_bearing_returns() -> pd.Series:
+        """A 24/7 daily float Series in the exact shape the flow-aware core
+        emits for an estimated_start<=0 account: a LEADING guarded day (NaN),
+        an INTERIOR guarded day (NaN), and real returns on the rest."""
+        import numpy as np
+
+        idx = pd.date_range("2026-01-01", periods=6, freq="D")
+        vals = [np.nan, 0.01, np.nan, -0.02, 0.03, 0.015]
+        return pd.Series(vals, index=idx, name="returns").astype("float64")
+
+    def test_nan_returns_downstream_tolerance(self) -> None:
+        """Sink (a): compute_all_metrics + compute_period_returns TOLERATE a
+        leading+interior NaN series — no crash, and the NaN days are dropped/
+        zeroed honestly (never surfaced as a fabricated number)."""
+        import numpy as np
+
+        from services.metrics import compute_all_metrics, _safe_float
+        from services.portfolio_metrics import compute_period_returns
+
+        returns = self._nan_bearing_returns()
+
+        # --- compute_all_metrics: does NOT crash despite 2 NaN days. ---
+        # (len counts NaN entries, so the `len(returns) < 2` precondition is
+        #  satisfied by the 6-row series even though only 4 days are real.)
+        result = compute_all_metrics(returns)
+
+        # The headline cumulative_return equals the SAME metric computed on the
+        # NaN-DROPPED days — proving NaN is honestly excluded from statistics,
+        # not coerced to 0.0 (which would fabricate an extra flat day) and not
+        # propagated to a NaN headline (which would be an invalid magnitude).
+        expected_cum = float((1.0 + returns.dropna()).prod() - 1.0)
+        assert result["cumulative_return"] == pytest.approx(expected_cum, rel=1e-12)
+        assert np.isfinite(result["cumulative_return"]), (
+            "headline cumulative_return must be finite (NaN days dropped, not "
+            "propagated) — a NaN scalar would render as an invalid factsheet KPI"
+        )
+
+        # --- compute_period_returns: NaN days skipped, not fabricated. ---
+        periods = compute_period_returns(returns)
+        # MTD/YTD compound via .prod() which skips NaN (skipna=True default);
+        # they equal the dropna cumulative for this single-month, single-year
+        # window — honest, finite, no fabricated magnitude.
+        assert periods["return_mtd"] == pytest.approx(expected_cum, rel=1e-12)
+        assert periods["return_ytd"] == pytest.approx(expected_cum, rel=1e-12)
+        # Last day is real (0.015) -> return_24h is that value, unmodified.
+        assert periods["return_24h"] == pytest.approx(0.015, rel=1e-12)
+
+        # A guarded LAST day nulls return_24h honestly (None), never a fabricated
+        # number: _safe_float(nan) -> None is the honest "no interpretable value".
+        last_nan = returns.copy()
+        last_nan.iloc[-1] = np.nan
+        assert compute_period_returns(last_nan)["return_24h"] is None
+        assert _safe_float(float("nan")) is None
+
+    def test_nan_return_upsert_serialization_fails_loud(self) -> None:
+        """Sink (b): the csv_daily_returns `float(val)` upsert. The column is
+        DOUBLE PRECISION (stores NaN), but the postgrest-py/httpx JSON encoder
+        rejects a non-finite float BEFORE the request leaves the process — so a
+        guarded-day NaN would CRASH the upsert fail-loud, not persist silently.
+
+        This pins WHY 74-02/74-03 must skip NaN rows in the upsert
+        list-comprehension (job_worker.py:2062-2082): the current path cannot
+        even transmit a NaN daily_return, and a persisted NaN would be a
+        fabricated magnitude for any naive reader of csv_daily_returns."""
+        import httpx
+        import numpy as np
+
+        # `float(val)` on a numpy NaN does NOT crash at the Python conversion —
+        # the failure is downstream at JSON encode (the exact upsert payload).
+        val = np.float64(np.nan)
+        assert isinstance(float(val), float)  # no crash at job_worker.py:2068
+
+        # The upsert payload shape (one row of the list-comprehension). httpx is
+        # the transport postgrest-py 2.31.0 uses; it raises on non-finite floats.
+        row_payload = {"strategy_id": "x", "date": "2026-01-01", "daily_return": float(val)}
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            httpx.Request("POST", "http://csv-daily-returns.local", json=[row_payload])
