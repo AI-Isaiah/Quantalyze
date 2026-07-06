@@ -1719,6 +1719,57 @@ class TestDeriveBrokerDailies:
         assert captured["csv_rows"], "expected a reconstructed daily-return series"
 
     @pytest.mark.asyncio
+    async def test_guarded_broker_day_prestamps_dq01_guard_flag(self) -> None:
+        """MED-2: a broker account with a DQ-01-guarded day (a dominating
+        withdrawal → flow_dominated_guard, the day NaN-broken and SKIPPED from
+        csv_daily_returns) must PRE-STAMP the guard flag onto strategy_analytics so
+        the CSV factsheet reads complete_with_warnings — closing the P74
+        broker→CSV guard-meta gap. Mutation-honest: neutering the guard-flag bridge
+        (pre-stamping only flow_coverage_incomplete) drops the flag → RED."""
+        import datetime as _dt
+        from services.job_worker import run_derive_broker_dailies_job
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+        d1 = (now - _dt.timedelta(days=3)).date().isoformat()
+        d2 = (now - _dt.timedelta(days=2)).date().isoformat()
+
+        def _rec(day: str, pnl: float) -> dict:
+            return {
+                "exchange": "binance", "symbol": "PORTFOLIO",
+                "side": "buy" if pnl >= 0 else "sell", "price": abs(pnl),
+                "quantity": 1, "fee": 0, "fee_currency": "USDT",
+                "timestamp": f"{day}T00:00:00+00:00", "order_type": "daily_pnl",
+            }
+
+        # anchor 5000 + realized [+800, +15000] reconstructs NAV_{d1}=80000; a
+        # -90000 USDT withdrawal on d2 has |F|=90000 >= NAV → flow_dominated_guard
+        # (the same LTP068-shaped dominating-withdrawal fixture, proven in
+        # test_derive_broker_dailies_dualmode).
+        realized = [_rec(d1, 800.0), _rec(d2, 15000.0)]
+        d2_ms = int(
+            _dt.datetime.fromisoformat(d2 + "T00:00:00+00:00").timestamp() * 1000
+        )
+        withdrawal = {"id": "w1", "type": "withdrawal", "currency": "USDT",
+                      "amount": 90_000.0, "timestamp": d2_ms, "internal": False}
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="binance", deposits=[], withdrawals=[withdrawal],
+            realized=realized, equity=5_000.0,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        guarded = [
+            u for u in captured["analytics_upserts"]
+            if (u.get("data_quality_flags") or {}).get("flow_dominated_guard")
+        ]
+        assert guarded, (
+            "expected a flow_dominated_guard pre-stamp on strategy_analytics so "
+            "the broker factsheet reads complete_with_warnings (P74 gap closed)"
+        )
+
+    @pytest.mark.asyncio
     async def test_sync_trades_enqueue_failure_does_not_fail_job(
         self,
     ) -> None:

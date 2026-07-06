@@ -697,7 +697,19 @@ Blast radius if it bites: two duplicate `portfolio_analytics` history rows for t
 
 Fix path: add a short-window DQ flag (e.g. `elapsed_days < N` → `complete_with_warnings` / `insufficient_window`) at the CAGR site, WITHOUT changing the CAGR value. Deliberately deferred because a CAGR `computation_status` change is factsheet-wide blast radius (roadmap Pitfall #12) and must land behind the Phase 78 golden-parity gate with a threshold decision (what N, and whether magnitude is suppressed vs merely flagged). Interacts with the DQ NaN-break path: after guards NaN-break flow-heavy days, `returns.dropna().index` can collapse to a few far-apart survivors → same absurd annualization.
 
-### v1.8 P74: broker→CSV path drops guard meta → allocator sees `complete` for a guarded account (red-team MEDIUM-1 + verifier deferral, 2026-07-06)
+### ✅ CLOSED (P76, 2026-07-06) — v1.8 P74: broker→CSV path drops guard meta → allocator sees `complete` for a guarded account (red-team MEDIUM-1 + verifier deferral, 2026-07-06)
+
+**CLOSED by P76 MED-2.** The broker path now PRE-STAMPS the DQ-01 guard flags
+(`negative_nav_guard` / `dust_nav_guard` / `flow_dominated_guard`) onto
+`strategy_analytics.data_quality_flags` in `derive_broker_dailies` (`job_worker.py`) —
+the SAME bridge the `flow_coverage_incomplete` flag already rode from 76-04 — and
+`run_csv_strategy_analytics` (`analytics_runner.py`) now reads/preserves/promotes ALL of
+them, so a guarded broker account renders `complete_with_warnings` to allocators. The
+full guard meta now crosses the `csv_daily_returns` boundary. Mutation-honest tests:
+`test_guarded_broker_day_prestamps_dq01_guard_flag` (job_worker) +
+`test_csv_run_promotes_to_warnings_when_dq01_guard_prestamped` (analytics_runner). The
+short-window over-annualized-CAGR interaction (below) remains tracked with the P73 item
+behind the Phase 78 parity gate.
 
 **Priority:** P2 — magnitude honesty IS delivered (no fabricated base); this is a WARNING-propagation gap, not a fabrication. Verified acceptable-deferral by both the phase-74 verifier and the fresh-context red-team.
 

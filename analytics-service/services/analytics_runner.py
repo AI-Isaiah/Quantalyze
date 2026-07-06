@@ -2132,13 +2132,15 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             data_quality_flags["benchmark_unavailable"] = True
             data_quality_flags["benchmark_note"] = "Benchmark data unavailable."
 
-        # Phase 76 (v1.8 DQ-02): the broker flow-coverage terminus PRE-STAMPS
-        # flow_coverage_incomplete onto this strategy_analytics row (job_worker,
-        # derive_broker_dailies) BEFORE enqueuing this CSV run — the pre-terminus
-        # days are honestly absent from csv_daily_returns, so the flag is the only
-        # channel that tells the factsheet a coverage gap was refused. Read the
-        # pre-existing flag and PRESERVE it (a full _mark_complete upsert would
-        # otherwise wipe it) + promote status to complete_with_warnings.
+        # Phase 76 (v1.8 DQ-02 + DQ-01): the broker path PRE-STAMPS the coverage
+        # terminus flag AND the NAV-denominator guard flags (negative/dust/flow-
+        # dominated) onto this strategy_analytics row (job_worker,
+        # derive_broker_dailies) BEFORE enqueuing this CSV run — the guard-broken
+        # / pre-terminus days are honestly absent from csv_daily_returns, so these
+        # flags are the only channel that tells the factsheet a day was refused.
+        # Read each pre-existing flag and PRESERVE it (a full _mark_complete upsert
+        # would otherwise wipe it) + promote status to complete_with_warnings when
+        # ANY fired (MED-2 bridges the DQ-01 guard flags to the broker factsheet).
         def _read_existing_flags() -> dict[str, Any]:
             res = (
                 supabase.table("strategy_analytics")
@@ -2151,14 +2153,18 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             return dict(row.get("data_quality_flags") or {})
 
         existing_flags = await db_execute(_read_existing_flags)
-        flow_coverage_incomplete = bool(
-            existing_flags.get("flow_coverage_incomplete")
+        _BROKER_WARN_FLAGS = (
+            "flow_coverage_incomplete",
+            "negative_nav_guard",
+            "dust_nav_guard",
+            "flow_dominated_guard",
         )
-        if flow_coverage_incomplete:
-            data_quality_flags["flow_coverage_incomplete"] = True
-        csv_status = (
-            "complete_with_warnings" if flow_coverage_incomplete else "complete"
-        )
+        _warned = False
+        for _flag in _BROKER_WARN_FLAGS:
+            if existing_flags.get(_flag):
+                data_quality_flags[_flag] = True
+                _warned = True
+        csv_status = "complete_with_warnings" if _warned else "complete"
 
         def _mark_complete() -> None:
             payload: dict[str, Any] = {

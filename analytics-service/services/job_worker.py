@@ -2358,27 +2358,37 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         meta.get("used_heuristic_capital"),
     )
 
-    # DQ-02 (v1.8): when the flow-coverage terminus segmented a retention gap,
-    # PRE-STAMP flow_coverage_incomplete onto strategy_analytics so the CSV
-    # analytics run (run_csv_strategy_analytics) SURFACES it → complete_with_
-    # warnings. csv_daily_returns carries ONLY the post-segmentation return rows —
-    # the pre-terminus days are honestly ABSENT (never a fabricated return) — so
-    # this flag is the only channel telling the factsheet a coverage gap was
-    # refused. The CSV run MERGES this pre-existing flag rather than wiping it.
-    if meta.get("flow_coverage_incomplete"):
-        def _prestamp_coverage() -> None:
+    # DQ-02 + DQ-01 (v1.8): PRE-STAMP the coverage terminus flag AND the DQ-01
+    # NAV-denominator guard flags (negative_nav_guard / dust_nav_guard /
+    # flow_dominated_guard) onto strategy_analytics so the CSV analytics run
+    # (run_csv_strategy_analytics) SURFACES them → complete_with_warnings.
+    # csv_daily_returns carries ONLY the interpretable return rows — a
+    # guard-broken day is np.nan and SKIPPED at write time (74-04 NaN policy),
+    # and a coverage-gap day is honestly ABSENT — so these pre-stamped flags are
+    # the ONLY channel telling the factsheet a day was refused (MED-2 closes the
+    # P74 broker→CSV guard-meta gap). The CSV run MERGES these pre-existing flags
+    # rather than wiping them.
+    _BROKER_WARN_FLAGS = (
+        "flow_coverage_incomplete",
+        "negative_nav_guard",
+        "dust_nav_guard",
+        "flow_dominated_guard",
+    )
+    _prestamp_flags: dict[str, Any] = {"csv_source": True}
+    for _flag in _BROKER_WARN_FLAGS:
+        if meta.get(_flag):
+            _prestamp_flags[_flag] = True
+    if len(_prestamp_flags) > 1:
+        def _prestamp_dq_flags(flags: dict[str, Any] = _prestamp_flags) -> None:
             ctx.supabase.table("strategy_analytics").upsert(
                 {
                     "strategy_id": strategy_id,
-                    "data_quality_flags": {
-                        "csv_source": True,
-                        "flow_coverage_incomplete": True,
-                    },
+                    "data_quality_flags": flags,
                 },
                 on_conflict="strategy_id",
             ).execute()
 
-        await db_execute(_prestamp_coverage)
+        await db_execute(_prestamp_dq_flags)
 
     # Hand off to the standard CSV analytics route to compile the factsheet.
     def _enqueue_csv_analytics() -> None:

@@ -5745,3 +5745,43 @@ async def test_csv_run_stays_complete_without_flow_coverage_flag():
         "no coverage gap → status must stay exact-string 'complete' (SC-4)"
     )
     assert not (final.get("data_quality_flags") or {}).get("flow_coverage_incomplete")
+
+
+@pytest.mark.asyncio
+async def test_csv_run_promotes_to_warnings_when_dq01_guard_prestamped():
+    """MED-2: when derive_broker_dailies PRE-STAMPED a DQ-01 guard flag
+    (flow_dominated_guard — a NaN-broken day honestly absent from
+    csv_daily_returns) onto strategy_analytics, the CSV run PRESERVES it and
+    promotes computation_status to complete_with_warnings — bridging the guard
+    meta to the broker factsheet. Mutation: dropping the guard flags from the
+    read/promote leaves status 'complete' → RED."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ]
+    sb = _csv_supabase_mock(
+        rows,
+        existing_flags={"csv_source": True, "flow_dominated_guard": True},
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_clean_metrics_result()):
+        await run_csv_strategy_analytics("s1")
+
+    complete = [
+        u for u in sb.upserts
+        if u.get("computation_status") in ("complete", "complete_with_warnings")
+    ]
+    assert complete
+    final = complete[-1]
+    assert final["computation_status"] == "complete_with_warnings", (
+        "a pre-stamped DQ-01 guard flag must promote the broker CSV factsheet"
+    )
+    assert (final.get("data_quality_flags") or {}).get("flow_dominated_guard"), (
+        "the guard flag must be preserved on the completion upsert, not wiped"
+    )
