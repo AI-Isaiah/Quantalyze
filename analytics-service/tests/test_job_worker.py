@@ -1337,12 +1337,21 @@ class TestDeriveBrokerDailies:
         ohlcv_by_symbol: dict[str, list[list]] | None = None,
         realized: list[dict] | None = None,
         transfers_error: Exception | None = None,
+        upnl: float = 0.0,
+        balance_error: bool = False,
     ):
         """Build the (mock_ctx, patches, captured) harness for a ccxt-venue
         derive_broker_dailies run. ``captured['external_flows']`` records the
         exact flows threaded into combine; ``captured['csv_rows']`` records the
         daily-return rows written to csv_daily_returns (post-segmentation).
-        ``captured['ohlcv_calls']`` records the reused price-source symbols."""
+        ``captured['ohlcv_calls']`` records the reused price-source symbols.
+
+        Phase 77 (FLOW-04): ``upnl`` models the 77-02 companion open-uPnL wedge
+        (``fetch_account_equity_and_upnl_usd`` 3-tuple); the harness patches the
+        NEW 3-tuple read to return ``(equity, balance_error, upnl)`` AND keeps the
+        legacy 2-tuple patch so the harness spans the RED→GREEN transition. OKX
+        supplies a real ``upl``; Bybit/Binance are structurally 0.0 (77-02). The
+        threaded wedge is recorded on ``captured['open_unrealized_usd']``."""
         import pandas as pd
         from contextlib import ExitStack
 
@@ -1423,7 +1432,14 @@ class TestDeriveBrokerDailies:
         ))
         stack.enter_context(patch(
             "services.exchange.fetch_account_equity_usd",
-            new=AsyncMock(return_value=(equity, False)),
+            new=AsyncMock(return_value=(equity, balance_error)),
+        ))
+        # Phase 77 (FLOW-04): the venue-gated companion 3-tuple read. Patched
+        # alongside the 2-tuple so the harness works both in RED (source still
+        # calls the 2-tuple, wedge stays 0.0) and GREEN (source calls this).
+        stack.enter_context(patch(
+            "services.exchange.fetch_account_equity_and_upnl_usd",
+            new=AsyncMock(return_value=(equity, balance_error, upnl)),
         ))
         for _fn in ("fetch_funding_binance", "fetch_funding_okx", "fetch_funding_bybit"):
             stack.enter_context(patch(
@@ -1821,6 +1837,199 @@ class TestDeriveBrokerDailies:
         assert clean == {"csv_source": True}, (
             f"clean re-derive must clear all warn flags; got {clean!r}"
         )
+
+    # ------------------------------------------------------------------
+    # FLOW-04 (v1.8, 77-03): venue-gated open-uPnL wedge threading + the
+    # unrealized_pnl_in_anchor DQ-bridge pre-stamp.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _recent_daily_pnl(venue: str, pnls: dict[int, float]) -> list[dict]:
+        """A list of daily_pnl realized records, keyed by days-ago → pnl, all
+        within the venue's deposit-history retention (no coverage gap)."""
+        import datetime as _dt
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+        out: list[dict] = []
+        for days_ago, pnl in pnls.items():
+            d = (now - _dt.timedelta(days=days_ago)).date().isoformat()
+            out.append({
+                "exchange": venue, "symbol": "PORTFOLIO",
+                "side": "buy" if pnl >= 0 else "sell", "price": abs(pnl),
+                "quantity": 1, "fee": 0, "fee_currency": "USDT",
+                "timestamp": f"{d}T00:00:00+00:00", "order_type": "daily_pnl",
+            })
+        return out
+
+    @pytest.mark.asyncio
+    async def test_okx_material_wedge_threaded_and_flagged(self) -> None:
+        """OKX with a MATERIAL companion open-uPnL (upl 8000 on a 100k anchor →
+        8% > the 5% materiality ratio): derive_broker_dailies must thread the
+        real wedge into combine_realized_and_funding(open_unrealized_usd=...) so
+        the roll terminal is realized-basis, and the resulting
+        unrealized_pnl_in_anchor meta must be PRE-STAMPED onto strategy_analytics
+        (the DQ bridge). RED: the source still calls the 2-tuple read, threads no
+        wedge (captured stays 0.0), and no unrealized_pnl_in_anchor is stamped."""
+        from services.job_worker import run_derive_broker_dailies_job
+
+        realized = self._recent_daily_pnl("okx", {10: 200.0, 5: 150.0, 1: 75.0})
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="okx", deposits=[], realized=realized,
+            equity=100_000.0, upnl=8_000.0,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        # The real wedge reaches the roll terminal (realized-basis).
+        assert captured["open_unrealized_usd"] == pytest.approx(8_000.0), (
+            "OKX must thread the companion upl into "
+            "combine_realized_and_funding(open_unrealized_usd=...); "
+            f"got {captured['open_unrealized_usd']!r}"
+        )
+        # A material wedge rides the same MED-2/MED-3 broker→CSV pre-stamp bridge.
+        flagged = [
+            u for u in captured["analytics_upserts"]
+            if (u.get("data_quality_flags") or {}).get("unrealized_pnl_in_anchor")
+        ]
+        assert flagged, (
+            "a material wedge must pre-stamp unrealized_pnl_in_anchor onto "
+            "strategy_analytics so the factsheet reads complete_with_warnings"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("venue", ["bybit", "binance"])
+    async def test_walletbalance_venue_wedge_zero_no_double_count(
+        self, venue: str,
+    ) -> None:
+        """DOUBLE-COUNT PIN (Pitfall 2 / T-77-07): a Bybit/Binance anchor is
+        realized-basis walletBalance, so the companion wedge is STRUCTURALLY 0.0
+        and derive_broker_dailies must thread exactly 0.0 — a flow-less series is
+        byte-identical to the pre-77 (wedge-absent) baseline. Mutation-honest: the
+        wedge is load-bearing (a non-zero wedge shifts the series), so threading a
+        non-zero wedge here would silently double-count. In RED both runs share the
+        untouched (wedge-0.0) 2-tuple path, so the load-bearing assertion REDs."""
+        from services.job_worker import run_derive_broker_dailies_job
+
+        realized = self._recent_daily_pnl(venue, {10: 200.0, 5: 150.0, 1: 75.0})
+
+        def _rows(cap: dict) -> list[tuple[str, float]]:
+            return sorted(
+                (r["date"], r["daily_return"]) for r in cap["csv_rows"]
+            )
+
+        # Real path: the walletBalance venue's structural 0.0 wedge.
+        _, stack0, cap0 = self._flow_harness(
+            venue=venue, deposits=[], realized=realized,
+            equity=100_000.0, upnl=0.0,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack0:
+            await run_derive_broker_dailies_job(job)
+        rows0 = _rows(cap0)
+
+        # Mutation model: a hypothetical non-zero wedge leaking through the read.
+        _, stack1, cap1 = self._flow_harness(
+            venue=venue, deposits=[], realized=realized,
+            equity=100_000.0, upnl=6_000.0,
+        )
+        with stack1:
+            await run_derive_broker_dailies_job(job)
+        rows1 = _rows(cap1)
+
+        # The structural wedge threaded for a walletBalance venue is exactly 0.0.
+        assert cap0["open_unrealized_usd"] == 0.0, (
+            f"{venue} must thread a 0.0 wedge (no double-count); "
+            f"got {cap0['open_unrealized_usd']!r}"
+        )
+        # The wedge is load-bearing: a non-zero wedge shifts the roll terminal, so
+        # the structural 0.0 (byte-identical to the pre-77 baseline) genuinely
+        # protects the realized-basis walletBalance series from a double-count.
+        assert rows0 != rows1, (
+            "the open-uPnL wedge must move the reconstructed series (load-bearing); "
+            "if it does not, the byte-identity pin is vacuous"
+        )
+        # No unrealized_pnl_in_anchor on a structurally-zero-wedge venue.
+        assert not any(
+            (u.get("data_quality_flags") or {}).get("unrealized_pnl_in_anchor")
+            for u in cap0["analytics_upserts"]
+        ), "a 0.0-wedge walletBalance account must not raise unrealized_pnl_in_anchor"
+
+    @pytest.mark.asyncio
+    async def test_heuristic_anchor_forces_wedge_zero(self) -> None:
+        """NOISE GUARD (Pitfall 5 / T-77-08): a balance_error (heuristic) anchor
+        must force open_unrealized_usd=0.0 EVEN for OKX — a wedge is never
+        subtracted onto a heuristic base, and unrealized_pnl_in_anchor stays
+        clear. Contrast: test_okx_material_wedge_threaded_and_flagged proves the
+        SAME upl DOES thread when the anchor is trustworthy."""
+        from services.job_worker import run_derive_broker_dailies_job
+
+        realized = self._recent_daily_pnl("okx", {10: 200.0, 5: 150.0, 1: 75.0})
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="okx", deposits=[], realized=realized,
+            equity=100_000.0, upnl=8_000.0, balance_error=True,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            await run_derive_broker_dailies_job(job)
+
+        assert captured["open_unrealized_usd"] == 0.0, (
+            "a heuristic (balance_error) anchor must force the wedge to 0.0; "
+            f"got {captured['open_unrealized_usd']!r}"
+        )
+        assert not any(
+            (u.get("data_quality_flags") or {}).get("unrealized_pnl_in_anchor")
+            for u in captured["analytics_upserts"]
+        ), "no wedge on a heuristic base → no unrealized_pnl_in_anchor"
+
+    @pytest.mark.asyncio
+    async def test_dust_anchor_forces_wedge_zero(self) -> None:
+        """NOISE GUARD (Pitfall 5 / T-77-08): a dust anchor (|equity| <=
+        DUST_NAV_FLOOR) forces open_unrealized_usd=0.0 — the materiality ratio is
+        meaningless/explosive on a tiny base, so the wedge is never subtracted."""
+        from services.job_worker import run_derive_broker_dailies_job
+
+        realized = self._recent_daily_pnl("okx", {10: 5.0, 5: 3.0, 1: 2.0})
+        # equity 500 < DUST_NAV_FLOOR (1000) → dust base.
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="okx", deposits=[], realized=realized,
+            equity=500.0, upnl=400.0,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            await run_derive_broker_dailies_job(job)
+
+        assert captured["open_unrealized_usd"] == 0.0, (
+            "a dust anchor must force the wedge to 0.0; "
+            f"got {captured['open_unrealized_usd']!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_material_wedge_does_not_mutate_stored_equity_scalar(
+        self,
+    ) -> None:
+        """Q4-tail INVARIANT (T-77-10): the reported CURRENT NAV re-add is
+        DEFINITIONAL. The derive path writes ONLY csv_daily_returns — it must NOT
+        subtract the wedge from any stored equity scalar (account_balance_usdt is
+        never written on this path). Even with a material wedge, no
+        account_balance_usdt key appears in any strategy_analytics upsert."""
+        from services.job_worker import run_derive_broker_dailies_job
+
+        realized = self._recent_daily_pnl("okx", {10: 200.0, 5: 150.0, 1: 75.0})
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="okx", deposits=[], realized=realized,
+            equity=100_000.0, upnl=8_000.0,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            await run_derive_broker_dailies_job(job)
+
+        # The derive path never writes a stored MTM equity scalar (the wedge
+        # reaches only combine's open_unrealized_usd kwarg).
+        assert all(
+            "account_balance_usdt" not in u for u in captured["analytics_upserts"]
+        ), "derive path must not mutate a stored equity scalar with the wedge"
+        assert captured["csv_rows"], "expected a reconstructed daily-return series"
 
     @pytest.mark.asyncio
     async def test_sync_trades_enqueue_failure_does_not_fail_job(

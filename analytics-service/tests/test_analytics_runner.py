@@ -2466,6 +2466,37 @@ async def test_status_guard_promotion_flow_coverage_incomplete_lifts_and_promote
 
 
 @pytest.mark.asyncio
+async def test_status_guard_promotion_unrealized_pnl_in_anchor_lifts_and_promotes():
+    """Phase 77 (v1.8 FLOW-04): unrealized_pnl_in_anchor on returns_meta (a
+    material open-uPnL wedge relative to a non-dust anchor) extends the 74-03
+    guard-key lift — it must (1) surface in data_quality_flags and (2) promote
+    computation_status to 'complete_with_warnings', mirroring the NAV guard keys
+    and flow_coverage_incomplete. RED: the lift loop and the promotion predicate
+    have no unrealized_pnl_in_anchor term, so the flag is dropped and status stays
+    the un-promoted 'complete'."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        guard_flags={"unrealized_pnl_in_anchor": True},
+    )
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("unrealized_pnl_in_anchor") is True, (
+        f"unrealized_pnl_in_anchor must lift into data_quality_flags; got: {flags!r}"
+    )
+    assert upsert.get("computation_status") == "complete_with_warnings", (
+        "A material open-uPnL wedge must promote computation_status to "
+        f"'complete_with_warnings'; got: {upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_complete_unchanged_no_guard_flow_less_stays_complete():
     """GREEN-invariant (SC-4 status): a no-guard, flow-less, estimated_start>0
     account (returns_meta carries NO guard key) stays
@@ -5785,3 +5816,76 @@ async def test_csv_run_promotes_to_warnings_when_dq01_guard_prestamped():
     assert (final.get("data_quality_flags") or {}).get("flow_dominated_guard"), (
         "the guard flag must be preserved on the completion upsert, not wiped"
     )
+
+
+@pytest.mark.asyncio
+async def test_csv_run_promotes_to_warnings_when_unrealized_pnl_prestamped():
+    """FLOW-04 (v1.8, 77-03): when derive_broker_dailies PRE-STAMPED
+    unrealized_pnl_in_anchor (a material open-uPnL wedge) onto strategy_analytics,
+    the CSV run PRESERVES the flag and promotes computation_status to
+    complete_with_warnings — bridging the wedge materiality to the broker
+    factsheet, mirroring the flow_coverage / DQ-01 guard bridges. Mutation:
+    dropping unrealized_pnl_in_anchor from the broker warn-flag lift leaves status
+    'complete' → RED."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ]
+    sb = _csv_supabase_mock(
+        rows,
+        existing_flags={"csv_source": True, "unrealized_pnl_in_anchor": True},
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_clean_metrics_result()):
+        await run_csv_strategy_analytics("s1")
+
+    complete = [
+        u for u in sb.upserts
+        if u.get("computation_status") in ("complete", "complete_with_warnings")
+    ]
+    assert complete
+    final = complete[-1]
+    assert final["computation_status"] == "complete_with_warnings", (
+        "a pre-stamped unrealized_pnl_in_anchor must promote the broker CSV factsheet"
+    )
+    assert (final.get("data_quality_flags") or {}).get("unrealized_pnl_in_anchor"), (
+        "the wedge materiality flag must be preserved on the completion upsert"
+    )
+
+
+@pytest.mark.asyncio
+async def test_csv_run_stays_complete_without_unrealized_pnl_flag():
+    """SC-4: a broker/CSV account with no pre-stamped unrealized_pnl_in_anchor
+    keeps its exact-string 'complete' — the 8 downstream consumers that gate on it
+    are unaffected (an immaterial / zero-wedge account is clean-complete)."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ]
+    sb = _csv_supabase_mock(rows, existing_flags={"csv_source": True})
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_clean_metrics_result()):
+        await run_csv_strategy_analytics("s1")
+
+    complete = [
+        u for u in sb.upserts
+        if u.get("computation_status") in ("complete", "complete_with_warnings")
+    ]
+    assert complete
+    final = complete[-1]
+    assert final["computation_status"] == "complete", (
+        "no material wedge → status must stay exact-string 'complete' (SC-4)"
+    )
+    assert not (final.get("data_quality_flags") or {}).get("unrealized_pnl_in_anchor")
