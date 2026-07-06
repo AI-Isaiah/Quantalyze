@@ -1940,7 +1940,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         apply_flow_coverage_terminus,
         flow_coverage_terminus_day,
     )
-    from services.exchange import fetch_account_equity_usd
+    from services.exchange import fetch_account_equity_and_upnl_usd
+    from services.nav_twr import DUST_NAV_FLOOR, UNREALIZED_MATERIALITY_RATIO
     from services.external_flows import ExternalFlow
     from services.ccxt_flow_fetch import fetch_ccxt_transfers
     from services.ccxt_flows import ccxt_rows_to_dated_flows
@@ -1965,7 +1966,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 LedgerTruncatedError,
                 ScopeAuthError,
                 assert_ledger_complete,
-                fetch_deribit_account_equity_usd,
+                fetch_deribit_account_equity_and_upnl_usd,
                 fetch_deribit_ledger_daily_records,
             )
             from services.deribit_txn import LedgerValuationError
@@ -1999,9 +2000,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 
             # USD equity anchor — fetch_account_equity_usd does NOT cover deribit
             # (coin-margined USDT balance is not USD equity); this converts each
-            # currency's coin equity at its event/mark index into USD.
-            equity, balance_error = await fetch_deribit_account_equity_usd(
-                ctx.exchange
+            # currency's coin equity at its event/mark index into USD. FLOW-04
+            # (v1.8): the companion session-uPnL wedge (session_upl) rides the SAME
+            # get_account_summaries response + index_prices (77-02) — noise-guarded
+            # below before it threads into the realized-basis roll terminal.
+            equity, balance_error, open_unrealized_usd = (
+                await fetch_deribit_account_equity_and_upnl_usd(ctx.exchange)
             )
             try:
                 realized, _completeness = await fetch_deribit_ledger_daily_records(
@@ -2097,8 +2101,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         else:
             # Current total equity = the initial-capital anchor (anchor-to-today,
             # reconstruct backward). OKX is read via raw totalEq inside
-            # fetch_account_equity_usd (ccxt fetch_balance crashes on OKX).
-            equity, balance_error = await fetch_account_equity_usd(ctx.exchange, venue)
+            # fetch_account_equity_and_upnl_usd (ccxt fetch_balance crashes on OKX).
+            # FLOW-04 (v1.8): the venue-gated companion open-uPnL wedge rides the
+            # SAME response (OKX upl; Bybit/Binance structural 0.0 — realized-basis
+            # walletBalance, so a downstream subtract can never double-count, 77-02).
+            equity, balance_error, open_unrealized_usd = (
+                await fetch_account_equity_and_upnl_usd(ctx.exchange, venue)
+            )
             # since_ms=None ⇒ ENTIRE account history (OKX inception via archive
             # bills, Binance inception, Bybit last 365 days).
             realized = await fetch_all_trades(ctx.exchange, since_ms=None)
@@ -2168,10 +2177,30 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         except Exception:  # pragma: no cover
             pass
 
+    # FLOW-04 (v1.8) NOISE GUARD (Pitfall 5 / T-77-08): the companion open-uPnL
+    # wedge is only trustworthy relative to a trustworthy anchor. Force it to 0.0
+    # when the anchor is heuristic/dust — a balance_error read, a missing equity,
+    # or a dust base (|equity| <= DUST_NAV_FLOOR, where the materiality ratio is
+    # meaningless and a divide-by-tiny explodes into a false positive). The wedge
+    # is NEVER subtracted onto such a base; a healthy anchor keeps the real wedge.
+    if (
+        balance_error
+        or equity is None
+        or abs(equity) <= DUST_NAV_FLOOR
+    ):
+        open_unrealized_usd = 0.0
+
     try:
+        # FLOW-04: the venue-gated, noise-guarded wedge threads into the honest
+        # core's terminal seam (broker_dailies passes it straight to
+        # reconstruct_nav_and_funding). The stored/displayed MTM equity anchor is
+        # KEPT full — the reported CURRENT NAV re-add is DEFINITIONAL, so the
+        # derive path writes ONLY csv_daily_returns and never mutates `equity`
+        # (Q4 tail). OKX/Deribit subtract the real wedge (realized-basis terminal);
+        # Bybit/Binance passed 0.0 above (no double-count).
         returns, meta = combine_realized_and_funding(
             realized, funding, account_balance=equity, balance_error=balance_error,
-            external_flows=external_flows,
+            external_flows=external_flows, open_unrealized_usd=open_unrealized_usd,
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL NAV/TWR reconstruction failure surfacing from the honest
@@ -2214,6 +2243,24 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             ),
             error_kind="permanent",
         )
+
+    # FLOW-04 (v1.8): surface the open-uPnL materiality flag onto meta POST-COMBINE.
+    # The honest core (reconstruct_nav_and_twr) raises unrealized_pnl_in_anchor when
+    # |wedge|/anchor > UNREALIZED_MATERIALITY_RATIO, but transforms._merge_status_meta
+    # (a P74-pinned boundary) does not carry that key through — so mirror the
+    # flow_coverage_incomplete pattern below and recompute the SAME test here on the
+    # already-noise-guarded wedge. The wedge is 0.0 on every dust/heuristic/balance-
+    # error anchor (forced above), so this fires ONLY on a trustworthy anchor where
+    # transforms used anchor_nav == equity — faithfully reproducing the core's ratio.
+    # A BOOL only (no raw USD — account-size leak T-77-09); NOT threaded through
+    # transforms so the Phase 74 byte-identity pins stay GREEN.
+    if (
+        open_unrealized_usd != 0.0
+        and equity is not None
+        and abs(equity) > DUST_NAV_FLOOR
+        and abs(open_unrealized_usd) / abs(equity) > UNREALIZED_MATERIALITY_RATIO
+    ):
+        meta["unrealized_pnl_in_anchor"] = True
 
     # DQ-02 (v1.8): apply the flow-coverage terminus gate POST-COMBINE. When the
     # return window extends BEFORE the venue's deposit-history retention (OKX 90d /
@@ -2380,6 +2427,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         "negative_nav_guard",
         "dust_nav_guard",
         "flow_dominated_guard",
+        # FLOW-04 (v1.8): a material open-uPnL wedge relative to a non-dust anchor
+        # rides the SAME broker→CSV pre-stamp bridge → complete_with_warnings.
+        "unrealized_pnl_in_anchor",
     )
     _prestamp_flags: dict[str, Any] = {"csv_source": True}
     for _flag in _BROKER_WARN_FLAGS:

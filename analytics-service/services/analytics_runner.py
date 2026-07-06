@@ -177,6 +177,13 @@ class DataQualityFlags(TypedDict, total=False):
     # and this flag promotes computation_status to complete_with_warnings. Rides
     # the same channel as the NAV guard keys. ---
     flow_coverage_incomplete: bool
+    # --- Phase 77 (v1.8 FLOW-04): open-uPnL materiality. Fires when the terminal
+    # open unrealized PnL wedge is material (|wedge|/anchor > 5%) relative to a
+    # non-dust anchor — the anchor-to-today NAV embeds uncrystallised MTM that the
+    # realized-basis roll cannot reconstruct per-day. A BOOL only (no raw USD, the
+    # account-size leak T-77-09); promotes computation_status to
+    # complete_with_warnings on the same channel as the NAV guard keys. ---
+    unrealized_pnl_in_anchor: bool
     # --- sibling-table batch upsert ---
     sibling_kinds_failed: bool
     sibling_kinds_error: str
@@ -1749,6 +1756,9 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             "dust_nav_guard",
             "flow_dominated_guard",
             "flow_coverage_incomplete",
+            # Phase 77 (v1.8 FLOW-04): a material open-uPnL wedge joins the
+            # additive NavTWRMeta guard-key lift — present ONLY when it fired.
+            "unrealized_pnl_in_anchor",
         ):
             if returns_meta.get(_guard_key):
                 data_quality_flags = data_quality_flags or {}
@@ -1832,6 +1842,10 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             # Phase 76 (v1.8 DQ-02): a refused flow-coverage gap is at least as
             # degraded as a NAV guard — promote to complete_with_warnings.
             or (top_level_flags or {}).get("flow_coverage_incomplete")
+            # Phase 77 (v1.8 FLOW-04): a material open-uPnL wedge means the
+            # anchor-to-today NAV embeds uncrystallised MTM the realized roll
+            # cannot per-day reconstruct — promote to complete_with_warnings.
+            or (top_level_flags or {}).get("unrealized_pnl_in_anchor")
         )
         # When the consumer flag is suppressed (because the upstream
         # account_balance_unavailable / no_linked_api_key already
@@ -2158,6 +2172,9 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             "negative_nav_guard",
             "dust_nav_guard",
             "flow_dominated_guard",
+            # Phase 77 (v1.8 FLOW-04): the pre-stamped open-uPnL materiality flag
+            # rides the same broker→CSV warn bridge → complete_with_warnings.
+            "unrealized_pnl_in_anchor",
         )
         _warned = False
         for _flag in _BROKER_WARN_FLAGS:
