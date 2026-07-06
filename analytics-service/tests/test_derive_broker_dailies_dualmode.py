@@ -611,3 +611,64 @@ class TestLtp068AcceptanceSubNavPureFlow:
         assert _cumulative_twr(returns) != pytest.approx(
             _cumulative_twr(returns_no_flow)
         ), "dropping the load-bearing flow must change the reconstructed result"
+
+
+class TestLtp068AcceptanceDominatingWithdrawal:
+    """FLOW-02 acceptance (75-CONTEXT.md SC4, reconciled) — the DOMINATING case.
+    LTP068's motivating event was a ~$2.5M withdrawal that DWARFED prior-day
+    capital. When the valued ``|F| >= NAV_{t-1}`` (FLOW_DOM_RATIO=1.0) the
+    chain-link is not interpretable, so ``reconstruct_nav_and_twr`` breaks the
+    day (``r_t = NaN``) and raises ``flow_dominated_guard`` +
+    ``complete_with_warnings`` — the CORRECT honest behavior. It never fabricates
+    a +/-100% day and never collapses to ``r_t == 0``.
+
+    Boundary distinction (the subtle SC4 point, 75-RESEARCH.md Pitfall 5 +
+    Open Q2): the SAME machinery yields ``r_t == 0`` for a sub-NAV pure flow
+    (``TestLtp068AcceptanceSubNavPureFlow``) and the guard for a dominating flow
+    (here). BOTH reconciled outcomes are pinned so a future change cannot collapse
+    them into one another.
+
+    Mutation-honest: removing the guard would divide the dominating flow through
+    a base it dwarfs and surface a fabricated magnitude instead of NaN -> the
+    ``np.isnan`` assertion reddens."""
+
+    def test_ltp068_dominating_withdrawal_trips_flow_dominated_guard(self) -> None:
+        # The scenario-4 fixture: a -2.0 BTC withdrawal valued via its OWN
+        # same-day settlement index (BTC_INDEX_2026_03_16) -> -90000 USD on
+        # 2026-03-16. The guard is about MAGNITUDE, not a valuation failure, so
+        # the flow is fully valued.
+        flows = deribit_dated_external_flows_usd(dominating_withdrawal_rows())
+        assert len(flows) == 1
+        (flow,) = flows
+        assert flow.utc_day_iso == DAY_DOMINATING
+        assert flow.usd_signed == pytest.approx(-2.0 * BTC_INDEX_2026_03_16)  # -90000
+        assert flow.usd_signed < 0.0
+
+        # Realized pnl [+800 (03-15), +15000 (03-16)] with anchor 5000
+        # reconstructs NAV_{03-15}=80000; the -90000 withdrawal on 03-16 has
+        # |F|=90000 >= 80000 -> flow_dominated_guard. (The big same-day gain is
+        # inherent to a dominating withdrawal: to withdraw MORE than prior-day
+        # capital the day's intraday gains must have funded it — LTP068's LP
+        # withdrew nearly the whole account after an up day.)
+        realized = [
+            _daily_pnl_record("2026-03-15", 800.0),  # a normal, non-guarded day
+            _daily_pnl_record(DAY_DOMINATING, 15000.0),
+        ]
+        returns, meta = combine_realized_and_funding(
+            realized, [], account_balance=5_000.0, external_flows=flows
+        )
+
+        # The dominating day is NaN (a break) — NOT r_t==0, NOT a fabricated
+        # +/-100% magnitude. Removing the guard would compute a number here.
+        assert np.isnan(returns.loc[DAY_DOMINATING])
+        # The guard fired and it is a WARNING (honest, surfaced), not an error /
+        # permanent fail — the day is flagged, never fabricated.
+        assert meta.get("flow_dominated_guard") is True
+        assert meta["computation_status_hint"] == "complete_with_warnings"
+        # Boundary distinction: ONLY the flow-dominated guard fired here (the
+        # sub-NAV case fires NO guard) — the two SC4 outcomes stay distinct.
+        assert "negative_nav_guard" not in meta
+        assert "dust_nav_guard" not in meta
+        # The normal prior day is a healthy, non-guarded finite return.
+        assert np.isfinite(returns.loc["2026-03-15"])
+        assert returns.loc["2026-03-15"] != 0.0
