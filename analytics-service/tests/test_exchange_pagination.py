@@ -402,3 +402,43 @@ async def test_transfers_not_supported_returns_partial_not_raise() -> None:
 
     rows = await fetch_ccxt_transfers(exchange, "deposits", 0, 1_000)
     assert rows == []
+
+
+async def test_transfers_boundary_flow_not_double_counted() -> None:
+    """LOW-1: a transfer whose timestamp lands EXACTLY on a 90-day window boundary
+    is fetchable in BOTH adjacent windows (the next window's inclusive `since` ==
+    the prior window's end, and a venue page can spill rows a few ms past the
+    window end). Dedup by transfer `id` must count it exactly once — a
+    double-counted deposit/withdrawal would corrupt the flow-aware TWR base.
+    MUTATION: removing the id-dedup double-counts the boundary flow → RED."""
+    window_ms = 90 * 24 * 60 * 60 * 1000
+    ws = _WINDOW_START_MS
+    day = 24 * 60 * 60 * 1000
+    now_ms = ws + window_ms + 2 * day  # spans two 90-day windows
+
+    events = [
+        {"id": "e0", "timestamp": ws, "currency": "USDT", "amount": 1.0},
+        {"id": "eB", "timestamp": ws + window_ms, "currency": "USDT", "amount": 1.0},
+        {"id": "e2", "timestamp": ws + window_ms + day, "currency": "USDT",
+         "amount": 1.0},
+    ]
+
+    async def _fetch(_symbol, since_ms, _limit):
+        # Unbounded venue page (models a call that returns rows spilling past the
+        # requested 90-day window end, as a real 90d-capped endpoint can when
+        # `since` is mid-window).
+        matching = [e for e in events if e["timestamp"] >= since_ms]
+        matching.sort(key=lambda e: e["timestamp"])
+        return matching
+
+    exchange = MagicMock()
+    exchange.fetch_deposits = _fetch
+
+    rows = await fetch_ccxt_transfers(exchange, "deposits", ws, now_ms)
+
+    ids = [r["id"] for r in rows]
+    assert ids.count("eB") == 1, (
+        f"boundary flow eB double-counted across adjacent windows: {ids}"
+    )
+    # Every transfer appears exactly once — no over-fetch, none lost.
+    assert sorted(ids) == ["e0", "e2", "eB"], f"expected each flow once; got {ids}"

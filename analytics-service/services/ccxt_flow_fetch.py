@@ -64,6 +64,14 @@ async def fetch_ccxt_transfers(
     window_ms = 90 * 24 * 60 * 60 * 1000
     page_limit = 500
     all_rows: list[dict[str, Any]] = []
+    # LOW-1: contiguous 90-day windows overlap at their inclusive boundary (the
+    # next window's `since` == the prior window's end, and a venue page may also
+    # spill rows a few ms past the requested window end). A boundary-timestamp
+    # transfer therefore gets fetched in BOTH adjacent windows. Dedup by the ccxt
+    # transfer `id` so such a flow is counted exactly once (a double-counted
+    # deposit/withdrawal would corrupt the flow-aware TWR base). Rows with no `id`
+    # are kept as-is (cannot be de-duplicated; ccxt transfers always carry one).
+    seen_ids: set[Any] = set()
     window_start = since_ms
     while window_start < now_ms:
         window_end = min(window_start + window_ms, now_ms)
@@ -91,7 +99,13 @@ async def fetch_ccxt_transfers(
             page = page or []
             if not page:
                 break
-            all_rows.extend(page)
+            for _row in page:
+                _rid = _row.get("id") if isinstance(_row, dict) else None
+                if _rid is not None:
+                    if _rid in seen_ids:
+                        continue  # already collected from the overlapping window
+                    seen_ids.add(_rid)
+                all_rows.append(_row)
             # Phase 76-01 (RESEARCH Pitfall 3): do NOT break on
             # ``len(page) < page_limit``. OKX caps transfer history at
             # 100 rows/page and Bybit at 50 — a FULL venue-capped page is
