@@ -133,12 +133,47 @@ def _flows_to_daily_usd(external_flows: Sequence[Any] | None) -> pd.Series:
     return pd.Series([sums[d] for d in ordered_days], index=index, name="flows")
 
 
+def _union_flow_days(daily_pnl: pd.Series, flows_by_day: pd.Series) -> pd.Series:
+    """Union the external-flow days INTO the daily-pnl index so a flow on a day
+    with no return-bearing row becomes a valid zero-pnl NAV day.
+
+    The pnl index is built from cash-bearing rows only (``transforms``'
+    ``groupby("date").sum()`` / ``txn_rows_to_daily_records``), so a flow on a day
+    with NO trade — an initial deposit before the first trade, or a terminal /
+    quiet-day withdrawal (the LTP068 shape) — is dated OUTSIDE that index. Left
+    alone it is an ORPHAN that ``_align_flows`` rejects, permanently FAILING the
+    whole job for the MAJORITY of real flow-bearing accounts (HIGH-1).
+
+    Placing every flow day into the index (pnl filled 0.0) makes such a day
+    flow-neutral: ``pnl_t == 0`` and ``F_t == flow`` so
+    ``r_t == (NAV_t - NAV_{t-1} - F_t)/NAV_{t-1} == 0`` — while a DOMINATING flow
+    on that same day still trips ``flow_dominated_guard`` (the union changes WHICH
+    days exist, never the guard math). Realized cash is never lost: every flow day
+    is represented. Flow-less input is returned unchanged (SC-4 byte-identity)."""
+    if flows_by_day is None or flows_by_day.empty:
+        return daily_pnl
+    if daily_pnl.empty:
+        # No return-bearing rows at all: every day is a pure-flow (r_t == 0) day.
+        return pd.Series(0.0, index=flows_by_day.index, name="daily_pnl")
+    new_days = flows_by_day.index.difference(daily_pnl.index)
+    if len(new_days) == 0:
+        return daily_pnl  # every flow already lands on a return-bearing day
+    union_index = daily_pnl.index.union(flows_by_day.index)  # sorted DatetimeIndex
+    return daily_pnl.reindex(union_index, fill_value=0.0)
+
+
 def _align_flows(flows_by_day: pd.Series, index: pd.Index) -> pd.Series:
     """Align a per-day flow Series onto ``index`` (the pnl/NAV timeline).
 
-    A flow dated on a day NOT present in ``index`` fails loud — a flow we cannot
-    place is realized cash we would otherwise silently lose (never drop cash).
-    Days in ``index`` with no flow are filled with 0.0 (a genuine no-flow day)."""
+    Days in ``index`` with no flow are filled with 0.0 (a genuine no-flow day).
+
+    A flow dated on a day NOT present in ``index`` fails loud. This is now a
+    DEFENSIVE INVARIANT rather than the primary flow-placement mechanism:
+    ``reconstruct_nav_and_twr`` unions every flow day into the pnl index up front
+    (``_union_flow_days``, HIGH-1), so a legitimate quiet-day/boundary flow is
+    ALWAYS present here and is never rejected. Reaching this raise means the
+    union was bypassed (a future refactor regressed the invariant) — fail loud
+    rather than silently drop realized cash via ``reindex`` (never lose cash)."""
     if flows_by_day is None or flows_by_day.empty:
         return pd.Series(0.0, index=index, name="flows")
 
@@ -307,6 +342,12 @@ def reconstruct_nav_and_twr(
     ``estimated_start > 0`` account (SC-4).
     """
     flows_by_day = _flows_to_daily_usd(external_flows)
+    # HIGH-1: union external-flow days into the pnl index BEFORE reconstruction so
+    # a flow on a no-trade day (initial deposit before the first trade; a terminal
+    # / quiet-day withdrawal — the LTP068 shape) becomes a valid zero-pnl NAV day
+    # (r_t == 0) instead of an orphan that fails the whole job. Placed by
+    # inclusion, so realized cash is never lost and a dominating flow still guards.
+    daily_pnl = _union_flow_days(daily_pnl, flows_by_day)
     if daily_pnl.empty:
         return pd.Series(dtype=float, name="returns"), _build_nav_meta({})
 

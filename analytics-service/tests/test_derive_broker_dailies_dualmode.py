@@ -32,10 +32,13 @@ from services.nav_twr import NavReconstructionError
 from tests.fixtures.deribit_flow_fixtures import (
     BTC_INDEX_2026_03_14,
     BTC_INDEX_2026_03_16,
+    BTC_INDEX_2026_03_17,
     DAY_DOMINATING,
     DAY_INVERSE_WITH_INDEX,
+    DAY_PURE_FLOW,
     dominating_withdrawal_rows,
     inverse_flow_day_with_index_rows,
+    pure_flow_no_trade_rows,
 )
 
 
@@ -672,3 +675,55 @@ class TestLtp068AcceptanceDominatingWithdrawal:
         # The normal prior day is a healthy, non-guarded finite return.
         assert np.isfinite(returns.loc["2026-03-15"])
         assert returns.loc["2026-03-15"] != 0.0
+
+
+class TestLtp068PureFlowNoTradeDayUnioned:
+    """HIGH-1 (75-05) — the GENUINELY-pure scenario 5 through the FULL honest seam
+    (``deribit_dated_external_flows_usd`` -> ``combine_realized_and_funding`` ->
+    ``reconstruct_nav_and_twr``) WITHOUT the ``_daily_pnl_record`` synthetic
+    injection on the flow day.
+
+    The flow day carries NO return-bearing row, so it is ABSENT from the pnl index
+    (built from cash-bearing rows only). Pre-fix ``_align_flows`` orphan-rejects it
+    -> ``NavReconstructionError`` -> the whole job permanently FAILED — the LTP068
+    class where the MAJORITY of real flow-bearing accounts (initial deposit before
+    the first trade, terminal/quiet-day withdrawal) could never compute. Post-fix
+    the flow day is UNIONED as a zero-pnl NAV day and is flow-neutral: honest
+    ``r_t == 0``, status ``complete``.
+
+    Mutation-honest: reverting the HIGH-1 ``_union_flow_days`` call re-orphans the
+    flow day and this test goes RED (``NavReconstructionError`` instead of
+    ``r_t == 0``). The sub-NAV valuation (|F| < NAV_{t-1}) trips no guard, so the
+    zero is the flow-neutral property, not a suppressed warning."""
+
+    def test_pure_flow_no_trade_day_yields_zero_not_raise(self) -> None:
+        # Scenario 5: a sub-NAV BTC withdrawal on a no-trade day, valued via the
+        # C1-fetched same-day settlement index (the day carries no own index row).
+        flows = deribit_dated_external_flows_usd(
+            pure_flow_no_trade_rows(),
+            supplemental_index={(DAY_PURE_FLOW, "BTC"): BTC_INDEX_2026_03_17},
+        )
+        assert len(flows) == 1
+        (flow,) = flows
+        assert flow.utc_day_iso == DAY_PURE_FLOW
+        # Event-time valued (-0.1 BTC * same-day index) and correctly signed.
+        assert flow.usd_signed == pytest.approx(-0.1 * BTC_INDEX_2026_03_17)  # -4100
+        assert flow.usd_signed < 0.0
+
+        # A real trade day EARLIER (2026-03-16); the flow day 2026-03-17 carries NO
+        # pnl record — it is a GENUINE orphan against the pnl index (no synthetic
+        # ``_daily_pnl_record`` injection to mask it).
+        realized = [_daily_pnl_record("2026-03-16", 1000.0)]
+        returns, meta = combine_realized_and_funding(
+            realized, [], account_balance=100_000.0, external_flows=flows
+        )
+
+        # The no-trade flow day is unioned into the NAV timeline and is
+        # flow-neutral: r_t == 0 (production yields an honest zero, not a raise).
+        assert DAY_PURE_FLOW in {d.date().isoformat() for d in returns.index}
+        assert returns.loc[DAY_PURE_FLOW] == pytest.approx(0.0, abs=1e-12)
+        # A sub-NAV flow is a NORMAL day: no guard, honest 'complete'.
+        assert meta["computation_status_hint"] == "complete"
+        assert "negative_nav_guard" not in meta
+        assert "flow_dominated_guard" not in meta
+        assert "dust_nav_guard" not in meta

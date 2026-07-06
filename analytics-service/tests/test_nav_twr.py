@@ -151,9 +151,44 @@ def test_malformed_flow_usd_fails_loud() -> None:
         _flows_to_daily_usd([("2026-01-02", "not-a-number")])
 
 
-def test_reconstruct_nav_rejects_orphan_flow_day() -> None:
-    """A flow dated on a day absent from the pnl window fails loud rather than
-    being silently lost (never lose realized cash)."""
+def test_flow_on_no_trade_day_unioned_as_zero_return() -> None:
+    """HIGH-1: a flow dated on a day ABSENT from the pnl index (a no-trade day —
+    an initial deposit before the first trade, or a terminal / quiet-day
+    withdrawal, the LTP068 shape) is UNIONED into the NAV timeline as a zero-pnl
+    day and is flow-neutral (r_t == 0). It is NEVER rejected as an orphan (the
+    old permanent-FAILED behavior for the MAJORITY of real flow-bearing accounts)
+    and NEVER silently dropped (the flow day appears in the returned index).
+
+    Mutation-honest: reverting the ``_union_flow_days`` call in
+    ``reconstruct_nav_and_twr`` re-orphans the flow day, ``_align_flows`` raises
+    ``NavReconstructionError``, and this test goes RED. The low-level
+    ``_align_flows`` raise is preserved as the defensive invariant that makes that
+    revert loud (never a silent cash loss)."""
+    # pnl on 2026-01-01..03; a sub-NAV withdrawal on 2026-01-05 — a day carrying
+    # NO return-bearing row (absent from the pnl index).
+    flow_day = pd.Timestamp("2026-01-05")
+    ret, meta = reconstruct_nav_and_twr(
+        _pnl([100.0, -50.0, 25.0]),  # 2026-01-01..03
+        anchor_nav=100_000.0,
+        external_flows=[("2026-01-05", -4100.0)],
+    )
+    # The no-trade flow day is now a valid NAV day (unioned in), and is
+    # flow-neutral: pnl_t == 0 and F_t == flow -> r_t == 0.
+    assert flow_day in ret.index
+    assert ret.loc[flow_day] == pytest.approx(0.0, abs=1e-12)
+    # A sub-NAV flow trips no guard: an honest 'complete', not a fabricated move.
+    assert meta["computation_status_hint"] == "complete"
+    assert "flow_dominated_guard" not in meta
+    assert "negative_nav_guard" not in meta
+    assert "dust_nav_guard" not in meta
+
+
+def test_align_flows_orphan_invariant_still_fails_loud() -> None:
+    """The ``_align_flows`` orphan raise is preserved as a DEFENSIVE INVARIANT:
+    the public entry unions flow days up front so this never fires for a real
+    flow, but a direct low-level call with an off-window flow must still fail loud
+    rather than silently drop realized cash via ``reindex``. This is the mutation
+    detector that makes a reverted HIGH-1 union RED instead of a silent drop."""
     daily_pnl = _pnl([10.0, 20.0, 30.0])  # 2026-01-01..03
     orphan = _flows_to_daily_usd([("2026-06-01", 100.0)])
     with pytest.raises(NavReconstructionError):
