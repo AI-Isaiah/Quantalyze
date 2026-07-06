@@ -703,33 +703,83 @@ async def fetch_deribit_ledger_daily_records(
     )
 
 
-async def fetch_deribit_account_equity_usd(
+def _deribit_session_upl_to_usd(
+    summaries: Sequence[Any],
+    index_prices: Mapping[str, float],
+) -> float:
+    """Sum the per-currency Deribit session open-uPnL wedge into USD, reusing
+    the EXACT conversion rule of ``deribit_equity_to_usd``.
+
+    [ASSUMED A1]: ``session_upl`` is the Deribit account-summary open-unrealized
+    component (the session unrealized PnL). An absent / null / non-numeric field
+    coerces to a 0.0 contribution — the safe conservative fallback (NEVER a
+    fabricated value; T-77-05). USD-family currencies pass through as USD; a
+    non-linear currency's coin uPnL is multiplied by its ``{ccy}_usd`` index.
+
+    A non-linear currency carrying a wedge but no resolvable index contributes
+    0.0 rather than raising — the equity anchor (computed FIRST) already fails
+    loud for any held currency lacking an index, so this path is only reached
+    for the warning-only wedge on a base the anchor already validated; refusing
+    to fabricate a USD figure for an unvaluable wedge is the honest default.
+    """
+    from services.deribit_txn import _LINEAR_CURRENCIES
+
+    total = 0.0
+    for summ in summaries:
+        if not isinstance(summ, Mapping):
+            continue
+        ccy = str(summ.get("currency", "")).upper()
+        if not ccy:
+            continue
+        raw = summ.get("session_upl")  # [ASSUMED A1]
+        if raw is None:
+            continue  # absent / null → 0.0 wedge (fallback, never fabricate)
+        try:
+            upl = float(raw)
+        except (TypeError, ValueError):
+            continue  # non-numeric → 0.0 wedge (fallback, never fabricate)
+        if upl == 0.0:
+            continue
+        if ccy in _LINEAR_CURRENCIES:
+            total += upl  # already USD
+            continue
+        price = index_prices.get(ccy)
+        if price is None:
+            continue  # unvaluable wedge → 0.0 contribution (never fabricate)
+        total += upl * float(price)
+    return total
+
+
+async def fetch_deribit_account_equity_and_upnl_usd(
     exchange: Any,
-) -> tuple[float | None, bool]:
-    """Total Deribit account equity in USD (the initial-capital anchor).
+) -> tuple[float | None, bool, float]:
+    """Total Deribit account equity in USD (the initial-capital anchor) AND the
+    companion session open-uPnL wedge, both from ONE ``get_account_summaries``
+    response + the SAME resolved index_prices (SC-1) — no new fetch.
 
     Reads ``private/get_account_summaries``; each coin-margined currency's coin
     equity is converted at its USD index price (``public/get_index_price`` with
     ``index_name={ccy}_usd``) while USD-family currencies pass through. The
     money math is the pure ``deribit_txn.deribit_equity_to_usd`` — NEVER anchor
-    to a raw coin quantity (the anchor-shift class mis-scales every return).
+    to a raw coin quantity (the anchor-shift class mis-scales every return). The
+    open-uPnL wedge sums ``session_upl`` [ASSUMED A1] from the SAME summaries
+    with the SAME index_prices; an absent/uncertain field → wedge 0.0 (fallback,
+    never fabricated).
 
-    Returns ``(equity, balance_error)`` mirroring ``fetch_account_equity_usd``:
-    ``balance_error=True`` means the read failed (caller flags heuristic
-    capital). ``fetch_account_equity_usd`` (services.exchange) does NOT cover
-    deribit — coin-margined USDT balance is not USD equity — so this is the
-    deribit-specific anchor.
+    Returns ``(equity, balance_error, open_unrealized_usd)``. A failed read or
+    an unvaluable held currency → ``(None, True, 0.0)`` (the wedge inherits the
+    anchor's fail-loud disposition — never fabricated on an unvaluable base).
     """
     from services.deribit_txn import _LINEAR_CURRENCIES, deribit_equity_to_usd
 
     try:
         resp = await exchange.private_get_get_account_summaries({})
     except Exception:  # noqa: BLE001 - a failed read is a DQ flag, not a crash
-        return None, True
+        return None, True, 0.0
     result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
     summaries = result.get("summaries", []) if isinstance(result, Mapping) else []
     if not isinstance(summaries, Sequence) or not summaries:
-        return None, True
+        return None, True, 0.0
 
     index_prices: dict[str, float] = {}
     for summ in summaries:
@@ -757,8 +807,31 @@ async def fetch_deribit_account_equity_usd(
     except ValueError:
         # A coin-margined currency with no resolvable USD index → refuse a
         # coin/non-USD anchor; flag heuristic capital rather than mis-scale.
-        return None, True
-    return equity, False
+        # The wedge inherits the same fail-loud disposition (never fabricated).
+        return None, True, 0.0
+    open_unrealized_usd = _deribit_session_upl_to_usd(summaries, index_prices)
+    return equity, False, open_unrealized_usd
+
+
+async def fetch_deribit_account_equity_usd(
+    exchange: Any,
+) -> tuple[float | None, bool]:
+    """Total Deribit account equity in USD (the initial-capital anchor).
+
+    Thin 2-tuple-preserving delegate to
+    :func:`fetch_deribit_account_equity_and_upnl_usd` (equity + balance_error
+    elements only) so existing callers/tests are byte-identical.
+
+    Returns ``(equity, balance_error)`` mirroring ``fetch_account_equity_usd``:
+    ``balance_error=True`` means the read failed (caller flags heuristic
+    capital). ``fetch_account_equity_usd`` (services.exchange) does NOT cover
+    deribit — coin-margined USDT balance is not USD equity — so this is the
+    deribit-specific anchor.
+    """
+    equity, balance_error, _upnl = await fetch_deribit_account_equity_and_upnl_usd(
+        exchange
+    )
+    return equity, balance_error
 
 
 def assert_ledger_complete(report: CompletenessReport) -> None:
