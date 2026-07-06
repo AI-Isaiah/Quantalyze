@@ -60,6 +60,32 @@ DUST_NAV_FLOOR = 1000.0
 # computed return, and is tuned against real accounts at the Phase 78 gate.
 FLOW_DOM_RATIO = 1.0
 
+# --- DQ-02 flow-coverage terminus retention (per venue) ----------------------
+# A deposit older than a venue's deposit/withdrawal-history retention is
+# UNFETCHABLE — a genuine coverage gap, not a code bug. Left un-segmented, the
+# missing capital drives the early reconstructed NAV <= 0 and is silently
+# attributed to performance (the LTP068-inflation class at venue scope). These
+# per-venue windows let 76-04 derive a ``flow_coverage_start_day`` so
+# ``apply_flow_coverage_terminus`` refuses pre-terminus TWR instead. Named
+# explicitly (plan W2) so a >retention-old deposit SEGMENTS + flags rather than
+# hard-failing on the construction-sanity residual (which stays ~0 by
+# construction even when a flow is merely MISSING vs mis-rolled).
+#
+# OKX ~90d mirrors the coded trade-history terminus
+# (equity_reconstruction.OKX_TRADE_TERMINUS_DAYS = 90, RESEARCH A3). Bybit ~365d
+# per the trade-history precedent (job_worker.py:1988 "Bybit last 365 days");
+# named with that citation because the exact deposit-history window is
+# LOW-confidence and 365d is the safe (over-segmenting) direction. Binance has no
+# known deposit-history cap → None → never segments.
+OKX_DEPOSIT_TERMINUS_DAYS: int = 90
+BYBIT_DEPOSIT_TERMINUS_DAYS: int = 365
+BINANCE_DEPOSIT_TERMINUS_DAYS: int | None = None
+FLOW_TERMINUS_DAYS_BY_VENUE: dict[str, int | None] = {
+    "okx": OKX_DEPOSIT_TERMINUS_DAYS,
+    "bybit": BYBIT_DEPOSIT_TERMINUS_DAYS,
+    "binance": BINANCE_DEPOSIT_TERMINUS_DAYS,
+}
+
 
 class NavTWRMeta(ReturnsComputationMeta, total=False):
     """Extends ``ReturnsComputationMeta`` (read-only from transforms.py) with the
@@ -73,6 +99,11 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     dust_nav_guard: bool
     negative_nav_guard: bool
     flow_dominated_guard: bool
+    # DQ-02: a flow-coverage retention gap segmented the series at a terminus
+    # (pre-terminus TWR refused). 76-04 lifts this into the DataQualityFlags
+    # TypedDict + the 74-03 promotion predicate; here it rides the SAME
+    # complete_with_warnings channel as the DQ-01 guards (no parallel status).
+    flow_coverage_incomplete: bool
 
 
 class NavReconstructionError(ValueError):
@@ -322,7 +353,118 @@ def _build_nav_meta(flags: Mapping[str, bool]) -> NavTWRMeta:
         meta["negative_nav_guard"] = True
     if flags.get("flow_dominated_guard"):
         meta["flow_dominated_guard"] = True
+    if flags.get("flow_coverage_incomplete"):
+        meta["flow_coverage_incomplete"] = True
     return meta
+
+
+def reconcile_flow_residual(
+    terminal_nav: float,
+    reconstructed_start: float,
+    daily_pnl: pd.Series,
+    flows_by_day: pd.Series,
+) -> float:
+    """DQ-02 construction-sanity residual — a pure mutation detector.
+
+    ``residual = terminal_nav − reconstructed_start − Σpnl − Σflows``. In the
+    backward roll (``nav_twr:reconstruct_nav``) this is ~0 BY CONSTRUCTION when
+    the flows that funded the account are all present and correctly rolled:
+    ``reconstructed_start`` (the pre-history capital) equals
+    ``terminal − Σ_all_t(pnl_t + F_t)``. So a non-zero residual means the roll
+    DROPPED or MIS-VALUED a flow (T-76-03-DROP), OR the terminal anchor is scoped
+    to a different pool of capital than the reconstructable start (a wrong Binance
+    SPOT/USDⓈ-M or Bybit FUND/UNIFIED wallet scope — T-76-03 W3): either way a
+    silent mis-attribution is refused.
+
+    Tolerance ``max(1.00, 1e-6 * abs(terminal_nav))`` — an absolute cent-floor
+    (consistent with the DUST_NAV_FLOOR=$1000 scale) plus a relative band that
+    scales with account size. On breach → ``NavReconstructionError`` (permanent,
+    loud). ``Σpnl``/``Σflows`` are summed from the INPUTS (not from the rolled
+    NAV) so a roll that corrupts ``reconstructed_start`` cannot cancel itself out.
+
+    T-76-03-LEAK: the raise message carries NO raw NAV/flow USD value (account-
+    size leak discipline, ``nav_twr`` module docstring)."""
+    index = daily_pnl.index
+    flows = _align_flows(flows_by_day, index).to_numpy(dtype=float)
+    pnl = np.array(
+        [
+            _coerce_float(v, field="daily_pnl", row={"day": str(index[i])})
+            for i, v in enumerate(daily_pnl.to_numpy())
+        ]
+    )
+    terminal = _coerce_float(terminal_nav, field="terminal_nav", row={})
+    start = _coerce_float(
+        reconstructed_start, field="reconstructed_start", row={}
+    )
+    residual = terminal - start - float(pnl.sum()) - float(flows.sum())
+    tol = max(1.00, 1e-6 * abs(terminal))
+    if not np.isfinite(residual) or abs(residual) > tol:
+        raise NavReconstructionError(
+            "nav_twr DQ-02 flow reconciliation residual exceeds tolerance — a "
+            "flow was dropped/mis-valued in the backward roll or the anchor is "
+            "scoped to a different capital pool than the reconstructable start"
+        )
+    return residual
+
+
+def flow_coverage_terminus_day(
+    venue: str,
+    *,
+    first_return_day: Any,
+    now_utc: Any,
+) -> pd.Timestamp | None:
+    """Derive the DQ-02 flow-coverage terminus day for ``venue`` — the earliest
+    day whose flows are fetchable (and therefore whose reconstructed NAV is
+    trustworthy) — or ``None`` when the whole return window is within retention or
+    the venue has no known deposit-history cap (Binance).
+
+    Pure: the caller (76-04, I/O) supplies ``now_utc`` so this stays revert-proof
+    and clock-free. ``first_return_day``/``now_utc`` accept any
+    ``pd.Timestamp``-coercible value. When ``first_return_day`` is already within
+    ``retention_days`` of ``now_utc`` there is no gap → ``None`` (no segmentation,
+    SC-4 byte-identity preserved)."""
+    retention_days = FLOW_TERMINUS_DAYS_BY_VENUE.get(venue.lower())
+    if retention_days is None:
+        return None  # no known retention cap (Binance) → full coverage
+    terminus = pd.Timestamp(now_utc).normalize() - pd.Timedelta(
+        days=retention_days
+    )
+    if pd.Timestamp(first_return_day) >= terminus:
+        return None  # entire window within retention → no coverage gap
+    return terminus
+
+
+def apply_flow_coverage_terminus(
+    returns: pd.Series,
+    flow_coverage_start_day: Any | None,
+) -> tuple[pd.Series, dict[str, bool]]:
+    """DQ-02 terminus segmentation — a STANDALONE pure helper 76-04 applies to the
+    combined returns Series AFTER combine (NOT threaded through transforms.py, so
+    the Phase 74 byte-identity pins stay trivially GREEN).
+
+    When ``flow_coverage_start_day`` is set and later than the first return day,
+    the pre-terminus window is untrustworthy (a deposit older than the venue's
+    retention is unfetchable → the early reconstructed NAV goes <= 0). Segment at
+    the last trustworthy day: NaN the returns BEFORE ``flow_coverage_start_day``
+    (refuse pre-terminus TWR — NEVER a fabricated number over the gap) and raise
+    the ``flow_coverage_incomplete`` flag → ``complete_with_warnings``. A missing
+    old deposit is therefore never attributed to performance (T-76-03-GAP).
+
+    ``flow_coverage_start_day is None`` (full coverage / flow-less / no-cap venue)
+    → returns UNCHANGED, no flag (SC-4). Transient vs terminal (WR-04): this helper
+    segments ONLY on a set start-day signal — a clean end-of-history boundary. A
+    transient fetch error is NOT this signal; it bubbles retryable at the I/O layer
+    (76-04) and must never reach here as a segment request. So a retryable blip
+    cannot over-truncate a good series (T-76-03-TRANS)."""
+    if flow_coverage_start_day is None or returns.empty:
+        return returns, {}
+    start_ts = pd.Timestamp(flow_coverage_start_day)
+    if start_ts <= returns.index[0]:
+        return returns, {}  # whole window within retention → nothing to refuse
+    segmented = returns.copy()
+    pre_terminus = segmented.index < start_ts
+    segmented[pre_terminus] = np.nan
+    return segmented, {"flow_coverage_incomplete": True}
 
 
 def reconstruct_nav_and_twr(
@@ -356,5 +498,18 @@ def reconstruct_nav_and_twr(
     ) - _coerce_float(open_unrealized_usd, field="open_unrealized_usd", row={})
 
     nav = reconstruct_nav(daily_pnl, terminal_nav, flows_by_day)
+    # DQ-02 construction-sanity self-check: the backward-roll identity must hold.
+    # ``reconstructed_start`` is the pre-history capital = the day-0 chain-link
+    # denominator (NAV_0 − pnl_0 − F_0), derived from the ACTUAL rolled ``nav`` so a
+    # roll that drops/mis-values a flow (or a wrong-scope anchor) reddens loud here
+    # rather than silently mis-attributing the gap to performance.
+    flows0 = _align_flows(flows_by_day, nav.index).iloc[0]
+    pnl0 = _coerce_float(
+        daily_pnl.iloc[0], field="daily_pnl", row={"day": str(nav.index[0])}
+    )
+    reconstructed_start = float(nav.iloc[0]) - pnl0 - float(flows0)
+    reconcile_flow_residual(
+        terminal_nav, reconstructed_start, daily_pnl, flows_by_day
+    )
     returns, flags = chain_linked_twr(nav, daily_pnl, flows_by_day)
     return returns, _build_nav_meta(flags)
