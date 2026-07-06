@@ -2366,8 +2366,15 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # guard-broken day is np.nan and SKIPPED at write time (74-04 NaN policy),
     # and a coverage-gap day is honestly ABSENT — so these pre-stamped flags are
     # the ONLY channel telling the factsheet a day was refused (MED-2 closes the
-    # P74 broker→CSV guard-meta gap). The CSV run MERGES these pre-existing flags
-    # rather than wiping them.
+    # P74 broker→CSV guard-meta gap). The CSV run reads these pre-existing flags.
+    #
+    # MED-3: the pre-stamp is UNCONDITIONAL and writes the FULL current flag state
+    # (each warn flag set ONLY when this derive's meta raised it). The upsert
+    # REPLACES the data_quality_flags JSONB column wholesale, so a CLEAN re-derive
+    # writes {csv_source: True} and thereby CLEARS any stale flow_coverage / guard
+    # flag left by an earlier gapped run — a healed account returns to `complete`
+    # rather than staying stuck warned. Were this conditional, the stale flag would
+    # survive across the csv_daily_returns boundary and re-warn a clean series.
     _BROKER_WARN_FLAGS = (
         "flow_coverage_incomplete",
         "negative_nav_guard",
@@ -2378,17 +2385,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     for _flag in _BROKER_WARN_FLAGS:
         if meta.get(_flag):
             _prestamp_flags[_flag] = True
-    if len(_prestamp_flags) > 1:
-        def _prestamp_dq_flags(flags: dict[str, Any] = _prestamp_flags) -> None:
-            ctx.supabase.table("strategy_analytics").upsert(
-                {
-                    "strategy_id": strategy_id,
-                    "data_quality_flags": flags,
-                },
-                on_conflict="strategy_id",
-            ).execute()
 
-        await db_execute(_prestamp_dq_flags)
+    def _prestamp_dq_flags(flags: dict[str, Any] = _prestamp_flags) -> None:
+        ctx.supabase.table("strategy_analytics").upsert(
+            {
+                "strategy_id": strategy_id,
+                "data_quality_flags": flags,
+            },
+            on_conflict="strategy_id",
+        ).execute()
+
+    await db_execute(_prestamp_dq_flags)
 
     # Hand off to the standard CSV analytics route to compile the factsheet.
     def _enqueue_csv_analytics() -> None:

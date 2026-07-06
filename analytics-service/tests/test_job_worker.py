@@ -1770,6 +1770,59 @@ class TestDeriveBrokerDailies:
         )
 
     @pytest.mark.asyncio
+    async def test_clean_broker_rederive_clears_stale_warn_flags(self) -> None:
+        """MED-3: the pre-stamp is UNCONDITIONAL and writes the FULL current flag
+        state, so a CLEAN re-derive emits data_quality_flags == {csv_source: True}
+        — wholesale-replacing (clearing) any stale flow_coverage / guard flag left
+        by an earlier gapped run, returning a healed account to 'complete'.
+        Mutation-honest: a conditional (only-when-flagged) pre-stamp emits NO
+        clearing upsert on a clean re-derive → the stale flag would persist → RED."""
+        import datetime as _dt
+        from services.job_worker import run_derive_broker_dailies_job
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+
+        def _rec(days_ago: int, pnl: float) -> dict:
+            d = (now - _dt.timedelta(days=days_ago)).date().isoformat()
+            return {
+                "exchange": "binance", "symbol": "PORTFOLIO",
+                "side": "buy" if pnl >= 0 else "sell", "price": abs(pnl),
+                "quantity": 1, "fee": 0, "fee_currency": "USDT",
+                "timestamp": f"{d}T00:00:00+00:00", "order_type": "daily_pnl",
+            }
+
+        # A healthy account: modest realized, a sub-NAV deposit, large anchor → no
+        # coverage gap (Binance has no retention cap) and no DQ-01 guard fires.
+        realized = [_rec(10, 200.0), _rec(5, 150.0), _rec(1, 75.0)]
+        day8 = (now - _dt.timedelta(days=8)).date().isoformat()
+        day8_ms = int(
+            _dt.datetime.fromisoformat(day8 + "T00:00:00+00:00").timestamp() * 1000
+        )
+        deposit = {"id": "d1", "type": "deposit", "currency": "USDT",
+                   "amount": 5_000.0, "timestamp": day8_ms, "internal": False}
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="binance", deposits=[deposit], realized=realized, equity=250_000.0,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        # A clean re-derive STILL emits a pre-stamp (the clearing write), and it
+        # carries NO warn flags — exactly {csv_source: True}.
+        prestamps = [
+            u for u in captured["analytics_upserts"] if "data_quality_flags" in u
+        ]
+        assert prestamps, (
+            "a clean re-derive must still emit a pre-stamp upsert so a stale warn "
+            "flag from an earlier gapped run is wholesale-cleared"
+        )
+        clean = prestamps[-1]["data_quality_flags"]
+        assert clean == {"csv_source": True}, (
+            f"clean re-derive must clear all warn flags; got {clean!r}"
+        )
+
+    @pytest.mark.asyncio
     async def test_sync_trades_enqueue_failure_does_not_fail_job(
         self,
     ) -> None:
