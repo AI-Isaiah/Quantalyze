@@ -2687,9 +2687,27 @@ async def fetch_usdt_balance_with_status(
     return None, False
 
 
-async def fetch_okx_total_equity_usd(exchange: ccxt.Exchange) -> float | None:
+def _okx_upl_or_zero(raw_upl: Any) -> float:
+    """Coerce OKX ``upl`` (account-level open unrealized PnL, USD) to a float.
+
+    Absent / null / non-numeric → 0.0. This is the safe non-fabricating
+    fallback: a wedge we cannot read is 0, never an invented value (T-77-05).
+    The sign is trusted verbatim (a net open loss is a negative wedge).
+    """
+    if raw_upl is None:
+        return 0.0
+    try:
+        return float(raw_upl)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def fetch_okx_total_equity_and_upl_usd(
+    exchange: ccxt.Exchange,
+) -> tuple[float | None, float]:
     """Read OKX unified-account total equity (USD, incl. open-position
-    unrealized PnL) via the RAW ``private_get_account_balance`` endpoint.
+    unrealized PnL) AND the sibling open-uPnL wedge from ONE raw
+    ``private_get_account_balance`` response — no new HTTP round-trip.
 
     ccxt's unified ``fetch_balance()`` calls ``load_markets()`` →
     ``set_markets()`` → ``keysort(markets_by_id)`` → ``sorted()``, which raises
@@ -2697,9 +2715,14 @@ async def fetch_okx_total_equity_usd(exchange: ccxt.Exchange) -> float | None:
     ccxt 4.5.x because a market carries a ``None`` id. The raw private call has
     no such dependency (it's the same path ``fetch_daily_pnl`` already uses for
     OKX bills). ``totalEq`` is OKX's own marked-to-USD account equity, which is
-    exactly the initial-capital anchor the daily-return derivation needs.
+    exactly the initial-capital anchor the daily-return derivation needs;
+    ``upl`` is the account-level open unrealized PnL EMBEDDED in that same
+    marked-to-USD equity — the wedge a downstream subtract removes.
 
-    Returns the equity float, or None on any failure / non-positive value.
+    Returns ``(equity_or_None, upl_float)``. Equity is None on any failure /
+    non-positive value; upl is 0.0 when absent/null/non-numeric (never
+    fabricated). ``upl`` is read from the SAME ``data[0]`` object as
+    ``totalEq`` — the mock is awaited exactly once (no second fetch).
     """
     try:
         raw = await exchange.private_get_account_balance()
@@ -2710,18 +2733,31 @@ async def fetch_okx_total_equity_usd(exchange: ccxt.Exchange) -> float | None:
             "OKX raw account balance fetch failed: exc_class=%s scrubbed=%s",
             type(e).__name__, scrub_freeform_string(str(e)),
         )
-        return None
+        return None, 0.0
     data = (raw or {}).get("data") or []
     if not data or not isinstance(data, list):
-        return None
-    raw_eq = data[0].get("totalEq") if isinstance(data[0], dict) else None
+        return None, 0.0
+    row = data[0] if isinstance(data[0], dict) else {}
+    upl = _okx_upl_or_zero(row.get("upl"))
+    raw_eq = row.get("totalEq")
     if raw_eq is None:
-        return None
+        return None, upl
     try:
         eq = float(raw_eq)
     except (TypeError, ValueError):
-        return None
-    return eq if eq > 0 else None
+        return None, upl
+    return (eq if eq > 0 else None), upl
+
+
+async def fetch_okx_total_equity_usd(exchange: ccxt.Exchange) -> float | None:
+    """Read OKX unified-account total equity (USD). Thin 2-tuple-preserving
+    delegate to :func:`fetch_okx_total_equity_and_upl_usd` (equity element
+    only) so existing callers/tests are byte-identical.
+
+    Returns the equity float, or None on any failure / non-positive value.
+    """
+    eq, _upl = await fetch_okx_total_equity_and_upl_usd(exchange)
+    return eq
 
 
 async def fetch_account_equity_usd(
@@ -2743,6 +2779,34 @@ async def fetch_account_equity_usd(
         eq = await fetch_okx_total_equity_usd(exchange)
         return eq, eq is None
     return await fetch_usdt_balance_with_status(exchange)
+
+
+async def fetch_account_equity_and_upnl_usd(
+    exchange: ccxt.Exchange, venue: str,
+) -> tuple[float | None, bool, float]:
+    """Venue-dispatched account equity + companion open-uPnL wedge (SC-1).
+
+    Returns ``(equity, balance_error, open_unrealized_usd)`` — the third
+    element is the open unrealized PnL EMBEDDED IN THE SPECIFIC ANCHOR FIELD,
+    gated to the marked-to-market venues:
+
+    * **OKX** — ``upl`` rides the SAME ``private_get_account_balance`` response
+      as ``totalEq`` (no new fetch). The wedge is forced to 0.0 when there is
+      no equity (a failed read has no trustworthy wedge).
+    * **Bybit / Binance** — the anchor is realized-basis ``walletBalance``
+      (ccxt 4.5.59 ``bybit.parse_balance`` / binance spot): the wedge is
+      STRUCTURALLY 0.0 by construction, so a downstream subtract can never
+      double-count (Q2 / Pitfall 2). Returning a non-zero wedge here is the
+      double-count bug — it is hard-coded 0.0, NOT a read field.
+
+    ``fetch_account_equity_usd`` (the 2-tuple) is left intact for allocator /
+    other callers.
+    """
+    if venue == "okx":
+        eq, upl = await fetch_okx_total_equity_and_upl_usd(exchange)
+        return eq, eq is None, (upl if eq is not None else 0.0)
+    equity, balance_error = await fetch_usdt_balance_with_status(exchange)
+    return equity, balance_error, 0.0
 
 
 # ---------------------------------------------------------------------------
