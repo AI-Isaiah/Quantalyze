@@ -1501,7 +1501,7 @@ async def test_wr_adv_02_fetch_transfers_paginates_within_window():
     """Adversarial: _fetch_transfers must paginate WITHIN each 90-day window.
     Pre-fix, a window containing >500 rows dropped everything past row 500
     when the loop advanced cursor_ms += window_ms unconditionally."""
-    from services.equity_reconstruction import _fetch_transfers
+    from services.ccxt_flow_fetch import fetch_ccxt_transfers
 
     # Simulate a single 90-day window with 750 deposits, forcing within-
     # window pagination. Two pages of 500 then 250.
@@ -1526,7 +1526,7 @@ async def test_wr_adv_02_fetch_transfers_paginates_within_window():
     mock_exchange = MagicMock()
     mock_exchange.fetch_deposits = _fake_fetch_deposits
 
-    rows = await _fetch_transfers(mock_exchange, "deposits", window_start_ms, now_ms)
+    rows = await fetch_ccxt_transfers(mock_exchange, "deposits", window_start_ms, now_ms)
 
     assert len(rows) == 750, (
         f"expected all 750 in-window deposits to be collected; got {len(rows)}. "
