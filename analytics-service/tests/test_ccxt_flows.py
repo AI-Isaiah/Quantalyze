@@ -143,6 +143,69 @@ def test_okx_structural_external_keeps_none_internal_rows() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# MED-1 / LOW-2 — an UNCLASSIFIABLE (None/missing) internal marker is EXTERNAL.
+# The anti-overstatement direction: only an EXPLICITLY-internal row is excluded.
+# --------------------------------------------------------------------------- #
+def test_binance_none_internal_deposit_is_kept_as_external() -> None:
+    """MED-1 (OVERSTATEMENT direction): a Binance deposit with ``internal=None``
+    (Binance omits transferType) must be KEPT as +F_t. Pre-fix ``internal is
+    False`` DROPPED it — silently overstating the deposit as performance.
+    MUTATION: reverting to ``is False`` drops the 10000 deposit → empty → RED."""
+    rows = [_row(id="dep", type="deposit", currency="USDT", amount=10_000.0,
+                 internal=None, info={})]
+    flows = ccxt_rows_to_dated_flows(rows, venue="binance", price_index={})
+    assert flows == [ExternalFlow(_day(2024, 1, 1), 10_000.0)]
+
+
+def test_binance_none_internal_withdrawal_is_kept_as_external() -> None:
+    """LOW-2 (UNDERSTATEMENT direction): a Binance withdrawal with
+    ``internal=None`` must be KEPT as −F_t. Pre-fix ``is False`` dropped it,
+    understating the cash-out. MUTATION: ``is False`` → dropped → RED."""
+    rows = [_row(id="wd", type="withdrawal", currency="USDT", amount=4_000.0,
+                 internal=None, info={})]
+    flows = ccxt_rows_to_dated_flows(rows, venue="binance", price_index={})
+    assert flows == [ExternalFlow(_day(2024, 1, 1), -4_000.0)]
+
+
+def test_binance_explicit_internal_is_still_excluded() -> None:
+    """Only an EXPLICITLY internal (``internal is True``) Binance row is dropped —
+    the anti-overstatement stance keeps ambiguity, not real own-transfers."""
+    rows = [
+        _row(id="dep", type="deposit", currency="USDT", amount=1_000.0,
+             internal=None, info={}),
+        _row(id="own", type="deposit", currency="USDT", amount=5_000.0,
+             internal=True, info={"transferType": 1}),
+    ]
+    flows = ccxt_rows_to_dated_flows(rows, venue="binance", price_index={})
+    assert flows == [ExternalFlow(_day(2024, 1, 1), 1_000.0)]
+
+
+def test_bybit_missing_withdrawtype_is_kept_as_external() -> None:
+    """LOW-2 (bybit): a withdrawal with a MISSING withdrawType (info absent the
+    key) must be KEPT as −F_t. Pre-fix ``str(withdraw_type) == '0'`` required an
+    explicit '0' and DROPPED the missing case — understating a real cash-out.
+    MUTATION: requiring ``== '0'`` drops the 800 withdrawal → empty → RED."""
+    rows = [_row(id="wd", type="withdrawal", currency="USDT", amount=800.0,
+                 internal=None, info={})]
+    flows = ccxt_rows_to_dated_flows(rows, venue="bybit", price_index={})
+    assert flows == [ExternalFlow(_day(2024, 1, 1), -800.0)]
+
+
+def test_bybit_explicit_internal_withdrawtype_still_excluded() -> None:
+    """Only an EXPLICITLY internal bybit withdrawal (``withdrawType == '1'``) is
+    dropped; an on-chain '0' and a missing marker are both kept."""
+    rows = [
+        _row(id="onchain", type="withdrawal", currency="USDT", amount=300.0,
+             internal=None, info={"withdrawType": "0"}),
+        _row(id="offchain", type="withdrawal", currency="USDT", amount=800.0,
+             internal=None, info={"withdrawType": "1"}),
+    ]
+    flows = ccxt_rows_to_dated_flows(rows, venue="bybit", price_index={})
+    # on-chain −300 kept, off-chain −800 excluded → net −300.
+    assert flows == [ExternalFlow(_day(2024, 1, 1), -300.0)]
+
+
+# --------------------------------------------------------------------------- #
 # EVENT-TIME VALUATION — non-stable coin at same-UTC-day close, fail-loud.
 # --------------------------------------------------------------------------- #
 def test_non_stable_valued_at_same_utc_day_close() -> None:

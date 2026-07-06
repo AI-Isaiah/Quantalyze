@@ -27,17 +27,22 @@ MUST emit this EXACT key shape — a ``datetime.date`` / ``datetime`` key or a
 lowercase code would silently miss every lookup and fail loud as a spurious
 ``NavReconstructionError``.
 
-Per-venue own-transfer semantics (introspected ccxt 4.5.59 — RESEARCH Pattern 2):
+Per-venue own-transfer semantics (introspected ccxt 4.5.59 — RESEARCH Pattern 2).
+ANTI-OVERSTATEMENT STANCE (MED-1/LOW-2): a row is excluded ONLY when it is
+EXPLICITLY marked internal; an UNCLASSIFIABLE (None/missing) marker is treated as
+EXTERNAL (kept). Dropping an unclassifiable flow would silently OVERSTATE a deposit
+(and understate a withdrawal) — the never-lose-cash direction — so the ambiguous
+case always keeps the row, consistent with the OKX structural-external stance.
   * binance — ``parse_transaction`` maps ``transferType != 0`` into the unified
-    ``internal`` flag, so an external transfer has ``internal is False`` and an
-    own-transfer has ``internal is True``. Keep iff ``row['internal'] is False``.
-  * bybit — ``parse_transaction`` sets ``internal = None`` (do NOT use it). Read
-    the raw ``info.withdrawType`` ('0' = on-chain); deposit records are on-chain
-    by nature (kept), off-chain/internal withdrawals ('1', ...) are dropped.
+    ``internal`` flag. Keep unless ``row['internal'] is True`` (explicit
+    own-transfer). ``internal is None`` (Binance omits transferType) → KEEP.
+  * bybit — ``parse_transaction`` sets ``internal = None`` (do NOT use it).
+    Deposit records are on-chain by nature (kept). Withdrawals: keep unless the
+    raw ``info.withdrawType`` is EXPLICITLY '1' (off-chain/internal); a
+    missing/None/unclassifiable withdrawType → KEEP (external).
   * okx — the deposit-/withdrawal-history endpoints structurally exclude own
     funding↔trading moves and also leave ``internal = None``; every fetched row
-    is external, so all are kept (applying the Binance ``is False`` filter here
-    would wrongly drop every None-internal row).
+    is external, so all are kept.
 
 Purity: stdlib + typing + the imported shared contract only (``ExternalFlow``,
 ``_row_utc_day``, ``STABLECOINS``, ``NavReconstructionError``) — no ccxt, no
@@ -73,16 +78,23 @@ def _is_external(row: Mapping[str, Any], venue: str, *, kind: str) -> bool:
     ``False`` drops an own-transfer. ``venue`` is already normalised/validated by
     the caller; ``kind`` is the lowercased ccxt ``type``."""
     if venue == _VENUE_BINANCE:
-        # ccxt maps binance transferType!=0 -> internal=True; external == False.
-        return row.get("internal") is False
+        # ccxt maps binance transferType!=0 -> internal=True. Anti-overstatement:
+        # KEEP (external) unless EXPLICITLY internal (``internal is True``). A
+        # None/missing marker (Binance omits transferType) is treated as external
+        # — dropping it would silently OVERSTATE a deposit / understate a
+        # withdrawal (never lose real cash), mirroring the OKX structural stance.
+        return row.get("internal") is not True
     if venue == _VENUE_BYBIT:
-        # ccxt leaves internal=None for bybit; deposits are on-chain by nature,
-        # withdrawals must carry raw info.withdrawType == '0' (on-chain).
+        # ccxt leaves internal=None for bybit; deposits are on-chain by nature.
+        # Withdrawals: KEEP (external) unless EXPLICITLY internal
+        # (raw info.withdrawType == '1', off-chain). A missing/None/unclassifiable
+        # withdrawType is treated as external (anti-overstatement) rather than
+        # dropped.
         if kind == "deposit":
             return True
         info = row.get("info")
         withdraw_type = info.get("withdrawType") if isinstance(info, Mapping) else None
-        return str(withdraw_type) == "0"
+        return str(withdraw_type) != "1"
     # okx: deposit/withdraw-history rows are structurally external-only.
     return True
 
