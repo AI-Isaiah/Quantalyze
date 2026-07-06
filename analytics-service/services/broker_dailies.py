@@ -31,9 +31,20 @@ Because total_pnl now includes funding, the derived initial capital matches the
 real principal and the most-recent equity equals today's real (read) equity;
 reconstruction error accrues into the distant past, not the present.
 
-Read-only keys cannot enumerate deposits/withdrawals on every venue, so we do
-NOT depend on flow data: the equity anchor is what injects the unseen initial
-capital. Mid-window external flows are an accepted, flagged limitation.
+Event-time external flows (v1.8 FLOW-03)
+----------------------------------------
+As of Phase 76, read-only keys DO enumerate deposits/withdrawals on the ccxt
+venues (binance/okx/bybit) via the promoted ``fetch_ccxt_transfers`` (76-01) and
+value them at their same-UTC-day close (``ccxt_rows_to_dated_flows``, 76-02). The
+``derive_broker_dailies`` else-branch (``job_worker``) threads the resulting
+``external_flows`` into ``combine_realized_and_funding`` → the honest core's
+backward NAV roll, which applies the ONE flow correction to the chain-linked TWR
+numerator. A mid-window deposit/withdrawal is therefore NO LONGER an accepted,
+flagged limitation for the ccxt venues — it is captured. The equity anchor still
+injects capital deposited BEFORE the fetchable retention window (OKX ~90d /
+Bybit ~365d); that pre-terminus gap is surfaced by the DQ-02 coverage terminus
+(``flow_coverage_incomplete`` → ``complete_with_warnings``), never silently
+attributed to performance.
 """
 from __future__ import annotations
 

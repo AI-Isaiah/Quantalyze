@@ -1774,6 +1774,114 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+async def _resolve_ccxt_flow_price_index(
+    exchange: Any,
+    venue: str,
+    supabase: Any,
+    rows: list[dict[str, Any]],
+) -> dict[tuple[str, str], float]:
+    """I/O price resolver for the ccxt flow adapter (FLOW-03, 76-04).
+
+    Build the canonical same-UTC-day close ``price_index[(utc_day_iso,
+    CCY_UPPER)]`` the pure ``ccxt_rows_to_dated_flows`` valuer needs for every
+    NON-STABLE currency observed in the fetched deposit/withdrawal rows. REUSES
+    the existing OHLCV → CoinGecko → token_price_history source
+    (``services.equity_reconstruction``) — there is NO new price fetcher (RESEARCH
+    Don't-Hand-Roll). Stablecoins are marked 1.0 inside the pure valuer and need
+    no entry here; a non-stable flow whose same-day close is genuinely absent from
+    every source is left OUT of the index so the pure valuer fails loud
+    (``NavReconstructionError``) rather than fabricating a ±return.
+
+    The day key uses ``epoch_ms_to_iso_day`` — the SAME 'YYYY-MM-DD' UTC-day
+    derivation the pure valuer applies via ``_row_utc_day`` to the flow row's
+    epoch-ms ``timestamp`` — so the injected keys line up exactly (canonical-key
+    contract, 76-02 W4).
+
+    WR-04: only ``ccxt.BadSymbol`` is caught on the primary OHLCV pass (feature
+    detection → CoinGecko fallback). A transient network error on ``fetch_ohlcv``
+    BUBBLES to the outer dispatcher (retryable), never silently degrading to an
+    unpriced flow that would fail loud permanent.
+    """
+    from services.closed_sets import STABLECOINS
+    from services.dateday import epoch_ms_to_iso_day
+    from services.deribit_txn import _row_utc_day
+    from services.equity_reconstruction import (
+        _cache_coingecko_prices,
+        _fetch_coingecko_daily_closes,
+        _fetch_ohlcv_daily,
+        _read_cached_prices,
+    )
+
+    # Collect the set of UTC days needed per NON-STABLE currency.
+    needed_days: dict[str, set[str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ccy = str(row.get("currency", "")).upper()
+        if not ccy or ccy in STABLECOINS:
+            continue
+        try:
+            day = _row_utc_day(row.get("timestamp"))
+        except (ValueError, TypeError, OverflowError):
+            # An undatable non-stable flow row: leave it unpriced so the pure
+            # valuer fails loud on the row itself (never guess a day/price).
+            continue
+        needed_days.setdefault(ccy, set()).add(day)
+
+    price_index: dict[tuple[str, str], float] = {}
+    if not needed_days:
+        return price_index
+
+    all_days = sorted({d for days in needed_days.values() for d in days})
+    start_iso, end_iso = all_days[0], all_days[-1]
+    start_ms = int(
+        datetime.fromisoformat(start_iso + "T00:00:00+00:00").timestamp() * 1000
+    )
+    end_ms = (
+        int(datetime.fromisoformat(end_iso + "T00:00:00+00:00").timestamp() * 1000)
+        + 24 * 60 * 60 * 1000
+    )
+
+    for ccy, days in needed_days.items():
+        closes: dict[str, float] = {}
+        # Pass 1 — primary-venue OHLCV daily closes for {ccy}/USDT.
+        try:
+            raw = await _fetch_ohlcv_daily(exchange, f"{ccy}/USDT", start_ms, end_ms)
+            for candle in raw:
+                closes[epoch_ms_to_iso_day(candle[0])] = float(candle[4])
+        except ccxt.BadSymbol:
+            closes = {}
+        # Pass 2 — cached token_price_history + CoinGecko fallback for any day the
+        # primary venue did not list/return.
+        if days - set(closes):
+            cached = await _read_cached_prices(supabase, ccy, start_iso, end_iso)
+            for d, p in cached.items():
+                closes.setdefault(d, p)
+            if days - set(closes):
+                cg = await _fetch_coingecko_daily_closes(
+                    ccy,
+                    int(
+                        datetime.fromisoformat(
+                            start_iso + "T00:00:00+00:00"
+                        ).timestamp()
+                    ),
+                    int(
+                        datetime.fromisoformat(
+                            end_iso + "T00:00:00+00:00"
+                        ).timestamp()
+                    )
+                    + 24 * 60 * 60,
+                )
+                if cg:
+                    await _cache_coingecko_prices(supabase, ccy, cg)
+                    for d, p in cg:
+                        closes.setdefault(d, p)
+        for d in days:
+            if d in closes:
+                price_index[(d, ccy)] = closes[d]
+    return price_index
+
+
 async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     """Broker key full-history → daily-return series → csv_daily_returns.
 
@@ -1826,9 +1934,16 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     venue = ctx.key_row["exchange"]
 
     from services.broker_dailies import combine_realized_and_funding
-    from services.nav_twr import NavReconstructionError
+    from services.nav_twr import (
+        NavReconstructionError,
+        FLOW_TERMINUS_DAYS_BY_VENUE,
+        apply_flow_coverage_terminus,
+        flow_coverage_terminus_day,
+    )
     from services.exchange import fetch_account_equity_usd
     from services.external_flows import ExternalFlow
+    from services.ccxt_flow_fetch import fetch_ccxt_transfers
+    from services.ccxt_flows import ccxt_rows_to_dated_flows
     from services.funding_fetch import (
         fetch_funding_binance,
         fetch_funding_okx,
@@ -1999,6 +2114,51 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     error_message=f"derive_broker_dailies: venue {venue} not supported",
                     error_kind="permanent",
                 )
+            # FLOW-03 (v1.8): enumerate + event-time-value real deposits/
+            # withdrawals for the ccxt venues (binance/okx/bybit) and thread
+            # them into the honest core's F_t term at the SAME seam the deribit
+            # branch uses (external_flows → combine_realized_and_funding →
+            # reconstruct_nav_and_twr). Read-only keys DO enumerate transfers now
+            # (76-01 promoted fetch), so a mid-window deposit no longer silently
+            # inflates the TWR (broker_dailies premise updated). The whole
+            # derive_broker_dailies path is already gated by the
+            # BROKER_DAILIES_VIA_FUNDING kill-switch upstream (:1501), so flows
+            # inherit it with no extra guard. Bound the flow lookback to the
+            # venue's deposit-history retention (OKX 90d / Bybit 365d); Binance
+            # (no cap → None) fetches full history. This never spins empty
+            # pre-inception windows AND the DQ-02 terminus (below) segments any
+            # window the return series extends before that retention.
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            _retention_days = FLOW_TERMINUS_DAYS_BY_VENUE.get(venue)
+            _flow_since_ms = (
+                0
+                if _retention_days is None
+                else max(0, now_ms - _retention_days * 24 * 60 * 60 * 1000)
+            )
+            # WR-04: fetch_ccxt_transfers bubbles every error but
+            # ccxt.NotSupported (a transient auth/network blip stays RETRYABLE,
+            # never a silent truncation), so these are NOT wrapped in a
+            # segment-converting catch — a transient fetch error must reach the
+            # outer dispatcher classifier, never be mistaken for a coverage gap.
+            _deposits = await fetch_ccxt_transfers(
+                ctx.exchange, "deposits", _flow_since_ms, now_ms
+            )
+            _withdrawals = await fetch_ccxt_transfers(
+                ctx.exchange, "withdrawals", _flow_since_ms, now_ms
+            )
+            _flow_rows = list(_deposits) + list(_withdrawals)
+            # Resolve the same-UTC-day close for every NON-STABLE flow currency
+            # (I/O — reuses the existing OHLCV/CoinGecko/token_price_history
+            # source; NO new price fetcher). The pure valuer marks stablecoins at
+            # 1.0 and FAILS LOUD if a non-stable flow has no same-day price (never
+            # 1.0 / current / drop → never a fabricated ±return that mis-anchors
+            # the TWR base).
+            _price_index = await _resolve_ccxt_flow_price_index(
+                ctx.exchange, venue, ctx.supabase, _flow_rows
+            )
+            external_flows = ccxt_rows_to_dated_flows(
+                _flow_rows, venue=venue, price_index=_price_index
+            )
     except ccxt.RateLimitExceeded as exc:
         await _stamp_429(ctx.supabase, ctx.key_row, exc)
         raise

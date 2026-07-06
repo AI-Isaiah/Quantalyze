@@ -1324,6 +1324,195 @@ class TestDeriveBrokerDailies:
         assert analytics_upserts[0]["computation_status"] == "failed"
         assert analytics_upserts[0]["data_quality_flags"] == {"csv_source": True}
 
+    # ------------------------------------------------------------------
+    # FLOW-03 (v1.8, 76-04): ccxt else-branch flow wiring
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _flow_harness(
+        *,
+        venue: str,
+        deposits: list[dict],
+        withdrawals: list[dict] | None = None,
+        equity: float = 100_000.0,
+        ohlcv_by_symbol: dict[str, list[list]] | None = None,
+    ):
+        """Build the (mock_ctx, patches, captured) harness for a ccxt-venue
+        derive_broker_dailies run. ``captured['external_flows']`` records the
+        exact flows threaded into combine; ``captured['csv_rows']`` records the
+        daily-return rows written to csv_daily_returns (post-segmentation).
+        ``captured['ohlcv_calls']`` records the reused price-source symbols."""
+        import pandas as pd
+        from contextlib import ExitStack
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = AsyncMock()
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "s-flow", "user_id": "u1"}
+        mock_ctx.key_row = {"id": "k1", "exchange": venue, "user_id": "u1"}
+
+        captured: dict = {"csv_rows": [], "ohlcv_calls": []}
+        analytics_upserts: list[dict] = []
+        existing_flags: dict = {}
+
+        def _table(name: str) -> MagicMock:
+            tbl = MagicMock()
+
+            def _upsert(payload, **_kw):
+                if name == "strategy_analytics":
+                    analytics_upserts.append(dict(payload))
+                    existing_flags.update(payload.get("data_quality_flags") or {})
+                elif name == "csv_daily_returns":
+                    captured["csv_rows"].extend(payload)
+                stub = MagicMock()
+                stub.execute.return_value = MagicMock(data=1)
+                return stub
+
+            # strategy_analytics read (single row) for the CSV-run flag merge.
+            sel = MagicMock()
+            sel.select.return_value = sel
+            sel.eq.return_value = sel
+            sel.single.return_value = sel
+            sel.maybe_single.return_value = sel
+            sel.execute.return_value = MagicMock(
+                data={"data_quality_flags": dict(existing_flags)}
+            )
+            tbl.select.return_value = sel
+            tbl.upsert.side_effect = _upsert
+            return tbl
+
+        mock_ctx.supabase.table.side_effect = _table
+        captured["analytics_upserts"] = analytics_upserts
+
+        async def _fake_transfers(exchange, kind, since_ms, now_ms):
+            if kind == "deposits":
+                return list(deposits)
+            return list(withdrawals or [])
+
+        _ohlcv = ohlcv_by_symbol or {}
+
+        async def _fake_ohlcv(exchange, symbol, start_ms, end_ms):
+            captured["ohlcv_calls"].append(symbol)
+            sym = symbol.split("/")[0].upper()
+            if sym in _ohlcv:
+                return _ohlcv[sym]
+            raise ccxt.BadSymbol(symbol)
+
+        import services.broker_dailies as _bd
+        real_combine = _bd.combine_realized_and_funding
+
+        def _spy_combine(*a, **kw):
+            captured["external_flows"] = list(kw.get("external_flows") or [])
+            captured["open_unrealized_usd"] = kw.get("open_unrealized_usd", 0.0)
+            return real_combine(*a, **kw)
+
+        stack = ExitStack()
+        stack.enter_context(patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ))
+        stack.enter_context(patch(
+            "services.job_worker.fetch_all_trades", new=AsyncMock(return_value=[]),
+        ))
+        stack.enter_context(patch(
+            "services.job_worker.aclose_exchange", new=AsyncMock(),
+        ))
+        stack.enter_context(patch(
+            "services.exchange.fetch_account_equity_usd",
+            new=AsyncMock(return_value=(equity, False)),
+        ))
+        for _fn in ("fetch_funding_binance", "fetch_funding_okx", "fetch_funding_bybit"):
+            stack.enter_context(patch(
+                f"services.funding_fetch.{_fn}", new=AsyncMock(return_value=[]),
+            ))
+        stack.enter_context(patch(
+            "services.ccxt_flow_fetch.fetch_ccxt_transfers",
+            new=AsyncMock(side_effect=_fake_transfers),
+        ))
+        stack.enter_context(patch(
+            "services.equity_reconstruction._fetch_ohlcv_daily",
+            new=AsyncMock(side_effect=_fake_ohlcv),
+        ))
+        stack.enter_context(patch(
+            "services.broker_dailies.combine_realized_and_funding",
+            side_effect=_spy_combine,
+        ))
+        stack.enter_context(patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ))
+        return mock_ctx, stack, captured
+
+    @pytest.mark.asyncio
+    async def test_ccxt_branch_values_flows_at_same_day_close(self) -> None:
+        """A BTC deposit + a USDT deposit on the same UTC day → the BTC leg is
+        valued at THAT day's close (reused OHLCV source) and the stablecoin leg
+        at 1.0, both threaded into combine as a single collapsed F_t. Proves the
+        FLOW-03 wire: fetch → I/O price resolver → pure valuer → external_flows."""
+        from services.job_worker import run_derive_broker_dailies_job
+
+        day = "2026-06-01"
+        day_ms = int(
+            __import__("datetime").datetime.fromisoformat(
+                day + "T12:00:00+00:00"
+            ).timestamp() * 1000
+        )
+        deposits = [
+            {"id": "d1", "type": "deposit", "currency": "BTC", "amount": 2.0,
+             "timestamp": day_ms, "internal": False},
+            {"id": "d2", "type": "deposit", "currency": "USDT", "amount": 5000.0,
+             "timestamp": day_ms, "internal": False},
+        ]
+        ohlcv = {"BTC": [[
+            int(__import__("datetime").datetime.fromisoformat(
+                day + "T00:00:00+00:00").timestamp() * 1000),
+            0.0, 0.0, 0.0, 42_000.0, 0.0,
+        ]]}
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="binance", deposits=deposits, ohlcv_by_symbol=ohlcv,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            await run_derive_broker_dailies_job(job)
+
+        flows = captured["external_flows"]
+        assert len(flows) == 1, f"expected one collapsed daily flow, got {flows}"
+        assert flows[0].utc_day_iso == day
+        # BTC 2 * 42000 + USDT 5000 * 1.0 = 89000.
+        assert flows[0].usd_signed == pytest.approx(89_000.0)
+        # The price source was the reused OHLCV path (BTC/USDT), never a new one.
+        assert "BTC/USDT" in captured["ohlcv_calls"]
+        # Realized basis: no uPnL wedge passed (Phase 77 owns it).
+        assert captured["open_unrealized_usd"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_ccxt_branch_stablecoin_only_needs_no_price_source(self) -> None:
+        """A stablecoin-only account values every flow at 1.0 and NEVER touches
+        the OHLCV/CoinGecko price source (no non-stable currency to resolve)."""
+        from services.job_worker import run_derive_broker_dailies_job
+
+        day = "2026-06-02"
+        day_ms = int(
+            __import__("datetime").datetime.fromisoformat(
+                day + "T09:00:00+00:00").timestamp() * 1000
+        )
+        deposits = [
+            {"id": "d1", "type": "deposit", "currency": "USDC", "amount": 12_000.0,
+             "timestamp": day_ms, "internal": False},
+        ]
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="bybit", deposits=deposits,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            await run_derive_broker_dailies_job(job)
+
+        flows = captured["external_flows"]
+        assert len(flows) == 1
+        assert flows[0].usd_signed == pytest.approx(12_000.0)
+        assert captured["ohlcv_calls"] == [], (
+            "stablecoin-only account must not hit the price source"
+        )
+
     @pytest.mark.asyncio
     async def test_sync_trades_enqueue_failure_does_not_fail_job(
         self,
