@@ -832,17 +832,25 @@ def test_byte_identical_combine_snapshot():
 
 
 def test_external_flows_param_threads_through_combine_to_core():
-    """74-02 Task 3: the external_flows kwarg passed to
-    combine_realized_and_funding must be THREADED all the way to the honest core
-    (trades_to_daily_returns_with_status -> reconstruct_nav_and_twr). We prove
-    the WIRE, not flow valuation (that is Phase 75): an orphan flow dated OUTSIDE
-    the realized/funding return window is rejected by the core's _align_flows
-    with NavReconstructionError. Pre-wiring this raised TypeError (unknown
-    kwarg); post-wiring it raises NavReconstructionError, proving the param
-    reaches the core. The default (external_flows=None) path is unchanged and
-    byte-identical (test_byte_identical_combine_snapshot)."""
+    """74-02 Task 3 (updated for 75-05 HIGH-1): the external_flows kwarg passed to
+    combine_realized_and_funding is THREADED all the way to the honest core
+    (trades_to_daily_returns_with_status -> reconstruct_nav_and_twr). We prove the
+    WIRE, not flow valuation (that is Phase 75).
+
+    Pre-HIGH-1 this test proved the wire via the orphan-raise: an off-window flow
+    was rejected by _align_flows. HIGH-1 deliberately removes that behavior — a
+    flow on a day with no realized/funding row is now UNIONED into the NAV
+    timeline (never orphaned, never lost). So the wire is proven the correct,
+    stronger way instead: passing a boundary/quiet-day flow (a) ADDS its day to
+    the reconstructed index (placed, not dropped) and (b) is LOAD-BEARING — the
+    shared trading day's reconstructed return differs from the no-flow run.
+
+    Mutation-honest: dropping the thread (external_flows not forwarded to the
+    core) makes the with/without runs identical AND the unioned day absent -> RED.
+    Pre-wiring, external_flows was an unknown kwarg (TypeError). The default
+    (external_flows=None) path is unchanged (test_byte_identical_combine_snapshot).
+    """
     from services.broker_dailies import combine_realized_and_funding
-    from services.nav_twr import NavReconstructionError
 
     realized = [
         {
@@ -856,11 +864,21 @@ def test_external_flows_param_threads_through_combine_to_core():
             "timestamp": "2026-01-02T00:00:00+00:00", "order_type": "daily_pnl",
         },
     ]
-    orphan_flow = [("2099-01-01", 5000.0)]  # dated far outside the window
-    with pytest.raises(NavReconstructionError):
-        combine_realized_and_funding(
-            realized,
-            [],
-            account_balance=100_000.0,
-            external_flows=orphan_flow,
-        )
+    # A sub-NAV withdrawal on 2026-01-03 — a day with NO realized/funding row.
+    # HIGH-1 unions it into the NAV timeline rather than orphan-raising.
+    flow_day = pd.Timestamp("2026-01-03")
+    with_flow, _ = combine_realized_and_funding(
+        realized, [], account_balance=100_000.0,
+        external_flows=[("2026-01-03", -5000.0)],
+    )
+    without_flow, _ = combine_realized_and_funding(
+        realized, [], account_balance=100_000.0, external_flows=None,
+    )
+    # (a) The flow day reached the core and was PLACED (unioned in), not dropped.
+    assert flow_day in with_flow.index
+    assert flow_day not in without_flow.index
+    # (b) The flow is LOAD-BEARING: a shared trading day's reconstructed return
+    # differs from the no-flow run (the param genuinely reached the reconstruction,
+    # not silently ignored).
+    shared_day = pd.Timestamp("2026-01-01")
+    assert with_flow.loc[shared_day] != pytest.approx(without_flow.loc[shared_day])
