@@ -885,6 +885,79 @@ def test_dated_external_flow_missing_change_fails_loud() -> None:
     assert "7502001" in str(exc.value)
 
 
+@pytest.mark.parametrize("blank", [None, "", "   ", "\t"])
+def test_dated_external_flow_null_blank_change_fails_loud(blank: object) -> None:
+    """HIGH-2 (75-05): a flow row whose `change` is PRESENT but null/blank (None,
+    empty or whitespace-only string) fails loud — the absent-KEY guard does NOT
+    catch it, and the old `raw_change or 0.0` coalesce would silently turn it into
+    a 0.0 flow -> `continue` -> a DROPPED real capital in/out (the original LTP068
+    dropped-flow class). Mutation-honest: restoring `or 0.0` makes None/"" skip
+    silently (returns []) instead of raising -> RED."""
+    row = {
+        "type": "withdrawal",
+        "currency": "USDC",  # linear: would value with no index if it got that far
+        "change": blank,
+        "timestamp": _ms(_DAY_A),
+        "id": 7502002,
+    }
+    with pytest.raises(LedgerValuationError) as exc:
+        deribit_dated_external_flows_usd([row])
+    assert "change" in str(exc.value)
+    assert "7502002" in str(exc.value)
+
+
+def test_dated_external_flow_numeric_zero_change_is_legit_noop() -> None:
+    """HIGH-2 boundary: a NUMERIC 0.0 `change` (observed flow row, no cash) stays a
+    legitimate no-op skip — NOT a fail-loud. The null/blank guard must reject only
+    None/blank, never a real zero. (Pins that the guard is not over-broad.)"""
+    row = {
+        "type": "withdrawal",
+        "currency": "USDC",
+        "change": 0.0,
+        "timestamp": _ms(_DAY_A),
+        "id": 7502003,
+    }
+    assert deribit_dated_external_flows_usd([row]) == []
+
+
+@pytest.mark.parametrize("blank", [None, "", "   ", "\t"])
+def test_cash_bearing_null_blank_change_fails_loud(blank: object) -> None:
+    """HIGH-2 (75-05): a cash-bearing row whose `change` is PRESENT but null/blank
+    fails loud — the old `raw_change or 0.0` coalesce would silently zero real
+    realized cash and render a green-but-wrong track record. Mutation-honest:
+    restoring `or 0.0` makes None/"" a silent zero-cash day instead of raising ->
+    RED. Applied identically to the shared cash-bearing realized branch."""
+    row = {
+        "type": "trade",
+        "instrument_name": "BTC_USDC-PERPETUAL",  # linear: USD passthrough
+        "currency": "USDC",
+        "change": blank,
+        "timestamp": _ms(_DAY_A),
+        "id": 7502004,
+    }
+    with pytest.raises(LedgerValuationError) as exc:
+        txn_rows_to_daily_records([row])
+    assert "change" in str(exc.value)
+    assert "7502004" in str(exc.value)
+
+
+def test_cash_bearing_numeric_zero_change_is_legit_noop() -> None:
+    """HIGH-2 boundary: a NUMERIC 0.0 cash-bearing `change` stays a legitimate
+    zero-cash day (the day is present at 0.0, no index needed) — NOT a fail-loud.
+    Pins that the null/blank guard does not reject a real zero."""
+    row = {
+        "type": "trade",
+        "instrument_name": "BTC_USDC-PERPETUAL",
+        "currency": "USDC",
+        "change": 0.0,
+        "timestamp": _ms(_DAY_A),
+        "id": 7502005,
+    }
+    records = txn_rows_to_daily_records([row])
+    assert len(records) == 1
+    assert records[0]["price"] == pytest.approx(0.0, abs=1e-12)
+
+
 def test_flow_count_once_excluded_from_realized_sum() -> None:
     """Count-once: a flow row feeds the dated F_t list EXACTLY once and is ABSENT
     from the realized sum (txn_rows_to_daily_records skips INFORMATIONAL_TYPES).

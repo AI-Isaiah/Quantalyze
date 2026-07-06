@@ -582,7 +582,21 @@ def deribit_dated_external_flows_usd(
                 "a missing balance-delta as a zero flow (schema drift would silently "
                 "drop a real capital in/out and mis-anchor the flow-aware TWR base)"
             )
-        change = _coerce_float(raw_change or 0.0, field="change", row=row)
+        # HIGH-2: a PRESENT-but-null/blank `change` (None, "", whitespace-only) is
+        # schema drift too — the `or 0.0` coalesce below would turn it into a silent
+        # 0.0 -> `continue` -> a DROPPED real capital flow (the original LTP068
+        # dropped-flow class the absent-key guard above does NOT catch). A numeric
+        # 0.0 (or "0") stays a legitimate observed-no-cash no-op.
+        if raw_change is None or (
+            isinstance(raw_change, str) and not raw_change.strip()
+        ):
+            raise LedgerValuationError(
+                f"external-flow Deribit row id={row.get('id')!r} "
+                f"type={row.get('type')!r} has a null/blank change={raw_change!r} — "
+                "refusing to coalesce it to a zero flow (schema drift would silently "
+                "drop a real capital in/out and mis-anchor the flow-aware TWR base)"
+            )
+        change = _coerce_float(raw_change, field="change", row=row)
         if change == 0.0:
             continue  # observed flow row, no cash — no entry, no index needed
         # An undatable flow row must fail loud as a STRUCTURAL valuation error
@@ -664,7 +678,20 @@ def txn_rows_to_daily_records(
                     "missing balance-delta as zero (schema drift would silently "
                     "zero realized cash and render a green-but-wrong track record)"
                 )
-            change = _coerce_float(raw_change or 0.0, field="change", row=row)
+            # HIGH-2: a PRESENT-but-null/blank `change` (None, "", whitespace-only)
+            # is schema drift too — the `or 0.0` coalesce below would silently zero
+            # real realized cash and pass the completeness gate green. A numeric 0.0
+            # (or "0") stays a legitimate zero-cash no-op.
+            if raw_change is None or (
+                isinstance(raw_change, str) and not raw_change.strip()
+            ):
+                raise LedgerValuationError(
+                    f"cash-bearing Deribit row id={row.get('id')!r} "
+                    f"type={row_type!r} has a null/blank change={raw_change!r} — "
+                    "refusing to coalesce it to zero (schema drift would silently "
+                    "zero realized cash and render a green-but-wrong track record)"
+                )
+            change = _coerce_float(raw_change, field="change", row=row)
             # An undatable cash-bearing row must fail loud as a STRUCTURAL
             # valuation error (permanent), not a bare ValueError the network
             # over-catch would mistake for transient. _row_utc_day is shared, so
