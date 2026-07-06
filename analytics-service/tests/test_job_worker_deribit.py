@@ -211,3 +211,129 @@ def test_f1_scalar_region_source_scan() -> None:
     assert "saw_unvalued_inverse_flow" not in body
     assert "net_external_flow_usd" not in body
     assert not re.search(r"equity\s*=\s*equity\s*-\s*.*external_flow", body)
+
+
+# ===========================================================================
+# Phase 77-02 / SC-1 — Deribit session-uPnL companion (FLOW-04).
+#
+# session_upl rides the SAME get_account_summaries response + same
+# index_prices as the equity anchor. An absent/uncertain field falls back to
+# wedge 0.0 (A1 — NEVER fabricated). [ASSUMED A1]: session_upl.
+# ===========================================================================
+
+
+class _FakeDeribitSummaries:
+    """Stub deribit exchange for the account-summaries + index-price reads."""
+
+    def __init__(
+        self,
+        *,
+        summaries: Any = None,
+        index_price: Any = None,
+        summaries_exc: BaseException | None = None,
+    ) -> None:
+        self._summaries = summaries
+        self._index_price = index_price  # dict ccy->price OR a single float
+        self._summaries_exc = summaries_exc
+
+    async def private_get_get_account_summaries(self, params: dict[str, Any]) -> Any:
+        if self._summaries_exc is not None:
+            raise self._summaries_exc
+        return {"result": {"summaries": self._summaries}}
+
+    async def public_get_get_index_price(self, params: dict[str, Any]) -> Any:
+        ccy = str(params["index_name"]).split("_")[0].upper()
+        price = (
+            self._index_price.get(ccy)
+            if isinstance(self._index_price, dict)
+            else self._index_price
+        )
+        if price is None:
+            raise RuntimeError("no index for " + ccy)
+        return {"result": {"index_price": price}}
+
+
+@pytest.mark.asyncio
+async def test_deribit_session_upl_valued_usd() -> None:
+    """session_upl rides the SAME summaries response + same index_prices as
+    the equity anchor: 0.3 BTC uPnL x 40000 = 12000 USD wedge, equity 80000."""
+    from services.deribit_ingest import fetch_deribit_account_equity_and_upnl_usd
+
+    ex = _FakeDeribitSummaries(
+        summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.3}],
+        index_price={"BTC": 40000.0},
+    )
+    equity, balance_error, upnl = await fetch_deribit_account_equity_and_upnl_usd(ex)
+    assert equity == pytest.approx(80000.0)
+    assert balance_error is False
+    assert upnl == pytest.approx(12000.0)
+
+
+@pytest.mark.asyncio
+async def test_deribit_usd_family_session_upl_passthrough() -> None:
+    """A USD-family currency's session_upl passes through as USD — no index
+    multiply (mirrors the equity anchor's pass-through rule)."""
+    from services.deribit_ingest import fetch_deribit_account_equity_and_upnl_usd
+
+    ex = _FakeDeribitSummaries(
+        summaries=[{"currency": "USDC", "equity": 50000.0, "session_upl": 1500.0}],
+    )
+    equity, balance_error, upnl = await fetch_deribit_account_equity_and_upnl_usd(ex)
+    assert equity == pytest.approx(50000.0)
+    assert balance_error is False
+    assert upnl == pytest.approx(1500.0)
+
+
+@pytest.mark.asyncio
+async def test_deribit_missing_session_upl_fallback_zero() -> None:
+    """A1 fallback: summaries with equity but NO session_upl key (or null) →
+    wedge 0.0 (conservative, realized-basis terminal) — NEVER fabricated."""
+    from services.deribit_ingest import fetch_deribit_account_equity_and_upnl_usd
+
+    ex_absent = _FakeDeribitSummaries(
+        summaries=[{"currency": "BTC", "equity": 2.0}],
+        index_price={"BTC": 40000.0},
+    )
+    equity, balance_error, upnl = await fetch_deribit_account_equity_and_upnl_usd(
+        ex_absent
+    )
+    assert equity == pytest.approx(80000.0)
+    assert balance_error is False
+    assert upnl == 0.0
+
+    ex_null = _FakeDeribitSummaries(
+        summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": None}],
+        index_price={"BTC": 40000.0},
+    )
+    _eq, _err, upnl_null = await fetch_deribit_account_equity_and_upnl_usd(ex_null)
+    assert upnl_null == 0.0
+
+
+@pytest.mark.asyncio
+async def test_deribit_balance_error_wedge_zero() -> None:
+    """A failed summaries read → (None, True, 0.0): no equity, balance error,
+    wedge forced to 0.0."""
+    from services.deribit_ingest import fetch_deribit_account_equity_and_upnl_usd
+
+    ex = _FakeDeribitSummaries(summaries_exc=RuntimeError("network down"))
+    equity, balance_error, upnl = await fetch_deribit_account_equity_and_upnl_usd(ex)
+    assert equity is None
+    assert balance_error is True
+    assert upnl == 0.0
+
+
+@pytest.mark.asyncio
+async def test_deribit_no_index_upnl_balance_error() -> None:
+    """A held non-linear currency carrying uPnL but no resolvable USD index →
+    the equity anchor fails loud; the wedge path inherits (None, True, 0.0) —
+    the wedge is NOT fabricated on an unvaluable base."""
+    from services.deribit_ingest import fetch_deribit_account_equity_and_upnl_usd
+
+    ex = _FakeDeribitSummaries(
+        summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.3}],
+        index_price=None,  # index resolution fails for BTC
+    )
+    equity, balance_error, upnl = await fetch_deribit_account_equity_and_upnl_usd(ex)
+    assert equity is None
+    assert balance_error is True
+    assert upnl == 0.0
