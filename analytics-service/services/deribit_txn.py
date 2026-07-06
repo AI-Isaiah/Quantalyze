@@ -425,6 +425,40 @@ def _row_utc_day(ts: Any) -> str:
     raise ValueError(f"uninterpretable transaction-log timestamp: {ts!r}")
 
 
+def _row_utc_instant(ts: Any) -> float:
+    """A sortable UTC instant (epoch MILLISECONDS) for a Deribit txn-log
+    timestamp — the SAME tolerant parsing as ``_row_utc_day`` but preserving
+    intraday resolution so same-(day, currency) rows can be ordered. The
+    END-OF-DAY settlement mark is the greatest instant (MEDIUM-1: the same-day
+    index pick must be the event-appropriate end-of-day mark, not the
+    iteration-order-dependent first row). Raises ValueError on an uninterpretable
+    timestamp (mirrors ``_row_utc_day`` — never silently reorder on junk)."""
+    if isinstance(ts, datetime):
+        aware = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+        return aware.astimezone(timezone.utc).timestamp() * 1000.0
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        return float(ts)
+    if isinstance(ts, str):
+        stripped = ts.strip()
+        if stripped.lstrip("-").isdigit():
+            try:
+                return float(int(stripped))
+            except (ValueError, OverflowError):
+                pass
+        try:
+            parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            aware = (
+                parsed
+                if parsed.tzinfo is not None
+                else parsed.replace(tzinfo=timezone.utc)
+            )
+            return aware.astimezone(timezone.utc).timestamp() * 1000.0
+    raise ValueError(f"uninterpretable transaction-log timestamp: {ts!r}")
+
+
 def _day_ccy_own_index(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[tuple[str, str], float]:
@@ -442,6 +476,14 @@ def _day_ccy_own_index(
     index_price on any row cannot crash the whole job (untrusted input).
     """
     day_ccy_index: dict[tuple[str, str], float] = {}
+    # MEDIUM-1: pick the END-OF-DAY mark (greatest event instant) per (day, ccy),
+    # NOT the iteration-order-dependent first row. A `setdefault` first-wins made
+    # the pick order-dependent when a day carried multiple index-bearing rows of
+    # DIFFERENT index_price (a row-order swap flipped the valued cash). The
+    # greatest-instant row is the settlement mark closest to the end-of-day flow
+    # convention; a same-instant tie is broken deterministically on the GREATER
+    # price (a data property, never iteration order).
+    best_instant: dict[tuple[str, str], float] = {}
     for row in rows:
         if not isinstance(row, Mapping):
             continue
@@ -453,11 +495,21 @@ def _day_ccy_own_index(
             continue
         try:
             day = _row_utc_day(row.get("timestamp"))
+            instant = _row_utc_instant(row.get("timestamp"))
             price = float(index_price)
         except (ValueError, TypeError, OverflowError):
             continue
-        if price > 0:
-            day_ccy_index.setdefault((day, ccy), price)
+        if price <= 0:
+            continue
+        key = (day, ccy)
+        prev_instant = best_instant.get(key)
+        if (
+            prev_instant is None
+            or instant > prev_instant
+            or (instant == prev_instant and price > day_ccy_index[key])
+        ):
+            best_instant[key] = instant
+            day_ccy_index[key] = price
     return day_ccy_index
 
 

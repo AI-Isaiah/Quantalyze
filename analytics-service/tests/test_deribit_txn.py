@@ -221,6 +221,53 @@ def test_same_day_fallback_index_used_when_row_lacks_own() -> None:
     )
 
 
+def test_same_day_multi_index_picks_end_of_day_deterministically() -> None:
+    """MEDIUM-1 (75-05): on a day carrying MULTIPLE index-bearing rows of DIFFERENT
+    index_price for the same currency, the same-day fallback index is the
+    END-OF-DAY (greatest-timestamp) settlement mark — DETERMINISTIC and
+    INDEPENDENT of row order. The old `setdefault` first-wins made the pick
+    order-dependent (a row-order swap flipped the valued cash ~50% in the review
+    repro, -40000 <-> -60000).
+
+    Mutation-honest: reverting to `setdefault` first-wins makes the two orders
+    DISAGREE (forward returns the 06:00 index, reverse the 20:00 one) and the
+    end-of-day assertion fails -> RED."""
+    from services.deribit_txn import _day_ccy_own_index
+
+    day = "2026-01-15"
+    early = {
+        "type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+        "change": 0.0, "index_price": 40000.0,
+        "timestamp": _ms("2026-01-15T06:00:00+00:00"), "id": 1,
+    }
+    late = {
+        "type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+        "change": 0.0, "index_price": 60000.0,
+        "timestamp": _ms("2026-01-15T20:00:00+00:00"), "id": 2,
+    }
+    key = (day, "BTC")
+    fwd = _day_ccy_own_index([early, late])
+    rev = _day_ccy_own_index([late, early])
+    # Order-independent: both orderings agree on the SAME value.
+    assert fwd[key] == rev[key]
+    # The END-OF-DAY (20:00) settlement mark wins, NOT the 06:00 first-seen row.
+    assert fwd[key] == pytest.approx(60000.0)
+
+    # Observable at the valuation seam: a quiet inverse fee on the SAME day (no own
+    # index) consumes this fallback, so its USD is order-independent and uses the
+    # end-of-day mark. -0.1 BTC * 60000 == -6000 in BOTH orders.
+    fee = {
+        "type": "negative_balance_fee", "currency": "BTC", "change": -0.1,
+        "timestamp": _ms("2026-01-15T23:00:00+00:00"), "id": 3,
+    }
+    rec_fwd = txn_rows_to_daily_records([early, late, fee])
+    rec_rev = txn_rows_to_daily_records([fee, late, early])
+    assert rec_fwd == rec_rev  # deterministic day-sum regardless of order
+    # day-sum = 0 (settlements) + 0 (settlements) + (-0.1 * 60000) == -6000
+    assert rec_fwd[0]["side"] == "sell"
+    assert rec_fwd[0]["price"] == pytest.approx(6000.0, abs=1e-9)
+
+
 # ---------------------------------------------------------------------------
 # classify_instrument — inverse / linear / option / future / unknown
 # (single definition, lifted into services.deribit_txn — D-05)
