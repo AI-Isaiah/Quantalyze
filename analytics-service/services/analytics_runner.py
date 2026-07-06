@@ -170,6 +170,13 @@ class DataQualityFlags(TypedDict, total=False):
     negative_nav_guard: bool
     dust_nav_guard: bool
     flow_dominated_guard: bool
+    # --- Phase 76 (v1.8 DQ-02): flow-coverage terminus. Fires when a broker
+    # account's return window extends BEFORE the venue's deposit-history
+    # retention (OKX 90d / Bybit 365d) so the pre-terminus flows are unfetchable;
+    # the honest core NaNs those days (refusing a fabricated return over the gap)
+    # and this flag promotes computation_status to complete_with_warnings. Rides
+    # the same channel as the NAV guard keys. ---
+    flow_coverage_incomplete: bool
     # --- sibling-table batch upsert ---
     sibling_kinds_failed: bool
     sibling_kinds_error: str
@@ -1732,10 +1739,16 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # status-identical to today (the 8 exact-string 'complete' consumers are
         # unaffected — see the consumer_specific_flags block below). Same
         # additive shape + None-vs-empty-dict guarding as used_heuristic_capital.
+        # Phase 76 (v1.8 DQ-02) — flow_coverage_incomplete joins the additive
+        # NavTWRMeta guard-key lift. It fires when the flow-coverage terminus
+        # segmented a retention gap (unfetchable pre-terminus flows), and like the
+        # NAV guards it is present ONLY when it fired, so a fully-covered account
+        # carries none of them and stays status-identical (SC-4).
         for _guard_key in (
             "negative_nav_guard",
             "dust_nav_guard",
             "flow_dominated_guard",
+            "flow_coverage_incomplete",
         ):
             if returns_meta.get(_guard_key):
                 data_quality_flags = data_quality_flags or {}
@@ -1816,6 +1829,9 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             or (top_level_flags or {}).get("negative_nav_guard")
             or (top_level_flags or {}).get("dust_nav_guard")
             or (top_level_flags or {}).get("flow_dominated_guard")
+            # Phase 76 (v1.8 DQ-02): a refused flow-coverage gap is at least as
+            # degraded as a NAV guard — promote to complete_with_warnings.
+            or (top_level_flags or {}).get("flow_coverage_incomplete")
         )
         # When the consumer flag is suppressed (because the upstream
         # account_balance_unavailable / no_linked_api_key already
@@ -2116,10 +2132,38 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             data_quality_flags["benchmark_unavailable"] = True
             data_quality_flags["benchmark_note"] = "Benchmark data unavailable."
 
+        # Phase 76 (v1.8 DQ-02): the broker flow-coverage terminus PRE-STAMPS
+        # flow_coverage_incomplete onto this strategy_analytics row (job_worker,
+        # derive_broker_dailies) BEFORE enqueuing this CSV run — the pre-terminus
+        # days are honestly absent from csv_daily_returns, so the flag is the only
+        # channel that tells the factsheet a coverage gap was refused. Read the
+        # pre-existing flag and PRESERVE it (a full _mark_complete upsert would
+        # otherwise wipe it) + promote status to complete_with_warnings.
+        def _read_existing_flags() -> dict[str, Any]:
+            res = (
+                supabase.table("strategy_analytics")
+                .select("data_quality_flags")
+                .eq("strategy_id", strategy_id)
+                .maybe_single()
+                .execute()
+            )
+            row = getattr(res, "data", None) or {}
+            return dict(row.get("data_quality_flags") or {})
+
+        existing_flags = await db_execute(_read_existing_flags)
+        flow_coverage_incomplete = bool(
+            existing_flags.get("flow_coverage_incomplete")
+        )
+        if flow_coverage_incomplete:
+            data_quality_flags["flow_coverage_incomplete"] = True
+        csv_status = (
+            "complete_with_warnings" if flow_coverage_incomplete else "complete"
+        )
+
         def _mark_complete() -> None:
             payload: dict[str, Any] = {
                 "strategy_id": strategy_id,
-                "computation_status": "complete",
+                "computation_status": csv_status,
                 "computation_error": None,
                 "data_quality_flags": data_quality_flags,
                 "trade_metrics": None,    # CSV has no fills

@@ -1335,6 +1335,8 @@ class TestDeriveBrokerDailies:
         withdrawals: list[dict] | None = None,
         equity: float = 100_000.0,
         ohlcv_by_symbol: dict[str, list[list]] | None = None,
+        realized: list[dict] | None = None,
+        transfers_error: Exception | None = None,
     ):
         """Build the (mock_ctx, patches, captured) harness for a ccxt-venue
         derive_broker_dailies run. ``captured['external_flows']`` records the
@@ -1384,6 +1386,8 @@ class TestDeriveBrokerDailies:
         captured["analytics_upserts"] = analytics_upserts
 
         async def _fake_transfers(exchange, kind, since_ms, now_ms):
+            if transfers_error is not None:
+                raise transfers_error
             if kind == "deposits":
                 return list(deposits)
             return list(withdrawals or [])
@@ -1411,7 +1415,8 @@ class TestDeriveBrokerDailies:
             new=AsyncMock(return_value=mock_ctx),
         ))
         stack.enter_context(patch(
-            "services.job_worker.fetch_all_trades", new=AsyncMock(return_value=[]),
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=list(realized or [])),
         ))
         stack.enter_context(patch(
             "services.job_worker.aclose_exchange", new=AsyncMock(),
@@ -1512,6 +1517,206 @@ class TestDeriveBrokerDailies:
         assert captured["ohlcv_calls"] == [], (
             "stablecoin-only account must not hit the price source"
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "venue,own_transfer",
+        [
+            (
+                "binance",
+                {"id": "o1", "type": "withdrawal", "currency": "USDT",
+                 "amount": 3000.0, "internal": True},
+            ),
+            (
+                "bybit",
+                {"id": "o1", "type": "withdrawal", "currency": "USDT",
+                 "amount": 3000.0, "info": {"withdrawType": "1"}},
+            ),
+        ],
+    )
+    async def test_ccxt_branch_excludes_own_transfer_end_to_end(
+        self, venue: str, own_transfer: dict,
+    ) -> None:
+        """End-to-end per venue: a real deposit + an INTERNAL own-transfer flows
+        through fetch → pure valuer → external_flows, and ONLY the deposit becomes
+        an F_t. Mutation-honest: were the per-venue filter neutered (own-transfer
+        kept), the flow sum would drop by the own-transfer's 3000 → this exact-sum
+        assertion REDs."""
+        import datetime as _dt
+        from services.job_worker import run_derive_broker_dailies_job
+
+        day = "2026-06-01"
+        day_ms = int(
+            _dt.datetime.fromisoformat(day + "T00:00:00+00:00").timestamp() * 1000
+        )
+        deposit = {
+            "id": "d1", "type": "deposit", "currency": "USDT", "amount": 10_000.0,
+            "timestamp": day_ms, "internal": False,
+        }
+        own = dict(own_transfer, timestamp=day_ms)
+        mock_ctx, stack, captured = self._flow_harness(
+            venue=venue, deposits=[deposit], withdrawals=[own],
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            await run_derive_broker_dailies_job(job)
+
+        flows = captured["external_flows"]
+        total = sum(f.usd_signed for f in flows)
+        assert total == pytest.approx(10_000.0), (
+            f"only the deposit should reach F_t; own-transfer leaked into {flows}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_okx_keeps_structurally_external_withdrawal(self) -> None:
+        """OKX deposit-/withdrawal-history rows are structurally external (ccxt
+        leaves internal=None) — both a deposit and a withdrawal are real F_t, none
+        dropped as an own-transfer."""
+        import datetime as _dt
+        from services.job_worker import run_derive_broker_dailies_job
+
+        day = "2026-06-01"
+        day_ms = int(
+            _dt.datetime.fromisoformat(day + "T00:00:00+00:00").timestamp() * 1000
+        )
+        deposit = {"id": "d1", "type": "deposit", "currency": "USDT",
+                   "amount": 10_000.0, "timestamp": day_ms}
+        withdrawal = {"id": "w1", "type": "withdrawal", "currency": "USDT",
+                      "amount": 4_000.0, "timestamp": day_ms}
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="okx", deposits=[deposit], withdrawals=[withdrawal],
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            await run_derive_broker_dailies_job(job)
+
+        total = sum(f.usd_signed for f in captured["external_flows"])
+        # +10000 deposit, -4000 withdrawal, both kept.
+        assert total == pytest.approx(6_000.0)
+
+    @pytest.mark.asyncio
+    async def test_retention_gap_segments_and_flags_complete_with_warnings(
+        self,
+    ) -> None:
+        """DQ-02 end-to-end: an OKX account whose realized window extends BEFORE
+        the 90d deposit-history retention → the reconstructed series SEGMENTS at
+        the terminus (pre-terminus days absent from csv_daily_returns, never a
+        fabricated return) and flow_coverage_incomplete is PRE-STAMPED so the CSV
+        factsheet reads complete_with_warnings. Mutation-honest: remove the
+        segment → the pre-terminus dates reappear in csv_rows → REDs."""
+        import datetime as _dt
+        from services.job_worker import run_derive_broker_dailies_job
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+
+        def _rec(days_ago: int, pnl: float) -> dict:
+            d = (now - _dt.timedelta(days=days_ago)).date().isoformat()
+            return {
+                "exchange": "okx", "symbol": "PORTFOLIO",
+                "side": "buy" if pnl >= 0 else "sell", "price": abs(pnl),
+                "quantity": 1, "fee": 0, "fee_currency": "USDT",
+                "timestamp": f"{d}T00:00:00+00:00", "order_type": "daily_pnl",
+            }
+
+        realized = [_rec(120, 100.0), _rec(100, 50.0), _rec(80, 25.0), _rec(5, 10.0)]
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="okx", deposits=[], realized=realized,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        terminus = (now - _dt.timedelta(days=90)).date()
+        csv_dates = sorted(r["date"] for r in captured["csv_rows"])
+        assert csv_dates, "expected post-terminus daily-return rows"
+        # No pre-terminus (older than 90d) date survives — the gap is refused.
+        assert all(
+            _dt.date.fromisoformat(d) >= terminus for d in csv_dates
+        ), f"pre-terminus days leaked into csv_daily_returns: {csv_dates[:3]}"
+        # The 120d/100d-old realized days must be ABSENT (no fabricated return).
+        stale = {(now - _dt.timedelta(days=n)).date().isoformat() for n in (120, 100)}
+        assert not (stale & set(csv_dates))
+        # flow_coverage_incomplete pre-stamped so the CSV run surfaces the warning.
+        prestamps = [
+            u for u in captured["analytics_upserts"]
+            if (u.get("data_quality_flags") or {}).get("flow_coverage_incomplete")
+        ]
+        assert prestamps, (
+            "expected a flow_coverage_incomplete pre-stamp on strategy_analytics"
+        )
+
+    @pytest.mark.asyncio
+    async def test_transient_flow_fetch_error_is_retryable_not_a_segment(
+        self,
+    ) -> None:
+        """WR-04 / T-76-04-TRANS: a transient transfer-fetch error BUBBLES
+        (retryable) — it is never converted into a coverage segment or a permanent
+        truncation, and nothing is written to csv_daily_returns."""
+        from services.job_worker import run_derive_broker_dailies_job
+
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="okx", deposits=[],
+            transfers_error=ccxt.NetworkError("simulated transient blip"),
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            with pytest.raises(ccxt.NetworkError):
+                await run_derive_broker_dailies_job(job)
+
+        assert captured["csv_rows"] == []
+        assert not any(
+            (u.get("data_quality_flags") or {}).get("flow_coverage_incomplete")
+            for u in captured["analytics_upserts"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_open_position_account_reconciles_on_realized_basis(self) -> None:
+        """Residual-activation safety: an account with open positions (anchor
+        equity INCLUDES uPnL) reconciles on the realized basis (open_unrealized_usd
+        defaulted 0.0 — Phase 77 owns the wedge). The internal DQ-02 residual
+        self-check must NOT spuriously breach → the job completes, never a
+        permanent NavReconstructionError failure."""
+        import datetime as _dt
+        from services.job_worker import run_derive_broker_dailies_job
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+
+        def _rec(days_ago: int, pnl: float) -> dict:
+            d = (now - _dt.timedelta(days=days_ago)).date().isoformat()
+            return {
+                "exchange": "binance", "symbol": "PORTFOLIO",
+                "side": "buy" if pnl >= 0 else "sell", "price": abs(pnl),
+                "quantity": 1, "fee": 0, "fee_currency": "USDT",
+                "timestamp": f"{d}T00:00:00+00:00", "order_type": "daily_pnl",
+            }
+
+        realized = [_rec(10, 200.0), _rec(5, 150.0), _rec(1, 75.0)]
+        day = (now - _dt.timedelta(days=8)).date().isoformat()
+        day_ms = int(
+            _dt.datetime.fromisoformat(day + "T00:00:00+00:00").timestamp() * 1000
+        )
+        deposit = {"id": "d1", "type": "deposit", "currency": "USDT",
+                   "amount": 20_000.0, "timestamp": day_ms, "internal": False}
+        # Anchor equity is deliberately LARGER than realized-only would imply
+        # (models unrealized PnL living in the anchor NAV).
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="binance", deposits=[deposit], realized=realized, equity=250_000.0,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        # Realized basis: no uPnL wedge threaded at this seam.
+        assert captured["open_unrealized_usd"] == 0.0
+        # No permanent reconstruction-failure stamp.
+        assert not any(
+            u.get("computation_status") == "failed"
+            and "reconstruction" in (u.get("computation_error") or "").lower()
+            for u in captured["analytics_upserts"]
+        )
+        assert captured["csv_rows"], "expected a reconstructed daily-return series"
 
     @pytest.mark.asyncio
     async def test_sync_trades_enqueue_failure_does_not_fail_job(

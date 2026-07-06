@@ -2214,6 +2214,33 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             ),
             error_kind="permanent",
         )
+
+    # DQ-02 (v1.8): apply the flow-coverage terminus gate POST-COMBINE. When the
+    # return window extends BEFORE the venue's deposit-history retention (OKX 90d /
+    # Bybit 365d — Binance has no cap → None), the earliest capital moves are
+    # UNFETCHABLE, so the pre-terminus reconstructed NAV cannot be trusted. The
+    # standalone pure helper (nav_twr, 76-03) NaNs the pre-terminus days (refusing
+    # a fabricated return over the gap) and raises the flow_coverage_incomplete
+    # flag. Applied on the returns Series here — NOT threaded through transforms.py
+    # — so the Phase 74 byte-identity pins stay GREEN. Only the set start-day
+    # signal segments; a transient fetch error already bubbled retryable above
+    # (WR-04), so a blip can never reach here as an over-truncation (T-76-04-TRANS).
+    if not returns.empty:
+        # The combined returns index is tz-NAIVE UTC calendar days
+        # (gap_fill_daily_returns → pd.date_range), so supply a tz-naive UTC
+        # `now` to the pure terminus helper (76-03) — a tz-aware value would
+        # raise "Cannot compare tz-naive and tz-aware timestamps".
+        _flow_coverage_start_day = flow_coverage_terminus_day(
+            venue,
+            first_return_day=returns.index[0],
+            now_utc=datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+        returns, _coverage_flags = apply_flow_coverage_terminus(
+            returns, _flow_coverage_start_day
+        )
+        if _coverage_flags.get("flow_coverage_incomplete"):
+            meta["flow_coverage_incomplete"] = True
+
     if len(returns) < 2:
         # Brand-new / inactive account: not enough history to compile a
         # factsheet (compute_all_metrics needs >=2 days).
@@ -2330,6 +2357,28 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         len(rows_payload), strategy_id, venue, len(realized), len(funding),
         meta.get("used_heuristic_capital"),
     )
+
+    # DQ-02 (v1.8): when the flow-coverage terminus segmented a retention gap,
+    # PRE-STAMP flow_coverage_incomplete onto strategy_analytics so the CSV
+    # analytics run (run_csv_strategy_analytics) SURFACES it → complete_with_
+    # warnings. csv_daily_returns carries ONLY the post-segmentation return rows —
+    # the pre-terminus days are honestly ABSENT (never a fabricated return) — so
+    # this flag is the only channel telling the factsheet a coverage gap was
+    # refused. The CSV run MERGES this pre-existing flag rather than wiping it.
+    if meta.get("flow_coverage_incomplete"):
+        def _prestamp_coverage() -> None:
+            ctx.supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": strategy_id,
+                    "data_quality_flags": {
+                        "csv_source": True,
+                        "flow_coverage_incomplete": True,
+                    },
+                },
+                on_conflict="strategy_id",
+            ).execute()
+
+        await db_execute(_prestamp_coverage)
 
     # Hand off to the standard CSV analytics route to compile the factsheet.
     def _enqueue_csv_analytics() -> None:
