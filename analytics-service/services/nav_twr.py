@@ -60,6 +60,17 @@ DUST_NAV_FLOOR = 1000.0
 # computed return, and is tuned against real accounts at the Phase 78 gate.
 FLOW_DOM_RATIO = 1.0
 
+# Phase 77 FLOW-04 — terminal uPnL wedge materiality (Q5). When the MTM anchor's
+# open-uPnL wedge is |open_unrealized_usd|/anchor_nav > 5%, the realized-basis
+# terminal is materially below the reported (MTM) anchor and the intra-window NAV
+# excludes that uPnL drift — surfaced via ``unrealized_pnl_in_anchor``. Warning-
+# only (never alters a return); rides the SAME complete_with_warnings channel as
+# the DQ guards. 5% is the smallest wedge that visibly moves the terminal vs a
+# typical daily return; it sits above measurement noise and below the account-
+# scale guards (DUST_NAV_FLOOR, FLOW_DOM_RATIO) and is tuned against real accounts
+# at the Phase 78 gate exactly like FLOW_DOM_RATIO.
+UNREALIZED_MATERIALITY_RATIO = 0.05
+
 # --- DQ-02 flow-coverage terminus retention (per venue) ----------------------
 # A deposit older than a venue's deposit/withdrawal-history retention is
 # UNFETCHABLE — a genuine coverage gap, not a code bug. Left un-segmented, the
@@ -104,6 +115,10 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     # TypedDict + the 74-03 promotion predicate; here it rides the SAME
     # complete_with_warnings channel as the DQ-01 guards (no parallel status).
     flow_coverage_incomplete: bool
+    # Phase 77 FLOW-04 — the MTM anchor's open uPnL wedge is material
+    # (|open_unrealized_usd|/anchor > UNREALIZED_MATERIALITY_RATIO). Rides the same
+    # complete_with_warnings channel as the DQ-01/DQ-02 guards; NO parallel status.
+    unrealized_pnl_in_anchor: bool
 
 
 class NavReconstructionError(ValueError):
@@ -355,6 +370,8 @@ def _build_nav_meta(flags: Mapping[str, bool]) -> NavTWRMeta:
         meta["flow_dominated_guard"] = True
     if flags.get("flow_coverage_incomplete"):
         meta["flow_coverage_incomplete"] = True
+    if flags.get("unrealized_pnl_in_anchor"):
+        meta["unrealized_pnl_in_anchor"] = True
     return meta
 
 
@@ -489,10 +506,26 @@ def reconstruct_nav_and_twr(
     chain-link the daily time-weighted return.
 
     ``terminal_nav = anchor_nav - open_unrealized_usd`` (realized basis; the
-    uPnL wedge defaults to 0.0 and is Phase 77's job to fill). With
-    ``external_flows`` empty and ``open_unrealized_usd == 0.0`` the returned
-    Series is byte-identical to the honest transforms.py daily_pnl path for an
-    ``estimated_start > 0`` account (SC-4).
+    uPnL wedge defaults to 0.0). With ``external_flows`` empty and
+    ``open_unrealized_usd == 0.0`` the returned Series is byte-identical to the
+    honest transforms.py daily_pnl path for an ``estimated_start > 0`` account
+    (SC-4).
+
+    Realized-basis-intraday / MTM-at-endpoint invariant (Phase 77 FLOW-04, Q3):
+    Intra-window NAV is realized-basis; uPnL is reconciled only at the terminal
+    (endpoint), because historical open-position marks are
+    "not retrievable on read-only keys". A material terminal wedge is surfaced
+    via ``unrealized_pnl_in_anchor``, and is "never spread across history"
+    (that would fabricate marks). Concretely: ``open_unrealized_usd`` is subtracted from
+    ``terminal_nav`` BEFORE the backward roll, so EVERY reconstructed intra-window
+    NAV — including day n-1 -> day n — excludes uPnL; there is no point at which
+    uPnL enters the series, hence NO step discontinuity at the anchor day. No
+    per-day historical-uPnL array is ever constructed. When
+    ``|open_unrealized_usd| / anchor_nav > UNREALIZED_MATERIALITY_RATIO`` (and the
+    anchor is above ``DUST_NAV_FLOOR``), the wedge is material relative to the
+    reported anchor and ``unrealized_pnl_in_anchor`` is raised
+    (-> ``complete_with_warnings``). The flag carries a BOOL only — the raw USD
+    wedge is never logged or emitted (account-size leak class T-77-02).
     """
     flows_by_day = _flows_to_daily_usd(external_flows)
     # HIGH-1: union external-flow days into the pnl index BEFORE reconstruction so
@@ -504,9 +537,11 @@ def reconstruct_nav_and_twr(
     if daily_pnl.empty:
         return pd.Series(dtype=float, name="returns"), _build_nav_meta({})
 
-    terminal_nav = _coerce_float(
-        anchor_nav, field="anchor_nav", row={}
-    ) - _coerce_float(open_unrealized_usd, field="open_unrealized_usd", row={})
+    anchor = _coerce_float(anchor_nav, field="anchor_nav", row={})
+    upnl = _coerce_float(
+        open_unrealized_usd, field="open_unrealized_usd", row={}
+    )
+    terminal_nav = anchor - upnl
 
     nav = reconstruct_nav(daily_pnl, terminal_nav, flows_by_day)
     # DQ-02 construction-sanity self-check: the backward-roll identity holds BY
@@ -525,4 +560,12 @@ def reconstruct_nav_and_twr(
         terminal_nav, reconstructed_start, daily_pnl, flows_by_day
     )
     returns, flags = chain_linked_twr(nav, daily_pnl, flows_by_day)
+    # FLOW-04 terminal uPnL wedge materiality (Q5). Evaluate the ratio ONLY on a
+    # non-dust anchor — a dust/near-zero base makes |uPnL|/anchor meaningless (and
+    # divide-by-tiny explodes it into a false positive); a dust NAV is already
+    # flagged by the DQ-01 dust guard on its own merits. A BOOL is merged (never
+    # the raw USD wedge — account-size leak T-77-02); no key when immaterial so the
+    # SC-4 zero-wedge default stays byte/status-identical.
+    if anchor > DUST_NAV_FLOOR and abs(upnl) / anchor > UNREALIZED_MATERIALITY_RATIO:
+        flags = {**flags, "unrealized_pnl_in_anchor": True}
     return returns, _build_nav_meta(flags)
