@@ -26,11 +26,19 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from services import nav_twr as nav_twr_mod
 from services.nav_twr import (
+    BINANCE_DEPOSIT_TERMINUS_DAYS,
+    BYBIT_DEPOSIT_TERMINUS_DAYS,
+    FLOW_TERMINUS_DAYS_BY_VENUE,
+    OKX_DEPOSIT_TERMINUS_DAYS,
     NavReconstructionError,
     _flows_to_daily_usd,
+    apply_flow_coverage_terminus,
     chain_linked_twr,
     cumulative_twr,
+    flow_coverage_terminus_day,
+    reconcile_flow_residual,
     reconstruct_nav,
     reconstruct_nav_and_twr,
 )
@@ -488,3 +496,299 @@ def test_empty_inputs_degenerate_cleanly() -> None:
     # A single-day series whose only day breaks -> cumulative is NaN, not 0.0.
     ret_neg, _ = reconstruct_nav_and_twr(_pnl([2000.0]), anchor_nav=1500.0)
     assert np.isnan(cumulative_twr(ret_neg))
+
+
+# ---------------------------------------------------------------------------
+# DQ-02 — identity residual (construction-sanity mutation detector)
+# ---------------------------------------------------------------------------
+
+
+def _reconstructed_start(
+    daily_pnl: pd.Series, terminal_nav: float, flows_by_day: pd.Series
+) -> float:
+    """Pre-history reconstructable capital = the day-0 chain-link denominator
+    (``NAV_0 - pnl_0 - F_0``) derived from the ACTUAL backward roll — the same
+    value ``chain_linked_twr`` uses as ``prev`` for ``t == 0``."""
+    nav = reconstruct_nav(daily_pnl, terminal_nav, flows_by_day)
+    flows0 = flows_by_day.reindex(nav.index, fill_value=0.0).iloc[0]
+    return float(nav.iloc[0] - daily_pnl.iloc[0] - flows0)
+
+
+def test_reconcile_residual_holds_by_construction() -> None:
+    """The identity ``terminal − reconstructed_start − Σpnl − Σflows`` is ~0 by
+    construction of the backward roll → ``reconcile_flow_residual`` returns a
+    residual within tolerance (never raises) for a well-formed reconstruction."""
+    daily_pnl = _pnl([120.0, -80.0, 40.0, 15.0, -30.0])
+    flows = _flows_to_daily_usd([("2026-01-02", 500.0), ("2026-01-04", -200.0)])
+    terminal_nav = 10_000.0
+    start = _reconstructed_start(daily_pnl, terminal_nav, flows)
+
+    residual = reconcile_flow_residual(terminal_nav, start, daily_pnl, flows)
+    assert abs(residual) <= max(1.00, 1e-6 * abs(terminal_nav))
+    assert residual == pytest.approx(0.0, abs=1e-6)
+
+
+def test_reconcile_residual_reddens_on_dropped_flow() -> None:
+    """MUTATION (T-76-03-DROP): a flow dropped/mis-valued in the backward roll
+    breaks the identity. Here the roll drops the ``- flows[t]`` term, so the
+    reconstructed_start no longer matches ``terminal − Σpnl − Σflows`` and
+    ``reconcile_flow_residual`` raises ``NavReconstructionError``. This is the
+    mutation detector that reddens if the roll ever leaks a flow."""
+    daily_pnl = _pnl([120.0, -80.0, 40.0, 15.0, -30.0])
+    flows = _flows_to_daily_usd([("2026-01-02", 500.0), ("2026-01-04", -200.0)])
+    terminal_nav = 10_000.0
+
+    # Mutant roll: drop the flow term (NAV_{t-1} = NAV_t - pnl_t only), exactly the
+    # bug reconcile must catch. Derive a mutant reconstructed_start from it.
+    index = daily_pnl.index
+    pnl_vals = daily_pnl.to_numpy(dtype=float)
+    flows0 = flows.reindex(index, fill_value=0.0).iloc[0]
+    n = len(index)
+    mutant = np.empty(n)
+    mutant[n - 1] = terminal_nav
+    for t in range(n - 1, 0, -1):
+        mutant[t - 1] = mutant[t] - pnl_vals[t]  # flow term dropped
+    mutant_start = float(mutant[0] - pnl_vals[0] - flows0)
+
+    with pytest.raises(NavReconstructionError):
+        reconcile_flow_residual(terminal_nav, mutant_start, daily_pnl, flows)
+
+
+def test_reconcile_residual_wired_into_reconstruct(monkeypatch) -> None:
+    """Revert-proof wiring: ``reconstruct_nav_and_twr`` runs the residual
+    self-check internally. Monkeypatching ``reconstruct_nav`` to a flow-dropping
+    roll makes the internal ``reconcile_flow_residual`` call raise — so REMOVING
+    the internal call from ``reconstruct_nav_and_twr`` turns this test RED."""
+    real_reconstruct = nav_twr_mod.reconstruct_nav
+
+    def _flow_dropping_roll(
+        daily_pnl: pd.Series, terminal_nav: float, flows_by_day: pd.Series
+    ) -> pd.Series:
+        nav = real_reconstruct(daily_pnl, terminal_nav, flows_by_day)
+        # Corrupt the early NAV as a dropped-flow roll would, WITHOUT touching the
+        # terminal anchor — this is exactly the residual's target mutation.
+        vals = nav.to_numpy(dtype=float).copy()
+        if len(vals) > 1:
+            vals[:-1] += 1234.0
+        return pd.Series(vals, index=nav.index, name="nav")
+
+    monkeypatch.setattr(nav_twr_mod, "reconstruct_nav", _flow_dropping_roll)
+    with pytest.raises(NavReconstructionError):
+        reconstruct_nav_and_twr(
+            _pnl([120.0, -80.0, 40.0, 15.0, -30.0]),
+            anchor_nav=10_000.0,
+            external_flows=[("2026-01-02", 500.0), ("2026-01-04", -200.0)],
+        )
+
+
+def test_reconcile_wallet_scope_mismatch_fails_loud() -> None:
+    """W3 (T-76-03 wallet-scope): a mis-scoped anchor (reading e.g. Binance SPOT
+    while PnL is USDⓈ-M, or Bybit UNIFIED-only while capital spans FUND) makes the
+    terminal NAV inconsistent with the TRUE reconstructable capital. Injecting an
+    anchor 20% below the true reconstructable start drives the residual past
+    tolerance → ``NavReconstructionError``. This is the interim safety net for the
+    P78-deferred wallet-scope confirmation: a wrong scope CANNOT silently
+    mis-attribute."""
+    daily_pnl = _pnl([120.0, -80.0, 40.0, 15.0, -30.0])
+    flows = _flows_to_daily_usd([("2026-01-02", 500.0), ("2026-01-04", -200.0)])
+    true_terminal = 100_000.0
+    # The TRUE reconstructable start, from a correctly-scoped anchor.
+    true_start = _reconstructed_start(daily_pnl, true_terminal, flows)
+
+    # Wrong-scope anchor: 20% lower than the true reconstructable capital, while the
+    # true start (independently known) is unchanged → identity breaks loudly.
+    wrong_terminal = true_terminal * 0.80
+    with pytest.raises(NavReconstructionError):
+        reconcile_flow_residual(wrong_terminal, true_start, daily_pnl, flows)
+
+
+def test_reconcile_tolerance_is_relative_for_large_navs() -> None:
+    """The tolerance ``max($1, 1e-6·|terminal|)`` scales with account size: a
+    sub-dollar float-noise residual passes at any scale, but a residual just over
+    the relative band on a large NAV still reddens (no silent absolute blindness)."""
+    daily_pnl = _pnl([10.0, 20.0])
+    flows = _flows_to_daily_usd([])
+    terminal = 5_000_000.0  # 1e-6 * 5e6 = $5 relative tolerance
+    start = _reconstructed_start(daily_pnl, terminal, flows)
+
+    # A 50-cent perturbation is float noise → within the $5 relative band.
+    assert reconcile_flow_residual(terminal, start + 0.50, daily_pnl, flows) == pytest.approx(
+        -0.50, abs=1e-6
+    )
+    # A $50 perturbation exceeds the $5 relative band → raises.
+    with pytest.raises(NavReconstructionError):
+        reconcile_flow_residual(terminal, start + 50.0, daily_pnl, flows)
+
+
+# ---------------------------------------------------------------------------
+# DQ-02 — terminus segmentation (retention coverage gap) + transient-vs-terminal
+# ---------------------------------------------------------------------------
+
+
+def test_terminus_segmentation_nans_pre_terminus_and_flags() -> None:
+    """T-76-03-GAP: a flow-coverage terminus (a deposit older than a venue's
+    deposit-history retention is unfetchable) segments the series at the last
+    trustworthy day: pre-terminus returns become NaN (pre-terminus TWR REFUSED,
+    never fabricated) and ``flow_coverage_incomplete`` is flagged. The missing old
+    deposit is NEVER attributed to performance."""
+    idx = _days(6, start="2026-01-01")
+    returns = pd.Series(
+        [0.01, -0.02, 0.03, 0.01, -0.01, 0.02], index=idx, name="returns"
+    )
+    terminus = pd.Timestamp("2026-01-04")  # days 01-03 are pre-terminus / untrusted
+
+    segmented, flags = apply_flow_coverage_terminus(returns, terminus)
+
+    # Pre-terminus days refused (NaN); on/after-terminus days preserved verbatim.
+    assert segmented.loc[pd.Timestamp("2026-01-01"):pd.Timestamp("2026-01-03")].isna().all()
+    assert segmented.loc[pd.Timestamp("2026-01-04")] == pytest.approx(0.01)
+    assert segmented.loc[pd.Timestamp("2026-01-06")] == pytest.approx(0.02)
+    assert flags == {"flow_coverage_incomplete": True}
+    # The gap is NOT rolled into a cumulative number: only trusted days survive.
+    assert cumulative_twr(segmented) == pytest.approx(
+        (1.01 * 0.99 * 1.02) - 1.0, rel=1e-9
+    )
+
+
+def test_terminus_segmentation_mutation_removing_segment_fabricates_return() -> None:
+    """MUTATION-honest (T-76-03-GAP): if the segment is REMOVED (returns passed
+    through unchanged), a fabricated pre-terminus return leaks into the cumulative.
+    This asserts the segmented cumulative DIFFERS from the un-segmented one — so a
+    revert that stops NaN-ing the pre-terminus window turns the assertion RED."""
+    idx = _days(6, start="2026-01-01")
+    returns = pd.Series(
+        [0.50, -0.40, 0.30, 0.01, -0.01, 0.02], index=idx, name="returns"
+    )
+    terminus = pd.Timestamp("2026-01-04")
+
+    segmented, _ = apply_flow_coverage_terminus(returns, terminus)
+    # The pre-terminus days carried large (fabricated-over-the-gap) returns; the
+    # segmented cumulative must EXCLUDE them and thus differ from the raw cumulative.
+    assert cumulative_twr(segmented) != pytest.approx(cumulative_twr(returns))
+    assert cumulative_twr(segmented) == pytest.approx(
+        (1.01 * 0.99 * 1.02) - 1.0, rel=1e-9
+    )
+
+
+def test_terminus_none_is_full_coverage_byte_identical() -> None:
+    """SC-4 preservation: ``flow_coverage_start_day is None`` (a fully-covered /
+    flow-less account, e.g. Binance with no retention cap) returns the series
+    UNCHANGED with no flag — fully-covered accounts do not move."""
+    idx = _days(4, start="2026-01-01")
+    returns = pd.Series([0.01, -0.02, 0.03, 0.01], index=idx, name="returns")
+
+    out, flags = apply_flow_coverage_terminus(returns, None)
+    pd.testing.assert_series_equal(out, returns)
+    assert flags == {}
+
+
+def test_terminus_before_first_day_is_no_op() -> None:
+    """A terminus at/before the first return day means the whole window is within
+    retention → no segmentation, no flag (full coverage)."""
+    idx = _days(4, start="2026-02-01")
+    returns = pd.Series([0.01, -0.02, 0.03, 0.01], index=idx, name="returns")
+
+    out, flags = apply_flow_coverage_terminus(returns, pd.Timestamp("2026-01-15"))
+    pd.testing.assert_series_equal(out, returns)
+    assert flags == {}
+
+
+def test_transient_not_terminal_does_not_segment() -> None:
+    """WR-04 transient-vs-terminal: a TRANSIENT fetch error is NOT a coverage
+    terminus — it bubbles retryable at the I/O layer and never reaches here as a
+    start-day signal. Modelled purely: ``None`` (no clean end-of-history boundary)
+    never segments, so a retryable blip cannot over-truncate a good series."""
+    idx = _days(5, start="2026-03-01")
+    returns = pd.Series([0.02, 0.01, -0.03, 0.04, 0.01], index=idx, name="returns")
+
+    # A transient condition surfaces as "no terminus signal" (None) here.
+    out, flags = apply_flow_coverage_terminus(returns, None)
+    pd.testing.assert_series_equal(out, returns)
+    assert "flow_coverage_incomplete" not in flags
+
+
+def test_terminus_flag_lifts_to_complete_with_warnings() -> None:
+    """The ``flow_coverage_incomplete`` flag flows through the existing meta
+    channel: ``_build_nav_meta`` stamps it and downgrades the status hint to
+    ``complete_with_warnings`` — no parallel status system is invented."""
+    meta = nav_twr_mod._build_nav_meta({"flow_coverage_incomplete": True})
+    assert meta["flow_coverage_incomplete"] is True
+    assert meta["computation_status_hint"] == "complete_with_warnings"
+    # A clean (no-flag) build stays complete and omits the key.
+    clean = nav_twr_mod._build_nav_meta({})
+    assert clean["computation_status_hint"] == "complete"
+    assert "flow_coverage_incomplete" not in clean
+
+
+# ---------------------------------------------------------------------------
+# DQ-02 — per-venue flow-coverage terminus constants (W2)
+# ---------------------------------------------------------------------------
+
+
+def test_per_venue_terminus_constants() -> None:
+    """W2: per-venue deposit-history retention is NAMED explicitly. OKX ~90d,
+    Bybit ~365d (job_worker.py:1988 'Bybit last 365 days'), Binance None (no known
+    retention cap → never segments)."""
+    assert OKX_DEPOSIT_TERMINUS_DAYS == 90
+    assert BYBIT_DEPOSIT_TERMINUS_DAYS == 365
+    assert BINANCE_DEPOSIT_TERMINUS_DAYS is None
+    assert FLOW_TERMINUS_DAYS_BY_VENUE == {
+        "okx": 90,
+        "bybit": 365,
+        "binance": None,
+    }
+
+
+def test_flow_coverage_terminus_day_per_venue() -> None:
+    """``flow_coverage_terminus_day`` maps (venue, first_return_day, now) to the
+    earliest trustworthy day, or None when the window is within retention or the
+    venue has no cap. A >365-day-old Bybit deposit SEGMENTS; Binance never does."""
+    now = pd.Timestamp("2026-07-06")
+
+    # OKX: first return 200 days ago → older than the 90-day cap → terminus set.
+    okx_terminus = flow_coverage_terminus_day(
+        "okx", first_return_day=now - pd.Timedelta(days=200), now_utc=now
+    )
+    assert okx_terminus == (now.normalize() - pd.Timedelta(days=90))
+
+    # Bybit: a deposit 400 days ago is beyond the 365-day cap → terminus set
+    # (segments gracefully rather than hard-failing on the residual).
+    bybit_terminus = flow_coverage_terminus_day(
+        "bybit", first_return_day=now - pd.Timedelta(days=400), now_utc=now
+    )
+    assert bybit_terminus == (now.normalize() - pd.Timedelta(days=365))
+
+    # Bybit within retention (100 days) → None (full coverage).
+    assert (
+        flow_coverage_terminus_day(
+            "bybit", first_return_day=now - pd.Timedelta(days=100), now_utc=now
+        )
+        is None
+    )
+
+    # Binance: no known retention cap → always None (never segments).
+    assert (
+        flow_coverage_terminus_day(
+            "binance", first_return_day=now - pd.Timedelta(days=1000), now_utc=now
+        )
+        is None
+    )
+
+
+def test_flow_coverage_terminus_day_feeds_segmentation() -> None:
+    """End-to-end (pure): a Bybit window older than 365 days derives a terminus
+    that, applied via ``apply_flow_coverage_terminus``, segments + flags — the two
+    pure seams compose exactly as 76-04 will wire them."""
+    now = pd.Timestamp("2026-07-06")
+    idx = pd.DatetimeIndex(
+        [now - pd.Timedelta(days=400), now - pd.Timedelta(days=100), now]
+    )
+    returns = pd.Series([0.10, 0.02, 0.01], index=idx, name="returns")
+
+    terminus = flow_coverage_terminus_day(
+        "bybit", first_return_day=idx[0], now_utc=now
+    )
+    assert terminus is not None
+    segmented, flags = apply_flow_coverage_terminus(returns, terminus)
+    assert np.isnan(segmented.iloc[0])  # the >365d-old day is refused
+    assert flags == {"flow_coverage_incomplete": True}
