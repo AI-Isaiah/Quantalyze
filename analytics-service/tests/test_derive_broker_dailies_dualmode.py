@@ -25,8 +25,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from services.broker_dailies import combine_realized_and_funding
+from services.deribit_txn import deribit_dated_external_flows_usd
 from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
 from services.nav_twr import NavReconstructionError
+from tests.fixtures.deribit_flow_fixtures import (
+    BTC_INDEX_2026_03_14,
+    BTC_INDEX_2026_03_16,
+    DAY_DOMINATING,
+    DAY_INVERSE_WITH_INDEX,
+    dominating_withdrawal_rows,
+    inverse_flow_day_with_index_rows,
+)
 
 
 def _two_day_returns() -> pd.Series:
@@ -505,3 +515,99 @@ class TestNaNSafeCsvDailyReturnsUpsert:
             assert row["api_key_id"] == "key-nk"
             assert row["allocator_id"] == "alloc-1"
             assert row["strategy_id"] is None
+
+
+def _daily_pnl_record(day: str, pnl_usd: float) -> dict[str, object]:
+    """A single ``daily_pnl``-shaped realized record (the exact shape
+    ``combine_realized_and_funding`` feeds ``trades_to_daily_returns_with_status``:
+    ``order_type='daily_pnl'``, ``side`` encodes the sign, ``price`` is the
+    absolute USD). Places ``day`` (YYYY-MM-DD) into the reconstructed return
+    window so a same-day dated flow lands ON the NAV timeline (not an orphan)."""
+    return {
+        "exchange": "",
+        "symbol": "BTCUSDT",
+        "side": "buy" if pnl_usd >= 0 else "sell",
+        "price": abs(pnl_usd),
+        "quantity": 1,
+        "fee": 0,
+        "fee_currency": "USDT",
+        "timestamp": f"{day}T00:00:00+00:00",
+        "order_type": "daily_pnl",
+    }
+
+
+def _cumulative_twr(returns: pd.Series) -> float:
+    """Chain-linked cumulative return over the retained (non-NaN) days:
+    ``Prod(1 + r) - 1``. Mirrors ``nav_twr.cumulative_twr`` locally so the
+    dropped-flow proof compares a single scalar across the two flow scenarios."""
+    retained = returns.dropna()
+    return float((1.0 + retained).prod() - 1.0)
+
+
+class TestLtp068AcceptanceSubNavPureFlow:
+    """FLOW-02 acceptance (75-CONTEXT.md SC4, reconciled) — the NON-dominating
+    case. A real BTC withdrawal, valued at ``change * same-day settlement index``
+    on its actual UTC day, flows through the FULL honest seam
+    (``deribit_dated_external_flows_usd`` -> ``combine_realized_and_funding``
+    -> ``reconstruct_nav_and_twr``). On a sub-NAV pure-flow day (``|F| <
+    NAV_{t-1}``, no trading) the day's ``r_t == 0`` (the flow-neutral TWR
+    property proven in Phase 73), NOT a fabricated return.
+
+    This is the honest replacement for the LTP068 +458% class: the ~$21k
+    withdrawal is a correctly-signed, event-time-valued ``F_t`` that reduces NAV
+    and yields a zero own-day return — it does NOT surface as a phantom +/- move.
+
+    Every assertion is mutation-honest: a wrong-day / 1.0 / current-price
+    valuation reddens the event-time proof, and DROPPING the flow from
+    ``external_flows`` changes the reconstructed cumulative return (the flow is
+    load-bearing, not silently dropped)."""
+
+    def test_ltp068_sub_nav_pure_flow_yields_zero_return(self) -> None:
+        # --- Event-time + sign proof. The scenario-2 fixture carries its OWN
+        # same-day index-bearing settlement row (BTC_INDEX_2026_03_14); the
+        # supplemental map is supplied too (own index wins — identical resolution
+        # order to txn_rows_to_daily_records). The withdrawal (-0.5 BTC) values at
+        # change * same-day index on its actual UTC day 2026-03-14.
+        flows = deribit_dated_external_flows_usd(
+            inverse_flow_day_with_index_rows(),
+            supplemental_index={(DAY_INVERSE_WITH_INDEX, "BTC"): BTC_INDEX_2026_03_14},
+        )
+        assert len(flows) == 1
+        (flow,) = flows
+        assert flow.utc_day_iso == DAY_INVERSE_WITH_INDEX  # actual withdrawal day
+        # Correctly signed (withdrawal -> NEGATIVE) and event-time valued.
+        assert flow.usd_signed == pytest.approx(-0.5 * BTC_INDEX_2026_03_14)  # -21000
+        assert flow.usd_signed < 0.0
+        # Wrong-DAY index (a cross-time substitution) would value differently ->
+        # the event-time proof is falsifiable, not incidental.
+        assert flow.usd_signed != pytest.approx(-0.5 * BTC_INDEX_2026_03_16)
+
+        # --- Flow-neutral proof. Anchor 100k with realized pnl [+1000 (03-13),
+        # 0 (03-14)] reconstructs NAV_{03-13}=121000; |F|=21000 is STRICTLY under
+        # it (no guard). On the pure-flow day the flow cancels in the numerator
+        # (NAV_t - NAV_{t-1} == F_t) -> r_t == 0, status 'complete'.
+        realized = [
+            _daily_pnl_record("2026-03-13", 1000.0),
+            _daily_pnl_record(DAY_INVERSE_WITH_INDEX, 0.0),  # no trading on flow day
+        ]
+        returns, meta = combine_realized_and_funding(
+            realized, [], account_balance=100_000.0, external_flows=flows
+        )
+        assert returns.loc[DAY_INVERSE_WITH_INDEX] == pytest.approx(0.0, abs=1e-12)
+        # No guard fired: a sub-NAV flow is a NORMAL day, surfaced as 'complete'.
+        assert meta["computation_status_hint"] == "complete"
+        assert "flow_dominated_guard" not in meta
+        assert "negative_nav_guard" not in meta
+        assert "dust_nav_guard" not in meta
+
+        # --- Dropped-flow proof. Removing the dated flow changes the
+        # reconstructed NAV timeline and hence the cumulative return: the flow is
+        # LOAD-BEARING. (r_t on the zero-pnl day is 0 either way; the flow's
+        # effect is on the NAV level / the trading day's denominator, so the
+        # cumulative return is the honest place to pin it.)
+        returns_no_flow, _ = combine_realized_and_funding(
+            realized, [], account_balance=100_000.0, external_flows=[]
+        )
+        assert _cumulative_twr(returns) != pytest.approx(
+            _cumulative_twr(returns_no_flow)
+        ), "dropping the load-bearing flow must change the reconstructed result"
