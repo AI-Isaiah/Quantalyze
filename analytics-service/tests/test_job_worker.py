@@ -1416,6 +1416,7 @@ class TestDeriveBrokerDailies:
         def _spy_combine(*a, **kw):
             captured["external_flows"] = list(kw.get("external_flows") or [])
             captured["open_unrealized_usd"] = kw.get("open_unrealized_usd", 0.0)
+            captured["account_balance"] = kw.get("account_balance")
             return real_combine(*a, **kw)
 
         stack = ExitStack()
@@ -2029,6 +2030,18 @@ class TestDeriveBrokerDailies:
         assert all(
             "account_balance_usdt" not in u for u in captured["analytics_upserts"]
         ), "derive path must not mutate a stored equity scalar with the wedge"
+        # The FULL stored MTM anchor reaches combine — the wedge is NEVER
+        # subtracted onto `account_balance` before the roll (the re-add is
+        # definitional; only the terminal seam's open_unrealized_usd carries it).
+        # Mutation-honest: `account_balance=equity - open_unrealized_usd` would
+        # drop this to 92_000 → RED.
+        assert captured["account_balance"] == pytest.approx(100_000.0), (
+            "the stored MTM equity anchor must reach combine UNMUTATED by the "
+            f"wedge; got {captured['account_balance']!r}"
+        )
+        assert captured["open_unrealized_usd"] == pytest.approx(8_000.0), (
+            "the wedge must ride ONLY the open_unrealized_usd terminal seam"
+        )
         assert captured["csv_rows"], "expected a reconstructed daily-return series"
 
     @pytest.mark.asyncio

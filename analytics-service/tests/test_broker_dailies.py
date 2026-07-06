@@ -321,8 +321,10 @@ def _deribit_patches(
             new=ledger_mock,
         ),
         patch(
-            "services.deribit_ingest.fetch_deribit_account_equity_usd",
-            new=AsyncMock(return_value=(100_000.0, False)),
+            # FLOW-04 (77-03): the deribit branch reads the companion 3-tuple
+            # (equity + session-uPnL wedge) from ONE get_account_summaries response.
+            "services.deribit_ingest.fetch_deribit_account_equity_and_upnl_usd",
+            new=AsyncMock(return_value=(100_000.0, False, 0.0)),
         ),
         patch("services.broker_dailies.combine_realized_and_funding", new=combine),
         patch(

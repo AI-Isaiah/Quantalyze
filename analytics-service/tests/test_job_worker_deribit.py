@@ -59,6 +59,7 @@ def _patches(
     ledger_side_effect: object = None,
     equity: float | None = _RAW_EQUITY_USD,
     balance_error: bool = False,
+    upnl: float = 0.0,
 ) -> tuple[list, MagicMock]:
     """Patch set for the deribit branch. fetch_all_trades RAISES so any test that
     reaches combine proves the deribit branch never touched it (D-08)."""
@@ -95,8 +96,10 @@ def _patches(
             new=ledger_mock,
         ),
         patch(
-            "services.deribit_ingest.fetch_deribit_account_equity_usd",
-            new=AsyncMock(return_value=(equity, balance_error)),
+            # FLOW-04 (77-03): the deribit branch now reads the companion 3-tuple
+            # (equity + session-uPnL wedge) from ONE get_account_summaries response.
+            "services.deribit_ingest.fetch_deribit_account_equity_and_upnl_usd",
+            new=AsyncMock(return_value=(equity, balance_error, upnl)),
         ),
         patch("services.broker_dailies.combine_realized_and_funding", new=combine),
         patch(
