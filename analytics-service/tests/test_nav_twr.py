@@ -800,3 +800,186 @@ def test_flow_coverage_terminus_day_feeds_segmentation() -> None:
     segmented, flags = apply_flow_coverage_terminus(returns, terminus)
     assert np.isnan(segmented.iloc[0])  # the >365d-old day is refused
     assert flags == {"flow_coverage_incomplete": True}
+
+
+# ---------------------------------------------------------------------------
+# FLOW-04 — terminal uPnL wedge: materiality flag + realized-basis invariant
+# ---------------------------------------------------------------------------
+
+
+def test_terminal_wedge_equivalence_byte_identical() -> None:
+    """SC-2/SC-4: the terminal uPnL wedge is a PURE terminal shift, not an
+    intra-window operation. ``reconstruct_nav_and_twr(pnl, anchor=A,
+    open_unrealized_usd=X)`` produces a returns Series byte-identical (rtol
+    1e-12) to ``reconstruct_nav_and_twr(pnl, anchor=A-X, open_unrealized_usd=0)``
+    — the wedge only lowers the roll terminal, it never enters any daily
+    increment. The META, however, DIVERGES: the wedge call surfaces
+    ``unrealized_pnl_in_anchor`` (X is material vs A) while the pre-reduced call
+    does not (its uPnL is 0). This is the whole point — the wedge is invisible to
+    the return series but visible to the materiality flag.
+
+    Mutation: adding X into any intra-window NAV (e.g. nav.iloc[-1] += X
+    post-roll) breaks the byte-identity assertion below."""
+    pnls = [500.0, -300.0, 800.0, -100.0, 400.0]
+    anchor = 100_000.0
+    wedge = 8_000.0  # |X|/A = 0.08 > 0.05 -> material
+
+    ret_wedge, meta_wedge = reconstruct_nav_and_twr(
+        _pnl(pnls), anchor_nav=anchor, open_unrealized_usd=wedge
+    )
+    ret_prered, meta_prered = reconstruct_nav_and_twr(
+        _pnl(pnls), anchor_nav=anchor - wedge, open_unrealized_usd=0.0
+    )
+
+    pd.testing.assert_series_equal(
+        ret_wedge,
+        ret_prered,
+        check_exact=False,
+        rtol=1e-12,
+        check_freq=False,
+        check_names=False,
+    )
+    # Series identical; meta diverges on the materiality flag.
+    assert meta_wedge.get("unrealized_pnl_in_anchor") is True
+    assert meta_wedge["computation_status_hint"] == "complete_with_warnings"
+    assert "unrealized_pnl_in_anchor" not in meta_prered
+    assert meta_prered["computation_status_hint"] == "complete"
+
+
+def test_no_step_discontinuity_large_open_position() -> None:
+    """SC-2: a large open position across the window end (material wedge X)
+    reconstructs with NO step discontinuity at the anchor day. The terminal NAV
+    equals A-X and the last-day return equals ``pnl_n / NAV_{n-1}`` with NO uPnL
+    term — uPnL never enters an intra-window day.
+
+    Mutation: injecting X into the last intra-window NAV (nav.iloc[-1] or
+    NAV_{n-1}) would change the last-day return away from pnl_n/NAV_{n-1} and
+    redden this test."""
+    pnls = [500.0, -300.0, 800.0, -100.0, 400.0]
+    anchor = 100_000.0
+    wedge = 20_000.0  # |X|/A = 0.20 -> large, material
+
+    ret, meta = reconstruct_nav_and_twr(
+        _pnl(pnls), anchor_nav=anchor, open_unrealized_usd=wedge
+    )
+
+    terminal = anchor - wedge
+    nav = reconstruct_nav(_pnl(pnls), terminal, _flows_to_daily_usd([]))
+    # Terminal is the realized-basis anchor, no step at the endpoint.
+    assert nav.iloc[-1] == pytest.approx(terminal, rel=0, abs=1e-9)
+    # Day n-1 -> n return is pnl_n / NAV_{n-1}, with NO uPnL term.
+    nav_prev = float(nav.iloc[-2])
+    expected_last = pnls[-1] / nav_prev
+    assert ret.iloc[-1] == pytest.approx(expected_last, rel=1e-12)
+    # The material wedge is surfaced as a flag, never spread across the roll.
+    assert meta.get("unrealized_pnl_in_anchor") is True
+
+
+def test_unrealized_pnl_in_anchor_materiality_boundary() -> None:
+    """SC-3: ``unrealized_pnl_in_anchor`` fires when |open_unrealized_usd|/anchor
+    is strictly ABOVE UNREALIZED_MATERIALITY_RATIO (0.05), is clear at/below, and
+    exercises BOTH signs of the wedge. The account base (100k, small pnls, no
+    flows) trips no other guard, so the materiality flag is the only signal.
+
+    Mutation: flipping the ``>`` comparator to ``>=`` reddens the exactly-at-5%
+    case; flipping it to ``<`` reddens both above-threshold cases."""
+    pnls = [500.0, -300.0, 800.0]
+    anchor = 100_000.0
+
+    # The const exists and is the locked 5% default.
+    assert nav_twr_mod.UNREALIZED_MATERIALITY_RATIO == 0.05
+
+    # Just ABOVE 5% (ratio 0.051), both signs -> flag + complete_with_warnings.
+    for wedge in (5_100.0, -5_100.0):
+        _, meta = reconstruct_nav_and_twr(
+            _pnl(pnls), anchor_nav=anchor, open_unrealized_usd=wedge
+        )
+        assert meta.get("unrealized_pnl_in_anchor") is True
+        assert meta["computation_status_hint"] == "complete_with_warnings"
+
+    # Exactly AT 5% (ratio 0.05) -> NOT material (strict >), stays complete.
+    for wedge in (5_000.0, -5_000.0):
+        _, meta = reconstruct_nav_and_twr(
+            _pnl(pnls), anchor_nav=anchor, open_unrealized_usd=wedge
+        )
+        assert "unrealized_pnl_in_anchor" not in meta
+        assert meta["computation_status_hint"] == "complete"
+
+    # Just BELOW 5% (ratio 0.049), both signs -> key ABSENT, complete.
+    for wedge in (4_900.0, -4_900.0):
+        _, meta = reconstruct_nav_and_twr(
+            _pnl(pnls), anchor_nav=anchor, open_unrealized_usd=wedge
+        )
+        assert "unrealized_pnl_in_anchor" not in meta
+        assert meta["computation_status_hint"] == "complete"
+
+
+def test_unrealized_pnl_in_anchor_dust_anchor_suppressed() -> None:
+    """SC-3 dust guard: a dust/near-zero anchor (<= DUST_NAV_FLOOR) never raises
+    the materiality flag on noise. With a $500 anchor (< $1000 floor), even a
+    wedge that is a huge FRACTION of the base must not surface
+    ``unrealized_pnl_in_anchor`` — the ratio is meaningless on a dust base (and a
+    dust NAV is already flagged by the DQ-01 dust guard on its own merits)."""
+    # anchor 500 (dust), tiny pnl so the roll stays near the dust base.
+    _, meta = reconstruct_nav_and_twr(
+        _pnl([10.0]), anchor_nav=500.0, open_unrealized_usd=200.0
+    )
+    # |200|/500 = 0.40 would be "material" on a healthy base, but the base is
+    # dust -> the materiality ratio is NOT evaluated.
+    assert "unrealized_pnl_in_anchor" not in meta
+
+
+def test_no_historical_mark_no_perday_upnl_array() -> None:
+    """T-77-03 / Q3 no-fabricated-marks source-scan (mirrors the P73/P76
+    forbidden-substitution scans): the uPnL wedge is applied ONLY as a scalar
+    subtraction on ``terminal_nav``; NO per-day historical-uPnL Series/array is
+    constructed anywhere in the roll. Encodes the Q3 verdict — historical
+    open-position marks are NOT retrievable on read-only keys, so a per-day
+    true-up is NOT implemented and must never be fabricated.
+
+    Also asserts the realized-basis-intraday / MTM-at-endpoint invariant is
+    documented in the module (executable invariant, not just prose)."""
+    src = _NAV_TWR_SRC.read_text()
+
+    # No per-day uPnL array / Series / positional indexing of a uPnL stream.
+    forbidden = [
+        r"unrealized\w*\s*=\s*pd\.Series",
+        r"upnl\w*\s*=\s*pd\.Series",
+        r"open_unrealized\w*\s*=\s*pd\.Series",
+        r"upnl\w*\.iloc",
+        r"open_unrealized\w*\.iloc",
+        r"for\s+\w+\s+in\s+.*open_unrealized",
+    ]
+    offenders: list[str] = []
+    for line in src.splitlines():
+        if line.strip().startswith("#"):
+            continue  # prose describing the anti-pattern is allowed
+        for pat in forbidden:
+            if re.search(pat, line):
+                offenders.append(f"{pat!r} -> {line.strip()!r}")
+    assert offenders == [], f"per-day uPnL array constructed: {offenders}"
+
+    # The flag exists in the core, and the Q3 invariant is documented verbatim.
+    assert "unrealized_pnl_in_anchor" in src
+    assert "not retrievable on read-only keys" in src
+    assert "never spread across history" in src
+
+
+def test_material_wedge_does_not_spuriously_breach_reconcile() -> None:
+    """SC-2 guard: a non-zero (even large) uPnL wedge must NOT spuriously breach
+    the DQ-02 construction residual inside ``reconstruct_nav_and_twr``. The
+    terminal and the derived ``reconstructed_start`` shift by the SAME wedge, so
+    the roll-vs-Σ identity stays ~0 by construction — the residual detects a
+    dropped/mis-valued FLOW, not a legitimate terminal wedge. A material wedge
+    completing without ``NavReconstructionError`` proves the wedge is a clean
+    terminal shift."""
+    pnls = [500.0, -300.0, 800.0, -100.0, 400.0]
+    # A large wedge (30% of anchor) still reconstructs cleanly — no false breach.
+    ret, meta = reconstruct_nav_and_twr(
+        _pnl(pnls),
+        anchor_nav=100_000.0,
+        external_flows=[("2026-01-03", 2_000.0)],
+        open_unrealized_usd=30_000.0,
+    )
+    assert len(ret) == len(pnls)
+    assert meta.get("unrealized_pnl_in_anchor") is True
