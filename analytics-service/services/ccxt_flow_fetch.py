@@ -67,10 +67,15 @@ async def fetch_ccxt_transfers(
     window_start = since_ms
     while window_start < now_ms:
         window_end = min(window_start + window_ms, now_ms)
-        # Paginate WITHIN each 90-day window so a bursty allocator with
-        # >500 transfers per window doesn't lose rows past row 500.
+        # Paginate WITHIN each 90-day window so a bursty allocator with a
+        # large per-window transfer count doesn't lose rows past page 1.
         inner_cursor = window_start
-        for _ in range(100):  # safety ceiling: 100 × 500 = 50k per window
+        # Safety ceiling only — real termination is cursor-non-advance /
+        # empty page / window-end below. We request page_limit=500 but the
+        # venue may cap far lower (OKX 100, Bybit 50), so size the ceiling
+        # off the smallest realistic cap (50) to preserve ~50k rows/window
+        # of headroom regardless of venue: 1000 × 50 = 50k.
+        for _ in range(1000):
             # WR-04: only catch ccxt.NotSupported here (feature detection —
             # the exchange cannot enumerate transfers at all). All other
             # exceptions (auth revoked mid-backfill, rate limit, network
@@ -87,8 +92,14 @@ async def fetch_ccxt_transfers(
             if not page:
                 break
             all_rows.extend(page)
-            if len(page) < page_limit:
-                break
+            # Phase 76-01 (RESEARCH Pitfall 3): do NOT break on
+            # ``len(page) < page_limit``. OKX caps transfer history at
+            # 100 rows/page and Bybit at 50 — a FULL venue-capped page is
+            # always shorter than our requested page_limit of 500, so the
+            # old short-page break mistook page 1 for end-of-history and
+            # silently dropped every transfer past it (threat T-76-01-TRUNC,
+            # mirroring the identical _fetch_ohlcv_daily fix). Termination is
+            # driven purely by cursor-non-advance / empty page / window-end.
             max_ts = max(
                 (int(r.get("timestamp") or 0) for r in page), default=inner_cursor
             )

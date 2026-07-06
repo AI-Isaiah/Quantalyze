@@ -5093,11 +5093,23 @@ async def test_equity_reconstruction_byte_identical_across_transfers_promotion(
     ]
     ohlcv = [_make_ohlcv_row(ts0 + d * day_ms, 50000.0 + d * 1000.0) for d in range(5)]
 
+    # Deposit/withdrawal doubles that honour `since_ms` exactly as real ccxt
+    # fetch_deposits/fetch_withdrawals do — the paginator advances its cursor
+    # past collected rows, so a naive return-the-same-list mock would
+    # double-count on the second (cursor-advanced) page. Modelling the
+    # since-filter keeps this pin a faithful stand-in for a live exchange and
+    # byte-identical across the cursor-advance pagination fix.
+    def _since_filtered(rows: list[dict]):
+        async def _fetch(_symbol, since_ms, _limit):
+            return [r for r in rows if int(r["timestamp"]) >= since_ms]
+
+        return _fetch
+
     exchange = AsyncMock()
     exchange.id = "binance"
     exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
-    exchange.fetch_deposits = AsyncMock(return_value=deposits)
-    exchange.fetch_withdrawals = AsyncMock(return_value=withdrawals)
+    exchange.fetch_deposits = _since_filtered(deposits)
+    exchange.fetch_withdrawals = _since_filtered(withdrawals)
     exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
 
     rows, hit_terminus, telemetry = await er._fetch_and_price_window(
