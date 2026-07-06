@@ -581,25 +581,33 @@ def test_reconcile_residual_wired_into_reconstruct(monkeypatch) -> None:
         )
 
 
-def test_reconcile_wallet_scope_mismatch_fails_loud() -> None:
-    """W3 (T-76-03 wallet-scope): a mis-scoped anchor (reading e.g. Binance SPOT
-    while PnL is USDⓈ-M, or Bybit UNIFIED-only while capital spans FUND) makes the
-    terminal NAV inconsistent with the TRUE reconstructable capital. Injecting an
-    anchor 20% below the true reconstructable start drives the residual past
-    tolerance → ``NavReconstructionError``. This is the interim safety net for the
-    P78-deferred wallet-scope confirmation: a wrong scope CANNOT silently
-    mis-attribute."""
+def test_reconcile_does_not_detect_wrong_scope_anchor() -> None:
+    """HIGH-1 (honesty): the residual is a CONSTRUCTION tautology, NOT a
+    wrong-scope guard. In production ``reconstruct_nav_and_twr`` derives
+    ``reconstructed_start`` from day-0 of the SAME rolled ``nav`` built off the
+    (possibly wrong) anchor — so a mis-scoped anchor (Binance SPOT vs USDⓈ-M,
+    Bybit UNIFIED-only vs FUND+UNIFIED) shifts ``terminal`` and
+    ``reconstructed_start`` by the SAME amount and the residual stays ~0. This
+    test PROVES the wrong-scope anchor SAILS THROUGH the self-check (it does NOT
+    raise) so the codebase never again claims the residual is an interim
+    wrong-scope net. Wrong scope is caught ONLY at the Phase 78 golden-parity
+    panel + founder confirmation."""
     daily_pnl = _pnl([120.0, -80.0, 40.0, 15.0, -30.0])
     flows = _flows_to_daily_usd([("2026-01-02", 500.0), ("2026-01-04", -200.0)])
-    true_terminal = 100_000.0
-    # The TRUE reconstructable start, from a correctly-scoped anchor.
-    true_start = _reconstructed_start(daily_pnl, true_terminal, flows)
 
-    # Wrong-scope anchor: 20% lower than the true reconstructable capital, while the
-    # true start (independently known) is unchanged → identity breaks loudly.
-    wrong_terminal = true_terminal * 0.80
-    with pytest.raises(NavReconstructionError):
-        reconcile_flow_residual(wrong_terminal, true_start, daily_pnl, flows)
+    # A wrong-scope anchor 20% below the true capital pool. Crucially, the
+    # reconstructed_start is derived FROM this same wrong anchor's rolled nav —
+    # exactly as the production path does — NOT from the true anchor.
+    wrong_terminal = 100_000.0 * 0.80
+    wrong_start = _reconstructed_start(daily_pnl, wrong_terminal, flows)
+
+    # No raise: the identity closes by construction for the wrong anchor too. The
+    # factsheet would ship `complete` with silently re-scaled returns — which is
+    # precisely why the Phase 78 parity panel, not this residual, is the net.
+    residual = reconcile_flow_residual(
+        wrong_terminal, wrong_start, daily_pnl, flows
+    )
+    assert residual == pytest.approx(0.0, abs=1e-6)
 
 
 def test_reconcile_tolerance_is_relative_for_large_navs() -> None:

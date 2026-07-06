@@ -364,23 +364,33 @@ def reconcile_flow_residual(
     daily_pnl: pd.Series,
     flows_by_day: pd.Series,
 ) -> float:
-    """DQ-02 construction-sanity residual — a pure mutation detector.
+    """DQ-02 CONSTRUCTION self-check — a pure roll-vs-Σ mutation detector.
 
     ``residual = terminal_nav − reconstructed_start − Σpnl − Σflows``. In the
-    backward roll (``nav_twr:reconstruct_nav``) this is ~0 BY CONSTRUCTION when
-    the flows that funded the account are all present and correctly rolled:
-    ``reconstructed_start`` (the pre-history capital) equals
-    ``terminal − Σ_all_t(pnl_t + F_t)``. So a non-zero residual means the roll
-    DROPPED or MIS-VALUED a flow (T-76-03-DROP), OR the terminal anchor is scoped
-    to a different pool of capital than the reconstructable start (a wrong Binance
-    SPOT/USDⓈ-M or Bybit FUND/UNIFIED wallet scope — T-76-03 W3): either way a
-    silent mis-attribution is refused.
+    backward roll (``nav_twr:reconstruct_nav``) this is ~0 BY CONSTRUCTION:
+    ``reconstruct_nav_and_twr`` derives ``reconstructed_start`` from day-0 of the
+    SAME rolled ``nav`` (``NAV_0 − pnl_0 − F_0``), so the identity closes for ANY
+    anchor value. What a non-zero residual therefore catches is a CODE divergence
+    between the backward-roll loop and the Σ of its own inputs — a roll that
+    DROPPED or MIS-VALUED a flow (T-76-03-DROP). ``Σpnl``/``Σflows`` are summed
+    from the INPUTS (not from the rolled NAV), so a roll that corrupts the early
+    NAV cannot cancel itself out here.
+
+    WHAT IT DOES **NOT** DETECT — an economically-wrong anchor / wallet-scope.
+    Because ``reconstructed_start`` is reconstructed FROM the (possibly wrong)
+    anchor, a mis-scoped anchor (Binance SPOT vs USDⓈ-M, Bybit UNIFIED-only vs
+    FUND+UNIFIED) shifts ``terminal`` and ``reconstructed_start`` by the SAME
+    amount → the residual stays ~0 and sails through as ``complete`` while
+    silently re-scaling every daily return. This is a CONSTRUCTION tautology, NOT
+    a wrong-scope guard (proven: a 20%-low anchor passes with a +22% relative
+    return change). Wrong scope has NO automated interim net; it is caught ONLY
+    at the Phase 78 golden old-vs-new parity panel on known accounts + founder
+    confirmation, and no LTP/production factsheet ships until then.
 
     Tolerance ``max(1.00, 1e-6 * abs(terminal_nav))`` — an absolute cent-floor
     (consistent with the DUST_NAV_FLOOR=$1000 scale) plus a relative band that
     scales with account size. On breach → ``NavReconstructionError`` (permanent,
-    loud). ``Σpnl``/``Σflows`` are summed from the INPUTS (not from the rolled
-    NAV) so a roll that corrupts ``reconstructed_start`` cannot cancel itself out.
+    loud).
 
     T-76-03-LEAK: the raise message carries NO raw NAV/flow USD value (account-
     size leak discipline, ``nav_twr`` module docstring)."""
@@ -400,9 +410,10 @@ def reconcile_flow_residual(
     tol = max(1.00, 1e-6 * abs(terminal))
     if not np.isfinite(residual) or abs(residual) > tol:
         raise NavReconstructionError(
-            "nav_twr DQ-02 flow reconciliation residual exceeds tolerance — a "
-            "flow was dropped/mis-valued in the backward roll or the anchor is "
-            "scoped to a different capital pool than the reconstructable start"
+            "nav_twr DQ-02 construction residual exceeds tolerance — the "
+            "backward roll dropped or mis-valued a flow (a roll-loop-vs-Σ code "
+            "divergence). NOTE: this self-check does NOT detect a wrong-scope "
+            "anchor (that shifts terminal and reconstructed_start together)"
         )
     return residual
 
@@ -498,11 +509,13 @@ def reconstruct_nav_and_twr(
     ) - _coerce_float(open_unrealized_usd, field="open_unrealized_usd", row={})
 
     nav = reconstruct_nav(daily_pnl, terminal_nav, flows_by_day)
-    # DQ-02 construction-sanity self-check: the backward-roll identity must hold.
-    # ``reconstructed_start`` is the pre-history capital = the day-0 chain-link
-    # denominator (NAV_0 − pnl_0 − F_0), derived from the ACTUAL rolled ``nav`` so a
-    # roll that drops/mis-values a flow (or a wrong-scope anchor) reddens loud here
-    # rather than silently mis-attributing the gap to performance.
+    # DQ-02 construction-sanity self-check: the backward-roll identity holds BY
+    # CONSTRUCTION. ``reconstructed_start`` is the day-0 chain-link denominator
+    # (NAV_0 − pnl_0 − F_0) derived from the ACTUAL rolled ``nav``, so this reddens
+    # ONLY on a roll that drops/mis-values a flow (a roll-loop-vs-Σ code
+    # divergence). It does NOT catch an economically-wrong anchor/wallet-scope —
+    # that shifts terminal and reconstructed_start together → residual ~0, caught
+    # only at the Phase 78 parity panel + founder confirmation.
     flows0 = _align_flows(flows_by_day, nav.index).iloc[0]
     pnl0 = _coerce_float(
         daily_pnl.iloc[0], field="daily_pnl", row={"day": str(nav.index[0])}
