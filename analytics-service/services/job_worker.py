@@ -1941,7 +1941,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         flow_coverage_terminus_day,
     )
     from services.exchange import fetch_account_equity_and_upnl_usd
-    from services.nav_twr import DUST_NAV_FLOOR, UNREALIZED_MATERIALITY_RATIO
+    from services.nav_twr import DUST_NAV_FLOOR
     from services.external_flows import ExternalFlow
     from services.ccxt_flow_fetch import fetch_ccxt_transfers
     from services.ccxt_flows import ccxt_rows_to_dated_flows
@@ -2288,23 +2288,16 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             ),
         )
 
-    # FLOW-04 (v1.8): surface the open-uPnL materiality flag onto meta POST-COMBINE.
-    # The honest core (reconstruct_nav_and_twr) raises unrealized_pnl_in_anchor when
-    # |wedge|/anchor > UNREALIZED_MATERIALITY_RATIO, but transforms._merge_status_meta
-    # (a P74-pinned boundary) does not carry that key through — so mirror the
-    # flow_coverage_incomplete pattern below and recompute the SAME test here on the
-    # already-noise-guarded wedge. The wedge is 0.0 on every dust/heuristic/balance-
-    # error anchor (forced above), so this fires ONLY on a trustworthy anchor where
-    # transforms used anchor_nav == equity — faithfully reproducing the core's ratio.
-    # A BOOL only (no raw USD — account-size leak T-77-09); NOT threaded through
-    # transforms so the Phase 74 byte-identity pins stay GREEN.
-    if (
-        open_unrealized_usd != 0.0
-        and equity is not None
-        and abs(equity) > DUST_NAV_FLOOR
-        and abs(open_unrealized_usd) / abs(equity) > UNREALIZED_MATERIALITY_RATIO
-    ):
-        meta["unrealized_pnl_in_anchor"] = True
+    # FLOW-04 (v1.8): the open-uPnL materiality flag lives in ONE place — the honest
+    # core (reconstruct_nav_and_twr) raises unrealized_pnl_in_anchor when
+    # |wedge|/anchor > UNREALIZED_MATERIALITY_RATIO (signed anchor), and
+    # transforms._merge_status_meta now carries that key THROUGH additively (MEDIUM-1
+    # single-source). So `meta["unrealized_pnl_in_anchor"]` is already set here when
+    # the core judged the wedge material; the previous job_worker recompute (which
+    # divided by abs(equity) and diverged on a negative anchor) is DELETED. The wedge
+    # is 0.0 on every dust/heuristic/balance-error anchor (forced above), so combine
+    # sees open_unrealized_usd == 0.0 there and the core never flags — the pre-77
+    # byte-identity accounts stay `complete`.
 
     # DQ-02 (v1.8): apply the flow-coverage terminus gate POST-COMBINE. When the
     # return window extends BEFORE the venue's deposit-history retention (OKX 90d /

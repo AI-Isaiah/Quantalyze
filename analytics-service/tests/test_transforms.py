@@ -154,6 +154,36 @@ class TestTradesToDailyReturnsWithStatus:
         assert meta["balance_error"] is False
         assert meta["computation_status_hint"] == "complete"
 
+    def test_material_wedge_flag_carried_through_single_source(self):
+        """MEDIUM-1: the core's ``unrealized_pnl_in_anchor`` materiality flag must
+        survive the ``_merge_status_meta`` boundary — the materiality test lives in
+        ONE place (the core), and the transforms seam carries the flag through
+        additively + promotes to ``complete_with_warnings``. Previously the key was
+        silently DROPPED here, forcing a divergent job_worker recompute.
+
+        Mutation-honest: reverting the ``_merge_status_meta`` carry-through drops
+        the key (and the warn promotion) → both asserts RED."""
+        trades = self._daily_pnl_trades()
+        # 8% wedge on a 100k anchor > the 5% materiality ratio → material.
+        _returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=100_000.0, balance_error=False,
+            open_unrealized_usd=8_000.0,
+        )
+        assert meta.get("unrealized_pnl_in_anchor") is True, (
+            "the core's materiality flag must be carried through the transforms "
+            f"boundary (single source); got {meta!r}"
+        )
+        assert meta["computation_status_hint"] == "complete_with_warnings"
+
+        # Control: an immaterial (zero) wedge never sets the flag → the pre-77
+        # byte-identity account stays `complete`.
+        _r2, meta2 = trades_to_daily_returns_with_status(
+            trades, account_balance=100_000.0, balance_error=False,
+            open_unrealized_usd=0.0,
+        )
+        assert "unrealized_pnl_in_anchor" not in meta2
+        assert meta2["computation_status_hint"] == "complete"
+
     def test_balance_error_propagates_to_warnings(self):
         """The audit's headline case: exchange API failed, caller
         passes balance_error=True. Even though account_balance is also

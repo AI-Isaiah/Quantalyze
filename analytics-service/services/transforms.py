@@ -270,7 +270,20 @@ def _individual_trades_daily_pnl(df: pd.DataFrame) -> tuple[pd.Series, float]:
     return daily_agg["pnl"], float(daily_agg["net_notional"].iloc[0])
 
 
-_GUARD_KEYS = ("dust_nav_guard", "negative_nav_guard", "flow_dominated_guard")
+# DQ-01 NAV-denominator guards + the FLOW-04/DQ-02 warn flags the core
+# (reconstruct_nav_and_twr) may raise on its NavTWRMeta. ALL are carried through
+# _merge_status_meta ADDITIVELY and fold into complete_with_warnings, exactly like
+# _build_nav_meta — so the core's materiality/coverage judgment is the SINGLE
+# source and is never silently dropped at the transforms boundary (MEDIUM-1). A
+# flow-less / immaterial account never sets any of these, so the SC-4 / Phase 74
+# byte-identity accounts stay `complete`.
+_GUARD_KEYS = (
+    "dust_nav_guard",
+    "negative_nav_guard",
+    "flow_dominated_guard",
+    "flow_coverage_incomplete",
+    "unrealized_pnl_in_anchor",
+)
 
 
 def _merge_status_meta(
@@ -286,9 +299,11 @@ def _merge_status_meta(
     False`` (it reconstructs from the real anchor and reads no balance), so this
     function is the single place the two signal families combine:
     ``complete_with_warnings`` iff the heuristic was used OR the balance read
-    errored OR any NAV-denominator guard fired. The additive guard keys
-    (dust/negative/flow-dominated) are carried THROUGH onto the returned meta so
-    74-03 can lift them into the data-quality flags."""
+    errored OR any core warn flag fired. The additive keys (dust/negative/
+    flow-dominated NAV guards + the FLOW-04 ``unrealized_pnl_in_anchor`` /
+    DQ-02 ``flow_coverage_incomplete``) are carried THROUGH onto the returned meta
+    so 74-03 can lift them into the data-quality flags — the core's judgment is the
+    single source and is never dropped here (MEDIUM-1)."""
     guard_fired = any(nav_meta.get(k) for k in _GUARD_KEYS)
     warn = used_heuristic_capital or balance_error or guard_fired
     meta: NavTWRMeta = {
@@ -306,6 +321,10 @@ def _merge_status_meta(
         meta["negative_nav_guard"] = True
     if nav_meta.get("flow_dominated_guard"):
         meta["flow_dominated_guard"] = True
+    if nav_meta.get("flow_coverage_incomplete"):
+        meta["flow_coverage_incomplete"] = True
+    if nav_meta.get("unrealized_pnl_in_anchor"):
+        meta["unrealized_pnl_in_anchor"] = True
     return meta
 
 
