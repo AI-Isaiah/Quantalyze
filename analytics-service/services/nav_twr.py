@@ -328,9 +328,9 @@ def chain_linked_twr(
     keeps EXACTLY today's arithmetic — day-0 ``prev`` is the reconstructed
     ``NAV_0 - pnl_0 - F_0`` from ``daily_pnl.iloc[0]``, so every existing caller
     and test is byte-identical (SC-4). It exists because ``daily_pnl.iloc[0]``
-    has no meaning once ``pnl`` is per-currency native: the native core
-    (``native_nav.reconstruct_native_nav_and_twr``) injects the pre-history
-    capital valued at day-0 marks, ``prev0_usd``, instead. When ``prev0`` is set,
+    has no meaning once ``pnl`` is per-currency native: the per-currency
+    native-unit core (Phase 79-02, §1.4) injects the pre-history capital valued at
+    day-0 marks, ``prev0_usd``, instead. When ``prev0`` is set,
     day-0 ``prev`` is that supplied value (fail-loud coerced via ``_coerce_float``)
     and the ``_guard_denominator`` guards apply to it UNCHANGED.
 
