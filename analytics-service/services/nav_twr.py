@@ -371,13 +371,63 @@ def _guard_denominator(prev_nav: float, flow: float) -> str | None:
     return None
 
 
-def cumulative_twr(returns: pd.Series) -> float:
-    """Cumulative chain-linked return ``Π(1 + r) - 1`` over the retained
-    (non-broken) days. Returns NaN when no day survived the guards."""
-    retained = returns.dropna()
-    if retained.empty:
-        return float("nan")
-    return float((1.0 + retained).prod() - 1.0)
+def _last_interior_break_suffix(returns: pd.Series) -> pd.Series:
+    """The single source of the retained-suffix boundary (§6.2).
+
+    Returns the maximal contiguous non-NaN run that ENDS at the last valid
+    observation — i.e. the anchored, trustworthy segment that chains back from
+    the real venue terminal:
+
+      * No NaN            -> the whole series (clean path).
+      * Leading NaNs only -> the post-NaN suffix (the terminus already flagged).
+      * Trailing NaNs only -> the leading valid run (no valid day after the NaN,
+                              so it is not an interior break).
+      * Any INTERIOR NaN  -> the maximal contiguous suffix AFTER the LAST break.
+      * All-NaN           -> an empty Series (nothing survived).
+
+    This is the ONE boundary source both ``cumulative_twr_segmented`` (compounds
+    it) and ``metrics._cagr_index`` (annualizes over its ``.index``) consume, so
+    the compounded window and the CAGR window are provably the same days."""
+    valid = returns.notna().to_numpy()
+    if not valid.any():
+        return returns.iloc[0:0]
+    last = len(valid) - 1 - int(np.argmax(valid[::-1]))
+    start = last
+    while start > 0 and valid[start - 1]:
+        start -= 1
+    return returns.iloc[start : last + 1]
+
+
+def cumulative_twr_segmented(returns: pd.Series) -> tuple[float, dict[str, bool]]:
+    """Cumulative chain-linked return that refuses to compound across an
+    INTERIOR break (§6.2).
+
+    * No NaN in ``returns``            -> ``Π(1+r) − 1``, no flag — bit-identical
+                                          to the deleted ``cumulative_twr``
+                                          (SC-4 clean path).
+    * LEADING NaNs only (a DQ-02 terminus segment, apply_flow_coverage_terminus,
+      or a day-0 guard)               -> compound the post-NaN suffix; NO new
+                                          flag (the terminus/DQ-01 machinery
+                                          already flagged the cause).
+    * Any INTERIOR NaN (a break with retained returns on BOTH sides)
+                                      -> compound ONLY the maximal contiguous
+                                          suffix after the LAST break, and raise
+                                          ``{"twr_chain_broken": True}``.
+
+    NEVER stitches across a gap; NEVER returns NaN when a valid suffix exists;
+    returns NaN only when no day survived (the same terminal case as the deleted
+    ``cumulative_twr``). Break-detection is derived from the SINGLE
+    ``_last_interior_break_suffix`` boundary source (no forked detector): an
+    interior break exists exactly when a valid day lies before the retained
+    suffix, i.e. ``retained_valid_count > len(suffix)``."""
+    suffix = _last_interior_break_suffix(returns)
+    if suffix.empty:
+        return float("nan"), {}
+    value = float((1.0 + suffix).prod() - 1.0)
+    flags: dict[str, bool] = {}
+    if int(returns.notna().sum()) > len(suffix):
+        flags["twr_chain_broken"] = True
+    return value, flags
 
 
 def _build_nav_meta(flags: Mapping[str, bool]) -> NavTWRMeta:

@@ -38,7 +38,7 @@ from services.nav_twr import (
     _flows_to_daily_usd,
     apply_flow_coverage_terminus,
     chain_linked_twr,
-    cumulative_twr,
+    cumulative_twr_segmented,
     flow_coverage_gap_evidence,
     flow_coverage_terminus_day,
     negative_nav_guard_pre_terminus,
@@ -288,7 +288,7 @@ def test_twr_edge_cases() -> None:
         * (1.0 + 25.0 / 9975.0)
         - 1.0
     )
-    assert cumulative_twr(ret3) == pytest.approx(exp_cum, rel=1e-12)
+    assert cumulative_twr_segmented(ret3)[0] == pytest.approx(exp_cum, rel=1e-12)
 
 
 def test_twr_agrees_with_compute_twr() -> None:
@@ -304,7 +304,7 @@ def test_twr_agrees_with_compute_twr() -> None:
         anchor_nav=1200.0,
         external_flows=[("2026-01-03", 100.0)],
     )
-    nav_twr_cum = cumulative_twr(returns)
+    nav_twr_cum = cumulative_twr_segmented(returns)[0]
 
     equity = pd.Series(
         [1000.0, 1100.0, 1050.0, 1200.0], index=_days(4, "2026-01-01")
@@ -529,7 +529,118 @@ def test_empty_inputs_degenerate_cleanly() -> None:
     assert meta["computation_status_hint"] == "complete"
     # A single-day series whose only day breaks -> cumulative is NaN, not 0.0.
     ret_neg, _ = reconstruct_nav_and_twr(_pnl([2000.0]), anchor_nav=1500.0)
-    assert np.isnan(cumulative_twr(ret_neg))
+    assert np.isnan(cumulative_twr_segmented(ret_neg)[0])
+
+
+# ---------------------------------------------------------------------------
+# DQ-03 — cumulative_twr_segmented (§6): no silent chain-bridging
+# ---------------------------------------------------------------------------
+
+
+def test_cumulative_segmented_clean_path_bit_identical() -> None:
+    """SC-4 clean path: a no-NaN returns series compounds to the EXACT old
+    ``Π(1+r)−1`` product with NO flag — byte-identical to the deleted
+    ``cumulative_twr`` on clean input."""
+    from services.nav_twr import cumulative_twr_segmented
+
+    idx = _days(4, "2026-01-01")
+    returns = pd.Series([0.01, -0.02, 0.03, 0.015], index=idx, name="returns")
+    value, flags = cumulative_twr_segmented(returns)
+    # Bit-identical to the old expression (float ops in the same order).
+    assert value == float((1.0 + returns).prod() - 1.0)
+    assert flags == {}
+
+
+def test_cumulative_segmented_interior_break_suffix_only() -> None:
+    """§6.3 verbatim: an INTERIOR guard-NaN flanked by valid returns on BOTH
+    sides compounds ONLY the maximal contiguous suffix after the LAST break and
+    raises ``twr_chain_broken`` — the suffix product is provably DIFFERENT from
+    the dropna-bridged product, so a regression to bridging fails on the NUMBER,
+    not just the flag."""
+    from services.nav_twr import cumulative_twr_segmented
+
+    idx = _days(5, "2026-01-01")
+    # Interior NaN at index 2 (01-03), valid on both sides.
+    returns = pd.Series(
+        [0.10, 0.05, float("nan"), 0.20, -0.10], index=idx, name="returns"
+    )
+    value, flags = cumulative_twr_segmented(returns)
+    suffix_product = float((1.20 * 0.90) - 1.0)  # only 01-04, 01-05
+    bridged_product = float((1.10 * 1.05 * 1.20 * 0.90) - 1.0)  # the old bridge
+    assert flags == {"twr_chain_broken": True}
+    assert value == pytest.approx(suffix_product, rel=1e-12)
+    # Mutation-honesty: bridging (a re-added dropna) would yield bridged_product.
+    assert suffix_product != pytest.approx(bridged_product)
+
+
+def test_cumulative_segmented_leading_nan_only_no_flag() -> None:
+    """Leading-NaN-only (a DQ-02 terminus / day-0 guard shape) compounds the
+    post-NaN suffix with NO new flag — the terminus/DQ-01 machinery already
+    flagged the cause, so no double-flag."""
+    from services.nav_twr import cumulative_twr_segmented
+
+    idx = _days(4, "2026-01-01")
+    returns = pd.Series(
+        [float("nan"), float("nan"), 0.03, 0.02], index=idx, name="returns"
+    )
+    value, flags = cumulative_twr_segmented(returns)
+    assert value == pytest.approx((1.03 * 1.02) - 1.0, rel=1e-12)
+    assert flags == {}
+
+
+def test_cumulative_segmented_multiple_interior_breaks() -> None:
+    """Multiple interior breaks: only the maximal contiguous suffix AFTER the
+    LAST break is compounded (the anchored, trustworthy segment), single flag.
+    Compounding the PREFIX instead of the suffix flips this RED."""
+    from services.nav_twr import cumulative_twr_segmented
+
+    idx = _days(6, "2026-01-01")
+    # Interior NaNs at index 1 and 3.
+    returns = pd.Series(
+        [0.50, float("nan"), 0.10, float("nan"), 0.02, 0.03],
+        index=idx,
+        name="returns",
+    )
+    value, flags = cumulative_twr_segmented(returns)
+    assert flags == {"twr_chain_broken": True}
+    # Suffix after the LAST break (index 3) is [0.02, 0.03].
+    assert value == pytest.approx((1.02 * 1.03) - 1.0, rel=1e-12)
+    # Prefix-compounding would differ materially — mutation-honest.
+    assert value != pytest.approx((1.50 * 1.10 * 1.02 * 1.03) - 1.0)
+
+
+def test_cumulative_segmented_all_nan_terminal_is_nan() -> None:
+    """All-broken series → (NaN, {}): the same terminal case as the deleted
+    function; NEVER a fabricated 0.0, and no flag when nothing survived."""
+    from services.nav_twr import cumulative_twr_segmented
+
+    idx = _days(3, "2026-01-01")
+    returns = pd.Series([float("nan")] * 3, index=idx, name="returns")
+    value, flags = cumulative_twr_segmented(returns)
+    assert np.isnan(value)
+    assert flags == {}
+
+
+def test_cumulative_segmented_trailing_nan_no_flag() -> None:
+    """Trailing-NaN-only (no valid day AFTER the NaN) is not an interior break:
+    compound the leading valid run, NO flag."""
+    from services.nav_twr import cumulative_twr_segmented
+
+    idx = _days(4, "2026-01-01")
+    returns = pd.Series(
+        [0.01, 0.02, 0.03, float("nan")], index=idx, name="returns"
+    )
+    value, flags = cumulative_twr_segmented(returns)
+    assert value == pytest.approx((1.01 * 1.02 * 1.03) - 1.0, rel=1e-12)
+    assert flags == {}
+
+
+def test_cumulative_twr_deleted_no_two_semantics() -> None:
+    """§6.2 / App A #4: the old bridging ``cumulative_twr`` is DELETED in the
+    same change — two coexisting cumulative semantics is the 'surface conflicts,
+    don't average them' violation."""
+    with pytest.raises(ImportError):
+        from services.nav_twr import cumulative_twr  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -687,9 +798,11 @@ def test_terminus_segmentation_nans_pre_terminus_and_flags() -> None:
     assert segmented.loc[pd.Timestamp("2026-01-06")] == pytest.approx(0.02)
     assert flags == {"flow_coverage_incomplete": True}
     # The gap is NOT rolled into a cumulative number: only trusted days survive.
-    assert cumulative_twr(segmented) == pytest.approx(
-        (1.01 * 0.99 * 1.02) - 1.0, rel=1e-9
-    )
+    # (Leading-NaN-only shape → suffix compounded, NO twr_chain_broken flag: the
+    # terminus already flagged flow_coverage_incomplete, no double-flag.)
+    seg_value, seg_flags = cumulative_twr_segmented(segmented)
+    assert seg_value == pytest.approx((1.01 * 0.99 * 1.02) - 1.0, rel=1e-9)
+    assert seg_flags == {}
 
 
 def test_terminus_segmentation_mutation_removing_segment_fabricates_return() -> None:
@@ -706,8 +819,10 @@ def test_terminus_segmentation_mutation_removing_segment_fabricates_return() -> 
     segmented, _ = apply_flow_coverage_terminus(returns, terminus)
     # The pre-terminus days carried large (fabricated-over-the-gap) returns; the
     # segmented cumulative must EXCLUDE them and thus differ from the raw cumulative.
-    assert cumulative_twr(segmented) != pytest.approx(cumulative_twr(returns))
-    assert cumulative_twr(segmented) == pytest.approx(
+    assert cumulative_twr_segmented(segmented)[0] != pytest.approx(
+        cumulative_twr_segmented(returns)[0]
+    )
+    assert cumulative_twr_segmented(segmented)[0] == pytest.approx(
         (1.01 * 0.99 * 1.02) - 1.0, rel=1e-9
     )
 
@@ -1192,10 +1307,17 @@ def test_multi_flow_with_one_dominated_day_does_not_poison_neighbors() -> None:
     # r_0107 = (20000 - 19400 - 500)/19400 = 100/19400.
     assert ret.loc[pd.Timestamp("2026-01-07")] == pytest.approx(100.0 / 19400.0)
 
-    # cumulative_twr excludes ONLY the dominated day: it equals the product over
-    # the six finite returns, not the seven-day product (a NaN is skipped, never
-    # coerced to 0.0 which would silently zero-out that day's compounding).
-    finite = ret.dropna()
-    assert len(finite) == 6
-    expected_cum = float(np.prod(1.0 + finite.to_numpy(dtype=float)) - 1.0)
-    assert cumulative_twr(ret) == pytest.approx(expected_cum)
+    # DQ-03 (§6) BEHAVIOR CHANGE: the dominated day (01-05, index 4) is an
+    # INTERIOR break (valid returns on BOTH sides), so the honest cumulative no
+    # longer BRIDGES it. It compounds ONLY the maximal contiguous suffix AFTER
+    # the last break — the trustworthy segment anchored to the venue terminal:
+    # days 01-06 and 01-07. The number consciously CHANGES from the old six-day
+    # bridged product; the suffix product differs from the bridge (a regression
+    # to bridging would fail on the NUMBER), and twr_chain_broken now rides.
+    value, flags = cumulative_twr_segmented(ret)
+    suffix = ret.iloc[5:]  # 01-06, 01-07 (after the interior break at index 4)
+    expected_suffix = float(np.prod(1.0 + suffix.to_numpy(dtype=float)) - 1.0)
+    bridged = float(np.prod(1.0 + ret.dropna().to_numpy(dtype=float)) - 1.0)
+    assert flags == {"twr_chain_broken": True}
+    assert value == pytest.approx(expected_suffix)
+    assert expected_suffix != pytest.approx(bridged)  # honest suffix != bridge
