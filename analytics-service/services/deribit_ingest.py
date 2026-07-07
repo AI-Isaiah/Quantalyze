@@ -27,12 +27,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import AbstractSet, Any
 
 from services.deribit_txn import (
     _INVERSE_CURRENCIES,
@@ -41,7 +42,7 @@ from services.deribit_txn import (
     inverse_days_needing_index,
     txn_rows_to_daily_records,
 )
-from services.external_flows import ExternalFlow
+from services.external_flows import USD_FAMILY, ExternalFlow
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger(__name__)
@@ -542,6 +543,66 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+async def build_deribit_indexable_currencies(
+    exchange: Any,
+    currencies: Sequence[str],
+    *,
+    static_floor: AbstractSet[str] = _INVERSE_CURRENCIES,
+) -> frozenset[str]:
+    """The real per-job ``indexable_currencies`` set (contract §7.2): the static
+    floor UNIONED with every enumerated non-USD-family currency whose ``{ccy}_usd``
+    index resolves finite-positive on ``public/get_index_price``.
+
+    The floor (``_INVERSE_CURRENCIES`` = BTC/ETH) is the degraded-mode default —
+    currencies known-resolvable WITHOUT a probe — NEVER the ceiling. SOL is
+    indexable because ``sol_usd`` resolves; a tokenized-fund wallet (BUIDL/USYC)
+    is NOT because its probe raises / has no index, so it keeps failing loud at the
+    census consumers (§7.2 branch-3 by construction). This heals the key-1 SOL
+    crash on the existing USD-space path (79-CONTEXT G6, revised).
+
+    Probe discipline (mirrors the verbatim shape at the equity anchor's
+    ``public_get_get_index_price`` read): USD-family AND static-floor members are
+    NEVER probed (BTC/ETH are members by the floor; USDC/USDT are linear), each
+    remaining currency is probed AT MOST ONCE (per-job cache, the
+    ``settlement_index_cache`` discipline), an unresolvable/raising probe or a
+    non-finite/≤0 ``index_price`` leaves the currency OUT. A raised ccxt error is
+    scrubbed before logging (leak discipline, ``scrub_freeform_string``).
+    """
+    probed: set[str] = set()
+    seen: set[str] = set()  # per-job: probe each currency at most once
+    for currency in currencies:
+        ccy = str(currency).upper()
+        # USD-family are linear (never index-multiplied); static-floor members are
+        # already indexable by definition — neither is ever probed. `seen` makes a
+        # duplicated universe entry cost at most one probe.
+        if ccy in USD_FAMILY or ccy in static_floor or ccy in seen:
+            continue
+        seen.add(ccy)
+        try:
+            resp = await exchange.public_get_get_index_price(
+                {"index_name": f"{ccy.lower()}_usd"}
+            )
+        except Exception as exc:  # noqa: BLE001 - unresolvable index → not indexable
+            logger.debug(
+                "deribit indexable probe: %s_usd unresolved (%s)",
+                ccy.lower(),
+                scrub_freeform_string(str(exc)),
+            )
+            continue
+        result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
+        raw = result.get("index_price") if isinstance(result, Mapping) else None
+        if raw is None:
+            continue
+        try:
+            price = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(price) or price <= 0:
+            continue
+        probed.add(ccy)
+    return frozenset(static_floor | probed)
+
+
 async def fetch_deribit_ledger_daily_records(
     exchange: Any,
     since_ms: int | None = None,
@@ -583,6 +644,17 @@ async def fetch_deribit_ledger_daily_records(
     # enumerated scope. Both enumerations fail loud, so `expected` can never be a
     # silently-truncated set the gate would then be blind to.
     currencies = await enumerate_currencies(exchange, scopes[0], {})
+    # Build the REAL indexable set ONCE per job (79-CONTEXT G6, revised): the
+    # static floor ∪ every enumerated currency whose {ccy}_usd index resolves. This
+    # is threaded live into the :636 supplemental-index gate AND every downstream
+    # census consumer (inverse_days_needing_index / txn_rows_to_daily_records /
+    # deribit_dated_external_flows_usd) so SOL heals on the existing USD-space path
+    # — records returned, no LedgerValuationError — while an un-indexable currency
+    # (BUIDL / an unresolvable probe) still refuses loudly. Once-per-job, mirroring
+    # the settlement_index_cache discipline below.
+    indexable = await build_deribit_indexable_currencies(
+        exchange, currencies, static_floor=_INVERSE_CURRENCIES
+    )
     expected: dict[str, list[str]] = {}
     scope_auths: dict[str, dict[str, Any]] = {}
     for scope in scopes:
@@ -633,10 +705,12 @@ async def fetch_deribit_ledger_daily_records(
             # exist; own-row/ledger index always wins inside the aggregator.
             supplemental: dict[tuple[str, str], float] | None = None
             ccy_upper = currency.upper()
-            if ccy_upper in _INVERSE_CURRENCIES:
+            if ccy_upper in indexable:
                 needed = {
                     (d, c)
-                    for (d, c) in inverse_days_needing_index(rows)
+                    for (d, c) in inverse_days_needing_index(
+                        rows, indexable_currencies=indexable
+                    )
                     if c == ccy_upper
                 }
                 if needed:
@@ -667,7 +741,9 @@ async def fetch_deribit_ledger_daily_records(
                         if d in price_map
                     }
             records = txn_rows_to_daily_records(
-                rows, supplemental_index=supplemental
+                rows,
+                supplemental_index=supplemental,
+                indexable_currencies=indexable,
             )
             daily_records.extend(records)
             # Accumulate the honest DATED external flows (for the core's F_t term)
@@ -680,7 +756,11 @@ async def fetch_deribit_ledger_daily_records(
             # are _EXTERNAL_FLOW_TYPES (⊆ INFORMATIONAL_TYPES), so they are excluded
             # from the realized `records` above — count-once by construction.
             dated_external_flows.extend(
-                deribit_dated_external_flows_usd(rows, supplemental_index=supplemental)
+                deribit_dated_external_flows_usd(
+                    rows,
+                    supplemental_index=supplemental,
+                    indexable_currencies=indexable,
+                )
             )
             total_return_rows += sum(
                 1

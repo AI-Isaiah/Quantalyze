@@ -602,6 +602,7 @@ def deribit_dated_external_flows_usd(
     rows: Sequence[Mapping[str, Any]],
     *,
     supplemental_index: Mapping[tuple[str, str], float] | None = None,
+    indexable_currencies: AbstractSet[str] = _INVERSE_CURRENCIES,
 ) -> list[ExternalFlow]:
     """The ONE honest dated external-flow producer: convert the in-band
     ``_EXTERNAL_FLOW_TYPES`` rows into a per-UTC-day ``list[ExternalFlow]`` for the
@@ -636,7 +637,9 @@ def deribit_dated_external_flows_usd(
     entries, sorted ascending by day. Supersedes the linear-only scalar
     ``deribit_linear_external_flow_usd`` (its sole consumer is removed in 75-03).
     """
-    day_ccy_index = _day_ccy_own_index(rows)
+    day_ccy_index = _day_ccy_own_index(
+        rows, indexable_currencies=indexable_currencies
+    )
     by_day: dict[str, float] = {}
     for row in rows:
         if not isinstance(row, Mapping):
@@ -686,7 +689,9 @@ def deribit_dated_external_flows_usd(
         fb = day_ccy_index.get((day, ccy))
         if fb is None and supplemental_index is not None:
             fb = supplemental_index.get((day, ccy))
-        by_day[day] = by_day.get(day, 0.0) + txn_change_to_usd(row, fallback_index=fb)
+        by_day[day] = by_day.get(day, 0.0) + txn_change_to_usd(
+            row, fallback_index=fb, indexable_currencies=indexable_currencies
+        )
     return [ExternalFlow(day, usd) for day, usd in sorted(by_day.items())]
 
 
@@ -694,6 +699,7 @@ def txn_rows_to_daily_records(
     rows: Sequence[Mapping[str, Any]],
     *,
     supplemental_index: Mapping[tuple[str, str], float] | None = None,
+    indexable_currencies: AbstractSet[str] = _INVERSE_CURRENCIES,
 ) -> list[dict[str, Any]]:
     """Sum return-bearing transaction-log ``change`` deltas by UTC day into a
     SINGLE list of ``daily_pnl``-shaped records (mirrors
@@ -728,7 +734,9 @@ def txn_rows_to_daily_records(
     """
     # Pass 1: same-day per-currency event index from the batch's own index-
     # bearing rows (see _day_ccy_own_index for the M1 / untrusted-input pins).
-    day_ccy_index = _day_ccy_own_index(rows)
+    day_ccy_index = _day_ccy_own_index(
+        rows, indexable_currencies=indexable_currencies
+    )
 
     by_day: dict[str, float] = {}
     for row in rows:
@@ -784,7 +792,9 @@ def txn_rows_to_daily_records(
             fb = day_ccy_index.get((day, ccy))
             if fb is None and supplemental_index is not None:
                 fb = supplemental_index.get((day, ccy))
-            usd = txn_change_to_usd(row, fallback_index=fb)
+            usd = txn_change_to_usd(
+                row, fallback_index=fb, indexable_currencies=indexable_currencies
+            )
             by_day[day] = by_day.get(day, 0.0) + usd
             continue
         # Unknown type (incl. options_settlement_summary / correction, H3):

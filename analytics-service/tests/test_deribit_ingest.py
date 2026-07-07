@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from services import deribit_ingest as di
+from services.deribit_txn import LedgerValuationError
 
 
 # ---------------------------------------------------------------------------
@@ -1350,3 +1351,169 @@ def test_known_totals_documented_non_reconciling() -> None:
 
     doc = (_mod.reconcile_fill_count.__doc__ or "").lower()
     assert "advisory" in doc
+
+
+# ===========================================================================
+# Plan 79-04 Task 2 — build_deribit_indexable_currencies probe builder + LIVE
+# threading into fetch_deribit_ledger_daily_records (SOL heals on the existing
+# USD-space path; §7.2, 79-CONTEXT G6 revised).
+# ===========================================================================
+
+
+class _IndexProbeStub:
+    """Serves scripted public/get_index_price responses per ``{ccy}_usd`` index
+    name and records every probe. A mapped ``Exception`` value RAISES; a float is
+    returned as ``{"result": {"index_price": <float>}}``; ``None`` returns a result
+    with no ``index_price`` key (an unresolvable-but-non-raising probe)."""
+
+    def __init__(self, prices: dict[str, Any]) -> None:
+        self._prices = dict(prices)
+        self.probed: list[str] = []
+
+    async def public_get_get_index_price(self, params: dict[str, Any]) -> Any:
+        name = params["index_name"]
+        self.probed.append(name)
+        val = self._prices.get(name, RuntimeError("no such index"))
+        if isinstance(val, Exception):
+            raise val
+        if val is None:
+            return {"result": {}}
+        return {"result": {"index_price": val}}
+
+
+async def test_build_indexable_static_floor_plus_probed() -> None:
+    """probe_builder: the built set is the static floor ∪ every probed non-USD-
+    family currency that resolves finite-positive. SOL resolves → in; BUIDL raises
+    → out; BTC is in WITHOUT a probe (floor); USDC is NEVER probed (USD-family).
+    Mutation-honest: probing USD-family (assert below) or dropping the floor
+    (BTC/ETH assertions) reddens this."""
+    stub = _IndexProbeStub(
+        {
+            "sol_usd": 150.0,
+            "buidl_usd": RuntimeError("no index"),
+        }
+    )
+    built = await di.build_deribit_indexable_currencies(
+        stub, ["BTC", "ETH", "USDC", "SOL", "BUIDL"]
+    )
+    assert built == frozenset({"BTC", "ETH", "SOL"})
+    # BTC/ETH (floor) and USDC (USD-family) are NEVER probed; SOL and BUIDL are.
+    assert stub.probed == ["sol_usd", "buidl_usd"]
+    assert "usdc_usd" not in stub.probed
+    assert "btc_usd" not in stub.probed
+
+
+async def test_build_indexable_rejects_non_finite_and_non_positive() -> None:
+    """A probe that returns a non-finite / ≤0 / missing index_price leaves the
+    currency OUT — a bogus mark can never admit an un-indexable currency (T-79-13).
+    Mutation-honest: inverting the success test (admitting on failure) reddens."""
+    stub = _IndexProbeStub(
+        {
+            "sol_usd": 0.0,  # non-positive → out
+            "xrp_usd": float("nan"),  # non-finite → out
+            "avax_usd": None,  # no index_price key → out
+        }
+    )
+    built = await di.build_deribit_indexable_currencies(
+        stub, ["SOL", "XRP", "AVAX"]
+    )
+    assert built == frozenset({"BTC", "ETH"})  # floor only
+
+
+async def test_build_indexable_probes_each_currency_at_most_once() -> None:
+    """probe_called_once_per_currency: a duplicated universe entry costs at most
+    one probe (the per-job cache discipline of settlement_index_cache)."""
+    stub = _IndexProbeStub({"sol_usd": 150.0})
+    built = await di.build_deribit_indexable_currencies(
+        stub, ["SOL", "SOL", "sol"]
+    )
+    assert built == frozenset({"BTC", "ETH", "SOL"})
+    assert stub.probed == ["sol_usd"]  # probed ONCE despite three entries
+
+
+def test_indexable_set_drives_the_636_gate_source_scan() -> None:
+    """built_and_threaded_live (source-scan): the built ``indexable`` set — NOT the
+    module constant ``_INVERSE_CURRENCIES`` — drives the :636 supplemental-index
+    gate, and it is built right after enumerate_currencies. Mutation-honest:
+    reverting the gate to ``ccy_upper in _INVERSE_CURRENCIES`` reddens this."""
+    src = inspect.getsource(di.fetch_deribit_ledger_daily_records)
+    # The built set is constructed once per job right after enumerate_currencies.
+    assert "build_deribit_indexable_currencies(" in src
+    enum_at = src.index("enumerate_currencies(exchange, scopes[0]")
+    build_at = src.index("build_deribit_indexable_currencies(")
+    assert build_at > enum_at  # built AFTER the universe is enumerated
+    # The gate consults the built set, never the module constant.
+    assert "if ccy_upper in indexable:" in src
+    assert "if ccy_upper in _INVERSE_CURRENCIES:" not in src
+
+
+async def test_sol_heals_on_existing_path(monkeypatch: Any) -> None:
+    """sol_heals_on_existing_path (the key-1 crash healed in Phase 79): a universe
+    including SOL, whose ``sol_usd`` probe resolves finite-positive and whose txn
+    log carries a quiet-day SOL cash row, VALUES that row via the same-day
+    settlement index and returns records — NO LedgerValuationError.
+
+    The SOL row is a QUIET fee (no own index) so the heal DEPENDS on the built set
+    driving the :636 gate: reverting the gate to ``_INVERSE_CURRENCIES``
+    un-threads SOL, the supplemental fetch is skipped, and the SOL row fails loud
+    for lack of any index — i.e. the neuter reddens this test."""
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "SOL":
+            return [{"type": "negative_balance_fee", "currency": "SOL",
+                     "change": -0.5, "timestamp": _DAY_D_MS}]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["SOL"]}, paginate=_paginate,
+    )
+
+    fetched: list[tuple[str, str]] = []
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        fetched.append((currency, oldest_day))
+        return {"2024-01-02": 150.0}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    # The exchange passed to fetch is the probe stub: sol_usd resolves → SOL indexable.
+    exchange = _IndexProbeStub({"sol_usd": 150.0})
+    records, report = await di.fetch_deribit_ledger_daily_records(exchange)
+
+    # SOL healed: the same-day index was fetched and the fee valued -0.5*150 = -75.
+    assert fetched == [("SOL", "2024-01-02")]
+    assert len(records) == 1
+    assert records[0]["side"] == "sell"
+    assert records[0]["price"] == pytest.approx(75.0, abs=1e-9)
+    di.assert_ledger_complete(report)
+
+
+async def test_sol_still_refuses_when_probe_unresolvable(monkeypatch: Any) -> None:
+    """The MIRROR of the heal (fail-loud shape survives, T-79-15): the SAME quiet
+    SOL account whose ``sol_usd`` probe RAISES leaves SOL OUT of the built set → the
+    SOL row still refuses loudly (LedgerValuationError). A bogus/absent probe can
+    never silently admit a currency."""
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "SOL":
+            return [{"type": "negative_balance_fee", "currency": "SOL",
+                     "change": -0.5, "timestamp": _DAY_D_MS}]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["SOL"]}, paginate=_paginate,
+    )
+
+    # sol_usd probe RAISES → SOL ∉ indexable → the row has no basis for an index
+    # multiply and fails loud (never blind-multiplied, never silently dropped).
+    exchange = _IndexProbeStub({"sol_usd": RuntimeError("no sol index")})
+    with pytest.raises(LedgerValuationError):
+        await di.fetch_deribit_ledger_daily_records(exchange)
