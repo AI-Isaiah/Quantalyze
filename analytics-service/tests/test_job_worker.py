@@ -1339,6 +1339,7 @@ class TestDeriveBrokerDailies:
         transfers_error: Exception | None = None,
         upnl: float = 0.0,
         balance_error: bool = False,
+        upnl_unreadable: bool = False,
     ):
         """Build the (mock_ctx, patches, captured) harness for a ccxt-venue
         derive_broker_dailies run. ``captured['external_flows']`` records the
@@ -1442,7 +1443,9 @@ class TestDeriveBrokerDailies:
         # calls the 2-tuple, wedge stays 0.0) and GREEN (source calls this).
         stack.enter_context(patch(
             "services.exchange.fetch_account_equity_and_upnl_usd",
-            new=AsyncMock(return_value=(equity, balance_error, upnl)),
+            new=AsyncMock(
+                return_value=(equity, balance_error, upnl, upnl_unreadable)
+            ),
         ))
         for _fn in ("fetch_funding_binance", "fetch_funding_okx", "fetch_funding_bybit"):
             stack.enter_context(patch(
@@ -2197,6 +2200,80 @@ class TestDeriveBrokerDailies:
             "a material wedge must pre-stamp unrealized_pnl_in_anchor onto "
             "strategy_analytics so the factsheet reads complete_with_warnings"
         )
+
+    @pytest.mark.asyncio
+    async def test_unreadable_upnl_field_flags_complete_with_warnings(self) -> None:
+        """MUST-2 (specialist-silentfailure HIGH-1/MEDIUM-1): an OKX MTM account
+        whose uPnL FIELD was unreadable (upl absent/garbled while totalEq read
+        cleanly, a trustworthy non-dust anchor) must PRE-STAMP
+        unrealized_pnl_unreadable onto strategy_analytics → the CSV factsheet
+        reads complete_with_warnings. Otherwise a wrong/renamed field silently
+        coalesces to a 0.0 wedge (the full MTM equity stays in the terminal,
+        rescaling every return) and the account ships a false `complete`.
+
+        Mutation-honest: a genuinely-flat book (upnl_unreadable=False, present-0)
+        stays clean — NO unrealized_pnl_unreadable — so the flag reddens ONLY on
+        the truly-unreadable case, not on every zero wedge. Reverting the
+        job_worker meta-set (or dropping the flag from _BROKER_WARN_FLAGS) drops
+        the pre-stamp → RED.
+        """
+        from services.job_worker import run_derive_broker_dailies_job
+
+        realized = self._recent_daily_pnl("okx", {10: 200.0, 5: 150.0, 1: 75.0})
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+
+        # Unreadable wedge field on a clean, non-dust anchor → LOUD.
+        _ctx, stack, cap = self._flow_harness(
+            venue="okx", deposits=[], realized=realized,
+            equity=100_000.0, upnl=0.0, upnl_unreadable=True,
+        )
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+        assert result.outcome == DispatchOutcome.DONE
+        flagged = [
+            u for u in cap["analytics_upserts"]
+            if (u.get("data_quality_flags") or {}).get("unrealized_pnl_unreadable")
+        ]
+        assert flagged, (
+            "an unreadable uPnL field on a trustworthy anchor must pre-stamp "
+            "unrealized_pnl_unreadable so the factsheet reads complete_with_warnings"
+        )
+
+        # Genuinely flat book (readable present-0 wedge) → clean, no false warning.
+        _ctx2, stack2, cap2 = self._flow_harness(
+            venue="okx", deposits=[], realized=realized,
+            equity=100_000.0, upnl=0.0, upnl_unreadable=False,
+        )
+        with stack2:
+            await run_derive_broker_dailies_job(job)
+        assert not any(
+            (u.get("data_quality_flags") or {}).get("unrealized_pnl_unreadable")
+            for u in cap2["analytics_upserts"]
+        ), "a readable present-0 wedge is a clean flat book, never unreadable"
+
+    @pytest.mark.asyncio
+    async def test_unreadable_upnl_suppressed_on_untrustworthy_anchor(self) -> None:
+        """MUST-2 noise guard: an unreadable uPnL field on an UNTRUSTWORTHY anchor
+        (balance_error / dust) must NOT raise unrealized_pnl_unreadable — the
+        wedge is force-zeroed there anyway and the anchor itself is the flagged
+        problem, so the unreadable warning would be pure noise. Mirrors the
+        FLOW-04 wedge noise guard (T-77-08)."""
+        from services.job_worker import run_derive_broker_dailies_job
+
+        realized = self._recent_daily_pnl("okx", {10: 200.0, 5: 150.0, 1: 75.0})
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+
+        # Dust anchor + unreadable field → suppressed (wedge force-zeroed anyway).
+        _ctx, stack, cap = self._flow_harness(
+            venue="okx", deposits=[], realized=realized,
+            equity=100.0, upnl=0.0, upnl_unreadable=True,
+        )
+        with stack:
+            await run_derive_broker_dailies_job(job)
+        assert not any(
+            (u.get("data_quality_flags") or {}).get("unrealized_pnl_unreadable")
+            for u in cap["analytics_upserts"]
+        ), "a dust anchor force-zeroes the wedge — unreadable must be suppressed"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("venue", ["bybit", "binance"])

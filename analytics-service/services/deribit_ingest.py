@@ -706,31 +706,46 @@ async def fetch_deribit_ledger_daily_records(
 def _deribit_session_upl_to_usd(
     summaries: Sequence[Any],
     index_prices: Mapping[str, float],
-) -> float:
+) -> tuple[float, bool]:
     """Sum the per-currency Deribit session open-uPnL wedge into USD, reusing
     the EXACT conversion rule of ``deribit_equity_to_usd``.
 
     [ASSUMED A1]: ``session_upl`` is the Deribit account-summary open-unrealized
     component (the session unrealized PnL). An absent / null / non-numeric field
-    coerces to a 0.0 contribution — the safe conservative fallback (NEVER a
-    fabricated value; T-77-05). USD-family currencies pass through as USD; a
-    non-linear currency's coin uPnL is multiplied by its ``{ccy}_usd`` index.
+    coerces to a 0.0 contribution — NEVER a fabricated value (T-77-05).
+    USD-family currencies pass through as USD; a non-linear currency's coin uPnL
+    is multiplied by its ``{ccy}_usd`` index.
 
     A non-linear currency carrying a wedge but no resolvable index contributes
     0.0 rather than raising — the equity anchor (computed FIRST) already fails
     loud for any held currency lacking an index, so this path is only reached
     for the warning-only wedge on a base the anchor already validated; refusing
     to fabricate a USD figure for an unvaluable wedge is the honest default.
+
+    MUST-2 (specialist-silentfailure HIGH-1): returns ``(wedge_usd, unreadable)``.
+    Because ``session_upl`` is an ``[ASSUMED A1]`` field NAME, a wrong/renamed
+    field would be absent on EVERY summary and silently coalesce to a 0.0 wedge —
+    indistinguishable from a genuinely flat book, disabling FLOW-04 for every
+    Deribit account with no signal. ``unreadable`` is True when there WERE
+    summaries to read but the field was present-and-numeric on NONE of them (a
+    wrong field name or a fully-garbled response). A book that is genuinely flat
+    reports ``session_upl == 0`` — a PRESENT numeric read — so ``unreadable`` is
+    False and the account stays clean ``complete``. The caller raises
+    ``unrealized_pnl_unreadable`` (→ ``complete_with_warnings``) so a wrong field
+    name is LOUD, not a silent overstatement.
     """
     from services.deribit_txn import _LINEAR_CURRENCIES
 
     total = 0.0
+    saw_summary = False
+    read_any = False
     for summ in summaries:
         if not isinstance(summ, Mapping):
             continue
         ccy = str(summ.get("currency", "")).upper()
         if not ccy:
             continue
+        saw_summary = True
         raw = summ.get("session_upl")  # [ASSUMED A1]
         if raw is None:
             continue  # absent / null → 0.0 wedge (fallback, never fabricate)
@@ -738,6 +753,9 @@ def _deribit_session_upl_to_usd(
             upl = float(raw)
         except (TypeError, ValueError):
             continue  # non-numeric → 0.0 wedge (fallback, never fabricate)
+        # The field was PRESENT and numeric (even genuine 0.0) — the assumed
+        # field name resolves, so this account is not "unreadable".
+        read_any = True
         if upl == 0.0:
             continue
         if ccy in _LINEAR_CURRENCIES:
@@ -747,12 +765,14 @@ def _deribit_session_upl_to_usd(
         if price is None:
             continue  # unvaluable wedge → 0.0 contribution (never fabricate)
         total += upl * float(price)
-    return total
+    # Unreadable ONLY when there were summaries yet not a single one carried a
+    # readable session_upl — the wrong-field-name / garbled-response signal.
+    return total, (saw_summary and not read_any)
 
 
 async def fetch_deribit_account_equity_and_upnl_usd(
     exchange: Any,
-) -> tuple[float | None, bool, float]:
+) -> tuple[float | None, bool, float, bool]:
     """Total Deribit account equity in USD (the initial-capital anchor) AND the
     companion session open-uPnL wedge, both from ONE ``get_account_summaries``
     response + the SAME resolved index_prices (SC-1) — no new fetch.
@@ -766,20 +786,24 @@ async def fetch_deribit_account_equity_and_upnl_usd(
     with the SAME index_prices; an absent/uncertain field → wedge 0.0 (fallback,
     never fabricated).
 
-    Returns ``(equity, balance_error, open_unrealized_usd)``. A failed read or
-    an unvaluable held currency → ``(None, True, 0.0)`` (the wedge inherits the
-    anchor's fail-loud disposition — never fabricated on an unvaluable base).
+    Returns ``(equity, balance_error, open_unrealized_usd, upnl_unreadable)``. A
+    failed read or an unvaluable held currency → ``(None, True, 0.0, False)``
+    (the wedge inherits the anchor's fail-loud disposition — never fabricated on
+    an unvaluable base, and ``unreadable`` is moot on a failed anchor). MUST-2:
+    ``upnl_unreadable`` is True when the anchor read cleanly but ``session_upl``
+    was absent/unreadable on EVERY summary — the caller surfaces
+    ``unrealized_pnl_unreadable`` so a wrong assumed field name is LOUD.
     """
     from services.deribit_txn import _LINEAR_CURRENCIES, deribit_equity_to_usd
 
     try:
         resp = await exchange.private_get_get_account_summaries({})
     except Exception:  # noqa: BLE001 - a failed read is a DQ flag, not a crash
-        return None, True, 0.0
+        return None, True, 0.0, False
     result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
     summaries = result.get("summaries", []) if isinstance(result, Mapping) else []
     if not isinstance(summaries, Sequence) or not summaries:
-        return None, True, 0.0
+        return None, True, 0.0, False
 
     index_prices: dict[str, float] = {}
     for summ in summaries:
@@ -808,9 +832,11 @@ async def fetch_deribit_account_equity_and_upnl_usd(
         # A coin-margined currency with no resolvable USD index → refuse a
         # coin/non-USD anchor; flag heuristic capital rather than mis-scale.
         # The wedge inherits the same fail-loud disposition (never fabricated).
-        return None, True, 0.0
-    open_unrealized_usd = _deribit_session_upl_to_usd(summaries, index_prices)
-    return equity, False, open_unrealized_usd
+        return None, True, 0.0, False
+    open_unrealized_usd, upnl_unreadable = _deribit_session_upl_to_usd(
+        summaries, index_prices
+    )
+    return equity, False, open_unrealized_usd, upnl_unreadable
 
 
 async def fetch_deribit_account_equity_usd(
@@ -828,8 +854,8 @@ async def fetch_deribit_account_equity_usd(
     deribit — coin-margined USDT balance is not USD equity — so this is the
     deribit-specific anchor.
     """
-    equity, balance_error, _upnl = await fetch_deribit_account_equity_and_upnl_usd(
-        exchange
+    equity, balance_error, _upnl, _unreadable = (
+        await fetch_deribit_account_equity_and_upnl_usd(exchange)
     )
     return equity, balance_error
 

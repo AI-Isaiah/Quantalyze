@@ -184,6 +184,13 @@ class DataQualityFlags(TypedDict, total=False):
     # account-size leak T-77-09); promotes computation_status to
     # complete_with_warnings on the same channel as the NAV guard keys. ---
     unrealized_pnl_in_anchor: bool
+    # --- MUST-2 (v1.8): the open-uPnL wedge FIELD was unreadable on a MTM venue
+    # (Deribit session_upl / OKX upl absent-or-garbled while the anchor read
+    # cleanly). A wrong/renamed assumed field would silently coalesce to a 0.0
+    # wedge — the FLOW-04 harm class minus even the warning. A BOOL only;
+    # promotes computation_status to complete_with_warnings on the same channel
+    # as the other guard keys so a wrong field name is LOUD. ---
+    unrealized_pnl_unreadable: bool
     # --- sibling-table batch upsert ---
     sibling_kinds_failed: bool
     sibling_kinds_error: str
@@ -1759,6 +1766,9 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             # Phase 77 (v1.8 FLOW-04): a material open-uPnL wedge joins the
             # additive NavTWRMeta guard-key lift — present ONLY when it fired.
             "unrealized_pnl_in_anchor",
+            # MUST-2 (v1.8): an unreadable uPnL wedge field on a MTM venue joins
+            # the same lift — present ONLY when the field could not be read.
+            "unrealized_pnl_unreadable",
         ):
             if returns_meta.get(_guard_key):
                 data_quality_flags = data_quality_flags or {}
@@ -1846,6 +1856,10 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             # anchor-to-today NAV embeds uncrystallised MTM the realized roll
             # cannot per-day reconstruct — promote to complete_with_warnings.
             or (top_level_flags or {}).get("unrealized_pnl_in_anchor")
+            # MUST-2 (v1.8): an unreadable uPnL wedge field on a MTM venue means
+            # the anchor MAY embed uncrystallised MTM we could not measure —
+            # promote to complete_with_warnings so a wrong field name is LOUD.
+            or (top_level_flags or {}).get("unrealized_pnl_unreadable")
         )
         # When the consumer flag is suppressed (because the upstream
         # account_balance_unavailable / no_linked_api_key already
@@ -2175,6 +2189,9 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             # Phase 77 (v1.8 FLOW-04): the pre-stamped open-uPnL materiality flag
             # rides the same broker→CSV warn bridge → complete_with_warnings.
             "unrealized_pnl_in_anchor",
+            # MUST-2 (v1.8): the pre-stamped unreadable-uPnL-field flag rides the
+            # same bridge → complete_with_warnings (a wrong field name is LOUD).
+            "unrealized_pnl_unreadable",
         )
         _warned = False
         for _flag in _BROKER_WARN_FLAGS:

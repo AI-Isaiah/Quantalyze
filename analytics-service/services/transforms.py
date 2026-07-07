@@ -283,6 +283,12 @@ _GUARD_KEYS = (
     "flow_dominated_guard",
     "flow_coverage_incomplete",
     "unrealized_pnl_in_anchor",
+    # MUST-2 (v1.8): the uPnL wedge field was unreadable on a MTM venue. Like
+    # flow_coverage_incomplete it is set by the broker wiring post-combine, not
+    # the core, so nav_meta never carries it HERE — but it is registered for
+    # single-source consistency (the SC-4 / P74 byte-identity accounts never set
+    # it, so their status is unchanged).
+    "unrealized_pnl_unreadable",
 )
 
 
@@ -325,6 +331,8 @@ def _merge_status_meta(
         meta["flow_coverage_incomplete"] = True
     if nav_meta.get("unrealized_pnl_in_anchor"):
         meta["unrealized_pnl_in_anchor"] = True
+    if nav_meta.get("unrealized_pnl_unreadable"):
+        meta["unrealized_pnl_unreadable"] = True
     return meta
 
 

@@ -119,6 +119,12 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     # (|open_unrealized_usd|/anchor > UNREALIZED_MATERIALITY_RATIO). Rides the same
     # complete_with_warnings channel as the DQ-01/DQ-02 guards; NO parallel status.
     unrealized_pnl_in_anchor: bool
+    # MUST-2 (v1.8) — the open-uPnL wedge FIELD was unreadable on a MTM venue
+    # (Deribit session_upl / OKX upl absent-or-garbled while the anchor read
+    # cleanly). Set by the broker wiring (job_worker), NOT the pure core — same
+    # pattern as flow_coverage_incomplete — so a wrong assumed field name is
+    # LOUD (complete_with_warnings) rather than a silent 0-wedge overstatement.
+    unrealized_pnl_unreadable: bool
 
 
 class NavReconstructionError(ValueError):

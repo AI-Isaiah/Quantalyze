@@ -60,6 +60,7 @@ def _patches(
     equity: float | None = _RAW_EQUITY_USD,
     balance_error: bool = False,
     upnl: float = 0.0,
+    upnl_unreadable: bool = False,
 ) -> tuple[list, MagicMock]:
     """Patch set for the deribit branch. fetch_all_trades RAISES so any test that
     reaches combine proves the deribit branch never touched it (D-08)."""
@@ -96,10 +97,13 @@ def _patches(
             new=ledger_mock,
         ),
         patch(
-            # FLOW-04 (77-03): the deribit branch now reads the companion 3-tuple
-            # (equity + session-uPnL wedge) from ONE get_account_summaries response.
+            # FLOW-04 (77-03) + MUST-2: the deribit branch reads the companion
+            # 4-tuple (equity + session-uPnL wedge + unreadable flag) from ONE
+            # get_account_summaries response.
             "services.deribit_ingest.fetch_deribit_account_equity_and_upnl_usd",
-            new=AsyncMock(return_value=(equity, balance_error, upnl)),
+            new=AsyncMock(
+                return_value=(equity, balance_error, upnl, upnl_unreadable)
+            ),
         ),
         patch("services.broker_dailies.combine_realized_and_funding", new=combine),
         patch(
@@ -266,10 +270,14 @@ async def test_deribit_session_upl_valued_usd() -> None:
         summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.3}],
         index_price={"BTC": 40000.0},
     )
-    equity, balance_error, upnl = await fetch_deribit_account_equity_and_upnl_usd(ex)
+    equity, balance_error, upnl, unreadable = (
+        await fetch_deribit_account_equity_and_upnl_usd(ex)
+    )
     assert equity == pytest.approx(80000.0)
     assert balance_error is False
     assert upnl == pytest.approx(12000.0)
+    # A present, numeric session_upl is readable (MUST-2).
+    assert unreadable is False
 
 
 @pytest.mark.asyncio
@@ -281,35 +289,62 @@ async def test_deribit_usd_family_session_upl_passthrough() -> None:
     ex = _FakeDeribitSummaries(
         summaries=[{"currency": "USDC", "equity": 50000.0, "session_upl": 1500.0}],
     )
-    equity, balance_error, upnl = await fetch_deribit_account_equity_and_upnl_usd(ex)
+    equity, balance_error, upnl, unreadable = (
+        await fetch_deribit_account_equity_and_upnl_usd(ex)
+    )
     assert equity == pytest.approx(50000.0)
     assert balance_error is False
     assert upnl == pytest.approx(1500.0)
+    assert unreadable is False
 
 
 @pytest.mark.asyncio
-async def test_deribit_missing_session_upl_fallback_zero() -> None:
-    """A1 fallback: summaries with equity but NO session_upl key (or null) →
-    wedge 0.0 (conservative, realized-basis terminal) — NEVER fabricated."""
+async def test_deribit_missing_session_upl_fallback_zero_but_flagged_unreadable(
+) -> None:
+    """MUST-2: summaries with equity but NO session_upl key (or null on every
+    summary) → wedge 0.0 (never fabricated) AND ``unreadable`` True. A wrong
+    ``[ASSUMED A1]`` field name is absent on every summary and would otherwise
+    silently coalesce to a flat 0.0 wedge — disabling FLOW-04 for every Deribit
+    account with no signal. Mutation-honest: reverting _deribit_session_upl_to_usd
+    to a bare float turns the ``unreadable is True`` assertions RED.
+
+    A genuinely flat book reports session_upl == 0 (a PRESENT numeric read) →
+    unreadable False, so it stays clean `complete`.
+    """
     from services.deribit_ingest import fetch_deribit_account_equity_and_upnl_usd
 
     ex_absent = _FakeDeribitSummaries(
         summaries=[{"currency": "BTC", "equity": 2.0}],
         index_price={"BTC": 40000.0},
     )
-    equity, balance_error, upnl = await fetch_deribit_account_equity_and_upnl_usd(
-        ex_absent
+    equity, balance_error, upnl, unreadable = (
+        await fetch_deribit_account_equity_and_upnl_usd(ex_absent)
     )
     assert equity == pytest.approx(80000.0)
     assert balance_error is False
     assert upnl == 0.0
+    assert unreadable is True, "absent session_upl on every summary must flag unreadable"
 
     ex_null = _FakeDeribitSummaries(
         summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": None}],
         index_price={"BTC": 40000.0},
     )
-    _eq, _err, upnl_null = await fetch_deribit_account_equity_and_upnl_usd(ex_null)
+    _eq, _err, upnl_null, unreadable_null = (
+        await fetch_deribit_account_equity_and_upnl_usd(ex_null)
+    )
     assert upnl_null == 0.0
+    assert unreadable_null is True
+
+    # A PRESENT numeric 0.0 session_upl is a genuinely flat book — readable.
+    ex_flat = _FakeDeribitSummaries(
+        summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.0}],
+        index_price={"BTC": 40000.0},
+    )
+    _eqf, _errf, upnl_flat, unreadable_flat = (
+        await fetch_deribit_account_equity_and_upnl_usd(ex_flat)
+    )
+    assert upnl_flat == 0.0
+    assert unreadable_flat is False, "present-0 session_upl is a clean flat book"
 
 
 @pytest.mark.asyncio
@@ -319,10 +354,14 @@ async def test_deribit_balance_error_wedge_zero() -> None:
     from services.deribit_ingest import fetch_deribit_account_equity_and_upnl_usd
 
     ex = _FakeDeribitSummaries(summaries_exc=RuntimeError("network down"))
-    equity, balance_error, upnl = await fetch_deribit_account_equity_and_upnl_usd(ex)
+    equity, balance_error, upnl, unreadable = (
+        await fetch_deribit_account_equity_and_upnl_usd(ex)
+    )
     assert equity is None
     assert balance_error is True
     assert upnl == 0.0
+    # A failed anchor read → unreadable is moot/False (balance_error is the flag).
+    assert unreadable is False
 
 
 @pytest.mark.asyncio
@@ -336,7 +375,10 @@ async def test_deribit_no_index_upnl_balance_error() -> None:
         summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.3}],
         index_price=None,  # index resolution fails for BTC
     )
-    equity, balance_error, upnl = await fetch_deribit_account_equity_and_upnl_usd(ex)
+    equity, balance_error, upnl, unreadable = (
+        await fetch_deribit_account_equity_and_upnl_usd(ex)
+    )
     assert equity is None
     assert balance_error is True
     assert upnl == 0.0
+    assert unreadable is False

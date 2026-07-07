@@ -2041,7 +2041,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # (v1.8): the companion session-uPnL wedge (session_upl) rides the SAME
             # get_account_summaries response + index_prices (77-02) — noise-guarded
             # below before it threads into the realized-basis roll terminal.
-            equity, balance_error, open_unrealized_usd = (
+            equity, balance_error, open_unrealized_usd, upnl_unreadable = (
                 await fetch_deribit_account_equity_and_upnl_usd(ctx.exchange)
             )
             try:
@@ -2142,7 +2142,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # FLOW-04 (v1.8): the venue-gated companion open-uPnL wedge rides the
             # SAME response (OKX upl; Bybit/Binance structural 0.0 — realized-basis
             # walletBalance, so a downstream subtract can never double-count, 77-02).
-            equity, balance_error, open_unrealized_usd = (
+            equity, balance_error, open_unrealized_usd, upnl_unreadable = (
                 await fetch_account_equity_and_upnl_usd(ctx.exchange, venue)
             )
             # since_ms=None ⇒ ENTIRE account history (OKX inception via archive
@@ -2305,6 +2305,23 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # is 0.0 on every dust/heuristic/balance-error anchor (forced above), so combine
     # sees open_unrealized_usd == 0.0 there and the core never flags — the pre-77
     # byte-identity accounts stay `complete`.
+
+    # MUST-2 (specialist-silentfailure HIGH-1/MEDIUM-1): the open-uPnL wedge
+    # FIELD was unreadable on a marked-to-market venue (Deribit session_upl
+    # absent on every summary / OKX upl absent-or-garbled while totalEq read
+    # cleanly). A wrong/renamed field would otherwise silently coalesce to a 0.0
+    # wedge — indistinguishable from a genuinely flat book — leaving the full MTM
+    # equity in the terminal, rescaling every return, and NEVER firing
+    # unrealized_pnl_in_anchor (factsheet ships `complete`). Surface
+    # unrealized_pnl_unreadable → complete_with_warnings so the wrong field name
+    # is LOUD. Gated on a TRUSTWORTHY anchor: on a balance-error / missing / dust
+    # base the wedge is already force-zeroed above and this warning would be
+    # noise (the anchor itself is the flagged problem there). Bybit/Binance never
+    # reach here as unreadable (realized-basis walletBalance has no wedge field).
+    if upnl_unreadable and not (
+        balance_error or equity is None or abs(equity) <= DUST_NAV_FLOOR
+    ):
+        meta["unrealized_pnl_unreadable"] = True
 
     # DQ-02 (v1.8): apply the flow-coverage terminus gate POST-COMBINE. When the
     # return window extends BEFORE the venue's deposit-history retention (OKX 90d /
@@ -2481,6 +2498,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # FLOW-04 (v1.8): a material open-uPnL wedge relative to a non-dust anchor
         # rides the SAME broker→CSV pre-stamp bridge → complete_with_warnings.
         "unrealized_pnl_in_anchor",
+        # MUST-2 (v1.8): the uPnL wedge FIELD was unreadable on a MTM venue —
+        # rides the SAME bridge so a wrong assumed field name is LOUD.
+        "unrealized_pnl_unreadable",
     )
     _prestamp_flags: dict[str, Any] = {"csv_source": True}
     for _flag in _BROKER_WARN_FLAGS:
