@@ -1737,6 +1737,71 @@ class TestDeriveBrokerDailies:
         )
 
     @pytest.mark.asyncio
+    async def test_fully_segmented_series_short_circuits_on_nonnan_count(
+        self,
+    ) -> None:
+        """MEDIUM-2: when the DQ-02 terminus NaNs EVERY interpretable row (an OKX
+        account whose whole realized window predates the 90d retention), the
+        'not enough history' gate must short-circuit on the count of INTERPRETABLE
+        (non-NaN) rows — the rows actually written to csv_daily_returns — not the
+        NaN-inclusive length. It stamps the clean brand-new-account 'Insufficient
+        broker history' terminal failed and does NOT hand off to the CSV run.
+
+        Mutation-honest: with the old ``len(returns) < 2`` gate the all-NaN series
+        (len ≫ 2) sails past → writes 0 rows → enqueues a CSV run that fails a
+        second time 'insufficient history'. Reverting to ``len(returns)`` drops the
+        'failed' insufficient-history stamp and enqueues instead → RED."""
+        import datetime as _dt
+        from services.job_worker import run_derive_broker_dailies_job
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+
+        def _rec(days_ago: int, pnl: float) -> dict:
+            d = (now - _dt.timedelta(days=days_ago)).date().isoformat()
+            return {
+                "exchange": "okx", "symbol": "PORTFOLIO",
+                "side": "buy" if pnl >= 0 else "sell", "price": abs(pnl),
+                "quantity": 1, "fee": 0, "fee_currency": "USDT",
+                "timestamp": f"{d}T00:00:00+00:00", "order_type": "daily_pnl",
+            }
+
+        # ALL realized days are older than the OKX 90d retention → every
+        # gap-filled row is pre-terminus → NaN'd. len(returns) ≫ 2, but
+        # notna().sum() == 0.
+        realized = [_rec(120, 100.0), _rec(110, 50.0), _rec(100, 25.0)]
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="okx", deposits=[], realized=realized,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        # No interpretable rows were written.
+        assert captured["csv_rows"] == [], (
+            f"a fully-segmented series must write no csv rows; got {captured['csv_rows']!r}"
+        )
+        # The clean short-circuit stamps a terminal insufficient-history 'failed'.
+        failed = [
+            u for u in captured["analytics_upserts"]
+            if u.get("computation_status") == "failed"
+            and "Insufficient broker history" in (u.get("computation_error") or "")
+        ]
+        assert failed, (
+            "a <2-interpretable-row series must short-circuit to the insufficient-"
+            f"history 'failed' stamp; got {captured['analytics_upserts']!r}"
+        )
+        # It must NOT hand off to the CSV analytics run (no enqueue).
+        enqueues = [
+            c for c in mock_ctx.supabase.rpc.call_args_list
+            if c.args and c.args[0] == "enqueue_compute_job"
+        ]
+        assert enqueues == [], (
+            "the short-circuit must not enqueue a doomed CSV analytics run; "
+            f"got {enqueues!r}"
+        )
+
+    @pytest.mark.asyncio
     async def test_transient_flow_fetch_error_is_retryable_not_a_segment(
         self,
     ) -> None:
@@ -1815,11 +1880,19 @@ class TestDeriveBrokerDailies:
         csv_daily_returns) must PRE-STAMP the guard flag onto strategy_analytics so
         the CSV factsheet reads complete_with_warnings — closing the P74
         broker→CSV guard-meta gap. Mutation-honest: neutering the guard-flag bridge
-        (pre-stamping only flow_coverage_incomplete) drops the flag → RED."""
+        (pre-stamping only flow_coverage_incomplete) drops the flag → RED.
+
+        MEDIUM-2 note: the fixture carries TWO interpretable (non-NaN) days plus the
+        one guarded day, so ``returns.notna().sum() == 2`` clears the insufficient-
+        history short-circuit and the account actually COMPILES a complete_with_
+        warnings factsheet — the guard-flag bridge is only meaningful on a
+        computable account (a lone interpretable day is genuine insufficient
+        history and short-circuits before any factsheet)."""
         import datetime as _dt
         from services.job_worker import run_derive_broker_dailies_job
 
         now = _dt.datetime.now(_dt.timezone.utc)
+        d0 = (now - _dt.timedelta(days=4)).date().isoformat()
         d1 = (now - _dt.timedelta(days=3)).date().isoformat()
         d2 = (now - _dt.timedelta(days=2)).date().isoformat()
 
@@ -1831,11 +1904,13 @@ class TestDeriveBrokerDailies:
                 "timestamp": f"{day}T00:00:00+00:00", "order_type": "daily_pnl",
             }
 
-        # anchor 5000 + realized [+800, +15000] reconstructs NAV_{d1}=80000; a
-        # -90000 USDT withdrawal on d2 has |F|=90000 >= NAV → flow_dominated_guard
-        # (the same LTP068-shaped dominating-withdrawal fixture, proven in
-        # test_derive_broker_dailies_dualmode).
-        realized = [_rec(d1, 800.0), _rec(d2, 15000.0)]
+        # anchor 5000 + realized [+500, +800, +15000] reconstructs positive NAV on
+        # d0/d1 (both interpretable); a -90000 USDT withdrawal on d2 has |F|=90000
+        # >= NAV → flow_dominated_guard on d2 only (the LTP068-shaped dominating-
+        # withdrawal fixture, proven in test_derive_broker_dailies_dualmode). Two
+        # clean days keep the account above the MEDIUM-2 non-NaN insufficient-
+        # history floor so the guard-flag bridge genuinely fires.
+        realized = [_rec(d0, 500.0), _rec(d1, 800.0), _rec(d2, 15000.0)]
         d2_ms = int(
             _dt.datetime.fromisoformat(d2 + "T00:00:00+00:00").timestamp() * 1000
         )

@@ -2325,9 +2325,16 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         if _coverage_flags.get("flow_coverage_incomplete"):
             meta["flow_coverage_incomplete"] = True
 
-    if len(returns) < 2:
+    if int(returns.notna().sum()) < 2:
         # Brand-new / inactive account: not enough history to compile a
-        # factsheet (compute_all_metrics needs >=2 days).
+        # factsheet (compute_all_metrics needs >=2 days). MEDIUM-2: gate on the
+        # count of INTERPRETABLE (non-NaN) rows, not the NaN-inclusive length —
+        # after the DQ-01 guards and the DQ-02 terminus segmentation the series may
+        # still CONTAIN NaN rows (guarded / pre-terminus days), and only the
+        # non-NaN rows are actually written to csv_daily_returns (74-04 NaN policy).
+        # A NaN-inclusive `len(returns) >= 2` would pass here then write < 2 real
+        # rows → a confusing two-step "insufficient history" CSV failure instead of
+        # this clean brand-new-account short-circuit.
         if is_key_mode:
             # Key-mode has no per-key analytics row to stamp (per-key reads are
             # Phase 36) — log and return DONE without touching strategy_analytics.
