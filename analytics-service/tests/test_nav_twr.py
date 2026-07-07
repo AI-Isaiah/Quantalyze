@@ -643,6 +643,59 @@ def test_cumulative_twr_deleted_no_two_semantics() -> None:
         from services.nav_twr import cumulative_twr  # noqa: F401
 
 
+def test_twr_chain_broken_rides_registry() -> None:
+    """§6.2 by-construction: ``twr_chain_broken`` is in ``NAV_TWR_GUARD_KEYS``
+    and the existing subset pin still holds, so it propagates through every
+    downstream registry (transforms._merge_status_meta, the analytics_runner
+    lift, the job_worker pre-stamp) with NO consumer-file edits. Removing the
+    registry append flips this RED."""
+    assert "twr_chain_broken" in NAV_TWR_GUARD_KEYS
+    assert set(NAV_TWR_GUARD_KEYS) <= set(nav_twr_mod.NavTWRMeta.__annotations__)
+
+
+def test_core_sets_twr_chain_broken_on_interior_negative_nav() -> None:
+    """A mid-history negative reconstructed NAV (guard-NaN flanked by valid days
+    on BOTH sides) surfaces ``twr_chain_broken: True`` AND rides
+    ``complete_with_warnings`` — the hint was ALREADY warnings via
+    ``negative_nav_guard``, so the key is additive and the status class does not
+    change. The SAME cumulative_twr_segmented decides brokenness (one detector)."""
+    # nav backward roll = [100000, 0, 80000, 90000, 95000]; day-2 prev NAV == 0.
+    ret, meta = reconstruct_nav_and_twr(
+        _pnl([0.0, -100000.0, 80000.0, 10000.0, 5000.0]), anchor_nav=95000.0
+    )
+    assert bool(ret.isna().iloc[2])          # the interior guarded day
+    assert not bool(ret.isna().iloc[1])      # valid return before the break
+    assert not bool(ret.isna().iloc[4])      # valid return after the break
+    assert meta.get("negative_nav_guard") is True
+    assert meta.get("twr_chain_broken") is True
+    assert meta["computation_status_hint"] == "complete_with_warnings"
+
+
+def test_clean_fixture_has_no_twr_chain_broken() -> None:
+    """SC-4 clean path: a no-guard fixture's meta is byte/status-identical to
+    today — NO ``twr_chain_broken`` key, status ``complete``."""
+    _ret, meta = reconstruct_nav_and_twr(
+        _pnl([100.0, -50.0, 25.0]), anchor_nav=10_000.0
+    )
+    assert "twr_chain_broken" not in meta
+    assert meta["computation_status_hint"] == "complete"
+
+
+def test_leading_day0_guard_has_no_twr_chain_broken() -> None:
+    """A day-0-guard-only fixture (leading NaN, no interior break) flags the
+    day-0 guard exactly as today but carries NO ``twr_chain_broken`` key —
+    leading NaN is not an interior break. A leading-NaN fixture gaining the flag
+    flips this RED (clean_and_leading_unchanged)."""
+    ret, meta = reconstruct_nav_and_twr(
+        _pnl([60000.0, 100.0, 50.0, 25.0]), anchor_nav=50175.0
+    )
+    assert bool(ret.isna().iloc[0])              # day-0 guard (leading NaN)
+    assert not bool(ret.isna().iloc[1:].any())   # every later day valid
+    assert meta.get("negative_nav_guard") is True
+    assert "twr_chain_broken" not in meta
+    assert meta["computation_status_hint"] == "complete_with_warnings"
+
+
 # ---------------------------------------------------------------------------
 # DQ-02 — identity residual (construction-sanity mutation detector)
 # ---------------------------------------------------------------------------
@@ -1257,7 +1310,8 @@ def test_nav_twr_guard_keys_are_declared_and_single_sourced() -> None:
     assert "balance_error" not in NAV_TWR_GUARD_KEYS
     # No duplicate keys in the single source.
     assert len(NAV_TWR_GUARD_KEYS) == len(set(NAV_TWR_GUARD_KEYS))
-    # The six v1.8 warn flags are all present (regression pin on the closed set).
+    # The v1.8 warn flags + the v1.9 DQ-03 chain-break key are all present
+    # (regression pin on the closed set).
     assert set(NAV_TWR_GUARD_KEYS) == {
         "dust_nav_guard",
         "negative_nav_guard",
@@ -1265,6 +1319,7 @@ def test_nav_twr_guard_keys_are_declared_and_single_sourced() -> None:
         "flow_coverage_incomplete",
         "unrealized_pnl_in_anchor",
         "unrealized_pnl_unreadable",
+        "twr_chain_broken",
     }
 
 

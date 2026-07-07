@@ -130,6 +130,12 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     # pattern as flow_coverage_incomplete — so a wrong assumed field name is
     # LOUD (complete_with_warnings) rather than a silent 0-wedge overstatement.
     unrealized_pnl_unreadable: bool
+    # DQ-03 (§6.2) — an INTERIOR chain break: the cumulative figure compounds
+    # ONLY the maximal contiguous post-break suffix (never bridges the gap). Set
+    # from cumulative_twr_segmented's own break-detection (one detector) and
+    # rides the SAME complete_with_warnings channel as the DQ-01/DQ-02 guards;
+    # NO parallel status.
+    twr_chain_broken: bool
 
 
 # SHOULD-1 (specialist-types): the ONE source of truth for the additive
@@ -149,6 +155,7 @@ NAV_TWR_GUARD_KEYS: tuple[str, ...] = (
     "flow_coverage_incomplete",
     "unrealized_pnl_in_anchor",
     "unrealized_pnl_unreadable",
+    "twr_chain_broken",
 )
 
 
@@ -456,6 +463,8 @@ def _build_nav_meta(flags: Mapping[str, bool]) -> NavTWRMeta:
         meta["flow_coverage_incomplete"] = True
     if flags.get("unrealized_pnl_in_anchor"):
         meta["unrealized_pnl_in_anchor"] = True
+    if flags.get("twr_chain_broken"):
+        meta["twr_chain_broken"] = True
     return meta
 
 
@@ -742,6 +751,13 @@ def reconstruct_nav_and_twr(
         terminal_nav, reconstructed_start, daily_pnl, flows_by_day
     )
     returns, flags = chain_linked_twr(nav, daily_pnl, flows_by_day)
+    # DQ-03 (§6.2): the SAME function that computes the honest cumulative decides
+    # brokenness — ONE break-detection semantics, no forked detector. An INTERIOR
+    # break (a guard-NaN flanked by valid returns) merges {"twr_chain_broken":
+    # True}; leading/trailing-only NaN and the clean path merge {} (byte/status-
+    # identical). The float cumulative is discarded here — the core emits the
+    # daily series; the cumulative consumer is metrics (Task 3).
+    flags = {**flags, **cumulative_twr_segmented(returns)[1]}
     # FLOW-04 terminal uPnL wedge materiality (Q5). Evaluate the ratio ONLY on a
     # non-dust anchor — a dust/near-zero base makes |uPnL|/anchor meaningless (and
     # divide-by-tiny explodes it into a false positive); a dust NAV is already
