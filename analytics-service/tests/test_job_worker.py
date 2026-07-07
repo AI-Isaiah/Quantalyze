@@ -1582,6 +1582,114 @@ class TestDeriveBrokerDailies:
         assert captured["open_unrealized_usd"] == 0.0
 
     @pytest.mark.asyncio
+    async def test_ccxt_flow_price_index_pass2_coingecko_fallback_same_day(
+        self,
+    ) -> None:
+        """MUST-1 (specialist-tests C1): a non-``{ccy}/USDT`` coin the primary
+        venue does NOT list (``ccxt.BadSymbol`` on Pass 1) is priced via the
+        Pass-2 token_price_history/CoinGecko fallback — the previously
+        ZERO-coverage branch of ``_resolve_ccxt_flow_price_index``. Proves the
+        full wire: fetch → Pass-1 BadSymbol → Pass-2 CoinGecko → pure valuer →
+        external_flows, at the flow's OWN UTC day.
+
+        Mutation-honest on the DAY KEY: the flow lands at 23:59:59 UTC on
+        ``day`` (a just-before-midnight boundary). CoinGecko returns the correct
+        close on ``day`` AND a decoy close on ``day+1``. The builder keys the
+        price by ``epoch_ms_to_iso_day`` while the pure valuer keys the flow by
+        ``_row_utc_day`` — if those two helpers diverged at the boundary (a tz /
+        ms mis-key), the lookup would either MISS (→ NavReconstructionError, no
+        flow) or pick the ``day+1`` decoy (→ 900 not 300). The exact-300
+        assertion reddens on both. If Pass 2 is neutered (fallback removed), the
+        coin is unpriced → the job FAILS and ``external_flows`` is never
+        captured → also RED.
+        """
+        import datetime as _dt
+        from services.dateday import epoch_ms_to_iso_day
+        from services.job_worker import run_derive_broker_dailies_job
+
+        day = "2026-06-01"
+        next_day = "2026-06-02"
+        # A just-before-midnight UTC instant: the day-boundary case where a
+        # tz/ms mis-key between the two day helpers would surface.
+        day_ms = int(
+            _dt.datetime.fromisoformat(day + "T23:59:59.500+00:00").timestamp()
+            * 1000
+        )
+        # Sanity: the price-source key helper and the flow key helper agree on
+        # this boundary instant (the invariant the builder relies on).
+        from services.deribit_txn import _row_utc_day
+        assert epoch_ms_to_iso_day(day_ms) == _row_utc_day(day_ms) == day
+
+        deposits = [
+            {"id": "d1", "type": "deposit", "currency": "PEPE",
+             "amount": 1_000_000.0, "timestamp": day_ms, "internal": False},
+        ]
+        # No OHLCV entry for PEPE → Pass 1 raises ccxt.BadSymbol → Pass 2 runs.
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="binance", deposits=deposits, ohlcv_by_symbol={},
+        )
+        # Pass-2 sources: empty token_price_history cache forces the CoinGecko
+        # leg; CoinGecko returns the correct same-day close plus a next-day decoy.
+        stack.enter_context(patch(
+            "services.equity_reconstruction._read_cached_prices",
+            new=AsyncMock(return_value={}),
+        ))
+        stack.enter_context(patch(
+            "services.equity_reconstruction._fetch_coingecko_daily_closes",
+            new=AsyncMock(return_value=[(day, 0.0003), (next_day, 0.0009)]),
+        ))
+        stack.enter_context(patch(
+            "services.equity_reconstruction._cache_coingecko_prices",
+            new=AsyncMock(),
+        ))
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE, (
+            f"Pass-2-priced flow must complete, not fail; got {result!r}"
+        )
+        flows = captured["external_flows"]
+        assert len(flows) == 1, f"expected one collapsed daily flow, got {flows}"
+        assert flows[0].utc_day_iso == day
+        # 1_000_000 PEPE * 0.0003 (day close) = 300.0 — NOT the 900 decoy.
+        assert flows[0].usd_signed == pytest.approx(300.0), (
+            "Pass-2 flow must be valued at the flow's OWN-UTC-day CoinGecko "
+            f"close (day-key alignment); got {flows[0].usd_signed}"
+        )
+        # Pass 1 was attempted (BadSymbol) before the fallback.
+        assert "PEPE/USDT" in captured["ohlcv_calls"]
+
+    def test_ccxt_flow_day_key_helpers_agree_on_utc_boundary(self) -> None:
+        """MUST-1 alignment pin: ``_resolve_ccxt_flow_price_index`` keys the
+        price by ``epoch_ms_to_iso_day`` but the pure valuer keys the flow by
+        ``deribit_txn._row_utc_day``. For the SAME epoch-ms instant the two MUST
+        produce the identical 'YYYY-MM-DD' or a Pass-2-priced coin is mis-keyed
+        (silent wrong-day price OR fail-loud unpriced). Pin the equivalence
+        across day-boundary instants so a future edit to either helper that
+        diverges them reddens HERE, not in production.
+        """
+        import datetime as _dt
+        from services.dateday import epoch_ms_to_iso_day
+        from services.deribit_txn import _row_utc_day
+
+        instants = [
+            "2026-06-01T00:00:00+00:00",       # midnight (day start)
+            "2026-06-01T00:00:00.001+00:00",   # 1ms past midnight
+            "2026-06-01T12:00:00+00:00",       # midday
+            "2026-06-01T23:59:59.999+00:00",   # last ms before next midnight
+            "2026-02-28T23:59:59.500+00:00",   # month boundary
+            "2025-12-31T23:59:59.999+00:00",   # year boundary
+        ]
+        for iso in instants:
+            ts_ms = int(_dt.datetime.fromisoformat(iso).timestamp() * 1000)
+            assert epoch_ms_to_iso_day(ts_ms) == _row_utc_day(ts_ms), (
+                f"day-key helpers diverge at {iso}: "
+                f"epoch_ms_to_iso_day={epoch_ms_to_iso_day(ts_ms)!r} vs "
+                f"_row_utc_day={_row_utc_day(ts_ms)!r}"
+            )
+
+    @pytest.mark.asyncio
     async def test_ccxt_branch_stablecoin_only_needs_no_price_source(self) -> None:
         """A stablecoin-only account values every flow at 1.0 and NEVER touches
         the OHLCV/CoinGecko price source (no non-stable currency to resolve)."""
