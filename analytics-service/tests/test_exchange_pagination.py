@@ -442,3 +442,48 @@ async def test_transfers_boundary_flow_not_double_counted() -> None:
     )
     # Every transfer appears exactly once — no over-fetch, none lost.
     assert sorted(ids) == ["e0", "e2", "eB"], f"expected each flow once; got {ids}"
+
+
+async def test_transfers_page_ceiling_logs_warning_not_silent_truncation(
+    caplog,
+) -> None:
+    """NIT-1 (specialist-silentfailure): if a single 90-day window genuinely
+    exceeds the ~50k-row (1000-page) safety ceiling, the inner loop falls
+    through to the next window — a SILENT truncation of transfer history, the
+    exact direction this module otherwise guards hard. A cursor-advancing,
+    never-empty, never-window-end fetcher forces the ceiling; the run must emit a
+    LOUD warning (never a silent drop) and still return the collected rows.
+
+    Mutation-honest: removing the for/else warning branch leaves caplog empty →
+    RED. No raw amount appears in the log (account-size leak discipline).
+    """
+    import logging
+
+    window_start_ms = _WINDOW_START_MS
+    now_ms = window_start_ms + 89 * 24 * 60 * 60 * 1000  # ONE 90-day window
+    step = 1000  # ms the cursor advances per page (well within the window)
+
+    async def _never_terminating(_symbol, since_ms, _limit):
+        # Always a non-empty page whose max timestamp ADVANCES the cursor and
+        # never reaches window_end → no natural break → the ceiling triggers.
+        return [{"id": f"r{since_ms}", "timestamp": since_ms + step,
+                 "currency": "USDT", "amount": 1.0}]
+
+    exchange = MagicMock()
+    exchange.rateLimit = None  # _rate_limit_sleep no-ops → fast
+    exchange.fetch_deposits = _never_terminating
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.ccxt_flow_fetch"):
+        rows = await fetch_ccxt_transfers(exchange, "deposits", window_start_ms, now_ms)
+
+    ceiling_warnings = [
+        r for r in caplog.records if "ceiling" in r.getMessage()
+    ]
+    assert ceiling_warnings, (
+        "hitting the 1000-page ceiling must log a LOUD warning, never silently "
+        "truncate transfer history"
+    )
+    # The collected rows (partial) are still returned — never raised, never []'d.
+    assert len(rows) == 1000, f"expected the ceiling's worth of rows; got {len(rows)}"
+    # Account-size leak discipline: no raw USD amount in the warning message.
+    assert "1.0" not in ceiling_warnings[0].getMessage()

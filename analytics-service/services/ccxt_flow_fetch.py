@@ -121,6 +121,22 @@ async def fetch_ccxt_transfers(
                 break
             inner_cursor = max_ts + 1
             await _rate_limit_sleep(exchange)
+        else:
+            # NIT-1 (specialist-silentfailure): the 1000-iteration safety ceiling
+            # (~50k rows/window) was reached WITHOUT a natural termination (empty
+            # page / cursor-non-advance / window-end). This is astronomically
+            # unlikely for a real account, but silently falling through to the
+            # next window would TRUNCATE transfer history with no signal — the
+            # double-count-vs-truncation direction this module otherwise guards
+            # hard. Log LOUD so a genuine ceiling hit is never a silent drop. No
+            # raw amounts logged (account-size leak); only the window + count.
+            logger.warning(
+                "fetch_ccxt_transfers hit the %d-page ceiling for kind=%s "
+                "window_start_ms=%d — transfer history for this window may be "
+                "TRUNCATED (collected=%d rows so far); investigate before "
+                "trusting the flow-aware TWR base for this account",
+                1000, kind, window_start, len(all_rows),
+            )
         window_start += window_ms
         await _rate_limit_sleep(exchange)
     return all_rows
