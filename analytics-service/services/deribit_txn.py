@@ -43,7 +43,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Any
+from typing import AbstractSet, Any
 
 # Pure, I/O-free venue-agnostic dated-flow contract (Plan 75-01). Importing it
 # here keeps the module network-free — external_flows.py imports stdlib + typing
@@ -98,11 +98,16 @@ _FUTURE_EXPIRY_RE: re.Pattern[str] = re.compile(r"-\d{1,2}[A-Z]{3}\d{2}$")
 # Deribit, so ``_row_is_linear`` never encounters it).
 _LINEAR_CURRENCIES: frozenset[str] = USD_FAMILY
 
-# The ONLY coin-margined (inverse) settlement currencies on Deribit — the sole
-# currencies whose coin `change`/equity is validly multiplied by a USD index.
-# A non-linear, non-inverse currency (e.g. a tokenized-fund wallet like BUIDL/
-# USYC) must FAIL LOUD rather than be blindly index-multiplied: we have no
-# evidence it is coin-margined, and a wrong multiply silently mis-scales cash.
+# The STATIC FLOOR of coin-margined (inverse) settlement currencies on Deribit —
+# currencies known-resolvable to a USD index WITHOUT a probe. This is the
+# degraded-mode default of the injected ``indexable_currencies`` set (§7.2), NEVER
+# the ceiling: the I/O layer probes ``{ccy}_usd`` per enumerated currency and
+# threads the union (floor ∪ probed) into the census consumers below, so SOL heals
+# on the existing USD-space path once its ``sol_usd`` index resolves. A currency
+# absent from the consulted set (e.g. a tokenized-fund wallet like BUIDL/USYC, or
+# a currency whose probe raises) must FAIL LOUD rather than be blindly index-
+# multiplied: we have no evidence it is coin-margined, and a wrong multiply
+# silently mis-scales cash.
 _INVERSE_CURRENCIES: frozenset[str] = frozenset({"BTC", "ETH"})
 
 # MUST be disjoint: both converters check linear FIRST, so a currency in both
@@ -134,7 +139,11 @@ def classify_instrument(instrument_name: str) -> str:
     return "unknown"
 
 
-def classify_instrument_settlement(instrument_name: str) -> tuple[bool, str]:
+def classify_instrument_settlement(
+    instrument_name: str,
+    *,
+    indexable_currencies: AbstractSet[str] = _INVERSE_CURRENCIES,
+) -> tuple[bool, str]:
     """Return ``(is_coin_settled, base_currency)`` for a Deribit instrument by
     name — the single source of the coin-vs-USD settlement decision, shared by
     the ledger cash converter (``txn_change_to_usd`` via ``_row_is_linear``) and
@@ -157,10 +166,10 @@ def classify_instrument_settlement(instrument_name: str) -> tuple[bool, str]:
     if any(marker in name for marker in _LINEAR_MARGIN_MARKERS):
         return (False, "")
     base = name.split("-", 1)[0].split("_", 1)[0]
-    if base not in _INVERSE_CURRENCIES:
+    if base not in indexable_currencies:
         raise ValueError(
             f"deribit instrument {name!r}: coin-settled base {base!r} is not a "
-            f"known coin-margined currency {sorted(_INVERSE_CURRENCIES)}; "
+            f"known coin-margined currency {sorted(indexable_currencies)}; "
             "refusing to blind-multiply an unknown coin by a USD index"
         )
     return (True, base)
@@ -186,7 +195,10 @@ def _row_is_linear(row: Mapping[str, Any]) -> bool:
 
 
 def txn_change_to_usd(
-    row: Mapping[str, Any], *, fallback_index: float | None = None
+    row: Mapping[str, Any],
+    *,
+    fallback_index: float | None = None,
+    indexable_currencies: AbstractSet[str] = _INVERSE_CURRENCIES,
 ) -> float:
     """Convert a transaction-log row's ``change`` (cash-balance delta, FEE-
     INCLUSIVE — the balance-reconciling field) to signed USD.
@@ -211,12 +223,12 @@ def txn_change_to_usd(
     # currency reaching here (e.g. a tokenized-fund wallet) has no basis for an
     # index multiply — fail loud rather than silently mis-scale.
     currency = str(row.get("currency", "")).upper()
-    if currency not in _INVERSE_CURRENCIES:
+    if currency not in indexable_currencies:
         raise LedgerValuationError(
             f"Deribit row id={row.get('id')!r} "
             f"instrument={row.get('instrument_name')!r} type={row.get('type')!r} "
             f"settles in {currency!r} which is neither USD-family (linear) nor a "
-            f"known coin-margined currency {sorted(_INVERSE_CURRENCIES)}; refusing "
+            f"known coin-margined currency {sorted(indexable_currencies)}; refusing "
             "to blind-multiply an unknown currency by a USD index"
         )
     index_price = row.get("index_price")
@@ -465,6 +477,8 @@ def _row_utc_instant(ts: Any) -> float:
 
 def _day_ccy_own_index(
     rows: Sequence[Mapping[str, Any]],
+    *,
+    indexable_currencies: AbstractSet[str] = _INVERSE_CURRENCIES,
 ) -> dict[tuple[str, str], float]:
     """Build the same-day per-(UTC-day, currency) event index from the batch's
     OWN index-bearing rows — Pass 1 of ``txn_rows_to_daily_records``, factored so
@@ -495,7 +509,7 @@ def _day_ccy_own_index(
         if index_price is None:
             continue
         ccy = str(row.get("currency", "")).upper()
-        if ccy not in _INVERSE_CURRENCIES:
+        if ccy not in indexable_currencies:
             continue
         try:
             day = _row_utc_day(row.get("timestamp"))
@@ -519,6 +533,8 @@ def _day_ccy_own_index(
 
 def inverse_days_needing_index(
     rows: Sequence[Mapping[str, Any]],
+    *,
+    indexable_currencies: AbstractSet[str] = _INVERSE_CURRENCIES,
 ) -> set[tuple[str, str]]:
     """The ``(UTC-day ISO, CURRENCY)`` pairs a settlement-index fetch must cover:
     days on which an INVERSE (coin-margined) row that will be VALUED against a
@@ -548,20 +564,20 @@ def inverse_days_needing_index(
     planner). Excludes zero-change rows, linear currencies, and any day already
     carrying an own index for that currency.
     """
-    own_index = _day_ccy_own_index(rows)
+    own_index = _day_ccy_own_index(rows, indexable_currencies=indexable_currencies)
     needed: set[tuple[str, str]] = set()
     for row in rows:
         if not isinstance(row, Mapping):
             continue
         # Finding C1: BOTH cash-bearing rows AND inverse external-flow rows are
         # valued against a same-day index, so BOTH quiet-day kinds need a fetch.
-        # (The linear-flow case is filtered out by the _INVERSE_CURRENCIES guard
+        # (The linear-flow case is filtered out by the indexable_currencies guard
         # below — a USD-family flow never consumes an index.)
         row_type = str(row.get("type", ""))
         if row_type not in CASH_BEARING_TYPES and row_type not in _EXTERNAL_FLOW_TYPES:
             continue
         ccy = str(row.get("currency", "")).upper()
-        if ccy not in _INVERSE_CURRENCIES:
+        if ccy not in indexable_currencies:
             continue
         raw_change = row.get("change", _MISSING)
         if raw_change is _MISSING:

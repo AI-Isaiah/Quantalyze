@@ -1146,3 +1146,126 @@ def test_static_disjointness_retained() -> None:
     """The import-time floor still holds: USD-family ∩ inverse == ∅ (the static
     assert now covers ``USD_FAMILY`` since ``_LINEAR_CURRENCIES`` aliases it)."""
     assert not (_LINEAR_CURRENCIES & _INVERSE_CURRENCIES)
+
+
+# ---------------------------------------------------------------------------
+# Plan 79-04 Task 1 — indexable_currencies injection across the 4 deribit_txn
+# census consumers (§7.1/§7.2). Default = the static floor (byte-identical);
+# with SOL injected the key-1 crash class dies at the function level.
+# ---------------------------------------------------------------------------
+
+_SOL_FLOOR = frozenset({"BTC", "ETH", "SOL"})
+
+
+def test_constant_retained_as_static_floor() -> None:
+    """The module constant is retained UNCHANGED as the static floor — the
+    degraded-mode default, never the ceiling. Mutation-honest: changing the
+    default set flips every default_byte_identical pin below."""
+    assert _INVERSE_CURRENCIES == frozenset({"BTC", "ETH"})
+
+
+def test_txn_change_to_usd_sol_refuses_by_default() -> None:
+    """default_byte_identical: WITHOUT the kwarg, a SOL row still refuses loudly
+    (the static floor is BTC/ETH) — every existing caller byte-identical."""
+    row = {
+        "type": "settlement",
+        "instrument_name": "SOL-PERPETUAL",
+        "currency": "SOL",
+        "change": 5.0,
+        "index_price": 150.0,
+        "id": 91,
+    }
+    with pytest.raises(LedgerValuationError) as exc:
+        txn_change_to_usd(row)
+    assert "SOL" in str(exc.value)
+
+
+def test_txn_change_to_usd_values_sol_when_injected() -> None:
+    """sol_injected (a): with SOL in ``indexable_currencies`` the SAME multiply
+    fires — ``change × index_price``, no new conversion path. Mutation-honest:
+    testing against the module constant instead of the parameter reddens this."""
+    row = {
+        "type": "settlement",
+        "instrument_name": "SOL-PERPETUAL",
+        "currency": "SOL",
+        "change": 5.0,
+        "index_price": 150.0,
+        "id": 91,
+    }
+    # 5.0 * 150.0 == 750.0
+    assert txn_change_to_usd(
+        row, indexable_currencies=_SOL_FLOOR
+    ) == pytest.approx(750.0, abs=1e-12)
+
+
+def test_txn_change_to_usd_buidl_still_refuses_when_sol_injected() -> None:
+    """sol_injected (e): a genuinely un-indexable currency (BUIDL) STILL refuses
+    even with SOL injected — the refusal now fires only for currencies actually
+    absent from the consulted set (the silent-mis-scale class the module fights).
+    Mutation-honest: letting BUIDL through flips this red."""
+    row = {
+        "type": "settlement",
+        "instrument_name": "BUIDL-SOMETHING",
+        "currency": "BUIDL",
+        "change": 5.0,
+        "index_price": 1.0,
+        "id": 92,
+    }
+    with pytest.raises(LedgerValuationError) as exc:
+        txn_change_to_usd(row, indexable_currencies=_SOL_FLOOR)
+    assert "BUIDL" in str(exc.value)
+    # The message names the ACTUAL set consulted (now includes SOL).
+    assert "SOL" in str(exc.value)
+
+
+def test_classify_instrument_settlement_sol_by_default_refuses() -> None:
+    """default_byte_identical: SOL-PERPETUAL still raises without the kwarg."""
+    from services.deribit_txn import classify_instrument_settlement
+
+    with pytest.raises(ValueError):
+        classify_instrument_settlement("SOL-PERPETUAL")
+
+
+def test_classify_instrument_settlement_sol_when_injected() -> None:
+    """sol_injected (b): classify_instrument_settlement('SOL-PERPETUAL') returns
+    (True, 'SOL') under injection."""
+    from services.deribit_txn import classify_instrument_settlement
+
+    assert classify_instrument_settlement(
+        "SOL-PERPETUAL", indexable_currencies=_SOL_FLOOR
+    ) == (True, "SOL")
+
+
+def test_day_ccy_own_index_seeds_sol_when_injected() -> None:
+    """sol_injected (c): _day_ccy_own_index seeds a (day, 'SOL') entry from a SOL
+    index-bearing row only under injection; skips it by default."""
+    from services.deribit_txn import _day_ccy_own_index
+
+    sol_row = {
+        "type": "settlement",
+        "instrument_name": "SOL-PERPETUAL",
+        "currency": "SOL",
+        "change": 0.0,
+        "index_price": 150.0,
+        "timestamp": _ms("2026-01-15T20:00:00+00:00"),
+        "id": 1,
+    }
+    assert _day_ccy_own_index([sol_row]) == {}  # default: SOL skipped
+    seeded = _day_ccy_own_index([sol_row], indexable_currencies=_SOL_FLOOR)
+    assert seeded[("2026-01-15", "SOL")] == pytest.approx(150.0)
+
+
+def test_inverse_days_needing_index_includes_sol_when_injected() -> None:
+    """sol_injected (d): inverse_days_needing_index plans a quiet SOL day only
+    under injection; the internal _day_ccy_own_index consults the SAME set so the
+    two never diverge (the :541-545 'all three never disagree' pin)."""
+    fee = {
+        "type": "negative_balance_fee",
+        "currency": "SOL",
+        "change": -0.1,
+        "timestamp": _ms("2026-01-15T23:00:00+00:00"),
+        "id": 3,
+    }
+    assert inverse_days_needing_index([fee]) == set()  # default: SOL skipped
+    needed = inverse_days_needing_index([fee], indexable_currencies=_SOL_FLOOR)
+    assert ("2026-01-15", "SOL") in needed
