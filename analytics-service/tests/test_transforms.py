@@ -184,6 +184,51 @@ class TestTradesToDailyReturnsWithStatus:
         assert "unrealized_pnl_in_anchor" not in meta2
         assert meta2["computation_status_hint"] == "complete"
 
+    def test_twr_chain_broken_carried_through_merge_status_meta(self):
+        """DQ-03 (§6.2): the core's ``twr_chain_broken`` INTERIOR-chain-break flag
+        must survive the ``_merge_status_meta`` boundary onto the returned meta so
+        the analytics_runner lift + job_worker pre-stamp (both iterate the ONE
+        shared ``NAV_TWR_GUARD_KEYS``) carry it into ``data_quality_flags`` by
+        construction. The break detection lives in ONE place (the core's
+        ``cumulative_twr_segmented``); the transforms seam only rides the flag
+        through additively + folds it into ``complete_with_warnings``.
+
+        The STATUS already passes (``guard_fired`` iterates NAV_TWR_GUARD_KEYS,
+        which includes ``twr_chain_broken``); pre-fix the individual KEY was
+        silently DROPPED by the explicit carry-through allowlist. Mutation-honest:
+        reverting the ``_merge_status_meta`` carry-through line drops the key (the
+        second assert reddens) while the status assert stays green."""
+        import services.transforms as transforms_mod
+
+        # A core NavTWRMeta for an interior chain break (a guard-NaN day flanked by
+        # valid returns): the single-source break detector already fired.
+        nav_meta = {
+            "computation_status_hint": "complete_with_warnings",
+            "twr_chain_broken": True,
+        }
+        meta = transforms_mod._merge_status_meta(
+            nav_meta, used_heuristic_capital=False, balance_error=False
+        )
+        assert meta["computation_status_hint"] == "complete_with_warnings", (
+            "an interior chain break is a warn condition; guard_fired iterates "
+            f"NAV_TWR_GUARD_KEYS so status must promote; got {meta!r}"
+        )
+        assert meta.get("twr_chain_broken") is True, (
+            "the core's twr_chain_broken flag must be carried THROUGH the "
+            "_merge_status_meta boundary so the runner lift / job_worker "
+            f"pre-stamp reach data_quality_flags by construction; got {meta!r}"
+        )
+
+        # Control: a clean series (no break) never sets the flag and stays
+        # `complete`, preserving the SC-4 / Phase 74 byte-identity accounts.
+        meta_clean = transforms_mod._merge_status_meta(
+            {"computation_status_hint": "complete"},
+            used_heuristic_capital=False,
+            balance_error=False,
+        )
+        assert "twr_chain_broken" not in meta_clean
+        assert meta_clean["computation_status_hint"] == "complete"
+
     def test_balance_error_propagates_to_warnings(self):
         """The audit's headline case: exchange API failed, caller
         passes balance_error=True. Even though account_balance is also

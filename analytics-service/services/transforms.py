@@ -323,6 +323,8 @@ def _merge_status_meta(
         meta["unrealized_pnl_in_anchor"] = True
     if nav_meta.get("unrealized_pnl_unreadable"):
         meta["unrealized_pnl_unreadable"] = True
+    if nav_meta.get("twr_chain_broken"):
+        meta["twr_chain_broken"] = True
     return meta
 
 
