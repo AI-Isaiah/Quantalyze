@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
 from .transforms import downsample_series, cap_data_points
+from .nav_twr import cumulative_twr_segmented, _last_interior_break_suffix
 
 logger = logging.getLogger("quantalyze.analytics.metrics")
 
@@ -460,12 +461,14 @@ def compute_all_metrics(
     returns_for_chart = returns.fillna(0).clip(lower=_LOG_RETURN_FLOOR)
 
     # Core metrics (safe_float handles NaN/Inf from quantstats)
-    # NEW-C02-05: cumulative_return scalar uses raw returns (NaN-dropped, same
-    # as cagr/sharpe/sortino) so all headline KPIs share one NaN policy.
-    # returns_for_chart (fillna(0)) is chart-only — it bridges gap days to keep
-    # the equity curve continuous; the ranking scalar must not use it.
+    # NEW-C02-05 / DQ-03 (§6.2): the headline cumulative_return NO LONGER bridges
+    # across an INTERIOR chain break. It compounds ONLY the maximal contiguous
+    # suffix after the last break via nav_twr.cumulative_twr_segmented (the ONE
+    # boundary source; suffix-honest, bit-identical Pi(1+r)-1 on the clean path).
+    # returns_for_chart (fillna(0)) stays chart-only — it bridges gap days to
+    # keep the equity curve continuous; the ranking scalar must not use it.
     cumulative = (1 + returns_for_chart).cumprod()
-    total_return = _safe_float((1 + returns.dropna()).prod() - 1)
+    total_return = _safe_float(cumulative_twr_segmented(returns)[0])
     # TWR-05 (founder decision 2026-07-05): CAGR annualizes on the CALENDAR
     # clock — years = true elapsed-calendar-days / 365 from the DatetimeIndex
     # span — NOT on `periods_per_year` (252). A 24/7 crypto series posts a
@@ -481,9 +484,15 @@ def compute_all_metrics(
     # basis had the same shape) tracked for a DQ short-window flag behind the
     # Phase 78 parity gate — deliberately not point-fixed here because a
     # CAGR-status change is factsheet-wide blast radius (roadmap Pitfall #12).
-    # This reuses `total_return` (== comp(returns)) so the geometric base is
-    # exactly the value the module already computed.
-    _cagr_index = returns.dropna().index
+    # This reuses `total_return` (== the segmented suffix compound) so the
+    # geometric base is exactly the value the module already computed.
+    # DQ-03 (§6.2): the annualization window is the SAME days total_return
+    # compounds — the post-last-break suffix from the ONE shared
+    # nav_twr._last_interior_break_suffix source (NOT the full dropna span), so
+    # a broken-chain account annualizes over its trustworthy segment, never a
+    # mixed-basis fabrication. Clean series: the suffix IS the whole series, so
+    # this is byte-identical to the old `returns.dropna().index`.
+    _cagr_index = _last_interior_break_suffix(returns).index
     if total_return is None or len(_cagr_index) < 2:
         cagr = _safe_float(float("nan"))
     else:

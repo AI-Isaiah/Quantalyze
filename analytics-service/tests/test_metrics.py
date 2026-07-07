@@ -137,6 +137,89 @@ class TestSanitizeMetrics:
         assert result == data
 
 
+class TestSegmentedCumulativeMetrics:
+    """DQ-03 (§6): the headline cumulative_return + CAGR are suffix-honest and
+    derive from the ONE shared nav_twr boundary source (no metrics-local bridge
+    or forked break-detector)."""
+
+    def test_total_return_suffix_honest(self):
+        """An interior NaN → cumulative_return is the post-break suffix product,
+        NOT the dropna-bridged product. Reverting :468 to the inline dropna-prod
+        flips this RED on the NUMBER."""
+        idx = pd.date_range("2026-01-01", periods=6, freq="D")
+        returns = pd.Series([0.10, 0.05, np.nan, 0.02, 0.01, 0.03], index=idx)
+        result = compute_all_metrics(returns)
+        suffix_product = (1.02 * 1.01 * 1.03) - 1.0  # after the interior break
+        bridged_product = (1.10 * 1.05 * 1.02 * 1.01 * 1.03) - 1.0  # old bridge
+        assert result["cumulative_return"] == pytest.approx(suffix_product, rel=1e-12)
+        assert suffix_product != pytest.approx(bridged_product)
+
+    def test_cagr_window_consistent_multi_break(self):
+        """>=2 interior breaks: the CAGR annualization window is the SAME days
+        the number compounds (post-last-break suffix), NOT the full dropna span.
+        Deriving _cagr_index from returns.dropna().index while compounding the
+        suffix flips this RED (a single-break fixture could mask a boundary
+        off-by-one, so this uses two interior breaks)."""
+        idx = pd.date_range("2026-01-01", periods=8, freq="D")
+        returns = pd.Series(
+            [0.5, np.nan, 0.1, np.nan, 0.02, 0.01, 0.03, 0.04], index=idx
+        )
+        result = compute_all_metrics(returns)
+        tr = (1.02 * 1.01 * 1.03 * 1.04) - 1.0  # suffix product (01-05..01-08)
+        assert result["cumulative_return"] == pytest.approx(tr, rel=1e-12)
+        suffix_elapsed = 3  # 01-08 - 01-05 (the compounded window)
+        full_elapsed = 7  # 01-08 - 01-01 (the forked, WRONG basis)
+        honest_cagr = (1.0 + tr) ** (365.0 / suffix_elapsed) - 1.0
+        forked_cagr = (1.0 + tr) ** (365.0 / full_elapsed) - 1.0
+        assert result["cagr"] == pytest.approx(honest_cagr, rel=1e-9)
+        assert honest_cagr != pytest.approx(forked_cagr)  # mutation-honest
+
+    def test_clean_path_bit_identical(self):
+        """SC-4 clean path: a no-NaN series' cumulative_return + cagr are
+        identical to the old expression (the suffix IS the whole series)."""
+        idx = pd.date_range("2026-01-01", periods=5, freq="D")
+        returns = pd.Series([0.01, -0.02, 0.03, 0.015, 0.02], index=idx)
+        result = compute_all_metrics(returns)
+        expected_tr = float((1 + returns).prod() - 1)  # old expression, no NaN
+        assert result["cumulative_return"] == pytest.approx(expected_tr, rel=1e-15)
+        elapsed = (idx[-1] - idx[0]).days
+        expected_cagr = (1.0 + expected_tr) ** (365.0 / elapsed) - 1.0
+        assert result["cagr"] == pytest.approx(expected_cagr, rel=1e-12)
+
+    def test_no_inline_bridge_and_shared_suffix_source(self):
+        """§6.2 source-scan (the tests/test_nav_twr.py:427 forbidden-substitution
+        pattern): no headline ``dropna()).prod()`` / ``dropna()).cumprod()``
+        bridge survives in metrics.py or nav_twr.py, and metrics consumes the ONE
+        shared boundary source — no metrics-local break-detector."""
+        import re
+        from pathlib import Path
+
+        base = Path(__file__).resolve().parents[1] / "services"
+        metrics_src = (base / "metrics.py").read_text()
+        nav_twr_src = (base / "nav_twr.py").read_text()
+        forbidden = re.compile(r"dropna\(\)\)\.(prod|cumprod)\(")
+        for name, src in (("metrics.py", metrics_src), ("nav_twr.py", nav_twr_src)):
+            offenders = [
+                ln.strip()
+                for ln in src.splitlines()
+                if not ln.strip().startswith("#") and forbidden.search(ln)
+            ]
+            assert offenders == [], f"{name} headline dropna-bridge(s): {offenders}"
+        # metrics derives BOTH the number and the CAGR window from the shared
+        # nav_twr source (shared_suffix_single_source).
+        assert "cumulative_twr_segmented(" in metrics_src
+        assert "_last_interior_break_suffix(" in metrics_src
+        # The forked full-window CAGR basis (returns.dropna().index) is gone —
+        # a second detector reintroducing it flips this RED.
+        code_lines = [
+            ln for ln in metrics_src.splitlines() if not ln.strip().startswith("#")
+        ]
+        assert not any("dropna().index" in ln for ln in code_lines), (
+            "metrics must derive _cagr_index from _last_interior_break_suffix, "
+            "not the full dropna span"
+        )
+
+
 class TestComputeAllMetrics:
     def test_golden_dataset_core_metrics(self, golden_returns):
         result = compute_all_metrics(golden_returns)
@@ -1928,26 +2011,35 @@ def test_monthly_rets_no_phantom_zeros_on_sparse_calendar():
 # ---------------------------------------------------------------------------
 
 
-def test_cumulative_return_uses_raw_returns_not_fillna():
-    """NEW-C02-05: cumulative_return must match (1+raw_returns.dropna()).prod()-1,
-    NOT the fillna(0) version.  A 1-day gap (NaN) should have negligible effect
-    on the product but the two series must agree within tolerance.
+def test_cumulative_return_is_suffix_honest_not_fillna_or_bridge():
+    """NEW-C02-05 + DQ-03 (§6.2 behavior change): a gap day is NEVER treated as
+    0% (not fillna(0)). Under DQ-03 an INTERIOR gap is also no longer silently
+    BRIDGED — cumulative_return compounds ONLY the maximal contiguous suffix
+    after the last break. This consciously supersedes the old
+    ``(1+returns.dropna()).prod()`` expectation (which bridged the interior gap):
+    the honest number now equals the post-break suffix product and differs from
+    BOTH the fillna(0) and the dropna-bridge products.
     """
     dates = pd.bdate_range("2024-01-01", periods=50)
     np.random.seed(42)
     values = list(np.random.normal(0.001, 0.01, 50))
-    # Introduce a gap day — shouldn't inflate the result
+    # Interior gap day (index 10) flanked by valid returns on both sides.
     values[10] = float("nan")
     returns = pd.Series(values, index=dates)
 
     result = compute_all_metrics(returns)
     reported = result["cumulative_return"]
 
-    expected = float((1 + returns.dropna()).prod() - 1)
-    assert abs(reported - expected) < 1e-9, (
-        f"cumulative_return={reported} diverges from raw-returns product={expected}; "
-        "gap days must not be treated as 0% (NEW-C02-05)"
+    # DQ-03: only the suffix AFTER the interior break (days 11..49) compounds.
+    expected_suffix = float((1 + returns.iloc[11:]).prod() - 1)
+    bridged = float((1 + returns.dropna()).prod() - 1)  # the old bridged product
+    fillna0 = float((1 + returns.fillna(0)).prod() - 1)  # gap-as-0% product
+    assert abs(reported - expected_suffix) < 1e-12, (
+        f"cumulative_return={reported} must equal the post-break suffix product "
+        f"{expected_suffix} (DQ-03 §6.2), never bridging the interior gap"
     )
+    assert expected_suffix != pytest.approx(bridged)  # no longer bridges
+    assert expected_suffix != pytest.approx(fillna0)  # gap not treated as 0%
 
 
 # ---------------------------------------------------------------------------

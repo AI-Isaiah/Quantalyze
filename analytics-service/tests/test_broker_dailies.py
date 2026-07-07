@@ -107,6 +107,26 @@ def test_gap_fill_empty_is_noop():
     assert gap_fill_daily_returns(empty).empty
 
 
+def test_gap_fill_preserves_guard_nan_days():
+    """§6.2 FROZEN PIN (DQ-03): ``gap_fill_daily_returns`` fills MISSING calendar
+    labels with 0.0 (equity flat), but a pre-existing guard-NaN day STAYS NaN —
+    it must never be converted to 0.0 (that would silently un-break the chain
+    and let a broken day compound as a flat 0%). ``reindex(fill_value=0.0)`` only
+    fills newly-created labels, so today's behavior already complies; a refactor
+    to ``.fillna(0)`` would flip this test RED."""
+    idx = pd.DatetimeIndex(["2026-01-01", "2026-01-02", "2026-01-04"])
+    returns = pd.Series([0.01, float("nan"), 0.02], index=idx, dtype="float64")
+    filled = gap_fill_daily_returns(returns)
+    # The MISSING calendar day (01-03) is filled 0.0 ...
+    assert filled.loc["2026-01-03"] == 0.0
+    # ... but the EXISTING guard-NaN day (01-02) STAYS NaN.
+    assert pd.isna(filled.loc["2026-01-02"])
+    # Index is gap-free ascending across the full span.
+    assert list(filled.index) == list(
+        pd.date_range("2026-01-01", "2026-01-04", freq="D")
+    )
+
+
 # --- combine_realized_and_funding (the regression) ----------------------------
 
 def test_combine_funding_lifts_return_regression():
