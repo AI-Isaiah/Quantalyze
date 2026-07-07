@@ -167,6 +167,25 @@ class InceptionReconciliationError(NavReconstructionError):
 
 _USD_BUCKET = "USD"  # the coalesced branch-1 bucket key (§4.1, mark ≡ 1.0)
 
+# --- §5.2 inception-reconciliation tolerance policy --------------------------
+# The FIRST non-tautological reconciliation (reconcile_flow_residual is a
+# construction tautology per its own nav_twr.py:419-437 docstring; that tautology
+# is retained in the legacy path for its original roll-divergence job). Per
+# currency, valued at the INCEPTION-day mark:
+#   resid_usd_c = |resid_c| × mark_c(first_day_c)     # branch-1: × 1.0
+#   PASS iff Σ_c resid_usd_c ≤ max(INCEPTION_ABS_TOL_USD,
+#                                  INCEPTION_REL_TOL × NAV_usd(anchor_day))
+INCEPTION_ABS_TOL_USD: float = 1.00   # same $1 floor as reconcile_flow_residual
+                                      # (nav_twr.py:458: max(1.00, 1e-6·|terminal|))
+INCEPTION_REL_TOL: float = 1e-4       # wider than the tautology's 1e-6: this gate
+                                      # compares two INDEPENDENT measurements
+                                      # (reported equity vs summed ledger), which
+                                      # legitimately differ by fee-rounding dust.
+# Both constants are tuned against the three real Deribit keys at the P78-style
+# live acceptance gate (the FLOW_DOM_RATIO precedent, nav_twr.py:64-65); real-key
+# green is Phase 80's INCEPT-01, NOT claimed here. Tightening after calibration is
+# expected; loosening requires evidence.
+
 
 @dataclass(frozen=True)
 class NativeLedger:
@@ -558,12 +577,66 @@ def _assert_inception_reconciled(
     *,
     venue: str,
 ) -> None:
-    """Step 3 (§5) — the inception-reconciliation refuse gate. Filled in Task 3
-    (79-02 T3): for a ``full_history=True`` ledger it values each bucket's rolled
-    pre-history residual at its inception-day mark, sums them, and refuses via
-    ``InceptionReconciliationError`` when the sum exceeds
-    ``max(INCEPTION_ABS_TOL_USD, INCEPTION_REL_TOL × anchor NAV)``;
-    ``full_history=False`` SKIPS entirely. This placeholder keeps the step-3 call
-    site present in the six-step pipeline so the core is written once, complete —
-    Task 3 supplies the body, the tolerance constants, and the gate tests."""
-    return
+    """Step 3 (§5) — the FIRST non-tautological reconciliation gate, run AFTER the
+    rolls and BEFORE valuation.
+
+    For a ``full_history=True`` ledger (Deribit — the txn-log reaches inception),
+    the backward roll from today's venue-reported native equity through the ENTIRE
+    ledger must land at a pre-history balance of ~0 per currency. Each bucket's
+    rolled pre-history residual ``resid_c = B_c(d0_c) − pnl_c(d0_c) − flowqty_c(d0_c)``
+    is valued at its INCEPTION-day mark (the earliest mark held — never a current
+    price, D-07 discipline; branch-1 × 1.0), summed, and compared per §5.2. A
+    breach means the reported equity and the summed ledger disagree (missing rows,
+    a mis-classified type, a wrong scope) — a permanent, loud
+    ``InceptionReconciliationError`` carrying CODES + venue + the RELATIVE breach
+    ratio ONLY (no raw residuals — leak discipline).
+
+    ``full_history=False`` (retention-capped venues, P3) SKIPS this gate entirely
+    (§5.3): a truncated ledger can never reconcile to zero and must not be
+    punished; those venues stay on the existing DQ-02 evidence-gated terminus
+    (nav_twr.py:585). Live tuning + real-key green are Phase 80's gate
+    (INCEPT-01) — NOT claimed here.
+    """
+    if not ledger.full_history:
+        return  # §5.3 — a truncated ledger legitimately cannot reconcile to zero.
+
+    per_bucket_resid_usd: list[tuple[str, float]] = []
+    resid_usd_total = 0.0
+    anchor_nav = 0.0
+    for bucket in rolled:
+        d0 = bucket.balance.index[0]
+        dN = bucket.balance.index[-1]
+        pnl0 = float(bucket.pnl_unioned.iloc[0])
+        flow0 = (
+            float(bucket.flow_qty.reindex([d0], fill_value=0.0).iloc[0])
+            if not bucket.flow_qty.empty
+            else 0.0
+        )
+        # The rolled pre-history native balance (== terminal_native − upnl − Σpnl
+        # − Σflow, the whole ledger rolled back one step past its first day).
+        resid = float(bucket.balance.iloc[0]) - pnl0 - flow0
+        if bucket.mark is None:  # branch-1 — inception AND anchor mark ≡ 1.0
+            mark0 = 1.0
+            markN = 1.0
+        else:
+            mark0 = float(bucket.mark.reindex([d0]).iloc[0])
+            markN = float(bucket.mark.reindex([dN]).iloc[0])
+        resid_usd = abs(resid) * mark0
+        per_bucket_resid_usd.append((bucket.code, resid_usd))
+        resid_usd_total += resid_usd
+        anchor_nav += float(bucket.balance.iloc[-1]) * markN
+
+    tol = max(INCEPTION_ABS_TOL_USD, INCEPTION_REL_TOL * abs(anchor_nav))
+    if resid_usd_total > tol:
+        # Name the materially-offending buckets (each above the $1 floor); fall
+        # back to every nonzero contributor for a sum-of-dust breach.
+        offenders = [
+            code for code, r in per_bucket_resid_usd if r > INCEPTION_ABS_TOL_USD
+        ]
+        if not offenders:
+            offenders = [code for code, r in per_bucket_resid_usd if r > 0.0]
+        raise InceptionReconciliationError(
+            currencies=offenders,
+            venue=venue,
+            breach_ratio=resid_usd_total / tol,
+        )

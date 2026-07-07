@@ -26,6 +26,8 @@ from services.broker_dailies import gap_fill_daily_returns
 from services.external_flows import USD_FAMILY, ExternalFlow
 from services.nav_twr import NavReconstructionError, reconstruct_nav_and_twr
 from services.native_nav import (
+    INCEPTION_ABS_TOL_USD,
+    INCEPTION_REL_TOL,
     InceptionReconciliationError,
     MarkBranch,
     NativeLedger,
@@ -555,3 +557,155 @@ def test_leak_scan_no_raw_values_in_refusal_or_source() -> None:
     assert "import logging" not in src
     assert "getLogger" not in src
     assert "logger." not in src
+
+
+# ===========================================================================
+# 79-02 Task 3 — §5 inception-reconciliation refuse gate (step 3, before valuation)
+# ===========================================================================
+
+
+def _btc_zero_pnl_ledger(
+    *,
+    terminal_btc: float,
+    mark_first: float,
+    mark_last: float,
+    full_history: bool,
+) -> NativeLedger:
+    """A 2-day BTC-only full/partial-history ledger with ZERO pnl/flows, so the
+    rolled pre-history residual equals ``terminal_btc`` exactly (nav = [T, T];
+    resid = T − 0 − 0). Marks diverge first→last so a gate that values the
+    residual at the WRONG (anchor) mark is caught."""
+    return NativeLedger(
+        native_pnl={"BTC": _dense([0.0, 0.0])},
+        terminal_native_equity={"BTC": terminal_btc},
+        marks={"BTC": _s([("2026-01-01", mark_first), ("2026-01-02", mark_last)])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=full_history,
+    )
+
+
+def test_inception_constants_verbatim() -> None:
+    """The two §5.2 constants exist module-level with the locked values."""
+    assert INCEPTION_ABS_TOL_USD == 1.00
+    assert INCEPTION_REL_TOL == 1e-4
+
+
+def test_inception_clean_reconciliation_passes() -> None:
+    """A full_history=True mixed ledger whose per-currency rolled pre-history
+    residual is ~0 (BTC exact; a sub-$1 USD dust) passes the gate and valuation
+    proceeds — anchor NAV ~2010 ⇒ tol = max($1, 1e-4·2010) = $1, resid 0.5 ≤ $1."""
+    ledger = NativeLedger(
+        native_pnl={
+            "BTC": _dense([0.1, -0.05, 0.0]),      # Σ = 0.05 = terminal ⇒ resid 0
+            "USDC": _s([("2026-01-01", 10.0)]),    # terminal 10.5 ⇒ resid 0.5 dust
+        },
+        terminal_native_equity={"BTC": 0.05, "USDC": 10.5},
+        marks={"BTC": _dense([40000.0, 40000.0, 40000.0])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    returns, meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"})
+    )
+    assert returns.name == "returns"
+    assert "computation_status_hint" in meta
+
+
+def test_inception_breach_refuses_before_valuation_leak_safe() -> None:
+    """A full_history=True ledger whose venue-reported equity disagrees with the
+    summed ledger (terminal 5.0 BTC vs Σpnl 0.05) refuses via
+    InceptionReconciliationError carrying currencies/venue/breach_ratio ONLY — no
+    raw residual quantity/USD in the message (nav_twr.py:443-444 discipline)."""
+    ledger = NativeLedger(
+        native_pnl={"BTC": _dense([0.1, -0.05, 0.0])},  # Σ = 0.05
+        terminal_native_equity={"BTC": 5.0},            # resid ≈ 4.95 BTC
+        marks={"BTC": _dense([40000.0, 40000.0, 40000.0])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    with pytest.raises(InceptionReconciliationError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+    assert exc.value.currencies == ["BTC"]
+    assert exc.value.venue == "deribit"
+    assert exc.value.breach_ratio > 1.0
+    # Leak scan: the raw residual (≈4.95 BTC / ≈198000 USD) never surfaces.
+    msg = str(exc.value)
+    assert "4.95" not in msg
+    assert "198000" not in msg
+    assert "198" not in msg or "breach_ratio" in msg  # ratio may contain digits
+
+
+def test_inception_tolerance_abs_arm_boundary() -> None:
+    """ABS arm: a small account (1e-4·anchor < $1 ⇒ tol = $1). resid valued at the
+    INCEPTION-day mark (2.0), NOT the anchor mark (1.0). T=0.49 ⇒ resid_usd 0.98
+    ≤ $1 passes; T=0.51 ⇒ 1.02 > $1 breaches. Valuing at the anchor mark (1.0)
+    would keep 0.51 < $1 and NOT breach — so this pins the inception-mark rule."""
+    ok = _btc_zero_pnl_ledger(
+        terminal_btc=0.49, mark_first=2.0, mark_last=1.0, full_history=True
+    )
+    reconstruct_native_nav_and_twr(ok, indexable_currencies=frozenset({"BTC"}))
+    breach = _btc_zero_pnl_ledger(
+        terminal_btc=0.51, mark_first=2.0, mark_last=1.0, full_history=True
+    )
+    with pytest.raises(InceptionReconciliationError):
+        reconstruct_native_nav_and_twr(
+            breach, indexable_currencies=frozenset({"BTC"})
+        )
+
+
+def test_inception_tolerance_rel_arm_boundary() -> None:
+    """REL arm: a large anchor (1e-4·anchor > $1 ⇒ tol = 1e-4·anchor = 2.0 when
+    anchor mark = 20000). resid_usd = T·mark_first (T=1.0). mark_first 1.9 ⇒ 1.9
+    ≤ 2.0 passes (and 1.9 > $1 proves the ABS floor is NOT what decided); 2.1 >
+    2.0 breaches."""
+    ok = _btc_zero_pnl_ledger(
+        terminal_btc=1.0, mark_first=1.9, mark_last=20000.0, full_history=True
+    )
+    reconstruct_native_nav_and_twr(ok, indexable_currencies=frozenset({"BTC"}))
+    breach = _btc_zero_pnl_ledger(
+        terminal_btc=1.0, mark_first=2.1, mark_last=20000.0, full_history=True
+    )
+    with pytest.raises(InceptionReconciliationError):
+        reconstruct_native_nav_and_twr(
+            breach, indexable_currencies=frozenset({"BTC"})
+        )
+
+
+def test_inception_multi_currency_sum_hides_nothing() -> None:
+    """§8 step 5: a clean USDC book (resid exactly 0) cannot hide a broken BTC
+    book — residuals are summed in USD and a breach in ONE bucket refuses, naming
+    only the offending currency."""
+    ledger = NativeLedger(
+        native_pnl={
+            "USDC": _s([("2026-01-01", 10.0)]),           # terminal 10 ⇒ resid 0
+            "BTC": _dense([0.0, 0.0]),                    # terminal 5 ⇒ resid 5
+        },
+        terminal_native_equity={"USDC": 10.0, "BTC": 5.0},
+        marks={"BTC": _dense([40000.0, 40000.0])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    with pytest.raises(InceptionReconciliationError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+    assert exc.value.currencies == ["BTC"]
+
+
+def test_inception_full_history_false_skips_gate() -> None:
+    """§5.3: the SAME breaching ledger with full_history=False does NOT raise — a
+    truncated (retention-capped) ledger can never reconcile to zero and must not
+    be punished; it stays on the existing DQ-02 terminus."""
+    breach = _btc_zero_pnl_ledger(
+        terminal_btc=5.0, mark_first=40000.0, mark_last=40000.0, full_history=False
+    )
+    returns, _ = reconstruct_native_nav_and_twr(
+        breach, indexable_currencies=frozenset({"BTC"})
+    )
+    assert returns.name == "returns"  # valuation proceeded, no gate refusal
