@@ -521,8 +521,9 @@ class TestNaNReturnsDownstreamTolerance:
     """Characterization pins for a guarded-day NaN-bearing returns Series.
 
     Sink (a) — compute_all_metrics / compute_period_returns: TOLERATES.
-        NaN days are honestly DROPPED from the headline scalars (dropna on the
-        cumulative_return, skipna .prod() for MTD/YTD) and treated as 0.0 for
+        NaN days are honestly EXCLUDED from the headline scalars (DQ-03 §6.2:
+        the cumulative_return compounds the post-last-interior-break suffix;
+        skipna .prod() for the MTD/YTD window KPIs) and treated as 0.0 for
         chart-only equity (fillna(0)); a NaN LAST day nulls return_24h via
         _safe_float. len() counts NaN entries so the `len(returns) < 2` guard is
         not tripped by guarded days. No fabricated magnitude is ever produced.
@@ -563,24 +564,27 @@ class TestNaNReturnsDownstreamTolerance:
         #  satisfied by the 6-row series even though only 4 days are real.)
         result = compute_all_metrics(returns)
 
-        # The headline cumulative_return equals the SAME metric computed on the
-        # NaN-DROPPED days — proving NaN is honestly excluded from statistics,
-        # not coerced to 0.0 (which would fabricate an extra flat day) and not
-        # propagated to a NaN headline (which would be an invalid magnitude).
-        expected_cum = float((1.0 + returns.dropna()).prod() - 1.0)
-        assert result["cumulative_return"] == pytest.approx(expected_cum, rel=1e-12)
+        # DQ-03 (§6.2): the headline cumulative_return no longer BRIDGES an
+        # interior break — it compounds ONLY the maximal contiguous suffix after
+        # the LAST interior NaN (index 2 here), proving NaN is honestly excluded
+        # (never coerced to 0.0, never propagated as a NaN headline). The leading
+        # NaN (index 0) is not an interior break; the suffix is [index 3..5].
+        expected_headline = float((1.0 + returns.iloc[3:]).prod() - 1.0)
+        assert result["cumulative_return"] == pytest.approx(expected_headline, rel=1e-12)
         assert np.isfinite(result["cumulative_return"]), (
             "headline cumulative_return must be finite (NaN days dropped, not "
             "propagated) — a NaN scalar would render as an invalid factsheet KPI"
         )
 
         # --- compute_period_returns: NaN days skipped, not fabricated. ---
+        # MTD/YTD are WINDOW KPIs (portfolio_metrics.compute_period_returns), out
+        # of §6's headline-chain scope: they compound via skipna .prod() over the
+        # whole window (the dropna-bridge), unchanged by DQ-03. So they equal the
+        # dropna cumulative for this single-month/single-year window.
+        expected_bridge = float((1.0 + returns.dropna()).prod() - 1.0)
         periods = compute_period_returns(returns)
-        # MTD/YTD compound via .prod() which skips NaN (skipna=True default);
-        # they equal the dropna cumulative for this single-month, single-year
-        # window — honest, finite, no fabricated magnitude.
-        assert periods["return_mtd"] == pytest.approx(expected_cum, rel=1e-12)
-        assert periods["return_ytd"] == pytest.approx(expected_cum, rel=1e-12)
+        assert periods["return_mtd"] == pytest.approx(expected_bridge, rel=1e-12)
+        assert periods["return_ytd"] == pytest.approx(expected_bridge, rel=1e-12)
         # Last day is real (0.015) -> return_24h is that value, unmodified.
         assert periods["return_24h"] == pytest.approx(0.015, rel=1e-12)
 
