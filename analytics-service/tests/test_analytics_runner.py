@@ -1908,6 +1908,7 @@ async def _run_and_get_success_upsert(
     daily_rows_count: int = 15,
     used_heuristic_capital: bool = False,
     balance_error: bool = False,
+    guard_flags: dict[str, bool] | None = None,
     benchmark_return: tuple | None = None,
 ) -> dict:
     """Invoke run_strategy_analytics with the standard patches and return
@@ -1939,7 +1940,7 @@ async def _run_and_get_success_upsert(
     dates = pd.bdate_range("2024-01-01", periods=daily_rows_count)
     mock_returns = pd.Series([0.001] * daily_rows_count, index=dates)
 
-    if used_heuristic_capital or balance_error:
+    if used_heuristic_capital or balance_error or guard_flags:
         hint = "complete_with_warnings"
     else:
         hint = "complete"
@@ -1948,6 +1949,12 @@ async def _run_and_get_success_upsert(
         "balance_error": balance_error,
         "computation_status_hint": hint,
     }
+    # Phase 74 (v1.8) — the NavTWRMeta the honest core now carries onto
+    # returns_meta (74-02) surfaces the three NAV-denominator guard keys
+    # (present only when they fired, total=False). Inject them here so the
+    # consumer-side DQF lift + status-promotion (74-03) can be exercised.
+    if guard_flags:
+        mock_meta.update(guard_flags)
 
     bench_return = benchmark_return if benchmark_return is not None else (None, True)
 
@@ -2350,6 +2357,295 @@ async def test_consumer_migration_fully_clean_run_status_complete_no_flags():
     assert not flags, (
         "A fully clean run must carry zero data_quality_flags. "
         f"Got: {flags!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 74 (v1.8 Flow-Aware TWR) Plan 03 Task 1 — NAV-guard DQF lift + promotion
+# ---------------------------------------------------------------------------
+# The Phase-73 honest core (services/nav_twr.py) breaks a day's chain-link and
+# raises a NAV-denominator guard (dust / negative / flow-dominated) instead of
+# dividing by a fabricated base. 74-02 threads those guard keys onto the
+# NavTWRMeta returned by trades_to_daily_returns_with_status. This consumer
+# (analytics_runner) must lift each fired guard key into data_quality_flags and
+# promote computation_status to 'complete_with_warnings' — a guarded (NaN-day)
+# account must NOT render as canonical-'complete' on the public factsheet
+# (T-74-05). INVARIANT: a no-guard, flow-less account carries ZERO guard keys
+# and stays computation_status='complete' — status-identical to today so the 8
+# exact-string `=== "complete"` frontend consumers are unaffected.
+
+
+@pytest.mark.asyncio
+async def test_status_guard_promotion_negative_nav_guard_lifts_and_promotes():
+    """A negative_nav_guard on returns_meta (estimated_start<=0 account, whose
+    reconstructed pre-history NAV was non-positive) must (1) surface in
+    data_quality_flags and (2) promote computation_status to
+    'complete_with_warnings'. Fails today: the guard key is dropped from DQF and
+    the promotion predicate only ORs used_heuristic_capital / balance_error, so
+    status stays the un-promoted 'complete' — a broken NAV denominator rendered
+    as canonical."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        guard_flags={"negative_nav_guard": True},
+    )
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("negative_nav_guard") is True, (
+        f"negative_nav_guard must lift into data_quality_flags; got: {flags!r}"
+    )
+    assert upsert.get("computation_status") == "complete_with_warnings", (
+        "A fired NAV-denominator guard must promote computation_status to "
+        "'complete_with_warnings' (a NaN-denominator day is not canonical); "
+        f"got: {upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_status_guard_promotion_dust_and_flow_guards_both_surface():
+    """dust_nav_guard AND flow_dominated_guard both lift into DQF and each
+    promotes status. Pins that ALL three guard keys (not just negative) are
+    lifted and OR'd into the promotion predicate."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        guard_flags={"dust_nav_guard": True, "flow_dominated_guard": True},
+    )
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("dust_nav_guard") is True, (
+        f"dust_nav_guard must lift into data_quality_flags; got: {flags!r}"
+    )
+    assert flags.get("flow_dominated_guard") is True, (
+        f"flow_dominated_guard must lift into data_quality_flags; got: {flags!r}"
+    )
+    assert upsert.get("computation_status") == "complete_with_warnings", (
+        "A fired guard must promote computation_status; "
+        f"got: {upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_status_guard_promotion_flow_coverage_incomplete_lifts_and_promotes():
+    """Phase 76 (v1.8 DQ-02): flow_coverage_incomplete on returns_meta extends the
+    74-03 guard-key lift — it must (1) surface in data_quality_flags and (2)
+    promote computation_status to 'complete_with_warnings', mirroring the NAV
+    guard keys."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        guard_flags={"flow_coverage_incomplete": True},
+    )
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("flow_coverage_incomplete") is True, (
+        f"flow_coverage_incomplete must lift into data_quality_flags; got: {flags!r}"
+    )
+    assert upsert.get("computation_status") == "complete_with_warnings", (
+        "A refused flow-coverage gap must promote computation_status to "
+        f"'complete_with_warnings'; got: {upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_status_guard_promotion_unrealized_pnl_in_anchor_lifts_and_promotes():
+    """Phase 77 (v1.8 FLOW-04): unrealized_pnl_in_anchor on returns_meta (a
+    material open-uPnL wedge relative to a non-dust anchor) extends the 74-03
+    guard-key lift — it must (1) surface in data_quality_flags and (2) promote
+    computation_status to 'complete_with_warnings', mirroring the NAV guard keys
+    and flow_coverage_incomplete. RED: the lift loop and the promotion predicate
+    have no unrealized_pnl_in_anchor term, so the flag is dropped and status stays
+    the un-promoted 'complete'."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        guard_flags={"unrealized_pnl_in_anchor": True},
+    )
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("unrealized_pnl_in_anchor") is True, (
+        f"unrealized_pnl_in_anchor must lift into data_quality_flags; got: {flags!r}"
+    )
+    assert upsert.get("computation_status") == "complete_with_warnings", (
+        "A material open-uPnL wedge must promote computation_status to "
+        f"'complete_with_warnings'; got: {upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_unchanged_no_guard_flow_less_stays_complete():
+    """GREEN-invariant (SC-4 status): a no-guard, flow-less, estimated_start>0
+    account (returns_meta carries NO guard key) stays
+    computation_status='complete' AND data_quality_flags carries no guard key —
+    STATUS-IDENTICAL to today. A regression that lifts a guard key or promotes
+    status unconditionally breaks the 8 exact-string `=== "complete"` frontend
+    consumers. Driven fully clean (valid non-stale benchmark) so the only thing
+    under test is the absence of guard promotion."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+    bench_dates = pd.bdate_range("2024-01-01", periods=15)
+    valid_benchmark = pd.Series([0.0005] * 15, index=bench_dates, name="BTC")
+
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        guard_flags=None,  # flow-less, estimated_start>0 → no guard fired
+        benchmark_return=(valid_benchmark, False),
+    )
+    assert upsert.get("computation_status") == "complete", (
+        "A no-guard flow-less account must stay 'complete' (status-identical); "
+        f"got: {upsert.get('computation_status')!r}"
+    )
+    flags = upsert.get("data_quality_flags")
+    for guard_key in (
+        "negative_nav_guard",
+        "dust_nav_guard",
+        "flow_dominated_guard",
+    ):
+        assert not (flags or {}).get(guard_key), (
+            f"No guard key must appear on a no-guard run; {guard_key} leaked "
+            f"into {flags!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 74 (v1.8) Plan 03 Task 2 — NavReconstructionError permanent catch
+# ---------------------------------------------------------------------------
+# A NavReconstructionError (non-finite/non-numeric anchor or pnl, an undatable /
+# orphan external flow) is a PERMANENT STRUCTURAL fault — retrying cannot help.
+# As a bare ValueError it falls through to the generic `except Exception` at the
+# analytics_runner callsite, becomes HTTPException(500), and classify_exception
+# buckets 500 as 'unknown' → retried FOREVER on an input that can never succeed
+# (T-74-02 denial-of-service). The typed catch must stamp a terminal 'failed'
+# and raise a 4xx (422) so classify_exception buckets it permanent, mirroring
+# the LedgerValuationError catch at job_worker.py:1916-1941. The catch is narrow
+# to the typed subclass so a transient ValueError escaping elsewhere still hits
+# the generic handler and stays retryable.
+
+
+@pytest.mark.asyncio
+async def test_nav_error_permanent_stamps_failed_and_raises_4xx():
+    """A NavReconstructionError raised at the trades_to_daily_returns_with_status
+    callsite must (1) stamp strategy_analytics.computation_status='failed' and
+    (2) raise an HTTPException with a PERMANENT 4xx status (400<=s<500, not
+    408/429/403/404) so job_worker.classify_exception buckets it permanent — NOT
+    the retried-forever 500 'unknown' a bare ValueError produces today."""
+    from fastapi import HTTPException
+    from services.nav_twr import NavReconstructionError
+    from services.analytics_runner import run_strategy_analytics
+
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+
+    async def _mock_db_execute(fn):
+        return await asyncio.to_thread(fn)
+
+    def _raise_nav(*args, **kwargs):
+        # Message shape mirrors nav_twr._coerce_float — carries a row repr that
+        # scrub_freeform_string must strip before the message is stamped.
+        raise NavReconstructionError(
+            "nav_twr non-finite daily_pnl=nan (row={'day': '2024-01-01'})"
+        )
+
+    with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
+         patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
+         patch(
+             "services.analytics_runner.trades_to_daily_returns_with_status",
+             side_effect=_raise_nav,
+         ):
+        with pytest.raises(HTTPException) as ei:
+            await run_strategy_analytics("strat-test")
+
+    status = ei.value.status_code
+    assert 400 <= status < 500, (
+        "NavReconstructionError must surface as a 4xx so classify_exception "
+        f"buckets it permanent (not the retried 500 'unknown'); got {status}"
+    )
+    assert status not in (408, 429, 403, 404), (
+        "must be a PERMANENT 4xx (400/422 bucket), not a transient/unknown one; "
+        f"got {status}"
+    )
+    failed = [
+        u for u in sa_upsert_calls if u.get("computation_status") == "failed"
+    ]
+    assert failed, (
+        "NavReconstructionError must stamp a terminal computation_status='failed' "
+        f"(not leave the wizard on an infinite 'computing' spinner); "
+        f"upserts: {sa_upsert_calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_nav_error_permanent_catch_is_narrow_transient_valueerror_still_5xx():
+    """GREEN-invariant: the typed catch is NARROW. A generic ValueError (a
+    transient fault escaping elsewhere, NOT a NavReconstructionError) must still
+    fall through to the generic handler and raise HTTPException(500) so it stays
+    retryable — the typed catch must not over-broaden to every ValueError and
+    silently mark transient faults permanent."""
+    from fastapi import HTTPException
+    from services.analytics_runner import run_strategy_analytics
+
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+
+    async def _mock_db_execute(fn):
+        return await asyncio.to_thread(fn)
+
+    def _raise_generic(*args, **kwargs):
+        raise ValueError("transient blip unrelated to NAV reconstruction")
+
+    with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
+         patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
+         patch(
+             "services.analytics_runner.trades_to_daily_returns_with_status",
+             side_effect=_raise_generic,
+         ):
+        with pytest.raises(HTTPException) as ei:
+            await run_strategy_analytics("strat-test")
+
+    assert ei.value.status_code == 500, (
+        "A generic ValueError must fall through to the generic 500 handler "
+        "(stays retryable); the NavReconstructionError catch must not over-catch; "
+        f"got {ei.value.status_code}"
     )
 
 
@@ -5348,3 +5644,248 @@ def test_trade_mix_nan_notional_coerced_to_zero():
         "NaN notional must contribute 0 to total_notional"
     )
     assert result["short_taker"]["total_notional"] == pytest.approx(300.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 76 (v1.8 DQ-02): flow_coverage_incomplete status lift (run_csv path)
+# ---------------------------------------------------------------------------
+def _csv_supabase_mock(rows, *, existing_flags):
+    """Supabase mock for run_csv_strategy_analytics: existence probe + paginated
+    data load + a maybe_single read of the pre-existing data_quality_flags (the
+    DQ-02 pre-stamp channel). Records every upsert payload on ``.upserts``."""
+    sb = MagicMock()
+    table_mock = MagicMock()
+    sb.table.return_value = table_mock
+
+    select_chain = MagicMock()
+    eq_chain = MagicMock()
+    # data load: .select().eq().order().range().execute()
+    order_chain = MagicMock()
+    order_chain.execute.return_value = MagicMock(data=rows)
+    range_chain = MagicMock()
+    range_chain.execute.return_value = MagicMock(data=rows)
+    order_chain.range.return_value = range_chain
+    eq_chain.order.return_value = order_chain
+    # existence probe: .select().eq().single().execute()
+    single_chain = MagicMock()
+    single_chain.execute.return_value = MagicMock(data={"id": "s1", "user_id": "u1"})
+    eq_chain.single.return_value = single_chain
+    # DQ-02 pre-stamp read: .select().eq().maybe_single().execute()
+    maybe_single_chain = MagicMock()
+    maybe_single_chain.execute.return_value = MagicMock(
+        data={"data_quality_flags": dict(existing_flags)}
+    )
+    eq_chain.maybe_single.return_value = maybe_single_chain
+    select_chain.eq.return_value = eq_chain
+    table_mock.select.return_value = select_chain
+
+    sb.upserts = []
+
+    def _upsert(payload, **_kw):
+        sb.upserts.append(dict(payload))
+        m = MagicMock()
+        m.execute = MagicMock(return_value=MagicMock(data=[]))
+        return m
+
+    table_mock.upsert.side_effect = _upsert
+    sb.rpc.return_value = MagicMock(execute=MagicMock(return_value=MagicMock(data=[])))
+    return sb
+
+
+def _clean_metrics_result():
+    return MetricsResult(
+        metrics_json={
+            "cumulative_return": 0.1, "cagr": 0.12, "volatility": 0.2,
+            "sharpe": 1.5, "sortino": 2.0, "calmar": 1.0,
+            "max_drawdown": -0.05, "max_drawdown_duration_days": 5,
+            "six_month_return": 0.06, "sparkline_returns": [],
+            "sparkline_drawdown": [], "metrics_json": {},
+            "returns_series": [], "drawdown_series": [],
+            "monthly_returns": {}, "rolling_metrics": {}, "return_quantiles": {},
+        },
+        sibling_kinds={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_csv_run_promotes_to_warnings_when_flow_coverage_prestamped():
+    """DQ-02 surfacing: when derive_broker_dailies PRE-STAMPED
+    flow_coverage_incomplete onto strategy_analytics, the CSV run PRESERVES the
+    flag and promotes computation_status to complete_with_warnings — the broker
+    factsheet honestly signals the refused retention gap."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ]
+    sb = _csv_supabase_mock(
+        rows,
+        existing_flags={"csv_source": True, "flow_coverage_incomplete": True},
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_clean_metrics_result()):
+        result = await run_csv_strategy_analytics("s1")
+
+    assert result["status"] == "complete"  # returns 'complete' string envelope
+    complete = [
+        u for u in sb.upserts
+        if u.get("computation_status") in ("complete", "complete_with_warnings")
+    ]
+    assert complete, "expected a completion upsert"
+    final = complete[-1]
+    assert final["computation_status"] == "complete_with_warnings", (
+        "a pre-stamped flow_coverage_incomplete must promote the CSV factsheet"
+    )
+    assert (final.get("data_quality_flags") or {}).get("flow_coverage_incomplete"), (
+        "the flag must be preserved on the completion upsert, not wiped"
+    )
+
+
+@pytest.mark.asyncio
+async def test_csv_run_stays_complete_without_flow_coverage_flag():
+    """SC-4: a normal broker/CSV account (no pre-stamped coverage gap) keeps its
+    exact-string 'complete' — the 8 downstream consumers that gate on it are
+    unaffected."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ]
+    sb = _csv_supabase_mock(rows, existing_flags={"csv_source": True})
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_clean_metrics_result()):
+        await run_csv_strategy_analytics("s1")
+
+    complete = [
+        u for u in sb.upserts
+        if u.get("computation_status") in ("complete", "complete_with_warnings")
+    ]
+    assert complete
+    final = complete[-1]
+    assert final["computation_status"] == "complete", (
+        "no coverage gap → status must stay exact-string 'complete' (SC-4)"
+    )
+    assert not (final.get("data_quality_flags") or {}).get("flow_coverage_incomplete")
+
+
+@pytest.mark.asyncio
+async def test_csv_run_promotes_to_warnings_when_dq01_guard_prestamped():
+    """MED-2: when derive_broker_dailies PRE-STAMPED a DQ-01 guard flag
+    (flow_dominated_guard — a NaN-broken day honestly absent from
+    csv_daily_returns) onto strategy_analytics, the CSV run PRESERVES it and
+    promotes computation_status to complete_with_warnings — bridging the guard
+    meta to the broker factsheet. Mutation: dropping the guard flags from the
+    read/promote leaves status 'complete' → RED."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ]
+    sb = _csv_supabase_mock(
+        rows,
+        existing_flags={"csv_source": True, "flow_dominated_guard": True},
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_clean_metrics_result()):
+        await run_csv_strategy_analytics("s1")
+
+    complete = [
+        u for u in sb.upserts
+        if u.get("computation_status") in ("complete", "complete_with_warnings")
+    ]
+    assert complete
+    final = complete[-1]
+    assert final["computation_status"] == "complete_with_warnings", (
+        "a pre-stamped DQ-01 guard flag must promote the broker CSV factsheet"
+    )
+    assert (final.get("data_quality_flags") or {}).get("flow_dominated_guard"), (
+        "the guard flag must be preserved on the completion upsert, not wiped"
+    )
+
+
+@pytest.mark.asyncio
+async def test_csv_run_promotes_to_warnings_when_unrealized_pnl_prestamped():
+    """FLOW-04 (v1.8, 77-03): when derive_broker_dailies PRE-STAMPED
+    unrealized_pnl_in_anchor (a material open-uPnL wedge) onto strategy_analytics,
+    the CSV run PRESERVES the flag and promotes computation_status to
+    complete_with_warnings — bridging the wedge materiality to the broker
+    factsheet, mirroring the flow_coverage / DQ-01 guard bridges. Mutation:
+    dropping unrealized_pnl_in_anchor from the broker warn-flag lift leaves status
+    'complete' → RED."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ]
+    sb = _csv_supabase_mock(
+        rows,
+        existing_flags={"csv_source": True, "unrealized_pnl_in_anchor": True},
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_clean_metrics_result()):
+        await run_csv_strategy_analytics("s1")
+
+    complete = [
+        u for u in sb.upserts
+        if u.get("computation_status") in ("complete", "complete_with_warnings")
+    ]
+    assert complete
+    final = complete[-1]
+    assert final["computation_status"] == "complete_with_warnings", (
+        "a pre-stamped unrealized_pnl_in_anchor must promote the broker CSV factsheet"
+    )
+    assert (final.get("data_quality_flags") or {}).get("unrealized_pnl_in_anchor"), (
+        "the wedge materiality flag must be preserved on the completion upsert"
+    )
+
+
+@pytest.mark.asyncio
+async def test_csv_run_stays_complete_without_unrealized_pnl_flag():
+    """SC-4: a broker/CSV account with no pre-stamped unrealized_pnl_in_anchor
+    keeps its exact-string 'complete' — the 8 downstream consumers that gate on it
+    are unaffected (an immaterial / zero-wedge account is clean-complete)."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ]
+    sb = _csv_supabase_mock(rows, existing_flags={"csv_source": True})
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_clean_metrics_result()):
+        await run_csv_strategy_analytics("s1")
+
+    complete = [
+        u for u in sb.upserts
+        if u.get("computation_status") in ("complete", "complete_with_warnings")
+    ]
+    assert complete
+    final = complete[-1]
+    assert final["computation_status"] == "complete", (
+        "no material wedge → status must stay exact-string 'complete' (SC-4)"
+    )
+    assert not (final.get("data_quality_flags") or {}).get("unrealized_pnl_in_anchor")

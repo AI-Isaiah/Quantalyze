@@ -2067,3 +2067,43 @@ def test_monthly_rets_all_nan_window_not_phantom_zero():
         f"Expected 2 real months (Jan+Mar), got {len(monthly_rets)} — "
         "all-NaN month produced phantom entry (CR-I3 regression)"
     )
+
+
+# --- Phase 73 (TWR-05): Calmar derives from the calendar-CAGR, not qs.stats.calmar
+def test_calmar_uses_calendar_cagr():
+    """TWR-05: Calmar == calendar-CAGR / |max_drawdown|, computed directly.
+
+    Proves two things on a dense 365-calendar-day series (where the calendar
+    clock 365/elapsed diverges from the len/252 clock): (1) the emitted Calmar
+    equals the emitted CAGR divided by |max_drawdown| to fp tolerance, so the
+    two headline numbers share ONE basis; and (2) it does NOT equal
+    ``qs.stats.calmar(returns, periods=252)`` — proving the quantstats helper
+    (which recomputes its CAGR leg at len/252) is no longer the source.
+    """
+    idx = pd.date_range("2024-01-01", periods=365, freq="D")
+    rng = np.random.default_rng(7)
+    r = pd.Series(rng.normal(0.0004, 0.012, size=365), index=idx, name="returns")
+
+    mj = compute_all_metrics(r).metrics_json
+    cagr = mj["cagr"]
+    calmar = mj["calmar"]
+    max_dd = mj["max_drawdown"]
+
+    # Guard: the proof is only meaningful when there IS a drawdown and a CAGR.
+    assert max_dd is not None and max_dd < 0, "fixture must have a real drawdown"
+    assert cagr is not None, "fixture must have a computable CAGR"
+
+    # 1) Calmar shares the calendar-CAGR basis: calmar == cagr / |max_dd|.
+    assert calmar == pytest.approx(cagr / abs(max_dd), rel=1e-9), (
+        "Calmar is not CAGR / |max_drawdown| — the two headline numbers have "
+        "diverged from a shared basis"
+    )
+
+    # 2) It is NOT quantstats calmar at 252 (whose CAGR leg is len/252). On this
+    #    dense 365-row series the two clocks differ, so a surviving qs.stats.calmar
+    #    call would produce a materially different number.
+    qs_calmar_252 = float(qs.stats.calmar(r, periods=252))
+    assert calmar != pytest.approx(qs_calmar_252, rel=1e-6), (
+        "Calmar matched qs.stats.calmar(returns, periods=252) — the quantstats "
+        "helper is still the source instead of the calendar-CAGR"
+    )

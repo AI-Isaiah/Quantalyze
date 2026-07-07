@@ -255,11 +255,23 @@ describe("METRICS-13 cross-runtime parity (TS independent math oracle)", () => {
     expect(metrics.cumulative_return).toBeCloseTo(cumulativeReturn(rets), 9);
   });
 
-  it("cagr equals cumulative_return for this sub-1y fixture", () => {
-    // For a 252-day (1y) series the annualization factor is ~1; regen freezes
-    // cagr == cumulative_return. A bug that double-annualized (×252/252 wrong,
-    // or applied √252) would diverge here.
-    expect(metrics.cagr).toBeCloseTo(metrics.cumulative_return, 9);
+  it("cagr matches the calendar-365 date-span annualization (TWR-05)", () => {
+    // TWR-05 (v1.8): CAGR annualizes on a TRUE calendar clock —
+    // (1 + cumulative_return) ** (365 / elapsed_calendar_days) − 1, where
+    // elapsed_calendar_days = (last − first) date of the returns index
+    // (metrics.py:490-492). This fixture's 252 trading days span
+    // 2025-01-01..2025-12-18 = 351 calendar days, so cagr (~0.02245) is now
+    // GREATER than cumulative_return (~0.02158) — the pre-v1.8 `len/252`
+    // exponent that froze cagr == cumulative_return is gone. A regression back
+    // to it, or a √252 / ×252 divisor bug, diverges here.
+    const first = Date.parse(input.returns[0].date + "T00:00:00Z");
+    const last = Date.parse(
+      input.returns[input.returns.length - 1].date + "T00:00:00Z",
+    );
+    const elapsedDays = Math.max(Math.round((last - first) / 86_400_000), 1);
+    const expectedCagr =
+      Math.pow(1 + cumulativeReturn(rets), 365 / elapsedDays) - 1;
+    expect(metrics.cagr).toBeCloseTo(expectedCagr, 9);
   });
 
   it("volatility matches sample-std × √252", () => {

@@ -45,6 +45,12 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
+# Pure, I/O-free venue-agnostic dated-flow contract (Plan 75-01). Importing it
+# here keeps the module network-free — external_flows.py imports stdlib + typing
+# ONLY (no ccxt/pandas/supabase/services.exchange), so the purity source-scan
+# guard (test_deribit_txn.py) still holds.
+from services.external_flows import ExternalFlow
+
 # Sentinel distinguishing an ABSENT dict key from a present ``None``/``0`` value.
 _MISSING: Any = object()
 
@@ -419,6 +425,40 @@ def _row_utc_day(ts: Any) -> str:
     raise ValueError(f"uninterpretable transaction-log timestamp: {ts!r}")
 
 
+def _row_utc_instant(ts: Any) -> float:
+    """A sortable UTC instant (epoch MILLISECONDS) for a Deribit txn-log
+    timestamp — the SAME tolerant parsing as ``_row_utc_day`` but preserving
+    intraday resolution so same-(day, currency) rows can be ordered. The
+    END-OF-DAY settlement mark is the greatest instant (MEDIUM-1: the same-day
+    index pick must be the event-appropriate end-of-day mark, not the
+    iteration-order-dependent first row). Raises ValueError on an uninterpretable
+    timestamp (mirrors ``_row_utc_day`` — never silently reorder on junk)."""
+    if isinstance(ts, datetime):
+        aware = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+        return aware.astimezone(timezone.utc).timestamp() * 1000.0
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        return float(ts)
+    if isinstance(ts, str):
+        stripped = ts.strip()
+        if stripped.lstrip("-").isdigit():
+            try:
+                return float(int(stripped))
+            except (ValueError, OverflowError):
+                pass
+        try:
+            parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            aware = (
+                parsed
+                if parsed.tzinfo is not None
+                else parsed.replace(tzinfo=timezone.utc)
+            )
+            return aware.astimezone(timezone.utc).timestamp() * 1000.0
+    raise ValueError(f"uninterpretable transaction-log timestamp: {ts!r}")
+
+
 def _day_ccy_own_index(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[tuple[str, str], float]:
@@ -436,6 +476,14 @@ def _day_ccy_own_index(
     index_price on any row cannot crash the whole job (untrusted input).
     """
     day_ccy_index: dict[tuple[str, str], float] = {}
+    # MEDIUM-1: pick the END-OF-DAY mark (greatest event instant) per (day, ccy),
+    # NOT the iteration-order-dependent first row. A `setdefault` first-wins made
+    # the pick order-dependent when a day carried multiple index-bearing rows of
+    # DIFFERENT index_price (a row-order swap flipped the valued cash). The
+    # greatest-instant row is the settlement mark closest to the end-of-day flow
+    # convention; a same-instant tie is broken deterministically on the GREATER
+    # price (a data property, never iteration order).
+    best_instant: dict[tuple[str, str], float] = {}
     for row in rows:
         if not isinstance(row, Mapping):
             continue
@@ -447,11 +495,21 @@ def _day_ccy_own_index(
             continue
         try:
             day = _row_utc_day(row.get("timestamp"))
+            instant = _row_utc_instant(row.get("timestamp"))
             price = float(index_price)
         except (ValueError, TypeError, OverflowError):
             continue
-        if price > 0:
-            day_ccy_index.setdefault((day, ccy), price)
+        if price <= 0:
+            continue
+        key = (day, ccy)
+        prev_instant = best_instant.get(key)
+        if (
+            prev_instant is None
+            or instant > prev_instant
+            or (instant == prev_instant and price > day_ccy_index[key])
+        ):
+            best_instant[key] = instant
+            day_ccy_index[key] = price
     return day_ccy_index
 
 
@@ -459,28 +517,44 @@ def inverse_days_needing_index(
     rows: Sequence[Mapping[str, Any]],
 ) -> set[tuple[str, str]]:
     """The ``(UTC-day ISO, CURRENCY)`` pairs a settlement-index fetch must cover:
-    days on which an INVERSE (coin-margined) CASH_BEARING row with NONZERO
-    ``change`` exists but NO row in the batch supplies a same-day OWN
-    ``index_price`` for that currency.
+    days on which an INVERSE (coin-margined) row that will be VALUED against a
+    same-day index — a CASH_BEARING row OR an external-flow (``transfer``/
+    ``deposit``/``withdrawal``/``usdc_reward``) row — with NONZERO ``change``
+    exists but NO row in the batch supplies a same-day OWN ``index_price`` for
+    that currency.
 
-    These are exactly the "quiet day" rows (e.g. a ``negative_balance_fee`` on a
-    day with no index-bearing settlement) that would otherwise fail loud in
-    ``txn_change_to_usd`` for lack of any same-day index. The crawl consults this
-    to decide which days to fetch ``public/get_delivery_prices`` for; the fetched
-    prices feed back as ``txn_rows_to_daily_records(..., supplemental_index=...)``.
+    These are exactly the "quiet day" rows that would otherwise fail loud in
+    ``txn_change_to_usd`` for lack of any same-day index:
+      * a CASH_BEARING quiet day, e.g. a ``negative_balance_fee`` on a day with no
+        index-bearing settlement (the P72 live finding); and
+      * an INVERSE external-flow quiet day, e.g. a BTC ``withdrawal`` on a no-trade
+        day (Finding C1) — the flow producer
+        (``deribit_dated_external_flows_usd``) values it against a same-day index,
+        so an un-fetched inverse flow day sinks the whole job. BOTH must be
+        fetched; a deposit/withdrawal structurally carries no own ``index_price``.
 
-    Reuses ``_day_ccy_own_index`` (Pass 1) + the exact day/ccy computation of
-    ``txn_rows_to_daily_records`` so the two never disagree. Pure; never raises —
-    an undatable row is skipped here (it surfaces via the aggregator's fail-loud
-    path, not this planner). Excludes zero-change rows, linear currencies, and any
-    day already carrying an own index for that currency.
+    The crawl consults this to decide which days to fetch
+    ``public/get_delivery_prices`` for; the fetched prices feed back as the
+    ``supplemental_index`` of BOTH ``txn_rows_to_daily_records`` and
+    ``deribit_dated_external_flows_usd``.
+
+    Reuses ``_day_ccy_own_index`` (Pass 1) + the exact day/ccy computation of the
+    two valuers so all three never disagree. Pure; never raises — an undatable row
+    is skipped here (it surfaces via the aggregator's fail-loud path, not this
+    planner). Excludes zero-change rows, linear currencies, and any day already
+    carrying an own index for that currency.
     """
     own_index = _day_ccy_own_index(rows)
     needed: set[tuple[str, str]] = set()
     for row in rows:
         if not isinstance(row, Mapping):
             continue
-        if str(row.get("type", "")) not in CASH_BEARING_TYPES:
+        # Finding C1: BOTH cash-bearing rows AND inverse external-flow rows are
+        # valued against a same-day index, so BOTH quiet-day kinds need a fetch.
+        # (The linear-flow case is filtered out by the _INVERSE_CURRENCIES guard
+        # below — a USD-family flow never consumes an index.)
+        row_type = str(row.get("type", ""))
+        if row_type not in CASH_BEARING_TYPES and row_type not in _EXTERNAL_FLOW_TYPES:
             continue
         ccy = str(row.get("currency", "")).upper()
         if ccy not in _INVERSE_CURRENCIES:
@@ -502,6 +576,98 @@ def inverse_days_needing_index(
             continue
         needed.add((day, ccy))
     return needed
+
+
+def deribit_dated_external_flows_usd(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    supplemental_index: Mapping[tuple[str, str], float] | None = None,
+) -> list[ExternalFlow]:
+    """The ONE honest dated external-flow producer: convert the in-band
+    ``_EXTERNAL_FLOW_TYPES`` rows into a per-UTC-day ``list[ExternalFlow]`` for the
+    flow-aware TWR core (FLOW-02).
+
+    Each ``transfer``/``deposit``/``withdrawal``/``usdc_reward`` row with a nonzero
+    ``change`` is valued via ``txn_change_to_usd`` — the SAME single honest
+    valuation path the realized sum uses (NO second inverse converter):
+
+      * LINEAR / USD-family (USDC/USDT/USD/EURR) -> ``change`` passes through as USD
+        (a $50k USDC deposit is $50k, never index-multiplied).
+      * INVERSE (BTC/ETH) -> ``change x same-day settlement index``. Deposit/
+        withdrawal rows structurally carry NO own ``index_price``, so the index is
+        resolved (identically to ``txn_rows_to_daily_records``) as: the batch's own
+        same-day index (``_day_ccy_own_index`` — a same-day index-bearing settlement
+        row) FIRST, else the ``supplemental_index`` (``public/get_delivery_prices``,
+        fetched for the days ``inverse_days_needing_index`` flags — Finding C1).
+        Both are SAME-day → D-07-compliant. If NEITHER exists,
+        ``txn_change_to_usd`` raises ``LedgerValuationError`` (fail loud) — a coin
+        flow is NEVER valued at 1.0 / a current price, nor silently dropped.
+
+    The ``change`` sign is trusted verbatim (a withdrawal -> NEGATIVE usd_signed).
+    A MISSING ``change`` field (schema drift) FAILS LOUD before valuation (RISKY
+    discipline): coalescing absent->0.0 would silently zero a real capital flow and
+    mis-anchor the TWR base. This guard is local to the flow producer and does NOT
+    alter the shared ``txn_change_to_usd`` coalesce that cash-bearing rows rely on.
+
+    Flow rows are ``_EXTERNAL_FLOW_TYPES`` (a subset of ``INFORMATIONAL_TYPES``),
+    so they are STRUCTURALLY excluded from ``txn_rows_to_daily_records``'s realized
+    sum — count-once: a flow feeds F_t here exactly once and never the realized
+    stream. Returns the per-day USD sums as ``ExternalFlow(utc_day_iso, usd_signed)``
+    entries, sorted ascending by day. Supersedes the linear-only scalar
+    ``deribit_linear_external_flow_usd`` (its sole consumer is removed in 75-03).
+    """
+    day_ccy_index = _day_ccy_own_index(rows)
+    by_day: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) not in _EXTERNAL_FLOW_TYPES:
+            continue
+        # A flow row MUST carry a `change` field. Absent (not merely zero) is
+        # schema drift — coalescing absent->0.0 would silently drop a real capital
+        # flow (the TWR-base mis-anchor class). Distinguish absent from present-0.
+        raw_change = row.get("change", _MISSING)
+        if raw_change is _MISSING:
+            raise LedgerValuationError(
+                f"external-flow Deribit row id={row.get('id')!r} "
+                f"type={row.get('type')!r} has NO `change` field — refusing to treat "
+                "a missing balance-delta as a zero flow (schema drift would silently "
+                "drop a real capital in/out and mis-anchor the flow-aware TWR base)"
+            )
+        # HIGH-2: a PRESENT-but-null/blank `change` (None, "", whitespace-only) is
+        # schema drift too — the `or 0.0` coalesce below would turn it into a silent
+        # 0.0 -> `continue` -> a DROPPED real capital flow (the original LTP068
+        # dropped-flow class the absent-key guard above does NOT catch). A numeric
+        # 0.0 (or "0") stays a legitimate observed-no-cash no-op.
+        if raw_change is None or (
+            isinstance(raw_change, str) and not raw_change.strip()
+        ):
+            raise LedgerValuationError(
+                f"external-flow Deribit row id={row.get('id')!r} "
+                f"type={row.get('type')!r} has a null/blank change={raw_change!r} — "
+                "refusing to coalesce it to a zero flow (schema drift would silently "
+                "drop a real capital in/out and mis-anchor the flow-aware TWR base)"
+            )
+        change = _coerce_float(raw_change, field="change", row=row)
+        if change == 0.0:
+            continue  # observed flow row, no cash — no entry, no index needed
+        # An undatable flow row must fail loud as a STRUCTURAL valuation error
+        # (permanent), not a bare ValueError the worker's network over-catch would
+        # mistake for transient (mirrors the aggregator's wrap of the shared helper).
+        try:
+            day = _row_utc_day(row.get("timestamp"))
+        except ValueError as e:
+            raise LedgerValuationError(str(e)) from e
+        ccy = str(row.get("currency", "")).upper()
+        # Own/ledger same-day index ALWAYS wins; the supplemental settlement index
+        # is consulted ONLY when the batch carries no same-day index for this coin
+        # flow — identical resolution order to txn_rows_to_daily_records so the two
+        # paths can never disagree on a day's index.
+        fb = day_ccy_index.get((day, ccy))
+        if fb is None and supplemental_index is not None:
+            fb = supplemental_index.get((day, ccy))
+        by_day[day] = by_day.get(day, 0.0) + txn_change_to_usd(row, fallback_index=fb)
+    return [ExternalFlow(day, usd) for day, usd in sorted(by_day.items())]
 
 
 def txn_rows_to_daily_records(
@@ -564,7 +730,20 @@ def txn_rows_to_daily_records(
                     "missing balance-delta as zero (schema drift would silently "
                     "zero realized cash and render a green-but-wrong track record)"
                 )
-            change = _coerce_float(raw_change or 0.0, field="change", row=row)
+            # HIGH-2: a PRESENT-but-null/blank `change` (None, "", whitespace-only)
+            # is schema drift too — the `or 0.0` coalesce below would silently zero
+            # real realized cash and pass the completeness gate green. A numeric 0.0
+            # (or "0") stays a legitimate zero-cash no-op.
+            if raw_change is None or (
+                isinstance(raw_change, str) and not raw_change.strip()
+            ):
+                raise LedgerValuationError(
+                    f"cash-bearing Deribit row id={row.get('id')!r} "
+                    f"type={row_type!r} has a null/blank change={raw_change!r} — "
+                    "refusing to coalesce it to zero (schema drift would silently "
+                    "zero realized cash and render a green-but-wrong track record)"
+                )
+            change = _coerce_float(raw_change, field="change", row=row)
             # An undatable cash-bearing row must fail loud as a STRUCTURAL
             # valuation error (permanent), not a bare ValueError the network
             # over-catch would mistake for transient. _row_utc_day is shared, so

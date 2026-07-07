@@ -278,3 +278,212 @@ async def test_all_dropped_page_is_not_empty_and_advances() -> None:
     )
     assert result.rows == [9]
     assert len(seen) == 2  # did NOT stop on the all-dropped page
+
+
+# ---------------------------------------------------------------------------
+# Phase 76-01 Task 3 — fetch_ccxt_transfers OKX/Bybit under-pagination fix.
+#
+# WHY (Rule 9): fetch_ccxt_transfers requests page_limit=500 per call, but OKX
+# caps transfer history at 100 rows/page and Bybit at 50 rows/page (RESEARCH
+# Pitfall 3, introspected ccxt 4.5.59). The old `if len(page) < page_limit:
+# break` mistook a FULL but venue-capped page for end-of-history and dropped
+# every transfer past page 1 — silently truncating real capital flows
+# (threat T-76-01-TRUNC). Termination must be driven by cursor-non-advance /
+# empty page / window-end, NEVER by a short page relative to the requested cap.
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timezone  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+import ccxt.async_support as _ccxt  # noqa: E402
+
+from services.ccxt_flow_fetch import fetch_ccxt_transfers  # noqa: E402
+
+_WINDOW_START_MS = int(
+    datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp() * 1000
+)
+
+
+def _make_capped_transfer_fetcher(events: list[dict], cap: int):
+    """A ccxt fetch_deposits/withdrawals double that returns AT MOST ``cap``
+    rows per call regardless of the (larger) requested limit — mirroring a
+    venue whose real per-page cap sits below fetch_ccxt_transfers' page_limit
+    of 500. Rows are those with timestamp >= since_ms, ascending."""
+    call_log: list[tuple[int, int]] = []
+
+    async def _fetch(_symbol, since_ms, _limit):
+        call_log.append((since_ms, _limit))
+        matching = [e for e in events if e["timestamp"] >= since_ms]
+        matching.sort(key=lambda e: e["timestamp"])
+        return matching[:cap]
+
+    return _fetch, call_log
+
+
+async def test_transfers_bybit_50_per_page_multi_page_not_truncated() -> None:
+    """Bybit caps transfers at 50/page. A 170-row single-window history spread
+    over 4 capped pages must return ALL 170 rows — the old len<500 break
+    truncated this to 50 (page 1 only)."""
+    window_start_ms = _WINDOW_START_MS
+    now_ms = window_start_ms + 60 * 24 * 60 * 60 * 1000  # single 90-day window
+    six_h = 6 * 60 * 60 * 1000
+    events = [
+        {"timestamp": window_start_ms + i * six_h, "currency": "USDT", "amount": 1.0}
+        for i in range(170)
+    ]
+    fetcher, call_log = _make_capped_transfer_fetcher(events, cap=50)
+    exchange = MagicMock()
+    exchange.fetch_deposits = fetcher
+
+    rows = await fetch_ccxt_transfers(exchange, "deposits", window_start_ms, now_ms)
+
+    assert len(rows) == 170, (
+        f"expected all 170 Bybit (50/page) transfers; got {len(rows)}. "
+        f"len<500 break truncates a full 50-row page as end-of-history. "
+        f"Call log: {call_log!r}"
+    )
+
+
+async def test_transfers_okx_100_per_page_multi_page_not_truncated() -> None:
+    """OKX caps transfers at 100/page. Two FULL 100-row pages must both be
+    fetched — the old len<500 break stopped after page 1 (100 rows)."""
+    window_start_ms = _WINDOW_START_MS
+    now_ms = window_start_ms + 60 * 24 * 60 * 60 * 1000
+    four_h = 4 * 60 * 60 * 1000
+    events = [
+        {"timestamp": window_start_ms + i * four_h, "currency": "USDT", "amount": 1.0}
+        for i in range(200)
+    ]
+    fetcher, call_log = _make_capped_transfer_fetcher(events, cap=100)
+    exchange = MagicMock()
+    exchange.fetch_withdrawals = fetcher
+
+    rows = await fetch_ccxt_transfers(exchange, "withdrawals", window_start_ms, now_ms)
+
+    assert len(rows) == 200, (
+        f"expected both OKX (100/page) full pages; got {len(rows)}. "
+        f"Call log: {call_log!r}"
+    )
+
+
+async def test_transfers_genuinely_short_final_page_terminates() -> None:
+    """Regression guard for the OTHER direction: dropping the len<500 break
+    must not cause an over-fetch / infinite loop. A Binance-style history
+    that fits in a single short page still terminates on the empty follow-up
+    page (cursor-advance + empty-page discipline)."""
+    window_start_ms = _WINDOW_START_MS
+    now_ms = window_start_ms + 30 * 24 * 60 * 60 * 1000
+    day_ms = 24 * 60 * 60 * 1000
+    events = [
+        {"timestamp": window_start_ms + i * day_ms, "currency": "USDT", "amount": 1.0}
+        for i in range(7)
+    ]
+    fetcher, call_log = _make_capped_transfer_fetcher(events, cap=1000)
+    exchange = MagicMock()
+    exchange.fetch_deposits = fetcher
+
+    rows = await fetch_ccxt_transfers(exchange, "deposits", window_start_ms, now_ms)
+
+    assert len(rows) == 7
+    # First call returns all 7; second call (cursor past last event) is empty
+    # → natural stop. No runaway paging.
+    assert len(call_log) == 2, f"expected fetch → empty-terminate; got {call_log!r}"
+
+
+async def test_transfers_not_supported_returns_partial_not_raise() -> None:
+    """WR-04 discipline preserved through the pagination fix: ccxt.NotSupported
+    (feature detection) still short-circuits to whatever was collected, while
+    any OTHER exception must bubble (asserted elsewhere via the handler path)."""
+    async def _raises_not_supported(_symbol, _since, _limit):
+        raise _ccxt.NotSupported("venue cannot enumerate transfers")
+
+    exchange = MagicMock()
+    exchange.fetch_deposits = _raises_not_supported
+
+    rows = await fetch_ccxt_transfers(exchange, "deposits", 0, 1_000)
+    assert rows == []
+
+
+async def test_transfers_boundary_flow_not_double_counted() -> None:
+    """LOW-1: a transfer whose timestamp lands EXACTLY on a 90-day window boundary
+    is fetchable in BOTH adjacent windows (the next window's inclusive `since` ==
+    the prior window's end, and a venue page can spill rows a few ms past the
+    window end). Dedup by transfer `id` must count it exactly once — a
+    double-counted deposit/withdrawal would corrupt the flow-aware TWR base.
+    MUTATION: removing the id-dedup double-counts the boundary flow → RED."""
+    window_ms = 90 * 24 * 60 * 60 * 1000
+    ws = _WINDOW_START_MS
+    day = 24 * 60 * 60 * 1000
+    now_ms = ws + window_ms + 2 * day  # spans two 90-day windows
+
+    events = [
+        {"id": "e0", "timestamp": ws, "currency": "USDT", "amount": 1.0},
+        {"id": "eB", "timestamp": ws + window_ms, "currency": "USDT", "amount": 1.0},
+        {"id": "e2", "timestamp": ws + window_ms + day, "currency": "USDT",
+         "amount": 1.0},
+    ]
+
+    async def _fetch(_symbol, since_ms, _limit):
+        # Unbounded venue page (models a call that returns rows spilling past the
+        # requested 90-day window end, as a real 90d-capped endpoint can when
+        # `since` is mid-window).
+        matching = [e for e in events if e["timestamp"] >= since_ms]
+        matching.sort(key=lambda e: e["timestamp"])
+        return matching
+
+    exchange = MagicMock()
+    exchange.fetch_deposits = _fetch
+
+    rows = await fetch_ccxt_transfers(exchange, "deposits", ws, now_ms)
+
+    ids = [r["id"] for r in rows]
+    assert ids.count("eB") == 1, (
+        f"boundary flow eB double-counted across adjacent windows: {ids}"
+    )
+    # Every transfer appears exactly once — no over-fetch, none lost.
+    assert sorted(ids) == ["e0", "e2", "eB"], f"expected each flow once; got {ids}"
+
+
+async def test_transfers_page_ceiling_logs_warning_not_silent_truncation(
+    caplog,
+) -> None:
+    """NIT-1 (specialist-silentfailure): if a single 90-day window genuinely
+    exceeds the ~50k-row (1000-page) safety ceiling, the inner loop falls
+    through to the next window — a SILENT truncation of transfer history, the
+    exact direction this module otherwise guards hard. A cursor-advancing,
+    never-empty, never-window-end fetcher forces the ceiling; the run must emit a
+    LOUD warning (never a silent drop) and still return the collected rows.
+
+    Mutation-honest: removing the for/else warning branch leaves caplog empty →
+    RED. No raw amount appears in the log (account-size leak discipline).
+    """
+    import logging
+
+    window_start_ms = _WINDOW_START_MS
+    now_ms = window_start_ms + 89 * 24 * 60 * 60 * 1000  # ONE 90-day window
+    step = 1000  # ms the cursor advances per page (well within the window)
+
+    async def _never_terminating(_symbol, since_ms, _limit):
+        # Always a non-empty page whose max timestamp ADVANCES the cursor and
+        # never reaches window_end → no natural break → the ceiling triggers.
+        return [{"id": f"r{since_ms}", "timestamp": since_ms + step,
+                 "currency": "USDT", "amount": 1.0}]
+
+    exchange = MagicMock()
+    exchange.rateLimit = None  # _rate_limit_sleep no-ops → fast
+    exchange.fetch_deposits = _never_terminating
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.ccxt_flow_fetch"):
+        rows = await fetch_ccxt_transfers(exchange, "deposits", window_start_ms, now_ms)
+
+    ceiling_warnings = [
+        r for r in caplog.records if "ceiling" in r.getMessage()
+    ]
+    assert ceiling_warnings, (
+        "hitting the 1000-page ceiling must log a LOUD warning, never silently "
+        "truncate transfer history"
+    )
+    # The collected rows (partial) are still returned — never raised, never []'d.
+    assert len(rows) == 1000, f"expected the ceiling's worth of rows; got {len(rows)}"
+    # Account-size leak discipline: no raw USD amount in the warning message.
+    assert "1.0" not in ceiling_warnings[0].getMessage()

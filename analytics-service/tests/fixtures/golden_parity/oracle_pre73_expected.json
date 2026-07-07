@@ -1,0 +1,33 @@
+{
+  "_provenance": "INDEPENDENT witness: captured ONCE from the REAL pre-73 module services.transforms.trades_to_daily_returns_with_status at git ref 9a1e7b8e via a throwaway `git worktree add --detach <tmp> 9a1e7b8e`. NOT derived from the Task-1 transcription (scripts/golden_parity.py) or any exec of the extracted snippet. Regenerate with scratchpad/capture_witness.py against a fresh 9a1e7b8e worktree.",
+  "cases": {
+    "estimated_start_positive": [
+      {
+        "date": "2025-08-01",
+        "value": 0.010256410256410256
+      },
+      {
+        "date": "2025-08-02",
+        "value": 0.02030456852791878
+      },
+      {
+        "date": "2025-08-03",
+        "value": -0.004975124378109453
+      }
+    ],
+    "estimated_start_nonpositive_ltp068_shape": [
+      {
+        "date": "2025-08-01",
+        "value": 0.6
+      },
+      {
+        "date": "2025-08-02",
+        "value": 0.5
+      },
+      {
+        "date": "2025-08-03",
+        "value": -0.08333333333333333
+      }
+    ]
+  }
+}

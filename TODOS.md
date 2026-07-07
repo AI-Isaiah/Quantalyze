@@ -688,3 +688,33 @@ Fix path: mechanical refactor across `src/app/portfolio-pdf/[id]/page.tsx`, `src
 Fix path: add a Postgres migration `UNIQUE INDEX portfolio_analytics_one_computing_per_portfolio_idx ON portfolio_analytics(portfolio_id) WHERE computation_status='computing'`, then catch `UniqueViolation` in `_compute_portfolio_analytics`'s INSERT branch and map it to the same "skip — already in-flight" path the cron router uses. Alternative: `pg_try_advisory_xact_lock(hashtext(portfolio_id))` inside the compute. Either closes the gap cross-process; current state is "best-effort within-process throttle" and v0.22.39.0's comment says so honestly.
 
 Blast radius if it bites: two duplicate `portfolio_analytics` history rows for the same portfolio, two competing computes hitting Supabase, alert fan-out triggering twice. Hasn't been observed in prod, but the architectural seam is real.
+
+### v1.8 P73: short-window CAGR over-annualization DQ flag (red-team MEDIUM-1, 2026-07-05)
+
+**Priority:** P2 — pre-existing class, deferred behind the Phase 78 parity gate.
+
+`analytics-service/services/metrics.py` CAGR annualizes on the 365 calendar-day span (TWR-05). The only upstream floor is `len(returns) < 2`; a genuine 2-day window (`elapsed_days == 1`) still annualizes with exponent 365 → CAGR explodes (a `[0.0, 0.05]` 2-day series yields cagr ≈ 5.4e7) and is stamped `complete` with no DQ flag. This is the milestone's origin population (short-lived, flow-heavy accounts posting absurd CAGR). It is a *pre-existing* class — the old `len/252` basis had the same shape (a 2-day input gave ~456x) — so TWR-05 did not introduce it, but neither did it flag it. The false comment claiming an "upstream sample-floor" protects this was corrected in `f875ab63`.
+
+Fix path: add a short-window DQ flag (e.g. `elapsed_days < N` → `complete_with_warnings` / `insufficient_window`) at the CAGR site, WITHOUT changing the CAGR value. Deliberately deferred because a CAGR `computation_status` change is factsheet-wide blast radius (roadmap Pitfall #12) and must land behind the Phase 78 golden-parity gate with a threshold decision (what N, and whether magnitude is suppressed vs merely flagged). Interacts with the DQ NaN-break path: after guards NaN-break flow-heavy days, `returns.dropna().index` can collapse to a few far-apart survivors → same absurd annualization.
+
+### ✅ CLOSED (P76, 2026-07-06) — v1.8 P74: broker→CSV path drops guard meta → allocator sees `complete` for a guarded account (red-team MEDIUM-1 + verifier deferral, 2026-07-06)
+
+**CLOSED by P76 MED-2.** The broker path now PRE-STAMPS the DQ-01 guard flags
+(`negative_nav_guard` / `dust_nav_guard` / `flow_dominated_guard`) onto
+`strategy_analytics.data_quality_flags` in `derive_broker_dailies` (`job_worker.py`) —
+the SAME bridge the `flow_coverage_incomplete` flag already rode from 76-04 — and
+`run_csv_strategy_analytics` (`analytics_runner.py`) now reads/preserves/promotes ALL of
+them, so a guarded broker account renders `complete_with_warnings` to allocators. The
+full guard meta now crosses the `csv_daily_returns` boundary. Mutation-honest tests:
+`test_guarded_broker_day_prestamps_dq01_guard_flag` (job_worker) +
+`test_csv_run_promotes_to_warnings_when_dq01_guard_prestamped` (analytics_runner). The
+short-window over-annualized-CAGR interaction (below) remains tracked with the P73 item
+behind the Phase 78 parity gate.
+
+**Priority:** P2 — magnitude honesty IS delivered (no fabricated base); this is a WARNING-propagation gap, not a fabrication. Verified acceptable-deferral by both the phase-74 verifier and the fresh-context red-team.
+
+The broker→CSV path (`analytics-service/services/job_worker.py` → `run_csv_strategy_analytics`) re-reads `csv_daily_returns` (guarded `estimated_start<=0` days already SKIPPED at write time per 74-04's NaN-safe upsert) with NO access to the NavTWRMeta guard keys. `_mark_complete` overwrites `data_quality_flags` with `{csv_source: True}`, so a guarded broker account exits `computation_status="complete"` — an allocator sees a clean factsheet with no `complete_with_warnings`. `complete_with_warnings` DOES surface on the stored-trades `run_strategy_analytics` path (wired in 74-03); the gap is confined to the CSV re-read architectural loop. Pinned as intentional scope in `tests/…::test_nan_account_honest_end_to_end` / `TestNaNAccountHonestEndToEnd`.
+
+Compounding interaction: when early days are guard-skipped, the surviving window can be short with the first survivor just above the $1000 dust cliff → over-annualized CAGR (red-team measured ~300%/day retained over a 6-day window). This is the SAME short-window over-annualization class tracked in the P73 item above.
+
+Fix path (Phase 76 territory — the ccxt/broker reconciliation gate): carry the guard meta across the `csv_daily_returns` boundary (persist a per-day flag column, or re-derive/attach guard status in `run_csv_strategy_analytics` so `_mark_complete` can promote), so a guarded broker account renders `complete_with_warnings` to allocators. Close alongside the P73 short-window CAGR DQ flag behind the Phase 78 parity gate. Until then, broker-path CAGR on short-lived / estimated_start<=0 accounts should not be trusted by allocators without the warning.

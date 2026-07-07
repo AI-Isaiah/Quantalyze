@@ -30,6 +30,16 @@ logger = logging.getLogger("quantalyze.analytics.metrics")
 # rewrite. Mirrors the existing `optimizer.py:TRADING_DAYS = 252` precedent.
 DEFAULT_PERIODS_PER_YEAR = 252
 
+# TWR-05 (founder decision 2026-07-05): RETURN/CAGR and Calmar annualize on the
+# true CALENDAR clock — 365 calendar-days per year over the real DatetimeIndex
+# span — while Sharpe / volatility / Sortino / rolling_* / TE-IR stay on
+# `periods_per_year` (252). Return and risk are deliberately orthogonal clocks:
+# a 24/7 crypto series posts a return every calendar day, so a 252-basis
+# `years = len/periods` mis-reads a ~365-row record as ~1.45 years and
+# over-annualizes the return. Not 365.25 — matches the existing `365/252`
+# rescale-proof constant and the PROJECT.md wording ("365 / elapsed-calendar-days").
+_CALENDAR_DAYS_PER_YEAR = 365.0
+
 
 # PR #181 take-2 red-team F16: when a fundamental qs.stats shape regression
 # trips multiple scalars at once (e.g., a future qs upgrade returns Series
@@ -456,7 +466,31 @@ def compute_all_metrics(
     # the equity curve continuous; the ranking scalar must not use it.
     cumulative = (1 + returns_for_chart).cumprod()
     total_return = _safe_float((1 + returns.dropna()).prod() - 1)
-    cagr = _safe_float(qs.stats.cagr(returns, periods=periods_per_year))
+    # TWR-05 (founder decision 2026-07-05): CAGR annualizes on the CALENDAR
+    # clock — years = true elapsed-calendar-days / 365 from the DatetimeIndex
+    # span — NOT on `periods_per_year` (252). A 24/7 crypto series posts a
+    # return every calendar day, so quantstats' `years = len(returns)/periods`
+    # at 252 mis-reads a ~365-row record as ~1.45 years and OVER-annualizes the
+    # return; a sparse CSV/MT5 series (rows < calendar-days) has the mirror bug.
+    # The date-span basis is frequency-proof for BOTH dense crypto and sparse
+    # CSV/MT5. `max(elapsed, 1)` guards a single-day/degenerate window against a
+    # divide-by-zero. NOTE: the ONLY upstream floor is `len(returns) < 2`; a
+    # genuine 2-day window (elapsed_days==1) still annualizes with exponent 365,
+    # which explodes CAGR for a days-old account and is NOT yet flagged. That
+    # short-window over-annualization is a pre-existing class (the old len/252
+    # basis had the same shape) tracked for a DQ short-window flag behind the
+    # Phase 78 parity gate — deliberately not point-fixed here because a
+    # CAGR-status change is factsheet-wide blast radius (roadmap Pitfall #12).
+    # This reuses `total_return` (== comp(returns)) so the geometric base is
+    # exactly the value the module already computed.
+    _cagr_index = returns.dropna().index
+    if total_return is None or len(_cagr_index) < 2:
+        cagr = _safe_float(float("nan"))
+    else:
+        _elapsed_days = max((_cagr_index[-1] - _cagr_index[0]).days, 1)
+        cagr = _safe_float(
+            (1.0 + total_return) ** (_CALENDAR_DAYS_PER_YEAR / _elapsed_days) - 1.0
+        )
     volatility = _safe_float(qs.stats.volatility(returns, periods=periods_per_year))
     sharpe = _safe_float(qs.stats.sharpe(returns, periods=periods_per_year))
     # Audit 2026-05-07 H-0725: pass `rf=MAR` explicitly so the scalar sortino
@@ -464,12 +498,18 @@ def compute_all_metrics(
     # Relying on qs.stats.sortino's implicit `rf=0` default silently diverges
     # the moment MAR is ever tuned away from 0.
     sortino = _safe_float(qs.stats.sortino(returns, rf=MAR, periods=periods_per_year))
-    # calmar = CAGR / |max_drawdown|; quantstats computes the CAGR leg via
-    # `cagr(returns, periods=periods)`, so calmar is periods-dependent and MUST
-    # thread the same basis as cagr/sharpe/sortino/volatility — else a non-252
-    # caller gets a rescaled CAGR but a stale-252 Calmar (calmar != cagr/|maxdd|).
-    calmar = _safe_float(qs.stats.calmar(returns, periods=periods_per_year))
     max_dd = _safe_float(qs.stats.max_drawdown(returns))
+    # TWR-05: calmar = CAGR / |max_drawdown|, computed DIRECTLY so it shares the
+    # calendar-CAGR basis above. quantstats' calmar helper is NO LONGER called:
+    # it recomputes its own CAGR leg internally via `cagr(returns, periods=periods)`
+    # (a len/periods years exponent), which would DIVERGE from the date-span CAGR
+    # and leave the two headline numbers disagreeing (calmar != cagr / |maxdd|).
+    # NaN when max_dd is 0/None (a flat series) so the ratio never divides by zero.
+    calmar = (
+        _safe_float(cagr / abs(max_dd))
+        if (cagr is not None and max_dd is not None and max_dd != 0.0)
+        else _safe_float(float("nan"))
+    )
 
     # Drawdown series — chart continuity per F3 (same fillna(0) rationale).
     dd_series = qs.stats.to_drawdown_series(returns_for_chart)

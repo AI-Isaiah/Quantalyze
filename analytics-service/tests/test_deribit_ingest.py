@@ -901,6 +901,203 @@ async def test_multi_scope_older_quiet_day_triggers_deeper_settlement_fetch(
 
 
 # ===========================================================================
+# 75-03 — CompletenessReport.dated_external_flows: the crawl accumulates a dated
+# list[ExternalFlow] (replacing the net-scalar + saw_unvalued_inverse_flow fields)
+# via deribit_dated_external_flows_usd, feeding the honest core's F_t term. The
+# quiet-day inverse flow (Finding C1) values via the SAME supplemental fetch that
+# feeds txn_rows_to_daily_records — count-once by construction.
+# ===========================================================================
+
+
+async def test_crawl_accumulates_dated_inverse_flow_with_own_index(
+    monkeypatch: Any,
+) -> None:
+    # Dated accumulation proof: crawling scenario 2 (a BTC withdrawal on a day that
+    # ALSO carries an index-bearing settlement row) yields ONE correctly-signed,
+    # event-time-valued ExternalFlow on the withdrawal's actual UTC day — valued at
+    # the OWN same-day index (no external fetch needed). -0.5 * 42000 = -21000.
+    from services.external_flows import ExternalFlow
+    from tests.fixtures.deribit_flow_fixtures import (
+        BTC_INDEX_2026_03_14,
+        DAY_INVERSE_WITH_INDEX,
+        inverse_flow_day_with_index_rows,
+    )
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return inverse_flow_day_with_index_rows()
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+
+    called: list[str] = []
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        called.append(currency)
+        return {}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    _records, report = await di.fetch_deribit_ledger_daily_records(object())
+    # The withdrawal day carries its OWN index (the paired settlement row), so no
+    # settlement-index fetch was needed.
+    assert called == [], "own-index inverse flow must not trigger a supplemental fetch"
+    assert report.dated_external_flows == [
+        ExternalFlow(DAY_INVERSE_WITH_INDEX, -0.5 * BTC_INDEX_2026_03_14)
+    ]
+
+
+async def test_crawl_c1_quiet_inverse_flow_values_via_settlement_index(
+    monkeypatch: Any,
+) -> None:
+    # C1 end-to-end proof: a QUIET-day BTC withdrawal (no own index) VALUES via the
+    # fetched same-day settlement index instead of failing loud — the flow appears
+    # in dated_external_flows. Revert-proof: without the 75-02 C1 extension the day
+    # is never fetched (inverse_days_needing_index would not emit it) and the flow
+    # producer raises LedgerValuationError out of the crawl (this test errors).
+    from services.external_flows import ExternalFlow
+    from tests.fixtures.deribit_flow_fixtures import (
+        DAY_INVERSE_NO_INDEX,
+        inverse_flow_day_without_index_rows,
+    )
+
+    quiet_price = 43000.0
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return inverse_flow_day_without_index_rows()
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+
+    fetched: list[tuple[str, str]] = []
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        fetched.append((currency, oldest_day))
+        return {DAY_INVERSE_NO_INDEX: quiet_price}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    _records, report = await di.fetch_deribit_ledger_daily_records(object())
+    # The C1 extension flagged the quiet day → the settlement index was fetched for
+    # BTC anchored at that day, and the withdrawal valued at -0.5 * 43000 = -21500
+    # rather than failing loud.
+    assert fetched == [("BTC", DAY_INVERSE_NO_INDEX)]
+    assert report.dated_external_flows == [
+        ExternalFlow(DAY_INVERSE_NO_INDEX, -0.5 * quiet_price)
+    ]
+
+
+async def test_crawl_accumulates_linear_flow_without_index_fetch(
+    monkeypatch: Any,
+) -> None:
+    # Linear proof: a USDC (linear / USD-family) deposit accumulates a +USD dated
+    # flow with NO settlement-index fetch (USD passes through, never index-scaled).
+    from services.external_flows import ExternalFlow
+    from tests.fixtures.deribit_flow_fixtures import (
+        DAY_LINEAR,
+        linear_flow_day_rows,
+    )
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "USDC":
+            return linear_flow_day_rows()
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["USDC"]}, paginate=_paginate,
+    )
+
+    called: list[str] = []
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        called.append(currency)
+        return {}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    _records, report = await di.fetch_deribit_ledger_daily_records(object())
+    assert called == [], "a linear USDC deposit must never fetch a settlement index"
+    # +50000 USDC deposit passes through as +50000 USD on its own UTC day.
+    assert report.dated_external_flows == [ExternalFlow(DAY_LINEAR, 50000.0)]
+
+
+async def test_completeness_report_retired_scalar_fields(monkeypatch: Any) -> None:
+    # Field-swap proof: the net-scalar fields are GONE; dated_external_flows +
+    # total_return_rows are the survivors.
+    report = di.CompletenessReport()
+    assert not hasattr(report, "net_external_flow_usd")
+    assert not hasattr(report, "saw_unvalued_inverse_flow")
+    assert report.dated_external_flows == []
+    assert report.total_return_rows == 0
+
+
+async def test_crawl_flow_row_count_once_absent_from_realized(
+    monkeypatch: Any,
+) -> None:
+    # Count-once proof (crawl level): the deposit flow row is EXCLUDED from the
+    # realized daily_records (txn_rows_to_daily_records skips _EXTERNAL_FLOW_TYPES)
+    # and appears exactly once in dated_external_flows. Only the linear trade fee
+    # (a CASH_BEARING row) reaches realized.
+    from services.external_flows import ExternalFlow
+    from tests.fixtures.deribit_flow_fixtures import (
+        DAY_LINEAR,
+        linear_flow_day_rows,
+    )
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "USDC":
+            return linear_flow_day_rows()
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["USDC"]}, paginate=_paginate,
+    )
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        return {}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    records, report = await di.fetch_deribit_ledger_daily_records(object())
+    # The +50000 deposit is a flow, NOT realized — it must not leak into realized
+    # daily_records (else it double-counts against F_t).
+    realized_usd = [abs(float(r["price"])) for r in records]
+    assert 50000.0 not in realized_usd, "deposit flow leaked into the realized sum"
+    # The only realized record is the -5 linear trade fee.
+    assert records and all(abs(float(r["price"])) == 5.0 for r in records)
+    # The deposit appears exactly once as a dated flow.
+    assert report.dated_external_flows == [ExternalFlow(DAY_LINEAR, 50000.0)]
+
+
+# ===========================================================================
 # 70-04 Task 1 — the SECONDARY trades axis: id-cursor fill fetch + FillRow map.
 #
 # This axis is execution detail + an ADVISORY fill-count cross-check — NOT the

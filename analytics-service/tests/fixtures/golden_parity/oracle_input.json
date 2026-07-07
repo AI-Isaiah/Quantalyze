@@ -1,0 +1,25 @@
+{
+  "_provenance": "Deterministic committed input for the ACC-01 frozen-oracle golden pin. daily_pnl-branch records (order_type='daily_pnl', side=buy->+price / sell->-price). Two cases cover BOTH regimes of the pre-73 anchor-to-today formula: estimated_start>0 (control shape) and estimated_start<=0 (the LTP068 profits-withdrawn bug that fell back to account_balance). No live/untrusted data.",
+  "cases": [
+    {
+      "label": "estimated_start_positive",
+      "regime": "account_balance - total_pnl > 0 (control shape; byte-identity path)",
+      "account_balance": 100000.0,
+      "trades": [
+        {"timestamp": "2025-08-01T00:00:00+00:00", "order_type": "daily_pnl", "side": "buy", "price": 1000.0},
+        {"timestamp": "2025-08-02T00:00:00+00:00", "order_type": "daily_pnl", "side": "buy", "price": 2000.0},
+        {"timestamp": "2025-08-03T00:00:00+00:00", "order_type": "daily_pnl", "side": "sell", "price": 500.0}
+      ]
+    },
+    {
+      "label": "estimated_start_nonpositive_ltp068_shape",
+      "regime": "account_balance - total_pnl <= 0 (profits withdrawn; the fallback IS the +458% LTP068 bug)",
+      "account_balance": 5000.0,
+      "trades": [
+        {"timestamp": "2025-08-01T00:00:00+00:00", "order_type": "daily_pnl", "side": "buy", "price": 3000.0},
+        {"timestamp": "2025-08-02T00:00:00+00:00", "order_type": "daily_pnl", "side": "buy", "price": 4000.0},
+        {"timestamp": "2025-08-03T00:00:00+00:00", "order_type": "daily_pnl", "side": "sell", "price": 1000.0}
+      ]
+    }
+  ]
+}

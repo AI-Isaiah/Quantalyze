@@ -5656,3 +5656,148 @@ class TestClusterIC1301BybitCategoryGuard:
             await _fetch_raw_trades_bybit(mock_exchange, None, category="spot")
         flags = get_and_clear_last_dq_flags()
         assert flags.get("bybit_unsupported_category") is True
+
+
+# ===========================================================================
+# Phase 77-02 / SC-1 — venue-gated companion open-uPnL reads (FLOW-04).
+#
+# OKX `upl` rides the SAME private_get_account_balance response as `totalEq`
+# (no new HTTP round-trip). Bybit/Binance anchor on realized-basis
+# walletBalance, so their wedge is STRUCTURALLY 0.0 — subtracting a non-zero
+# wedge there is the Pitfall-2 double-count.
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_okx_upl_single_call_companion() -> None:
+    """OKX companion returns (equity, balance_error, upl) from a SINGLE
+    private_get_account_balance call — the upl is the sibling wedge in the
+    SAME response as totalEq. Awaited-exactly-once proves no new fetch."""
+    from services.exchange import fetch_account_equity_and_upnl_usd
+
+    mock_exchange = AsyncMock()
+    mock_exchange.private_get_account_balance = AsyncMock(
+        return_value={"data": [{"totalEq": "100000", "upl": "8000"}]}
+    )
+    eq, balance_error, upl, unreadable = await fetch_account_equity_and_upnl_usd(
+        mock_exchange, "okx"
+    )
+    assert eq == pytest.approx(100000.0)
+    assert balance_error is False
+    assert upl == pytest.approx(8000.0)
+    # A present, numeric upl is readable (MUST-2): no unreadable flag.
+    assert unreadable is False
+    # No new fetch: upl rides the totalEq response object.
+    assert mock_exchange.private_get_account_balance.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_okx_upl_negative_sign_preserved() -> None:
+    """A negative `upl` (net open loss) is trusted verbatim — the wedge sign
+    is preserved, not abs()'d."""
+    from services.exchange import fetch_account_equity_and_upnl_usd
+
+    mock_exchange = AsyncMock()
+    mock_exchange.private_get_account_balance = AsyncMock(
+        return_value={"data": [{"totalEq": "100000", "upl": "-4000"}]}
+    )
+    _eq, _err, upl, _unreadable = await fetch_account_equity_and_upnl_usd(
+        mock_exchange, "okx"
+    )
+    assert upl == pytest.approx(-4000.0)
+
+
+@pytest.mark.asyncio
+async def test_okx_missing_upl_wedge_zero_but_flagged_unreadable() -> None:
+    """totalEq present but no `upl` key (or null) → wedge 0.0 (never
+    fabricated) AND ``unreadable`` True (MUST-2): a garbled/absent wedge on a
+    readable anchor is an inconsistent response the caller must surface, NOT a
+    clean zero. Mutation-honest: reverting _okx_upl_or_zero to return a bare
+    float turns the ``unreadable is True`` assertions RED."""
+    from services.exchange import fetch_account_equity_and_upnl_usd
+
+    ex_absent = AsyncMock()
+    ex_absent.private_get_account_balance = AsyncMock(
+        return_value={"data": [{"totalEq": "100000"}]}
+    )
+    eq, err, upl, unreadable = await fetch_account_equity_and_upnl_usd(
+        ex_absent, "okx"
+    )
+    assert eq == pytest.approx(100000.0)
+    assert err is False
+    assert upl == 0.0
+    assert unreadable is True, "absent upl on a readable anchor must flag unreadable"
+
+    ex_null = AsyncMock()
+    ex_null.private_get_account_balance = AsyncMock(
+        return_value={"data": [{"totalEq": "100000", "upl": None}]}
+    )
+    _eq, _err, upl_null, unreadable_null = await fetch_account_equity_and_upnl_usd(
+        ex_null, "okx"
+    )
+    assert upl_null == 0.0
+    assert unreadable_null is True, "null upl on a readable anchor must flag unreadable"
+
+    # A PRESENT numeric 0.0 upl is a genuinely flat book — readable, NOT flagged.
+    ex_flat = AsyncMock()
+    ex_flat.private_get_account_balance = AsyncMock(
+        return_value={"data": [{"totalEq": "100000", "upl": "0"}]}
+    )
+    _eqf, _errf, upl_flat, unreadable_flat = await fetch_account_equity_and_upnl_usd(
+        ex_flat, "okx"
+    )
+    assert upl_flat == 0.0
+    assert unreadable_flat is False, "present-0 upl is a clean flat book, not unreadable"
+
+
+@pytest.mark.asyncio
+async def test_bybit_binance_wedge_zero() -> None:
+    """Bybit/Binance anchor on realized-basis walletBalance → wedge is
+    STRUCTURALLY 0.0 regardless of balance (Q2 / Pitfall-2 double-count
+    guard). The dispatch never reads a upl field for these venues."""
+    from services.exchange import fetch_account_equity_and_upnl_usd
+
+    for venue in ("bybit", "binance"):
+        with patch(
+            "services.exchange.fetch_usdt_balance_with_status",
+            new=AsyncMock(return_value=(123456.0, False)),
+        ):
+            eq, err, upl, unreadable = await fetch_account_equity_and_upnl_usd(
+                AsyncMock(), venue
+            )
+        assert eq == pytest.approx(123456.0)
+        assert err is False
+        assert upl == 0.0, f"{venue} wedge must be structurally 0.0"
+        # Realized-basis venues have NO wedge field to read → never unreadable.
+        assert unreadable is False, f"{venue} has no wedge field, not unreadable"
+
+
+@pytest.mark.asyncio
+async def test_okx_balance_error_wedge_zero() -> None:
+    """A failed/empty OKX response → (None, True, 0.0): no equity, balance
+    error, and the wedge forced to 0.0 (no equity → no trustworthy wedge)."""
+    from services.exchange import fetch_account_equity_and_upnl_usd
+
+    ex_boom = AsyncMock()
+    ex_boom.private_get_account_balance = AsyncMock(
+        side_effect=RuntimeError("boom")
+    )
+    eq, err, upl, unreadable = await fetch_account_equity_and_upnl_usd(
+        ex_boom, "okx"
+    )
+    assert eq is None
+    assert err is True
+    assert upl == 0.0
+    # A failed read has no trustworthy anchor → unreadable is moot/False (the
+    # balance_error is the flagged problem, not the wedge).
+    assert unreadable is False
+
+    ex_empty = AsyncMock()
+    ex_empty.private_get_account_balance = AsyncMock(return_value={"data": []})
+    eq2, err2, upl2, unreadable2 = await fetch_account_equity_and_upnl_usd(
+        ex_empty, "okx"
+    )
+    assert eq2 is None
+    assert err2 is True
+    assert upl2 == 0.0
+    assert unreadable2 is False

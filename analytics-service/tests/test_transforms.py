@@ -31,12 +31,23 @@ class TestTradesToDailyReturns:
         assert len(returns) == 1
 
     def test_returns_are_finite(self, sample_trades):
-        returns = trades_to_daily_returns(sample_trades)
+        # 74-02: sample_trades is a net-flat round-trip whose first-day net
+        # notional is ~$10; with no account_balance the honest core (dust floor
+        # $1000) correctly guards that sub-dust base to NaN. This test's intent
+        # is "real trades produce finite returns", so anchor it to a realistic
+        # institutional balance where estimated_start > dust and no guard fires.
+        returns = trades_to_daily_returns(sample_trades, account_balance=100_000.0)
         for val in returns.values:
             assert np.isfinite(val), f"Non-finite return: {val}"
 
     def test_fees_reduce_returns(self):
-        """Same trades with and without fees — fees should reduce net return."""
+        """Same trades with and without fees — fees should reduce net return.
+
+        74-02: anchored to a realistic $10k balance. Pre-wiring these fed the
+        individual-trades heuristic a ~$10 base (dust) and produced finite-but-
+        gibberish -100%/-200% returns; the honest core guards a sub-dust base to
+        NaN, so a real balance is required to compare the fee effect on the same
+        real base (fees enter the numerator PnL, so the fee series is lower)."""
         no_fee_trades = [
             {"timestamp": "2023-01-02T10:00:00Z", "symbol": "BTCUSDT", "side": "buy", "price": "100", "quantity": "1", "fee": "0", "order_type": "market"},
             {"timestamp": "2023-01-02T14:00:00Z", "symbol": "BTCUSDT", "side": "sell", "price": "110", "quantity": "1", "fee": "0", "order_type": "market"},
@@ -45,8 +56,8 @@ class TestTradesToDailyReturns:
             {"timestamp": "2023-01-02T10:00:00Z", "symbol": "BTCUSDT", "side": "buy", "price": "100", "quantity": "1", "fee": "5", "order_type": "market"},
             {"timestamp": "2023-01-02T14:00:00Z", "symbol": "BTCUSDT", "side": "sell", "price": "110", "quantity": "1", "fee": "5", "order_type": "market"},
         ]
-        r_no_fee = trades_to_daily_returns(no_fee_trades)
-        r_fee = trades_to_daily_returns(fee_trades)
+        r_no_fee = trades_to_daily_returns(no_fee_trades, account_balance=10_000.0)
+        r_fee = trades_to_daily_returns(fee_trades, account_balance=10_000.0)
         # The return with fees should be less
         assert float(r_fee.iloc[0]) < float(r_no_fee.iloc[0])
 
@@ -142,6 +153,36 @@ class TestTradesToDailyReturnsWithStatus:
         assert meta["used_heuristic_capital"] is False
         assert meta["balance_error"] is False
         assert meta["computation_status_hint"] == "complete"
+
+    def test_material_wedge_flag_carried_through_single_source(self):
+        """MEDIUM-1: the core's ``unrealized_pnl_in_anchor`` materiality flag must
+        survive the ``_merge_status_meta`` boundary — the materiality test lives in
+        ONE place (the core), and the transforms seam carries the flag through
+        additively + promotes to ``complete_with_warnings``. Previously the key was
+        silently DROPPED here, forcing a divergent job_worker recompute.
+
+        Mutation-honest: reverting the ``_merge_status_meta`` carry-through drops
+        the key (and the warn promotion) → both asserts RED."""
+        trades = self._daily_pnl_trades()
+        # 8% wedge on a 100k anchor > the 5% materiality ratio → material.
+        _returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=100_000.0, balance_error=False,
+            open_unrealized_usd=8_000.0,
+        )
+        assert meta.get("unrealized_pnl_in_anchor") is True, (
+            "the core's materiality flag must be carried through the transforms "
+            f"boundary (single source); got {meta!r}"
+        )
+        assert meta["computation_status_hint"] == "complete_with_warnings"
+
+        # Control: an immaterial (zero) wedge never sets the flag → the pre-77
+        # byte-identity account stays `complete`.
+        _r2, meta2 = trades_to_daily_returns_with_status(
+            trades, account_balance=100_000.0, balance_error=False,
+            open_unrealized_usd=0.0,
+        )
+        assert "unrealized_pnl_in_anchor" not in meta2
+        assert meta2["computation_status_hint"] == "complete"
 
     def test_balance_error_propagates_to_warnings(self):
         """The audit's headline case: exchange API failed, caller
@@ -288,21 +329,30 @@ class TestDustThresholdC0233:
         ]
 
     def test_real_balance_below_pnl_spike_still_takes_real_capital_path(self):
-        """The headline case: account_balance = $500k (legitimate
+        """The headline case: account_balance = $1.5M (legitimate
         institutional), max daily PnL = $1M. Pre-fix, min_balance =
-        $1M × 2 = $2M and the heuristic branch fires. Post-fix, the
-        fixed $1k floor means real balance wins and the factsheet
-        renders accurate numbers."""
+        $1M × 2 = $2M so a $1.5M balance (< $2M) still fired the heuristic
+        branch. Post-fix, the fixed $1k floor means real balance wins and the
+        factsheet renders accurate numbers.
+
+        74-02 note: the balance was $500k pre-wiring, but $500k with a $1M
+        single-day PnL is physically impossible (it implies estimated_start =
+        500k - 1.005M = -505k, i.e. the account gained more than it ever held).
+        The old code SILENTLY substituted the balance as the base for that
+        impossible input; the honest core now flags it (negative_nav_guard),
+        which is the divergence the dedicated pins own. $1.5M keeps this
+        regression focused on the dust-decoupling it was written for (still
+        below the old $2M PnL-derived threshold) with a physically consistent
+        estimated_start = 1.5M - 1.005M = 495k > 0 (no guard)."""
         trades = self._outlier_day_trades()
         returns, meta = trades_to_daily_returns_with_status(
-            trades, account_balance=500_000.0, balance_error=False
+            trades, account_balance=1_500_000.0, balance_error=False
         )
         assert len(returns) == 2
         assert meta["used_heuristic_capital"] is False, (
-            "real institutional balance ($500k) MUST flow through the "
-            "real-capital branch even when one day's PnL exceeds the "
-            "balance — the fixed dust floor decouples the heuristic "
-            "trigger from PnL magnitude"
+            "real institutional balance ($1.5M, below the old $2M PnL-derived "
+            "threshold) MUST flow through the real-capital branch — the fixed "
+            "dust floor decouples the heuristic trigger from PnL magnitude"
         )
         assert meta["computation_status_hint"] == "complete"
 
@@ -381,3 +431,329 @@ class TestCapDataPoints:
         # Should keep most recent (last 50)
         assert result[0] == 50
         assert result[-1] == 99
+
+
+# ---------------------------------------------------------------------------
+# Phase 74 Wave 0 — byte-identity SNAPSHOT pins (the revert-proof safety net)
+# ---------------------------------------------------------------------------
+# These freeze TODAY's EXACT returns Series (pre-refactor) for the flow-less,
+# estimated_start>0 input shapes that flow through
+# ``trades_to_daily_returns_with_status``. Wave 2 (plan 74-02) delegates the
+# daily_pnl path to ``nav_twr.reconstruct_nav_and_twr``; these pins are the
+# safety net that MUST STAY GREEN across the whole phase — a delegation diff
+# that changes any value on a flow-less / estimated_start>0 account fails here.
+#
+# The assertion pattern mirrors the SC-4 pin in test_nav_twr.py
+# (``test_zero_flow_byte_identical``): rtol 1e-12, index-name excluded (the
+# "returns" vs input index-name convention is cosmetic).
+#
+# Do NOT assert any NaN/guard behavior here — the estimated_start<=0 divergence
+# / fallback-deletion pins are authored RED->GREEN inside 74-02. Every fixture
+# here keeps estimated_start>0 (or is the heuristic branch) so NO guard fires.
+class TestByteIdentitySnapshotPins:
+    """Revert-proof byte-identity pins for the three flow-less input shapes."""
+
+    def test_byte_identical_daily_pnl_snapshot(self):
+        """Pin the daily_pnl branch (order_type='daily_pnl') on an
+        estimated_start>0 account. account_balance=250k, Σpnl=1800 ->
+        estimated_start=248,200 (>$1000 dust floor) so the real-balance path
+        is taken and NO heuristic/guard fires. Frozen to rtol 1e-12."""
+        pnls = [1200.0, -450.0, 900.0, -200.0, 650.0, -300.0]  # Σ = 1800
+        account_balance = 250_000.0
+        trades = [
+            {
+                "timestamp": f"2026-03-{i + 1:02d}T00:00:00+00:00",
+                "order_type": "daily_pnl",
+                "side": "buy" if p >= 0 else "sell",
+                "price": abs(p),
+            }
+            for i, p in enumerate(pnls)
+        ]
+        returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=account_balance
+        )
+
+        expected_index = pd.DatetimeIndex(
+            [f"2026-03-{i + 1:02d}" for i in range(len(pnls))]
+        )
+        expected_values = [
+            0.004834810636583401,
+            -0.0018043303929430633,
+            0.003615183771841735,
+            -0.0008004802881729037,
+            0.0026036451031444022,
+            -0.0011985617259288853,
+        ]
+        expected = pd.Series(expected_values, index=expected_index, name="returns")
+
+        pd.testing.assert_series_equal(
+            returns, expected, check_exact=False, rtol=1e-12,
+            check_freq=False, check_names=False,
+        )
+        # Real-balance path: no heuristic, no guard -> 'complete'.
+        assert meta["used_heuristic_capital"] is False
+        assert meta["computation_status_hint"] == "complete"
+
+    def test_byte_identical_individual_snapshot(self):
+        """Pin the individual-trades branch (raw buy/sell fills with
+        price/quantity/fee, NO order_type='daily_pnl') on an
+        estimated_start>0 account (account_balance=50k). This is the branch
+        Phase 73 SC-4 never covered (portfolio.py:2260 feeds it real fills).
+        Frozen to rtol 1e-12."""
+        fills = [
+            ("2026-05-01", "buy", 100.0, 10.0, 2.0),
+            ("2026-05-01", "sell", 105.0, 10.0, 2.0),
+            ("2026-05-02", "buy", 50.0, 20.0, 1.5),
+            ("2026-05-02", "sell", 52.0, 20.0, 1.5),
+            ("2026-05-03", "buy", 200.0, 5.0, 3.0),
+            ("2026-05-03", "sell", 190.0, 5.0, 3.0),
+        ]
+        trades = [
+            {
+                "timestamp": f"{d}T10:00:00+00:00",
+                "symbol": "BTCUSDT",
+                "side": s,
+                "price": str(price),
+                "quantity": str(qty),
+                "fee": str(fee),
+                "order_type": "market",
+            }
+            for (d, s, price, qty, fee) in fills
+        ]
+        returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=50_000.0
+        )
+
+        expected_index = pd.DatetimeIndex(["2026-05-01", "2026-05-02", "2026-05-03"])
+        expected_values = [
+            -0.0010788564122030646,
+            -0.0008600172003440069,
+            0.0008807750820722236,
+        ]
+        expected = pd.Series(expected_values, index=expected_index, name="returns")
+
+        pd.testing.assert_series_equal(
+            returns, expected, check_exact=False, rtol=1e-12,
+            check_freq=False, check_names=False,
+        )
+        assert meta["used_heuristic_capital"] is False
+        assert meta["computation_status_hint"] == "complete"
+
+    def test_byte_identical_heuristic_snapshot(self):
+        """HARDENING (plan-checker Warning 2): pin the HEURISTIC sub-branch
+        (account_balance=None -> transforms.py:160-169, the process_key:896
+        path) so the flow-less guarantee covers it too. This branch derives
+        initial_capital from the PnL magnitude (off by 5-10x by design), so it
+        is net-new to guard against 74-02 accidentally altering the fallback
+        that estimated_start<=0 currently shares. Frozen to rtol 1e-12."""
+        pnls = [1200.0, -450.0, 900.0, -200.0, 650.0, -300.0]
+        trades = [
+            {
+                "timestamp": f"2026-03-{i + 1:02d}T00:00:00+00:00",
+                "order_type": "daily_pnl",
+                "side": "buy" if p >= 0 else "sell",
+                "price": abs(p),
+            }
+            for i, p in enumerate(pnls)
+        ]
+        returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=None
+        )
+
+        expected_index = pd.DatetimeIndex(
+            [f"2026-03-{i + 1:02d}" for i in range(len(pnls))]
+        )
+        expected_values = [
+            0.019459459459459462,
+            -0.0071580063626723225,
+            0.014419225634178906,
+            -0.00315872598052119,
+            0.010298389226300502,
+            -0.004704652378463147,
+        ]
+        expected = pd.Series(expected_values, index=expected_index, name="returns")
+
+        pd.testing.assert_series_equal(
+            returns, expected, check_exact=False, rtol=1e-12,
+            check_freq=False, check_names=False,
+        )
+        # Heuristic fired: account_balance=None -> complete_with_warnings.
+        assert meta["used_heuristic_capital"] is True
+        assert meta["computation_status_hint"] == "complete_with_warnings"
+
+
+# ---------------------------------------------------------------------------
+# Phase 74 Wave 2 (plan 74-02) — the HONEST divergence pins (RED -> GREEN)
+# ---------------------------------------------------------------------------
+# These are the behaviour-CHANGE pins the milestone exists for. Once
+# ``trades_to_daily_returns_with_status`` delegates to
+# ``nav_twr.reconstruct_nav_and_twr``, an ``estimated_start <= 0`` account (the
+# account whose current balance is LESS than its cumulative PnL — i.e. it gained
+# more than its whole starting capital) no longer has a base FABRICATED for it.
+# Pre-refactor: the ``else: initial_capital = account_balance`` substitution
+# (daily_pnl :154-159 / individual :196-199) invented today's balance as the
+# base and the ``prev_equity.replace(0, initial_capital)`` swap (:175 / :211)
+# invented a base for a zeroed day, both stamping the fabricated magnitude
+# ``complete``. Post-refactor the reconstructed non-positive base FLAGS via the
+# core's ``negative_nav_guard`` and that day's return is ``np.nan`` — flag, never
+# substitute (the harm class TWR-03/TWR-04 kill).
+#
+# Each pin is mutation-honest: it asserts the NaN-not-magnitude AND names the
+# exact fabricated value the deleted branch would have produced, so it fails if
+# the substitution is ever reintroduced. The source-scan pins statically ban the
+# token class so a revert cannot slip past even if a fixture stops covering it.
+class TestDailyPnlDelegationDivergence:
+    """daily_pnl branch: estimated_start<=0 flags NaN, no base substitution."""
+
+    def _estimated_start_nonpositive_daily_pnl(self) -> tuple[list[dict], float]:
+        """balance=1500, Σpnl=2000 (day0 +3000, day1 -1000) ->
+        estimated_start = 1500 - 2000 = -500 (<= 0). Real balance is above the
+        $1000 dust floor so the real-anchor sub-branch is taken; the divergence
+        is purely the deleted estimated_start<=0 substitution."""
+        trades = [
+            {
+                "timestamp": "2026-03-01T00:00:00+00:00",
+                "order_type": "daily_pnl",
+                "side": "buy",
+                "price": 3000,
+            },
+            {
+                "timestamp": "2026-03-02T00:00:00+00:00",
+                "order_type": "daily_pnl",
+                "side": "sell",
+                "price": 1000,
+            },
+        ]
+        return trades, 1500.0
+
+    def test_daily_pnl_estimated_start_nonpositive_flags_nan_not_magnitude(self):
+        """The core reconstructs prev-base = terminal-roll = -500 (<=0) on day 0
+        -> negative_nav_guard -> NaN + complete_with_warnings. Pre-refactor this
+        day fabricated 3000/1500 = 2.0 (200% daily) and rendered as canonical."""
+        trades, balance = self._estimated_start_nonpositive_daily_pnl()
+        returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=balance
+        )
+        assert np.isnan(returns.iloc[0]), (
+            "estimated_start<=0 day 0 MUST be np.nan (guarded), not a "
+            "fabricated magnitude"
+        )
+        assert meta.get("negative_nav_guard") is True
+        assert meta["computation_status_hint"] == "complete_with_warnings"
+        # Real balance read (not the heuristic): the warning is the GUARD.
+        assert meta["used_heuristic_capital"] is False
+
+    def test_daily_pnl_fallback_deletion_no_account_balance_substitution(self):
+        """Mutation-honest fallback-deletion pin: the DELETED ``else:
+        initial_capital = account_balance`` branch would have divided day-0 PnL
+        by the substituted balance-derived base and produced 3000/1500 == 2.0.
+        Assert that exact fabricated value is ABSENT (day 0 is NaN instead)."""
+        trades, balance = self._estimated_start_nonpositive_daily_pnl()
+        returns, _meta = trades_to_daily_returns_with_status(
+            trades, account_balance=balance
+        )
+        fabricated_day0 = 3000.0 / 1500.0  # what the deleted substitution yields
+        assert np.isnan(returns.iloc[0])
+        assert not np.isclose(
+            np.nan_to_num(returns.iloc[0], nan=-999.0), fabricated_day0
+        ), "the estimated_start<=0 -> account_balance substitution was reintroduced"
+
+    def test_forbidden_daily_pnl_base_substitution_token_absent(self):
+        """Source-scan (mutation-honest, revert-proof): the exact fabrication
+        token ``initial_capital = account_balance`` must NOT appear anywhere in
+        transforms.py source outside a full-line comment. Fails if the deleted
+        daily_pnl substitution is reintroduced even under a fixture that no
+        longer exercises it."""
+        from pathlib import Path
+        import services.transforms as transforms_mod
+
+        src = Path(transforms_mod.__file__).read_text()
+        code = "\n".join(
+            ln for ln in src.splitlines() if ln.lstrip()[:1] != "#"
+        )
+        assert "initial_capital = account_balance" not in code, (
+            "forbidden base-substitution token reintroduced in transforms.py"
+        )
+
+
+class TestIndividualTradesDelegationDivergence:
+    """individual-trades branch (raw fills, portfolio.py:2260 path):
+    estimated_start<=0 flags NaN via the delegated core, no base substitution."""
+
+    def _estimated_start_nonpositive_individual(self) -> tuple[list[dict], float]:
+        """Raw fills chosen so total_pnl > balance. Day 0 is a lone $2000 buy
+        (net_notional +2000 => pnl +2000); day 1 nets +10. total_pnl = 2010 vs
+        balance 1500 (> $1000 dust so the real-anchor sub-branch is taken) ->
+        estimated_start = 1500 - 2010 = -510 (<= 0)."""
+        fills = [
+            ("2026-06-01", "buy", 2000.0, 1.0, 0.0),
+            ("2026-06-02", "buy", 100.0, 1.0, 0.0),
+            ("2026-06-02", "sell", 90.0, 1.0, 0.0),
+        ]
+        trades = [
+            {
+                "timestamp": f"{d}T10:00:00+00:00",
+                "symbol": "BTCUSDT",
+                "side": s,
+                "price": str(price),
+                "quantity": str(qty),
+                "fee": str(fee),
+                "order_type": "market",
+            }
+            for (d, s, price, qty, fee) in fills
+        ]
+        return trades, 1500.0
+
+    def test_individual_estimated_start_nonpositive_flags_nan_not_magnitude(self):
+        """Delegated core reconstructs day-0 prev-base = -510 (<=0) ->
+        negative_nav_guard -> NaN + complete_with_warnings. Pre-refactor the
+        individual branch fabricated 2000/1500 == 1.333 for this same input."""
+        trades, balance = self._estimated_start_nonpositive_individual()
+        returns, meta = trades_to_daily_returns_with_status(
+            trades, account_balance=balance
+        )
+        assert np.isnan(returns.iloc[0]), (
+            "individual-trades estimated_start<=0 day 0 MUST be np.nan (guarded)"
+        )
+        assert meta.get("negative_nav_guard") is True
+        assert meta["computation_status_hint"] == "complete_with_warnings"
+        assert meta["used_heuristic_capital"] is False
+
+    def test_individual_fallback_deletion_no_account_balance_substitution(self):
+        """Mutation-honest: the DELETED ``estimated_start if ... else
+        account_balance`` substitution (transforms.py:196-199) and the
+        ``prev_equity.replace(0, ...)`` swap (:211) would have divided day-0 PnL
+        by the substituted balance base and produced 2000/1500 == 1.333. Assert
+        that fabricated value is ABSENT (day 0 is NaN instead)."""
+        trades, balance = self._estimated_start_nonpositive_individual()
+        returns, _meta = trades_to_daily_returns_with_status(
+            trades, account_balance=balance
+        )
+        fabricated_day0 = 2000.0 / 1500.0
+        assert np.isnan(returns.iloc[0])
+        assert not np.isclose(
+            np.nan_to_num(returns.iloc[0], nan=-999.0), fabricated_day0
+        ), "the individual-branch estimated_start<=0 substitution was reintroduced"
+
+    def test_forbidden_base_substitution_tokens_absent_both_branches(self):
+        """Comprehensive revert-proof source-scan: NEITHER the
+        ``prev_equity.replace(0`` base swap NOR the ``else account_balance``
+        substitution may appear anywhere in transforms.py source outside a
+        full-line comment. Covers BOTH branches (daily_pnl :175 and individual
+        :211/:199) so a revert on either path fails here even without a fixture
+        that exercises it. Together with the daily_pnl token pin this bans the
+        entire fabrication token class (TWR-03: fallback gone EVERYWHERE)."""
+        from pathlib import Path
+        import services.transforms as transforms_mod
+
+        src = Path(transforms_mod.__file__).read_text()
+        code = "\n".join(
+            ln for ln in src.splitlines() if ln.lstrip()[:1] != "#"
+        )
+        assert ".replace(0" not in code, (
+            "forbidden prev_equity.replace(0, ...) base swap reintroduced"
+        )
+        assert "else account_balance" not in code, (
+            "forbidden estimated_start<=0 -> account_balance substitution "
+            "reintroduced on the individual-trades branch"
+        )

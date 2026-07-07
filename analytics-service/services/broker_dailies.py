@@ -31,9 +31,20 @@ Because total_pnl now includes funding, the derived initial capital matches the
 real principal and the most-recent equity equals today's real (read) equity;
 reconstruction error accrues into the distant past, not the present.
 
-Read-only keys cannot enumerate deposits/withdrawals on every venue, so we do
-NOT depend on flow data: the equity anchor is what injects the unseen initial
-capital. Mid-window external flows are an accepted, flagged limitation.
+Event-time external flows (v1.8 FLOW-03)
+----------------------------------------
+As of Phase 76, read-only keys DO enumerate deposits/withdrawals on the ccxt
+venues (binance/okx/bybit) via the promoted ``fetch_ccxt_transfers`` (76-01) and
+value them at their same-UTC-day close (``ccxt_rows_to_dated_flows``, 76-02). The
+``derive_broker_dailies`` else-branch (``job_worker``) threads the resulting
+``external_flows`` into ``combine_realized_and_funding`` → the honest core's
+backward NAV roll, which applies the ONE flow correction to the chain-linked TWR
+numerator. A mid-window deposit/withdrawal is therefore NO LONGER an accepted,
+flagged limitation for the ccxt venues — it is captured. The equity anchor still
+injects capital deposited BEFORE the fetchable retention window (OKX ~90d /
+Bybit ~365d); that pre-terminus gap is surfaced by the DQ-02 coverage terminus
+(``flow_coverage_incomplete`` → ``complete_with_warnings``), never silently
+attributed to performance.
 """
 from __future__ import annotations
 
@@ -121,14 +132,29 @@ def combine_realized_and_funding(
     funding_rows: Sequence[Mapping[str, Any]],
     account_balance: float | None,
     balance_error: bool = False,
+    *,
+    external_flows: Sequence[Any] | None = None,
+    open_unrealized_usd: float = 0.0,
 ) -> tuple[pd.Series, dict[str, Any]]:
     """Combine realized daily PnL + funding into one anchored, gap-filled
     daily-return series. Returns ``(returns, meta)`` where ``meta`` is the
-    ``ReturnsComputationMeta`` from ``trades_to_daily_returns_with_status``
-    (carries ``used_heuristic_capital`` / ``balance_error`` for DQ flags)."""
+    ``NavTWRMeta`` from ``trades_to_daily_returns_with_status`` (carries
+    ``used_heuristic_capital`` / ``balance_error`` plus any DQ-01 NAV-denominator
+    guard flags for the DQ pipeline).
+
+    ``external_flows`` / ``open_unrealized_usd`` are threaded straight to the
+    honest core (``reconstruct_nav_and_twr``). They default to ``None`` / ``0.0``
+    so every existing caller is byte-identical; sourcing/valuing real flows is
+    Phase 75's job. An in-window flow adjusts the chain-linked TWR numerator; a
+    flow dated outside the return window fails loud (``NavReconstructionError``)
+    rather than silently dropping realized cash."""
     combined = list(realized_pnl_records) + funding_rows_to_daily_pnl_records(funding_rows)
     returns, meta = trades_to_daily_returns_with_status(
-        combined, account_balance=account_balance, balance_error=balance_error
+        combined,
+        account_balance=account_balance,
+        balance_error=balance_error,
+        external_flows=external_flows,
+        open_unrealized_usd=open_unrealized_usd,
     )
     returns = gap_fill_daily_returns(returns)
     return returns, dict(meta)

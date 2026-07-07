@@ -1501,7 +1501,7 @@ async def test_wr_adv_02_fetch_transfers_paginates_within_window():
     """Adversarial: _fetch_transfers must paginate WITHIN each 90-day window.
     Pre-fix, a window containing >500 rows dropped everything past row 500
     when the loop advanced cursor_ms += window_ms unconditionally."""
-    from services.equity_reconstruction import _fetch_transfers
+    from services.ccxt_flow_fetch import fetch_ccxt_transfers
 
     # Simulate a single 90-day window with 750 deposits, forcing within-
     # window pagination. Two pages of 500 then 250.
@@ -1526,7 +1526,7 @@ async def test_wr_adv_02_fetch_transfers_paginates_within_window():
     mock_exchange = MagicMock()
     mock_exchange.fetch_deposits = _fake_fetch_deposits
 
-    rows = await _fetch_transfers(mock_exchange, "deposits", window_start_ms, now_ms)
+    rows = await fetch_ccxt_transfers(mock_exchange, "deposits", window_start_ms, now_ms)
 
     assert len(rows) == 750, (
         f"expected all 750 in-window deposits to be collected; got {len(rows)}. "
@@ -4996,3 +4996,147 @@ def test_l0065_cap_breakdown_still_truncates_large_breakdown():
     assert len(capped) == _BREAKDOWN_TOP_N + 1
     # Highest-value symbol (TOKEN_0149...) must survive the top-N cut.
     assert "TOKEN_0149_USDT_PERP" in capped
+
+
+# ---------------------------------------------------------------------------
+# Phase 76 Task 1 — characterization pin (byte-identity safety net)
+#
+# WHY (Rule 9): Phase 76-01 promotes `_fetch_transfers` out of
+# equity_reconstruction into the shared `services/ccxt_flow_fetch.py` module,
+# then fixes the OKX/Bybit under-pagination. Both changes touch the exact code
+# path the allocator-dashboard equity reconstruction rides. This test freezes
+# the reconstructed equity curve (value_usd + breakdown), the source label, the
+# per-row `pre_terminus_balance_unknown` flag, `hit_terminus`, and the telemetry
+# BEFORE the promotion, so the move + pagination fix are PROVEN behaviour-
+# preserving: any drift in the transfer-driven equity (deposits/withdrawals
+# folded into the daily replay) flips this snapshot RED.
+#
+# The snapshot below was captured against pre-promotion code
+# (equity_reconstruction._fetch_transfers, the local definition at :642).
+# ---------------------------------------------------------------------------
+
+# Committed byte-identity snapshot of the allocator-dashboard reconstruction.
+_TRANSFERS_PROMOTION_PIN_EXPECTED_ROWS = [
+    {
+        "asof": "2026-04-11",
+        "value_usd": 0.0,
+        "breakdown": {"BTC": 50000.0, "USDT": -50000.0},
+        "source": "exchange_primary",
+        "pre_terminus_balance_unknown": False,
+    },
+    {
+        "asof": "2026-04-12",
+        "value_usd": 2000.0,
+        "breakdown": {"BTC": 51000.0, "USDT": -49000.0},
+        "source": "exchange_primary",
+        "pre_terminus_balance_unknown": False,
+    },
+    {
+        "asof": "2026-04-13",
+        "value_usd": 2500.0,
+        "breakdown": {"BTC": 52000.0, "USDT": -49500.0},
+        "source": "exchange_primary",
+        "pre_terminus_balance_unknown": False,
+    },
+    {
+        "asof": "2026-04-14",
+        "value_usd": 3500.0,
+        "breakdown": {"BTC": 53000.0, "USDT": -49500.0},
+        "source": "exchange_primary",
+        "pre_terminus_balance_unknown": False,
+    },
+    {
+        "asof": "2026-04-15",
+        "value_usd": 4500.0,
+        "breakdown": {"BTC": 54000.0, "USDT": -49500.0},
+        "source": "exchange_primary",
+        "pre_terminus_balance_unknown": False,
+    },
+]
+
+
+@pytest.mark.asyncio
+async def test_equity_reconstruction_byte_identical_across_transfers_promotion(
+    monkeypatch,
+):
+    """Characterization pin: the allocator-dashboard equity reconstruction
+    (`_fetch_and_price_window`) — which consumes the paginated ccxt transfer
+    fetch — is byte-identical across the Phase 76 promotion of
+    `_fetch_transfers` into the shared module and the OKX/Bybit pagination fix.
+
+    Drives a deterministic stub exchange (1 BTC buy + a USDT deposit + a USDT
+    withdrawal + 5 days of BTC/USDT closes) and snapshots the FULL reconstructed
+    output against a committed expected structure. Would RED if the transfer-
+    driven equity, the daily replay math, the source label, or the
+    `pre_terminus_balance_unknown` flag shifted by so much as a rounding step.
+    """
+    from services import equity_reconstruction as er
+
+    end_date_dt = datetime(2026, 4, 15, tzinfo=timezone.utc)
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date_dt if tz else end_date_dt.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    day_ms = 24 * 60 * 60 * 1000
+    start_d = date(2026, 4, 11)
+    end_d = date(2026, 4, 15)
+    ts0 = int(datetime(2026, 4, 11, tzinfo=timezone.utc).timestamp() * 1000)
+
+    trades = [_make_trade(ts0, "BTC/USDT", "buy", 50000.0, 1.0)]
+    deposits = [{"timestamp": ts0 + day_ms, "currency": "USDT", "amount": 1000.0}]
+    withdrawals = [
+        {"timestamp": ts0 + 2 * day_ms, "currency": "USDT", "amount": 500.0}
+    ]
+    ohlcv = [_make_ohlcv_row(ts0 + d * day_ms, 50000.0 + d * 1000.0) for d in range(5)]
+
+    # Deposit/withdrawal doubles that honour `since_ms` exactly as real ccxt
+    # fetch_deposits/fetch_withdrawals do — the paginator advances its cursor
+    # past collected rows, so a naive return-the-same-list mock would
+    # double-count on the second (cursor-advanced) page. Modelling the
+    # since-filter keeps this pin a faithful stand-in for a live exchange and
+    # byte-identical across the cursor-advance pagination fix.
+    def _since_filtered(rows: list[dict]):
+        async def _fetch(_symbol, since_ms, _limit):
+            return [r for r in rows if int(r["timestamp"]) >= since_ms]
+
+        return _fetch
+
+    exchange = AsyncMock()
+    exchange.id = "binance"
+    exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    exchange.fetch_deposits = _since_filtered(deposits)
+    exchange.fetch_withdrawals = _since_filtered(withdrawals)
+    exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+
+    rows, hit_terminus, telemetry = await er._fetch_and_price_window(
+        exchange, "binance", MagicMock(), start_d, end_d
+    )
+
+    # hit_terminus is the top-level DQ signal — a non-terminus Binance window.
+    assert hit_terminus is False
+
+    # Byte-identical row snapshot (value_usd compared at rtol 1e-12 to guard
+    # against float-repr noise while still failing on any real math drift).
+    assert len(rows) == len(_TRANSFERS_PROMOTION_PIN_EXPECTED_ROWS)
+    for got, want in zip(rows, _TRANSFERS_PROMOTION_PIN_EXPECTED_ROWS):
+        assert got["asof"] == want["asof"]
+        assert got["source"] == want["source"]
+        assert got["pre_terminus_balance_unknown"] is want[
+            "pre_terminus_balance_unknown"
+        ]
+        assert got["value_usd"] == pytest.approx(want["value_usd"], rel=1e-12, abs=1e-9)
+        assert set(got["breakdown"]) == set(want["breakdown"])
+        for sym, val in want["breakdown"].items():
+            assert got["breakdown"][sym] == pytest.approx(val, rel=1e-12, abs=1e-9)
+
+    # Telemetry DQ keys must stay quiescent (no skips / no implausible anchors)
+    # for this clean fixture — pins the observability contract too.
+    assert telemetry["pre_terminus_balance_unknown"] is False
+    assert telemetry["skipped_symbols"] == []
+    assert telemetry["unknown_perp_symbols"] == []
+    assert telemetry["inverse_perp_symbols"] == []
+    assert telemetry["ctval_drift_warnings"] == []

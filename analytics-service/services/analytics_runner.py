@@ -57,6 +57,7 @@ from services.db import (
 from services.metrics import _safe_float, compute_all_metrics
 from services.equity.fallback import merge_dq_flags
 from services.position_reconstruction import _normalize_side
+from services.nav_twr import NAV_TWR_GUARD_KEYS, NavReconstructionError
 from services.transforms import trades_to_daily_returns_with_status
 
 logger = logging.getLogger("quantalyze.analytics.runner")
@@ -162,6 +163,34 @@ class DataQualityFlags(TypedDict, total=False):
     no_linked_api_key: bool
     used_heuristic_capital: bool
     balance_error: bool
+    # --- Phase 74 (v1.8 Flow-Aware TWR): NAV-denominator guard keys lifted from
+    # the NavTWRMeta the honest core carries onto returns_meta. Each fires only
+    # when a day's chain-link BROKE (NaN) rather than divided by a fabricated
+    # base; each promotes computation_status to complete_with_warnings. ---
+    negative_nav_guard: bool
+    dust_nav_guard: bool
+    flow_dominated_guard: bool
+    # --- Phase 76 (v1.8 DQ-02): flow-coverage terminus. Fires when a broker
+    # account's return window extends BEFORE the venue's deposit-history
+    # retention (OKX 90d / Bybit 365d) so the pre-terminus flows are unfetchable;
+    # the honest core NaNs those days (refusing a fabricated return over the gap)
+    # and this flag promotes computation_status to complete_with_warnings. Rides
+    # the same channel as the NAV guard keys. ---
+    flow_coverage_incomplete: bool
+    # --- Phase 77 (v1.8 FLOW-04): open-uPnL materiality. Fires when the terminal
+    # open unrealized PnL wedge is material (|wedge|/anchor > 5%) relative to a
+    # non-dust anchor — the anchor-to-today NAV embeds uncrystallised MTM that the
+    # realized-basis roll cannot reconstruct per-day. A BOOL only (no raw USD, the
+    # account-size leak T-77-09); promotes computation_status to
+    # complete_with_warnings on the same channel as the NAV guard keys. ---
+    unrealized_pnl_in_anchor: bool
+    # --- MUST-2 (v1.8): the open-uPnL wedge FIELD was unreadable on a MTM venue
+    # (Deribit session_upl / OKX upl absent-or-garbled while the anchor read
+    # cleanly). A wrong/renamed assumed field would silently coalesce to a 0.0
+    # wedge — the FLOW-04 harm class minus even the warning. A BOOL only;
+    # promotes computation_status to complete_with_warnings on the same channel
+    # as the other guard keys so a wrong field name is LOUD. ---
+    unrealized_pnl_unreadable: bool
     # --- sibling-table batch upsert ---
     sibling_kinds_failed: bool
     sibling_kinds_error: str
@@ -1712,6 +1741,31 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["balance_error"] = True
 
+        # Phase 74 (v1.8 Flow-Aware TWR) — lift the three NAV-denominator guard
+        # keys the Phase-73 honest core now carries onto returns_meta (via the
+        # NavTWRMeta contract, 74-02). A guard fires when a day's NAV
+        # denominator was not a usable base (dust / negative / flow-dominated),
+        # so the core BROKE that day's chain-link (NaN) instead of dividing by a
+        # fabricated floor — the very "invalid presented as valid" harm this
+        # milestone kills. These keys are additive and present on returns_meta
+        # ONLY when they fired (NavTWRMeta is total=False), so a no-guard
+        # flow-less / estimated_start>0 account carries NONE of them and stays
+        # status-identical to today (the 8 exact-string 'complete' consumers are
+        # unaffected — see the consumer_specific_flags block below). Same
+        # additive shape + None-vs-empty-dict guarding as used_heuristic_capital.
+        # Phase 76 (v1.8 DQ-02) — flow_coverage_incomplete joins the additive
+        # NavTWRMeta guard-key lift. It fires when the flow-coverage terminus
+        # segmented a retention gap (unfetchable pre-terminus flows), and like the
+        # NAV guards it is present ONLY when it fired, so a fully-covered account
+        # carries none of them and stays status-identical (SC-4). Phase 77
+        # (unrealized_pnl_in_anchor) + MUST-2 (unrealized_pnl_unreadable) join the
+        # same additive lift. SHOULD-1: iterate the ONE shared NAV_TWR_GUARD_KEYS
+        # source so adding a guard propagates here by construction.
+        for _guard_key in NAV_TWR_GUARD_KEYS:
+            if returns_meta.get(_guard_key):
+                data_quality_flags = data_quality_flags or {}
+                data_quality_flags[_guard_key] = True  # type: ignore[literal-required]
+
         # Audit-2026-05-07 round-2 / P1994+P1995 follow-up: lift inner
         # `data_quality_flags` from reconstruct_positions (breakeven_positions,
         # positions_missing_realized_pnl, plus pre-existing fills_dropped_no_symbol
@@ -1772,9 +1826,25 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # is its own follow-up PR (tracked in FIX-LIST follow-up backlog
         # alongside PR-7c). Until then, stay narrow: only the audit-#9
         # producer/consumer pair upgrades status.
+        #
+        # Phase 74 (v1.8) — the three NAV-denominator guard keys join the
+        # consumer-promoting set. A guard means a day's return was BROKEN (NaN),
+        # not merely approximated, so a guarded run is at least as degraded as a
+        # heuristic-capital run and MUST promote to complete_with_warnings for
+        # the same reason (SC-4 semantics preserved). They are consumer-safe:
+        # unlike the section-level flags above, a guard key appears ONLY when a
+        # real NAV fault fired, so a clean flow-less account never trips them and
+        # keeps its exact-string 'complete' the 8 consumers gate on.
+        # The two heuristic-capital signals stay explicit; the NAV/flow/uPnL
+        # guard keys promote via the ONE shared NAV_TWR_GUARD_KEYS source
+        # (SHOULD-1) so a new guard promotes here by construction. A guard means a
+        # day's return was BROKEN (NaN) or the anchor embeds unmeasured MTM — at
+        # least as degraded as a heuristic-capital run → complete_with_warnings.
+        _tlf = top_level_flags or {}
         consumer_specific_flags = (
-            (top_level_flags or {}).get("used_heuristic_capital")
-            or (top_level_flags or {}).get("balance_error")
+            _tlf.get("used_heuristic_capital")
+            or _tlf.get("balance_error")
+            or any(_tlf.get(_k) for _k in NAV_TWR_GUARD_KEYS)
         )
         # When the consumer flag is suppressed (because the upstream
         # account_balance_unavailable / no_linked_api_key already
@@ -1893,6 +1963,50 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             ).execute()
         )
         raise
+    except NavReconstructionError as exc:
+        # Phase 74 (v1.8 Flow-Aware TWR) — a NAV/TWR reconstruction failure
+        # (non-finite/non-numeric anchor or pnl, an undatable or orphan external
+        # flow) is a PERMANENT STRUCTURAL fault: the input can never
+        # reconstruct, so retrying only burns the dispatcher's retry budget. As
+        # a bare ValueError it would fall through to the generic `except
+        # Exception` below → HTTPException(500) → classify_exception 'unknown' →
+        # retried forever (T-74-02). Catch the TYPED subclass, stamp a terminal
+        # 'failed' (so the wizard reaches a gate instead of an infinite
+        # 'computing' spinner), and raise HTTPException(422) so
+        # classify_exception buckets it permanent (422 ∈ 400..499, not
+        # 408/429/403/404). Mirrors the LedgerValuationError catch at
+        # job_worker.py:1916-1941. Narrowed to NavReconstructionError so a
+        # transient ValueError escaping elsewhere still hits the generic handler
+        # and stays transient-retryable — never silently marked permanent.
+        # scrub_freeform_string strips any account-size USD / row repr from the
+        # message before it is stamped or surfaced (T-74-03 — never log raw
+        # NAV/flow magnitudes); detail carries only the scrubbed text and NO
+        # `from exc` chain so the unscrubbed repr cannot leak into
+        # classify_exception's __cause__ append.
+        from services.redact import scrub_freeform_string
+
+        scrubbed = str(scrub_freeform_string(str(exc)))
+        logger.error(
+            "Compute analytics: NAV/TWR reconstruction failed for %s: %s",
+            strategy_id, scrubbed,
+        )
+        await db_execute(
+            lambda: supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": strategy_id,
+                    "computation_status": "failed",
+                    "computation_error": (
+                        "NAV/TWR reconstruction failed (unusable return "
+                        "denominator or malformed input); operator "
+                        "intervention required. " + scrubbed
+                    ),
+                },
+                on_conflict="strategy_id",
+            ).execute()
+        )
+        raise HTTPException(
+            status_code=422, detail="NAV/TWR reconstruction failed"
+        )
     except Exception as e:
         logger.error(
             "Compute analytics failed for %s: %s", strategy_id, str(e)
@@ -2031,10 +2145,42 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             data_quality_flags["benchmark_unavailable"] = True
             data_quality_flags["benchmark_note"] = "Benchmark data unavailable."
 
+        # Phase 76 (v1.8 DQ-02 + DQ-01): the broker path PRE-STAMPS the coverage
+        # terminus flag AND the NAV-denominator guard flags (negative/dust/flow-
+        # dominated) onto this strategy_analytics row (job_worker,
+        # derive_broker_dailies) BEFORE enqueuing this CSV run — the guard-broken
+        # / pre-terminus days are honestly absent from csv_daily_returns, so these
+        # flags are the only channel that tells the factsheet a day was refused.
+        # Read each pre-existing flag and PRESERVE it (a full _mark_complete upsert
+        # would otherwise wipe it) + promote status to complete_with_warnings when
+        # ANY fired (MED-2 bridges the DQ-01 guard flags to the broker factsheet).
+        def _read_existing_flags() -> dict[str, Any]:
+            res = (
+                supabase.table("strategy_analytics")
+                .select("data_quality_flags")
+                .eq("strategy_id", strategy_id)
+                .maybe_single()
+                .execute()
+            )
+            row = getattr(res, "data", None) or {}
+            return dict(row.get("data_quality_flags") or {})
+
+        existing_flags = await db_execute(_read_existing_flags)
+        # SHOULD-1: the pre-stamped broker warn flags (the NAV/flow/uPnL guard
+        # keys derive_broker_dailies stamps onto strategy_analytics) ride the
+        # broker→CSV bridge → complete_with_warnings. Iterate the ONE shared
+        # NAV_TWR_GUARD_KEYS source so a new guard surfaces here by construction.
+        _warned = False
+        for _flag in NAV_TWR_GUARD_KEYS:
+            if existing_flags.get(_flag):
+                data_quality_flags[_flag] = True  # type: ignore[literal-required]
+                _warned = True
+        csv_status = "complete_with_warnings" if _warned else "complete"
+
         def _mark_complete() -> None:
             payload: dict[str, Any] = {
                 "strategy_id": strategy_id,
-                "computation_status": "complete",
+                "computation_status": csv_status,
                 "computation_error": None,
                 "data_quality_flags": data_quality_flags,
                 "trade_metrics": None,    # CSV has no fills

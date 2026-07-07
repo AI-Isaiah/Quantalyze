@@ -1774,6 +1774,114 @@ async def run_sync_funding_job(job: dict[str, Any]) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+async def _resolve_ccxt_flow_price_index(
+    exchange: Any,
+    venue: str,
+    supabase: Any,
+    rows: list[dict[str, Any]],
+) -> dict[tuple[str, str], float]:
+    """I/O price resolver for the ccxt flow adapter (FLOW-03, 76-04).
+
+    Build the canonical same-UTC-day close ``price_index[(utc_day_iso,
+    CCY_UPPER)]`` the pure ``ccxt_rows_to_dated_flows`` valuer needs for every
+    NON-STABLE currency observed in the fetched deposit/withdrawal rows. REUSES
+    the existing OHLCV → CoinGecko → token_price_history source
+    (``services.equity_reconstruction``) — there is NO new price fetcher (RESEARCH
+    Don't-Hand-Roll). Stablecoins are marked 1.0 inside the pure valuer and need
+    no entry here; a non-stable flow whose same-day close is genuinely absent from
+    every source is left OUT of the index so the pure valuer fails loud
+    (``NavReconstructionError``) rather than fabricating a ±return.
+
+    The day key uses ``epoch_ms_to_iso_day`` — the SAME 'YYYY-MM-DD' UTC-day
+    derivation the pure valuer applies via ``_row_utc_day`` to the flow row's
+    epoch-ms ``timestamp`` — so the injected keys line up exactly (canonical-key
+    contract, 76-02 W4).
+
+    WR-04: only ``ccxt.BadSymbol`` is caught on the primary OHLCV pass (feature
+    detection → CoinGecko fallback). A transient network error on ``fetch_ohlcv``
+    BUBBLES to the outer dispatcher (retryable), never silently degrading to an
+    unpriced flow that would fail loud permanent.
+    """
+    from services.closed_sets import STABLECOINS
+    from services.dateday import epoch_ms_to_iso_day
+    from services.deribit_txn import _row_utc_day
+    from services.equity_reconstruction import (
+        _cache_coingecko_prices,
+        _fetch_coingecko_daily_closes,
+        _fetch_ohlcv_daily,
+        _read_cached_prices,
+    )
+
+    # Collect the set of UTC days needed per NON-STABLE currency.
+    needed_days: dict[str, set[str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ccy = str(row.get("currency", "")).upper()
+        if not ccy or ccy in STABLECOINS:
+            continue
+        try:
+            day = _row_utc_day(row.get("timestamp"))
+        except (ValueError, TypeError, OverflowError):
+            # An undatable non-stable flow row: leave it unpriced so the pure
+            # valuer fails loud on the row itself (never guess a day/price).
+            continue
+        needed_days.setdefault(ccy, set()).add(day)
+
+    price_index: dict[tuple[str, str], float] = {}
+    if not needed_days:
+        return price_index
+
+    all_days = sorted({d for days in needed_days.values() for d in days})
+    start_iso, end_iso = all_days[0], all_days[-1]
+    start_ms = int(
+        datetime.fromisoformat(start_iso + "T00:00:00+00:00").timestamp() * 1000
+    )
+    end_ms = (
+        int(datetime.fromisoformat(end_iso + "T00:00:00+00:00").timestamp() * 1000)
+        + 24 * 60 * 60 * 1000
+    )
+
+    for ccy, days in needed_days.items():
+        closes: dict[str, float] = {}
+        # Pass 1 — primary-venue OHLCV daily closes for {ccy}/USDT.
+        try:
+            raw = await _fetch_ohlcv_daily(exchange, f"{ccy}/USDT", start_ms, end_ms)
+            for candle in raw:
+                closes[epoch_ms_to_iso_day(candle[0])] = float(candle[4])
+        except ccxt.BadSymbol:
+            closes = {}
+        # Pass 2 — cached token_price_history + CoinGecko fallback for any day the
+        # primary venue did not list/return.
+        if days - set(closes):
+            cached = await _read_cached_prices(supabase, ccy, start_iso, end_iso)
+            for d, p in cached.items():
+                closes.setdefault(d, p)
+            if days - set(closes):
+                cg = await _fetch_coingecko_daily_closes(
+                    ccy,
+                    int(
+                        datetime.fromisoformat(
+                            start_iso + "T00:00:00+00:00"
+                        ).timestamp()
+                    ),
+                    int(
+                        datetime.fromisoformat(
+                            end_iso + "T00:00:00+00:00"
+                        ).timestamp()
+                    )
+                    + 24 * 60 * 60,
+                )
+                if cg:
+                    await _cache_coingecko_prices(supabase, ccy, cg)
+                    for d, p in cg:
+                        closes.setdefault(d, p)
+        for d in days:
+            if d in closes:
+                price_index[(d, ccy)] = closes[d]
+    return price_index
+
+
 async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     """Broker key full-history → daily-return series → csv_daily_returns.
 
@@ -1826,12 +1934,69 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     venue = ctx.key_row["exchange"]
 
     from services.broker_dailies import combine_realized_and_funding
-    from services.exchange import fetch_account_equity_usd
+    from services.nav_twr import (
+        NavReconstructionError,
+        apply_flow_coverage_terminus,
+        flow_coverage_gap_evidence,
+        flow_coverage_terminus_day,
+        flow_retention_floor,
+        negative_nav_guard_pre_terminus,
+    )
+    from services.exchange import fetch_account_equity_and_upnl_usd
+    from services.nav_twr import DUST_NAV_FLOOR, NAV_TWR_GUARD_KEYS
+    from services.external_flows import ExternalFlow
+    from services.ccxt_flow_fetch import fetch_ccxt_transfers
+    from services.ccxt_flows import ccxt_rows_to_dated_flows
     from services.funding_fetch import (
         fetch_funding_binance,
         fetch_funding_okx,
         fetch_funding_bybit,
     )
+
+    # Dated external flows feed ONLY the core's F_t term (deribit branch sets them
+    # from the ledger crawl; other venues have no dated-flow adapter yet → None).
+    external_flows: list[ExternalFlow] | None = None
+    # CRITICAL-1: the ccxt else-branch sets this to the venue retention floor the
+    # flow fetch was capped at; the DQ-02 terminus evidence gate (below) reads it
+    # to decide whether a boundary flow proves a truncation. None on the deribit
+    # branch (no ccxt retention cap → the terminus is None there anyway).
+    _retention_floor: pd.Timestamp | None = None
+
+    async def _dispose_broker_nav_error(
+        exc: NavReconstructionError, *, stamp_detail: str, result_detail: str
+    ) -> DispatchResult:
+        """Shared TERMINAL disposition for a structural NavReconstructionError on
+        the broker path — the ccxt flow-valuation seam (HIGH-1) AND the combine-site
+        reconstruction seam use the IDENTICAL disposition so they can never drift.
+
+        Mirrors the deribit LedgerValuationError disposition (:2040): scrub the
+        message (T-74-03 account-size-leak — the schema-drift variants carry
+        ``amount={raw!r}``), stamp a terminal 'failed' on strategy_analytics
+        (strategy-mode only — key-mode has no per-key row, like the <2 branch), and
+        return a PERMANENT FAILED so a structurally-unre-priceable input is never
+        retried forever as a generic `unknown` (T-74-02 DoS) with the wizard poller
+        stuck on an infinite 'computing' spinner."""
+        from services.redact import scrub_freeform_string
+
+        scrubbed = str(scrub_freeform_string(str(exc)))
+        if not is_key_mode:
+            def _stamp_nav_failed() -> None:
+                ctx.supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "computation_status": "failed",
+                        "computation_error": stamp_detail + scrubbed,
+                        "data_quality_flags": {"csv_source": True},
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+
+            await db_execute(_stamp_nav_failed)
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=result_detail + scrubbed,
+            error_kind="permanent",
+        )
 
     try:
         if venue == "deribit":
@@ -1845,7 +2010,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 LedgerTruncatedError,
                 ScopeAuthError,
                 assert_ledger_complete,
-                fetch_deribit_account_equity_usd,
+                fetch_deribit_account_equity_and_upnl_usd,
                 fetch_deribit_ledger_daily_records,
             )
             from services.deribit_txn import LedgerValuationError
@@ -1879,9 +2044,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 
             # USD equity anchor — fetch_account_equity_usd does NOT cover deribit
             # (coin-margined USDT balance is not USD equity); this converts each
-            # currency's coin equity at its event/mark index into USD.
-            equity, balance_error = await fetch_deribit_account_equity_usd(
-                ctx.exchange
+            # currency's coin equity at its event/mark index into USD. FLOW-04
+            # (v1.8): the companion session-uPnL wedge (session_upl) rides the SAME
+            # get_account_summaries response + index_prices (77-02) — noise-guarded
+            # below before it threads into the realized-basis roll terminal.
+            equity, balance_error, open_unrealized_usd, upnl_unreadable = (
+                await fetch_deribit_account_equity_and_upnl_usd(ctx.exchange)
             )
             try:
                 realized, _completeness = await fetch_deribit_ledger_daily_records(
@@ -1964,25 +2132,26 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     ),
                     error_kind="permanent",
                 )
-            # F1 — correct the initial-capital anchor for net external flows. With
-            # the anchor-to-today identity (initial = equity_today − Σrealized) and
-            # Σrealized EXCLUDING transfers/deposits/withdrawals while equity_today
-            # REFLECTS them, the anchor is off by the net flow. Subtracting the net
-            # flow restores the true trading-capital base (e.g. acct3: equity ~219k
-            # − net flow −628k ⇒ ~847k). An unvalued INVERSE flow → flag heuristic
-            # rather than under-correct.
-            if equity is not None and not balance_error:
-                if _completeness.saw_unvalued_inverse_flow:
-                    balance_error = True  # cannot fully value flows → DQ flag
-                else:
-                    equity = equity - _completeness.net_external_flow_usd
+            # The equity anchor flows into the honest core UNADJUSTED. The dated
+            # external flows (_completeness.dated_external_flows) are threaded into
+            # combine_realized_and_funding below, where the core's backward NAV roll
+            # (NAV_{t-1} = NAV_t − pnl_t − F_t) performs the ONE honest flow
+            # correction — never a second scalar subtraction (count-once, no
+            # double-correction). An unvaluable inverse flow already failed loud as a
+            # permanent LedgerValuationError (caught above), never silently degraded.
+            external_flows = _completeness.dated_external_flows
             # Funding is inside the ledger settlement cash delta — pass EMPTY.
             funding: list[Any] = []
         else:
             # Current total equity = the initial-capital anchor (anchor-to-today,
             # reconstruct backward). OKX is read via raw totalEq inside
-            # fetch_account_equity_usd (ccxt fetch_balance crashes on OKX).
-            equity, balance_error = await fetch_account_equity_usd(ctx.exchange, venue)
+            # fetch_account_equity_and_upnl_usd (ccxt fetch_balance crashes on OKX).
+            # FLOW-04 (v1.8): the venue-gated companion open-uPnL wedge rides the
+            # SAME response (OKX upl; Bybit/Binance structural 0.0 — realized-basis
+            # walletBalance, so a downstream subtract can never double-count, 77-02).
+            equity, balance_error, open_unrealized_usd, upnl_unreadable = (
+                await fetch_account_equity_and_upnl_usd(ctx.exchange, venue)
+            )
             # since_ms=None ⇒ ENTIRE account history (OKX inception via archive
             # bills, Binance inception, Bybit last 365 days).
             realized = await fetch_all_trades(ctx.exchange, since_ms=None)
@@ -1998,6 +2167,84 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     error_message=f"derive_broker_dailies: venue {venue} not supported",
                     error_kind="permanent",
                 )
+            # FLOW-03 (v1.8): enumerate + event-time-value real deposits/
+            # withdrawals for the ccxt venues (binance/okx/bybit) and thread
+            # them into the honest core's F_t term at the SAME seam the deribit
+            # branch uses (external_flows → combine_realized_and_funding →
+            # reconstruct_nav_and_twr). Read-only keys DO enumerate transfers now
+            # (76-01 promoted fetch), so a mid-window deposit no longer silently
+            # inflates the TWR (broker_dailies premise updated). The whole
+            # derive_broker_dailies path is already gated by the
+            # BROKER_DAILIES_VIA_FUNDING kill-switch upstream (:1501), so flows
+            # inherit it with no extra guard. Bound the flow lookback to the
+            # venue's deposit-history retention (OKX 90d / Bybit 365d); Binance
+            # (no cap → None) fetches full history. This never spins empty
+            # pre-inception windows AND the DQ-02 terminus (below) segments any
+            # window the return series extends before that retention.
+            _now_utc = datetime.now(timezone.utc)
+            now_ms = int(_now_utc.timestamp() * 1000)
+            # LOW-2: derive the flow-fetch lower bound from the SAME normalized
+            # retention floor (midnight(now) − retention) the DQ-02 terminus gate
+            # uses (flow_retention_floor), NOT a wall-clock `now − retention`. The
+            # two "retention" definitions now share ONE source so they can never
+            # drift by the ≤1-day midnight-vs-wall-clock gap as the constants are
+            # tuned at P78. A no-cap venue (Binance) → None → since=0 (full history).
+            _retention_floor = flow_retention_floor(venue, _now_utc)
+            _flow_since_ms = (
+                0
+                if _retention_floor is None
+                else max(0, int(_retention_floor.timestamp() * 1000))
+            )
+            # WR-04: fetch_ccxt_transfers bubbles every error but
+            # ccxt.NotSupported (a transient auth/network blip stays RETRYABLE,
+            # never a silent truncation), so these are NOT wrapped in a
+            # segment-converting catch — a transient fetch error must reach the
+            # outer dispatcher classifier, never be mistaken for a coverage gap.
+            _deposits = await fetch_ccxt_transfers(
+                ctx.exchange, "deposits", _flow_since_ms, now_ms
+            )
+            _withdrawals = await fetch_ccxt_transfers(
+                ctx.exchange, "withdrawals", _flow_since_ms, now_ms
+            )
+            _flow_rows = list(_deposits) + list(_withdrawals)
+            # Resolve the same-UTC-day close for every NON-STABLE flow currency
+            # (I/O — reuses the existing OHLCV/CoinGecko/token_price_history
+            # source; NO new price fetcher). The pure valuer marks stablecoins at
+            # 1.0 and FAILS LOUD if a non-stable flow has no same-day price (never
+            # 1.0 / current / drop → never a fabricated ±return that mis-anchors
+            # the TWR base).
+            _price_index = await _resolve_ccxt_flow_price_index(
+                ctx.exchange, venue, ctx.supabase, _flow_rows
+            )
+            # HIGH-1: the PURE flow valuer raises NavReconstructionError
+            # (permanent, structural) on the realistically-common case of a
+            # non-stable coin flow with no resolvable same-UTC-day price AND on
+            # schema-drift amounts (whose message carries ``amount={raw!r}``). It
+            # sits INSIDE the fetch try, which only catches ccxt.RateLimitExceeded,
+            # so without this split it escapes to the generic dispatcher → retried
+            # FOREVER as `unknown` (T-74-02) with NO scrubbed terminal `failed`
+            # stamp (wizard spins on 'computing') and the raw amount LEAKS
+            # unscrubbed to compute_jobs.error_message (T-74-03). The WR-04
+            # transient-bubble comment above is correct ONLY for the fetch — the
+            # pure valuation is disposed permanent with the SAME terminal
+            # disposition as the combine site below.
+            try:
+                external_flows = ccxt_rows_to_dated_flows(
+                    _flow_rows, venue=venue, price_index=_price_index
+                )
+            except NavReconstructionError as exc:
+                return await _dispose_broker_nav_error(
+                    exc,
+                    stamp_detail=(
+                        "Broker flow valuation failed on a structural input (a "
+                        "coin flow with no same-UTC-day price, or a schema-drifted"
+                        "/undatable/non-finite flow amount). "
+                    ),
+                    result_detail=(
+                        "derive_broker_dailies: ccxt flow valuation failed "
+                        "structurally — "
+                    ),
+                )
     except ccxt.RateLimitExceeded as exc:
         await _stamp_429(ctx.supabase, ctx.key_row, exc)
         raise
@@ -2007,12 +2254,141 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         except Exception:  # pragma: no cover
             pass
 
-    returns, meta = combine_realized_and_funding(
-        realized, funding, account_balance=equity, balance_error=balance_error,
-    )
-    if len(returns) < 2:
+    # FLOW-04 (v1.8) NOISE GUARD (Pitfall 5 / T-77-08): the companion open-uPnL
+    # wedge is only trustworthy relative to a trustworthy anchor. Force it to 0.0
+    # when the anchor is heuristic/dust — a balance_error read, a missing equity,
+    # or a dust base (|equity| <= DUST_NAV_FLOOR, where the materiality ratio is
+    # meaningless and a divide-by-tiny explodes into a false positive). The wedge
+    # is NEVER subtracted onto such a base; a healthy anchor keeps the real wedge.
+    if (
+        balance_error
+        or equity is None
+        or abs(equity) <= DUST_NAV_FLOOR
+    ):
+        open_unrealized_usd = 0.0
+
+    try:
+        # FLOW-04: the venue-gated, noise-guarded wedge threads into the honest
+        # core's terminal seam (broker_dailies passes it straight to
+        # reconstruct_nav_and_funding). The stored/displayed MTM equity anchor is
+        # KEPT full — the reported CURRENT NAV re-add is DEFINITIONAL, so the
+        # derive path writes ONLY csv_daily_returns and never mutates `equity`
+        # (Q4 tail). OKX/Deribit subtract the real wedge (realized-basis terminal);
+        # Bybit/Binance passed 0.0 above (no double-count).
+        returns, meta = combine_realized_and_funding(
+            realized, funding, account_balance=equity, balance_error=balance_error,
+            external_flows=external_flows, open_unrealized_usd=open_unrealized_usd,
+        )
+    except NavReconstructionError as exc:
+        # A STRUCTURAL NAV/TWR reconstruction failure surfacing from the honest
+        # core (services.nav_twr) via combine_realized_and_funding — a schema
+        # -drifted flow amount, an undatable/orphan flow, or a non-finite pnl.
+        # This call sits OUTSIDE the deribit LedgerValuationError try
+        # (:1916-1941), so without this typed catch the error escapes to the
+        # generic dispatcher classifier and is retried FOREVER as `unknown`
+        # (T-74-02 DoS). Narrowed to the TYPED subclass so a transient ValueError
+        # (network parse blip) still falls through to the generic handler and
+        # stays transient-retryable. Disposed via the SHARED helper so this seam
+        # and the ccxt flow-valuation seam (HIGH-1) can never drift.
+        return await _dispose_broker_nav_error(
+            exc,
+            stamp_detail=(
+                "Broker return reconstruction failed on a structural input "
+                "(schema drift, undatable/orphan flow, or a non-finite amount). "
+            ),
+            result_detail=(
+                "derive_broker_dailies: broker NAV/TWR reconstruction failed "
+                "structurally — "
+            ),
+        )
+
+    # FLOW-04 (v1.8): the open-uPnL materiality flag lives in ONE place — the honest
+    # core (reconstruct_nav_and_twr) raises unrealized_pnl_in_anchor when
+    # |wedge|/anchor > UNREALIZED_MATERIALITY_RATIO (signed anchor), and
+    # transforms._merge_status_meta now carries that key THROUGH additively (MEDIUM-1
+    # single-source). So `meta["unrealized_pnl_in_anchor"]` is already set here when
+    # the core judged the wedge material; the previous job_worker recompute (which
+    # divided by abs(equity) and diverged on a negative anchor) is DELETED. The wedge
+    # is 0.0 on every dust/heuristic/balance-error anchor (forced above), so combine
+    # sees open_unrealized_usd == 0.0 there and the core never flags — the pre-77
+    # byte-identity accounts stay `complete`.
+
+    # MUST-2 (specialist-silentfailure HIGH-1/MEDIUM-1): the open-uPnL wedge
+    # FIELD was unreadable on a marked-to-market venue (Deribit session_upl
+    # absent on every summary / OKX upl absent-or-garbled while totalEq read
+    # cleanly). A wrong/renamed field would otherwise silently coalesce to a 0.0
+    # wedge — indistinguishable from a genuinely flat book — leaving the full MTM
+    # equity in the terminal, rescaling every return, and NEVER firing
+    # unrealized_pnl_in_anchor (factsheet ships `complete`). Surface
+    # unrealized_pnl_unreadable → complete_with_warnings so the wrong field name
+    # is LOUD. Gated on a TRUSTWORTHY anchor: on a balance-error / missing / dust
+    # base the wedge is already force-zeroed above and this warning would be
+    # noise (the anchor itself is the flagged problem there). Bybit/Binance never
+    # reach here as unreadable (realized-basis walletBalance has no wedge field).
+    if upnl_unreadable and not (
+        balance_error or equity is None or abs(equity) <= DUST_NAV_FLOOR
+    ):
+        meta["unrealized_pnl_unreadable"] = True
+
+    # DQ-02 (v1.8): apply the flow-coverage terminus gate POST-COMBINE. When the
+    # return window extends BEFORE the venue's deposit-history retention (OKX 90d /
+    # Bybit 365d — Binance has no cap → None), the earliest capital moves are
+    # UNFETCHABLE, so the pre-terminus reconstructed NAV cannot be trusted. The
+    # standalone pure helper (nav_twr, 76-03) NaNs the pre-terminus days (refusing
+    # a fabricated return over the gap) and raises the flow_coverage_incomplete
+    # flag. Applied on the returns Series here — NOT threaded through transforms.py
+    # — so the Phase 74 byte-identity pins stay GREEN. Only the set start-day
+    # signal segments; a transient fetch error already bubbled retryable above
+    # (WR-04), so a blip can never reach here as an over-truncation (T-76-04-TRANS).
+    if not returns.empty:
+        # The combined returns index is tz-NAIVE UTC calendar days
+        # (gap_fill_daily_returns → pd.date_range), so supply a tz-naive UTC
+        # `now` to the pure terminus helper (76-03) — a tz-aware value would
+        # raise "Cannot compare tz-naive and tz-aware timestamps".
+        _flow_coverage_start_day = flow_coverage_terminus_day(
+            venue,
+            first_return_day=returns.index[0],
+            now_utc=datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+        # CRITICAL-1 (v1.8 xhigh red team): the terminus mechanics above answer
+        # "IF a flow gap exists, where is it?" — but the OLD wiring fired it
+        # UNCONDITIONALLY for every past-retention window, blanket-truncating a
+        # FLOW-LESS OKX/Bybit account's years of correct history to the retention
+        # window and stamping flow_coverage_incomplete even with a clean positive
+        # reconstructed NAV. That contradicts the "full history of a key" goal and
+        # broke the SC-4 byte-identity invariant. Gate segmentation on EVIDENCE of
+        # an actually-truncated flow: a pre-terminus negative-NAV guard (the harm
+        # manifested) OR a real fetched flow at/near the retention floor (older
+        # flows plausibly exist just beyond the unfetchable boundary). A flow-less
+        # account with clean NAV has neither → keep FULL history, stay `complete`.
+        if _flow_coverage_start_day is not None:
+            _guard_pre_terminus = negative_nav_guard_pre_terminus(
+                returns,
+                terminus=_flow_coverage_start_day,
+                negative_nav_guard_fired=bool(meta.get("negative_nav_guard")),
+            )
+            if not flow_coverage_gap_evidence(
+                external_flows=external_flows,
+                retention_floor=_retention_floor,
+                pre_terminus_nav_guard_fired=_guard_pre_terminus,
+            ):
+                _flow_coverage_start_day = None  # no evidence → retain full history
+        returns, _coverage_flags = apply_flow_coverage_terminus(
+            returns, _flow_coverage_start_day
+        )
+        if _coverage_flags.get("flow_coverage_incomplete"):
+            meta["flow_coverage_incomplete"] = True
+
+    if int(returns.notna().sum()) < 2:
         # Brand-new / inactive account: not enough history to compile a
-        # factsheet (compute_all_metrics needs >=2 days).
+        # factsheet (compute_all_metrics needs >=2 days). MEDIUM-2: gate on the
+        # count of INTERPRETABLE (non-NaN) rows, not the NaN-inclusive length —
+        # after the DQ-01 guards and the DQ-02 terminus segmentation the series may
+        # still CONTAIN NaN rows (guarded / pre-terminus days), and only the
+        # non-NaN rows are actually written to csv_daily_returns (74-04 NaN policy).
+        # A NaN-inclusive `len(returns) >= 2` would pass here then write < 2 real
+        # rows → a confusing two-step "insufficient history" CSV failure instead of
+        # this clean brand-new-account short-circuit.
         if is_key_mode:
             # Key-mode has no per-key analytics row to stamp (per-key reads are
             # Phase 36) — log and return DONE without touching strategy_analytics.
@@ -2058,6 +2434,18 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # index (strategy_id,date) / (api_key_id,date) makes the re-derive
     # idempotent. Chunked so a long-history account can't exceed PostgREST's
     # request-size ceiling in a single upsert.
+    import pandas as pd
+
+    # 74-04 NaN policy (74-01 sink-(b) finding). The flow-aware core
+    # (services.nav_twr) emits np.nan for a GUARDED day (estimated_start<=0 ->
+    # negative_nav_guard, dust, or flow-dominated) rather than silently
+    # substituting a floor. csv_daily_returns is DOUBLE PRECISION (it *stores*
+    # NaN), but the postgrest-py/httpx JSON encoder raises "Out of range float
+    # values are not JSON compliant: nan" BEFORE the request is sent — so a NaN
+    # row would crash the upsert fail-loud. A guarded day has no interpretable
+    # return, so it must be honestly ABSENT: SKIP the NaN row (never coerce to
+    # 0.0, which would fabricate a flat return; never crash). Applied
+    # identically to both the is_key_mode and strategy-mode payload builders.
     if is_key_mode:
         rows_payload = [
             {
@@ -2068,6 +2456,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 "daily_return": float(val),
             }
             for ts, val in returns.items()
+            if pd.notna(val)
         ]
         _conflict = "api_key_id,date"
     else:
@@ -2078,6 +2467,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 "daily_return": float(val),
             }
             for ts, val in returns.items()
+            if pd.notna(val)
         ]
         _conflict = "strategy_id,date"
 
@@ -2112,6 +2502,43 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         len(rows_payload), strategy_id, venue, len(realized), len(funding),
         meta.get("used_heuristic_capital"),
     )
+
+    # DQ-02 + DQ-01 (v1.8): PRE-STAMP the coverage terminus flag AND the DQ-01
+    # NAV-denominator guard flags (negative_nav_guard / dust_nav_guard /
+    # flow_dominated_guard) onto strategy_analytics so the CSV analytics run
+    # (run_csv_strategy_analytics) SURFACES them → complete_with_warnings.
+    # csv_daily_returns carries ONLY the interpretable return rows — a
+    # guard-broken day is np.nan and SKIPPED at write time (74-04 NaN policy),
+    # and a coverage-gap day is honestly ABSENT — so these pre-stamped flags are
+    # the ONLY channel telling the factsheet a day was refused (MED-2 closes the
+    # P74 broker→CSV guard-meta gap). The CSV run reads these pre-existing flags.
+    #
+    # MED-3: the pre-stamp is UNCONDITIONAL and writes the FULL current flag state
+    # (each warn flag set ONLY when this derive's meta raised it). The upsert
+    # REPLACES the data_quality_flags JSONB column wholesale, so a CLEAN re-derive
+    # writes {csv_source: True} and thereby CLEARS any stale flow_coverage / guard
+    # flag left by an earlier gapped run — a healed account returns to `complete`
+    # rather than staying stuck warned. Were this conditional, the stale flag would
+    # survive across the csv_daily_returns boundary and re-warn a clean series.
+    # SHOULD-1: pre-stamp the fired warn flags from the ONE shared
+    # NAV_TWR_GUARD_KEYS source (the DQ-01 NAV guards + DQ-02 coverage + FLOW-04
+    # materiality + MUST-2 unreadable-uPnL) so adding a guard propagates onto the
+    # broker→CSV bridge by construction rather than being silently dropped here.
+    _prestamp_flags: dict[str, Any] = {"csv_source": True}
+    for _flag in NAV_TWR_GUARD_KEYS:
+        if meta.get(_flag):
+            _prestamp_flags[_flag] = True
+
+    def _prestamp_dq_flags(flags: dict[str, Any] = _prestamp_flags) -> None:
+        ctx.supabase.table("strategy_analytics").upsert(
+            {
+                "strategy_id": strategy_id,
+                "data_quality_flags": flags,
+            },
+            on_conflict="strategy_id",
+        ).execute()
+
+    await db_execute(_prestamp_dq_flags)
 
     # Hand off to the standard CSV analytics route to compile the factsheet.
     def _enqueue_csv_analytics() -> None:
