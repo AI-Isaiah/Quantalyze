@@ -96,6 +96,152 @@ def old_anchor_to_today_returns(
     )
 
 
+# ---------------------------------------------------------------------------
+# ACC-01 PANEL-GATE DRIVER (Plan 78-02)
+# ---------------------------------------------------------------------------
+# The driver below is the ACC-01 gate itself: it drives the frozen oracle above
+# (the OLD series) against the LIVE flow-aware core (the NEW series) through the
+# already-shipped ``services/parity_diff.py::classify_delta`` primitive, asserts
+# the expected bucket per account, and FAILS CLOSED on any UNEXPLAINED delta.
+#
+# Purity note: the service-graph imports (parity_diff / nav_twr / metrics) are
+# LOCAL to the driver functions on purpose — ``import scripts.golden_parity`` and
+# the frozen oracle transcription above stay dependency-free (the golden-pin test
+# imports only ``old_anchor_to_today_returns`` and must NOT drag the service
+# graph). The driver is fixture/live-run only; it is NOT wired into
+# ``.github/workflows/ci.yml`` (the Task-3 self-test is the CI gate — RESEARCH
+# Pitfall 4).
+#
+# Security (T-78-01): the driver emits classification BUCKETS + COUNTS + BOOLEANS
+# only. It NEVER prints or embeds a raw USD NAV / flow / balance / return
+# magnitude (account-size leak class).
+
+
+def _cagr_calmar(returns: pd.Series) -> dict[str, float | None]:
+    """Extract just ``{"cagr", "calmar"}`` from the LIVE metrics core.
+
+    Both sides go through HEAD ``compute_all_metrics`` (the 365-calendar CAGR
+    clock), so on a byte-identical series the scalars are identical and the delta
+    buckets UNCHANGED — the REANNUALIZATION 365/252 shift is only reachable by an
+    ASYMMETRIC (252-vs-365) metrics pair, exercised directly in the self-test
+    (LOW-3), never through this both-at-HEAD driver.
+
+    A series with fewer than two valid (non-NaN) points has no defined CAGR; return
+    ``None`` scalars in that case (``classify_delta`` only consults the metrics when
+    the SERIES is unchanged, so an all-moved series never depends on this).
+    """
+    from services.metrics import compute_all_metrics
+
+    if returns.dropna().shape[0] < 2:
+        return {"cagr": None, "calmar": None}
+    metrics_json = compute_all_metrics(returns).metrics_json
+    return {"cagr": metrics_json.get("cagr"), "calmar": metrics_json.get("calmar")}
+
+
+def gate_account(
+    daily_pnl: pd.Series,
+    account_balance: float | None,
+    *,
+    external_flows: Any | None,
+    open_unrealized_usd: float,
+    has_flows: bool,
+    expected_bucket: str,
+) -> bool:
+    """Classify ONE account's OLD-vs-NEW return delta and assert the expected bucket.
+
+    OLD is the frozen anchor-to-today oracle (flow-blind). NEW is the LIVE
+    flow-aware core (``reconstruct_nav_and_twr``: reconstruct NAV backward from the
+    real anchor, chain-link the TWR with dated flows in the numerator — the exact
+    terminus ``transforms``/``broker_dailies`` delegate to; NOT a reimplemented
+    chain-link). ``has_flows`` is ALWAYS caller-supplied (never inferred): a
+    flow-less control that MOVES fails CLOSED as UNEXPLAINED.
+
+    Raises ``AssertionError`` when the delta classifies UNEXPLAINED (fail-closed).
+    Returns ``bucket == expected_bucket``.
+    """
+    from services.nav_twr import reconstruct_nav_and_twr
+    from services.parity_diff import UNEXPLAINED, classify_delta
+
+    old_returns = old_anchor_to_today_returns(daily_pnl, account_balance)
+
+    # Feed the LIVE core the SAME anchor the honest transforms.py daily_pnl branch
+    # uses (today's balance IS the terminal NAV); it rolls the NAV backward and
+    # chain-links the TWR. external_flows=None on a control ⇒ byte-identical to OLD.
+    core_input = pd.Series(
+        daily_pnl.to_numpy(),
+        index=pd.DatetimeIndex(daily_pnl.index),
+        name="daily_pnl",
+    )
+    new_returns, _meta = reconstruct_nav_and_twr(
+        core_input,
+        float(account_balance) if account_balance is not None else 0.0,
+        external_flows=external_flows,
+        open_unrealized_usd=open_unrealized_usd,
+    )
+
+    bucket = classify_delta(
+        old_returns,
+        new_returns,
+        old_metrics=_cagr_calmar(old_returns),
+        new_metrics=_cagr_calmar(new_returns),
+        has_flows=has_flows,
+    )
+
+    # Fail closed: an UNEXPLAINED delta is never accepted (T-73-04 / T-78-04). The
+    # message carries the bucket label only — no USD magnitude (T-78-01).
+    assert bucket != UNEXPLAINED, (
+        f"ACC-01 gate breach: account classified {bucket!r} "
+        f"(expected {expected_bucket!r}) — fail closed"
+    )
+    return bucket == expected_bucket
+
+
+def main(accounts: Any | None = None) -> int:
+    """Panel driver: classify every account, print buckets/counts, exit nonzero on
+    ANY mismatch or ANY UNEXPLAINED.
+
+    ``accounts`` is an iterable of ``PanelAccount`` (defaults to the CI panel). The
+    return value is a process exit code (0 = clean panel, 1 = breach). Emits ONLY
+    labels + buckets + booleans + counts — never a raw USD magnitude (T-78-01).
+    """
+    from services.parity_diff import UNEXPLAINED
+
+    if accounts is None:
+        from tests.fixtures.golden_parity.panel_fixtures import panel
+
+        accounts = panel()
+
+    passed = 0
+    failed = 0
+    for acct in accounts:
+        try:
+            ok = gate_account(
+                acct.daily_pnl,
+                acct.account_balance,
+                external_flows=acct.external_flows,
+                open_unrealized_usd=acct.open_unrealized_usd,
+                has_flows=acct.has_flows,
+                expected_bucket=acct.expected_bucket,
+            )
+        except AssertionError as exc:
+            # UNEXPLAINED fail-closed (or any in-gate assertion). Report + count.
+            print(f"  {acct.label}: {UNEXPLAINED} -> FAIL ({exc})")
+            failed += 1
+            continue
+        status = "ok" if ok else "FAIL"
+        print(
+            f"  {acct.label}: expected {acct.expected_bucket} -> "
+            f"{'match' if ok else 'MISMATCH'} [{status}]"
+        )
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+
+    print(f"ACC-01 panel: {passed} passed, {failed} failed")
+    return 0 if failed == 0 else 1
+
+
 def old_anchor_to_today_returns_from_trades(
     trades: list[dict[str, Any]],
     account_balance: float | None,
@@ -151,3 +297,9 @@ def old_anchor_to_today_returns_from_trades(
         index=pd.DatetimeIndex(returns_values.index),
         name="returns",
     )
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry, exercised via main()
+    import sys
+
+    sys.exit(main())
