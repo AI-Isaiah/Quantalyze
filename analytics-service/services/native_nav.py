@@ -521,15 +521,26 @@ def _value_over_calendar(
     )
 
 
-def _prev0_usd(rolled: list[_Bucket]) -> float:
+def _prev0_usd(rolled: list[_Bucket], day0: pd.Timestamp) -> float:
     """Day-0 previous capital, native analog (§1.3/§1.4):
     ``prev0_usd = Σ_c (B_c(d0_c) − pnl_c(d0_c) − flowqty_c(d0_c)) × mark_c(d0_c)``
     — each bucket's OWN first day (the earliest mark we possess; inventing an
     earlier price would be fabrication). A bucket whose pre-history balance is
-    exactly 0 contributes 0 (no inception mark needed there)."""
+    exactly 0 contributes 0 (no inception mark needed there).
+
+    F-2: ``prev0`` is the denominator for ``union_index[0]`` (``day0``), so it
+    includes ONLY buckets present on that day (``d0_c == day0``). A later-starting
+    bucket (``d0_c > day0``) contributes 0 here — its capital was NOT part of the
+    day-0 NAV and enters the chain via its own first-day roll/flow. Folding it in
+    would inflate the day-0 base and distort ``r_0`` (visible when
+    ``full_history=False``, where the inception gate that would zero it is skipped;
+    for ``full_history=True`` every residual is ~0 by the §5 gate, so behavior is
+    unchanged)."""
     total = 0.0
     for bucket in rolled:
         d0 = bucket.balance.index[0]
+        if d0 != day0:
+            continue  # later-starting bucket: not present in the day-0 base.
         b0 = float(bucket.balance.iloc[0])
         pnl0 = float(bucket.pnl_unioned.iloc[0])
         flow0 = (
@@ -594,7 +605,7 @@ def reconstruct_native_nav_and_twr(
         nav_usd,
         composed_pnl_usd,
         composed_flows_usd,
-        prev0=_prev0_usd(rolled),
+        prev0=_prev0_usd(rolled, union_index[0]),
     )
 
     # Step 6 — meta + the §6 interior-chain-break key (79-03 merge, one detector).

@@ -228,15 +228,53 @@ def test_mixed_account_composition_hand_computed() -> None:
     returns, meta = reconstruct_native_nav_and_twr(
         ledger, indexable_currencies=frozenset({"BTC"})
     )
-    # NAV = [80000, 87000, 89000]; prev0 = 1.9*40000 + (5000-1000) = 80000.
-    # r_0 = 0; r_1 = (87000-80000-1000)/80000 = 0.075; r_2 = 2000/87000.
+    # NAV = [80000, 87000, 89000]. F-2: prev0 includes ONLY buckets present on
+    # day-0 (01-01). BTC IS present (pre-history 1.9 BTC × 40000 = 76000); the USDC
+    # bucket starts 01-02 (its 4000-USD pre-history is EXCLUDED — that capital
+    # enters via its 01-02 deposit, not the day-0 base). prev0 = 76000 ⇒ r_0 =
+    # (80000-76000)/76000 = 4000/76000 (the real BTC +0.1 day-0 gain, no longer
+    # masked to 0 by the phantom USDC capital). r_1/r_2 unchanged (their base is the
+    # prior day's NAV, not prev0).
     assert list(returns.index) == list(
         pd.date_range("2026-01-01", periods=3, freq="D")
     )
-    assert returns.iloc[0] == pytest.approx(0.0)
+    assert returns.iloc[0] == pytest.approx(4000.0 / 76000.0)
     assert returns.iloc[1] == pytest.approx(6000.0 / 80000.0)
     assert returns.iloc[2] == pytest.approx(2000.0 / 87000.0)
     assert meta["computation_status_hint"] == "complete"
+
+
+def test_prev0_excludes_later_starting_bucket() -> None:
+    """F-2 [MEDIUM]: the day-0 denominator ``prev0`` must include ONLY buckets
+    present on ``union_index[0]``. A later-starting bucket (its first day >
+    union_index[0]) must NOT fold its pre-history into the day-0 base — its capital
+    enters on its OWN first day. USDC present day-0 (pre-history 900 USD); BTC
+    starts day-1 (its 0.015-BTC pre-history × 50000 = 750 USD must be EXCLUDED).
+
+    NAV = [10000, 20000]; prev0 = 9000 (USDC only) ⇒ r_0 = (10000-9000)/9000 =
+    1000/9000. Neuter (fold BTC's day-1 pre-history 0.15 BTC × 50000 = 7500 into
+    prev0) ⇒ prev0 = 9000 + 7500 = 16500 ⇒ r_0 = (10000-16500)/16500 = -6500/16500
+    ≈ -0.394 — a phantom day-0 loss from capital not present on day 0. Magnitudes
+    are above DUST_NAV_FLOOR ($1000); full_history=False skips the inception gate."""
+    ledger = NativeLedger(
+        native_pnl={
+            "USDC": _s([("2026-01-01", 1000.0)]),   # present on day-0
+            "BTC": _s([("2026-01-02", 0.05)]),       # starts day-1
+        },
+        terminal_native_equity={"USDC": 10000.0, "BTC": 0.2},
+        marks={"BTC": _s([("2026-01-02", 50000.0)])},  # BTC needs a mark only on 01-02
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    returns, _ = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"})
+    )
+    assert list(returns.index) == list(
+        pd.date_range("2026-01-01", periods=2, freq="D")
+    )
+    assert returns.iloc[0] == pytest.approx(1000.0 / 9000.0)   # NOT -6500/16500
+    assert returns.iloc[1] == pytest.approx(1.0)
 
 
 def test_translation_term_carried() -> None:
