@@ -238,7 +238,9 @@ class _Bucket:
     terminal_native: float
     upnl_native: float
     flow_qty: pd.Series          # native flow qty per day, summed (may be empty)
-    mark: pd.Series | None       # None ⇒ literal 1.0 (USD bucket)
+    mark: pd.Series | None       # None ⇔ USD bucket (branch USD_FAMILY, literal
+                                 # 1.0); an INDEXED bucket ALWAYS has a mark Series
+                                 # (the F-1 build-time invariant — never None)
     balance: pd.Series = field(
         default_factory=lambda: pd.Series(dtype=float, name="nav")
     )
@@ -391,6 +393,21 @@ def _build_buckets(
             )
         )
     for code in indexed_codes:
+        mark = ledger.marks.get(code)
+        # F-1: the invariant INDEXED ⇒ mark is not None is enforced HERE, at build
+        # time. An absent mark Series (marks.get returned None) for a value-carrying
+        # INDEXED coin is NOT the USD-family literal-1.0 case — routing it through
+        # the old `mark is None` USD branch silently valued the coin at $1/unit. A
+        # zero-value INDEXED coin (never actually valued) stays value-gated (skipped
+        # at the roll), mirroring the UNMARKABLE value-gate above (§3.1). The count
+        # is 0 here — the whole series is absent, so no per-day calendar exists yet
+        # (the per-day count is only meaningful post-roll in _value_over_calendar),
+        # matching the other build-time refusals (no_usd_index / flow_quantity_missing).
+        if mark is None and _code_carries_value(code, ledger):
+            raise UnmarkableCurrencyError(
+                currency=code, venue=venue,
+                reason="missing_daily_marks", missing_day_count=0,
+            )
         pnl = ledger.native_pnl.get(code)
         buckets.append(
             _Bucket(
@@ -407,7 +424,7 @@ def _build_buckets(
                     frozenset({code}), ledger,
                     branch=MarkBranch.INDEXED, venue=venue,
                 ),
-                mark=ledger.marks.get(code),
+                mark=mark,
             )
         )
     return buckets
@@ -463,13 +480,28 @@ def _value_over_calendar(
         pnl_eff = bucket.pnl_unioned.reindex(index, fill_value=0.0).to_numpy(
             dtype=float
         )
-        if bucket.mark is None:  # USD bucket — mark ≡ 1.0 (IEEE no-op)
+        if bucket.branch is MarkBranch.USD_FAMILY:  # USD bucket — mark ≡ 1.0 (IEEE no-op)
             nav_total += b_eff
             flow_total += flow_eff
             pnl_total += pnl_eff
             continue
-        mark_vals = bucket.mark.reindex(index).to_numpy(dtype=float)
+        # F-1: the literal-1.0 fold is keyed on branch (not `mark is None`), so a
+        # None mark can NEVER re-introduce the $1/unit conflation here. A
+        # value-carrying INDEXED coin was refused at build if its mark Series was
+        # absent, so the only mark=None INDEXED bucket that can reach valuation is a
+        # ZERO-value residual (all-zero pnl days keep it in `rolled`): it has no
+        # required day and contributes nothing (defensively refuse if it somehow
+        # does carry a required day — never a silent 1.0).
         required = (b_eff != 0.0) | (flow_eff != 0.0)
+        if bucket.mark is None:
+            if bool(required.any()):
+                raise UnmarkableCurrencyError(
+                    currency=bucket.code, venue=venue,
+                    reason="missing_daily_marks",
+                    missing_day_count=int(required.sum()),
+                )
+            continue  # zero-value INDEXED residual — no mark needed, adds 0.
+        mark_vals = bucket.mark.reindex(index).to_numpy(dtype=float)
         valid = np.isfinite(mark_vals) & (mark_vals > 0.0)
         missing = required & ~valid
         if bool(missing.any()):
@@ -510,8 +542,8 @@ def _prev0_usd(rolled: list[_Bucket]) -> float:
             continue
         mark0 = (
             1.0
-            if bucket.mark is None
-            else float(bucket.mark.reindex([d0]).iloc[0])
+            if bucket.branch is MarkBranch.USD_FAMILY
+            else float(bucket.mark.reindex([d0]).iloc[0])  # type: ignore[union-attr]
         )
         total += pre_hist * mark0
     return total
@@ -615,10 +647,15 @@ def _assert_inception_reconciled(
         # The rolled pre-history native balance (== terminal_native − upnl − Σpnl
         # − Σflow, the whole ledger rolled back one step past its first day).
         resid = float(bucket.balance.iloc[0]) - pnl0 - flow0
-        if bucket.mark is None:  # branch-1 — inception AND anchor mark ≡ 1.0
+        if bucket.branch is MarkBranch.USD_FAMILY:  # branch-1 — inception AND anchor mark ≡ 1.0
             mark0 = 1.0
             markN = 1.0
-        else:
+        elif bucket.mark is None:
+            # F-1: a mark=None INDEXED bucket is a ZERO-value residual (value-carrying
+            # ones were refused at build) — its resid and anchor contributions are
+            # both 0, so it cannot breach; skip it (never a silent branch-1 fold).
+            continue
+        else:  # INDEXED with a mark Series
             mark0 = float(bucket.mark.reindex([d0]).iloc[0])
             markN = float(bucket.mark.reindex([dN]).iloc[0])
         resid_usd = abs(resid) * mark0

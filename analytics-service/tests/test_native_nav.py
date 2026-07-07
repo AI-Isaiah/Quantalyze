@@ -395,6 +395,63 @@ def test_refusal_indexed_missing_mark_counts_days() -> None:
     assert exc.value.missing_day_count == 2
 
 
+def test_indexed_absent_mark_series_refuses_not_valued_at_one() -> None:
+    """F-1 [HIGH]: an INDEXED currency carrying value with NO entry in
+    ``ledger.marks`` (the whole mark Series absent, not a per-day gap) must REFUSE
+    with reason='missing_daily_marks' at build time — it must NOT be silently
+    valued at the literal 1.0/unit. Regression for the ``bucket.mark is None``
+    overload (None meant BOTH 'USD-family literal 1.0' AND 'INDEXED but marks.get
+    returned None'). Neuter (route a mark=None INDEXED bucket back through the
+    ``mark is None`` USD branch in _value_over_calendar) → SOL valued at $1/unit,
+    no refusal → red."""
+    ledger = NativeLedger(
+        native_pnl={"SOL": _dense([1.0, 2.0, 0.0])},
+        terminal_native_equity={"SOL": 50.0},
+        marks={},  # NO SOL mark series at all (the absent-series case)
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    with pytest.raises(UnmarkableCurrencyError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC", "SOL"}), venue="deribit"
+        )
+    assert exc.value.reason == "missing_daily_marks"
+    assert exc.value.currency == "SOL"
+    assert exc.value.venue == "deribit"
+
+
+def test_indexed_zero_value_absent_mark_series_skipped() -> None:
+    """F-1 corollary: a ZERO-value INDEXED currency with no mark Series stays
+    value-gated (skipped, never valued) — the absent-mark refusal fires ONLY when
+    the coin actually carries value (§3.1 value-gate). Output is byte-identical to
+    the ledger without the zero SOL."""
+    base = NativeLedger(
+        native_pnl={"BTC": _dense([0.0, 0.0, 0.0])},
+        terminal_native_equity={"BTC": 2.0},
+        marks={"BTC": _s([("2026-01-01", 40000.0), ("2026-01-02", 41000.0),
+                          ("2026-01-03", 42000.0)])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    with_zero_sol = NativeLedger(
+        native_pnl={"BTC": base.native_pnl["BTC"], "SOL": _dense([0.0, 0.0, 0.0])},
+        terminal_native_equity={"BTC": 2.0, "SOL": 0.0},
+        marks=base.marks,  # SOL absent from marks
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    r_base, _ = reconstruct_native_nav_and_twr(
+        base, indexable_currencies=frozenset({"BTC", "SOL"})
+    )
+    r_sol, _ = reconstruct_native_nav_and_twr(
+        with_zero_sol, indexable_currencies=frozenset({"BTC", "SOL"})
+    )
+    pd.testing.assert_series_equal(r_base, r_sol, check_exact=True)
+
+
 def test_refusal_branch2_flow_quantity_missing() -> None:
     """(d) A branch-2 (INDEXED) flow with quantity=None refuses
     reason='flow_quantity_missing' — never back-solved from usd_signed."""
