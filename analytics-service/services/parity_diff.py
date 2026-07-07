@@ -114,7 +114,7 @@ def _metrics_unchanged(
 
 def _reannualize_cagr(old_cagr: float, factor: float) -> float:
     """Apply the known 365/252 calendar-clock shift to a CAGR value."""
-    return (1.0 + old_cagr) ** factor - 1.0
+    return float((1.0 + old_cagr) ** factor - 1.0)
 
 
 def _matches_reannualization(

@@ -507,7 +507,7 @@ def compute_all_metrics(
     # NaN when max_dd is 0/None (a flat series) so the ratio never divides by zero.
     calmar = (
         _safe_float(cagr / abs(max_dd))
-        if (cagr is not None and max_dd not in (None, 0.0))
+        if (cagr is not None and max_dd is not None and max_dd != 0.0)
         else _safe_float(float("nan"))
     )
 

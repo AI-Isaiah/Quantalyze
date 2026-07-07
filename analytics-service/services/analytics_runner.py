@@ -1764,7 +1764,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         for _guard_key in NAV_TWR_GUARD_KEYS:
             if returns_meta.get(_guard_key):
                 data_quality_flags = data_quality_flags or {}
-                data_quality_flags[_guard_key] = True
+                data_quality_flags[_guard_key] = True  # type: ignore[literal-required]
 
         # Audit-2026-05-07 round-2 / P1994+P1995 follow-up: lift inner
         # `data_quality_flags` from reconstruct_positions (breakeven_positions,
@@ -2173,7 +2173,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         _warned = False
         for _flag in NAV_TWR_GUARD_KEYS:
             if existing_flags.get(_flag):
-                data_quality_flags[_flag] = True
+                data_quality_flags[_flag] = True  # type: ignore[literal-required]
                 _warned = True
         csv_status = "complete_with_warnings" if _warned else "complete"
 

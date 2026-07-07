@@ -621,7 +621,7 @@ def flow_coverage_gap_evidence(
         return False
     floor_day = _naive_normalized_day(retention_floor)
     earliest = min(_naive_normalized_day(f.utc_day_iso) for f in external_flows)
-    return earliest <= floor_day + pd.Timedelta(days=proximity_days)
+    return bool(earliest <= floor_day + pd.Timedelta(days=proximity_days))
 
 
 def reconstruct_nav_and_twr(
