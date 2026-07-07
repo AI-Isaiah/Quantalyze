@@ -127,6 +127,26 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     unrealized_pnl_unreadable: bool
 
 
+# SHOULD-1 (specialist-types): the ONE source of truth for the additive
+# NavTWRMeta warn-flag key set. Every downstream registry that promotes / lifts /
+# pre-stamps these flags (transforms._merge_status_meta, analytics_runner's lift +
+# promotion + broker-reconcile lists, job_worker's broker pre-stamp) iterates THIS
+# tuple instead of hand-restating the literal keys, so adding a guard is a one-line
+# edit that propagates by construction rather than silently dropping in any
+# registry a future edit forgets. Kept as a plain tuple (not derived from
+# ``NavTWRMeta.__annotations__``) so the ORDER is deterministic and the two
+# inherited non-guard keys (used_heuristic_capital / balance_error) are excluded;
+# a unit test pins ``set(NAV_TWR_GUARD_KEYS) <= set(NavTWRMeta.__annotations__)``.
+NAV_TWR_GUARD_KEYS: tuple[str, ...] = (
+    "dust_nav_guard",
+    "negative_nav_guard",
+    "flow_dominated_guard",
+    "flow_coverage_incomplete",
+    "unrealized_pnl_in_anchor",
+    "unrealized_pnl_unreadable",
+)
+
+
 class NavReconstructionError(ValueError):
     """A NAV/TWR input could not be structurally reconstructed — permanent and
     structural (a schema-drifted flow amount, an undatable flow, an orphan flow

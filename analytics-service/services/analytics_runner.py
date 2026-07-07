@@ -57,7 +57,7 @@ from services.db import (
 from services.metrics import _safe_float, compute_all_metrics
 from services.equity.fallback import merge_dq_flags
 from services.position_reconstruction import _normalize_side
-from services.nav_twr import NavReconstructionError
+from services.nav_twr import NAV_TWR_GUARD_KEYS, NavReconstructionError
 from services.transforms import trades_to_daily_returns_with_status
 
 logger = logging.getLogger("quantalyze.analytics.runner")
@@ -1757,19 +1757,11 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # NavTWRMeta guard-key lift. It fires when the flow-coverage terminus
         # segmented a retention gap (unfetchable pre-terminus flows), and like the
         # NAV guards it is present ONLY when it fired, so a fully-covered account
-        # carries none of them and stays status-identical (SC-4).
-        for _guard_key in (
-            "negative_nav_guard",
-            "dust_nav_guard",
-            "flow_dominated_guard",
-            "flow_coverage_incomplete",
-            # Phase 77 (v1.8 FLOW-04): a material open-uPnL wedge joins the
-            # additive NavTWRMeta guard-key lift — present ONLY when it fired.
-            "unrealized_pnl_in_anchor",
-            # MUST-2 (v1.8): an unreadable uPnL wedge field on a MTM venue joins
-            # the same lift — present ONLY when the field could not be read.
-            "unrealized_pnl_unreadable",
-        ):
+        # carries none of them and stays status-identical (SC-4). Phase 77
+        # (unrealized_pnl_in_anchor) + MUST-2 (unrealized_pnl_unreadable) join the
+        # same additive lift. SHOULD-1: iterate the ONE shared NAV_TWR_GUARD_KEYS
+        # source so adding a guard propagates here by construction.
+        for _guard_key in NAV_TWR_GUARD_KEYS:
             if returns_meta.get(_guard_key):
                 data_quality_flags = data_quality_flags or {}
                 data_quality_flags[_guard_key] = True
@@ -1843,23 +1835,16 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # unlike the section-level flags above, a guard key appears ONLY when a
         # real NAV fault fired, so a clean flow-less account never trips them and
         # keeps its exact-string 'complete' the 8 consumers gate on.
+        # The two heuristic-capital signals stay explicit; the NAV/flow/uPnL
+        # guard keys promote via the ONE shared NAV_TWR_GUARD_KEYS source
+        # (SHOULD-1) so a new guard promotes here by construction. A guard means a
+        # day's return was BROKEN (NaN) or the anchor embeds unmeasured MTM — at
+        # least as degraded as a heuristic-capital run → complete_with_warnings.
+        _tlf = top_level_flags or {}
         consumer_specific_flags = (
-            (top_level_flags or {}).get("used_heuristic_capital")
-            or (top_level_flags or {}).get("balance_error")
-            or (top_level_flags or {}).get("negative_nav_guard")
-            or (top_level_flags or {}).get("dust_nav_guard")
-            or (top_level_flags or {}).get("flow_dominated_guard")
-            # Phase 76 (v1.8 DQ-02): a refused flow-coverage gap is at least as
-            # degraded as a NAV guard — promote to complete_with_warnings.
-            or (top_level_flags or {}).get("flow_coverage_incomplete")
-            # Phase 77 (v1.8 FLOW-04): a material open-uPnL wedge means the
-            # anchor-to-today NAV embeds uncrystallised MTM the realized roll
-            # cannot per-day reconstruct — promote to complete_with_warnings.
-            or (top_level_flags or {}).get("unrealized_pnl_in_anchor")
-            # MUST-2 (v1.8): an unreadable uPnL wedge field on a MTM venue means
-            # the anchor MAY embed uncrystallised MTM we could not measure —
-            # promote to complete_with_warnings so a wrong field name is LOUD.
-            or (top_level_flags or {}).get("unrealized_pnl_unreadable")
+            _tlf.get("used_heuristic_capital")
+            or _tlf.get("balance_error")
+            or any(_tlf.get(_k) for _k in NAV_TWR_GUARD_KEYS)
         )
         # When the consumer flag is suppressed (because the upstream
         # account_balance_unavailable / no_linked_api_key already
@@ -2181,20 +2166,12 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             return dict(row.get("data_quality_flags") or {})
 
         existing_flags = await db_execute(_read_existing_flags)
-        _BROKER_WARN_FLAGS = (
-            "flow_coverage_incomplete",
-            "negative_nav_guard",
-            "dust_nav_guard",
-            "flow_dominated_guard",
-            # Phase 77 (v1.8 FLOW-04): the pre-stamped open-uPnL materiality flag
-            # rides the same broker→CSV warn bridge → complete_with_warnings.
-            "unrealized_pnl_in_anchor",
-            # MUST-2 (v1.8): the pre-stamped unreadable-uPnL-field flag rides the
-            # same bridge → complete_with_warnings (a wrong field name is LOUD).
-            "unrealized_pnl_unreadable",
-        )
+        # SHOULD-1: the pre-stamped broker warn flags (the NAV/flow/uPnL guard
+        # keys derive_broker_dailies stamps onto strategy_analytics) ride the
+        # broker→CSV bridge → complete_with_warnings. Iterate the ONE shared
+        # NAV_TWR_GUARD_KEYS source so a new guard surfaces here by construction.
         _warned = False
-        for _flag in _BROKER_WARN_FLAGS:
+        for _flag in NAV_TWR_GUARD_KEYS:
             if existing_flags.get(_flag):
                 data_quality_flags[_flag] = True
                 _warned = True

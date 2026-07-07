@@ -1941,7 +1941,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         flow_retention_floor,
     )
     from services.exchange import fetch_account_equity_and_upnl_usd
-    from services.nav_twr import DUST_NAV_FLOOR
+    from services.nav_twr import DUST_NAV_FLOOR, NAV_TWR_GUARD_KEYS
     from services.external_flows import ExternalFlow
     from services.ccxt_flow_fetch import fetch_ccxt_transfers
     from services.ccxt_flows import ccxt_rows_to_dated_flows
@@ -2490,20 +2490,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # flag left by an earlier gapped run — a healed account returns to `complete`
     # rather than staying stuck warned. Were this conditional, the stale flag would
     # survive across the csv_daily_returns boundary and re-warn a clean series.
-    _BROKER_WARN_FLAGS = (
-        "flow_coverage_incomplete",
-        "negative_nav_guard",
-        "dust_nav_guard",
-        "flow_dominated_guard",
-        # FLOW-04 (v1.8): a material open-uPnL wedge relative to a non-dust anchor
-        # rides the SAME broker→CSV pre-stamp bridge → complete_with_warnings.
-        "unrealized_pnl_in_anchor",
-        # MUST-2 (v1.8): the uPnL wedge FIELD was unreadable on a MTM venue —
-        # rides the SAME bridge so a wrong assumed field name is LOUD.
-        "unrealized_pnl_unreadable",
-    )
+    # SHOULD-1: pre-stamp the fired warn flags from the ONE shared
+    # NAV_TWR_GUARD_KEYS source (the DQ-01 NAV guards + DQ-02 coverage + FLOW-04
+    # materiality + MUST-2 unreadable-uPnL) so adding a guard propagates onto the
+    # broker→CSV bridge by construction rather than being silently dropped here.
     _prestamp_flags: dict[str, Any] = {"csv_source": True}
-    for _flag in _BROKER_WARN_FLAGS:
+    for _flag in NAV_TWR_GUARD_KEYS:
         if meta.get(_flag):
             _prestamp_flags[_flag] = True
 

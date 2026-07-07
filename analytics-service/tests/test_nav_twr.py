@@ -31,6 +31,7 @@ from services.nav_twr import (
     BINANCE_DEPOSIT_TERMINUS_DAYS,
     BYBIT_DEPOSIT_TERMINUS_DAYS,
     FLOW_TERMINUS_DAYS_BY_VENUE,
+    NAV_TWR_GUARD_KEYS,
     OKX_DEPOSIT_TERMINUS_DAYS,
     NavReconstructionError,
     _flows_to_daily_usd,
@@ -983,3 +984,36 @@ def test_material_wedge_does_not_spuriously_breach_reconcile() -> None:
     )
     assert len(ret) == len(pnls)
     assert meta.get("unrealized_pnl_in_anchor") is True
+
+
+def test_nav_twr_guard_keys_are_declared_and_single_sourced() -> None:
+    """SHOULD-1 (specialist-types): NAV_TWR_GUARD_KEYS is the ONE source of truth
+    for the additive warn-flag set. Pin that every key it lists is a DECLARED
+    NavTWRMeta field (``set(NAV_TWR_GUARD_KEYS) <= NavTWRMeta.__annotations__``)
+    — so a typo in the shared tuple, or a key that never made it into the
+    TypedDict, reddens here rather than silently never-promoting downstream. Also
+    pin it EXCLUDES the two inherited non-guard keys (a guard key must promote
+    status; used_heuristic_capital / balance_error are handled separately).
+    """
+    from services.nav_twr import NavTWRMeta
+
+    declared = set(NavTWRMeta.__annotations__)
+    assert set(NAV_TWR_GUARD_KEYS) <= declared, (
+        "every NAV_TWR_GUARD_KEYS entry must be a declared NavTWRMeta field; "
+        f"undeclared: {set(NAV_TWR_GUARD_KEYS) - declared}"
+    )
+    # The inherited non-guard signals must NOT be in the guard set (they promote
+    # via their own explicit predicate, not the shared guard iteration).
+    assert "used_heuristic_capital" not in NAV_TWR_GUARD_KEYS
+    assert "balance_error" not in NAV_TWR_GUARD_KEYS
+    # No duplicate keys in the single source.
+    assert len(NAV_TWR_GUARD_KEYS) == len(set(NAV_TWR_GUARD_KEYS))
+    # The six v1.8 warn flags are all present (regression pin on the closed set).
+    assert set(NAV_TWR_GUARD_KEYS) == {
+        "dust_nav_guard",
+        "negative_nav_guard",
+        "flow_dominated_guard",
+        "flow_coverage_incomplete",
+        "unrealized_pnl_in_anchor",
+        "unrealized_pnl_unreadable",
+    }

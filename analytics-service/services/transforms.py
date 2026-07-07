@@ -277,21 +277,6 @@ def _individual_trades_daily_pnl(df: pd.DataFrame) -> tuple[pd.Series, float]:
 # source and is never silently dropped at the transforms boundary (MEDIUM-1). A
 # flow-less / immaterial account never sets any of these, so the SC-4 / Phase 74
 # byte-identity accounts stay `complete`.
-_GUARD_KEYS = (
-    "dust_nav_guard",
-    "negative_nav_guard",
-    "flow_dominated_guard",
-    "flow_coverage_incomplete",
-    "unrealized_pnl_in_anchor",
-    # MUST-2 (v1.8): the uPnL wedge field was unreadable on a MTM venue. Like
-    # flow_coverage_incomplete it is set by the broker wiring post-combine, not
-    # the core, so nav_meta never carries it HERE — but it is registered for
-    # single-source consistency (the SC-4 / P74 byte-identity accounts never set
-    # it, so their status is unchanged).
-    "unrealized_pnl_unreadable",
-)
-
-
 def _merge_status_meta(
     nav_meta: Mapping[str, Any],
     *,
@@ -310,7 +295,12 @@ def _merge_status_meta(
     DQ-02 ``flow_coverage_incomplete``) are carried THROUGH onto the returned meta
     so 74-03 can lift them into the data-quality flags — the core's judgment is the
     single source and is never dropped here (MEDIUM-1)."""
-    guard_fired = any(nav_meta.get(k) for k in _GUARD_KEYS)
+    # SHOULD-1: iterate the ONE shared guard-key source (lazy import — nav_twr
+    # imports transforms at module scope, so the reverse can only be a runtime
+    # import to avoid a cycle, mirroring the reconstruct_nav_and_twr import).
+    from services.nav_twr import NAV_TWR_GUARD_KEYS
+
+    guard_fired = any(nav_meta.get(k) for k in NAV_TWR_GUARD_KEYS)
     warn = used_heuristic_capital or balance_error or guard_fired
     meta: NavTWRMeta = {
         "used_heuristic_capital": used_heuristic_capital,
