@@ -33,16 +33,20 @@ from services.nav_twr import (
     FLOW_TERMINUS_DAYS_BY_VENUE,
     NAV_TWR_GUARD_KEYS,
     OKX_DEPOSIT_TERMINUS_DAYS,
+    FLOW_BOUNDARY_PROXIMITY_DAYS,
     NavReconstructionError,
     _flows_to_daily_usd,
     apply_flow_coverage_terminus,
     chain_linked_twr,
     cumulative_twr,
+    flow_coverage_gap_evidence,
     flow_coverage_terminus_day,
+    negative_nav_guard_pre_terminus,
     reconcile_flow_residual,
     reconstruct_nav,
     reconstruct_nav_and_twr,
 )
+from services.external_flows import ExternalFlow
 from services.portfolio_metrics import compute_twr
 
 
@@ -801,6 +805,107 @@ def test_flow_coverage_terminus_day_feeds_segmentation() -> None:
     segmented, flags = apply_flow_coverage_terminus(returns, terminus)
     assert np.isnan(segmented.iloc[0])  # the >365d-old day is refused
     assert flags == {"flow_coverage_incomplete": True}
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL-1 (v1.8 xhigh red team) — the DQ-02 terminus is EVIDENCE-gated.
+# ---------------------------------------------------------------------------
+
+
+def test_flow_gap_evidence_flowless_account_is_false() -> None:
+    """A FLOW-LESS account (no external flows) with NO pre-terminus guard has NO
+    evidence of a truncated flow → False → the terminus does NOT fire → full
+    history retained (the CRITICAL-1 fix / SC-4 byte-identity restoration).
+    MUTATION: defaulting to True (the old unconditional gate) → this asserts
+    False, so the revert REDs here."""
+    floor = pd.Timestamp("2026-04-07")  # now − 90d
+    assert not flow_coverage_gap_evidence(
+        external_flows=[], retention_floor=floor, pre_terminus_nav_guard_fired=False
+    )
+    assert not flow_coverage_gap_evidence(
+        external_flows=None, retention_floor=floor, pre_terminus_nav_guard_fired=False
+    )
+
+
+def test_flow_gap_evidence_boundary_flow_is_true() -> None:
+    """A real fetched flow AT/NEAR the retention floor (within
+    FLOW_BOUNDARY_PROXIMITY_DAYS) is boundary evidence that older flows plausibly
+    exist beyond the unfetchable bound → True. A flow WELL INSIDE the window (its
+    inception flow was captured → complete coverage) → False."""
+    floor = pd.Timestamp("2026-04-07")
+    near = [ExternalFlow((floor + pd.Timedelta(days=2)).strftime("%Y-%m-%d"), 1000.0)]
+    assert flow_coverage_gap_evidence(
+        external_flows=near, retention_floor=floor, pre_terminus_nav_guard_fired=False
+    )
+    far = [
+        ExternalFlow(
+            (floor + pd.Timedelta(days=FLOW_BOUNDARY_PROXIMITY_DAYS + 5)).strftime(
+                "%Y-%m-%d"
+            ),
+            1000.0,
+        )
+    ]
+    assert not flow_coverage_gap_evidence(
+        external_flows=far, retention_floor=floor, pre_terminus_nav_guard_fired=False
+    )
+
+
+def test_flow_gap_evidence_no_retention_cap_is_false() -> None:
+    """A no-cap venue (Binance → retention_floor None) cannot have a boundary-flow
+    truncation regardless of flows → False (only a manifested guard could fire the
+    terminus, and Binance's terminus is None anyway)."""
+    near = [ExternalFlow("2026-04-09", 1000.0)]
+    assert not flow_coverage_gap_evidence(
+        external_flows=near, retention_floor=None, pre_terminus_nav_guard_fired=False
+    )
+
+
+def test_flow_gap_evidence_pre_terminus_guard_short_circuits_true() -> None:
+    """A pre-terminus negative-NAV guard is the manifested-harm signal → True even
+    for a flow-less account with no boundary flow."""
+    assert flow_coverage_gap_evidence(
+        external_flows=[], retention_floor=None, pre_terminus_nav_guard_fired=True
+    )
+
+
+def test_flow_gap_evidence_tolerates_tz_aware_floor_vs_naive_flow_day() -> None:
+    """The retention floor is built from a tz-AWARE now while ExternalFlow days are
+    tz-naive 'YYYY-MM-DD' — the predicate must not raise 'Cannot compare tz-naive
+    and tz-aware'. MUTATION: dropping the tz-strip raises → RED."""
+    floor = pd.Timestamp("2026-04-07", tz="UTC")
+    near = [ExternalFlow("2026-04-09", 1000.0)]  # naive
+    assert flow_coverage_gap_evidence(
+        external_flows=near, retention_floor=floor, pre_terminus_nav_guard_fired=False
+    )
+
+
+def test_negative_nav_guard_pre_terminus_localizes_to_pre_region() -> None:
+    """``negative_nav_guard_pre_terminus`` is True only when the guard fired AND a
+    guarded (NaN) day lies BEFORE the terminus — a POST-terminus blow-up must not
+    trigger a spurious whole-history truncation."""
+    now = pd.Timestamp("2026-07-06")
+    terminus = now.normalize() - pd.Timedelta(days=90)
+    idx = pd.DatetimeIndex(
+        [now - pd.Timedelta(days=120), now - pd.Timedelta(days=100), now]
+    )
+    # A NaN (guard) on the 120d-old PRE-terminus day → True.
+    pre_nan = pd.Series([np.nan, 0.02, 0.01], index=idx, name="returns")
+    assert negative_nav_guard_pre_terminus(
+        pre_nan, terminus=terminus, negative_nav_guard_fired=True
+    )
+    # The SAME NaN pattern but guard flag False (some other NaN source) → False.
+    assert not negative_nav_guard_pre_terminus(
+        pre_nan, terminus=terminus, negative_nav_guard_fired=False
+    )
+    # A NaN only on the POST-terminus (recent) day → not pre-terminus → False.
+    post_nan = pd.Series([0.10, 0.02, np.nan], index=idx, name="returns")
+    assert not negative_nav_guard_pre_terminus(
+        post_nan, terminus=terminus, negative_nav_guard_fired=True
+    )
+    # No terminus (no cap) → False.
+    assert not negative_nav_guard_pre_terminus(
+        pre_nan, terminus=None, negative_nav_guard_fired=True
+    )
 
 
 # ---------------------------------------------------------------------------

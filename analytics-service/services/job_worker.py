@@ -1937,8 +1937,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     from services.nav_twr import (
         NavReconstructionError,
         apply_flow_coverage_terminus,
+        flow_coverage_gap_evidence,
         flow_coverage_terminus_day,
         flow_retention_floor,
+        negative_nav_guard_pre_terminus,
     )
     from services.exchange import fetch_account_equity_and_upnl_usd
     from services.nav_twr import DUST_NAV_FLOOR, NAV_TWR_GUARD_KEYS
@@ -1954,6 +1956,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # Dated external flows feed ONLY the core's F_t term (deribit branch sets them
     # from the ledger crawl; other venues have no dated-flow adapter yet → None).
     external_flows: list[ExternalFlow] | None = None
+    # CRITICAL-1: the ccxt else-branch sets this to the venue retention floor the
+    # flow fetch was capped at; the DQ-02 terminus evidence gate (below) reads it
+    # to decide whether a boundary flow proves a truncation. None on the deribit
+    # branch (no ccxt retention cap → the terminus is None there anyway).
+    _retention_floor: pd.Timestamp | None = None
 
     async def _dispose_broker_nav_error(
         exc: NavReconstructionError, *, stamp_detail: str, result_detail: str
@@ -2343,6 +2350,29 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             first_return_day=returns.index[0],
             now_utc=datetime.now(timezone.utc).replace(tzinfo=None),
         )
+        # CRITICAL-1 (v1.8 xhigh red team): the terminus mechanics above answer
+        # "IF a flow gap exists, where is it?" — but the OLD wiring fired it
+        # UNCONDITIONALLY for every past-retention window, blanket-truncating a
+        # FLOW-LESS OKX/Bybit account's years of correct history to the retention
+        # window and stamping flow_coverage_incomplete even with a clean positive
+        # reconstructed NAV. That contradicts the "full history of a key" goal and
+        # broke the SC-4 byte-identity invariant. Gate segmentation on EVIDENCE of
+        # an actually-truncated flow: a pre-terminus negative-NAV guard (the harm
+        # manifested) OR a real fetched flow at/near the retention floor (older
+        # flows plausibly exist just beyond the unfetchable boundary). A flow-less
+        # account with clean NAV has neither → keep FULL history, stay `complete`.
+        if _flow_coverage_start_day is not None:
+            _guard_pre_terminus = negative_nav_guard_pre_terminus(
+                returns,
+                terminus=_flow_coverage_start_day,
+                negative_nav_guard_fired=bool(meta.get("negative_nav_guard")),
+            )
+            if not flow_coverage_gap_evidence(
+                external_flows=external_flows,
+                retention_floor=_retention_floor,
+                pre_terminus_nav_guard_fired=_guard_pre_terminus,
+            ):
+                _flow_coverage_start_day = None  # no evidence → retain full history
         returns, _coverage_flags = apply_flow_coverage_terminus(
             returns, _flow_coverage_start_day
         )

@@ -1801,12 +1801,18 @@ class TestDeriveBrokerDailies:
     async def test_retention_gap_segments_and_flags_complete_with_warnings(
         self,
     ) -> None:
-        """DQ-02 end-to-end: an OKX account whose realized window extends BEFORE
-        the 90d deposit-history retention → the reconstructed series SEGMENTS at
-        the terminus (pre-terminus days absent from csv_daily_returns, never a
-        fabricated return) and flow_coverage_incomplete is PRE-STAMPED so the CSV
-        factsheet reads complete_with_warnings. Mutation-honest: remove the
-        segment → the pre-terminus dates reappear in csv_rows → REDs."""
+        """DQ-02 end-to-end (CRITICAL-1 EVIDENCE case): an OKX account whose
+        realized window extends BEFORE the 90d deposit-history retention AND that
+        has a real fetched deposit at/near the retention floor (boundary evidence
+        that older, unfetchable flows plausibly exist) → the reconstructed series
+        SEGMENTS at the terminus (pre-terminus days absent from csv_daily_returns,
+        never a fabricated return) and flow_coverage_incomplete is PRE-STAMPED so
+        the CSV factsheet reads complete_with_warnings.
+
+        Mutation-honest: remove the segment → the pre-terminus dates reappear in
+        csv_rows → RED. Also gates the CRITICAL-1 fix in the OTHER direction: the
+        boundary deposit is what supplies the evidence — the flow-less variant is
+        proven to KEEP full history by test_flowless_account_keeps_full_history."""
         import datetime as _dt
         from services.job_worker import run_derive_broker_dailies_job
 
@@ -1822,8 +1828,18 @@ class TestDeriveBrokerDailies:
             }
 
         realized = [_rec(120, 100.0), _rec(100, 50.0), _rec(80, 25.0), _rec(5, 10.0)]
+        # Boundary evidence: a real USDT deposit 89 days ago — just INSIDE the 90d
+        # retention floor — proves the account was moving capital at the fetch
+        # cutoff, so older flows plausibly exist just beyond the unfetchable bound.
+        boundary_dep_ms = int(
+            (now - _dt.timedelta(days=89)).timestamp() * 1000
+        )
+        deposits = [{
+            "id": "boundary", "type": "deposit", "currency": "USDT",
+            "amount": 1000.0, "timestamp": boundary_dep_ms, "internal": False,
+        }]
         mock_ctx, stack, captured = self._flow_harness(
-            venue="okx", deposits=[], realized=realized,
+            venue="okx", deposits=deposits, realized=realized,
         )
         job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
         with stack:
@@ -1850,28 +1866,22 @@ class TestDeriveBrokerDailies:
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "venue,terminus_days,should_segment",
-        [
-            ("bybit", 365, True),     # 365d deposit-history retention → segments
-            ("binance", None, False),  # no cap → NEVER segments (full history)
-        ],
-    )
-    async def test_retention_terminus_per_venue_end_to_end(
-        self, venue: str, terminus_days: int | None, should_segment: bool,
-    ) -> None:
-        """H1 (specialist-tests): the DQ-02 terminus is exercised END-TO-END per
-        venue — Bybit's 365d window (LOW-confidence in the source, the most
-        likely to be mis-tuned) SEGMENTS a >365d-old realized day, while Binance
-        (None → never-segment) RETAINS a >365d-old day with NO
-        flow_coverage_incomplete. A per-venue regression (Bybit inheriting OKX's
-        90d, or Binance accidentally segmenting) would truncate real history and
-        was NOT caught end-to-end before (only at the pure-helper level).
+    @pytest.mark.parametrize("venue", ["okx", "bybit", "binance"])
+    async def test_flowless_account_keeps_full_history(self, venue: str) -> None:
+        """CRITICAL-1 (v1.8 xhigh red team): a FLOW-LESS account whose realized
+        window predates the venue retention floor keeps its FULL, correct history
+        and stays ``complete`` — the DQ-02 terminus must NOT fire without evidence
+        of an actually-truncated flow. This is the founder's "full history of a
+        key" goal and restores the SC-4 byte-identity invariant the OLD
+        unconditional gate broke (it blanket-truncated years of clean OKX/Bybit
+        history to the 90d/365d window and stamped flow_coverage_incomplete even on
+        a clean positive reconstructed NAV).
 
-        Mutation-honest: for Bybit, mis-wiring the venue→terminus map so it never
-        segments makes the 400d-old day reappear in csv_rows and drops the
-        flow_coverage_incomplete pre-stamp → RED. For Binance, wrongly segmenting
-        drops the 400d-old day (and adds a false warning) → RED.
+        Mutation-honest: reverting the evidence gate (segmenting unconditionally
+        on ``first_return_day < terminus``) drops the 400d-old day from csv_rows
+        AND raises a false flow_coverage_incomplete pre-stamp → RED. Covers OKX
+        (90d) and Bybit (365d) — the capped venues the OLD gate over-truncated —
+        plus Binance (no cap) as the always-retained control.
         """
         import datetime as _dt
         from services.job_worker import run_derive_broker_dailies_job
@@ -1887,7 +1897,8 @@ class TestDeriveBrokerDailies:
                 "timestamp": f"{d}T00:00:00+00:00", "order_type": "daily_pnl",
             }
 
-        # A realized day well BEYOND 365d (400d) + a recent day.
+        # A realized day well beyond every venue cap (400d) + a recent day, and
+        # NO deposits/withdrawals — the flow-less shape the old gate truncated.
         realized = [_rec(400, 100.0), _rec(380, 50.0), _rec(5, 10.0)]
         mock_ctx, stack, captured = self._flow_harness(
             venue=venue, deposits=[], realized=realized,
@@ -1904,27 +1915,71 @@ class TestDeriveBrokerDailies:
             for u in captured["analytics_upserts"]
         )
 
-        if should_segment:
-            terminus = (now - _dt.timedelta(days=terminus_days)).date()
-            assert all(
-                _dt.date.fromisoformat(d) >= terminus for d in csv_dates
-            ), f"{venue}: pre-{terminus_days}d days leaked into csv: {sorted(csv_dates)[:3]}"
-            assert old_day not in csv_dates, (
-                f"{venue}: the 400d-old day must be segmented out (>{terminus_days}d)"
-            )
-            assert prestamped, (
-                f"{venue}: a segmented retention gap must pre-stamp "
-                "flow_coverage_incomplete"
-            )
-        else:
-            # Binance never segments — the 400d-old day is RETAINED, no warning.
-            assert old_day in csv_dates, (
-                "binance has no deposit-history cap → the 400d-old day must be "
-                "retained (never segmented)"
-            )
-            assert not prestamped, (
-                "binance must NOT raise flow_coverage_incomplete (never segments)"
-            )
+        assert old_day in csv_dates, (
+            f"{venue}: a flow-less account must RETAIN the 400d-old day (no "
+            f"evidence of a truncated flow → no segmentation); got {sorted(csv_dates)[:3]}"
+        )
+        assert not prestamped, (
+            f"{venue}: a flow-less account with clean NAV must NOT raise "
+            "flow_coverage_incomplete (the terminus is evidence-gated)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_pre_terminus_nav_guard_evidence_segments(self) -> None:
+        """CRITICAL-1: a FLOW-LESS OKX account (no boundary-flow evidence) whose
+        backward-rolled NAV goes <= 0 in the PRE-terminus region (a
+        negative_nav_guard fires there — the missing-capital harm manifesting)
+        supplies the OTHER evidence signal, so the terminus DOES fire and NaNs the
+        whole pre-terminus region — including the clean gap-filled zero days the
+        per-day guard leaves untouched — while post-terminus history is retained.
+
+        A +100k pnl on the 120d-old day vs the 100k equity anchor drives NAV_start
+        <= 0 there; a clean gap day at 100d (>90d) has a POSITIVE reconstructed NAV
+        so the per-day guard leaves it interpretable — only the terminus removes
+        it. Mutation-honest: drop the guard-evidence signal (leaving only
+        boundary-flow evidence) → this flow-less account has NO evidence → the
+        terminus does not fire → the 100d-old gap day REAPPEARS in csv_rows → RED."""
+        import datetime as _dt
+        from services.job_worker import run_derive_broker_dailies_job
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+
+        def _rec(days_ago: int, pnl: float) -> dict:
+            d = (now - _dt.timedelta(days=days_ago)).date().isoformat()
+            return {
+                "exchange": "okx", "symbol": "PORTFOLIO",
+                "side": "buy" if pnl >= 0 else "sell", "price": abs(pnl),
+                "quantity": 1, "fee": 0, "fee_currency": "USDT",
+                "timestamp": f"{d}T00:00:00+00:00", "order_type": "daily_pnl",
+            }
+
+        # 120d pnl +100k drives pre-terminus NAV <= 0 (guard evidence); 80d + 5d
+        # are post-terminus with healthy NAV. NO deposits (flow-less → the guard is
+        # the ONLY evidence). The gap-filled 100d-old day has positive NAV.
+        realized = [_rec(120, 100_000.0), _rec(80, 50.0), _rec(5, 10.0)]
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="okx", deposits=[], realized=realized,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        csv_dates = set(r["date"] for r in captured["csv_rows"])
+        gap_day = (now - _dt.timedelta(days=100)).date().isoformat()  # pre-terminus
+        post_day = (now - _dt.timedelta(days=80)).date().isoformat()  # post-terminus
+        assert gap_day not in csv_dates, (
+            "the pre-terminus gap day must be segmented out by the guard-evidence "
+            f"terminus (only the terminus removes this positive-NAV day); got {sorted(csv_dates)}"
+        )
+        assert post_day in csv_dates, (
+            "post-terminus history must be RETAINED (the terminus segments only "
+            f"the pre-terminus region); got {sorted(csv_dates)}"
+        )
+        assert any(
+            (u.get("data_quality_flags") or {}).get("flow_coverage_incomplete")
+            for u in captured["analytics_upserts"]
+        ), "a guard-evidence segmentation must pre-stamp flow_coverage_incomplete"
 
     @pytest.mark.asyncio
     async def test_fully_segmented_series_short_circuits_on_nonnan_count(
@@ -1936,6 +1991,12 @@ class TestDeriveBrokerDailies:
         (non-NaN) rows — the rows actually written to csv_daily_returns — not the
         NaN-inclusive length. It stamps the clean brand-new-account 'Insufficient
         broker history' terminal failed and does NOT hand off to the CSV run.
+
+        CRITICAL-1: the terminus is now EVIDENCE-gated, so segmentation must be
+        driven by a real signal — here a pre-terminus negative-NAV guard (a huge
+        +100k pnl on the oldest day drives the backward-rolled NAV <= 0 before the
+        terminus, the missing-capital harm manifesting). That evidence fires the
+        terminus, which NaNs every pre-terminus day → 0 interpretable rows.
 
         Mutation-honest: with the old ``len(returns) < 2`` gate the all-NaN series
         (len ≫ 2) sails past → writes 0 rows → enqueues a CSV run that fails a
@@ -1955,10 +2016,12 @@ class TestDeriveBrokerDailies:
                 "timestamp": f"{d}T00:00:00+00:00", "order_type": "daily_pnl",
             }
 
-        # ALL realized days are older than the OKX 90d retention → every
-        # gap-filled row is pre-terminus → NaN'd. len(returns) ≫ 2, but
-        # notna().sum() == 0.
-        realized = [_rec(120, 100.0), _rec(110, 50.0), _rec(100, 25.0)]
+        # ALL realized days are older than the OKX 90d retention. The oldest day
+        # carries a +100k pnl vs the 100k equity anchor → the backward roll drives
+        # NAV_start <= 0 there, firing negative_nav_guard PRE-TERMINUS: the
+        # evidence that fires the (now-gated) terminus → every pre-terminus row is
+        # NaN'd. len(returns) ≫ 2, but notna().sum() == 0.
+        realized = [_rec(120, 100_000.0), _rec(110, 50.0), _rec(100, 25.0)]
         mock_ctx, stack, captured = self._flow_harness(
             venue="okx", deposits=[], realized=realized,
         )

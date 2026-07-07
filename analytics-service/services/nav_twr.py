@@ -538,6 +538,92 @@ def apply_flow_coverage_terminus(
     return segmented, {"flow_coverage_incomplete": True}
 
 
+# CRITICAL-1 (v1.8 xhigh red team): the earliest fetched external flow may sit a
+# few days INSIDE the retention floor even when older flows exist beyond it (a
+# venue page spilling, a first-of-month deposit). A small proximity buffer treats
+# "a real flow right at the fetch cutoff" as boundary evidence without demanding
+# a flow dated on the exact floor day.
+FLOW_BOUNDARY_PROXIMITY_DAYS: int = 7
+
+
+def _naive_normalized_day(value: Any) -> pd.Timestamp:
+    """Coerce any timestamp-like to a tz-NAIVE, midnight-normalized UTC day so a
+    tz-aware retention floor (built from a tz-aware ``now``) and a tz-naive flow
+    day (from an 'YYYY-MM-DD' ``ExternalFlow``) compare without raising
+    'Cannot compare tz-naive and tz-aware timestamps'."""
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is not None:
+        ts = ts.tz_localize(None)
+    return ts.normalize()
+
+
+def negative_nav_guard_pre_terminus(
+    returns: pd.Series,
+    *,
+    terminus: Any | None,
+    negative_nav_guard_fired: bool,
+) -> bool:
+    """True when a DQ-01 ``negative_nav_guard`` fired AND a guarded (NaN) day sits
+    in the PRE-terminus region — i.e. the missing-old-capital harm actually
+    MANIFESTED before the terminus (the reconstructed NAV went <= 0 there, the
+    LTP068-inflation class at venue scope).
+
+    Called BEFORE ``apply_flow_coverage_terminus`` runs, so every NaN in
+    ``returns`` still originates from a DQ-01 per-day guard (the terminus has not
+    yet NaN'd anything). Gating on ``negative_nav_guard_fired`` scopes the signal
+    to the sign-flip guard; the pre-terminus NaN check localizes it so a genuine
+    POST-terminus blow-up does not trigger a spurious whole-history truncation."""
+    if not negative_nav_guard_fired or terminus is None or returns.empty:
+        return False
+    start_ts = _naive_normalized_day(terminus)
+    pre = returns.index < start_ts
+    if not bool(pre.any()):
+        return False
+    return bool(returns[pre].isna().any())
+
+
+def flow_coverage_gap_evidence(
+    *,
+    external_flows: Sequence[Any] | None,
+    retention_floor: Any | None,
+    pre_terminus_nav_guard_fired: bool,
+    proximity_days: int = FLOW_BOUNDARY_PROXIMITY_DAYS,
+) -> bool:
+    """Return True only when there is EVIDENCE that a genuine external flow was
+    truncated by the venue's retention floor — the CRITICAL-1 gate on whether the
+    DQ-02 coverage terminus is allowed to fire at all.
+
+    Two independent signals; either suffices:
+
+    * PRE-TERMINUS NAV-GUARD evidence (``pre_terminus_nav_guard_fired``) — a DQ-01
+      negative-NAV guard fired in the pre-terminus region: the missing-capital
+      harm MANIFESTED (early reconstructed NAV <= 0).
+    * BOUNDARY-FLOW evidence — the retention-capped flow fetch (``retention_floor``
+      set, i.e. the fetch was bounded rather than fetched from inception) returned
+      a real external flow at/near its lower bound (earliest flow day
+      <= floor + ``proximity_days``). The account was already moving capital at the
+      fetch cutoff, so OLDER flows plausibly exist just beyond the unfetchable
+      boundary → precautionary segment.
+
+    A FLOW-LESS account (no external flows) with a clean positive reconstructed
+    NAV throughout hits NEITHER signal → returns False → the terminus does NOT
+    fire → FULL history is retained and the series stays ``complete`` (restoring
+    the SC-4 byte-identity invariant the OLD unconditional gate violated —
+    CRITICAL-1). This intentionally does NOT segment the residual "a missing old
+    flow biases but does not sign-flip the pre-terminus NAV" case: per the founder
+    direction, keeping the full, correct history of a flow-less key is preferred
+    over blanket-truncating every account's pre-retention history to cover that
+    non-sign-flipping bias (which the per-day guard already catches whenever it is
+    materially harmful — it drives NAV <= 0)."""
+    if pre_terminus_nav_guard_fired:
+        return True
+    if retention_floor is None or not external_flows:
+        return False
+    floor_day = _naive_normalized_day(retention_floor)
+    earliest = min(_naive_normalized_day(f.utc_day_iso) for f in external_flows)
+    return earliest <= floor_day + pd.Timedelta(days=proximity_days)
+
+
 def reconstruct_nav_and_twr(
     daily_pnl: pd.Series,
     anchor_nav: float,
