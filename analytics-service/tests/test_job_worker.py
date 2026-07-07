@@ -1395,6 +1395,8 @@ class TestDeriveBrokerDailies:
         captured["analytics_upserts"] = analytics_upserts
 
         async def _fake_transfers(exchange, kind, since_ms, now_ms):
+            captured["since_ms"] = since_ms
+            captured["now_ms"] = now_ms
             if transfers_error is not None:
                 raise transfers_error
             if kind == "deposits":
@@ -1799,6 +1801,48 @@ class TestDeriveBrokerDailies:
         assert enqueues == [], (
             "the short-circuit must not enqueue a doomed CSV analytics run; "
             f"got {enqueues!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_flow_fetch_lower_bound_shares_normalized_terminus(self) -> None:
+        """LOW-2: the ccxt flow-fetch lower bound (``_flow_since_ms``) must derive
+        from the SAME normalized retention floor (midnight(now) − retention) the
+        DQ-02 terminus gate uses (``flow_retention_floor``), NOT a wall-clock
+        ``now − retention``. So the fetched ``since_ms`` lands on a UTC MIDNIGHT and
+        equals the terminus boundary — the two 'retention' definitions share one
+        source and cannot drift by the ≤1-day gap.
+
+        Mutation-honest: the old ``now_ms - retention*86400000`` bound carries the
+        current intraday offset, so it is NOT midnight-aligned (except if run at
+        exactly 00:00 UTC) and does NOT equal the normalized floor → RED."""
+        import datetime as _dt
+        from services.job_worker import run_derive_broker_dailies_job
+        from services.nav_twr import flow_retention_floor
+
+        mock_ctx, stack, captured = self._flow_harness(venue="okx", deposits=[])
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        before = _dt.datetime.now(_dt.timezone.utc)
+        with stack:
+            await run_derive_broker_dailies_job(job)
+        after = _dt.datetime.now(_dt.timezone.utc)
+
+        since_ms = captured["since_ms"]
+        # The lower bound is UTC-midnight aligned (a normalized boundary), never a
+        # wall-clock instant.
+        assert since_ms % (24 * 60 * 60 * 1000) == 0, (
+            "the flow-fetch lower bound must be a normalized UTC-midnight boundary; "
+            f"got {since_ms} ({_dt.datetime.fromtimestamp(since_ms / 1000, _dt.timezone.utc)})"
+        )
+        # And it equals the shared terminus floor (midnight(now) − 90d for OKX).
+        # `before`/`after` bracket the worker's own `now`; unless the run crosses
+        # UTC midnight the normalized floor is identical for both bounds.
+        expected = {
+            int(flow_retention_floor("okx", n).timestamp() * 1000)
+            for n in (before, after)
+        }
+        assert since_ms in expected, (
+            "the flow-fetch lower bound must equal the DQ-02 normalized retention "
+            f"floor; got {since_ms}, expected one of {expected}"
         )
 
     @pytest.mark.asyncio

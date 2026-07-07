@@ -1936,9 +1936,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     from services.broker_dailies import combine_realized_and_funding
     from services.nav_twr import (
         NavReconstructionError,
-        FLOW_TERMINUS_DAYS_BY_VENUE,
         apply_flow_coverage_terminus,
         flow_coverage_terminus_day,
+        flow_retention_floor,
     )
     from services.exchange import fetch_account_equity_and_upnl_usd
     from services.nav_twr import DUST_NAV_FLOOR
@@ -2174,12 +2174,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # (no cap → None) fetches full history. This never spins empty
             # pre-inception windows AND the DQ-02 terminus (below) segments any
             # window the return series extends before that retention.
-            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-            _retention_days = FLOW_TERMINUS_DAYS_BY_VENUE.get(venue)
+            _now_utc = datetime.now(timezone.utc)
+            now_ms = int(_now_utc.timestamp() * 1000)
+            # LOW-2: derive the flow-fetch lower bound from the SAME normalized
+            # retention floor (midnight(now) − retention) the DQ-02 terminus gate
+            # uses (flow_retention_floor), NOT a wall-clock `now − retention`. The
+            # two "retention" definitions now share ONE source so they can never
+            # drift by the ≤1-day midnight-vs-wall-clock gap as the constants are
+            # tuned at P78. A no-cap venue (Binance) → None → since=0 (full history).
+            _retention_floor = flow_retention_floor(venue, _now_utc)
             _flow_since_ms = (
                 0
-                if _retention_days is None
-                else max(0, now_ms - _retention_days * 24 * 60 * 60 * 1000)
+                if _retention_floor is None
+                else max(0, int(_retention_floor.timestamp() * 1000))
             )
             # WR-04: fetch_ccxt_transfers bubbles every error but
             # ccxt.NotSupported (a transient auth/network blip stays RETRYABLE,

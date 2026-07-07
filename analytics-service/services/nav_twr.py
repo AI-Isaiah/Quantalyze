@@ -435,6 +435,21 @@ def reconcile_flow_residual(
     return residual
 
 
+def flow_retention_floor(venue: str, now_utc: Any) -> pd.Timestamp | None:
+    """The SINGLE normalized retention boundary for ``venue`` —
+    ``midnight(now_utc) − retention_days`` — or ``None`` for a no-cap venue
+    (Binance). Both the DQ-02 coverage terminus (``flow_coverage_terminus_day``)
+    AND the ccxt flow-fetch lower bound (job_worker's ``_flow_since_ms``) derive
+    from THIS one helper so the two "retention" definitions can never drift by the
+    ≤1-day wall-clock-vs-normalized-midnight gap (LOW-2) as the constants are tuned
+    at P78. ``now_utc`` is normalized to midnight so the boundary is a stable UTC
+    calendar day, not a moving wall-clock instant."""
+    retention_days = FLOW_TERMINUS_DAYS_BY_VENUE.get(venue.lower())
+    if retention_days is None:
+        return None  # no known retention cap (Binance) → full coverage
+    return pd.Timestamp(now_utc).normalize() - pd.Timedelta(days=retention_days)
+
+
 def flow_coverage_terminus_day(
     venue: str,
     *,
@@ -451,12 +466,9 @@ def flow_coverage_terminus_day(
     ``pd.Timestamp``-coercible value. When ``first_return_day`` is already within
     ``retention_days`` of ``now_utc`` there is no gap → ``None`` (no segmentation,
     SC-4 byte-identity preserved)."""
-    retention_days = FLOW_TERMINUS_DAYS_BY_VENUE.get(venue.lower())
-    if retention_days is None:
+    terminus = flow_retention_floor(venue, now_utc)
+    if terminus is None:
         return None  # no known retention cap (Binance) → full coverage
-    terminus = pd.Timestamp(now_utc).normalize() - pd.Timedelta(
-        days=retention_days
-    )
     if pd.Timestamp(first_return_day) >= terminus:
         return None  # entire window within retention → no coverage gap
     return terminus
