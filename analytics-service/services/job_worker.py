@@ -1954,6 +1954,43 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # Dated external flows feed ONLY the core's F_t term (deribit branch sets them
     # from the ledger crawl; other venues have no dated-flow adapter yet → None).
     external_flows: list[ExternalFlow] | None = None
+
+    async def _dispose_broker_nav_error(
+        exc: NavReconstructionError, *, stamp_detail: str, result_detail: str
+    ) -> DispatchResult:
+        """Shared TERMINAL disposition for a structural NavReconstructionError on
+        the broker path — the ccxt flow-valuation seam (HIGH-1) AND the combine-site
+        reconstruction seam use the IDENTICAL disposition so they can never drift.
+
+        Mirrors the deribit LedgerValuationError disposition (:2040): scrub the
+        message (T-74-03 account-size-leak — the schema-drift variants carry
+        ``amount={raw!r}``), stamp a terminal 'failed' on strategy_analytics
+        (strategy-mode only — key-mode has no per-key row, like the <2 branch), and
+        return a PERMANENT FAILED so a structurally-unre-priceable input is never
+        retried forever as a generic `unknown` (T-74-02 DoS) with the wizard poller
+        stuck on an infinite 'computing' spinner."""
+        from services.redact import scrub_freeform_string
+
+        scrubbed = str(scrub_freeform_string(str(exc)))
+        if not is_key_mode:
+            def _stamp_nav_failed() -> None:
+                ctx.supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "computation_status": "failed",
+                        "computation_error": stamp_detail + scrubbed,
+                        "data_quality_flags": {"csv_source": True},
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+
+            await db_execute(_stamp_nav_failed)
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=result_detail + scrubbed,
+            error_kind="permanent",
+        )
+
     try:
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
@@ -2165,9 +2202,35 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             _price_index = await _resolve_ccxt_flow_price_index(
                 ctx.exchange, venue, ctx.supabase, _flow_rows
             )
-            external_flows = ccxt_rows_to_dated_flows(
-                _flow_rows, venue=venue, price_index=_price_index
-            )
+            # HIGH-1: the PURE flow valuer raises NavReconstructionError
+            # (permanent, structural) on the realistically-common case of a
+            # non-stable coin flow with no resolvable same-UTC-day price AND on
+            # schema-drift amounts (whose message carries ``amount={raw!r}``). It
+            # sits INSIDE the fetch try, which only catches ccxt.RateLimitExceeded,
+            # so without this split it escapes to the generic dispatcher → retried
+            # FOREVER as `unknown` (T-74-02) with NO scrubbed terminal `failed`
+            # stamp (wizard spins on 'computing') and the raw amount LEAKS
+            # unscrubbed to compute_jobs.error_message (T-74-03). The WR-04
+            # transient-bubble comment above is correct ONLY for the fetch — the
+            # pure valuation is disposed permanent with the SAME terminal
+            # disposition as the combine site below.
+            try:
+                external_flows = ccxt_rows_to_dated_flows(
+                    _flow_rows, venue=venue, price_index=_price_index
+                )
+            except NavReconstructionError as exc:
+                return await _dispose_broker_nav_error(
+                    exc,
+                    stamp_detail=(
+                        "Broker flow valuation failed on a structural input (a "
+                        "coin flow with no same-UTC-day price, or a schema-drifted"
+                        "/undatable/non-finite flow amount). "
+                    ),
+                    result_detail=(
+                        "derive_broker_dailies: ccxt flow valuation failed "
+                        "structurally — "
+                    ),
+                )
     except ccxt.RateLimitExceeded as exc:
         await _stamp_429(ctx.supabase, ctx.key_row, exc)
         raise
@@ -2209,39 +2272,20 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # This call sits OUTSIDE the deribit LedgerValuationError try
         # (:1916-1941), so without this typed catch the error escapes to the
         # generic dispatcher classifier and is retried FOREVER as `unknown`
-        # (T-74-02 DoS). Mirror the LedgerValuationError disposition: a scrubbed
-        # terminal 'failed' stamp so the wizard poller reaches a gate instead of
-        # an infinite 'computing' spinner (strategy-mode only — key-mode has no
-        # per-key analytics row, exactly like the <2 branch below), then a
-        # PERMANENT FAILED. Narrowed to the TYPED subclass so a transient
-        # ValueError (network parse blip) still falls through to the generic
-        # handler and stays transient-retryable.
-        from services.redact import scrub_freeform_string
-        scrubbed = str(scrub_freeform_string(str(exc)))
-        if not is_key_mode:
-            def _stamp_nav_failed() -> None:
-                ctx.supabase.table("strategy_analytics").upsert(
-                    {
-                        "strategy_id": strategy_id,
-                        "computation_status": "failed",
-                        "computation_error": (
-                            "Broker return reconstruction failed on a structural "
-                            "input (schema drift, undatable/orphan flow, or a "
-                            "non-finite amount). " + scrubbed
-                        ),
-                        "data_quality_flags": {"csv_source": True},
-                    },
-                    on_conflict="strategy_id",
-                ).execute()
-
-            await db_execute(_stamp_nav_failed)
-        return DispatchResult(
-            outcome=DispatchOutcome.FAILED,
-            error_message=(
-                "derive_broker_dailies: broker NAV/TWR reconstruction failed "
-                "structurally — " + scrubbed
+        # (T-74-02 DoS). Narrowed to the TYPED subclass so a transient ValueError
+        # (network parse blip) still falls through to the generic handler and
+        # stays transient-retryable. Disposed via the SHARED helper so this seam
+        # and the ccxt flow-valuation seam (HIGH-1) can never drift.
+        return await _dispose_broker_nav_error(
+            exc,
+            stamp_detail=(
+                "Broker return reconstruction failed on a structural input "
+                "(schema drift, undatable/orphan flow, or a non-finite amount). "
             ),
-            error_kind="permanent",
+            result_detail=(
+                "derive_broker_dailies: broker NAV/TWR reconstruction failed "
+                "structurally — "
+            ),
         )
 
     # FLOW-04 (v1.8): surface the open-uPnL materiality flag onto meta POST-COMBINE.

@@ -1465,6 +1465,79 @@ class TestDeriveBrokerDailies:
         return mock_ctx, stack, captured
 
     @pytest.mark.asyncio
+    async def test_ccxt_flow_valuation_error_is_permanent_scrubbed_not_retried(
+        self,
+    ) -> None:
+        """HIGH-1: a ccxt flow row the PURE valuer cannot value (here a schema-
+        drifted non-numeric ``amount``) raises NavReconstructionError from
+        ``ccxt_rows_to_dated_flows`` — which sits INSIDE the fetch try that only
+        catches ``ccxt.RateLimitExceeded``. Without the HIGH-1 split it escapes to
+        the generic dispatcher → retried FOREVER as ``unknown`` with NO scrubbed
+        terminal ``failed`` stamp (wizard spins on 'computing') and the raw amount
+        LEAKING to ``compute_jobs.error_message`` (T-74-03). It must instead be a
+        TERMINAL permanent FAILED with a scrubbed strategy_analytics stamp — the
+        SAME disposition as the combine site.
+
+        Mutation-honest: reverting the split (removing the try/except around
+        ``ccxt_rows_to_dated_flows``) lets the error escape the handler, so
+        ``run_derive_broker_dailies_job`` RAISES instead of returning FAILED → RED.
+        """
+        from services.job_worker import run_derive_broker_dailies_job
+
+        day_ms = int(
+            __import__("datetime").datetime.fromisoformat(
+                "2026-06-01T12:00:00+00:00"
+            ).timestamp() * 1000
+        )
+        # A STABLECOIN deposit (no price lookup needed → the pure valuer, not the
+        # I/O resolver, is the raise site) whose ``amount`` is schema-drifted to a
+        # non-numeric string carrying a denylisted ``secret=`` token. The valuer's
+        # message embeds ``amount={raw!r}``, so a working scrub pass is provable by
+        # the token's absence from BOTH the dispatch error and the stamped error.
+        deposits = [
+            {"id": "dx", "type": "deposit", "currency": "USDT",
+             "amount": "secret=hunter2", "timestamp": day_ms, "internal": False},
+        ]
+        realized = self._recent_daily_pnl("binance", {10: 200.0, 5: 150.0, 1: 75.0})
+        _ctx, stack, captured = self._flow_harness(
+            venue="binance", deposits=deposits, realized=realized,
+            equity=100_000.0,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        # Terminal permanent failure — NOT a retried-forever `unknown`.
+        assert result.outcome == DispatchOutcome.FAILED, (
+            "a ccxt flow-valuation NavReconstructionError must return FAILED "
+            f"(permanent), not escape to the generic classifier; got {result!r}"
+        )
+        assert result.error_kind == "permanent", (
+            f"must be permanent (structural, non-retryable); got {result.error_kind!r}"
+        )
+        # The raw amount never leaks unscrubbed to compute_jobs.error_message.
+        assert "hunter2" not in (result.error_message or ""), (
+            "the raw flow amount must be scrubbed from the dispatch error; got "
+            f"{result.error_message!r}"
+        )
+        # Strategy-mode stamps a scrubbed terminal 'failed' so the wizard poller
+        # reaches a gate instead of an infinite 'computing' spinner.
+        failed = [
+            u for u in captured["analytics_upserts"]
+            if u.get("computation_status") == "failed"
+        ]
+        assert failed, (
+            "a ccxt flow-valuation fault must stamp a terminal 'failed' on "
+            f"strategy_analytics; got {captured['analytics_upserts']!r}"
+        )
+        assert "hunter2" not in failed[0].get("computation_error", ""), (
+            "the stamped computation_error must be scrubbed; got "
+            f"{failed[0].get('computation_error')!r}"
+        )
+        # No csv_daily_returns write — the failure precedes the upsert.
+        assert captured["csv_rows"] == []
+
+    @pytest.mark.asyncio
     async def test_ccxt_branch_values_flows_at_same_day_close(self) -> None:
         """A BTC deposit + a USDT deposit on the same UTC day → the BTC leg is
         valued at THAT day's close (reused OHLCV source) and the stablecoin leg
