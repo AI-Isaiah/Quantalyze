@@ -2,10 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260412094454_sync_strategy_analytics_status.sql
--- --------------------------------------------------------------------------
--- STEP 1: sync_strategy_analytics_status RPC
--- --------------------------------------------------------------------------
+-- source migration: 20260707120000_sync_status_preserve_warnings.sql
 CREATE OR REPLACE FUNCTION sync_strategy_analytics_status(p_strategy_id UUID)
 RETURNS VOID
 LANGUAGE plpgsql
@@ -23,10 +20,7 @@ BEGIN
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
 
-  -- (d) no rows → preserve existing strategy_analytics row. Bail out
-  -- before any write. Protects brand-new strategies with a default
-  -- 'pending' row, and legacy strategies whose analytics landed through
-  -- the pre-Sprint-3 after() path without ever going through compute_jobs.
+  -- (d) no rows → preserve existing strategy_analytics row (unchanged).
   SELECT count(*) INTO v_job_count
     FROM compute_jobs
    WHERE strategy_id = p_strategy_id;
@@ -35,32 +29,37 @@ BEGIN
     RETURN;
   END IF;
 
-  -- (a) any non-terminal row → UI shows 'computing'. Terminal states are
-  -- 'done' and 'failed_final' only; everything else is still in motion.
-  -- failed_retry is non-terminal because the worker will pick it up again
-  -- after the backoff window.
+  -- (a) any non-terminal row → 'computing', UNLESS the runner has already
+  -- written 'complete_with_warnings'. That warning is a runner-owned terminal
+  -- sub-state the compute_jobs aggregate cannot see; this branch fires whenever
+  -- ANY sibling job for the strategy is still in flight (e.g. a poll_positions /
+  -- sync_funding job claimed in the same batch as the warned analytics job, or
+  -- a pre-mark bridge call while this job's own row is still 'running'). Writing
+  -- a bare 'computing' here would launder the warning, which branch (c) would
+  -- then resolve to a plain 'complete' — ordering-dependent, so it leaked on
+  -- multi-job (live-API) strategies. Preserve it. Only the analytics runner
+  -- clears the warning, via its own 'computing' entry-write when it actually
+  -- recomputes; the bridge must never downgrade it.
   SELECT count(*) INTO v_nonterminal_count
     FROM compute_jobs
    WHERE strategy_id = p_strategy_id
      AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry');
 
   IF v_nonterminal_count > 0 THEN
-    -- Upsert with on-conflict update. strategy_analytics has UNIQUE
-    -- constraint on strategy_id (migration 001:72).
     INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error)
     VALUES (p_strategy_id, 'computing', NULL)
     ON CONFLICT (strategy_id) DO UPDATE
-       SET computation_status = EXCLUDED.computation_status,
+       SET computation_status = CASE
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+             THEN 'complete_with_warnings'
+             ELSE 'computing'
+           END,
            computation_error  = EXCLUDED.computation_error,
            computed_at        = now();
     RETURN;
   END IF;
 
-  -- (b) all terminal, any failed_final → UI shows 'failed'. Pull the
-  -- latest failed_final row's last_error so the UI can render a meaningful
-  -- diagnostic. `updated_at` is stamped by the compute_jobs_set_updated_at
-  -- trigger (032:254), so ORDER BY updated_at DESC is the canonical way
-  -- to pick the most recent terminal failure.
+  -- (b) all terminal, any failed_final → 'failed' with latest error (unchanged).
   SELECT count(*) INTO v_failed_count
     FROM compute_jobs
    WHERE strategy_id = p_strategy_id
@@ -84,14 +83,19 @@ BEGIN
     RETURN;
   END IF;
 
-  -- (c) all rows 'done' → UI shows 'complete'. Clear any stale
-  -- computation_error from a previous failed run so the UI doesn't show
-  -- "complete with error X" contradictory state.
+  -- (c) all rows 'done' → terminal SUCCESS. PRESERVE an existing
+  -- 'complete_with_warnings' (a more-informative success the analytics worker
+  -- already wrote); otherwise resolve to 'complete'. Clears any stale
+  -- computation_error either way.
   INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error)
   VALUES (p_strategy_id, 'complete', NULL)
   ON CONFLICT (strategy_id) DO UPDATE
-     SET computation_status = EXCLUDED.computation_status,
-         computation_error  = EXCLUDED.computation_error,
+     SET computation_status = CASE
+           WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+           THEN 'complete_with_warnings'
+           ELSE 'complete'
+         END,
+         computation_error  = NULL,
          computed_at        = now();
 END;
 $$;

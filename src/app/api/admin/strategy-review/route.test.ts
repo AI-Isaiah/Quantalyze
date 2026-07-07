@@ -116,7 +116,13 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     /** count returned by the final pre-UPDATE trades count query. */
     recheckTradeCount: number;
     /** computation_status returned by the final pre-UPDATE analytics query. */
-    recheckStatus: "pending" | "computing" | "complete" | "failed" | null;
+    recheckStatus:
+      | "pending"
+      | "computing"
+      | "complete"
+      | "complete_with_warnings"
+      | "failed"
+      | null;
     /** rows returned by the strategies UPDATE().eq().eq().select('id'). */
     updateAffected: Array<{ id: string }>;
     /** api_key_id from the re-check strategies read. Default "key-1" (exchange
@@ -315,6 +321,21 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     mockAdminClient({
       recheckTradeCount: 12,
       recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+  });
+
+  it("returns 200 when re-check sees complete_with_warnings (terminal success)", async () => {
+    // mig 20260707120000: complete_with_warnings is a terminal SUCCESS the
+    // first-pass strategyGate deny-list admits. The re-check MUST admit it too,
+    // else a warned strategy passes the gate then 409s here — un-approvable.
+    mockAdminClient({
+      recheckTradeCount: 12,
+      recheckStatus: "complete_with_warnings",
       updateAffected: [{ id: "strat-1" }],
     });
     const res = await postApprove();

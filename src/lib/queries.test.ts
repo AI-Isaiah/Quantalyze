@@ -848,6 +848,27 @@ describe("getStrategyDetailV2 — Plan 14b-06 panel4..7 mappings", () => {
     expect(result!.panel7Inputs.correlation_analytics.metrics_json).toBeNull();
   });
 
+  it("Test 6b (mig-20260707120000): complete_with_warnings is a terminal success — panels POPULATE (call site invokes isComputedAnalytics, not exact-match)", async () => {
+    // Wiring guard, not a helper test: a warned row must render metrics, else
+    // every panel goes blank for warned strategies. Reverting queries.ts:687 to
+    // `=== "complete"` makes these assertions fail.
+    recorders.strategyData = buildStrategyRow({
+      strategy_analytics: buildAnalyticsRow({
+        computation_status: "complete_with_warnings",
+      }),
+    });
+    const result = await getStrategyDetailV2(STRAT_ID);
+    expect(result!.panel4Inputs.monthly_returns).toEqual({
+      "2024": { Jan: 0.01, Feb: 0.02 },
+    });
+    expect(result!.panel4Inputs.returns_series).toEqual([
+      { date: "2024-01-01", value: 1.0 },
+      { date: "2024-12-31", value: 1.42 },
+    ]);
+    expect(result!.panel5Inputs.sharpe).not.toBeNull();
+    expect(result!.panel6Inputs.trade_metrics).not.toBeNull();
+  });
+
   it("Test 7: visibility gate — getStrategyDetailV2 returns null when supabase reports an error", async () => {
     // No row data + the mock chain's .single() returns { data: null, error: null }
     // The function checks `error || !strategy` — when both are falsy, the

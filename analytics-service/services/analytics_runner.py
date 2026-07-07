@@ -2291,13 +2291,32 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # pill survives the unrecoverable failure. Without it the
         # owner-side UI sees null data_quality_flags and falls back to
         # generic "missing data" copy instead of "CSV upload failed".
+        #
+        # mig 20260707120000: READ-MODIFY-WRITE — do NOT wipe the column. This
+        # path raises HTTP 500 → the job goes to failed_retry and the CSV run is
+        # re-dispatched (derive is NOT re-run). A wholesale {csv_source:True}
+        # write here destroyed any NAV_TWR_GUARD_KEYS that derive_broker_dailies
+        # pre-stamped, so attempt 2's _read_existing_flags found none →
+        # _warned=False → a clean 'complete' over a guard-refused series (the
+        # exact laundering class this migration kills). Preserve prior flags.
         def _mark_unrecoverable() -> None:
+            prior_res = (
+                supabase.table("strategy_analytics")
+                .select("data_quality_flags")
+                .eq("strategy_id", strategy_id)
+                .maybe_single()
+                .execute()
+            )
+            prior_flags = dict(
+                (getattr(prior_res, "data", None) or {}).get("data_quality_flags") or {}
+            )
+            prior_flags["csv_source"] = True
             supabase.table("strategy_analytics").upsert(
                 {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
                     "computation_error": "CSV analytics computation failed.",
-                    "data_quality_flags": {"csv_source": True},
+                    "data_quality_flags": prior_flags,
                 },
                 on_conflict="strategy_id",
             ).execute()

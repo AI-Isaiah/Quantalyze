@@ -3546,10 +3546,13 @@ async def run_rescore_allocator_job(job: dict[str, Any]) -> DispatchResult:
 async def dispatch(job: dict[str, Any]) -> DispatchResult:
     """Route a claimed job to its per-kind handler, wrap in timeout, classify.
 
-    After the handler resolves (or raises) and before returning, strategy-
-    scoped jobs call the UI status bridge so strategy_analytics.computation_status
-    reflects the new compute_jobs aggregate. Portfolio-scoped jobs skip
-    the bridge (there is no strategy_analytics row to update).
+    After the handler resolves (or raises) and before returning, a strategy-
+    scoped job whose outcome is DEFERRED calls the UI status bridge (the only
+    outcome with no post-mark bridge). Terminal outcomes (DONE/FAILED) are
+    bridged authoritatively by mark_compute_job_done / mark_compute_job_failed
+    AFTER main_worker flips the job row — see the DEFERRED-only rationale at the
+    bridge call site below. Portfolio-scoped jobs never bridge (no
+    strategy_analytics row).
 
     Handler lookup is done via if/elif rather than a dict so that
     monkeypatching the module-level run_*_job functions in tests works
@@ -3641,11 +3644,25 @@ async def dispatch(job: dict[str, Any]) -> DispatchResult:
         if is_final:
             await _mark_intro_snapshot_failed(job)
 
-    # UI status bridge: after every strategy-scoped job, derive the UI
-    # status from the compute_jobs aggregate and write it into
-    # strategy_analytics.computation_status. Portfolio jobs skip the bridge.
+    # UI status bridge (DEFERRED-only). For TERMINAL outcomes the authoritative
+    # status bridge is the in-RPC `PERFORM sync_strategy_analytics_status`
+    # inside mark_compute_job_done / mark_compute_job_failed, which fires AFTER
+    # the compute_jobs row is flipped to its terminal state (main_worker calls
+    # the mark RPC once dispatch returns).
+    #
+    # Calling the bridge HERE for a terminal outcome — pre-mark, while this
+    # job's row is still 'running' — made the RPC take branch (a) ("any
+    # non-terminal job" → 'computing') and OVERWRITE the runner's just-written
+    # 'complete_with_warnings' terminal status. The later branch-(c) bridge from
+    # mark_compute_job_done then read 'computing' and resolved to a plain
+    # 'complete', laundering the warning on every queued path, every venue (the
+    # whole complete_with_warnings channel was dead). See migration
+    # 20260707120000_sync_status_preserve_warnings.sql.
+    #
+    # DEFERRED is the ONLY outcome with no post-mark bridge (main_worker runs no
+    # mark RPC on defer), so it alone still needs a dispatch-side status refresh.
     strategy_id = job.get("strategy_id")
-    if strategy_id:
+    if strategy_id and result.outcome == DispatchOutcome.DEFERRED:
         try:
             await sync_strategy_analytics_status(strategy_id)
         except Exception as exc:  # noqa: BLE001

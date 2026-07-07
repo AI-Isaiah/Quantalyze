@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
 import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
+import { isComputedAnalytics } from "./closed-sets";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
 import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 import {
@@ -681,7 +682,9 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
   // missing keys remain `null` and per-panel banners trigger correctly.
   const analyticsRaw = (strategy as Record<string, unknown>).strategy_analytics;
   const a = extractAnalytics(analyticsRaw);
-  const isComplete = a?.computation_status === "complete";
+  // Terminal SUCCESS includes complete_with_warnings — else warned strategies
+  // render every metric panel blank (migration 20260707120000 surfacing).
+  const isComplete = isComputedAnalytics(a?.computation_status);
   const metricsJson = (a?.metrics_json ?? {}) as Record<string, unknown>;
 
   const panel1 = {

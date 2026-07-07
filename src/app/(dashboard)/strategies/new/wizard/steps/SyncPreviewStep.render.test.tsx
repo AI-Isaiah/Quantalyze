@@ -670,7 +670,7 @@ describe("[P72] SyncPreviewStep — ledger-backed (Deribit) success path", () =>
    * csv_daily_returns rows, complete analytics, and a deribit key — the exact
    * shape of a verified Deribit onboarding.
    */
-  function installDeribitPassMock(csvCount: number) {
+  function installDeribitPassMock(csvCount: number, pollStatus = "complete") {
     const thenable = (data: unknown, count: number) => ({
       eq: () => thenable(data, count),
       neq: () => thenable(data, count),
@@ -706,7 +706,7 @@ describe("[P72] SyncPreviewStep — ledger-backed (Deribit) success path", () =>
                 maybeSingle: () =>
                   Promise.resolve({
                     data: {
-                      computation_status: "complete",
+                      computation_status: pollStatus,
                       computation_error: null,
                     },
                     error: null,
@@ -782,5 +782,93 @@ describe("[P72] SyncPreviewStep — ledger-backed (Deribit) success path", () =>
     expect(screen.queryByText(/0 trades detected/i)).not.toBeInTheDocument();
     // The "use this key" affordance is present on the passed branch.
     expect(screen.getByTestId("wizard-use-this-key")).toBeInTheDocument();
+  });
+
+  it("[mig-20260707120000] complete_with_warnings is terminal — reaches the factsheet preview, does NOT poll forever", async () => {
+    // Regression: a warned first compute (e.g. Deribit onboarding tripping a DQ
+    // guard) now PERSISTS 'complete_with_warnings' instead of being laundered to
+    // 'complete'. The poll must treat it as a terminal success (isComputedAnalytics)
+    // or the wizard spins forever. Same harness as the 'complete' case, warned poll.
+    installDeribitPassMock(30, "complete_with_warnings");
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    expect(
+      screen.getByRole("heading", { name: /your verified factsheet is ready/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/30 days of returns detected/i)).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-use-this-key")).toBeInTheDocument();
+  });
+});
+
+// mig 20260707120000 — the `isFresh` resume check must treat a fresh
+// complete_with_warnings row as fresh (isComputedAnalytics), else a warned-but-
+// fresh strategy re-fires the /api/keys/sync POST + queue on every wizard
+// revisit (churn / rate-limit exposure). Guards the second changed line in this
+// file (the poll terminal-check is guarded above).
+describe("[mig-20260707120000] SyncPreviewStep — fresh complete_with_warnings skips the resync POST", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-07T12:00:00.000Z"));
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+  });
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+  });
+
+  it("a fresh warned row is treated as fresh → no /api/keys/sync POST fires", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    currentClientFactory = () => ({
+      from: () => ({
+        select: (cols: string) => ({
+          eq: () => ({
+            maybeSingle: () =>
+              cols === "computation_status, computed_at"
+                ? Promise.resolve({
+                    data: {
+                      computation_status: "complete_with_warnings",
+                      // 1s before the fake clock → fresh under any sane window.
+                      computed_at: "2026-07-07T11:59:59.000Z",
+                    },
+                    error: null,
+                  })
+                : Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // Pre-fix (`=== "complete"`) this warned row is NOT fresh → the kickoff POST
+    // fires. With isComputedAnalytics it short-circuits, so no sync POST occurs.
+    const syncPosts = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("/api/keys/sync"),
+    );
+    expect(syncPosts).toHaveLength(0);
   });
 });

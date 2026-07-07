@@ -54,8 +54,23 @@ vi.mock("@/lib/supabase/client", () => ({
         order: (_col: string, _opts?: unknown) =>
           Promise.resolve(selectResultMock()),
       }),
+      // handleLinkKey does strategies.update({api_key_id}).eq('id', ...).
+      update: (_vals: unknown) => ({
+        eq: (_col: string, _val: unknown) => Promise.resolve({ error: null }),
+      }),
     }),
   }),
+}));
+
+// Capture SyncProgress's onStatusChange so a test can drive the terminal
+// callback directly (mig 20260707120000 regression: complete_with_warnings must
+// be treated as a terminal SUCCESS, clearing syncingKeyId + refreshing).
+let capturedOnStatusChange: ((s: string) => void) | null = null;
+vi.mock("./SyncProgress", () => ({
+  SyncProgress: (props: { onStatusChange?: (s: string) => void }) => {
+    capturedOnStatusChange = props.onStatusChange ?? null;
+    return null;
+  },
 }));
 
 // Polyfill jsdom's missing HTMLDialogElement methods so the <Modal> the
@@ -250,5 +265,79 @@ describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", (
     expect(
       screen.getByText(/^Binance\s*·\s*Last synced/),
     ).toBeInTheDocument();
+  });
+});
+
+// mig 20260707120000 — a warned sync (complete_with_warnings) is a terminal
+// SUCCESS. If ApiKeyManager's status handler only matches "complete", a warned
+// resync leaves syncingKeyId set forever: every Resync/Use button stays disabled
+// ("Syncing…") while the panel says "Synced with warnings" — a dead-lock only a
+// reload recovers. This drives SyncProgress's onStatusChange with the warned
+// value and asserts the button re-enables.
+describe("ApiKeyManager — complete_with_warnings is terminal (mig 20260707120000)", () => {
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+    capturedOnStatusChange = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("clears the syncing lock on a complete_with_warnings terminal status", async () => {
+    selectResultMock.mockReturnValue({
+      data: [
+        {
+          id: "key-1",
+          user_id: "user-a",
+          exchange: "binance",
+          label: "My Binance",
+          is_active: true,
+          sync_status: "complete",
+          last_sync_at: null,
+          account_balance_usdt: 1000,
+          created_at: "2026-01-01T00:00:00Z",
+          sync_error: null,
+          last_429_at: null,
+          disconnected_at: null,
+        },
+      ],
+      error: null,
+    });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-1" />);
+    });
+    await waitFor(() => expect(screen.getByText("My Binance")).toBeInTheDocument());
+
+    // Kick off a sync → syncStatus becomes non-idle, button shows "Syncing…",
+    // and the (mocked) SyncProgress captures onStatusChange.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Resync/i }));
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Syncing/i })).toBeInTheDocument();
+      expect(capturedOnStatusChange).not.toBeNull();
+    });
+
+    // The warned terminal status arrives. The lock MUST clear (button → Resync).
+    await act(async () => {
+      capturedOnStatusChange!("complete_with_warnings");
+    });
+    expect(
+      screen.getByRole("button", { name: /Resync/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Syncing/i }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -348,12 +348,14 @@ export function SyncProgress({
         </div>
       )}
 
-      {/* Last synced timestamp */}
-      {syncStatus === "complete" && lastSyncAt && (
-        <p className="text-xs text-text-muted mt-1 ml-6">
-          Last synced {formatRelativeTime(lastSyncAt)}
-        </p>
-      )}
+      {/* Last synced timestamp — shown for BOTH terminal successes (a warned
+          sync is still a completed sync; mig 20260707120000 now persists it). */}
+      {(syncStatus === "complete" || syncStatus === "complete_with_warnings") &&
+        lastSyncAt && (
+          <p className="text-xs text-text-muted mt-1 ml-6">
+            Last synced {formatRelativeTime(lastSyncAt)}
+          </p>
+        )}
 
       {/* Warnings detail */}
       {syncStatus === "complete_with_warnings" && syncWarnings && (

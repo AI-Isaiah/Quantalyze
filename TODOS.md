@@ -12,6 +12,23 @@
 
 ---
 
+## v1.8 complete_with_warnings surfacing follow-ups (from /ship red-team + Fable specialist fan-out, 2026-07-07)
+
+### P2: CI guard against fresh `computation_status === 'complete'` exact-matches
+The revived-value class (mig 20260707120000) is now closed by convention — every strategy_analytics read-gate shares `isComputedAnalytics()` — but nothing MECHANICALLY stops a future consumer writing a new `=== 'complete'` and silently re-breaking a warned strategy. Add a grep-style CI check (like `check-route-contract.ts`) that bans exact-matching `computation_status` against `'complete'` outside `src/lib/closed-sets.ts`, with an allowlist for the legitimate exact-matchers: portfolio_analytics (different table, no warned value), verification-request status, and the intentional founder-lp/readiness withhold.
+
+### P3: residual `complete_with_warnings` launder via failed_final bounce
+Warned → a sibling job hits `failed_final` (branch (b) writes `'failed'`, destroying the sticky value) → the failed job recovers WITHOUT an analytics re-run → branch (c) reads `'failed'` → plain `'complete'` while `data_quality_flags` still carry the warning. Unfixable in the bridge without duplicating the runner's flag→status policy in SQL (only some flags promote to warned); interacts with the pre-existing mig-038 "any failed_final → failed" retry poison. Both documented in the migration header; track together.
+
+### P3: founder-LP warned-month email alert leg is dead in prod (RESEND_API_KEY unset)
+The founder-LP report withholds a warned month and fires a fail-loud alert with two legs (Sentry + Resend email). `RESEND_API_KEY` is unset in Vercel prod, so the founder-visible EMAIL leg is dead — the first warned month manifests as a Sentry event + a silently missing LP report, not an inbox alert. Set `RESEND_API_KEY` in Vercel prod before the first warned founder month lands. (See existing `project_resend_api_key_vercel_gap` note.)
+
+### P4: warned-strategy UI polish (cosmetic, not dead-ends)
+- `ApiKeyManager` doesn't pass `syncWarnings` to `SyncProgress`, so a warned resync shows the "Synced with warnings" pill without a "Show details" expander (the wizard path carries the text; the key-manager doesn't source it).
+- The v1 public strategy page renders warned metrics with NO warned badge, while v2 surfaces DQ chips via panel6 — inconsistent "surface with a badge" between v1/v2.
+- `ApiKeyManager.exchangeIcon` map lacks `deribit` → Deribit keys show a "?" icon (pre-existing, unrelated).
+- Test-coverage nits (LOW): a `SyncProgress` test asserting the poll forwards `onStatusChange` for `complete_with_warnings` (the one untested link in the resync-deadlock chain), and a `csv-finalize` placeholder warned-skip case.
+
 ## v1.3 phase 45 nav follow-ups (deferred from /ship pre-landing review, 2026-06-27)
 
 ### P3: tab-strip edge-tab focus ring clipped by `overflow-x-auto`

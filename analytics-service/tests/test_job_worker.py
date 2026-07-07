@@ -729,13 +729,27 @@ class TestDispatchExceptionHandling:
 # ---------------------------------------------------------------------------
 
 class TestDispatchStatusBridge:
-    """After every strategy-scoped job, dispatch must call
-    sync_strategy_analytics_status so the UI state reflects the queue.
-    Portfolio-scoped jobs skip the call (no strategy_analytics row).
+    """dispatch runs a strategy-scoped status bridge ONLY for the DEFERRED
+    outcome. For TERMINAL outcomes (DONE / FAILED) the authoritative bridge is
+    the in-RPC PERFORM sync_strategy_analytics_status inside
+    mark_compute_job_done / mark_compute_job_failed, which fires AFTER
+    main_worker flips the compute_jobs row to its terminal state.
+
+    Regression fence (20260707120000): dispatch used to bridge pre-mark on
+    EVERY outcome. While this job's row was still 'running', that call took
+    branch (a) → 'computing' and OVERWROTE the runner's just-written
+    'complete_with_warnings', which the later branch-(c) bridge then laundered
+    to a plain 'complete'. The whole complete_with_warnings channel was dead
+    platform-wide. dispatch must NOT bridge on a terminal outcome now.
+
+    Portfolio-scoped jobs never bridge (no strategy_analytics row).
     """
 
     @pytest.mark.asyncio
-    async def test_strategy_job_calls_status_bridge_on_success(self) -> None:
+    async def test_strategy_job_does_not_bridge_on_success(self) -> None:
+        """DONE → dispatch does NOT bridge; mark_compute_job_done bridges
+        post-flip. A pre-mark bridge here would launder complete_with_warnings
+        (see the class docstring / migration 20260707120000)."""
         job = {"id": "job-10", "kind": "sync_trades", "strategy_id": "strat-10"}
         with patch(
             "services.job_worker.run_sync_trades_job",
@@ -745,10 +759,12 @@ class TestDispatchStatusBridge:
             new=AsyncMock(return_value=None),
         ) as mock_sync:
             await dispatch(job)
-        mock_sync.assert_awaited_once_with("strat-10")
+        mock_sync.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_strategy_job_calls_status_bridge_on_failure(self) -> None:
+    async def test_strategy_job_does_not_bridge_on_failure(self) -> None:
+        """FAILED → dispatch does NOT bridge; mark_compute_job_failed bridges
+        post-flip (branch (b) → 'failed')."""
         async def _fail(job: dict) -> DispatchResult:
             raise RuntimeError("boom")
 
@@ -761,7 +777,23 @@ class TestDispatchStatusBridge:
             new=AsyncMock(return_value=None),
         ) as mock_sync:
             await dispatch(job)
-        mock_sync.assert_awaited_once_with("strat-11")
+        mock_sync.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_strategy_job_bridges_on_deferred(self) -> None:
+        """DEFERRED is the only outcome with no post-mark bridge (main_worker
+        runs no mark RPC on defer), so dispatch must still refresh the UI
+        status here."""
+        job = {"id": "job-13", "kind": "sync_trades", "strategy_id": "strat-13"}
+        with patch(
+            "services.job_worker.run_sync_trades_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DEFERRED)),
+        ), patch(
+            "services.job_worker.sync_strategy_analytics_status",
+            new=AsyncMock(return_value=None),
+        ) as mock_sync:
+            await dispatch(job)
+        mock_sync.assert_awaited_once_with("strat-13")
 
     @pytest.mark.asyncio
     async def test_portfolio_job_does_not_call_status_bridge(self) -> None:

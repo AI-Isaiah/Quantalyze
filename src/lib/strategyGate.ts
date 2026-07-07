@@ -36,6 +36,7 @@ export interface StrategyGateInput {
     | "pending"
     | "computing"
     | "complete"
+    | "complete_with_warnings"
     | "failed"
     | null;
   /** Raw `strategy_analytics.computation_error` for richer messaging. */

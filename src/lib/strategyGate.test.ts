@@ -38,6 +38,20 @@ describe("checkStrategyGate", () => {
     });
   });
 
+  it("passes complete_with_warnings — a terminal success this deny-list must admit (mig 20260707120000)", () => {
+    // The gate is a DENY-LIST: only null/pending/computing/failed are rejected;
+    // both 'complete' and 'complete_with_warnings' fall through to PASS. This
+    // pins that intent so a future refactor to an allow-list (=== 'complete')
+    // can't silently make warned strategies un-approvable — the admin
+    // strategy-review re-check (which admits warned) relies on this.
+    const result = checkStrategyGate({
+      ...BASE,
+      computationStatus: "complete_with_warnings",
+    });
+    expect(result.passed).toBe(true);
+    expect(result.code).toBeNull();
+  });
+
   it("rejects when there is no API key and no trades", () => {
     const result = checkStrategyGate({
       ...BASE,

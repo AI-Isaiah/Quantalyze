@@ -10,6 +10,20 @@
  * Behavior contract:
  *   ok=true  → strategy.status='published' AND analytics.computation_status='complete'
  *   ok=false → reason string suitable for Sentry tagging + Resend body.
+ *
+ * WARNED MONTHS ARE INTENTIONALLY WITHHELD (2026-07-07). This gate is a strict
+ * exact-match on 'complete' — it deliberately does NOT admit
+ * 'complete_with_warnings'. Before migration 20260707120000 the queue-path RPC
+ * laundered warned runs to 'complete', so this gate never saw a warning; the
+ * migration now persists it. We keep the strict bar for LP-facing artifacts: a
+ * DQ guard (NAV-denominator, flow-coverage, unrealized-pnl wedge) means the
+ * factsheet numbers may be unreliable, so the monthly cron withholds the PDF and
+ * sends the founder a fail-LOUD alert (reason names the warned status) rather
+ * than mailing LPs guard-flagged returns. This is a STRICTER bar than the
+ * factsheet PDF routes (which render 'complete_with_warnings'): LP reporting is
+ * higher-stakes than on-request viewing. To send warned months instead, admit
+ * via isComputedAnalytics() and surface the warning in the email body — a
+ * deliberate product decision, not a drift.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 // Import from @/lib/utils (not the @/lib/queries barrel) — gated by the
@@ -60,6 +74,8 @@ export async function checkFounderStrategyReadiness(
     };
   }
   const compStatus = analytics.computation_status;
+  // Strict on purpose: 'complete_with_warnings' is intentionally NOT admitted
+  // for LP-facing reports (withhold + fail-loud alert). See the header contract.
   if (compStatus !== "complete") {
     return {
       ok: false,
