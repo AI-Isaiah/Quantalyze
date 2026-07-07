@@ -49,7 +49,7 @@ from typing import Any
 # here keeps the module network-free — external_flows.py imports stdlib + typing
 # ONLY (no ccxt/pandas/supabase/services.exchange), so the purity source-scan
 # guard (test_deribit_txn.py) still holds.
-from services.external_flows import ExternalFlow
+from services.external_flows import USD_FAMILY, ExternalFlow
 
 # Sentinel distinguishing an ABSENT dict key from a present ``None``/``0`` value.
 _MISSING: Any = object()
@@ -92,7 +92,11 @@ _FUTURE_EXPIRY_RE: re.Pattern[str] = re.compile(r"-\d{1,2}[A-Z]{3}\d{2}$")
 # USD-family settlement currencies whose cash delta is already denominated in
 # USD (no index multiplication). Complements the instrument-name markers: a
 # linear row is detectable by instrument name OR settlement currency.
-_LINEAR_CURRENCIES: frozenset[str] = frozenset({"USDC", "USDT", "USD", "EURR"})
+# Aliases the single source of truth in ``external_flows.USD_FAMILY`` (identity,
+# NOT a copy) so the native core (Phase 79) and Deribit ingest can never drift
+# (§3.2). The set now includes DAI — behavior-neutral here (no DAI wallet on
+# Deribit, so ``_row_is_linear`` never encounters it).
+_LINEAR_CURRENCIES: frozenset[str] = USD_FAMILY
 
 # The ONLY coin-margined (inverse) settlement currencies on Deribit — the sole
 # currencies whose coin `change`/equity is validly multiplied by a USD index.

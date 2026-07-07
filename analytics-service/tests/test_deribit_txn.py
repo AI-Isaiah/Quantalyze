@@ -30,13 +30,16 @@ from services.deribit_txn import (
     CASH_BEARING_TYPES,
     INFORMATIONAL_TYPES,
     LedgerValuationError,
+    _INVERSE_CURRENCIES,
+    _LINEAR_CURRENCIES,
+    _row_is_linear,
     classify_instrument,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
     txn_change_to_usd,
     txn_rows_to_daily_records,
 )
-from services.external_flows import ExternalFlow
+from services.external_flows import USD_FAMILY, ExternalFlow
 from tests.fixtures.deribit_flow_fixtures import (
     BTC_INDEX_2026_03_14,
     BTC_INDEX_2026_03_17,
@@ -1056,10 +1059,14 @@ def test_dated_external_flow_returns_sorted_externalflow_list() -> None:
     flows = deribit_dated_external_flows_usd([later, earlier])
     assert [f.utc_day_iso for f in flows] == ["2026-02-01", "2026-02-10"]
     assert all(isinstance(f, ExternalFlow) for f in flows)
-    # positional unpack (matches the honest core's `day_raw, usd_raw = flow`)
-    day_raw, usd_raw = flows[0]
+    # Indexed access (matches the honest core's `day_raw, usd_raw = flow[0], flow[1]`
+    # after the Phase 79-01 native-channel extension); this producer stays 2-arg,
+    # so the native channel carries the byte-identical defaults.
+    day_raw, usd_raw = flows[0][0], flows[0][1]
     assert day_raw == "2026-02-01"
     assert usd_raw == pytest.approx(-40.0, abs=1e-9)
+    assert flows[0].currency == "USD"
+    assert flows[0].quantity is None
 
 
 # ---------------------------------------------------------------------------
@@ -1114,3 +1121,28 @@ def test_c1_zero_change_inverse_flow_not_needed() -> None:
     zero = {"type": "withdrawal", "currency": "BTC", "change": 0.0,
             "timestamp": _ms(_DAY_A), "id": 502}
     assert inverse_days_needing_index([zero]) == set()
+
+
+# ---------------------------------------------------------------------------
+# Phase 79-01: USD_FAMILY single source of truth (SC-3, §3.2).
+# ---------------------------------------------------------------------------
+
+
+def test_linear_currencies_is_usd_family_alias() -> None:
+    """``_LINEAR_CURRENCIES`` is the SAME object as ``external_flows.USD_FAMILY``
+    (identity — an alias, not a copy that can silently drift). RED today: the two
+    are distinct frozensets with different membership (no DAI)."""
+    assert _LINEAR_CURRENCIES is USD_FAMILY
+
+
+def test_row_is_linear_dai_currency() -> None:
+    """A DAI-currency row classifies linear (USD-family pass-through, no index
+    multiply) — behavior-neutral for Deribit (no DAI wallet exists there, §3.2).
+    RED today: DAI is not in ``_LINEAR_CURRENCIES``."""
+    assert _row_is_linear({"currency": "DAI", "change": 100.0}) is True
+
+
+def test_static_disjointness_retained() -> None:
+    """The import-time floor still holds: USD-family ∩ inverse == ∅ (the static
+    assert now covers ``USD_FAMILY`` since ``_LINEAR_CURRENCIES`` aliases it)."""
+    assert not (_LINEAR_CURRENCIES & _INVERSE_CURRENCIES)

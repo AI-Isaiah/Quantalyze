@@ -163,6 +163,35 @@ def test_malformed_flow_usd_fails_loud() -> None:
         _flows_to_daily_usd([("2026-01-02", "not-a-number")])
 
 
+def test_four_field_flow_through_flows_to_daily_usd() -> None:
+    """Phase 79-01 SC-2: a 4-field ``ExternalFlow`` (native channel populated)
+    passes through ``_flows_to_daily_usd`` — its ``usd_signed`` still sums on its
+    UTC day. RED today: ``day_raw, usd_raw = flow`` (nav_twr.py:201) unpacks a
+    4-field NamedTuple → ``ValueError: too many values to unpack``."""
+    flow = ExternalFlow("2026-01-02", -500.0, "BTC", -0.012)
+    out = _flows_to_daily_usd([flow])
+    assert list(out.index) == [pd.Timestamp("2026-01-02")]
+    assert out.loc[pd.Timestamp("2026-01-02")] == pytest.approx(-500.0)
+
+
+def test_flows_to_daily_usd_legacy_byte_identical() -> None:
+    """Phase 79-01 SC-4: a mix of 2-field ``ExternalFlow`` and bare ``(day, usd)``
+    tuples produces the EXACT Series it produces today — the indexed-access fix at
+    :201 is byte-identical for every existing caller (check_exact)."""
+    mixed = [
+        ExternalFlow("2026-01-02", 500.0),   # 2-arg NamedTuple (defaults fill)
+        ("2026-01-02", -150.0),              # bare 2-tuple (core docstring allows)
+        ExternalFlow("2026-01-05", 1000.0),
+    ]
+    out = _flows_to_daily_usd(mixed)
+    expected = pd.Series(
+        [350.0, 1000.0],
+        index=pd.DatetimeIndex([pd.Timestamp("2026-01-02"), pd.Timestamp("2026-01-05")]),
+        name="flows",
+    )
+    pd.testing.assert_series_equal(out, expected, check_exact=True)
+
+
 def test_flow_on_no_trade_day_unioned_as_zero_return() -> None:
     """HIGH-1: a flow dated on a day ABSENT from the pnl index (a no-trade day —
     an initial deposit before the first trade, or a terminal / quiet-day

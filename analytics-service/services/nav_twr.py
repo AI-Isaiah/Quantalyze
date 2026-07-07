@@ -198,7 +198,10 @@ def _flows_to_daily_usd(external_flows: Sequence[Any] | None) -> pd.Series:
 
     sums: dict[str, float] = defaultdict(float)
     for i, flow in enumerate(external_flows):
-        day_raw, usd_raw = flow
+        # Indexed access (not a positional unpack) so a 4-field ``ExternalFlow``
+        # (native channel populated, Phase 79) AND a bare ``(day, usd)`` 2-tuple
+        # both read their first two fields. usd_signed stays authoritative here.
+        day_raw, usd_raw = flow[0], flow[1]
         day = _row_utc_day(day_raw)  # 'YYYY-MM-DD' (fails loud if undatable)
         usd = _coerce_float(
             usd_raw, field="usd_signed", row={"index": i, "day": day}
