@@ -99,6 +99,68 @@ def _is_external(row: Mapping[str, Any], venue: str, *, kind: str) -> bool:
     return True
 
 
+def _fee_usd(
+    row: Mapping[str, Any],
+    *,
+    day: str,
+    flow_ccy: str,
+    flow_price: float,
+    price_index: PriceIndex,
+) -> float:
+    """The transfer's fee as a NON-NEGATIVE USD cost, or ``0.0`` when there is no
+    valuable fee (MEDIUM-1).
+
+    The ccxt unified transfer carries an optional ``fee = {'currency', 'cost'}``.
+    That fee is a DEBIT borne by the account on TOP of the moved ``amount`` — so
+    the true balance delta of a withdrawal is ``amount + fee`` (not ``amount``),
+    and of a deposit credited net of an exchange fee is ``amount - fee``. Valuing
+    a flow on ``amount`` alone therefore understates ``|F_t|`` by the fee and
+    silently attributes that difference to performance — a systematic
+    wrong-direction bias on withdrawal-heavy accounts. The caller folds this cost
+    into the flow magnitude with the flow's sign (``sign*amount*price - fee_usd``):
+    it makes a withdrawal MORE negative and a deposit LESS positive, i.e. the fee
+    always reduces NAV. Deribit is unaffected — it values the ledger ``change``,
+    which is already the true balance delta incl. fee.
+
+    Fee valuation is deliberately DEGRADING, not fail-loud: a fee is immaterial
+    next to the capital move, so an unpriceable fee currency must never sink the
+    whole reconstruction (that would turn a minor bias-fix into a fail-loud
+    landmine). The material ``amount`` keeps its authoritative fail-loud valuation
+    in the caller. Fees are valued only where they are unambiguous:
+      * stablecoin fee → cost 1:1 in USD;
+      * fee in the SAME currency as the flow → reuse the flow's same-UTC-day price
+        (already resolved and fail-loud-checked for the amount);
+      * fee in another currency present in the injected ``price_index`` → its
+        same-day close.
+    Any other case (missing/None fee, unparseable/non-finite cost, or a
+    cross-currency fee with no same-day price) contributes ``0.0`` — an ACCEPTED
+    approximation for an immaterial cost, never a fabricated or fail-loud value."""
+    fee = row.get("fee")
+    if not isinstance(fee, Mapping):
+        return 0.0
+    raw_cost = fee.get("cost")
+    if raw_cost is None:
+        return 0.0
+    try:
+        cost = float(raw_cost)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(cost) or cost == 0.0:
+        return 0.0
+    cost = abs(cost)  # a fee is a cost regardless of the sign the venue reports
+    fee_ccy = str(fee.get("currency", "")).upper()
+    if not fee_ccy:
+        return 0.0
+    if fee_ccy in STABLECOINS:
+        return cost
+    if fee_ccy == flow_ccy:
+        return cost * flow_price
+    resolved = price_index.get((day, fee_ccy))
+    if resolved is None:
+        return 0.0
+    return cost * float(resolved)
+
+
 def ccxt_rows_to_dated_flows(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -121,6 +183,13 @@ def ccxt_rows_to_dated_flows(
         currency is valued at ``amount × price_index[(utc_day, ccy_upper)]`` —
         its SAME-UTC-day close. No same-day price → ``NavReconstructionError``
         (never 1.0, never a current price, never dropped).
+      * FEE (MEDIUM-1): the transfer ``fee`` is a DEBIT on top of the moved
+        ``amount`` — it is valued same-UTC-day (via ``_fee_usd``) and SUBTRACTED
+        from the flow, so a withdrawal is ``-(amount+fee)`` and a deposit is
+        ``+(amount-fee)``. Valuing on ``amount`` alone understates ``|F_t|`` and
+        biases returns (wrong-direction on withdrawal-heavy accounts). Fee
+        valuation degrades to ``0.0`` on an unpriceable fee currency (an
+        immaterial cost never fails the whole reconstruction — unlike ``amount``).
 
     Same-UTC-day flows collapse into one summed ``ExternalFlow`` (dict-by-day,
     like the Deribit producer). The day key uses the shared ``_row_utc_day``
@@ -214,6 +283,13 @@ def ccxt_rows_to_dated_flows(
                 )
             price = float(resolved)
 
-        by_day[day] = by_day.get(day, 0.0) + sign * amount * price
+        # MEDIUM-1: fold the transfer fee (a debit) into the flow magnitude. The
+        # fee always REDUCES NAV, so it is subtracted regardless of direction:
+        # withdrawal (sign −1) → -(amount·price + fee); deposit (sign +1) →
+        # +(amount·price − fee). Immaterial/unpriceable fee → 0.0 (never a raise).
+        fee_usd = _fee_usd(
+            row, day=day, flow_ccy=currency, flow_price=price, price_index=price_index
+        )
+        by_day[day] = by_day.get(day, 0.0) + sign * amount * price - fee_usd
 
     return [ExternalFlow(day, usd) for day, usd in sorted(by_day.items())]

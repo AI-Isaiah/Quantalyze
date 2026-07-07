@@ -298,6 +298,66 @@ def test_same_utc_day_multi_flow_collapses_to_one_entry() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# MEDIUM-1 — the transfer FEE is folded into |F_t| (a debit on top of amount).
+# --------------------------------------------------------------------------- #
+def test_withdrawal_fee_deepens_the_outflow() -> None:
+    """A withdrawal's fee is an extra DEBIT: |F_t| = amount + fee, so the flow is
+    ``-(amount+fee)``. A stablecoin fee is valued 1:1. MUTATION: valuing on
+    ``amount`` alone (dropping the ``- fee_usd`` term) yields −1000.0 → RED."""
+    rows = [
+        _row(id="w", type="withdrawal", currency="USDT", amount=1000.0,
+             internal=None, fee={"currency": "USDT", "cost": 5.0}),
+    ]
+    flows = ccxt_rows_to_dated_flows(rows, venue="okx", price_index={})
+    assert flows == [ExternalFlow(_day(2024, 1, 1), -1005.0)]
+
+
+def test_deposit_fee_reduces_the_inflow() -> None:
+    """A deposit credited net of an exchange fee: F_t = +(amount − fee). MUTATION:
+    ignoring the fee yields +1000.0 instead of +996.5 → RED."""
+    rows = [
+        _row(id="d", type="deposit", currency="USDT", amount=1000.0,
+             internal=None, fee={"currency": "USDT", "cost": 3.5}),
+    ]
+    flows = ccxt_rows_to_dated_flows(rows, venue="okx", price_index={})
+    assert flows == [ExternalFlow(_day(2024, 1, 1), 996.5)]
+
+
+def test_fee_in_flow_currency_uses_the_same_day_close() -> None:
+    """A BTC withdrawal with a BTC fee: the fee reuses the flow's SAME-UTC-day BTC
+    close (no separate price entry needed). amount 1 BTC @42000 + fee 0.001 BTC
+    @42000 = 42000 + 42 → −42042.0. MUTATION: valuing the fee at 1.0 (stable
+    fallback) or dropping it moves the number → RED."""
+    rows = [
+        _row(id="w", type="withdrawal", currency="BTC", amount=1.0,
+             timestamp=_ms(2024, 1, 1), internal=None,
+             fee={"currency": "BTC", "cost": 0.001}),
+    ]
+    flows = ccxt_rows_to_dated_flows(rows, venue="okx", price_index=_BTC_INDEX)
+    assert flows == [ExternalFlow(_day(2024, 1, 1), -42042.0)]
+
+
+@pytest.mark.parametrize(
+    "fee",
+    [None, {"currency": "USDT", "cost": None}, {"currency": "USDT", "cost": 0.0},
+     {"currency": "DOGE", "cost": 5.0}, {"cost": 5.0}],
+    ids=["no-fee", "null-cost", "zero-cost", "unpriced-ccy", "no-ccy"],
+)
+def test_immaterial_or_unpriceable_fee_degrades_to_zero_never_fails(fee: Any) -> None:
+    """A fee is immaterial next to the capital move, so it must NEVER sink the
+    reconstruction: a missing/null/zero fee, or a cross-currency fee with no
+    same-day price, contributes 0.0 (flow == plain amount) rather than raising —
+    unlike the material ``amount``, which keeps its fail-loud valuation. MUTATION:
+    making ``_fee_usd`` fail loud (or 1.0-fallback the unpriced DOGE fee) → RED."""
+    rows = [
+        _row(id="w", type="withdrawal", currency="USDT", amount=1000.0,
+             internal=None, fee=fee),
+    ]
+    flows = ccxt_rows_to_dated_flows(rows, venue="okx", price_index={})
+    assert flows == [ExternalFlow(_day(2024, 1, 1), -1000.0)]
+
+
+# --------------------------------------------------------------------------- #
 # Fail-loud schema-drift guards (mirror the Deribit _MISSING discipline).
 # --------------------------------------------------------------------------- #
 def test_missing_amount_fails_loud() -> None:
