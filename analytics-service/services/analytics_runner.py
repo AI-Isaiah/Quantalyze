@@ -1863,6 +1863,15 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         upsert_payload: dict[str, Any] = {
             "strategy_id": strategy_id,
             "computation_status": computation_status_value,
+            # SI-02: the runner-owned PERSISTED warned marker. It rides its OWN
+            # column so a compute_jobs-derived branch (b) 'failed' write over
+            # computation_status cannot destroy the warning; the bridge's
+            # sync_strategy_analytics_status branches (a)/(c) READ it (never
+            # re-deriving warned-ness from data_quality_flags, which would fork
+            # this runner's consumer_specific_flags policy). Set on EVERY terminal
+            # success (TRUE when promoted, FALSE on a clean recompute) so a genuine
+            # clean recompute clears the sticky warning; only the runner clears it.
+            "computation_warned": bool(consumer_specific_flags),
             "computation_error": None,
             "data_quality_flags": top_level_flags,
             **metrics_result.metrics_json,
@@ -2181,6 +2190,10 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             payload: dict[str, Any] = {
                 "strategy_id": strategy_id,
                 "computation_status": csv_status,
+                # SI-02: same runner-owned warned marker as the stored-trades path
+                # (TRUE when the broker→CSV guard flags promoted csv_status,
+                # FALSE on a clean run). The bridge branches (a)/(c) read it.
+                "computation_warned": _warned,
                 "computation_error": None,
                 "data_quality_flags": data_quality_flags,
                 "trade_metrics": None,    # CSV has no fills

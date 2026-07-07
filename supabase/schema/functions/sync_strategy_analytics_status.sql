@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260707120000_sync_status_preserve_warnings.sql
+-- source migration: 20260708120000_sync_status_failed_final_bounce.sql
 CREATE OR REPLACE FUNCTION sync_strategy_analytics_status(p_strategy_id UUID)
 RETURNS VOID
 LANGUAGE plpgsql
@@ -30,16 +30,17 @@ BEGIN
   END IF;
 
   -- (a) any non-terminal row → 'computing', UNLESS the runner has already
-  -- written 'complete_with_warnings'. That warning is a runner-owned terminal
-  -- sub-state the compute_jobs aggregate cannot see; this branch fires whenever
-  -- ANY sibling job for the strategy is still in flight (e.g. a poll_positions /
-  -- sync_funding job claimed in the same batch as the warned analytics job, or
-  -- a pre-mark bridge call while this job's own row is still 'running'). Writing
-  -- a bare 'computing' here would launder the warning, which branch (c) would
-  -- then resolve to a plain 'complete' — ordering-dependent, so it leaked on
-  -- multi-job (live-API) strategies. Preserve it. Only the analytics runner
-  -- clears the warning, via its own 'computing' entry-write when it actually
-  -- recomputes; the bridge must never downgrade it.
+  -- written 'complete_with_warnings' OR set its runner-owned computation_warned
+  -- marker. That warning is a runner-owned terminal sub-state the compute_jobs
+  -- aggregate cannot see; this branch fires whenever ANY sibling job for the
+  -- strategy is still in flight (e.g. a poll_positions / sync_funding job claimed
+  -- in the same batch as the warned analytics job, or a pre-mark bridge call while
+  -- this job's own row is still 'running'). Writing a bare 'computing' here would
+  -- launder the warning, which branch (c) would then resolve to a plain 'complete'
+  -- — ordering-dependent, so it leaked on multi-job (live-API) strategies.
+  -- Preserve it. Only the analytics runner clears the warning, via its own
+  -- 'computing' entry-write + clean terminal write when it actually recomputes;
+  -- the bridge must never downgrade it.
   SELECT count(*) INTO v_nonterminal_count
     FROM compute_jobs
    WHERE strategy_id = p_strategy_id
@@ -51,6 +52,7 @@ BEGIN
     ON CONFLICT (strategy_id) DO UPDATE
        SET computation_status = CASE
              WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR strategy_analytics.computation_warned
              THEN 'complete_with_warnings'
              ELSE 'computing'
            END,
@@ -60,6 +62,10 @@ BEGIN
   END IF;
 
   -- (b) all terminal, any failed_final → 'failed' with latest error (unchanged).
+  -- NOTE: this write does NOT touch computation_warned — the runner-owned marker
+  -- survives the 'failed' bounce in its own column, so branch (c) can recover the
+  -- warning after a sibling failed_final→done recovery WITHOUT an analytics re-run
+  -- (this is the SI-02 failed_final-bounce launder closed by mig 20260708120000).
   SELECT count(*) INTO v_failed_count
     FROM compute_jobs
    WHERE strategy_id = p_strategy_id
@@ -84,14 +90,17 @@ BEGIN
   END IF;
 
   -- (c) all rows 'done' → terminal SUCCESS. PRESERVE an existing
-  -- 'complete_with_warnings' (a more-informative success the analytics worker
-  -- already wrote); otherwise resolve to 'complete'. Clears any stale
-  -- computation_error either way.
+  -- 'complete_with_warnings' OR a runner-owned computation_warned marker (a
+  -- more-informative success the analytics worker already wrote — the marker
+  -- read is what closes the failed_final-bounce launder, since branch (b) may
+  -- have bounced computation_status to 'failed' in between); otherwise resolve
+  -- to 'complete'. Clears any stale computation_error either way.
   INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error)
   VALUES (p_strategy_id, 'complete', NULL)
   ON CONFLICT (strategy_id) DO UPDATE
      SET computation_status = CASE
            WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                OR strategy_analytics.computation_warned
            THEN 'complete_with_warnings'
            ELSE 'complete'
          END,
