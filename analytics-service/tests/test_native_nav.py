@@ -16,16 +16,23 @@ the two leak-safe refuse errors — NOT the core / NativeLedger / tolerances
 """
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
 import pytest
 
-from services.external_flows import USD_FAMILY
-from services.nav_twr import NavReconstructionError
+from services.broker_dailies import gap_fill_daily_returns
+from services.external_flows import USD_FAMILY, ExternalFlow
+from services.nav_twr import NavReconstructionError, reconstruct_nav_and_twr
 from services.native_nav import (
     InceptionReconciliationError,
     MarkBranch,
+    NativeLedger,
     UnmarkableCurrencyError,
     _assert_families_disjoint,
     classify_currency,
+    reconstruct_native_nav_and_twr,
 )
 
 _INDEXABLE = frozenset({"BTC", "ETH", "SOL"})
@@ -139,3 +146,412 @@ def test_inception_reconciliation_error_shape_and_leak_safety() -> None:
     assert planted_raw_residual not in str(err)
     custom = set(vars(err)) - {"args"}
     assert custom == {"currencies", "venue", "breach_ratio"}
+
+
+# ===========================================================================
+# 79-02 Task 2 — NativeLedger + reconstruct_native_nav_and_twr
+# (steps 1, 2, 4, 5, 6). The inception gate (step 3) is Task 3. These fixtures
+# use full_history=False so the gate SKIPS — the per-bucket roll / valuation /
+# refusal mechanism is what these pin (contract §1.2/§1.3/§3, 79-CONTEXT G2-G4).
+# ===========================================================================
+
+
+def _s(day_value_pairs: list[tuple[str, float]]) -> pd.Series:
+    """A native-pnl / mark Series on an ascending tz-naive midnight index."""
+    pairs = sorted(day_value_pairs, key=lambda p: p[0])
+    idx = pd.DatetimeIndex([pd.Timestamp(d) for d, _ in pairs])
+    return pd.Series([float(v) for _, v in pairs], index=idx, name="native_pnl")
+
+
+def _dense(values: list[float], start: str = "2026-01-01") -> pd.Series:
+    idx = pd.DatetimeIndex(pd.date_range(start=start, periods=len(values), freq="D"))
+    return pd.Series([float(v) for v in values], index=idx, name="native_pnl")
+
+
+# ---------------------------------------------------------------------------
+# usd_native_single_bucket — the §4 base case; native == legacy over summed floats.
+# ---------------------------------------------------------------------------
+
+
+def test_usd_native_single_bucket_matches_legacy() -> None:
+    """An all-USDC/USDT ledger coalesces into ONE 'USD' bucket (mark ≡ 1.0,
+    quantities summed per day in producer order) and returns a Series equal
+    (check_exact) to the legacy reconstruct_nav_and_twr over the same summed
+    floats — the §4.1 identity MECHANISM (the full dual-run matrix is 79-04)."""
+    usdc = _dense([100.0, 50.0, -25.0])
+    usdt = _dense([10.0, 0.0, 5.0])
+    ledger = NativeLedger(
+        native_pnl={"USDC": usdc, "USDT": usdt},
+        terminal_native_equity={"USDC": 6000.0, "USDT": 4000.0},
+        marks={},
+        native_flows=[ExternalFlow("2026-01-02", 300.0, "USDC", 300.0)],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    native_ret, native_meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"})
+    )
+    # Legacy over the same summed USD floats: pnl [110, 50, -20], anchor 10000.
+    legacy_ret, legacy_meta = reconstruct_nav_and_twr(
+        _dense([110.0, 50.0, -20.0]),
+        anchor_nav=10_000.0,
+        external_flows=[("2026-01-02", 300.0)],
+    )
+    pd.testing.assert_series_equal(
+        native_ret, legacy_ret, check_exact=True, check_freq=False
+    )
+    assert dict(native_meta) == dict(legacy_meta)
+
+
+# ---------------------------------------------------------------------------
+# mixed_account_composition (§8) — per-bucket roll + carry-forward + translation.
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_account_composition_hand_computed() -> None:
+    """Buckets {USDC→USD, BTC}: NAV(d) = B_USD(d)·1.0 + B_BTC(d)·P_BTC(d) over
+    the UNION calendar. BTC index is {01-01, 01-03}; on 01-02 (inside BTC's span,
+    absent from its index) the carried-forward BTC balance is valued (a mutation
+    that drops carry-forward reddens this). A USDC deposit never touches the BTC
+    roll (per-bucket F_t isolation)."""
+    ledger = NativeLedger(
+        native_pnl={"BTC": _s([("2026-01-01", 0.1), ("2026-01-03", 0.0)])},
+        terminal_native_equity={"USDC": 5000.0, "BTC": 2.0},
+        marks={"BTC": _s([("2026-01-01", 40000.0), ("2026-01-02", 41000.0),
+                          ("2026-01-03", 42000.0)])},
+        native_flows=[ExternalFlow("2026-01-02", 1000.0, "USDC", 1000.0)],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    returns, meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"})
+    )
+    # NAV = [80000, 87000, 89000]; prev0 = 1.9*40000 + (5000-1000) = 80000.
+    # r_0 = 0; r_1 = (87000-80000-1000)/80000 = 0.075; r_2 = 2000/87000.
+    assert list(returns.index) == list(
+        pd.date_range("2026-01-01", periods=3, freq="D")
+    )
+    assert returns.iloc[0] == pytest.approx(0.0)
+    assert returns.iloc[1] == pytest.approx(6000.0 / 80000.0)
+    assert returns.iloc[2] == pytest.approx(2000.0 / 87000.0)
+    assert meta["computation_status_hint"] == "complete"
+
+
+def test_translation_term_carried() -> None:
+    """§0 raison d'être: a BTC-only fixture with ZERO pnl and ZERO flows but a
+    MOVING mark produces day returns equal to B·ΔP / prior-NAV ≠ 0 — the USD-space
+    legacy core produces 0 here. Asserts the native return equals the
+    hand-computed translation term."""
+    ledger = NativeLedger(
+        native_pnl={"BTC": _dense([0.0, 0.0, 0.0])},
+        terminal_native_equity={"BTC": 2.0},
+        marks={"BTC": _s([("2026-01-01", 40000.0), ("2026-01-02", 41000.0),
+                          ("2026-01-03", 42000.0)])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    returns, _ = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"})
+    )
+    # NAV = 2.0*[40000,41000,42000] = [80000,82000,84000]; prev0 = 2.0*40000.
+    assert returns.iloc[0] == pytest.approx(0.0)
+    # r_1 = B·ΔP/prior-NAV = 2.0*(41000-40000)/(2.0*40000) = 1000/40000 = 0.025.
+    assert returns.iloc[1] == pytest.approx(1000.0 / 40000.0)
+    assert returns.iloc[1] != 0.0  # the legacy USD-space core would be 0 here
+    assert returns.iloc[2] == pytest.approx(2000.0 / 82000.0)
+
+
+# ---------------------------------------------------------------------------
+# outside_span (G3) — before-first contributes 0 (no mark needed); after-last
+# carries the terminal balance forward (mark REQUIRED there → missing refuses).
+# ---------------------------------------------------------------------------
+
+
+def _outside_span_ledger(btc_marks: list[tuple[str, float]]) -> NativeLedger:
+    # BTC span {01-02, 01-03}; USD events on 01-01 and 01-04 bracket it so the
+    # union is {01-01..01-04}: 01-01 is BEFORE BTC's first day, 01-04 is AFTER
+    # its last (carried-forward balance).
+    return NativeLedger(
+        native_pnl={"BTC": _s([("2026-01-02", 0.0), ("2026-01-03", 0.0)])},
+        terminal_native_equity={"USDC": 5000.0, "BTC": 1.0},
+        marks={"BTC": _s(btc_marks)},
+        native_flows=[
+            ExternalFlow("2026-01-01", 1000.0, "USDC", 1000.0),
+            ExternalFlow("2026-01-04", 1000.0, "USDC", 1000.0),
+        ],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+
+
+def test_outside_span_before_first_needs_no_mark() -> None:
+    """01-01 is before BTC's first index day → BTC contributes 0.0 there → NO
+    mark is required on 01-01 (G3). Marks provided only on BTC's required days
+    {01-02, 01-03, 01-04}; the ledger reconstructs WITHOUT refusing."""
+    ledger = _outside_span_ledger(
+        [("2026-01-02", 50000.0), ("2026-01-03", 51000.0), ("2026-01-04", 52000.0)]
+    )
+    returns, meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"})
+    )
+    assert returns.name == "returns"
+    assert list(returns.index) == list(
+        pd.date_range("2026-01-01", periods=4, freq="D")
+    )
+
+
+def test_outside_span_after_last_missing_mark_refuses() -> None:
+    """After BTC's last index day (01-03) its terminal balance (1.0) carries
+    forward to 01-04 → a mark is REQUIRED there (nonzero balance ⇒ density). A
+    missing 01-04 mark refuses with reason='missing_daily_marks' count=1 —
+    NEVER forward-filled from 01-03."""
+    ledger = _outside_span_ledger(
+        [("2026-01-02", 50000.0), ("2026-01-03", 51000.0)]  # 01-04 omitted
+    )
+    with pytest.raises(UnmarkableCurrencyError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+    assert exc.value.reason == "missing_daily_marks"
+    assert exc.value.currency == "BTC"
+    assert exc.value.venue == "deribit"
+    assert exc.value.missing_day_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Refusal matrix (§3.3 / §3.4 + G4).
+# ---------------------------------------------------------------------------
+
+
+def test_refusal_nonzero_unmarkable_no_usd_index() -> None:
+    """(a) A currency with no resolvable index (BUIDL ∉ USD_FAMILY ∪ indexable)
+    carrying nonzero value refuses reason='no_usd_index'."""
+    ledger = NativeLedger(
+        native_pnl={},
+        terminal_native_equity={"BUIDL": 100.0},
+        marks={},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    with pytest.raises(UnmarkableCurrencyError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+    assert exc.value.reason == "no_usd_index"
+    assert exc.value.currency == "BUIDL"
+
+
+def test_refusal_zero_everywhere_unmarkable_skipped() -> None:
+    """(b) A zero-everywhere UNMARKABLE currency (0 pnl/equity/flows) is SKIPPED
+    SILENTLY — identical output to the ledger without it (the
+    deribit_txn.py:282-283 `if equity == 0.0: continue` precedent)."""
+    base = NativeLedger(
+        native_pnl={"BTC": _dense([0.0, 0.0, 0.0])},
+        terminal_native_equity={"BTC": 2.0},
+        marks={"BTC": _s([("2026-01-01", 40000.0), ("2026-01-02", 41000.0),
+                          ("2026-01-03", 42000.0)])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    with_buidl = NativeLedger(
+        native_pnl={"BTC": base.native_pnl["BTC"]},
+        terminal_native_equity={"BTC": 2.0, "BUIDL": 0.0},
+        marks=base.marks,
+        native_flows=[ExternalFlow("2026-01-02", 0.0, "BUIDL", 0.0)],
+        terminal_upnl_native={"BUIDL": 0.0},
+        full_history=False,
+    )
+    r_base, m_base = reconstruct_native_nav_and_twr(
+        base, indexable_currencies=frozenset({"BTC"})
+    )
+    r_buidl, m_buidl = reconstruct_native_nav_and_twr(
+        with_buidl, indexable_currencies=frozenset({"BTC"})
+    )
+    pd.testing.assert_series_equal(r_base, r_buidl, check_exact=True)
+    assert dict(m_base) == dict(m_buidl)
+
+
+def test_refusal_indexed_missing_mark_counts_days() -> None:
+    """(c) An INDEXED currency missing a mark on a day with B_c ≠ 0 refuses
+    reason='missing_daily_marks' with the COUNT of missing days — never filled."""
+    ledger = NativeLedger(
+        native_pnl={"BTC": _dense([0.0, 0.0, 0.0])},
+        terminal_native_equity={"BTC": 2.0},
+        marks={"BTC": _s([("2026-01-01", 40000.0)])},  # 01-02, 01-03 missing
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    with pytest.raises(UnmarkableCurrencyError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+    assert exc.value.reason == "missing_daily_marks"
+    assert exc.value.missing_day_count == 2
+
+
+def test_refusal_branch2_flow_quantity_missing() -> None:
+    """(d) A branch-2 (INDEXED) flow with quantity=None refuses
+    reason='flow_quantity_missing' — never back-solved from usd_signed."""
+    ledger = NativeLedger(
+        native_pnl={"BTC": _dense([0.0, 0.0, 0.0])},
+        terminal_native_equity={"BTC": 2.0},
+        marks={"BTC": _s([("2026-01-01", 40000.0), ("2026-01-02", 41000.0),
+                          ("2026-01-03", 42000.0)])},
+        native_flows=[ExternalFlow("2026-01-02", 40000.0, "BTC", None)],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    with pytest.raises(UnmarkableCurrencyError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+    assert exc.value.reason == "flow_quantity_missing"
+    assert exc.value.currency == "BTC"
+
+
+def test_branch1_flow_quantity_none_uses_usd_signed() -> None:
+    """(d) A branch-1 (USD-family) flow with quantity=None uses usd_signed
+    verbatim as the native quantity (G4 identity, mark ≡ 1.0) — does NOT refuse.
+    Byte-identical to the same flow with quantity=usd_signed set explicitly."""
+    def _mk(qty: float | None) -> NativeLedger:
+        return NativeLedger(
+            native_pnl={"USDC": _dense([100.0, 50.0, -25.0])},
+            terminal_native_equity={"USDC": 10_000.0},
+            marks={},
+            native_flows=[ExternalFlow("2026-01-02", 300.0, "USDC", qty)],
+            terminal_upnl_native={},
+            full_history=False,
+        )
+    r_none, _ = reconstruct_native_nav_and_twr(
+        _mk(None), indexable_currencies=frozenset({"BTC"})
+    )
+    r_set, _ = reconstruct_native_nav_and_twr(
+        _mk(300.0), indexable_currencies=frozenset({"BTC"})
+    )
+    pd.testing.assert_series_equal(r_none, r_set, check_exact=True)
+
+
+def test_refusal_nonpositive_mark() -> None:
+    """(e) A non-finite or ≤ 0 mark on a needed day refuses (the
+    txn_change_to_usd price<=0 rule) — surfaced as missing_daily_marks."""
+    for bad in (0.0, -1.0, float("nan")):
+        ledger = NativeLedger(
+            native_pnl={"BTC": _dense([0.0, 0.0, 0.0])},
+            terminal_native_equity={"BTC": 2.0},
+            marks={"BTC": _s([("2026-01-01", 40000.0), ("2026-01-02", bad),
+                              ("2026-01-03", 42000.0)])},
+            native_flows=[],
+            terminal_upnl_native={},
+            full_history=False,
+        )
+        with pytest.raises(UnmarkableCurrencyError) as exc:
+            reconstruct_native_nav_and_twr(
+                ledger, indexable_currencies=frozenset({"BTC"})
+            )
+        assert exc.value.reason == "missing_daily_marks"
+
+
+def test_refusal_family_overlap() -> None:
+    """(f) A USD_FAMILY ∩ indexable overlap raises via _assert_families_disjoint
+    at the top of the core (G1) — before any valuation."""
+    ledger = NativeLedger(
+        native_pnl={"USDC": _dense([1.0])},
+        terminal_native_equity={"USDC": 100.0},
+        marks={},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    with pytest.raises(NavReconstructionError):
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"USDC"})
+        )
+
+
+# ---------------------------------------------------------------------------
+# shape_contract / chain_break_key / leak_scan.
+# ---------------------------------------------------------------------------
+
+
+def test_shape_contract_round_trips_gap_fill() -> None:
+    """The returned (returns, meta) is the legacy shape: a 'returns'-named float
+    Series on an ascending tz-naive midnight DatetimeIndex + NavTWRMeta, and it
+    round-trips through gap_fill_daily_returns (broker_dailies.py:118) unchanged
+    in type/name."""
+    ledger = NativeLedger(
+        native_pnl={"BTC": _dense([0.0, 0.0, 0.0])},
+        terminal_native_equity={"BTC": 2.0},
+        marks={"BTC": _s([("2026-01-01", 40000.0), ("2026-01-02", 41000.0),
+                          ("2026-01-03", 42000.0)])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    returns, meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"})
+    )
+    assert returns.name == "returns"
+    assert returns.dtype == np.float64
+    assert isinstance(returns.index, pd.DatetimeIndex)
+    assert returns.index.tz is None
+    assert returns.index.is_monotonic_increasing
+    assert "computation_status_hint" in meta
+    filled = gap_fill_daily_returns(returns)
+    assert filled.name == "returns"
+    assert isinstance(filled.index, pd.DatetimeIndex)
+
+
+def test_chain_break_key_on_interior_negative_nav() -> None:
+    """§1.3 step 6: an interior negative bucket NAV (a negative_nav_guard flanked
+    by valid returns) carries twr_chain_broken in meta (via the 79-03 merge) with
+    complete_with_warnings — same semantics as the legacy core."""
+    # USD-only ledger whose reconstructed NAV = [5000, -100, 6000, 7000]:
+    # pnl[t] = nav[t] - nav[t-1] (no flows); pnl[0] arbitrary (0.0).
+    ledger = NativeLedger(
+        native_pnl={"USDC": _dense([0.0, -5100.0, 6100.0, 1000.0])},
+        terminal_native_equity={"USDC": 7000.0},
+        marks={},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    returns, meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"})
+    )
+    assert bool(np.isnan(returns.iloc[2]))       # interior break (prev NAV = -100)
+    assert not bool(np.isnan(returns.iloc[3]))   # valid AFTER the break
+    assert meta.get("negative_nav_guard") is True
+    assert meta.get("twr_chain_broken") is True
+    assert meta["computation_status_hint"] == "complete_with_warnings"
+
+
+def test_leak_scan_no_raw_values_in_refusal_or_source() -> None:
+    """The core emits NO raw balance/quantity/flow/NAV float in a refusal message
+    or via logging (§1.1, nav_twr.py:443-444 discipline)."""
+    planted = 987654.321  # a distinctive raw BTC-balance-scale value
+    ledger = NativeLedger(
+        native_pnl={"BTC": _dense([0.0, 0.0])},
+        terminal_native_equity={"BTC": planted},
+        marks={"BTC": _s([("2026-01-01", 40000.0)])},  # 01-02 missing → refuse
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    with pytest.raises(UnmarkableCurrencyError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"})
+        )
+    assert str(planted) not in str(exc.value)
+    assert "987654" not in str(exc.value)
+    # Source scan: the module never logs / prints (raw-value leak vector).
+    import services.native_nav as native_nav_mod
+
+    src = Path(native_nav_mod.__file__).read_text()
+    assert "print(" not in src
+    assert "import logging" not in src
+    assert "getLogger" not in src
+    assert "logger." not in src
