@@ -674,6 +674,18 @@ def _assert_inception_reconciled(
         resid_usd_total += resid_usd
         anchor_nav += float(bucket.balance.iloc[-1]) * markN
 
+    # F-3: a non-finite residual/anchor (e.g. a NaN inception-day mark) makes
+    # `resid_usd_total > tol` evaluate `NaN > tol → False` — a SILENT pass. Refuse
+    # explicitly rather than let the breach sail past this gate and surface later as
+    # a misleading generic non-finite error (or, worse, a silent NaN track record).
+    if not (np.isfinite(resid_usd_total) and np.isfinite(anchor_nav)):
+        offenders = [
+            code for code, r in per_bucket_resid_usd if not np.isfinite(r)
+        ] or [code for code, _ in per_bucket_resid_usd]
+        raise InceptionReconciliationError(
+            currencies=offenders, venue=venue, breach_ratio=float("inf"),
+        )
+
     tol = max(INCEPTION_ABS_TOL_USD, INCEPTION_REL_TOL * abs(anchor_nav))
     if resid_usd_total > tol:
         # Name the materially-offending buckets (each above the $1 floor); fall

@@ -735,6 +735,29 @@ def test_inception_breach_refuses_before_valuation_leak_safe() -> None:
     assert "198" not in msg or "breach_ratio" in msg  # ratio may contain digits
 
 
+def test_inception_nonfinite_residual_refuses_not_silent_pass() -> None:
+    """F-3 [LOW]: the inception gate must REFUSE on a non-finite residual/anchor,
+    never silently pass. A NaN inception-day mark makes ``resid_usd_total`` NaN, and
+    ``NaN > tol`` evaluates False — the gate would silently pass. Construct a
+    full_history=True BTC bucket whose day-0 balance rolls to EXACTLY 0 (so the NaN
+    day-0 mark is NOT required in valuation and cannot be caught downstream there),
+    with real day-0 pnl (resid = -2 BTC) and a NaN mark on that inception day:
+    pnl [2.0, 3.0], terminal 3.0 ⇒ B[01-01]=0, B[01-02]=3.0. Without the isfinite
+    guard the gate passes (NaN > tol is False); with it, refuses."""
+    ledger = NativeLedger(
+        native_pnl={"BTC": _dense([2.0, 3.0])},  # 01-01, 01-02
+        terminal_native_equity={"BTC": 3.0},      # B[01-01] rolls to exactly 0.0
+        marks={"BTC": _s([("2026-01-01", float("nan")), ("2026-01-02", 40000.0)])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    with pytest.raises(InceptionReconciliationError):
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+
+
 def test_inception_tolerance_abs_arm_boundary() -> None:
     """ABS arm: a small account (1e-4·anchor < $1 ⇒ tol = $1). resid valued at the
     INCEPTION-day mark (2.0), NOT the anchor mark (1.0). T=0.49 ⇒ resid_usd 0.98
