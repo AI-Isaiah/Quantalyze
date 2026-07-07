@@ -38,6 +38,7 @@ from services.deribit_txn import (
     inverse_days_needing_index,
     txn_change_to_usd,
     txn_rows_to_daily_records,
+    txn_rows_to_native_daily,
 )
 from services.external_flows import USD_FAMILY, ExternalFlow
 from tests.fixtures.deribit_flow_fixtures import (
@@ -1269,3 +1270,143 @@ def test_inverse_days_needing_index_includes_sol_when_injected() -> None:
     assert inverse_days_needing_index([fee]) == set()  # default: SOL skipped
     needed = inverse_days_needing_index([fee], indexable_currencies=_SOL_FLOOR)
     assert ("2026-01-15", "SOL") in needed
+
+
+# ---------------------------------------------------------------------------
+# Phase 80-01 Task 1 — txn_rows_to_native_daily: the (day, ccy)-keyed NATIVE-unit
+# sibling of txn_rows_to_daily_records. Type-partition + the three `change`
+# fail-loud guards are LIFTED VERBATIM; the sum is RAW native `change` with NO
+# index multiply. The module stays pandas-pure (the AST guard forbids a pandas
+# import), so it returns plain data — ccy -> {utc_day_iso: native pnl} — and the
+# 80-02 adapter builds the pd.Series. Every proof below is mutation-honest.
+# ---------------------------------------------------------------------------
+
+
+def test_txn_rows_to_native_daily_quiet_day_no_index() -> None:
+    """quiet_day_no_index: a quiet-day negative_balance_fee (BTC, no instrument,
+    no index_price) contributes its RAW native change to BTC's day WITHOUT any
+    settlement index — the P72 index dependency is gone from native pnl.
+
+    Mutation-honest (a): multiplying the native sum by any fake index turns the
+    asserted -0.01 into -0.01*index and reddens this test."""
+    fee = {
+        "type": "negative_balance_fee",
+        "currency": "BTC",
+        "change": -0.01,
+        "timestamp": _ms(_DAY_A),
+        "id": 8001001,
+    }
+    native = txn_rows_to_native_daily([fee])
+    assert list(native) == ["BTC"]
+    assert native["BTC"] == {"2026-01-15": pytest.approx(-0.01, abs=1e-12)}
+
+
+def test_txn_rows_to_native_daily_informational_skip() -> None:
+    """informational_skip: every INFORMATIONAL type (transfer / deposit /
+    withdrawal / usdc_reward / swap) is skipped even carrying nonzero change —
+    they are external-flow / not-pnl, exactly as in the USD sibling."""
+    rows = [
+        {"type": t, "currency": "BTC", "change": 1.0,
+         "timestamp": _ms(_DAY_A), "id": 8001100 + i}
+        for i, t in enumerate(sorted(INFORMATIONAL_TYPES))
+    ]
+    assert txn_rows_to_native_daily(rows) == {}
+
+
+def test_txn_rows_to_native_daily_unknown_type_fail_loud() -> None:
+    """unknown_type_fail_loud: an unknown type carrying nonzero change raises
+    LedgerValuationError naming the type (verbatim guard); a zero-change unknown
+    row is harmlessly ignored (no entry)."""
+    unknown = "correction"
+    row = {
+        "type": unknown, "currency": "BTC", "change": 0.5,
+        "timestamp": _ms(_DAY_A), "id": 8001003,
+    }
+    with pytest.raises(LedgerValuationError) as exc:
+        txn_rows_to_native_daily([row])
+    assert unknown in str(exc.value)
+    assert txn_rows_to_native_daily([dict(row, change=0.0)]) == {}
+
+
+def test_txn_rows_to_native_daily_absent_change_fails_loud() -> None:
+    """change_guards_verbatim (absent): a cash-bearing row with NO `change` key
+    fails loud naming id — never coalesced to 0.0.
+
+    Mutation-honest (b): coalescing absent change->0.0 makes this return {}
+    instead of raising and reddens the test."""
+    row = {
+        "type": "settlement", "currency": "BTC",
+        "timestamp": _ms(_DAY_A), "id": 8001004,
+    }
+    with pytest.raises(LedgerValuationError) as exc:
+        txn_rows_to_native_daily([row])
+    assert "change" in str(exc.value)
+    assert "8001004" in str(exc.value)
+
+
+@pytest.mark.parametrize("blank", [None, "", "   ", "\t"])
+def test_txn_rows_to_native_daily_null_blank_change_fails_loud(blank: object) -> None:
+    """change_guards_verbatim (null/blank): a PRESENT-but-null/blank change
+    (None, empty or whitespace-only) fails loud — the `or 0.0` coalesce that a
+    revert would restore is refused. A numeric 0.0 stays legit (next test)."""
+    row = {
+        "type": "settlement", "currency": "BTC", "change": blank,
+        "timestamp": _ms(_DAY_A), "id": 8001005,
+    }
+    with pytest.raises(LedgerValuationError) as exc:
+        txn_rows_to_native_daily([row])
+    assert "change" in str(exc.value)
+    assert "8001005" in str(exc.value)
+
+
+def test_txn_rows_to_native_daily_numeric_zero_change_makes_no_entry() -> None:
+    """change_guards_verbatim boundary: a NUMERIC 0.0 cash-bearing row is a
+    legitimate no-cash no-op — NOT a fail-loud — and, unlike the USD sibling's
+    setdefault(day, 0.0), creates NO entry (native pnl has no all-zero-day
+    placeholder; the native core unions flow days itself)."""
+    row = {
+        "type": "settlement", "currency": "BTC", "change": 0.0,
+        "index_price": 60000.0, "timestamp": _ms(_DAY_A), "id": 8001006,
+    }
+    assert txn_rows_to_native_daily([row]) == {}
+
+
+def test_txn_rows_to_native_daily_multi_currency_partition() -> None:
+    """multi_currency_partition: a BTC + USDC + ETH cash batch yields three
+    series keyed BTC/USDC/ETH, each summing only its own currency's days — in
+    NATIVE units (no index multiply).
+
+    Mutation-honest (c): folding all currencies into one bucket collapses the
+    three keys to one and reddens this test."""
+    rows = [
+        {"type": "settlement", "currency": "BTC", "change": -0.01,
+         "index_price": 60000.0, "timestamp": _ms(_DAY_A), "id": 8001201},
+        {"type": "trade", "currency": "USDC", "change": -5.0,
+         "timestamp": _ms(_DAY_A), "id": 8001202},
+        {"type": "settlement", "currency": "ETH", "change": 0.2,
+         "index_price": 3000.0, "timestamp": _ms(_DAY_B), "id": 8001203},
+    ]
+    native = txn_rows_to_native_daily(rows)
+    assert set(native) == {"BTC", "USDC", "ETH"}
+    assert native["BTC"] == {"2026-01-15": pytest.approx(-0.01, abs=1e-12)}
+    assert native["USDC"] == {"2026-01-15": pytest.approx(-5.0, abs=1e-12)}
+    assert native["ETH"] == {"2026-01-16": pytest.approx(0.2, abs=1e-12)}
+
+
+def test_txn_rows_to_native_daily_same_day_multi_currency_separate_and_summed() -> None:
+    """Same-day BTC rows SUM into ONE (day, ccy) native entry while a same-day
+    USDC row stays a SEPARATE currency bucket — the (day, ccy) keying keeps
+    same-day multi-currency activity per-currency-separate."""
+    rows = [
+        {"type": "settlement", "currency": "BTC", "change": -0.01,
+         "index_price": 60000.0, "timestamp": _ms("2026-01-15T08:00:00+00:00"),
+         "id": 8001301},
+        {"type": "settlement", "currency": "BTC", "change": -0.02,
+         "index_price": 60000.0, "timestamp": _ms("2026-01-15T20:00:00+00:00"),
+         "id": 8001302},
+        {"type": "trade", "currency": "USDC", "change": 7.0,
+         "timestamp": _ms("2026-01-15T10:00:00+00:00"), "id": 8001303},
+    ]
+    native = txn_rows_to_native_daily(rows)
+    assert native["BTC"] == {"2026-01-15": pytest.approx(-0.03, abs=1e-12)}
+    assert native["USDC"] == {"2026-01-15": pytest.approx(7.0, abs=1e-12)}

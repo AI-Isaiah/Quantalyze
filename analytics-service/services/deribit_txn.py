@@ -822,3 +822,109 @@ def txn_rows_to_daily_records(
         }
         for day, amount in sorted(by_day.items())
     ]
+
+
+def txn_rows_to_native_daily(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, float]]:
+    """The ``(day, currency)``-keyed NATIVE-UNIT sibling of
+    ``txn_rows_to_daily_records`` (§9.1): sum each return-bearing row's raw
+    ``change`` by ``(UTC-day, currency)`` in NATIVE units — NO index multiply,
+    NO ``supplemental_index``. Returns ``UPPERCASE-currency -> {utc_day_iso: Σ
+    native change}`` (days ascending within each currency).
+
+    The type-partition and the three ``change`` fail-loud guards (absent /
+    null-blank / undatable-day) are LIFTED VERBATIM from
+    ``txn_rows_to_daily_records`` so the two aggregators cannot drift (§4.1):
+      * ``type`` in ``INFORMATIONAL_TYPES`` -> skipped (external flow / reward);
+      * ``type`` in ``CASH_BEARING_TYPES`` -> its raw native ``change`` added to
+        that row's ``(day, ccy)`` bucket. A quiet-day ``negative_balance_fee``
+        (no instrument, no ``index_price``) contributes its native ``change``
+        WITHOUT any settlement index — the P72 index dependency is GONE from
+        native pnl (it shifts entirely to the 80-02 daily mark series);
+      * ANY OTHER (unknown) ``type`` carrying nonzero ``change`` ->
+        ``LedgerValuationError`` naming the type (fail loud), verbatim.
+
+    The ONLY two differences from the sibling: (1) accumulate the raw
+    ``_coerce_float(change)`` keyed ``(day, CCY_UPPER)`` — never
+    ``txn_change_to_usd``, no index, and NO ``supplemental_index`` /
+    ``indexable_currencies`` parameter (native units never need an index);
+    (2) a zero-change cash-bearing row creates NO entry (native pnl has no
+    all-zero-day placeholder — the native core unions flow days itself), whereas
+    the USD sibling ``setdefault(day, 0.0)``.
+
+    The dict -> ``pd.Series`` conversion (tz-naive midnight ``DatetimeIndex``,
+    per ``NativeLedger.native_pnl: Mapping[str, pd.Series]``) is done by
+    ``build_deribit_native_ledger`` (80-02): this module stays pandas-pure (the
+    AST purity guard in test_deribit_txn.py forbids a pandas import), so — like
+    the parent's ``list[dict]`` — the sibling returns plain data.
+
+    Leak discipline (§App B): the guards name only id/type; no raw balance value
+    is logged or raised (the unknown-type guard is lifted verbatim from the
+    parent so the two paths cannot drift).
+    """
+    by_day_ccy: dict[tuple[str, str], float] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        row_type = str(row.get("type", ""))
+        if row_type in INFORMATIONAL_TYPES:
+            continue
+        if row_type in CASH_BEARING_TYPES:
+            # [VERBATIM from txn_rows_to_daily_records] absent-`change` guard: a
+            # cash-bearing row MUST carry a `change` field. Coalescing absent→0.0
+            # would silently zero real cash and pass the completeness gate green.
+            raw_change = row.get("change", _MISSING)
+            if raw_change is _MISSING:
+                raise LedgerValuationError(
+                    f"cash-bearing Deribit row id={row.get('id')!r} "
+                    f"type={row_type!r} has NO `change` field — refusing to treat a "
+                    "missing balance-delta as zero (schema drift would silently "
+                    "zero realized cash and render a green-but-wrong track record)"
+                )
+            # [VERBATIM] null/blank-`change` guard: a PRESENT-but-null/blank
+            # change (None, "", whitespace-only) is schema drift too; a numeric
+            # 0.0 (or "0") stays a legitimate zero-cash no-op.
+            if raw_change is None or (
+                isinstance(raw_change, str) and not raw_change.strip()
+            ):
+                raise LedgerValuationError(
+                    f"cash-bearing Deribit row id={row.get('id')!r} "
+                    f"type={row_type!r} has a null/blank change={raw_change!r} — "
+                    "refusing to coalesce it to zero (schema drift would silently "
+                    "zero realized cash and render a green-but-wrong track record)"
+                )
+            change = _coerce_float(raw_change, field="change", row=row)
+            # [VERBATIM] undatable-day guard: fail loud as a STRUCTURAL valuation
+            # error (permanent), not a bare ValueError the network over-catch
+            # would mistake for transient.
+            try:
+                day = _row_utc_day(row.get("timestamp"))
+            except ValueError as e:
+                raise LedgerValuationError(str(e)) from e
+            if change == 0.0:
+                # Difference (2): native pnl has NO all-zero-day placeholder
+                # (the USD sibling setdefault(day, 0.0) here). No cash → no entry.
+                continue
+            ccy = str(row.get("currency", "")).upper()
+            # Difference (1): sum the RAW native `change` — never index-multiplied
+            # (no txn_change_to_usd, no supplemental_index). The index dependency
+            # lives entirely in the 80-02 daily mark series.
+            key = (day, ccy)
+            by_day_ccy[key] = by_day_ccy.get(key, 0.0) + change
+            continue
+        # [VERBATIM] unknown-type nonzero-`change` fail-loud (H3): silence is
+        # unsafe both ways — fail loud on any cash, harmlessly ignore a
+        # zero-change occurrence.
+        change = _coerce_float(row.get("change", 0.0) or 0.0, field="change", row=row)
+        if change != 0.0:
+            raise LedgerValuationError(
+                f"unknown Deribit transaction-log type {row_type!r} carries "
+                f"nonzero change ({change}); it is in neither CASH_BEARING nor "
+                "INFORMATIONAL — classify it against fresh evidence before "
+                "ingesting (never silently drop nor double-count realized cash)"
+            )
+    result: dict[str, dict[str, float]] = {}
+    for (day, ccy), amount in sorted(by_day_ccy.items()):
+        result.setdefault(ccy, {})[day] = amount
+    return result
