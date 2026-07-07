@@ -1,9 +1,13 @@
 """Pure, I/O-free NAV reconstruction + chain-linked time-weighted returns.
 
 Phase 73 (v1.8 Flow-Aware TWR) core. This module is the honest replacement for
-the silent base substitution in ``transforms.trades_to_daily_returns_with_status``
-(``estimated_start <= 0 -> account_balance`` at L154-159, and the forbidden
-zero-to-initial base swap on prev_equity at L175). It NEVER fabricates a base:
+the FORMER silent base substitution in
+``transforms.trades_to_daily_returns_with_status`` (the
+``estimated_start <= 0 -> account_balance`` fallback and the forbidden
+zero-to-initial ``prev_equity`` swap) — both REMOVED in Phase 73/74 when that
+function was rewired to call this core (see the deletion in this milestone's
+diff; those line numbers no longer resolve to that code). It NEVER fabricates a
+base:
 
   1. Reconstruct a per-day NAV series BACKWARD from the real exchange anchor:
      ``NAV_{t-1} = NAV_t - pnl_t - F_t`` (dated flows on their UTC days). The
@@ -84,8 +88,9 @@ UNREALIZED_MATERIALITY_RATIO = 0.05
 #
 # OKX ~90d mirrors the coded trade-history terminus
 # (equity_reconstruction.OKX_TRADE_TERMINUS_DAYS = 90, RESEARCH A3). Bybit ~365d
-# per the trade-history precedent (job_worker.py:1988 "Bybit last 365 days");
-# named with that citation because the exact deposit-history window is
+# per the trade-history precedent (the "Bybit last 365 days" fetch bound in
+# job_worker.run_derive_broker_dailies_job); named with that citation because the
+# exact deposit-history window is
 # LOW-confidence and 365d is the safe (over-segmenting) direction. Binance has no
 # known deposit-history cap → None → never segments.
 OKX_DEPOSIT_TERMINUS_DAYS: int = 90
@@ -430,10 +435,10 @@ def reconcile_flow_residual(
     at the Phase 78 golden old-vs-new parity panel on known accounts + founder
     confirmation, and no LTP/production factsheet ships until then.
 
-    Tolerance ``max(1.00, 1e-6 * abs(terminal_nav))`` — an absolute cent-floor
-    (consistent with the DUST_NAV_FLOOR=$1000 scale) plus a relative band that
-    scales with account size. On breach → ``NavReconstructionError`` (permanent,
-    loud).
+    Tolerance ``max(1.00, 1e-6 * abs(terminal_nav))`` — an absolute one-dollar
+    floor (``$1.00``, consistent with the DUST_NAV_FLOOR=$1000 scale) plus a
+    relative band that scales with account size. On breach →
+    ``NavReconstructionError`` (permanent, loud).
 
     T-76-03-LEAK: the raise message carries NO raw NAV/flow USD value (account-
     size leak discipline, ``nav_twr`` module docstring)."""
