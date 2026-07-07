@@ -5,6 +5,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { withAuth } from "@/lib/api/withAuth";
 import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
+import { isComputedAnalytics } from "@/lib/closed-sets";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
 import { canonicalizeExchangeList } from "@/lib/constants";
@@ -589,11 +590,16 @@ async function writeFailedStrategyAnalyticsPlaceholder(
       // when SELECT succeeds and the row is already complete.
     } else if (
       existing &&
-      (existing as { computation_status?: string }).computation_status ===
-        "complete"
+      isComputedAnalytics(
+        (existing as { computation_status?: string }).computation_status,
+      )
     ) {
+      // Skip the 'failed' placeholder when the worker already wrote ANY terminal
+      // success (complete OR complete_with_warnings) — else the enqueue-error
+      // race would stomp a good row with 'failed'. complete_with_warnings is not
+      // written on the CSV path today, but the guard must be class-consistent.
       console.warn(
-        `${opts.logPrefix} ${opts.subcontext} placeholder SKIPPED — worker already wrote computation_status='complete' [correlation_id=${opts.correlationId}, strategy_id=${strategyId}]`,
+        `${opts.logPrefix} ${opts.subcontext} placeholder SKIPPED — worker already wrote a terminal success (${(existing as { computation_status?: string }).computation_status}) [correlation_id=${opts.correlationId}, strategy_id=${strategyId}]`,
       );
       return;
     }

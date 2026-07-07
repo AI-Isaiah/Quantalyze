@@ -14,6 +14,8 @@ import {
   ADMIN_ONLY_PREFERENCE_FIELDS,
   LIQUIDITY_PREFERENCES,
   MAGNITUDE_CAPS,
+  STRATEGY_ANALYTICS_COMPUTATION_STATUSES,
+  isComputedAnalytics,
 } from "./closed-sets";
 import { ROLES } from "./types";
 
@@ -21,6 +23,32 @@ import { ROLES } from "./types";
 // derivations that other modules + the UI depend on. A drift here (re-widened
 // set, wrong cap, casing mismatch) is exactly the class B8 closes.
 describe("closed-sets registry", () => {
+  describe("isComputedAnalytics (shared terminal-success gate)", () => {
+    // Guards migration 20260707120000's surfacing: complete_with_warnings is a
+    // terminal SUCCESS and must gate identically to complete everywhere, or a
+    // warned strategy dead-ends (wizard poll hangs, admin 409s, panels blank).
+    it("admits BOTH complete and complete_with_warnings", () => {
+      expect(isComputedAnalytics("complete")).toBe(true);
+      expect(isComputedAnalytics("complete_with_warnings")).toBe(true);
+    });
+
+    it("rejects every non-terminal / failed / absent status", () => {
+      for (const s of ["pending", "computing", "failed"]) {
+        expect(isComputedAnalytics(s)).toBe(false);
+      }
+      expect(isComputedAnalytics(null)).toBe(false);
+      expect(isComputedAnalytics(undefined)).toBe(false);
+      expect(isComputedAnalytics("")).toBe(false);
+    });
+
+    it("classifies exactly the two success members of the status closed set", () => {
+      const computed = STRATEGY_ANALYTICS_COMPUTATION_STATUSES.filter(
+        isComputedAnalytics,
+      );
+      expect(computed).toEqual(["complete", "complete_with_warnings"]);
+    });
+  });
+
   describe("exchanges (value-space A)", () => {
     it("SUPPORTED_EXCHANGES is the canonical lowercase wire form (key-save boundary)", () => {
       // Phase 68 (DRB-02): the key-save boundary admits deribit. This is the

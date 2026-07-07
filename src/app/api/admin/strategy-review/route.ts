@@ -4,6 +4,7 @@ import { revalidateTag } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { isComputedAnalytics } from "@/lib/closed-sets";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { notifyManagerApproved } from "@/lib/email";
@@ -253,7 +254,10 @@ export async function POST(req: NextRequest) {
         { status: 409 },
       );
     }
-    if (recheckAnalytics?.computation_status !== "complete") {
+    // complete_with_warnings is a terminal success the first-pass gate
+    // (strategyGate.ts, a deny-list) admits; the re-check must too, or a warned
+    // strategy passes the gate then 409s here — un-approvable (mig 20260707120000).
+    if (!isComputedAnalytics(recheckAnalytics?.computation_status)) {
       return NextResponse.json(
         { error: "Cannot approve: analytics no longer complete." },
         { status: 409 },

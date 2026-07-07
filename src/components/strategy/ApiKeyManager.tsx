@@ -100,7 +100,13 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
 
   const handleSyncStatusChange = useCallback((status: SyncStatus) => {
     setSyncStatus(status);
-    if (status === "complete") {
+    // complete_with_warnings is a terminal SUCCESS (SyncProgress maps the
+    // DB-native value to this UI state; mig 20260707120000 now persists it
+    // instead of laundering to 'complete'). Treat it exactly like 'complete',
+    // else syncingKeyId is never cleared and every key's Resync/Use button
+    // stays disabled ("Syncing…") forever while the panel says "Synced with
+    // warnings" — a permanent dead-lock only a reload recovers.
+    if (status === "complete" || status === "complete_with_warnings") {
       setSyncingKeyId(null);
       // NEW-C37-04: pass the key that was actually synced so loadKeys can
       // derive lastSyncAt from the correct row, not from currentKeyId.

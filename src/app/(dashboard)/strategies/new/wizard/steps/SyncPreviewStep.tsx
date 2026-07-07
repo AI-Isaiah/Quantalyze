@@ -18,6 +18,7 @@ import {
   type WizardErrorCode,
 } from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
+import { isComputedAnalytics } from "@/lib/closed-sets";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 
@@ -202,7 +203,7 @@ export function SyncPreviewStep({
           ? Date.parse(existing.computed_at)
           : null;
         const isFresh =
-          existing?.computation_status === "complete" &&
+          isComputedAnalytics(existing?.computation_status) &&
           computedAtMs !== null &&
           Number.isFinite(computedAtMs) &&
           Date.now() - computedAtMs < SYNC_FRESHNESS_WINDOW_MS;
@@ -367,7 +368,11 @@ export function SyncPreviewStep({
           return;
         }
 
-        if (nextStatus !== "complete") {
+        // Terminal SUCCESS includes complete_with_warnings — else a warned
+        // first compute (e.g. a Deribit onboarding tripping a DQ guard) polls
+        // forever, since the runner now persists that status instead of it
+        // being laundered to 'complete' (mig 20260707120000).
+        if (!isComputedAnalytics(nextStatus)) {
           scheduleNext();
           return;
         }

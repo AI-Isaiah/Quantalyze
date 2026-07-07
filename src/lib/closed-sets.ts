@@ -158,15 +158,16 @@ export type LiquidityPreference = (typeof LIQUIDITY_PREFERENCES)[number];
 // 4-value CHECK has no 'complete_with_warnings' — see portfolio-analytics-
 // adapter.ts COMPUTATION_STATUSES). Do not conflate the two.
 //
-// SURFACING CAVEAT (red-team 2026-06-02): the CHECK widening prevents the latent
-// 23514 that would reject the worker's whole metrics upsert on the warnings path
-// (its proven value). It does NOT by itself make 'complete_with_warnings' surface
-// end-to-end: on the compute-jobs QUEUE path the 038 RPC
-// sync_strategy_analytics_status clobbers it back to 'complete' when all jobs
-// finish, and two consumer gates still exact-match 'complete' (queries.ts:667
-// getStrategyV2Panels; admin/strategy-review/route.ts:148). Completing that
-// surfacing (RPC-preserve + a shared isComputedAnalytics() gate) is a tracked
-// B3-completion follow-up, OUT of B9's boundary-parity scope.
+// SURFACING CAVEAT (red-team 2026-06-02; RESOLVED 2026-07-07): the CHECK widening
+// prevented the latent 23514 that would reject the worker's whole metrics upsert
+// on the warnings path, but did NOT by itself make 'complete_with_warnings'
+// surface end-to-end — the queue-path RPC sync_strategy_analytics_status
+// laundered it back to 'complete', and several consumer gates exact-matched
+// 'complete'. Migration 20260707120000 fixed the RPC (branches (a) AND (c)
+// preserve the value), and the read-gates now share isComputedAnalytics() below
+// (wizard SyncPreviewStep, admin/strategy-review re-check, queries.ts
+// getStrategyV2Panels; the factsheet PDF routes + strategy v1 page already
+// admitted both). The value now persists and surfaces end-to-end.
 export const STRATEGY_ANALYTICS_COMPUTATION_STATUSES = [
   "pending",
   "computing",
@@ -176,6 +177,21 @@ export const STRATEGY_ANALYTICS_COMPUTATION_STATUSES = [
 ] as const;
 export type StrategyAnalyticsComputationStatus =
   (typeof STRATEGY_ANALYTICS_COMPUTATION_STATUSES)[number];
+
+// The shared terminal-success gate. `complete_with_warnings` is a terminal
+// SUCCESS (a run whose factsheet is valid but had a DQ guard fire — the runner
+// wrote it alongside data_quality_flags); it must be treated as computed
+// EVERYWHERE `complete` is, or a warned strategy dead-ends (onboarding poll
+// hangs, admin approval 409s, metric panels blank). Before migration
+// 20260707120000 the queue-path RPC laundered the value to `complete` so no
+// consumer ever saw it; now that it persists, every read-gate MUST use this
+// predicate instead of an exact-match on `'complete'`. See the SURFACING CAVEAT
+// above. NOT a portfolio_analytics status (different table, no warnings value).
+export function isComputedAnalytics(
+  status: string | null | undefined,
+): boolean {
+  return status === "complete" || status === "complete_with_warnings";
+}
 
 // --- Signup roles (SECURITY BOUNDARY) --------------------------------------
 // SECURITY BOUNDARY (NEW-C15-05): the AUTHORITATIVE allowlist for the role a
