@@ -1850,6 +1850,83 @@ class TestDeriveBrokerDailies:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "venue,terminus_days,should_segment",
+        [
+            ("bybit", 365, True),     # 365d deposit-history retention → segments
+            ("binance", None, False),  # no cap → NEVER segments (full history)
+        ],
+    )
+    async def test_retention_terminus_per_venue_end_to_end(
+        self, venue: str, terminus_days: int | None, should_segment: bool,
+    ) -> None:
+        """H1 (specialist-tests): the DQ-02 terminus is exercised END-TO-END per
+        venue — Bybit's 365d window (LOW-confidence in the source, the most
+        likely to be mis-tuned) SEGMENTS a >365d-old realized day, while Binance
+        (None → never-segment) RETAINS a >365d-old day with NO
+        flow_coverage_incomplete. A per-venue regression (Bybit inheriting OKX's
+        90d, or Binance accidentally segmenting) would truncate real history and
+        was NOT caught end-to-end before (only at the pure-helper level).
+
+        Mutation-honest: for Bybit, mis-wiring the venue→terminus map so it never
+        segments makes the 400d-old day reappear in csv_rows and drops the
+        flow_coverage_incomplete pre-stamp → RED. For Binance, wrongly segmenting
+        drops the 400d-old day (and adds a false warning) → RED.
+        """
+        import datetime as _dt
+        from services.job_worker import run_derive_broker_dailies_job
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+
+        def _rec(days_ago: int, pnl: float) -> dict:
+            d = (now - _dt.timedelta(days=days_ago)).date().isoformat()
+            return {
+                "exchange": venue, "symbol": "PORTFOLIO",
+                "side": "buy" if pnl >= 0 else "sell", "price": abs(pnl),
+                "quantity": 1, "fee": 0, "fee_currency": "USDT",
+                "timestamp": f"{d}T00:00:00+00:00", "order_type": "daily_pnl",
+            }
+
+        # A realized day well BEYOND 365d (400d) + a recent day.
+        realized = [_rec(400, 100.0), _rec(380, 50.0), _rec(5, 10.0)]
+        mock_ctx, stack, captured = self._flow_harness(
+            venue=venue, deposits=[], realized=realized,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        csv_dates = set(r["date"] for r in captured["csv_rows"])
+        old_day = (now - _dt.timedelta(days=400)).date().isoformat()
+        prestamped = any(
+            (u.get("data_quality_flags") or {}).get("flow_coverage_incomplete")
+            for u in captured["analytics_upserts"]
+        )
+
+        if should_segment:
+            terminus = (now - _dt.timedelta(days=terminus_days)).date()
+            assert all(
+                _dt.date.fromisoformat(d) >= terminus for d in csv_dates
+            ), f"{venue}: pre-{terminus_days}d days leaked into csv: {sorted(csv_dates)[:3]}"
+            assert old_day not in csv_dates, (
+                f"{venue}: the 400d-old day must be segmented out (>{terminus_days}d)"
+            )
+            assert prestamped, (
+                f"{venue}: a segmented retention gap must pre-stamp "
+                "flow_coverage_incomplete"
+            )
+        else:
+            # Binance never segments — the 400d-old day is RETAINED, no warning.
+            assert old_day in csv_dates, (
+                "binance has no deposit-history cap → the 400d-old day must be "
+                "retained (never segmented)"
+            )
+            assert not prestamped, (
+                "binance must NOT raise flow_coverage_incomplete (never segments)"
+            )
+
+    @pytest.mark.asyncio
     async def test_fully_segmented_series_short_circuits_on_nonnan_count(
         self,
     ) -> None:
@@ -2359,6 +2436,42 @@ class TestDeriveBrokerDailies:
             (u.get("data_quality_flags") or {}).get("unrealized_pnl_in_anchor")
             for u in captured["analytics_upserts"]
         ), "no wedge on a heuristic base → no unrealized_pnl_in_anchor"
+
+    @pytest.mark.asyncio
+    async def test_none_equity_forces_wedge_zero(self) -> None:
+        """M1 (specialist-tests) NOISE GUARD (T-77-08): a MISSING anchor
+        (``equity is None`` — totalEq absent while a upl>0 was still read, the
+        (None, upl>0) OKX shape) must force open_unrealized_usd=0.0 and never
+        raise unrealized_pnl_in_anchor — a real wedge threaded onto an unreadable
+        anchor is the T-77-08 harm. The dispatcher forces 0.0 on a None equity,
+        but the harness patches the read directly, so this pins the job_worker
+        ``equity is None`` noise-guard branch specifically (the harness elsewhere
+        always supplies a positive float, leaving THIS branch untested).
+
+        Mutation-honest: deleting the ``equity is None`` clause from the noise
+        guard threads the 8000 wedge onto a None anchor → captured wedge is 8000
+        not 0.0 → RED.
+        """
+        from services.job_worker import run_derive_broker_dailies_job
+
+        realized = self._recent_daily_pnl("okx", {10: 200.0, 5: 150.0, 1: 75.0})
+        # equity None (unreadable anchor) but a non-zero upl was read.
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="okx", deposits=[], realized=realized,
+            equity=None, upnl=8_000.0, balance_error=False,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            await run_derive_broker_dailies_job(job)
+
+        assert captured["open_unrealized_usd"] == 0.0, (
+            "a missing (None) anchor must force the wedge to 0.0 — never thread a "
+            f"live wedge onto an unreadable base; got {captured['open_unrealized_usd']!r}"
+        )
+        assert not any(
+            (u.get("data_quality_flags") or {}).get("unrealized_pnl_in_anchor")
+            for u in captured["analytics_upserts"]
+        ), "no wedge on a None anchor → no unrealized_pnl_in_anchor"
 
     @pytest.mark.asyncio
     async def test_dust_anchor_forces_wedge_zero(self) -> None:

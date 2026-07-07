@@ -1017,3 +1017,51 @@ def test_nav_twr_guard_keys_are_declared_and_single_sourced() -> None:
         "unrealized_pnl_in_anchor",
         "unrealized_pnl_unreadable",
     }
+
+
+def test_multi_flow_with_one_dominated_day_does_not_poison_neighbors() -> None:
+    """H2 (specialist-tests): ONE reconstruction carrying MULTIPLE external flows
+    across different days where the middle flow DOMINATES (NaN + flow_dominated_
+    guard) while the other flow days produce VALID non-zero returns. Pins the
+    ``_union_flow_days`` docstring claim that the union changes WHICH days exist,
+    never the guard math — a dominated day must NOT poison a neighbour's
+    denominator, and flows must NOT be summed across days.
+
+    Mutation-honest: the exact neighbour returns are load-bearing. If a guarded
+    day leaked its NaN into the next day's NAV_{t-1}, or if flows were summed
+    across days, r on 01-03 / 01-07 would change and these approx assertions RED.
+    Only the dominated day (01-05) is excluded from cumulative_twr.
+    """
+    pnl = _pnl([100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0])  # 7 days
+    flows = [
+        ("2026-01-03", 1_000.0),    # normal deposit (|F| < NAV_prev)
+        ("2026-01-05", 12_000.0),   # DOMINATING (|F| >= NAV_prev) -> NaN + guard
+        ("2026-01-07", 500.0),      # normal deposit
+    ]
+    ret, meta = reconstruct_nav_and_twr(pnl, anchor_nav=20_000.0, external_flows=flows)
+
+    # NAV backward roll: [5900, 6000, 7100, 7200, 19300, 19400, 20000].
+    # Only the dominated day (index 4, 2026-01-05) breaks; the other six days —
+    # including BOTH neighbour flow days — carry finite returns.
+    nan_mask = ret.isna()
+    assert nan_mask.sum() == 1, f"exactly one guarded day expected; got {ret.tolist()}"
+    assert bool(nan_mask.iloc[4]), "the dominating-flow day (01-05) must be the NaN"
+    assert meta.get("flow_dominated_guard") is True
+    assert meta.get("negative_nav_guard") is None
+    assert meta.get("dust_nav_guard") is None
+    assert meta["computation_status_hint"] == "complete_with_warnings"
+
+    # The two NEIGHBOUR flow days produce their own correct non-zero returns —
+    # the guarded day between/around them did not poison the denominators.
+    # r_0103 = (7100 - 6000 - 1000)/6000 = 100/6000.
+    assert ret.loc[pd.Timestamp("2026-01-03")] == pytest.approx(100.0 / 6000.0)
+    # r_0107 = (20000 - 19400 - 500)/19400 = 100/19400.
+    assert ret.loc[pd.Timestamp("2026-01-07")] == pytest.approx(100.0 / 19400.0)
+
+    # cumulative_twr excludes ONLY the dominated day: it equals the product over
+    # the six finite returns, not the seven-day product (a NaN is skipped, never
+    # coerced to 0.0 which would silently zero-out that day's compounding).
+    finite = ret.dropna()
+    assert len(finite) == 6
+    expected_cum = float(np.prod(1.0 + finite.to_numpy(dtype=float)) - 1.0)
+    assert cumulative_twr(ret) == pytest.approx(expected_cum)
