@@ -881,9 +881,15 @@ def txn_rows_to_native_daily(
     AST purity guard in test_deribit_txn.py forbids a pandas import), so — like
     the parent's ``list[dict]`` — the sibling returns plain data.
 
-    Leak discipline (§App B): the guards name only id/type; no raw balance value
-    is logged or raised (the unknown-type guard is lifted verbatim from the
-    parent so the two paths cannot drift).
+    Leak discipline (§App B): the absent/null-blank/undatable guards name only
+    id/type. The unknown-type guard is lifted VERBATIM from
+    ``txn_rows_to_daily_records`` — INCLUDING its ``({change})`` in the raise
+    message. That embedded ``change`` is a SINGLE per-row native delta (never an
+    account total or a held balance) and the guard fires ONLY on unknown-type
+    schema drift; keeping the raise byte-identical to the parent is the deliberate
+    anti-drift choice (§4.1) so the two aggregators cannot diverge. (Scrubbing
+    ``({change})`` from BOTH raises is the alternative if per-row deltas must never
+    surface at all; it is intentionally NOT done here to preserve verbatim parity.)
     """
     by_day_ccy: dict[tuple[str, str], float] = {}
     for row in rows:
