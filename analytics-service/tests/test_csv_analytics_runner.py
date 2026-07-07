@@ -185,6 +185,60 @@ async def test_csv_analytics_benchmark_unavailable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mark_unrecoverable_preserves_pre_stamped_guard_flags() -> None:
+    """mig 20260707120000 — a transient CSV-run failure must NOT wipe the
+    NAV_TWR_GUARD_KEYS that derive_broker_dailies pre-stamped. Pre-fix,
+    _mark_unrecoverable wrote {csv_source:True} WHOLESALE, so the failed_retry's
+    attempt 2 saw no guard flags → _warned=False → a clean 'complete' over a
+    guard-refused series (the exact laundering class the migration kills). The
+    failed stamp must READ-MODIFY-WRITE so the retry re-derives
+    complete_with_warnings."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+    ] * 5  # 10 rows — past the insufficient-history gate
+    sb = _make_supabase_mock(rows)
+    # derive_broker_dailies already pre-stamped a NAV guard onto the row; both
+    # _read_existing_flags (success path) and _mark_unrecoverable (failure path)
+    # read it via .select(...).eq(...).maybe_single().execute().
+    sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value = MagicMock(
+        execute=MagicMock(
+            return_value=MagicMock(
+                data={
+                    "data_quality_flags": {
+                        "negative_nav_guard": True,
+                        "csv_source": True,
+                    }
+                }
+            )
+        )
+    )
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(pd.Series([0.001] * 10), False))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               side_effect=RuntimeError("transient blip mid-compute")):
+        with pytest.raises(HTTPException) as exc_info:
+            await run_csv_strategy_analytics("test-strategy-uuid")
+
+    assert exc_info.value.status_code == 500
+
+    upsert_calls = sb.table.return_value.upsert.call_args_list
+    failed = [c for c in upsert_calls if c.args[0].get("computation_status") == "failed"]
+    assert len(failed) >= 1, "Expected the unrecoverable-failure stamp"
+    flags = failed[0].args[0]["data_quality_flags"]
+    # The pre-stamped NAV guard SURVIVES the failure stamp (pre-fix: wiped).
+    assert flags.get("negative_nav_guard") is True, (
+        "the NAV guard pre-stamp must survive so the failed_retry re-derives "
+        "complete_with_warnings; pre-fix the wholesale write laundered it"
+    )
+    assert flags.get("csv_source") is True
+
+
+@pytest.mark.asyncio
 async def test_mark_unrecoverable_logs_warning_before_reraise(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
