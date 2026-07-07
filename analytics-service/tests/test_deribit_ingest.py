@@ -951,8 +951,11 @@ async def test_crawl_accumulates_dated_inverse_flow_with_own_index(
     # The withdrawal day carries its OWN index (the paired settlement row), so no
     # settlement-index fetch was needed.
     assert called == [], "own-index inverse flow must not trigger a supplemental fetch"
+    # Phase 80-01: the producer now emits the 4-field (day, ccy)-keyed form.
+    # usd_signed (=-0.5*42000) and the day are byte-identical to the pre-80-01
+    # 2-field value; currency="BTC" and quantity=-0.5 (native change) are added.
     assert report.dated_external_flows == [
-        ExternalFlow(DAY_INVERSE_WITH_INDEX, -0.5 * BTC_INDEX_2026_03_14)
+        ExternalFlow(DAY_INVERSE_WITH_INDEX, -0.5 * BTC_INDEX_2026_03_14, "BTC", -0.5)
     ]
 
 
@@ -999,8 +1002,10 @@ async def test_crawl_c1_quiet_inverse_flow_values_via_settlement_index(
     # BTC anchored at that day, and the withdrawal valued at -0.5 * 43000 = -21500
     # rather than failing loud.
     assert fetched == [("BTC", DAY_INVERSE_NO_INDEX)]
+    # Phase 80-01: 4-field emit — usd_signed (=-0.5*quiet_price) + day unchanged;
+    # native channel currency="BTC", quantity=-0.5 added.
     assert report.dated_external_flows == [
-        ExternalFlow(DAY_INVERSE_NO_INDEX, -0.5 * quiet_price)
+        ExternalFlow(DAY_INVERSE_NO_INDEX, -0.5 * quiet_price, "BTC", -0.5)
     ]
 
 
@@ -1041,7 +1046,11 @@ async def test_crawl_accumulates_linear_flow_without_index_fetch(
     _records, report = await di.fetch_deribit_ledger_daily_records(object())
     assert called == [], "a linear USDC deposit must never fetch a settlement index"
     # +50000 USDC deposit passes through as +50000 USD on its own UTC day.
-    assert report.dated_external_flows == [ExternalFlow(DAY_LINEAR, 50000.0)]
+    # Phase 80-01: 4-field emit — usd_signed (=50000) + day unchanged; a linear
+    # USDC deposit carries currency="USDC" and quantity=50000 (USD-family: qty==usd).
+    assert report.dated_external_flows == [
+        ExternalFlow(DAY_LINEAR, 50000.0, "USDC", 50000.0)
+    ]
 
 
 async def test_completeness_report_retired_scalar_fields(monkeypatch: Any) -> None:
@@ -1095,7 +1104,11 @@ async def test_crawl_flow_row_count_once_absent_from_realized(
     # The only realized record is the -5 linear trade fee.
     assert records and all(abs(float(r["price"])) == 5.0 for r in records)
     # The deposit appears exactly once as a dated flow.
-    assert report.dated_external_flows == [ExternalFlow(DAY_LINEAR, 50000.0)]
+    # Phase 80-01: 4-field emit — usd_signed (=50000) + day unchanged; a linear
+    # USDC deposit carries currency="USDC" and quantity=50000 (USD-family: qty==usd).
+    assert report.dated_external_flows == [
+        ExternalFlow(DAY_LINEAR, 50000.0, "USDC", 50000.0)
+    ]
 
 
 # ===========================================================================

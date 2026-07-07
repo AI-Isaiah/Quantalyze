@@ -1061,13 +1061,17 @@ def test_dated_external_flow_returns_sorted_externalflow_list() -> None:
     assert [f.utc_day_iso for f in flows] == ["2026-02-01", "2026-02-10"]
     assert all(isinstance(f, ExternalFlow) for f in flows)
     # Indexed access (matches the honest core's `day_raw, usd_raw = flow[0], flow[1]`
-    # after the Phase 79-01 native-channel extension); this producer stays 2-arg,
-    # so the native channel carries the byte-identical defaults.
+    # after the Phase 79-01 native-channel extension); usd_signed stays the
+    # authoritative legacy figure.
     day_raw, usd_raw = flows[0][0], flows[0][1]
     assert day_raw == "2026-02-01"
     assert usd_raw == pytest.approx(-40.0, abs=1e-9)
-    assert flows[0].currency == "USD"
-    assert flows[0].quantity is None
+    # Phase 80-01: the producer now emits the 4-field (day, ccy)-keyed form — a
+    # USDC withdrawal carries currency="USDC" and quantity=native change (the
+    # raw signed USD-family amount), while usd_signed is byte-identical to the
+    # pre-80-01 2-field value (for a USD-family flow quantity == usd_signed).
+    assert flows[0].currency == "USDC"
+    assert flows[0].quantity == pytest.approx(-40.0, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -1410,3 +1414,103 @@ def test_txn_rows_to_native_daily_same_day_multi_currency_separate_and_summed() 
     native = txn_rows_to_native_daily(rows)
     assert native["BTC"] == {"2026-01-15": pytest.approx(-0.03, abs=1e-12)}
     assert native["USDC"] == {"2026-01-15": pytest.approx(7.0, abs=1e-12)}
+
+
+# ---------------------------------------------------------------------------
+# Phase 80-01 Task 2 — deribit_dated_external_flows_usd emits 4-field (day, ccy)-
+# keyed ExternalFlows. usd_signed stays the authoritative legacy figure (byte-
+# identical per day); currency + quantity are the additive native channel. A
+# same-day USDC deposit + BTC withdrawal stays TWO flows (§2.3). Mutation-honest.
+# ---------------------------------------------------------------------------
+
+
+def _mixed_same_day_flow_rows(day: str = "2026-04-01") -> list[dict[str, object]]:
+    """A same-UTC-day USDC deposit (+1000) AND BTC withdrawal (-0.5), with a
+    zero-cash BTC settlement seeding the day's OWN index (42000) so the coin
+    flow values at -0.5*42000 = -21000. Old (day-only) collapse would sum to a
+    single -20000 USD flow; the (day, ccy) keying keeps them SEPARATE."""
+    return [
+        {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": 0.0, "index_price": 42000.0,
+         "timestamp": _ms(f"{day}T08:00:00+00:00"), "id": 8002001},
+        {"type": "deposit", "currency": "USDC", "change": 1000.0,
+         "timestamp": _ms(f"{day}T09:00:00+00:00"), "id": 8002002},
+        {"type": "withdrawal", "currency": "BTC", "change": -0.5,
+         "timestamp": _ms(f"{day}T15:00:00+00:00"), "id": 8002003},
+    ]
+
+
+def test_flow_four_field_emit_carries_currency_and_native_quantity() -> None:
+    """four_field_emit: an inverse BTC withdrawal emits currency="BTC",
+    quantity=native change (-0.5, signed), usd_signed=change*index (-21000).
+
+    Mutation-honest (b): dropping quantity (leaving None) makes this coin flow
+    refuse downstream (native_nav._bucket_flow_qty INDEXED branch) — pinned here
+    as quantity is not None and equals the native change."""
+    flows = deribit_dated_external_flows_usd(inverse_flow_day_with_index_rows())
+    assert len(flows) == 1
+    flow = flows[0]
+    assert flow.currency == "BTC"
+    assert flow.quantity is not None
+    assert flow.quantity == pytest.approx(-0.5, abs=1e-12)
+    assert flow.usd_signed == pytest.approx(-0.5 * BTC_INDEX_2026_03_14, abs=1e-9)
+    assert flow.usd_signed == pytest.approx(-21000.0, abs=1e-9)
+
+
+def test_flow_day_ccy_keyed_no_collapse_usdc_and_btc_stay_two() -> None:
+    """day_ccy_keyed_no_collapse: a same-day USDC deposit AND BTC withdrawal emit
+    TWO flows (one per currency), NOT one collapsed USD sum — the accumulator is
+    keyed (day, ccy).
+
+    Mutation-honest (a): reverting the key to day-only recollapses these into a
+    single -20000 USD flow and reddens this test."""
+    flows = deribit_dated_external_flows_usd(_mixed_same_day_flow_rows())
+    assert len(flows) == 2
+    by_ccy = {f.currency: f for f in flows}
+    assert set(by_ccy) == {"USDC", "BTC"}
+    assert by_ccy["USDC"].usd_signed == pytest.approx(1000.0, abs=1e-9)
+    assert by_ccy["USDC"].quantity == pytest.approx(1000.0, abs=1e-9)
+    assert by_ccy["BTC"].usd_signed == pytest.approx(-21000.0, abs=1e-9)
+    assert by_ccy["BTC"].quantity == pytest.approx(-0.5, abs=1e-12)
+
+
+def test_flow_same_day_same_ccy_still_folds_to_one() -> None:
+    """Two same-day USDC deposits still fold into ONE USDC flow (the (day, ccy)
+    key groups by currency); quantity and usd_signed both sum."""
+    day = "2026-05-02"
+    d1 = {"type": "deposit", "currency": "USDC", "change": 1000.0,
+          "timestamp": _ms(f"{day}T09:00:00+00:00"), "id": 8002101}
+    d2 = {"type": "deposit", "currency": "USDC", "change": 2500.0,
+          "timestamp": _ms(f"{day}T18:00:00+00:00"), "id": 8002102}
+    flows = deribit_dated_external_flows_usd([d1, d2])
+    assert len(flows) == 1
+    assert flows[0].currency == "USDC"
+    assert flows[0].usd_signed == pytest.approx(3500.0, abs=1e-9)
+    assert flows[0].quantity == pytest.approx(3500.0, abs=1e-9)
+
+
+def test_flow_usd_signed_byte_identical_per_day() -> None:
+    """usd_signed_byte_identical: the per-day Σ usd_signed across the new per-ccy
+    flows equals the OLD per-day collapsed usd_signed (legacy USD-space consumers
+    read usd_signed and must not shift). The mixed day's old sum was
+    1000 + (-21000) = -20000.
+
+    Mutation-honest (c): perturbing usd_signed (e.g. index-multiplying the linear
+    leg, or dropping the coin index multiply) changes this -20000 and reddens."""
+    flows = deribit_dated_external_flows_usd(_mixed_same_day_flow_rows())
+    per_day: dict[str, float] = {}
+    for f in flows:
+        per_day[f.utc_day_iso] = per_day.get(f.utc_day_iso, 0.0) + f.usd_signed
+    assert per_day == {"2026-04-01": pytest.approx(-20000.0, abs=1e-9)}
+
+
+def test_flow_every_emitted_flow_passes_validate_shape() -> None:
+    """validate_passes: each emitted 4-field flow passes
+    external_flows.validate_flow_shape (finite usd_signed, non-empty day,
+    UPPERCASE currency, finite quantity)."""
+    from services.external_flows import validate_flow_shape
+
+    flows = deribit_dated_external_flows_usd(_mixed_same_day_flow_rows())
+    assert flows  # non-empty
+    for f in flows:
+        assert validate_flow_shape(f) is f

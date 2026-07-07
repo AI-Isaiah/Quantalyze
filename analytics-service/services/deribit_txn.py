@@ -633,14 +633,27 @@ def deribit_dated_external_flows_usd(
     Flow rows are ``_EXTERNAL_FLOW_TYPES`` (a subset of ``INFORMATIONAL_TYPES``),
     so they are STRUCTURALLY excluded from ``txn_rows_to_daily_records``'s realized
     sum — count-once: a flow feeds F_t here exactly once and never the realized
-    stream. Returns the per-day USD sums as ``ExternalFlow(utc_day_iso, usd_signed)``
-    entries, sorted ascending by day. Supersedes the linear-only scalar
-    ``deribit_linear_external_flow_usd`` (its sole consumer is removed in 75-03).
+    stream.
+
+    Phase 80-01 (§2.3): the accumulator is keyed ``(day, ccy)`` and every entry is
+    emitted as a 4-field ``ExternalFlow(utc_day_iso, usd_signed, currency,
+    quantity)``, sorted ascending by ``(day, ccy)``. ``usd_signed`` KEEPS its exact
+    meaning — the event-time USD value via ``txn_change_to_usd`` — and stays
+    AUTHORITATIVE for the legacy USD-space path (Σ ``usd_signed`` per day is
+    byte-identical to the pre-80-01 day-keyed output). ``currency`` (UPPERCASE) and
+    ``quantity`` (the summed native ``change``, signed) are the additive native
+    channel the native core reads (§2.2): a same-day USDC deposit + BTC withdrawal
+    stays TWO flows rather than one collapsed USD sum. Supersedes the linear-only
+    scalar ``deribit_linear_external_flow_usd`` (its sole consumer is removed in
+    75-03).
     """
     day_ccy_index = _day_ccy_own_index(
         rows, indexable_currencies=indexable_currencies
     )
-    by_day: dict[str, float] = {}
+    # Parallel (day, ccy)-keyed accumulators: usd_signed (the authoritative legacy
+    # leg, via txn_change_to_usd) and the native quantity (raw signed `change`).
+    by_day_ccy_usd: dict[tuple[str, str], float] = {}
+    by_day_ccy_qty: dict[tuple[str, str], float] = {}
     for row in rows:
         if not isinstance(row, Mapping):
             continue
@@ -689,10 +702,19 @@ def deribit_dated_external_flows_usd(
         fb = day_ccy_index.get((day, ccy))
         if fb is None and supplemental_index is not None:
             fb = supplemental_index.get((day, ccy))
-        by_day[day] = by_day.get(day, 0.0) + txn_change_to_usd(
+        key = (day, ccy)
+        # usd_signed leg — UNCHANGED resolution (own/ledger index wins, then
+        # supplemental), so the legacy per-day USD sum is byte-identical.
+        by_day_ccy_usd[key] = by_day_ccy_usd.get(key, 0.0) + txn_change_to_usd(
             row, fallback_index=fb, indexable_currencies=indexable_currencies
         )
-    return [ExternalFlow(day, usd) for day, usd in sorted(by_day.items())]
+        # native quantity leg — the raw signed `change` the guards already coerced
+        # (no index): every coin flow carries a native quantity for the native core.
+        by_day_ccy_qty[key] = by_day_ccy_qty.get(key, 0.0) + change
+    return [
+        ExternalFlow(day, by_day_ccy_usd[(day, ccy)], ccy, by_day_ccy_qty[(day, ccy)])
+        for (day, ccy) in sorted(by_day_ccy_usd)
+    ]
 
 
 def txn_rows_to_daily_records(
