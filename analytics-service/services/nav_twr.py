@@ -305,7 +305,11 @@ def reconstruct_nav(
 
 
 def chain_linked_twr(
-    nav: pd.Series, daily_pnl: pd.Series, flows_by_day: pd.Series
+    nav: pd.Series,
+    daily_pnl: pd.Series,
+    flows_by_day: pd.Series,
+    *,
+    prev0: float | None = None,
 ) -> tuple[pd.Series, dict[str, bool]]:
     """Chain-link the daily time-weighted return from a reconstructed NAV series.
 
@@ -320,6 +324,16 @@ def chain_linked_twr(
     flow-dominated guards live in the fail-loud guard block (DQ-01) which
     generalises this same break — see ``_guard_denominator``.
 
+    ``prev0`` (§1.4, App A #2) is an ADDITIVE keyword. ``prev0=None`` (default)
+    keeps EXACTLY today's arithmetic — day-0 ``prev`` is the reconstructed
+    ``NAV_0 - pnl_0 - F_0`` from ``daily_pnl.iloc[0]``, so every existing caller
+    and test is byte-identical (SC-4). It exists because ``daily_pnl.iloc[0]``
+    has no meaning once ``pnl`` is per-currency native: the native core
+    (``native_nav.reconstruct_native_nav_and_twr``) injects the pre-history
+    capital valued at day-0 marks, ``prev0_usd``, instead. When ``prev0`` is set,
+    day-0 ``prev`` is that supplied value (fail-loud coerced via ``_coerce_float``)
+    and the ``_guard_denominator`` guards apply to it UNCHANGED.
+
     Returns ``(returns, flags)`` where ``returns`` is a ``"returns"``-named
     Series on the NAV DatetimeIndex (broken days are NaN) and ``flags`` maps the
     DQ flag keys that fired to ``True``.
@@ -330,6 +344,11 @@ def chain_linked_twr(
     pnl0 = _coerce_float(
         daily_pnl.iloc[0], field="daily_pnl", row={"day": str(index[0])}
     )
+    prev0_val: float | None = (
+        None
+        if prev0 is None
+        else _coerce_float(prev0, field="prev0", row={"day": str(index[0])})
+    )
 
     n = len(index)
     flags: dict[str, bool] = {}
@@ -338,7 +357,9 @@ def chain_linked_twr(
         cur = nav_vals[t]
         flow_t = flows[t]
         if t == 0:
-            prev = cur - pnl0 - flow_t  # reconstructed pre-history capital
+            # prev0=None ⇒ the reconstructed pre-history capital (today's exact
+            # arithmetic); prev0 set ⇒ the native core's day-0-mark-valued capital.
+            prev = (cur - pnl0 - flow_t) if prev0_val is None else prev0_val
         else:
             prev = nav_vals[t - 1]  # NAV_{t-1}
 

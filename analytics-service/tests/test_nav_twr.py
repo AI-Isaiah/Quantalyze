@@ -332,6 +332,84 @@ def test_chain_linked_twr_returns_named_series_and_flags() -> None:
 
 
 # ---------------------------------------------------------------------------
+# §1.4 — chain_linked_twr additive ``prev0`` kwarg (native-core day-0 injection)
+# ---------------------------------------------------------------------------
+
+
+def test_prev0_default_byte_identical() -> None:
+    """``prev0=None`` (and ``prev0`` absent) is byte-identical to today over
+    clean, flow-bearing, and interior-guard-firing fixtures — the §1.4 SC-4
+    default-preservation pin (App A #2). Mutation: reverting the default day-0
+    path or deriving ``prev`` differently when ``prev0=None`` flips this red."""
+    fixtures = [
+        ([100.0, 50.0, -25.0], 10_000.0, []),                 # clean
+        ([50.0, 30.0, 20.0], 11_000.0, [("2026-01-01", 1000.0)]),  # flow-bearing
+        ([0.0, -1000.0, 800.0], 800.0, []),                   # interior zero-NAV
+    ]
+    for values, terminal, flows in fixtures:
+        daily_pnl = _pnl(values)
+        fbd = _flows_to_daily_usd(flows)
+        nav = reconstruct_nav(daily_pnl, terminal, fbd)
+        base_ret, base_flags = chain_linked_twr(nav, daily_pnl, fbd)
+        none_ret, none_flags = chain_linked_twr(nav, daily_pnl, fbd, prev0=None)
+        pd.testing.assert_series_equal(base_ret, none_ret, check_exact=True)
+        assert base_flags == none_flags == chain_linked_twr(nav, daily_pnl, fbd)[1]
+
+    # Self-sufficient golden on the clean fixture: day-0 prev is the reconstructed
+    # pre-history capital NAV_0 − pnl_0 − F_0, NOT a dropped-pnl0 shortcut. nav =
+    # [9975, 10025, 10000]; prev_0 = 9975 − 100 = 9875. A neuter deriving day-0
+    # prev differently when prev0=None (e.g. dropping pnl0) reddens THIS test, not
+    # only the sibling corpus.
+    clean = _pnl([100.0, 50.0, -25.0])
+    clean_fbd = _flows_to_daily_usd([])
+    clean_nav = reconstruct_nav(clean, 10_000.0, clean_fbd)
+    clean_ret, _ = chain_linked_twr(clean_nav, clean, clean_fbd)
+    assert clean_ret.iloc[0] == pytest.approx(100.0 / 9875.0)
+    assert clean_ret.iloc[1] == pytest.approx(50.0 / 9975.0)
+    assert clean_ret.iloc[2] == pytest.approx(-25.0 / 10025.0)
+
+
+def test_prev0_supplied_overrides_day0_prev() -> None:
+    """With ``prev0=X`` set, day-0 return is ``(nav0 − X − flow0)/X`` and
+    ``daily_pnl.iloc[0]`` does NOT enter the day-0 denominator (§1.3/§1.4).
+    Fixture where the pnl-derived prev and the supplied ``prev0`` DISAGREE, so the
+    prev0 arithmetic must win. Mutation: ignoring ``prev0`` when supplied flips
+    this red."""
+    daily_pnl = _pnl([100.0, 50.0, -25.0])
+    fbd = _flows_to_daily_usd([])
+    nav = reconstruct_nav(daily_pnl, 10_000.0, fbd)
+    nav0 = float(nav.iloc[0])
+    prev0 = 8_000.0  # deliberately != nav0 - pnl0 - flow0 (== nav0 - 100.0)
+    assert prev0 != nav0 - 100.0
+    returns, flags = chain_linked_twr(nav, daily_pnl, fbd, prev0=prev0)
+    assert returns.iloc[0] == pytest.approx((nav0 - prev0 - 0.0) / prev0)
+    # t>0 is unaffected — still uses the reconstructed NAV_{t-1}.
+    assert returns.iloc[1] == pytest.approx(
+        (float(nav.iloc[1]) - nav0 - 0.0) / nav0
+    )
+    assert flags == {}
+
+
+def test_prev0_guarded_dust_and_negative() -> None:
+    """``_guard_denominator`` applies to the supplied ``prev0`` UNCHANGED (§1.4):
+    a dust ``prev0`` fires ``dust_nav_guard`` on day 0; a negative ``prev0`` fires
+    ``negative_nav_guard`` — the guarded day is NaN, never a fabricated number.
+    Mutation: bypassing ``_guard_denominator`` for a supplied ``prev0`` flips this
+    red."""
+    daily_pnl = _pnl([100.0, 50.0, -25.0])
+    fbd = _flows_to_daily_usd([])
+    nav = reconstruct_nav(daily_pnl, 10_000.0, fbd)
+
+    dust_ret, dust_flags = chain_linked_twr(nav, daily_pnl, fbd, prev0=500.0)
+    assert np.isnan(dust_ret.iloc[0])
+    assert dust_flags.get("dust_nav_guard") is True
+
+    neg_ret, neg_flags = chain_linked_twr(nav, daily_pnl, fbd, prev0=-100.0)
+    assert np.isnan(neg_ret.iloc[0])
+    assert neg_flags.get("negative_nav_guard") is True
+
+
+# ---------------------------------------------------------------------------
 # DQ-01 — fail-loud NAV-denominator guards (flag, never substitute) + SC-4 pin
 # ---------------------------------------------------------------------------
 
