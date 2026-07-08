@@ -606,3 +606,102 @@ def test_dust_account_excluded_from_identity(monkeypatch: Any) -> None:
         "a dust-bearing account legitimately differs from a pure-USD roll — it is "
         "a parity-panel MOVED case (80-04), never a gate-i identity fixture (D8)"
     )
+
+
+def _build_ledger_from_rows(
+    rows_by_ccy: dict[str, list[dict[str, Any]]],
+    summaries: list[dict[str, Any]],
+    currencies: list[str],
+    monkeypatch: Any,
+) -> tuple[NativeLedger, di.CompletenessReport]:
+    """Build a NativeLedger via the REAL ``build_deribit_native_ledger`` from
+    explicit per-currency raw rows + summaries (all-USD-family → no index endpoint
+    is ever hit)."""
+
+    async def _enumerate_scopes(_ex: Any) -> list[Any]:
+        return [di.Scope("main", None, True)]
+
+    async def _resolve_scope_auth(_ex: Any, _scope: Any) -> dict[str, Any]:
+        return {}
+
+    async def _enumerate_currencies(_ex: Any, _scope: Any, _auth: Any) -> list[str]:
+        return list(currencies)
+
+    async def _paginate(
+        _ex: Any, _scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[dict[str, Any]]:
+        return list(rows_by_ccy.get(currency, []))
+
+    monkeypatch.setattr(di, "enumerate_scopes", _enumerate_scopes)
+    monkeypatch.setattr(di, "resolve_scope_auth", _resolve_scope_auth)
+    monkeypatch.setattr(di, "enumerate_currencies", _enumerate_currencies)
+    monkeypatch.setattr(di, "paginate_txn_log", _paginate)
+    stub = _DeribitAdapterStub(summaries)
+    return asyncio.run(di.build_deribit_native_ledger(stub))
+
+
+def test_same_family_swap_is_noop_in_coalesced_usd_bucket(monkeypatch: Any) -> None:
+    """SC-4 decision (same-family swap): HIGH-1's native ``swap`` inclusion is
+    native-only, so a same-family USDC↔USDT swap is absorbed by the branch-1
+    coalesce. A net-zero swap (−100 USDC / +100 USDT, both marked ≡ 1.0) sums to
+    EXACTLY 0.0 within the single 'USD' bucket, so it is a NO-OP: the native
+    reconstruction of an all-USD account WITH the swap is byte-identical to the SAME
+    account WITHOUT it, and it reconciles under the §5 inception gate (no false
+    breach). This pins that the swap fix cannot inject a spurious return into a
+    USD-native account — it is invisible to the SC-4 byte-identity gate. (A
+    cross-collateral swap, where one leg is an INDEXED coin, is the real
+    conservation case HIGH-1 reconciles at the integration test.)
+
+    A same-family swap with real slippage would net to a small nonzero USD loss the
+    coalesce correctly captures (native being MORE correct than the legacy path that
+    drops swaps entirely) — that is a MOVED parity case, not a gate-i fixture."""
+    # Baseline: deposit +1,000 USDC (day 0), settlement +50 USDC (day 1). No swap.
+    rows_no_swap = {
+        "USDC": [
+            {"type": "deposit", "currency": "USDC", "change": 1000.0,
+             "timestamp": _day_ms(0)},
+            {"type": "settlement", "currency": "USDC", "change": 50.0,
+             "timestamp": _day_ms(1)},
+        ]
+    }
+    led_no, rep_no = _build_ledger_from_rows(
+        rows_no_swap,
+        [{"currency": "USDC", "equity": 1050.0, "session_upl": 0.0}],
+        ["USDC"],
+        monkeypatch,
+    )
+    ret_no, _ = reconstruct_native_nav_and_twr(
+        led_no, indexable_currencies=rep_no.indexable_currencies, venue="deribit"
+    )
+
+    # Same account PLUS a net-zero same-family swap on day 1 (−100 USDC / +100 USDT).
+    # Terminal shifts −100 USDC / +100 USDT (net zero → coalesced anchor unchanged).
+    rows_swap = {
+        "USDC": [
+            {"type": "deposit", "currency": "USDC", "change": 1000.0,
+             "timestamp": _day_ms(0)},
+            {"type": "settlement", "currency": "USDC", "change": 50.0,
+             "timestamp": _day_ms(1)},
+            {"type": "swap", "currency": "USDC", "change": -100.0,
+             "timestamp": _day_ms(1)},
+        ],
+        "USDT": [
+            {"type": "swap", "currency": "USDT", "change": 100.0,
+             "timestamp": _day_ms(1)},
+        ],
+    }
+    led_sw, rep_sw = _build_ledger_from_rows(
+        rows_swap,
+        [
+            {"currency": "USDC", "equity": 950.0, "session_upl": 0.0},
+            {"currency": "USDT", "equity": 100.0, "session_upl": 0.0},
+        ],
+        ["USDC", "USDT"],
+        monkeypatch,
+    )
+    ret_sw, _ = reconstruct_native_nav_and_twr(
+        led_sw, indexable_currencies=rep_sw.indexable_currencies, venue="deribit"
+    )
+
+    # The swap legs cancel in the coalesced 'USD' bucket → byte-identical returns.
+    pd.testing.assert_series_equal(ret_no, ret_sw, check_exact=True)
