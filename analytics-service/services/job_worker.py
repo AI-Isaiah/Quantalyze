@@ -2586,6 +2586,55 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         ]
         _conflict = "strategy_id,date"
 
+    # MEDIUM-HIGH (v1.9 xhigh red team): make the derive AUTHORITATIVE for the
+    # strategy's series WITHIN its reconstructed span — an upsert alone never
+    # DELETES. A day the CURRENT derive REFUSES (NaN -> skipped above, 74-04) but a
+    # PRIOR derive wrote keeps its stale row; at load (run_csv_strategy_analytics)
+    # that day looks "present", the MEDIUM-1 NaN reinstatement does NOT fire, and
+    # cumulative_twr_segmented COMPOUNDS the stale return across a day this
+    # reconstruction refused -> the headline is BRIDGED across a stale value instead
+    # of suffix-only. At the v1.9 native cutover the native core's per-day DQ guards
+    # differ from the legacy USD rows that populated the table, so recomputed track
+    # records would silently mix stale legacy returns into refused days.
+    #
+    # Reconcile the axis: DELETE the strategy's csv_daily_returns rows inside the
+    # derive's AUTHORITATIVE span, then re-insert the fresh payload below. A refused
+    # day thereby becomes honestly ABSENT (the load boundary reinstates its NaN).
+    #
+    # SPAN/SCOPE bound — the delete must NEVER remove legitimate out-of-scope
+    # history. The authoritative span is EXACTLY the dense reconstructed calendar
+    # [returns.index.min(), returns.index.max()]. `returns` here is the POST-terminus
+    # dense Series (gap_fill_daily_returns -> pd.date_range, then the DQ-02 terminus
+    # segmentation), so its min/max cleanly bound the span for BOTH venue classes:
+    #   - full_history (Deribit, no retention cap): [min,max] IS the whole strategy
+    #     series — every stored row is in-scope and authoritative.
+    #   - retention-windowed (ccxt OKX/Bybit): [min,max] is only the reconstructed
+    #     window. Rows OLDER than index.min() (written by an EARLIER derive when the
+    #     retention floor sat further back) are strictly < span_start and fall
+    #     OUTSIDE the ranged delete -> PRESERVED. The delete is a bounded gte/lte on
+    #     `date`, so it can only touch days this derive actually reconstructed.
+    _span_start = returns.index.min().date().isoformat()
+    _span_end = returns.index.max().date().isoformat()
+
+    def _reconcile_span_delete(
+        span_start: str = _span_start, span_end: str = _span_end,
+    ) -> None:
+        _q = (
+            ctx.supabase.table("csv_daily_returns")
+            .delete()
+            .gte("date", span_start)
+            .lte("date", span_end)
+        )
+        # Scope on the SAME axis as the upsert conflict arbiter (per-key vs
+        # per-strategy) so the reconcile can never cross-wipe a sibling series.
+        if is_key_mode:
+            _q = _q.eq("api_key_id", api_key_id)
+        else:
+            _q = _q.eq("strategy_id", strategy_id)
+        _q.execute()
+
+    await db_execute(_reconcile_span_delete)
+
     _UPSERT_CHUNK = 1000
     for _start in range(0, len(rows_payload), _UPSERT_CHUNK):
         _batch = rows_payload[_start:_start + _UPSERT_CHUNK]
