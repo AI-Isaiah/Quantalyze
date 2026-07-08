@@ -375,6 +375,7 @@ from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
 
 from services.deribit_ingest import (  # noqa: E402
     CompletenessReport,
+    DeribitNativeAccountState,
     LedgerCompletenessError,
     LedgerTruncatedError,
 )
@@ -481,11 +482,21 @@ def _deribit_patches(
             new=ledger_mock,
         ),
         patch(
-            # FLOW-04 (77-03) + MUST-2: the deribit branch reads the companion
-            # 4-tuple (equity + session-uPnL wedge + unreadable flag) from ONE
-            # get_account_summaries response — kept for C2 + the parity anchor.
-            "services.deribit_ingest.fetch_deribit_account_equity_and_upnl_usd",
-            new=AsyncMock(return_value=(100_000.0, False, 0.0, False)),
+            # 80-06 (HIGH-1+MEDIUM-1, D5 one-read): the deribit branch reads its
+            # anchor ONCE via fetch_deribit_native_account_state — native maps
+            # (core anchor) + collapsed USD equity/wedge (materiality + C2) from ONE
+            # get_account_summaries response — and threads it into the builder.
+            "services.deribit_ingest.fetch_deribit_native_account_state",
+            new=AsyncMock(
+                return_value=DeribitNativeAccountState(
+                    native_equity={"USDC": 1.0},
+                    native_upnl={},
+                    collapsed_equity_usd=100_000.0,
+                    collapsed_upnl_usd=0.0,
+                    balance_error=False,
+                    upnl_unreadable=False,
+                )
+            ),
         ),
         patch("services.broker_dailies.combine_native_ledger", new=combine),
         patch(

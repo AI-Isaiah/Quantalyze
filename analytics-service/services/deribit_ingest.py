@@ -106,6 +106,20 @@ class CurrencyEnumerationError(RuntimeError):
     enumeration fails loud rather than under-anchor the expected coverage."""
 
 
+class DeribitTransientReadError(RuntimeError):
+    """A ``get_account_summaries`` anchor read FAILED/came back empty (I/O), so
+    there is NO native anchor to reconstruct from. This is a TRANSIENT read
+    condition — NOT a structural refusal — so it must NEVER be dispositioned
+    permanent: a blank read that silently built a ZERO-anchor ledger would roll
+    every bucket back from 0.0 and the ``full_history`` §5 inception gate would
+    false-refuse ``InceptionReconciliationError`` (permanent, no retry) on a mere
+    network blip. Deliberately a NON-``ValueError`` / non-``NavReconstructionError``
+    type so it escapes the deribit permanent except chain to the generic
+    retryable dispatcher (which retries). An unvaluable COLLAPSE (a held coin with
+    no USD index) keeps the readable native maps and is left to the core's
+    structural refusal — it is NOT this transient case."""
+
+
 # 2015-01-01 UTC in ms — full Deribit history default (txn-log spans 2023→2026).
 DEFAULT_START_MS: int = 1_420_070_400_000
 
@@ -1145,11 +1159,21 @@ async def _build_dense_native_marks(
     ``get_index_price``) whose ``get_delivery_prices`` is empty (SOL, an explicit
     target) or gappy on an event day (BTC/ETH) was FALSE-refused
     ``missing_daily_marks`` by the core, even though the USD path values it via each
-    row's own ``index_price``. Unioning the own-row index gives native marks
-    coverage IDENTICAL to the USD path. Own-row index WINS on a day both sources
-    carry (identical precedence to ``deribit_txn.py`` — the ledger's own same-day
-    index always wins); a day present in NEITHER stays absent so the core refuses it
-    honestly. Marks are NEVER filled — only the union of two genuine same-day marks.
+    row's own ``index_price``. Unioning the own-row index restores coverage on
+    EVENT days to match the USD path exactly (each row's own same-day index).
+
+    But the equivalence is NOT total: the native roll additionally needs a mark on
+    every non-event CARRY-FORWARD day (the core carries balances forward and values
+    them daily), which the USD leg — dated per realized event only — never required.
+    Carry-forward-day density therefore rests on the ``get_delivery_prices`` feed,
+    and a SPARSE-feed INDEXED coin can still refuse ``missing_daily_marks`` on a
+    quiet day where the USD path valued it. This is VALIDATED against real coin keys
+    at the 80-04 parity gate; if it manifests it is resolved there with a documented
+    fallback/guard (NOT here — no fallback is added now, ahead of real data). Own-row
+    index WINS on a day both sources carry (identical precedence to
+    ``deribit_txn.py`` — the ledger's own same-day index always wins); a day present
+    in NEITHER stays absent so the core refuses it honestly. Marks are NEVER filled —
+    only the union of two genuine same-day marks.
 
     USD-family currencies get NO marks entry (their mark is the literal ``1.0`` in
     the core, §4.1). An UNINDEXABLE currency gets NONE either — the adapter never
@@ -1226,6 +1250,7 @@ async def build_deribit_native_ledger(
     exchange: Any,
     since_ms: int | None = None,
     *,
+    account_state: DeribitNativeAccountState | None = None,
     sleep: SleepFn = asyncio.sleep,
 ) -> tuple[NativeLedger, CompletenessReport]:
     """Assemble a :class:`~services.native_nav.NativeLedger` for the landed Phase-79
@@ -1237,10 +1262,13 @@ async def build_deribit_native_ledger(
         each ``{day: native_change}`` dict converted to a tz-naive midnight Series
         (D9).
       * ``terminal_native_equity`` / ``terminal_upnl_native`` — the per-currency
-        native anchor + wedge read from the ONE ``get_account_summaries`` response
-        (:func:`fetch_deribit_native_account_state`). The unmarkable-wedge App A #6
-        refusal is delivered BY CONSTRUCTION — the raw native ``session_upl`` is
-        passed through and the core's value-gate refuses it.
+        native anchor + wedge from the ONE ``get_account_summaries`` response
+        (:func:`fetch_deribit_native_account_state`). The caller threads its
+        already-read ``account_state`` in (D5 one-read: the core anchor + the
+        caller's materiality/C2 basis judge the SAME response); a standalone /
+        test caller omits it and this reads the anchor itself. The unmarkable-wedge
+        App A #6 refusal is delivered BY CONSTRUCTION — the raw native
+        ``session_upl`` is passed through and the core's value-gate refuses it.
       * ``marks`` — a DENSE daily ``{ccy}_usd`` settlement-index Series per INDEXED
         nonzero currency (:func:`_build_dense_native_marks`); USD-family absent.
       * ``native_flows`` — the crawl's 4-field ``(day, ccy)`` dated flows, reused
@@ -1261,7 +1289,15 @@ async def build_deribit_native_ledger(
         for ccy, day_map in txn_rows_to_native_daily(raw_rows).items()
     }
     native_flows = report.dated_external_flows
-    state = await fetch_deribit_native_account_state(exchange)
+    # HIGH-1/MEDIUM-1 (D5 one-read): use the anchor the caller already read from
+    # the SAME get_account_summaries response so the core's anchor + the caller's
+    # materiality/C2 basis judge ONE response. Standalone / test callers pass
+    # nothing → fall back to a self-contained read (no behaviour change for them).
+    state = (
+        account_state
+        if account_state is not None
+        else await fetch_deribit_native_account_state(exchange)
+    )
     marks = await _build_dense_native_marks(
         exchange,
         indexable=indexable,

@@ -2007,12 +2007,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             from services.broker_dailies import combine_native_ledger
             from services.deribit_ingest import (
                 CurrencyEnumerationError,
+                DeribitTransientReadError,
                 LedgerCompletenessError,
                 LedgerTruncatedError,
                 ScopeAuthError,
                 assert_ledger_complete,
                 build_deribit_native_ledger,
-                fetch_deribit_account_equity_and_upnl_usd,
+                fetch_deribit_native_account_state,
             )
             from services.deribit_txn import LedgerValuationError
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
@@ -2044,15 +2045,42 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 
                 await db_execute(_upsert)
 
-            # USD equity anchor — fetch_account_equity_usd does NOT cover deribit
-            # (coin-margined USDT balance is not USD equity); this converts each
-            # currency's coin equity at its event/mark index into USD. FLOW-04
-            # (v1.8): the companion session-uPnL wedge (session_upl) rides the SAME
-            # get_account_summaries response + index_prices (77-02) — noise-guarded
-            # below before it threads into the realized-basis roll terminal.
-            equity, balance_error, open_unrealized_usd, upnl_unreadable = (
-                await fetch_deribit_account_equity_and_upnl_usd(ctx.exchange)
-            )
+            # 80-06 (HIGH-1+MEDIUM-1, one-read root-cause): read the Deribit anchor
+            # ONCE for the WHOLE branch. fetch_deribit_native_account_state yields
+            # BOTH the native maps the core anchors on AND the collapsed USD
+            # equity/wedge that materiality + C2 judge, from the SAME
+            # get_account_summaries response (D5) — so the core's anchor can never
+            # diverge from the materiality basis, and there is no second summaries
+            # fetch inside the builder. fetch_account_equity_usd does NOT cover
+            # deribit (coin-margined USDT balance is not USD equity); the collapse
+            # converts each currency's coin equity at its event/mark index into USD.
+            # FLOW-04 (v1.8): the companion session-uPnL wedge (session_upl) rides
+            # this SAME response + index_prices (77-02) — noise-guarded below before
+            # it threads into the realized-basis roll terminal.
+            account_state = await fetch_deribit_native_account_state(ctx.exchange)
+            # HIGH-1: a FAILED / empty summaries read yields EMPTY native maps. A
+            # blank read is I/O, NOT a structural refusal — fail RETRYABLE rather
+            # than build a ZERO-anchor ledger. A zero anchor rolls every bucket back
+            # from 0.0 → the full_history §5 inception gate false-refuses
+            # InceptionReconciliationError, which the deribit except chain
+            # dispositions PERMANENT (no retry) — a transient blip would then
+            # permanently kill analytics. Raise a non-ValueError /
+            # non-NavReconstructionError type BEFORE the try so it escapes the
+            # permanent except chain to the generic retryable dispatcher. An
+            # unvaluable COLLAPSE (a held coin with no USD index) still carries
+            # readable native maps (native_equity non-empty) → NOT this case; it is
+            # left to the core's structural refusal so it is never retried forever
+            # (T-80-10).
+            if account_state.balance_error and not account_state.native_equity:
+                raise DeribitTransientReadError(
+                    "Deribit get_account_summaries anchor read failed/empty (no "
+                    "native anchor) — retrying rather than building a zero-anchor "
+                    "ledger."
+                )
+            equity = account_state.collapsed_equity_usd
+            balance_error = account_state.balance_error
+            open_unrealized_usd = account_state.collapsed_upnl_usd
+            upnl_unreadable = account_state.upnl_unreadable
             try:
                 # v1.9 NATIVE SWITCH (80-03, NAT-05): every Deribit account —
                 # USD-native included — is reconstructed in NATIVE units through
@@ -2064,7 +2092,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # funding-inside-settlement and completeness accounting are
                 # unchanged) and assembles the NativeLedger + CompletenessReport.
                 native_ledger, _completeness = await build_deribit_native_ledger(
-                    ctx.exchange
+                    ctx.exchange, account_state=account_state
                 )
                 # Re-anchored D-02 gate: a silently-partial ledger FAILS LOUD
                 # BEFORE any upsert — no partial track record is ever written. The
@@ -2124,7 +2152,6 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     > UNREALIZED_MATERIALITY_RATIO
                 ):
                     meta["unrealized_pnl_in_anchor"] = True
-                    meta["computation_status_hint"] = "complete_with_warnings"
             except (
                 LedgerCompletenessError,
                 LedgerTruncatedError,

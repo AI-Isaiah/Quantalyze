@@ -25,10 +25,18 @@ import pandas as pd
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from services.deribit_ingest import CompletenessReport
+from services.deribit_ingest import (
+    CompletenessReport,
+    DeribitNativeAccountState,
+    DeribitTransientReadError,
+)
 from services.deribit_txn import LedgerValuationError
 from services.external_flows import ExternalFlow
-from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
+from services.job_worker import (
+    DispatchOutcome,
+    classify_exception,
+    run_derive_broker_dailies_job,
+)
 from services.native_nav import (
     InceptionReconciliationError,
     NativeLedger,
@@ -85,6 +93,30 @@ def _stub_native_ledger(
     )
 
 
+def _account_state(
+    *,
+    equity: float | None,
+    balance_error: bool,
+    upnl: float,
+    upnl_unreadable: bool,
+    native_equity: dict[str, float] | None = None,
+) -> DeribitNativeAccountState:
+    """A DeribitNativeAccountState for the branch's SINGLE anchor read (80-06 D5).
+    native_equity defaults to a non-empty map so the HIGH-1 zero-anchor retryable
+    guard (``balance_error and not native_equity``) does NOT fire — a test that
+    wants the failed-read case passes ``native_equity={}``."""
+    return DeribitNativeAccountState(
+        native_equity=(
+            native_equity if native_equity is not None else {"USDC": 1.0}
+        ),
+        native_upnl={},
+        collapsed_equity_usd=equity,
+        collapsed_upnl_usd=upnl,
+        balance_error=balance_error,
+        upnl_unreadable=upnl_unreadable,
+    )
+
+
 def _patches(
     ctx: MagicMock,
     *,
@@ -96,12 +128,17 @@ def _patches(
     balance_error: bool = False,
     upnl: float = 0.0,
     upnl_unreadable: bool = False,
+    native_equity: dict[str, float] | None = None,
+    state_spy: AsyncMock | None = None,
 ) -> tuple[list, MagicMock]:
     """Patch set for the NATIVE deribit branch. fetch_all_trades RAISES so any
     test that reaches combine proves the deribit branch never touched it (D-08).
     build_deribit_native_ledger returns ``(NativeLedger, CompletenessReport)`` and
     combine_native_ledger is a spy — the (returns, meta) it yields drives the
-    downstream CSV write exactly as before (byte-shape identical, §9.2)."""
+    downstream CSV write exactly as before (byte-shape identical, §9.2).
+
+    The branch reads its anchor ONCE via fetch_deribit_native_account_state
+    (80-06 D5 one-read); ``state_spy`` lets a test count that single call."""
     two_day = pd.Series(
         [0.01, -0.02],
         index=pd.DatetimeIndex(["2024-05-01", "2024-05-02"]),
@@ -133,12 +170,21 @@ def _patches(
             new=ledger_mock,
         ),
         patch(
-            # FLOW-04 (77-03) + MUST-2: the deribit branch reads the companion
-            # 4-tuple (equity + session-uPnL wedge + unreadable flag) from ONE
-            # get_account_summaries response — kept for C2 + the parity anchor.
-            "services.deribit_ingest.fetch_deribit_account_equity_and_upnl_usd",
-            new=AsyncMock(
-                return_value=(equity, balance_error, upnl, upnl_unreadable)
+            # 80-06 (HIGH-1+MEDIUM-1, D5 one-read): the deribit branch reads its
+            # anchor ONCE — native maps (core anchor) + collapsed USD equity/wedge
+            # (materiality + C2) from ONE get_account_summaries response — and
+            # threads it into build_deribit_native_ledger so there is no second
+            # summaries fetch.
+            "services.deribit_ingest.fetch_deribit_native_account_state",
+            new=state_spy
+            or AsyncMock(
+                return_value=_account_state(
+                    equity=equity,
+                    balance_error=balance_error,
+                    upnl=upnl,
+                    upnl_unreadable=upnl_unreadable,
+                    native_equity=native_equity,
+                )
             ),
         ),
         patch("services.broker_dailies.combine_native_ledger", new=combine),
@@ -300,6 +346,134 @@ async def test_c2_equity_vs_activity_floor_preserved() -> None:
         result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
     assert result.outcome == DispatchOutcome.FAILED
     combine.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_failed_summaries_read_is_retryable_not_zero_anchor() -> None:
+    """HIGH-1: a Deribit job whose get_account_summaries anchor read FAILS
+    (balance_error with EMPTY native maps) must fail RETRYABLE, NEVER build a
+    zero-anchor ledger. The branch raises DeribitTransientReadError BEFORE building
+    any ledger, so a zero anchor never reaches the core (no false
+    InceptionReconciliationError) and NO permanent 'failed' analytics stamp is
+    written; the generic dispatcher retries it (classify_exception != 'permanent').
+
+    ROOT CAUSE: fetch_deribit_native_account_state swallows a summaries-fetch blip
+    → empty native maps + balance_error. Pre-80-06 that zero anchor rolled every
+    bucket from 0.0 → the full_history §5 inception gate false-refused
+    InceptionReconciliationError → dispositioned PERMANENT (no retry): a transient
+    blip permanently killed analytics.
+
+    NEUTER: removing the ``balance_error and not native_equity`` transient-raise
+    lets the branch proceed to build → combine is reached and no exception is
+    raised → both the pytest.raises and combine.assert_not_called() assertions
+    RED."""
+    ctx, capture = _deribit_ctx()
+    patches, combine = _patches(
+        ctx,
+        report=CompletenessReport(total_return_rows=2),
+        equity=None,
+        balance_error=True,
+        native_equity={},  # FAILED / empty read → NO native anchor
+    )
+    with _apply(patches), patch(
+        "services.job_worker._exchange_preflight",
+        new=AsyncMock(return_value=ctx),
+    ):
+        with pytest.raises(DeribitTransientReadError):
+            await run_derive_broker_dailies_job({"strategy_id": "s-drb"})
+    # A zero-anchor ledger NEVER reached the core.
+    combine.assert_not_called()
+    # RETRYABLE, not a terminal permanent stamp.
+    stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+    assert not stamps, "a transient read blip must NOT stamp a permanent 'failed'"
+    assert classify_exception(DeribitTransientReadError("x"))[0] != "permanent"
+
+
+@pytest.mark.asyncio
+async def test_unvaluable_collapse_is_not_transient_retry() -> None:
+    """Discriminator proof (root-cause narrowness): balance_error with NON-empty
+    native maps — an unvaluable COLLAPSE (a held coin whose {ccy}_usd index did not
+    resolve, so collapsed_equity is None but the native maps are READABLE) — is NOT
+    the failed-read transient case. The branch does NOT raise
+    DeribitTransientReadError; it builds from the readable native maps and lets the
+    core structurally refuse (permanent), so an unmarkable coin is NEVER retried
+    forever (T-80-10). Blanket-raising on balance_error would wrongly redden this to
+    an infinite retry — this test guards that."""
+    ctx, _ = _deribit_ctx()
+    patches, combine = _patches(
+        ctx,
+        report=CompletenessReport(total_return_rows=2),
+        equity=None,
+        balance_error=True,
+        native_equity={"BTC": 2.0},  # readable native maps → NOT a failed read
+    )
+    with _apply(patches):
+        result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
+    assert result.outcome == DispatchOutcome.DONE
+    combine.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_deribit_branch_reads_summaries_once() -> None:
+    """80-06 D5 one-read pin: the deribit branch fetches the account anchor EXACTLY
+    ONCE (pre-80-06 it read TWICE — a separate collapsed read A + a second read
+    inside build_deribit_native_ledger — so the core anchor could diverge from the
+    materiality/C2 basis). The single state threads into the builder; combined with
+    the builder-injection pin (test_deribit_ingest) this fixes the branch total at
+    1. Neuter: reintroducing a second read inside the branch → call_count 2 → RED."""
+    ctx, _ = _deribit_ctx()
+    state_spy = AsyncMock(
+        return_value=_account_state(
+            equity=_RAW_EQUITY_USD, balance_error=False, upnl=0.0,
+            upnl_unreadable=False,
+        )
+    )
+    patches, _ = _patches(
+        ctx,
+        report=CompletenessReport(total_return_rows=2),
+        state_spy=state_spy,
+    )
+    with _apply(patches):
+        result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
+    assert result.outcome == DispatchOutcome.DONE
+    assert state_spy.call_count == 1, (
+        "the deribit branch must read get_account_summaries exactly once "
+        f"(D5 one-read); got {state_spy.call_count}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_deribit_material_wedge_prestamps_complete_with_warnings() -> None:
+    """LOW-1: a material-wedge deribit account still reaches complete_with_warnings
+    via the NAV_TWR_GUARD_KEYS prestamp (unrealized_pnl_in_anchor → the
+    data_quality_flags the CSV run surfaces), NOT the dropped-dead
+    meta['computation_status_hint'] assignment. equity 100k + wedge 8k (8% > the 5%
+    materiality ratio) on a trustworthy anchor → the branch sets
+    meta['unrealized_pnl_in_anchor'] and the prestamp writes it. Strategy mode (the
+    prestamp channel is strategy-keyed)."""
+    ctx, capture = _deribit_ctx()
+    patches, _ = _patches(
+        ctx,
+        report=CompletenessReport(total_return_rows=2),
+        equity=100_000.0,
+        upnl=8_000.0,
+    )
+    with _apply(patches), patch(
+        "services.job_worker._exchange_preflight",
+        new=AsyncMock(return_value=ctx),
+    ):
+        result = await run_derive_broker_dailies_job({"strategy_id": "s-drb"})
+    assert result.outcome == DispatchOutcome.DONE
+    flagged = [
+        payload for name, payload, _ in capture["upserts"]
+        if name == "strategy_analytics"
+        and (payload.get("data_quality_flags") or {}).get("unrealized_pnl_in_anchor")
+    ]
+    assert flagged, (
+        "a material deribit wedge must pre-stamp unrealized_pnl_in_anchor onto "
+        "strategy_analytics (the complete_with_warnings channel) — NOT rely on the "
+        "dropped computation_status_hint meta key"
+    )
 
 
 def test_f1_scalar_region_source_scan() -> None:

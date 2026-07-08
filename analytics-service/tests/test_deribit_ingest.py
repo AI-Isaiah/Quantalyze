@@ -1761,6 +1761,109 @@ async def test_build_native_ledger_assembles_fields(monkeypatch: Any) -> None:
     assert btc_flows and btc_flows[0].quantity == pytest.approx(0.5)
 
 
+async def test_build_native_ledger_uses_injected_state_no_second_read(
+    monkeypatch: Any,
+) -> None:
+    """80-06 (HIGH-1+MEDIUM-1, D5 one-read): given ``account_state=<state>`` the
+    builder uses the INJECTED anchor and does NOT fetch a second
+    get_account_summaries — so the core anchor + the caller's materiality/C2 basis
+    judge the SAME response. Spy: fetch_deribit_native_account_state must NOT be
+    called; the ledger anchors on the injected native_equity. Neuter: reverting the
+    builder to an unconditional ``await fetch_deribit_native_account_state(exchange)``
+    trips the spy (a second read) → RED."""
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [{"type": "settlement", "currency": "BTC", "change": 10.0,
+                     "timestamp": _DAY1_MS}]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes,
+        currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        return {"2024-01-01": 50000.0}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    async def _must_not_read(_ex: Any) -> Any:  # pragma: no cover - asserted below
+        raise AssertionError(
+            "injected account_state must suppress the second summaries read (D5)"
+        )
+
+    monkeypatch.setattr(di, "fetch_deribit_native_account_state", _must_not_read)
+
+    injected = di.DeribitNativeAccountState(
+        native_equity={"BTC": 99.0},
+        native_upnl={},
+        collapsed_equity_usd=99.0 * 50000.0,
+        collapsed_upnl_usd=0.0,
+        balance_error=False,
+        upnl_unreadable=False,
+    )
+    ex = _NativeAnchorStub(summaries=[], index_price={"BTC": 50000.0})
+    ledger, _report = await di.build_deribit_native_ledger(
+        ex, account_state=injected
+    )
+    # The ledger anchors on the INJECTED state — never a re-read.
+    assert ledger.terminal_native_equity == {"BTC": 99.0}
+
+
+async def test_build_native_ledger_fallback_reads_once_when_not_injected(
+    monkeypatch: Any,
+) -> None:
+    """Standalone / test callers omit account_state → the builder keeps its
+    self-contained fallback read (EXACTLY once, so the branch total stays 1 once
+    the caller threads its own read in). Spy call_count == 1."""
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [{"type": "settlement", "currency": "BTC", "change": 10.0,
+                     "timestamp": _DAY1_MS}]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes,
+        currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        return {"2024-01-01": 50000.0}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    calls = {"n": 0}
+    _real_state = di.fetch_deribit_native_account_state
+
+    async def _counting_state(ex: Any) -> Any:
+        calls["n"] += 1
+        return await _real_state(ex)
+
+    monkeypatch.setattr(di, "fetch_deribit_native_account_state", _counting_state)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 30.0, "session_upl": 0.0}],
+        index_price={"BTC": 50000.0},
+    )
+    ledger, _report = await di.build_deribit_native_ledger(ex)
+    assert calls["n"] == 1, (
+        f"fallback must read the anchor exactly once; got {calls['n']}"
+    )
+    assert ledger.terminal_native_equity == {"BTC": 30.0}
+
+
 async def test_build_native_ledger_dense_marks_and_usd_absent(
     monkeypatch: Any,
 ) -> None:
