@@ -2098,3 +2098,26 @@ def test_balance_identity_default_frozenset_is_byte_identical() -> None:
     native_broken = txn_rows_to_native_daily(broken)
     with pytest.raises(LedgerValuationError):
         assert_balance_identity(broken, native_broken)
+
+
+def test_summary_blank_currency_fails_loud() -> None:
+    """WR-03: an options_settlement_summary row carrying rpl+upl but a blank/missing
+    currency would mis-bucket the P&L into a "" bucket. Fail loud (schema-drift
+    discipline, consistent with _required_summary_field), never silently attribute
+    option P&L to a blank currency."""
+    blank = {
+        "type": "options_settlement_summary",
+        "instrument_name": "BTC-14JUL25-60000-C",
+        "currency": "",
+        "change": 0.0,
+        "realized_pl": 0.03,
+        "unrealized_pl": -0.01,
+        "timestamp": _ms(_SUM_LO),
+        "id": 8299001,
+    }
+    with pytest.raises(LedgerValuationError):
+        txn_rows_to_native_daily([blank])
+    # Missing currency key entirely → same fail-loud.
+    missing = {k: v for k, v in blank.items() if k != "currency"}
+    with pytest.raises(LedgerValuationError):
+        txn_rows_to_native_daily([missing])

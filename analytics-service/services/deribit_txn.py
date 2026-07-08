@@ -1274,6 +1274,18 @@ def txn_rows_to_native_daily(
             if contribution == 0.0:
                 continue
             ccy = str(row.get("currency", "")).upper()
+            # WR-03: a nonzero-P&L summary with a blank/missing currency would
+            # mis-bucket realized_pl+unrealized_pl into a "" bucket. Fail loud
+            # (schema-drift discipline, consistent with _required_summary_field) —
+            # never silently attribute option P&L to a blank currency.
+            if not ccy:
+                raise LedgerValuationError(
+                    f"options_settlement_summary Deribit row id={row.get('id')!r} "
+                    "has empty/missing currency yet carries nonzero "
+                    "realized_pl+unrealized_pl — refusing to bucket option P&L into "
+                    "a blank-currency bucket (schema drift would silently "
+                    "mis-attribute realized cash)"
+                )
             key = (day, ccy)
             by_day_ccy[key] = by_day_ccy.get(key, 0.0) + contribution
             continue
