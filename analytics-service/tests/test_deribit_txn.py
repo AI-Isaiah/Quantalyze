@@ -32,7 +32,12 @@ from services.deribit_txn import (
     LedgerValuationError,
     _INVERSE_CURRENCIES,
     _LINEAR_CURRENCIES,
+    _NATIVE_CASH_BEARING_TYPES,
+    _NATIVE_OPTIONS_SUMMARY_TYPES,
+    _pre_coverage_option_days,
     _row_is_linear,
+    _summary_coverage_windows,
+    assert_balance_identity,
     classify_instrument,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
@@ -1567,3 +1572,442 @@ def test_flow_every_emitted_flow_passes_validate_shape() -> None:
     assert flows  # non-empty
     for f in flows:
         assert validate_flow_shape(f) is f
+
+
+# ===========================================================================
+# Phase 82 — options-aware native daily P&L (coverage-gated classifier +
+# balance-identity guard). Every money-path test below FAILS on pre-fix code
+# (which sums option `trade`/`delivery` premium `change` as P&L and ignores the
+# options_settlement_summary channel) and is mutation-honest.
+# ===========================================================================
+
+# Covered-era anchors: BTC summaries bracket 2025-07-13 → window covers it.
+_SUM_LO = "2025-07-12T08:00:00+00:00"  # first summary
+_SUM_HI = "2025-07-14T08:00:00+00:00"  # last summary
+_COVERED_DAY = "2025-07-13T10:00:00+00:00"  # inside [first−24h, last]
+
+
+def _summary_row(
+    ts: str, *, ccy: str = "BTC", rpl: float = 0.0, upl: float = 0.0, rid: int = 0
+) -> dict[str, object]:
+    """An options_settlement_summary row: change is ALWAYS 0.0; the P&L lives in
+    realized_pl (session realized) + unrealized_pl (session DELTA, load-bearing)."""
+    return {
+        "type": "options_settlement_summary",
+        "instrument_name": "BTC-14JUL25-60000-C",
+        "currency": ccy,
+        "change": 0.0,
+        "realized_pl": rpl,
+        "unrealized_pl": upl,
+        "timestamp": _ms(ts),
+        "id": 8200000 + rid,
+    }
+
+
+def _option_trade(
+    ts: str,
+    *,
+    ccy: str = "BTC",
+    change: float,
+    commission: float = 0.0007,
+    instrument: str = "BTC-14JUL25-60000-C",
+    rid: int = 0,
+) -> dict[str, object]:
+    return {
+        "type": "trade",
+        "instrument_name": instrument,
+        "currency": ccy,
+        "change": change,
+        "commission": commission,
+        "timestamp": _ms(ts),
+        "id": 8210000 + rid,
+    }
+
+
+def test_option_trade_premium_excluded_fee_kept_inside_coverage() -> None:
+    """The 2025-07-13 regression shape: option trade rows INSIDE coverage with a
+    large net premium `change` contribute ONLY `−commission` — the premium cash
+    is carried by the summary channel, never counted as P&L.
+
+    Mutation-honest: the pre-fix formula sums `change=+2.736` as native pnl (the
+    +65% spike); this asserts the day is `−0.0007`, so reverting to `change`
+    reddens it hard."""
+    rows = [
+        _summary_row(_SUM_LO, rpl=0.0, upl=0.0, rid=1),
+        _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=2),
+        _option_trade(_COVERED_DAY, change=2.736, commission=0.0007, rid=1),
+    ]
+    native = txn_rows_to_native_daily(rows)
+    assert native["BTC"] == {"2025-07-13": pytest.approx(-0.0007, abs=1e-12)}
+
+
+def test_option_rows_outside_coverage_keep_change() -> None:
+    """Option rows BEFORE `first_summary − 24h` (pre-rollout) keep full `change`;
+    and a currency with NO summaries keeps `change` on EVERY option row."""
+    # (a) pre-rollout: 2 days before the −24h lower edge.
+    pre = [
+        _summary_row(_SUM_LO, rid=3),
+        _summary_row(_SUM_HI, rid=4),
+        _option_trade("2025-07-09T10:00:00+00:00", change=2.736, rid=2),
+    ]
+    native = txn_rows_to_native_daily(pre)
+    assert native["BTC"] == {"2025-07-09": pytest.approx(2.736, abs=1e-9)}
+
+    # (b) no summaries for the currency at all → every option row cash-basis.
+    no_win = [_option_trade(_COVERED_DAY, change=2.736, ccy="ETH", rid=3)]
+    native2 = txn_rows_to_native_daily(no_win)
+    assert native2["ETH"] == {"2025-07-13": pytest.approx(2.736, abs=1e-9)}
+
+
+def test_coverage_window_bounds() -> None:
+    """The −24h lower edge and the last-summary upper edge are both correct."""
+    windows = _summary_coverage_windows(
+        [_summary_row(_SUM_LO, rid=5), _summary_row(_SUM_HI, rid=6)]
+    )
+    start, end = windows["BTC"]
+    assert start == pytest.approx(_ms(_SUM_LO) - 24 * 3600 * 1000, abs=1)
+    assert end == pytest.approx(_ms(_SUM_HI), abs=1)
+
+    # Option trade 23h before the first summary is INSIDE (−24h edge covers it).
+    inside_edge = [
+        _summary_row(_SUM_LO, rid=7),
+        _summary_row(_SUM_HI, rid=8),
+        _option_trade("2025-07-11T09:00:00+00:00", change=1.0, commission=0.002, rid=4),
+    ]
+    n1 = txn_rows_to_native_daily(inside_edge)
+    assert n1["BTC"] == {"2025-07-11": pytest.approx(-0.002, abs=1e-12)}
+
+    # Option trade AFTER the last summary is OUTSIDE → trailing-edge cash basis.
+    after_edge = [
+        _summary_row(_SUM_LO, rid=9),
+        _summary_row(_SUM_HI, rid=10),
+        _option_trade("2025-07-15T09:00:00+00:00", change=1.0, commission=0.002, rid=5),
+    ]
+    n2 = txn_rows_to_native_daily(after_edge)
+    assert n2["BTC"] == {"2025-07-15": pytest.approx(1.0, abs=1e-9)}
+
+
+def test_options_settlement_summary_enters_native_pnl() -> None:
+    """A summary row (change=0.0, realized_pl=0.03, unrealized_pl=-0.01) adds
+    +0.02 to that (day, ccy) — the NEW native-path classification of a type the
+    pre-fix code left unclassified (would ignore its zero change)."""
+    rows = [_summary_row(_SUM_LO, rpl=0.03, upl=-0.01, rid=11)]
+    native = txn_rows_to_native_daily(rows)
+    assert native["BTC"] == {"2025-07-12": pytest.approx(0.02, abs=1e-12)}
+
+
+def test_summary_unrealized_pl_is_load_bearing() -> None:
+    """unrealized_pl is a session DELTA and is summed WITH realized_pl. Dropping
+    it breaks the balance-identity closure on a covered fixture.
+
+    Encodes WHY it is summed: a closure fixture where Σ_inside(change+commission)
+    == Σ(rpl+upl); zeroing upl in the computed total opens a residual the guard
+    catches."""
+    # One covered option trade: change=+1.0, commission=0.01 → fee-gross 1.01.
+    # Summary carries rpl=0.6 + upl=0.41 = 1.01 → closes.
+    rows = [
+        _summary_row(_SUM_LO, rpl=0.6, upl=0.41, rid=12),
+        _summary_row(_SUM_HI, rid=13),
+        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=6),
+    ]
+    native = txn_rows_to_native_daily(rows)
+    # Green: full closure passes.
+    assert_balance_identity(rows, native)
+    # Mutation: drop unrealized_pl from the summed total → residual 0.41 > tol.
+    broken = {
+        c: dict(days) for c, days in native.items()
+    }
+    broken["BTC"]["2025-07-12"] = 0.6  # rpl only (upl dropped)
+    with pytest.raises(LedgerValuationError):
+        assert_balance_identity(rows, broken)
+
+
+@pytest.mark.parametrize(
+    "field,bad",
+    [
+        ("realized_pl", None),
+        ("realized_pl", ""),
+        ("realized_pl", "x"),
+        ("unrealized_pl", None),
+        ("unrealized_pl", ""),
+        ("unrealized_pl", "x"),
+    ],
+)
+def test_summary_missing_realized_or_unrealized_fails_loud(
+    field: str, bad: object
+) -> None:
+    """A summary row with an absent/null/non-numeric realized_pl OR unrealized_pl
+    fails loud — both are REQUIRED (probe-verified present on all rows)."""
+    row = _summary_row(_SUM_LO, rpl=0.03, upl=-0.01, rid=14)
+    if bad is None and field in row:
+        del row[field]  # absent variant
+    else:
+        row[field] = bad
+    with pytest.raises(LedgerValuationError):
+        txn_rows_to_native_daily([row])
+
+
+def test_summary_nonzero_change_fails_loud() -> None:
+    """A summary row's `change` is ALWAYS 0.0; a nonzero change is semantics
+    drift → fail loud (never silently sum a nonzero recap change)."""
+    row = _summary_row(_SUM_LO, rpl=0.03, upl=-0.01, rid=15)
+    row["change"] = 0.5
+    with pytest.raises(LedgerValuationError):
+        txn_rows_to_native_daily([row])
+
+
+def test_option_trade_missing_commission_fails_loud() -> None:
+    """Inside coverage an option trade contributes `−commission`; an
+    absent/null/non-numeric commission fails loud. OUTSIDE coverage the row is
+    cash-basis and commission is NOT consulted (no raise)."""
+    inside_bad = [
+        _summary_row(_SUM_LO, rid=16),
+        _summary_row(_SUM_HI, rid=17),
+        {
+            "type": "trade",
+            "instrument_name": "BTC-14JUL25-60000-C",
+            "currency": "BTC",
+            "change": 2.736,
+            "timestamp": _ms(_COVERED_DAY),
+            "id": 8219001,
+        },
+    ]
+    with pytest.raises(LedgerValuationError):
+        txn_rows_to_native_daily(inside_bad)
+
+    # Outside coverage: same missing-commission option row is cash-basis, no raise.
+    outside_ok = [
+        _summary_row(_SUM_LO, rid=18),
+        _summary_row(_SUM_HI, rid=19),
+        {
+            "type": "trade",
+            "instrument_name": "BTC-14JUL25-60000-C",
+            "currency": "BTC",
+            "change": 2.736,
+            "timestamp": _ms("2025-07-09T10:00:00+00:00"),
+            "id": 8219002,
+        },
+    ]
+    native = txn_rows_to_native_daily(outside_ok)
+    assert native["BTC"] == {"2025-07-09": pytest.approx(2.736, abs=1e-9)}
+
+
+def test_option_delivery_fee_only_inside_coverage() -> None:
+    """Option `delivery` INSIDE coverage contributes fee only (`−commission`) —
+    the payout cash is carried by the summary's realized_pl. OUTSIDE coverage it
+    keeps `change`.
+
+    Mutation-honest: including the full `change` (the pre-fix behavior) turns the
+    asserted `−0.003` into `+1.5` and reddens."""
+    inside = [
+        _summary_row(_SUM_LO, rid=20),
+        _summary_row(_SUM_HI, rid=21),
+        {
+            "type": "delivery",
+            "instrument_name": "BTC-14JUL25-60000-C",
+            "currency": "BTC",
+            "change": 1.5,
+            "commission": 0.003,
+            "timestamp": _ms(_COVERED_DAY),
+            "id": 8219100,
+        },
+    ]
+    native = txn_rows_to_native_daily(inside)
+    assert native["BTC"] == {"2025-07-13": pytest.approx(-0.003, abs=1e-12)}
+
+    outside = [
+        _summary_row(_SUM_LO, rid=22),
+        _summary_row(_SUM_HI, rid=23),
+        {
+            "type": "delivery",
+            "instrument_name": "BTC-14JUL25-60000-C",
+            "currency": "BTC",
+            "change": 1.5,
+            "commission": 0.003,
+            "timestamp": _ms("2025-07-09T10:00:00+00:00"),
+            "id": 8219101,
+        },
+    ]
+    n2 = txn_rows_to_native_daily(outside)
+    assert n2["BTC"] == {"2025-07-09": pytest.approx(1.5, abs=1e-9)}
+
+
+def test_delivery_unknown_instrument_nonzero_change_fails_loud() -> None:
+    """Minor (plan-check): a `delivery` row classifying `unknown` (junk/empty
+    instrument) with nonzero change fails loud — a delivery always names its
+    expiring instrument; silence would mis-route expiry cash. Zero-change is a
+    harmless no-op."""
+    bad = {
+        "type": "delivery",
+        "instrument_name": "",
+        "currency": "BTC",
+        "change": 0.9,
+        "timestamp": _ms(_COVERED_DAY),
+        "id": 8219200,
+    }
+    with pytest.raises(LedgerValuationError):
+        txn_rows_to_native_daily([bad])
+    # Zero-change unknown delivery: no entry, no raise.
+    assert txn_rows_to_native_daily([dict(bad, change=0.0)]) == {}
+
+
+def test_balance_identity_guard_raises_on_missing_midwindow_summary() -> None:
+    """The ONE residual money hole: a mid-window session with option premium cash
+    but NO summary carrying it → the option `−commission` drops the premium with
+    nothing replacing it → computed total ≠ Σchange beyond tolerance → raise.
+
+    Companion green case: an equivalent fixture WITH the carrying summary closes.
+    """
+    # BROKEN: covered option trade change=+1.0 fee 0.01 → contributes −0.01;
+    # Σchange over cash-bearing = +1.0; NO summary carries the 1.01 → residual ~1.01.
+    broken_rows = [
+        _summary_row(_SUM_LO, rpl=0.0, upl=0.0, rid=24),
+        _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=25),
+        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=7),
+    ]
+    native_broken = txn_rows_to_native_daily(broken_rows)
+    with pytest.raises(LedgerValuationError):
+        assert_balance_identity(broken_rows, native_broken)
+
+    # GREEN: the summary carries rpl+upl = change+commission = 1.01 → closes.
+    ok_rows = [
+        _summary_row(_SUM_LO, rpl=0.6, upl=0.41, rid=26),
+        _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=27),
+        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=8),
+    ]
+    native_ok = txn_rows_to_native_daily(ok_rows)
+    assert_balance_identity(ok_rows, native_ok)  # no raise
+
+
+def test_balance_identity_reference_set_includes_swap() -> None:
+    """M2: the guard's REFERENCE row-set is `_NATIVE_CASH_BEARING_TYPES` (which
+    INCLUDES `swap`), NOT the USD `CASH_BEARING_TYPES` (which omits it). Using
+    the USD set false-fires by Σ(swap change) on any swap-bearing account.
+
+    Fixture: a swap leg (−1 BTC) that enters native_pnl. With the correct set the
+    guard closes (swap on both sides); with the USD set the reference misses the
+    swap change and the residual is the whole −1.0 → would raise."""
+    assert "swap" in _NATIVE_CASH_BEARING_TYPES
+    assert "swap" not in CASH_BEARING_TYPES
+    rows = [
+        {"type": "swap", "currency": "BTC", "change": -1.0,
+         "timestamp": _ms(_COVERED_DAY), "id": 8219300},
+        {"type": "settlement", "currency": "BTC", "change": 0.05,
+         "index_price": 60000.0, "timestamp": _ms(_COVERED_DAY), "id": 8219301},
+    ]
+    native = txn_rows_to_native_daily(rows)
+    # native total BTC = -1.0 + 0.05 = -0.95; Σchange over _NATIVE_CASH_BEARING
+    # (incl swap) = -0.95 → closes. (The USD-set reference would be +0.05 → resid
+    # 1.0 → raise, which this asserting-no-raise catches as the wrong set.)
+    assert_balance_identity(rows, native)
+
+
+def test_pre_coverage_option_days_helper() -> None:
+    """Returns exactly the (ccy, day) buckets with option rows OUTSIDE coverage;
+    empty for fully-covered and perp-only fixtures."""
+    # Pre-rollout option day + a covered option day.
+    rows = [
+        _summary_row(_SUM_LO, rid=28),
+        _summary_row(_SUM_HI, rid=29),
+        _option_trade("2025-07-09T10:00:00+00:00", change=2.0, rid=9),  # outside
+        _option_trade(_COVERED_DAY, change=1.0, rid=10),  # inside
+    ]
+    assert _pre_coverage_option_days(rows) == [("BTC", "2025-07-09")]
+
+    # Fully covered: only covered option rows → empty.
+    covered = [
+        _summary_row(_SUM_LO, rid=30),
+        _summary_row(_SUM_HI, rid=31),
+        _option_trade(_COVERED_DAY, change=1.0, rid=11),
+    ]
+    assert _pre_coverage_option_days(covered) == []
+
+    # Perp-only: no option rows at all → empty.
+    perp = [
+        {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.01, "index_price": 60000.0, "timestamp": _ms(_DAY_A), "id": 8219400},
+    ]
+    assert _pre_coverage_option_days(perp) == []
+
+
+def test_future_delivery_change_unchanged() -> None:
+    """A `future` delivery (real expiry cash, no summary covers it) keeps its full
+    `change` — the option classification gate never touches it."""
+    rows = [
+        {"type": "delivery", "instrument_name": "BTC-27MAR26", "currency": "BTC",
+         "change": 0.25, "timestamp": _ms(_COVERED_DAY), "id": 8219500},
+    ]
+    native = txn_rows_to_native_daily(rows)
+    assert native["BTC"] == {"2025-07-13": pytest.approx(0.25, abs=1e-9)}
+
+
+def test_perp_trade_change_unchanged() -> None:
+    """A perp `trade` (inverse or linear) keeps its `change` even INSIDE a
+    currency's coverage window — the option gate is classification-gated."""
+    rows = [
+        _summary_row(_SUM_LO, rid=32),
+        _summary_row(_SUM_HI, rid=33),
+        {"type": "trade", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.002, "commission": 0.001, "timestamp": _ms(_COVERED_DAY),
+         "id": 8219600},
+    ]
+    native = txn_rows_to_native_daily(rows)
+    # Perp trade change kept verbatim (NOT −commission) despite being in-window.
+    assert native["BTC"]["2025-07-13"] == pytest.approx(-0.002, abs=1e-12)
+
+
+def test_spot_conversion_both_legs_unchanged() -> None:
+    """A BTC_USDC spot conversion (classify=='unknown') keeps both legs' `change`
+    (swap-analog pin) — never reclassified to option treatment."""
+    rows = [
+        {"type": "trade", "instrument_name": "BTC_USDC", "currency": "BTC",
+         "change": -1.0, "timestamp": _ms(_COVERED_DAY), "id": 8219700},
+        {"type": "trade", "instrument_name": "BTC_USDC", "currency": "USDC",
+         "change": 60000.0, "timestamp": _ms(_COVERED_DAY), "id": 8219701},
+    ]
+    native = txn_rows_to_native_daily(rows)
+    assert native["BTC"] == {"2025-07-13": pytest.approx(-1.0, abs=1e-12)}
+    assert native["USDC"] == {"2025-07-13": pytest.approx(60000.0, abs=1e-9)}
+
+
+def test_perp_only_ledger_byte_identical() -> None:
+    """SC-4 unit pin: a perp/future/settlement/liquidation/nbf/swap/flow ledger
+    (ZERO option rows) produces the EXACT dict the pre-fix formula did — the
+    coverage pre-pass finds no windows and `_pre_coverage_option_days` is empty.
+
+    Golden literals = Σ change (the OLD formula), bit-equal.
+    """
+    rows = [
+        {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.01, "index_price": 60000.0,
+         "timestamp": _ms("2026-01-15T08:00:00+00:00"), "id": 8219800},
+        {"type": "trade", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.0002, "commission": 0.0002,
+         "timestamp": _ms("2026-01-15T09:00:00+00:00"), "id": 8219801},
+        {"type": "trade", "instrument_name": "BTC-27MAR26", "currency": "BTC",
+         "change": 0.03, "timestamp": _ms("2026-01-15T10:00:00+00:00"), "id": 8219802},
+        {"type": "delivery", "instrument_name": "BTC-27MAR26", "currency": "BTC",
+         "change": 0.02, "timestamp": _ms("2026-01-16T08:00:00+00:00"), "id": 8219803},
+        {"type": "liquidation", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.005, "timestamp": _ms("2026-01-16T09:00:00+00:00"), "id": 8219804},
+        {"type": "negative_balance_fee", "currency": "BTC", "change": -0.001,
+         "timestamp": _ms("2026-01-16T10:00:00+00:00"), "id": 8219805},
+        {"type": "swap", "currency": "BTC", "change": -0.5,
+         "timestamp": _ms("2026-01-17T08:00:00+00:00"), "id": 8219806},
+        {"type": "deposit", "currency": "BTC", "change": 2.0,
+         "timestamp": _ms("2026-01-17T09:00:00+00:00"), "id": 8219807},
+    ]
+    native = txn_rows_to_native_daily(rows)
+    # Pre-fix golden (Σ change per (day,ccy); deposit skipped; swap summed):
+    assert native == {
+        "BTC": {
+            "2026-01-15": pytest.approx(-0.01 + -0.0002 + 0.03, abs=1e-12),
+            "2026-01-16": pytest.approx(0.02 + -0.005 + -0.001, abs=1e-12),
+            "2026-01-17": pytest.approx(-0.5, abs=1e-12),
+        }
+    }
+    # Coverage pre-pass: no summaries → no windows; no pre-coverage option days.
+    assert _summary_coverage_windows(rows) == {}
+    assert _pre_coverage_option_days(rows) == []
+    # Guard closes trivially (contributions ARE the changes).
+    assert_balance_identity(rows, native)

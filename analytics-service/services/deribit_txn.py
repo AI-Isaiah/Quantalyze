@@ -405,6 +405,29 @@ assert not (_NATIVE_CASH_BEARING_TYPES & _NATIVE_INFORMATIONAL_TYPES), (
     "native CASH_BEARING and INFORMATIONAL sets must be disjoint"
 )
 
+# --- native options P&L channel (Phase 82, options-aware daily P&L) -----------
+# The `options_settlement_summary` type is Deribit's own daily MTM decomposition
+# (`realized_pl` = session realized, `unrealized_pl` = session DELTA — a
+# LOAD-BEARING per-session change, not a level). On the NATIVE path it is
+# CLASSIFIED (contributes `realized_pl + unrealized_pl`); its row `change` is
+# always 0.0 (nonzero → fail loud). In the USD sibling it stays DELIBERATELY
+# unclassified (P70 H3, :437-444) — zero-change → ignored, nonzero → loud.
+_NATIVE_OPTIONS_SUMMARY_TYPES: frozenset[str] = frozenset(
+    {"options_settlement_summary"}
+)
+# The summary set MUST be disjoint from BOTH native sets: a type simultaneously
+# summed as cash-bearing AND re-attributed via the summary channel would
+# double-count (order-dependent silent corruption). Enforced at import (mirrors
+# the CASH_BEARING/INFORMATIONAL disjointness asserts).
+assert not (_NATIVE_OPTIONS_SUMMARY_TYPES & _NATIVE_CASH_BEARING_TYPES), (
+    "native OPTIONS_SUMMARY and CASH_BEARING sets must be disjoint"
+)
+assert not (_NATIVE_OPTIONS_SUMMARY_TYPES & _NATIVE_INFORMATIONAL_TYPES), (
+    "native OPTIONS_SUMMARY and INFORMATIONAL sets must be disjoint"
+)
+# One UTC day in epoch-milliseconds — the coverage-window lower-bound shift.
+_COVERAGE_DAY_MS: float = 24 * 60 * 60 * 1000.0
+
 
 def deribit_linear_external_flow_usd(
     rows: Sequence[Mapping[str, Any]],
@@ -889,6 +912,202 @@ def txn_rows_to_daily_records(
     ]
 
 
+def _summary_coverage_windows(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, tuple[float, float]]:
+    """Per-currency options-settlement coverage window (epoch-ms), derived from
+    the batch's OWN ``options_settlement_summary`` rows:
+
+        coverage_window[c] = (first_summary_ts[c] − 24h, last_summary_ts[c])
+
+    A currency with NO summary rows is ABSENT from the dict → every option row of
+    that currency stays cash-basis ``change`` (pre-rollout fallback, §1). The
+    −24h lower shift covers the session PRECEDING the first summary (the first
+    summary settles it); the upper bound is the last summary ts (option trades
+    after it are the live partial session — cash-basis until the next crawl's
+    summary lands, then convergent on recompute).
+
+    Pure / never raises: an undatable summary ts is skipped (the
+    ``assert_balance_identity`` guard is the money backstop). This is a value-inert
+    pre-pass for perp-only / USD-native ledgers (no summaries → ``{}``), preserving
+    SC-4 byte-identity."""
+    first: dict[str, float] = {}
+    last: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) not in _NATIVE_OPTIONS_SUMMARY_TYPES:
+            continue
+        try:
+            instant = _row_utc_instant(row.get("timestamp"))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        ccy = str(row.get("currency", "")).upper()
+        if ccy not in first or instant < first[ccy]:
+            first[ccy] = instant
+        if ccy not in last or instant > last[ccy]:
+            last[ccy] = instant
+    return {ccy: (first[ccy] - _COVERAGE_DAY_MS, last[ccy]) for ccy in first}
+
+
+def _ts_in_coverage(instant: float, window: tuple[float, float] | None) -> bool:
+    """True iff ``instant`` (epoch-ms) is inside the inclusive coverage window;
+    a missing window (currency never emitted a summary) is never covered."""
+    if window is None:
+        return False
+    start, end = window
+    return start <= instant <= end
+
+
+def _pre_coverage_option_days(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[tuple[str, str]]:
+    """Sorted-unique ``(currency, utc_day)`` buckets carrying option
+    ``trade``/``delivery`` rows that fall OUTSIDE their currency's coverage window
+    (pre-rollout or trailing-edge cash-fallback). This is the list the adapter
+    stamps as ``pre_summary_rollout_option_dailies`` → ``complete_with_warnings``
+    (Q6). Empty for fully-covered and perp-only fixtures.
+
+    Pure / never raises — an undatable row is skipped (the aggregator's verbatim
+    ``change`` guards are the fail-loud path; this helper is advisory metadata)."""
+    windows = _summary_coverage_windows(rows)
+    out: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) not in ("trade", "delivery"):
+            continue
+        if classify_instrument(str(row.get("instrument_name", ""))) != "option":
+            continue
+        try:
+            instant = _row_utc_instant(row.get("timestamp"))
+            day = _row_utc_day(row.get("timestamp"))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        ccy = str(row.get("currency", "")).upper()
+        if not _ts_in_coverage(instant, windows.get(ccy)):
+            out.add((ccy, day))
+    return sorted(out)
+
+
+def assert_balance_identity(
+    rows: Sequence[Mapping[str, Any]],
+    native_daily: Mapping[str, Mapping[str, float]],
+    *,
+    native_floor: Mapping[str, float] | None = None,
+) -> None:
+    """MANDATORY fail-loud reconcile guard (§1). Per currency ``c``, the computed
+    total realized (Σ over ALL ``native_daily[c]`` day contributions) MUST equal
+    ``Σ change`` over that currency's ``_NATIVE_CASH_BEARING_TYPES`` rows, to
+    within ``max(floor_c, 1e-4 · throughput_c)`` where
+    ``throughput_c = Σ|change|`` over those rows. On breach →
+    ``LedgerValuationError`` (never ship).
+
+    The REFERENCE row-set is ``_NATIVE_CASH_BEARING_TYPES`` (= the USD
+    ``CASH_BEARING_TYPES`` PLUS the reclassed internal-rebalance ``swap``), NOT the
+    USD set — using the USD set (which omits ``swap``) would false-fire by
+    ``Σ(swap change)`` on any swap-bearing account.
+
+    Closes by construction: outside coverage the contributions ARE the changes;
+    inside coverage the summary channel replaces the option cash legs
+    (``residual = Σ(summary rpl+upl) − Σ_inside(change + commission)`` ≈ 0,
+    probe-proven 9.222194 vs 9.222190). Catches the one residual money hole — a
+    mid-window session that ever LACKED a summary while options were open (its
+    premium would be dropped with nothing carrying it).
+
+    ``floor_c`` (the ``$1``-equivalent NATIVE floor) is supplied by the adapter
+    from the anchor mark; the pure helper defaults it to 0.0 (relative term only).
+    Leak discipline (§App B): the raise names only currency + a coarse
+    breach/tolerance magnitude class, never a held balance."""
+    floor = native_floor or {}
+    sigma_change: dict[str, float] = {}
+    throughput: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) not in _NATIVE_CASH_BEARING_TYPES:
+            continue
+        raw = row.get("change")
+        try:
+            change = float(raw)  # aggregator already validated cash-bearing change
+        except (TypeError, ValueError):
+            continue
+        ccy = str(row.get("currency", "")).upper()
+        sigma_change[ccy] = sigma_change.get(ccy, 0.0) + change
+        throughput[ccy] = throughput.get(ccy, 0.0) + abs(change)
+    currencies = set(sigma_change) | {str(c).upper() for c in native_daily}
+    for ccy in sorted(currencies):
+        computed = sum(native_daily.get(ccy, {}).values())
+        reference = sigma_change.get(ccy, 0.0)
+        residual = abs(computed - reference)
+        tol = max(float(floor.get(ccy, 0.0)), 1e-4 * throughput.get(ccy, 0.0))
+        if residual > tol:
+            raise LedgerValuationError(
+                f"Deribit balance-identity breach for currency {ccy!r}: computed "
+                f"realized total diverges from Σchange over cash-bearing rows by "
+                f"more than max($1-equiv, 1e-4·throughput) (residual/tolerance "
+                f"class {residual / tol if tol else float('inf'):.1f}x) — a "
+                "mid-window session likely lacked its options_settlement_summary; "
+                "STOP and investigate that account's summary stream, never loosen "
+                "the tolerance (silent P&L misattribution risk)"
+            )
+
+
+def _required_summary_field(row: Mapping[str, Any], field: str) -> float:
+    """Read a REQUIRED numeric summary field (``realized_pl`` / ``unrealized_pl``)
+    — both are present + numeric on every ``options_settlement_summary`` row
+    (probe-verified). Absent / null / blank / non-numeric → ``LedgerValuationError``
+    (schema-drift fail-loud, never attribute option P&L without both legs)."""
+    raw = row.get(field, _MISSING)
+    if raw is _MISSING or raw is None or (
+        isinstance(raw, str) and not raw.strip()
+    ):
+        raise LedgerValuationError(
+            f"options_settlement_summary Deribit row id={row.get('id')!r} has "
+            f"absent/null {field} — both realized_pl and unrealized_pl are "
+            "REQUIRED (Deribit's session P&L decomposition); refusing to attribute "
+            "option P&L without it (schema drift would silently drop realized cash)"
+        )
+    return _coerce_float(raw, field=field, row=row)
+
+
+def _summary_contribution(row: Mapping[str, Any]) -> float:
+    """Native-pnl contribution of an ``options_settlement_summary`` row:
+    ``realized_pl + unrealized_pl`` (``unrealized_pl`` is a session DELTA — E1,
+    load-bearing). The row ``change`` is ALWAYS 0.0; a nonzero change is semantics
+    drift → ``LedgerValuationError``."""
+    change = _coerce_float(row.get("change", 0.0) or 0.0, field="change", row=row)
+    if change != 0.0:
+        raise LedgerValuationError(
+            f"options_settlement_summary Deribit row id={row.get('id')!r} carries "
+            f"a nonzero change — the summary recap change is always 0.0 (its P&L is "
+            "in realized_pl/unrealized_pl); a nonzero change is semantics drift, "
+            "classify against fresh evidence before ingesting"
+        )
+    return _required_summary_field(row, "realized_pl") + _required_summary_field(
+        row, "unrealized_pl"
+    )
+
+
+def _option_commission(row: Mapping[str, Any]) -> float:
+    """The POSITIVE commission on an option ``trade``/``delivery`` row (present +
+    numeric on 100% of option rows — E3). Absent / null / blank / non-numeric →
+    ``LedgerValuationError`` (inside coverage the fee leg is the ONLY contribution;
+    fabricating it would silently mis-state P&L)."""
+    raw = row.get("commission", _MISSING)
+    if raw is _MISSING or raw is None or (
+        isinstance(raw, str) and not raw.strip()
+    ):
+        raise LedgerValuationError(
+            f"option Deribit row id={row.get('id')!r} type={row.get('type')!r} "
+            "INSIDE coverage has absent/null commission — the premium cash is "
+            "carried by the summary channel so the fee (−commission) is the only "
+            "native-pnl contribution; refusing to fabricate it (E3: commission is "
+            "present+numeric on every option row)"
+        )
+    return _coerce_float(raw, field="commission", row=row)
+
+
 def txn_rows_to_native_daily(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, dict[str, float]]:
@@ -942,6 +1161,11 @@ def txn_rows_to_native_daily(
     ``({change})`` from BOTH raises is the alternative if per-row deltas must never
     surface at all; it is intentionally NOT done here to preserve verbatim parity.)
     """
+    # Phase 82 pre-pass: per-currency options coverage windows from this batch's
+    # own summary rows. Value-inert for perp-only / USD-native ledgers (no
+    # summaries → {}), so SC-4 byte-identity holds (the loop below runs the same
+    # rows through the same float ops on the untouched non-option path).
+    coverage_windows = _summary_coverage_windows(rows)
     by_day_ccy: dict[tuple[str, str], float] = {}
     for row in rows:
         if not isinstance(row, Mapping):
@@ -952,6 +1176,22 @@ def txn_rows_to_native_daily(
         # real per-currency balance delta that belongs in native_pnl. The USD sets
         # (and thus ``txn_rows_to_daily_records``) are untouched.
         if row_type in _NATIVE_INFORMATIONAL_TYPES:
+            continue
+        # Phase 82: options_settlement_summary is CLASSIFIED on the native path —
+        # it contributes realized_pl + unrealized_pl (session DELTA, load-bearing).
+        # Row change is always 0.0 (nonzero → fail loud). NOT subject to the
+        # cash-bearing change==0 skip (its P&L is in the summary fields, not change).
+        if row_type in _NATIVE_OPTIONS_SUMMARY_TYPES:
+            contribution = _summary_contribution(row)
+            try:
+                day = _row_utc_day(row.get("timestamp"))
+            except ValueError as e:
+                raise LedgerValuationError(str(e)) from e
+            if contribution == 0.0:
+                continue
+            ccy = str(row.get("currency", "")).upper()
+            key = (day, ccy)
+            by_day_ccy[key] = by_day_ccy.get(key, 0.0) + contribution
             continue
         if row_type in _NATIVE_CASH_BEARING_TYPES:
             # [VERBATIM from txn_rows_to_daily_records] absent-`change` guard: a
@@ -985,16 +1225,41 @@ def txn_rows_to_native_daily(
                 day = _row_utc_day(row.get("timestamp"))
             except ValueError as e:
                 raise LedgerValuationError(str(e)) from e
-            if change == 0.0:
+            ccy = str(row.get("currency", "")).upper()
+            # Phase 82 coverage-gated option re-attribution (classification-gated —
+            # NEVER consulted for non-option rows, so the perp/future/spot path is
+            # byte-identical: contribution stays `change`). Inside a currency's
+            # summary coverage window an option trade/delivery contributes ONLY the
+            # fee (−commission); the premium/payout cash is carried by the summary
+            # channel. Outside the window (pre-rollout or trailing-edge) it keeps
+            # the full `change` (cash fallback, flagged by _pre_coverage_option_days).
+            contribution = change
+            if row_type == "trade" or row_type == "delivery":
+                cls = classify_instrument(str(row.get("instrument_name", "")))
+                if cls == "option":
+                    instant = _row_utc_instant(row.get("timestamp"))
+                    if _ts_in_coverage(instant, coverage_windows.get(ccy)):
+                        contribution = -_option_commission(row)
+                    # else: cash fallback — contribution stays `change`.
+                elif row_type == "delivery" and cls == "unknown" and change != 0.0:
+                    # A delivery ALWAYS names its expiring instrument; an
+                    # unknown-classified delivery with nonzero cash would mis-route
+                    # expiry P&L — fail loud, never guess (D-08).
+                    raise LedgerValuationError(
+                        f"Deribit delivery row id={row.get('id')!r} names an "
+                        "unclassifiable instrument yet carries nonzero cash — "
+                        "refusing to guess an expiring instrument's P&L channel "
+                        "(never silently mis-route delivery cash)"
+                    )
+            if contribution == 0.0:
                 # Difference (2): native pnl has NO all-zero-day placeholder
                 # (the USD sibling setdefault(day, 0.0) here). No cash → no entry.
                 continue
-            ccy = str(row.get("currency", "")).upper()
-            # Difference (1): sum the RAW native `change` — never index-multiplied
-            # (no txn_change_to_usd, no supplemental_index). The index dependency
-            # lives entirely in the 80-02 daily mark series.
+            # Difference (1): sum the RAW native contribution — never
+            # index-multiplied (no txn_change_to_usd, no supplemental_index). The
+            # index dependency lives entirely in the 80-02 daily mark series.
             key = (day, ccy)
-            by_day_ccy[key] = by_day_ccy.get(key, 0.0) + change
+            by_day_ccy[key] = by_day_ccy.get(key, 0.0) + contribution
             continue
         # [VERBATIM] unknown-type nonzero-`change` fail-loud (H3): silence is
         # unsafe both ways — fail loud on any cash, harmlessly ignore a
