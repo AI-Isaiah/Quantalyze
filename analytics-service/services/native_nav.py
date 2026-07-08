@@ -588,33 +588,38 @@ def reconstruct_native_nav_and_twr(
     for b in buckets:
         (rolled if _roll_bucket(b) else unrolled).append(b)
 
-    # HIGH-3: a bucket that did NOT roll (no pnl days, no flow days) but carries
-    # nonzero terminal equity or a terminal-uPnL wedge is a held balance with no
-    # explaining ledger. Such a bucket is dropped from `rolled` and is therefore
-    # invisible to the §5 inception gate below — pre-fix it silently understated
-    # NAV (or returned an empty Series when it was the only bucket) with no refusal.
-    # For a full_history ledger that IS an inception failure, so refuse LOUD,
-    # mirroring the F-1 build-time refuse. The check is VALUE-GATED (a genuinely
-    # zero un-rolled bucket stays skipped) and gated on `full_history` to match the
-    # inception gate's own §5.3 skip — a truncated (retention-capped) ledger
-    # legitimately holds pre-window balances its ledger cannot explain.
+    # HIGH-3 (refined): a bucket that did NOT roll (no pnl days, no flow days) but
+    # carries nonzero terminal equity or a terminal-uPnL wedge is a held balance with
+    # no explaining ledger. Such a bucket is dropped from `rolled` and is therefore
+    # invisible to the §5 inception gate — left alone it silently understates NAV (or
+    # returns an empty Series when it is the only bucket) with no refusal.
+    #
+    # Rather than an UNCONDITIONAL hard-refuse on exact `!= 0` (which punished a
+    # sub-tolerance DUST wallet where a *rolled* dust bucket enjoys the §5.2
+    # max($1, 1e-4·NAV) tolerance), FOLD each value-carrying orphan's residual —
+    # valued at its anchor mark — into `_assert_inception_reconciled`'s residual sum
+    # so it is judged under the SAME tolerance. A MATERIAL orphan still breaches LOUD
+    # (mirroring the F-1 build-time refuse); a sub-tolerance dust orphan passes like
+    # rolled dust. VALUE-gated (a genuinely zero un-rolled bucket stays skipped) and
+    # full_history gated to match the gate's own §5.3 skip — a truncated
+    # (retention-capped) ledger legitimately holds pre-window balances it cannot
+    # explain.
+    orphans: list[_Bucket] = []
     if ledger.full_history:
         orphans = [
-            b.code for b in unrolled
+            b for b in unrolled
             if b.terminal_native != 0.0 or b.upnl_native != 0.0
         ]
-        if orphans:
-            raise InceptionReconciliationError(
-                currencies=orphans, venue=venue, breach_ratio=float("inf"),
-            )
+
+    # Step 3 — inception-reconciliation refuse gate (§5). Run BEFORE the empty-rolled
+    # short-circuit so a MATERIAL orphan on an otherwise-empty ledger still refuses
+    # (leak-safety): the gate folds the orphan residuals into its §5.2 tolerance.
+    _assert_inception_reconciled(
+        ledger, rolled, indexable_currencies, venue=venue, orphans=orphans,
+    )
 
     if not rolled:
         return pd.Series(dtype=float, name="returns"), _build_nav_meta({})
-
-    # Step 3 — inception-reconciliation refuse gate (§5), BEFORE valuation.
-    _assert_inception_reconciled(
-        ledger, rolled, indexable_currencies, venue=venue
-    )
 
     # Step 4 — value NAV(d) = Σ_c B_c(d)×mark_c(d) over the union calendar.
     union_index = rolled[0].balance.index
@@ -643,6 +648,7 @@ def _assert_inception_reconciled(
     indexable: AbstractSet[str],
     *,
     venue: str,
+    orphans: list[_Bucket] | None = None,
 ) -> None:
     """Step 3 (§5) — the FIRST non-tautological reconciliation gate, run AFTER the
     rolls and BEFORE valuation.
@@ -697,6 +703,29 @@ def _assert_inception_reconciled(
         per_bucket_resid_usd.append((bucket.code, resid_usd))
         resid_usd_total += resid_usd
         anchor_nav += float(bucket.balance.iloc[-1]) * markN
+
+    # HIGH-3 (refined): FOLD each value-carrying event-less ORPHAN into the same
+    # residual sum so it is judged under the §5.2 tolerance (a material orphan
+    # breaches; a sub-tolerance dust orphan passes like rolled dust). An un-rolled
+    # bucket has NO balance index, so value its residual at the ANCHOR mark (the
+    # latest mark held). The residual is the realized-basis unexplained held balance
+    # (terminal_native − upnl_native) — exactly the terminal `_roll_bucket` would
+    # have used. A value-carrying orphan we CANNOT value (no usable mark) refuses
+    # LOUD — never a silent pass over real held value (the F-1 discipline).
+    for bucket in orphans or []:
+        resid = bucket.terminal_native - bucket.upnl_native
+        if bucket.branch is MarkBranch.USD_FAMILY:  # inception AND anchor mark ≡ 1.0
+            anchor_mark = 1.0
+        elif bucket.mark is None or bucket.mark.empty:
+            raise InceptionReconciliationError(
+                currencies=[bucket.code], venue=venue, breach_ratio=float("inf"),
+            )
+        else:
+            anchor_mark = float(bucket.mark.iloc[-1])
+        resid_usd = abs(resid) * anchor_mark
+        per_bucket_resid_usd.append((bucket.code, resid_usd))
+        resid_usd_total += resid_usd
+        anchor_nav += resid * anchor_mark  # signed, matches the rolled contribution
 
     # F-3: a non-finite residual/anchor (e.g. a NaN inception-day mark) makes
     # `resid_usd_total > tol` evaluate `NaN > tol → False` — a SILENT pass. Refuse

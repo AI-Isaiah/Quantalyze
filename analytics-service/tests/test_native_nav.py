@@ -933,3 +933,58 @@ def test_genuinely_zero_unrolled_bucket_stays_skipped() -> None:
         ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
     )
     assert returns.empty  # zero-everywhere bucket adds nothing, no refusal
+
+
+def test_dust_value_orphan_folded_into_inception_tolerance_passes() -> None:
+    """HIGH-3 (refined, LOW): an event-less value-carrying orphan is FOLDED into the
+    §5 inception residual sum (judged under the SAME max($1, 1e-4·NAV) tolerance as a
+    rolled dust residual), NOT hard-refused on exact ``!= 0``. A SUB-TOLERANCE dust
+    orphan therefore PASSES like rolled dust rather than permanently refusing.
+
+    A healthy USDC book rolls (resid ~0, anchor NAV 150); alongside it a BTC orphan
+    holds 0.00002 BTC @ 40000 = $0.80 of terminal equity with NO pnl/flow days. Its
+    residual folds to $0.80 ≤ tol $1 → the reconstruction PASSES and returns the
+    USDC-driven series (the dust value is omitted from NAV exactly like a rolled dust
+    residual).
+
+    Neuter: revert to the unconditional exact ``!= 0`` hard-refuse → the $0.80 dust
+    orphan raises InceptionReconciliationError → this reddens."""
+    ledger = NativeLedger(
+        native_pnl={"USDC": _dense([100.0, 50.0])},  # rolls: B=[100,150], resid 0
+        terminal_native_equity={"USDC": 150.0, "BTC": 0.00002},  # BTC: dust, no events
+        marks={"BTC": _s([("2026-01-01", 40000.0)])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    returns, meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+    )
+    # No refusal — the dust orphan passed under the inception tolerance.
+    assert returns.name == "returns"
+    assert not returns.empty  # the rolled USDC book drives a real series
+    assert "computation_status_hint" in meta
+
+
+def test_material_value_orphan_still_refuses_after_fold() -> None:
+    """HIGH-3 (refined) material arm: the fold PRESERVES the material-orphan
+    protection. A BTC orphan holding 5.0 BTC @ 40000 = $200k of unexplained terminal
+    equity (no pnl/flow days) alongside a clean rolled USDC book folds to a residual
+    that BREACHES the §5.2 tolerance → still refuses LOUD, naming BTC only.
+
+    Neuter: fold the orphan but DROP it from the residual sum (judge only rolled
+    residuals) → the $200k held balance sails past → this ``pytest.raises`` reddens."""
+    ledger = NativeLedger(
+        native_pnl={"USDC": _dense([100.0, 50.0])},  # rolls clean, resid 0
+        terminal_native_equity={"USDC": 150.0, "BTC": 5.0},  # BTC: material orphan
+        marks={"BTC": _s([("2026-01-01", 40000.0)])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    with pytest.raises(InceptionReconciliationError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+    assert exc.value.currencies == ["BTC"]
+    assert exc.value.venue == "deribit"
