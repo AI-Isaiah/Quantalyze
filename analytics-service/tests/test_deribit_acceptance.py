@@ -333,19 +333,26 @@ def test_perp_only_eligibility_summary_row_fails() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 5 — the fresh daily_reconcile basis is the PRODUCTION native formula
-# (txn_rows_to_native_daily), not the legacy USD daily_pnl path production no
-# longer runs. An options-summary-only day is NONZERO natively but ABSENT under
-# the old USD basis (summary change=0 → unclassified) → the USD basis would
-# false-drop it.
+# Phase 83 — the fresh daily_reconcile CASH basis is the PRODUCTION native cash
+# formula (txn_rows_to_native_daily). Under Phase 83 an options-summary-only day
+# is NO LONGER a native nonzero day: the summary is inert on the native path and
+# its P&L is REDISTRIBUTED across held days via the ΔMTM channel (merged by the
+# adapter, NOT by txn_rows_to_native_daily). Cash-bearing days (perp settlement,
+# option trade/delivery) still count.
+#
+# ⚠️ Task-10 watch: _native_nonzero_dates is CASH-ONLY. A day where the option
+# book moved (ΔMTM) but no cash row landed is persisted by production (adapter
+# merge) yet ABSENT from this cash-only set → the strict daily_reconcile gate
+# would "inject"-fail on a held-options account. Before the live Task-10 run the
+# harness must derive nonzero days from the FULL production ledger
+# (build_deribit_native_ledger().native_pnl), not the cash channel alone.
 # ---------------------------------------------------------------------------
 
 
-def test_native_nonzero_basis_includes_summary_only_day() -> None:
-    from datetime import datetime, timezone
+def test_native_cash_basis_excludes_summary_only_day() -> None:
+    from datetime import datetime
 
     from scripts.deribit_acceptance import _native_nonzero_dates
-    from services.deribit_txn import txn_rows_to_daily_records
 
     def _ms(iso: str) -> int:
         return int(datetime.fromisoformat(iso).timestamp() * 1000)
@@ -361,15 +368,8 @@ def test_native_nonzero_basis_includes_summary_only_day() -> None:
          "timestamp": _ms("2025-07-13T08:00:00+00:00"), "id": 2},
     ]
     native_days = _native_nonzero_dates(rows)
-    assert date(2025, 7, 12) in native_days  # summary day counts (native basis)
+    # Phase 83: the summary-only day is inert on the native CASH path (its P&L is
+    # redistributed via ΔMTM in the adapter, not here) → NOT a cash nonzero day.
+    assert date(2025, 7, 12) not in native_days
+    # The cash-bearing perp settlement day still counts.
     assert date(2025, 7, 13) in native_days
-
-    # The OLD USD basis (txn_rows_to_daily_records → price nonzero) MISSES the
-    # summary-only day (summary is unclassified there, change=0).
-    usd_records = txn_rows_to_daily_records(rows)
-    usd_days = {
-        date.fromisoformat(str(r["timestamp"])[:10])
-        for r in usd_records
-        if float(r.get("price", 0.0) or 0.0) != 0.0
-    }
-    assert date(2025, 7, 12) not in usd_days  # would false-drop under the old basis

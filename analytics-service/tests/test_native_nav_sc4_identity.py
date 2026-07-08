@@ -708,12 +708,12 @@ def test_same_family_swap_is_noop_in_coalesced_usd_bucket(monkeypatch: Any) -> N
 
 
 # ===========================================================================
-# Phase 82 Task 4 — SC-4 byte-identity for an INVERSE (BTC-margined) perp-only
-# ledger. The coverage-gated option arms are classification-gated: a ledger with
-# ZERO option rows and ZERO summary rows runs the SAME rows through the SAME
-# float ops → the native_pnl dict is BIT-EXACT to the OLD Σchange formula. Proven
-# through the REAL build_deribit_native_ledger seam (inverse marks via a stubbed
-# settlement index).
+# Phase 83 Task 7 — SC-4 byte-identity for an INVERSE (BTC-margined) perp-only
+# ledger. The option arms are classification-gated: a ledger with ZERO option
+# rows and ZERO summary rows has an EMPTY replay → NO marks fetched → the ΔMTM
+# merge is a no-op → the native_pnl dict is BIT-EXACT to the OLD Σchange formula.
+# Proven through the REAL build_deribit_native_ledger seam (inverse marks via a
+# stubbed settlement index).
 # ===========================================================================
 
 
@@ -754,12 +754,12 @@ def test_inverse_perp_only_ledger_byte_identical_real_adapter(
     """SC-4 (gate i, inverse tier): a BTC perp-only ledger — settlement +
     perp-trade fees + future delivery + negative_balance_fee + swap, ZERO option/
     summary rows — through the REAL adapter yields native_pnl BIT-EXACT to the OLD
-    Σchange formula (check_exact). The coverage pre-pass finds no window and
-    _pre_coverage_option_days is empty (classification-gated, not account-flagged).
+    Σchange formula (check_exact). The replay is empty and no coverage window
+    exists (classification-gated, not account-flagged).
     """
     from services.deribit_txn import (
-        _pre_coverage_option_days,
         _summary_coverage_windows,
+        replay_option_positions,
     )
 
     btc_rows = [
@@ -824,7 +824,7 @@ def test_inverse_perp_only_ledger_byte_identical_real_adapter(
     pd.testing.assert_series_equal(
         ledger.native_pnl["BTC"], expected, check_exact=True, check_names=False
     )
-    # Classification-gating: no summary rows → no coverage window, no pre-coverage
-    # option days (the option arms are never consulted on this inverse ledger).
+    # Classification-gating: no summary rows → no coverage window; no option rows
+    # → empty replay (the option arms are never consulted on this inverse ledger).
     assert _summary_coverage_windows(btc_rows) == {}
-    assert _pre_coverage_option_days(btc_rows) == []
+    assert replay_option_positions(btc_rows) == {}

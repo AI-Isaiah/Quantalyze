@@ -453,7 +453,17 @@ def _native_nonzero_dates(raw_rows: Sequence[Mapping[str, Any]]) -> set[date]:
     the harness must check what is actually persisted — NOT masking: the money
     gates are the balance-identity guard + §5 closure, untouched by this basis
     switch. A day is nonzero iff ANY currency's native pnl for that day is
-    nonzero."""
+    nonzero.
+
+    ⚠️ PHASE 83 (Task-10 watch): this is the CASH channel only. Phase 83
+    redistributes option P&L across held days via the ΔMTM channel, which is
+    merged by ``build_deribit_native_ledger`` (the ADAPTER), NOT by
+    ``txn_rows_to_native_daily``. A day where the option book moved (ΔMTM) but no
+    cash row landed is persisted by production yet ABSENT here → the strict
+    ``check_daily_reconcile`` gate would "inject"-fail on a held-options account.
+    Before the live Task-10 acceptance run, derive the nonzero-day basis from the
+    FULL production ledger (``build_deribit_native_ledger(...).native_pnl``) so the
+    harness checks exactly what production persists (cash + ΔMTM)."""
     native = txn_rows_to_native_daily(raw_rows)
     out: set[date] = set()
     for day_map in native.values():
