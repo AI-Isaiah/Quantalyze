@@ -42,6 +42,8 @@ from services.deribit_txn import (
     _INVERSE_CURRENCIES,
     CASH_BEARING_TYPES,
     _day_ccy_own_index,
+    _pre_coverage_option_days,
+    assert_balance_identity,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
     txn_rows_to_daily_records,
@@ -748,6 +750,13 @@ class CompletenessReport:
     # the ledger's marks were built against to ``reconstruct_native_nav_and_twr``,
     # never re-probing (which could drift and mis-classify a currency).
     indexable_currencies: frozenset[str] = field(default_factory=frozenset)
+    # Phase 82 — sorted-unique ``(currency, utc_day)`` buckets carrying option
+    # rows OUTSIDE their currency's summary coverage window (pre-rollout /
+    # trailing-edge cash fallback). A crawl artifact (like ``dated_external_flows``)
+    # computed in ``build_deribit_native_ledger`` from the raw rows; the worker
+    # stamps it as the ``pre_summary_rollout_option_dailies`` warning (Q6). Empty
+    # for perp-only / fully-covered accounts.
+    pre_coverage_option_days: list[tuple[str, str]] = field(default_factory=list)
 
 
 def _now_ms() -> int:
@@ -1602,9 +1611,13 @@ async def build_deribit_native_ledger(
     _daily_records, raw_rows, indexable, report = await _crawl_deribit_ledger(
         exchange, since_ms, sleep=sleep
     )
+    # Phase 82: keep the plain (day, ccy)-keyed native dict for the balance-identity
+    # guard (which reconciles against Σchange over cash-bearing rows) BEFORE the
+    # pd.Series conversion.
+    native_daily = txn_rows_to_native_daily(raw_rows)
     native_pnl: dict[str, pd.Series] = {
         ccy: _native_daily_to_series(day_map)
-        for ccy, day_map in txn_rows_to_native_daily(raw_rows).items()
+        for ccy, day_map in native_daily.items()
     }
     native_flows = report.dated_external_flows
     # HIGH-1/MEDIUM-1 (D5 one-read): use the anchor the caller already read from
@@ -1626,6 +1639,32 @@ async def build_deribit_native_ledger(
         raw_rows=raw_rows,
         sleep=sleep,
     )
+    # Phase 82 MANDATORY fail-loud reconcile guard (§1): per currency the computed
+    # realized total MUST equal Σchange over cash-bearing rows, to
+    # max($1-equiv native floor, 1e-4·throughput). The $1-equivalent NATIVE floor
+    # is derived from the anchor mark the adapter already holds: USD-family ≈ 1.0
+    # native/$1; an indexed coin ≈ 1/terminal_mark. Closes by construction; the
+    # one breach it catches is a mid-window session that lacked its options
+    # summary while options were open (its premium dropped with nothing carrying
+    # it) — a LedgerValuationError STOP, never a shipped wrong number.
+    native_floor: dict[str, float] = {}
+    for ccy in set(native_daily) | {str(c).upper() for c in state.native_equity}:
+        if ccy in USD_FAMILY:
+            native_floor[ccy] = 1.0
+            continue
+        mark_series = marks.get(ccy)
+        if mark_series is not None and len(mark_series) > 0:
+            anchor_mark = float(mark_series.iloc[-1])
+            if anchor_mark > 0:
+                native_floor[ccy] = 1.0 / anchor_mark
+        # else: no mark (a value-carrying no-mark coin fails at native_nav's own
+        # mark refusal); rely on the relative 1e-4·throughput term (floor 0.0).
+    assert_balance_identity(raw_rows, native_daily, native_floor=native_floor)
+    # Phase 82 Q6: option rows outside their currency's summary coverage window
+    # fall back to cash-basis `change` (premium noise persists — no summary
+    # channel to reshape them). Surface the affected buckets so the worker stamps
+    # complete_with_warnings (never silently ship pre-rollout noise as clean).
+    report.pre_coverage_option_days = _pre_coverage_option_days(raw_rows)
     ledger = NativeLedger(
         native_pnl=native_pnl,
         terminal_native_equity=state.native_equity,

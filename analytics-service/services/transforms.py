@@ -325,6 +325,14 @@ def _merge_status_meta(
         meta["unrealized_pnl_unreadable"] = True
     if nav_meta.get("twr_chain_broken"):
         meta["twr_chain_broken"] = True
+    # Phase 82: carry the pre-coverage option-dailies bucket LIST through verbatim
+    # (not coerced to True) so the factsheet can caveat WHICH (ccy, day) buckets
+    # are pre-rollout cash-basis noise; a non-empty list already fired guard_fired
+    # above → complete_with_warnings.
+    if nav_meta.get("pre_summary_rollout_option_dailies"):
+        meta["pre_summary_rollout_option_dailies"] = nav_meta[
+            "pre_summary_rollout_option_dailies"
+        ]
     return meta
 
 

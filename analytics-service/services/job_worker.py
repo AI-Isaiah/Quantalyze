@@ -2160,6 +2160,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     > UNREALIZED_MATERIALITY_RATIO
                 ):
                     meta["unrealized_pnl_in_anchor"] = True
+                # Phase 82 Q6: option rows outside their currency's summary
+                # coverage window (pre-2025-01-12 rollout / trailing edge) fell
+                # back to cash-basis `change` — premium noise persists there (no
+                # summary channel to reshape it). Stamp the affected buckets so the
+                # status promotes to complete_with_warnings (a non-empty list is a
+                # registered NAV_TWR_GUARD_KEYS flag) — the factsheet caveats rather
+                # than silently shipping pre-rollout noise as a clean track record.
+                # (Same pattern as unrealized_pnl_unreadable: worker-stamped, not
+                # emitted by the pure core.) The exact TOTAL stays honest (Σchange
+                # is exact in both eras); only the daily attribution is flagged.
+                if _completeness.pre_coverage_option_days:
+                    meta["pre_summary_rollout_option_dailies"] = [
+                        f"{ccy}:{day}"
+                        for ccy, day in _completeness.pre_coverage_option_days
+                    ]
             except (
                 LedgerCompletenessError,
                 LedgerTruncatedError,

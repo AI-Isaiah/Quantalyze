@@ -2727,3 +2727,222 @@ async def test_build_dense_native_marks_dense_delivery_skips_perp() -> None:
     got = {d.strftime("%Y-%m-%d"): float(v) for d, v in marks["BTC"].items()}
     assert got == {"2025-07-01": 60000.0, "2025-07-02": 61000.0}
     assert stub.perp_calls == 0  # dense delivery → perp never consulted
+
+
+# ===========================================================================
+# Phase 82 — options-aware native ledger: coverage-gated re-attribution +
+# balance-identity guard wiring + pre-coverage (Q6) flag. All through the REAL
+# build_deribit_native_ledger seam (synthetic BTC options rows/summaries + a
+# monkeypatched settlement index — no network). RED-first: pre-fix the adapter
+# sums option premium as native pnl, ignores the summary channel, and never
+# invokes the guard.
+# ===========================================================================
+
+import datetime as _dt  # noqa: E402
+
+
+def _jul_ms(day: int, hour: int = 12) -> int:
+    """Epoch-ms for a 2025-07-`day` instant (covered-era anchor)."""
+    return int(
+        _dt.datetime(2025, 7, day, hour, tzinfo=_dt.timezone.utc).timestamp() * 1000
+    )
+
+
+def _btc_summary(day: int, *, rpl: float = 0.0, upl: float = 0.0) -> dict[str, Any]:
+    return {
+        "type": "options_settlement_summary",
+        "instrument_name": "BTC-14JUL25-60000-C",
+        "currency": "BTC",
+        "change": 0.0,
+        "realized_pl": rpl,
+        "unrealized_pl": upl,
+        "timestamp": _jul_ms(day, 8),
+    }
+
+
+def _btc_option_trade(
+    day: int, *, change: float, commission: float = 0.01
+) -> dict[str, Any]:
+    return {
+        "type": "trade",
+        "instrument_name": "BTC-14JUL25-60000-C",
+        "currency": "BTC",
+        "change": change,
+        "commission": commission,
+        "timestamp": _jul_ms(day, 10),
+    }
+
+
+_JUL_INDEX = {f"2025-07-{d:02d}": 60000.0 for d in range(8, 16)}
+
+
+def _patch_jul_index(monkeypatch: Any) -> None:
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        return dict(_JUL_INDEX)
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+
+async def test_native_ledger_covered_options_reattributed_and_marks_dense(
+    monkeypatch: Any,
+) -> None:
+    """A covered-era BTC options account through the REAL adapter: option premium
+    is EXCLUDED (fee-only) and the summary channel enters native_pnl; the dense
+    marks span covers the summary-only day; the balance-identity guard closes.
+
+    Pre-fix: native_pnl[BTC][07-13] would be +1.0 (premium) and there would be no
+    07-12 summary entry — this asserts −0.01 and +1.01 respectively → RED."""
+    import pandas as pd
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [
+                _btc_summary(12, rpl=0.6, upl=0.41),   # carries fee-gross 1.01
+                _btc_summary(14, rpl=0.0, upl=0.0),    # upper window bound
+                _btc_option_trade(13, change=1.0, commission=0.01),  # inside → −0.01
+            ]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+    _patch_jul_index(monkeypatch)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 1.0, "session_upl": 0.0}],
+        index_price={"BTC": 60000.0},
+    )
+    ledger, report = await di.build_deribit_native_ledger(ex)
+
+    btc = ledger.native_pnl["BTC"]
+    assert btc.loc[pd.Timestamp("2025-07-12")] == pytest.approx(1.01, abs=1e-9)
+    assert btc.loc[pd.Timestamp("2025-07-13")] == pytest.approx(-0.01, abs=1e-9)
+    # Dense marks cover the summary-only day 07-12 (it is a native_pnl day).
+    assert pd.Timestamp("2025-07-12") in ledger.marks["BTC"].index
+    assert pd.Timestamp("2025-07-13") in ledger.marks["BTC"].index
+    # Fully covered → no pre-coverage buckets.
+    assert report.pre_coverage_option_days == []
+
+
+async def test_native_ledger_broken_midwindow_closure_raises(
+    monkeypatch: Any,
+) -> None:
+    """The guard is INVOKED at the build call site (wiring-guard discipline): a
+    mid-window session with option premium but NO carrying summary breaches the
+    balance identity → LedgerValuationError at ledger build.
+
+    Neuter: removing the assert_balance_identity call from the adapter makes this
+    build succeed (premium silently dropped) → RED."""
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [
+                _btc_summary(12, rpl=0.0, upl=0.0),   # window bounds only
+                _btc_summary(14, rpl=0.0, upl=0.0),
+                _btc_option_trade(13, change=1.0, commission=0.01),  # premium dropped
+            ]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+    _patch_jul_index(monkeypatch)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 1.0, "session_upl": 0.0}],
+        index_price={"BTC": 60000.0},
+    )
+    with pytest.raises(LedgerValuationError):
+        await di.build_deribit_native_ledger(ex)
+
+
+async def test_native_ledger_pre_coverage_option_days_reported(
+    monkeypatch: Any,
+) -> None:
+    """A pre-rollout BTC option row (before first_summary−24h) falls back to
+    cash-basis change and its (ccy, day) bucket is reported for the Q6 warning;
+    the balance identity still closes (cash contributions ARE the changes)."""
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [
+                _btc_summary(12, rpl=0.0, upl=0.0),
+                _btc_summary(14, rpl=0.0, upl=0.0),
+                _btc_option_trade(9, change=2.0),   # pre-rollout → cash fallback
+            ]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+    _patch_jul_index(monkeypatch)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.0}],
+        index_price={"BTC": 60000.0},
+    )
+    _ledger, report = await di.build_deribit_native_ledger(ex)
+    assert report.pre_coverage_option_days == [("BTC", "2025-07-09")]
+
+
+async def test_mixed_era_options_account_resolves_complete_with_warnings(
+    monkeypatch: Any,
+) -> None:
+    """M1 end-to-end: a mixed-era account (covered + pre-rollout option days)
+    stamps `pre_summary_rollout_option_dailies` (worker Q6 stamp) and the status
+    merge resolves to `complete_with_warnings`, NOT bare `complete` — the flag is
+    a registered NAV_TWR_GUARD_KEYS promoter.
+
+    Pre-M1 (flag not in the allow-list): the merge would return `complete` → RED."""
+    from services.broker_dailies import combine_native_ledger
+    from services.transforms import _merge_status_meta
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [
+                _btc_summary(12, rpl=0.6, upl=0.41),
+                _btc_summary(14, rpl=0.0, upl=0.0),
+                _btc_option_trade(13, change=1.0, commission=0.01),  # covered
+                _btc_option_trade(9, change=2.0),                    # pre-rollout
+            ]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+    _patch_jul_index(monkeypatch)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 3.0, "session_upl": 0.0}],
+        index_price={"BTC": 60000.0},
+    )
+    ledger, report = await di.build_deribit_native_ledger(ex)
+    assert report.pre_coverage_option_days == [("BTC", "2025-07-09")]
+
+    _returns, meta = combine_native_ledger(ledger, report.indexable_currencies)
+    # The worker Q6 stamp (job_worker deribit branch):
+    meta["pre_summary_rollout_option_dailies"] = [
+        f"{ccy}:{day}" for ccy, day in report.pre_coverage_option_days
+    ]
+    merged = _merge_status_meta(
+        meta, used_heuristic_capital=False, balance_error=False
+    )
+    assert merged["computation_status_hint"] == "complete_with_warnings"
+    # The bucket list is carried through verbatim (not coerced to a bare bool).
+    assert merged["pre_summary_rollout_option_dailies"] == ["BTC:2025-07-09"]

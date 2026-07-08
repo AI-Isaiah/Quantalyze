@@ -136,6 +136,18 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     # rides the SAME complete_with_warnings channel as the DQ-01/DQ-02 guards;
     # NO parallel status.
     twr_chain_broken: bool
+    # Phase 82 — Deribit option rows OUTSIDE their currency's summary coverage
+    # window (pre-2025-01-12 rollout, or the live trailing edge) fell back to
+    # cash-basis `change`: premium swings PERSIST there (no summary channel exists
+    # to re-attribute them, and none ever will — exchange-side rollout, not a data
+    # error). The value is the sorted list of affected ``"{ccy}:{day}"`` buckets so
+    # the factsheet can CAVEAT rather than silently ship noise. Set by the broker
+    # wiring (job_worker), NOT the pure core — same pattern as
+    # unrealized_pnl_unreadable; a NON-EMPTY list is truthy → rides the SAME
+    # complete_with_warnings channel (founder-lp strict mode withholds warned
+    # accounts automatically). Registered in NAV_TWR_GUARD_KEYS so the flag alone
+    # promotes the status (Q6).
+    pre_summary_rollout_option_dailies: list[str]
 
 
 # SHOULD-1 (specialist-types): the ONE source of truth for the additive
@@ -156,6 +168,7 @@ NAV_TWR_GUARD_KEYS: tuple[str, ...] = (
     "unrealized_pnl_in_anchor",
     "unrealized_pnl_unreadable",
     "twr_chain_broken",
+    "pre_summary_rollout_option_dailies",
 )
 
 

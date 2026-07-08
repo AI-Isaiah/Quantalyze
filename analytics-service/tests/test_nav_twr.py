@@ -1388,8 +1388,9 @@ def test_nav_twr_guard_keys_are_declared_and_single_sourced() -> None:
     assert "balance_error" not in NAV_TWR_GUARD_KEYS
     # No duplicate keys in the single source.
     assert len(NAV_TWR_GUARD_KEYS) == len(set(NAV_TWR_GUARD_KEYS))
-    # The v1.8 warn flags + the v1.9 DQ-03 chain-break key are all present
-    # (regression pin on the closed set).
+    # The v1.8 warn flags + the v1.9 DQ-03 chain-break key + the Phase 82
+    # pre-coverage option-dailies flag are all present (regression pin on the
+    # closed set).
     assert set(NAV_TWR_GUARD_KEYS) == {
         "dust_nav_guard",
         "negative_nav_guard",
@@ -1398,6 +1399,7 @@ def test_nav_twr_guard_keys_are_declared_and_single_sourced() -> None:
         "unrealized_pnl_in_anchor",
         "unrealized_pnl_unreadable",
         "twr_chain_broken",
+        "pre_summary_rollout_option_dailies",
     }
 
 
