@@ -705,3 +705,126 @@ def test_same_family_swap_is_noop_in_coalesced_usd_bucket(monkeypatch: Any) -> N
 
     # The swap legs cancel in the coalesced 'USD' bucket → byte-identical returns.
     pd.testing.assert_series_equal(ret_no, ret_sw, check_exact=True)
+
+
+# ===========================================================================
+# Phase 82 Task 4 — SC-4 byte-identity for an INVERSE (BTC-margined) perp-only
+# ledger. The coverage-gated option arms are classification-gated: a ledger with
+# ZERO option rows and ZERO summary rows runs the SAME rows through the SAME
+# float ops → the native_pnl dict is BIT-EXACT to the OLD Σchange formula. Proven
+# through the REAL build_deribit_native_ledger seam (inverse marks via a stubbed
+# settlement index).
+# ===========================================================================
+
+
+def _old_formula_native_pnl(
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, float]]:
+    """The PRE-Phase-82 native formula written inline: Σ raw `change` per
+    (UTC-day, ccy) over the native cash-bearing types (incl swap), skipping the
+    external-flow informational types. A drift on ANY non-option row reddens the
+    check below."""
+    from services.deribit_txn import (
+        _NATIVE_CASH_BEARING_TYPES,
+        _NATIVE_INFORMATIONAL_TYPES,
+        _row_utc_day,
+    )
+
+    acc: dict[tuple[str, str], float] = {}
+    for r in rows:
+        t = str(r.get("type", ""))
+        if t in _NATIVE_INFORMATIONAL_TYPES:
+            continue
+        if t in _NATIVE_CASH_BEARING_TYPES:
+            chg = float(r["change"])
+            if chg == 0.0:
+                continue
+            day = _row_utc_day(r["timestamp"])
+            ccy = str(r["currency"]).upper()
+            acc[(day, ccy)] = acc.get((day, ccy), 0.0) + chg
+    out: dict[str, dict[str, float]] = {}
+    for (day, ccy), v in sorted(acc.items()):
+        out.setdefault(ccy, {})[day] = v
+    return out
+
+
+def test_inverse_perp_only_ledger_byte_identical_real_adapter(
+    monkeypatch: Any,
+) -> None:
+    """SC-4 (gate i, inverse tier): a BTC perp-only ledger — settlement +
+    perp-trade fees + future delivery + negative_balance_fee + swap, ZERO option/
+    summary rows — through the REAL adapter yields native_pnl BIT-EXACT to the OLD
+    Σchange formula (check_exact). The coverage pre-pass finds no window and
+    _pre_coverage_option_days is empty (classification-gated, not account-flagged).
+    """
+    from services.deribit_txn import (
+        _pre_coverage_option_days,
+        _summary_coverage_windows,
+    )
+
+    btc_rows = [
+        {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": 0.5, "index_price": 60000.0, "timestamp": _day_ms(0)},
+        {"type": "trade", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.0002, "commission": 0.0002, "timestamp": _day_ms(0)},
+        {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": 0.02, "index_price": 60000.0, "timestamp": _day_ms(1)},
+        {"type": "delivery", "instrument_name": "BTC-27MAR26", "currency": "BTC",
+         "change": 0.005, "timestamp": _day_ms(1)},
+        {"type": "negative_balance_fee", "currency": "BTC",
+         "change": -0.001, "timestamp": _day_ms(1)},
+        {"type": "swap", "currency": "BTC", "change": -0.1, "timestamp": _day_ms(2)},
+    ]
+    currencies = ["BTC"]
+
+    async def _enumerate_scopes(_ex: Any) -> list[Any]:
+        return [di.Scope("main", None, True)]
+
+    async def _resolve_scope_auth(_ex: Any, _scope: Any) -> dict[str, Any]:
+        return {}
+
+    async def _enumerate_currencies(_ex: Any, _scope: Any, _auth: Any) -> list[str]:
+        return list(currencies)
+
+    async def _paginate(
+        _ex: Any, _scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[dict[str, Any]]:
+        return list(btc_rows) if currency == "BTC" else []
+
+    async def _index_probe(_ex: Any, _ccy: str, *, oldest_day: str, sleep: Any) -> Any:
+        return {_iso(0): 60000.0, _iso(1): 60000.0, _iso(2): 60000.0}
+
+    monkeypatch.setattr(di, "enumerate_scopes", _enumerate_scopes)
+    monkeypatch.setattr(di, "resolve_scope_auth", _resolve_scope_auth)
+    monkeypatch.setattr(di, "enumerate_currencies", _enumerate_currencies)
+    monkeypatch.setattr(di, "paginate_txn_log", _paginate)
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _index_probe)
+
+    class _BtcStub:
+        async def private_get_get_account_summaries(self, params: Any) -> Any:
+            # terminal = Σ pnl (full_history residual-clean, no flows/wedge).
+            total = sum(
+                v for days in _old_formula_native_pnl(btc_rows).values()
+                for v in days.values()
+            )
+            return {"result": {"summaries": [
+                {"currency": "BTC", "equity": total, "session_upl": 0.0},
+            ]}}
+
+        async def public_get_get_index_price(self, params: Any) -> Any:
+            return {"result": {"index_price": 60000.0}}
+
+    ledger, _report = asyncio.run(di.build_deribit_native_ledger(_BtcStub()))
+
+    # BIT-EXACT vs the OLD Σchange formula (golden computed inline).
+    golden = _old_formula_native_pnl(btc_rows)["BTC"]
+    expected = pd.Series(
+        {pd.Timestamp(d): v for d, v in golden.items()}, dtype=float
+    ).sort_index()
+    pd.testing.assert_series_equal(
+        ledger.native_pnl["BTC"], expected, check_exact=True, check_names=False
+    )
+    # Classification-gating: no summary rows → no coverage window, no pre-coverage
+    # option days (the option arms are never consulted on this inverse ledger).
+    assert _summary_coverage_windows(btc_rows) == {}
+    assert _pre_coverage_option_days(btc_rows) == []

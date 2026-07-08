@@ -29,6 +29,7 @@ from scripts.deribit_acceptance import (
     check_date_coverage,
     check_factsheet_status,
     check_inverse_signs,
+    check_perp_only_eligibility,
     summarize_fills,
 )
 
@@ -282,3 +283,50 @@ def test_live_driver_pure_surface_imports() -> None:
     assert spec.window_start == date(2025, 8, 1)
     assert spec.window_end == date(2025, 9, 30)
     assert spec.label == "LTP072"
+
+
+# ---------------------------------------------------------------------------
+# check_perp_only_eligibility — Phase 82 SC-4 byte-identity control gate.
+# ---------------------------------------------------------------------------
+
+
+def test_perp_only_eligibility_zero_option_zero_summary_passes() -> None:
+    """A pure perp/future ledger (no option trade/delivery, no summary) is a valid
+    byte-identity control key → passes 0/0."""
+    rows = [
+        {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.01},
+        {"type": "trade", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.0002},
+        {"type": "delivery", "instrument_name": "BTC-27MAR26", "currency": "BTC",
+         "change": 0.02},
+    ]
+    chk = check_perp_only_eligibility(rows)
+    assert chk.passed
+    assert "0 option" in chk.detail
+
+
+def test_perp_only_eligibility_option_trade_fails_and_names_count() -> None:
+    """A single option trade row disqualifies the key as a byte-identity control
+    (its native P&L legitimately moves post-fix) → fails, naming the counts."""
+    rows = [
+        {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.01},
+        {"type": "trade", "instrument_name": "BTC-14JUL25-60000-C", "currency": "BTC",
+         "change": 2.0},
+    ]
+    chk = check_perp_only_eligibility(rows)
+    assert not chk.passed
+    assert "1 option trade/delivery row(s)" in chk.detail
+
+
+def test_perp_only_eligibility_summary_row_fails() -> None:
+    """An options_settlement_summary row also disqualifies (the account traded
+    options at some point) → fails."""
+    rows = [
+        {"type": "options_settlement_summary", "currency": "BTC", "change": 0.0,
+         "realized_pl": 0.0, "unrealized_pl": 0.0},
+    ]
+    chk = check_perp_only_eligibility(rows)
+    assert not chk.passed
+    assert "options_settlement_summary row(s)" in chk.detail

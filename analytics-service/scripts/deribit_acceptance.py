@@ -74,7 +74,12 @@ from services.deribit_ingest import (
     assert_ledger_complete,
     fetch_deribit_ledger_daily_records,
 )
-from services.deribit_txn import _INVERSE_CURRENCIES, txn_change_to_usd
+from services.deribit_txn import (
+    _INVERSE_CURRENCIES,
+    _NATIVE_OPTIONS_SUMMARY_TYPES,
+    classify_instrument,
+    txn_change_to_usd,
+)
 
 # Cap on how many symmetric-difference dates / sign-mismatch rows a Check detail
 # names — enough to triage, bounded so a wholesale mismatch cannot flood the log.
@@ -233,6 +238,45 @@ def check_daily_reconcile(
             f"(injected): {_fmt_dates(injected)}"
         )
     return Check("daily_reconcile", False, "; ".join(parts) + zero_note)
+
+
+def check_perp_only_eligibility(rows: Sequence[Mapping[str, Any]]) -> Check:
+    """Phase 82 SC-4 eligibility gate for a byte-identity CONTROL key: a key used
+    to prove perp-only factsheets are UNCHANGED post-options-fix must carry ZERO
+    historical option ``trade``/``delivery`` rows AND ZERO
+    ``options_settlement_summary`` rows over full history.
+
+    A key that ever traded ONE option carries summary/delivery rows whose native
+    P&L LEGITIMATELY changes post-fix (coverage-gated re-attribution) — using it
+    as a byte-identity control would be a FALSE red. This check counts both and
+    passes iff 0/0, naming the counts so the Task-7 run log records eligibility
+    per key BEFORE the byte-identity comparison is trusted."""
+    option_rows = 0
+    summary_rows = 0
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        row_type = str(row.get("type", ""))
+        if row_type in _NATIVE_OPTIONS_SUMMARY_TYPES:
+            summary_rows += 1
+        elif row_type in ("trade", "delivery"):
+            if classify_instrument(str(row.get("instrument_name", ""))) == "option":
+                option_rows += 1
+    if option_rows == 0 and summary_rows == 0:
+        return Check(
+            "perp_only_eligibility",
+            True,
+            "0 option trade/delivery rows, 0 options_settlement_summary rows — "
+            "eligible as a byte-identity control key",
+        )
+    return Check(
+        "perp_only_eligibility",
+        False,
+        f"{option_rows} option trade/delivery row(s) and {summary_rows} "
+        "options_settlement_summary row(s) present — this key's native P&L "
+        "LEGITIMATELY moves post-fix (coverage-gated re-attribution); it is NOT a "
+        "valid byte-identity control (Task 4 plan-check finding)",
+    )
 
 
 def check_inverse_signs(rows: Sequence[Mapping[str, Any]]) -> Check:
