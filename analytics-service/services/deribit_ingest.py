@@ -578,6 +578,135 @@ async def fetch_deribit_settlement_index(
     return prices
 
 
+# The linear USDC-quoted perpetual whose DAILY CLOSE is the lowest-precedence
+# {ccy}_usd mark fill (80-04) for INDEXED coins whose get_delivery_prices series
+# is SPARSE. Deribit names it "{CCY}_USDC-PERPETUAL" (e.g. SOL_USDC-PERPETUAL);
+# NEVER the bare "{CCY}-PERPETUAL" (that is the COIN-margined perp, quoted in coin
+# — its "price" is ~1.0-scaled and is NOT a USD mark).
+_PERP_DAILY_INSTRUMENT_SUFFIX = "_USDC-PERPETUAL"
+_PERP_DAILY_RESOLUTION = "1D"
+
+
+async def fetch_deribit_perp_daily_index(
+    exchange: Any,
+    currency: str,
+    *,
+    oldest_day: str,
+    sleep: SleepFn = asyncio.sleep,
+    max_retries: int = PUBLIC_READ_MAX_RETRIES,
+) -> dict[str, float]:
+    """Per-UTC-day USD mark for ``currency`` from the DAILY CLOSE of Deribit's
+    linear ``{ccy}_USDC-PERPETUAL`` via the PUBLIC ``get_tradingview_chart_data``
+    endpoint (``resolution=1D``), for ``[oldest_day 00:00 UTC, now]``.
+
+    The LOWEST-precedence dense-daily mark fill (80-04). An INDEXED coin whose
+    ``get_delivery_prices`` feed is SPARSE (SOL: 553 gappy dates across 2022-2026,
+    absent through 2025-07/08) leaves the native roll's carry-forward / quiet-flow
+    days unmarked, so the core refuses ``missing_daily_marks`` on days the coin
+    genuinely carries value. This same-exchange, same-UTC-day close fills those
+    days: it is a D-07-compliant same-time-basis mark (NOT a period-end/current
+    price), and the DAILY close matches the daily boundary at which the native core
+    marks NAV *and* flows (``native_nav.py`` values a flow as ``qty x mark(day)``),
+    so no intraday basis mismatch is introduced. It NEVER wins over a real own-row
+    ``index_price`` or a same-day ``delivery_price`` (the callers union it beneath
+    both), so a currency whose delivery feed is already dense-daily (BTC/ETH) is
+    byte-identically unaffected (SC-4).
+
+    Read-error discipline mirrors :func:`fetch_deribit_settlement_index`: a TRANSIENT
+    read (``ccxt.NetworkError``) is retried with exponential backoff and, on
+    ``max_retries`` exhaustion, RAISES ``DeribitTransientReadError`` (retryable) —
+    NEVER a silently-partial map. A GENUINE benign no-data (the exchange RESPONDED —
+    e.g. ``BadSymbol`` for a coin with no USDC perp, or ``status != "ok"``) returns
+    ``{}`` so the honest union + the core's fail-loud refusal handle a real gap. A
+    1D series spans at most a few thousand points, so ONE request suffices (no
+    pagination). Every ccxt error is scrubbed before logging.
+    """
+    instrument = f"{currency.upper()}{_PERP_DAILY_INSTRUMENT_SUFFIX}"
+    start_ms = int(pd.Timestamp(oldest_day, tz="UTC").timestamp() * 1000)
+    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    params: dict[str, Any] = {
+        "instrument_name": instrument,
+        "start_timestamp": start_ms,
+        "end_timestamp": end_ms,
+        "resolution": _PERP_DAILY_RESOLUTION,
+    }
+    retries = 0
+    while True:
+        try:
+            resp = await exchange.public_get_get_tradingview_chart_data(params)
+            break
+        except Exception as exc:  # noqa: BLE001
+            if _is_transient_read_error(exc):
+                retries += 1
+                if retries > max_retries:
+                    raise DeribitTransientReadError(
+                        "deribit get_tradingview_chart_data transient read budget "
+                        f"({max_retries}) exhausted for instrument={instrument} — "
+                        "refusing a silently-partial daily-mark map (retryable)"
+                    ) from None
+                await sleep(PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1)))
+                continue
+            logger.warning(
+                "deribit get_tradingview_chart_data structural no-data for "
+                "instrument=%s (%s); returning no daily marks",
+                instrument,
+                scrub_freeform_string(str(exc)),
+            )
+            return {}
+    result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
+    if not isinstance(result, Mapping) or result.get("status") != "ok":
+        return {}
+    ticks = result.get("ticks", [])
+    close = result.get("close", [])
+    if (
+        not isinstance(ticks, Sequence)
+        or isinstance(ticks, (str, bytes))
+        or not isinstance(close, Sequence)
+        or isinstance(close, (str, bytes))
+        or len(ticks) != len(close)
+    ):
+        return {}
+    prices: dict[str, float] = {}
+    for raw_ts, raw_price in zip(ticks, close):
+        try:
+            ts_ms = int(raw_ts)
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        day = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime(
+            "%Y-%m-%d"
+        )
+        # One 1D bar per UTC day; setdefault keeps the FIRST (defensive vs a dupe).
+        prices.setdefault(day, price)
+    return prices
+
+
+def _price_map_has_gap(
+    price_map: Mapping[str, float], oldest_day: str, newest_day: str
+) -> bool:
+    """Does ``price_map`` fail to cover EVERY calendar day in the REQUIRED span
+    ``[oldest_day, newest_day]`` — i.e. is it sparse (SOL) rather than dense-daily
+    (BTC/ETH)? Empty, not reaching back to ``oldest_day``, not reaching up to
+    ``newest_day``, or holed anywhere between all count as a gap. The span is the
+    currency's own activity range (oldest activity day → newest day it can be
+    required, i.e. its last ledger day, or today if a nonzero terminal balance
+    carries forward), NOT ``[min(map), max(map)]`` — a single delivery day at the
+    span start has no INTERNAL gap yet leaves every later carry-forward day
+    unmarked. Used to decide whether the ``{ccy}_USDC-PERPETUAL`` daily-close fill
+    is needed, so a dense-delivery coin (BTC/ETH) triggers NO perp fetch (SC-4)."""
+    if not price_map:
+        return True
+    days = sorted(price_map)
+    if days[0] > oldest_day or days[-1] < newest_day:
+        return True  # doesn't span the full required range
+    for day in pd.date_range(oldest_day, newest_day, freq="D"):
+        if day.strftime("%Y-%m-%d") not in price_map:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # The scope×currency producer + the re-anchored D-02 completeness gate.
 # ---------------------------------------------------------------------------
@@ -796,6 +925,9 @@ async def _crawl_deribit_ledger(
     # currency, reused across every scope) — public/get_delivery_prices is
     # account-wide, so multiple scopes share the same {date: price} map.
     settlement_index_cache: dict[str, dict[str, float]] = {}
+    # 80-04: per-currency {ccy}_USDC-PERPETUAL daily-close cache, the lowest-
+    # precedence fill for needed days a SPARSE delivery feed (SOL) can't cover.
+    perp_daily_cache: dict[str, dict[str, float]] = {}
     for scope in scopes:
         auth = scope_auths[scope.label]
         for currency in expected[scope.label]:
@@ -865,6 +997,37 @@ async def _crawl_deribit_ledger(
                         for (d, c) in needed
                         if d in price_map
                     }
+                    # 80-04 sparse-delivery fill: needed quiet-day rows whose day the
+                    # delivery feed lacks (SOL — sparse/absent through the flow days)
+                    # value against the {ccy}_USDC-PERPETUAL DAILY CLOSE instead of
+                    # failing loud. LOWEST precedence: only days STILL uncovered by
+                    # own-row (wins in the aggregator) and delivery (placed above) are
+                    # filled, so a dense-delivery coin (BTC/ETH) never enters here and
+                    # stays byte-identical (SC-4). Fetched ONCE per currency, cached
+                    # across scopes; keyed by UPPERCASED currency (mirrors delivery).
+                    still_needed = {
+                        (d, c) for (d, c) in needed if (d, c) not in supplemental
+                    }
+                    if still_needed:
+                        still_min = min(d for (d, _c) in still_needed)
+                        perp_cached = perp_daily_cache.get(ccy_upper)
+                        if (
+                            perp_cached is None
+                            or not perp_cached
+                            or min(perp_cached) > still_min
+                        ):
+                            perp_daily_cache[ccy_upper] = (
+                                await fetch_deribit_perp_daily_index(
+                                    exchange,
+                                    currency,
+                                    oldest_day=still_min,
+                                    sleep=sleep,
+                                )
+                            )
+                        perp_map = perp_daily_cache[ccy_upper]
+                        for (d, c) in still_needed:
+                            if d in perp_map:
+                                supplemental[(d, c)] = perp_map[d]
             records = txn_rows_to_daily_records(
                 rows,
                 supplemental_index=supplemental,
@@ -1312,29 +1475,43 @@ async def _build_dense_native_marks(
     that defers the refusal to ``_value_over_calendar``."""
     value_ccys: set[str] = set()
     oldest_day: dict[str, str] = {}
+    # Newest day a ccy can be REQUIRED (its last ledger day, or today if a nonzero
+    # terminal balance carries forward) — the upper bound of the sparse-delivery gap
+    # check so the perp fill covers the whole carry-forward span, not just [min,max].
+    newest_day: dict[str, str] = {}
+    today_iso = _today_utc_iso()
 
-    def _note(ccy: str, day: str | None) -> None:
+    def _note(ccy: str, day_oldest: str | None, day_newest: str | None) -> None:
         value_ccys.add(ccy)
-        if day is not None:
+        if day_oldest is not None:
             prev = oldest_day.get(ccy)
-            oldest_day[ccy] = day if prev is None else min(prev, day)
+            oldest_day[ccy] = day_oldest if prev is None else min(prev, day_oldest)
+        if day_newest is not None:
+            prevn = newest_day.get(ccy)
+            newest_day[ccy] = day_newest if prevn is None else max(prevn, day_newest)
 
     for ccy, series in native_pnl.items():
         if ccy not in indexable or series.empty:
             continue
         if bool((series.to_numpy(dtype=float) != 0.0).any()):
-            _note(ccy, str(series.index[0].strftime("%Y-%m-%d")))
+            _note(
+                ccy,
+                str(series.index[0].strftime("%Y-%m-%d")),
+                str(series.index[-1].strftime("%Y-%m-%d")),
+            )
     for flow in native_flows:
         ccy = flow.currency
         if ccy not in indexable:
             continue
         qty = flow.quantity
         if float(flow.usd_signed) != 0.0 or (qty is not None and float(qty) != 0.0):
-            _note(ccy, flow.utc_day_iso)
+            _note(ccy, flow.utc_day_iso, flow.utc_day_iso)
     for source in (terminal_native_equity, terminal_upnl_native):
         for ccy, val in source.items():
             if ccy in indexable and float(val) != 0.0:
-                _note(ccy, None)
+                # A nonzero terminal balance carries forward to TODAY → the newest
+                # required day is today (no oldest contribution — no ledger day).
+                _note(ccy, None, today_iso)
 
     marks: dict[str, pd.Series] = {}
     if not value_ccys:
@@ -1363,8 +1540,23 @@ async def _build_dense_native_marks(
         # refuses it honestly. This gives native marks coverage identical to the
         # USD path (HIGH-1).
         merged = {**delivery, **own_by_ccy.get(ccy, {})}
+        # 80-04 sparse-delivery fill: an INDEXED coin whose delivery ∪ own union is
+        # gappy across its carry-forward span (SOL — get_delivery_prices is sparse
+        # and no same-day trade seeds an own index) refuses missing_daily_marks even
+        # though it genuinely carries value. Fill the gaps with the
+        # {ccy}_USDC-PERPETUAL DAILY CLOSE — same-exchange same-UTC-day, LOWEST
+        # precedence (delivery/own already placed WIN on any shared day). Fetched
+        # ONLY when a gap exists, so a dense-delivery coin (BTC/ETH) triggers no
+        # perp fetch and stays byte-identical (SC-4).
+        span_oldest = oldest_day.get(ccy, global_oldest)
+        span_newest = newest_day.get(ccy, span_oldest)
+        if _price_map_has_gap(merged, span_oldest, span_newest):
+            perp = await fetch_deribit_perp_daily_index(
+                exchange, ccy, oldest_day=span_oldest, sleep=sleep
+            )
+            merged = {**perp, **merged}
         if not merged:
-            # LOW-2: no mark from EITHER source for a value-carrying INDEXED
+            # LOW-2: no mark from ANY source for a value-carrying INDEXED
             # currency → OMIT the key (no empty Series) so the F-1 build-time
             # invariant refuses it cleanly at _build_buckets.
             continue

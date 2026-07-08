@@ -2536,3 +2536,194 @@ async def test_native_account_state_structural_collapsed_probe_flags_balance_err
     assert state.native_equity == {"BTC": 1.5}  # readable native maps preserved
     assert state.collapsed_equity_usd is None
     assert spy.waits == []  # structural → never retried
+
+
+# ===========================================================================
+# 80-04 sparse-delivery fill: the {ccy}_USDC-PERPETUAL DAILY CLOSE fallback.
+# A real Deribit coin key (SOL) carries material capital flows on days with no
+# same-day trade (no own index_price) AND no get_delivery_prices entry (SOL's
+# delivery series is sparse). Both the usd_signed flow leg and the native core's
+# missing_daily_marks guard refused. fetch_deribit_perp_daily_index fills those
+# days from the linear USDC perp's daily close — same-exchange same-UTC-day, and
+# LOWEST precedence so dense-delivery coins (BTC/ETH) stay byte-identical.
+# ===========================================================================
+
+
+class _ChartDataStub:
+    """Serves a scripted public/get_tradingview_chart_data response or error."""
+
+    def __init__(self, script: list[Any]) -> None:
+        self._script = list(script)
+        self.calls: list[dict[str, Any]] = []
+
+    async def public_get_get_tradingview_chart_data(
+        self, params: dict[str, Any]
+    ) -> Any:
+        self.calls.append(dict(params))
+        item = self._script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _chart_ok(day_price: list[tuple[str, float]]) -> dict[str, Any]:
+    import pandas as pd
+
+    ticks = [int(pd.Timestamp(d, tz="UTC").timestamp() * 1000) for d, _ in day_price]
+    close = [p for _, p in day_price]
+    return {"result": {"status": "ok", "ticks": ticks, "close": close}}
+
+
+async def test_perp_daily_parses_maps_days_and_instrument() -> None:
+    stub = _ChartDataStub(
+        [_chart_ok([("2025-07-01", 149.13), ("2025-08-04", 166.05)])]
+    )
+    prices = await di.fetch_deribit_perp_daily_index(
+        stub, "SOL", oldest_day="2025-07-01", sleep=_SleepSpy()
+    )
+    assert prices == {"2025-07-01": 149.13, "2025-08-04": 166.05}
+    # The LINEAR USDC-quoted perp (never the coin-margined SOL-PERPETUAL) at 1D.
+    assert stub.calls[0]["instrument_name"] == "SOL_USDC-PERPETUAL"
+    assert stub.calls[0]["resolution"] == "1D"
+
+
+async def test_perp_daily_skips_nonpositive_close() -> None:
+    stub = _ChartDataStub(
+        [_chart_ok([("2025-07-01", 149.0), ("2025-07-02", 0.0), ("2025-07-03", -1.0)])]
+    )
+    prices = await di.fetch_deribit_perp_daily_index(
+        stub, "SOL", oldest_day="2025-07-01", sleep=_SleepSpy()
+    )
+    assert prices == {"2025-07-01": 149.0}  # 0 and negative closes dropped
+
+
+async def test_perp_daily_status_not_ok_returns_empty() -> None:
+    stub = _ChartDataStub([{"result": {"status": "no_data", "ticks": [], "close": []}}])
+    prices = await di.fetch_deribit_perp_daily_index(
+        stub, "SOL", oldest_day="2025-07-01", sleep=_SleepSpy()
+    )
+    assert prices == {}
+
+
+async def test_perp_daily_structural_nodata_returns_empty() -> None:
+    # A coin with no USDC perp → BadSymbol (the exchange RESPONDED): benign, {}.
+    stub = _ChartDataStub([ccxt.BadSymbol("no such instrument")])
+    prices = await di.fetch_deribit_perp_daily_index(
+        stub, "DOGE", oldest_day="2025-07-01", sleep=_SleepSpy()
+    )
+    assert prices == {}
+    assert len(stub.calls) == 1  # structural → NOT retried
+
+
+async def test_perp_daily_transient_raises_retryable() -> None:
+    # A NetworkError (RequestTimeout) is RETRYABLE: retry with backoff, then raise
+    # DeribitTransientReadError on budget exhaustion — never a silent empty map that
+    # would drive a PERMANENT missing_daily_marks refusal on a mere blip.
+    stub = _ChartDataStub([ccxt.RequestTimeout("blip")] * 3)
+    spy = _SleepSpy()
+    with pytest.raises(DeribitTransientReadError):
+        await di.fetch_deribit_perp_daily_index(
+            stub, "SOL", oldest_day="2025-07-01", sleep=spy, max_retries=2
+        )
+    assert len(stub.calls) == 3  # initial + 2 retries
+    assert spy.waits == [1.0, 2.0]  # exponential backoff
+
+
+def test_price_map_has_gap() -> None:
+    # Dense-daily (BTC/ETH shape) spanning [oldest, newest] → NO gap → no perp fetch.
+    dense = {"2025-07-01": 1.0, "2025-07-02": 1.0, "2025-07-03": 1.0}
+    assert di._price_map_has_gap(dense, "2025-07-01", "2025-07-03") is False
+    # Internal calendar gap → needs the perp fill.
+    assert di._price_map_has_gap(
+        {"2025-07-01": 1.0, "2025-07-03": 1.0}, "2025-07-01", "2025-07-03"
+    )
+    # A single day at the span START leaves later carry-forward days unmarked (the
+    # exact SOL trap: no INTERNAL gap, but doesn't reach newest) → gap.
+    assert di._price_map_has_gap({"2025-07-01": 1.0}, "2025-07-01", "2025-07-03")
+    # Empty → gap. Not reaching back to oldest → gap.
+    assert di._price_map_has_gap({}, "2025-07-01", "2025-07-03") is True
+    assert di._price_map_has_gap({"2025-07-03": 1.0}, "2025-07-01", "2025-07-03")
+
+
+class _MarksStubExchange:
+    """Combined stub: sparse delivery-prices + dense USDC-perp daily close."""
+
+    def __init__(
+        self, delivery: dict[str, float], perp: dict[str, float]
+    ) -> None:
+        self._delivery = delivery
+        self._perp = perp
+        self.perp_calls = 0
+
+    async def public_get_get_delivery_prices(self, params: dict[str, Any]) -> Any:
+        # One full page then exhaustion (the fetcher stops on the empty page).
+        if params.get("offset", 0) == 0 and self._delivery:
+            return {
+                "result": {
+                    "data": [
+                        {"date": d, "delivery_price": p}
+                        for d, p in self._delivery.items()
+                    ]
+                }
+            }
+        return {"result": {"data": []}}
+
+    async def public_get_get_tradingview_chart_data(
+        self, params: dict[str, Any]
+    ) -> Any:
+        self.perp_calls += 1
+        return _chart_ok(sorted(self._perp.items()))
+
+
+async def test_build_dense_native_marks_fills_sparse_delivery_with_perp() -> None:
+    """RED without the fix: a SOL series spanning 07-01..07-03 with delivery holding
+    ONLY 07-01 leaves 07-02/07-03 unmarked → core refuses missing_daily_marks. The
+    perp daily-close fill densifies the span; delivery WINS on the shared 07-01."""
+    import pandas as pd
+
+    idx = pd.DatetimeIndex([pd.Timestamp(d) for d in ("2025-07-01", "2025-07-03")])
+    native_pnl = {"SOL": pd.Series([10.0, 5.0], index=idx, name="native_pnl")}
+    stub = _MarksStubExchange(
+        delivery={"2025-07-01": 150.0},  # sparse: 07-02, 07-03 absent
+        perp={"2025-07-01": 149.0, "2025-07-02": 151.0, "2025-07-03": 166.0},
+    )
+    marks = await di._build_dense_native_marks(
+        stub,
+        indexable={"SOL"},
+        native_pnl=native_pnl,
+        native_flows=[],
+        terminal_native_equity={"SOL": 0.0},
+        terminal_upnl_native={},
+        raw_rows=[],
+        sleep=_SleepSpy(),
+    )
+    sol = marks["SOL"]
+    got = {d.strftime("%Y-%m-%d"): float(v) for d, v in sol.items()}
+    assert got == {"2025-07-01": 150.0, "2025-07-02": 151.0, "2025-07-03": 166.0}
+    assert stub.perp_calls == 1  # perp fetched exactly once for the gap
+
+
+async def test_build_dense_native_marks_dense_delivery_skips_perp() -> None:
+    """SC-4: a dense-daily delivery feed (BTC/ETH shape) covers the whole span, so
+    the perp fill is NEVER fetched → byte-identical to pre-80-04 behaviour."""
+    import pandas as pd
+
+    idx = pd.DatetimeIndex([pd.Timestamp(d) for d in ("2025-07-01", "2025-07-02")])
+    native_pnl = {"BTC": pd.Series([1.0, 1.0], index=idx, name="native_pnl")}
+    stub = _MarksStubExchange(
+        delivery={"2025-07-01": 60000.0, "2025-07-02": 61000.0},  # dense
+        perp={"2025-07-01": 1.0, "2025-07-02": 1.0},  # would corrupt if used
+    )
+    marks = await di._build_dense_native_marks(
+        stub,
+        indexable={"BTC"},
+        native_pnl=native_pnl,
+        native_flows=[],
+        terminal_native_equity={"BTC": 0.0},
+        terminal_upnl_native={},
+        raw_rows=[],
+        sleep=_SleepSpy(),
+    )
+    got = {d.strftime("%Y-%m-%d"): float(v) for d, v in marks["BTC"].items()}
+    assert got == {"2025-07-01": 60000.0, "2025-07-02": 61000.0}
+    assert stub.perp_calls == 0  # dense delivery → perp never consulted
