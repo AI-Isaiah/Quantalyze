@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import AbstractSet, Any
 
+import ccxt
 import pandas as pd
 
 from services.deribit_txn import (
@@ -65,6 +66,13 @@ LEDGER_PACE_SECONDS: float = 1.0
 LEDGER_BACKOFF_BASE_SECONDS: float = 1.0
 # Max consecutive 10028 retries for a single page before failing loud.
 LEDGER_MAX_RETRIES: int = 8
+
+# A TRANSIENT public-read blip (network/timeout/5xx → ccxt.NetworkError) on a
+# settlement-index or index-price probe is RETRYABLE: retry with backoff, then
+# raise DeribitTransientReadError. Reuses the txn-log read discipline's budget +
+# backoff base so the ONE read-retry policy governs every Deribit public read.
+PUBLIC_READ_MAX_RETRIES: int = LEDGER_MAX_RETRIES
+PUBLIC_READ_BACKOFF_BASE_SECONDS: float = LEDGER_BACKOFF_BASE_SECONDS
 
 # Deribit error codes.
 _RATE_LIMIT_CODE: int = 10028
@@ -165,6 +173,23 @@ def _deribit_real_code(exc: BaseException) -> int | None:
     if isinstance(code, bool):
         return None
     return code if isinstance(code, int) else None
+
+
+def _is_transient_read_error(exc: BaseException) -> bool:
+    """True when a PUBLIC-read exception is a TRANSIENT network condition
+    (network/timeout/5xx/rate-limit), NOT a benign STRUCTURAL response.
+
+    A genuinely-absent index / "no data" is a business response the exchange
+    RETURNED — ccxt raises it as ``ExchangeError`` / ``BadSymbol`` / ``BadRequest``,
+    none of which subclass ``NetworkError`` → this returns ``False`` → the reader
+    keeps its honest structural behaviour (skip the currency / return the
+    accumulated map, never retried forever). Only a ``ccxt.NetworkError`` (which
+    covers ``RequestTimeout``, ``RateLimitExceeded``, ``ExchangeNotAvailable`` and
+    ``DDoSProtection``) is transient → ``True`` → retry with backoff, then raise
+    ``DeribitTransientReadError`` on exhaustion. This is EXACTLY the platform
+    ``classify_exception`` transient bucket (``job_worker.py``), so the read-retry
+    policy and the job-level dispatcher agree on what "transient" means."""
+    return isinstance(exc, ccxt.NetworkError)
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +480,7 @@ async def fetch_deribit_settlement_index(
     *,
     oldest_day: str,
     sleep: SleepFn = asyncio.sleep,
+    max_retries: int = PUBLIC_READ_MAX_RETRIES,
 ) -> dict[str, float]:
     """Per-UTC-day USD settlement index for ``currency`` from the PUBLIC
     ``public/get_delivery_prices`` endpoint (``index_name={ccy}_usd``).
@@ -467,10 +493,16 @@ async def fetch_deribit_settlement_index(
     ``paginate_txn_log``'s ``LEDGER_PACE_SECONDS``).
 
     This is a SAME-DAY settlement mark → D-07-compliant same-time-basis fallback,
-    NOT a period-end/current price. A failed public read is NON-fatal to
-    correctness — the aggregator still fails loud (Fix A) if a needed day stays
-    unvalued — so a fetch error returns whatever was accumulated rather than
-    crashing the crawl. Every ccxt error is scrubbed before logging.
+    NOT a period-end/current price. Read-error discipline (red-team HIGH-2): a
+    GENUINE benign "no data" (the exchange RESPONDED — a non-``NetworkError`` ccxt
+    error) is NON-fatal to correctness — the aggregator still fails loud (Fix A) if a
+    needed day stays unvalued — so it returns whatever was accumulated rather than
+    crashing the crawl. A TRANSIENT read (network/timeout/5xx → ``ccxt.NetworkError``)
+    is instead RETRIED with backoff and, on ``max_retries`` exhaustion, raises
+    ``DeribitTransientReadError`` (retryable) — NEVER a silently-truncated partial map
+    that looks complete-but-sparse (which the core would refuse PERMANENTLY as
+    ``missing_daily_marks`` on a mere blip). Every ccxt error is scrubbed before
+    logging.
     """
     index_name = f"{currency.lower()}_usd"
     prices: dict[str, float] = {}
@@ -482,18 +514,41 @@ async def fetch_deribit_settlement_index(
             "offset": page * DELIVERY_PRICES_PAGE_COUNT,
             "count": DELIVERY_PRICES_PAGE_COUNT,
         }
-        try:
-            resp = await exchange.public_get_get_delivery_prices(params)
-        except Exception as exc:  # noqa: BLE001 - non-fatal; return partial map
-            logger.warning(
-                "deribit get_delivery_prices failed for index_name=%s offset=%s "
-                "(%s); returning %d accumulated day(s)",
-                index_name,
-                params["offset"],
-                scrub_freeform_string(str(exc)),
-                len(prices),
-            )
-            return prices
+        # A TRANSIENT read (network/timeout/5xx → ccxt.NetworkError) is RETRYABLE:
+        # retry the SAME offset with backoff, then RAISE DeribitTransientReadError on
+        # exhaustion — NEVER return a silently-truncated partial map that looks
+        # complete-but-sparse (which would drive a PERMANENT missing_daily_marks core
+        # refusal on a mere blip). A GENUINE benign "no data" (the exchange
+        # RESPONDED — ExchangeError/BadSymbol) returns the accumulated map as before;
+        # the own-index union + honest core refusal handle a real gap.
+        retries = 0
+        while True:
+            try:
+                resp = await exchange.public_get_get_delivery_prices(params)
+                break
+            except Exception as exc:  # noqa: BLE001
+                if _is_transient_read_error(exc):
+                    retries += 1
+                    if retries > max_retries:
+                        raise DeribitTransientReadError(
+                            "deribit get_delivery_prices transient read budget "
+                            f"({max_retries}) exhausted for index_name={index_name} "
+                            f"offset={params['offset']} — refusing a silently-partial "
+                            "settlement map (retryable)"
+                        ) from None
+                    await sleep(
+                        PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1))
+                    )
+                    continue
+                logger.warning(
+                    "deribit get_delivery_prices structural no-data for "
+                    "index_name=%s offset=%s (%s); returning %d accumulated day(s)",
+                    index_name,
+                    params["offset"],
+                    scrub_freeform_string(str(exc)),
+                    len(prices),
+                )
+                return prices
         result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
         data = result.get("data", []) if isinstance(result, Mapping) else []
         if not isinstance(data, Sequence) or isinstance(data, (str, bytes)):
@@ -575,6 +630,8 @@ async def build_deribit_indexable_currencies(
     currencies: Sequence[str],
     *,
     static_floor: AbstractSet[str] = _INVERSE_CURRENCIES,
+    sleep: SleepFn = asyncio.sleep,
+    max_retries: int = PUBLIC_READ_MAX_RETRIES,
 ) -> frozenset[str]:
     """The real per-job ``indexable_currencies`` set (contract §7.2): the static
     floor UNIONED with every enumerated non-USD-family currency whose ``{ccy}_usd``
@@ -605,16 +662,42 @@ async def build_deribit_indexable_currencies(
         if ccy in USD_FAMILY or ccy in static_floor or ccy in seen:
             continue
         seen.add(ccy)
-        try:
-            resp = await exchange.public_get_get_index_price(
-                {"index_name": f"{ccy.lower()}_usd"}
-            )
-        except Exception as exc:  # noqa: BLE001 - unresolvable index → not indexable
-            logger.debug(
-                "deribit indexable probe: %s_usd unresolved (%s)",
-                ccy.lower(),
-                scrub_freeform_string(str(exc)),
-            )
+        # A TRANSIENT probe (network/timeout/5xx → ccxt.NetworkError) is RETRYABLE:
+        # retry with backoff, then RAISE DeribitTransientReadError on exhaustion —
+        # NEVER silently drop a possibly-INDEXED currency to UNMARKABLE (a real
+        # INDEXED coin mis-classified UNMARKABLE → permanent core refuse on a mere
+        # blip). A GENUINE "index not found" (ExchangeError/BadSymbol — the exchange
+        # RESPONDED) leaves the currency OUT (genuinely not indexable), as before.
+        retries = 0
+        resp: Any = None
+        while True:
+            try:
+                resp = await exchange.public_get_get_index_price(
+                    {"index_name": f"{ccy.lower()}_usd"}
+                )
+                break
+            except Exception as exc:  # noqa: BLE001
+                if _is_transient_read_error(exc):
+                    retries += 1
+                    if retries > max_retries:
+                        raise DeribitTransientReadError(
+                            "deribit get_index_price transient probe budget "
+                            f"({max_retries}) exhausted for "
+                            f"index_name={ccy.lower()}_usd — refusing to drop a "
+                            "possibly-indexed currency to UNMARKABLE (retryable)"
+                        ) from None
+                    await sleep(
+                        PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1))
+                    )
+                    continue
+                logger.debug(
+                    "deribit indexable probe: %s_usd unresolved (%s)",
+                    ccy.lower(),
+                    scrub_freeform_string(str(exc)),
+                )
+                resp = None
+                break
+        if resp is None:
             continue
         result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
         raw = result.get("index_price") if isinstance(result, Mapping) else None
@@ -694,7 +777,7 @@ async def _crawl_deribit_ledger(
     # (BUIDL / an unresolvable probe) still refuses loudly. Once-per-job, mirroring
     # the settlement_index_cache discipline below.
     indexable = await build_deribit_indexable_currencies(
-        exchange, currencies, static_floor=_INVERSE_CURRENCIES
+        exchange, currencies, static_floor=_INVERSE_CURRENCIES, sleep=sleep
     )
     expected: dict[str, list[str]] = {}
     scope_auths: dict[str, dict[str, Any]] = {}
@@ -950,6 +1033,9 @@ class DeribitNativeAccountState:
 
 async def fetch_deribit_native_account_state(
     exchange: Any,
+    *,
+    sleep: SleepFn = asyncio.sleep,
+    max_retries: int = PUBLIC_READ_MAX_RETRIES,
 ) -> DeribitNativeAccountState:
     """Read the Deribit account anchor in native + collapsed channels from ONE
     ``get_account_summaries`` response (D5) — the SINGLE summaries fetch and the
@@ -959,7 +1045,14 @@ async def fetch_deribit_native_account_state(
     The native maps are read STRAIGHT off each summary (``equity`` /
     ``session_upl``) in NATIVE units — no ``{ccy}_usd`` multiply. The collapsed
     anchor/wedge reuse the SAME resolved ``index_prices`` (one probe per held
-    non-linear currency) so there is NO second fetch of anything. Leak: no raw
+    non-linear currency) so there is NO second fetch of anything. Read-error
+    discipline (red-team LOW-1): a TRANSIENT collapsed-anchor probe blip
+    (network/timeout/5xx → ``ccxt.NetworkError``) is RETRIED with backoff and, on
+    ``max_retries`` exhaustion, raises ``DeribitTransientReadError`` (retryable) —
+    it is NEVER swallowed into ``balance_error=True`` (which would let the caller
+    proceed to a silent clean ``complete`` that skips the collapsed-anchor DQ
+    checks). A GENUINE unvaluable collapse (a held coin whose ``{ccy}_usd`` index
+    genuinely does not resolve) still flags ``balance_error`` honestly. Leak: no raw
     equity/upnl values are logged.
     """
     from services.deribit_txn import _LINEAR_CURRENCIES, deribit_equity_to_usd
@@ -1003,11 +1096,44 @@ async def fetch_deribit_native_account_state(
         ccy = str(summ.get("currency", "")).upper()
         if not ccy or ccy in _LINEAR_CURRENCIES:
             continue
-        try:
-            ip = await exchange.public_get_get_index_price(
-                {"index_name": f"{ccy.lower()}_usd"}
-            )
-        except Exception:  # noqa: BLE001 - missing index → gate below fails loud
+        # LOW-1: a TRANSIENT collapsed-anchor probe blip (network/timeout/5xx →
+        # ccxt.NetworkError) is RETRYABLE: retry with backoff, then RAISE
+        # DeribitTransientReadError on exhaustion — NEVER silently swallow it into
+        # balance_error=True and proceed to a silent clean 'complete' (skipping the
+        # C2 / FLOW-04 / uPnL-unreadable DQ checks the caller gates on
+        # ``not balance_error``, where the legacy path degraded to
+        # complete_with_warnings). A retry likely restores the index → FULL DQ. A
+        # GENUINE unvaluable collapse (the index genuinely does not resolve →
+        # ExchangeError/BadSymbol) still ``continue``s → the wedge stays out and the
+        # collapse below flags balance_error honestly (the core's structural refusal
+        # handles it, never an infinite retry).
+        retries = 0
+        ip: Any = None
+        while True:
+            try:
+                ip = await exchange.public_get_get_index_price(
+                    {"index_name": f"{ccy.lower()}_usd"}
+                )
+                break
+            except Exception as exc:  # noqa: BLE001
+                if _is_transient_read_error(exc):
+                    retries += 1
+                    if retries > max_retries:
+                        raise DeribitTransientReadError(
+                            "deribit get_index_price transient collapsed-anchor "
+                            f"probe budget ({max_retries}) exhausted for "
+                            f"index_name={ccy.lower()}_usd — refusing a silent-clean "
+                            "complete that would skip the collapsed-anchor DQ checks "
+                            "(retryable)"
+                        ) from None
+                    await sleep(
+                        PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1))
+                    )
+                    continue
+                # Genuine missing index → gate below flags balance_error honestly.
+                ip = None
+                break
+        if ip is None:
             continue
         ipr = ip.get("result", {}) if isinstance(ip, Mapping) else {}
         price = ipr.get("index_price") if isinstance(ipr, Mapping) else None
