@@ -54,6 +54,19 @@ def _make_supabase_mock(rows: list[dict]) -> MagicMock:
     select_chain.eq.return_value = eq_chain
     table.select.return_value = select_chain
 
+    # WR-01 strategy-existence probe: .select(...).eq(...).single().execute().
+    # MEDIUM-1 (v1.9): the runner now reads `api_key_id` off this row to gate the
+    # broker-vs-user-CSV NaN reinstatement. Wire a REAL dict (api_key_id=None →
+    # user-CSV branch, no reinstatement) so the shared mock preserves today's
+    # behavior; broker-sourced tests use _make_broker_supabase_mock below.
+    eq_chain.single.return_value = MagicMock(
+        execute=MagicMock(
+            return_value=MagicMock(
+                data={"id": "s", "user_id": "u", "api_key_id": None}
+            )
+        )
+    )
+
     # WR-02 (19.1-REVIEW): paginated_select calls .order(...).range(s, e)
     # .execute(). Wire the same rows on the range chain so the first
     # page returns everything; paginated_select then short-circuits on
@@ -803,3 +816,190 @@ class TestNaNAccountHonestEndToEnd:
                 f"fabricated or NaN magnitude; got {payload[key]!r}"
             )
         assert payload["data_quality_flags"]["csv_source"] is True
+
+
+# ---------------------------------------------------------------------------
+# MEDIUM-1 (v1.9, DQ-03) — broker-sourced series reinstate the interior-break
+# NaN at the CSV persistence boundary so the headline does NOT bridge the break.
+# ---------------------------------------------------------------------------
+# Root cause: a guarded interior day (flow-dominated / negative-NAV / dust) is
+# np.nan and SKIPPED at the csv_daily_returns write (74-04 NaN policy), so it is
+# ABSENT from the stored rows. For a BROKER-sourced series (derive_broker_dailies
+# gap-fills to a DENSE daily calendar BEFORE the NaN-skip), an in-span missing
+# calendar date can ONLY be a refused/guarded day. If the loader rebuilds the
+# series verbatim from the stored (sparse) rows, cumulative_twr_segmented finds no
+# NaN and compounds ACROSS the break — the exact bridging DQ-03 forbids. The fix
+# reindexes a broker-sourced series to its dense [min,max] span and REINSTATES NaN
+# on in-span missing dates before compute_all_metrics, so the segmenter sees the
+# break and computes the suffix-only headline.
+#
+# Distinguisher (gated OFF for genuinely-sparse user CSVs): strategies.api_key_id.
+# derive_broker_dailies gates its ENTIRE broker path on api_key_id IS NOT NULL
+# (services/job_worker.py:_load_strategy_and_key); a user CSV upload has
+# api_key_id IS NULL (the wizard "CSV branch"). A user CSV's missing date is
+# legitimately absent (weekend / non-trading day), so it must NOT be NaN-filled.
+#
+# Neuter: skip the reinstatement (drop the broker reindex at the load boundary)
+# → the loaded broker series has no interior NaN → cumulative_twr_segmented
+# BRIDGES the break → the broker assert below reddens.
+
+
+def _make_broker_supabase_mock(
+    daily_rows: list[dict], *, api_key_id: str | None
+) -> MagicMock:
+    """Supabase mock whose strategy-existence probe returns a REAL strategy row
+    with the given api_key_id (broker when non-None), and whose csv_daily_returns
+    load (paginated_select) returns daily_rows. strategy_analytics reads/writes
+    are inert."""
+    sb = MagicMock()
+
+    def _table(name: str) -> MagicMock:
+        tbl = MagicMock()
+        if name == "strategies":
+            # .select(...).eq(...).single().execute() → real dict.
+            single_exec = MagicMock(
+                return_value=MagicMock(
+                    data={"id": "s", "user_id": "u", "api_key_id": api_key_id}
+                )
+            )
+            tbl.select.return_value.eq.return_value.single.return_value.execute = (
+                single_exec
+            )
+        elif name == "csv_daily_returns":
+            # paginated_select: .select(...).eq(...).order(...).range(s,e).execute().
+            eq_chain = tbl.select.return_value.eq.return_value
+            order_chain = eq_chain.order.return_value
+            order_chain.range.return_value.execute.return_value = MagicMock(
+                data=daily_rows
+            )
+            order_chain.execute.return_value = MagicMock(data=daily_rows)
+        elif name == "strategy_analytics":
+            # _read_existing_flags: .select(...).eq(...).maybe_single().execute().
+            tbl.select.return_value.eq.return_value.maybe_single.return_value.execute = (
+                MagicMock(return_value=MagicMock(data={"data_quality_flags": {}}))
+            )
+            tbl.upsert.return_value = MagicMock(execute=MagicMock())
+        else:
+            tbl.upsert.return_value = MagicMock(execute=MagicMock())
+        return tbl
+
+    sb.table.side_effect = _table
+    sb.rpc.return_value = MagicMock(execute=MagicMock())
+    return sb
+
+
+# A broker series that WAS dense [01..05] but whose interior day 03 was a guarded
+# NaN → SKIPPED at write → ABSENT from the stored rows. Suffix after the break =
+# {04, 05}. Bridged (buggy) product ≠ suffix-only product, so the two are
+# distinguishable in the headline.
+_BROKER_ROWS_GUARDED_INTERIOR = [
+    {"date": "2024-01-01", "daily_return": 0.10},
+    {"date": "2024-01-02", "daily_return": 0.10},
+    # 2024-01-03 ABSENT — the guarded/NaN interior day.
+    {"date": "2024-01-04", "daily_return": 0.20},
+    {"date": "2024-01-05", "daily_return": 0.20},
+]
+
+
+@pytest.mark.asyncio
+async def test_broker_series_reinstates_interior_nan_suffix_only_headline() -> None:
+    """MEDIUM-1: a BROKER-sourced series (api_key_id set) whose interior guarded
+    day is absent from csv_daily_returns must have the NaN REINSTATED at load so
+    the headline compounds ONLY the post-break suffix (not the bridged product)
+    and cumulative_twr_segmented raises twr_chain_broken."""
+    import numpy as np
+    from services.analytics_runner import run_csv_strategy_analytics
+    from services.nav_twr import (
+        _last_interior_break_suffix,
+        cumulative_twr_segmented,
+    )
+
+    captured: dict[str, pd.Series] = {}
+
+    def _spy_compute(returns: pd.Series, benchmark_rets=None, *a, **k):  # type: ignore[no-untyped-def]
+        captured["returns"] = returns
+        return _make_metrics_result()
+
+    sb = _make_broker_supabase_mock(
+        _BROKER_ROWS_GUARDED_INTERIOR, api_key_id="key-123"
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               side_effect=_spy_compute):
+        await run_csv_strategy_analytics("broker-strategy-uuid")
+
+    series = captured["returns"]
+    # (1) The interior guarded day is REINSTATED as NaN on the dense calendar.
+    ts_03 = pd.Timestamp("2024-01-03")
+    assert ts_03 in series.index, (
+        "broker load must reindex to the dense [min,max] calendar so the absent "
+        f"guarded day is present; got index {list(series.index)!r}"
+    )
+    assert bool(np.isnan(series.loc[ts_03])), (
+        "the in-span missing broker date must be reinstated as NaN (the guard), "
+        f"got {series.loc[ts_03]!r}"
+    )
+    assert int(series.notna().sum()) == 4 and int(series.isna().sum()) == 1
+
+    # (2) The headline compounds ONLY the suffix {04,05}, NOT the bridged product.
+    value, flags = cumulative_twr_segmented(series)
+    suffix_only = (1.20 * 1.20) - 1.0            # 0.44
+    bridged = (1.10 * 1.10 * 1.20 * 1.20) - 1.0  # 0.7424
+    assert value == pytest.approx(suffix_only), (
+        f"headline must be suffix-only {suffix_only}, not the bridged {bridged}; "
+        f"got {value}"
+    )
+    assert value != pytest.approx(bridged)
+    # (3) The chain-break flag is raised by the segmenter.
+    assert flags.get("twr_chain_broken") is True, (
+        "an interior break must raise twr_chain_broken"
+    )
+    # (4) The CAGR window is the same suffix (2 days), not the full span.
+    cagr_idx = _last_interior_break_suffix(series).index
+    assert list(cagr_idx) == [pd.Timestamp("2024-01-04"), pd.Timestamp("2024-01-05")]
+
+
+@pytest.mark.asyncio
+async def test_user_csv_sparse_day_not_nan_filled() -> None:
+    """MEDIUM-1 contrast: a USER-uploaded sparse CSV (api_key_id IS NULL) whose
+    interior date is genuinely absent must NOT be NaN-filled — the missing day is
+    legitimately absent (weekend / non-trading), so the loaded series stays sparse
+    and the headline compounds every stored day (no fabricated break)."""
+    import numpy as np
+    from services.analytics_runner import run_csv_strategy_analytics
+    from services.nav_twr import cumulative_twr_segmented
+
+    captured: dict[str, pd.Series] = {}
+
+    def _spy_compute(returns: pd.Series, benchmark_rets=None, *a, **k):  # type: ignore[no-untyped-def]
+        captured["returns"] = returns
+        return _make_metrics_result()
+
+    # Same rows, but api_key_id=None → user CSV: 2024-01-03 is legitimately absent.
+    sb = _make_broker_supabase_mock(
+        _BROKER_ROWS_GUARDED_INTERIOR, api_key_id=None
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               side_effect=_spy_compute):
+        await run_csv_strategy_analytics("user-csv-strategy-uuid")
+
+    series = captured["returns"]
+    # The user CSV series stays SPARSE — no dense reindex, no reinstated NaN.
+    assert pd.Timestamp("2024-01-03") not in series.index, (
+        "a user CSV's genuinely-absent day must NOT be reindexed in; the missing "
+        f"date must stay absent; got index {list(series.index)!r}"
+    )
+    assert int(series.isna().sum()) == 0, (
+        "a user CSV series must carry NO reinstated NaN (that would corrupt "
+        "legitimate sparse data)"
+    )
+    assert len(series) == 4
+    # No fabricated break: the headline compounds all four stored days.
+    value, flags = cumulative_twr_segmented(series)
+    assert value == pytest.approx((1.10 * 1.10 * 1.20 * 1.20) - 1.0)
+    assert "twr_chain_broken" not in flags

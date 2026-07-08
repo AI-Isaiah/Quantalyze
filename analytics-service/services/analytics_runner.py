@@ -2083,13 +2083,28 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
     # existence check.
     strategy_result = await db_execute(
         lambda: supabase.table("strategies")
-        .select("id, user_id")
+        .select("id, user_id, api_key_id")
         .eq("id", strategy_id)
         .single()
         .execute()
     )
     if not strategy_result.data:
         raise HTTPException(status_code=404, detail="Strategy not found")
+
+    # MEDIUM-1 (v1.9, DQ-03): the broker-vs-user-CSV distinguisher for the
+    # interior-break NaN reinstatement below. A BROKER-sourced strategy carries an
+    # api_key_id — derive_broker_dailies gates its ENTIRE (dense, gap-filled) path
+    # on `api_key_id IS NOT NULL` (job_worker._load_strategy_and_key), so a
+    # broker series is ALWAYS gap-filled to a dense daily calendar BEFORE the
+    # 74-04 NaN-skip write. A user CSV upload has api_key_id IS NULL (the wizard
+    # "CSV branch") and is NEVER gap-filled — its missing dates are legitimately
+    # absent (weekend / non-trading day) and MUST NOT be NaN-filled.
+    # `.single()` returns the row as a dict; the isinstance guard keeps a
+    # malformed/None probe response from being mis-read as broker-sourced.
+    _strategy_row = strategy_result.data
+    _is_broker_sourced = bool(
+        isinstance(_strategy_row, dict) and _strategy_row.get("api_key_id")
+    )
 
     # Mark computing.
     def _mark_computing() -> None:
@@ -2151,6 +2166,30 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         dates = pd.DatetimeIndex([r["date"] for r in data])
         values = [float(r["daily_return"]) for r in data]
         returns = pd.Series(values, index=dates, name="returns")
+
+        # MEDIUM-1 (v1.9, DQ-03): reinstate the interior-break NaN for a
+        # BROKER-sourced series at the load boundary. A guarded interior day
+        # (flow-dominated / negative-NAV / dust) is np.nan and SKIPPED at the
+        # csv_daily_returns write (74-04 NaN policy) → ABSENT from the stored
+        # rows. Because the broker path gap-fills to a DENSE daily calendar
+        # BEFORE that NaN-skip (broker_dailies.gap_fill_daily_returns), an in-span
+        # missing calendar date can ONLY be such a refused/guarded day. Rebuilding
+        # the series verbatim from the sparse stored rows would hide the break:
+        # cumulative_twr_segmented would find no NaN and compound ACROSS it — the
+        # exact bridging DQ-03 forbids (the twr_chain_broken flag still arrives via
+        # the derive prestamp, but the money number would be the bridged figure).
+        # Reindex to the dense [min,max] daily span so the in-span gaps become NaN
+        # again; the segmenter then computes the suffix-only headline + CAGR.
+        # GATED to broker sources: a user CSV (api_key_id IS NULL) is NOT
+        # gap-filled, so its missing dates are legitimately absent and must stay
+        # sparse — NaN-filling them would fabricate a break and corrupt the
+        # headline of legitimate data.
+        if _is_broker_sourced and not returns.empty:
+            dense_index = pd.date_range(
+                returns.index.min(), returns.index.max(), freq="D"
+            )
+            returns = returns.reindex(dense_index)
+            returns.name = "returns"
 
         benchmark_rets, benchmark_stale = None, True
         try:
