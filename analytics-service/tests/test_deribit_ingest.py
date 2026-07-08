@@ -1991,3 +1991,188 @@ async def test_build_native_ledger_completeness_report_passed_through(
     # completeness gate; a truncated crawl still fails assert_ledger_complete.
     with pytest.raises(di.LedgerCompletenessError):
         di.assert_ledger_complete(report)
+
+
+# ===========================================================================
+# 80-02 HIGH-1 — native marks must match the USD path's coverage: the mark
+# Series is the UNION of the per-event own-row index_price (_day_ccy_own_index,
+# exactly the USD leg's resolution) and the get_delivery_prices supplemental.
+# A currency classified INDEXED but with an empty/gappy get_delivery_prices is
+# NO LONGER false-refused missing_daily_marks when its own rows carry an index.
+# LOW-2 — an INDEXED currency whose MERGED map is empty OMITS the key so the
+# F-1 build-time refusal fires cleanly (missing_day_count == 0).
+# ===========================================================================
+
+
+async def test_native_marks_sol_own_index_heals_empty_delivery_prices(
+    monkeypatch: Any,
+) -> None:
+    """HIGH-1 (SOL target class): a SOL bucket classified INDEXED whose
+    ``get_delivery_prices(sol_usd)`` returns ``{}`` but whose raw rows carry a SOL
+    ``index_price`` on its event days is now VALUED by the core via the own-row
+    index — no false ``missing_daily_marks`` refusal. Neuter (drop the own-index
+    merge → marks come only from the empty delivery-price map → SOL is omitted and
+    false-refuses)."""
+    import pandas as pd
+
+    from services.native_nav import reconstruct_native_nav_and_twr
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "SOL":
+            # SOL settlements carrying their OWN same-day index_price on both days;
+            # equity 5.0 == Σ change (2+3) so the inception gate reconciles to 0.
+            return [
+                {"type": "settlement", "currency": "SOL", "change": 2.0,
+                 "index_price": 150.0, "timestamp": _DAY1_MS},
+                {"type": "settlement", "currency": "SOL", "change": 3.0,
+                 "index_price": 160.0, "timestamp": _DAY2_MS},
+            ]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["SOL"]}, paginate=_paginate,
+    )
+
+    # get_delivery_prices(sol_usd) is EMPTY — the narrower endpoint the pre-fix
+    # planner relied on has no SOL settlement data at all.
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        return {}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    # sol_usd resolves on get_index_price → SOL is classified INDEXED.
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "SOL", "equity": 5.0, "session_upl": 0.0}],
+        index_price={"SOL": 150.0},
+    )
+    ledger, _report = await di.build_deribit_native_ledger(ex)
+
+    # The mark Series is populated from the OWN-ROW index (delivery-prices was empty).
+    assert "SOL" in ledger.marks
+    sol_marks = ledger.marks["SOL"]
+    assert sol_marks.loc[pd.Timestamp("2024-01-01")] == pytest.approx(150.0)
+    assert sol_marks.loc[pd.Timestamp(_DAY2_MS, unit="ms")] == pytest.approx(160.0)
+    # The core VALUES SOL on those days instead of false-refusing missing_daily_marks.
+    returns, _meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"SOL"}), venue="deribit"
+    )
+    assert isinstance(returns, pd.Series)
+
+
+async def test_native_marks_btc_own_index_fills_delivery_price_gap(
+    monkeypatch: Any,
+) -> None:
+    """HIGH-1 (BTC gap): a BTC event day MISSING from ``get_delivery_prices`` but
+    present as an own-row ``index_price`` is covered by the union — the core values
+    BTC with no refusal. Neuter (drop the own-index merge → the day2 delivery-price
+    gap survives → the core refuses ``missing_daily_marks``)."""
+    import pandas as pd
+
+    from services.native_nav import reconstruct_native_nav_and_twr
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            # BTC events on day1/day2/day3, each carrying its own index_price; equity
+            # 3.0 == Σ change so the inception gate reconciles to 0.
+            return [
+                {"type": "settlement", "currency": "BTC", "change": 1.0,
+                 "index_price": 50000.0, "timestamp": _DAY1_MS},
+                {"type": "settlement", "currency": "BTC", "change": 1.0,
+                 "index_price": 51000.0, "timestamp": _DAY2_MS},
+                {"type": "settlement", "currency": "BTC", "change": 1.0,
+                 "index_price": 52000.0, "timestamp": _DAY3_MS},
+            ]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+
+    # get_delivery_prices covers day1 + day3 but has a GAP on day2 — only the own-row
+    # index_price supplies day2.
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        return {"2024-01-01": 50000.0, "2024-01-03": 52000.0}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 3.0, "session_upl": 0.0}],
+        index_price={"BTC": 52000.0},
+    )
+    ledger, _report = await di.build_deribit_native_ledger(ex)
+
+    # day2 — absent from delivery-prices — is present via the own-row index.
+    btc_marks = ledger.marks["BTC"]
+    assert btc_marks.loc[pd.Timestamp("2024-01-02")] == pytest.approx(51000.0)
+    # The core values BTC across day1..day3 with no missing_daily_marks refusal.
+    returns, _meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+    )
+    assert isinstance(returns, pd.Series)
+
+
+async def test_native_marks_empty_merged_map_omits_key_build_time_refusal(
+    monkeypatch: Any,
+) -> None:
+    """LOW-2: a value-carrying INDEXED currency with NO marks from EITHER source
+    (empty delivery-prices AND no own-row index) OMITS the key, so the F-1
+    BUILD-time invariant refuses it LOUDLY — ``UnmarkableCurrencyError`` with
+    ``missing_day_count == 0`` (the whole Series is absent, refused at
+    ``_build_buckets``). SOL here holds real native EQUITY but has NO ledger cash
+    rows (so the USD leg does not crash) — the canonical LOW-2 case. Neuter (store
+    an empty Series instead of omitting → the build-time guard is skipped; the
+    equity-only bucket then does not roll and ``reconstruct`` returns EMPTY with NO
+    refusal, silently dropping SOL's real value → the ``pytest.raises`` reddens)."""
+    from services.native_nav import (
+        UnmarkableCurrencyError,
+        reconstruct_native_nav_and_twr,
+    )
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        return []  # NO ledger rows anywhere — the USD leg has nothing to value.
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["SOL"]}, paginate=_paginate,
+    )
+
+    # get_delivery_prices is empty AND there are no own-index rows → the merged map
+    # is empty for a value-carrying INDEXED currency.
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        return {}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    ex = _NativeAnchorStub(
+        # SOL held as real native equity; sol_usd resolves → SOL is INDEXED.
+        summaries=[{"currency": "SOL", "equity": 5.0, "session_upl": 0.0}],
+        index_price={"SOL": 150.0},
+    )
+    ledger, _report = await di.build_deribit_native_ledger(ex)
+    # The empty map OMITS the key entirely — never an empty Series.
+    assert "SOL" not in ledger.marks
+    with pytest.raises(UnmarkableCurrencyError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"SOL"}), venue="deribit"
+        )
+    assert exc.value.reason == "missing_daily_marks"
+    # missing_day_count == 0 is the BUILD-time refusal signature (_build_buckets),
+    # before any per-day calendar exists.
+    assert exc.value.missing_day_count == 0

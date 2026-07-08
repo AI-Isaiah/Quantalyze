@@ -40,6 +40,7 @@ import pandas as pd
 from services.deribit_txn import (
     _INVERSE_CURRENCIES,
     CASH_BEARING_TYPES,
+    _day_ccy_own_index,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
     txn_rows_to_daily_records,
@@ -1111,21 +1112,45 @@ async def _build_dense_native_marks(
     native_flows: Sequence[ExternalFlow],
     terminal_native_equity: Mapping[str, float],
     terminal_upnl_native: Mapping[str, float],
+    raw_rows: Sequence[Mapping[str, Any]],
     sleep: SleepFn = asyncio.sleep,
 ) -> dict[str, pd.Series]:
     """The DENSE daily settlement-mark planner (D4). For every INDEXED currency
-    carrying nonzero native value (pnl, equity, wedge, or flow), fetch a DENSE
-    daily ``{ccy}_usd`` settlement-index Series across ``[oldest activity day,
-    today]`` via :func:`fetch_deribit_settlement_index` — NOT pruned to event days
-    (the core carries balances forward and needs a mark on every carry-forward day)
-    and NEVER forward-filled (a genuine publish gap stays a gap → the core's
-    ``missing_daily_marks`` refusal fires, T-80-05).
+    carrying nonzero native value (pnl, equity, wedge, or flow), build a DENSE
+    daily ``{ccy}_usd`` mark Series across ``[oldest activity day, today]`` as the
+    UNION of two REAL same-day sources — NOT pruned to event days (the core carries
+    balances forward and needs a mark on every carry-forward day) and NEVER
+    forward-filled/fabricated (a genuine publish gap stays a gap → the core's
+    ``missing_daily_marks`` refusal fires, T-80-05):
+
+      1. the per-event OWN-ROW ``index_price`` a settlement/cash row carries, via
+         :func:`_day_ccy_own_index` — EXACTLY the same-day index the USD leg trusts
+         (``txn_rows_to_daily_records`` / ``deribit_dated_external_flows_usd``); and
+      2. the ``public/get_delivery_prices`` supplemental (via
+         :func:`fetch_deribit_settlement_index`) for quiet/settlement days the
+         ledger itself carries no own index on.
+
+    HIGH-1: without the own-row leg, native marks came ONLY from
+    ``get_delivery_prices`` — a strictly NARROWER endpoint than the USD path's
+    coverage. A currency classified INDEXED (``{ccy}_usd`` resolves on
+    ``get_index_price``) whose ``get_delivery_prices`` is empty (SOL, an explicit
+    target) or gappy on an event day (BTC/ETH) was FALSE-refused
+    ``missing_daily_marks`` by the core, even though the USD path values it via each
+    row's own ``index_price``. Unioning the own-row index gives native marks
+    coverage IDENTICAL to the USD path. Own-row index WINS on a day both sources
+    carry (identical precedence to ``deribit_txn.py`` — the ledger's own same-day
+    index always wins); a day present in NEITHER stays absent so the core refuses it
+    honestly. Marks are NEVER filled — only the union of two genuine same-day marks.
 
     USD-family currencies get NO marks entry (their mark is the literal ``1.0`` in
     the core, §4.1). An UNINDEXABLE currency gets NONE either — the adapter never
     fabricates a ``1.0`` mark; the core value-gates and refuses it downstream.
     ``indexable`` is DISJOINT from USD-family (§3.2), so ``ccy in indexable`` ⟺ the
-    currency is a branch-2 INDEXED coin."""
+    currency is a branch-2 INDEXED coin. LOW-2: a value-carrying INDEXED currency
+    whose MERGED map is still empty is OMITTED (no key) so ``marks.get(code)`` is
+    ``None`` and the F-1 build-time invariant (``native_nav.py:406``) fires the clean
+    ``missing_daily_marks`` refusal at ``_build_buckets`` — never an empty Series
+    that defers the refusal to ``_value_over_calendar``."""
     value_ccys: set[str] = set()
     oldest_day: dict[str, str] = {}
 
@@ -1155,15 +1180,36 @@ async def _build_dense_native_marks(
     marks: dict[str, pd.Series] = {}
     if not value_ccys:
         return marks
+    # The per-event OWN-ROW same-day index (leg 1), computed ONCE over the flat
+    # raw rows via the EXACT resolution the USD leg trusts (_day_ccy_own_index —
+    # end-of-day index_price per (day, ccy), seeded only for indexable currencies).
+    # Grouped by UPPERCASE currency into a {day: price} map so it can be UNIONED
+    # with each currency's delivery-price supplemental (leg 2) below.
+    own_index = _day_ccy_own_index(raw_rows, indexable_currencies=indexable)
+    own_by_ccy: dict[str, dict[str, float]] = {}
+    for (day, ccy), price in own_index.items():
+        own_by_ccy.setdefault(ccy, {})[day] = price
     # A currency carrying value ONLY via the anchor/wedge (no ledger day) spans from
     # the earliest day any indexed currency carries, so its dense mark series still
     # covers the whole reconstruction; today's date if nothing carries a day.
     global_oldest = min(oldest_day.values()) if oldest_day else _today_utc_iso()
     for ccy in sorted(value_ccys):
-        price_map = await fetch_deribit_settlement_index(
+        delivery = await fetch_deribit_settlement_index(
             exchange, ccy, oldest_day=oldest_day.get(ccy, global_oldest), sleep=sleep
         )
-        marks[ccy] = _marks_series(price_map)
+        # UNION of two REAL same-day sources — the delivery-price supplemental for
+        # quiet days OVERLAID by the own-row index (which WINS on a shared day,
+        # mirroring deribit_txn's own-index-wins precedence). NEVER a fabricated /
+        # forward-filled day: a day in NEITHER source stays absent so the core
+        # refuses it honestly. This gives native marks coverage identical to the
+        # USD path (HIGH-1).
+        merged = {**delivery, **own_by_ccy.get(ccy, {})}
+        if not merged:
+            # LOW-2: no mark from EITHER source for a value-carrying INDEXED
+            # currency → OMIT the key (no empty Series) so the F-1 build-time
+            # invariant refuses it cleanly at _build_buckets.
+            continue
+        marks[ccy] = _marks_series(merged)
     return marks
 
 
@@ -1214,6 +1260,7 @@ async def build_deribit_native_ledger(
         native_flows=native_flows,
         terminal_native_equity=state.native_equity,
         terminal_upnl_native=state.native_upnl,
+        raw_rows=raw_rows,
         sleep=sleep,
     )
     ledger = NativeLedger(
