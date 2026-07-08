@@ -160,6 +160,138 @@ def test_combine_empty_returns_empty_series():
     assert returns.empty
 
 
+# --- combine_native_ledger (80-03 T1: the native sibling) ---------------------
+# combine_native_ledger is the transforms-level counterpart of
+# combine_realized_and_funding: it calls the landed native core
+# (reconstruct_native_nav_and_twr, venue="deribit") and reuses
+# gap_fill_daily_returns so the (returns, meta) shape is IDENTICAL to the legacy
+# sibling — everything downstream (CSV route, compute_all_metrics, persistence,
+# factsheet) is untouched by the switch (§9.2).
+
+
+def _usd_native_ledger(
+    pnl_by_day: dict[int, float],
+    *,
+    flows: list[tuple[int, float]] | None = None,
+    ccy: str = "USDC",
+):
+    """A minimal all-USD-family NativeLedger (branch-1 only, marks empty, mark ≡
+    1.0). ``terminal_native_equity`` is set residual-clean (Σ pnl + Σ flow) so the
+    §5 inception gate reconciles to a ~0 pre-history balance (full_history=True)."""
+    from services.external_flows import ExternalFlow
+    from services.native_nav import NativeLedger
+
+    base = pd.Timestamp("2026-01-01")
+    ordered = sorted(pnl_by_day)
+    pnl = pd.Series(
+        [pnl_by_day[d] for d in ordered],
+        index=pd.DatetimeIndex([base + pd.Timedelta(days=d) for d in ordered]),
+        name="native_pnl",
+    )
+    flows = flows or []
+    native_flows = [
+        ExternalFlow(str((base + pd.Timedelta(days=d)).date()), u, ccy, u)
+        for (d, u) in flows
+    ]
+    terminal = sum(pnl_by_day.values()) + sum(u for (_d, u) in flows)
+    return NativeLedger(
+        native_pnl={ccy: pnl},
+        terminal_native_equity={ccy: terminal},
+        marks={},
+        native_flows=native_flows,
+        terminal_upnl_native={},
+        full_history=True,
+    )
+
+
+def test_combine_native_ledger_shape_parity():
+    """combine_native_ledger returns the SAME (pd.Series, dict) shape
+    combine_realized_and_funding returns — a gap-filled float Series on an
+    ascending daily DatetimeIndex and a plain dict meta carrying the status hint."""
+    from services.broker_dailies import combine_native_ledger
+
+    ledger = _usd_native_ledger({0: 100_000.0, 1: 50_000.0, 2: -30_000.0})
+    returns, meta = combine_native_ledger(ledger, frozenset())
+    assert isinstance(returns, pd.Series)
+    assert returns.dtype == "float64"
+    assert isinstance(meta, dict)
+    assert meta["computation_status_hint"] in ("complete", "complete_with_warnings")
+    # Same ascending, gap-free daily index the CSV route requires.
+    assert list(returns.index) == list(returns.index.sort_values())
+    assert returns.index.freq is None or returns.index.inferred_freq == "D"
+
+
+def test_combine_native_ledger_gap_fill_reused():
+    """gap_fill_daily_returns is reused: a ledger with an activity GAP (days 0,1,3
+    — no day 2) yields a returns Series REINDEXED to every calendar day, the day-2
+    hole filled 0.0. Mutation (a): skipping gap_fill drops day 2 and reddens."""
+    from services.broker_dailies import combine_native_ledger
+
+    ledger = _usd_native_ledger({0: 100_000.0, 1: 50_000.0, 3: -30_000.0})
+    returns, _ = combine_native_ledger(ledger, frozenset())
+    day2 = pd.Timestamp("2026-01-03")  # base 2026-01-01 + 2 days
+    assert day2 in returns.index, "gap_fill must reindex the missing calendar day"
+    assert returns.loc[day2] == 0.0
+
+
+def test_combine_native_ledger_empty_is_noop():
+    """An empty core return yields an empty Series (gap_fill no-op)."""
+    from services.broker_dailies import combine_native_ledger
+    from services.native_nav import NativeLedger
+
+    empty = NativeLedger(
+        native_pnl={},
+        terminal_native_equity={},
+        marks={},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    returns, meta = combine_native_ledger(empty, frozenset())
+    assert returns.empty
+    assert isinstance(meta, dict)
+
+
+def test_combine_native_ledger_threads_venue_deribit():
+    """The core is called with venue="deribit" (it rides only into exception
+    metadata, G2). Neutering the venue kwarg reddens this."""
+    from unittest.mock import MagicMock, patch
+
+    import services.broker_dailies as bd
+
+    ledger = _usd_native_ledger({0: 100_000.0, 1: 50_000.0})
+    spy = MagicMock(
+        return_value=(pd.Series(dtype="float64", name="returns"), {})
+    )
+    with patch.object(bd, "reconstruct_native_nav_and_twr", spy):
+        bd.combine_native_ledger(ledger, frozenset())
+    _args, kwargs = spy.call_args
+    assert kwargs["venue"] == "deribit"
+    assert kwargs["indexable_currencies"] == frozenset()
+
+
+def test_combine_native_ledger_propagates_typed_error():
+    """A core NavReconstructionError subclass propagates OUT unchanged (typed) —
+    NOT swallowed, NOT converted to a bare ValueError or an empty series. Mutation
+    (b): catching+zeroing the core error here reddens (the callsite dispositions
+    it, never combine_native_ledger)."""
+    from unittest.mock import MagicMock, patch
+
+    import services.broker_dailies as bd
+    from services.native_nav import UnmarkableCurrencyError
+
+    ledger = _usd_native_ledger({0: 100_000.0})
+    exc = UnmarkableCurrencyError(
+        currency="BUIDL", venue="deribit", reason="no_usd_index", missing_day_count=3
+    )
+    with patch.object(
+        bd, "reconstruct_native_nav_and_twr", MagicMock(side_effect=exc)
+    ):
+        with pytest.raises(UnmarkableCurrencyError) as ei:
+            bd.combine_native_ledger(ledger, frozenset())
+    assert ei.value is exc
+
+
 # --- fetch_okx_total_equity_usd (the OKX read fix) ----------------------------
 
 class _FakeOKX:

@@ -55,6 +55,7 @@ from typing import Any
 
 import pandas as pd
 
+from services.native_nav import NativeLedger, reconstruct_native_nav_and_twr
 from services.transforms import trades_to_daily_returns_with_status
 
 logger = logging.getLogger(__name__)
@@ -155,6 +156,33 @@ def combine_realized_and_funding(
         balance_error=balance_error,
         external_flows=external_flows,
         open_unrealized_usd=open_unrealized_usd,
+    )
+    returns = gap_fill_daily_returns(returns)
+    return returns, dict(meta)
+
+
+def combine_native_ledger(
+    ledger: NativeLedger,
+    indexable: frozenset[str],
+) -> tuple[pd.Series, dict[str, Any]]:
+    """The NATIVE-unit sibling of ``combine_realized_and_funding`` (80-03 T1,
+    §9.2). Call the landed native core (``reconstruct_native_nav_and_twr``,
+    ``venue="deribit"``) and gap-fill the returns so the returned ``(returns,
+    meta)`` is BYTE-for-byte the same shape the legacy sibling yields — a
+    gap-filled float Series on an ascending daily DatetimeIndex + a plain dict of
+    the ``NavTWRMeta``.
+
+    Because the shape is identical, EVERYTHING downstream is untouched by the
+    production switch: the CSV route, ``compute_all_metrics``, persistence, and
+    the factsheet all consume ``(returns, meta)`` exactly as before — the native
+    core just replaces the USD-space reconstruction as the returns source.
+
+    ``NavReconstructionError`` subclasses (``UnmarkableCurrencyError`` §3.4,
+    ``InceptionReconciliationError`` §5) are NOT caught here — they propagate typed
+    so the job-worker callsite can disposition them PERMANENT (no retry, no
+    factsheet, scrubbed message — the ``LedgerValuationError`` discipline)."""
+    returns, meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=indexable, venue="deribit"
     )
     returns = gap_fill_daily_returns(returns)
     return returns, dict(meta)
