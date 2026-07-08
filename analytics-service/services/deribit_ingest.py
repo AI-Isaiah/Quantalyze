@@ -1156,17 +1156,25 @@ def _combined_session_upl(summ: Mapping[str, Any]) -> tuple[float, bool, bool]:
     there is a loud stop, never a silent 0-wedge overstatement)."""
     read_any = False
     total = 0.0
-    # Futures/base component — exactly ONE of the two field spellings is consulted.
+    # Futures/base component — the preferred ``futures_session_upl`` else the
+    # legacy ``session_upl`` (exactly one SUCCESSFUL read consulted so a layout
+    # carrying both, equal, never double-counts). F2: a PRESENT-but-null preferred
+    # field is NOT a read — fall through (``continue``) to the next spelling rather
+    # than break on mere key presence (which silently dropped a real fallback
+    # value). Break only after a successful numeric read, or on a genuine
+    # non-numeric (a garbled value is its own signal, not an 'absent' field).
     for key in ("futures_session_upl", "session_upl"):
-        if key in summ:
-            raw = summ.get(key)
-            if raw is not None:
-                try:
-                    total += float(raw)
-                    read_any = True
-                except (TypeError, ValueError):
-                    pass  # non-numeric → 0.0 contribution (never fabricate)
-            break
+        if key not in summ:
+            continue
+        raw = summ.get(key)
+        if raw is None:
+            continue  # present-but-null → consult the next spelling (F2)
+        try:
+            total += float(raw)
+            read_any = True
+            break  # successful numeric read — stop (never double-count spellings)
+        except (TypeError, ValueError):
+            break  # genuine non-numeric → 0.0 contribution, stop (never fabricate)
     # Options component (new) — additive when present. Track its OWN readability
     # (F1) so a readable futures leg cannot mask a missing options wedge.
     options_read = False

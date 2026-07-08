@@ -3032,6 +3032,28 @@ def test_combined_session_upl_open_book_missing_options_leg_is_unreadable() -> N
     assert opt_unreadable4 is False
 
 
+def test_combined_session_upl_present_but_null_futures_consults_fallback() -> None:
+    """F2: a PRESENT-but-null `futures_session_upl` must consult the legacy
+    `session_upl` fallback (pre-fix the loop broke on key PRESENCE, so a null
+    preferred field silently dropped the real value → 0.0 wedge)."""
+    value, read_any, _ = di._combined_session_upl(
+        {"currency": "BTC", "futures_session_upl": None, "session_upl": 1.2}
+    )
+    assert value == pytest.approx(1.2, abs=1e-12)
+    assert read_any is True
+    # Null futures + null fallback → wholly unreadable (read_any False, no fabricate).
+    _v, read2, _o = di._combined_session_upl(
+        {"currency": "BTC", "futures_session_upl": None, "session_upl": None}
+    )
+    assert read2 is False
+    # A successful preferred read still wins and does NOT also consult the fallback
+    # (never double-count two present spellings).
+    value3, _r3, _o3 = di._combined_session_upl(
+        {"currency": "BTC", "futures_session_upl": 1.5, "session_upl": 9.9}
+    )
+    assert value3 == pytest.approx(1.5, abs=1e-12)
+
+
 async def test_native_account_state_open_book_missing_options_leg_warns() -> None:
     """F1 end-to-end: an OPEN-options account whose futures wedge reads but whose
     options wedge field is absent surfaces `upnl_unreadable` (→
