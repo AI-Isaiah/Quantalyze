@@ -25,21 +25,22 @@ LOCKED design pins (analytics-service/docs/deribit-ingestion-design.md):
   PnL (a BYB-02-class silent over-statement). The daily return sums `change`
   for NON-OPTION rows. Evidence: docs/evidence/drb02-deribit-field-semantics-2026-07-05.json.
 
-* ⚠️ PHASE 82 (options-aware, native path only) — the "sums `change`" pin above
-  is AMENDED for OPTION rows: inside a currency's summary coverage window
-  `[first_summary−24h, last_summary]` an option `trade`/`delivery` contributes
-  `−commission` (NOT its premium `change`), and `options_settlement_summary`
-  contributes `realized_pl + unrealized_pl` (a session DELTA — load-bearing).
-  This REDEFINES option native_pnl from a "cash-balance delta" to an "MTM
-  (settled-equity) delta" for covered option rows: the premium/payout cash is
-  offset by the option book's mark value and its P&L content is carried by the
-  summary channel (probe closure 9.222194 vs 9.222190 BTC). Do NOT "fix" the
-  fee-only arm back to cash `change`. Outside coverage (pre-2025-01-12 rollout /
-  live trailing edge) option rows stay cash-basis `change` + a
-  `pre_summary_rollout_option_dailies` warning. Guard/oracle = the BALANCE
-  IDENTITY (computed total == Σchange over CASH_BEARING, fail-loud), NOT the
-  row-embedded equity snapshot (REJECTED: 13% day-match, mark-timing noise).
-  Evidence: docs/evidence/drb-options-semantics-2026-07.json (see design pin D-11).
+* ⚠️ PHASE 83 (daily option mark-to-market, native path only) — SUPERSEDES the
+  Phase-82 coverage-gated reclass. Option `trade`/`delivery` rows contribute their
+  FULL native `change` EVERYWHERE (the −commission arm is GONE), and
+  `options_settlement_summary` is CLASSIFIED-BUT-INERT (change==0 enforced, then
+  skipped — it contributes NOTHING to attribution). Option native P&L is now
+  "cash `change` + per-day ΔMTM of the replayed open book" (`replay_option_positions`
+  + `option_mtm_daily`, marked at the 1D chart close; the ΔMTM is MERGED into the
+  daily dict by the adapter, `build_deribit_native_ledger`). This REDISTRIBUTES the
+  session P&L (a per-session delta the summary lumped onto one day) across the days
+  it accrued — a total-preserving telescope (Σ_d ΔMTM = Book[last]−0). Sparse marks
+  inside listed life fail loud (D-07, no interpolation, no session-lump fallback);
+  the only cash-basis era left is pre-retention (instruments whose whole life
+  predates the ~2.5yr chart retention) + a reused `pre_summary_rollout_option_dailies`
+  warning. Guard/oracle = the 3-channel BALANCE IDENTITY (strict cash Σchange +
+  settled-book anchor + summary cross-check, all fail-loud). Evidence:
+  docs/evidence/drb-option-daily-marks-2026-07.json (see design pin D-12).
 
 * D-07/D-08 — Inverse coin->USD uses the row's OWN event-time `index_price`,
   NEVER a current/period-end index (cross-time is category-invalid). The ledger's
@@ -422,20 +423,22 @@ assert not (_NATIVE_CASH_BEARING_TYPES & _NATIVE_INFORMATIONAL_TYPES), (
     "native CASH_BEARING and INFORMATIONAL sets must be disjoint"
 )
 
-# --- native options P&L channel (Phase 82, options-aware daily P&L) -----------
-# The `options_settlement_summary` type is Deribit's own daily MTM decomposition
-# (`realized_pl` = session realized, `unrealized_pl` = session DELTA — a
-# LOAD-BEARING per-session change, not a level). On the NATIVE path it is
-# CLASSIFIED (contributes `realized_pl + unrealized_pl`); its row `change` is
-# always 0.0 (nonzero → fail loud). In the USD sibling it stays DELIBERATELY
-# unclassified (P70 H3, :437-444) — zero-change → ignored, nonzero → loud.
+# --- native options P&L channel (Phase 83, daily option MTM) ------------------
+# The `options_settlement_summary` type is Deribit's own session MTM decomposition
+# (`realized_pl` = session realized, `unrealized_pl` = session DELTA). Phase 83:
+# on the NATIVE path it is CLASSIFIED-BUT-INERT — it contributes NOTHING to daily
+# attribution (the option book's P&L is redistributed across held days via the
+# daily-MTM channel, `option_mtm_daily`). Its row `change` is always 0.0 (nonzero
+# → fail loud); its realized_pl/unrealized_pl feed ONLY the summary-channel
+# cross-check (`_summary_channel_cross_check`). In the USD sibling it stays
+# DELIBERATELY unclassified (P70 H3) — zero-change → ignored, nonzero → loud.
 _NATIVE_OPTIONS_SUMMARY_TYPES: frozenset[str] = frozenset(
     {"options_settlement_summary"}
 )
 # The summary set MUST be disjoint from BOTH native sets: a type simultaneously
-# summed as cash-bearing AND re-attributed via the summary channel would
-# double-count (order-dependent silent corruption). Enforced at import (mirrors
-# the CASH_BEARING/INFORMATIONAL disjointness asserts).
+# summed as cash-bearing AND handled via the summary channel would double-count
+# (order-dependent silent corruption). Enforced at import (mirrors the
+# CASH_BEARING/INFORMATIONAL disjointness asserts).
 assert not (_NATIVE_OPTIONS_SUMMARY_TYPES & _NATIVE_CASH_BEARING_TYPES), (
     "native OPTIONS_SUMMARY and CASH_BEARING sets must be disjoint"
 )

@@ -50,11 +50,12 @@ official OpenAPI schema + practitioner sources + ccxt source + a 3-account live 
   `transfer`, `swap`, `correction`, `usdc_reward`, `options_settlement_summary`.
   (`options_settlement_summary` is a zero-cash aggregate — live-confirmed Σ`change`=0.0 on all 3
   accounts; excluding it also avoids double-counting the real `settlement`/`delivery` rows.)
-  ⚠️ **Phase 82 (native path ONLY):** `options_settlement_summary` is RECLASSIFIED into native_pnl
-  (`realized_pl + unrealized_pl`) and covered option `trade`/`delivery` premium is EXCLUDED in favour
-  of `−commission` — see **D-11** below. The USD sibling `txn_rows_to_daily_records` is UNCHANGED
-  (summary stays excluded). `swap` is likewise native-only cash-bearing (HIGH-1); it stays
-  informational in the USD path.
+  ⚠️ **Phase 83 (native path ONLY):** option `trade`/`delivery` rows contribute their FULL native
+  `change`, and `options_settlement_summary` is CLASSIFIED-BUT-INERT (change==0 enforced, contributes
+  NOTHING to attribution). Option P&L = cash `change` + the daily ΔMTM of the replayed open book —
+  see **D-12** below (which SUPERSEDES the Phase-82 D-11 coverage-gated reclass). The USD sibling
+  `txn_rows_to_daily_records` is UNCHANGED (summary stays excluded). `swap` is likewise native-only
+  cash-bearing (HIGH-1); it stays informational in the USD path.
 - **Unknown `type` with nonzero `change` → FAIL LOUD** (never silently include or drop). Deribit
   documents new types can appear at any time, so this is an allow-list, not a block-list.
 
@@ -88,7 +89,12 @@ The reconstruction is anchor-to-today: `initial_capital = equity_today − Σrea
 For a raw equity CURVE (not the anchor), prefer `account_summary.equity_usd` (mark-to-market). The
 per-row `balance`/`equity` are event-stamped snapshots, not a daily grid.
 
-## D-11 — Options P&L channel: coverage-gated MTM re-attribution (Phase 82, native path)
+## D-11 — Options P&L channel: coverage-gated MTM re-attribution (Phase 82, native path) — ⛔ SUPERSEDED by D-12
+
+> **⛔ SUPERSEDED by D-12 (Phase 83).** The coverage-gated `−commission` reclass, the summary→
+> `rpl+upl` attribution, the `pre_summary_rollout` era boundary, the pre-rollout-straddle permanent
+> FAILED, and the CR-01 open-book exemption are all REMOVED. Retained below only as history — do NOT
+> implement against it. The current rule is **D-12**.
 
 Resolves the **F2 known limitation** above (open-option UPL in the anchor but not in Σrealized) for
 the NATIVE path. Deribit's `change` on an option `trade`/`delivery` is the **premium/payout cash**, a
@@ -169,6 +175,67 @@ open-options account is onboarded (§6 follow-up).
 legitimately MOVES for options accounts, same D8 posture as coin-dust accounts). SC-4 byte-identity is
 preserved for perp-only / USD-native accounts (classification-gated: zero option/summary rows → same
 rows, same float ops, bit-identical output). Evidence: `docs/evidence/drb-options-semantics-2026-07.json`.
+
+## D-12 — Option daily attribution = full cash `change` + per-day ΔMTM of the replayed open book (Phase 83, native path)
+
+**SUPERSEDES D-11.** Phase 82 fixed the full-history TOTAL but attributed each
+`options_settlement_summary`'s `realized_pl + unrealized_pl` — a per-SESSION delta spanning many days —
+to the ONE settlement day, so DAILY returns were insane (Phoenix `c225840c` key `95089958`: max
+|daily| 94%/day, Aug-2025 +3305%). Phase 83 marks the open option book DAILY and SPREADS the MTM
+across the days it accrued — a **REDISTRIBUTION that PRESERVES the total** (the closure gates stay
+green by construction).
+
+**The rule (per currency `c`, native path only):**
+
+- Option `trade`/`delivery` rows contribute their **FULL native `change`** everywhere (the D-11
+  coverage-gated `−commission` arm is REMOVED). `options_settlement_summary` is **CLASSIFIED-BUT-INERT**:
+  its `change` is always 0.0 (nonzero → fail loud) and it contributes NOTHING to attribution.
+- **Daily MTM channel:** `replay_option_positions(rows)` reconstructs per-instrument end-of-day signed
+  positions from the post-trade `position` field; `fetch_deribit_option_daily_marks` fetches the 1D
+  chart close per held instrument over its expiry-capped `[first_held, last_held]` span (one public
+  request each; `last_held` already caps the span — a position cannot outlive its expiry, so **no
+  expiry parse exists nor is needed**); `option_mtm_daily` computes
+  `Book[c][d] = Σ_instr pos[instr][d] × mark[instr][d]` and `ΔMTM[c][d] = Book[c][d] − Book[c][d−1]`.
+  The adapter MERGES `ΔMTM` into the cash daily dict before the pd.Series conversion.
+- **Day-grid convention (PINNED):** bar-tick UTC day = native grid day. The 1D bar stamped `D 08:00`
+  keys day `D` (same `tick → strftime('%Y-%m-%d')` as the perp-close fill); positions replay on the
+  same `_row_utc_day` grid. The ≤8h skew is intraday attribution noise WITHIN the one-day class; the
+  telescoped total is exact regardless.
+- **Total preservation (telescoping):** `Σ_d native_pnl[c][d] = Σchange + Book[c][last_marked_day]`
+  (pre-inception book 0, full-history venue). Flat terminal → `Book(T)=0` → total = `Σchange` exactly
+  (the Phoenix targets BTC +6.479224 / USDC −97752.858490 hold verbatim). Non-flat terminal → total =
+  `Σchange + settled book at the last settlement`, the SAME basis the §5 gate anchors to, so §5 closes
+  by construction with the KEPT combined futures+options wedge.
+- **Sparse marks fail loud (D-07):** a missing bar inside an instrument's listed life on a
+  nonzero-position day → `LedgerValuationError` naming instrument+day. NO interpolation, NO
+  session-lump fallback (that lump IS the misattribution being removed). The ONLY cash-basis era left
+  is **pre-retention** (an instrument whose whole life predates the venue's ~2.5yr 1D-chart retention →
+  a wholly-empty marks response whose `last_held` is older than the horizon): those days keep cash
+  `change` and stamp the REUSED `pre_summary_rollout_option_dailies` warning → `complete_with_warnings`
+  (the M2 key — repointing it across nav_twr/transforms/founder-lp would risk a silent drop). A
+  wholly-empty response for an IN-retention instrument is structural → fail loud.
+
+**Identity = 3 channels (`assert_balance_identity`, on every ledger build):**
+1. **Strict cash channel (ALL currencies, exact).** `Σ native_daily_cash[c] == Σchange` over
+   `_NATIVE_CASH_BEARING_TYPES`. With full option `change` restored and the summary inert this is a
+   plain arithmetic identity — **the CR-01 open-book exemption is REMOVED** (an open book is now VALUED
+   in the ΔMTM channel, so the cash channel closes for open books too; the F1 widened-§5-envelope
+   follow-up is RESOLVED — no exempted currency ⇒ no widened silent envelope). ⚠️ The guard reconciles
+   the PRE-MERGE cash-only dict; merging ΔMTM first would false-fire (`Σchange + Book ≠ Σchange`).
+2. **Book anchor cross-check.** The replayed `terminal_book[c]` reconciles against the anchor's settled
+   book `native_options_value[c] − native_options_session_upl[c]` (both off the SAME
+   `get_account_summaries`), to `max($1-equiv, 1e-4·throughput)`. NOT verifiable at a flat terminal
+   (both sides 0) — the first live open-book anchor is the §6 watch (a breach there is a loud STOP).
+3. **Summary cross-check.** Over each summary coverage window,
+   `Σ(rpl+upl) == Σ(option change+commission) + [Book(end) − Book(start)]` (E3 generalized to the MTM
+   series). Material breach → fail loud — the summaries stop DRIVING attribution but keep POLICING it.
+
+**Boundary asymmetry (§6 live watch):** an instrument whose `last_day` precedes the currency's global
+last grid day drops out of `Book` after `last_day`, so a NON-last-day open terminal position registers
+a spurious ΔMTM on `last_day+1`. Total-exact regardless; live watch item (fixtures put the open
+instrument's last trade on the crawl day). **Scope:** native path only; SC-4 byte-identity preserved
+for perp-only / USD-native accounts (empty replay → no marks → no-op merge). Evidence:
+`docs/evidence/drb-option-daily-marks-2026-07.json`.
 
 ## Funding is settlement-BUNDLED — do NOT add a separate funding stream
 

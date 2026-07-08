@@ -2170,3 +2170,30 @@ def test_mtm_mutation_dropping_a_bar_reddens() -> None:
                                        if k != "2025-07-12"}}
     with pytest.raises(LedgerValuationError):
         option_mtm_daily(replay, dropped)
+
+
+def test_mtm_spike_collapse_regression() -> None:
+    """Phase-83 HEADLINE regression (spike-collapse). Under Phase 82 a long-dated
+    option book's whole session P&L lumped onto the ONE settlement day → an insane
+    daily spike (Phoenix: 94%/day). Phase 83 SPREADS it across the accrual days.
+
+    Fixture: a +1 option book worth 0.10 → 0.90 over 9 days (terminal book +0.90).
+    The OLD lump would put +0.90 on the settlement day; the daily-MTM channel puts
+    +0.10 on EACH day. Assert: (a) no single day carries the whole +0.90 move
+    (max |ΔMTM| ≪ total), (b) the total still telescopes to +0.90."""
+    replay = replay_option_positions([
+        _opt_row("2025-07-01T10:00:00+00:00", position=1.0, rid=80),
+        _opt_row("2025-07-09T10:00:00+00:00", position=1.0, rid=81),
+    ])
+    marks = {"BTC-14JUL25-60000-C": {
+        f"2025-07-0{d}": 0.10 * d for d in range(1, 10)
+    }}
+    delta, terminal = option_mtm_daily(replay, marks)
+    daily = delta["BTC"]
+    total = sum(daily.values())
+    assert total == pytest.approx(0.90, abs=1e-9)         # telescopes to Book(T)
+    assert terminal["BTC"] == pytest.approx(0.90, abs=1e-9)
+    # The spike is COLLAPSED: no single day carries the whole session move — each
+    # day is +0.10, ~1/9 of the total (the old single-day lump shape is GONE).
+    assert max(abs(v) for v in daily.values()) < 0.20     # ≪ 0.90 lump
+    assert all(abs(v) == pytest.approx(0.10, abs=1e-9) for v in daily.values())
