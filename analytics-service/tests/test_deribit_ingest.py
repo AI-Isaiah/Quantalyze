@@ -2630,6 +2630,98 @@ async def test_perp_daily_transient_raises_retryable() -> None:
     assert spy.waits == [1.0, 2.0]  # exponential backoff
 
 
+# ===========================================================================
+# Phase 83 (83-01): fetch_deribit_option_daily_marks — the option daily-MTM
+# mark fetcher. Sibling of fetch_deribit_perp_daily_index (same endpoint,
+# same read-error discipline), takes an instrument VERBATIM + an expiry-capped
+# [oldest_day, newest_day] span; the caller owns the fail-loud hole decision.
+# ===========================================================================
+
+
+async def test_option_marks_parses_maps_days_and_instrument() -> None:
+    stub = _ChartDataStub(
+        [_chart_ok([("2025-07-12", 0.041), ("2025-07-13", 0.038)])]
+    )
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-14JUL25-60000-C",
+        oldest_day="2025-07-12",
+        newest_day="2025-07-14",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {"2025-07-12": 0.041, "2025-07-13": 0.038}
+    # Instrument passed VERBATIM (no suffix synthesis), 1D resolution.
+    assert stub.calls[0]["instrument_name"] == "BTC-14JUL25-60000-C"
+    assert stub.calls[0]["resolution"] == "1D"
+
+
+async def test_option_marks_ms_bounds() -> None:
+    """The exact ms bounds: start = oldest_day 00:00 UTC; end = newest_day 00:00
+    + one full UTC day so the newest_day 08:00 settlement bar is INSIDE the
+    window (a 00:00 upper bound would drop the final needed mark → a spurious
+    hole fail-loud downstream)."""
+    import pandas as pd
+
+    stub = _ChartDataStub([_chart_ok([("2025-07-12", 0.04)])])
+    await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-14JUL25-60000-C",
+        oldest_day="2025-07-12",
+        newest_day="2025-07-14",
+        sleep=_SleepSpy(),
+    )
+    start = int(pd.Timestamp("2025-07-12", tz="UTC").timestamp() * 1000)
+    end = int(pd.Timestamp("2025-07-14", tz="UTC").timestamp() * 1000) + 86_400_000
+    assert stub.calls[0]["start_timestamp"] == start
+    assert stub.calls[0]["end_timestamp"] == end
+    # The newest_day 08:00 bar tick is strictly inside [start, end].
+    bar_0800 = int(pd.Timestamp("2025-07-14T08:00:00", tz="UTC").timestamp() * 1000)
+    assert start <= bar_0800 <= end
+
+
+async def test_option_marks_skips_nonpositive_close() -> None:
+    stub = _ChartDataStub(
+        [_chart_ok([("2025-07-12", 0.04), ("2025-07-13", 0.0), ("2025-07-14", -1.0)])]
+    )
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub, "BTC-14JUL25-60000-C", oldest_day="2025-07-12", newest_day="2025-07-14",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {"2025-07-12": 0.04}  # 0 and negative dropped
+
+
+async def test_option_marks_status_not_ok_returns_empty() -> None:
+    stub = _ChartDataStub([{"result": {"status": "no_data", "ticks": [], "close": []}}])
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub, "BTC-14JUL25-60000-C", oldest_day="2025-07-12", newest_day="2025-07-14",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {}
+
+
+async def test_option_marks_structural_nodata_returns_empty() -> None:
+    # An unlisted/expired-past-retention instrument → BadSymbol (RESPONDED): {}.
+    stub = _ChartDataStub([ccxt.BadSymbol("no such instrument")])
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub, "BTC-01JAN20-9000-C", oldest_day="2020-01-01", newest_day="2020-01-01",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {}
+    assert len(stub.calls) == 1  # structural → NOT retried
+
+
+async def test_option_marks_transient_raises_retryable() -> None:
+    stub = _ChartDataStub([ccxt.RequestTimeout("blip")] * 3)
+    spy = _SleepSpy()
+    with pytest.raises(DeribitTransientReadError):
+        await di.fetch_deribit_option_daily_marks(
+            stub, "BTC-14JUL25-60000-C", oldest_day="2025-07-12",
+            newest_day="2025-07-14", sleep=spy, max_retries=2,
+        )
+    assert len(stub.calls) == 3  # initial + 2 retries
+    assert spy.waits == [1.0, 2.0]  # exponential backoff
+
+
 def test_price_map_has_gap() -> None:
     # Dense-daily (BTC/ETH shape) spanning [oldest, newest] → NO gap → no perp fetch.
     dense = {"2025-07-01": 1.0, "2025-07-02": 1.0, "2025-07-03": 1.0}
