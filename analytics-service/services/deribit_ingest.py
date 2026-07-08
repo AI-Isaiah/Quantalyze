@@ -1253,6 +1253,14 @@ class DeribitNativeAccountState:
     collapsed_upnl_usd: float
     balance_error: bool
     upnl_unreadable: bool
+    # CR-01 — per-UPPERCASE-ccy ``options_value`` read off the SAME summaries
+    # response (D5): the NATIVE-unit mark of the currency's OPEN option book. A
+    # nonzero value proves the option book is OPEN at crawl, so the STRICT
+    # balance-identity guard (which closes only for a FLAT-at-settlement book) is
+    # exempted for that currency and the §5 inception gate becomes the
+    # authoritative reconciliation. Absent on perp-only summaries → 0.0 (never
+    # fabricated; SC-4 byte-safe). A failed/empty read yields an EMPTY map.
+    native_options_value: Mapping[str, float]
 
 
 async def fetch_deribit_native_account_state(
@@ -1285,16 +1293,17 @@ async def fetch_deribit_native_account_state(
     try:
         resp = await exchange.private_get_get_account_summaries({})
     except Exception:  # noqa: BLE001 - a failed read is a DQ flag, not a crash
-        return DeribitNativeAccountState(empty, {}, None, 0.0, True, False)
+        return DeribitNativeAccountState(empty, {}, None, 0.0, True, False, {})
     result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
     summaries = result.get("summaries", []) if isinstance(result, Mapping) else []
     if not isinstance(summaries, Sequence) or not summaries:
-        return DeribitNativeAccountState({}, {}, None, 0.0, True, False)
+        return DeribitNativeAccountState({}, {}, None, 0.0, True, False, {})
 
     # Native per-currency maps read from the SAME summaries (D5) — NEVER index-
     # multiplied. session_upl absent/null/non-numeric → 0.0 (never fabricated).
     native_equity: dict[str, float] = {}
     native_upnl: dict[str, float] = {}
+    native_options_value: dict[str, float] = {}
     for summ in summaries:
         if not isinstance(summ, Mapping):
             continue
@@ -1306,6 +1315,11 @@ async def fetch_deribit_native_account_state(
         # perp-only (options component absent → 0.0 → unchanged value → SC-4).
         upl, _read = _combined_session_upl(summ)
         native_upnl[ccy] = upl
+        # CR-01: the open-option-book mark read off the SAME response. Absent on
+        # perp-only summaries → 0.0 (never fabricated; SC-4). A nonzero value
+        # exempts this currency from the STRICT balance-identity guard (§5 becomes
+        # authoritative on the open book).
+        native_options_value[ccy] = float(summ.get("options_value", 0.0) or 0.0)
 
     # Resolve one {ccy}_usd index per held non-linear currency for the COLLAPSED
     # anchor/wedge only (the native maps above never touch these).
@@ -1371,13 +1385,19 @@ async def fetch_deribit_native_account_state(
         # mis-scale. The NATIVE maps stay (they need no index); the wedge inherits
         # the same fail-loud collapsed disposition (never fabricated).
         return DeribitNativeAccountState(
-            native_equity, native_upnl, None, 0.0, True, False
+            native_equity, native_upnl, None, 0.0, True, False, native_options_value
         )
     open_unrealized_usd, upnl_unreadable = _deribit_session_upl_to_usd(
         summaries, index_prices
     )
     return DeribitNativeAccountState(
-        native_equity, native_upnl, equity, open_unrealized_usd, False, upnl_unreadable
+        native_equity,
+        native_upnl,
+        equity,
+        open_unrealized_usd,
+        False,
+        upnl_unreadable,
+        native_options_value,
     )
 
 

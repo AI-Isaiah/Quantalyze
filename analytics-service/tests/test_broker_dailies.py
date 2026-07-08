@@ -495,6 +495,7 @@ def _deribit_patches(
                     collapsed_upnl_usd=0.0,
                     balance_error=False,
                     upnl_unreadable=False,
+                    native_options_value={},
                 )
             ),
         ),

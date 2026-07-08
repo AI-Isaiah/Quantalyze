@@ -1813,6 +1813,7 @@ async def test_build_native_ledger_uses_injected_state_no_second_read(
         collapsed_upnl_usd=0.0,
         balance_error=False,
         upnl_unreadable=False,
+        native_options_value={},
     )
     ex = _NativeAnchorStub(summaries=[], index_price={"BTC": 50000.0})
     ledger, _report = await di.build_deribit_native_ledger(
@@ -3017,6 +3018,36 @@ async def test_native_account_state_wedge_is_combined(monkeypatch: Any) -> None:
     state_opts = await di.fetch_deribit_native_account_state(opts)
     # Combined 0.8 (fails pre-fix futures-only read = 0.3).
     assert state_opts.native_upnl == {"BTC": pytest.approx(0.8, abs=1e-12)}
+
+
+async def test_native_account_state_reads_options_value_per_currency() -> None:
+    """CR-01 step 1: `native_options_value` is read off the SAME summaries response
+    (`options_value` per currency) — a nonzero value marks a provably-OPEN option
+    book for the balance-identity exemption. Absent on perp-only summaries → 0.0
+    (SC-4 byte-safe pattern)."""
+    opts = _NativeAnchorStub(
+        summaries=[
+            {"currency": "BTC", "equity": 2.0, "session_upl": 0.3,
+             "options_value": 0.7},
+            {"currency": "ETH", "equity": 5.0, "session_upl": 0.0},  # no options_value
+        ],
+        index_price={"BTC": 60000.0, "ETH": 3000.0},
+    )
+    state = await di.fetch_deribit_native_account_state(opts)
+    assert state.native_options_value["BTC"] == pytest.approx(0.7, abs=1e-12)
+    # ETH summary has NO options_value → 0.0 (never fabricated), byte-safe.
+    assert state.native_options_value["ETH"] == pytest.approx(0.0, abs=1e-12)
+
+
+async def test_native_account_state_options_value_empty_on_failed_read() -> None:
+    """A failed / empty summaries read yields an EMPTY native_options_value map
+    (the error constructors pass `{}`), consistent with the other native maps."""
+    failed = _NativeAnchorStub(summaries_exc=RuntimeError("boom"))
+    state = await di.fetch_deribit_native_account_state(failed)
+    assert state.native_options_value == {}
+    empty = _NativeAnchorStub(summaries=[])
+    state2 = await di.fetch_deribit_native_account_state(empty)
+    assert state2.native_options_value == {}
 
 
 # ===========================================================================

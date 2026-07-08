@@ -114,6 +114,7 @@ def _account_state(
         collapsed_upnl_usd=upnl,
         balance_error=balance_error,
         upnl_unreadable=upnl_unreadable,
+        native_options_value={},
     )
 
 
