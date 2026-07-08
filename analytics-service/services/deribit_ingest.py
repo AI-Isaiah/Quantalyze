@@ -850,41 +850,86 @@ def _deribit_session_upl_to_usd(
     return total, (saw_summary and not read_any)
 
 
-async def fetch_deribit_account_equity_and_upnl_usd(
+@dataclass(frozen=True)
+class DeribitNativeAccountState:
+    """The Deribit account anchor read in BOTH channels from ONE
+    ``get_account_summaries`` response (D5):
+
+      * ``native_equity`` / ``native_upnl`` — per-UPPERCASE-ccy NATIVE units
+        (``equity`` / ``session_upl`` verbatim, NEVER index-multiplied); the
+        additive channel the 79 native core consumes. ``session_upl`` absent /
+        null / non-numeric coerces to ``0.0`` for that currency (never
+        fabricated), matching ``_deribit_session_upl_to_usd``'s [ASSUMED A1].
+      * ``collapsed_equity_usd`` / ``collapsed_upnl_usd`` + ``upnl_unreadable`` —
+        the LEGACY collapsed USD anchor/wedge (``deribit_equity_to_usd`` /
+        ``_deribit_session_upl_to_usd``), kept byte-identical for the 80-04 parity
+        panel.
+      * ``balance_error`` — the DQ flag: a failed/empty summaries read or an
+        unvaluable held currency (``deribit_equity_to_usd`` raises).
+
+    App A #6 (D6) holds BY CONSTRUCTION: an unvaluable coin ``session_upl`` is
+    SILENTLY zeroed in ``collapsed_upnl_usd`` (the legacy path) but PRESERVED raw
+    in ``native_upnl`` — the native core value-gate is what refuses it, not the
+    adapter. A FAILED read yields EMPTY native maps; an unvaluable COLLAPSE keeps
+    the (readable) native maps while flagging ``balance_error``.
+    """
+
+    native_equity: Mapping[str, float]
+    native_upnl: Mapping[str, float]
+    collapsed_equity_usd: float | None
+    collapsed_upnl_usd: float
+    balance_error: bool
+    upnl_unreadable: bool
+
+
+async def fetch_deribit_native_account_state(
     exchange: Any,
-) -> tuple[float | None, bool, float, bool]:
-    """Total Deribit account equity in USD (the initial-capital anchor) AND the
-    companion session open-uPnL wedge, both from ONE ``get_account_summaries``
-    response + the SAME resolved index_prices (SC-1) — no new fetch.
+) -> DeribitNativeAccountState:
+    """Read the Deribit account anchor in native + collapsed channels from ONE
+    ``get_account_summaries`` response (D5) — the SINGLE summaries fetch and the
+    SINGLE code path both ``fetch_deribit_account_equity_and_upnl_usd`` (legacy
+    4-tuple) and ``build_deribit_native_ledger`` (native maps) delegate to.
 
-    Reads ``private/get_account_summaries``; each coin-margined currency's coin
-    equity is converted at its USD index price (``public/get_index_price`` with
-    ``index_name={ccy}_usd``) while USD-family currencies pass through. The
-    money math is the pure ``deribit_txn.deribit_equity_to_usd`` — NEVER anchor
-    to a raw coin quantity (the anchor-shift class mis-scales every return). The
-    open-uPnL wedge sums ``session_upl`` [ASSUMED A1] from the SAME summaries
-    with the SAME index_prices; an absent/uncertain field → wedge 0.0 (fallback,
-    never fabricated).
-
-    Returns ``(equity, balance_error, open_unrealized_usd, upnl_unreadable)``. A
-    failed read or an unvaluable held currency → ``(None, True, 0.0, False)``
-    (the wedge inherits the anchor's fail-loud disposition — never fabricated on
-    an unvaluable base, and ``unreadable`` is moot on a failed anchor). MUST-2:
-    ``upnl_unreadable`` is True when the anchor read cleanly but ``session_upl``
-    was absent/unreadable on EVERY summary — the caller surfaces
-    ``unrealized_pnl_unreadable`` so a wrong assumed field name is LOUD.
+    The native maps are read STRAIGHT off each summary (``equity`` /
+    ``session_upl``) in NATIVE units — no ``{ccy}_usd`` multiply. The collapsed
+    anchor/wedge reuse the SAME resolved ``index_prices`` (one probe per held
+    non-linear currency) so there is NO second fetch of anything. Leak: no raw
+    equity/upnl values are logged.
     """
     from services.deribit_txn import _LINEAR_CURRENCIES, deribit_equity_to_usd
 
+    empty: dict[str, float] = {}
     try:
         resp = await exchange.private_get_get_account_summaries({})
     except Exception:  # noqa: BLE001 - a failed read is a DQ flag, not a crash
-        return None, True, 0.0, False
+        return DeribitNativeAccountState(empty, {}, None, 0.0, True, False)
     result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
     summaries = result.get("summaries", []) if isinstance(result, Mapping) else []
     if not isinstance(summaries, Sequence) or not summaries:
-        return None, True, 0.0, False
+        return DeribitNativeAccountState({}, {}, None, 0.0, True, False)
 
+    # Native per-currency maps read from the SAME summaries (D5) — NEVER index-
+    # multiplied. session_upl absent/null/non-numeric → 0.0 (never fabricated).
+    native_equity: dict[str, float] = {}
+    native_upnl: dict[str, float] = {}
+    for summ in summaries:
+        if not isinstance(summ, Mapping):
+            continue
+        ccy = str(summ.get("currency", "")).upper()
+        if not ccy:
+            continue
+        native_equity[ccy] = float(summ.get("equity", 0.0) or 0.0)
+        raw = summ.get("session_upl")  # [ASSUMED A1]
+        upl = 0.0
+        if raw is not None:
+            try:
+                upl = float(raw)
+            except (TypeError, ValueError):
+                upl = 0.0
+        native_upnl[ccy] = upl
+
+    # Resolve one {ccy}_usd index per held non-linear currency for the COLLAPSED
+    # anchor/wedge only (the native maps above never touch these).
     index_prices: dict[str, float] = {}
     for summ in summaries:
         if not isinstance(summ, Mapping):
@@ -910,13 +955,53 @@ async def fetch_deribit_account_equity_and_upnl_usd(
         equity = deribit_equity_to_usd(summaries, index_prices)
     except ValueError:
         # A coin-margined currency with no resolvable USD index → refuse a
-        # coin/non-USD anchor; flag heuristic capital rather than mis-scale.
-        # The wedge inherits the same fail-loud disposition (never fabricated).
-        return None, True, 0.0, False
+        # coin/non-USD collapsed anchor; flag heuristic capital rather than
+        # mis-scale. The NATIVE maps stay (they need no index); the wedge inherits
+        # the same fail-loud collapsed disposition (never fabricated).
+        return DeribitNativeAccountState(
+            native_equity, native_upnl, None, 0.0, True, False
+        )
     open_unrealized_usd, upnl_unreadable = _deribit_session_upl_to_usd(
         summaries, index_prices
     )
-    return equity, False, open_unrealized_usd, upnl_unreadable
+    return DeribitNativeAccountState(
+        native_equity, native_upnl, equity, open_unrealized_usd, False, upnl_unreadable
+    )
+
+
+async def fetch_deribit_account_equity_and_upnl_usd(
+    exchange: Any,
+) -> tuple[float | None, bool, float, bool]:
+    """Total Deribit account equity in USD (the initial-capital anchor) AND the
+    companion session open-uPnL wedge, both from ONE ``get_account_summaries``
+    response + the SAME resolved index_prices (SC-1) — no new fetch.
+
+    Thin collapsed-4-tuple delegate to :func:`fetch_deribit_native_account_state`
+    (byte-identical to the pre-80-02 body): reads
+    ``private/get_account_summaries``; each coin-margined currency's coin equity
+    is converted at its USD index price (``public/get_index_price`` with
+    ``index_name={ccy}_usd``) while USD-family currencies pass through. The money
+    math is the pure ``deribit_txn.deribit_equity_to_usd`` — NEVER anchor to a raw
+    coin quantity (the anchor-shift class mis-scales every return). The open-uPnL
+    wedge sums ``session_upl`` [ASSUMED A1] from the SAME summaries with the SAME
+    index_prices; an absent/uncertain field → wedge 0.0 (fallback, never
+    fabricated).
+
+    Returns ``(equity, balance_error, open_unrealized_usd, upnl_unreadable)``. A
+    failed read or an unvaluable held currency → ``(None, True, 0.0, False)``
+    (the wedge inherits the anchor's fail-loud disposition — never fabricated on
+    an unvaluable base, and ``unreadable`` is moot on a failed anchor). MUST-2:
+    ``upnl_unreadable`` is True when the anchor read cleanly but ``session_upl``
+    was absent/unreadable on EVERY summary — the caller surfaces
+    ``unrealized_pnl_unreadable`` so a wrong assumed field name is LOUD.
+    """
+    state = await fetch_deribit_native_account_state(exchange)
+    return (
+        state.collapsed_equity_usd,
+        state.balance_error,
+        state.collapsed_upnl_usd,
+        state.upnl_unreadable,
+    )
 
 
 async def fetch_deribit_account_equity_usd(

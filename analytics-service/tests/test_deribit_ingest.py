@@ -1530,3 +1530,149 @@ async def test_sol_still_refuses_when_probe_unresolvable(monkeypatch: Any) -> No
     exchange = _IndexProbeStub({"sol_usd": RuntimeError("no sol index")})
     with pytest.raises(LedgerValuationError):
         await di.fetch_deribit_ledger_daily_records(exchange)
+
+
+# ===========================================================================
+# 80-02 Task 1 — native per-currency equity + session_upl from ONE summaries read
+# (D5). The collapsed USD anchor stays byte-identical for the 80-04 parity panel;
+# the native maps are the additive channel that feeds the 79 core (App A #6 wedge
+# refusal is BY CONSTRUCTION — the native session_upl is passed through, never the
+# legacy silent-0.0).
+# ===========================================================================
+
+
+class _NativeAnchorStub:
+    """One ``get_account_summaries`` response + per-``{ccy}_usd`` index prices,
+    counting summary reads so the single-fetch invariant is pin-able. ``index_price``
+    is a ``{CCY: price}`` map, a scalar, or ``None`` (probe raises → unresolvable)."""
+
+    def __init__(
+        self,
+        *,
+        summaries: Any = None,
+        index_price: Any = None,
+        summaries_exc: BaseException | None = None,
+    ) -> None:
+        self._summaries = summaries
+        self._index_price = index_price
+        self._summaries_exc = summaries_exc
+        self.summaries_calls = 0
+
+    async def private_get_get_account_summaries(self, params: dict[str, Any]) -> Any:
+        self.summaries_calls += 1
+        if self._summaries_exc is not None:
+            raise self._summaries_exc
+        return {"result": {"summaries": self._summaries}}
+
+    async def public_get_get_index_price(self, params: dict[str, Any]) -> Any:
+        ccy = str(params["index_name"]).split("_")[0].upper()
+        price = (
+            self._index_price.get(ccy)
+            if isinstance(self._index_price, dict)
+            else self._index_price
+        )
+        if price is None:
+            raise RuntimeError("no index for " + ccy)
+        return {"result": {"index_price": price}}
+
+
+async def test_native_account_state_reads_native_equity_map() -> None:
+    # native_equity is per-UPPERCASE-ccy NATIVE units: 1.5 BTC coins, NEVER
+    # 1.5 × 60000. Mutation (a): index-multiplying the native equity map makes
+    # BTC == 90000.0 and reddens.
+    stub = _NativeAnchorStub(
+        summaries=[
+            {"currency": "BTC", "equity": 1.5, "session_upl": 0.0},
+            {"currency": "USDC", "equity": 40000.0, "session_upl": 0.0},
+        ],
+        index_price={"BTC": 60000.0},
+    )
+    state = await di.fetch_deribit_native_account_state(stub)
+    assert state.native_equity == {"BTC": 1.5, "USDC": 40000.0}
+
+
+async def test_native_account_state_native_upnl_coerces_absent_to_zero() -> None:
+    # session_upl absent / null / non-numeric coerces to 0.0 for that currency
+    # (never fabricated), matching _deribit_session_upl_to_usd's [ASSUMED A1].
+    stub = _NativeAnchorStub(
+        summaries=[
+            {"currency": "BTC", "equity": 2.0, "session_upl": 0.3},
+            {"currency": "ETH", "equity": 1.0},  # absent → 0.0
+            {"currency": "USDC", "equity": 1.0, "session_upl": None},  # null → 0.0
+            {"currency": "SOL", "equity": 1.0, "session_upl": "oops"},  # non-num → 0.0
+        ],
+        index_price={"BTC": 40000.0, "ETH": 3000.0, "SOL": 150.0},
+    )
+    state = await di.fetch_deribit_native_account_state(stub)
+    assert state.native_upnl["BTC"] == pytest.approx(0.3)
+    assert state.native_upnl["ETH"] == 0.0
+    assert state.native_upnl["USDC"] == 0.0
+    assert state.native_upnl["SOL"] == 0.0
+
+
+async def test_native_account_state_single_summaries_fetch() -> None:
+    # BOTH native maps AND the collapsed USD anchor come from ONE summaries read.
+    # Mutation (b): a second get_account_summaries fetch makes summaries_calls == 2
+    # and reddens.
+    stub = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.3}],
+        index_price={"BTC": 40000.0},
+    )
+    state = await di.fetch_deribit_native_account_state(stub)
+    assert stub.summaries_calls == 1
+    assert state.native_equity == {"BTC": 2.0}
+    assert state.collapsed_equity_usd == pytest.approx(80000.0)
+
+
+async def test_native_account_state_collapsed_anchor_matches_legacy_tuple() -> None:
+    # The collapsed USD anchor + wedge are byte-identical to the legacy 4-tuple the
+    # existing callers consume (the delegate returns exactly the state's collapsed
+    # fields). Mutation (c): changing the collapsed anchor (e.g. summing native
+    # equity instead of the USD collapse) reddens this AND the whole
+    # test_job_worker_deribit collapsed suite.
+    stub = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.3}],
+        index_price={"BTC": 40000.0},
+    )
+    state = await di.fetch_deribit_native_account_state(stub)
+    legacy = await di.fetch_deribit_account_equity_and_upnl_usd(stub)
+    assert legacy == (
+        state.collapsed_equity_usd,
+        state.balance_error,
+        state.collapsed_upnl_usd,
+        state.upnl_unreadable,
+    )
+    assert legacy == (pytest.approx(80000.0), False, pytest.approx(12000.0), False)
+
+
+async def test_native_account_state_failed_read_empty_native_maps() -> None:
+    # A failed summaries read yields EMPTY native maps + the existing
+    # (None, True, 0.0, False) collapsed disposition (never fabricated).
+    stub = _NativeAnchorStub(summaries_exc=RuntimeError("network down"))
+    state = await di.fetch_deribit_native_account_state(stub)
+    assert state.native_equity == {}
+    assert state.native_upnl == {}
+    assert state.collapsed_equity_usd is None
+    assert state.balance_error is True
+    assert state.collapsed_upnl_usd == 0.0
+    assert state.upnl_unreadable is False
+
+
+async def test_native_upnl_not_zeroed_for_unvaluable_coin_wedge() -> None:
+    # App A #6 BY CONSTRUCTION (D6): BTC holds ZERO equity (so the collapsed anchor
+    # succeeds) but carries a nonzero coin session_upl with NO resolvable index. The
+    # LEGACY collapsed wedge SILENTLY zeros it (_deribit_session_upl_to_usd:844-846).
+    # The NATIVE channel MUST keep the raw 0.3 so the 79 core's value-gate can refuse
+    # it — never the legacy silent 0.0. Mutation: sourcing native_upnl from the
+    # collapsed wedge instead of the raw summary zeros BTC and reddens.
+    stub = _NativeAnchorStub(
+        summaries=[
+            {"currency": "USDC", "equity": 1000.0, "session_upl": 0.0},
+            {"currency": "BTC", "equity": 0.0, "session_upl": 0.3},
+        ],
+        index_price=None,  # no index for BTC → wedge unvaluable in the collapse
+    )
+    state = await di.fetch_deribit_native_account_state(stub)
+    assert state.balance_error is False
+    assert state.collapsed_upnl_usd == 0.0  # legacy silent-0.0 for the coin wedge
+    assert state.native_upnl["BTC"] == pytest.approx(0.3)  # native channel preserves
