@@ -153,6 +153,17 @@ async def test_csv_analytics_insufficient_history() -> None:
     # insufficient-history failure path so the owner UI renders the
     # "CSV upload failed" pill, not the generic "missing data" copy.
     assert failed[0].args[0].get("data_quality_flags") == {"csv_source": True}
+    # SI-02 (MEDIUM-2, v1.9): a runner-owned terminal 'failed' stamp MUST clear
+    # the runner-owned computation_warned marker. If a prior run left the marker
+    # TRUE (complete_with_warnings), the status bridge branches (a)/(c) read the
+    # marker and would RESURRECT complete_with_warnings over this genuine failure
+    # (stale metrics for a failed strategy). Clearing it here lets the bridge
+    # resolve 'failed'. Neuter: drop `"computation_warned": False` from the
+    # source stamp → marker survives TRUE → resurrection → this assert reddens.
+    assert failed[0].args[0].get("computation_warned") is False, (
+        "insufficient-history 'failed' stamp must set computation_warned=False "
+        "(SI-02 stale-marker resurrection guard)"
+    )
 
 
 @pytest.mark.asyncio
@@ -236,6 +247,12 @@ async def test_mark_unrecoverable_preserves_pre_stamped_guard_flags() -> None:
         "complete_with_warnings; pre-fix the wholesale write laundered it"
     )
     assert flags.get("csv_source") is True
+    # SI-02 (MEDIUM-2): the unrecoverable 'failed' stamp clears the runner-owned
+    # marker so the bridge cannot resurrect complete_with_warnings.
+    assert failed[0].args[0].get("computation_warned") is False, (
+        "_mark_unrecoverable 'failed' stamp must set computation_warned=False "
+        "(SI-02 stale-marker resurrection guard)"
+    )
 
 
 @pytest.mark.asyncio
@@ -359,6 +376,11 @@ async def test_csv_analytics_unrecoverable_stamps_csv_source_flag() -> None:
         f"{payload.get('data_quality_flags')!r}"
     )
     assert payload["computation_error"] == "CSV analytics computation failed."
+    # SI-02 (MEDIUM-2): the unrecoverable 'failed' stamp clears the marker.
+    assert payload.get("computation_warned") is False, (
+        "_mark_unrecoverable 'failed' stamp must set computation_warned=False "
+        "(SI-02 stale-marker resurrection guard)"
+    )
 
 
 @pytest.mark.asyncio
@@ -430,6 +452,11 @@ async def test_csv_analytics_paginated_truncation_writes_specific_error() -> Non
     assert payload["data_quality_flags"] == {"csv_source": True}, (
         f"WR-05 provenance flag must survive truncation; got: "
         f"{payload.get('data_quality_flags')!r}"
+    )
+    # SI-02 (MEDIUM-2): the truncation 'failed' stamp clears the marker.
+    assert payload.get("computation_warned") is False, (
+        "_mark_truncated 'failed' stamp must set computation_warned=False "
+        "(SI-02 stale-marker resurrection guard)"
     )
 
 

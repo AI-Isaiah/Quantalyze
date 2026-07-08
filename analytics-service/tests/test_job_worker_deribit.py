@@ -327,6 +327,14 @@ async def test_nav_reconstruction_error_permanent(exc: Exception) -> None:
     stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
     assert stamps, "a native structural refusal must stamp strategy_analytics"
     assert stamps[0][1]["computation_status"] == "failed"
+    # SI-02 (MEDIUM-2, v1.9): the deribit terminal 'failed' stamp clears the
+    # runner-owned computation_warned marker so the status bridge branches
+    # (a)/(c) cannot resurrect a stale complete_with_warnings over the failure.
+    # Neuter: drop `"computation_warned": False` from the source stamp → reddens.
+    assert stamps[0][1].get("computation_warned") is False, (
+        "deribit '_stamp_deribit_analytics_failed' must set "
+        "computation_warned=False (SI-02 stale-marker resurrection guard)"
+    )
     # No raw balances leaked into the returned message.
     assert not re.search(r"\d{4,}\.\d", result.error_message or "")
 

@@ -2607,6 +2607,15 @@ async def test_nav_error_permanent_stamps_failed_and_raises_4xx():
         f"(not leave the wizard on an infinite 'computing' spinner); "
         f"upserts: {sa_upsert_calls!r}"
     )
+    # SI-02 (MEDIUM-2, v1.9): the terminal 'failed' stamp MUST clear the
+    # runner-owned computation_warned marker so the status bridge branches
+    # (a)/(c) cannot resurrect a stale complete_with_warnings over this genuine
+    # failure. Neuter: drop `"computation_warned": False` from the source stamp
+    # → the marker survives TRUE → resurrection → this assert reddens.
+    assert failed[-1].get("computation_warned") is False, (
+        "NavReconstructionError 'failed' stamp must set computation_warned=False "
+        "(SI-02 stale-marker resurrection guard)"
+    )
 
 
 @pytest.mark.asyncio
@@ -2646,6 +2655,17 @@ async def test_nav_error_permanent_catch_is_narrow_transient_valueerror_still_5x
         "A generic ValueError must fall through to the generic 500 handler "
         "(stays retryable); the NavReconstructionError catch must not over-catch; "
         f"got {ei.value.status_code}"
+    )
+    # SI-02 (MEDIUM-2, v1.9): even the generic catch-all 'failed' stamp must clear
+    # the runner-owned computation_warned marker so the status bridge branches
+    # (a)/(c) cannot resurrect a stale complete_with_warnings over the failure.
+    generic_failed = [
+        u for u in sa_upsert_calls if u.get("computation_status") == "failed"
+    ]
+    assert generic_failed, "generic exception must stamp a terminal 'failed'"
+    assert generic_failed[-1].get("computation_warned") is False, (
+        "generic-exception 'failed' stamp must set computation_warned=False "
+        "(SI-02 stale-marker resurrection guard)"
     )
 
 
@@ -5244,6 +5264,12 @@ class TestLoadPositionTimeSeriesNavSafety:
         )
         assert "position_snapshots" in error_msg, (
             f"Expected truncation hint in computation_error; got: {error_msg!r}"
+        )
+        # SI-02 (MEDIUM-2): the truncation 'failed' stamp clears the marker so
+        # the status bridge cannot resurrect a stale complete_with_warnings.
+        assert last_failure.get("computation_warned") is False, (
+            "PaginatedSelectTruncated 'failed' stamp must set "
+            "computation_warned=False (SI-02 stale-marker resurrection guard)"
         )
 
 

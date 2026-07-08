@@ -1536,6 +1536,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                     {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
+                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker on
+                        # every terminal 'failed' so the status bridge (branches
+                        # a/c) cannot resurrect a stale complete_with_warnings.
+                        "computation_warned": False,
                         "computation_error": (
                             "Analytics enqueue failed during sync. "
                             "The next scheduled sync will retry — "
@@ -1985,6 +1989,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
+                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                        "computation_warned": False,
                         "computation_error": stamp_detail + scrubbed,
                         "data_quality_flags": {"csv_source": True},
                     },
@@ -2037,6 +2043,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         {
                             "strategy_id": strategy_id,
                             "computation_status": "failed",
+                            # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                            "computation_warned": False,
                             "computation_error": scrubbed,
                             "data_quality_flags": {"csv_source": True},
                         },
@@ -2521,6 +2529,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
+                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                    "computation_warned": False,
                     "computation_error": (
                         "Insufficient broker history. At least 2 days of "
                         "activity required."

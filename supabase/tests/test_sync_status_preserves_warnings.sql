@@ -325,3 +325,81 @@ BEGIN
   RAISE NOTICE 'Part 5 OK: computation_warned=FALSE resolves to plain complete (no over-preserve; the runner clears the marker).';
 END $$;
 ROLLBACK;
+
+-- ==========================================================================
+-- Part 6 — SI-02 STALE-MARKER RESURRECTION (MEDIUM-2, v1.9). DISTINCT from the
+-- Part-4 bounce-RECOVERY case. Scenario: a strategy WAS complete_with_warnings
+-- (marker TRUE). A native switch (or any runner/worker path) then stamps
+-- computation_status='failed' because the strategy GENUINELY failed. The MEDIUM-2
+-- fix makes every runner/worker 'failed' stamp ALSO write computation_warned=FALSE.
+-- This Part proves the CONSEQUENCE at the bridge: with the marker cleared, the
+-- status bridge branches (a) and (c) must NOT resurrect complete_with_warnings
+-- over the genuine failure (which would show stale metrics for a failed strategy).
+--
+-- Contrast with Part 4: there the strategy was legitimately warned and the marker
+-- SHOULD survive a sibling failed_final→recover. Here the strategy failed for real
+-- and the runner cleared the marker, so the bridge must resolve to computing/complete
+-- (never complete_with_warnings). The two Parts together pin BOTH directions of the
+-- marker: TRUE preserves (Part 4), FALSE never resurrects (Part 6).
+--
+-- Neuter linkage: if the runner's 'failed' stamp did NOT clear the marker (drop
+-- `"computation_warned": False` from services/analytics_runner.py /
+-- services/job_worker.py — the exact Python change MEDIUM-2 adds), the marker
+-- would remain TRUE from the prior complete_with_warnings write, and branch (c)
+-- below would RESURRECT complete_with_warnings — reddening the final assert. The
+-- Python-side unit tests are the primary RED anchor for that clear; this SQL arm
+-- proves the bridge-side consequence the clear feeds. Rolled back always.
+-- ==========================================================================
+BEGIN;
+DO $$
+DECLARE
+  v_user        uuid := gen_random_uuid();
+  v_strat       uuid;
+  v_job_ana     uuid := gen_random_uuid();  -- the re-analytics job (native switch)
+  v_job_sib     uuid := gen_random_uuid();  -- a sibling (e.g. poll_positions)
+  v_token_ana   uuid := gen_random_uuid();
+  v_token_sib   uuid := gen_random_uuid();
+  v_status TEXT;
+BEGIN
+  INSERT INTO auth.users (id, email)
+    VALUES (v_user, 'sync-stale-marker-' || v_user || '@invalid.local');
+  INSERT INTO public.profiles (id, display_name)
+    VALUES (v_user, 'sync-stale-marker') ON CONFLICT (id) DO NOTHING;
+  INSERT INTO public.strategies (user_id, name)
+    VALUES (v_user, 'sync-stale-marker-strat') RETURNING id INTO v_strat;
+
+  -- The runner/worker stamped a GENUINE terminal failure AND cleared the marker
+  -- (the MEDIUM-2 fix): computation_status='failed', computation_warned=FALSE —
+  -- even though this strategy had previously been complete_with_warnings.
+  INSERT INTO public.strategy_analytics (strategy_id, computation_status, computation_warned)
+    VALUES (v_strat, 'failed', FALSE);
+
+  -- Two strategy-scoped jobs, both running (the native-switch re-analytics job and
+  -- a sibling claimed in the same batch).
+  INSERT INTO public.compute_jobs
+    (id, kind, strategy_id, status, priority, attempts, next_attempt_at, claim_token)
+  VALUES
+    (v_job_ana, 'compute_analytics', v_strat, 'running', 'normal', 1, now(), v_token_ana),
+    (v_job_sib, 'poll_positions',    v_strat, 'running', 'normal', 1, now(), v_token_sib);
+
+  -- Analytics job done first, sibling still running → branch (a). With the marker
+  -- cleared the bridge must NOT preserve/ resurrect a warning here.
+  PERFORM public.mark_compute_job_done(v_job_ana, v_token_ana);
+  SELECT computation_status INTO v_status
+    FROM public.strategy_analytics WHERE strategy_id = v_strat;
+  IF v_status = 'complete_with_warnings' THEN
+    RAISE EXCEPTION 'stale-marker: branch (a) RESURRECTED complete_with_warnings over a genuine failure (marker not cleared — MEDIUM-2 regression)';
+  END IF;
+
+  -- Sibling finishes → all done → branch (c). The genuine failure must resolve to
+  -- plain 'complete' (all jobs done), NEVER back to complete_with_warnings.
+  PERFORM public.mark_compute_job_done(v_job_sib, v_token_sib);
+  SELECT computation_status INTO v_status
+    FROM public.strategy_analytics WHERE strategy_id = v_strat;
+  IF v_status = 'complete_with_warnings' THEN
+    RAISE EXCEPTION 'stale-marker: branch (c) RESURRECTED complete_with_warnings from a stale marker over a genuine failure (SI-02 MEDIUM-2 resurrection re-opened)';
+  END IF;
+
+  RAISE NOTICE 'Part 6 OK: a runner-cleared computation_warned=FALSE on a genuine failure is NOT resurrected to complete_with_warnings by branches (a)/(c) (got %).', v_status;
+END $$;
+ROLLBACK;

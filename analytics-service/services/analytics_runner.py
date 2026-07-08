@@ -1209,6 +1209,10 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                     {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
+                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker on
+                        # every terminal 'failed' so the status bridge (branches
+                        # a/c) cannot resurrect a stale complete_with_warnings.
+                        "computation_warned": False,
                         "computation_error": "Insufficient trade history. At least 2 trading days required.",
                     },
                     on_conflict="strategy_id",
@@ -1345,6 +1349,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                     {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
+                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                        "computation_warned": False,
                         "computation_error": "Insufficient trading days after aggregation.",
                     },
                     on_conflict="strategy_id",
@@ -1961,6 +1967,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
+                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                    "computation_warned": False,
                     "computation_error": (
                         f"Analytics aborted: dataset exceeds "
                         f"{trunc.page_count * trunc.page_size:,} rows "
@@ -2004,6 +2012,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
+                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                    "computation_warned": False,
                     "computation_error": (
                         "NAV/TWR reconstruction failed (unusable return "
                         "denominator or malformed input); operator "
@@ -2025,6 +2035,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
+                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                    "computation_warned": False,
                     "computation_error": "Analytics computation failed. Contact support if this persists.",
                 },
                 on_conflict="strategy_id",
@@ -2121,6 +2133,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                     {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
+                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                        "computation_warned": False,
                         "computation_error": "Insufficient CSV history. At least 2 data points required.",
                         "data_quality_flags": {"csv_source": True},
                     },
@@ -2275,6 +2289,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
+                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                    "computation_warned": False,
                     "computation_error": (
                         f"CSV analytics aborted: dataset exceeds "
                         f"{trunc.page_count * trunc.page_size:,} rows "
@@ -2328,6 +2344,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
+                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                    "computation_warned": False,
                     "computation_error": "CSV analytics computation failed.",
                     "data_quality_flags": prior_flags,
                 },

@@ -285,6 +285,14 @@ class TestStrategyModeNonRegression:
         _name, payload, _oc = sa_upserts[0]
         assert payload["computation_status"] == "failed"
         assert payload["data_quality_flags"] == {"csv_source": True}
+        # SI-02 (MEDIUM-2, v1.9): the terminal 'failed' stamp clears the
+        # runner-owned computation_warned marker so the status bridge cannot
+        # resurrect a stale complete_with_warnings over the failure. Neuter:
+        # drop `"computation_warned": False` from the source stamp → reddens.
+        assert payload.get("computation_warned") is False, (
+            "derive <2-day 'failed' stamp must set computation_warned=False "
+            "(SI-02 stale-marker resurrection guard)"
+        )
 
 
 def _patches_with_combine(
@@ -368,6 +376,13 @@ class TestNavReconstructionErrorPermanentCatch:
         _name, payload, _oc = sa_upserts[0]
         assert payload["computation_status"] == "failed"
         assert payload["data_quality_flags"] == {"csv_source": True}
+        # SI-02 (MEDIUM-2): the terminal NAV-fault 'failed' stamp clears the
+        # runner-owned marker so the status bridge cannot resurrect a stale
+        # complete_with_warnings over the failure.
+        assert payload.get("computation_warned") is False, (
+            "broker NAV-fault 'failed' stamp must set computation_warned=False "
+            "(SI-02 stale-marker resurrection guard)"
+        )
         # scrub_freeform_string redacts the denylisted `secret=` value.
         assert "hunter2" not in payload["computation_error"], (
             f"stamped computation_error must be scrubbed; got "
