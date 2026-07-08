@@ -13,9 +13,11 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import ccxt
 import pytest
 
 from services import deribit_ingest as di
+from services.deribit_ingest import DeribitTransientReadError
 from services.deribit_txn import LedgerValuationError
 
 
@@ -1574,6 +1576,10 @@ class _NativeAnchorStub:
             if isinstance(self._index_price, dict)
             else self._index_price
         )
+        # A mapped Exception RAISES it (every call) — lets a test script a
+        # transient (ccxt.NetworkError) vs structural (ccxt.ExchangeError) probe.
+        if isinstance(price, BaseException):
+            raise price
         if price is None:
             raise RuntimeError("no index for " + ccy)
         return {"result": {"index_price": price}}
@@ -2364,3 +2370,169 @@ async def test_native_ledger_historical_swap_reconciles_and_swap_day_zero_return
         ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
     )
     assert returns.loc[pd.Timestamp("2024-01-02")] == pytest.approx(0.0, abs=1e-9)
+
+
+# ===========================================================================
+# Batch 2 — transient-read robustness (red-team HIGH-2 + LOW-1).
+#
+# Unifying principle: a TRANSIENT public-read blip (network/timeout/5xx →
+# ccxt.NetworkError) must be RETRYABLE — retry with backoff, then raise
+# DeribitTransientReadError (which classify_exception routes non-permanent) —
+# NEVER silently return a partial/degraded input the core then mis-handles
+# (permanent missing_daily_marks refuse, silent UNMARKABLE drop, or a silent
+# clean 'complete' where legacy degraded to complete_with_warnings). A GENUINE
+# structural condition (a genuinely-absent index → ccxt.ExchangeError/BadSymbol)
+# stays an honest skip/return-partial, never retried forever.
+# ===========================================================================
+
+
+class _RepeatingDeliveryStub:
+    """Serves ``pages`` in order, then RAISES ``after`` on every subsequent call
+    (so a retry loop re-hitting the same offset keeps seeing the same error)."""
+
+    def __init__(self, pages: list[Any], after: BaseException) -> None:
+        self._pages = list(pages)
+        self._after = after
+        self.calls: list[dict[str, Any]] = []
+
+    async def public_get_get_delivery_prices(self, params: dict[str, Any]) -> Any:
+        self.calls.append(dict(params))
+        if self._pages:
+            return self._pages.pop(0)
+        raise self._after
+
+
+async def test_settlement_index_transient_midpage_raises_retryable() -> None:
+    """HIGH-2.1 (RED): a mid-pagination TRANSIENT read (ccxt.RequestTimeout — a
+    NetworkError subclass) on a page still needing rows is RETRIED with backoff and,
+    on budget exhaustion, RAISES DeribitTransientReadError — a retryable disposition
+    — rather than silently returning a truncated page-1 map that looks
+    complete-but-sparse (which would drive a PERMANENT missing_daily_marks core
+    refusal on a mere network blip).
+
+    NEUTER: reverting the mid-pagination handler to swallow-and-return the partial
+    ``prices`` makes the call RETURN a 100-day map (no raise) → pytest.raises RED."""
+    from datetime import date, timedelta
+
+    base = date(2026, 4, 10)
+    page1 = _delivery_page(
+        [((base - timedelta(days=i)).isoformat(), 60000.0 + i) for i in range(100)]
+    )
+    stub = _RepeatingDeliveryStub([page1], ccxt.RequestTimeout("read blip"))
+    spy = _SleepSpy()
+    with pytest.raises(DeribitTransientReadError):
+        # oldest_day far in the past forces a second (transient-failing) page.
+        await di.fetch_deribit_settlement_index(
+            stub, "BTC", oldest_day="2000-01-01", sleep=spy, max_retries=2
+        )
+    # page 1 (rows) + 3 attempts at page 2 (initial + 2 retries) before exhaustion.
+    assert len(stub.calls) == 4
+    assert stub.calls[1]["offset"] == 100  # retried the SAME still-needed offset
+    # Exponential backoff between the two retries (1, 2) — the read discipline.
+    assert spy.waits[-2:] == [1.0, 2.0]
+
+
+async def test_settlement_index_structural_nodata_returns_partial() -> None:
+    """HIGH-2.1 (RED): a GENUINE benign 'no data' (ccxt.ExchangeError — the exchange
+    RESPONDED, NOT a network error) mid-crawl returns the accumulated map as today —
+    the own-index union + honest core refusal handle a genuine gap. It is NEVER
+    retried forever nor escalated to DeribitTransientReadError.
+
+    NEUTER: treating a structural ExchangeError as transient (retry+raise) makes this
+    RAISE instead of returning the 100-day map → RED."""
+    from datetime import date, timedelta
+
+    base = date(2026, 4, 10)
+    page1 = _delivery_page(
+        [((base - timedelta(days=i)).isoformat(), 60000.0 + i) for i in range(100)]
+    )
+    stub = _RepeatingDeliveryStub([page1], ccxt.ExchangeError("no data for index"))
+    spy = _SleepSpy()
+    prices = await di.fetch_deribit_settlement_index(
+        stub, "BTC", oldest_day="2000-01-01", sleep=spy, max_retries=2
+    )
+    assert len(prices) == 100  # page-1 map preserved; structural → honest partial
+    assert len(stub.calls) == 2  # page 1 + ONE structural page-2 attempt (no retry)
+    assert spy.waits == [1.0]  # only the inter-page pace, never a backoff retry
+
+
+async def test_build_indexable_transient_probe_raises_retryable() -> None:
+    """HIGH-2.2 (RED): a TRANSIENT probe (ccxt.RequestTimeout) for a value-carrying
+    coin is RETRIED and, on exhaustion, RAISES DeribitTransientReadError — never
+    silently DROPS a possibly-INDEXED currency to UNMARKABLE (which would drive a
+    PERMANENT core refuse on a network blip).
+
+    NEUTER: reverting the probe handler to swallow-and-continue drops SOL and returns
+    the floor {BTC, ETH} with NO raise → pytest.raises RED."""
+    stub = _IndexProbeStub({"sol_usd": ccxt.RequestTimeout("probe blip")})
+    spy = _SleepSpy()
+    with pytest.raises(DeribitTransientReadError):
+        await di.build_deribit_indexable_currencies(
+            stub, ["SOL"], sleep=spy, max_retries=2
+        )
+    # SOL probed initial + 2 retries before exhaustion (same index re-hit).
+    assert stub.probed == ["sol_usd", "sol_usd", "sol_usd"]
+    assert spy.waits == [1.0, 2.0]  # exponential backoff between retries
+
+
+async def test_build_indexable_structural_probe_skips_not_retried() -> None:
+    """HIGH-2.2 (RED): a GENUINE 'index not found' (ccxt.BadSymbol — a business
+    response, NOT a network error) leaves the currency OUT (genuinely not indexable)
+    exactly as today — probed ONCE, never retried, never raised.
+
+    NEUTER: treating BadSymbol as transient makes this RAISE / re-probe → RED."""
+    stub = _IndexProbeStub({"sol_usd": ccxt.BadSymbol("no such index")})
+    spy = _SleepSpy()
+    built = await di.build_deribit_indexable_currencies(
+        stub, ["SOL"], sleep=spy, max_retries=2
+    )
+    assert built == frozenset({"BTC", "ETH"})  # floor only — SOL genuinely not indexed
+    assert stub.probed == ["sol_usd"]  # probed exactly ONCE (no transient retry)
+    assert spy.waits == []
+
+
+async def test_native_account_state_transient_collapsed_probe_raises_retryable() -> None:
+    """LOW-1 (RED): a TRANSIENT collapsed-anchor probe blip (ccxt.RequestTimeout) for
+    a value-carrying held coin is RETRIED and, on exhaustion, RAISES
+    DeribitTransientReadError — a retryable disposition — rather than silently
+    setting balance_error=True and letting the branch proceed to a silent clean
+    'complete' (skipping the C2 / FLOW-04 / uPnL-unreadable DQ checks gated on
+    ``not balance_error``, where legacy degraded to complete_with_warnings).
+
+    NEUTER: reverting the collapsed probe to swallow-and-continue returns a
+    DeribitNativeAccountState with balance_error=True and NO raise → pytest.raises
+    RED."""
+    stub = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 1.5, "session_upl": 0.0}],
+        index_price={"BTC": ccxt.RequestTimeout("anchor probe blip")},
+    )
+    spy = _SleepSpy()
+    with pytest.raises(DeribitTransientReadError):
+        await di.fetch_deribit_native_account_state(stub, sleep=spy, max_retries=2)
+    assert spy.waits == [1.0, 2.0]  # retried with backoff before raising
+    # A transient collapsed blip is RETRYABLE, never routed permanent.
+    from services.job_worker import classify_exception
+
+    assert classify_exception(DeribitTransientReadError("x"))[0] != "permanent"
+
+
+async def test_native_account_state_structural_collapsed_probe_flags_balance_error(
+) -> None:
+    """LOW-1 (RED): a GENUINE unvaluable collapse — a held coin whose {ccy}_usd index
+    genuinely does not resolve (ccxt.ExchangeError, a business response) — stays the
+    honest structural degrade: balance_error=True with the readable native maps
+    intact, NO raise (the core's structural refusal handles it, never an infinite
+    retry).
+
+    NEUTER: treating a structural ExchangeError as transient makes this RAISE
+    DeribitTransientReadError → RED (an infinite retry on a genuine no-index)."""
+    stub = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 1.5, "session_upl": 0.0}],
+        index_price={"BTC": ccxt.ExchangeError("no index for BTC")},
+    )
+    spy = _SleepSpy()
+    state = await di.fetch_deribit_native_account_state(stub, sleep=spy, max_retries=2)
+    assert state.balance_error is True  # honest structural degrade
+    assert state.native_equity == {"BTC": 1.5}  # readable native maps preserved
+    assert state.collapsed_equity_usd is None
+    assert spy.waits == []  # structural → never retried
