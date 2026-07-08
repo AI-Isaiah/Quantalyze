@@ -1,0 +1,57 @@
+{
+  "_evidence": "DRB option daily-marks feasibility probe — Task-0 record for Phase 83 (daily option mark-to-market attribution). Encodes the SETTLED live probe; the executor builds against these as fixed facts and never re-derives them.",
+  "_generated": "2026-07-08",
+  "_subject": "Phase 82 fixed the full-history TOTAL (BTC +6.479224 / USDC −97752.858490, <$1) but attributes each options_settlement_summary's (realized_pl + unrealized_pl) — a per-SESSION delta spanning MANY days — onto the ONE settlement day, so daily returns are insane (max |daily| 94%/day, Aug-2025 +3305% on strategy c225840c 'Phoenix Protocol' key 95089958). Fix: mark the open option book DAILY and SPREAD the MTM across the days it accrued. A REDISTRIBUTION that PRESERVES the total — closure gates stay green by construction.",
+  "_supersedes_attribution_of": "docs/evidence/drb-options-semantics-2026-07.json (E1–E5 stay valid FACTS; their ATTRIBUTION consequences — coverage-gated −commission reclass, summary → daily rpl+upl — are superseded by this phase's daily-MTM model).",
+  "M1_mark_source_daily_chart": {
+    "endpoint": "public/get_tradingview_chart_data resolution=1D",
+    "finding": "Returns daily marks for OPTION instruments at ~100% coverage WITHIN each instrument's listed life, INCLUDING long-expired instruments (2.5+ year retention observed). One request per instrument suffices (a 1D series spans at most a few thousand points; no pagination).",
+    "bar_stamping": "Bars are stamped 08:00 UTC = Deribit's settlement boundary — session-aligned with the options_settlement_summary rows.",
+    "retention_horizon_years": 2.5,
+    "consequence": "The open option book can be marked per-day per-instrument at the 1D chart close, and the day-over-day book delta (ΔMTM) redistributes the session P&L across the days it accrued."
+  },
+  "M2_rejected_alternatives": {
+    "get_mark_price_history": "REFUSES expired instruments — dead end for historical attribution.",
+    "get_last_settlements_by_instrument": "REFUSES expired instruments — dead end.",
+    "public_trades": "REFUSES expired instruments — dead end.",
+    "note": "Only get_tradingview_chart_data resolution=1D serves expired-instrument daily closes. Do NOT revisit the rejected candidates."
+  },
+  "M3_position_source_signed_post_trade": {
+    "finding": "The signed post-trade `position` field on option trade/delivery rows reconstructs the per-day open book per instrument by pure replay — no fills-axis dependency, no hand-rolled Greeks/settlement math (D-08 stays in force).",
+    "semantics": {
+      "long": "positive position size",
+      "short": "negative position size",
+      "delivery_zeroes": "a delivery row's post-trade `position` is 0 when the position fully expires (encoded in fixtures, NOT asserted as a runtime rejection — a partial-delivery nonzero post-trade position is accepted as data, Deribit's call).",
+      "single_scope": "key IS its own subaccount (drb03) — no cross-scope position mixing."
+    },
+    "guard": "option trade/delivery row with absent/null/non-numeric `position` -> LedgerValuationError (schema drift — the field is the ONLY position source; fabricating a book mis-states MTM)."
+  },
+  "M4_day_grid_convention": {
+    "finding": "bar-tick UTC-day = native-grid day (PINNED §2 Q1). mark[instr][D] = close of the 1D bar whose tick timestamp falls on UTC day D (the bar stamped D 08:00), via the SAME tick->strftime('%Y-%m-%d') mapping fetch_deribit_perp_daily_index already pins. position[instr][D] = signed post-trade position after the LAST option row with utc_day <= D (end-of-day replay on the _row_utc_day grid).",
+    "skew": "The <=8h skew between a bar boundary (08:00) and native midnight is intraday attribution noise WITHIN the one-day class; the telescoped TOTAL is exact regardless (the skew cancels day-over-day)."
+  },
+  "M5_telescoping_total_preservation": {
+    "identity": "Sum_d native_pnl[c][d] = Sigma_change[c] + Book[c][last_marked_day], with Book[c][pre-inception] = 0 (full-history venue).",
+    "flat_terminal": "Terminal-flat book -> Book(T)=0 -> total = Sigma_change EXACTLY (the Phoenix flat-terminal targets hold verbatim: BTC +6.479224, USDC −97752.858490).",
+    "non_flat_terminal": "Open book at crawl -> total = Sigma_change + open-book MTM at the last settlement — the SAME settled-equity basis the native §5 gate anchors to (equity − combined_session_upl == cash + options_value − options_session_upl), so §5 closes by construction with the Phase-82 combined futures+options wedge (KEPT). NOT verifiable at Phoenix's flat terminal — first live open-book anchor is the watched follow-up."
+  },
+  "M6_sparse_marks_fail_loud": {
+    "finding": "A missing bar inside an instrument's listed life essentially NEVER happens (probe evidence). A hole is therefore STRUCTURAL.",
+    "disposition": "day inside [first_held, last_held] where the instrument's position is nonzero and its mark map has NO bar -> LedgerValuationError naming instrument + day (D-07). NO interpolation, NO session-lump fallback (that lump IS the bug being removed).",
+    "pre_retention_only_fallback": "The only remaining cash-basis era is pre-retention/pre-listing (an instrument whose entire life predates the venue's ~2.5yr chart retention): a WHOLLY-EMPTY marks response whose last_held_day is older than the retention horizon -> that instrument contributes NO MTM; its days stay cash-basis `change` + the pre_summary_rollout_option_dailies warning (reused key). A wholly-empty response for an instrument INSIDE the retention horizon -> fail loud (structural)."
+  },
+  "spike_collapse_regression": {
+    "day_2025_07_14_spike": "drops to |daily| < 10% (was part of the 94%/day insanity)",
+    "day_2025_08_28_spike": "drops to |daily| < 10%",
+    "aug_2025_monthly": "sane (no longer +3305%; plausible band for a ~$150k options book)",
+    "whole_era": "|daily| < 10% across the ENTIRE covered era (max was 94%)"
+  },
+  "settled_do_not_reopen": [
+    "1D chart is the ONLY expired-instrument daily-mark source (M2 rejections are final)",
+    "signed post-trade `position` is the position source (no fills-axis, no Greeks)",
+    "bar-tick day = native UTC day (no new day-grid convention enters the codebase)",
+    "sparse mark inside listed life = fail loud, never interpolate",
+    "the redistribution PRESERVES the total (closure gates green by construction)",
+    "no option-expiry parser exists nor is needed — last_held_day caps the span (a position cannot outlive its expiry); the pre-retention discriminator compares last_held_day vs the retention horizon, not a parsed expiry (M1)"
+  ]
+}
