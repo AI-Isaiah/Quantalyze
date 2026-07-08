@@ -1132,7 +1132,7 @@ def _combined_session_upl(summ: Mapping[str, Any]) -> tuple[float, bool, bool]:
       * options component — ``options_session_upl``, additive when present
         (ABSENT on perp-only summaries → 0.0 → wedge value unchanged → SC-4).
 
-    Returns ``(combined_upl, read_any, options_unreadable)`` where ``read_any`` is
+    Returns ``(combined_upl, read_any, component_unreadable)`` where ``read_any`` is
     True iff AT LEAST ONE component read as a present numeric (the MUST-2 unreadable
     signal: a wholly absent/garbled wedge is 'unreadable', a genuine flat 0.0 is
     'read'). Absent / null / non-numeric components coerce to 0.0 each — never
@@ -1148,6 +1148,22 @@ def _combined_session_upl(summ: Mapping[str, Any]) -> tuple[float, bool, bool]:
     renamed/garbled options wedge field is LOUD, never a silent 0-wedge
     overstatement on an account that actually holds open options.
 
+    F3 (regression from the F1 fix — SYMMETRIC futures leg): the F1 fix added the
+    PER-COMPONENT unreadable signal for the OPTIONS leg only. A GARBLED
+    (present-but-non-numeric) futures ``session_upl`` / ``futures_session_upl``
+    hits the ``except (TypeError, ValueError)`` below, contributing 0.0 with the
+    futures leg NOT read; a readable ``options_session_upl`` then set
+    ``read_any=True`` and the account-level unreadable signal never fired — a
+    silently-zeroed FUTURES wedge shipped clean (pre-F1 the single ``read_any``
+    flagged it). ``futures_unreadable`` distinguishes GARBLED (schema drift →
+    unreadable) from ABSENT (benign → 0.0) for the futures leg too. The third
+    return element is the COMBINED component-unreadable flag
+    (``options_unreadable or futures_unreadable``): a garbled value in EITHER leg
+    raises it, and the caller lifts it into ``unrealized_pnl_unreadable``. The
+    wedge VALUE is unchanged (still 0.0 for a garbled/absent field — never
+    fabricated); a clean perp-only account (numeric or absent ``session_upl``, no
+    ``options_value``) stays byte-identical — no new flag, no value change (SC-4).
+
     NOTE (§6 live-anchor follow-up): the exact field layout of
     ``get_account_summaries`` for an OPEN options book is not verifiable at the
     probe account's flat terminal (``session_upl == 0``); this defensive combined
@@ -1156,6 +1172,7 @@ def _combined_session_upl(summ: Mapping[str, Any]) -> tuple[float, bool, bool]:
     there is a loud stop, never a silent 0-wedge overstatement)."""
     read_any = False
     total = 0.0
+    futures_unreadable = False
     # Futures/base component — the preferred ``futures_session_upl`` else the
     # legacy ``session_upl`` (exactly one SUCCESSFUL read consulted so a layout
     # carrying both, equal, never double-counts). F2: a PRESENT-but-null preferred
@@ -1174,7 +1191,14 @@ def _combined_session_upl(summ: Mapping[str, Any]) -> tuple[float, bool, bool]:
             read_any = True
             break  # successful numeric read — stop (never double-count spellings)
         except (TypeError, ValueError):
-            break  # genuine non-numeric → 0.0 contribution, stop (never fabricate)
+            # F3: a GARBLED (present-but-non-numeric) futures wedge is schema drift,
+            # SYMMETRIC to the options leg — surface it as unreadable rather than
+            # silently coercing to a 0.0 wedge with no signal (a readable options
+            # leg would otherwise mask it). 0.0 contribution (never fabricate); stop
+            # (a garbled value is its own signal, not an 'absent' field — an ABSENT
+            # field never reaches here, so it stays benign).
+            futures_unreadable = True
+            break
     # Options component (new) — additive when present. Track its OWN readability
     # (F1) so a readable futures leg cannot mask a missing options wedge.
     options_read = False
@@ -1194,7 +1218,11 @@ def _combined_session_upl(summ: Mapping[str, Any]) -> tuple[float, bool, bool]:
     except (TypeError, ValueError):
         opt_value = 0.0
     options_unreadable = (opt_value != 0.0) and not options_read
-    return total, read_any, options_unreadable
+    # F1 + F3: the COMBINED component-unreadable flag — a garbled value in EITHER
+    # the options leg (open book, absent/garbled wedge) OR the futures leg (garbled
+    # present-but-non-numeric wedge) raises it. The caller lifts it into
+    # ``unrealized_pnl_unreadable`` (→ ``complete_with_warnings``).
+    return total, read_any, (options_unreadable or futures_unreadable)
 
 
 def _deribit_session_upl_to_usd(
@@ -1233,7 +1261,7 @@ def _deribit_session_upl_to_usd(
     total = 0.0
     saw_summary = False
     read_any = False
-    options_unreadable_any = False
+    component_unreadable_any = False
     for summ in summaries:
         if not isinstance(summ, Mapping):
             continue
@@ -1244,13 +1272,15 @@ def _deribit_session_upl_to_usd(
         # Task 2b: COMBINED futures + options session uPnL (§2 Q5) — not the
         # futures-only legacy read. read_component is the MUST-2 unreadable signal
         # (True iff any wedge component was a present numeric, even a flat 0.0).
-        # F1: options_unreadable flags an OPEN book whose options wedge component
-        # was absent/garbled while the futures leg read (must not be masked).
-        upl, read_component, options_unreadable = _combined_session_upl(summ)
+        # F1+F3: component_unreadable flags a garbled/absent wedge in EITHER leg —
+        # an OPEN book's absent/garbled options wedge (F1) OR a garbled
+        # present-but-non-numeric futures wedge (F3) — while the other leg read
+        # (must not be masked).
+        upl, read_component, component_unreadable = _combined_session_upl(summ)
         if read_component:
             read_any = True
-        if options_unreadable:
-            options_unreadable_any = True
+        if component_unreadable:
+            component_unreadable_any = True
         if upl == 0.0:
             continue
         if ccy in _LINEAR_CURRENCIES:
@@ -1263,8 +1293,9 @@ def _deribit_session_upl_to_usd(
     # Unreadable when there were summaries yet not a single one carried a readable
     # session_upl (the wrong-field-name / garbled-response signal), OR (F1) an OPEN
     # option book carried a readable futures leg but an absent/garbled options
-    # wedge — the futures leg must not suppress the options-leg unreadable signal.
-    return total, ((saw_summary and not read_any) or options_unreadable_any)
+    # wedge, OR (F3) a readable options leg masked a GARBLED futures wedge — a
+    # garbled/absent component in EITHER leg must not be suppressed by the other.
+    return total, ((saw_summary and not read_any) or component_unreadable_any)
 
 
 @dataclass(frozen=True)
@@ -1357,7 +1388,7 @@ async def fetch_deribit_native_account_state(
         native_equity[ccy] = float(summ.get("equity", 0.0) or 0.0)
         # Task 2b: COMBINED futures + options session uPnL (§2 Q5), byte-safe for
         # perp-only (options component absent → 0.0 → unchanged value → SC-4).
-        upl, _read, _opt_unread = _combined_session_upl(summ)
+        upl, _read, _component_unread = _combined_session_upl(summ)
         native_upnl[ccy] = upl
         # CR-01: the open-option-book mark read off the SAME response. Absent on
         # perp-only summaries → 0.0 (never fabricated; SC-4). A nonzero value

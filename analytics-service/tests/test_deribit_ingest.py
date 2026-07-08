@@ -3054,6 +3054,65 @@ def test_combined_session_upl_present_but_null_futures_consults_fallback() -> No
     assert value3 == pytest.approx(1.5, abs=1e-12)
 
 
+def test_combined_session_upl_garbled_futures_leg_is_unreadable() -> None:
+    """F3 (regression): a GARBLED (present-but-non-numeric) FUTURES wedge is schema
+    drift → the combined component-unreadable signal fires, SYMMETRIC to the options
+    leg, even when a readable options leg would otherwise mask it. The garbled leg
+    contributes 0.0 (never fabricated). Pre-fix the futures leg tracked no
+    unreadable signal, so a readable options leg set read_any=True and shipped a
+    silently-zeroed futures wedge clean.
+
+    NOTE: the third return element is now the COMBINED component-unreadable flag
+    (options-leg OR futures-leg), lifted by the caller into
+    unrealized_pnl_unreadable — see `_combined_session_upl`."""
+    # (a) garbled futures `session_upl` masked by a readable options leg → unreadable.
+    value, read_any, unreadable = di._combined_session_upl(
+        {"currency": "BTC", "session_upl": "GARBLED", "options_session_upl": 0.4,
+         "options_value": 0.7}
+    )
+    assert value == pytest.approx(0.4, abs=1e-12)  # only options leg (futures → 0.0)
+    assert read_any is True            # options leg read (masks the garble pre-fix)
+    assert unreadable is True          # garbled futures leg surfaced (F3)
+    # A garbled EXPLICIT futures_session_upl is likewise unreadable (no options leg).
+    _v2, _r2, unreadable2 = di._combined_session_upl(
+        {"currency": "BTC", "futures_session_upl": "x"}
+    )
+    assert unreadable2 is True
+    # (b) SC-4: clean perp-only (numeric session_upl, no options) → byte-identical
+    # value, read, and NOT unreadable — no new flag on a healthy perp-only account.
+    v3, r3, unreadable3 = di._combined_session_upl(
+        {"currency": "BTC", "session_upl": 1.5}
+    )
+    assert v3 == pytest.approx(1.5, abs=1e-12)
+    assert r3 is True
+    assert unreadable3 is False
+    # (c) ABSENT session_upl entirely → benign (existing behavior): read_any False,
+    # NOT unreadable (absent ≠ garbled; never fabricated).
+    v4, r4, unreadable4 = di._combined_session_upl({"currency": "BTC"})
+    assert v4 == pytest.approx(0.0, abs=1e-12)
+    assert r4 is False
+    assert unreadable4 is False
+
+
+def test_deribit_session_upl_garbled_futures_masked_by_options_reddens() -> None:
+    """F3 (regression, account-level RED-proof): a GARBLED futures wedge on one
+    summary, MASKED by a readable options leg, must still raise the account-level
+    unreadable signal `_deribit_session_upl_to_usd` returns. Pre-fix the readable
+    options leg set read_any=True and the account shipped a silently-zeroed FUTURES
+    wedge as clean `complete` — this asserts it now reddens (unreadable=True) with
+    the futures value still honestly 0.0 (never fabricated). The options leg reads
+    fine here, so the ONLY path to unreadable=True is the F3 futures-garble signal —
+    isolating the regression from the F1 options-leg signal."""
+    total, unreadable = di._deribit_session_upl_to_usd(
+        [{"currency": "BTC", "session_upl": "GARBLED", "options_session_upl": 0.4,
+          "options_value": 0.7}],
+        {"BTC": 60000.0},
+    )
+    # Garbled futures → 0.0 contribution; options 0.4 BTC × 60000 index.
+    assert total == pytest.approx(0.4 * 60000.0, abs=1e-6)
+    assert unreadable is True
+
+
 async def test_native_account_state_open_book_missing_options_leg_warns() -> None:
     """F1 end-to-end: an OPEN-options account whose futures wedge reads but whose
     options wedge field is absent surfaces `upnl_unreadable` (→
