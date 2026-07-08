@@ -2960,23 +2960,26 @@ async def test_mixed_era_options_account_resolves_complete_with_warnings(
 def test_combined_session_upl_perp_only_byte_identical() -> None:
     """SC-4: a perp-only summary (only the legacy session_upl, no
     options_session_upl) reads BYTE-IDENTICAL to the raw session_upl — the
-    options component defaults to 0.0."""
-    value, read_any = di._combined_session_upl({"currency": "BTC", "session_upl": 1.5})
+    options component defaults to 0.0 and is never options-unreadable."""
+    value, read_any, opt_unreadable = di._combined_session_upl(
+        {"currency": "BTC", "session_upl": 1.5}
+    )
     assert value == pytest.approx(1.5, abs=1e-12)
     assert read_any is True
+    assert opt_unreadable is False
 
 
 def test_combined_session_upl_sums_options_and_futures() -> None:
     """An options summary carrying BOTH components sums them (fails pre-fix: the
     futures-only read drops the options component)."""
-    value, read_any = di._combined_session_upl(
+    value, read_any, _ = di._combined_session_upl(
         {"currency": "BTC", "session_upl": 1.5, "options_session_upl": 0.4}
     )
     assert value == pytest.approx(1.9, abs=1e-12)
     assert read_any is True
     # Explicit futures_session_upl is preferred over legacy session_upl (never
     # double-counted with it) and still adds the options component.
-    value2, _ = di._combined_session_upl(
+    value2, _r, _o = di._combined_session_upl(
         {
             "currency": "BTC",
             "futures_session_upl": 1.5,
@@ -2990,12 +2993,56 @@ def test_combined_session_upl_sums_options_and_futures() -> None:
 def test_combined_session_upl_all_absent_is_unreadable() -> None:
     """No wedge component present → read_any False (the MUST-2 unreadable signal
     is preserved: a wholly-absent wedge is 'unreadable', not a silent flat 0.0)."""
-    value, read_any = di._combined_session_upl({"currency": "BTC"})
+    value, read_any, _ = di._combined_session_upl({"currency": "BTC"})
     assert value == pytest.approx(0.0, abs=1e-12)
     assert read_any is False
     # A genuine flat 0.0 IS read (readable iff any component read numerically).
-    _v, read2 = di._combined_session_upl({"currency": "BTC", "session_upl": 0.0})
+    _v, read2, _o = di._combined_session_upl({"currency": "BTC", "session_upl": 0.0})
     assert read2 is True
+
+
+def test_combined_session_upl_open_book_missing_options_leg_is_unreadable() -> None:
+    """F1: an OPEN option book (`options_value` != 0) with a READABLE futures leg
+    but an ABSENT/non-numeric `options_session_upl` is options-UNREADABLE — the
+    futures leg must NOT mask the missing options wedge (the pre-fix OR-accumulator
+    silently coerced it to 0.0 with no signal)."""
+    # Readable futures leg + missing options leg on an open book → unreadable.
+    _v, read_any, opt_unreadable = di._combined_session_upl(
+        {"currency": "BTC", "futures_session_upl": 1.5, "options_value": 0.7}
+    )
+    assert read_any is True          # futures leg read fine (would mask pre-fix)
+    assert opt_unreadable is True
+    # A non-numeric options leg on an open book is ALSO unreadable (never a
+    # fabricated 0.0).
+    _v2, _r2, opt_unreadable2 = di._combined_session_upl(
+        {"currency": "BTC", "session_upl": 1.5, "options_session_upl": "x",
+         "options_value": 0.7}
+    )
+    assert opt_unreadable2 is True
+    # Perp-only (options_value 0/absent) is never options-unreadable.
+    _v3, _r3, opt_unreadable3 = di._combined_session_upl(
+        {"currency": "BTC", "session_upl": 1.5}
+    )
+    assert opt_unreadable3 is False
+    # An open book WITH a readable options leg is readable.
+    _v4, _r4, opt_unreadable4 = di._combined_session_upl(
+        {"currency": "BTC", "session_upl": 1.5, "options_session_upl": 0.2,
+         "options_value": 0.7}
+    )
+    assert opt_unreadable4 is False
+
+
+async def test_native_account_state_open_book_missing_options_leg_warns() -> None:
+    """F1 end-to-end: an OPEN-options account whose futures wedge reads but whose
+    options wedge field is absent surfaces `upnl_unreadable` (→
+    unrealized_pnl_unreadable warning), NOT a silent 0-wedge overstatement."""
+    opts = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.3,
+                    "options_value": 0.7}],
+        index_price={"BTC": 60000.0},
+    )
+    state = await di.fetch_deribit_native_account_state(opts)
+    assert state.upnl_unreadable is True
 
 
 async def test_native_account_state_wedge_is_combined(monkeypatch: Any) -> None:

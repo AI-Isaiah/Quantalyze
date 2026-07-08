@@ -1112,7 +1112,7 @@ async def fetch_deribit_ledger_daily_records(
     return daily_records, report
 
 
-def _combined_session_upl(summ: Mapping[str, Any]) -> tuple[float, bool]:
+def _combined_session_upl(summ: Mapping[str, Any]) -> tuple[float, bool, bool]:
     """The COMBINED per-currency session open-uPnL wedge for one account-summary
     entry: futures + options session unrealized (§2 Q5, Task 2b).
 
@@ -1132,11 +1132,21 @@ def _combined_session_upl(summ: Mapping[str, Any]) -> tuple[float, bool]:
       * options component — ``options_session_upl``, additive when present
         (ABSENT on perp-only summaries → 0.0 → wedge value unchanged → SC-4).
 
-    Returns ``(combined_upl, read_any)`` where ``read_any`` is True iff AT LEAST
-    ONE component read as a present numeric (the MUST-2 unreadable signal: a
-    wholly absent/garbled wedge is 'unreadable', a genuine flat 0.0 is 'read').
-    Absent / null / non-numeric components coerce to 0.0 each — never fabricated
-    (T-77-05).
+    Returns ``(combined_upl, read_any, options_unreadable)`` where ``read_any`` is
+    True iff AT LEAST ONE component read as a present numeric (the MUST-2 unreadable
+    signal: a wholly absent/garbled wedge is 'unreadable', a genuine flat 0.0 is
+    'read'). Absent / null / non-numeric components coerce to 0.0 each — never
+    fabricated (T-77-05).
+
+    F1 (specialist-silentfailure HIGH): ``read_any`` is a single OR-accumulator
+    across BOTH legs, so on an OPEN option book a readable futures leg would MASK
+    an absent/garbled options wedge (silently coercing the options component to
+    0.0 with no signal). ``options_unreadable`` is tracked PER COMPONENT: True iff
+    this summary shows an OPEN option book (``options_value != 0.0``) yet the
+    ``options_session_upl`` component was absent / non-numeric. The caller lifts it
+    into ``unrealized_pnl_unreadable`` (→ ``complete_with_warnings``) so a
+    renamed/garbled options wedge field is LOUD, never a silent 0-wedge
+    overstatement on an account that actually holds open options.
 
     NOTE (§6 live-anchor follow-up): the exact field layout of
     ``get_account_summaries`` for an OPEN options book is not verifiable at the
@@ -1157,15 +1167,26 @@ def _combined_session_upl(summ: Mapping[str, Any]) -> tuple[float, bool]:
                 except (TypeError, ValueError):
                     pass  # non-numeric → 0.0 contribution (never fabricate)
             break
-    # Options component (new) — additive when present.
+    # Options component (new) — additive when present. Track its OWN readability
+    # (F1) so a readable futures leg cannot mask a missing options wedge.
+    options_read = False
     raw_opt = summ.get("options_session_upl")
     if raw_opt is not None:
         try:
             total += float(raw_opt)
             read_any = True
+            options_read = True
         except (TypeError, ValueError):
             pass  # non-numeric → 0.0 contribution (never fabricate)
-    return total, read_any
+    # F1: an OPEN option book (options_value != 0) whose options wedge component
+    # was absent/non-numeric is UNREADABLE — surfaced so the futures leg does NOT
+    # suppress the options-leg unreadable signal.
+    try:
+        opt_value = float(summ.get("options_value", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        opt_value = 0.0
+    options_unreadable = (opt_value != 0.0) and not options_read
+    return total, read_any, options_unreadable
 
 
 def _deribit_session_upl_to_usd(
@@ -1204,6 +1225,7 @@ def _deribit_session_upl_to_usd(
     total = 0.0
     saw_summary = False
     read_any = False
+    options_unreadable_any = False
     for summ in summaries:
         if not isinstance(summ, Mapping):
             continue
@@ -1214,9 +1236,13 @@ def _deribit_session_upl_to_usd(
         # Task 2b: COMBINED futures + options session uPnL (§2 Q5) — not the
         # futures-only legacy read. read_component is the MUST-2 unreadable signal
         # (True iff any wedge component was a present numeric, even a flat 0.0).
-        upl, read_component = _combined_session_upl(summ)
+        # F1: options_unreadable flags an OPEN book whose options wedge component
+        # was absent/garbled while the futures leg read (must not be masked).
+        upl, read_component, options_unreadable = _combined_session_upl(summ)
         if read_component:
             read_any = True
+        if options_unreadable:
+            options_unreadable_any = True
         if upl == 0.0:
             continue
         if ccy in _LINEAR_CURRENCIES:
@@ -1226,9 +1252,11 @@ def _deribit_session_upl_to_usd(
         if price is None:
             continue  # unvaluable wedge → 0.0 contribution (never fabricate)
         total += upl * float(price)
-    # Unreadable ONLY when there were summaries yet not a single one carried a
-    # readable session_upl — the wrong-field-name / garbled-response signal.
-    return total, (saw_summary and not read_any)
+    # Unreadable when there were summaries yet not a single one carried a readable
+    # session_upl (the wrong-field-name / garbled-response signal), OR (F1) an OPEN
+    # option book carried a readable futures leg but an absent/garbled options
+    # wedge — the futures leg must not suppress the options-leg unreadable signal.
+    return total, ((saw_summary and not read_any) or options_unreadable_any)
 
 
 @dataclass(frozen=True)
@@ -1321,7 +1349,7 @@ async def fetch_deribit_native_account_state(
         native_equity[ccy] = float(summ.get("equity", 0.0) or 0.0)
         # Task 2b: COMBINED futures + options session uPnL (§2 Q5), byte-safe for
         # perp-only (options component absent → 0.0 → unchanged value → SC-4).
-        upl, _read = _combined_session_upl(summ)
+        upl, _read, _opt_unread = _combined_session_upl(summ)
         native_upnl[ccy] = upl
         # CR-01: the open-option-book mark read off the SAME response. Absent on
         # perp-only summaries → 0.0 (never fabricated; SC-4). A nonzero value
