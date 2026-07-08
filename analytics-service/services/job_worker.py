@@ -2004,16 +2004,18 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # (funding-inclusive settlement cash deltas) — NEVER fetch_all_trades
             # / the fills endpoint. Funding is INSIDE the settlement sum (A3/D-10)
             # → EMPTY funding_rows, no funding_fees write (count-once, DRB-07).
+            from services.broker_dailies import combine_native_ledger
             from services.deribit_ingest import (
                 CurrencyEnumerationError,
                 LedgerCompletenessError,
                 LedgerTruncatedError,
                 ScopeAuthError,
                 assert_ledger_complete,
+                build_deribit_native_ledger,
                 fetch_deribit_account_equity_and_upnl_usd,
-                fetch_deribit_ledger_daily_records,
             )
             from services.deribit_txn import LedgerValuationError
+            from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
             from services.redact import scrub_freeform_string
 
             # P72 — fail-loud analytics stamp. A deribit permanent-FAIL below
@@ -2052,12 +2054,77 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 await fetch_deribit_account_equity_and_upnl_usd(ctx.exchange)
             )
             try:
-                realized, _completeness = await fetch_deribit_ledger_daily_records(
-                    ctx.exchange, None
+                # v1.9 NATIVE SWITCH (80-03, NAT-05): every Deribit account —
+                # USD-native included — is reconstructed in NATIVE units through
+                # the landed core. There is NO per-account dispatch flag; §4 SC-4
+                # bit-identity (ship gate i) is what licenses routing every account
+                # the same way (route-by-data-availability, not by account type).
+                # build_deribit_native_ledger runs the SAME single txn-log crawl the
+                # old fetch_deribit_ledger_daily_records did (so the D-08
+                # funding-inside-settlement and completeness accounting are
+                # unchanged) and assembles the NativeLedger + CompletenessReport.
+                native_ledger, _completeness = await build_deribit_native_ledger(
+                    ctx.exchange
                 )
                 # Re-anchored D-02 gate: a silently-partial ledger FAILS LOUD
-                # BEFORE any upsert — no partial track record is ever written.
+                # BEFORE any upsert — no partial track record is ever written. The
+                # native path does NOT bypass this honesty gate.
                 assert_ledger_complete(_completeness)
+                # C2 — equity-vs-activity floor: a materially-funded account that
+                # produced ZERO return-bearing rows across the whole window is a
+                # silently-empty (green) ledger (broken key / wrong account / mass
+                # -32602), not a genuine "insufficient history". Fail loud BEFORE
+                # the native reconstruction runs (so a zero-row material account
+                # never reaches combine).
+                if (
+                    not balance_error
+                    and equity is not None
+                    and abs(equity) > _DERIBIT_EMPTY_LEDGER_FLOOR_USD
+                    and _completeness.total_return_rows == 0
+                ):
+                    await _stamp_deribit_analytics_failed(
+                        "Deribit account holds equity but the ledger produced no "
+                        "return-bearing activity in the window."
+                    )
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "derive_broker_dailies: deribit account holds material "
+                            f"equity (~{abs(equity):.0f} USD) but the ledger "
+                            "produced ZERO return-bearing rows — refusing an "
+                            "empty-but-green track record (broken key / wrong "
+                            "account / mass -32602)"
+                        ),
+                        error_kind="permanent",
+                    )
+                # Native reconstruction: NAV(d) = Σ_c B_c(d)×mark_c(d) rolled
+                # backward per currency from today's native equity, chain-linked to
+                # TWR, with the §5 inception gate + App A #6 unmarkable-wedge
+                # refusal enforced INSIDE the core. combine_native_ledger reuses
+                # gap_fill_daily_returns so (returns, meta) is byte-shape identical
+                # to the legacy sibling → everything downstream is untouched (§9.2).
+                # The EXACT indexable set the ledger's marks were built against is
+                # threaded off the report — never re-probed (drift-free).
+                returns, meta = combine_native_ledger(
+                    native_ledger, _completeness.indexable_currencies
+                )
+                # FLOW-04 materiality: the pure native core does not emit
+                # unrealized_pnl_in_anchor (it subtracts the wedge per-currency, App
+                # A #6). Preserve the v1.8 warning using the collapsed USD anchor +
+                # wedge — a material open-uPnL wedge on a TRUSTWORTHY anchor stamps
+                # complete_with_warnings exactly as the legacy USD-space deribit
+                # path did (nav_twr.py:788 signed-anchor condition, mirrored on the
+                # collapsed scalars; a dust/negative/balance-error anchor never
+                # flags — the anchor itself is the flagged problem below).
+                if (
+                    not balance_error
+                    and equity is not None
+                    and equity > DUST_NAV_FLOOR
+                    and abs(open_unrealized_usd) / equity
+                    > UNREALIZED_MATERIALITY_RATIO
+                ):
+                    meta["unrealized_pnl_in_anchor"] = True
+                    meta["computation_status_hint"] = "complete_with_warnings"
             except (
                 LedgerCompletenessError,
                 LedgerTruncatedError,
@@ -2082,17 +2149,16 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     error_kind="permanent",
                 )
             except LedgerValuationError as exc:
-                # A row→USD STRUCTURAL conversion failure from
-                # txn_rows_to_daily_records (a coin cash row with no same-day index
-                # even after the settlement-index fallback, an undatable timestamp,
-                # schema drift, or an unknown type/currency) — retrying cannot help.
-                # It must fail PERMANENT (not the transient "unknown" that burns 3
-                # retries) AND stamp the analytics row so the wizard reaches a
-                # terminal gate instead of an infinite 'computing' spinner. Narrowed
-                # to the TYPED LedgerValuationError (a ValueError subclass) so a
-                # transient network ValueError/json.JSONDecodeError escaping the
-                # crawl falls through to the outer generic handler and stays
-                # transient-retryable — never silently marked permanent.
+                # A row→USD STRUCTURAL conversion failure from the crawl (a coin
+                # cash row with no same-day index even after the settlement-index
+                # fallback, an undatable timestamp, schema drift, or an unknown
+                # type/currency) — retrying cannot help. It must fail PERMANENT (not
+                # the transient "unknown" that burns 3 retries) AND stamp the
+                # analytics row so the wizard reaches a terminal gate instead of an
+                # infinite 'computing' spinner. Narrowed to the TYPED
+                # LedgerValuationError (a ValueError subclass) so a transient
+                # network ValueError/json.JSONDecodeError escaping the crawl falls
+                # through to the outer generic handler and stays transient-retryable.
                 scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_deribit_analytics_failed(
                     "Deribit ledger contained a transaction that could not be "
@@ -2107,41 +2173,43 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     ),
                     error_kind="permanent",
                 )
-            # C2 — equity-vs-activity floor: a materially-funded account that
-            # produced ZERO return-bearing rows across the whole window is a
-            # silently-empty (green) ledger (broken key / wrong account / mass
-            # -32602), not a genuine "insufficient history". Fail loud rather than
-            # fall through to a clean DONE.
-            if (
-                not balance_error
-                and equity is not None
-                and abs(equity) > _DERIBIT_EMPTY_LEDGER_FLOOR_USD
-                and _completeness.total_return_rows == 0
-            ):
+            except NavReconstructionError as exc:
+                # v1.9 NATIVE SWITCH: a STRUCTURAL refusal from the native core —
+                # UnmarkableCurrencyError (§3.4: a value-bearing currency with no
+                # resolvable {ccy}_usd mark, incl. the App A #6 unmarkable-wedge
+                # refusal) or InceptionReconciliationError (§5: the full-history
+                # native roll did not reconcile to a ~0 pre-history balance). Both
+                # are permanent/structural — retrying cannot help — so they take the
+                # IDENTICAL disposition as LedgerValuationError: permanent FAILED,
+                # scrubbed message (the core errors already carry codes/counts/ratios
+                # only — still scrubbed), and a terminal analytics stamp so the
+                # wizard reaches a gate instead of an infinite 'computing' spinner.
+                # Caught in this SAME try as the crawl so a native refusal is never
+                # misclassified transient 'unknown' and retried forever (T-80-10).
+                scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_deribit_analytics_failed(
-                    "Deribit account holds equity but the ledger produced no "
-                    "return-bearing activity in the window."
+                    "Deribit native NAV reconstruction refused a structural input "
+                    "(a value-bearing currency with no USD mark, or the "
+                    "full-history roll did not reconcile to inception). " + scrubbed
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
                     error_message=(
-                        "derive_broker_dailies: deribit account holds material "
-                        f"equity (~{abs(equity):.0f} USD) but the ledger produced "
-                        "ZERO return-bearing rows — refusing an empty-but-green "
-                        "track record (broken key / wrong account / mass -32602)"
+                        "derive_broker_dailies: deribit native NAV reconstruction "
+                        "refused structurally — " + scrubbed
                     ),
                     error_kind="permanent",
                 )
-            # The equity anchor flows into the honest core UNADJUSTED. The dated
-            # external flows (_completeness.dated_external_flows) are threaded into
-            # combine_realized_and_funding below, where the core's backward NAV roll
-            # (NAV_{t-1} = NAV_t − pnl_t − F_t) performs the ONE honest flow
-            # correction — never a second scalar subtraction (count-once, no
-            # double-correction). An unvaluable inverse flow already failed loud as a
-            # permanent LedgerValuationError (caught above), never silently degraded.
+            # The dated external flows are already inside the NativeLedger the core
+            # reconstructed (native_flows, re-valued at the core's own day marks);
+            # they are surfaced here for the DQ-02 terminus evidence gate (a no-op
+            # for deribit — full_history has no retention cap → terminus is None).
             external_flows = _completeness.dated_external_flows
-            # Funding is inside the ledger settlement cash delta — pass EMPTY.
+            # Funding is inside the ledger settlement cash delta — count-once
+            # (D-08). The native path has no flat realized-records list; realized/
+            # funding are retained (empty) only for the downstream log lines.
             funding: list[Any] = []
+            realized: list[Any] = []
         else:
             # Current total equity = the initial-capital anchor (anchor-to-today,
             # reconstruct backward). OKX is read via raw totalEq inside
@@ -2254,53 +2322,63 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         except Exception:  # pragma: no cover
             pass
 
-    # FLOW-04 (v1.8) NOISE GUARD (Pitfall 5 / T-77-08): the companion open-uPnL
-    # wedge is only trustworthy relative to a trustworthy anchor. Force it to 0.0
-    # when the anchor is heuristic/dust — a balance_error read, a missing equity,
-    # or a dust base (|equity| <= DUST_NAV_FLOOR, where the materiality ratio is
-    # meaningless and a divide-by-tiny explodes into a false positive). The wedge
-    # is NEVER subtracted onto such a base; a healthy anchor keeps the real wedge.
-    if (
-        balance_error
-        or equity is None
-        or abs(equity) <= DUST_NAV_FLOOR
-    ):
-        open_unrealized_usd = 0.0
+    # v1.9 NATIVE SWITCH: the deribit venue already produced (returns, meta) via
+    # the native core above (combine_native_ledger), with its per-currency wedge
+    # subtracted INSIDE the core (App A #6) and materiality re-derived from the
+    # collapsed anchor. The USD-space noise-guard + combine below are the CCXT
+    # venues' path only — running combine_realized_and_funding for deribit would
+    # overwrite the native returns with an empty realized/funding stream.
+    if venue != "deribit":
+        # FLOW-04 (v1.8) NOISE GUARD (Pitfall 5 / T-77-08): the companion open-uPnL
+        # wedge is only trustworthy relative to a trustworthy anchor. Force it to
+        # 0.0 when the anchor is heuristic/dust — a balance_error read, a missing
+        # equity, or a dust base (|equity| <= DUST_NAV_FLOOR, where the materiality
+        # ratio is meaningless and a divide-by-tiny explodes into a false positive).
+        # The wedge is NEVER subtracted onto such a base; a healthy anchor keeps the
+        # real wedge.
+        if (
+            balance_error
+            or equity is None
+            or abs(equity) <= DUST_NAV_FLOOR
+        ):
+            open_unrealized_usd = 0.0
 
-    try:
-        # FLOW-04: the venue-gated, noise-guarded wedge threads into the honest
-        # core's terminal seam (broker_dailies passes it straight to
-        # reconstruct_nav_and_funding). The stored/displayed MTM equity anchor is
-        # KEPT full — the reported CURRENT NAV re-add is DEFINITIONAL, so the
-        # derive path writes ONLY csv_daily_returns and never mutates `equity`
-        # (Q4 tail). OKX/Deribit subtract the real wedge (realized-basis terminal);
-        # Bybit/Binance passed 0.0 above (no double-count).
-        returns, meta = combine_realized_and_funding(
-            realized, funding, account_balance=equity, balance_error=balance_error,
-            external_flows=external_flows, open_unrealized_usd=open_unrealized_usd,
-        )
-    except NavReconstructionError as exc:
-        # A STRUCTURAL NAV/TWR reconstruction failure surfacing from the honest
-        # core (services.nav_twr) via combine_realized_and_funding — a schema
-        # -drifted flow amount, an undatable/orphan flow, or a non-finite pnl.
-        # This call sits OUTSIDE the deribit LedgerValuationError try
-        # (:1916-1941), so without this typed catch the error escapes to the
-        # generic dispatcher classifier and is retried FOREVER as `unknown`
-        # (T-74-02 DoS). Narrowed to the TYPED subclass so a transient ValueError
-        # (network parse blip) still falls through to the generic handler and
-        # stays transient-retryable. Disposed via the SHARED helper so this seam
-        # and the ccxt flow-valuation seam (HIGH-1) can never drift.
-        return await _dispose_broker_nav_error(
-            exc,
-            stamp_detail=(
-                "Broker return reconstruction failed on a structural input "
-                "(schema drift, undatable/orphan flow, or a non-finite amount). "
-            ),
-            result_detail=(
-                "derive_broker_dailies: broker NAV/TWR reconstruction failed "
-                "structurally — "
-            ),
-        )
+        try:
+            # FLOW-04: the venue-gated, noise-guarded wedge threads into the honest
+            # core's terminal seam (broker_dailies passes it straight to
+            # reconstruct_nav_and_funding). The stored/displayed MTM equity anchor
+            # is KEPT full — the reported CURRENT NAV re-add is DEFINITIONAL, so the
+            # derive path writes ONLY csv_daily_returns and never mutates `equity`
+            # (Q4 tail). OKX subtracts the real wedge (realized-basis terminal);
+            # Bybit/Binance passed 0.0 above (no double-count).
+            returns, meta = combine_realized_and_funding(
+                realized, funding, account_balance=equity,
+                balance_error=balance_error,
+                external_flows=external_flows,
+                open_unrealized_usd=open_unrealized_usd,
+            )
+        except NavReconstructionError as exc:
+            # A STRUCTURAL NAV/TWR reconstruction failure surfacing from the honest
+            # core (services.nav_twr) via combine_realized_and_funding — a schema
+            # -drifted flow amount, an undatable/orphan flow, or a non-finite pnl.
+            # This call sits OUTSIDE the deribit try, so without this typed catch
+            # the error escapes to the generic dispatcher classifier and is retried
+            # FOREVER as `unknown` (T-74-02 DoS). Narrowed to the TYPED subclass so
+            # a transient ValueError (network parse blip) still falls through to the
+            # generic handler and stays transient-retryable. Disposed via the SHARED
+            # helper so this seam and the ccxt flow-valuation seam (HIGH-1) can never
+            # drift.
+            return await _dispose_broker_nav_error(
+                exc,
+                stamp_detail=(
+                    "Broker return reconstruction failed on a structural input "
+                    "(schema drift, undatable/orphan flow, or a non-finite amount). "
+                ),
+                result_detail=(
+                    "derive_broker_dailies: broker NAV/TWR reconstruction failed "
+                    "structurally — "
+                ),
+            )
 
     # FLOW-04 (v1.8): the open-uPnL materiality flag lives in ONE place — the honest
     # core (reconstruct_nav_and_twr) raises unrealized_pnl_in_anchor when

@@ -542,6 +542,14 @@ class CompletenessReport:
     entries: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     dated_external_flows: list[ExternalFlow] = field(default_factory=list)
     total_return_rows: int = 0
+    # The per-job ``indexable_currencies`` set resolved ONCE by the crawl
+    # (``build_deribit_indexable_currencies``): the static floor ∪ every
+    # enumerated non-USD-family currency whose ``{ccy}_usd`` index resolves. It is
+    # threaded here (a crawl artifact, exactly like ``dated_external_flows`` /
+    # ``total_return_rows``) so the native job path (80-03) can pass the EXACT set
+    # the ledger's marks were built against to ``reconstruct_native_nav_and_twr``,
+    # never re-probing (which could drift and mis-classify a currency).
+    indexable_currencies: frozenset[str] = field(default_factory=frozenset)
 
 
 def _now_ms() -> int:
@@ -804,6 +812,7 @@ async def _crawl_deribit_ledger(
         entries=entries,
         dated_external_flows=dated_external_flows,
         total_return_rows=total_return_rows,
+        indexable_currencies=indexable,
     )
 
 
