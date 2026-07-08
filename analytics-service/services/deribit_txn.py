@@ -1133,6 +1133,19 @@ def assert_balance_identity(
         # CR-01: a provably-open option book cannot satisfy the flat-at-settlement
         # identity (residual = terminal open MTM). Skip the strict compare and let
         # §5 _assert_inception_reconciled be the authoritative reconciliation.
+        #
+        # F1 (bounded, §6 live-anchor follow-up): the exemption cannot ship an
+        # UNBOUNDED wrong number (a material hole still fires §5, same permanent-
+        # FAILED disposition), but the §5 silent envelope for an exempted currency
+        # is WIDER than this strict per-ccy guard along three axes: (1) §5 tolerance
+        # is account-level max($1, 1e-4·whole-account anchor NAV) vs this per-ccy
+        # 1e-4·Σ|change|_ccy; (2) §5 values the residual at the INCEPTION mark
+        # (D-07), undervaluing it ~N× for a coin appreciated N× since inception →
+        # the window widens ~N×; (3) USD-family (USD/USDC/USDT/EURR/DAI) coalesce
+        # into ONE signed §5 bucket so residuals NET before abs() (this per-ccy
+        # guard abs()es each). DELIBERATE (do NOT modify the shared §5 gate — blast
+        # radius on all native-reconstructed accounts); tighten at the first live
+        # open-options onboarding. See docs/deribit-ingestion-design.md (CR-01).
         if ccy in open_option_ccys:
             continue
         computed = sum(native_daily.get(ccy, {}).values())

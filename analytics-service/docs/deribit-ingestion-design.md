@@ -140,6 +140,29 @@ open. The row-embedded `equity` snapshot was REJECTED as the oracle (matched `Δ
 ~13% of days — intraday mark-timing noise; perp `session_upl` NULL on settlement rows). The §5 wedge
 read is the COMBINED `options_session_upl + futures_session_upl` (byte-safe for perp-only).
 
+**CR-01 exemption — the §5 envelope is WIDER than the strict guard (F1, bounded, §6 live-anchor
+follow-up):** for an exempted (open-option) currency the strict per-currency `assert_balance_identity`
+guard is SKIPPED and the §5 `_assert_inception_reconciled` gate is authoritative. The exemption cannot
+ship an UNBOUNDED wrong number — a material hole still fires §5 (same permanent-`FAILED` disposition) —
+BUT the silent envelope for an exempted currency is wider than the strict guard's along **three
+quantified axes**:
+1. **Tolerance scope.** §5 uses an ACCOUNT-LEVEL `max($1, 1e-4·whole-account anchor NAV)`
+   (`native_nav.py` ~767) vs the strict per-ccy `max($1-equiv, 1e-4·Σ|change|_ccy)`. A small currency's
+   residual is judged against the WHOLE account's NAV, so a hole up to `1e-4·NAV_account` passes where
+   the strict guard would have caught `1e-4·throughput_ccy`.
+2. **Inception-mark valuation.** §5 values the residual at the INCEPTION-day mark `mark0`
+   (`native_nav.py` ~716, ~727) — D-07 discipline (never a current price) — while the tolerance scales
+   with the TERMINAL anchor NAV. For a coin that appreciated `N×` since account inception the residual
+   is undervalued ~`N×` relative to the tolerance → the silent window widens ~`N×`.
+3. **USD-family netting.** USD-family currencies (`USD`/`USDC`/`USDT`/`EURR`/`DAI`) coalesce into ONE
+   signed bucket (`native_nav.py` ~377-406) so their residuals NET before `abs()` — an exempted `USDC`
+   error can cancel an opposite `USDT` error that the strict per-currency guard (abs per ccy) would
+   catch.
+
+This is a DELIBERATE, bounded envelope (decision: do NOT modify the shared §5 gate — blast radius on
+all native-reconstructed accounts + needs live open-options validation). Tighten when the FIRST live
+open-options account is onboarded (§6 follow-up).
+
 **Scope:** native path only (`txn_rows_to_native_daily` + `build_deribit_native_ledger` +
 `reconstruct_native_nav_and_twr`), the production Deribit path since P80. The USD-space
 `txn_rows_to_daily_records` is intentionally unchanged (legacy/parity-panel — the 80-04 parity panel
