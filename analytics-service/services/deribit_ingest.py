@@ -1104,6 +1104,62 @@ async def fetch_deribit_ledger_daily_records(
     return daily_records, report
 
 
+def _combined_session_upl(summ: Mapping[str, Any]) -> tuple[float, bool]:
+    """The COMBINED per-currency session open-uPnL wedge for one account-summary
+    entry: futures + options session unrealized (§2 Q5, Task 2b).
+
+    Deribit structures the legacy ``session_upl`` as FUTURES-only; an open options
+    book's session unrealized lives in ``options_session_upl``. Reading only
+    ``session_upl`` (the pre-fix behaviour) drops the options component, so an
+    open-options-book anchor would structurally breach the §5 inception gate
+    (``terminal_native − upnl`` = equity − wedge must be settled-equity, and the
+    equity INCLUDES the option book's mark; the wedge must therefore include the
+    option book's session move).
+
+    Read defensively so the wedge captures BOTH channels for an open options book
+    while staying BYTE-IDENTICAL for perp-only accounts:
+      * futures/base component — an explicit ``futures_session_upl`` is preferred,
+        else the legacy ``session_upl`` (consulting exactly ONE so a layout that
+        carries both, equal, never double-counts);
+      * options component — ``options_session_upl``, additive when present
+        (ABSENT on perp-only summaries → 0.0 → wedge value unchanged → SC-4).
+
+    Returns ``(combined_upl, read_any)`` where ``read_any`` is True iff AT LEAST
+    ONE component read as a present numeric (the MUST-2 unreadable signal: a
+    wholly absent/garbled wedge is 'unreadable', a genuine flat 0.0 is 'read').
+    Absent / null / non-numeric components coerce to 0.0 each — never fabricated
+    (T-77-05).
+
+    NOTE (§6 live-anchor follow-up): the exact field layout of
+    ``get_account_summaries`` for an OPEN options book is not verifiable at the
+    probe account's flat terminal (``session_upl == 0``); this defensive combined
+    read is implemented now so an open-book anchor does not structurally breach
+    the gate, and the first live open-options anchor is watched at §5 (a breach
+    there is a loud stop, never a silent 0-wedge overstatement)."""
+    read_any = False
+    total = 0.0
+    # Futures/base component — exactly ONE of the two field spellings is consulted.
+    for key in ("futures_session_upl", "session_upl"):
+        if key in summ:
+            raw = summ.get(key)
+            if raw is not None:
+                try:
+                    total += float(raw)
+                    read_any = True
+                except (TypeError, ValueError):
+                    pass  # non-numeric → 0.0 contribution (never fabricate)
+            break
+    # Options component (new) — additive when present.
+    raw_opt = summ.get("options_session_upl")
+    if raw_opt is not None:
+        try:
+            total += float(raw_opt)
+            read_any = True
+        except (TypeError, ValueError):
+            pass  # non-numeric → 0.0 contribution (never fabricate)
+    return total, read_any
+
+
 def _deribit_session_upl_to_usd(
     summaries: Sequence[Any],
     index_prices: Mapping[str, float],
@@ -1147,16 +1203,12 @@ def _deribit_session_upl_to_usd(
         if not ccy:
             continue
         saw_summary = True
-        raw = summ.get("session_upl")  # [ASSUMED A1]
-        if raw is None:
-            continue  # absent / null → 0.0 wedge (fallback, never fabricate)
-        try:
-            upl = float(raw)
-        except (TypeError, ValueError):
-            continue  # non-numeric → 0.0 wedge (fallback, never fabricate)
-        # The field was PRESENT and numeric (even genuine 0.0) — the assumed
-        # field name resolves, so this account is not "unreadable".
-        read_any = True
+        # Task 2b: COMBINED futures + options session uPnL (§2 Q5) — not the
+        # futures-only legacy read. read_component is the MUST-2 unreadable signal
+        # (True iff any wedge component was a present numeric, even a flat 0.0).
+        upl, read_component = _combined_session_upl(summ)
+        if read_component:
+            read_any = True
         if upl == 0.0:
             continue
         if ccy in _LINEAR_CURRENCIES:
@@ -1250,13 +1302,9 @@ async def fetch_deribit_native_account_state(
         if not ccy:
             continue
         native_equity[ccy] = float(summ.get("equity", 0.0) or 0.0)
-        raw = summ.get("session_upl")  # [ASSUMED A1]
-        upl = 0.0
-        if raw is not None:
-            try:
-                upl = float(raw)
-            except (TypeError, ValueError):
-                upl = 0.0
+        # Task 2b: COMBINED futures + options session uPnL (§2 Q5), byte-safe for
+        # perp-only (options component absent → 0.0 → unchanged value → SC-4).
+        upl, _read = _combined_session_upl(summ)
         native_upnl[ccy] = upl
 
     # Resolve one {ccy}_usd index per held non-linear currency for the COLLAPSED

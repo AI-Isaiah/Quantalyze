@@ -2946,3 +2946,74 @@ async def test_mixed_era_options_account_resolves_complete_with_warnings(
     assert merged["computation_status_hint"] == "complete_with_warnings"
     # The bucket list is carried through verbatim (not coerced to a bare bool).
     assert merged["pre_summary_rollout_option_dailies"] == ["BTC:2025-07-09"]
+
+
+# ===========================================================================
+# Phase 82 Task 2b — combined options+futures session uPnL wedge (§2 Q5). The
+# legacy read (summ.get("session_upl")) is FUTURES-only; the §5 wedge must be
+# options_session_upl + futures_session_upl so an open options book's inception
+# gate closes. BYTE-SAFE for perp-only (options component absent → unchanged).
+# ===========================================================================
+
+
+def test_combined_session_upl_perp_only_byte_identical() -> None:
+    """SC-4: a perp-only summary (only the legacy session_upl, no
+    options_session_upl) reads BYTE-IDENTICAL to the raw session_upl — the
+    options component defaults to 0.0."""
+    value, read_any = di._combined_session_upl({"currency": "BTC", "session_upl": 1.5})
+    assert value == pytest.approx(1.5, abs=1e-12)
+    assert read_any is True
+
+
+def test_combined_session_upl_sums_options_and_futures() -> None:
+    """An options summary carrying BOTH components sums them (fails pre-fix: the
+    futures-only read drops the options component)."""
+    value, read_any = di._combined_session_upl(
+        {"currency": "BTC", "session_upl": 1.5, "options_session_upl": 0.4}
+    )
+    assert value == pytest.approx(1.9, abs=1e-12)
+    assert read_any is True
+    # Explicit futures_session_upl is preferred over legacy session_upl (never
+    # double-counted with it) and still adds the options component.
+    value2, _ = di._combined_session_upl(
+        {
+            "currency": "BTC",
+            "futures_session_upl": 1.5,
+            "session_upl": 1.5,
+            "options_session_upl": 0.4,
+        }
+    )
+    assert value2 == pytest.approx(1.9, abs=1e-12)
+
+
+def test_combined_session_upl_all_absent_is_unreadable() -> None:
+    """No wedge component present → read_any False (the MUST-2 unreadable signal
+    is preserved: a wholly-absent wedge is 'unreadable', not a silent flat 0.0)."""
+    value, read_any = di._combined_session_upl({"currency": "BTC"})
+    assert value == pytest.approx(0.0, abs=1e-12)
+    assert read_any is False
+    # A genuine flat 0.0 IS read (readable iff any component read numerically).
+    _v, read2 = di._combined_session_upl({"currency": "BTC", "session_upl": 0.0})
+    assert read2 is True
+
+
+async def test_native_account_state_wedge_is_combined(monkeypatch: Any) -> None:
+    """fetch_deribit_native_account_state's native_upnl is the COMBINED wedge; a
+    perp-only account stays byte-identical, an options account sums both."""
+    perp = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.3}],
+        index_price={"BTC": 60000.0},
+    )
+    state_perp = await di.fetch_deribit_native_account_state(perp)
+    assert state_perp.native_upnl == {"BTC": pytest.approx(0.3, abs=1e-12)}
+
+    opts = _NativeAnchorStub(
+        summaries=[
+            {"currency": "BTC", "equity": 2.0, "session_upl": 0.3,
+             "options_session_upl": 0.5}
+        ],
+        index_price={"BTC": 60000.0},
+    )
+    state_opts = await di.fetch_deribit_native_account_state(opts)
+    # Combined 0.8 (fails pre-fix futures-only read = 0.3).
+    assert state_opts.native_upnl == {"BTC": pytest.approx(0.8, abs=1e-12)}
