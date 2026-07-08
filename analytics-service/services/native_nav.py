@@ -181,6 +181,22 @@ INCEPTION_REL_TOL: float = 1e-4       # wider than the tautology's 1e-6: this ga
                                       # compares two INDEPENDENT measurements
                                       # (reported equity vs summed ledger), which
                                       # legitimately differ by fee-rounding dust.
+# Per-currency NATIVE dust floor (80-04 INCEPT-01, calibrated against the real
+# Deribit production key). A backward roll accumulates float rounding over every
+# ledger row; that residual is dust when it is negligible relative to the
+# currency's OWN native throughput (Σ|pnl| + Σ|flowqty|). A raw USD floor cannot
+# tell "$1 of BTC rounding" (0.000012 BTC over 6.48 BTC of throughput on a
+# ~$88k/coin price) from "$1 of missing rows", so a per-currency residual at or
+# below this fraction of its throughput contributes ZERO to the §5.2 USD breach
+# sum; anything ABOVE it is valued in USD and still faces the tolerance (fail
+# loud). The floor is throughput-RELATIVE so it scales with coin price and row
+# count. Observed production dust ratio ≈ 2e-6; a real missing row is O(1) of a
+# single row's size (>> this). 1e-4 sits ~50x above the observed dust and far
+# below any economically-meaningful discrepancy. A ZERO-throughput bucket (an
+# event-less orphan) has NO dust allowance (0×rel = 0) so a nonzero orphan still
+# fails loud. Loosening requires evidence (this is the evidence); tightening after
+# more keys is expected.
+INCEPTION_NATIVE_DUST_REL: float = 1e-4
 # Both constants are tuned against the three real Deribit keys at the P78-style
 # live acceptance gate (the FLOW_DOM_RATIO precedent, nav_twr.py:64-65); real-key
 # green is Phase 80's INCEPT-01, NOT claimed here. Tightening after calibration is
@@ -699,7 +715,16 @@ def _assert_inception_reconciled(
         else:  # INDEXED with a mark Series
             mark0 = float(bucket.mark.reindex([d0]).iloc[0])
             markN = float(bucket.mark.reindex([dN]).iloc[0])
-        resid_usd = abs(resid) * mark0
+        # 80-04 INCEPT-01: a residual negligible vs the currency's OWN native
+        # throughput (Σ|pnl| + Σ|flowqty|) is accumulated float rounding, NOT a
+        # missing/mis-classified row — it contributes ZERO to the USD breach sum.
+        # A material residual (or any residual on a zero-throughput bucket) is
+        # valued in USD and still faces the §5.2 tolerance (fail loud preserved).
+        throughput = float(bucket.pnl_unioned.abs().sum()) + float(
+            bucket.flow_qty.abs().sum()
+        )
+        is_dust = abs(resid) <= INCEPTION_NATIVE_DUST_REL * throughput
+        resid_usd = 0.0 if is_dust else abs(resid) * mark0
         per_bucket_resid_usd.append((bucket.code, resid_usd))
         resid_usd_total += resid_usd
         anchor_nav += float(bucket.balance.iloc[-1]) * markN

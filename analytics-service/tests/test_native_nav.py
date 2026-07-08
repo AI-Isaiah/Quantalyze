@@ -816,6 +816,64 @@ def test_inception_multi_currency_sum_hides_nothing() -> None:
     assert exc.value.currencies == ["BTC"]
 
 
+def test_inception_dust_relative_to_throughput_passes() -> None:
+    """80-04 INCEPT-01 (RED without the native-dust floor): the real Deribit
+    production shape — BTC rolled 6.48 in and out (≈$570k throughput) landing at a
+    0.000012 BTC residual (accumulated float rounding). At ~$88k/coin that residual
+    is ~$1.03 USD, which trips the $1 absolute floor and refuses. A residual
+    negligible vs the currency's OWN native throughput is rounding, not a missing
+    row, so the gate must PASS.
+
+    NEUTER: dropping the INCEPTION_NATIVE_DUST_REL dust exemption makes resid_usd
+    ≈ $1.03 > $1 tol → InceptionReconciliationError → this call RAISES (RED)."""
+    ledger = NativeLedger(
+        native_pnl={"BTC": _dense([3.0, 3.479214])},  # Σpnl 6.479214
+        terminal_native_equity={"BTC": 0.000024},     # resid 0.000012 BTC (dust)
+        marks={"BTC": _dense([88000.0, 88000.0])},
+        native_flows=[ExternalFlow("2026-01-02", -570000.0, "BTC", -6.479202)],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    # Passes (no InceptionReconciliationError): dust vs 12.96 BTC throughput.
+    returns, _ = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+    )
+    assert returns.name == "returns"
+
+
+def test_inception_material_residual_above_dust_still_breaches() -> None:
+    """The dust floor does NOT blanket-excuse a high-throughput bucket: the SAME
+    6.48-BTC-throughput shape with a MATERIAL 0.5 BTC residual (far above the
+    1e-4·throughput ≈ 0.0013 BTC dust allowance) still refuses. Pins that the
+    exemption is dust-only, never a hole big enough to hide a missing row."""
+    ledger = NativeLedger(
+        native_pnl={"BTC": _dense([3.0, 3.479214])},  # Σpnl 6.479214
+        terminal_native_equity={"BTC": 0.5},          # resid ≈ 0.5 BTC (material)
+        marks={"BTC": _dense([88000.0, 88000.0])},
+        native_flows=[ExternalFlow("2026-01-02", -570000.0, "BTC", -6.479202)],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    with pytest.raises(InceptionReconciliationError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+    assert exc.value.currencies == ["BTC"]
+
+
+def test_inception_dust_floor_zero_throughput_orphan_still_breaches() -> None:
+    """A zero-throughput bucket (no pnl, no flow) gets NO dust allowance
+    (1e-4 × 0 = 0), so a nonzero residual still fails loud — the dust exemption can
+    never silence an event-less held balance the ledger cannot explain."""
+    breach = _btc_zero_pnl_ledger(
+        terminal_btc=0.51, mark_first=2.0, mark_last=1.0, full_history=True
+    )
+    with pytest.raises(InceptionReconciliationError):
+        reconstruct_native_nav_and_twr(
+            breach, indexable_currencies=frozenset({"BTC"})
+        )
+
+
 def test_inception_full_history_false_skips_gate() -> None:
     """§5.3: the SAME breaching ledger with full_history=False does NOT raise — a
     truncated (retention-capped) ledger can never reconcile to zero and must not
