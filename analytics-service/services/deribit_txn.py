@@ -1107,6 +1107,8 @@ def assert_balance_identity(
         if str(row.get("type", "")) not in _NATIVE_CASH_BEARING_TYPES:
             continue
         raw = row.get("change")
+        if raw is None:
+            continue
         try:
             change = float(raw)  # aggregator already validated cash-bearing change
         except (TypeError, ValueError):
