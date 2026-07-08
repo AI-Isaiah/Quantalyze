@@ -1097,7 +1097,19 @@ def assert_balance_identity(
     reconciliation on the open book (a dropped cash row / missing summary of size
     ``x`` surfaces there as ``§5 residual = x`` → InceptionReconciliationError, the
     SAME permanent-FAILED disposition). The default ``frozenset()`` exempts nothing
-    → every existing caller stays byte-identical (SC-4)."""
+    → every existing caller stays byte-identical (SC-4).
+
+    F2 — PRE-ROLLOUT STRADDLE (INTENTIONAL fail-loud, §6 follow-up): a currency
+    whose option book was held OPEN across the coverage-window START (a position
+    opened >24h before the first summary, i.e. across the ~2025-01-12 rollout)
+    telescopes ``Σ summary unrealized_pl`` from a NONZERO book-MTM-at-window-start
+    ``V₀`` (not 0) — the pre-rollout open premium is counted verbatim outside
+    coverage while the covered sessions' unrealized delta only sees ``V_N − V₀``,
+    leaving an unreconciled residual = ``V₀``. Flat-at-crawl → THIS strict guard
+    fires; open-at-crawl → exempted here but the §5 gate residual = ``V₀`` fires
+    identically. BOTH are permanent FAILED (correct until ``V₀``-at-window-start
+    handling is built — validate on live keys #2/#3 with pre-2025 option history).
+    PINNED by ``test_pre_rollout_straddle_fails_loud_intentional``; do NOT loosen."""
     floor = native_floor or {}
     sigma_change: dict[str, float] = {}
     throughput: dict[str, float] = {}

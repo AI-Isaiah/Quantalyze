@@ -112,6 +112,18 @@ NAV; the 2025-07-13 option-trade day summed to +2.736 BTC ≈ +65%). The real op
   correct daily attribution is derivable pre-rollout; the TOTAL stays exact — Σ`change` is exact in
   both eras — so we caveat, never fail-loud/withhold nor synthesize).
 
+**Pre-rollout STRADDLE (position OPEN across the first summary) — currently FAILS LOUD (F2):** a
+currency whose option book was held OPEN across the coverage-window START (a position opened >24h
+before the first `options_settlement_summary`, i.e. held across the ~2025-01-12 rollout) telescopes
+`Σ summary unrealized_pl` from a NONZERO book-MTM-at-window-start `V₀` (not 0): the pre-rollout open
+premium is counted verbatim outside coverage while the covered sessions' unrealized delta only sees
+`V_N − V₀`, leaving an unreconciled residual = `V₀`. Flat-at-crawl → the strict
+`assert_balance_identity` fires; open-at-crawl → exempted from the strict guard (CR-01) but the §5
+`_assert_inception_reconciled` residual = `V₀` fires — BOTH are permanent `FAILED` (same disposition).
+This is INTENTIONAL doctrine (fail loud until `V₀`-at-window-start handling is built) and is PINNED by
+`test_pre_rollout_straddle_fails_loud_intentional`. `V₀`-at-window-start handling is a §6 follow-up;
+validate on live keys #2/#3, which carry pre-2025 option history.
+
 **Semantic shift (do NOT revert):** excluding premium REDEFINES option native_pnl from a "cash-balance
 delta" to an **MTM (settled-equity) delta** for covered option rows. This is intentional — it makes the
 daily series a settled-equity series consistent with the terminal anchor, so the §5 inception identity

@@ -1880,6 +1880,44 @@ def test_balance_identity_guard_raises_on_missing_midwindow_summary() -> None:
     assert_balance_identity(ok_rows, native_ok)  # no raise
 
 
+def test_pre_rollout_straddle_fails_loud_intentional() -> None:
+    """F2 (pin the INTENTIONAL fail-loud): an option book held OPEN across the
+    coverage-window START — a position opened >24h before the first
+    `options_settlement_summary`, i.e. across Deribit's ~2025-01-12 summary
+    rollout — telescopes `Σ summary unrealized_pl` from a NONZERO
+    book-MTM-at-window-start V₀ (not 0). The pre-rollout open premium is counted
+    verbatim OUTSIDE coverage while the covered sessions' unrealized delta only
+    sees V_N − V₀ → the balance identity leaves an unreconciled residual = V₀.
+
+    This is CORRECT doctrine (fail loud until V₀-at-window-start handling is
+    built — a §6 follow-up validated on live keys #2/#3 which carry pre-2025
+    option history). This test PINS the raise as INTENTIONAL so a future change
+    that silently ships a V₀-contaminated reconstruction reddens here.
+
+    Flat-at-crawl (position closed inside coverage) → the STRICT
+    `assert_balance_identity` fires (this test). The open-at-crawl sibling is
+    exempted from the strict guard but its §5 `_assert_inception_reconciled`
+    residual = V₀ fires identically (same permanent-FAILED disposition)."""
+    # V₀ = 0.5: the straddle is worth 0.5 BTC at window start (opened pre-rollout).
+    # Pre-rollout open (2025-07-09, before _SUM_LO−24h = 2025-07-11T08:00) →
+    # change kept VERBATIM outside coverage; close inside coverage settles it.
+    straddle_rows = [
+        _option_trade(
+            "2025-07-09T10:00:00+00:00", change=-1.0, commission=0.0, rid=40
+        ),  # pre-rollout open premium (outside coverage → native −1.0 verbatim)
+        _summary_row(_SUM_LO, rpl=2.5, upl=-0.5, rid=40),  # upl telescopes V_N−V₀=−0.5
+        _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=41),
+        _option_trade(
+            _COVERED_DAY, change=2.5, commission=0.0, rid=41
+        ),  # close inside coverage (−commission only; change +2.5 into Σchange)
+    ]
+    # Σnative = −1.0 (pre open) + (2.5−0.5) (summary) + 0.0 (inside close) = 1.0;
+    # Σchange = −1.0 + 2.5 = 1.5; residual = 0.5 = V₀ ≫ tol (1e-4·throughput).
+    native = txn_rows_to_native_daily(straddle_rows)
+    with pytest.raises(LedgerValuationError):
+        assert_balance_identity(straddle_rows, native)
+
+
 def test_balance_identity_reference_set_includes_swap() -> None:
     """M2: the guard's REFERENCE row-set is `_NATIVE_CASH_BEARING_TYPES` (which
     INCLUDES `swap`), NOT the USD `CASH_BEARING_TYPES` (which omits it). Using
