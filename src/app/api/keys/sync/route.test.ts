@@ -563,6 +563,12 @@ describe("POST /api/keys/sync", () => {
       computation_status: "failed",
       computation_error: FAILURE_MESSAGE,
     });
+    // SI-02 (LOW-MEDIUM, v1.9): the legacy after() 'failed' write must also
+    // CLEAR the runner-owned computation_warned marker, mirroring the Python
+    // fix. Otherwise a prior-warned strategy can be resurrected to
+    // complete_with_warnings by the status bridge OVER a genuine failure.
+    // Neuter: drop `computation_warned: false` from the source write → reddens.
+    expect(failurePayload.computation_warned).toBe(false);
 
     consoleSpy.mockRestore();
   });
