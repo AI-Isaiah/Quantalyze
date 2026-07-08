@@ -3174,3 +3174,150 @@ async def test_e2e_total_is_era_invariant(monkeypatch: Any) -> None:
     assert total_native == pytest.approx(1.3, abs=1e-9)
     # The pre-rollout day is FLAGGED (cash-basis), the covered day is not.
     assert report.pre_coverage_option_days == [("BTC", "2025-07-09")]
+
+
+# ===========================================================================
+# CR-01 — open-option balance-identity exemption through the production seam.
+# An OPEN option book at crawl leaves the strict guard's residual = terminal open
+# MTM (it closes only for a flat-at-settlement book). The exemption lets §5 be the
+# authoritative reconciliation; a real hole for the exempted currency still fails
+# loud at §5. Fixtures reuse the _btc_* / _NativeAnchorStub seam helpers.
+# ===========================================================================
+
+
+def _open_book_paginate(*, drop_day12_summary: bool = False):
+    """A covered-era BTC options account with an OPEN position at crawl: the
+    day-12 summary carries +0.5 unrealized STILL open (Σupl telescopes to a
+    terminal open MTM of +0.09 vs the flat-closing 1.01), so the strict identity
+    residual is 0.09 → it would false-fire without the CR-01 exemption.
+
+    ``drop_day12_summary`` injects a MISSING-summary hole of size 1.1 → §5 must
+    fire (InceptionReconciliationError) for the exempted currency."""
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency != "BTC":
+            return []
+        rows: list[Any] = [_btc_deposit(10, change=1.0)]  # seed capital (flow)
+        if not drop_day12_summary:
+            rows.append(_btc_summary(12, rpl=0.6, upl=0.5))  # 1.1 incl open unreal.
+        rows.append(_btc_summary(14, rpl=0.0, upl=0.0))      # upper window bound
+        rows.append(_btc_option_trade(13, change=1.0, commission=0.01))  # −0.01
+        return rows
+
+    return _paginate
+
+
+async def test_open_book_exempt_passes_and_flat_book_still_guarded(
+    monkeypatch: Any,
+) -> None:
+    """CR-01 REGRESSION: an OPEN-book account (options_value != 0, telescoping
+    summaries) FAILS the strict guard today (residual = terminal open MTM 0.09) and
+    PASSES with the exemption. Neuter (drop the open_option_ccys wiring / read
+    options_value as 0) → build raises LedgerValuationError → RED.
+
+    Companion: a FLAT quiet book (no options_value, no trailing rows) exempts
+    NOTHING → the strict guard still runs and closes (byte regression preserved)."""
+    scopes = [di.Scope("main", None, True)]
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]},
+        paginate=_open_book_paginate(),
+    )
+    _patch_jul_index(monkeypatch)
+
+    # OPEN book: anchor summary carries a nonzero options_value → BTC exempt.
+    open_ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.59, "session_upl": 0.5,
+                    "options_value": 0.5}],
+        index_price={"BTC": 60000.0},
+    )
+    ledger, report = await di.build_deribit_native_ledger(open_ex)
+    # Exemption surfaced for the harness (NOT a warning — an open book is normal).
+    assert report.balance_identity_open_option_ccys == ["BTC"]
+    # §5 still closes for the intact open book (no InceptionReconciliationError).
+    from services.broker_dailies import combine_native_ledger
+
+    combine_native_ledger(ledger, report.indexable_currencies)  # must not raise
+
+    # FLAT quiet book (Phoenix-shaped): a fully-covered flat closure with NO
+    # options_value → nothing exempted → the strict guard runs and closes.
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]},
+        paginate=_covered_flat_paginate(),
+    )
+    flat_ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 1.0, "session_upl": 0.0}],
+        index_price={"BTC": 60000.0},
+    )
+    _fledger, freport = await di.build_deribit_native_ledger(flat_ex)
+    assert freport.balance_identity_open_option_ccys == []  # nothing exempted
+
+
+def _covered_flat_paginate():
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency != "BTC":
+            return []
+        return [
+            _btc_summary(12, rpl=0.6, upl=0.41),  # flat closure 1.01
+            _btc_summary(14, rpl=0.0, upl=0.0),
+            _btc_option_trade(13, change=1.0, commission=0.01),  # −0.01
+        ]
+
+    return _paginate
+
+
+async def test_open_book_missing_summary_hole_fails_at_inception_gate(
+    monkeypatch: Any,
+) -> None:
+    """CR-01: the exemption is NOT a silent skip — for the EXEMPTED currency a
+    dropped cash row / missing summary of size x surfaces at §5 as a residual → the
+    authoritative InceptionReconciliationError (same permanent-FAILED disposition
+    the strict guard would have). Drops the day-12 summary (size 1.1)."""
+    from services.broker_dailies import combine_native_ledger
+    from services.native_nav import InceptionReconciliationError
+
+    scopes = [di.Scope("main", None, True)]
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]},
+        paginate=_open_book_paginate(drop_day12_summary=True),
+    )
+    _patch_jul_index(monkeypatch)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.59, "session_upl": 0.5,
+                    "options_value": 0.5}],
+        index_price={"BTC": 60000.0},
+    )
+    # BTC is exempt → the strict guard does NOT fire at build; the ledger builds.
+    ledger, report = await di.build_deribit_native_ledger(ex)
+    assert report.balance_identity_open_option_ccys == ["BTC"]
+    # §5 catches the 1.1 hole for the exempted currency (fail-loud preserved).
+    with pytest.raises(InceptionReconciliationError):
+        combine_native_ledger(ledger, report.indexable_currencies)
+
+
+async def test_open_book_renamed_options_value_field_fails_loud(
+    monkeypatch: Any,
+) -> None:
+    """CR-01 renamed-field safety: if ``options_value`` is ABSENT on an actually-
+    OPEN book (a renamed/garbled field → native_options_value 0.0) and there is no
+    trailing option activity, the currency is NOT exempted → the strict guard
+    false-fires LOUD (LedgerValuationError). Never a silent pass over an open book
+    the exemption failed to recognise."""
+    scopes = [di.Scope("main", None, True)]
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]},
+        paginate=_open_book_paginate(),
+    )
+    _patch_jul_index(monkeypatch)
+
+    # OPEN book but the anchor summary has NO options_value → BTC NOT exempted.
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.59, "session_upl": 0.5}],
+        index_price={"BTC": 60000.0},
+    )
+    with pytest.raises(LedgerValuationError):
+        await di.build_deribit_native_ledger(ex)

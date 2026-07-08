@@ -42,6 +42,7 @@ from services.deribit_txn import (
     _INVERSE_CURRENCIES,
     CASH_BEARING_TYPES,
     _day_ccy_own_index,
+    _option_activity_after_coverage,
     _pre_coverage_option_days,
     assert_balance_identity,
     deribit_dated_external_flows_usd,
@@ -757,6 +758,13 @@ class CompletenessReport:
     # stamps it as the ``pre_summary_rollout_option_dailies`` warning (Q6). Empty
     # for perp-only / fully-covered accounts.
     pre_coverage_option_days: list[tuple[str, str]] = field(default_factory=list)
+    # CR-01 — sorted currencies EXEMPTED from the strict balance-identity guard
+    # because their option book is provably OPEN at crawl (nonzero
+    # ``native_options_value``) or has trailing option activity past the last
+    # summary. Surfaced for logs / the acceptance harness ONLY; an open book is the
+    # normal state (§5 ``_assert_inception_reconciled`` is the authoritative
+    # reconciliation), so this is NOT a warning and never promotes the status.
+    balance_identity_open_option_ccys: list[str] = field(default_factory=list)
 
 
 def _now_ms() -> int:
@@ -1727,7 +1735,24 @@ async def build_deribit_native_ledger(
                 native_floor[ccy] = 1.0 / anchor_mark
         # else: no mark (a value-carrying no-mark coin fails at native_nav's own
         # mark refusal); rely on the relative 1e-4·throughput term (floor 0.0).
-    assert_balance_identity(raw_rows, native_daily, native_floor=native_floor)
+    # CR-01: exempt provably-OPEN option currencies from the STRICT guard (which
+    # closes only for a flat-at-settlement book). Open evidence = a nonzero
+    # ``options_value`` on the anchor summary (open positions marked at crawl) OR an
+    # option row trailing the last summary (closed intra-session after the last
+    # settlement). §5 ``_assert_inception_reconciled`` remains the authoritative
+    # reconciliation for these currencies — a dropped cash row / missing summary of
+    # size x surfaces there as ``§5 residual = x`` (same permanent-FAILED
+    # disposition as the strict guard), never a silent skip.
+    open_opt = frozenset(
+        c for c, v in state.native_options_value.items() if v != 0.0
+    ) | _option_activity_after_coverage(raw_rows)
+    assert_balance_identity(
+        raw_rows, native_daily, native_floor=native_floor, open_option_ccys=open_opt
+    )
+    # Surface the exempted currencies for logs/harness (an open book is the NORMAL
+    # state — §5 guards it — so this is NOT promoted to complete_with_warnings;
+    # trailing/pre-rollout activity is separately stamped below).
+    report.balance_identity_open_option_ccys = sorted(open_opt)
     # Phase 82 Q6: option rows outside their currency's summary coverage window
     # fall back to cash-basis `change` (premium noise persists — no summary
     # channel to reshape them). Surface the affected buckets so the worker stamps
