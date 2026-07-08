@@ -2279,3 +2279,88 @@ async def test_native_marks_empty_merged_map_omits_key_build_time_refusal(
     # missing_day_count == 0 is the BUILD-time refusal signature (_build_buckets),
     # before any per-day calendar exists.
     assert exc.value.missing_day_count == 0
+
+
+async def test_native_ledger_historical_swap_reconciles_and_swap_day_zero_return(
+    monkeypatch: Any,
+) -> None:
+    """HIGH-1 (end-to-end): an account that DEPOSITED 60,000 USDC then SWAPPED it
+    into 1.0 BTC reconciles under ``build_deribit_native_ledger`` →
+    ``reconstruct_native_nav_and_twr`` with NO ``InceptionReconciliationError``,
+    and the swap day's return is ~0 (the swap is USD-net-zero, so
+    ``NAV_usd`` is continuous across it — only real slippage would show).
+
+    Conservation: WITHOUT the native `swap` reclassification the swap legs VANISH.
+    The USDC bucket then rolls a +60,000 deposit against a 0 terminal → a −60,000
+    pre-history residual → the §5 inception gate BREACHES; the BTC bucket (1.0 BTC
+    terminal, no ledger event) silently disappears from NAV. WITH the fix each leg
+    enters native_pnl: USDC pre-history rolls to 0 and BTC's +1.0 pnl day explains
+    its terminal → both reconcile to ~0.
+
+    Neuter: revert `swap` to a plain INFORMATIONAL skip in ``txn_rows_to_native_daily``
+    → ``reconstruct_native_nav_and_twr`` raises ``InceptionReconciliationError`` →
+    this test (which asserts NO raise + a ~0 swap-day return) reddens."""
+    import pandas as pd
+
+    from services.native_nav import reconstruct_native_nav_and_twr
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "USDC":
+            # Day-1 deposit of 60,000 USDC (external flow), then a day-2 swap leg
+            # spending it (−60,000 USDC). The deposit is the pre-history explainer;
+            # the swap leg is the INTERNAL rebalance that must reach native_pnl.
+            return [
+                {"type": "deposit", "currency": "USDC", "change": 60000.0,
+                 "timestamp": _DAY1_MS},
+                {"type": "swap", "currency": "USDC", "change": -60000.0,
+                 "timestamp": _DAY2_MS},
+            ]
+        if currency == "BTC":
+            # The other swap leg: +1.0 BTC acquired on day 2 (net-zero vs the
+            # −60,000 USDC at the 60,000 BTC mark).
+            return [
+                {"type": "swap", "currency": "BTC", "change": 1.0,
+                 "timestamp": _DAY2_MS},
+            ]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes,
+        currencies={"main": ["USDC", "BTC"]}, paginate=_paginate,
+    )
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        return {"2024-01-01": 60000.0, "2024-01-02": 60000.0}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    ex = _NativeAnchorStub(
+        # Terminal: the USDC was fully swapped away (0), the 1.0 BTC is held.
+        summaries=[
+            {"currency": "USDC", "equity": 0.0, "session_upl": 0.0},
+            {"currency": "BTC", "equity": 1.0, "session_upl": 0.0},
+        ],
+        index_price={"BTC": 60000.0},
+    )
+    ledger, _report = await di.build_deribit_native_ledger(ex)
+
+    # The swap legs reached native_pnl on BOTH currencies (the count-once, native-
+    # only inclusion): +1.0 BTC and −60,000 USDC on the swap day.
+    assert ledger.native_pnl["BTC"].loc[pd.Timestamp("2024-01-02")] == pytest.approx(
+        1.0
+    )
+    assert ledger.native_pnl["USDC"].loc[pd.Timestamp("2024-01-02")] == pytest.approx(
+        -60000.0
+    )
+
+    # Reconciles (no InceptionReconciliationError) AND the swap day return is ~0.
+    returns, _meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+    )
+    assert returns.loc[pd.Timestamp("2024-01-02")] == pytest.approx(0.0, abs=1e-9)

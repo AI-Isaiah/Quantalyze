@@ -1305,16 +1305,69 @@ def test_txn_rows_to_native_daily_quiet_day_no_index() -> None:
     assert native["BTC"] == {"2026-01-15": pytest.approx(-0.01, abs=1e-12)}
 
 
-def test_txn_rows_to_native_daily_informational_skip() -> None:
-    """informational_skip: every INFORMATIONAL type (transfer / deposit /
-    withdrawal / usdc_reward / swap) is skipped even carrying nonzero change —
-    they are external-flow / not-pnl, exactly as in the USD sibling."""
+def test_txn_rows_to_native_daily_external_flow_types_skipped() -> None:
+    """external_flow_skip: the EXTERNAL-flow INFORMATIONAL types (transfer /
+    deposit / withdrawal / usdc_reward) stay skipped in the native sibling even
+    carrying nonzero change — they are external capital / rewards that enter the
+    F_t flow channel (never native_pnl), exactly as in the USD sibling. `swap`
+    is DELIBERATELY excluded here — it is an INTERNAL rebalance and is asserted
+    to enter native_pnl by the swap tests below (HIGH-1)."""
+    flow_types = sorted(INFORMATIONAL_TYPES - {"swap"})
+    assert flow_types == ["deposit", "transfer", "usdc_reward", "withdrawal"]
     rows = [
         {"type": t, "currency": "BTC", "change": 1.0,
          "timestamp": _ms(_DAY_A), "id": 8001100 + i}
-        for i, t in enumerate(sorted(INFORMATIONAL_TYPES))
+        for i, t in enumerate(flow_types)
     ]
     assert txn_rows_to_native_daily(rows) == {}
+
+
+def test_txn_rows_to_native_daily_swap_enters_native_pnl_per_leg() -> None:
+    """HIGH-1: a cross-collateral `swap` (an INTERNAL FX conversion) is
+    INFORMATIONAL in the USD path (net ~0 USD across its legs, rightly skipped)
+    but in NATIVE per-currency space EACH leg is a REAL balance delta that must
+    enter native_pnl — else the per-bucket backward roll cannot close. A
+    BTC→USDC swap (−1 BTC / +60,000 USDC) yields a native_pnl entry on EACH
+    leg's currency, summing its RAW native change (no index multiply).
+
+    Mutation-honest / neuter: skipping `swap` in the native sibling (reverting it
+    to a plain INFORMATIONAL skip) drops both legs → native == {} → RED."""
+    rows = [
+        {"type": "swap", "currency": "BTC", "change": -1.0,
+         "timestamp": _ms(_DAY_A), "id": 8009001},
+        {"type": "swap", "currency": "USDC", "change": 60000.0,
+         "timestamp": _ms(_DAY_A), "id": 8009002},
+    ]
+    native = txn_rows_to_native_daily(rows)
+    assert set(native) == {"BTC", "USDC"}
+    assert native["BTC"] == {"2026-01-15": pytest.approx(-1.0, abs=1e-12)}
+    assert native["USDC"] == {"2026-01-15": pytest.approx(60000.0, abs=1e-12)}
+
+
+def test_swap_is_native_only_usd_path_and_flow_channel_unchanged() -> None:
+    """HIGH-1 count-once + USD-path byte-identity: a `swap` enters ONLY the
+    native sibling's native_pnl. The USD realized path
+    (``txn_rows_to_daily_records``) still SKIPS it (byte-identical to pre-fix)
+    AND it is NOT an external flow (``deribit_dated_external_flows_usd`` returns
+    nothing for it), so it can never double-count into F_t.
+
+    Neuter (a): reverting the native sibling makes native_pnl empty → the last
+    assert reddens. Neuter (b): routing `swap` into the flow channel makes
+    ``deribit_dated_external_flows_usd`` return a nonzero entry → the flow
+    assert reddens."""
+    rows = [
+        {"type": "swap", "currency": "BTC", "change": -1.0,
+         "timestamp": _ms(_DAY_A), "id": 8009101},
+        {"type": "swap", "currency": "USDC", "change": 60000.0,
+         "timestamp": _ms(_DAY_A), "id": 8009102},
+    ]
+    # USD realized path: `swap` contributes NOTHING (unchanged, still skipped).
+    assert txn_rows_to_daily_records(rows) == []
+    # Flow channel: `swap` is NOT an external flow → count-once by construction.
+    assert deribit_dated_external_flows_usd(rows) == []
+    # Native path: `swap` DOES enter native_pnl (both legs).
+    native = txn_rows_to_native_daily(rows)
+    assert set(native) == {"BTC", "USDC"}
 
 
 def test_txn_rows_to_native_daily_unknown_type_fail_loud() -> None:

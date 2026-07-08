@@ -362,6 +362,49 @@ _EXTERNAL_FLOW_TYPES: frozenset[str] = frozenset(
     {"transfer", "deposit", "withdrawal", "usdc_reward"}
 )
 
+# --- native-sibling type reclassification (v1.9 native-unit, HIGH-1) ----------
+# A `swap` is an INTERNAL cross-collateral FX conversion: net ~0 in USD across its
+# legs (the USD path in ``txn_rows_to_daily_records`` rightly skips it as
+# INFORMATIONAL) but in NATIVE per-currency space each leg is a REAL balance delta
+# (−1 BTC on the BTC leg, +60,000 USDC on the USDC leg). Skipping it in the native
+# sibling makes the per-bucket backward roll fail to close → a ``full_history``
+# inception FALSE-breach (a material swap) or a silently mis-stated pre-swap
+# balance (a sub-tolerance swap). Because a swap leg's balance delta IS "Σ ledger
+# `change` per currency per day", it legitimately belongs in native_pnl. A swap is
+# an INTERNAL rebalance, NOT external capital, so it MUST enter native_pnl and MUST
+# NOT enter the external-flow channel / ``F_t`` (routing it there would distort the
+# TWR denominator). It is deliberately ABSENT from ``_EXTERNAL_FLOW_TYPES`` →
+# count-once holds by construction (native_pnl only, never also a flow).
+#
+# AUDIT of the other INFORMATIONAL_TYPES (HIGH-1): the reclassed set is exactly
+# ``INFORMATIONAL_TYPES − _EXTERNAL_FLOW_TYPES`` — the informational types that are
+# NOT external flows. transfer/deposit/withdrawal/usdc_reward ARE external capital
+# in/out and are captured by the flow channel (``report.dated_external_flows``);
+# reclassing them to native_pnl would double-count and distort ``F_t``, so they
+# stay INFORMATIONAL in the native sibling too. `swap` is the SOLE informational
+# non-flow type, so it is the only type moved.
+_NATIVE_INTERNAL_REBALANCE_TYPES: frozenset[str] = frozenset({"swap"})
+# The native sibling's effective type partition: reclass `swap` from the skip set
+# into the cash-bearing set (native-only — the USD sets are untouched).
+_NATIVE_INFORMATIONAL_TYPES: frozenset[str] = (
+    INFORMATIONAL_TYPES - _NATIVE_INTERNAL_REBALANCE_TYPES
+)
+_NATIVE_CASH_BEARING_TYPES: frozenset[str] = (
+    CASH_BEARING_TYPES | _NATIVE_INTERNAL_REBALANCE_TYPES
+)
+# Invariants (import-time, mirroring the USD-set disjointness assert):
+#   (1) every reclassed type is an INFORMATIONAL type that is NOT an external flow
+#       (an internal rebalance between the account's own buckets) — never an
+#       external-capital type (that would double-count against F_t);
+#   (2) the two native sets stay disjoint (a type simultaneously summed AND skipped
+#       is order-dependent silent corruption).
+assert _NATIVE_INTERNAL_REBALANCE_TYPES <= (
+    INFORMATIONAL_TYPES - _EXTERNAL_FLOW_TYPES
+), "native-reclassed types must be INFORMATIONAL non-external-flow (internal) types"
+assert not (_NATIVE_CASH_BEARING_TYPES & _NATIVE_INFORMATIONAL_TYPES), (
+    "native CASH_BEARING and INFORMATIONAL sets must be disjoint"
+)
+
 
 def deribit_linear_external_flow_usd(
     rows: Sequence[Mapping[str, Any]],
@@ -855,11 +898,19 @@ def txn_rows_to_native_daily(
     NO ``supplemental_index``. Returns ``UPPERCASE-currency -> {utc_day_iso: Σ
     native change}`` (days ascending within each currency).
 
-    The type-partition and the three ``change`` fail-loud guards (absent /
-    null-blank / undatable-day) are LIFTED VERBATIM from
-    ``txn_rows_to_daily_records`` so the two aggregators cannot drift (§4.1):
-      * ``type`` in ``INFORMATIONAL_TYPES`` -> skipped (external flow / reward);
-      * ``type`` in ``CASH_BEARING_TYPES`` -> its raw native ``change`` added to
+    The three ``change`` fail-loud guards (absent / null-blank / undatable-day)
+    are LIFTED VERBATIM from ``txn_rows_to_daily_records`` so the two aggregators
+    cannot drift (§4.1). The type-partition is the same EXCEPT the native-only
+    ``swap`` reclassification (HIGH-1): ``swap`` is an INTERNAL cross-collateral
+    rebalance whose per-leg native ``change`` is a real per-currency balance delta
+    — INFORMATIONAL (skipped) in the USD path, but native-CASH_BEARING here so it
+    enters native_pnl (else the per-bucket backward roll cannot close). It stays
+    absent from ``_EXTERNAL_FLOW_TYPES`` so it never also enters ``F_t``
+    (count-once). Concretely:
+      * ``type`` in ``_NATIVE_INFORMATIONAL_TYPES`` (the external-flow / reward
+        types: transfer / deposit / withdrawal / usdc_reward) -> skipped;
+      * ``type`` in ``_NATIVE_CASH_BEARING_TYPES`` (``CASH_BEARING_TYPES`` PLUS the
+        reclassed internal-rebalance ``swap``) -> its raw native ``change`` added to
         that row's ``(day, ccy)`` bucket. A quiet-day ``negative_balance_fee``
         (no instrument, no ``index_price``) contributes its native ``change``
         WITHOUT any settlement index — the P72 index dependency is GONE from
@@ -896,9 +947,13 @@ def txn_rows_to_native_daily(
         if not isinstance(row, Mapping):
             continue
         row_type = str(row.get("type", ""))
-        if row_type in INFORMATIONAL_TYPES:
+        # HIGH-1: the native sibling reclasses `swap` (an INTERNAL rebalance) from
+        # the skip set into the cash-bearing set — its per-leg native `change` is a
+        # real per-currency balance delta that belongs in native_pnl. The USD sets
+        # (and thus ``txn_rows_to_daily_records``) are untouched.
+        if row_type in _NATIVE_INFORMATIONAL_TYPES:
             continue
-        if row_type in CASH_BEARING_TYPES:
+        if row_type in _NATIVE_CASH_BEARING_TYPES:
             # [VERBATIM from txn_rows_to_daily_records] absent-`change` guard: a
             # cash-bearing row MUST carry a `change` field. Coalescing absent→0.0
             # would silently zero real cash and pass the completeness gate green.
