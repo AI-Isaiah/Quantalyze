@@ -485,6 +485,48 @@ async def test_deribit_material_wedge_prestamps_complete_with_warnings() -> None
     )
 
 
+@pytest.mark.asyncio
+async def test_worker_stamps_pre_summary_rollout_option_dailies() -> None:
+    """M1 (money-risk 9): the WORKER's OWN deribit stamp branch
+    (`if _completeness.pre_coverage_option_days:` in run_derive_broker_dailies_job)
+    populates data_quality_flags['pre_summary_rollout_option_dailies'] from
+    report.pre_coverage_option_days and pre-stamps it onto strategy_analytics (the
+    complete_with_warnings channel via NAV_TWR_GUARD_KEYS).
+
+    Mutation-honest: neutering the stamp block (removing the
+    `meta['pre_summary_rollout_option_dailies'] = [...]` assignment) makes the flag
+    never reach the pre-stamp → the assertion below reddens. The pre-existing
+    test_mixed_era_options_account (test_deribit_ingest) only stamps meta by hand;
+    this drives the WORKER so a regression in the worker branch cannot ship green."""
+    report = CompletenessReport(
+        total_return_rows=2,
+        indexable_currencies=frozenset({"BTC"}),
+        pre_coverage_option_days=[("BTC", "2025-07-09"), ("BTC", "2025-07-13")],
+    )
+    ctx, capture = _deribit_ctx()
+    patches, _ = _patches(ctx, report=report)
+    with _apply(patches), patch(
+        "services.job_worker._exchange_preflight",
+        new=AsyncMock(return_value=ctx),
+    ):
+        result = await run_derive_broker_dailies_job({"strategy_id": "s-drb"})
+    assert result.outcome == DispatchOutcome.DONE
+    stamped = [
+        payload for name, payload, _ in capture["upserts"]
+        if name == "strategy_analytics"
+        and (payload.get("data_quality_flags") or {}).get(
+            "pre_summary_rollout_option_dailies"
+        )
+    ]
+    assert stamped, (
+        "the worker's deribit branch must stamp pre_summary_rollout_option_dailies "
+        "onto strategy_analytics.data_quality_flags (the complete_with_warnings "
+        "channel) from report.pre_coverage_option_days — a fully-covered/perp-only "
+        "account never reaches here, so a regression that drops the stamp ships "
+        "green without this test"
+    )
+
+
 def test_f1_scalar_region_source_scan() -> None:
     """No-double-correction proof (mutation-honest source scan): the F1 scalar
     subtraction cannot be reintroduced — neither the net-scalar fields nor an
