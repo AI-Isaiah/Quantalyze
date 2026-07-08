@@ -1011,11 +1011,56 @@ def _pre_coverage_option_days(
     return sorted(out)
 
 
+def _option_activity_after_coverage(
+    rows: Sequence[Mapping[str, Any]],
+) -> frozenset[str]:
+    """CR-01 — currencies that HAVE an options-settlement coverage window AND carry
+    an option ``trade``/``delivery`` row with ``instant > window_end`` (the
+    trailing-edge open-book signal).
+
+    An option position opened/closed AFTER the last summary landed leaves the book
+    non-flat across the covered span even when ``options_value == 0`` at the crawl
+    instant — so the STRICT balance-identity guard (which closes ONLY for a
+    flat-at-settlement book) would false-fire. This disjunct (unioned with the
+    ``native_options_value != 0`` currencies at the call site) exempts such a
+    currency from the strict guard; the §5 ``_assert_inception_reconciled`` gate
+    remains the authoritative reconciliation.
+
+    Reuses ``_summary_coverage_windows`` (the SAME per-currency windows the
+    aggregator uses) and the option row-filter of ``_pre_coverage_option_days``,
+    restricted to the trailing edge (``instant`` strictly past ``window_end``). A
+    currency with NO window is ABSENT (that is the pre-rollout ``change``-fallback
+    path, not an open book). Pure / never raises — an undatable row is skipped
+    (the guard is the money backstop). Perp-only / USD-native → ``frozenset()``
+    (SC-4 byte-inert)."""
+    windows = _summary_coverage_windows(rows)
+    out: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) not in ("trade", "delivery"):
+            continue
+        if classify_instrument(str(row.get("instrument_name", ""))) != "option":
+            continue
+        ccy = str(row.get("currency", "")).upper()
+        window = windows.get(ccy)
+        if window is None:
+            continue  # no coverage window → pre-rollout path, not an open book
+        try:
+            instant = _row_utc_instant(row.get("timestamp"))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if instant > window[1]:  # strictly past the last summary → trailing edge
+            out.add(ccy)
+    return frozenset(out)
+
+
 def assert_balance_identity(
     rows: Sequence[Mapping[str, Any]],
     native_daily: Mapping[str, Mapping[str, float]],
     *,
     native_floor: Mapping[str, float] | None = None,
+    open_option_ccys: AbstractSet[str] = frozenset(),
 ) -> None:
     """MANDATORY fail-loud reconcile guard (§1). Per currency ``c``, the computed
     total realized (Σ over ALL ``native_daily[c]`` day contributions) MUST equal
@@ -1039,7 +1084,20 @@ def assert_balance_identity(
     ``floor_c`` (the ``$1``-equivalent NATIVE floor) is supplied by the adapter
     from the anchor mark; the pure helper defaults it to 0.0 (relative term only).
     Leak discipline (§App B): the raise names only currency + a coarse
-    breach/tolerance magnitude class, never a held balance."""
+    breach/tolerance magnitude class, never a held balance.
+
+    CR-01 — ``open_option_ccys`` names currencies with a provably-OPEN option book
+    (nonzero ``native_options_value`` and/or trailing option activity after the
+    last summary). The strict identity above closes ONLY for a book that is FLAT at
+    the last settlement (Σunrealized_pl telescopes to a terminal open-MTM of 0 iff
+    flat); an OPEN book leaves a residual = the terminal open MTM, which would
+    false-fire this guard → a permanent FAILED on a perfectly healthy open-options
+    account. An exempted currency is SKIPPED here; the §5
+    ``_assert_inception_reconciled`` gate (native_nav.py) is the AUTHORITATIVE
+    reconciliation on the open book (a dropped cash row / missing summary of size
+    ``x`` surfaces there as ``§5 residual = x`` → InceptionReconciliationError, the
+    SAME permanent-FAILED disposition). The default ``frozenset()`` exempts nothing
+    → every existing caller stays byte-identical (SC-4)."""
     floor = native_floor or {}
     sigma_change: dict[str, float] = {}
     throughput: dict[str, float] = {}
@@ -1058,6 +1116,11 @@ def assert_balance_identity(
         throughput[ccy] = throughput.get(ccy, 0.0) + abs(change)
     currencies = set(sigma_change) | {str(c).upper() for c in native_daily}
     for ccy in sorted(currencies):
+        # CR-01: a provably-open option book cannot satisfy the flat-at-settlement
+        # identity (residual = terminal open MTM). Skip the strict compare and let
+        # §5 _assert_inception_reconciled be the authoritative reconciliation.
+        if ccy in open_option_ccys:
+            continue
         computed = sum(native_daily.get(ccy, {}).values())
         reference = sigma_change.get(ccy, 0.0)
         residual = abs(computed - reference)

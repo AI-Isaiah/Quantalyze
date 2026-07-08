@@ -34,6 +34,7 @@ from services.deribit_txn import (
     _LINEAR_CURRENCIES,
     _NATIVE_CASH_BEARING_TYPES,
     _NATIVE_OPTIONS_SUMMARY_TYPES,
+    _option_activity_after_coverage,
     _pre_coverage_option_days,
     _row_is_linear,
     _summary_coverage_windows,
@@ -2011,3 +2012,89 @@ def test_perp_only_ledger_byte_identical() -> None:
     assert _pre_coverage_option_days(rows) == []
     # Guard closes trivially (contributions ARE the changes).
     assert_balance_identity(rows, native)
+
+
+def test_option_activity_after_coverage_detects_trailing_option_rows() -> None:
+    """CR-01: `_option_activity_after_coverage` returns exactly the currencies that
+    HAVE a coverage window AND carry an option trade/delivery AFTER window_end —
+    the trailing-edge open-book signal (the option book closed intra-session after
+    the last summary, so `options_value==0` NOW yet the strict guard would still
+    false-fire)."""
+    # BTC: an option delivery AFTER the last summary (2025-07-14T08:00) → trailing.
+    trailing = [
+        _summary_row(_SUM_LO, rid=40),
+        _summary_row(_SUM_HI, rid=41),
+        {"type": "delivery", "instrument_name": "BTC-14JUL25-60000-C",
+         "currency": "BTC", "change": 1.5, "commission": 0.003,
+         "timestamp": _ms("2025-07-15T09:00:00+00:00"), "id": 8219900},
+    ]
+    assert _option_activity_after_coverage(trailing) == frozenset({"BTC"})
+
+    # A covered-only option account (all option rows inside the window) → empty.
+    covered = [
+        _summary_row(_SUM_LO, rid=42),
+        _summary_row(_SUM_HI, rid=43),
+        _option_trade(_COVERED_DAY, change=1.0, rid=20),
+    ]
+    assert _option_activity_after_coverage(covered) == frozenset()
+
+    # A PERP trade after the window is NOT option activity → empty (classification
+    # gated: only option trade/delivery rows count).
+    perp_after = [
+        _summary_row(_SUM_LO, rid=44),
+        _summary_row(_SUM_HI, rid=45),
+        {"type": "trade", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.002, "timestamp": _ms("2025-07-15T09:00:00+00:00"),
+         "id": 8219901},
+    ]
+    assert _option_activity_after_coverage(perp_after) == frozenset()
+
+    # A currency with NO summary window (pre-rollout only) is NOT "after coverage"
+    # (it has no window at all — that is the _pre_coverage_option_days path).
+    no_window = [_option_trade(_COVERED_DAY, change=2.0, ccy="ETH", rid=21)]
+    assert _option_activity_after_coverage(no_window) == frozenset()
+
+
+def test_balance_identity_exempts_open_option_currency() -> None:
+    """CR-01: the STRICT balance-identity guard closes ONLY for a flat-at-settlement
+    book (Σunrealized_pl telescopes to a terminal open-MTM of 0 iff flat). An OPEN
+    book leaves a residual = terminal open MTM → the strict guard would raise. A
+    currency in `open_option_ccys` is EXEMPTED (§5 `_assert_inception_reconciled`
+    is the authoritative reconciliation on the open book)."""
+    # Open book: summary carries an extra +0.09 unrealized still open at crawl →
+    # computed (1.09) diverges from Σchange over cash-bearing (1.0) by 0.09.
+    rows = [
+        _summary_row(_SUM_LO, rpl=0.6, upl=0.5, rid=46),  # 1.1, incl open unreal.
+        _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=47),
+        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=22),  # −0.01
+    ]
+    native = txn_rows_to_native_daily(rows)
+    # Without exemption the open-book residual breaches (this is the FLAT-only
+    # closure limitation the fix targets).
+    with pytest.raises(LedgerValuationError):
+        assert_balance_identity(rows, native)
+    # Exempting BTC skips the residual compare → no raise (§5 guards it).
+    assert_balance_identity(rows, native, open_option_ccys=frozenset({"BTC"}))
+
+
+def test_balance_identity_default_frozenset_is_byte_identical() -> None:
+    """CR-01 byte-identity: the default `open_option_ccys=frozenset()` exempts
+    NOTHING — a flat covered fixture still closes and a real mid-window hole still
+    raises, exactly as before the kwarg existed."""
+    # Flat covered closure (rpl+upl == change+commission) → closes with the default.
+    flat = [
+        _summary_row(_SUM_LO, rpl=0.6, upl=0.41, rid=48),  # 1.01
+        _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=49),
+        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=23),
+    ]
+    native_flat = txn_rows_to_native_daily(flat)
+    assert_balance_identity(flat, native_flat)  # default path (no exemption)
+    # A real hole still raises under the default (exemption not requested).
+    broken = [
+        _summary_row(_SUM_LO, rpl=0.0, upl=0.0, rid=50),
+        _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=51),
+        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=24),
+    ]
+    native_broken = txn_rows_to_native_daily(broken)
+    with pytest.raises(LedgerValuationError):
+        assert_balance_identity(broken, native_broken)
