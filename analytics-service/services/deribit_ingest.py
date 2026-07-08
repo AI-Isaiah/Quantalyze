@@ -35,14 +35,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import AbstractSet, Any
 
+import pandas as pd
+
 from services.deribit_txn import (
     _INVERSE_CURRENCIES,
     CASH_BEARING_TYPES,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
     txn_rows_to_daily_records,
+    txn_rows_to_native_daily,
 )
 from services.external_flows import USD_FAMILY, ExternalFlow
+from services.native_nav import NativeLedger
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger(__name__)
@@ -603,15 +607,29 @@ async def build_deribit_indexable_currencies(
     return frozenset(static_floor | probed)
 
 
-async def fetch_deribit_ledger_daily_records(
+async def _crawl_deribit_ledger(
     exchange: Any,
     since_ms: int | None = None,
     *,
     sleep: SleepFn = asyncio.sleep,
-) -> tuple[list[dict[str, Any]], CompletenessReport]:
-    """Crawl the txn-log ledger across every scope × currency and return the
-    accumulated funding-inclusive ``daily_pnl`` records plus a
-    ``CompletenessReport``.
+) -> tuple[
+    list[dict[str, Any]],
+    list[Mapping[str, Any]],
+    frozenset[str],
+    CompletenessReport,
+]:
+    """Crawl the txn-log ledger across every scope × currency ONCE, returning
+    ``(daily_records, raw_rows, indexable, report)``.
+
+    This is the SHARED crawl both the USD-space
+    :func:`fetch_deribit_ledger_daily_records` (which discards ``raw_rows`` /
+    ``indexable``) and the native-unit :func:`build_deribit_native_ledger` (which
+    reads ``raw_rows`` for ``txn_rows_to_native_daily`` + ``report`` for the
+    4-field native flows + ``indexable`` for the marks planner) delegate to — so
+    the completeness accounting and the per-job ``indexable`` build happen exactly
+    ONCE, never duplicated. ``raw_rows`` is the flat concatenation of every
+    (scope, currency) ``paginate_txn_log`` page batch (native pnl is an
+    order-independent per-(day,ccy) sum, so flat concatenation is lossless).
 
     For each scope: resolve its auth (fail loud on an unresolvable scope) and
     enumerate its currencies from the account. Then crawl every (scope, currency)
@@ -664,6 +682,7 @@ async def fetch_deribit_ledger_daily_records(
 
     # Pass 2 — crawl every OWED (scope, currency), concatenating the records.
     daily_records: list[dict[str, Any]] = []
+    raw_rows_all: list[Mapping[str, Any]] = []
     entries: dict[tuple[str, str], dict[str, Any]] = {}
     dated_external_flows: list[ExternalFlow] = []
     total_return_rows = 0
@@ -746,6 +765,10 @@ async def fetch_deribit_ledger_daily_records(
                 indexable_currencies=indexable,
             )
             daily_records.extend(records)
+            # Retain the RAW rows (flat) for the native-unit adapter's
+            # txn_rows_to_native_daily — a per-(day,ccy) sum that is order- and
+            # batch-independent, so flat concatenation across scopes is lossless.
+            raw_rows_all.extend(r for r in rows if isinstance(r, Mapping))
             # Accumulate the honest DATED external flows (for the core's F_t term)
             # and the return-bearing row count (for the C2 equity-vs-activity floor).
             # The SAME `supplemental` settlement-index map built for
@@ -775,12 +798,31 @@ async def fetch_deribit_ledger_daily_records(
                 **({"note": "no wallet for currency"} if not rows else {}),
             }
 
-    return daily_records, CompletenessReport(
+    return daily_records, raw_rows_all, indexable, CompletenessReport(
         expected=expected,
         entries=entries,
         dated_external_flows=dated_external_flows,
         total_return_rows=total_return_rows,
     )
+
+
+async def fetch_deribit_ledger_daily_records(
+    exchange: Any,
+    since_ms: int | None = None,
+    *,
+    sleep: SleepFn = asyncio.sleep,
+) -> tuple[list[dict[str, Any]], CompletenessReport]:
+    """Crawl the txn-log ledger across every scope × currency and return the
+    accumulated funding-inclusive ``daily_pnl`` records plus a
+    ``CompletenessReport`` (the USD-space entry point — byte-identical to the
+    pre-80-02 behaviour). Thin delegate to :func:`_crawl_deribit_ledger`, which is
+    now shared with the native-unit adapter; the raw rows + indexable set the
+    native path needs are discarded here.
+    """
+    daily_records, _raw_rows, _indexable, report = await _crawl_deribit_ledger(
+        exchange, since_ms, sleep=sleep
+    )
+    return daily_records, report
 
 
 def _deribit_session_upl_to_usd(
@@ -1023,6 +1065,166 @@ async def fetch_deribit_account_equity_usd(
         await fetch_deribit_account_equity_and_upnl_usd(exchange)
     )
     return equity, balance_error
+
+
+# ---------------------------------------------------------------------------
+# 80-02 — the native-unit venue adapter: assemble a NativeLedger from existing
+# Deribit parts for the landed Phase-79 core. Writes NO reconstruction math.
+# ---------------------------------------------------------------------------
+
+
+def _today_utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _native_daily_to_series(day_map: Mapping[str, float]) -> pd.Series:
+    """D9: convert the pandas-pure ``{utc_day_iso: native_pnl}`` dict
+    (``txn_rows_to_native_daily`` output) into a float Series on a tz-naive
+    midnight ASCENDING ``DatetimeIndex`` — the ``NativeLedger.native_pnl`` shape.
+    This conversion lives HERE (not in the AST-pandas-pure ``deribit_txn.py``)."""
+    if not day_map:
+        return pd.Series(dtype=float, name="native_pnl")
+    days = sorted(day_map)
+    index = pd.DatetimeIndex([pd.Timestamp(d) for d in days])
+    return pd.Series(
+        [day_map[d] for d in days], index=index, dtype=float, name="native_pnl"
+    )
+
+
+def _marks_series(price_map: Mapping[str, float]) -> pd.Series:
+    """A dense daily USD mark Series on a tz-naive midnight ascending
+    ``DatetimeIndex`` from a ``{utc_day_iso: delivery_price}`` map — NEVER
+    forward-filled (the map is already dense from ``public/get_delivery_prices``;
+    a genuine gap stays a gap so the core's ``missing_daily_marks`` refusal fires)."""
+    days = sorted(price_map)
+    index = pd.DatetimeIndex([pd.Timestamp(d) for d in days])
+    return pd.Series(
+        [price_map[d] for d in days], index=index, dtype=float, name="mark"
+    )
+
+
+async def _build_dense_native_marks(
+    exchange: Any,
+    *,
+    indexable: AbstractSet[str],
+    native_pnl: Mapping[str, pd.Series],
+    native_flows: Sequence[ExternalFlow],
+    terminal_native_equity: Mapping[str, float],
+    terminal_upnl_native: Mapping[str, float],
+    sleep: SleepFn = asyncio.sleep,
+) -> dict[str, pd.Series]:
+    """The DENSE daily settlement-mark planner (D4). For every INDEXED currency
+    carrying nonzero native value (pnl, equity, wedge, or flow), fetch a DENSE
+    daily ``{ccy}_usd`` settlement-index Series across ``[oldest activity day,
+    today]`` via :func:`fetch_deribit_settlement_index` — NOT pruned to event days
+    (the core carries balances forward and needs a mark on every carry-forward day)
+    and NEVER forward-filled (a genuine publish gap stays a gap → the core's
+    ``missing_daily_marks`` refusal fires, T-80-05).
+
+    USD-family currencies get NO marks entry (their mark is the literal ``1.0`` in
+    the core, §4.1). An UNINDEXABLE currency gets NONE either — the adapter never
+    fabricates a ``1.0`` mark; the core value-gates and refuses it downstream.
+    ``indexable`` is DISJOINT from USD-family (§3.2), so ``ccy in indexable`` ⟺ the
+    currency is a branch-2 INDEXED coin."""
+    value_ccys: set[str] = set()
+    oldest_day: dict[str, str] = {}
+
+    def _note(ccy: str, day: str | None) -> None:
+        value_ccys.add(ccy)
+        if day is not None:
+            prev = oldest_day.get(ccy)
+            oldest_day[ccy] = day if prev is None else min(prev, day)
+
+    for ccy, series in native_pnl.items():
+        if ccy not in indexable or series.empty:
+            continue
+        if bool((series.to_numpy(dtype=float) != 0.0).any()):
+            _note(ccy, str(series.index[0].strftime("%Y-%m-%d")))
+    for flow in native_flows:
+        ccy = flow.currency
+        if ccy not in indexable:
+            continue
+        qty = flow.quantity
+        if float(flow.usd_signed) != 0.0 or (qty is not None and float(qty) != 0.0):
+            _note(ccy, flow.utc_day_iso)
+    for source in (terminal_native_equity, terminal_upnl_native):
+        for ccy, val in source.items():
+            if ccy in indexable and float(val) != 0.0:
+                _note(ccy, None)
+
+    marks: dict[str, pd.Series] = {}
+    if not value_ccys:
+        return marks
+    # A currency carrying value ONLY via the anchor/wedge (no ledger day) spans from
+    # the earliest day any indexed currency carries, so its dense mark series still
+    # covers the whole reconstruction; today's date if nothing carries a day.
+    global_oldest = min(oldest_day.values()) if oldest_day else _today_utc_iso()
+    for ccy in sorted(value_ccys):
+        price_map = await fetch_deribit_settlement_index(
+            exchange, ccy, oldest_day=oldest_day.get(ccy, global_oldest), sleep=sleep
+        )
+        marks[ccy] = _marks_series(price_map)
+    return marks
+
+
+async def build_deribit_native_ledger(
+    exchange: Any,
+    since_ms: int | None = None,
+    *,
+    sleep: SleepFn = asyncio.sleep,
+) -> tuple[NativeLedger, CompletenessReport]:
+    """Assemble a :class:`~services.native_nav.NativeLedger` for the landed Phase-79
+    native core from existing Deribit parts + the 80-01 siblings (NAT-04). It
+    writes NO reconstruction math — the core rolls, values, and refuses.
+
+    Six fields, all per-currency native:
+      * ``native_pnl`` — ``txn_rows_to_native_daily`` over the crawl's RAW rows,
+        each ``{day: native_change}`` dict converted to a tz-naive midnight Series
+        (D9).
+      * ``terminal_native_equity`` / ``terminal_upnl_native`` — the per-currency
+        native anchor + wedge read from the ONE ``get_account_summaries`` response
+        (:func:`fetch_deribit_native_account_state`). The unmarkable-wedge App A #6
+        refusal is delivered BY CONSTRUCTION — the raw native ``session_upl`` is
+        passed through and the core's value-gate refuses it.
+      * ``marks`` — a DENSE daily ``{ccy}_usd`` settlement-index Series per INDEXED
+        nonzero currency (:func:`_build_dense_native_marks`); USD-family absent.
+      * ``native_flows`` — the crawl's 4-field ``(day, ccy)`` dated flows, reused
+        verbatim from ``report.dated_external_flows`` (never recomputed).
+      * ``full_history=True`` — Deribit's txn-log reaches inception, so the §5
+        inception gate reconciles against a pre-history balance of 0.
+
+    Returns ``(NativeLedger, CompletenessReport)``; the caller still runs
+    :func:`assert_ledger_complete` on the report (the adapter never swallows it).
+    The collapsed USD anchor stays available via
+    :func:`fetch_deribit_native_account_state` for the 80-04 parity panel.
+    Leak: no raw balances/marks/flows logged."""
+    _daily_records, raw_rows, indexable, report = await _crawl_deribit_ledger(
+        exchange, since_ms, sleep=sleep
+    )
+    native_pnl: dict[str, pd.Series] = {
+        ccy: _native_daily_to_series(day_map)
+        for ccy, day_map in txn_rows_to_native_daily(raw_rows).items()
+    }
+    native_flows = report.dated_external_flows
+    state = await fetch_deribit_native_account_state(exchange)
+    marks = await _build_dense_native_marks(
+        exchange,
+        indexable=indexable,
+        native_pnl=native_pnl,
+        native_flows=native_flows,
+        terminal_native_equity=state.native_equity,
+        terminal_upnl_native=state.native_upnl,
+        sleep=sleep,
+    )
+    ledger = NativeLedger(
+        native_pnl=native_pnl,
+        terminal_native_equity=state.native_equity,
+        marks=marks,
+        native_flows=native_flows,
+        terminal_upnl_native=state.native_upnl,
+        full_history=True,
+    )
+    return ledger, report
 
 
 def assert_ledger_complete(report: CompletenessReport) -> None:

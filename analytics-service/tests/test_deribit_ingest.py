@@ -1449,7 +1449,10 @@ def test_indexable_set_drives_the_636_gate_source_scan() -> None:
     module constant ``_INVERSE_CURRENCIES`` — drives the :636 supplemental-index
     gate, and it is built right after enumerate_currencies. Mutation-honest:
     reverting the gate to ``ccy_upper in _INVERSE_CURRENCIES`` reddens this."""
-    src = inspect.getsource(di.fetch_deribit_ledger_daily_records)
+    # 80-02: the crawl body (with the :636 gate) is factored into the shared
+    # _crawl_deribit_ledger; fetch_deribit_ledger_daily_records is now a thin
+    # USD-space delegate. Scan the function that actually owns the gate.
+    src = inspect.getsource(di._crawl_deribit_ledger)
     # The built set is constructed once per job right after enumerate_currencies.
     assert "build_deribit_indexable_currencies(" in src
     enum_at = src.index("enumerate_currencies(exchange, scopes[0]")
@@ -1676,3 +1679,315 @@ async def test_native_upnl_not_zeroed_for_unvaluable_coin_wedge() -> None:
     assert state.balance_error is False
     assert state.collapsed_upnl_usd == 0.0  # legacy silent-0.0 for the coin wedge
     assert state.native_upnl["BTC"] == pytest.approx(0.3)  # native channel preserves
+
+
+# ===========================================================================
+# 80-02 Task 2 — build_deribit_native_ledger: dense marks planner + NativeLedger
+# assembly. Native pnl (dict→Series, D9), 4-field flows, per-currency native
+# anchors/wedge, DENSE daily marks per indexed nonzero currency, full_history=True.
+# The 79 core is IMPORTED and fed — never re-implemented.
+# ===========================================================================
+
+_DAY1_MS = 1_704_067_200_000  # 2024-01-01 00:00 UTC
+_DAY2_MS = _DAY_D_MS          # 2024-01-02 00:00 UTC
+_DAY3_MS = 1_704_240_000_000  # 2024-01-03 00:00 UTC
+
+
+async def test_build_native_ledger_assembles_fields(monkeypatch: Any) -> None:
+    import pandas as pd
+
+    from services.native_nav import NativeLedger
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [
+                {"type": "settlement", "currency": "BTC", "change": 10.0,
+                 "timestamp": _DAY1_MS},
+                {"type": "settlement", "currency": "BTC", "change": 20.0,
+                 "timestamp": _DAY3_MS},
+                {"type": "deposit", "currency": "BTC", "change": 0.5,
+                 "timestamp": _DAY1_MS},
+            ]
+        if currency == "USDC":
+            return [{"type": "settlement", "currency": "USDC", "change": 5.0,
+                     "timestamp": _DAY2_MS}]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes,
+        currencies={"main": ["BTC", "USDC"]}, paginate=_paginate,
+    )
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        return {"2024-01-01": 50000.0, "2024-01-02": 51000.0, "2024-01-03": 52000.0}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    ex = _NativeAnchorStub(
+        summaries=[
+            {"currency": "BTC", "equity": 30.5, "session_upl": 0.0},
+            {"currency": "USDC", "equity": 5.0, "session_upl": 0.0},
+        ],
+        index_price={"BTC": 52000.0},
+    )
+    ledger, report = await di.build_deribit_native_ledger(ex)
+
+    assert isinstance(ledger, NativeLedger)
+    assert isinstance(report, di.CompletenessReport)
+    # native_pnl from txn_rows_to_native_daily: the BTC deposit is INFORMATIONAL
+    # (flow), excluded — so native_pnl[BTC] is the settlements only, day-ascending.
+    btc_pnl = ledger.native_pnl["BTC"]
+    assert isinstance(btc_pnl, pd.Series)
+    assert list(btc_pnl.index) == [
+        pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-03"),
+    ]
+    assert btc_pnl.loc[pd.Timestamp("2024-01-01")] == pytest.approx(10.0)
+    assert btc_pnl.loc[pd.Timestamp("2024-01-03")] == pytest.approx(20.0)
+    assert ledger.native_pnl["USDC"].loc[pd.Timestamp("2024-01-02")] == pytest.approx(
+        5.0
+    )
+    # Native anchors read straight off the summaries (native units).
+    assert ledger.terminal_native_equity == {"BTC": 30.5, "USDC": 5.0}
+    assert ledger.full_history is True
+    # native_flows ARE the crawl's 4-field dated flows (reused, not recomputed).
+    assert ledger.native_flows == report.dated_external_flows
+    btc_flows = [f for f in ledger.native_flows if f.currency == "BTC"]
+    assert btc_flows and btc_flows[0].quantity == pytest.approx(0.5)
+
+
+async def test_build_native_ledger_dense_marks_and_usd_absent(
+    monkeypatch: Any,
+) -> None:
+    import pandas as pd
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            # BTC events on day1 and day3 ONLY — NOT day2.
+            return [
+                {"type": "settlement", "currency": "BTC", "change": 10.0,
+                 "timestamp": _DAY1_MS},
+                {"type": "settlement", "currency": "BTC", "change": 20.0,
+                 "timestamp": _DAY3_MS},
+            ]
+        if currency == "USDC":
+            return [{"type": "settlement", "currency": "USDC", "change": 5.0,
+                     "timestamp": _DAY2_MS}]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes,
+        currencies={"main": ["BTC", "USDC"]}, paginate=_paginate,
+    )
+
+    dense = {"2024-01-01": 50000.0, "2024-01-02": 51000.0, "2024-01-03": 52000.0}
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        return dict(dense)
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    ex = _NativeAnchorStub(
+        summaries=[
+            {"currency": "BTC", "equity": 30.0, "session_upl": 0.0},
+            {"currency": "USDC", "equity": 5.0, "session_upl": 0.0},
+        ],
+        index_price={"BTC": 52000.0},
+    )
+    ledger, _report = await di.build_deribit_native_ledger(ex)
+
+    btc_marks = ledger.marks["BTC"]
+    # DENSE across the fetched span — day2 (51000) is present EVEN THOUGH BTC has no
+    # event on day2. Mutation (a): fetching only event days (sparse) drops day2 and
+    # reddens this.
+    assert list(btc_marks.index) == [pd.Timestamp(d) for d in sorted(dense)]
+    assert btc_marks.loc[pd.Timestamp("2024-01-02")] == pytest.approx(51000.0)
+    # Mutation (b): USD-family currencies NEVER appear in marks (mark ≡ 1.0 in core).
+    assert "USDC" not in ledger.marks
+    assert "USD" not in ledger.marks
+
+
+async def test_build_native_ledger_marks_oldest_day_is_activity(
+    monkeypatch: Any,
+) -> None:
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [
+                {"type": "settlement", "currency": "BTC", "change": 10.0,
+                 "timestamp": _DAY1_MS},
+                {"type": "settlement", "currency": "BTC", "change": 20.0,
+                 "timestamp": _DAY3_MS},
+            ]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+
+    calls: list[tuple[str, str]] = []
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        calls.append((currency, oldest_day))
+        return {"2024-01-01": 50000.0, "2024-01-03": 52000.0}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 30.0, "session_upl": 0.0}],
+        index_price={"BTC": 52000.0},
+    )
+    await di.build_deribit_native_ledger(ex)
+    # oldest_day is BTC's EARLIEST activity day (2024-01-01), never a hardcoded
+    # recent date. Mutation (c): a fixed recent oldest_day reddens.
+    assert ("BTC", "2024-01-01") in calls
+    assert all(od == "2024-01-01" for (c, od) in calls if c == "BTC")
+
+
+async def test_build_native_ledger_no_mark_for_unindexable_value_currency(
+    monkeypatch: Any,
+) -> None:
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        return []  # no ledger cash rows anywhere
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes,
+        currencies={"main": ["BTC", "SOL"]}, paginate=_paginate,
+    )
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        return {"2024-01-01": 50000.0}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    # SOL held as native dust; sol_usd probe RAISES (empty price map) → SOL is NOT
+    # indexable, so the adapter builds NO mark for it (never a fabricated 1.0). The
+    # core refuses it downstream if it carries value.
+    ex = _NativeAnchorStub(
+        summaries=[
+            {"currency": "USDC", "equity": 1000.0, "session_upl": 0.0},
+            {"currency": "SOL", "equity": 5.0, "session_upl": 0.0},
+        ],
+        index_price={},  # every non-floor probe raises → SOL unindexable
+    )
+    ledger, _report = await di.build_deribit_native_ledger(ex)
+    assert "SOL" not in ledger.marks
+    assert ledger.terminal_native_equity["SOL"] == pytest.approx(5.0)
+
+
+async def test_build_native_ledger_mark_gap_propagates_core_refusal(
+    monkeypatch: Any,
+) -> None:
+    import pandas as pd
+
+    from services.native_nav import (
+        UnmarkableCurrencyError,
+        reconstruct_native_nav_and_twr,
+    )
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            # BTC events on day1 + day3 ONLY (both have a mark); its balance carries
+            # forward through day2.
+            return [
+                {"type": "settlement", "currency": "BTC", "change": 10.0,
+                 "timestamp": _DAY1_MS},
+                {"type": "settlement", "currency": "BTC", "change": 30.0,
+                 "timestamp": _DAY3_MS},
+            ]
+        if currency == "USDC":
+            # A USDC event on day2 puts day2 in the union calendar — so BTC's
+            # carried-forward day2 balance now REQUIRES a day2 mark.
+            return [{"type": "settlement", "currency": "USDC", "change": 5.0,
+                     "timestamp": _DAY2_MS}]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes,
+        currencies={"main": ["BTC", "USDC"]}, paginate=_paginate,
+    )
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        # A GENUINE settlement-index publish gap on day2 — the adapter NEVER fills
+        # it (T-80-05). day1 + day3 present (so the inception gate reconciles).
+        return {"2024-01-01": 50000.0, "2024-01-03": 52000.0}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    ex = _NativeAnchorStub(
+        summaries=[
+            {"currency": "BTC", "equity": 40.0, "session_upl": 0.0},
+            {"currency": "USDC", "equity": 5.0, "session_upl": 0.0},
+        ],
+        index_price={"BTC": 52000.0},
+    )
+    ledger, _report = await di.build_deribit_native_ledger(ex)
+    # The gap survives into the marks (never filled).
+    assert pd.Timestamp("2024-01-02") not in ledger.marks["BTC"].index
+    # Feed the ASSEMBLED ledger to the landed 79 core: BTC carries a nonzero balance
+    # forward onto USDC's day2, the mark is missing, and the core REFUSES.
+    with pytest.raises(UnmarkableCurrencyError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+    assert exc.value.reason == "missing_daily_marks"
+
+
+async def test_build_native_ledger_completeness_report_passed_through(
+    monkeypatch: Any,
+) -> None:
+    scopes = [di.Scope("main", None, True), di.Scope("sub_1", "101", False)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        raise di.LedgerTruncatedError("budget exhausted")
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes,
+        currencies={"main": ["USDC"], "sub_1": ["USDC"]}, paginate=_paginate,
+    )
+
+    async def _fetch_index(
+        _ex: Any, currency: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        return {}
+
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "USDC", "equity": 1000.0, "session_upl": 0.0}],
+    )
+    _ledger, report = await di.build_deribit_native_ledger(ex)
+    # The crawl's report is returned intact — the adapter does NOT swallow the
+    # completeness gate; a truncated crawl still fails assert_ledger_complete.
+    with pytest.raises(di.LedgerCompletenessError):
+        di.assert_ledger_complete(report)
