@@ -3017,3 +3017,129 @@ async def test_native_account_state_wedge_is_combined(monkeypatch: Any) -> None:
     state_opts = await di.fetch_deribit_native_account_state(opts)
     # Combined 0.8 (fails pre-fix futures-only read = 0.3).
     assert state_opts.native_upnl == {"BTC": pytest.approx(0.8, abs=1e-12)}
+
+
+# ===========================================================================
+# Phase 82 Task 3 — END-TO-END through the production seam
+# (build_deribit_native_ledger → combine_native_ledger): a covered options
+# account returns SANE daily returns (premium day ≈ −fee/NAV, not the pre-fix
+# +65% spike) and the §5 inception gate closes; a material summary perturbation
+# is load-bearing (breaches the guard); the TOTAL is era-invariant.
+# ===========================================================================
+
+
+def _btc_deposit(day: int, *, change: float) -> dict[str, Any]:
+    return {
+        "type": "deposit",
+        "currency": "BTC",
+        "change": change,
+        "timestamp": _jul_ms(day, 6),
+    }
+
+
+async def _covered_options_ledger(monkeypatch: Any, *, perturb_rpl: float = 0.0):
+    """A covered-era BTC options account seeded by a 1.0 BTC deposit: option
+    premium excluded (fee-only), summary carries the fee-gross economics, §5
+    closes (terminal 2.0 BTC = Σpnl 1.0 + Σflow 1.0). ``perturb_rpl`` materially
+    corrupts the summary to prove the balance-identity guard is load-bearing."""
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [
+                _btc_deposit(10, change=1.0),                       # external capital
+                _btc_summary(12, rpl=0.6 + perturb_rpl, upl=0.4007),  # fee-gross 1.0007
+                _btc_summary(14, rpl=0.0, upl=0.0),                # window upper bound
+                _btc_option_trade(13, change=1.0, commission=0.0007),  # inside → −0.0007
+            ]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+    _patch_jul_index(monkeypatch)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.0}],
+        index_price={"BTC": 60000.0},
+    )
+    return await di.build_deribit_native_ledger(ex)
+
+
+async def test_e2e_covered_options_sane_returns_and_inception_closes(
+    monkeypatch: Any,
+) -> None:
+    """The premium day (2025-07-13) return is ≈ −fee/NAV (|r| < 0.01), NOT the
+    pre-fix +65% premium spike, AND the §5 inception gate closes (no
+    InceptionReconciliationError). Pre-fix: day-13 native_pnl would be +1.0 BTC
+    (premium) → a >100% spike → RED."""
+    import pandas as pd
+
+    from services.broker_dailies import combine_native_ledger
+
+    ledger, report = await _covered_options_ledger(monkeypatch)
+    returns, meta = combine_native_ledger(ledger, report.indexable_currencies)
+
+    r13 = float(returns.loc[pd.Timestamp("2025-07-13")])
+    assert abs(r13) < 0.01, f"premium day return {r13} should be fee-sized, not a spike"
+    assert pd.notna(r13)
+    # combine_native_ledger did NOT raise InceptionReconciliationError → §5 closed.
+    # (The inception-seed deposit legitimately trips flow_dominated on day-0, an
+    # artifact of the minimal fixture — unrelated to the options fix — so the
+    # status may be complete_with_warnings; what matters is no inception BREACH.)
+    assert meta["computation_status_hint"] in ("complete", "complete_with_warnings")
+    # A fully-covered account is NOT flagged pre-coverage.
+    assert "pre_summary_rollout_option_dailies" not in meta
+    assert report.pre_coverage_option_days == []
+
+
+async def test_e2e_material_summary_perturbation_breaches_guard(
+    monkeypatch: Any,
+) -> None:
+    """Mutation-honesty: perturbing one summary's realized_pl by a MATERIAL amount
+    breaks the covered-era closure (Σ(rpl+upl) ≠ Σ_inside(change+commission)) →
+    assert_balance_identity raises at ledger build → the identity is load-bearing,
+    not tolerant-by-accident."""
+    with pytest.raises(LedgerValuationError):
+        await _covered_options_ledger(monkeypatch, perturb_rpl=0.5)
+
+
+async def test_e2e_total_is_era_invariant(monkeypatch: Any) -> None:
+    """A mixed-era account: covered-era option days are reshaped (fee-only) and
+    pre-coverage option days stay cash-basis, but the per-currency TOTAL native
+    pnl equals Σchange over cash-bearing rows either way (the balance identity
+    holds across both eras — Σchange is exact regardless of era)."""
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [
+                _btc_summary(12, rpl=0.6, upl=0.4007),   # covered fee-gross 1.0007
+                _btc_summary(14, rpl=0.0, upl=0.0),
+                _btc_option_trade(13, change=1.0, commission=0.0007),  # covered → −0.0007
+                _btc_option_trade(9, change=0.3),        # pre-rollout → cash 0.3
+            ]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+    _patch_jul_index(monkeypatch)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 1.3, "session_upl": 0.0}],
+        index_price={"BTC": 60000.0},
+    )
+    ledger, report = await di.build_deribit_native_ledger(ex)
+
+    # Σ native pnl BTC == Σchange over cash-bearing rows (both eras): the covered
+    # day (−0.0007) + pre-rollout day (+0.3) + summary (+1.0007) = 1.3; Σchange
+    # over the two option trades = 1.0 + 0.3 = 1.3. Era-invariant total.
+    total_native = float(ledger.native_pnl["BTC"].sum())
+    assert total_native == pytest.approx(1.3, abs=1e-9)
+    # The pre-rollout day is FLAGGED (cash-basis), the covered day is not.
+    assert report.pre_coverage_option_days == [("BTC", "2025-07-09")]
