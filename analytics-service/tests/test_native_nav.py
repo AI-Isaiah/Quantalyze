@@ -827,3 +827,109 @@ def test_inception_full_history_false_skips_gate() -> None:
         breach, indexable_currencies=frozenset({"BTC"})
     )
     assert returns.name == "returns"  # valuation proceeded, no gate refusal
+
+
+def test_value_carrying_unrolled_bucket_refuses_not_silent() -> None:
+    """HIGH-3: a bucket with nonzero terminal equity (or a terminal-uPnL wedge) but
+    ZERO ledger events (no pnl days, no flow days) does NOT roll — it is dropped
+    from ``rolled`` and is therefore invisible to the inception gate. For a
+    ``full_history=True`` ledger that is an inception failure (a held balance with
+    no explaining ledger), and the pre-fix code silently understates NAV by omitting
+    it (or, when it is the only bucket, returns an EMPTY Series) with no refusal.
+    It must fail loud, mirroring the F-1 build-time refuse.
+
+    Neuter: reverting the un-rolled-value refuse makes ``reconstruct`` return an
+    empty Series (BTC alone) instead of raising → this ``pytest.raises`` reddens."""
+    # BTC holds 5.0 of real terminal equity, has a mark (so the F-1 build-time
+    # missing_daily_marks refuse does NOT pre-empt), but NO pnl/flow days at all.
+    ledger = NativeLedger(
+        native_pnl={},  # no BTC pnl days
+        terminal_native_equity={"BTC": 5.0},
+        marks={"BTC": _s([("2026-01-01", 40000.0)])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    with pytest.raises(InceptionReconciliationError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+    assert exc.value.currencies == ["BTC"]
+    assert exc.value.venue == "deribit"
+
+
+def test_value_carrying_unrolled_wedge_bucket_refuses() -> None:
+    """HIGH-3 (wedge arm): the same refusal fires on a nonzero terminal-uPnL wedge
+    with no ledger events (zero terminal equity, all value in the open wedge). The
+    held wedge has no explaining ledger for a full_history account → refuse."""
+    ledger = NativeLedger(
+        native_pnl={},
+        terminal_native_equity={},
+        marks={"BTC": _s([("2026-01-01", 40000.0)])},
+        native_flows=[],
+        terminal_upnl_native={"BTC": 2.0},
+        full_history=True,
+    )
+    with pytest.raises(InceptionReconciliationError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+    assert exc.value.currencies == ["BTC"]
+
+
+def test_value_carrying_unrolled_bucket_omitted_from_nav_refuses() -> None:
+    """HIGH-3 (mixed): an event-less value-carrying bucket alongside a healthy
+    rolled bucket is silently OMITTED from NAV pre-fix (a real understatement, not
+    an empty Series). The refuse must fire even when other buckets roll — a clean
+    USDC book cannot mask BTC's unexplained held balance."""
+    ledger = NativeLedger(
+        native_pnl={"USDC": _s([("2026-01-01", 10.0)])},  # rolls; resid 0
+        terminal_native_equity={"USDC": 10.0, "BTC": 5.0},  # BTC has NO pnl/flow
+        marks={"BTC": _s([("2026-01-01", 40000.0)])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    with pytest.raises(InceptionReconciliationError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+    assert exc.value.currencies == ["BTC"]
+
+
+def test_value_carrying_unrolled_bucket_full_history_false_skips() -> None:
+    """HIGH-3 gating (§5.3): the SAME event-less value-carrying bucket with
+    full_history=False does NOT raise — a truncated ledger legitimately holds
+    pre-window balances it cannot explain, mirroring the inception gate's own
+    full_history skip. Neuter (un-gating the refuse) would redden this."""
+    ledger = NativeLedger(
+        native_pnl={},
+        terminal_native_equity={"BTC": 5.0},
+        marks={"BTC": _s([("2026-01-01", 40000.0)])},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=False,
+    )
+    returns, _ = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+    )
+    assert returns.name == "returns"  # no refusal for a truncated ledger
+
+
+def test_genuinely_zero_unrolled_bucket_stays_skipped() -> None:
+    """HIGH-3 value-gate: a genuinely ZERO event-less bucket (no equity, no wedge,
+    no pnl/flow) stays silently skipped — the refuse is value-gated, never fires on
+    a dust-free zero holding. A lone zero BTC bucket yields an empty Series, exactly
+    as before the fix."""
+    ledger = NativeLedger(
+        native_pnl={},
+        terminal_native_equity={"BTC": 0.0},
+        marks={},
+        native_flows=[],
+        terminal_upnl_native={"BTC": 0.0},
+        full_history=True,
+    )
+    returns, _ = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+    )
+    assert returns.empty  # zero-everywhere bucket adds nothing, no refusal

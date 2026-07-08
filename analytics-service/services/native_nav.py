@@ -583,7 +583,31 @@ def reconstruct_native_nav_and_twr(
     buckets = _build_buckets(ledger, indexable_currencies, venue)
 
     # Step 2 — per-bucket native backward roll (verbatim reconstruct_nav reuse).
-    rolled = [b for b in buckets if _roll_bucket(b)]
+    rolled: list[_Bucket] = []
+    unrolled: list[_Bucket] = []
+    for b in buckets:
+        (rolled if _roll_bucket(b) else unrolled).append(b)
+
+    # HIGH-3: a bucket that did NOT roll (no pnl days, no flow days) but carries
+    # nonzero terminal equity or a terminal-uPnL wedge is a held balance with no
+    # explaining ledger. Such a bucket is dropped from `rolled` and is therefore
+    # invisible to the §5 inception gate below — pre-fix it silently understated
+    # NAV (or returned an empty Series when it was the only bucket) with no refusal.
+    # For a full_history ledger that IS an inception failure, so refuse LOUD,
+    # mirroring the F-1 build-time refuse. The check is VALUE-GATED (a genuinely
+    # zero un-rolled bucket stays skipped) and gated on `full_history` to match the
+    # inception gate's own §5.3 skip — a truncated (retention-capped) ledger
+    # legitimately holds pre-window balances its ledger cannot explain.
+    if ledger.full_history:
+        orphans = [
+            b.code for b in unrolled
+            if b.terminal_native != 0.0 or b.upnl_native != 0.0
+        ]
+        if orphans:
+            raise InceptionReconciliationError(
+                currencies=orphans, venue=venue, breach_ratio=float("inf"),
+            )
+
     if not rolled:
         return pd.Series(dtype=float, name="returns"), _build_nav_meta({})
 
