@@ -34,8 +34,6 @@ from services.deribit_txn import (
     _LINEAR_CURRENCIES,
     _NATIVE_CASH_BEARING_TYPES,
     _NATIVE_OPTIONS_SUMMARY_TYPES,
-    _option_activity_after_coverage,
-    _pre_coverage_option_days,
     _row_is_linear,
     _summary_coverage_windows,
     assert_balance_identity,
@@ -1627,43 +1625,52 @@ def _option_trade(
     }
 
 
-def test_option_trade_premium_excluded_fee_kept_inside_coverage() -> None:
-    """The 2025-07-13 regression shape: option trade rows INSIDE coverage with a
-    large net premium `change` contribute ONLY `−commission` — the premium cash
-    is carried by the summary channel, never counted as P&L.
+def test_option_trade_full_change_restored() -> None:
+    """Phase 83: the 2025-07-13 fixture now contributes its FULL cash `change`
+    (+2.736) on its day — the Phase-82 coverage-gated −commission reclass is
+    REMOVED. The REDISTRIBUTION happens in the merged ΔMTM channel (asserted at
+    Task 5/8); this pins that the cash channel alone is Σchange-exact again.
 
-    Mutation-honest: the pre-fix formula sums `change=+2.736` as native pnl (the
-    +65% spike); this asserts the day is `−0.0007`, so reverting to `change`
-    reddens it hard."""
+    Mutation-honest: reverting to the −commission arm would turn +2.736 into
+    −0.0007 and redden."""
     rows = [
         _summary_row(_SUM_LO, rpl=0.0, upl=0.0, rid=1),
         _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=2),
         _option_trade(_COVERED_DAY, change=2.736, commission=0.0007, rid=1),
     ]
     native = txn_rows_to_native_daily(rows)
-    assert native["BTC"] == {"2025-07-13": pytest.approx(-0.0007, abs=1e-12)}
+    assert native["BTC"] == {"2025-07-13": pytest.approx(2.736, abs=1e-9)}
 
 
-def test_option_rows_outside_coverage_keep_change() -> None:
-    """Option rows BEFORE `first_summary − 24h` (pre-rollout) keep full `change`;
-    and a currency with NO summaries keeps `change` on EVERY option row."""
-    # (a) pre-rollout: 2 days before the −24h lower edge.
-    pre = [
+def test_option_rows_keep_full_change_everywhere() -> None:
+    """Phase 83: option rows keep full `change` regardless of coverage — inside a
+    window, pre-rollout, or a currency with no summaries at all (the −commission
+    reclass is gone; the summary no longer carries premium cash)."""
+    # (a) inside coverage: full change, NOT −commission.
+    inside = [
         _summary_row(_SUM_LO, rid=3),
         _summary_row(_SUM_HI, rid=4),
-        _option_trade("2025-07-09T10:00:00+00:00", change=2.736, rid=2),
+        _option_trade(_COVERED_DAY, change=2.736, commission=0.0007, rid=2),
     ]
-    native = txn_rows_to_native_daily(pre)
-    assert native["BTC"] == {"2025-07-09": pytest.approx(2.736, abs=1e-9)}
+    assert txn_rows_to_native_daily(inside)["BTC"] == {
+        "2025-07-13": pytest.approx(2.736, abs=1e-9)
+    }
+    # (b) pre-rollout: full change.
+    pre = [_option_trade("2025-07-09T10:00:00+00:00", change=2.736, rid=3)]
+    assert txn_rows_to_native_daily(pre)["BTC"] == {
+        "2025-07-09": pytest.approx(2.736, abs=1e-9)
+    }
+    # (c) no summaries for the currency: full change.
+    no_win = [_option_trade(_COVERED_DAY, change=2.736, ccy="ETH", rid=4)]
+    assert txn_rows_to_native_daily(no_win)["ETH"] == {
+        "2025-07-13": pytest.approx(2.736, abs=1e-9)
+    }
 
-    # (b) no summaries for the currency at all → every option row cash-basis.
-    no_win = [_option_trade(_COVERED_DAY, change=2.736, ccy="ETH", rid=3)]
-    native2 = txn_rows_to_native_daily(no_win)
-    assert native2["ETH"] == {"2025-07-13": pytest.approx(2.736, abs=1e-9)}
 
-
-def test_coverage_window_bounds() -> None:
-    """The −24h lower edge and the last-summary upper edge are both correct."""
+def test_summary_coverage_window_bounds() -> None:
+    """The −24h lower edge and the last-summary upper edge of
+    ``_summary_coverage_windows`` (KEPT, repurposed for the channel-3 summary
+    cross-check) are both correct."""
     windows = _summary_coverage_windows(
         [_summary_row(_SUM_LO, rid=5), _summary_row(_SUM_HI, rid=6)]
     )
@@ -1671,168 +1678,25 @@ def test_coverage_window_bounds() -> None:
     assert start == pytest.approx(_ms(_SUM_LO) - 24 * 3600 * 1000, abs=1)
     assert end == pytest.approx(_ms(_SUM_HI), abs=1)
 
-    # Option trade 23h before the first summary is INSIDE (−24h edge covers it).
-    inside_edge = [
-        _summary_row(_SUM_LO, rid=7),
-        _summary_row(_SUM_HI, rid=8),
-        _option_trade("2025-07-11T09:00:00+00:00", change=1.0, commission=0.002, rid=4),
-    ]
-    n1 = txn_rows_to_native_daily(inside_edge)
-    assert n1["BTC"] == {"2025-07-11": pytest.approx(-0.002, abs=1e-12)}
 
-    # Option trade AFTER the last summary is OUTSIDE → trailing-edge cash basis.
-    after_edge = [
-        _summary_row(_SUM_LO, rid=9),
-        _summary_row(_SUM_HI, rid=10),
-        _option_trade("2025-07-15T09:00:00+00:00", change=1.0, commission=0.002, rid=5),
-    ]
-    n2 = txn_rows_to_native_daily(after_edge)
-    assert n2["BTC"] == {"2025-07-15": pytest.approx(1.0, abs=1e-9)}
+def test_summary_contributes_nothing() -> None:
+    """Phase 83: an options_settlement_summary row (change=0.0, realized_pl=0.03,
+    unrealized_pl=-0.01) creates NO native_daily entry — the P&L is redistributed
+    via the daily-MTM channel, not attributed to the settlement day.
 
-
-def test_options_settlement_summary_enters_native_pnl() -> None:
-    """A summary row (change=0.0, realized_pl=0.03, unrealized_pl=-0.01) adds
-    +0.02 to that (day, ccy) — the NEW native-path classification of a type the
-    pre-fix code left unclassified (would ignore its zero change)."""
+    Fails pre-fix: the Phase-82 code created a +0.02 entry on 2025-07-12."""
     rows = [_summary_row(_SUM_LO, rpl=0.03, upl=-0.01, rid=11)]
     native = txn_rows_to_native_daily(rows)
-    assert native["BTC"] == {"2025-07-12": pytest.approx(0.02, abs=1e-12)}
+    assert native == {}
 
 
-def test_summary_unrealized_pl_is_load_bearing() -> None:
-    """unrealized_pl is a session DELTA and is summed WITH realized_pl. Dropping
-    it breaks the balance-identity closure on a covered fixture.
-
-    Encodes WHY it is summed: a closure fixture where Σ_inside(change+commission)
-    == Σ(rpl+upl); zeroing upl in the computed total opens a residual the guard
-    catches."""
-    # One covered option trade: change=+1.0, commission=0.01 → fee-gross 1.01.
-    # Summary carries rpl=0.6 + upl=0.41 = 1.01 → closes.
-    rows = [
-        _summary_row(_SUM_LO, rpl=0.6, upl=0.41, rid=12),
-        _summary_row(_SUM_HI, rid=13),
-        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=6),
-    ]
-    native = txn_rows_to_native_daily(rows)
-    # Green: full closure passes.
-    assert_balance_identity(rows, native)
-    # Mutation: drop unrealized_pl from the summed total → residual 0.41 > tol.
-    broken = {
-        c: dict(days) for c, days in native.items()
-    }
-    broken["BTC"]["2025-07-12"] = 0.6  # rpl only (upl dropped)
-    with pytest.raises(LedgerValuationError):
-        assert_balance_identity(rows, broken)
-
-
-@pytest.mark.parametrize(
-    "field,bad",
-    [
-        ("realized_pl", None),
-        ("realized_pl", ""),
-        ("realized_pl", "x"),
-        ("unrealized_pl", None),
-        ("unrealized_pl", ""),
-        ("unrealized_pl", "x"),
-    ],
-)
-def test_summary_missing_realized_or_unrealized_fails_loud(
-    field: str, bad: object
-) -> None:
-    """A summary row with an absent/null/non-numeric realized_pl OR unrealized_pl
-    fails loud — both are REQUIRED (probe-verified present on all rows)."""
-    row = _summary_row(_SUM_LO, rpl=0.03, upl=-0.01, rid=14)
-    if bad is None and field in row:
-        del row[field]  # absent variant
-    else:
-        row[field] = bad
-    with pytest.raises(LedgerValuationError):
-        txn_rows_to_native_daily([row])
-
-
-def test_summary_nonzero_change_fails_loud() -> None:
+def test_summary_nonzero_change_still_fails_loud() -> None:
     """A summary row's `change` is ALWAYS 0.0; a nonzero change is semantics
     drift → fail loud (never silently sum a nonzero recap change)."""
     row = _summary_row(_SUM_LO, rpl=0.03, upl=-0.01, rid=15)
     row["change"] = 0.5
     with pytest.raises(LedgerValuationError):
         txn_rows_to_native_daily([row])
-
-
-def test_option_trade_missing_commission_fails_loud() -> None:
-    """Inside coverage an option trade contributes `−commission`; an
-    absent/null/non-numeric commission fails loud. OUTSIDE coverage the row is
-    cash-basis and commission is NOT consulted (no raise)."""
-    inside_bad = [
-        _summary_row(_SUM_LO, rid=16),
-        _summary_row(_SUM_HI, rid=17),
-        {
-            "type": "trade",
-            "instrument_name": "BTC-14JUL25-60000-C",
-            "currency": "BTC",
-            "change": 2.736,
-            "timestamp": _ms(_COVERED_DAY),
-            "id": 8219001,
-        },
-    ]
-    with pytest.raises(LedgerValuationError):
-        txn_rows_to_native_daily(inside_bad)
-
-    # Outside coverage: same missing-commission option row is cash-basis, no raise.
-    outside_ok = [
-        _summary_row(_SUM_LO, rid=18),
-        _summary_row(_SUM_HI, rid=19),
-        {
-            "type": "trade",
-            "instrument_name": "BTC-14JUL25-60000-C",
-            "currency": "BTC",
-            "change": 2.736,
-            "timestamp": _ms("2025-07-09T10:00:00+00:00"),
-            "id": 8219002,
-        },
-    ]
-    native = txn_rows_to_native_daily(outside_ok)
-    assert native["BTC"] == {"2025-07-09": pytest.approx(2.736, abs=1e-9)}
-
-
-def test_option_delivery_fee_only_inside_coverage() -> None:
-    """Option `delivery` INSIDE coverage contributes fee only (`−commission`) —
-    the payout cash is carried by the summary's realized_pl. OUTSIDE coverage it
-    keeps `change`.
-
-    Mutation-honest: including the full `change` (the pre-fix behavior) turns the
-    asserted `−0.003` into `+1.5` and reddens."""
-    inside = [
-        _summary_row(_SUM_LO, rid=20),
-        _summary_row(_SUM_HI, rid=21),
-        {
-            "type": "delivery",
-            "instrument_name": "BTC-14JUL25-60000-C",
-            "currency": "BTC",
-            "change": 1.5,
-            "commission": 0.003,
-            "timestamp": _ms(_COVERED_DAY),
-            "id": 8219100,
-        },
-    ]
-    native = txn_rows_to_native_daily(inside)
-    assert native["BTC"] == {"2025-07-13": pytest.approx(-0.003, abs=1e-12)}
-
-    outside = [
-        _summary_row(_SUM_LO, rid=22),
-        _summary_row(_SUM_HI, rid=23),
-        {
-            "type": "delivery",
-            "instrument_name": "BTC-14JUL25-60000-C",
-            "currency": "BTC",
-            "change": 1.5,
-            "commission": 0.003,
-            "timestamp": _ms("2025-07-09T10:00:00+00:00"),
-            "id": 8219101,
-        },
-    ]
-    n2 = txn_rows_to_native_daily(outside)
-    assert n2["BTC"] == {"2025-07-09": pytest.approx(1.5, abs=1e-9)}
 
 
 def test_delivery_unknown_instrument_nonzero_change_fails_loud() -> None:
@@ -1854,70 +1718,34 @@ def test_delivery_unknown_instrument_nonzero_change_fails_loud() -> None:
     assert txn_rows_to_native_daily([dict(bad, change=0.0)]) == {}
 
 
-def test_balance_identity_guard_raises_on_missing_midwindow_summary() -> None:
-    """The ONE residual money hole: a mid-window session with option premium cash
-    but NO summary carrying it → the option `−commission` drops the premium with
-    nothing replacing it → computed total ≠ Σchange beyond tolerance → raise.
+def test_pre_rollout_straddle_now_reconciles() -> None:
+    """F2 INVERTED — the flagship Phase-83 regression. A straddle held OPEN across
+    the coverage-window START (opened >24h before the first summary, across the
+    ~2025-01-12 rollout) USED to leave an unreconciled residual = V₀ (the strict
+    guard fired, permanent FAILED). Phase 83 removes that: option rows contribute
+    their FULL `change` (Σchange-exact cash channel) and the pre-rollout book value
+    V₀ is CARRIED by the daily marks in the SEPARATE ΔMTM channel — so the strict
+    cash channel closes and `assert_balance_identity` no longer raises.
 
-    Companion green case: an equivalent fixture WITH the carrying summary closes.
-    """
-    # BROKEN: covered option trade change=+1.0 fee 0.01 → contributes −0.01;
-    # Σchange over cash-bearing = +1.0; NO summary carries the 1.01 → residual ~1.01.
-    broken_rows = [
-        _summary_row(_SUM_LO, rpl=0.0, upl=0.0, rid=24),
-        _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=25),
-        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=7),
-    ]
-    native_broken = txn_rows_to_native_daily(broken_rows)
-    with pytest.raises(LedgerValuationError):
-        assert_balance_identity(broken_rows, native_broken)
-
-    # GREEN: the summary carries rpl+upl = change+commission = 1.01 → closes.
-    ok_rows = [
-        _summary_row(_SUM_LO, rpl=0.6, upl=0.41, rid=26),
-        _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=27),
-        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=8),
-    ]
-    native_ok = txn_rows_to_native_daily(ok_rows)
-    assert_balance_identity(ok_rows, native_ok)  # no raise
-
-
-def test_pre_rollout_straddle_fails_loud_intentional() -> None:
-    """F2 (pin the INTENTIONAL fail-loud): an option book held OPEN across the
-    coverage-window START — a position opened >24h before the first
-    `options_settlement_summary`, i.e. across Deribit's ~2025-01-12 summary
-    rollout — telescopes `Σ summary unrealized_pl` from a NONZERO
-    book-MTM-at-window-start V₀ (not 0). The pre-rollout open premium is counted
-    verbatim OUTSIDE coverage while the covered sessions' unrealized delta only
-    sees V_N − V₀ → the balance identity leaves an unreconciled residual = V₀.
-
-    This is CORRECT doctrine (fail loud until V₀-at-window-start handling is
-    built — a §6 follow-up validated on live keys #2/#3 which carry pre-2025
-    option history). This test PINS the raise as INTENTIONAL so a future change
-    that silently ships a V₀-contaminated reconstruction reddens here.
-
-    Flat-at-crawl (position closed inside coverage) → the STRICT
-    `assert_balance_identity` fires (this test). The open-at-crawl sibling is
-    exempted from the strict guard but its §5 `_assert_inception_reconciled`
-    residual = V₀ fires identically (same permanent-FAILED disposition)."""
-    # V₀ = 0.5: the straddle is worth 0.5 BTC at window start (opened pre-rollout).
-    # Pre-rollout open (2025-07-09, before _SUM_LO−24h = 2025-07-11T08:00) →
-    # change kept VERBATIM outside coverage; close inside coverage settles it.
+    Fails without the whole phase (the Phase-82 −commission reclass left the cash
+    channel short by V₀)."""
     straddle_rows = [
         _option_trade(
             "2025-07-09T10:00:00+00:00", change=-1.0, commission=0.0, rid=40
-        ),  # pre-rollout open premium (outside coverage → native −1.0 verbatim)
-        _summary_row(_SUM_LO, rpl=2.5, upl=-0.5, rid=40),  # upl telescopes V_N−V₀=−0.5
+        ),  # pre-rollout open premium — full change −1.0 (Phase 83)
+        _summary_row(_SUM_LO, rpl=2.5, upl=-0.5, rid=40),  # inert on the native path
         _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=41),
         _option_trade(
             _COVERED_DAY, change=2.5, commission=0.0, rid=41
-        ),  # close inside coverage (−commission only; change +2.5 into Σchange)
+        ),  # close inside coverage — full change +2.5 (Phase 83)
     ]
-    # Σnative = −1.0 (pre open) + (2.5−0.5) (summary) + 0.0 (inside close) = 1.0;
-    # Σchange = −1.0 + 2.5 = 1.5; residual = 0.5 = V₀ ≫ tol (1e-4·throughput).
+    # Σnative(cash) = −1.0 + 2.5 = 1.5 == Σchange = 1.5 → strict cash channel closes.
     native = txn_rows_to_native_daily(straddle_rows)
-    with pytest.raises(LedgerValuationError):
-        assert_balance_identity(straddle_rows, native)
+    assert native["BTC"] == {
+        "2025-07-09": pytest.approx(-1.0, abs=1e-12),
+        "2025-07-13": pytest.approx(2.5, abs=1e-12),
+    }
+    assert_balance_identity(straddle_rows, native)  # no raise (was permanent FAILED)
 
 
 def test_balance_identity_reference_set_includes_swap() -> None:
@@ -1941,34 +1769,6 @@ def test_balance_identity_reference_set_includes_swap() -> None:
     # (incl swap) = -0.95 → closes. (The USD-set reference would be +0.05 → resid
     # 1.0 → raise, which this asserting-no-raise catches as the wrong set.)
     assert_balance_identity(rows, native)
-
-
-def test_pre_coverage_option_days_helper() -> None:
-    """Returns exactly the (ccy, day) buckets with option rows OUTSIDE coverage;
-    empty for fully-covered and perp-only fixtures."""
-    # Pre-rollout option day + a covered option day.
-    rows = [
-        _summary_row(_SUM_LO, rid=28),
-        _summary_row(_SUM_HI, rid=29),
-        _option_trade("2025-07-09T10:00:00+00:00", change=2.0, rid=9),  # outside
-        _option_trade(_COVERED_DAY, change=1.0, rid=10),  # inside
-    ]
-    assert _pre_coverage_option_days(rows) == [("BTC", "2025-07-09")]
-
-    # Fully covered: only covered option rows → empty.
-    covered = [
-        _summary_row(_SUM_LO, rid=30),
-        _summary_row(_SUM_HI, rid=31),
-        _option_trade(_COVERED_DAY, change=1.0, rid=11),
-    ]
-    assert _pre_coverage_option_days(covered) == []
-
-    # Perp-only: no option rows at all → empty.
-    perp = [
-        {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
-         "change": -0.01, "index_price": 60000.0, "timestamp": _ms(_DAY_A), "id": 8219400},
-    ]
-    assert _pre_coverage_option_days(perp) == []
 
 
 def test_future_delivery_change_unchanged() -> None:
@@ -2013,8 +1813,10 @@ def test_spot_conversion_both_legs_unchanged() -> None:
 
 def test_perp_only_ledger_byte_identical() -> None:
     """SC-4 unit pin: a perp/future/settlement/liquidation/nbf/swap/flow ledger
-    (ZERO option rows) produces the EXACT dict the pre-fix formula did — the
-    coverage pre-pass finds no windows and `_pre_coverage_option_days` is empty.
+    (ZERO option rows) produces the EXACT dict the pre-fix formula did — no option
+    rows → no replay → no marks → no ΔMTM merge (no-op), and no summaries → the
+    option arms it lost were option-classification-gated, so a perp-only ledger is
+    byte-untouched.
 
     Golden literals = Σ change (the OLD formula), bit-equal.
     """
@@ -2047,120 +1849,108 @@ def test_perp_only_ledger_byte_identical() -> None:
             "2026-01-17": pytest.approx(-0.5, abs=1e-12),
         }
     }
-    # Coverage pre-pass: no summaries → no windows; no pre-coverage option days.
+    # No summaries → no coverage windows; no option rows → empty replay.
     assert _summary_coverage_windows(rows) == {}
-    assert _pre_coverage_option_days(rows) == []
+    assert replay_option_positions(rows) == {}
     # Guard closes trivially (contributions ARE the changes).
     assert_balance_identity(rows, native)
 
 
-def test_option_activity_after_coverage_detects_trailing_option_rows() -> None:
-    """CR-01: `_option_activity_after_coverage` returns exactly the currencies that
-    HAVE a coverage window AND carry an option trade/delivery AFTER window_end —
-    the trailing-edge open-book signal (the option book closed intra-session after
-    the last summary, so `options_value==0` NOW yet the strict guard would still
-    false-fire)."""
-    # BTC: an option delivery AFTER the last summary (2025-07-14T08:00) → trailing.
-    trailing = [
-        _summary_row(_SUM_LO, rid=40),
-        _summary_row(_SUM_HI, rid=41),
-        {"type": "delivery", "instrument_name": "BTC-14JUL25-60000-C",
-         "currency": "BTC", "change": 1.5, "commission": 0.003,
-         "timestamp": _ms("2025-07-15T09:00:00+00:00"), "id": 8219900},
-    ]
-    assert _option_activity_after_coverage(trailing) == frozenset({"BTC"})
-
-    # A covered-only option account (all option rows inside the window) → empty.
-    covered = [
-        _summary_row(_SUM_LO, rid=42),
-        _summary_row(_SUM_HI, rid=43),
-        _option_trade(_COVERED_DAY, change=1.0, rid=20),
-    ]
-    assert _option_activity_after_coverage(covered) == frozenset()
-
-    # A PERP trade after the window is NOT option activity → empty (classification
-    # gated: only option trade/delivery rows count).
-    perp_after = [
-        _summary_row(_SUM_LO, rid=44),
-        _summary_row(_SUM_HI, rid=45),
-        {"type": "trade", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
-         "change": -0.002, "timestamp": _ms("2025-07-15T09:00:00+00:00"),
-         "id": 8219901},
-    ]
-    assert _option_activity_after_coverage(perp_after) == frozenset()
-
-    # A currency with NO summary window (pre-rollout only) is NOT "after coverage"
-    # (it has no window at all — that is the _pre_coverage_option_days path).
-    no_window = [_option_trade(_COVERED_DAY, change=2.0, ccy="ETH", rid=21)]
-    assert _option_activity_after_coverage(no_window) == frozenset()
+# ===========================================================================
+# Phase 83 — assert_balance_identity rework (Task 6): strict cash channel (no
+# exemption), book anchor cross-check, summary cross-check.
+# ===========================================================================
 
 
-def test_balance_identity_exempts_open_option_currency() -> None:
-    """CR-01: the STRICT balance-identity guard closes ONLY for a flat-at-settlement
-    book (Σunrealized_pl telescopes to a terminal open-MTM of 0 iff flat). An OPEN
-    book leaves a residual = terminal open MTM → the strict guard would raise. A
-    currency in `open_option_ccys` is EXEMPTED (§5 `_assert_inception_reconciled`
-    is the authoritative reconciliation on the open book)."""
-    # Open book: summary carries an extra +0.09 unrealized still open at crawl →
-    # computed (1.09) diverges from Σchange over cash-bearing (1.0) by 0.09.
+def test_cash_identity_strict_on_open_book() -> None:
+    """The CR-01 exemption is REMOVED: an open-book fixture that Phase 82 EXEMPTED
+    now PASSES the strict cash channel — because option rows contribute FULL
+    `change` (Σchange-exact) and the summary is inert. The open book's value lives
+    in the SEPARATE ΔMTM/book channel, so the cash channel closes for open books.
+
+    This proves the exemption could only be removed TOGETHER with Task 4 (full
+    change restored): with the Phase-82 −commission reclass the cash channel would
+    be short and this would false-fire."""
     rows = [
-        _summary_row(_SUM_LO, rpl=0.6, upl=0.5, rid=46),  # 1.1, incl open unreal.
+        _summary_row(_SUM_LO, rpl=0.6, upl=0.5, rid=46),  # inert (open unrealized)
         _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=47),
-        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=22),  # −0.01
+        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=22),
     ]
     native = txn_rows_to_native_daily(rows)
-    # Without exemption the open-book residual breaches (this is the FLAT-only
-    # closure limitation the fix targets).
-    with pytest.raises(LedgerValuationError):
-        assert_balance_identity(rows, native)
-    # Exempting BTC skips the residual compare → no raise (§5 guards it).
-    assert_balance_identity(rows, native, open_option_ccys=frozenset({"BTC"}))
+    assert native["BTC"] == {"2025-07-13": pytest.approx(1.0, abs=1e-12)}
+    # No exemption param exists any more; the strict cash channel closes.
+    assert_balance_identity(rows, native)
 
 
-def test_balance_identity_default_frozenset_is_byte_identical() -> None:
-    """CR-01 byte-identity: the default `open_option_ccys=frozenset()` exempts
-    NOTHING — a flat covered fixture still closes and a real mid-window hole still
-    raises, exactly as before the kwarg existed."""
-    # Flat covered closure (rpl+upl == change+commission) → closes with the default.
-    flat = [
-        _summary_row(_SUM_LO, rpl=0.6, upl=0.41, rid=48),  # 1.01
-        _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=49),
-        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=23),
+def test_dropped_cash_row_fails_loud() -> None:
+    """Channel-1 mutation-honesty: deleting one option trade row from native_daily
+    (a dropped cash row) breaches the strict cash channel → raise."""
+    rows = [
+        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=60),
+        _option_trade("2025-07-14T10:00:00+00:00", change=2.0, commission=0.01, rid=61),
     ]
-    native_flat = txn_rows_to_native_daily(flat)
-    assert_balance_identity(flat, native_flat)  # default path (no exemption)
-    # A real hole still raises under the default (exemption not requested).
-    broken = [
-        _summary_row(_SUM_LO, rpl=0.0, upl=0.0, rid=50),
-        _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=51),
-        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=24),
+    native = txn_rows_to_native_daily(rows)
+    assert_balance_identity(rows, native)  # intact → closes
+    broken = {c: dict(days) for c, days in native.items()}
+    del broken["BTC"]["2025-07-14"]  # drop the +2.0 cash row's day
+    with pytest.raises(LedgerValuationError):
+        assert_balance_identity(rows, broken)
+
+
+def test_book_channel_reconciles_anchor() -> None:
+    """Channel 2: the computed terminal_book reconciles against the anchor's
+    settled book (options_value − options_session_upl). A matching anchor closes;
+    a perturbed anchor options_value raises."""
+    rows = [_option_trade(_COVERED_DAY, change=1.0, commission=0.0, rid=62)]
+    native = txn_rows_to_native_daily(rows)
+    terminal_book = {"BTC": 0.42}
+    # Anchor: options_value 0.42, session_upl 0.0 → settled book 0.42 == computed.
+    assert_balance_identity(
+        rows, native,
+        terminal_book=terminal_book,
+        anchor_settled_book={"BTC": 0.42},
+    )
+    # Perturb the anchor materially → breach.
+    with pytest.raises(LedgerValuationError):
+        assert_balance_identity(
+            rows, native,
+            terminal_book=terminal_book,
+            anchor_settled_book={"BTC": 0.60},
+        )
+
+
+def test_summary_cross_check_breach_fails_loud() -> None:
+    """Channel 3: a covered-era summary whose Σ(rpl+upl) diverges MATERIALLY from
+    the Σ(option change+commission) + ΔBook(window) reconstruction raises (the
+    summaries stop driving attribution but keep policing it)."""
+    # One covered option trade change=+1.0, commission=0.01. No ΔMTM (flat book).
+    rows = [
+        _summary_row(_SUM_LO, rpl=5.0, upl=0.0, rid=70),  # 5.0 ≫ option cash 1.01
+        _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=71),
+        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=72),
     ]
-    native_broken = txn_rows_to_native_daily(broken)
+    native = txn_rows_to_native_daily(rows)
+    # No delta_mtm threaded → channel 3 skipped → closes.
+    assert_balance_identity(rows, native)
+    # Thread an empty delta_mtm (flat book) → channel 3 runs and the 5.0 summary
+    # diverges from the ~1.01 reconstruction → breach.
     with pytest.raises(LedgerValuationError):
-        assert_balance_identity(broken, native_broken)
+        assert_balance_identity(rows, native, delta_mtm={})
 
 
-def test_summary_blank_currency_fails_loud() -> None:
-    """WR-03: an options_settlement_summary row carrying rpl+upl but a blank/missing
-    currency would mis-bucket the P&L into a "" bucket. Fail loud (schema-drift
-    discipline, consistent with _required_summary_field), never silently attribute
-    option P&L to a blank currency."""
-    blank = {
-        "type": "options_settlement_summary",
-        "instrument_name": "BTC-14JUL25-60000-C",
-        "currency": "",
-        "change": 0.0,
-        "realized_pl": 0.03,
-        "unrealized_pl": -0.01,
-        "timestamp": _ms(_SUM_LO),
-        "id": 8299001,
-    }
-    with pytest.raises(LedgerValuationError):
-        txn_rows_to_native_daily([blank])
-    # Missing currency key entirely → same fail-loud.
-    missing = {k: v for k, v in blank.items() if k != "currency"}
-    with pytest.raises(LedgerValuationError):
-        txn_rows_to_native_daily([missing])
+def test_summary_cross_check_closes_with_matching_book() -> None:
+    """Channel 3 closes when the summary matches option cash + the window's ΔBook
+    (the E3 closure generalized to the MTM series)."""
+    # Option trade change=+1.0 comm 0.01 (option cash 1.01); summary rpl+upl = 1.51;
+    # the extra 0.50 is carried by ΔBook over the window.
+    rows = [
+        _summary_row(_SUM_LO, rpl=1.0, upl=0.51, rid=73),
+        _summary_row(_SUM_HI, rpl=0.0, upl=0.0, rid=74),
+        _option_trade(_COVERED_DAY, change=1.0, commission=0.01, rid=75),
+    ]
+    native = txn_rows_to_native_daily(rows)
+    delta_mtm = {"BTC": {"2025-07-13": 0.50}}  # ΔBook inside [SUM_LO−24h, SUM_HI]
+    assert_balance_identity(rows, native, delta_mtm=delta_mtm)  # no raise
 
 
 # ===========================================================================

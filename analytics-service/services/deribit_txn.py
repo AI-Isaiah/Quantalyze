@@ -981,81 +981,6 @@ def _ts_in_coverage(instant: float, window: tuple[float, float] | None) -> bool:
     return start <= instant <= end
 
 
-def _pre_coverage_option_days(
-    rows: Sequence[Mapping[str, Any]],
-) -> list[tuple[str, str]]:
-    """Sorted-unique ``(currency, utc_day)`` buckets carrying option
-    ``trade``/``delivery`` rows that fall OUTSIDE their currency's coverage window
-    (pre-rollout or trailing-edge cash-fallback). This is the list the adapter
-    stamps as ``pre_summary_rollout_option_dailies`` → ``complete_with_warnings``
-    (Q6). Empty for fully-covered and perp-only fixtures.
-
-    Pure / never raises — an undatable row is skipped (the aggregator's verbatim
-    ``change`` guards are the fail-loud path; this helper is advisory metadata)."""
-    windows = _summary_coverage_windows(rows)
-    out: set[tuple[str, str]] = set()
-    for row in rows:
-        if not isinstance(row, Mapping):
-            continue
-        if str(row.get("type", "")) not in ("trade", "delivery"):
-            continue
-        if classify_instrument(str(row.get("instrument_name", ""))) != "option":
-            continue
-        try:
-            instant = _row_utc_instant(row.get("timestamp"))
-            day = _row_utc_day(row.get("timestamp"))
-        except (ValueError, TypeError, OverflowError):
-            continue
-        ccy = str(row.get("currency", "")).upper()
-        if not _ts_in_coverage(instant, windows.get(ccy)):
-            out.add((ccy, day))
-    return sorted(out)
-
-
-def _option_activity_after_coverage(
-    rows: Sequence[Mapping[str, Any]],
-) -> frozenset[str]:
-    """CR-01 — currencies that HAVE an options-settlement coverage window AND carry
-    an option ``trade``/``delivery`` row with ``instant > window_end`` (the
-    trailing-edge open-book signal).
-
-    An option position opened/closed AFTER the last summary landed leaves the book
-    non-flat across the covered span even when ``options_value == 0`` at the crawl
-    instant — so the STRICT balance-identity guard (which closes ONLY for a
-    flat-at-settlement book) would false-fire. This disjunct (unioned with the
-    ``native_options_value != 0`` currencies at the call site) exempts such a
-    currency from the strict guard; the §5 ``_assert_inception_reconciled`` gate
-    remains the authoritative reconciliation.
-
-    Reuses ``_summary_coverage_windows`` (the SAME per-currency windows the
-    aggregator uses) and the option row-filter of ``_pre_coverage_option_days``,
-    restricted to the trailing edge (``instant`` strictly past ``window_end``). A
-    currency with NO window is ABSENT (that is the pre-rollout ``change``-fallback
-    path, not an open book). Pure / never raises — an undatable row is skipped
-    (the guard is the money backstop). Perp-only / USD-native → ``frozenset()``
-    (SC-4 byte-inert)."""
-    windows = _summary_coverage_windows(rows)
-    out: set[str] = set()
-    for row in rows:
-        if not isinstance(row, Mapping):
-            continue
-        if str(row.get("type", "")) not in ("trade", "delivery"):
-            continue
-        if classify_instrument(str(row.get("instrument_name", ""))) != "option":
-            continue
-        ccy = str(row.get("currency", "")).upper()
-        window = windows.get(ccy)
-        if window is None:
-            continue  # no coverage window → pre-rollout path, not an open book
-        try:
-            instant = _row_utc_instant(row.get("timestamp"))
-        except (ValueError, TypeError, OverflowError):
-            continue
-        if instant > window[1]:  # strictly past the last summary → trailing edge
-            out.add(ccy)
-    return frozenset(out)
-
-
 # ===========================================================================
 # Phase 83 — daily option mark-to-market attribution (pure replay + ΔMTM).
 #
@@ -1274,61 +1199,129 @@ def option_mtm_daily(
     return delta_mtm, terminal_book
 
 
+def _summary_channel_cross_check(
+    rows: Sequence[Mapping[str, Any]],
+    delta_mtm: Mapping[str, Mapping[str, float]],
+    floor: Mapping[str, float],
+) -> None:
+    """Channel 3 (§2 Q3-3) — the summaries STOP driving attribution but keep
+    POLICING it. Over each currency's summary coverage window, the E3 closure
+    generalizes to a non-flat window end via the MTM series:
+
+        Σ_window (realized_pl + unrealized_pl)
+            == Σ_window (option change + commission) + [Book(end) − Book(start)]
+
+    where ``Book(end) − Book(start) = Σ_{start_day ≤ d ≤ end_day} ΔMTM[c][d]`` (the
+    pre-rollout straddle's ``V₀`` is now CARRIED by the daily marks, so the covered
+    window's ΔBook sees ``V_N − V₀`` — the same telescope the summaries do → the
+    straddle reconciles). A MATERIAL breach → ``LedgerValuationError`` naming
+    currency + magnitude class only (a dropped/mis-stated summary of size). The
+    tolerance absorbs the 08:00-bar-vs-midnight day-boundary skew (§6) via a
+    relative term on the summary throughput + the window's book move; a real
+    dropped summary exceeds it. Runs ONLY when the adapter threads ``delta_mtm``
+    (a standalone / pure caller passes nothing → this cross-check is skipped)."""
+    windows = _summary_coverage_windows(rows)
+    if not windows:
+        return
+    summary_total: dict[str, float] = {}
+    summary_throughput: dict[str, float] = {}
+    option_cash: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        rtype = str(row.get("type", ""))
+        ccy = str(row.get("currency", "")).upper()
+        window = windows.get(ccy)
+        if window is None:
+            continue
+        try:
+            instant = _row_utc_instant(row.get("timestamp"))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if not _ts_in_coverage(instant, window):
+            continue
+        if rtype in _NATIVE_OPTIONS_SUMMARY_TYPES:
+            contrib = _summary_contribution(row)  # requires rpl+upl, change==0
+            summary_total[ccy] = summary_total.get(ccy, 0.0) + contrib
+            summary_throughput[ccy] = summary_throughput.get(ccy, 0.0) + abs(contrib)
+        elif rtype in ("trade", "delivery"):
+            if classify_instrument(str(row.get("instrument_name", ""))) != "option":
+                continue
+            change = _coerce_float(
+                row.get("change", 0.0) or 0.0, field="change", row=row
+            )
+            option_cash[ccy] = option_cash.get(ccy, 0.0) + change + _option_commission(
+                row
+            )
+    for ccy, window in windows.items():
+        start_day = _row_utc_day(window[0])
+        end_day = _row_utc_day(window[1])
+        delta_book = sum(
+            v
+            for d, v in delta_mtm.get(ccy, {}).items()
+            if start_day <= d <= end_day
+        )
+        reconstructed = option_cash.get(ccy, 0.0) + delta_book
+        residual = abs(summary_total.get(ccy, 0.0) - reconstructed)
+        tol = max(
+            float(floor.get(ccy, 0.0)),
+            1e-2 * (summary_throughput.get(ccy, 0.0) + abs(delta_book)),
+        )
+        if residual > tol:
+            raise LedgerValuationError(
+                f"Deribit summary-channel cross-check breach for currency {ccy!r}: "
+                "Σ(realized_pl+unrealized_pl) over the coverage window diverges from "
+                "Σ(option change+commission) + ΔBook(window) by more than "
+                f"max($1-equiv, 1e-2·(Σ|summary|+|ΔBook|)) (residual/tolerance class "
+                f"{residual / tol if tol else float('inf'):.1f}x) — a summary was "
+                "likely dropped or mis-stated; STOP and investigate the summary "
+                "stream, never loosen (silent P&L misattribution risk)"
+            )
+
+
 def assert_balance_identity(
     rows: Sequence[Mapping[str, Any]],
     native_daily: Mapping[str, Mapping[str, float]],
     *,
     native_floor: Mapping[str, float] | None = None,
-    open_option_ccys: AbstractSet[str] = frozenset(),
+    terminal_book: Mapping[str, float] | None = None,
+    anchor_settled_book: Mapping[str, float] | None = None,
+    delta_mtm: Mapping[str, Mapping[str, float]] | None = None,
 ) -> None:
-    """MANDATORY fail-loud reconcile guard (§1). Per currency ``c``, the computed
-    total realized (Σ over ALL ``native_daily[c]`` day contributions) MUST equal
-    ``Σ change`` over that currency's ``_NATIVE_CASH_BEARING_TYPES`` rows, to
-    within ``max(floor_c, 1e-4 · throughput_c)`` where
-    ``throughput_c = Σ|change|`` over those rows. On breach →
-    ``LedgerValuationError`` (never ship).
+    """MANDATORY fail-loud reconcile guard (§2 Q3, Phase 83) — THREE channels.
 
-    The REFERENCE row-set is ``_NATIVE_CASH_BEARING_TYPES`` (= the USD
-    ``CASH_BEARING_TYPES`` PLUS the reclassed internal-rebalance ``swap``), NOT the
-    USD set — using the USD set (which omits ``swap``) would false-fire by
-    ``Σ(swap change)`` on any swap-bearing account.
+    ``native_daily`` MUST be the PRE-MERGE CASH-ONLY daily dict (M3): channel 1
+    reconciles it against Σchange, so a ΔMTM-merged dict would false-fire (Σchange +
+    Book ≠ Σchange). The adapter keeps the cash-only reference for this guard and
+    builds the pd.Series from the merged values.
 
-    Closes by construction: outside coverage the contributions ARE the changes;
-    inside coverage the summary channel replaces the option cash legs
-    (``residual = Σ(summary rpl+upl) − Σ_inside(change + commission)`` ≈ 0,
-    probe-proven 9.222194 vs 9.222190). Catches the one residual money hole — a
-    mid-window session that ever LACKED a summary while options were open (its
-    premium would be dropped with nothing carrying it).
+    **Channel 1 — strict cash identity (ALL currencies, exact).** Per currency
+    ``c``, ``Σ native_daily[c]`` MUST equal ``Σ change`` over that currency's
+    ``_NATIVE_CASH_BEARING_TYPES`` rows, to ``max(floor_c, 1e-4·throughput_c)``.
+    With Phase 83 restoring FULL option `change` and making the summary inert on the
+    native path, this is a plain ARITHMETIC identity — the CR-01 open-book exemption
+    is REMOVED (an open book is now VALUED in the separate MTM channel, so the cash
+    channel closes for open books too; F1's widened §5 envelope dissolves). The
+    reference row-set is ``_NATIVE_CASH_BEARING_TYPES`` (includes the reclassed
+    ``swap``); the USD set (no ``swap``) would false-fire by ``Σ(swap change)``.
 
-    ``floor_c`` (the ``$1``-equivalent NATIVE floor) is supplied by the adapter
-    from the anchor mark; the pure helper defaults it to 0.0 (relative term only).
-    Leak discipline (§App B): the raise names only currency + a coarse
-    breach/tolerance magnitude class, never a held balance.
+    **Channel 2 — book anchor cross-check (fail-loud, when threaded).** The computed
+    ``terminal_book[c]`` (replay × marks, §2 Q3) reconciles against the anchor's
+    settled book ``anchor_settled_book[c] = native_options_value[c] −
+    native_options_session_upl[c]`` (both off the SAME ``get_account_summaries``).
+    Tolerance ``max(floor_c, 1e-4·throughput_c)``. On breach →
+    ``LedgerValuationError`` (currency + magnitude class). ⚠️ NOT verifiable at a
+    flat terminal (both sides 0); first live open-book anchor is the §6 watch — a
+    breach there is a loud STOP, never a tolerance loosening.
 
-    CR-01 — ``open_option_ccys`` names currencies with a provably-OPEN option book
-    (nonzero ``native_options_value`` and/or trailing option activity after the
-    last summary). The strict identity above closes ONLY for a book that is FLAT at
-    the last settlement (Σunrealized_pl telescopes to a terminal open-MTM of 0 iff
-    flat); an OPEN book leaves a residual = the terminal open MTM, which would
-    false-fire this guard → a permanent FAILED on a perfectly healthy open-options
-    account. An exempted currency is SKIPPED here; the §5
-    ``_assert_inception_reconciled`` gate (native_nav.py) is the AUTHORITATIVE
-    reconciliation on the open book (a dropped cash row / missing summary of size
-    ``x`` surfaces there as ``§5 residual = x`` → InceptionReconciliationError, the
-    SAME permanent-FAILED disposition). The default ``frozenset()`` exempts nothing
-    → every existing caller stays byte-identical (SC-4).
+    **Channel 3 — summary cross-check (:func:`_summary_channel_cross_check`).** The
+    summaries keep policing the redistribution (E3 generalized to the MTM series);
+    a material breach fails loud.
 
-    F2 — PRE-ROLLOUT STRADDLE (INTENTIONAL fail-loud, §6 follow-up): a currency
-    whose option book was held OPEN across the coverage-window START (a position
-    opened >24h before the first summary, i.e. across the ~2025-01-12 rollout)
-    telescopes ``Σ summary unrealized_pl`` from a NONZERO book-MTM-at-window-start
-    ``V₀`` (not 0) — the pre-rollout open premium is counted verbatim outside
-    coverage while the covered sessions' unrealized delta only sees ``V_N − V₀``,
-    leaving an unreconciled residual = ``V₀``. Flat-at-crawl → THIS strict guard
-    fires; open-at-crawl → exempted here but the §5 gate residual = ``V₀`` fires
-    identically. BOTH are permanent FAILED (correct until ``V₀``-at-window-start
-    handling is built — validate on live keys #2/#3 with pre-2025 option history).
-    PINNED by ``test_pre_rollout_straddle_fails_loud_intentional``; do NOT loosen."""
+    Channels 2 and 3 run ONLY when the adapter threads their inputs; a standalone /
+    pure caller (``assert_balance_identity(rows, native_daily)``) runs channel 1
+    only (SC-4 byte-inert). Leak discipline: raises name only currency + a coarse
+    magnitude class, never a held balance."""
     floor = native_floor or {}
     sigma_change: dict[str, float] = {}
     throughput: dict[str, float] = {}
@@ -1347,26 +1340,9 @@ def assert_balance_identity(
         ccy = str(row.get("currency", "")).upper()
         sigma_change[ccy] = sigma_change.get(ccy, 0.0) + change
         throughput[ccy] = throughput.get(ccy, 0.0) + abs(change)
+    # Channel 1 — strict cash identity for ALL currencies (no exemption).
     currencies = set(sigma_change) | {str(c).upper() for c in native_daily}
     for ccy in sorted(currencies):
-        # CR-01: a provably-open option book cannot satisfy the flat-at-settlement
-        # identity (residual = terminal open MTM). Skip the strict compare and let
-        # §5 _assert_inception_reconciled be the authoritative reconciliation.
-        #
-        # F1 (bounded, §6 live-anchor follow-up): the exemption cannot ship an
-        # UNBOUNDED wrong number (a material hole still fires §5, same permanent-
-        # FAILED disposition), but the §5 silent envelope for an exempted currency
-        # is WIDER than this strict per-ccy guard along three axes: (1) §5 tolerance
-        # is account-level max($1, 1e-4·whole-account anchor NAV) vs this per-ccy
-        # 1e-4·Σ|change|_ccy; (2) §5 values the residual at the INCEPTION mark
-        # (D-07), undervaluing it ~N× for a coin appreciated N× since inception →
-        # the window widens ~N×; (3) USD-family (USD/USDC/USDT/EURR/DAI) coalesce
-        # into ONE signed §5 bucket so residuals NET before abs() (this per-ccy
-        # guard abs()es each). DELIBERATE (do NOT modify the shared §5 gate — blast
-        # radius on all native-reconstructed accounts); tighten at the first live
-        # open-options onboarding. See docs/deribit-ingestion-design.md (CR-01).
-        if ccy in open_option_ccys:
-            continue
         computed = sum(native_daily.get(ccy, {}).values())
         reference = sigma_change.get(ccy, 0.0)
         residual = abs(computed - reference)
@@ -1377,10 +1353,34 @@ def assert_balance_identity(
                 f"realized total diverges from Σchange over cash-bearing rows by "
                 f"more than max($1-equiv, 1e-4·throughput) (residual/tolerance "
                 f"class {residual / tol if tol else float('inf'):.1f}x) — a "
-                "mid-window session likely lacked its options_settlement_summary; "
-                "STOP and investigate that account's summary stream, never loosen "
-                "the tolerance (silent P&L misattribution risk)"
+                "cash-bearing row was dropped or mis-classified; STOP and "
+                "investigate that account's ledger, never loosen the tolerance "
+                "(silent P&L misattribution risk)"
             )
+    # Channel 2 — book anchor cross-check (settled-book basis; when threaded).
+    if terminal_book is not None and anchor_settled_book is not None:
+        book_ccys = (
+            {str(c).upper() for c in terminal_book}
+            | {str(c).upper() for c in anchor_settled_book}
+        )
+        for ccy in sorted(book_ccys):
+            computed_book = float(terminal_book.get(ccy, 0.0))
+            anchor_book = float(anchor_settled_book.get(ccy, 0.0))
+            residual = abs(computed_book - anchor_book)
+            tol = max(float(floor.get(ccy, 0.0)), 1e-4 * throughput.get(ccy, 0.0))
+            if residual > tol:
+                raise LedgerValuationError(
+                    f"Deribit book-channel anchor breach for currency {ccy!r}: the "
+                    "computed settled option book (replay × 1D marks) diverges from "
+                    "the summaries' settled book (options_value − options_session_upl)"
+                    f" by more than max($1-equiv, 1e-4·throughput) (residual/tolerance"
+                    f" class {residual / tol if tol else float('inf'):.1f}x) — a "
+                    "replay drift or a mark-basis error; STOP and investigate the "
+                    "anchor/replay, never loosen the tolerance"
+                )
+    # Channel 3 — summary cross-check (when the MTM series is threaded).
+    if delta_mtm is not None:
+        _summary_channel_cross_check(rows, delta_mtm, floor)
 
 
 def _required_summary_field(row: Mapping[str, Any], field: str) -> float:
@@ -1491,11 +1491,6 @@ def txn_rows_to_native_daily(
     ``({change})`` from BOTH raises is the alternative if per-row deltas must never
     surface at all; it is intentionally NOT done here to preserve verbatim parity.)
     """
-    # Phase 82 pre-pass: per-currency options coverage windows from this batch's
-    # own summary rows. Value-inert for perp-only / USD-native ledgers (no
-    # summaries → {}), so SC-4 byte-identity holds (the loop below runs the same
-    # rows through the same float ops on the untouched non-option path).
-    coverage_windows = _summary_coverage_windows(rows)
     by_day_ccy: dict[tuple[str, str], float] = {}
     for row in rows:
         if not isinstance(row, Mapping):
@@ -1507,33 +1502,26 @@ def txn_rows_to_native_daily(
         # (and thus ``txn_rows_to_daily_records``) are untouched.
         if row_type in _NATIVE_INFORMATIONAL_TYPES:
             continue
-        # Phase 82: options_settlement_summary is CLASSIFIED on the native path —
-        # it contributes realized_pl + unrealized_pl (session DELTA, load-bearing).
-        # Row change is always 0.0 (nonzero → fail loud). NOT subject to the
-        # cash-bearing change==0 skip (its P&L is in the summary fields, not change).
+        # Phase 83: options_settlement_summary contributes NOTHING to the native
+        # daily attribution — the option book's P&L is now REDISTRIBUTED across the
+        # days it accrued via the daily-MTM channel (option_mtm_daily, merged by the
+        # adapter). The summary stays CLASSIFIED-BUT-INERT here: its `change` is
+        # always 0.0 (a nonzero change is semantics drift → fail loud, kept
+        # verbatim), then it is skipped. Its realized_pl/unrealized_pl fields are
+        # read ONLY by the Q3-3 summary-channel cross-check (assert_balance_identity),
+        # where the WR-03 blank-currency + required-field guards now live.
         if row_type in _NATIVE_OPTIONS_SUMMARY_TYPES:
-            contribution = _summary_contribution(row)
-            try:
-                day = _row_utc_day(row.get("timestamp"))
-            except ValueError as e:
-                raise LedgerValuationError(str(e)) from e
-            if contribution == 0.0:
-                continue
-            ccy = str(row.get("currency", "")).upper()
-            # WR-03: a nonzero-P&L summary with a blank/missing currency would
-            # mis-bucket realized_pl+unrealized_pl into a "" bucket. Fail loud
-            # (schema-drift discipline, consistent with _required_summary_field) —
-            # never silently attribute option P&L to a blank currency.
-            if not ccy:
+            change = _coerce_float(
+                row.get("change", 0.0) or 0.0, field="change", row=row
+            )
+            if change != 0.0:
                 raise LedgerValuationError(
                     f"options_settlement_summary Deribit row id={row.get('id')!r} "
-                    "has empty/missing currency yet carries nonzero "
-                    "realized_pl+unrealized_pl — refusing to bucket option P&L into "
-                    "a blank-currency bucket (schema drift would silently "
-                    "mis-attribute realized cash)"
+                    "carries a nonzero change — the summary recap change is always "
+                    "0.0 (its P&L is in realized_pl/unrealized_pl); a nonzero change "
+                    "is semantics drift, classify against fresh evidence before "
+                    "ingesting"
                 )
-            key = (day, ccy)
-            by_day_ccy[key] = by_day_ccy.get(key, 0.0) + contribution
             continue
         if row_type in _NATIVE_CASH_BEARING_TYPES:
             # [VERBATIM from txn_rows_to_daily_records] absent-`change` guard: a
@@ -1568,22 +1556,17 @@ def txn_rows_to_native_daily(
             except ValueError as e:
                 raise LedgerValuationError(str(e)) from e
             ccy = str(row.get("currency", "")).upper()
-            # Phase 82 coverage-gated option re-attribution (classification-gated —
-            # NEVER consulted for non-option rows, so the perp/future/spot path is
-            # byte-identical: contribution stays `change`). Inside a currency's
-            # summary coverage window an option trade/delivery contributes ONLY the
-            # fee (−commission); the premium/payout cash is carried by the summary
-            # channel. Outside the window (pre-rollout or trailing-edge) it keeps
-            # the full `change` (cash fallback, flagged by _pre_coverage_option_days).
+            # Phase 83: option trade/delivery rows contribute their FULL native
+            # `change` EVERYWHERE (the Phase-82 coverage-gated −commission reclass is
+            # REMOVED). The premium/payout cash is now counted here and its MTM
+            # content is redistributed across held days by the daily-MTM channel
+            # (option_mtm_daily, merged by the adapter). This makes the cash channel
+            # a plain Σchange identity again (the strict cash guard closes by
+            # construction, open books included — the CR-01 exemption is removed).
             contribution = change
-            if row_type == "trade" or row_type == "delivery":
+            if row_type == "delivery":
                 cls = classify_instrument(str(row.get("instrument_name", "")))
-                if cls == "option":
-                    instant = _row_utc_instant(row.get("timestamp"))
-                    if _ts_in_coverage(instant, coverage_windows.get(ccy)):
-                        contribution = -_option_commission(row)
-                    # else: cash fallback — contribution stays `change`.
-                elif row_type == "delivery" and cls == "unknown" and change != 0.0:
+                if cls == "unknown" and change != 0.0:
                     # A delivery ALWAYS names its expiring instrument; an
                     # unknown-classified delivery with nonzero cash would mis-route
                     # expiry P&L — fail loud, never guess (D-08).
