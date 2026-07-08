@@ -22,8 +22,24 @@ LOCKED design pins (analytics-service/docs/deribit-ingestion-design.md):
   balance-reconciling delta (Σ`change` = exact balance delta). `cashflow` =
   "Realized SESSION PnL since last settlement" — deferred, fee-EXCLUDED, 0 at
   fill time for perps. Summing `cashflow` DROPS every trading fee and mis-times
-  PnL (a BYB-02-class silent over-statement). The daily return sums `change`.
-  Evidence: docs/evidence/drb02-deribit-field-semantics-2026-07-05.json.
+  PnL (a BYB-02-class silent over-statement). The daily return sums `change`
+  for NON-OPTION rows. Evidence: docs/evidence/drb02-deribit-field-semantics-2026-07-05.json.
+
+* ⚠️ PHASE 82 (options-aware, native path only) — the "sums `change`" pin above
+  is AMENDED for OPTION rows: inside a currency's summary coverage window
+  `[first_summary−24h, last_summary]` an option `trade`/`delivery` contributes
+  `−commission` (NOT its premium `change`), and `options_settlement_summary`
+  contributes `realized_pl + unrealized_pl` (a session DELTA — load-bearing).
+  This REDEFINES option native_pnl from a "cash-balance delta" to an "MTM
+  (settled-equity) delta" for covered option rows: the premium/payout cash is
+  offset by the option book's mark value and its P&L content is carried by the
+  summary channel (probe closure 9.222194 vs 9.222190 BTC). Do NOT "fix" the
+  fee-only arm back to cash `change`. Outside coverage (pre-2025-01-12 rollout /
+  live trailing edge) option rows stay cash-basis `change` + a
+  `pre_summary_rollout_option_dailies` warning. Guard/oracle = the BALANCE
+  IDENTITY (computed total == Σchange over CASH_BEARING, fail-loud), NOT the
+  row-embedded equity snapshot (REJECTED: 13% day-match, mark-timing noise).
+  Evidence: docs/evidence/drb-options-semantics-2026-07.json (see design pin D-11).
 
 * D-07/D-08 — Inverse coin->USD uses the row's OWN event-time `index_price`,
   NEVER a current/period-end index (cross-time is category-invalid). The ledger's
@@ -457,14 +473,19 @@ def deribit_linear_external_flow_usd(
     return net, saw_inverse
 
 
-# DELIBERATELY in NEITHER set (P70 review H3): `options_settlement_summary` (a
-# zero-cash recap — live-confirmed Sum(change)=0; excluding it also avoids
-# double-counting the real settlement/delivery rows) and `correction` (an
-# ambiguous manual adjustment that CAN be a real credit/debit). Leaving them
-# unclassified means a nonzero-`change` occurrence FAILS LOUD via the unknown-type
-# guard below (never a silent skip), forcing an evidence-grounded decision — while
-# their normal zero-`change` form is harmlessly ignored. Every UNKNOWN type
-# carrying nonzero `change` fails loud the same way.
+# DELIBERATELY in NEITHER USD set (P70 review H3): `options_settlement_summary`
+# and `correction` (an ambiguous manual adjustment that CAN be a real
+# credit/debit). Leaving them unclassified in the USD path means a nonzero-`change`
+# occurrence FAILS LOUD via the unknown-type guard below (never a silent skip),
+# while their normal zero-`change` form is harmlessly ignored.
+#
+# ⚠️ PHASE 82 (native path only): `options_settlement_summary` IS now classified
+# by `txn_rows_to_native_daily` via `_NATIVE_OPTIONS_SUMMARY_TYPES` — it carries
+# the option book's session MTM (`realized_pl + unrealized_pl`) into native_pnl
+# (its `change` is always 0.0; a nonzero change fails loud there). The USD sibling
+# `txn_rows_to_daily_records` is UNCHANGED: summary stays unclassified (zero-change
+# ignored, nonzero → loud). `correction` remains unclassified on BOTH paths. Every
+# UNKNOWN type carrying nonzero `change` fails loud the same way.
 
 
 def _row_utc_day(ts: Any) -> str:

@@ -50,6 +50,11 @@ official OpenAPI schema + practitioner sources + ccxt source + a 3-account live 
   `transfer`, `swap`, `correction`, `usdc_reward`, `options_settlement_summary`.
   (`options_settlement_summary` is a zero-cash aggregate — live-confirmed Σ`change`=0.0 on all 3
   accounts; excluding it also avoids double-counting the real `settlement`/`delivery` rows.)
+  ⚠️ **Phase 82 (native path ONLY):** `options_settlement_summary` is RECLASSIFIED into native_pnl
+  (`realized_pl + unrealized_pl`) and covered option `trade`/`delivery` premium is EXCLUDED in favour
+  of `−commission` — see **D-11** below. The USD sibling `txn_rows_to_daily_records` is UNCHANGED
+  (summary stays excluded). `swap` is likewise native-only cash-bearing (HIGH-1); it stays
+  informational in the USD path.
 - **Unknown `type` with nonzero `change` → FAIL LOUD** (never silently include or drop). Deribit
   documents new types can appear at any time, so this is an allow-list, not a block-list.
 
@@ -82,6 +87,53 @@ The reconstruction is anchor-to-today: `initial_capital = equity_today − Σrea
 
 For a raw equity CURVE (not the anchor), prefer `account_summary.equity_usd` (mark-to-market). The
 per-row `balance`/`equity` are event-stamped snapshots, not a daily grid.
+
+## D-11 — Options P&L channel: coverage-gated MTM re-attribution (Phase 82, native path)
+
+Resolves the **F2 known limitation** above (open-option UPL in the anchor but not in Σrealized) for
+the NATIVE path. Deribit's `change` on an option `trade`/`delivery` is the **premium/payout cash**, a
+swap of cash for position value — NOT P&L. Summing it counted premium as return (live: strategy
+`c225840c` key `95089958` "Phoenix Protocol" showed ±51–78% daily returns, +235% Aug-2025 on ~$150k
+NAV; the 2025-07-13 option-trade day summed to +2.736 BTC ≈ +65%). The real option P&L lives in the
+`options_settlement_summary` rows (`realized_pl` + `unrealized_pl`).
+
+**The coverage-gated rule (per currency `c`, native path only):**
+
+- Deribit began emitting `options_settlement_summary` ~**2025-01-12** (exchange-side rollout). The
+  per-currency coverage window is `[first_summary_ts[c] − 24h, last_summary_ts[c]]`; a currency with
+  no summaries has no window.
+- **Inside coverage:** option `trade`/`delivery` contribute `−commission` (fee kept; premium/payout
+  cash EXCLUDED — carried by the summary channel), and `options_settlement_summary` contributes
+  `realized_pl + unrealized_pl`. `unrealized_pl` is a per-session **DELTA** (not a level) and is
+  **LOAD-BEARING** — dropping it breaks closure. Summary `change` is always 0.0 (nonzero → fail loud);
+  absent/null/non-numeric `commission` / `realized_pl` / `unrealized_pl` → `LedgerValuationError`.
+- **Outside coverage** (pre-rollout / live trailing edge): option rows stay cash-basis `change` +
+  the account is stamped `pre_summary_rollout_option_dailies` → `complete_with_warnings` (Q6: no
+  correct daily attribution is derivable pre-rollout; the TOTAL stays exact — Σ`change` is exact in
+  both eras — so we caveat, never fail-loud/withhold nor synthesize).
+
+**Semantic shift (do NOT revert):** excluding premium REDEFINES option native_pnl from a "cash-balance
+delta" to an **MTM (settled-equity) delta** for covered option rows. This is intentional — it makes the
+daily series a settled-equity series consistent with the terminal anchor, so the §5 inception identity
+closes by construction (`Σpnl_c = settled-equity_c(T) − Σflow_c`). No future reader should "fix" the
+fee-only arm back to cash `change`.
+
+**Guard/oracle = the BALANCE IDENTITY, not the row equity snapshot.** Per currency, computed realized
+total MUST equal Σ`change` over `_NATIVE_CASH_BEARING_TYPES` rows (which INCLUDES `swap`), to
+`< max($1-equiv, 1e-4·throughput)` — else `LedgerValuationError`, never ship (`assert_balance_identity`,
+on every ledger build). It closes by construction (covered-era closure proven: option fee-gross
+Σ(`change`+`commission`) **9.222194 BTC** == Σ(`realized_pl`+`unrealized_pl`) **9.222190 BTC**) and
+catches the one residual money hole: a mid-window session that ever lacked a summary while options were
+open. The row-embedded `equity` snapshot was REJECTED as the oracle (matched `Δequity−flows` on only
+~13% of days — intraday mark-timing noise; perp `session_upl` NULL on settlement rows). The §5 wedge
+read is the COMBINED `options_session_upl + futures_session_upl` (byte-safe for perp-only).
+
+**Scope:** native path only (`txn_rows_to_native_daily` + `build_deribit_native_ledger` +
+`reconstruct_native_nav_and_twr`), the production Deribit path since P80. The USD-space
+`txn_rows_to_daily_records` is intentionally unchanged (legacy/parity-panel — the 80-04 parity panel
+legitimately MOVES for options accounts, same D8 posture as coin-dust accounts). SC-4 byte-identity is
+preserved for perp-only / USD-native accounts (classification-gated: zero option/summary rows → same
+rows, same float ops, bit-identical output). Evidence: `docs/evidence/drb-options-semantics-2026-07.json`.
 
 ## Funding is settlement-BUNDLED — do NOT add a separate funding stream
 
