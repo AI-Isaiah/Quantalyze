@@ -58,7 +58,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import AbstractSet, Any
 
 # Pure, I/O-free venue-agnostic dated-flow contract (Plan 75-01). Importing it
@@ -1053,6 +1054,224 @@ def _option_activity_after_coverage(
         if instant > window[1]:  # strictly past the last summary → trailing edge
             out.add(ccy)
     return frozenset(out)
+
+
+# ===========================================================================
+# Phase 83 — daily option mark-to-market attribution (pure replay + ΔMTM).
+#
+# The Phase-82 coverage-gated attribution lumped each options_settlement_summary's
+# (realized_pl + unrealized_pl) — a per-SESSION delta spanning MANY days — onto the
+# ONE settlement day. Phase 83 REDISTRIBUTES that P&L across the days it accrued by
+# marking the open option book DAILY: replay the signed post-trade `position` per
+# instrument, mark it at the 1D chart close (fetched by the adapter), and take the
+# day-over-day book delta ΔMTM. This is a REDISTRIBUTION that PRESERVES the total
+# (telescoping: Σ_d ΔMTM = Book[last_marked_day] − 0), so the closure gates stay
+# green by construction. Pure/pandas-free (the AST purity guard still holds).
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class OptionInstrumentReplay:
+    """Per-instrument end-of-day open-position replay (Phase 83, Q2).
+
+    ``positions`` maps each event ``utc_day`` → the signed post-trade position
+    AFTER the last option ``trade``/``delivery`` row of that day (shorts negative;
+    a delivery that fully expires zeroes it). Days BETWEEN events carry the last
+    value forward (a balance is constant between ledger events — resolved by
+    :func:`option_mtm_daily`, never stored densely). ``first_day``/``last_day`` are
+    the earliest/latest event days (the marked span cap — a position cannot outlive
+    its expiry, so ``last_day`` already caps the fetch/mark span; no expiry parse)."""
+
+    currency: str
+    first_day: str
+    last_day: str
+    positions: dict[str, float] = field(default_factory=dict)
+
+
+def _required_option_position(row: Mapping[str, Any]) -> float:
+    """The signed post-trade ``position`` on an option ``trade``/``delivery`` row —
+    the ONLY position source (Phase 83). Absent / null / blank / non-numeric →
+    ``LedgerValuationError`` (schema drift; fabricating a book mis-states MTM).
+    Leak discipline: names only id/type."""
+    raw = row.get("position", _MISSING)
+    if raw is _MISSING or raw is None or (
+        isinstance(raw, str) and not raw.strip()
+    ):
+        raise LedgerValuationError(
+            f"option Deribit row id={row.get('id')!r} type={row.get('type')!r} has "
+            "absent/null/blank position — the signed post-trade position is the "
+            "ONLY source for the open-book MTM replay; refusing to fabricate a "
+            "position (would silently mis-state option mark-to-market)"
+        )
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        raise LedgerValuationError(
+            f"option Deribit row id={row.get('id')!r} type={row.get('type')!r} has "
+            f"non-numeric position — refusing to fabricate the open-book position "
+            "(would silently mis-state option mark-to-market)"
+        ) from None
+
+
+def replay_option_positions(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, OptionInstrumentReplay]:
+    """Reconstruct per-instrument end-of-day open OPTION positions from the signed
+    post-trade ``position`` field on option ``trade``/``delivery`` rows (Phase 83,
+    §2 Q2). Classification-gated via :func:`classify_instrument` (option arm only)
+    — perp/future/spot rows are IGNORED, so a perp-only ledger returns ``{}`` (SC-4
+    byte-inert: no replay → no marks fetched → no ΔMTM).
+
+    Rows are ordered by ``(timestamp, id)`` within each instrument before replay
+    (crawl concat order is NOT trusted); the LAST row on a day sets that day's
+    end-of-day position. Returns ``{instrument_name: OptionInstrumentReplay}``.
+
+    Fail-loud (``LedgerValuationError``, id/type-only): an option row with an
+    absent/null/non-numeric ``position`` (schema drift) or an undatable timestamp
+    (verbatim guard class). A ``delivery`` whose post-trade position is NONZERO is
+    accepted as DATA (partial delivery is Deribit's call — never asserted zero)."""
+    # Group option rows by instrument, capturing each row's datable instant (fail
+    # loud on an undatable timestamp — the verbatim guard class) for the sort.
+    grouped: dict[str, list[tuple[float, Any, Mapping[str, Any]]]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) not in ("trade", "delivery"):
+            continue
+        instrument = str(row.get("instrument_name", ""))
+        if classify_instrument(instrument) != "option":
+            continue
+        try:
+            instant = _row_utc_instant(row.get("timestamp"))
+        except (ValueError, TypeError, OverflowError) as e:
+            raise LedgerValuationError(
+                f"option Deribit row id={row.get('id')!r} type={row.get('type')!r} "
+                f"has an undatable timestamp={row.get('timestamp')!r} — refusing to "
+                "replay an option position without a datable settlement day"
+            ) from e
+        rid = row.get("id")
+        try:
+            rid_sort: float = float(rid)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            rid_sort = 0.0
+        grouped.setdefault(instrument, []).append((instant, rid_sort, row))
+
+    out: dict[str, OptionInstrumentReplay] = {}
+    for instrument, entries in grouped.items():
+        entries.sort(key=lambda e: (e[0], e[1]))
+        positions: dict[str, float] = {}
+        currency = ""
+        days: list[str] = []
+        for _instant, _rid, row in entries:
+            pos = _required_option_position(row)
+            day = _row_utc_day(row.get("timestamp"))
+            positions[day] = pos  # end-of-day = last row of the day (sorted)
+            if day not in days:
+                days.append(day)
+            currency = str(row.get("currency", "")).upper()
+        first_day = min(days)
+        last_day = max(days)
+        out[instrument] = OptionInstrumentReplay(
+            currency=currency,
+            first_day=first_day,
+            last_day=last_day,
+            positions=positions,
+        )
+    return out
+
+
+def _calendar_days(first_day: str, last_day: str) -> list[str]:
+    """Inclusive ascending list of ``YYYY-MM-DD`` UTC days in ``[first_day,
+    last_day]``. Pure; both bounds are already-validated ISO day strings."""
+    start = datetime.strptime(first_day, "%Y-%m-%d")
+    end = datetime.strptime(last_day, "%Y-%m-%d")
+    out: list[str] = []
+    d = start
+    while d <= end:
+        out.append(d.strftime("%Y-%m-%d"))
+        d += timedelta(days=1)
+    return out
+
+
+def _position_on_day(replay: OptionInstrumentReplay, day: str) -> float:
+    """Carry-forward position for ``replay`` on ``day``: the value from the last
+    event-day ``≤ day`` (a balance is constant between ledger events; marks are
+    NEVER filled). 0.0 before the first event day."""
+    result = 0.0
+    for ev_day in sorted(replay.positions):
+        if ev_day <= day:
+            result = replay.positions[ev_day]
+        else:
+            break
+    return result
+
+
+def option_mtm_daily(
+    positions: Mapping[str, OptionInstrumentReplay],
+    marks: Mapping[str, Mapping[str, float]],
+) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
+    """Per-``(day, currency)`` day-over-day ΔMTM of the replayed open option book
+    (Phase 83, §2 Q3). ``Book[c][d] = Σ_instr pos[instr][d] × mark[instr][d]`` over
+    the currency's union calendar grid (positions carry forward between events;
+    marks are NEVER filled), ``ΔMTM[c][d] = Book[c][d] − Book[c][d−1]``. Day-grid
+    convention: bar-tick UTC day = native grid day (§2 Q1) — ``positions`` (via
+    ``_row_utc_day``) and ``marks`` (via the 1D bar tick → ``%Y-%m-%d``) share it.
+
+    Returns ``(delta_mtm, terminal_book)``:
+      * ``delta_mtm[c][d]`` — the per-day ΔMTM the adapter MERGES into the cash
+        ``native_daily`` (only nonzero deltas are stored);
+      * ``terminal_book[c]`` — ``Book[c][last grid day]`` = ``Σ_d ΔMTM[c][d]`` (it
+        telescopes from a pre-inception book of 0). Feeds the balance-identity
+        book-channel cross-check (settled-book anchor).
+
+    Fail-loud (D-07, ``LedgerValuationError`` naming instrument + day): a day inside
+    an instrument's ``[first_day, last_day]`` where its position is NONZERO and its
+    mark map has NO bar — a STRUCTURAL hole (the probe showed this essentially never
+    happens). NO interpolation, NO session-lump fallback (that lump IS the bug being
+    removed). Instruments flagged pre-retention (empty marks, expiry pre-retention)
+    are EXCLUDED by the adapter BEFORE this function sees them.
+
+    ⚠️ Boundary asymmetry (§6 live watch): an instrument whose ``last_day`` precedes
+    the currency's global last grid day drops out of ``Book`` after ``last_day`` (it
+    contributes 0), so an OPEN terminal position on a NON-last-day instrument would
+    register a spurious ΔMTM on ``last_day+1``. Total-exact regardless (telescoped);
+    the Task-8(ii) non-flat fixture is constructed with the open instrument's last
+    trade on the crawl day so ``last_day`` == the grid's last day."""
+    by_ccy: dict[str, list[str]] = {}
+    for instrument, replay in positions.items():
+        by_ccy.setdefault(replay.currency, []).append(instrument)
+
+    delta_mtm: dict[str, dict[str, float]] = {}
+    terminal_book: dict[str, float] = {}
+    for ccy, instruments in by_ccy.items():
+        first = min(positions[i].first_day for i in instruments)
+        last = max(positions[i].last_day for i in instruments)
+        prev_book = 0.0
+        for day in _calendar_days(first, last):
+            book = 0.0
+            for instrument in instruments:
+                replay = positions[instrument]
+                if day < replay.first_day or day > replay.last_day:
+                    continue  # instrument not active on this day → contributes 0
+                pos = _position_on_day(replay, day)
+                if pos == 0.0:
+                    continue  # flat position → no mark needed
+                mark = marks.get(instrument, {}).get(day)
+                if mark is None:
+                    raise LedgerValuationError(
+                        f"option instrument {instrument!r} has a nonzero position "
+                        f"on {day} (inside its listed life) but NO 1D daily-mark bar "
+                        "— a sparse mark inside an instrument's life is STRUCTURAL "
+                        "(D-07); refusing to interpolate or fall back to the session "
+                        "lump (that lump is the misattribution being removed)"
+                    )
+                book += pos * float(mark)
+            delta = book - prev_book
+            if delta != 0.0:
+                delta_mtm.setdefault(ccy, {})[day] = delta
+            prev_book = book
+        terminal_book[ccy] = prev_book
+    return delta_mtm, terminal_book
 
 
 def assert_balance_identity(

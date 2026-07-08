@@ -42,6 +42,8 @@ from services.deribit_txn import (
     classify_instrument,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
+    option_mtm_daily,
+    replay_option_positions,
     txn_change_to_usd,
     txn_rows_to_daily_records,
     txn_rows_to_native_daily,
@@ -2159,3 +2161,222 @@ def test_summary_blank_currency_fails_loud() -> None:
     missing = {k: v for k, v in blank.items() if k != "currency"}
     with pytest.raises(LedgerValuationError):
         txn_rows_to_native_daily([missing])
+
+
+# ===========================================================================
+# Phase 83 — replay_option_positions + option_mtm_daily (daily option MTM).
+# ===========================================================================
+
+
+def _opt_row(
+    ts: str,
+    *,
+    position: object,
+    instrument: str = "BTC-14JUL25-60000-C",
+    ccy: str = "BTC",
+    change: float = 0.0,
+    typ: str = "trade",
+    rid: int = 0,
+) -> dict[str, object]:
+    """An option trade/delivery row carrying the signed post-trade `position`."""
+    row: dict[str, object] = {
+        "type": typ,
+        "instrument_name": instrument,
+        "currency": ccy,
+        "change": change,
+        "timestamp": _ms(ts),
+        "id": 8300000 + rid,
+    }
+    if position is not _OMIT:
+        row["position"] = position
+    return row
+
+
+_OMIT: object = object()
+
+
+def test_replay_long_build_reduce_close() -> None:
+    """A single long option: build to +2, reduce to +1, close to 0 — end-of-day
+    positions per event day."""
+    rows = [
+        _opt_row("2025-07-11T10:00:00+00:00", position=2.0, rid=1),
+        _opt_row("2025-07-12T10:00:00+00:00", position=1.0, rid=2),
+        _opt_row("2025-07-13T10:00:00+00:00", position=0.0, typ="delivery", rid=3),
+    ]
+    replay = replay_option_positions(rows)
+    assert set(replay) == {"BTC-14JUL25-60000-C"}
+    r = replay["BTC-14JUL25-60000-C"]
+    assert r.currency == "BTC"
+    assert r.first_day == "2025-07-11"
+    assert r.last_day == "2025-07-13"
+    assert r.positions == {
+        "2025-07-11": 2.0, "2025-07-12": 1.0, "2025-07-13": 0.0
+    }
+
+
+def test_replay_shorts_negative_and_delivery_nonzero_accepted() -> None:
+    """Shorts carry a NEGATIVE post-trade position; a delivery leaving a nonzero
+    position is accepted as DATA (partial delivery), never asserted zero."""
+    rows = [
+        _opt_row("2025-07-11T10:00:00+00:00", position=-3.0, rid=4),
+        _opt_row("2025-07-12T10:00:00+00:00", position=-1.0, typ="delivery", rid=5),
+    ]
+    r = replay_option_positions(rows)["BTC-14JUL25-60000-C"]
+    assert r.positions == {"2025-07-11": -3.0, "2025-07-12": -1.0}
+
+
+def test_replay_multi_instrument_multi_currency_separation() -> None:
+    """Instruments and currencies are kept separate; the last row on a day wins
+    the end-of-day position."""
+    rows = [
+        _opt_row("2025-07-11T10:00:00+00:00", position=1.0,
+                 instrument="BTC-14JUL25-60000-C", ccy="BTC", rid=6),
+        _opt_row("2025-07-11T11:00:00+00:00", position=2.0,
+                 instrument="BTC-14JUL25-60000-C", ccy="BTC", rid=7),
+        _opt_row("2025-07-11T10:30:00+00:00", position=-5.0,
+                 instrument="ETH-14JUL25-3000-P", ccy="ETH", rid=8),
+    ]
+    replay = replay_option_positions(rows)
+    assert replay["BTC-14JUL25-60000-C"].positions == {"2025-07-11": 2.0}
+    assert replay["BTC-14JUL25-60000-C"].currency == "BTC"
+    assert replay["ETH-14JUL25-3000-P"].positions == {"2025-07-11": -5.0}
+    assert replay["ETH-14JUL25-3000-P"].currency == "ETH"
+
+
+def test_replay_out_of_order_rows_sorted_by_ts_id() -> None:
+    """Crawl concat order is NOT trusted — rows are re-sorted by (timestamp, id)
+    so the true end-of-day position is the last chronological row, not the last
+    in the list."""
+    rows = [
+        _opt_row("2025-07-11T11:00:00+00:00", position=2.0, rid=11),  # later ts
+        _opt_row("2025-07-11T10:00:00+00:00", position=1.0, rid=10),  # earlier ts
+    ]
+    r = replay_option_positions(rows)["BTC-14JUL25-60000-C"]
+    assert r.positions == {"2025-07-11": 2.0}  # 11:00 wins EOD, not the list order
+
+
+@pytest.mark.parametrize("bad", [_OMIT, None, "", "x"])
+def test_replay_missing_position_fails_loud(bad: object) -> None:
+    """An option trade/delivery with absent/null/blank/non-numeric position fails
+    loud — the signed post-trade position is the ONLY book source."""
+    with pytest.raises(LedgerValuationError):
+        replay_option_positions([_opt_row("2025-07-11T10:00:00+00:00", position=bad)])
+
+
+def test_replay_ignores_non_option_rows() -> None:
+    """Perp/future/spot trade rows are classification-gated OUT — a perp-only
+    ledger replays to {} (SC-4: no replay → no marks → no ΔMTM)."""
+    rows = [
+        {"type": "trade", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.002, "timestamp": _ms("2025-07-11T10:00:00+00:00"), "id": 1},
+        {"type": "delivery", "instrument_name": "BTC-27MAR26", "currency": "BTC",
+         "change": 0.02, "timestamp": _ms("2025-07-11T10:00:00+00:00"), "id": 2},
+        {"type": "trade", "instrument_name": "BTC_USDC", "currency": "BTC",
+         "change": -1.0, "timestamp": _ms("2025-07-11T10:00:00+00:00"), "id": 3},
+    ]
+    assert replay_option_positions(rows) == {}
+
+
+def test_mtm_single_long_telescopes_to_terminal_book() -> None:
+    """A single long option held N days → per-day ΔMTM equals the hand-computed
+    mark deltas and telescopes to Book(T) − 0 exactly."""
+    replay = replay_option_positions([
+        _opt_row("2025-07-11T10:00:00+00:00", position=2.0, rid=20),
+        _opt_row("2025-07-13T10:00:00+00:00", position=2.0, rid=21),
+    ])
+    marks = {"BTC-14JUL25-60000-C": {
+        "2025-07-11": 0.10, "2025-07-12": 0.15, "2025-07-13": 0.12,
+    }}
+    delta, terminal = option_mtm_daily(replay, marks)
+    # Book: d11 = 2*0.10=0.20; d12 = 2*0.15=0.30; d13 = 2*0.12=0.24.
+    assert delta["BTC"]["2025-07-11"] == pytest.approx(0.20, abs=1e-12)
+    assert delta["BTC"]["2025-07-12"] == pytest.approx(0.10, abs=1e-12)
+    assert delta["BTC"]["2025-07-13"] == pytest.approx(-0.06, abs=1e-12)
+    assert sum(delta["BTC"].values()) == pytest.approx(0.24, abs=1e-12)
+    assert terminal["BTC"] == pytest.approx(0.24, abs=1e-12)
+
+
+def test_mtm_short_position_signs_invert() -> None:
+    replay = replay_option_positions([
+        _opt_row("2025-07-11T10:00:00+00:00", position=-2.0, rid=22),
+        _opt_row("2025-07-12T10:00:00+00:00", position=-2.0, rid=23),
+    ])
+    marks = {"BTC-14JUL25-60000-C": {"2025-07-11": 0.10, "2025-07-12": 0.15}}
+    delta, terminal = option_mtm_daily(replay, marks)
+    assert delta["BTC"]["2025-07-11"] == pytest.approx(-0.20, abs=1e-12)
+    assert delta["BTC"]["2025-07-12"] == pytest.approx(-0.10, abs=1e-12)
+    assert terminal["BTC"] == pytest.approx(-0.30, abs=1e-12)
+
+
+def test_mtm_carry_forward_across_no_trade_days() -> None:
+    """Position carries forward on days with no event; a flat-terminal book (last
+    event zeroes the position) telescopes to 0 exactly."""
+    replay = replay_option_positions([
+        _opt_row("2025-07-11T10:00:00+00:00", position=1.0, rid=24),
+        _opt_row("2025-07-14T10:00:00+00:00", position=0.0, typ="delivery", rid=25),
+    ])
+    marks = {"BTC-14JUL25-60000-C": {
+        "2025-07-11": 0.10, "2025-07-12": 0.20, "2025-07-13": 0.30, "2025-07-14": 0.40,
+    }}
+    delta, terminal = option_mtm_daily(replay, marks)
+    # d11 book 0.10; d12 0.20 (carry pos=1); d13 0.30; d14 pos=0 → book 0.
+    assert delta["BTC"]["2025-07-13"] == pytest.approx(0.10, abs=1e-12)
+    assert delta["BTC"]["2025-07-14"] == pytest.approx(-0.30, abs=1e-12)
+    assert sum(delta["BTC"].values()) == pytest.approx(0.0, abs=1e-12)
+    assert terminal["BTC"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_mtm_hole_inside_life_fails_loud_naming_instrument_day() -> None:
+    """A day with a nonzero position but NO mark bar (structural hole) → fail loud
+    naming instrument + day (D-07; no interpolation, no session-lump fallback)."""
+    replay = replay_option_positions([
+        _opt_row("2025-07-11T10:00:00+00:00", position=1.0, rid=26),
+        _opt_row("2025-07-13T10:00:00+00:00", position=1.0, rid=27),
+    ])
+    marks = {"BTC-14JUL25-60000-C": {"2025-07-11": 0.10, "2025-07-13": 0.12}}  # d12 hole
+    with pytest.raises(LedgerValuationError) as ei:
+        option_mtm_daily(replay, marks)
+    assert "BTC-14JUL25-60000-C" in str(ei.value)
+    assert "2025-07-12" in str(ei.value)
+
+
+def test_mtm_zero_position_day_needs_no_mark() -> None:
+    """A day where the position is flat (0) needs no mark — only NONZERO-position
+    days require a bar."""
+    replay = replay_option_positions([
+        _opt_row("2025-07-11T10:00:00+00:00", position=0.0, typ="delivery", rid=28),
+    ])
+    # No marks at all; position is 0 the whole (single-day) life → no hole.
+    delta, terminal = option_mtm_daily(replay, {})
+    assert delta == {}
+    assert terminal["BTC"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_mtm_day_grid_convention_bar_tick_day() -> None:
+    """§2 Q1: mark[instr][D] is keyed by the UTC day the 1D bar tick falls on (the
+    D 08:00 bar → day 'D'), the SAME grid as the position replay (_row_utc_day).
+    A position event at D 10:00 and the D-08:00 mark bar align on day 'D'."""
+    replay = replay_option_positions([
+        _opt_row("2025-07-11T10:00:00+00:00", position=1.0, rid=29),
+    ])
+    # Mark keyed '2025-07-11' (the 08:00 bar's UTC day) aligns with the 10:00 event.
+    delta, terminal = option_mtm_daily(replay, {"BTC-14JUL25-60000-C": {"2025-07-11": 0.42}})
+    assert delta["BTC"]["2025-07-11"] == pytest.approx(0.42, abs=1e-12)
+    assert terminal["BTC"] == pytest.approx(0.42, abs=1e-12)
+
+
+def test_mtm_mutation_dropping_a_bar_reddens() -> None:
+    """Mutation-honesty: dropping one interior mark bar (with a nonzero position)
+    reddens — proving the hole guard is load-bearing, not decorative."""
+    replay = replay_option_positions([
+        _opt_row("2025-07-11T10:00:00+00:00", position=1.0, rid=30),
+        _opt_row("2025-07-13T10:00:00+00:00", position=1.0, rid=31),
+    ])
+    full = {"BTC-14JUL25-60000-C": {
+        "2025-07-11": 0.10, "2025-07-12": 0.11, "2025-07-13": 0.12,
+    }}
+    option_mtm_daily(replay, full)  # green with the full series
+    dropped = {"BTC-14JUL25-60000-C": {k: v for k, v in full["BTC-14JUL25-60000-C"].items()
+                                       if k != "2025-07-12"}}
+    with pytest.raises(LedgerValuationError):
+        option_mtm_daily(replay, dropped)
