@@ -333,43 +333,42 @@ def test_perp_only_eligibility_summary_row_fails() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 83 — the fresh daily_reconcile CASH basis is the PRODUCTION native cash
-# formula (txn_rows_to_native_daily). Under Phase 83 an options-summary-only day
-# is NO LONGER a native nonzero day: the summary is inert on the native path and
-# its P&L is REDISTRIBUTED across held days via the ΔMTM channel (merged by the
-# adapter, NOT by txn_rows_to_native_daily). Cash-bearing days (perp settlement,
-# option trade/delivery) still count.
-#
-# ⚠️ Task-10 watch: _native_nonzero_dates is CASH-ONLY. A day where the option
-# book moved (ΔMTM) but no cash row landed is persisted by production (adapter
-# merge) yet ABSENT from this cash-only set → the strict daily_reconcile gate
-# would "inject"-fail on a held-options account. Before the live Task-10 run the
-# harness must derive nonzero days from the FULL production ledger
-# (build_deribit_native_ledger().native_pnl), not the cash channel alone.
+# Phase 83 C2 — the fresh daily_reconcile basis is the FULL production ledger
+# (cash + daily-MTM), i.e. build_deribit_native_ledger().native_pnl — EXACTLY
+# what job_worker persists to csv_daily_returns. This SUPERSEDES the cash-only
+# basis: Phase 83 redistributes option session P&L across held days via the ΔMTM
+# channel, merged into native_pnl by the adapter (NOT by txn_rows_to_native_daily).
+# An interior held day where the option book moved (ΔMTM) but no cash row landed
+# is a real persisted nonzero day — the cash-only basis omitted it, "inject"-
+# failing a CORRECT held-options ledger (the Phase-83 C2 defect).
 # ---------------------------------------------------------------------------
 
 
-def test_native_cash_basis_excludes_summary_only_day() -> None:
-    from datetime import datetime
+def test_ledger_nonzero_dates_gates_on_merged_mtm_basis() -> None:
+    import pandas as pd
 
-    from scripts.deribit_acceptance import _native_nonzero_dates
+    from scripts.deribit_acceptance import _ledger_nonzero_dates
 
-    def _ms(iso: str) -> int:
-        return int(datetime.fromisoformat(iso).timestamp() * 1000)
+    class _Ledger:
+        def __init__(self, native_pnl: dict[str, pd.Series]) -> None:
+            self.native_pnl = native_pnl
 
-    # A covered-era BTC options-summary-only day (change=0, rpl+upl≠0) plus a
-    # perp settlement on a different day.
-    rows = [
-        {"type": "options_settlement_summary", "instrument_name": "BTC-14JUL25-60000-C",
-         "currency": "BTC", "change": 0.0, "realized_pl": 0.03, "unrealized_pl": -0.01,
-         "timestamp": _ms("2025-07-12T08:00:00+00:00"), "id": 1},
-        {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
-         "change": -0.01, "index_price": 60000.0,
-         "timestamp": _ms("2025-07-13T08:00:00+00:00"), "id": 2},
-    ]
-    native_days = _native_nonzero_dates(rows)
-    # Phase 83: the summary-only day is inert on the native CASH path (its P&L is
-    # redistributed via ΔMTM in the adapter, not here) → NOT a cash nonzero day.
-    assert date(2025, 7, 12) not in native_days
-    # The cash-bearing perp settlement day still counts.
-    assert date(2025, 7, 13) in native_days
+    # Merged native_pnl for a held-options account: 07-12 carries ONLY a ΔMTM move
+    # (the option book marked up — NO cash row that day, so the cash-only basis
+    # would DROP it), 07-13 is genuinely flat, 07-14 an expiry-day cash change.
+    ledger = _Ledger(
+        {
+            "BTC": pd.Series(
+                [0.03, 0.0, -0.01],
+                index=pd.to_datetime(["2025-07-12", "2025-07-13", "2025-07-14"]),
+            )
+        }
+    )
+    days = _ledger_nonzero_dates(ledger)
+    # C2 regression: the ΔMTM-only held day MUST be gated (production persists it).
+    assert date(2025, 7, 12) in days
+    # The expiry-day cash change also counts.
+    assert date(2025, 7, 14) in days
+    # A genuinely flat day is excluded (advisory zero-day, never gated).
+    assert date(2025, 7, 13) not in days
+    assert days == {date(2025, 7, 12), date(2025, 7, 14)}
