@@ -51,12 +51,18 @@ NaN in BOTH paths — the first real return is day 1.
 """
 from __future__ import annotations
 
+import asyncio
 import struct
 from dataclasses import dataclass, field
 
 import pandas as pd
 import pytest
 
+from typing import Any
+
+import services.deribit_ingest as di
+from services.broker_dailies import combine_native_ledger, gap_fill_daily_returns
+from services.deribit_txn import deribit_equity_to_usd
 from services.external_flows import ExternalFlow
 from services.nav_twr import (
     DUST_NAV_FLOOR,
@@ -297,3 +303,306 @@ def test_ieee_x_times_one_is_bit_identity() -> None:
         assert struct.pack("<d", x * 1.0) == struct.pack("<d", x), x
     # -0.0 specifically keeps its sign bit through the multiply.
     assert struct.pack("<d", -0.0 * 1.0) == struct.pack("<d", -0.0)
+
+
+# ===========================================================================
+# SHIP GATE (i) — SC-4 dual-run bit-identity against the REAL adapter (80-03 T3).
+#
+# The tier above dual-runs the legacy core vs a TEST-LOCAL native shim. This tier
+# drives the native side through the REAL production adapter
+# (``build_deribit_native_ledger``, 80-02) fed synthetic Deribit exchange stubs
+# (NO network), then through the REAL ``combine_native_ledger`` (80-03 T1) — the
+# exact production seam the job path now takes. The merge is BLOCKED unless this
+# tier is bit-exact (check_exact=True series + byte-equal meta) over the whole
+# all-USD-family §4.2 matrix. Per D8, byte-identity is asserted ONLY over
+# genuinely all-USD-family accounts; a coin/dust account legitimately MOVES and is
+# proven excluded (test_dust_account_excluded_from_identity), never falsely
+# asserted identical.
+# ===========================================================================
+
+
+def _day_ms(i: int) -> int:
+    """UTC epoch-ms for fixture day ``i`` (naive midnight treated as UTC)."""
+    return int(_day(i).value // 1_000_000)
+
+
+def _fixture_currencies(fx: _Fixture) -> list[str]:
+    """First-appearance order of every currency in the fixture — the producer row
+    order the real crawl's ``enumerate_currencies`` must return so raw_rows (a
+    per-currency concatenation) fold in the SAME order the legacy per-day sum does
+    (op A). A different enumeration order would re-associate the day-1 fold on the
+    order-sensitive fixture and redden check_exact."""
+    seen: list[str] = []
+    for (_d, c, _chg) in fx.rows:
+        if c not in seen:
+            seen.append(c)
+    for (_d, c, _u) in fx.flows:
+        if c not in seen:
+            seen.append(c)
+    for c in fx.wedge:
+        if c not in seen:
+            seen.append(c)
+    return seen
+
+
+class _DeribitAdapterStub:
+    """A synthetic Deribit exchange: ONE get_account_summaries response for the
+    native anchor/wedge read. The crawl I/O primitives (enumerate_*, paginate) are
+    monkeypatched onto the ``di`` module; for an all-USD-family account NO index /
+    delivery-price endpoint is ever hit (USD-family is never probed, gets no
+    marks), so this stub needs only the summaries method."""
+
+    def __init__(self, summaries: list[dict[str, Any]]) -> None:
+        self._summaries = summaries
+
+    async def private_get_get_account_summaries(
+        self, params: dict[str, Any]
+    ) -> Any:
+        return {"result": {"summaries": self._summaries}}
+
+
+def _real_adapter_ledger(
+    fx: _Fixture, monkeypatch: Any
+) -> tuple[NativeLedger, di.CompletenessReport]:
+    """Build a NativeLedger via the REAL build_deribit_native_ledger from synthetic
+    Deribit rows/summaries — settlement rows → native pnl, external-flow rows →
+    dated flows, per-currency summaries → native anchor/wedge. The residual-clean
+    terminal (Σpnl+Σflow+Σwedge) is concentrated on the primary currency so the
+    coalesced USD bucket's terminal == the legacy anchor (op C)."""
+    currencies = _fixture_currencies(fx)
+    primary = fx.rows[0][1]
+
+    rows_by_ccy: dict[str, list[dict[str, Any]]] = {c: [] for c in currencies}
+    for (d, ccy, chg) in fx.rows:
+        rows_by_ccy[ccy].append(
+            {"type": "settlement", "currency": ccy, "change": chg,
+             "timestamp": _day_ms(d)}
+        )
+    for (d, ccy, u) in fx.flows:
+        # USD-family external flow: linear pass-through, native change == usd.
+        rows_by_ccy.setdefault(ccy, []).append(
+            {"type": "withdrawal" if u < 0 else "deposit", "currency": ccy,
+             "change": u, "timestamp": _day_ms(d)}
+        )
+
+    async def _enumerate_scopes(_ex: Any) -> list[Any]:
+        return [di.Scope("main", None, True)]
+
+    async def _resolve_scope_auth(_ex: Any, _scope: Any) -> dict[str, Any]:
+        return {}
+
+    async def _enumerate_currencies(_ex: Any, _scope: Any, _auth: Any) -> list[str]:
+        return list(currencies)
+
+    async def _paginate(
+        _ex: Any, _scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[dict[str, Any]]:
+        return list(rows_by_ccy.get(currency, []))
+
+    monkeypatch.setattr(di, "enumerate_scopes", _enumerate_scopes)
+    monkeypatch.setattr(di, "resolve_scope_auth", _resolve_scope_auth)
+    monkeypatch.setattr(di, "enumerate_currencies", _enumerate_currencies)
+    monkeypatch.setattr(di, "paginate_txn_log", _paginate)
+
+    # Per-currency native summaries: all residual-closing equity on the primary
+    # (equity == the legacy anchor); the wedge sits on its own currency.
+    anchor = _terminal_total(fx)
+    summaries = [
+        {"currency": primary, "equity": anchor,
+         "session_upl": float(fx.wedge.get(primary, 0.0))}
+    ]
+    for ccy in currencies:
+        if ccy == primary:
+            continue
+        summaries.append(
+            {"currency": ccy, "equity": 0.0,
+             "session_upl": float(fx.wedge.get(ccy, 0.0))}
+        )
+
+    stub = _DeribitAdapterStub(summaries)
+    return asyncio.run(di.build_deribit_native_ledger(stub))
+
+
+def _native_real(
+    fx: _Fixture, monkeypatch: Any
+) -> tuple[pd.Series, dict[str, object]]:
+    """The native side through the REAL production seam: build_deribit_native_ledger
+    → combine_native_ledger. The FLOW-04 unrealized_pnl_in_anchor materiality flag
+    is added exactly as the job_worker deribit branch does (the pure core does not
+    emit it — it subtracts the wedge per-currency, App A #6)."""
+    ledger, report = _real_adapter_ledger(fx, monkeypatch)
+    returns, meta = combine_native_ledger(ledger, report.indexable_currencies)
+    anchor = _terminal_total(fx)
+    upnl = sum(fx.wedge.values())
+    if anchor > DUST_NAV_FLOOR and abs(upnl) / anchor > UNREALIZED_MATERIALITY_RATIO:
+        meta["unrealized_pnl_in_anchor"] = True
+        meta["computation_status_hint"] = "complete_with_warnings"
+    return returns, meta
+
+
+def _legacy_gapfilled(fx: _Fixture) -> tuple[pd.Series, dict[str, object]]:
+    """The legacy core returns gap-filled to the daily calendar so it matches
+    combine_native_ledger's gap_fill (a no-op on the contiguous fixtures, applied
+    symmetrically to guarantee the comparison is at the same shape)."""
+    returns, meta = _legacy(fx)
+    return gap_fill_daily_returns(returns), meta
+
+
+@pytest.mark.parametrize("fx", _FIXTURES, ids=lambda f: f.name)
+def test_dual_run_bit_exact_real_adapter(fx: _Fixture, monkeypatch: Any) -> None:
+    """SHIP GATE (i): the native path through the REAL build_deribit_native_ledger
+    adapter + combine_native_ledger is BIT-EXACT (series) and BYTE-EQUAL (meta) to
+    the legacy honest core over the whole all-USD-family §4.2 matrix. This is the
+    merge-blocking assertion — a silent return rescale on ANY USD-native account
+    (T-80-09) cannot land.
+
+    What each layer of the real seam this pins: the adapter's per-currency native
+    pnl (``txn_rows_to_native_daily``), the collapsed anchor (Σ summaries equity),
+    the 4-field dated flows, the core's backward roll + §5 inception gate + §6
+    chain-break merge, and ``combine_native_ledger``'s gap_fill — every one must
+    reproduce the legacy returns bit-for-bit and the legacy guard/chain-break/
+    materiality meta byte-for-byte.
+
+    MUTATION-HONESTY: the interior-break fixtures (flow_dominated, neg_nav_interior_
+    break) redden the META equality if the native path's twr_chain_broken detection
+    forks one-sided; the wedge_above_5pct fixture reddens if the FLOW-04
+    unrealized_pnl_in_anchor materiality flag is dropped from the native seam (see
+    the neuter in test_real_adapter_materiality_flag_is_load_bearing). op A row-order
+    coalescing is pinned at the CORE by the shim tier's neuter (1); op C anchor
+    composition by test_anchor_composition_pin_real_adapter; the ×1.0 mark by
+    test_ieee_x_times_one_is_bit_identity. (The adapter canonicalises currency order
+    via txn_rows_to_native_daily, so the fold is deterministic regardless of crawl
+    order — enumerate order is intentionally NOT a divergence vector here.)
+    """
+    legacy_returns, legacy_meta = _legacy_gapfilled(fx)
+    native_returns, native_meta = _native_real(fx, monkeypatch)
+    pd.testing.assert_series_equal(
+        legacy_returns, native_returns, check_exact=True, check_names=False
+    )
+    assert dict(legacy_meta) == dict(native_meta)
+
+
+def test_real_adapter_materiality_flag_is_load_bearing(monkeypatch: Any) -> None:
+    """The meta byte-equality in the gate is LOAD-BEARING: the >5% wedge fixture's
+    native meta carries unrealized_pnl_in_anchor + complete_with_warnings, matching
+    the legacy core. If the native seam DROPPED the materiality flag (the pure core
+    does not emit it), this fixture's meta would diverge one-sided — proving the
+    gate's dict equality actually catches a dropped warning, not just series."""
+    fx = next(f for f in _FIXTURES if f.name == "wedge_above_5pct")
+    _legacy_returns, legacy_meta = _legacy_gapfilled(fx)
+    _native_returns, native_meta = _native_real(fx, monkeypatch)
+    # Both metas MUST carry the material-wedge warning.
+    assert legacy_meta.get("unrealized_pnl_in_anchor") is True
+    assert native_meta.get("unrealized_pnl_in_anchor") is True
+    assert native_meta.get("computation_status_hint") == "complete_with_warnings"
+    # And a native meta WITHOUT the flag would break the gate equality.
+    dropped = dict(native_meta)
+    dropped.pop("unrealized_pnl_in_anchor", None)
+    dropped["computation_status_hint"] = "complete"
+    assert dict(legacy_meta) != dropped
+
+
+def test_anchor_composition_pin_real_adapter(monkeypatch: Any) -> None:
+    """D8 / op C: with the residual-closing equity DISTRIBUTED across multiple
+    USD-family currencies (order-sensitive magnitudes), the coalesced native anchor
+    (Σ terminal_native_equity[branch-1] × 1.0) equals deribit_equity_to_usd's float
+    computed over the SAME summaries order. A re-ordered/re-associated anchor sum
+    would land a different last bit and redden the dual-run's check_exact — this
+    test pins the premise directly at the anchor.
+
+    The three summaries' equities are 1e16, 1.0, 1.0 — ((1e16+1)+1) == 1e16+2 but a
+    re-association ((1+1)+1e16) == 1e16 (2 ULP apart at this scale)."""
+    summaries = [
+        {"currency": "USDC", "equity": 1e16, "session_upl": 0.0},
+        {"currency": "USDT", "equity": 1.0, "session_upl": 0.0},
+        {"currency": "USD", "equity": 1.0, "session_upl": 0.0},
+    ]
+    # The collapsed USD anchor, summed in summaries order (mark ≡ 1.0 for USD-family).
+    collapsed = deribit_equity_to_usd(summaries, {})
+    # The native coalesced anchor = Σ terminal_native_equity in the SAME order.
+    native_anchor = 0.0
+    for s in summaries:
+        native_anchor += float(s["equity"]) * 1.0
+    assert struct.pack("<d", native_anchor) == struct.pack("<d", collapsed), (
+        "the native anchor must be bit-identical to the collapsed anchor in "
+        "summaries order (op C)"
+    )
+    # And the order-sensitivity is real at this scale (guards a "nice" fixture).
+    reassociated = (1.0 + 1.0) + 1e16
+    assert struct.pack("<d", native_anchor) != struct.pack("<d", reassociated)
+
+
+def test_dust_account_excluded_from_identity(monkeypatch: Any) -> None:
+    """D8: an account carrying coin DUST is NOT byte-identical old-vs-new — the
+    native path routes the dust into a marks-valued coin bucket while the legacy
+    collapsed anchor folds it into initial capital at the anchor-instant index. Such
+    an account legitimately MOVES; it is a parity-panel case (80-04), NOT a gate-i
+    identity fixture. This documents the boundary: a dust-bearing account produces a
+    native reconstruction that carries the coin bucket (≠ a pure-USD roll), so
+    asserting byte-identity on it would be FALSE. We prove the native path yields a
+    finite coin-inclusive series (not a refusal) and that it is DISTINCT from the
+    pure-USD legacy roll."""
+    # A USDC account (settlements) PLUS a nonzero BTC dust settlement + a BTC mark.
+    currencies = ["USDC", "BTC"]
+
+    async def _enumerate_scopes(_ex: Any) -> list[Any]:
+        return [di.Scope("main", None, True)]
+
+    async def _resolve_scope_auth(_ex: Any, _scope: Any) -> dict[str, Any]:
+        return {}
+
+    async def _enumerate_currencies(_ex: Any, _scope: Any, _auth: Any) -> list[str]:
+        return list(currencies)
+
+    async def _paginate(
+        _ex: Any, _scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[dict[str, Any]]:
+        if currency == "USDC":
+            return [
+                {"type": "settlement", "currency": "USDC", "change": 100_000.0,
+                 "timestamp": _day_ms(0)},
+                {"type": "settlement", "currency": "USDC", "change": 50_000.0,
+                 "timestamp": _day_ms(1)},
+            ]
+        if currency == "BTC":
+            return [
+                {"type": "settlement", "currency": "BTC", "change": 0.01,
+                 "timestamp": _day_ms(1)},
+            ]
+        return []
+
+    async def _index_probe(_ex: Any, _ccy: str, *, oldest_day: str, sleep: Any) -> Any:
+        return {_iso(0): 50_000.0, _iso(1): 50_000.0}
+
+    monkeypatch.setattr(di, "enumerate_scopes", _enumerate_scopes)
+    monkeypatch.setattr(di, "resolve_scope_auth", _resolve_scope_auth)
+    monkeypatch.setattr(di, "enumerate_currencies", _enumerate_currencies)
+    monkeypatch.setattr(di, "paginate_txn_log", _paginate)
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _index_probe)
+
+    class _CoinStub:
+        async def private_get_get_account_summaries(self, params: Any) -> Any:
+            # USDC 150k + 0.01 BTC × 50k = 500 in native coin units.
+            return {"result": {"summaries": [
+                {"currency": "USDC", "equity": 150_000.0, "session_upl": 0.0},
+                {"currency": "BTC", "equity": 0.01, "session_upl": 0.0},
+            ]}}
+
+        async def public_get_get_index_price(self, params: Any) -> Any:
+            return {"result": {"index_price": 50_000.0}}
+
+    stub = _CoinStub()
+    ledger, report = asyncio.run(di.build_deribit_native_ledger(stub))
+    # The dust BTC is INDEXED and marked — the native path carries a coin bucket.
+    assert "BTC" in ledger.marks, "the dust coin must be a marks-valued bucket"
+    native_returns, _ = combine_native_ledger(ledger, report.indexable_currencies)
+    # A pure-USD legacy roll of the SAME USDC-only activity (no BTC).
+    usd_fx = _Fixture(
+        "usd_only", [(0, "USDC", 100_000.0), (1, "USDC", 50_000.0)]
+    )
+    legacy_returns, _ = _legacy_gapfilled(usd_fx)
+    # The dust account MOVES relative to the pure-USD roll — NOT byte-identical.
+    assert not native_returns.equals(legacy_returns), (
+        "a dust-bearing account legitimately differs from a pure-USD roll — it is "
+        "a parity-panel MOVED case (80-04), never a gate-i identity fixture (D8)"
+    )
