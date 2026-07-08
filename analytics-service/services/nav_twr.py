@@ -140,13 +140,16 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     # window (pre-2025-01-12 rollout, or the live trailing edge) fell back to
     # cash-basis `change`: premium swings PERSIST there (no summary channel exists
     # to re-attribute them, and none ever will — exchange-side rollout, not a data
-    # error). The value is the sorted list of affected ``"{ccy}:{day}"`` buckets so
-    # the factsheet can CAVEAT rather than silently ship noise. Set by the broker
-    # wiring (job_worker), NOT the pure core — same pattern as
-    # unrealized_pnl_unreadable; a NON-EMPTY list is truthy → rides the SAME
-    # complete_with_warnings channel (founder-lp strict mode withholds warned
-    # accounts automatically). Registered in NAV_TWR_GUARD_KEYS so the flag alone
-    # promotes the status (Q6).
+    # error). The in-core value is the sorted list of affected ``"{ccy}:{day}"``
+    # buckets (useful for logs/harness). Set by the broker wiring (job_worker), NOT
+    # the pure core — same pattern as unrealized_pnl_unreadable. F3: the LIST does
+    # NOT survive to the factsheet — at the broker→CSV boundary
+    # (job_worker._prestamp_flags, analytics_runner data_quality_flags) it COLLAPSES
+    # to a boolean DQ-flag exactly like every other guard key (the persisted
+    # data_quality_flags carries `True`, not the buckets). A NON-EMPTY list is
+    # truthy → rides the SAME complete_with_warnings channel (founder-lp strict mode
+    # withholds warned accounts automatically). Registered in NAV_TWR_GUARD_KEYS so
+    # the flag alone promotes the status (Q6).
     pre_summary_rollout_option_dailies: list[str]
 
 
