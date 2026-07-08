@@ -330,3 +330,46 @@ def test_perp_only_eligibility_summary_row_fails() -> None:
     chk = check_perp_only_eligibility(rows)
     assert not chk.passed
     assert "options_settlement_summary row(s)" in chk.detail
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — the fresh daily_reconcile basis is the PRODUCTION native formula
+# (txn_rows_to_native_daily), not the legacy USD daily_pnl path production no
+# longer runs. An options-summary-only day is NONZERO natively but ABSENT under
+# the old USD basis (summary change=0 → unclassified) → the USD basis would
+# false-drop it.
+# ---------------------------------------------------------------------------
+
+
+def test_native_nonzero_basis_includes_summary_only_day() -> None:
+    from datetime import datetime, timezone
+
+    from scripts.deribit_acceptance import _native_nonzero_dates
+    from services.deribit_txn import txn_rows_to_daily_records
+
+    def _ms(iso: str) -> int:
+        return int(datetime.fromisoformat(iso).timestamp() * 1000)
+
+    # A covered-era BTC options-summary-only day (change=0, rpl+upl≠0) plus a
+    # perp settlement on a different day.
+    rows = [
+        {"type": "options_settlement_summary", "instrument_name": "BTC-14JUL25-60000-C",
+         "currency": "BTC", "change": 0.0, "realized_pl": 0.03, "unrealized_pl": -0.01,
+         "timestamp": _ms("2025-07-12T08:00:00+00:00"), "id": 1},
+        {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.01, "index_price": 60000.0,
+         "timestamp": _ms("2025-07-13T08:00:00+00:00"), "id": 2},
+    ]
+    native_days = _native_nonzero_dates(rows)
+    assert date(2025, 7, 12) in native_days  # summary day counts (native basis)
+    assert date(2025, 7, 13) in native_days
+
+    # The OLD USD basis (txn_rows_to_daily_records → price nonzero) MISSES the
+    # summary-only day (summary is unclassified there, change=0).
+    usd_records = txn_rows_to_daily_records(rows)
+    usd_days = {
+        date.fromisoformat(str(r["timestamp"])[:10])
+        for r in usd_records
+        if float(r.get("price", 0.0) or 0.0) != 0.0
+    }
+    assert date(2025, 7, 12) not in usd_days  # would false-drop under the old basis

@@ -71,14 +71,15 @@ from typing import Any
 
 from services.deribit_ingest import (
     LedgerCompletenessError,
+    _crawl_deribit_ledger,
     assert_ledger_complete,
-    fetch_deribit_ledger_daily_records,
 )
 from services.deribit_txn import (
     _INVERSE_CURRENCIES,
     _NATIVE_OPTIONS_SUMMARY_TYPES,
     classify_instrument,
     txn_change_to_usd,
+    txn_rows_to_native_daily,
 )
 
 # Cap on how many symmetric-difference dates / sign-mismatch rows a Check detail
@@ -441,6 +442,27 @@ def _records_dates_by_value(
     return nonzero, zero - nonzero
 
 
+def _native_nonzero_dates(raw_rows: Sequence[Mapping[str, Any]]) -> set[date]:
+    """The fresh nonzero-P&L UTC-day set under the PRODUCTION native formula
+    (``txn_rows_to_native_daily``) — the axis production actually persists since
+    P80 (``job_worker`` is native-only). The pre-Phase-82 harness derived this set
+    from the legacy USD ``fetch_deribit_ledger_daily_records`` path, which
+    PRODUCTION NO LONGER RUNS — so for an options account it checked a path that
+    does not match what is persisted (summary-only days appear here; covered-era
+    premium days shrink to fee-size but stay nonzero). This is correct alignment —
+    the harness must check what is actually persisted — NOT masking: the money
+    gates are the balance-identity guard + §5 closure, untouched by this basis
+    switch. A day is nonzero iff ANY currency's native pnl for that day is
+    nonzero."""
+    native = txn_rows_to_native_daily(raw_rows)
+    out: set[date] = set()
+    for day_map in native.values():
+        for day_iso, value in day_map.items():
+            if float(value) != 0.0:
+                out.add(date.fromisoformat(day_iso))
+    return out
+
+
 def _load_persisted(
     supabase: Any, strategy_id: str
 ) -> tuple[str, dict[str, Any], set[date], set[date]]:
@@ -484,7 +506,11 @@ async def verify_account(spec: AccountSpec, supabase: Any) -> AccountAcceptance:
     checks: list[Check] = []
     exchange = _build_deribit_exchange(spec.key_index)
     try:
-        records, completeness = await fetch_deribit_ledger_daily_records(
+        # Task 5: crawl ONCE via the shared producer so the fresh basis is derived
+        # over the SAME raw rows two ways — the NATIVE production formula
+        # (txn_rows_to_native_daily, the daily_reconcile money gate) and the legacy
+        # USD daily_pnl records (kept for the advisory fills / date-coverage basis).
+        records, raw_rows, _indexable, completeness = await _crawl_deribit_ledger(
             exchange, None
         )
     finally:
@@ -504,7 +530,11 @@ async def verify_account(spec: AccountSpec, supabase: Any) -> AccountAcceptance:
         checks.append(Check("ledger_completeness", False, str(exc)))
 
     active_dates = _records_active_dates(records)
-    ledger_nonzero, ledger_zero = _records_dates_by_value(records)
+    # Task 5: the gated nonzero-P&L days come from the PRODUCTION native formula
+    # (what is persisted), NOT the legacy USD daily_pnl records production no longer
+    # runs. The USD records still supply the ADVISORY cosmetic zero-day basis.
+    ledger_nonzero = _native_nonzero_dates(raw_rows)
+    _usd_nonzero, ledger_zero = _records_dates_by_value(records)
     status, flags, persisted_nonzero, persisted_zero = _load_persisted(
         supabase, spec.strategy_id
     )
@@ -522,20 +552,19 @@ async def verify_account(spec: AccountSpec, supabase: Any) -> AccountAcceptance:
         )
     )
 
-    # 5. Inverse signs — see the LIVE-driver note below.
-    # ponytail: fetch_deribit_ledger_daily_records aggregates the raw txn rows
-    # away (it returns daily_pnl records + a CompletenessReport, never the raw
-    # currency+change rows). Re-obtaining raw rows would mean re-driving the
-    # scope×currency crawl (paginate_txn_log) — re-implementing the ingest. Per
-    # the plan we do NOT re-implement the crawl; the inverse-sign invariant is
-    # pinned by the fixture unit test against the real txn_change_to_usd, and the
-    # live driver records that coverage as an explicit advisory note rather than
-    # running a partial re-check here.
+    # 5. Inverse signs — Task 5 now crawls via _crawl_deribit_ledger, which
+    # EXPOSES the raw currency+change rows (no re-implementation), so the
+    # D-07/D-08 sign invariant runs LIVE against the real txn_change_to_usd rather
+    # than only in the fixture unit test.
+    checks.append(check_inverse_signs(raw_rows))
+
+    # 6. Perp-only eligibility (Phase 82 SC-4): a byte-identity control key must
+    # carry ZERO option/summary rows; record it as ADVISORY so an options account
+    # is not gate-failed here (it legitimately moves), while a key intended as a
+    # perp-only control surfaces its eligibility in the run log.
     advisory: dict[str, object] = summarize_fills(completeness.total_return_rows)
-    advisory["inverse_signs"] = (
-        "covered by unit test (txn_change_to_usd); raw rows not exposed by the "
-        "aggregating ledger crawl — not re-implemented live"
-    )
+    _eligibility = check_perp_only_eligibility(raw_rows)
+    advisory["perp_only_eligibility"] = _eligibility.detail
     advisory["net_external_flow_usd"] = completeness.net_external_flow_usd
     advisory["saw_unvalued_inverse_flow"] = completeness.saw_unvalued_inverse_flow
 
