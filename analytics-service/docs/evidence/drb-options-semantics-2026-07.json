@@ -1,0 +1,57 @@
+{
+  "_evidence": "DRB options-semantics — consolidated Task-E record for Phase 82 (options-aware native daily P&L)",
+  "_generated": "2026-07-08",
+  "_subject": "Settled facts (E1–E5) from three 2026-07 live probes on key 95089958 (strategy c225840c 'Phoenix Protocol', options+perps, BTC-settled). These are INPUTS to the plan — the executor builds against them as fixed; re-deriving them is out of scope.",
+  "_sources": [
+    "docs/evidence/drb01-deribit-ground-truth-2026-07-04.json",
+    "docs/evidence/drb02-deribit-field-semantics-2026-07-05.json",
+    "docs/evidence/drb03-deribit-scope-equity-2026-07-05.json"
+  ],
+  "E1_unrealized_pl_is_session_delta": {
+    "finding": "options_settlement_summary.unrealized_pl is a per-session DELTA (change since the last settlement), NOT a running level. Present + numeric on ALL summary rows alongside realized_pl. Summary row `change` is always 0.0.",
+    "consequence": "The daily P&L MUST sum realized_pl + unrealized_pl (both load-bearing). Dropping unrealized_pl breaks the balance-identity closure. No per-scope grouping / day-over-day diffing needed — the flat scope concat is safe for summation. R3 (level-contingency machinery) is DEAD.",
+    "guard": "summary row with nonzero change, or absent/null/non-numeric realized_pl OR unrealized_pl -> LedgerValuationError (schema-drift fail-loud)."
+  },
+  "E2_expiry_in_summary_channel": {
+    "finding": "Option expiry economics live in the options_settlement_summary channel, not (only) in option delivery.change. => coverage-gated R1 selected; R2 (delivery-carries-payout) is DEAD.",
+    "oracle_rejection": "The row-embedded daily-equity snapshot was REJECTED as a per-day discriminator: it matched Δequity−flows on only ~13% of days (intraday mark-timing noise; perp session_upl NULL on every settlement row). Replaced by the BALANCE IDENTITY (Σchange == Δbalance per day; computed-total == Σchange over CASH_BEARING per currency)."
+  },
+  "E3_commission_present_summary_fee_excluded": {
+    "finding": "commission is POSITIVE and present + numeric on 100% of option trade/delivery rows. Summary economics are fee-EXCLUDED.",
+    "closure_proof": "covered-era option fee-gross Σ(change+commission) = 9.222194 BTC == Σ(realized_pl+unrealized_pl) = 9.222190 BTC (residual 3.7e-6 BTC).",
+    "consequence": "Inside coverage, option trade/delivery contribute −commission (fee kept, premium/payout cash EXCLUDED — carried by the summary channel). This neither drops nor double-counts fees.",
+    "guard": "option trade/delivery INSIDE coverage with absent/null/non-numeric commission -> LedgerValuationError."
+  },
+  "E4_coverage_window": {
+    "finding": "Deribit began emitting options_settlement_summary rows ~2025-01-12 (exchange-side feature rollout). Per currency c: coverage_window[c] = [first_summary_ts[c] − 24h, last_summary_ts[c]]. No summaries for c => no window => every option row of c stays cash-basis `change`.",
+    "lower_bound_minus_24h": "the first summary settles the session PRECEDING it, so option rows in the 24h before it are already carried.",
+    "upper_bound_last_summary": "option trades after the last crawled summary (live partial session) stay cash-basis until the next crawl's summary lands; the full-history recompute converges them onto the covered rule (trailing edge — keeps the balance-identity guard closing every compute)."
+  },
+  "E5_acceptance_hard_numbers": {
+    "balance_identity_days": "Σchange == Δbalance closes 279/280 days on the probe account (1 miss = 8dp rounding — tolerance absorbs it).",
+    "flat_terminal_full_history_targets": {
+      "BTC": 6.479224,
+      "USDC": -97752.858490,
+      "residual_bound_usd": 1.0
+    },
+    "covered_era_closure": {
+      "option_fee_gross_change_plus_commission_BTC": 9.222194,
+      "sum_realized_pl_plus_unrealized_pl_BTC": 9.222190,
+      "residual_native": 3.7e-06
+    },
+    "spike_collapse_regression": {
+      "day": "2025-07-13",
+      "old_native_pnl_BTC": 2.736,
+      "corrected_native_pnl_BTC": 0.0046,
+      "corrected_daily_return": -0.0036,
+      "old_daily_return_approx": 0.65
+    },
+    "coverage_rollout_date": "2025-01-12"
+  },
+  "settled_do_not_reopen": [
+    "field is `change` NOT cashflow (drb02)",
+    "single-scope: key IS its own subaccount (drb03)",
+    "funding is settlement-bundled (no separate funding type)",
+    "inverse-vs-linear is a RED HERRING — the BTC book is simply the one whose history predates the rollout"
+  ]
+}
