@@ -144,12 +144,53 @@ export default async function ScenarioSharePage({
     notFound();
   }
 
+  // 3b. Phase 84 (BLEND-01) — per-leg asset_class for the blend annualization
+  //     basis. SECURITY: this is a service_role read on the SAME admin transport
+  //     client, but it is deliberately NARROWER than the RPC — the projection is
+  //     EXACTLY `id, asset_class`, filtered to `status = 'published'` (mirroring
+  //     get_shared_scenario's own published-only rule) AND bounded to the
+  //     RPC-returned series ids ONLY. It NEVER selects book / value / api-key /
+  //     identity columns (the phase-29 leak-scan forbids those on this page). We
+  //     read asset_class here rather than widen the get_shared_scenario RPC
+  //     because the phase-29 exit gate (FORBIDDEN_MIGRATION_RE = /scenario|share/i)
+  //     forbids any new scenarios/share migration. A failed / empty read degrades
+  //     to an empty lookup → the √252 default (honest), never a throw on this
+  //     public page.
+  const assetClassById: Record<string, string | null> = {};
+  const seriesIds = (row.series ?? []).map((s) => s.strategy_id);
+  if (seriesIds.length > 0) {
+    try {
+      // B10 sanctioned-exception: NOT routed through withPublishedOnly. This is a
+      // deliberate, load-bearing EXPLICIT `.eq("status","published")` that mirrors
+      // the get_shared_scenario RPC's OWN published-only rule as defence-in-depth
+      // on a PUBLIC sessionless route — the phase-84 security contract requires
+      // the predicate visible AT this call site (not hidden in a helper), so a
+      // future edit cannot silently drop the public-page published gate. The
+      // projection is bounded to id + asset_class and the ids to the RPC series,
+      // so no draft/book/api-key row can leak even if RLS widened.
+      const { data: acRows } = await admin
+        .from("strategies")
+        .select("id, asset_class")
+        .in("id", seriesIds)
+        .eq("status", "published");
+      for (const r of (acRows ?? []) as Array<{
+        id: string;
+        asset_class: string | null;
+      }>) {
+        assetClassById[r.id] = r.asset_class ?? null;
+      }
+    } catch {
+      // Degrade to the empty lookup (→ √252 default). The public page never
+      // throws on this optional annualization-basis enrichment.
+    }
+  }
+
   // 4. Public BTC benchmark series (cacheable — NOT no-store). 5. Resolve.
   // The resolve layer no longer consumes btcDaily (the benchmark is recomputed
   // inside ScenarioBenchmarkSection from portfolioDaily + btcDaily); the page
   // still fetches it here to feed the chart overlay + the section directly.
   const btcDaily = await fetchBtcDaily();
-  const resolved = resolveSharedScenario(row);
+  const resolved = resolveSharedScenario(row, assetClassById);
 
   // DI-23-01 — a version-ahead / undecodable / dangling-ref draft is honest
   // absence, NEVER a live-book substitution and NEVER a 404 (the link IS valid).
@@ -168,7 +209,8 @@ export default async function ScenarioSharePage({
     );
   }
 
-  const { name, metrics, portfolioDaily, strategyNames, isMixed } = resolved;
+  const { name, metrics, portfolioDaily, strategyNames, isMixed, periodsPerYear } =
+    resolved;
   const btcAvailable = btcDaily.length > 0;
 
   // EquityChart needs cumulative-WEALTH form (start ~1.0). The engine's
@@ -258,6 +300,9 @@ export default async function ScenarioSharePage({
           portfolioDaily={portfolioDaily}
           btcDaily={btcDaily}
           benchmarkAvailable={btcAvailable}
+          // Phase 84 (BLEND-01): ride the SAME basis the projection used, so the
+          // vs-BTC TE/IR/alpha risk math matches the KPI strip's clock.
+          periodsPerYear={periodsPerYear}
         />
       </Card>
 

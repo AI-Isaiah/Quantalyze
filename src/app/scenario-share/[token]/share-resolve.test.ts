@@ -694,3 +694,109 @@ describe("Phase 64 / PRESENT-03 — isMixed (mixed-share caption condition)", ()
     expect(result.isMixed).toBe(false);
   });
 });
+
+// ===========================================================================
+// Phase 84 (BLEND-01) — share-page blend-basis threading.
+//
+// A shared blend must annualize on the SAME rule as the live composer: √365 if
+// ANY SELECTED leg is crypto, else √252 (blendPeriodsPerYear). The share page's
+// SSR caller derives per-leg asset_class from a published-rows-only strategies
+// read (NO get_shared_scenario RPC/migration — the phase-29 exit gate forbids
+// /scenario|share/i DDL) and threads it in as the optional `assetClassById`
+// second argument. ResolvedOk carries the basis actually used (periodsPerYear)
+// so the page threads the IDENTICAL basis into ScenarioBenchmarkSection.
+//
+// twr is basis-invariant (return space); vol/sharpe ride √basis. An
+// all-unknown / empty lookup keeps the √252 default byte-identical to today —
+// the whole existing suite above (which passes NO lookup) is that byte-identity
+// pin, staying green.
+// ===========================================================================
+describe("resolveSharedScenario — blend-basis threading (BLEND-01)", () => {
+  it("a crypto-tagged lookup → the projection annualizes on √365 and ResolvedOk.periodsPerYear === 365", () => {
+    const row = {
+      name: "Crypto blend",
+      draft: okDraft(), // STRAT_A + STRAT_B both selected
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: okSeriesRows(),
+    };
+
+    const crypto = resolveSharedScenario(row, { [STRAT_A]: "crypto" });
+    const bare = resolveSharedScenario(row); // no lookup → all null → √252
+
+    expect(crypto.kind).toBe("ok");
+    expect(bare.kind).toBe("ok");
+    if (crypto.kind !== "ok" || bare.kind !== "ok") throw new Error("expected ok");
+
+    // A SELECTED crypto leg → √365; the bare (unknown) blend stays √252.
+    expect(crypto.periodsPerYear).toBe(365);
+    expect(bare.periodsPerYear).toBe(252);
+
+    // twr is basis-invariant — identical underlying blended series.
+    expect(crypto.metrics.twr).toBe(bare.metrics.twr);
+    // …but the RISK-clock metric genuinely differs (the basis reached compute).
+    expect(crypto.metrics.volatility).not.toBe(bare.metrics.volatility);
+    expect(crypto.metrics.volatility).not.toBeNull();
+  });
+
+  it("no lookup and an EMPTY lookup are byte-identical, both √252 (default pin)", () => {
+    const row = {
+      name: "Unknown blend",
+      draft: okDraft(),
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: okSeriesRows(),
+    };
+
+    const bare = resolveSharedScenario(row);
+    const empty = resolveSharedScenario(row, {});
+
+    expect(bare.kind).toBe("ok");
+    if (bare.kind !== "ok") throw new Error("expected ok");
+    // The default basis is √252, byte-identical to today.
+    expect(bare.periodsPerYear).toBe(252);
+    // Supplying an empty lookup changes NOTHING.
+    expect(empty).toEqual(bare);
+  });
+
+  it("an added-only draft's asset_class comes from the lookup; a leg absent from the lookup defaults to the √252 leg", () => {
+    // Two selected added legs, only ONE tagged crypto → any-crypto rule → √365.
+    const row = {
+      name: "One crypto leg",
+      draft: okDraft(),
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: okSeriesRows(),
+    };
+    // STRAT_B absent from the lookup → null (√252 leg); STRAT_A crypto → √365.
+    const result = resolveSharedScenario(row, { [STRAT_A]: "crypto" });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.periodsPerYear).toBe(365);
+
+    // All-traditional lookup → √252 (no crypto leg selected).
+    const tradfi = resolveSharedScenario(row, {
+      [STRAT_A]: "traditional",
+      [STRAT_B]: "traditional",
+    });
+    expect(tradfi.kind).toBe("ok");
+    if (tradfi.kind !== "ok") throw new Error("expected ok");
+    expect(tradfi.periodsPerYear).toBe(252);
+  });
+
+  it("the lookup NEVER resurrects an honest-absence branch (book-only stays book-only)", () => {
+    const bookOnly: ScenarioDraft = {
+      ...okDraft(),
+      toggleByScopeRef: {},
+      addedStrategies: [],
+      weightOverrides: {},
+    };
+    const result = resolveSharedScenario(
+      { name: "Book-only", draft: bookOnly, schema_version: 2, series: [] },
+      { [STRAT_A]: "crypto" }, // a lookup must not conjure a projection
+    );
+    expect(result.kind).toBe("honest-absence");
+    expect(
+      result.kind === "honest-absence" ? result.reason : undefined,
+    ).toBe("book-only");
+    // No periodsPerYear leaks onto an honest-absence result.
+    expect(result).not.toHaveProperty("periodsPerYear");
+  });
+});
