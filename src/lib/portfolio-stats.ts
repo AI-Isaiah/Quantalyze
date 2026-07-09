@@ -412,11 +412,17 @@ export interface AlphaBetaResult {
 /**
  * CAPM alpha and beta.
  * beta = cov(r, b) / var(b)
- * alpha = annualized excess return (mean(r) - beta * mean(b)) * 252
+ * alpha = annualized excess return (mean(r) - beta * mean(b)) * periodsPerYear
+ *
+ * `periodsPerYear` (N) is the annualization basis — 252 (traditional, default,
+ * byte-identical to pre-#597) or 365 (crypto) per #597. Only alpha rides the
+ * basis (it is an annualized RETURN); beta is a dimensionless ratio and is
+ * basis-invariant.
  */
 export function computeAlphaBeta(
   returns: number[],
   benchmark: number[],
+  periodsPerYear = 252,
 ): AlphaBetaResult {
   const n = Math.min(returns.length, benchmark.length);
   if (n < 2) return { alpha: 0, beta: 0 };
@@ -436,7 +442,7 @@ export function computeAlphaBeta(
   }
 
   const beta = varB > 0 ? cov / varB : 0;
-  const alpha = (meanR - beta * meanB) * 252;
+  const alpha = (meanR - beta * meanB) * periodsPerYear;
   return { alpha, beta };
 }
 

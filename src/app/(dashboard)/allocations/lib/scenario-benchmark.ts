@@ -19,9 +19,11 @@
  *     `analytics-service/routers/portfolio.py:915-916`
  *     (`reindex(...).dropna()`).
  *
- *   - `computeScenarioBenchmark(portfolioDaily, btcDaily)` inner-joins the two
- *     series, then assembles tracking error / information ratio / alpha / beta
- *     / correlation over the aligned window with 252-day annualization,
+ *   - `computeScenarioBenchmark(portfolioDaily, btcDaily, periodsPerYear = 252)`
+ *     inner-joins the two series, then assembles tracking error / information
+ *     ratio / alpha / beta / correlation over the aligned window, annualizing
+ *     the RISK metrics on `periodsPerYear` (252 traditional default, byte-
+ *     identical to pre-#597; 365 for a crypto-legged blend, #597 part 2),
  *     REUSING the golden-tested `computeAlphaBeta` + `computeTrackingError`
  *     from `@/lib/portfolio-stats` (do not re-implement the OLS / std math).
  *
@@ -32,12 +34,15 @@
  *     NOT a safe net here: it returns {alpha:0, beta:0} only for n<2, but for a
  *     numerically-constant benchmark with n>=2 its `varB>0?:0` branch does not
  *     fire (float residue leaves varB ~1e-37, not exactly 0), so it returns a
- *     meaningless finite beta (~2) and alpha = meanR*252 — a fabricated number,
- *     not 0. So the constant-benchmark case MUST be detected HERE (varB
- *     computed first) via the relative-scale guard and surfaced as null.
+ *     meaningless finite beta (~2) and alpha = meanR*periodsPerYear — a
+ *     fabricated number, not 0. So the constant-benchmark case MUST be detected
+ *     HERE (varB computed first) via the relative-scale guard and surfaced as
+ *     null.
  *   - te=0 (p≡b) yields a `null` information ratio (guard via relative-scale
  *     degeneracy on the excess series, not exact te>0).
- *   - All annualization is ×252 / ×√252 via the reused helpers — never √365.
+ *   - RISK-metric annualization rides `periodsPerYear` (×N / ×√N) via the reused
+ *     helpers — 252 by default (byte-identical to pre-#597), 365 for a crypto
+ *     blend (#597 part 2). beta and correlation are basis-invariant ratios.
  */
 
 import { computeAlphaBeta, computeTrackingError } from "@/lib/portfolio-stats";
@@ -48,9 +53,9 @@ export interface ScenarioBenchmark {
   n: number;
   /** Annualized std of (p−b). `null` for n<2. */
   trackingError: number | null;
-  /** mean(p−b)·252 / te. `null` for n<2 or te=0. */
+  /** mean(p−b)·periodsPerYear / te. `null` for n<2 or te=0. */
   informationRatio: number | null;
-  /** CAPM alpha (mean(p) − β·mean(b))·252. `null` for n<2 or var(b)=0. */
+  /** CAPM alpha (mean(p) − β·mean(b))·periodsPerYear. `null` for n<2 or var(b)=0. */
   alpha: number | null;
   /** CAPM beta cov(p,b)/var(b). `null` for n<2 or var(b)=0. */
   beta: number | null;
@@ -102,34 +107,42 @@ const NULL_RESULT = (n: number): ScenarioBenchmark => ({
 export function computeScenarioBenchmark(
   portfolioDaily: DailyPoint[],
   btcDaily: DailyPoint[],
+  periodsPerYear = 252,
 ): ScenarioBenchmark {
   const { p, b } = innerJoinByDate(portfolioDaily, btcDaily);
   const n = p.length;
   if (n < 2) return NULL_RESULT(n);
 
   // Tracking error + information ratio always come from the reused helper.
-  const te = computeTrackingError(p, b); // std(p−b)·√252
+  // `periodsPerYear` is the annualization basis (252 traditional default,
+  // byte-identical to pre-#597; 365 for a crypto-legged blend) threaded to
+  // EVERY risk-metric annualization below (te √N, IR ×N, stdExcess √N, alpha ×N).
+  const te = computeTrackingError(p, b, periodsPerYear); // std(p−b)·√periodsPerYear
   const diff = p.map((v, i) => v - b[i]);
   const excessMean = mean(diff);
   // IR degeneracy is detected by RELATIVE scale, NOT an exact `te > 0` — the
   // SAME float-residue trap beta/alpha/correlation already guard. A
   // numerically-constant-but-NONZERO excess (e.g. steady +0.003/day
-  // outperformance) leaves te = std(excess)·√252 ≈ 1e-16 (mean-subtraction
-  // residue), which passes `> 0` and fabricates IR ≈ excessMean·252/1e-16 ≈
-  // 2.5e15, a finite number formatNumber would render. Test instead whether
-  // the excess series' own dispersion (std = te/√252) is negligible relative
-  // to its level → surface null so the UI renders "—".
-  const stdExcess = te / Math.sqrt(252);
+  // outperformance) leaves te = std(excess)·√periodsPerYear ≈ 1e-16 (mean-
+  // subtraction residue), which passes `> 0` and fabricates IR ≈
+  // excessMean·periodsPerYear/1e-16 ≈ 2.5e15, a finite number formatNumber
+  // would render. Test instead whether the excess series' own dispersion
+  // (std = te/√periodsPerYear) is negligible relative to its level → surface
+  // null so the UI renders "—". The guard is a ratio test → basis-invariant
+  // (fires identically at 252 and 365).
+  const stdExcess = te / Math.sqrt(periodsPerYear);
   const teIsDegenerate = stdExcess <= 1e-12 * (Math.abs(excessMean) + 1e-12);
-  const informationRatio = teIsDegenerate ? null : (excessMean * 252) / te;
+  const informationRatio = teIsDegenerate
+    ? null
+    : (excessMean * periodsPerYear) / te;
 
   // var(b): POPULATION variance of the aligned benchmark. Computed FIRST so
   // the constant-benchmark degenerate case is detected here. computeAlphaBeta
   // is NOT a safe net: it returns {alpha:0, beta:0} only for n<2, but for a
   // numerically-constant benchmark with n>=2 its `varB>0?:0` branch does not
   // fire (float residue leaves varB ~1e-37, not exactly 0), so it returns a
-  // meaningless finite beta (~2) and alpha = meanR*252 — a fabricated number,
-  // not 0. A constant benchmark must surface "—", not a 0.
+  // meaningless finite beta (~2) and alpha = meanR*periodsPerYear — a
+  // fabricated number, not 0. A constant benchmark must surface "—", not a 0.
   //
   // Degeneracy is detected by RELATIVE scale, not exact `varB === 0`: a
   // genuinely constant series (e.g. every value 0.003) does NOT yield an exact
@@ -149,7 +162,7 @@ export function computeScenarioBenchmark(
     alpha = null;
     beta = null;
   } else {
-    const ab = computeAlphaBeta(p, b); // beta=cov/var, alpha=(meanP−β·meanB)·252
+    const ab = computeAlphaBeta(p, b, periodsPerYear); // beta=cov/var, alpha=(meanP−β·meanB)·periodsPerYear
     alpha = ab.alpha;
     beta = ab.beta;
   }

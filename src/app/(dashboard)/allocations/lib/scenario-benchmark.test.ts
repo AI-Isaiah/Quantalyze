@@ -4,6 +4,7 @@ import {
   innerJoinByDate,
   type ScenarioBenchmark,
 } from "./scenario-benchmark";
+import { computeAlphaBeta } from "@/lib/portfolio-stats";
 
 /**
  * TDD pins for the scenario↔BTC benchmark engine (Plan 24-01, BENCH-01).
@@ -254,5 +255,107 @@ describe("computeScenarioBenchmark — null degenerate paths (em-dash source)", 
     expect(r.trackingError).toBeNull();
     expect(r.informationRatio).toBeNull();
     expect(r.correlation).toBeNull();
+  });
+});
+
+// =========================================================================
+// 4. #597 part 2 — periodsPerYear knob: default-252 byte-identity + 365 scaling
+// =========================================================================
+//
+// The blend basis (blendPeriodsPerYear) becomes a trailing param on the two
+// pure metric primitives so wave-3 callers can flip crypto blends to √365. This
+// plan only adds the KNOB — the default MUST stay byte-identical (T-84-02: a
+// silently shifted default fails these deep-equal pins). RISK metrics ride
+// √periodsPerYear; beta and correlation are basis-INVARIANT.
+
+describe("computeAlphaBeta — periodsPerYear knob (#597 part 2)", () => {
+  // A fully-overlapping pair with real benchmark variance.
+  const r = [0.01, -0.005, 0.02, 0.0, 0.015, -0.01];
+  const b = [0.008, -0.004, 0.012, 0.002, 0.01, -0.006];
+
+  it("default (no-arg) deep-equals explicit 252 (byte-identity)", () => {
+    expect(computeAlphaBeta(r, b)).toEqual(computeAlphaBeta(r, b, 252));
+  });
+
+  it("beta is basis-invariant (365 beta === 252 beta)", () => {
+    const at252 = computeAlphaBeta(r, b, 252);
+    const at365 = computeAlphaBeta(r, b, 365);
+    expect(at365.beta).toBe(at252.beta);
+  });
+
+  it("alpha scales by exactly 365/252 (alpha = excess·periodsPerYear)", () => {
+    const at252 = computeAlphaBeta(r, b, 252);
+    const at365 = computeAlphaBeta(r, b, 365);
+    expect(at365.alpha).toBeCloseTo(at252.alpha * (365 / 252), 12);
+  });
+});
+
+describe("computeScenarioBenchmark — periodsPerYear knob (#597 part 2)", () => {
+  const d = days(6);
+  const pVals = [0.01, -0.005, 0.02, 0.0, 0.015, -0.01];
+  const bVals = [0.008, -0.004, 0.012, 0.002, 0.01, -0.006];
+  const port: DP[] = d.map((date, i) => ({ date, value: pVals[i] }));
+  const bench: DP[] = d.map((date, i) => ({ date, value: bVals[i] }));
+
+  it("default (no-arg) deep-equals explicit 252 — the ENTIRE result (byte-identity)", () => {
+    expect(computeScenarioBenchmark(port, bench)).toEqual(
+      computeScenarioBenchmark(port, bench, 252),
+    );
+  });
+
+  it("at 365: tracking error scales by √(365/252)", () => {
+    const at252 = computeScenarioBenchmark(port, bench, 252);
+    const at365 = computeScenarioBenchmark(port, bench, 365);
+    expect(at365.trackingError!).toBeCloseTo(
+      at252.trackingError! * Math.sqrt(365 / 252),
+      12,
+    );
+  });
+
+  it("at 365: information ratio scales by √(365/252) (num ×365/252 over te ×√(365/252))", () => {
+    const at252 = computeScenarioBenchmark(port, bench, 252);
+    const at365 = computeScenarioBenchmark(port, bench, 365);
+    expect(at365.informationRatio!).toBeCloseTo(
+      at252.informationRatio! * Math.sqrt(365 / 252),
+      12,
+    );
+  });
+
+  it("at 365: alpha scales by exactly 365/252", () => {
+    const at252 = computeScenarioBenchmark(port, bench, 252);
+    const at365 = computeScenarioBenchmark(port, bench, 365);
+    expect(at365.alpha!).toBeCloseTo(at252.alpha! * (365 / 252), 12);
+  });
+
+  it("at 365: beta and correlation are UNCHANGED (basis-invariant)", () => {
+    const at252 = computeScenarioBenchmark(port, bench, 252);
+    const at365 = computeScenarioBenchmark(port, bench, 365);
+    expect(at365.beta).toBe(at252.beta);
+    expect(at365.correlation).toBe(at252.correlation);
+  });
+
+  it("degenerate guards fire identically at 365 (constant benchmark → null beta/alpha)", () => {
+    const cd = days(6);
+    const cPort: DP[] = cd.map((date, i) => ({
+      date,
+      value: i % 2 === 0 ? 0.01 : -0.004,
+    }));
+    const cBench: DP[] = cd.map((date) => ({ date, value: 0.003 })); // constant → var=0
+    const r365 = computeScenarioBenchmark(cPort, cBench, 365);
+    expect(r365.beta).toBeNull();
+    expect(r365.alpha).toBeNull();
+    expect(r365.correlation).toBeNull();
+  });
+
+  it("degenerate guards fire identically at 365 (constant nonzero excess → null IR, non-null te)", () => {
+    const ed = days(30);
+    const eBench: DP[] = ed.map((date, i) => ({
+      date,
+      value: i % 2 === 0 ? 0.01 : -0.006,
+    }));
+    const ePort: DP[] = eBench.map((x) => ({ ...x, value: x.value + 0.003 }));
+    const r365 = computeScenarioBenchmark(ePort, eBench, 365);
+    expect(r365.informationRatio).toBeNull();
+    expect(r365.trackingError).not.toBeNull();
   });
 });
