@@ -71,7 +71,7 @@ jobs:
           cache: npm
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -90,7 +90,7 @@ jobs:
       # tree is always complete.
       - name: Save node_modules
         if: steps.node_modules_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -125,7 +125,7 @@ jobs:
       # (flakiness audit F3 — transient ECONNRESET; no untrusted input).
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -145,7 +145,7 @@ jobs:
       # imports haven't changed since the last successful run — typecheck
       # drops 30-60% on small diffs.
       - name: Cache tsconfig.tsbuildinfo
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: tsconfig.tsbuildinfo
           key: ${{ runner.os }}-tsbuildinfo-${{ hashFiles('package-lock.json', 'tsconfig.json') }}-${{ hashFiles('src/**') }}
@@ -175,7 +175,7 @@ jobs:
       # (flakiness audit F3 — transient ECONNRESET; no untrusted input).
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -195,7 +195,7 @@ jobs:
       # whose mtime + content hash haven't changed since the last run —
       # repeat lint on unchanged files drops to milliseconds.
       - name: Cache ESLint
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules/.cache/.eslintcache
           key: ${{ runner.os }}-eslintcache-${{ hashFiles('package-lock.json', 'eslint.config.*', '.eslintrc*') }}-${{ hashFiles('src/**') }}
@@ -244,7 +244,7 @@ jobs:
       # (flakiness audit F3 — transient ECONNRESET; no untrusted input).
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -262,7 +262,7 @@ jobs:
       # transforms here; on a warm cache the transform step is largely a
       # no-op. Key on lockfile + vitest config + the src/tests trees.
       - name: Cache vitest transform (node_modules/.vite)
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules/.vite
           key: ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts') }}-${{ hashFiles('src/**', 'tests/**') }}
@@ -333,7 +333,7 @@ jobs:
           cache: npm
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -383,7 +383,7 @@ jobs:
       # (flakiness audit F3 — transient ECONNRESET; no untrusted input).
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -470,7 +470,7 @@ jobs:
           cache: npm
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -544,7 +544,7 @@ jobs:
       # (flakiness audit F3 — transient ECONNRESET; no untrusted input).
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -568,7 +568,7 @@ jobs:
       # lockfile-matched cache, never to a "different lockfile" prefix
       # (cross-Next-version cache restore is a known hazard).
       - name: Cache .next/cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .next/cache
           key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-${{ hashFiles('src/**') }}
@@ -876,7 +876,7 @@ jobs:
       # cold cache. Pin keyed on LYCHEE_VERSION so a bump re-downloads.
       - name: Cache lychee binary
         id: lychee-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.lychee-bin
           key: lychee-${{ runner.os }}-v0.23.0
@@ -925,7 +925,7 @@ jobs:
           # consumes TEST_SUPABASE_* secrets but does no git ops; the
           # persisted cred is pure attack surface.
           persist-credentials: false
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: "3.12"
           cache: pip
@@ -1040,7 +1040,7 @@ jobs:
       # (flakiness audit F3 — transient ECONNRESET; no untrusted input).
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -1063,7 +1063,7 @@ jobs:
       # browser bundle compatibility.
       - name: Cache Playwright browsers
         id: playwright-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('node_modules/@playwright/test/package.json') }}
@@ -1288,7 +1288,7 @@ jobs:
           cache: npm
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -1307,7 +1307,7 @@ jobs:
       # the write so the two parallel jobs never race the save.
       - name: Restore Playwright browsers
         id: playwright-cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('node_modules/@playwright/test/package.json') }}
@@ -1346,7 +1346,7 @@ jobs:
       # case where frontend-build's cache step hashed src/** to a
       # different bucket than this e2e job sees.
       - name: Restore .next/cache for the test-env build (read-only)
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .next/cache
           key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-${{ hashFiles('src/**') }}
@@ -1593,7 +1593,7 @@ jobs:
       # devDependency (0.15.1), so a cache hit already carries it.
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -1615,7 +1615,7 @@ jobs:
       # it at the installed Chromium binary explicitly.
       - name: Cache Playwright browsers
         id: playwright-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('node_modules/@playwright/test/package.json') }}

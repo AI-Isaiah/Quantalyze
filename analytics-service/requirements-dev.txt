@@ -23,7 +23,7 @@ quantstats==0.0.81
 # (ci.yml + cassette-refresh.yml + the analytics-service Makefile `install` target), so
 # the golden parquet fixture still loads in tests.
 # 18.1.0 is compatible with pandas==2.2.3 / numpy==2.2.4.
-pyarrow==18.1.0
+pyarrow==24.0.0
 
 # Test + type-check tooling. Relocated here from the inline
 # `pip install -r requirements.txt pytest …` in .github/workflows/ci.yml so
@@ -36,4 +36,4 @@ pytest-cov
 pytest-asyncio
 pytest-mock
 cryptography
-mypy==2.1.0
+mypy==2.2.0
