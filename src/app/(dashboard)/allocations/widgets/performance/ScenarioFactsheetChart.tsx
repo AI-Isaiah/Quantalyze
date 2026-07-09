@@ -119,6 +119,13 @@ export interface ScenarioFactsheetChartProps {
    * the OwnBookDeltaPanel is silently absent.
    */
   scenarioOwnBookDelta?: OwnBookDeltaPayload;
+  /**
+   * Phase 84 (#597 part 2) — the blend annualization basis (√365 crypto-legged /
+   * √252 pure-tradfi) forwarded into `buildScenarioFactsheetPayload`. Optional +
+   * additive: omitted → 252, so every existing caller renders a byte-identical
+   * payload. Wired by wave-3 from the active units' asset_class.
+   */
+  periodsPerYear?: number;
 }
 
 /**
@@ -195,6 +202,7 @@ export function ScenarioFactsheetChart({
   scenarioPeer,
   scenarioMandate,
   scenarioOwnBookDelta,
+  periodsPerYear = 252,
 }: ScenarioFactsheetChartProps) {
   // Synthesize the minimal, valid FactsheetPayload (csv arm) the factsheet
   // TimeSeriesChart + MasterBrush consume verbatim. SINGLE full-res returns axis
@@ -214,8 +222,9 @@ export function ScenarioFactsheetChart({
         scenarioPeer,
         scenarioMandate,
         scenarioOwnBookDelta,
+        periodsPerYear,
       }),
-    [benchmark, portfolioDaily, scenarioPeer, scenarioMandate, scenarioOwnBookDelta],
+    [benchmark, portfolioDaily, scenarioPeer, scenarioMandate, scenarioOwnBookDelta, periodsPerYear],
   );
 
   const axisLength = synthPayload.dates.length;

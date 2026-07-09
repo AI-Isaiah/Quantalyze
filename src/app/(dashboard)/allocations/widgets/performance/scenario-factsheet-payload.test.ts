@@ -597,3 +597,94 @@ describe("buildScenarioFactsheetPayload — coverage-window parity (Phase 56, PA
     expect(pEmpty.strategyEquity).toEqual([]);
   });
 });
+
+// ── Phase 84 (#597 part 2): periodsPerYear knob on the scenario preview ───────
+// The blend basis (blendPeriodsPerYear) becomes an optional arg threaded to
+// compute() + the three rolling panels + bootstrapCI, mirroring build-payload.ts's
+// #597 single-strategy threading. This plan ADDS the knob only — the default 252
+// path MUST stay byte-identical (T-84-02: a silently shifted default fails the
+// full-payload deep-equal pin). RISK metrics ride √periodsPerYear; CAGR rides the
+// CALENDAR clock (days/365.25) and is asset-class-INVARIANT (the two-clocks ruling).
+describe("buildScenarioFactsheetPayload — periodsPerYear knob (#597 part 2)", () => {
+  it("default (no-arg) deep-equals explicit 252 — the ENTIRE payload (byte-identity)", () => {
+    const dflt = buildScenarioFactsheetPayload({ portfolioDaily: BLEND_252 });
+    const at252 = buildScenarioFactsheetPayload({
+      portfolioDaily: BLEND_252,
+      periodsPerYear: 252,
+    });
+    expect(dflt).toEqual(at252);
+  });
+
+  it("at 365: ann_vol scales by √(365/252); sharpe & sortino scale by √(365/252)", () => {
+    const at252 = buildScenarioFactsheetPayload({
+      portfolioDaily: BLEND_30,
+      periodsPerYear: 252,
+    });
+    const at365 = buildScenarioFactsheetPayload({
+      portfolioDaily: BLEND_30,
+      periodsPerYear: 365,
+    });
+    const k = Math.sqrt(365 / 252);
+    expect(at365.strategyMetrics.ann_vol).toBeCloseTo(
+      at252.strategyMetrics.ann_vol * k,
+      12,
+    );
+    expect(at365.strategyMetrics.sharpe).toBeCloseTo(
+      at252.strategyMetrics.sharpe * k,
+      12,
+    );
+    expect(at365.strategyMetrics.sortino).toBeCloseTo(
+      at252.strategyMetrics.sortino * k,
+      12,
+    );
+  });
+
+  it("at 365: CAGR is UNCHANGED vs 252 (calendar clock, asset-class-invariant)", () => {
+    const at252 = buildScenarioFactsheetPayload({
+      portfolioDaily: BLEND_30,
+      periodsPerYear: 252,
+    });
+    const at365 = buildScenarioFactsheetPayload({
+      portfolioDaily: BLEND_30,
+      periodsPerYear: 365,
+    });
+    // compute()'s CAGR rides days/365.25 — byte-identical across the basis.
+    expect(at365.strategyMetrics.cagr).toBe(at252.strategyMetrics.cagr);
+    expect(at365.strategyMetrics.cum_ret).toBe(at252.strategyMetrics.cum_ret);
+  });
+
+  it("at 365: the rolling vol/sharpe/sortino panels move (post-warmup values differ)", () => {
+    const at252 = buildScenarioFactsheetPayload({
+      portfolioDaily: BLEND_252,
+      periodsPerYear: 252,
+    });
+    const at365 = buildScenarioFactsheetPayload({
+      portfolioDaily: BLEND_252,
+      periodsPerYear: 365,
+    });
+    const k = Math.sqrt(365 / 252);
+    // Find a post-warmup index where the 252 rolling vol is non-null.
+    const idx = at252.strategyRollingVol.findIndex((v) => v != null && v !== 0);
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(at365.strategyRollingVol[idx]!).toBeCloseTo(
+      at252.strategyRollingVol[idx]! * k,
+      12,
+    );
+    expect(at365.strategyRollingSharpe[idx]!).toBeCloseTo(
+      at252.strategyRollingSharpe[idx]! * k,
+      12,
+    );
+  });
+
+  it("degenerate gate output is byte-identical at any basis (safe-empty has no annualized field)", () => {
+    const at252 = buildScenarioFactsheetPayload({
+      portfolioDaily: [],
+      periodsPerYear: 252,
+    });
+    const at365 = buildScenarioFactsheetPayload({
+      portfolioDaily: [],
+      periodsPerYear: 365,
+    });
+    expect(at365).toEqual(at252);
+  });
+});
