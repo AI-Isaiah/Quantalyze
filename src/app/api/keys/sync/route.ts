@@ -346,6 +346,14 @@ async function legacyKeysSyncHandler(args: {
             {
               strategy_id,
               computation_status: "failed",
+              // SI-02 (LOW-MEDIUM, v1.9): clear the runner-owned warned marker
+              // on the terminal 'failed' write, mirroring the Python fix
+              // (analytics_runner / job_worker). Without it a prior-warned
+              // strategy can be resurrected to `complete_with_warnings` by the
+              // status bridge OVER a genuine failure. Defensive: this legacy
+              // after() path is dormant in prod (unified backbone active +
+              // USE_COMPUTE_JOBS_QUEUE unset), but the clear is cheap correctness.
+              computation_warned: false,
               computation_error: message,
             },
             { onConflict: "strategy_id" },

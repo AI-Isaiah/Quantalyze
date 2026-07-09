@@ -27,21 +27,33 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import AbstractSet, Any
+
+import ccxt
+import pandas as pd
 
 from services.deribit_txn import (
     _INVERSE_CURRENCIES,
     CASH_BEARING_TYPES,
+    DEFAULT_PNL_BASIS,
+    PNL_BASIS_MARK_TO_MARKET,
+    _day_ccy_own_index,
+    _option_activity_after_coverage,
+    _pre_coverage_option_days,
+    assert_balance_identity,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
     txn_rows_to_daily_records,
+    txn_rows_to_native_daily,
 )
-from services.external_flows import ExternalFlow
+from services.external_flows import USD_FAMILY, ExternalFlow
+from services.native_nav import NativeLedger
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger(__name__)
@@ -59,6 +71,13 @@ LEDGER_PACE_SECONDS: float = 1.0
 LEDGER_BACKOFF_BASE_SECONDS: float = 1.0
 # Max consecutive 10028 retries for a single page before failing loud.
 LEDGER_MAX_RETRIES: int = 8
+
+# A TRANSIENT public-read blip (network/timeout/5xx → ccxt.NetworkError) on a
+# settlement-index or index-price probe is RETRYABLE: retry with backoff, then
+# raise DeribitTransientReadError. Reuses the txn-log read discipline's budget +
+# backoff base so the ONE read-retry policy governs every Deribit public read.
+PUBLIC_READ_MAX_RETRIES: int = LEDGER_MAX_RETRIES
+PUBLIC_READ_BACKOFF_BASE_SECONDS: float = LEDGER_BACKOFF_BASE_SECONDS
 
 # Deribit error codes.
 _RATE_LIMIT_CODE: int = 10028
@@ -98,6 +117,20 @@ class CurrencyEnumerationError(RuntimeError):
     held balances would drop any currency that HELD history but is now
     zero-balance, and the gate graded against that set is blind to the drop — so
     enumeration fails loud rather than under-anchor the expected coverage."""
+
+
+class DeribitTransientReadError(RuntimeError):
+    """A ``get_account_summaries`` anchor read FAILED/came back empty (I/O), so
+    there is NO native anchor to reconstruct from. This is a TRANSIENT read
+    condition — NOT a structural refusal — so it must NEVER be dispositioned
+    permanent: a blank read that silently built a ZERO-anchor ledger would roll
+    every bucket back from 0.0 and the ``full_history`` §5 inception gate would
+    false-refuse ``InceptionReconciliationError`` (permanent, no retry) on a mere
+    network blip. Deliberately a NON-``ValueError`` / non-``NavReconstructionError``
+    type so it escapes the deribit permanent except chain to the generic
+    retryable dispatcher (which retries). An unvaluable COLLAPSE (a held coin with
+    no USD index) keeps the readable native maps and is left to the core's
+    structural refusal — it is NOT this transient case."""
 
 
 # 2015-01-01 UTC in ms — full Deribit history default (txn-log spans 2023→2026).
@@ -145,6 +178,23 @@ def _deribit_real_code(exc: BaseException) -> int | None:
     if isinstance(code, bool):
         return None
     return code if isinstance(code, int) else None
+
+
+def _is_transient_read_error(exc: BaseException) -> bool:
+    """True when a PUBLIC-read exception is a TRANSIENT network condition
+    (network/timeout/5xx/rate-limit), NOT a benign STRUCTURAL response.
+
+    A genuinely-absent index / "no data" is a business response the exchange
+    RETURNED — ccxt raises it as ``ExchangeError`` / ``BadSymbol`` / ``BadRequest``,
+    none of which subclass ``NetworkError`` → this returns ``False`` → the reader
+    keeps its honest structural behaviour (skip the currency / return the
+    accumulated map, never retried forever). Only a ``ccxt.NetworkError`` (which
+    covers ``RequestTimeout``, ``RateLimitExceeded``, ``ExchangeNotAvailable`` and
+    ``DDoSProtection``) is transient → ``True`` → retry with backoff, then raise
+    ``DeribitTransientReadError`` on exhaustion. This is EXACTLY the platform
+    ``classify_exception`` transient bucket (``job_worker.py``), so the read-retry
+    policy and the job-level dispatcher agree on what "transient" means."""
+    return isinstance(exc, ccxt.NetworkError)
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +485,7 @@ async def fetch_deribit_settlement_index(
     *,
     oldest_day: str,
     sleep: SleepFn = asyncio.sleep,
+    max_retries: int = PUBLIC_READ_MAX_RETRIES,
 ) -> dict[str, float]:
     """Per-UTC-day USD settlement index for ``currency`` from the PUBLIC
     ``public/get_delivery_prices`` endpoint (``index_name={ccy}_usd``).
@@ -447,10 +498,16 @@ async def fetch_deribit_settlement_index(
     ``paginate_txn_log``'s ``LEDGER_PACE_SECONDS``).
 
     This is a SAME-DAY settlement mark → D-07-compliant same-time-basis fallback,
-    NOT a period-end/current price. A failed public read is NON-fatal to
-    correctness — the aggregator still fails loud (Fix A) if a needed day stays
-    unvalued — so a fetch error returns whatever was accumulated rather than
-    crashing the crawl. Every ccxt error is scrubbed before logging.
+    NOT a period-end/current price. Read-error discipline (red-team HIGH-2): a
+    GENUINE benign "no data" (the exchange RESPONDED — a non-``NetworkError`` ccxt
+    error) is NON-fatal to correctness — the aggregator still fails loud (Fix A) if a
+    needed day stays unvalued — so it returns whatever was accumulated rather than
+    crashing the crawl. A TRANSIENT read (network/timeout/5xx → ``ccxt.NetworkError``)
+    is instead RETRIED with backoff and, on ``max_retries`` exhaustion, raises
+    ``DeribitTransientReadError`` (retryable) — NEVER a silently-truncated partial map
+    that looks complete-but-sparse (which the core would refuse PERMANENTLY as
+    ``missing_daily_marks`` on a mere blip). Every ccxt error is scrubbed before
+    logging.
     """
     index_name = f"{currency.lower()}_usd"
     prices: dict[str, float] = {}
@@ -462,18 +519,41 @@ async def fetch_deribit_settlement_index(
             "offset": page * DELIVERY_PRICES_PAGE_COUNT,
             "count": DELIVERY_PRICES_PAGE_COUNT,
         }
-        try:
-            resp = await exchange.public_get_get_delivery_prices(params)
-        except Exception as exc:  # noqa: BLE001 - non-fatal; return partial map
-            logger.warning(
-                "deribit get_delivery_prices failed for index_name=%s offset=%s "
-                "(%s); returning %d accumulated day(s)",
-                index_name,
-                params["offset"],
-                scrub_freeform_string(str(exc)),
-                len(prices),
-            )
-            return prices
+        # A TRANSIENT read (network/timeout/5xx → ccxt.NetworkError) is RETRYABLE:
+        # retry the SAME offset with backoff, then RAISE DeribitTransientReadError on
+        # exhaustion — NEVER return a silently-truncated partial map that looks
+        # complete-but-sparse (which would drive a PERMANENT missing_daily_marks core
+        # refusal on a mere blip). A GENUINE benign "no data" (the exchange
+        # RESPONDED — ExchangeError/BadSymbol) returns the accumulated map as before;
+        # the own-index union + honest core refusal handle a real gap.
+        retries = 0
+        while True:
+            try:
+                resp = await exchange.public_get_get_delivery_prices(params)
+                break
+            except Exception as exc:  # noqa: BLE001
+                if _is_transient_read_error(exc):
+                    retries += 1
+                    if retries > max_retries:
+                        raise DeribitTransientReadError(
+                            "deribit get_delivery_prices transient read budget "
+                            f"({max_retries}) exhausted for index_name={index_name} "
+                            f"offset={params['offset']} — refusing a silently-partial "
+                            "settlement map (retryable)"
+                        ) from None
+                    await sleep(
+                        PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1))
+                    )
+                    continue
+                logger.warning(
+                    "deribit get_delivery_prices structural no-data for "
+                    "index_name=%s offset=%s (%s); returning %d accumulated day(s)",
+                    index_name,
+                    params["offset"],
+                    scrub_freeform_string(str(exc)),
+                    len(prices),
+                )
+                return prices
         result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
         data = result.get("data", []) if isinstance(result, Mapping) else []
         if not isinstance(data, Sequence) or isinstance(data, (str, bytes)):
@@ -501,6 +581,135 @@ async def fetch_deribit_settlement_index(
         if prices and min(prices) <= oldest_day:
             break  # accumulated back to the oldest needed day (newest-first)
     return prices
+
+
+# The linear USDC-quoted perpetual whose DAILY CLOSE is the lowest-precedence
+# {ccy}_usd mark fill (80-04) for INDEXED coins whose get_delivery_prices series
+# is SPARSE. Deribit names it "{CCY}_USDC-PERPETUAL" (e.g. SOL_USDC-PERPETUAL);
+# NEVER the bare "{CCY}-PERPETUAL" (that is the COIN-margined perp, quoted in coin
+# — its "price" is ~1.0-scaled and is NOT a USD mark).
+_PERP_DAILY_INSTRUMENT_SUFFIX = "_USDC-PERPETUAL"
+_PERP_DAILY_RESOLUTION = "1D"
+
+
+async def fetch_deribit_perp_daily_index(
+    exchange: Any,
+    currency: str,
+    *,
+    oldest_day: str,
+    sleep: SleepFn = asyncio.sleep,
+    max_retries: int = PUBLIC_READ_MAX_RETRIES,
+) -> dict[str, float]:
+    """Per-UTC-day USD mark for ``currency`` from the DAILY CLOSE of Deribit's
+    linear ``{ccy}_USDC-PERPETUAL`` via the PUBLIC ``get_tradingview_chart_data``
+    endpoint (``resolution=1D``), for ``[oldest_day 00:00 UTC, now]``.
+
+    The LOWEST-precedence dense-daily mark fill (80-04). An INDEXED coin whose
+    ``get_delivery_prices`` feed is SPARSE (SOL: 553 gappy dates across 2022-2026,
+    absent through 2025-07/08) leaves the native roll's carry-forward / quiet-flow
+    days unmarked, so the core refuses ``missing_daily_marks`` on days the coin
+    genuinely carries value. This same-exchange, same-UTC-day close fills those
+    days: it is a D-07-compliant same-time-basis mark (NOT a period-end/current
+    price), and the DAILY close matches the daily boundary at which the native core
+    marks NAV *and* flows (``native_nav.py`` values a flow as ``qty x mark(day)``),
+    so no intraday basis mismatch is introduced. It NEVER wins over a real own-row
+    ``index_price`` or a same-day ``delivery_price`` (the callers union it beneath
+    both), so a currency whose delivery feed is already dense-daily (BTC/ETH) is
+    byte-identically unaffected (SC-4).
+
+    Read-error discipline mirrors :func:`fetch_deribit_settlement_index`: a TRANSIENT
+    read (``ccxt.NetworkError``) is retried with exponential backoff and, on
+    ``max_retries`` exhaustion, RAISES ``DeribitTransientReadError`` (retryable) —
+    NEVER a silently-partial map. A GENUINE benign no-data (the exchange RESPONDED —
+    e.g. ``BadSymbol`` for a coin with no USDC perp, or ``status != "ok"``) returns
+    ``{}`` so the honest union + the core's fail-loud refusal handle a real gap. A
+    1D series spans at most a few thousand points, so ONE request suffices (no
+    pagination). Every ccxt error is scrubbed before logging.
+    """
+    instrument = f"{currency.upper()}{_PERP_DAILY_INSTRUMENT_SUFFIX}"
+    start_ms = int(pd.Timestamp(oldest_day, tz="UTC").timestamp() * 1000)
+    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    params: dict[str, Any] = {
+        "instrument_name": instrument,
+        "start_timestamp": start_ms,
+        "end_timestamp": end_ms,
+        "resolution": _PERP_DAILY_RESOLUTION,
+    }
+    retries = 0
+    while True:
+        try:
+            resp = await exchange.public_get_get_tradingview_chart_data(params)
+            break
+        except Exception as exc:  # noqa: BLE001
+            if _is_transient_read_error(exc):
+                retries += 1
+                if retries > max_retries:
+                    raise DeribitTransientReadError(
+                        "deribit get_tradingview_chart_data transient read budget "
+                        f"({max_retries}) exhausted for instrument={instrument} — "
+                        "refusing a silently-partial daily-mark map (retryable)"
+                    ) from None
+                await sleep(PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1)))
+                continue
+            logger.warning(
+                "deribit get_tradingview_chart_data structural no-data for "
+                "instrument=%s (%s); returning no daily marks",
+                instrument,
+                scrub_freeform_string(str(exc)),
+            )
+            return {}
+    result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
+    if not isinstance(result, Mapping) or result.get("status") != "ok":
+        return {}
+    ticks = result.get("ticks", [])
+    close = result.get("close", [])
+    if (
+        not isinstance(ticks, Sequence)
+        or isinstance(ticks, (str, bytes))
+        or not isinstance(close, Sequence)
+        or isinstance(close, (str, bytes))
+        or len(ticks) != len(close)
+    ):
+        return {}
+    prices: dict[str, float] = {}
+    for raw_ts, raw_price in zip(ticks, close):
+        try:
+            ts_ms = int(raw_ts)
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        day = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime(
+            "%Y-%m-%d"
+        )
+        # One 1D bar per UTC day; setdefault keeps the FIRST (defensive vs a dupe).
+        prices.setdefault(day, price)
+    return prices
+
+
+def _price_map_has_gap(
+    price_map: Mapping[str, float], oldest_day: str, newest_day: str
+) -> bool:
+    """Does ``price_map`` fail to cover EVERY calendar day in the REQUIRED span
+    ``[oldest_day, newest_day]`` — i.e. is it sparse (SOL) rather than dense-daily
+    (BTC/ETH)? Empty, not reaching back to ``oldest_day``, not reaching up to
+    ``newest_day``, or holed anywhere between all count as a gap. The span is the
+    currency's own activity range (oldest activity day → newest day it can be
+    required, i.e. its last ledger day, or today if a nonzero terminal balance
+    carries forward), NOT ``[min(map), max(map)]`` — a single delivery day at the
+    span start has no INTERNAL gap yet leaves every later carry-forward day
+    unmarked. Used to decide whether the ``{ccy}_USDC-PERPETUAL`` daily-close fill
+    is needed, so a dense-delivery coin (BTC/ETH) triggers NO perp fetch (SC-4)."""
+    if not price_map:
+        return True
+    days = sorted(price_map)
+    if days[0] > oldest_day or days[-1] < newest_day:
+        return True  # doesn't span the full required range
+    for day in pd.date_range(oldest_day, newest_day, freq="D"):
+        if day.strftime("%Y-%m-%d") not in price_map:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -536,21 +745,148 @@ class CompletenessReport:
     entries: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     dated_external_flows: list[ExternalFlow] = field(default_factory=list)
     total_return_rows: int = 0
+    # The per-job ``indexable_currencies`` set resolved ONCE by the crawl
+    # (``build_deribit_indexable_currencies``): the static floor ∪ every
+    # enumerated non-USD-family currency whose ``{ccy}_usd`` index resolves. It is
+    # threaded here (a crawl artifact, exactly like ``dated_external_flows`` /
+    # ``total_return_rows``) so the native job path (80-03) can pass the EXACT set
+    # the ledger's marks were built against to ``reconstruct_native_nav_and_twr``,
+    # never re-probing (which could drift and mis-classify a currency).
+    indexable_currencies: frozenset[str] = field(default_factory=frozenset)
+    # Phase 82 (MARK_TO_MARKET basis only) — sorted-unique ``(currency, utc_day)``
+    # buckets carrying option rows OUTSIDE their currency's summary coverage window
+    # (pre-rollout / trailing-edge cash fallback). A crawl artifact (like
+    # ``dated_external_flows``) computed in ``build_deribit_native_ledger`` from the
+    # raw rows; the worker stamps it as the ``pre_summary_rollout_option_dailies``
+    # warning (Q6). Empty for perp-only / fully-covered accounts — and ALWAYS empty
+    # under CASH_SETTLEMENT (the DEFAULT / shipped basis), where there is no summary
+    # channel and no "pre-coverage fallback" (every option row books its raw cash
+    # ``change`` by design), so the adapter suppresses this list entirely.
+    pre_coverage_option_days: list[tuple[str, str]] = field(default_factory=list)
+    # CR-01 — sorted currencies EXEMPTED from the strict balance-identity guard
+    # because their option book is provably OPEN at crawl (nonzero
+    # ``native_options_value``) or has trailing option activity past the last
+    # summary. Surfaced for logs / the acceptance harness ONLY; an open book is the
+    # normal state (§5 ``_assert_inception_reconciled`` is the authoritative
+    # reconciliation), so this is NOT a warning and never promotes the status.
+    balance_identity_open_option_ccys: list[str] = field(default_factory=list)
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-async def fetch_deribit_ledger_daily_records(
+async def build_deribit_indexable_currencies(
+    exchange: Any,
+    currencies: Sequence[str],
+    *,
+    static_floor: AbstractSet[str] = _INVERSE_CURRENCIES,
+    sleep: SleepFn = asyncio.sleep,
+    max_retries: int = PUBLIC_READ_MAX_RETRIES,
+) -> frozenset[str]:
+    """The real per-job ``indexable_currencies`` set (contract §7.2): the static
+    floor UNIONED with every enumerated non-USD-family currency whose ``{ccy}_usd``
+    index resolves finite-positive on ``public/get_index_price``.
+
+    The floor (``_INVERSE_CURRENCIES`` = BTC/ETH) is the degraded-mode default —
+    currencies known-resolvable WITHOUT a probe — NEVER the ceiling. SOL is
+    indexable because ``sol_usd`` resolves; a tokenized-fund wallet (BUIDL/USYC)
+    is NOT because its probe raises / has no index, so it keeps failing loud at the
+    census consumers (§7.2 branch-3 by construction). This heals the key-1 SOL
+    crash on the existing USD-space path (79-CONTEXT G6, revised).
+
+    Probe discipline (mirrors the verbatim shape at the equity anchor's
+    ``public_get_get_index_price`` read): USD-family AND static-floor members are
+    NEVER probed (BTC/ETH are members by the floor; USDC/USDT are linear), each
+    remaining currency is probed AT MOST ONCE (per-job cache, the
+    ``settlement_index_cache`` discipline), an unresolvable/raising probe or a
+    non-finite/≤0 ``index_price`` leaves the currency OUT. A raised ccxt error is
+    scrubbed before logging (leak discipline, ``scrub_freeform_string``).
+    """
+    probed: set[str] = set()
+    seen: set[str] = set()  # per-job: probe each currency at most once
+    for currency in currencies:
+        ccy = str(currency).upper()
+        # USD-family are linear (never index-multiplied); static-floor members are
+        # already indexable by definition — neither is ever probed. `seen` makes a
+        # duplicated universe entry cost at most one probe.
+        if ccy in USD_FAMILY or ccy in static_floor or ccy in seen:
+            continue
+        seen.add(ccy)
+        # A TRANSIENT probe (network/timeout/5xx → ccxt.NetworkError) is RETRYABLE:
+        # retry with backoff, then RAISE DeribitTransientReadError on exhaustion —
+        # NEVER silently drop a possibly-INDEXED currency to UNMARKABLE (a real
+        # INDEXED coin mis-classified UNMARKABLE → permanent core refuse on a mere
+        # blip). A GENUINE "index not found" (ExchangeError/BadSymbol — the exchange
+        # RESPONDED) leaves the currency OUT (genuinely not indexable), as before.
+        retries = 0
+        resp: Any = None
+        while True:
+            try:
+                resp = await exchange.public_get_get_index_price(
+                    {"index_name": f"{ccy.lower()}_usd"}
+                )
+                break
+            except Exception as exc:  # noqa: BLE001
+                if _is_transient_read_error(exc):
+                    retries += 1
+                    if retries > max_retries:
+                        raise DeribitTransientReadError(
+                            "deribit get_index_price transient probe budget "
+                            f"({max_retries}) exhausted for "
+                            f"index_name={ccy.lower()}_usd — refusing to drop a "
+                            "possibly-indexed currency to UNMARKABLE (retryable)"
+                        ) from None
+                    await sleep(
+                        PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1))
+                    )
+                    continue
+                logger.debug(
+                    "deribit indexable probe: %s_usd unresolved (%s)",
+                    ccy.lower(),
+                    scrub_freeform_string(str(exc)),
+                )
+                resp = None
+                break
+        if resp is None:
+            continue
+        result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
+        raw = result.get("index_price") if isinstance(result, Mapping) else None
+        if raw is None:
+            continue
+        try:
+            price = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(price) or price <= 0:
+            continue
+        probed.add(ccy)
+    return frozenset(static_floor | probed)
+
+
+async def _crawl_deribit_ledger(
     exchange: Any,
     since_ms: int | None = None,
     *,
     sleep: SleepFn = asyncio.sleep,
-) -> tuple[list[dict[str, Any]], CompletenessReport]:
-    """Crawl the txn-log ledger across every scope × currency and return the
-    accumulated funding-inclusive ``daily_pnl`` records plus a
-    ``CompletenessReport``.
+) -> tuple[
+    list[dict[str, Any]],
+    list[Mapping[str, Any]],
+    frozenset[str],
+    CompletenessReport,
+]:
+    """Crawl the txn-log ledger across every scope × currency ONCE, returning
+    ``(daily_records, raw_rows, indexable, report)``.
+
+    This is the SHARED crawl both the USD-space
+    :func:`fetch_deribit_ledger_daily_records` (which discards ``raw_rows`` /
+    ``indexable``) and the native-unit :func:`build_deribit_native_ledger` (which
+    reads ``raw_rows`` for ``txn_rows_to_native_daily`` + ``report`` for the
+    4-field native flows + ``indexable`` for the marks planner) delegate to — so
+    the completeness accounting and the per-job ``indexable`` build happen exactly
+    ONCE, never duplicated. ``raw_rows`` is the flat concatenation of every
+    (scope, currency) ``paginate_txn_log`` page batch (native pnl is an
+    order-independent per-(day,ccy) sum, so flat concatenation is lossless).
 
     For each scope: resolve its auth (fail loud on an unresolvable scope) and
     enumerate its currencies from the account. Then crawl every (scope, currency)
@@ -583,6 +919,17 @@ async def fetch_deribit_ledger_daily_records(
     # enumerated scope. Both enumerations fail loud, so `expected` can never be a
     # silently-truncated set the gate would then be blind to.
     currencies = await enumerate_currencies(exchange, scopes[0], {})
+    # Build the REAL indexable set ONCE per job (79-CONTEXT G6, revised): the
+    # static floor ∪ every enumerated currency whose {ccy}_usd index resolves. This
+    # is threaded live into the :636 supplemental-index gate AND every downstream
+    # census consumer (inverse_days_needing_index / txn_rows_to_daily_records /
+    # deribit_dated_external_flows_usd) so SOL heals on the existing USD-space path
+    # — records returned, no LedgerValuationError — while an un-indexable currency
+    # (BUIDL / an unresolvable probe) still refuses loudly. Once-per-job, mirroring
+    # the settlement_index_cache discipline below.
+    indexable = await build_deribit_indexable_currencies(
+        exchange, currencies, static_floor=_INVERSE_CURRENCIES, sleep=sleep
+    )
     expected: dict[str, list[str]] = {}
     scope_auths: dict[str, dict[str, Any]] = {}
     for scope in scopes:
@@ -592,6 +939,7 @@ async def fetch_deribit_ledger_daily_records(
 
     # Pass 2 — crawl every OWED (scope, currency), concatenating the records.
     daily_records: list[dict[str, Any]] = []
+    raw_rows_all: list[Mapping[str, Any]] = []
     entries: dict[tuple[str, str], dict[str, Any]] = {}
     dated_external_flows: list[ExternalFlow] = []
     total_return_rows = 0
@@ -599,6 +947,9 @@ async def fetch_deribit_ledger_daily_records(
     # currency, reused across every scope) — public/get_delivery_prices is
     # account-wide, so multiple scopes share the same {date: price} map.
     settlement_index_cache: dict[str, dict[str, float]] = {}
+    # 80-04: per-currency {ccy}_USDC-PERPETUAL daily-close cache, the lowest-
+    # precedence fill for needed days a SPARSE delivery feed (SOL) can't cover.
+    perp_daily_cache: dict[str, dict[str, float]] = {}
     for scope in scopes:
         auth = scope_auths[scope.label]
         for currency in expected[scope.label]:
@@ -633,10 +984,12 @@ async def fetch_deribit_ledger_daily_records(
             # exist; own-row/ledger index always wins inside the aggregator.
             supplemental: dict[tuple[str, str], float] | None = None
             ccy_upper = currency.upper()
-            if ccy_upper in _INVERSE_CURRENCIES:
+            if ccy_upper in indexable:
                 needed = {
                     (d, c)
-                    for (d, c) in inverse_days_needing_index(rows)
+                    for (d, c) in inverse_days_needing_index(
+                        rows, indexable_currencies=indexable
+                    )
                     if c == ccy_upper
                 }
                 if needed:
@@ -666,10 +1019,47 @@ async def fetch_deribit_ledger_daily_records(
                         for (d, c) in needed
                         if d in price_map
                     }
+                    # 80-04 sparse-delivery fill: needed quiet-day rows whose day the
+                    # delivery feed lacks (SOL — sparse/absent through the flow days)
+                    # value against the {ccy}_USDC-PERPETUAL DAILY CLOSE instead of
+                    # failing loud. LOWEST precedence: only days STILL uncovered by
+                    # own-row (wins in the aggregator) and delivery (placed above) are
+                    # filled, so a dense-delivery coin (BTC/ETH) never enters here and
+                    # stays byte-identical (SC-4). Fetched ONCE per currency, cached
+                    # across scopes; keyed by UPPERCASED currency (mirrors delivery).
+                    still_needed = {
+                        (d, c) for (d, c) in needed if (d, c) not in supplemental
+                    }
+                    if still_needed:
+                        still_min = min(d for (d, _c) in still_needed)
+                        perp_cached = perp_daily_cache.get(ccy_upper)
+                        if (
+                            perp_cached is None
+                            or not perp_cached
+                            or min(perp_cached) > still_min
+                        ):
+                            perp_daily_cache[ccy_upper] = (
+                                await fetch_deribit_perp_daily_index(
+                                    exchange,
+                                    currency,
+                                    oldest_day=still_min,
+                                    sleep=sleep,
+                                )
+                            )
+                        perp_map = perp_daily_cache[ccy_upper]
+                        for (d, c) in still_needed:
+                            if d in perp_map:
+                                supplemental[(d, c)] = perp_map[d]
             records = txn_rows_to_daily_records(
-                rows, supplemental_index=supplemental
+                rows,
+                supplemental_index=supplemental,
+                indexable_currencies=indexable,
             )
             daily_records.extend(records)
+            # Retain the RAW rows (flat) for the native-unit adapter's
+            # txn_rows_to_native_daily — a per-(day,ccy) sum that is order- and
+            # batch-independent, so flat concatenation across scopes is lossless.
+            raw_rows_all.extend(r for r in rows if isinstance(r, Mapping))
             # Accumulate the honest DATED external flows (for the core's F_t term)
             # and the return-bearing row count (for the C2 equity-vs-activity floor).
             # The SAME `supplemental` settlement-index map built for
@@ -680,7 +1070,11 @@ async def fetch_deribit_ledger_daily_records(
             # are _EXTERNAL_FLOW_TYPES (⊆ INFORMATIONAL_TYPES), so they are excluded
             # from the realized `records` above — count-once by construction.
             dated_external_flows.extend(
-                deribit_dated_external_flows_usd(rows, supplemental_index=supplemental)
+                deribit_dated_external_flows_usd(
+                    rows,
+                    supplemental_index=supplemental,
+                    indexable_currencies=indexable,
+                )
             )
             total_return_rows += sum(
                 1
@@ -695,12 +1089,145 @@ async def fetch_deribit_ledger_daily_records(
                 **({"note": "no wallet for currency"} if not rows else {}),
             }
 
-    return daily_records, CompletenessReport(
+    return daily_records, raw_rows_all, indexable, CompletenessReport(
         expected=expected,
         entries=entries,
         dated_external_flows=dated_external_flows,
         total_return_rows=total_return_rows,
+        indexable_currencies=indexable,
     )
+
+
+async def fetch_deribit_ledger_daily_records(
+    exchange: Any,
+    since_ms: int | None = None,
+    *,
+    sleep: SleepFn = asyncio.sleep,
+) -> tuple[list[dict[str, Any]], CompletenessReport]:
+    """Crawl the txn-log ledger across every scope × currency and return the
+    accumulated funding-inclusive ``daily_pnl`` records plus a
+    ``CompletenessReport`` (the USD-space entry point — byte-identical to the
+    pre-80-02 behaviour). Thin delegate to :func:`_crawl_deribit_ledger`, which is
+    now shared with the native-unit adapter; the raw rows + indexable set the
+    native path needs are discarded here.
+    """
+    daily_records, _raw_rows, _indexable, report = await _crawl_deribit_ledger(
+        exchange, since_ms, sleep=sleep
+    )
+    return daily_records, report
+
+
+def _combined_session_upl(summ: Mapping[str, Any]) -> tuple[float, bool, bool]:
+    """The COMBINED per-currency session open-uPnL wedge for one account-summary
+    entry: futures + options session unrealized (§2 Q5, Task 2b).
+
+    Deribit structures the legacy ``session_upl`` as FUTURES-only; an open options
+    book's session unrealized lives in ``options_session_upl``. Reading only
+    ``session_upl`` (the pre-fix behaviour) drops the options component, so an
+    open-options-book anchor would structurally breach the §5 inception gate
+    (``terminal_native − upnl`` = equity − wedge must be settled-equity, and the
+    equity INCLUDES the option book's mark; the wedge must therefore include the
+    option book's session move).
+
+    Read defensively so the wedge captures BOTH channels for an open options book
+    while staying BYTE-IDENTICAL for perp-only accounts:
+      * futures/base component — an explicit ``futures_session_upl`` is preferred,
+        else the legacy ``session_upl`` (consulting exactly ONE so a layout that
+        carries both, equal, never double-counts);
+      * options component — ``options_session_upl``, additive when present
+        (ABSENT on perp-only summaries → 0.0 → wedge value unchanged → SC-4).
+
+    Returns ``(combined_upl, read_any, component_unreadable)`` where ``read_any`` is
+    True iff AT LEAST ONE component read as a present numeric (the MUST-2 unreadable
+    signal: a wholly absent/garbled wedge is 'unreadable', a genuine flat 0.0 is
+    'read'). Absent / null / non-numeric components coerce to 0.0 each — never
+    fabricated (T-77-05).
+
+    F1 (specialist-silentfailure HIGH): ``read_any`` is a single OR-accumulator
+    across BOTH legs, so on an OPEN option book a readable futures leg would MASK
+    an absent/garbled options wedge (silently coercing the options component to
+    0.0 with no signal). ``options_unreadable`` is tracked PER COMPONENT: True iff
+    this summary shows an OPEN option book (``options_value != 0.0``) yet the
+    ``options_session_upl`` component was absent / non-numeric. The caller lifts it
+    into ``unrealized_pnl_unreadable`` (→ ``complete_with_warnings``) so a
+    renamed/garbled options wedge field is LOUD, never a silent 0-wedge
+    overstatement on an account that actually holds open options.
+
+    F3 (regression from the F1 fix — SYMMETRIC futures leg): the F1 fix added the
+    PER-COMPONENT unreadable signal for the OPTIONS leg only. A GARBLED
+    (present-but-non-numeric) futures ``session_upl`` / ``futures_session_upl``
+    hits the ``except (TypeError, ValueError)`` below, contributing 0.0 with the
+    futures leg NOT read; a readable ``options_session_upl`` then set
+    ``read_any=True`` and the account-level unreadable signal never fired — a
+    silently-zeroed FUTURES wedge shipped clean (pre-F1 the single ``read_any``
+    flagged it). ``futures_unreadable`` distinguishes GARBLED (schema drift →
+    unreadable) from ABSENT (benign → 0.0) for the futures leg too. The third
+    return element is the COMBINED component-unreadable flag
+    (``options_unreadable or futures_unreadable``): a garbled value in EITHER leg
+    raises it, and the caller lifts it into ``unrealized_pnl_unreadable``. The
+    wedge VALUE is unchanged (still 0.0 for a garbled/absent field — never
+    fabricated); a clean perp-only account (numeric or absent ``session_upl``, no
+    ``options_value``) stays byte-identical — no new flag, no value change (SC-4).
+
+    NOTE (§6 live-anchor follow-up): the exact field layout of
+    ``get_account_summaries`` for an OPEN options book is not verifiable at the
+    probe account's flat terminal (``session_upl == 0``); this defensive combined
+    read is implemented now so an open-book anchor does not structurally breach
+    the gate, and the first live open-options anchor is watched at §5 (a breach
+    there is a loud stop, never a silent 0-wedge overstatement)."""
+    read_any = False
+    total = 0.0
+    futures_unreadable = False
+    # Futures/base component — the preferred ``futures_session_upl`` else the
+    # legacy ``session_upl`` (exactly one SUCCESSFUL read consulted so a layout
+    # carrying both, equal, never double-counts). F2: a PRESENT-but-null preferred
+    # field is NOT a read — fall through (``continue``) to the next spelling rather
+    # than break on mere key presence (which silently dropped a real fallback
+    # value). Break only after a successful numeric read, or on a genuine
+    # non-numeric (a garbled value is its own signal, not an 'absent' field).
+    for key in ("futures_session_upl", "session_upl"):
+        if key not in summ:
+            continue
+        raw = summ.get(key)
+        if raw is None:
+            continue  # present-but-null → consult the next spelling (F2)
+        try:
+            total += float(raw)
+            read_any = True
+            break  # successful numeric read — stop (never double-count spellings)
+        except (TypeError, ValueError):
+            # F3: a GARBLED (present-but-non-numeric) futures wedge is schema drift,
+            # SYMMETRIC to the options leg — surface it as unreadable rather than
+            # silently coercing to a 0.0 wedge with no signal (a readable options
+            # leg would otherwise mask it). 0.0 contribution (never fabricate); stop
+            # (a garbled value is its own signal, not an 'absent' field — an ABSENT
+            # field never reaches here, so it stays benign).
+            futures_unreadable = True
+            break
+    # Options component (new) — additive when present. Track its OWN readability
+    # (F1) so a readable futures leg cannot mask a missing options wedge.
+    options_read = False
+    raw_opt = summ.get("options_session_upl")
+    if raw_opt is not None:
+        try:
+            total += float(raw_opt)
+            read_any = True
+            options_read = True
+        except (TypeError, ValueError):
+            pass  # non-numeric → 0.0 contribution (never fabricate)
+    # F1: an OPEN option book (options_value != 0) whose options wedge component
+    # was absent/non-numeric is UNREADABLE — surfaced so the futures leg does NOT
+    # suppress the options-leg unreadable signal.
+    try:
+        opt_value = float(summ.get("options_value", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        opt_value = 0.0
+    options_unreadable = (opt_value != 0.0) and not options_read
+    # F1 + F3: the COMBINED component-unreadable flag — a garbled value in EITHER
+    # the options leg (open book, absent/garbled wedge) OR the futures leg (garbled
+    # present-but-non-numeric wedge) raises it. The caller lifts it into
+    # ``unrealized_pnl_unreadable`` (→ ``complete_with_warnings``).
+    return total, read_any, (options_unreadable or futures_unreadable)
 
 
 def _deribit_session_upl_to_usd(
@@ -739,6 +1266,7 @@ def _deribit_session_upl_to_usd(
     total = 0.0
     saw_summary = False
     read_any = False
+    component_unreadable_any = False
     for summ in summaries:
         if not isinstance(summ, Mapping):
             continue
@@ -746,16 +1274,18 @@ def _deribit_session_upl_to_usd(
         if not ccy:
             continue
         saw_summary = True
-        raw = summ.get("session_upl")  # [ASSUMED A1]
-        if raw is None:
-            continue  # absent / null → 0.0 wedge (fallback, never fabricate)
-        try:
-            upl = float(raw)
-        except (TypeError, ValueError):
-            continue  # non-numeric → 0.0 wedge (fallback, never fabricate)
-        # The field was PRESENT and numeric (even genuine 0.0) — the assumed
-        # field name resolves, so this account is not "unreadable".
-        read_any = True
+        # Task 2b: COMBINED futures + options session uPnL (§2 Q5) — not the
+        # futures-only legacy read. read_component is the MUST-2 unreadable signal
+        # (True iff any wedge component was a present numeric, even a flat 0.0).
+        # F1+F3: component_unreadable flags a garbled/absent wedge in EITHER leg —
+        # an OPEN book's absent/garbled options wedge (F1) OR a garbled
+        # present-but-non-numeric futures wedge (F3) — while the other leg read
+        # (must not be masked).
+        upl, read_component, component_unreadable = _combined_session_upl(summ)
+        if read_component:
+            read_any = True
+        if component_unreadable:
+            component_unreadable_any = True
         if upl == 0.0:
             continue
         if ccy in _LINEAR_CURRENCIES:
@@ -765,46 +1295,114 @@ def _deribit_session_upl_to_usd(
         if price is None:
             continue  # unvaluable wedge → 0.0 contribution (never fabricate)
         total += upl * float(price)
-    # Unreadable ONLY when there were summaries yet not a single one carried a
-    # readable session_upl — the wrong-field-name / garbled-response signal.
-    return total, (saw_summary and not read_any)
+    # Unreadable when there were summaries yet not a single one carried a readable
+    # session_upl (the wrong-field-name / garbled-response signal), OR (F1) an OPEN
+    # option book carried a readable futures leg but an absent/garbled options
+    # wedge, OR (F3) a readable options leg masked a GARBLED futures wedge — a
+    # garbled/absent component in EITHER leg must not be suppressed by the other.
+    return total, ((saw_summary and not read_any) or component_unreadable_any)
 
 
-async def fetch_deribit_account_equity_and_upnl_usd(
+@dataclass(frozen=True)
+class DeribitNativeAccountState:
+    """The Deribit account anchor read in BOTH channels from ONE
+    ``get_account_summaries`` response (D5):
+
+      * ``native_equity`` / ``native_upnl`` — per-UPPERCASE-ccy NATIVE units
+        (``equity`` / ``session_upl`` verbatim, NEVER index-multiplied); the
+        additive channel the 79 native core consumes. ``session_upl`` absent /
+        null / non-numeric coerces to ``0.0`` for that currency (never
+        fabricated), matching ``_deribit_session_upl_to_usd``'s [ASSUMED A1].
+      * ``collapsed_equity_usd`` / ``collapsed_upnl_usd`` + ``upnl_unreadable`` —
+        the LEGACY collapsed USD anchor/wedge (``deribit_equity_to_usd`` /
+        ``_deribit_session_upl_to_usd``), kept byte-identical for the 80-04 parity
+        panel.
+      * ``balance_error`` — the DQ flag: a failed/empty summaries read or an
+        unvaluable held currency (``deribit_equity_to_usd`` raises).
+
+    App A #6 (D6) holds BY CONSTRUCTION: an unvaluable coin ``session_upl`` is
+    SILENTLY zeroed in ``collapsed_upnl_usd`` (the legacy path) but PRESERVED raw
+    in ``native_upnl`` — the native core value-gate is what refuses it, not the
+    adapter. A FAILED read yields EMPTY native maps; an unvaluable COLLAPSE keeps
+    the (readable) native maps while flagging ``balance_error``.
+    """
+
+    native_equity: Mapping[str, float]
+    native_upnl: Mapping[str, float]
+    collapsed_equity_usd: float | None
+    collapsed_upnl_usd: float
+    balance_error: bool
+    upnl_unreadable: bool
+    # CR-01 — per-UPPERCASE-ccy ``options_value`` read off the SAME summaries
+    # response (D5): the NATIVE-unit mark of the currency's OPEN option book. A
+    # nonzero value proves the option book is OPEN at crawl, so the STRICT
+    # balance-identity guard (which closes only for a FLAT-at-settlement book) is
+    # exempted for that currency and the §5 inception gate becomes the
+    # authoritative reconciliation. Absent on perp-only summaries → 0.0 (never
+    # fabricated; SC-4 byte-safe). A failed/empty read yields an EMPTY map.
+    native_options_value: Mapping[str, float]
+
+
+async def fetch_deribit_native_account_state(
     exchange: Any,
-) -> tuple[float | None, bool, float, bool]:
-    """Total Deribit account equity in USD (the initial-capital anchor) AND the
-    companion session open-uPnL wedge, both from ONE ``get_account_summaries``
-    response + the SAME resolved index_prices (SC-1) — no new fetch.
+    *,
+    sleep: SleepFn = asyncio.sleep,
+    max_retries: int = PUBLIC_READ_MAX_RETRIES,
+) -> DeribitNativeAccountState:
+    """Read the Deribit account anchor in native + collapsed channels from ONE
+    ``get_account_summaries`` response (D5) — the SINGLE summaries fetch and the
+    SINGLE code path both ``fetch_deribit_account_equity_and_upnl_usd`` (legacy
+    4-tuple) and ``build_deribit_native_ledger`` (native maps) delegate to.
 
-    Reads ``private/get_account_summaries``; each coin-margined currency's coin
-    equity is converted at its USD index price (``public/get_index_price`` with
-    ``index_name={ccy}_usd``) while USD-family currencies pass through. The
-    money math is the pure ``deribit_txn.deribit_equity_to_usd`` — NEVER anchor
-    to a raw coin quantity (the anchor-shift class mis-scales every return). The
-    open-uPnL wedge sums ``session_upl`` [ASSUMED A1] from the SAME summaries
-    with the SAME index_prices; an absent/uncertain field → wedge 0.0 (fallback,
-    never fabricated).
-
-    Returns ``(equity, balance_error, open_unrealized_usd, upnl_unreadable)``. A
-    failed read or an unvaluable held currency → ``(None, True, 0.0, False)``
-    (the wedge inherits the anchor's fail-loud disposition — never fabricated on
-    an unvaluable base, and ``unreadable`` is moot on a failed anchor). MUST-2:
-    ``upnl_unreadable`` is True when the anchor read cleanly but ``session_upl``
-    was absent/unreadable on EVERY summary — the caller surfaces
-    ``unrealized_pnl_unreadable`` so a wrong assumed field name is LOUD.
+    The native maps are read STRAIGHT off each summary (``equity`` /
+    ``session_upl``) in NATIVE units — no ``{ccy}_usd`` multiply. The collapsed
+    anchor/wedge reuse the SAME resolved ``index_prices`` (one probe per held
+    non-linear currency) so there is NO second fetch of anything. Read-error
+    discipline (red-team LOW-1): a TRANSIENT collapsed-anchor probe blip
+    (network/timeout/5xx → ``ccxt.NetworkError``) is RETRIED with backoff and, on
+    ``max_retries`` exhaustion, raises ``DeribitTransientReadError`` (retryable) —
+    it is NEVER swallowed into ``balance_error=True`` (which would let the caller
+    proceed to a silent clean ``complete`` that skips the collapsed-anchor DQ
+    checks). A GENUINE unvaluable collapse (a held coin whose ``{ccy}_usd`` index
+    genuinely does not resolve) still flags ``balance_error`` honestly. Leak: no raw
+    equity/upnl values are logged.
     """
     from services.deribit_txn import _LINEAR_CURRENCIES, deribit_equity_to_usd
 
+    empty: dict[str, float] = {}
     try:
         resp = await exchange.private_get_get_account_summaries({})
     except Exception:  # noqa: BLE001 - a failed read is a DQ flag, not a crash
-        return None, True, 0.0, False
+        return DeribitNativeAccountState(empty, {}, None, 0.0, True, False, {})
     result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
     summaries = result.get("summaries", []) if isinstance(result, Mapping) else []
     if not isinstance(summaries, Sequence) or not summaries:
-        return None, True, 0.0, False
+        return DeribitNativeAccountState({}, {}, None, 0.0, True, False, {})
 
+    # Native per-currency maps read from the SAME summaries (D5) — NEVER index-
+    # multiplied. session_upl absent/null/non-numeric → 0.0 (never fabricated).
+    native_equity: dict[str, float] = {}
+    native_upnl: dict[str, float] = {}
+    native_options_value: dict[str, float] = {}
+    for summ in summaries:
+        if not isinstance(summ, Mapping):
+            continue
+        ccy = str(summ.get("currency", "")).upper()
+        if not ccy:
+            continue
+        native_equity[ccy] = float(summ.get("equity", 0.0) or 0.0)
+        # Task 2b: COMBINED futures + options session uPnL (§2 Q5), byte-safe for
+        # perp-only (options component absent → 0.0 → unchanged value → SC-4).
+        upl, _read, _component_unread = _combined_session_upl(summ)
+        native_upnl[ccy] = upl
+        # CR-01: the open-option-book mark read off the SAME response. Absent on
+        # perp-only summaries → 0.0 (never fabricated; SC-4). A nonzero value
+        # exempts this currency from the STRICT balance-identity guard (§5 becomes
+        # authoritative on the open book).
+        native_options_value[ccy] = float(summ.get("options_value", 0.0) or 0.0)
+
+    # Resolve one {ccy}_usd index per held non-linear currency for the COLLAPSED
+    # anchor/wedge only (the native maps above never touch these).
     index_prices: dict[str, float] = {}
     for summ in summaries:
         if not isinstance(summ, Mapping):
@@ -812,11 +1410,44 @@ async def fetch_deribit_account_equity_and_upnl_usd(
         ccy = str(summ.get("currency", "")).upper()
         if not ccy or ccy in _LINEAR_CURRENCIES:
             continue
-        try:
-            ip = await exchange.public_get_get_index_price(
-                {"index_name": f"{ccy.lower()}_usd"}
-            )
-        except Exception:  # noqa: BLE001 - missing index → gate below fails loud
+        # LOW-1: a TRANSIENT collapsed-anchor probe blip (network/timeout/5xx →
+        # ccxt.NetworkError) is RETRYABLE: retry with backoff, then RAISE
+        # DeribitTransientReadError on exhaustion — NEVER silently swallow it into
+        # balance_error=True and proceed to a silent clean 'complete' (skipping the
+        # C2 / FLOW-04 / uPnL-unreadable DQ checks the caller gates on
+        # ``not balance_error``, where the legacy path degraded to
+        # complete_with_warnings). A retry likely restores the index → FULL DQ. A
+        # GENUINE unvaluable collapse (the index genuinely does not resolve →
+        # ExchangeError/BadSymbol) still ``continue``s → the wedge stays out and the
+        # collapse below flags balance_error honestly (the core's structural refusal
+        # handles it, never an infinite retry).
+        retries = 0
+        ip: Any = None
+        while True:
+            try:
+                ip = await exchange.public_get_get_index_price(
+                    {"index_name": f"{ccy.lower()}_usd"}
+                )
+                break
+            except Exception as exc:  # noqa: BLE001
+                if _is_transient_read_error(exc):
+                    retries += 1
+                    if retries > max_retries:
+                        raise DeribitTransientReadError(
+                            "deribit get_index_price transient collapsed-anchor "
+                            f"probe budget ({max_retries}) exhausted for "
+                            f"index_name={ccy.lower()}_usd — refusing a silent-clean "
+                            "complete that would skip the collapsed-anchor DQ checks "
+                            "(retryable)"
+                        ) from None
+                    await sleep(
+                        PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1))
+                    )
+                    continue
+                # Genuine missing index → gate below flags balance_error honestly.
+                ip = None
+                break
+        if ip is None:
             continue
         ipr = ip.get("result", {}) if isinstance(ip, Mapping) else {}
         price = ipr.get("index_price") if isinstance(ipr, Mapping) else None
@@ -830,13 +1461,60 @@ async def fetch_deribit_account_equity_and_upnl_usd(
         equity = deribit_equity_to_usd(summaries, index_prices)
     except ValueError:
         # A coin-margined currency with no resolvable USD index → refuse a
-        # coin/non-USD anchor; flag heuristic capital rather than mis-scale.
-        # The wedge inherits the same fail-loud disposition (never fabricated).
-        return None, True, 0.0, False
+        # coin/non-USD collapsed anchor; flag heuristic capital rather than
+        # mis-scale. The NATIVE maps stay (they need no index); the wedge inherits
+        # the same fail-loud collapsed disposition (never fabricated).
+        return DeribitNativeAccountState(
+            native_equity, native_upnl, None, 0.0, True, False,
+            native_options_value,
+        )
     open_unrealized_usd, upnl_unreadable = _deribit_session_upl_to_usd(
         summaries, index_prices
     )
-    return equity, False, open_unrealized_usd, upnl_unreadable
+    return DeribitNativeAccountState(
+        native_equity,
+        native_upnl,
+        equity,
+        open_unrealized_usd,
+        False,
+        upnl_unreadable,
+        native_options_value,
+    )
+
+
+async def fetch_deribit_account_equity_and_upnl_usd(
+    exchange: Any,
+) -> tuple[float | None, bool, float, bool]:
+    """Total Deribit account equity in USD (the initial-capital anchor) AND the
+    companion session open-uPnL wedge, both from ONE ``get_account_summaries``
+    response + the SAME resolved index_prices (SC-1) — no new fetch.
+
+    Thin collapsed-4-tuple delegate to :func:`fetch_deribit_native_account_state`
+    (byte-identical to the pre-80-02 body): reads
+    ``private/get_account_summaries``; each coin-margined currency's coin equity
+    is converted at its USD index price (``public/get_index_price`` with
+    ``index_name={ccy}_usd``) while USD-family currencies pass through. The money
+    math is the pure ``deribit_txn.deribit_equity_to_usd`` — NEVER anchor to a raw
+    coin quantity (the anchor-shift class mis-scales every return). The open-uPnL
+    wedge sums ``session_upl`` [ASSUMED A1] from the SAME summaries with the SAME
+    index_prices; an absent/uncertain field → wedge 0.0 (fallback, never
+    fabricated).
+
+    Returns ``(equity, balance_error, open_unrealized_usd, upnl_unreadable)``. A
+    failed read or an unvaluable held currency → ``(None, True, 0.0, False)``
+    (the wedge inherits the anchor's fail-loud disposition — never fabricated on
+    an unvaluable base, and ``unreadable`` is moot on a failed anchor). MUST-2:
+    ``upnl_unreadable`` is True when the anchor read cleanly but ``session_upl``
+    was absent/unreadable on EVERY summary — the caller surfaces
+    ``unrealized_pnl_unreadable`` so a wrong assumed field name is LOUD.
+    """
+    state = await fetch_deribit_native_account_state(exchange)
+    return (
+        state.collapsed_equity_usd,
+        state.balance_error,
+        state.collapsed_upnl_usd,
+        state.upnl_unreadable,
+    )
 
 
 async def fetch_deribit_account_equity_usd(
@@ -858,6 +1536,368 @@ async def fetch_deribit_account_equity_usd(
         await fetch_deribit_account_equity_and_upnl_usd(exchange)
     )
     return equity, balance_error
+
+
+# ---------------------------------------------------------------------------
+# 80-02 — the native-unit venue adapter: assemble a NativeLedger from existing
+# Deribit parts for the landed Phase-79 core. Writes NO reconstruction math.
+# ---------------------------------------------------------------------------
+
+
+def _today_utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _native_daily_to_series(day_map: Mapping[str, float]) -> pd.Series:
+    """D9: convert the pandas-pure ``{utc_day_iso: native_pnl}`` dict
+    (``txn_rows_to_native_daily`` output) into a float Series on a tz-naive
+    midnight ASCENDING ``DatetimeIndex`` — the ``NativeLedger.native_pnl`` shape.
+    This conversion lives HERE (not in the AST-pandas-pure ``deribit_txn.py``)."""
+    if not day_map:
+        return pd.Series(dtype=float, name="native_pnl")
+    days = sorted(day_map)
+    index = pd.DatetimeIndex([pd.Timestamp(d) for d in days])
+    return pd.Series(
+        [day_map[d] for d in days], index=index, dtype=float, name="native_pnl"
+    )
+
+
+def _marks_series(price_map: Mapping[str, float]) -> pd.Series:
+    """A dense daily USD mark Series on a tz-naive midnight ascending
+    ``DatetimeIndex`` from a ``{utc_day_iso: delivery_price}`` map — NEVER
+    forward-filled (the map is already dense from ``public/get_delivery_prices``;
+    a genuine gap stays a gap so the core's ``missing_daily_marks`` refusal fires)."""
+    days = sorted(price_map)
+    index = pd.DatetimeIndex([pd.Timestamp(d) for d in days])
+    return pd.Series(
+        [price_map[d] for d in days], index=index, dtype=float, name="mark"
+    )
+
+
+async def _build_dense_native_marks(
+    exchange: Any,
+    *,
+    indexable: AbstractSet[str],
+    native_pnl: Mapping[str, pd.Series],
+    native_flows: Sequence[ExternalFlow],
+    terminal_native_equity: Mapping[str, float],
+    terminal_upnl_native: Mapping[str, float],
+    raw_rows: Sequence[Mapping[str, Any]],
+    sleep: SleepFn = asyncio.sleep,
+) -> dict[str, pd.Series]:
+    """The DENSE daily settlement-mark planner (D4). For every INDEXED currency
+    carrying nonzero native value (pnl, equity, wedge, or flow), build a DENSE
+    daily ``{ccy}_usd`` mark Series across ``[oldest activity day, today]`` as the
+    UNION of two REAL same-day sources — NOT pruned to event days (the core carries
+    balances forward and needs a mark on every carry-forward day) and NEVER
+    forward-filled/fabricated (a genuine publish gap stays a gap → the core's
+    ``missing_daily_marks`` refusal fires, T-80-05):
+
+      1. the per-event OWN-ROW ``index_price`` a settlement/cash row carries, via
+         :func:`_day_ccy_own_index` — EXACTLY the same-day index the USD leg trusts
+         (``txn_rows_to_daily_records`` / ``deribit_dated_external_flows_usd``); and
+      2. the ``public/get_delivery_prices`` supplemental (via
+         :func:`fetch_deribit_settlement_index`) for quiet/settlement days the
+         ledger itself carries no own index on.
+
+    HIGH-1: without the own-row leg, native marks came ONLY from
+    ``get_delivery_prices`` — a strictly NARROWER endpoint than the USD path's
+    coverage. A currency classified INDEXED (``{ccy}_usd`` resolves on
+    ``get_index_price``) whose ``get_delivery_prices`` is empty (SOL, an explicit
+    target) or gappy on an event day (BTC/ETH) was FALSE-refused
+    ``missing_daily_marks`` by the core, even though the USD path values it via each
+    row's own ``index_price``. Unioning the own-row index restores coverage on
+    EVENT days to match the USD path exactly (each row's own same-day index).
+
+    But the equivalence is NOT total: the native roll additionally needs a mark on
+    every non-event CARRY-FORWARD day (the core carries balances forward and values
+    them daily), which the USD leg — dated per realized event only — never required.
+    Carry-forward-day density therefore rests on the ``get_delivery_prices`` feed,
+    and a SPARSE-feed INDEXED coin can still refuse ``missing_daily_marks`` on a
+    quiet day where the USD path valued it. This is VALIDATED against real coin keys
+    at the 80-04 parity gate; if it manifests it is resolved there with a documented
+    fallback/guard (NOT here — no fallback is added now, ahead of real data). Own-row
+    index WINS on a day both sources carry (identical precedence to
+    ``deribit_txn.py`` — the ledger's own same-day index always wins); a day present
+    in NEITHER stays absent so the core refuses it honestly. Marks are NEVER filled —
+    only the union of two genuine same-day marks.
+
+    USD-family currencies get NO marks entry (their mark is the literal ``1.0`` in
+    the core, §4.1). An UNINDEXABLE currency gets NONE either — the adapter never
+    fabricates a ``1.0`` mark; the core value-gates and refuses it downstream.
+    ``indexable`` is DISJOINT from USD-family (§3.2), so ``ccy in indexable`` ⟺ the
+    currency is a branch-2 INDEXED coin. LOW-2: a value-carrying INDEXED currency
+    whose MERGED map is still empty is OMITTED (no key) so ``marks.get(code)`` is
+    ``None`` and the F-1 build-time invariant (``native_nav.py:406``) fires the clean
+    ``missing_daily_marks`` refusal at ``_build_buckets`` — never an empty Series
+    that defers the refusal to ``_value_over_calendar``."""
+    value_ccys: set[str] = set()
+    oldest_day: dict[str, str] = {}
+    # Newest day a ccy can be REQUIRED (its last ledger day, or today if a nonzero
+    # terminal balance carries forward) — the upper bound of the sparse-delivery gap
+    # check so the perp fill covers the whole carry-forward span, not just [min,max].
+    newest_day: dict[str, str] = {}
+    today_iso = _today_utc_iso()
+
+    def _note(ccy: str, day_oldest: str | None, day_newest: str | None) -> None:
+        value_ccys.add(ccy)
+        if day_oldest is not None:
+            prev = oldest_day.get(ccy)
+            oldest_day[ccy] = day_oldest if prev is None else min(prev, day_oldest)
+        if day_newest is not None:
+            prevn = newest_day.get(ccy)
+            newest_day[ccy] = day_newest if prevn is None else max(prevn, day_newest)
+
+    for ccy, series in native_pnl.items():
+        if ccy not in indexable or series.empty:
+            continue
+        if bool((series.to_numpy(dtype=float) != 0.0).any()):
+            _note(
+                ccy,
+                str(series.index[0].strftime("%Y-%m-%d")),
+                str(series.index[-1].strftime("%Y-%m-%d")),
+            )
+    for flow in native_flows:
+        ccy = flow.currency
+        if ccy not in indexable:
+            continue
+        qty = flow.quantity
+        if float(flow.usd_signed) != 0.0 or (qty is not None and float(qty) != 0.0):
+            _note(ccy, flow.utc_day_iso, flow.utc_day_iso)
+    for source in (terminal_native_equity, terminal_upnl_native):
+        for ccy, val in source.items():
+            if ccy in indexable and float(val) != 0.0:
+                # A nonzero terminal balance carries forward to TODAY → the newest
+                # required day is today (no oldest contribution — no ledger day).
+                _note(ccy, None, today_iso)
+
+    marks: dict[str, pd.Series] = {}
+    if not value_ccys:
+        return marks
+    # The per-event OWN-ROW same-day index (leg 1), computed ONCE over the flat
+    # raw rows via the EXACT resolution the USD leg trusts (_day_ccy_own_index —
+    # end-of-day index_price per (day, ccy), seeded only for indexable currencies).
+    # Grouped by UPPERCASE currency into a {day: price} map so it can be UNIONED
+    # with each currency's delivery-price supplemental (leg 2) below.
+    own_index = _day_ccy_own_index(raw_rows, indexable_currencies=indexable)
+    own_by_ccy: dict[str, dict[str, float]] = {}
+    for (day, ccy), price in own_index.items():
+        own_by_ccy.setdefault(ccy, {})[day] = price
+    # A currency carrying value ONLY via the anchor/wedge (no ledger day) spans from
+    # the earliest day any indexed currency carries, so its dense mark series still
+    # covers the whole reconstruction; today's date if nothing carries a day.
+    global_oldest = min(oldest_day.values()) if oldest_day else _today_utc_iso()
+    for ccy in sorted(value_ccys):
+        delivery = await fetch_deribit_settlement_index(
+            exchange, ccy, oldest_day=oldest_day.get(ccy, global_oldest), sleep=sleep
+        )
+        # UNION of two REAL same-day sources — the delivery-price supplemental for
+        # quiet days OVERLAID by the own-row index (which WINS on a shared day,
+        # mirroring deribit_txn's own-index-wins precedence). NEVER a fabricated /
+        # forward-filled day: a day in NEITHER source stays absent so the core
+        # refuses it honestly. This gives native marks coverage identical to the
+        # USD path (HIGH-1).
+        merged = {**delivery, **own_by_ccy.get(ccy, {})}
+        # 80-04 sparse-delivery fill: an INDEXED coin whose delivery ∪ own union is
+        # gappy across its carry-forward span (SOL — get_delivery_prices is sparse
+        # and no same-day trade seeds an own index) refuses missing_daily_marks even
+        # though it genuinely carries value. Fill the gaps with the
+        # {ccy}_USDC-PERPETUAL DAILY CLOSE — same-exchange same-UTC-day, LOWEST
+        # precedence (delivery/own already placed WIN on any shared day). Fetched
+        # ONLY when a gap exists, so a dense-delivery coin (BTC/ETH) triggers no
+        # perp fetch and stays byte-identical (SC-4).
+        span_oldest = oldest_day.get(ccy, global_oldest)
+        span_newest = newest_day.get(ccy, span_oldest)
+        if _price_map_has_gap(merged, span_oldest, span_newest):
+            perp = await fetch_deribit_perp_daily_index(
+                exchange, ccy, oldest_day=span_oldest, sleep=sleep
+            )
+            merged = {**perp, **merged}
+        if not merged:
+            # LOW-2: no mark from ANY source for a value-carrying INDEXED
+            # currency → OMIT the key (no empty Series) so the F-1 build-time
+            # invariant refuses it cleanly at _build_buckets.
+            continue
+        marks[ccy] = _marks_series(merged)
+    return marks
+
+
+async def build_deribit_native_ledger(
+    exchange: Any,
+    since_ms: int | None = None,
+    *,
+    account_state: DeribitNativeAccountState | None = None,
+    sleep: SleepFn = asyncio.sleep,
+    pnl_basis: str = DEFAULT_PNL_BASIS,
+    exclude_spot_extraction: bool = False,
+) -> tuple[NativeLedger, CompletenessReport]:
+    """Assemble a :class:`~services.native_nav.NativeLedger` for the landed Phase-79
+    native core from existing Deribit parts + the 80-01 siblings (NAT-04). It
+    writes NO reconstruction math — the core rolls, values, and refuses.
+
+    Six fields, all per-currency native:
+      * ``native_pnl`` — ``txn_rows_to_native_daily`` over the crawl's RAW rows,
+        each ``{day: native_change}`` dict converted to a tz-naive midnight Series
+        (D9).
+      * ``terminal_native_equity`` / ``terminal_upnl_native`` — the per-currency
+        native anchor + wedge from the ONE ``get_account_summaries`` response
+        (:func:`fetch_deribit_native_account_state`). The caller threads its
+        already-read ``account_state`` in (D5 one-read: the core anchor + the
+        caller's materiality/C2 basis judge the SAME response); a standalone /
+        test caller omits it and this reads the anchor itself. The unmarkable-wedge
+        App A #6 refusal is delivered BY CONSTRUCTION — the raw native
+        ``session_upl`` is passed through and the core's value-gate refuses it.
+      * ``marks`` — a DENSE daily ``{ccy}_usd`` settlement-index Series per INDEXED
+        nonzero currency (:func:`_build_dense_native_marks`); USD-family absent.
+      * ``native_flows`` — the crawl's 4-field ``(day, ccy)`` dated flows, reused
+        verbatim from ``report.dated_external_flows`` (never recomputed).
+      * ``full_history=True`` — Deribit's txn-log reaches inception, so the §5
+        inception gate reconciles against a pre-history balance of 0.
+
+    Returns ``(NativeLedger, CompletenessReport)``; the caller still runs
+    :func:`assert_ledger_complete` on the report (the adapter never swallows it).
+    The collapsed USD anchor stays available via
+    :func:`fetch_deribit_native_account_state` for the 80-04 parity panel.
+    Leak: no raw balances/marks/flows logged."""
+    _daily_records, raw_rows, indexable, report = await _crawl_deribit_ledger(
+        exchange, since_ms, sleep=sleep
+    )
+    # Keep the plain (day, ccy)-keyed native dict for the balance-identity guard
+    # (which reconciles against Σchange over cash-bearing rows) BEFORE the
+    # pd.Series conversion. ``pnl_basis`` (cash_settlement DEFAULT — zavara-
+    # validated — or mark_to_market) is threaded through per strategy/account.
+    # ``exclude_spot_extraction`` (Bug B) is TRUE only on the ALLOCATED / Zavara
+    # path (a non-None ``returns_denominator_config``); it drops net-extraction
+    # spot legs from native_pnl. On the NAV path it is FALSE so spot legs are
+    # RETAINED verbatim and the §5 inception reconciliation closes. The guard below
+    # is called in the SAME mode so the reference Σchange never drifts from native_pnl.
+    native_daily = txn_rows_to_native_daily(
+        raw_rows, pnl_basis=pnl_basis, exclude_spot_extraction=exclude_spot_extraction
+    )
+    native_pnl: dict[str, pd.Series] = {
+        ccy: _native_daily_to_series(day_map)
+        for ccy, day_map in native_daily.items()
+    }
+    native_flows = report.dated_external_flows
+    # HIGH-1/MEDIUM-1 (D5 one-read): use the anchor the caller already read from
+    # the SAME get_account_summaries response so the core's anchor + the caller's
+    # materiality/C2 basis judge ONE response. Standalone / test callers pass
+    # nothing → fall back to a self-contained read (no behaviour change for them).
+    state = (
+        account_state
+        if account_state is not None
+        else await fetch_deribit_native_account_state(exchange)
+    )
+    marks = await _build_dense_native_marks(
+        exchange,
+        indexable=indexable,
+        native_pnl=native_pnl,
+        native_flows=native_flows,
+        terminal_native_equity=state.native_equity,
+        terminal_upnl_native=state.native_upnl,
+        raw_rows=raw_rows,
+        sleep=sleep,
+    )
+    # Phase 82 MANDATORY fail-loud reconcile guard (§1): per currency the computed
+    # realized total MUST equal Σchange over cash-bearing rows, to
+    # max($1-equiv native floor, 1e-4·throughput). The $1-equivalent NATIVE floor
+    # is derived from the anchor mark the adapter already holds: USD-family ≈ 1.0
+    # native/$1; an indexed coin ≈ 1/terminal_mark. Closes by construction. Under
+    # CASH_SETTLEMENT (the DEFAULT / shipped basis) it is a plain Σ==Σ that catches a
+    # dropped/mis-summed cash row (the ONLY reconciliation there — B1: no open-option
+    # exemption). The mid-window-missing-summary breach it also catches is
+    # MARK_TO_MARKET-specific (an open-options session whose premium dropped with no
+    # summary carrying it) — either way a LedgerValuationError STOP, never a shipped
+    # wrong number.
+    native_floor: dict[str, float] = {}
+    for ccy in set(native_daily) | {str(c).upper() for c in state.native_equity}:
+        if ccy in USD_FAMILY:
+            native_floor[ccy] = 1.0
+            continue
+        mark_series = marks.get(ccy)
+        if mark_series is not None and len(mark_series) > 0:
+            anchor_mark = float(mark_series.iloc[-1])
+            if anchor_mark > 0:
+                native_floor[ccy] = 1.0 / anchor_mark
+        # else: no mark (a value-carrying no-mark coin fails at native_nav's own
+        # mark refusal); rely on the relative 1e-4·throughput term (floor 0.0).
+    # CR-01 / B1 (BASIS-SCOPED): exempt provably-OPEN option currencies from the
+    # STRICT guard ONLY under mark_to_market. There the summary channel re-attributes
+    # option P&L across held days and the open book's terminal MTM is a legitimate
+    # residual the flat-at-settlement identity cannot close — so the exemption is
+    # needed and §5 (NAV path) is the authoritative backstop. Under CASH_SETTLEMENT
+    # (the DEFAULT / Zavara basis) EVERY option row books its FULL cash ``change``
+    # (coverage_windows are never consulted), so the strict Σnative==Σchange identity
+    # closes EXACTLY and MUST run on open-option currencies too — it is the ONLY
+    # fail-loud reconciliation on the allocated/cash_settlement path (``combine_native_ledger``
+    # returns the allocated metrics BEFORE ``reconstruct_native_nav_and_twr``, so §5
+    # never runs there). Exempting a currency here would silently ship a wrong
+    # factsheet on a dropped/mis-summed BTC cash row. Hence: no exemption under
+    # cash_settlement.
+    open_opt = (
+        frozenset(c for c, v in state.native_options_value.items() if v != 0.0)
+        | _option_activity_after_coverage(raw_rows)
+        if pnl_basis == PNL_BASIS_MARK_TO_MARKET
+        else frozenset()
+    )
+    assert_balance_identity(
+        raw_rows, native_daily, native_floor=native_floor, open_option_ccys=open_opt,
+        exclude_spot_extraction=exclude_spot_extraction, pnl_basis=pnl_basis,
+    )
+    # Surface the exempted currencies for logs/harness (an open book is the NORMAL
+    # state — §5 guards it — so this is NOT promoted to complete_with_warnings;
+    # trailing/pre-rollout activity is separately stamped below).
+    report.balance_identity_open_option_ccys = sorted(open_opt)
+    # Q6 (MARK_TO_MARKET ONLY): option rows outside their currency's summary
+    # coverage window fall back to cash-basis `change` (premium noise persists — no
+    # summary channel to reshape them). Surface the affected buckets so the worker
+    # stamps complete_with_warnings (never silently ship pre-rollout noise as clean
+    # under MTM). Under CASH_SETTLEMENT (the DEFAULT) EVERY option row books its
+    # raw cash `change` on its settlement day BY DESIGN — there is no summary
+    # channel and no "pre-coverage fallback", so this warning would be spurious;
+    # suppress it (judgment call b).
+    report.pre_coverage_option_days = (
+        _pre_coverage_option_days(raw_rows)
+        if pnl_basis == PNL_BASIS_MARK_TO_MARKET
+        else []
+    )
+    # H1 (BLOCKER): under CASH_SETTLEMENT the OPEN option book's settled mark
+    # (``native_options_value``) is INCLUDED in the venue-reported ``equity``
+    # (terminal_native_equity) but is NOT in the cash-only ``native_pnl`` and NOT in
+    # the session-uPnL wedge — so §5 (`_assert_inception_reconciled`) would strand it
+    # as an unexplained residual and fail a perfectly healthy open-options NAV
+    # account PERMANENT (the shipped NAV+options+cash_settlement §5 combination had
+    # ZERO coverage). Value the open book INTO the terminal wedge so the reconciliation
+    # closes: terminal_equity == Σnative_pnl + Σflow + wedge, with wedge = session
+    # uPnL + open-book MTM. Like the session-uPnL wedge, this open-MTM is stripped
+    # from the realized-basis NAV backward roll (consistent with the existing
+    # unrealized-stripping design). Perp-only / no-open-book accounts have
+    # ``options_value`` == 0 ⇒ wedge unchanged ⇒ byte-identical (SC-4).
+    #
+    # Under MARK_TO_MARKET the open book's value is ALREADY carried INTO native_pnl by
+    # the summary channel, so adding it to the wedge would DOUBLE-COUNT — keep the
+    # wedge = session uPnL only there (unchanged).
+    if pnl_basis == PNL_BASIS_MARK_TO_MARKET:
+        terminal_upnl_native: Mapping[str, float] = state.native_upnl
+    else:
+        _wedge_ccys = (
+            {str(c).upper() for c in state.native_upnl}
+            | {str(c).upper() for c in state.native_options_value}
+        )
+        terminal_upnl_native = {
+            c: float(state.native_upnl.get(c, 0.0))
+            + float(state.native_options_value.get(c, 0.0))
+            for c in _wedge_ccys
+        }
+    ledger = NativeLedger(
+        native_pnl=native_pnl,
+        terminal_native_equity=state.native_equity,
+        marks=marks,
+        native_flows=native_flows,
+        terminal_upnl_native=terminal_upnl_native,
+        full_history=True,
+    )
+    return ledger, report
 
 
 def assert_ledger_complete(report: CompletenessReport) -> None:

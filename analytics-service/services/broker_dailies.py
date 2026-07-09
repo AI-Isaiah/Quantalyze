@@ -55,6 +55,11 @@ from typing import Any
 
 import pandas as pd
 
+from services.allocated_capital import (
+    ReturnsDenominatorConfig,
+    allocated_capital_returns_and_metrics,
+)
+from services.native_nav import NativeLedger, reconstruct_native_nav_and_twr
 from services.transforms import trades_to_daily_returns_with_status
 
 logger = logging.getLogger(__name__)
@@ -155,6 +160,62 @@ def combine_realized_and_funding(
         balance_error=balance_error,
         external_flows=external_flows,
         open_unrealized_usd=open_unrealized_usd,
+    )
+    returns = gap_fill_daily_returns(returns)
+    return returns, dict(meta)
+
+
+def combine_native_ledger(
+    ledger: NativeLedger,
+    indexable: frozenset[str],
+    *,
+    denominator_config: ReturnsDenominatorConfig | None = None,
+) -> tuple[pd.Series, dict[str, Any]]:
+    """The NATIVE-unit sibling of ``combine_realized_and_funding`` (80-03 T1,
+    §9.2). Call the landed native core (``reconstruct_native_nav_and_twr``,
+    ``venue="deribit"``) and gap-fill the returns so the returned ``(returns,
+    meta)`` is BYTE-for-byte the same shape the legacy sibling yields — a
+    gap-filled float Series on an ascending daily DatetimeIndex + a plain dict of
+    the ``NavTWRMeta``.
+
+    Because the shape is identical, EVERYTHING downstream is untouched by the
+    production switch: the CSV route, ``compute_all_metrics``, persistence, and
+    the factsheet all consume ``(returns, meta)`` exactly as before — the native
+    core just replaces the USD-space reconstruction as the returns source.
+
+    ``denominator_config`` (a per-strategy ``returns_denominator_config`` override):
+      * ``None`` (EVERY normal strategy) — the NAV backward-roll path above,
+        BYTE-IDENTICAL to before this parameter existed;
+      * PRESENT (Zavara-only allocated-capital) — returns are
+        ``daily_pnl_usd(d) / allocated_capital(d)`` (Option-2 daily_pnl_usd off the
+        ledger's ``native_pnl`` × ``marks``), DELIBERATELY bypassing
+        ``reconstruct_native_nav_and_twr`` and its §5 inception gate (the capital is
+        externally scheduled, not a reconstructed NAV). The zavara-convention
+        headline metrics ride in ``meta``. The returns Series is gap-filled to the
+        SAME dense daily shape so persistence is untouched.
+
+    ``NavReconstructionError`` subclasses (``UnmarkableCurrencyError`` §3.4,
+    ``InceptionReconciliationError`` §5) are NOT caught here — they propagate typed
+    so the job-worker callsite can disposition them PERMANENT (no retry, no
+    factsheet, scrubbed message — the ``LedgerValuationError`` discipline).
+
+    ponytail — COUPLING INVARIANT (Bug B): the ``ledger`` MUST have been built by
+    ``build_deribit_native_ledger`` with ``exclude_spot_extraction ==
+    (denominator_config is not None)``. The allocated branch below consumes
+    ``ledger.native_pnl`` AS IS (it assumes net-extraction spot legs are ALREADY
+    dropped); the NAV branch reconstructs off a ledger that RETAINS them so §5
+    closes. The job-worker derives BOTH from the SAME ``denominator_config`` so the
+    modes cannot diverge. If a future caller builds a ledger in one mode and calls
+    this in the other, the allocated returns would leak (or drop) spot extraction —
+    keep the two signals wired to the SAME source."""
+    if denominator_config is not None:
+        ac_returns, ac_meta = allocated_capital_returns_and_metrics(
+            ledger.native_pnl, ledger.marks, denominator_config
+        )
+        ac_returns = gap_fill_daily_returns(ac_returns)
+        return ac_returns, dict(ac_meta)
+    returns, meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=indexable, venue="deribit"
     )
     returns = gap_fill_daily_returns(returns)
     return returns, dict(meta)

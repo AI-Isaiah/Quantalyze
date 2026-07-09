@@ -1355,6 +1355,13 @@ class TestDeriveBrokerDailies:
         )
         assert analytics_upserts[0]["computation_status"] == "failed"
         assert analytics_upserts[0]["data_quality_flags"] == {"csv_source": True}
+        # SI-02 (MEDIUM-2, v1.9): the terminal 'failed' stamp clears the
+        # runner-owned computation_warned marker so the status bridge cannot
+        # resurrect a stale complete_with_warnings over the failure.
+        assert analytics_upserts[0].get("computation_warned") is False, (
+            "derive <2-day 'failed' stamp must set computation_warned=False "
+            "(SI-02 stale-marker resurrection guard)"
+        )
 
     # ------------------------------------------------------------------
     # FLOW-03 (v1.8, 76-04): ccxt else-branch flow wiring
@@ -2808,6 +2815,13 @@ class TestDeriveBrokerDailies:
         payload = failed_upserts[0]
         assert payload["strategy_id"] == "strat-hang"
         assert payload["computation_status"] == "failed"
+        # SI-02 (MEDIUM-2, v1.9): the sync_trades enqueue-failure 'failed' stamp
+        # clears the runner-owned computation_warned marker so the status bridge
+        # cannot resurrect a stale complete_with_warnings over the failure.
+        assert payload.get("computation_warned") is False, (
+            "sync_trades enqueue-failure 'failed' stamp must set "
+            "computation_warned=False (SI-02 stale-marker resurrection guard)"
+        )
         assert payload.get("computation_error"), (
             "computation_error must be a non-empty string so the wizard "
             "renders a meaningful GATE_ANALYTICS_FAILED envelope"

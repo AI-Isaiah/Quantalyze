@@ -130,6 +130,27 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     # pattern as flow_coverage_incomplete — so a wrong assumed field name is
     # LOUD (complete_with_warnings) rather than a silent 0-wedge overstatement.
     unrealized_pnl_unreadable: bool
+    # DQ-03 (§6.2) — an INTERIOR chain break: the cumulative figure compounds
+    # ONLY the maximal contiguous post-break suffix (never bridges the gap). Set
+    # from cumulative_twr_segmented's own break-detection (one detector) and
+    # rides the SAME complete_with_warnings channel as the DQ-01/DQ-02 guards;
+    # NO parallel status.
+    twr_chain_broken: bool
+    # Phase 82 — Deribit option rows OUTSIDE their currency's summary coverage
+    # window (pre-2025-01-12 rollout, or the live trailing edge) fell back to
+    # cash-basis `change`: premium swings PERSIST there (no summary channel exists
+    # to re-attribute them, and none ever will — exchange-side rollout, not a data
+    # error). The in-core value is the sorted list of affected ``"{ccy}:{day}"``
+    # buckets (useful for logs/harness). Set by the broker wiring (job_worker), NOT
+    # the pure core — same pattern as unrealized_pnl_unreadable. F3: the LIST does
+    # NOT survive to the factsheet — at the broker→CSV boundary
+    # (job_worker._prestamp_flags, analytics_runner data_quality_flags) it COLLAPSES
+    # to a boolean DQ-flag exactly like every other guard key (the persisted
+    # data_quality_flags carries `True`, not the buckets). A NON-EMPTY list is
+    # truthy → rides the SAME complete_with_warnings channel (founder-lp strict mode
+    # withholds warned accounts automatically). Registered in NAV_TWR_GUARD_KEYS so
+    # the flag alone promotes the status (Q6).
+    pre_summary_rollout_option_dailies: list[str]
 
 
 # SHOULD-1 (specialist-types): the ONE source of truth for the additive
@@ -149,6 +170,8 @@ NAV_TWR_GUARD_KEYS: tuple[str, ...] = (
     "flow_coverage_incomplete",
     "unrealized_pnl_in_anchor",
     "unrealized_pnl_unreadable",
+    "twr_chain_broken",
+    "pre_summary_rollout_option_dailies",
 )
 
 
@@ -198,7 +221,10 @@ def _flows_to_daily_usd(external_flows: Sequence[Any] | None) -> pd.Series:
 
     sums: dict[str, float] = defaultdict(float)
     for i, flow in enumerate(external_flows):
-        day_raw, usd_raw = flow
+        # Indexed access (not a positional unpack) so a 4-field ``ExternalFlow``
+        # (native channel populated, Phase 79) AND a bare ``(day, usd)`` 2-tuple
+        # both read their first two fields. usd_signed stays authoritative here.
+        day_raw, usd_raw = flow[0], flow[1]
         day = _row_utc_day(day_raw)  # 'YYYY-MM-DD' (fails loud if undatable)
         usd = _coerce_float(
             usd_raw, field="usd_signed", row={"index": i, "day": day}
@@ -295,7 +321,11 @@ def reconstruct_nav(
 
 
 def chain_linked_twr(
-    nav: pd.Series, daily_pnl: pd.Series, flows_by_day: pd.Series
+    nav: pd.Series,
+    daily_pnl: pd.Series,
+    flows_by_day: pd.Series,
+    *,
+    prev0: float | None = None,
 ) -> tuple[pd.Series, dict[str, bool]]:
     """Chain-link the daily time-weighted return from a reconstructed NAV series.
 
@@ -310,6 +340,16 @@ def chain_linked_twr(
     flow-dominated guards live in the fail-loud guard block (DQ-01) which
     generalises this same break — see ``_guard_denominator``.
 
+    ``prev0`` (§1.4, App A #2) is an ADDITIVE keyword. ``prev0=None`` (default)
+    keeps EXACTLY today's arithmetic — day-0 ``prev`` is the reconstructed
+    ``NAV_0 - pnl_0 - F_0`` from ``daily_pnl.iloc[0]``, so every existing caller
+    and test is byte-identical (SC-4). It exists because ``daily_pnl.iloc[0]``
+    has no meaning once ``pnl`` is per-currency native: the per-currency
+    native-unit core (Phase 79-02, §1.4) injects the pre-history capital valued at
+    day-0 marks, ``prev0_usd``, instead. When ``prev0`` is set,
+    day-0 ``prev`` is that supplied value (fail-loud coerced via ``_coerce_float``)
+    and the ``_guard_denominator`` guards apply to it UNCHANGED.
+
     Returns ``(returns, flags)`` where ``returns`` is a ``"returns"``-named
     Series on the NAV DatetimeIndex (broken days are NaN) and ``flags`` maps the
     DQ flag keys that fired to ``True``.
@@ -320,6 +360,11 @@ def chain_linked_twr(
     pnl0 = _coerce_float(
         daily_pnl.iloc[0], field="daily_pnl", row={"day": str(index[0])}
     )
+    prev0_val: float | None = (
+        None
+        if prev0 is None
+        else _coerce_float(prev0, field="prev0", row={"day": str(index[0])})
+    )
 
     n = len(index)
     flags: dict[str, bool] = {}
@@ -328,7 +373,9 @@ def chain_linked_twr(
         cur = nav_vals[t]
         flow_t = flows[t]
         if t == 0:
-            prev = cur - pnl0 - flow_t  # reconstructed pre-history capital
+            # prev0=None ⇒ the reconstructed pre-history capital (today's exact
+            # arithmetic); prev0 set ⇒ the native core's day-0-mark-valued capital.
+            prev = (cur - pnl0 - flow_t) if prev0_val is None else prev0_val
         else:
             prev = nav_vals[t - 1]  # NAV_{t-1}
 
@@ -368,13 +415,63 @@ def _guard_denominator(prev_nav: float, flow: float) -> str | None:
     return None
 
 
-def cumulative_twr(returns: pd.Series) -> float:
-    """Cumulative chain-linked return ``Π(1 + r) - 1`` over the retained
-    (non-broken) days. Returns NaN when no day survived the guards."""
-    retained = returns.dropna()
-    if retained.empty:
-        return float("nan")
-    return float((1.0 + retained).prod() - 1.0)
+def _last_interior_break_suffix(returns: pd.Series) -> pd.Series:
+    """The single source of the retained-suffix boundary (§6.2).
+
+    Returns the maximal contiguous non-NaN run that ENDS at the last valid
+    observation — i.e. the anchored, trustworthy segment that chains back from
+    the real venue terminal:
+
+      * No NaN            -> the whole series (clean path).
+      * Leading NaNs only -> the post-NaN suffix (the terminus already flagged).
+      * Trailing NaNs only -> the leading valid run (no valid day after the NaN,
+                              so it is not an interior break).
+      * Any INTERIOR NaN  -> the maximal contiguous suffix AFTER the LAST break.
+      * All-NaN           -> an empty Series (nothing survived).
+
+    This is the ONE boundary source both ``cumulative_twr_segmented`` (compounds
+    it) and ``metrics._cagr_index`` (annualizes over its ``.index``) consume, so
+    the compounded window and the CAGR window are provably the same days."""
+    valid = returns.notna().to_numpy()
+    if not valid.any():
+        return returns.iloc[0:0]
+    last = len(valid) - 1 - int(np.argmax(valid[::-1]))
+    start = last
+    while start > 0 and valid[start - 1]:
+        start -= 1
+    return returns.iloc[start : last + 1]
+
+
+def cumulative_twr_segmented(returns: pd.Series) -> tuple[float, dict[str, bool]]:
+    """Cumulative chain-linked return that refuses to compound across an
+    INTERIOR break (§6.2).
+
+    * No NaN in ``returns``            -> ``Π(1+r) − 1``, no flag — bit-identical
+                                          to the deleted ``cumulative_twr``
+                                          (SC-4 clean path).
+    * LEADING NaNs only (a DQ-02 terminus segment, apply_flow_coverage_terminus,
+      or a day-0 guard)               -> compound the post-NaN suffix; NO new
+                                          flag (the terminus/DQ-01 machinery
+                                          already flagged the cause).
+    * Any INTERIOR NaN (a break with retained returns on BOTH sides)
+                                      -> compound ONLY the maximal contiguous
+                                          suffix after the LAST break, and raise
+                                          ``{"twr_chain_broken": True}``.
+
+    NEVER stitches across a gap; NEVER returns NaN when a valid suffix exists;
+    returns NaN only when no day survived (the same terminal case as the deleted
+    ``cumulative_twr``). Break-detection is derived from the SINGLE
+    ``_last_interior_break_suffix`` boundary source (no forked detector): an
+    interior break exists exactly when a valid day lies before the retained
+    suffix, i.e. ``retained_valid_count > len(suffix)``."""
+    suffix = _last_interior_break_suffix(returns)
+    if suffix.empty:
+        return float("nan"), {}
+    value = float((1.0 + suffix).prod() - 1.0)
+    flags: dict[str, bool] = {}
+    if int(returns.notna().sum()) > len(suffix):
+        flags["twr_chain_broken"] = True
+    return value, flags
 
 
 def _build_nav_meta(flags: Mapping[str, bool]) -> NavTWRMeta:
@@ -403,6 +500,8 @@ def _build_nav_meta(flags: Mapping[str, bool]) -> NavTWRMeta:
         meta["flow_coverage_incomplete"] = True
     if flags.get("unrealized_pnl_in_anchor"):
         meta["unrealized_pnl_in_anchor"] = True
+    if flags.get("twr_chain_broken"):
+        meta["twr_chain_broken"] = True
     return meta
 
 
@@ -689,6 +788,13 @@ def reconstruct_nav_and_twr(
         terminal_nav, reconstructed_start, daily_pnl, flows_by_day
     )
     returns, flags = chain_linked_twr(nav, daily_pnl, flows_by_day)
+    # DQ-03 (§6.2): the SAME function that computes the honest cumulative decides
+    # brokenness — ONE break-detection semantics, no forked detector. An INTERIOR
+    # break (a guard-NaN flanked by valid returns) merges {"twr_chain_broken":
+    # True}; leading/trailing-only NaN and the clean path merge {} (byte/status-
+    # identical). The float cumulative is discarded here — the core emits the
+    # daily series; the cumulative consumer is metrics (Task 3).
+    flags = {**flags, **cumulative_twr_segmented(returns)[1]}
     # FLOW-04 terminal uPnL wedge materiality (Q5). Evaluate the ratio ONLY on a
     # non-dust anchor — a dust/near-zero base makes |uPnL|/anchor meaningless (and
     # divide-by-tiny explodes it into a false positive); a dust NAV is already

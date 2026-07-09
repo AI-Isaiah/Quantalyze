@@ -71,10 +71,17 @@ from typing import Any
 
 from services.deribit_ingest import (
     LedgerCompletenessError,
+    _crawl_deribit_ledger,
     assert_ledger_complete,
-    fetch_deribit_ledger_daily_records,
+    build_deribit_native_ledger,
 )
-from services.deribit_txn import _INVERSE_CURRENCIES, txn_change_to_usd
+from services.deribit_txn import (
+    _INVERSE_CURRENCIES,
+    _NATIVE_OPTIONS_SUMMARY_TYPES,
+    classify_instrument,
+    deribit_linear_external_flow_usd,
+    txn_change_to_usd,
+)
 
 # Cap on how many symmetric-difference dates / sign-mismatch rows a Check detail
 # names — enough to triage, bounded so a wholesale mismatch cannot flood the log.
@@ -233,6 +240,45 @@ def check_daily_reconcile(
             f"(injected): {_fmt_dates(injected)}"
         )
     return Check("daily_reconcile", False, "; ".join(parts) + zero_note)
+
+
+def check_perp_only_eligibility(rows: Sequence[Mapping[str, Any]]) -> Check:
+    """Phase 82 SC-4 eligibility gate for a byte-identity CONTROL key: a key used
+    to prove perp-only factsheets are UNCHANGED post-options-fix must carry ZERO
+    historical option ``trade``/``delivery`` rows AND ZERO
+    ``options_settlement_summary`` rows over full history.
+
+    A key that ever traded ONE option carries summary/delivery rows whose native
+    P&L LEGITIMATELY changes post-fix (coverage-gated re-attribution) — using it
+    as a byte-identity control would be a FALSE red. This check counts both and
+    passes iff 0/0, naming the counts so the Task-7 run log records eligibility
+    per key BEFORE the byte-identity comparison is trusted."""
+    option_rows = 0
+    summary_rows = 0
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        row_type = str(row.get("type", ""))
+        if row_type in _NATIVE_OPTIONS_SUMMARY_TYPES:
+            summary_rows += 1
+        elif row_type in ("trade", "delivery"):
+            if classify_instrument(str(row.get("instrument_name", ""))) == "option":
+                option_rows += 1
+    if option_rows == 0 and summary_rows == 0:
+        return Check(
+            "perp_only_eligibility",
+            True,
+            "0 option trade/delivery rows, 0 options_settlement_summary rows — "
+            "eligible as a byte-identity control key",
+        )
+    return Check(
+        "perp_only_eligibility",
+        False,
+        f"{option_rows} option trade/delivery row(s) and {summary_rows} "
+        "options_settlement_summary row(s) present — this key's native P&L "
+        "LEGITIMATELY moves post-fix (coverage-gated re-attribution); it is NOT a "
+        "valid byte-identity control (Task 4 plan-check finding)",
+    )
 
 
 def check_inverse_signs(rows: Sequence[Mapping[str, Any]]) -> Check:
@@ -397,6 +443,29 @@ def _records_dates_by_value(
     return nonzero, zero - nonzero
 
 
+def _ledger_nonzero_dates(native_ledger: Any) -> set[date]:
+    """The fresh nonzero-P&L UTC-day set under the FULL production ledger — the
+    ``native_pnl`` that ``job_worker`` persists to ``csv_daily_returns`` via
+    ``build_deribit_native_ledger`` (``services/deribit_ingest.py``). A day is
+    nonzero iff ANY currency's native pnl for that day is nonzero.
+
+    Read the ledger's ``native_pnl`` DIRECTLY — never a separately-recomputed
+    cash-only ``txn_rows_to_native_daily`` nor the legacy USD daily_pnl records
+    production no longer runs — so the harness gates on EXACTLY what production
+    persists, whatever the account's accrual basis. Under the DEFAULT
+    ``cash_settlement`` basis (the fleet basis) option premium/payout books its cash
+    ``change`` on the settlement day; the opt-in ``mark_to_market`` basis additionally
+    carries the ``options_settlement_summary`` channel (see D-13). (The Phase-83
+    daily-MTM ΔMTM merge was REVERTED — there is no longer a separate ΔMTM channel.)
+    The money gates (balance-identity guard + §5 closure) are untouched."""
+    out: set[date] = set()
+    for series in native_ledger.native_pnl.values():
+        for ts, value in series.items():
+            if float(value) != 0.0:
+                out.add(ts.date())
+    return out
+
+
 def _load_persisted(
     supabase: Any, strategy_id: str
 ) -> tuple[str, dict[str, Any], set[date], set[date]]:
@@ -440,7 +509,19 @@ async def verify_account(spec: AccountSpec, supabase: Any) -> AccountAcceptance:
     checks: list[Check] = []
     exchange = _build_deribit_exchange(spec.key_index)
     try:
-        records, completeness = await fetch_deribit_ledger_daily_records(
+        # Task 5: crawl ONCE via the shared producer so the fresh basis is derived
+        # over the SAME raw rows two ways — the NATIVE production formula
+        # (txn_rows_to_native_daily, the daily_reconcile money gate) and the legacy
+        # USD daily_pnl records (kept for the advisory fills / date-coverage basis).
+        records, raw_rows, _indexable, completeness = await _crawl_deribit_ledger(
+            exchange, None
+        )
+        # The daily_reconcile basis MUST be the FULL production ledger's native_pnl
+        # (via build_deribit_native_ledger — DEFAULT cash_settlement basis), NOT a
+        # separately-recomputed channel, so the harness gates on exactly what
+        # job_worker persists. (Second crawl of the same immutable txn-log; an
+        # offline acceptance script — correctness over the extra round-trip.)
+        native_ledger, _ledger_report = await build_deribit_native_ledger(
             exchange, None
         )
     finally:
@@ -460,7 +541,12 @@ async def verify_account(spec: AccountSpec, supabase: Any) -> AccountAcceptance:
         checks.append(Check("ledger_completeness", False, str(exc)))
 
     active_dates = _records_active_dates(records)
-    ledger_nonzero, ledger_zero = _records_dates_by_value(records)
+    # Task 5: the gated nonzero-P&L days come from the FULL production ledger's
+    # native_pnl (exactly what job_worker persists), NOT a separately-recomputed
+    # channel and NOT the legacy USD daily_pnl records production no longer runs. The
+    # USD records still supply the ADVISORY cosmetic zero-day basis.
+    ledger_nonzero = _ledger_nonzero_dates(native_ledger)
+    _usd_nonzero, ledger_zero = _records_dates_by_value(records)
     status, flags, persisted_nonzero, persisted_zero = _load_persisted(
         supabase, spec.strategy_id
     )
@@ -478,22 +564,26 @@ async def verify_account(spec: AccountSpec, supabase: Any) -> AccountAcceptance:
         )
     )
 
-    # 5. Inverse signs — see the LIVE-driver note below.
-    # ponytail: fetch_deribit_ledger_daily_records aggregates the raw txn rows
-    # away (it returns daily_pnl records + a CompletenessReport, never the raw
-    # currency+change rows). Re-obtaining raw rows would mean re-driving the
-    # scope×currency crawl (paginate_txn_log) — re-implementing the ingest. Per
-    # the plan we do NOT re-implement the crawl; the inverse-sign invariant is
-    # pinned by the fixture unit test against the real txn_change_to_usd, and the
-    # live driver records that coverage as an explicit advisory note rather than
-    # running a partial re-check here.
+    # 5. Inverse signs — Task 5 now crawls via _crawl_deribit_ledger, which
+    # EXPOSES the raw currency+change rows (no re-implementation), so the
+    # D-07/D-08 sign invariant runs LIVE against the real txn_change_to_usd rather
+    # than only in the fixture unit test.
+    checks.append(check_inverse_signs(raw_rows))
+
+    # 6. Perp-only eligibility (Phase 82 SC-4): a byte-identity control key must
+    # carry ZERO option/summary rows; record it as ADVISORY so an options account
+    # is not gate-failed here (it legitimately moves), while a key intended as a
+    # perp-only control surfaces its eligibility in the run log.
     advisory: dict[str, object] = summarize_fills(completeness.total_return_rows)
-    advisory["inverse_signs"] = (
-        "covered by unit test (txn_change_to_usd); raw rows not exposed by the "
-        "aggregating ledger crawl — not re-implemented live"
-    )
-    advisory["net_external_flow_usd"] = completeness.net_external_flow_usd
-    advisory["saw_unvalued_inverse_flow"] = completeness.saw_unvalued_inverse_flow
+    _eligibility = check_perp_only_eligibility(raw_rows)
+    advisory["perp_only_eligibility"] = _eligibility.detail
+    # Net external-flow USD + unvalued-inverse flag (these advisory diagnostics were
+    # previously read off removed CompletenessReport attributes — a latent
+    # AttributeError crash; recompute them from the raw rows via the ONE honest
+    # source, the same function the ledger's flow channel uses).
+    _net_flow_usd, _saw_unvalued_inverse = deribit_linear_external_flow_usd(raw_rows)
+    advisory["net_external_flow_usd"] = _net_flow_usd
+    advisory["saw_unvalued_inverse_flow"] = _saw_unvalued_inverse
 
     return AccountAcceptance(
         strategy_id=spec.strategy_id,

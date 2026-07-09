@@ -54,7 +54,17 @@ from services.db import (
     paginated_select,
     rows,
 )
-from services.metrics import _safe_float, compute_all_metrics
+from services.metrics import (
+    DEFAULT_PERIODS_PER_YEAR,
+    _safe_float,
+    compute_all_metrics,
+)
+from services.allocated_capital import (
+    ALLOCATED_CAPITAL_GUARD_KEYS,
+    ReturnsDenominatorConfigError,
+    metrics_day_basis,
+    parse_returns_denominator_config,
+)
 from services.equity.fallback import merge_dq_flags
 from services.position_reconstruction import _normalize_side
 from services.nav_twr import NAV_TWR_GUARD_KEYS, NavReconstructionError
@@ -191,6 +201,14 @@ class DataQualityFlags(TypedDict, total=False):
     # promotes computation_status to complete_with_warnings on the same channel
     # as the other guard keys so a wrong field name is LOUD. ---
     unrealized_pnl_unreadable: bool
+    # --- Fix B (v1.8 allocated-capital): mandate reporting-window exclusion. Fires
+    # when a config-bearing (allocated-capital) strategy dropped P&L activity days
+    # outside [mandate_start, mandate_end] — pre-mandate history and/or the
+    # post-mandate winding-down tail. Bridged explicitly by derive_broker_dailies
+    # (NOT a NAV_TWR_GUARD_KEYS member — it originates in the allocated_capital
+    # meta, not NavTWRMeta); promotes computation_status to complete_with_warnings
+    # on the same channel. ---
+    mandate_window_excluded_days: bool
     # --- sibling-table batch upsert ---
     sibling_kinds_failed: bool
     sibling_kinds_error: str
@@ -1209,6 +1227,10 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                     {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
+                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker on
+                        # every terminal 'failed' so the status bridge (branches
+                        # a/c) cannot resurrect a stale complete_with_warnings.
+                        "computation_warned": False,
                         "computation_error": "Insufficient trade history. At least 2 trading days required.",
                     },
                     on_conflict="strategy_id",
@@ -1345,6 +1367,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                     {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
+                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                        "computation_warned": False,
                         "computation_error": "Insufficient trading days after aggregation.",
                     },
                     on_conflict="strategy_id",
@@ -1610,7 +1634,29 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         )
 
         # METRICS-11/12: compute_all_metrics returns MetricsResult dataclass.
-        metrics_result = compute_all_metrics(returns, benchmark_rets)
+        # Fix A (v1.8): the trades path is crypto whenever it runs (an api_key_id-
+        # bearing strategy — this legacy path is dark in prod behind
+        # BROKER_DAILIES_VIA_FUNDING but must stay convention-consistent with the
+        # broker→CSV path if the kill-switch is ever flipped). Crypto ⇒ √365; the
+        # allocated-capital simple/active override rides ONLY the CSV path, so
+        # cumulative_method/day_basis stay at the geometric/calendar defaults here.
+        # Reuse the ALREADY-resolved `api_key_id` (never re-probe the row — a demo /
+        # failed-resolution strategy keeps api_key_id=None → the 252 default).
+        # Finding 5b (documented dark): this legacy trades path does NOT thread
+        # cumulative_method/day_basis. It is UNREACHABLE in prod (guarded by
+        # BROKER_DAILIES_VIA_FUNDING). If that kill-switch is ever flipped false
+        # (break-glass), an allocated-capital strategy routed here would revert to
+        # the geometric/calendar convention (NOT its simple/active mandate
+        # convention) — a KNOWN, ACCEPTABLE degradation for the break-glass path
+        # only; the shipped broker→CSV path (run_csv_strategy_analytics) carries the
+        # config-driven conventions.
+        metrics_result = compute_all_metrics(
+            returns,
+            benchmark_rets,
+            periods_per_year=(
+                365 if api_key_id else DEFAULT_PERIODS_PER_YEAR
+            ),
+        )
 
         # H-A1: pop exposure_series from exposure_metrics (so it lands in the
         # sibling table, not in the strategy_analytics.exposure_metrics column).
@@ -1863,6 +1909,15 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         upsert_payload: dict[str, Any] = {
             "strategy_id": strategy_id,
             "computation_status": computation_status_value,
+            # SI-02: the runner-owned PERSISTED warned marker. It rides its OWN
+            # column so a compute_jobs-derived branch (b) 'failed' write over
+            # computation_status cannot destroy the warning; the bridge's
+            # sync_strategy_analytics_status branches (a)/(c) READ it (never
+            # re-deriving warned-ness from data_quality_flags, which would fork
+            # this runner's consumer_specific_flags policy). Set on EVERY terminal
+            # success (TRUE when promoted, FALSE on a clean recompute) so a genuine
+            # clean recompute clears the sticky warning; only the runner clears it.
+            "computation_warned": bool(consumer_specific_flags),
             "computation_error": None,
             "data_quality_flags": top_level_flags,
             **metrics_result.metrics_json,
@@ -1952,6 +2007,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
+                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                    "computation_warned": False,
                     "computation_error": (
                         f"Analytics aborted: dataset exceeds "
                         f"{trunc.page_count * trunc.page_size:,} rows "
@@ -1995,6 +2052,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
+                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                    "computation_warned": False,
                     "computation_error": (
                         "NAV/TWR reconstruction failed (unusable return "
                         "denominator or malformed input); operator "
@@ -2016,6 +2075,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
+                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                    "computation_warned": False,
                     "computation_error": "Analytics computation failed. Contact support if this persists.",
                 },
                 on_conflict="strategy_id",
@@ -2062,13 +2123,28 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
     # existence check.
     strategy_result = await db_execute(
         lambda: supabase.table("strategies")
-        .select("id, user_id")
+        .select("id, user_id, api_key_id, returns_denominator_config")
         .eq("id", strategy_id)
         .single()
         .execute()
     )
     if not strategy_result.data:
         raise HTTPException(status_code=404, detail="Strategy not found")
+
+    # MEDIUM-1 (v1.9, DQ-03): the broker-vs-user-CSV distinguisher for the
+    # interior-break NaN reinstatement below. A BROKER-sourced strategy carries an
+    # api_key_id — derive_broker_dailies gates its ENTIRE (dense, gap-filled) path
+    # on `api_key_id IS NOT NULL` (job_worker._load_strategy_and_key), so a
+    # broker series is ALWAYS gap-filled to a dense daily calendar BEFORE the
+    # 74-04 NaN-skip write. A user CSV upload has api_key_id IS NULL (the wizard
+    # "CSV branch") and is NEVER gap-filled — its missing dates are legitimately
+    # absent (weekend / non-trading day) and MUST NOT be NaN-filled.
+    # `.single()` returns the row as a dict; the isinstance guard keeps a
+    # malformed/None probe response from being mis-read as broker-sourced.
+    _strategy_row = strategy_result.data
+    _is_broker_sourced = bool(
+        isinstance(_strategy_row, dict) and _strategy_row.get("api_key_id")
+    )
 
     # Mark computing.
     def _mark_computing() -> None:
@@ -2112,6 +2188,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                     {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
+                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                        "computation_warned": False,
                         "computation_error": "Insufficient CSV history. At least 2 data points required.",
                         "data_quality_flags": {"csv_source": True},
                     },
@@ -2129,6 +2207,30 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         values = [float(r["daily_return"]) for r in data]
         returns = pd.Series(values, index=dates, name="returns")
 
+        # MEDIUM-1 (v1.9, DQ-03): reinstate the interior-break NaN for a
+        # BROKER-sourced series at the load boundary. A guarded interior day
+        # (flow-dominated / negative-NAV / dust) is np.nan and SKIPPED at the
+        # csv_daily_returns write (74-04 NaN policy) → ABSENT from the stored
+        # rows. Because the broker path gap-fills to a DENSE daily calendar
+        # BEFORE that NaN-skip (broker_dailies.gap_fill_daily_returns), an in-span
+        # missing calendar date can ONLY be such a refused/guarded day. Rebuilding
+        # the series verbatim from the sparse stored rows would hide the break:
+        # cumulative_twr_segmented would find no NaN and compound ACROSS it — the
+        # exact bridging DQ-03 forbids (the twr_chain_broken flag still arrives via
+        # the derive prestamp, but the money number would be the bridged figure).
+        # Reindex to the dense [min,max] daily span so the in-span gaps become NaN
+        # again; the segmenter then computes the suffix-only headline + CAGR.
+        # GATED to broker sources: a user CSV (api_key_id IS NULL) is NOT
+        # gap-filled, so its missing dates are legitimately absent and must stay
+        # sparse — NaN-filling them would fabricate a break and corrupt the
+        # headline of legitimate data.
+        if _is_broker_sourced and not returns.empty:
+            dense_index = pd.date_range(
+                returns.index.min(), returns.index.max(), freq="D"
+            )
+            returns = returns.reindex(dense_index)
+            returns.name = "returns"
+
         benchmark_rets, benchmark_stale = None, True
         try:
             benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
@@ -2138,7 +2240,42 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 strategy_id, exc,
             )
 
-        metrics_result = compute_all_metrics(returns, benchmark_rets)
+        # Fix A (v1.8): thread the strategy's metrics CONVENTIONS into the SHIPPED
+        # factsheet so it matches the harness-validated path — NOT a geometric /
+        # √252 / calendar recompute of the persisted returns.
+        #   * periods_per_year — ASSET-CLASS driven. ponytail: all broker
+        #     integrations (deribit / bybit / binance / okx) are crypto today, so an
+        #     api_key_id-bearing (broker-sourced) strategy ⇒ crypto ⇒ 365 (every
+        #     calendar day trades); a CSV upload (api_key_id NULL — MT5 / forex)
+        #     stays 252. Replace api_key_id with an explicit asset_class / venue-
+        #     market signal when a non-crypto broker is ever added.
+        #   * cumulative_method / day_basis — from returns_denominator_config (the
+        #     allocated-capital override; Zavara → simple + active). Absent ⇒
+        #     geometric + calendar (BYTE-IDENTICAL to the pre-Fix-A recompute).
+        _periods_per_year = 365 if _is_broker_sourced else DEFAULT_PERIODS_PER_YEAR
+        _cumulative_method = "geometric"
+        _day_basis = "calendar"
+        _denominator_config = (
+            parse_returns_denominator_config(
+                _strategy_row.get("returns_denominator_config")
+            )
+            if isinstance(_strategy_row, dict)
+            else None
+        )
+        if _denominator_config is not None:
+            _cumulative_method = _denominator_config.cumulative_method
+            # B2: EXHAUSTIVE fail-loud map (no silent calendar default on a typo'd /
+            # future metrics_basis). ReturnsDenominatorConfigError is dispositioned
+            # PERMANENT by the except branch below (mirrors the derive path).
+            _day_basis = metrics_day_basis(_denominator_config.metrics_basis)
+
+        metrics_result = compute_all_metrics(
+            returns,
+            benchmark_rets,
+            periods_per_year=_periods_per_year,
+            cumulative_method=_cumulative_method,
+            day_basis=_day_basis,
+        )
 
         data_quality_flags: DataQualityFlags = {"csv_source": True}  # M-0657
         if benchmark_stale or benchmark_rets is None:
@@ -2175,12 +2312,25 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             if existing_flags.get(_flag):
                 data_quality_flags[_flag] = True  # type: ignore[literal-required]
                 _warned = True
+        # S3 — the allocated-capital warn flags (NOT NAV_TWR_GUARD_KEYS members: they
+        # originate in the allocated_capital meta, not NavTWRMeta) ride the SAME
+        # bridge via the ONE shared ALLOCATED_CAPITAL_GUARD_KEYS source, iterated
+        # exactly like NAV_TWR_GUARD_KEYS above — so a new allocated warn flag
+        # promotes here by construction instead of a hand-copied branch.
+        for _flag in ALLOCATED_CAPITAL_GUARD_KEYS:
+            if existing_flags.get(_flag):
+                data_quality_flags[_flag] = True  # type: ignore[literal-required]
+                _warned = True
         csv_status = "complete_with_warnings" if _warned else "complete"
 
         def _mark_complete() -> None:
             payload: dict[str, Any] = {
                 "strategy_id": strategy_id,
                 "computation_status": csv_status,
+                # SI-02: same runner-owned warned marker as the stored-trades path
+                # (TRUE when the broker→CSV guard flags promoted csv_status,
+                # FALSE on a clean run). The bridge branches (a)/(c) read it.
+                "computation_warned": _warned,
                 "computation_error": None,
                 "data_quality_flags": data_quality_flags,
                 "trade_metrics": None,    # CSV has no fills
@@ -2262,6 +2412,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
+                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                    "computation_warned": False,
                     "computation_error": (
                         f"CSV analytics aborted: dataset exceeds "
                         f"{trunc.page_count * trunc.page_size:,} rows "
@@ -2284,6 +2436,42 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 mark_exc,
             )
         raise
+    except ReturnsDenominatorConfigError as cfg_exc:
+        # S1 / B2: a malformed returns_denominator_config (or an unknown
+        # metrics_basis) is PERMANENT — never retry-forever. Mirror the derive path
+        # (run_derive_broker_dailies_job stamps failed + permanent): the generic
+        # `except Exception` below would downgrade this to a 500 → classify_exception
+        # 'unknown' → indefinite transient retry, losing the reason. Stamp failed and
+        # raise a 422 HTTPException (4xx ∈ 400..499 → classify_exception PERMANENT).
+        logger.error(
+            "csv analytics: malformed returns_denominator_config for %s: %s",
+            strategy_id, cfg_exc,
+        )
+
+        def _mark_config_failed() -> None:
+            supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": strategy_id,
+                    "computation_status": "failed",
+                    "computation_warned": False,
+                    "computation_error": (
+                        "Strategy returns_denominator_config is malformed; "
+                        "operator intervention required."
+                    ),
+                    "data_quality_flags": {"csv_source": True},
+                },
+                on_conflict="strategy_id",
+            ).execute()
+        try:
+            await db_execute(_mark_config_failed)
+        except Exception as mark_exc:  # noqa: BLE001
+            logger.warning(
+                "csv analytics: could not mark strategy %s config-failed: %s",
+                strategy_id, mark_exc,
+            )
+        raise HTTPException(
+            status_code=422, detail="Malformed returns_denominator_config"
+        ) from cfg_exc
     except Exception as exc:  # noqa: BLE001
         logger.error("csv analytics failed for %s: %s", strategy_id, exc)
 
@@ -2315,6 +2503,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
+                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                    "computation_warned": False,
                     "computation_error": "CSV analytics computation failed.",
                     "data_quality_flags": prior_flags,
                 },

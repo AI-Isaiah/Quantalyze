@@ -22,8 +22,30 @@ LOCKED design pins (analytics-service/docs/deribit-ingestion-design.md):
   balance-reconciling delta (Σ`change` = exact balance delta). `cashflow` =
   "Realized SESSION PnL since last settlement" — deferred, fee-EXCLUDED, 0 at
   fill time for perps. Summing `cashflow` DROPS every trading fee and mis-times
-  PnL (a BYB-02-class silent over-statement). The daily return sums `change`.
-  Evidence: docs/evidence/drb02-deribit-field-semantics-2026-07-05.json.
+  PnL (a BYB-02-class silent over-statement). The daily return sums `change`
+  for NON-OPTION rows. Evidence: docs/evidence/drb02-deribit-field-semantics-2026-07-05.json.
+
+* ⚠️ PHASE 82 (options-aware, native path — MARK_TO_MARKET BASIS ONLY) — the
+  amendment below applies ONLY when ``pnl_basis == mark_to_market``. Under
+  ``cash_settlement`` (the DEFAULT and the shipped/Zavara basis) NONE of this runs:
+  the coverage window is never consulted, option `trade`/`delivery` rows book their
+  FULL cash `change` on the settlement day, and `options_settlement_summary` rows
+  are INERT (their 0.0 change is ignored). Debugging the LIVE factsheet? It is
+  cash_settlement — the fee-only reclass / summary channel described here is dark.
+  MARK_TO_MARKET amendment: inside a currency's summary coverage window
+  `[first_summary−24h, last_summary]` an option `trade`/`delivery` contributes
+  `−commission` (NOT its premium `change`), and `options_settlement_summary`
+  contributes `realized_pl + unrealized_pl` (a session DELTA — load-bearing).
+  This REDEFINES option native_pnl from a "cash-balance delta" to an "MTM
+  (settled-equity) delta" for covered option rows: the premium/payout cash is
+  offset by the option book's mark value and its P&L content is carried by the
+  summary channel (probe closure 9.222194 vs 9.222190 BTC). Do NOT "fix" the
+  fee-only arm back to cash `change`. Outside coverage (pre-2025-01-12 rollout /
+  live trailing edge) option rows stay cash-basis `change` + a
+  `pre_summary_rollout_option_dailies` warning. Guard/oracle = the BALANCE
+  IDENTITY (computed total == Σchange over CASH_BEARING, fail-loud), NOT the
+  row-embedded equity snapshot (REJECTED: 13% day-match, mark-timing noise).
+  Evidence: docs/evidence/drb-options-semantics-2026-07.json (see design pin D-11).
 
 * D-07/D-08 — Inverse coin->USD uses the row's OWN event-time `index_price`,
   NEVER a current/period-end index (cross-time is category-invalid). The ledger's
@@ -43,13 +65,13 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Any
+from typing import AbstractSet, Any
 
 # Pure, I/O-free venue-agnostic dated-flow contract (Plan 75-01). Importing it
 # here keeps the module network-free — external_flows.py imports stdlib + typing
 # ONLY (no ccxt/pandas/supabase/services.exchange), so the purity source-scan
 # guard (test_deribit_txn.py) still holds.
-from services.external_flows import ExternalFlow
+from services.external_flows import USD_FAMILY, ExternalFlow
 
 # Sentinel distinguishing an ABSENT dict key from a present ``None``/``0`` value.
 _MISSING: Any = object()
@@ -92,13 +114,22 @@ _FUTURE_EXPIRY_RE: re.Pattern[str] = re.compile(r"-\d{1,2}[A-Z]{3}\d{2}$")
 # USD-family settlement currencies whose cash delta is already denominated in
 # USD (no index multiplication). Complements the instrument-name markers: a
 # linear row is detectable by instrument name OR settlement currency.
-_LINEAR_CURRENCIES: frozenset[str] = frozenset({"USDC", "USDT", "USD", "EURR"})
+# Aliases the single source of truth in ``external_flows.USD_FAMILY`` (identity,
+# NOT a copy) so the native core (Phase 79) and Deribit ingest can never drift
+# (§3.2). The set now includes DAI — behavior-neutral here (no DAI wallet on
+# Deribit, so ``_row_is_linear`` never encounters it).
+_LINEAR_CURRENCIES: frozenset[str] = USD_FAMILY
 
-# The ONLY coin-margined (inverse) settlement currencies on Deribit — the sole
-# currencies whose coin `change`/equity is validly multiplied by a USD index.
-# A non-linear, non-inverse currency (e.g. a tokenized-fund wallet like BUIDL/
-# USYC) must FAIL LOUD rather than be blindly index-multiplied: we have no
-# evidence it is coin-margined, and a wrong multiply silently mis-scales cash.
+# The STATIC FLOOR of coin-margined (inverse) settlement currencies on Deribit —
+# currencies known-resolvable to a USD index WITHOUT a probe. This is the
+# degraded-mode default of the injected ``indexable_currencies`` set (§7.2), NEVER
+# the ceiling: the I/O layer probes ``{ccy}_usd`` per enumerated currency and
+# threads the union (floor ∪ probed) into the census consumers below, so SOL heals
+# on the existing USD-space path once its ``sol_usd`` index resolves. A currency
+# absent from the consulted set (e.g. a tokenized-fund wallet like BUIDL/USYC, or
+# a currency whose probe raises) must FAIL LOUD rather than be blindly index-
+# multiplied: we have no evidence it is coin-margined, and a wrong multiply
+# silently mis-scales cash.
 _INVERSE_CURRENCIES: frozenset[str] = frozenset({"BTC", "ETH"})
 
 # MUST be disjoint: both converters check linear FIRST, so a currency in both
@@ -114,8 +145,20 @@ def classify_instrument(instrument_name: str) -> str:
     """Classify a Deribit instrument name. Never raises on unknown input.
 
     Returns one of: ``inverse_perpetual``, ``linear_perpetual``, ``option``,
-    ``future``, ``unknown``. Untrusted exchange input (T-70-05) is classified,
-    not crashed on.
+    ``future``, ``spot``, ``unknown``. Untrusted exchange input (T-70-05) is
+    classified, not crashed on.
+
+    ``spot`` names a Deribit SPOT conversion pair, e.g. ``BTC_USDC`` /
+    ``ETH_USDC`` — an underscore-joined ``BASE_QUOTE`` with NO derivative suffix
+    (not an option ``-C``/``-P``, not a ``-PERPETUAL``, not a dated ``-DDMONYY``
+    future). Ordered LAST among the positive matches so linear derivatives that
+    ALSO carry an underscore margin marker (``BTC_USDC-PERPETUAL``,
+    ``BTC_USDC-27MAR26``, ``BTC_USDC-27MAR26-50000-C``) are classified by their
+    suffix FIRST and never mis-read as spot. A spot leg is a capital conversion
+    (BTC<->USDC), never trading P&L — on the ALLOCATED path (Bug B) its
+    net-extraction legs are DROPPED from ``native_pnl`` (Zavara profit-extraction
+    methodology), so classifying it distinctly is load-bearing. On the NAV path
+    the spot legs are RETAINED verbatim (see ``txn_rows_to_native_daily``).
     """
     if not isinstance(instrument_name, str) or not instrument_name:
         return "unknown"
@@ -127,10 +170,174 @@ def classify_instrument(instrument_name: str) -> str:
         return "linear_perpetual" if is_linear else "inverse_perpetual"
     if _FUTURE_EXPIRY_RE.search(name):
         return "future"
+    # Spot conversion pair: an underscore-joined BASE_QUOTE with no derivative
+    # suffix (every dated/perp/option case is already returned above). A bare
+    # coin (BTC, ETH) has no underscore → stays ``unknown``.
+    if "_" in name:
+        return "spot"
     return "unknown"
 
 
-def classify_instrument_settlement(instrument_name: str) -> tuple[bool, str]:
+def is_spot_extraction_leg(row: Mapping[str, Any]) -> bool:
+    """True iff ``row`` is a SPOT-conversion leg that EXTRACTS value OUT of the
+    trading book — a profit-taking BTC->USDC conversion, NOT trading P&L.
+
+    Bug B (GLOBAL, both P&L bases): Deribit spot ``BTC_USDC`` trades post two
+    ledger legs — a BASE-coin leg (``currency=BTC``) and a QUOTE-cash leg
+    (``currency=USDC``). A SELL (extraction, taking profit out) moves the coin
+    OUT (BTC ``change < 0``) and cash IN (USDC ``change > 0``); a BUY (redeploy,
+    putting capital back to work) moves the coin IN (BTC ``change > 0``) and cash
+    OUT (USDC ``change < 0``). zavara EXCLUDES the extraction (sell) legs from
+    daily P&L and KEEPS the redeploy (buy) legs (live-verified against the
+    2025-11-20 +0.29 BTC buy, which zavara keeps). On the ALLOCATED path this
+    DROPS the extraction legs from ``native_pnl`` entirely (they are NOT routed to
+    any flow channel — no such routing exists; ``deribit_dated_external_flows_usd``
+    handles only transfer/deposit/withdrawal/usdc_reward, not ``type="trade"``
+    spot legs). On the NAV path the exclusion is OFF and every spot leg is kept.
+
+    Sign rule (base/quote-agnostic — reads the settlement ``currency`` only, no
+    instrument parsing): a USD-family (quote/cash) leg with ``change > 0`` is
+    sale PROCEEDS coming in; a non-USD (coin) leg with ``change < 0`` is the coin
+    going out. Either is an extraction leg. A buy-side leg (coin in / cash out)
+    matches NEITHER and is kept. Non-``trade`` / non-``spot`` rows are never
+    extraction legs. Pure / never raises (untrusted exchange input): an
+    unparseable ``change`` is treated as non-extraction (kept — the aggregator's
+    own verbatim change-guards are the fail-loud path).
+
+    NOTE: this is the PER-LEG classifier, retained for the verification harness's
+    per-leg reporting. The aggregators (:func:`txn_rows_to_native_daily`,
+    :func:`assert_balance_identity`) exclude on the NET-DAILY set
+    (:func:`spot_net_extraction_day_pairs`) — identical to this per-leg view on a
+    single-direction pair (every observed zavara day), but correct on a mixed
+    sell+buy day where only the pair's NET direction should decide.
+    """
+    if str(row.get("type", "")) != "trade":
+        return False
+    if classify_instrument(str(row.get("instrument_name", ""))) != "spot":
+        return False
+    try:
+        change = float(row.get("change", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    currency = str(row.get("currency", "")).upper()
+    if currency in USD_FAMILY:
+        return change > 0.0  # cash IN = sale proceeds (extraction)
+    return change < 0.0  # coin OUT = coin sold (extraction)
+
+
+def spot_net_extraction_day_pairs(
+    rows: Sequence[Mapping[str, Any]],
+) -> frozenset[tuple[str, str]]:
+    """The ``(utc_day, INSTRUMENT_NAME)`` CONVERSION PAIRS whose NET spot cash flow
+    over the UTC day is an EXTRACTION — the NET-DAILY form of Bug B, and the basis
+    the aggregators (:func:`txn_rows_to_native_daily`,
+    :func:`assert_balance_identity`) exclude on.
+
+    MEDIUM-1 (red-team) — net per CONVERSION PAIR, not per currency: a spot
+    conversion posts MIRROR legs in two currencies (e.g. ``BTC_USDC``: a ``BTC`` leg
+    and a ``USDC`` leg). Netting per ``(day, ccy)`` INDEPENDENTLY is wrong on a day
+    that trades TWO pairs sharing a currency — e.g. sell ``BTC→USDC`` (extraction) AND
+    buy ``ETH←USDC`` (redeploy) on the same day: the shared ``USDC`` nets across BOTH
+    events, so one pair's cash leg silently flips the other's classification, dropping
+    genuine intraday round-trip P&L. Netting per ``(day, instrument_name)`` keeps each
+    conversion event self-contained: both legs of ONE pair are decided TOGETHER by
+    THAT pair's own net cash direction.
+
+    Per ``(day, instrument_name)``: sum the ``change`` of each currency's SPOT legs;
+    the pair NET-EXTRACTS when its USD-family (cash) leg nets ``> 0`` (net cash IN —
+    the account took capital out). A net-REDEPLOY (cash net ``< 0``), a wash (cash net
+    ``0``), or a coin-for-coin pair with NO cash leg (a coin swap moves no capital in
+    or out) all KEEP their legs. On the ALLOCATED path EVERY spot leg of a
+    net-extraction pair is DROPPED from ``native_pnl`` (Zavara profit-extraction
+    methodology — NOT re-routed anywhere; no flow-channel routing exists). On the
+    NAV path the exclusion is off and this set is never consulted.
+
+    Netting per day/pair — not per leg — is load-bearing on a pair carrying BOTH a
+    sell and a buy: the pair is classified by its NET direction (the capital actually
+    taken out / put to work), never leg-by-leg. For a single-direction pair (every
+    observed zavara day) the net equals the leg, so this reproduces the validated
+    per-day track EXACTLY. Pure / never raises — an undatable / unparseable spot row
+    is skipped here (the aggregator's verbatim ``change``-guards are the fail-loud
+    path)."""
+    # per (day, instrument_name) → per-currency net change over the UTC day.
+    pair_ccy_net: dict[tuple[str, str], dict[str, float]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) != "trade":
+            continue
+        instr = str(row.get("instrument_name", ""))
+        if classify_instrument(instr) != "spot":
+            continue
+        try:
+            day = _row_utc_day(row.get("timestamp"))
+            change = float(row.get("change", 0.0) or 0.0)
+        except (ValueError, TypeError, OverflowError):
+            continue
+        ccy = str(row.get("currency", "")).upper()
+        key = (day, instr)
+        per_ccy = pair_ccy_net.setdefault(key, {})
+        per_ccy[ccy] = per_ccy.get(ccy, 0.0) + change
+    # ponytail — CEILING (Finding 4a): the pair is classified by its NET-CASH
+    # direction over the whole UTC day, so a genuine same-day ROUND-TRIP (a buy AND a
+    # sell of the SAME pair that nets to positive cash) drops BOTH legs — including
+    # the buy leg that carried real intra-day round-trip trading P&L. This
+    # UNDERSTATES P&L (never overstates) and NEVER triggers on Zavara's data (its
+    # spot is single-direction per day — pinned by
+    # test_zavara_shaped_spot_is_single_direction_per_day). Upgrade path if a
+    # non-Zavara allocated account ever round-trips a pair intraday: decompose the
+    # pair's legs per-fill (buy legs = redeploy/kept, sell legs = extraction/dropped)
+    # instead of netting the day, so the round-trip P&L survives.
+    out: set[tuple[str, str]] = set()
+    for key, per_ccy in pair_ccy_net.items():
+        cash_ccys = [c for c in per_ccy if c in USD_FAMILY]
+        coin_ccys = [c for c in per_ccy if c not in USD_FAMILY]
+        if cash_ccys:
+            # The authoritative direction: net cash IN (> 0) = the account took
+            # capital OUT = extraction. (A real conversion always has this cash leg.)
+            cash_net = sum(per_ccy[c] for c in cash_ccys)
+            if cash_net > 0.0:
+                out.add(key)
+        elif len(coin_ccys) == 1:
+            # No cash leg recorded for the pair (a synthetic / single-sided ledger):
+            # classify by the single coin's net — coin OUT (< 0) = extraction. This
+            # reproduces the pre-MEDIUM-1 per-currency semantics on such a pair.
+            if per_ccy[coin_ccys[0]] < 0.0:
+                out.add(key)
+        # else: a multi-coin swap with no cash leg moves no capital in or out → KEEP
+        # (never silently drop a coin-for-coin swap's realized P&L).
+    return frozenset(out)
+
+
+def _row_is_net_extraction_spot(
+    row: Mapping[str, Any],
+    extraction_day_pairs: AbstractSet[tuple[str, str]],
+) -> bool:
+    """True iff ``row`` is a spot leg on a ``(day, instrument_name)`` conversion pair
+    that NET-extracted (a member of ``extraction_day_pairs`` from
+    :func:`spot_net_extraction_day_pairs`) — the net-daily exclusion predicate the
+    aggregators use in place of the per-leg :func:`is_spot_extraction_leg`. Keying on
+    the pair (not the currency) routes EACH leg by its OWN conversion event, so a
+    currency shared across two same-day pairs (MEDIUM-1) is disambiguated. Pure /
+    never raises (an undatable spot row is treated as non-extraction — kept; the
+    aggregator change-guards are fail-loud)."""
+    if str(row.get("type", "")) != "trade":
+        return False
+    instr = str(row.get("instrument_name", ""))
+    if classify_instrument(instr) != "spot":
+        return False
+    try:
+        day = _row_utc_day(row.get("timestamp"))
+    except (ValueError, TypeError, OverflowError):
+        return False
+    return (day, instr) in extraction_day_pairs
+
+
+def classify_instrument_settlement(
+    instrument_name: str,
+    *,
+    indexable_currencies: AbstractSet[str] = _INVERSE_CURRENCIES,
+) -> tuple[bool, str]:
     """Return ``(is_coin_settled, base_currency)`` for a Deribit instrument by
     name — the single source of the coin-vs-USD settlement decision, shared by
     the ledger cash converter (``txn_change_to_usd`` via ``_row_is_linear``) and
@@ -153,10 +360,10 @@ def classify_instrument_settlement(instrument_name: str) -> tuple[bool, str]:
     if any(marker in name for marker in _LINEAR_MARGIN_MARKERS):
         return (False, "")
     base = name.split("-", 1)[0].split("_", 1)[0]
-    if base not in _INVERSE_CURRENCIES:
+    if base not in indexable_currencies:
         raise ValueError(
             f"deribit instrument {name!r}: coin-settled base {base!r} is not a "
-            f"known coin-margined currency {sorted(_INVERSE_CURRENCIES)}; "
+            f"known coin-margined currency {sorted(indexable_currencies)}; "
             "refusing to blind-multiply an unknown coin by a USD index"
         )
     return (True, base)
@@ -182,7 +389,10 @@ def _row_is_linear(row: Mapping[str, Any]) -> bool:
 
 
 def txn_change_to_usd(
-    row: Mapping[str, Any], *, fallback_index: float | None = None
+    row: Mapping[str, Any],
+    *,
+    fallback_index: float | None = None,
+    indexable_currencies: AbstractSet[str] = _INVERSE_CURRENCIES,
 ) -> float:
     """Convert a transaction-log row's ``change`` (cash-balance delta, FEE-
     INCLUSIVE — the balance-reconciling field) to signed USD.
@@ -207,12 +417,12 @@ def txn_change_to_usd(
     # currency reaching here (e.g. a tokenized-fund wallet) has no basis for an
     # index multiply — fail loud rather than silently mis-scale.
     currency = str(row.get("currency", "")).upper()
-    if currency not in _INVERSE_CURRENCIES:
+    if currency not in indexable_currencies:
         raise LedgerValuationError(
             f"Deribit row id={row.get('id')!r} "
             f"instrument={row.get('instrument_name')!r} type={row.get('type')!r} "
             f"settles in {currency!r} which is neither USD-family (linear) nor a "
-            f"known coin-margined currency {sorted(_INVERSE_CURRENCIES)}; refusing "
+            f"known coin-margined currency {sorted(indexable_currencies)}; refusing "
             "to blind-multiply an unknown currency by a USD index"
         )
     index_price = row.get("index_price")
@@ -346,6 +556,99 @@ _EXTERNAL_FLOW_TYPES: frozenset[str] = frozenset(
     {"transfer", "deposit", "withdrawal", "usdc_reward"}
 )
 
+# --- native-sibling type reclassification (v1.9 native-unit, HIGH-1) ----------
+# A `swap` is an INTERNAL cross-collateral FX conversion: net ~0 in USD across its
+# legs (the USD path in ``txn_rows_to_daily_records`` rightly skips it as
+# INFORMATIONAL) but in NATIVE per-currency space each leg is a REAL balance delta
+# (−1 BTC on the BTC leg, +60,000 USDC on the USDC leg). Skipping it in the native
+# sibling makes the per-bucket backward roll fail to close → a ``full_history``
+# inception FALSE-breach (a material swap) or a silently mis-stated pre-swap
+# balance (a sub-tolerance swap). Because a swap leg's balance delta IS "Σ ledger
+# `change` per currency per day", it legitimately belongs in native_pnl. A swap is
+# an INTERNAL rebalance, NOT external capital, so it MUST enter native_pnl and MUST
+# NOT enter the external-flow channel / ``F_t`` (routing it there would distort the
+# TWR denominator). It is deliberately ABSENT from ``_EXTERNAL_FLOW_TYPES`` →
+# count-once holds by construction (native_pnl only, never also a flow).
+#
+# AUDIT of the other INFORMATIONAL_TYPES (HIGH-1): the reclassed set is exactly
+# ``INFORMATIONAL_TYPES − _EXTERNAL_FLOW_TYPES`` — the informational types that are
+# NOT external flows. transfer/deposit/withdrawal/usdc_reward ARE external capital
+# in/out and are captured by the flow channel (``report.dated_external_flows``);
+# reclassing them to native_pnl would double-count and distort ``F_t``, so they
+# stay INFORMATIONAL in the native sibling too. `swap` is the SOLE informational
+# non-flow type, so it is the only type moved.
+_NATIVE_INTERNAL_REBALANCE_TYPES: frozenset[str] = frozenset({"swap"})
+# The native sibling's effective type partition: reclass `swap` from the skip set
+# into the cash-bearing set (native-only — the USD sets are untouched).
+_NATIVE_INFORMATIONAL_TYPES: frozenset[str] = (
+    INFORMATIONAL_TYPES - _NATIVE_INTERNAL_REBALANCE_TYPES
+)
+_NATIVE_CASH_BEARING_TYPES: frozenset[str] = (
+    CASH_BEARING_TYPES | _NATIVE_INTERNAL_REBALANCE_TYPES
+)
+# Invariants (import-time, mirroring the USD-set disjointness assert):
+#   (1) every reclassed type is an INFORMATIONAL type that is NOT an external flow
+#       (an internal rebalance between the account's own buckets) — never an
+#       external-capital type (that would double-count against F_t);
+#   (2) the two native sets stay disjoint (a type simultaneously summed AND skipped
+#       is order-dependent silent corruption).
+assert _NATIVE_INTERNAL_REBALANCE_TYPES <= (
+    INFORMATIONAL_TYPES - _EXTERNAL_FLOW_TYPES
+), "native-reclassed types must be INFORMATIONAL non-external-flow (internal) types"
+assert not (_NATIVE_CASH_BEARING_TYPES & _NATIVE_INFORMATIONAL_TYPES), (
+    "native CASH_BEARING and INFORMATIONAL sets must be disjoint"
+)
+
+# --- native options P&L channel (Phase 82, options-aware daily P&L) -----------
+# The `options_settlement_summary` type is Deribit's own daily MTM decomposition
+# (`realized_pl` = session realized, `unrealized_pl` = session DELTA — a
+# LOAD-BEARING per-session change, not a level). On the NATIVE path it is CLASSIFIED
+# (contributes `realized_pl + unrealized_pl`) ONLY under the MARK_TO_MARKET basis
+# (the `use_mtm` gate in `txn_rows_to_native_daily`); its row `change` is always 0.0
+# (nonzero → fail loud). Under CASH_SETTLEMENT (the DEFAULT / shipped basis) the
+# summary is INERT — it falls through to the unknown-type guard where its 0.0 change
+# is harmlessly ignored (option P&L is carried by the trade/delivery cash `change`
+# instead). In the USD sibling it stays DELIBERATELY unclassified (P70 H3) —
+# zero-change → ignored, nonzero → loud.
+_NATIVE_OPTIONS_SUMMARY_TYPES: frozenset[str] = frozenset(
+    {"options_settlement_summary"}
+)
+# The summary set MUST be disjoint from BOTH native sets: a type simultaneously
+# summed as cash-bearing AND re-attributed via the summary channel would
+# double-count (order-dependent silent corruption). Enforced at import (mirrors
+# the CASH_BEARING/INFORMATIONAL disjointness asserts).
+assert not (_NATIVE_OPTIONS_SUMMARY_TYPES & _NATIVE_CASH_BEARING_TYPES), (
+    "native OPTIONS_SUMMARY and CASH_BEARING sets must be disjoint"
+)
+assert not (_NATIVE_OPTIONS_SUMMARY_TYPES & _NATIVE_INFORMATIONAL_TYPES), (
+    "native OPTIONS_SUMMARY and INFORMATIONAL sets must be disjoint"
+)
+# One UTC day in epoch-milliseconds — the coverage-window lower-bound shift.
+_COVERAGE_DAY_MS: float = 24 * 60 * 60 * 1000.0
+
+# --- daily-P&L accrual basis (user-selectable per strategy/account) -----------
+# ``cash_settlement`` (DEFAULT, zavara-validated): book each option/perp/future
+#   P&L on its CASH-SETTLEMENT day — the raw ``change`` of trade/settlement/
+#   delivery rows (option premium net of commission on the trade day, expiry
+#   payout on the delivery day, perp session/funding on the settlement day). NO
+#   ``options_settlement_summary`` MTM channel, NO coverage-window reshaping.
+#   Reproduces zavara's cash-basis daily track to 4-5 decimals.
+# ``mark_to_market``: Deribit's OWN daily marks — the
+#   ``options_settlement_summary`` ``realized_pl + unrealized_pl`` channel that
+#   spreads option session P&L across the holding days it accrued on. By design
+#   this does NOT match zavara's cash-basis track (it re-dates premium off the
+#   trade day) and carries the pre-rollout-straddle / §5 open-book limitations
+#   documented on ``assert_balance_identity`` — a pre-rollout straddle (option
+#   book open across the ~2025-01-12 summary rollout) FAILS LOUD under this basis
+#   (no boundary-book V₀ anchor is computed; that machinery was removed as an
+#   invalid closed form). Use ``cash_settlement`` for such accounts.
+PNL_BASIS_CASH_SETTLEMENT: str = "cash_settlement"
+PNL_BASIS_MARK_TO_MARKET: str = "mark_to_market"
+_PNL_BASES: frozenset[str] = frozenset(
+    {PNL_BASIS_CASH_SETTLEMENT, PNL_BASIS_MARK_TO_MARKET}
+)
+DEFAULT_PNL_BASIS: str = PNL_BASIS_CASH_SETTLEMENT
+
 
 def deribit_linear_external_flow_usd(
     rows: Sequence[Mapping[str, Any]],
@@ -375,14 +678,21 @@ def deribit_linear_external_flow_usd(
     return net, saw_inverse
 
 
-# DELIBERATELY in NEITHER set (P70 review H3): `options_settlement_summary` (a
-# zero-cash recap — live-confirmed Sum(change)=0; excluding it also avoids
-# double-counting the real settlement/delivery rows) and `correction` (an
-# ambiguous manual adjustment that CAN be a real credit/debit). Leaving them
-# unclassified means a nonzero-`change` occurrence FAILS LOUD via the unknown-type
-# guard below (never a silent skip), forcing an evidence-grounded decision — while
-# their normal zero-`change` form is harmlessly ignored. Every UNKNOWN type
-# carrying nonzero `change` fails loud the same way.
+# DELIBERATELY in NEITHER USD set (P70 review H3): `options_settlement_summary`
+# and `correction` (an ambiguous manual adjustment that CAN be a real
+# credit/debit). Leaving them unclassified in the USD path means a nonzero-`change`
+# occurrence FAILS LOUD via the unknown-type guard below (never a silent skip),
+# while their normal zero-`change` form is harmlessly ignored.
+#
+# ⚠️ PHASE 82 (native path, MARK_TO_MARKET basis only): `options_settlement_summary`
+# IS classified by `txn_rows_to_native_daily` via `_NATIVE_OPTIONS_SUMMARY_TYPES`
+# ONLY when `pnl_basis == mark_to_market` — it then carries the option book's session
+# MTM (`realized_pl + unrealized_pl`) into native_pnl (its `change` is always 0.0; a
+# nonzero change fails loud there). Under CASH_SETTLEMENT (the DEFAULT / shipped
+# basis) the native path ALSO leaves it unclassified (zero-change ignored, nonzero →
+# loud), exactly like the USD sibling. The USD sibling `txn_rows_to_daily_records` is
+# UNCHANGED on both bases: summary stays unclassified. `correction` remains
+# unclassified everywhere. Every UNKNOWN type carrying nonzero `change` fails loud.
 
 
 def _row_utc_day(ts: Any) -> str:
@@ -461,6 +771,8 @@ def _row_utc_instant(ts: Any) -> float:
 
 def _day_ccy_own_index(
     rows: Sequence[Mapping[str, Any]],
+    *,
+    indexable_currencies: AbstractSet[str] = _INVERSE_CURRENCIES,
 ) -> dict[tuple[str, str], float]:
     """Build the same-day per-(UTC-day, currency) event index from the batch's
     OWN index-bearing rows — Pass 1 of ``txn_rows_to_daily_records``, factored so
@@ -491,7 +803,7 @@ def _day_ccy_own_index(
         if index_price is None:
             continue
         ccy = str(row.get("currency", "")).upper()
-        if ccy not in _INVERSE_CURRENCIES:
+        if ccy not in indexable_currencies:
             continue
         try:
             day = _row_utc_day(row.get("timestamp"))
@@ -515,6 +827,8 @@ def _day_ccy_own_index(
 
 def inverse_days_needing_index(
     rows: Sequence[Mapping[str, Any]],
+    *,
+    indexable_currencies: AbstractSet[str] = _INVERSE_CURRENCIES,
 ) -> set[tuple[str, str]]:
     """The ``(UTC-day ISO, CURRENCY)`` pairs a settlement-index fetch must cover:
     days on which an INVERSE (coin-margined) row that will be VALUED against a
@@ -544,20 +858,20 @@ def inverse_days_needing_index(
     planner). Excludes zero-change rows, linear currencies, and any day already
     carrying an own index for that currency.
     """
-    own_index = _day_ccy_own_index(rows)
+    own_index = _day_ccy_own_index(rows, indexable_currencies=indexable_currencies)
     needed: set[tuple[str, str]] = set()
     for row in rows:
         if not isinstance(row, Mapping):
             continue
         # Finding C1: BOTH cash-bearing rows AND inverse external-flow rows are
         # valued against a same-day index, so BOTH quiet-day kinds need a fetch.
-        # (The linear-flow case is filtered out by the _INVERSE_CURRENCIES guard
+        # (The linear-flow case is filtered out by the indexable_currencies guard
         # below — a USD-family flow never consumes an index.)
         row_type = str(row.get("type", ""))
         if row_type not in CASH_BEARING_TYPES and row_type not in _EXTERNAL_FLOW_TYPES:
             continue
         ccy = str(row.get("currency", "")).upper()
-        if ccy not in _INVERSE_CURRENCIES:
+        if ccy not in indexable_currencies:
             continue
         raw_change = row.get("change", _MISSING)
         if raw_change is _MISSING:
@@ -582,6 +896,7 @@ def deribit_dated_external_flows_usd(
     rows: Sequence[Mapping[str, Any]],
     *,
     supplemental_index: Mapping[tuple[str, str], float] | None = None,
+    indexable_currencies: AbstractSet[str] = _INVERSE_CURRENCIES,
 ) -> list[ExternalFlow]:
     """The ONE honest dated external-flow producer: convert the in-band
     ``_EXTERNAL_FLOW_TYPES`` rows into a per-UTC-day ``list[ExternalFlow]`` for the
@@ -612,12 +927,27 @@ def deribit_dated_external_flows_usd(
     Flow rows are ``_EXTERNAL_FLOW_TYPES`` (a subset of ``INFORMATIONAL_TYPES``),
     so they are STRUCTURALLY excluded from ``txn_rows_to_daily_records``'s realized
     sum — count-once: a flow feeds F_t here exactly once and never the realized
-    stream. Returns the per-day USD sums as ``ExternalFlow(utc_day_iso, usd_signed)``
-    entries, sorted ascending by day. Supersedes the linear-only scalar
-    ``deribit_linear_external_flow_usd`` (its sole consumer is removed in 75-03).
+    stream.
+
+    Phase 80-01 (§2.3): the accumulator is keyed ``(day, ccy)`` and every entry is
+    emitted as a 4-field ``ExternalFlow(utc_day_iso, usd_signed, currency,
+    quantity)``, sorted ascending by ``(day, ccy)``. ``usd_signed`` KEEPS its exact
+    meaning — the event-time USD value via ``txn_change_to_usd`` — and stays
+    AUTHORITATIVE for the legacy USD-space path (Σ ``usd_signed`` per day is
+    byte-identical to the pre-80-01 day-keyed output). ``currency`` (UPPERCASE) and
+    ``quantity`` (the summed native ``change``, signed) are the additive native
+    channel the native core reads (§2.2): a same-day USDC deposit + BTC withdrawal
+    stays TWO flows rather than one collapsed USD sum. Supersedes the linear-only
+    scalar ``deribit_linear_external_flow_usd`` (its sole consumer is removed in
+    75-03).
     """
-    day_ccy_index = _day_ccy_own_index(rows)
-    by_day: dict[str, float] = {}
+    day_ccy_index = _day_ccy_own_index(
+        rows, indexable_currencies=indexable_currencies
+    )
+    # Parallel (day, ccy)-keyed accumulators: usd_signed (the authoritative legacy
+    # leg, via txn_change_to_usd) and the native quantity (raw signed `change`).
+    by_day_ccy_usd: dict[tuple[str, str], float] = {}
+    by_day_ccy_qty: dict[tuple[str, str], float] = {}
     for row in rows:
         if not isinstance(row, Mapping):
             continue
@@ -666,14 +996,27 @@ def deribit_dated_external_flows_usd(
         fb = day_ccy_index.get((day, ccy))
         if fb is None and supplemental_index is not None:
             fb = supplemental_index.get((day, ccy))
-        by_day[day] = by_day.get(day, 0.0) + txn_change_to_usd(row, fallback_index=fb)
-    return [ExternalFlow(day, usd) for day, usd in sorted(by_day.items())]
+        key = (day, ccy)
+        # usd_signed leg — UNCHANGED resolution (own/ledger index wins, then
+        # supplemental), so the legacy per-day USD sum is byte-identical.
+        by_day_ccy_usd[key] = by_day_ccy_usd.get(key, 0.0) + txn_change_to_usd(
+            row, fallback_index=fb, indexable_currencies=indexable_currencies
+        )
+        # native quantity leg — the raw signed `change` the guards already coerced
+        # (no index): every coin flow carries a native quantity for the native core.
+        by_day_ccy_qty[key] = by_day_ccy_qty.get(key, 0.0) + change
+    return [
+        ExternalFlow(day, by_day_ccy_usd[(day, ccy)], ccy, by_day_ccy_qty[(day, ccy)])
+        for (day, ccy) in sorted(by_day_ccy_usd)
+    ]
 
 
 def txn_rows_to_daily_records(
     rows: Sequence[Mapping[str, Any]],
     *,
     supplemental_index: Mapping[tuple[str, str], float] | None = None,
+    indexable_currencies: AbstractSet[str] = _INVERSE_CURRENCIES,
+    exclude_spot_extraction: bool = False,
 ) -> list[dict[str, Any]]:
     """Sum return-bearing transaction-log ``change`` deltas by UTC day into a
     SINGLE list of ``daily_pnl``-shaped records (mirrors
@@ -705,10 +1048,24 @@ def txn_rows_to_daily_records(
     positive day-sum, "sell" for negative), ``price`` is the absolute USD, and
     ``timestamp`` is ISO8601 UTC at 00:00:00. Consumed by
     ``trades_to_daily_returns_with_status``.
+
+    ``exclude_spot_extraction`` (default ``False`` — byte-identical to every
+    existing caller): the USD-space parallel of the native sibling's flag. When
+    ``True`` (the ALLOCATED / Zavara path) net-extraction spot ``BTC_USDC`` legs are
+    dropped from the USD day-sum too, so this stream and ``txn_rows_to_native_daily``
+    stay consistent in the same mode. ``False`` sums every spot leg (pre-Bug-B).
     """
     # Pass 1: same-day per-currency event index from the batch's own index-
     # bearing rows (see _day_ccy_own_index for the M1 / untrusted-input pins).
-    day_ccy_index = _day_ccy_own_index(rows)
+    day_ccy_index = _day_ccy_own_index(
+        rows, indexable_currencies=indexable_currencies
+    )
+    # Bug B — ALLOCATED PATH ONLY: net-extraction spot legs are dropped from the USD
+    # sum too (same mode as the native sibling). EMPTY on the NAV path so this stream
+    # is byte-identical to pre-Bug-B for every non-allocated caller.
+    spot_extraction = (
+        spot_net_extraction_day_pairs(rows) if exclude_spot_extraction else frozenset()
+    )
 
     by_day: dict[str, float] = {}
     for row in rows:
@@ -716,6 +1073,12 @@ def txn_rows_to_daily_records(
             continue
         row_type = str(row.get("type", ""))
         if row_type in INFORMATIONAL_TYPES:
+            continue
+        # Bug B — ALLOCATED PATH ONLY: a net-extraction spot leg is capital
+        # extraction, not trading P&L. EMPTY set on the NAV path → inert (spot legs
+        # sum as before). Checked before the cash-bearing branch so the exclusion
+        # matches the native sibling exactly.
+        if _row_is_net_extraction_spot(row, spot_extraction):
             continue
         if row_type in CASH_BEARING_TYPES:
             # H2: a cash-bearing row MUST carry a `change` field. Absent (not just
@@ -764,7 +1127,9 @@ def txn_rows_to_daily_records(
             fb = day_ccy_index.get((day, ccy))
             if fb is None and supplemental_index is not None:
                 fb = supplemental_index.get((day, ccy))
-            usd = txn_change_to_usd(row, fallback_index=fb)
+            usd = txn_change_to_usd(
+                row, fallback_index=fb, indexable_currencies=indexable_currencies
+            )
             by_day[day] = by_day.get(day, 0.0) + usd
             continue
         # Unknown type (incl. options_settlement_summary / correction, H3):
@@ -792,3 +1157,578 @@ def txn_rows_to_daily_records(
         }
         for day, amount in sorted(by_day.items())
     ]
+
+
+def _summary_coverage_windows(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, tuple[float, float]]:
+    """Per-currency options-settlement coverage window (epoch-ms), derived from
+    the batch's OWN ``options_settlement_summary`` rows:
+
+        coverage_window[c] = (first_summary_ts[c] − 24h, last_summary_ts[c])
+
+    A currency with NO summary rows is ABSENT from the dict → every option row of
+    that currency stays cash-basis ``change`` (pre-rollout fallback, §1). The
+    −24h lower shift covers the session PRECEDING the first summary (the first
+    summary settles it); the upper bound is the last summary ts (option trades
+    after it are the live partial session — cash-basis until the next crawl's
+    summary lands, then convergent on recompute).
+
+    Pure / never raises: an undatable summary ts is skipped (the
+    ``assert_balance_identity`` guard is the money backstop). This is a value-inert
+    pre-pass for perp-only / USD-native ledgers (no summaries → ``{}``), preserving
+    SC-4 byte-identity."""
+    first: dict[str, float] = {}
+    last: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) not in _NATIVE_OPTIONS_SUMMARY_TYPES:
+            continue
+        try:
+            instant = _row_utc_instant(row.get("timestamp"))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        ccy = str(row.get("currency", "")).upper()
+        if ccy not in first or instant < first[ccy]:
+            first[ccy] = instant
+        if ccy not in last or instant > last[ccy]:
+            last[ccy] = instant
+    return {ccy: (first[ccy] - _COVERAGE_DAY_MS, last[ccy]) for ccy in first}
+
+
+def _ts_in_coverage(instant: float, window: tuple[float, float] | None) -> bool:
+    """True iff ``instant`` (epoch-ms) is inside the inclusive coverage window;
+    a missing window (currency never emitted a summary) is never covered."""
+    if window is None:
+        return False
+    start, end = window
+    return start <= instant <= end
+
+
+def _pre_coverage_option_days(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[tuple[str, str]]:
+    """Sorted-unique ``(currency, utc_day)`` buckets carrying option
+    ``trade``/``delivery`` rows that fall OUTSIDE their currency's coverage window
+    (pre-rollout or trailing-edge cash-fallback). This is the list the adapter
+    stamps as ``pre_summary_rollout_option_dailies`` → ``complete_with_warnings``
+    (Q6). Empty for fully-covered and perp-only fixtures.
+
+    Pure / never raises — an undatable row is skipped (the aggregator's verbatim
+    ``change`` guards are the fail-loud path; this helper is advisory metadata)."""
+    windows = _summary_coverage_windows(rows)
+    out: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) not in ("trade", "delivery"):
+            continue
+        if classify_instrument(str(row.get("instrument_name", ""))) != "option":
+            continue
+        try:
+            instant = _row_utc_instant(row.get("timestamp"))
+            day = _row_utc_day(row.get("timestamp"))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        ccy = str(row.get("currency", "")).upper()
+        if not _ts_in_coverage(instant, windows.get(ccy)):
+            out.add((ccy, day))
+    return sorted(out)
+
+
+def _option_activity_after_coverage(
+    rows: Sequence[Mapping[str, Any]],
+) -> frozenset[str]:
+    """CR-01 — currencies that HAVE an options-settlement coverage window AND carry
+    an option ``trade``/``delivery`` row with ``instant > window_end`` (the
+    trailing-edge open-book signal).
+
+    An option position opened/closed AFTER the last summary landed leaves the book
+    non-flat across the covered span even when ``options_value == 0`` at the crawl
+    instant — so the STRICT balance-identity guard (which closes ONLY for a
+    flat-at-settlement book) would false-fire. This disjunct (unioned with the
+    ``native_options_value != 0`` currencies at the call site) exempts such a
+    currency from the strict guard; the §5 ``_assert_inception_reconciled`` gate
+    remains the authoritative reconciliation.
+
+    Reuses ``_summary_coverage_windows`` (the SAME per-currency windows the
+    aggregator uses) and the option row-filter of ``_pre_coverage_option_days``,
+    restricted to the trailing edge (``instant`` strictly past ``window_end``). A
+    currency with NO window is ABSENT (that is the pre-rollout ``change``-fallback
+    path, not an open book). Pure / never raises — an undatable row is skipped
+    (the guard is the money backstop). Perp-only / USD-native → ``frozenset()``
+    (SC-4 byte-inert)."""
+    windows = _summary_coverage_windows(rows)
+    out: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) not in ("trade", "delivery"):
+            continue
+        if classify_instrument(str(row.get("instrument_name", ""))) != "option":
+            continue
+        ccy = str(row.get("currency", "")).upper()
+        window = windows.get(ccy)
+        if window is None:
+            continue  # no coverage window → pre-rollout path, not an open book
+        try:
+            instant = _row_utc_instant(row.get("timestamp"))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if instant > window[1]:  # strictly past the last summary → trailing edge
+            out.add(ccy)
+    return frozenset(out)
+
+
+def assert_balance_identity(
+    rows: Sequence[Mapping[str, Any]],
+    native_daily: Mapping[str, Mapping[str, float]],
+    *,
+    native_floor: Mapping[str, float] | None = None,
+    open_option_ccys: AbstractSet[str] = frozenset(),
+    exclude_spot_extraction: bool = False,
+    pnl_basis: str = DEFAULT_PNL_BASIS,
+) -> None:
+    """MANDATORY fail-loud reconcile guard (§1). Per currency ``c``, the computed
+    total realized (Σ over ALL ``native_daily[c]`` day contributions) MUST equal
+    ``Σ change`` over that currency's ``_NATIVE_CASH_BEARING_TYPES`` rows, to
+    within ``max(floor_c, 1e-4 · throughput_c)`` where
+    ``throughput_c = Σ|change|`` over those rows. On breach →
+    ``LedgerValuationError`` (never ship).
+
+    The REFERENCE row-set is ``_NATIVE_CASH_BEARING_TYPES`` (= the USD
+    ``CASH_BEARING_TYPES`` PLUS the reclassed internal-rebalance ``swap``), NOT the
+    USD set — using the USD set (which omits ``swap``) would false-fire by
+    ``Σ(swap change)`` on any swap-bearing account.
+
+    Closes by construction. Under CASH_SETTLEMENT (the DEFAULT / shipped basis)
+    EVERY contribution IS the raw `change` (no summary channel, no coverage reshape),
+    so the identity is a plain arithmetic Σ == Σ that closes trivially — its job on
+    that path is to catch a DROPPED / MIS-SUMMED / mis-classified cash row (see B1:
+    under cash_settlement it is the ONLY reconciliation, so no open-option exemption
+    is applied). Under MARK_TO_MARKET: outside coverage the contributions ARE the
+    changes; inside coverage the summary channel replaces the option cash legs
+    (``residual = Σ(summary rpl+upl) − Σ_inside(change + commission)`` ≈ 0,
+    probe-proven 9.222194 vs 9.222190) and the one residual money hole it catches — a
+    mid-window session that LACKED a summary while options were open (its premium
+    dropped with nothing carrying it) — is MARK_TO_MARKET-specific.
+
+    ``floor_c`` (the ``$1``-equivalent NATIVE floor) is supplied by the adapter
+    from the anchor mark; the pure helper defaults it to 0.0 (relative term only).
+    Leak discipline (§App B): the raise names only currency + a coarse
+    breach/tolerance magnitude class, never a held balance.
+
+    CR-01 / B1 (BASIS-SCOPED) — ``open_option_ccys`` names currencies with a
+    provably-OPEN option book (nonzero ``native_options_value`` and/or trailing
+    option activity after the last summary). The strict identity above closes ONLY
+    for a book FLAT at the last settlement (Σunrealized_pl telescopes to a terminal
+    open-MTM of 0 iff flat). The exemption is legitimate ONLY under
+    ``mark_to_market``: there the summary channel re-attributes option P&L and an
+    OPEN book leaves a residual = the terminal open MTM that would false-fire this
+    guard → a permanent FAILED on a healthy open-options account. On that
+    mark_to_market/NAV path the §5 ``_assert_inception_reconciled`` gate
+    (native_nav.py) is the authoritative backstop for exempted currencies (a dropped
+    cash row / missing summary of size ``x`` surfaces there as ``§5 residual = x`` →
+    InceptionReconciliationError, the SAME permanent-FAILED disposition).
+
+    Under ``cash_settlement`` (the DEFAULT / Zavara basis) the caller MUST pass
+    ``open_option_ccys=frozenset()`` (``build_deribit_native_ledger`` does): every
+    option row books its FULL cash ``change``, so the strict Σnative==Σchange
+    identity closes EXACTLY and MUST run on open-option currencies too — it is the
+    ONLY fail-loud reconciliation on the allocated/cash_settlement path (§5 is
+    BYPASSED there because ``combine_native_ledger`` returns the allocated-capital
+    metrics before ``reconstruct_native_nav_and_twr``). Exempting a currency on that
+    path would silently ship a wrong factsheet. The default ``frozenset()`` exempts
+    nothing → every existing caller stays byte-identical (SC-4).
+
+    F2 — PRE-ROLLOUT STRADDLE (INTENTIONAL fail-loud, §6 follow-up): a currency
+    whose option book was held OPEN across the coverage-window START (a position
+    opened >24h before the first summary, i.e. across the ~2025-01-12 rollout)
+    telescopes ``Σ summary unrealized_pl`` from a NONZERO book-MTM-at-window-start
+    ``V₀`` (not 0) — the pre-rollout open premium is counted verbatim outside
+    coverage while the covered sessions' unrealized delta only sees ``V_N − V₀``,
+    leaving an unreconciled residual = ``V₀``. Flat-at-crawl → THIS strict guard
+    fires; open-at-crawl → exempted here but the §5 gate residual = ``V₀`` fires
+    identically. BOTH are permanent FAILED (correct until ``V₀``-at-window-start
+    handling is built — validate on live keys #2/#3 with pre-2025 option history).
+    PINNED by ``test_pre_rollout_straddle_fails_loud_intentional``; do NOT loosen.
+
+    ``exclude_spot_extraction`` MUST match the mode ``txn_rows_to_native_daily`` was
+    called in for ``native_daily`` (default ``False`` = NAV path, spot retained on
+    both sides; ``True`` = allocated path, spot dropped on both sides). A mismatch
+    would false-fire the guard by ``Σ(spot extraction)`` — the coupling is why both
+    are threaded from the SAME ``returns_denominator_config is not None`` signal."""
+    floor = native_floor or {}
+    # Bug B — ALLOCATED PATH ONLY (``exclude_spot_extraction``): the NET-DAILY
+    # spot-extraction (day, pair) set — the SAME basis (and SAME mode) that
+    # ``txn_rows_to_native_daily`` excludes on, so the reference Σchange and the
+    # computed native_pnl never drift. EMPTY on the NAV path (config=None) → every
+    # spot leg counts in the reference Σchange, matching the retained native_pnl.
+    spot_extraction = (
+        spot_net_extraction_day_pairs(rows) if exclude_spot_extraction else frozenset()
+    )
+    sigma_change: dict[str, float] = {}
+    throughput: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) not in _NATIVE_CASH_BEARING_TYPES:
+            continue
+        # A net-extraction spot leg dropped from native_pnl (ALLOCATED path) MUST
+        # also be excluded from this reference Σchange — else the guard false-fires
+        # by Σ(spot extraction). ``spot_extraction`` is EMPTY on the NAV path, so no
+        # spot leg is skipped and the reference matches the retained native_pnl.
+        # Mirrors the aggregator's own net-daily skip in the SAME mode.
+        if _row_is_net_extraction_spot(row, spot_extraction):
+            continue
+        raw = row.get("change")
+        if raw is None:
+            continue
+        try:
+            change = float(raw)  # aggregator already validated cash-bearing change
+        except (TypeError, ValueError):
+            continue
+        ccy = str(row.get("currency", "")).upper()
+        sigma_change[ccy] = sigma_change.get(ccy, 0.0) + change
+        throughput[ccy] = throughput.get(ccy, 0.0) + abs(change)
+    currencies = set(sigma_change) | {str(c).upper() for c in native_daily}
+    for ccy in sorted(currencies):
+        # CR-01: a provably-open option book cannot satisfy the flat-at-settlement
+        # identity (residual = terminal open MTM). Skip the strict compare and let
+        # §5 _assert_inception_reconciled be the authoritative reconciliation.
+        #
+        # F1 (bounded, §6 live-anchor follow-up): the exemption cannot ship an
+        # UNBOUNDED wrong number (a material hole still fires §5, same permanent-
+        # FAILED disposition), but the §5 silent envelope for an exempted currency
+        # is WIDER than this strict per-ccy guard along three axes: (1) §5 tolerance
+        # is account-level max($1, 1e-4·whole-account anchor NAV) vs this per-ccy
+        # 1e-4·Σ|change|_ccy; (2) §5 values the residual at the INCEPTION mark
+        # (D-07), undervaluing it ~N× for a coin appreciated N× since inception →
+        # the window widens ~N×; (3) USD-family (USD/USDC/USDT/EURR/DAI) coalesce
+        # into ONE signed §5 bucket so residuals NET before abs() (this per-ccy
+        # guard abs()es each). DELIBERATE (do NOT modify the shared §5 gate — blast
+        # radius on all native-reconstructed accounts); tighten at the first live
+        # open-options onboarding. See docs/deribit-ingestion-design.md (CR-01).
+        if ccy in open_option_ccys:
+            continue
+        computed = sum(native_daily.get(ccy, {}).values())
+        reference = sigma_change.get(ccy, 0.0)
+        residual = abs(computed - reference)
+        tol = max(float(floor.get(ccy, 0.0)), 1e-4 * throughput.get(ccy, 0.0))
+        if residual > tol:
+            # LOW: the breach cause is BASIS-specific. Under cash_settlement (the
+            # DEFAULT / fleet basis, no summary channel) every contribution IS the
+            # raw change, so a breach means a DROPPED / MIS-CLASSIFIED cash-bearing
+            # row. Under mark_to_market the summary channel can leave a hole when a
+            # mid-window session lacked its options_settlement_summary.
+            if pnl_basis == PNL_BASIS_MARK_TO_MARKET:
+                _cause = (
+                    "a mid-window session likely lacked its "
+                    "options_settlement_summary; STOP and investigate that account's "
+                    "summary stream"
+                )
+            else:
+                _cause = (
+                    "a cash-bearing row was likely dropped or mis-classified; STOP "
+                    "and investigate that account's transaction log"
+                )
+            raise LedgerValuationError(
+                f"Deribit balance-identity breach for currency {ccy!r}: computed "
+                f"realized total diverges from Σchange over cash-bearing rows by "
+                f"more than max($1-equiv, 1e-4·throughput) (residual/tolerance "
+                f"class {residual / tol if tol else float('inf'):.1f}x) — "
+                f"{_cause}, never loosen the tolerance (silent P&L misattribution "
+                "risk)"
+            )
+
+
+def _required_summary_field(row: Mapping[str, Any], field: str) -> float:
+    """Read a REQUIRED numeric summary field (``realized_pl`` / ``unrealized_pl``)
+    — both are present + numeric on every ``options_settlement_summary`` row
+    (probe-verified). Absent / null / blank / non-numeric → ``LedgerValuationError``
+    (schema-drift fail-loud, never attribute option P&L without both legs)."""
+    raw = row.get(field, _MISSING)
+    if raw is _MISSING or raw is None or (
+        isinstance(raw, str) and not raw.strip()
+    ):
+        raise LedgerValuationError(
+            f"options_settlement_summary Deribit row id={row.get('id')!r} has "
+            f"absent/null {field} — both realized_pl and unrealized_pl are "
+            "REQUIRED (Deribit's session P&L decomposition); refusing to attribute "
+            "option P&L without it (schema drift would silently drop realized cash)"
+        )
+    return _coerce_float(raw, field=field, row=row)
+
+
+def _summary_contribution(row: Mapping[str, Any]) -> float:
+    """Native-pnl contribution of an ``options_settlement_summary`` row:
+    ``realized_pl + unrealized_pl`` (``unrealized_pl`` is a session DELTA — E1,
+    load-bearing). The row ``change`` is ALWAYS 0.0; a nonzero change is semantics
+    drift → ``LedgerValuationError``."""
+    change = _coerce_float(row.get("change", 0.0) or 0.0, field="change", row=row)
+    if change != 0.0:
+        raise LedgerValuationError(
+            f"options_settlement_summary Deribit row id={row.get('id')!r} carries "
+            f"a nonzero change — the summary recap change is always 0.0 (its P&L is "
+            "in realized_pl/unrealized_pl); a nonzero change is semantics drift, "
+            "classify against fresh evidence before ingesting"
+        )
+    return _required_summary_field(row, "realized_pl") + _required_summary_field(
+        row, "unrealized_pl"
+    )
+
+
+def _option_commission(row: Mapping[str, Any]) -> float:
+    """The POSITIVE commission on an option ``trade``/``delivery`` row (present +
+    numeric on 100% of option rows — E3). Absent / null / blank / non-numeric →
+    ``LedgerValuationError`` (inside coverage the fee leg is the ONLY contribution;
+    fabricating it would silently mis-state P&L)."""
+    raw = row.get("commission", _MISSING)
+    if raw is _MISSING or raw is None or (
+        isinstance(raw, str) and not raw.strip()
+    ):
+        raise LedgerValuationError(
+            f"option Deribit row id={row.get('id')!r} type={row.get('type')!r} "
+            "INSIDE coverage has absent/null commission — the premium cash is "
+            "carried by the summary channel so the fee (−commission) is the only "
+            "native-pnl contribution; refusing to fabricate it (E3: commission is "
+            "present+numeric on every option row)"
+        )
+    return _coerce_float(raw, field="commission", row=row)
+
+
+def txn_rows_to_native_daily(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    pnl_basis: str = DEFAULT_PNL_BASIS,
+    exclude_spot_extraction: bool = False,
+) -> dict[str, dict[str, float]]:
+    """The ``(day, currency)``-keyed NATIVE-UNIT sibling of
+    ``txn_rows_to_daily_records`` (§9.1): sum each return-bearing row's raw
+    ``change`` by ``(UTC-day, currency)`` in NATIVE units — NO index multiply,
+    NO ``supplemental_index``. Returns ``UPPERCASE-currency -> {utc_day_iso: Σ
+    native change}`` (days ascending within each currency).
+
+    The three ``change`` fail-loud guards (absent / null-blank / undatable-day)
+    are LIFTED VERBATIM from ``txn_rows_to_daily_records`` so the two aggregators
+    cannot drift (§4.1). The type-partition is the same EXCEPT the native-only
+    ``swap`` reclassification (HIGH-1): ``swap`` is an INTERNAL cross-collateral
+    rebalance whose per-leg native ``change`` is a real per-currency balance delta
+    — INFORMATIONAL (skipped) in the USD path, but native-CASH_BEARING here so it
+    enters native_pnl (else the per-bucket backward roll cannot close). It stays
+    absent from ``_EXTERNAL_FLOW_TYPES`` so it never also enters ``F_t``
+    (count-once). Concretely:
+      * ``type`` in ``_NATIVE_INFORMATIONAL_TYPES`` (the external-flow / reward
+        types: transfer / deposit / withdrawal / usdc_reward) -> skipped;
+      * ``type`` in ``_NATIVE_CASH_BEARING_TYPES`` (``CASH_BEARING_TYPES`` PLUS the
+        reclassed internal-rebalance ``swap``) -> its raw native ``change`` added to
+        that row's ``(day, ccy)`` bucket. A quiet-day ``negative_balance_fee``
+        (no instrument, no ``index_price``) contributes its native ``change``
+        WITHOUT any settlement index — the P72 index dependency is GONE from
+        native pnl (it shifts entirely to the 80-02 daily mark series);
+      * ANY OTHER (unknown) ``type`` carrying nonzero ``change`` ->
+        ``LedgerValuationError`` naming the type (fail loud), verbatim.
+
+    The ONLY two differences from the sibling: (1) accumulate the raw
+    ``_coerce_float(change)`` keyed ``(day, CCY_UPPER)`` — never
+    ``txn_change_to_usd``, no index, and NO ``supplemental_index`` /
+    ``indexable_currencies`` parameter (native units never need an index);
+    (2) a zero-change cash-bearing row creates NO entry (native pnl has no
+    all-zero-day placeholder — the native core unions flow days itself), whereas
+    the USD sibling ``setdefault(day, 0.0)``.
+
+    The dict -> ``pd.Series`` conversion (tz-naive midnight ``DatetimeIndex``,
+    per ``NativeLedger.native_pnl: Mapping[str, pd.Series]``) is done by
+    ``build_deribit_native_ledger`` (80-02): this module stays pandas-pure (the
+    AST purity guard in test_deribit_txn.py forbids a pandas import), so — like
+    the parent's ``list[dict]`` — the sibling returns plain data.
+
+    Leak discipline (§App B): the absent/null-blank/undatable guards name only
+    id/type. The unknown-type guard is lifted VERBATIM from
+    ``txn_rows_to_daily_records`` — INCLUDING its ``({change})`` in the raise
+    message. That embedded ``change`` is a SINGLE per-row native delta (never an
+    account total or a held balance) and the guard fires ONLY on unknown-type
+    schema drift; keeping the raise byte-identical to the parent is the deliberate
+    anti-drift choice (§4.1) so the two aggregators cannot diverge. (Scrubbing
+    ``({change})`` from BOTH raises is the alternative if per-row deltas must never
+    surface at all; it is intentionally NOT done here to preserve verbatim parity.)
+
+    ``exclude_spot_extraction`` (default ``False`` — the NAV path, byte-identical to
+    pre-Bug-B): when ``True`` (the ALLOCATED / Zavara path, threaded from a non-None
+    ``returns_denominator_config``) net-extraction spot ``BTC_USDC`` legs are DROPPED
+    from ``native_pnl`` per Zavara's profit-extraction methodology. ``False`` retains
+    every spot leg verbatim so the §5 inception reconciliation closes on a normal NAV
+    account (a dropped sell leg would otherwise leave a §5 residual — no flow channel
+    carries it). ``assert_balance_identity`` MUST be called in the SAME mode.
+    """
+    if pnl_basis not in _PNL_BASES:
+        raise LedgerValuationError(
+            f"unknown pnl_basis {pnl_basis!r}; expected one of "
+            f"{sorted(_PNL_BASES)} — refusing to compute daily P&L on an "
+            "unrecognized accrual basis"
+        )
+    use_mtm = pnl_basis == PNL_BASIS_MARK_TO_MARKET
+    # Phase 82 pre-pass (MARK_TO_MARKET only): per-currency options coverage
+    # windows from this batch's own summary rows. Value-inert for perp-only /
+    # USD-native ledgers (no summaries → {}). In CASH_SETTLEMENT the summary
+    # channel is not consulted at all — options book their raw cash `change`.
+    coverage_windows = _summary_coverage_windows(rows) if use_mtm else {}
+    # Bug B — ALLOCATED PATH ONLY (``exclude_spot_extraction=True``, threaded from a
+    # non-None ``returns_denominator_config``): the NET-DAILY spot-extraction
+    # (day, pair) set. A single pre-pass nets each conversion pair's spot legs per
+    # UTC day; a net-extraction pair's spot legs are ALL dropped below (Zavara
+    # profit-extraction methodology). ``assert_balance_identity`` excludes on the
+    # SAME set in the SAME mode so the reference Σchange and native_pnl never drift.
+    #
+    # ponytail: this couples the pnl-space (native_pnl) and the balance-identity
+    # reference row-set — BOTH must exclude, or BOTH include, per mode. When OFF
+    # (the NAV path, config=None) the set is EMPTY so every spot leg is retained
+    # verbatim (pre-Bug-B behaviour; §5 inception reconciles). Upgrade path: if a
+    # non-Zavara ALLOCATED account ever needs spot RETAINED, split this off a
+    # dedicated config axis rather than reusing the allocated/NAV distinction.
+    spot_extraction = (
+        spot_net_extraction_day_pairs(rows) if exclude_spot_extraction else frozenset()
+    )
+    by_day_ccy: dict[tuple[str, str], float] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        row_type = str(row.get("type", ""))
+        # HIGH-1: the native sibling reclasses `swap` (an INTERNAL rebalance) from
+        # the skip set into the cash-bearing set — its per-leg native `change` is a
+        # real per-currency balance delta that belongs in native_pnl. The USD sets
+        # (and thus ``txn_rows_to_daily_records``) are untouched.
+        if row_type in _NATIVE_INFORMATIONAL_TYPES:
+            continue
+        # Bug B — ALLOCATED PATH ONLY: a spot BTC_USDC leg on a NET-EXTRACTION day
+        # (the day's spot netted coin-OUT / cash-IN) is profit-taking capital, NOT
+        # trading P&L — zavara DROPS the whole day's spot from the reported track. A
+        # net-REDEPLOY / wash day's spot legs stay in native_pnl. ``spot_extraction``
+        # is EMPTY on the NAV path (config=None), so this skip is inert there and
+        # every spot leg is retained. Checked before the cash-bearing branch so it
+        # applies identically under cash_settlement AND mark_to_market.
+        if _row_is_net_extraction_spot(row, spot_extraction):
+            continue
+        # MARK_TO_MARKET only: options_settlement_summary contributes
+        # realized_pl + unrealized_pl (session DELTA, load-bearing). Row change is
+        # always 0.0 (nonzero → fail loud). NOT subject to the cash-bearing
+        # change==0 skip (its P&L is in the summary fields, not change). Under
+        # CASH_SETTLEMENT the summary row falls through to the unknown-type guard
+        # where its 0.0 change is harmlessly ignored (its P&L is carried instead
+        # by the option trade/delivery cash `change` on the settlement day).
+        if use_mtm and row_type in _NATIVE_OPTIONS_SUMMARY_TYPES:
+            contribution = _summary_contribution(row)
+            try:
+                day = _row_utc_day(row.get("timestamp"))
+            except ValueError as e:
+                raise LedgerValuationError(str(e)) from e
+            if contribution == 0.0:
+                continue
+            ccy = str(row.get("currency", "")).upper()
+            # WR-03: a nonzero-P&L summary with a blank/missing currency would
+            # mis-bucket realized_pl+unrealized_pl into a "" bucket. Fail loud
+            # (schema-drift discipline, consistent with _required_summary_field) —
+            # never silently attribute option P&L to a blank currency.
+            if not ccy:
+                raise LedgerValuationError(
+                    f"options_settlement_summary Deribit row id={row.get('id')!r} "
+                    "has empty/missing currency yet carries nonzero "
+                    "realized_pl+unrealized_pl — refusing to bucket option P&L into "
+                    "a blank-currency bucket (schema drift would silently "
+                    "mis-attribute realized cash)"
+                )
+            key = (day, ccy)
+            by_day_ccy[key] = by_day_ccy.get(key, 0.0) + contribution
+            continue
+        if row_type in _NATIVE_CASH_BEARING_TYPES:
+            # [VERBATIM from txn_rows_to_daily_records] absent-`change` guard: a
+            # cash-bearing row MUST carry a `change` field. Coalescing absent→0.0
+            # would silently zero real cash and pass the completeness gate green.
+            raw_change = row.get("change", _MISSING)
+            if raw_change is _MISSING:
+                raise LedgerValuationError(
+                    f"cash-bearing Deribit row id={row.get('id')!r} "
+                    f"type={row_type!r} has NO `change` field — refusing to treat a "
+                    "missing balance-delta as zero (schema drift would silently "
+                    "zero realized cash and render a green-but-wrong track record)"
+                )
+            # [VERBATIM] null/blank-`change` guard: a PRESENT-but-null/blank
+            # change (None, "", whitespace-only) is schema drift too; a numeric
+            # 0.0 (or "0") stays a legitimate zero-cash no-op.
+            if raw_change is None or (
+                isinstance(raw_change, str) and not raw_change.strip()
+            ):
+                raise LedgerValuationError(
+                    f"cash-bearing Deribit row id={row.get('id')!r} "
+                    f"type={row_type!r} has a null/blank change={raw_change!r} — "
+                    "refusing to coalesce it to zero (schema drift would silently "
+                    "zero realized cash and render a green-but-wrong track record)"
+                )
+            change = _coerce_float(raw_change, field="change", row=row)
+            # [VERBATIM] undatable-day guard: fail loud as a STRUCTURAL valuation
+            # error (permanent), not a bare ValueError the network over-catch
+            # would mistake for transient.
+            try:
+                day = _row_utc_day(row.get("timestamp"))
+            except ValueError as e:
+                raise LedgerValuationError(str(e)) from e
+            ccy = str(row.get("currency", "")).upper()
+            # Phase 82 coverage-gated option re-attribution (classification-gated —
+            # NEVER consulted for non-option rows, so the perp/future/spot path is
+            # byte-identical: contribution stays `change`). Inside a currency's
+            # summary coverage window an option trade/delivery contributes ONLY the
+            # fee (−commission); the premium/payout cash is carried by the summary
+            # channel. Outside the window (pre-rollout or trailing-edge) it keeps
+            # the full `change` (cash fallback, flagged by _pre_coverage_option_days).
+            contribution = change
+            if row_type == "trade" or row_type == "delivery":
+                cls = classify_instrument(str(row.get("instrument_name", "")))
+                if cls == "option":
+                    instant = _row_utc_instant(row.get("timestamp"))
+                    if _ts_in_coverage(instant, coverage_windows.get(ccy)):
+                        contribution = -_option_commission(row)
+                    # else: cash fallback — contribution stays `change`.
+                elif (
+                    row_type == "delivery"
+                    and cls in ("unknown", "spot")
+                    and change != 0.0
+                ):
+                    # A delivery ALWAYS names an expiring DERIVATIVE instrument. An
+                    # unknown-classified delivery with nonzero cash would mis-route
+                    # expiry P&L; a SPOT-named delivery (underscore BASE_QUOTE) is
+                    # nonsensical — spot does not deliver (S4: classify_instrument now
+                    # returns "spot" for BTC_USDC, so it must be caught here too or an
+                    # underscore-named delivery row would be booked silently). Fail
+                    # loud, never guess (D-08).
+                    raise LedgerValuationError(
+                        f"Deribit delivery row id={row.get('id')!r} names an "
+                        "unclassifiable or spot instrument yet carries nonzero cash — "
+                        "refusing to guess an expiring instrument's P&L channel "
+                        "(never silently mis-route delivery cash)"
+                    )
+            if contribution == 0.0:
+                # Difference (2): native pnl has NO all-zero-day placeholder
+                # (the USD sibling setdefault(day, 0.0) here). No cash → no entry.
+                continue
+            # Difference (1): sum the RAW native contribution — never
+            # index-multiplied (no txn_change_to_usd, no supplemental_index). The
+            # index dependency lives entirely in the 80-02 daily mark series.
+            key = (day, ccy)
+            by_day_ccy[key] = by_day_ccy.get(key, 0.0) + contribution
+            continue
+        # [VERBATIM] unknown-type nonzero-`change` fail-loud (H3): silence is
+        # unsafe both ways — fail loud on any cash, harmlessly ignore a
+        # zero-change occurrence.
+        change = _coerce_float(row.get("change", 0.0) or 0.0, field="change", row=row)
+        if change != 0.0:
+            raise LedgerValuationError(
+                f"unknown Deribit transaction-log type {row_type!r} carries "
+                f"nonzero change ({change}); it is in neither CASH_BEARING nor "
+                "INFORMATIONAL — classify it against fresh evidence before "
+                "ingesting (never silently drop nor double-count realized cash)"
+            )
+    result: dict[str, dict[str, float]] = {}
+    for (day, ccy), amount in sorted(by_day_ccy.items()):
+        result.setdefault(ccy, {})[day] = amount
+    return result

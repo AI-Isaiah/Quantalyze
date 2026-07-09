@@ -50,6 +50,14 @@ official OpenAPI schema + practitioner sources + ccxt source + a 3-account live 
   `transfer`, `swap`, `correction`, `usdc_reward`, `options_settlement_summary`.
   (`options_settlement_summary` is a zero-cash aggregate — live-confirmed Σ`change`=0.0 on all 3
   accounts; excluding it also avoids double-counting the real `settlement`/`delivery` rows.)
+  ⚠️ **Native path, basis-gated (see D-13, the current pin):** under the DEFAULT `cash_settlement`
+  basis option `trade`/`delivery` rows contribute their FULL native `change` on the settlement day and
+  `options_settlement_summary` is INERT (change==0, contributes NOTHING); an OPEN option book at crawl
+  reconciles at §5 via the terminal wedge (`options_value`, H1). Under the OPT-IN `mark_to_market`
+  basis the D-11 coverage-gated `−commission`/summary re-attribution applies instead. (The Phase-83
+  D-12 ΔMTM replay was REVERTED.) The USD sibling `txn_rows_to_daily_records` is UNCHANGED (summary
+  stays excluded on both bases). `swap` is likewise native-only cash-bearing (HIGH-1); it stays
+  informational in the USD path.
 - **Unknown `type` with nonzero `change` → FAIL LOUD** (never silently include or drop). Deribit
   documents new types can appear at any time, so this is an allow-list, not a block-list.
 
@@ -82,6 +90,206 @@ The reconstruction is anchor-to-today: `initial_capital = equity_today − Σrea
 
 For a raw equity CURVE (not the anchor), prefer `account_summary.equity_usd` (mark-to-market). The
 per-row `balance`/`equity` are event-stamped snapshots, not a daily grid.
+
+## D-13 — Per-strategy accrual basis: `cash_settlement` (default) vs `mark_to_market` (opt-in); open-book §5 wedge; allocated path bypasses §5 — ✅ CURRENT
+
+**SUPERSEDES D-12 (and re-activates the D-11 shape as an opt-in).** The Phase-83 daily-MTM replay was
+reverted. Option daily attribution is now selected per strategy/account by
+`returns_denominator_config.pnl_basis` (`services/deribit_txn.py`, threaded through
+`build_deribit_native_ledger`):
+
+- **`cash_settlement` — the DEFAULT and the fleet / Zavara basis.** Option `trade`/`delivery` rows
+  book their **FULL native `change`** on the settlement day; `options_settlement_summary` is INERT
+  (its 0.0 `change` is ignored, no `rpl+upl` attribution). There is NO coverage window, NO ΔMTM, NO
+  `pre_summary_rollout` warning. The balance identity is a plain arithmetic `Σnative == Σchange` over
+  cash-bearing rows and closes trivially — its job here is to catch a DROPPED / MIS-CLASSIFIED cash
+  row (it is the ONLY reconciliation on the allocated path, where §5 is bypassed). The CR-01
+  open-book strict-guard exemption is **NOT** applied under this basis (B1): the strict identity runs
+  on open-option currencies too.
+- **`mark_to_market` — OPT-IN.** Exactly the **D-11** shape: inside a currency's summary coverage
+  window option rows book `−commission` and `options_settlement_summary` contributes `rpl+upl`;
+  outside coverage they keep full `change` + the `pre_summary_rollout_option_dailies` warning; a
+  pre-rollout straddle fails loud; open books are exempted from the strict identity (CR-01), with §5
+  as the backstop.
+
+**Open option book at crawl under `cash_settlement` (§5 wedge, H1).** The venue-reported `equity`
+(`terminal_native_equity`) includes the open book's settled mark (`options_value`), but the cash-only
+`native_pnl` does not. To keep §5 (`_assert_inception_reconciled`) closing —
+`terminal_equity == Σnative_pnl + Σflow + wedge` — the open book's `options_value` is valued INTO the
+terminal wedge (`terminal_upnl_native = session_upl + options_value`); like the session-uPnL wedge it
+is stripped from the realized-basis NAV roll. Under `mark_to_market` the open book's value is already
+carried into `native_pnl` by the summary channel, so `options_value` is **NOT** added to the wedge
+there (it would double-count). Perp-only / no-open-book accounts have `options_value == 0` ⇒ wedge
+unchanged ⇒ SC-4 byte-identical.
+
+**Spot BTC_USDC extraction legs.** Net-daily spot-extraction legs are dropped from `native_pnl` ONLY
+on the ALLOCATED path (`exclude_spot_extraction = returns_denominator_config is not None`); on the NAV
+path spot legs are retained verbatim so §5 closes (Bug B).
+
+**Allocated path bypasses §5 entirely.** When `returns_denominator_config` is present the returns are
+`daily_pnl_usd(d) / allocated_capital(d)` (`allocated_capital_returns_and_metrics`), which returns
+BEFORE `reconstruct_native_nav_and_twr` — so neither §5 nor the NAV reconstruction runs for the
+Zavara/allocated factsheet.
+
+---
+
+## D-11 — Options P&L channel: coverage-gated MTM re-attribution (native path) — ✅ SHIPPED as the `mark_to_market` OPT-IN basis (see D-13)
+
+> **✅ CURRENT (basis-gated), per D-13.** Phase 83's ΔMTM replacement (D-12) was REVERTED; the code
+> now implements THIS D-11 shape, but ONLY under the OPT-IN `pnl_basis="mark_to_market"`. The default
+> and fleet/Zavara basis is `cash_settlement` (option rows book full cash `change`, summary inert) —
+> see **D-13**, the authoritative current pin. Under `mark_to_market` the coverage-gated `−commission`
+> reclass, the summary→`rpl+upl` attribution, the `pre_summary_rollout` warning, the pre-rollout-
+> straddle permanent-FAILED, and the CR-01 open-book strict-guard exemption all APPLY as described
+> below. (The `options_settlement_summary` is CLASSIFIED only under `mark_to_market`; under
+> `cash_settlement` it is inert.)
+
+Resolves the **F2 known limitation** above (open-option UPL in the anchor but not in Σrealized) for
+the NATIVE path. Deribit's `change` on an option `trade`/`delivery` is the **premium/payout cash**, a
+swap of cash for position value — NOT P&L. Summing it counted premium as return (live: strategy
+`c225840c` key `95089958` "Phoenix Protocol" showed ±51–78% daily returns, +235% Aug-2025 on ~$150k
+NAV; the 2025-07-13 option-trade day summed to +2.736 BTC ≈ +65%). The real option P&L lives in the
+`options_settlement_summary` rows (`realized_pl` + `unrealized_pl`).
+
+**The coverage-gated rule (per currency `c`, native path only):**
+
+- Deribit began emitting `options_settlement_summary` ~**2025-01-12** (exchange-side rollout). The
+  per-currency coverage window is `[first_summary_ts[c] − 24h, last_summary_ts[c]]`; a currency with
+  no summaries has no window.
+- **Inside coverage:** option `trade`/`delivery` contribute `−commission` (fee kept; premium/payout
+  cash EXCLUDED — carried by the summary channel), and `options_settlement_summary` contributes
+  `realized_pl + unrealized_pl`. `unrealized_pl` is a per-session **DELTA** (not a level) and is
+  **LOAD-BEARING** — dropping it breaks closure. Summary `change` is always 0.0 (nonzero → fail loud);
+  absent/null/non-numeric `commission` / `realized_pl` / `unrealized_pl` → `LedgerValuationError`.
+- **Outside coverage** (pre-rollout / live trailing edge): option rows stay cash-basis `change` +
+  the account is stamped `pre_summary_rollout_option_dailies` → `complete_with_warnings` (Q6: no
+  correct daily attribution is derivable pre-rollout; the TOTAL stays exact — Σ`change` is exact in
+  both eras — so we caveat, never fail-loud/withhold nor synthesize).
+
+**Pre-rollout STRADDLE (position OPEN across the first summary) — currently FAILS LOUD (F2):** a
+currency whose option book was held OPEN across the coverage-window START (a position opened >24h
+before the first `options_settlement_summary`, i.e. held across the ~2025-01-12 rollout) telescopes
+`Σ summary unrealized_pl` from a NONZERO book-MTM-at-window-start `V₀` (not 0): the pre-rollout open
+premium is counted verbatim outside coverage while the covered sessions' unrealized delta only sees
+`V_N − V₀`, leaving an unreconciled residual = `V₀`. Flat-at-crawl → the strict
+`assert_balance_identity` fires; open-at-crawl → exempted from the strict guard (CR-01) but the §5
+`_assert_inception_reconciled` residual = `V₀` fires — BOTH are permanent `FAILED` (same disposition).
+This is INTENTIONAL doctrine (fail loud until `V₀`-at-window-start handling is built) and is PINNED by
+`test_pre_rollout_straddle_fails_loud_intentional`. `V₀`-at-window-start handling is a §6 follow-up;
+validate on live keys #2/#3, which carry pre-2025 option history.
+
+**Semantic shift (do NOT revert):** excluding premium REDEFINES option native_pnl from a "cash-balance
+delta" to an **MTM (settled-equity) delta** for covered option rows. This is intentional — it makes the
+daily series a settled-equity series consistent with the terminal anchor, so the §5 inception identity
+closes by construction (`Σpnl_c = settled-equity_c(T) − Σflow_c`). No future reader should "fix" the
+fee-only arm back to cash `change`.
+
+**Guard/oracle = the BALANCE IDENTITY, not the row equity snapshot.** Per currency, computed realized
+total MUST equal Σ`change` over `_NATIVE_CASH_BEARING_TYPES` rows (which INCLUDES `swap`), to
+`< max($1-equiv, 1e-4·throughput)` — else `LedgerValuationError`, never ship (`assert_balance_identity`,
+on every ledger build). It closes by construction (covered-era closure proven: option fee-gross
+Σ(`change`+`commission`) **9.222194 BTC** == Σ(`realized_pl`+`unrealized_pl`) **9.222190 BTC**) and
+catches the one residual money hole: a mid-window session that ever lacked a summary while options were
+open. The row-embedded `equity` snapshot was REJECTED as the oracle (matched `Δequity−flows` on only
+~13% of days — intraday mark-timing noise; perp `session_upl` NULL on settlement rows). The §5 wedge
+read is the COMBINED `options_session_upl + futures_session_upl` (byte-safe for perp-only).
+
+**CR-01 exemption — the §5 envelope is WIDER than the strict guard (F1, bounded, §6 live-anchor
+follow-up):** for an exempted (open-option) currency the strict per-currency `assert_balance_identity`
+guard is SKIPPED and the §5 `_assert_inception_reconciled` gate is authoritative. The exemption cannot
+ship an UNBOUNDED wrong number — a material hole still fires §5 (same permanent-`FAILED` disposition) —
+BUT the silent envelope for an exempted currency is wider than the strict guard's along **three
+quantified axes**:
+1. **Tolerance scope.** §5 uses an ACCOUNT-LEVEL `max($1, 1e-4·whole-account anchor NAV)`
+   (`native_nav.py` ~767) vs the strict per-ccy `max($1-equiv, 1e-4·Σ|change|_ccy)`. A small currency's
+   residual is judged against the WHOLE account's NAV, so a hole up to `1e-4·NAV_account` passes where
+   the strict guard would have caught `1e-4·throughput_ccy`.
+2. **Inception-mark valuation.** §5 values the residual at the INCEPTION-day mark `mark0`
+   (`native_nav.py` ~716, ~727) — D-07 discipline (never a current price) — while the tolerance scales
+   with the TERMINAL anchor NAV. For a coin that appreciated `N×` since account inception the residual
+   is undervalued ~`N×` relative to the tolerance → the silent window widens ~`N×`.
+3. **USD-family netting.** USD-family currencies (`USD`/`USDC`/`USDT`/`EURR`/`DAI`) coalesce into ONE
+   signed bucket (`native_nav.py` ~377-406) so their residuals NET before `abs()` — an exempted `USDC`
+   error can cancel an opposite `USDT` error that the strict per-currency guard (abs per ccy) would
+   catch.
+
+This is a DELIBERATE, bounded envelope (decision: do NOT modify the shared §5 gate — blast radius on
+all native-reconstructed accounts + needs live open-options validation). Tighten when the FIRST live
+open-options account is onboarded (§6 follow-up).
+
+**Scope:** native path only (`txn_rows_to_native_daily` + `build_deribit_native_ledger` +
+`reconstruct_native_nav_and_twr`), the production Deribit path since P80. The USD-space
+`txn_rows_to_daily_records` is intentionally unchanged (legacy/parity-panel — the 80-04 parity panel
+legitimately MOVES for options accounts, same D8 posture as coin-dust accounts). SC-4 byte-identity is
+preserved for perp-only / USD-native accounts (classification-gated: zero option/summary rows → same
+rows, same float ops, bit-identical output). Evidence: `docs/evidence/drb-options-semantics-2026-07.json`.
+
+## D-12 — Option daily attribution = full cash `change` + per-day ΔMTM of the replayed open book (Phase 83, native path) — ⛔ REVERTED / SUPERSEDED by D-13
+
+> **⛔ REVERTED — do NOT implement against this.** The Phase-83 daily-MTM replay
+> (`replay_option_positions`, `option_mtm_daily`, the merged-ΔMTM `native_pnl`, and the 3-channel
+> balance identity) was REMOVED from the code. The shipped rule is **D-13** (a per-strategy
+> `pnl_basis` selector: `cash_settlement` default + `mark_to_market` opt-in = the D-11 shape).
+> Retained below only as history.
+
+**~~SUPERSEDES D-11~~ (reverted).** Phase 82 fixed the full-history TOTAL but attributed each
+`options_settlement_summary`'s `realized_pl + unrealized_pl` — a per-SESSION delta spanning many days —
+to the ONE settlement day, so DAILY returns were insane (Phoenix `c225840c` key `95089958`: max
+|daily| 94%/day, Aug-2025 +3305%). Phase 83 marks the open option book DAILY and SPREADS the MTM
+across the days it accrued — a **REDISTRIBUTION that PRESERVES the total** (the closure gates stay
+green by construction).
+
+**The rule (per currency `c`, native path only):**
+
+- Option `trade`/`delivery` rows contribute their **FULL native `change`** everywhere (the D-11
+  coverage-gated `−commission` arm is REMOVED). `options_settlement_summary` is **CLASSIFIED-BUT-INERT**:
+  its `change` is always 0.0 (nonzero → fail loud) and it contributes NOTHING to attribution.
+- **Daily MTM channel:** `replay_option_positions(rows)` reconstructs per-instrument end-of-day signed
+  positions from the post-trade `position` field; `fetch_deribit_option_daily_marks` fetches the 1D
+  chart close per held instrument over its expiry-capped `[first_held, last_held]` span (one public
+  request each; `last_held` already caps the span — a position cannot outlive its expiry, so **no
+  expiry parse exists nor is needed**); `option_mtm_daily` computes
+  `Book[c][d] = Σ_instr pos[instr][d] × mark[instr][d]` and `ΔMTM[c][d] = Book[c][d] − Book[c][d−1]`.
+  The adapter MERGES `ΔMTM` into the cash daily dict before the pd.Series conversion.
+- **Day-grid convention (PINNED):** bar-tick UTC day = native grid day. The 1D bar stamped `D 08:00`
+  keys day `D` (same `tick → strftime('%Y-%m-%d')` as the perp-close fill); positions replay on the
+  same `_row_utc_day` grid. The ≤8h skew is intraday attribution noise WITHIN the one-day class; the
+  telescoped total is exact regardless.
+- **Total preservation (telescoping):** `Σ_d native_pnl[c][d] = Σchange + Book[c][last_marked_day]`
+  (pre-inception book 0, full-history venue). Flat terminal → `Book(T)=0` → total = `Σchange` exactly
+  (the Phoenix targets BTC +6.479224 / USDC −97752.858490 hold verbatim). Non-flat terminal → total =
+  `Σchange + settled book at the last settlement`, the SAME basis the §5 gate anchors to, so §5 closes
+  by construction with the KEPT combined futures+options wedge.
+- **Sparse marks fail loud (D-07):** a missing bar inside an instrument's listed life on a
+  nonzero-position day → `LedgerValuationError` naming instrument+day. NO interpolation, NO
+  session-lump fallback (that lump IS the misattribution being removed). The ONLY cash-basis era left
+  is **pre-retention** (an instrument whose whole life predates the venue's ~2.5yr 1D-chart retention →
+  a wholly-empty marks response whose `last_held` is older than the horizon): those days keep cash
+  `change` and stamp the REUSED `pre_summary_rollout_option_dailies` warning → `complete_with_warnings`
+  (the M2 key — repointing it across nav_twr/transforms/founder-lp would risk a silent drop). A
+  wholly-empty response for an IN-retention instrument is structural → fail loud.
+
+**Identity = 3 channels (`assert_balance_identity`, on every ledger build):**
+1. **Strict cash channel (ALL currencies, exact).** `Σ native_daily_cash[c] == Σchange` over
+   `_NATIVE_CASH_BEARING_TYPES`. With full option `change` restored and the summary inert this is a
+   plain arithmetic identity — **the CR-01 open-book exemption is REMOVED** (an open book is now VALUED
+   in the ΔMTM channel, so the cash channel closes for open books too; the F1 widened-§5-envelope
+   follow-up is RESOLVED — no exempted currency ⇒ no widened silent envelope). ⚠️ The guard reconciles
+   the PRE-MERGE cash-only dict; merging ΔMTM first would false-fire (`Σchange + Book ≠ Σchange`).
+2. **Book anchor cross-check.** The replayed `terminal_book[c]` reconciles against the anchor's settled
+   book `native_options_value[c] − native_options_session_upl[c]` (both off the SAME
+   `get_account_summaries`), to `max($1-equiv, 1e-4·throughput)`. NOT verifiable at a flat terminal
+   (both sides 0) — the first live open-book anchor is the §6 watch (a breach there is a loud STOP).
+3. **Summary cross-check.** Over each summary coverage window,
+   `Σ(rpl+upl) == Σ(option change+commission) + [Book(end) − Book(start)]` (E3 generalized to the MTM
+   series). Material breach → fail loud — the summaries stop DRIVING attribution but keep POLICING it.
+
+**Boundary asymmetry (§6 live watch):** an instrument whose `last_day` precedes the currency's global
+last grid day drops out of `Book` after `last_day`, so a NON-last-day open terminal position registers
+a spurious ΔMTM on `last_day+1`. Total-exact regardless; live watch item (fixtures put the open
+instrument's last trade on the crawl day). **Scope:** native path only; SC-4 byte-identity preserved
+for perp-only / USD-native accounts (empty replay → no marks → no-op merge). Evidence:
+`docs/evidence/drb-option-daily-marks-2026-07.json`.
 
 ## Funding is settlement-BUNDLED — do NOT add a separate funding stream
 

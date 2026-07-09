@@ -137,6 +137,89 @@ class TestSanitizeMetrics:
         assert result == data
 
 
+class TestSegmentedCumulativeMetrics:
+    """DQ-03 (§6): the headline cumulative_return + CAGR are suffix-honest and
+    derive from the ONE shared nav_twr boundary source (no metrics-local bridge
+    or forked break-detector)."""
+
+    def test_total_return_suffix_honest(self):
+        """An interior NaN → cumulative_return is the post-break suffix product,
+        NOT the dropna-bridged product. Reverting :468 to the inline dropna-prod
+        flips this RED on the NUMBER."""
+        idx = pd.date_range("2026-01-01", periods=6, freq="D")
+        returns = pd.Series([0.10, 0.05, np.nan, 0.02, 0.01, 0.03], index=idx)
+        result = compute_all_metrics(returns)
+        suffix_product = (1.02 * 1.01 * 1.03) - 1.0  # after the interior break
+        bridged_product = (1.10 * 1.05 * 1.02 * 1.01 * 1.03) - 1.0  # old bridge
+        assert result["cumulative_return"] == pytest.approx(suffix_product, rel=1e-12)
+        assert suffix_product != pytest.approx(bridged_product)
+
+    def test_cagr_window_consistent_multi_break(self):
+        """>=2 interior breaks: the CAGR annualization window is the SAME days
+        the number compounds (post-last-break suffix), NOT the full dropna span.
+        Deriving _cagr_index from returns.dropna().index while compounding the
+        suffix flips this RED (a single-break fixture could mask a boundary
+        off-by-one, so this uses two interior breaks)."""
+        idx = pd.date_range("2026-01-01", periods=8, freq="D")
+        returns = pd.Series(
+            [0.5, np.nan, 0.1, np.nan, 0.02, 0.01, 0.03, 0.04], index=idx
+        )
+        result = compute_all_metrics(returns)
+        tr = (1.02 * 1.01 * 1.03 * 1.04) - 1.0  # suffix product (01-05..01-08)
+        assert result["cumulative_return"] == pytest.approx(tr, rel=1e-12)
+        suffix_elapsed = 3  # 01-08 - 01-05 (the compounded window)
+        full_elapsed = 7  # 01-08 - 01-01 (the forked, WRONG basis)
+        honest_cagr = (1.0 + tr) ** (365.0 / suffix_elapsed) - 1.0
+        forked_cagr = (1.0 + tr) ** (365.0 / full_elapsed) - 1.0
+        assert result["cagr"] == pytest.approx(honest_cagr, rel=1e-9)
+        assert honest_cagr != pytest.approx(forked_cagr)  # mutation-honest
+
+    def test_clean_path_bit_identical(self):
+        """SC-4 clean path: a no-NaN series' cumulative_return + cagr are
+        identical to the old expression (the suffix IS the whole series)."""
+        idx = pd.date_range("2026-01-01", periods=5, freq="D")
+        returns = pd.Series([0.01, -0.02, 0.03, 0.015, 0.02], index=idx)
+        result = compute_all_metrics(returns)
+        expected_tr = float((1 + returns).prod() - 1)  # old expression, no NaN
+        assert result["cumulative_return"] == pytest.approx(expected_tr, rel=1e-15)
+        elapsed = (idx[-1] - idx[0]).days
+        expected_cagr = (1.0 + expected_tr) ** (365.0 / elapsed) - 1.0
+        assert result["cagr"] == pytest.approx(expected_cagr, rel=1e-12)
+
+    def test_no_inline_bridge_and_shared_suffix_source(self):
+        """§6.2 source-scan (the tests/test_nav_twr.py:427 forbidden-substitution
+        pattern): no headline ``dropna()).prod()`` / ``dropna()).cumprod()``
+        bridge survives in metrics.py or nav_twr.py, and metrics consumes the ONE
+        shared boundary source — no metrics-local break-detector."""
+        import re
+        from pathlib import Path
+
+        base = Path(__file__).resolve().parents[1] / "services"
+        metrics_src = (base / "metrics.py").read_text()
+        nav_twr_src = (base / "nav_twr.py").read_text()
+        forbidden = re.compile(r"dropna\(\)\)\.(prod|cumprod)\(")
+        for name, src in (("metrics.py", metrics_src), ("nav_twr.py", nav_twr_src)):
+            offenders = [
+                ln.strip()
+                for ln in src.splitlines()
+                if not ln.strip().startswith("#") and forbidden.search(ln)
+            ]
+            assert offenders == [], f"{name} headline dropna-bridge(s): {offenders}"
+        # metrics derives BOTH the number and the CAGR window from the shared
+        # nav_twr source (shared_suffix_single_source).
+        assert "cumulative_twr_segmented(" in metrics_src
+        assert "_last_interior_break_suffix(" in metrics_src
+        # The forked full-window CAGR basis (returns.dropna().index) is gone —
+        # a second detector reintroducing it flips this RED.
+        code_lines = [
+            ln for ln in metrics_src.splitlines() if not ln.strip().startswith("#")
+        ]
+        assert not any("dropna().index" in ln for ln in code_lines), (
+            "metrics must derive _cagr_index from _last_interior_break_suffix, "
+            "not the full dropna span"
+        )
+
+
 class TestComputeAllMetrics:
     def test_golden_dataset_core_metrics(self, golden_returns):
         result = compute_all_metrics(golden_returns)
@@ -1928,26 +2011,35 @@ def test_monthly_rets_no_phantom_zeros_on_sparse_calendar():
 # ---------------------------------------------------------------------------
 
 
-def test_cumulative_return_uses_raw_returns_not_fillna():
-    """NEW-C02-05: cumulative_return must match (1+raw_returns.dropna()).prod()-1,
-    NOT the fillna(0) version.  A 1-day gap (NaN) should have negligible effect
-    on the product but the two series must agree within tolerance.
+def test_cumulative_return_is_suffix_honest_not_fillna_or_bridge():
+    """NEW-C02-05 + DQ-03 (§6.2 behavior change): a gap day is NEVER treated as
+    0% (not fillna(0)). Under DQ-03 an INTERIOR gap is also no longer silently
+    BRIDGED — cumulative_return compounds ONLY the maximal contiguous suffix
+    after the last break. This consciously supersedes the old
+    ``(1+returns.dropna()).prod()`` expectation (which bridged the interior gap):
+    the honest number now equals the post-break suffix product and differs from
+    BOTH the fillna(0) and the dropna-bridge products.
     """
     dates = pd.bdate_range("2024-01-01", periods=50)
     np.random.seed(42)
     values = list(np.random.normal(0.001, 0.01, 50))
-    # Introduce a gap day — shouldn't inflate the result
+    # Interior gap day (index 10) flanked by valid returns on both sides.
     values[10] = float("nan")
     returns = pd.Series(values, index=dates)
 
     result = compute_all_metrics(returns)
     reported = result["cumulative_return"]
 
-    expected = float((1 + returns.dropna()).prod() - 1)
-    assert abs(reported - expected) < 1e-9, (
-        f"cumulative_return={reported} diverges from raw-returns product={expected}; "
-        "gap days must not be treated as 0% (NEW-C02-05)"
+    # DQ-03: only the suffix AFTER the interior break (days 11..49) compounds.
+    expected_suffix = float((1 + returns.iloc[11:]).prod() - 1)
+    bridged = float((1 + returns.dropna()).prod() - 1)  # the old bridged product
+    fillna0 = float((1 + returns.fillna(0)).prod() - 1)  # gap-as-0% product
+    assert abs(reported - expected_suffix) < 1e-12, (
+        f"cumulative_return={reported} must equal the post-break suffix product "
+        f"{expected_suffix} (DQ-03 §6.2), never bridging the interior gap"
     )
+    assert expected_suffix != pytest.approx(bridged)  # no longer bridges
+    assert expected_suffix != pytest.approx(fillna0)  # gap not treated as 0%
 
 
 # ---------------------------------------------------------------------------
@@ -2107,3 +2199,204 @@ def test_calmar_uses_calendar_cagr():
         "Calmar matched qs.stats.calmar(returns, periods=252) — the quantstats "
         "helper is still the source instead of the calendar-CAGR"
     )
+
+
+class TestFixAConventions:
+    """Fix A (v1.8): the three metrics conventions threaded into compute_all_metrics
+    (periods_per_year / cumulative_method / day_basis). The geometric+calendar+252
+    defaults MUST stay byte-identical; only the simple/active/365 branches change."""
+
+    @staticmethod
+    def _series(vals: list[float], start: str = "2025-01-01") -> pd.Series:
+        idx = pd.date_range(start, periods=len(vals), freq="D")
+        return pd.Series(vals, index=idx, dtype=float)
+
+    def test_defaults_byte_identical_to_explicit_geometric_calendar_252(self) -> None:
+        """The new params default to the pre-Fix-A behaviour — an explicit
+        geometric/calendar/252 call is the SAME object as the bare default call."""
+        r = self._series([0.01, -0.005, 0.02, -0.01, 0.015] * 12)
+        bare = compute_all_metrics(r).metrics_json
+        explicit = compute_all_metrics(
+            r, periods_per_year=252, cumulative_method="geometric",
+            day_basis="calendar",
+        ).metrics_json
+        for k in ("cumulative_return", "cagr", "sharpe", "sortino", "volatility",
+                  "max_drawdown", "calmar"):
+            assert bare[k] == pytest.approx(explicit[k]), k
+
+    def test_periods_per_year_365_rescales_sharpe_by_sqrt_ratio(self) -> None:
+        """Crypto √365: Sharpe/vol scale by √(365/252) vs the 252 default (return
+        metrics — cumulative/CAGR — are invariant to the risk clock)."""
+        r = self._series([0.01, -0.005] * 40)
+        m252 = compute_all_metrics(r, periods_per_year=252).metrics_json
+        m365 = compute_all_metrics(r, periods_per_year=365).metrics_json
+        assert m365["sharpe"] / m252["sharpe"] == pytest.approx(
+            math.sqrt(365.0 / 252.0), rel=1e-9
+        )
+        assert m365["volatility"] / m252["volatility"] == pytest.approx(
+            math.sqrt(365.0 / 252.0), rel=1e-9
+        )
+        assert m365["cumulative_return"] == pytest.approx(m252["cumulative_return"])
+
+    def test_simple_cumulative_is_arithmetic_sum_and_maxdd_on_running_sum(self) -> None:
+        """cumulative_method='simple': cumulative_return = Σr (NOT the geometric
+        compound) and max_drawdown rides the running-SUM series."""
+        r = self._series([0.10, -0.05, 0.20])
+        simple = compute_all_metrics(r, cumulative_method="simple").metrics_json
+        geom = compute_all_metrics(r, cumulative_method="geometric").metrics_json
+        # Σ = 0.10 - 0.05 + 0.20 = 0.25 (arithmetic).
+        assert simple["cumulative_return"] == pytest.approx(0.25)
+        # Geometric compound = 1.1·0.95·1.2 − 1 = 0.254 — DISTINCT.
+        assert geom["cumulative_return"] == pytest.approx(1.1 * 0.95 * 1.2 - 1.0)
+        assert simple["cumulative_return"] != pytest.approx(geom["cumulative_return"])
+        # Running-sum underwater: cumsum [.10,.05,.25], peak [.10,.10,.25] →
+        # drawdown [0,-.05,0] → maxDD -0.05.
+        assert simple["max_drawdown"] == pytest.approx(-0.05)
+
+    def test_active_day_basis_drops_zero_days_from_risk_stats(self) -> None:
+        """day_basis='active': volatility/Sharpe/Sortino are computed on the nonzero
+        days only (a 0.0 no-activity day would dilute mean & std)."""
+        r = self._series([0.01, 0.0, 0.02, 0.0, 0.015, 0.0, 0.008, 0.0])
+        active = r[r != 0.0]
+        m_cal = compute_all_metrics(
+            r, day_basis="calendar", periods_per_year=365
+        ).metrics_json
+        m_act = compute_all_metrics(
+            r, day_basis="active", periods_per_year=365
+        ).metrics_json
+        # Active Sharpe is wired to the nonzero-day series (qs formula parity).
+        assert m_act["sharpe"] == pytest.approx(
+            float(qs.stats.sharpe(active, periods=365))
+        )
+        # And it genuinely differs from the calendar (zero-diluted) Sharpe.
+        assert m_act["sharpe"] != pytest.approx(m_cal["sharpe"], rel=1e-6)
+
+    def test_invalid_conventions_fail_loud(self) -> None:
+        r = self._series([0.01, -0.005, 0.02])
+        with pytest.raises(ValueError, match="cumulative_method"):
+            compute_all_metrics(r, cumulative_method="bogus")
+        with pytest.raises(ValueError, match="day_basis"):
+            compute_all_metrics(r, day_basis="bogus")
+
+    # ---- Finding 2: single-convention period panels ----------------------
+
+    def test_simple_monthly_grid_sums_to_cumulative_return(self) -> None:
+        """Finding 2: on the simple/active convention the monthly grid cells SUM to
+        the arithmetic cumulative_return headline (they are Σr per bucket, not a
+        geometric compound). Pre-fix the grid stayed geometric → mixed-convention."""
+        # ~2.5 months of dense daily returns spanning month boundaries.
+        vals = ([0.01, -0.006, 0.008, 0.012, -0.004] * 15)
+        idx = pd.date_range("2025-01-01", periods=len(vals), freq="D")
+        r = pd.Series(vals, index=idx, dtype=float)
+        res = compute_all_metrics(
+            r, periods_per_year=365, cumulative_method="simple", day_basis="active"
+        )
+        m = res.metrics_json
+        # Sum every monthly grid cell across all year/month buckets.
+        grid = res.metrics_json["monthly_returns"]  # {year: {month: pct}}
+        grid_sum = sum(v for months in grid.values() for v in months.values())
+        assert grid_sum == pytest.approx(m["cumulative_return"], abs=1e-9)
+        # And the headline itself is the arithmetic Σr (sanity anchor).
+        assert m["cumulative_return"] == pytest.approx(float(r.sum()), abs=1e-9)
+
+    def test_active_rolling_sharpe_full_window_converges_to_headline(self) -> None:
+        """Finding 2: on the active basis the rolling Sharpe rides the nonzero-day
+        series, so a full-window (window == #active days) rolling value converges to
+        the headline Sharpe. Pre-fix it rode the zero-diluted dense series and
+        diverged. Companion: the calendar basis stays zero-diluted (differs)."""
+        # 30 nonzero days followed by 30 zero (no-activity) days → 60 dense days.
+        vals = [0.01, -0.006, 0.013, -0.004, 0.009, -0.011] * 5 + [0.0] * 30
+        idx = pd.date_range("2025-01-01", periods=len(vals), freq="D")
+        r = pd.Series(vals, index=idx, dtype=float)
+        res_act = compute_all_metrics(
+            r, periods_per_year=365, cumulative_method="simple", day_basis="active"
+        )
+        m_act = res_act.metrics_json
+        # The 30d rolling on the active basis has exactly 30 nonzero points → its
+        # single full-window value is the whole-active-series Sharpe == headline.
+        roll30 = res_act.metrics_json["rolling_metrics"]["sharpe_30d"]
+        assert len(roll30) == 1
+        # The rolling series is stored rounded to 4 decimals, so compare at that
+        # precision — the point is convergence, not bit-identity to the headline.
+        assert roll30[-1]["value"] == pytest.approx(m_act["sharpe"], abs=1e-3)
+        # Calendar basis: the 30d rolling includes the 0.0 tail → many diluted
+        # points, none equal to the (different) calendar headline.
+        res_cal = compute_all_metrics(
+            r, periods_per_year=365, cumulative_method="simple", day_basis="calendar"
+        )
+        assert len(res_cal.metrics_json["rolling_metrics"]["sharpe_30d"]) > 1
+
+    def test_all_panels_byte_identical_geometric_calendar_252(self) -> None:
+        """Finding 2 byte-identity: the FULL metrics_json + monthly grid + rolling
+        series are IDENTICAL between the bare default call and an explicit
+        geometric/calendar/252 call — the single-convention gating must not perturb
+        ANY panel on the default path."""
+        vals = ([0.012, -0.007, 0.02, -0.011, 0.014, 0.003] * 30)
+        idx = pd.date_range("2024-01-01", periods=len(vals), freq="D")
+        r = pd.Series(vals, index=idx, dtype=float)
+        bare = compute_all_metrics(r)
+        explicit = compute_all_metrics(
+            r, periods_per_year=252, cumulative_method="geometric",
+            day_basis="calendar",
+        )
+        # The ENTIRE outer dict (top-level scalars + nested metrics_json sub-dict
+        # holding mtd/ytd/3m/best_month/var_1m_99 + monthly_returns + rolling_metrics
+        # + all series) must be byte-equal on the default geometric/calendar path.
+        assert bare.metrics_json == explicit.metrics_json
+
+    def test_simple_active_combo_cagr_calmar_hand_computed(self) -> None:
+        """T3: the LIVE Zavara combo (simple + active + 365) — never covered by the
+        separate simple/calendar + geometric/active tests. Hand-assert that
+        cumulative==Σr, CAGR==mean(nonzero)*365 (arithmetic annualization on the
+        ACTIVE basis), maxDD rides the running-sum, and calmar==cagr/|maxDD|."""
+        vals = [0.02, 0.0, -0.01, 0.0, 0.03, 0.0]  # zeros interspersed
+        r = self._series(vals)
+        m = compute_all_metrics(
+            r, periods_per_year=365, cumulative_method="simple", day_basis="active",
+        ).metrics_json
+        # cumulative = arithmetic Σr.
+        assert m["cumulative_return"] == pytest.approx(0.04)
+        # CAGR = mean of the NONZERO (active) days × 365.
+        active_mean = (0.02 - 0.01 + 0.03) / 3.0
+        assert m["cagr"] == pytest.approx(active_mean * 365.0)
+        # maxDD on running-sum: cumsum [.02,.02,.01,.01,.04,.04], peak .02 then .04 →
+        # drawdown min = -0.01.
+        assert m["max_drawdown"] == pytest.approx(-0.01)
+        # calmar = cagr / |maxDD|, sharing the arithmetic-CAGR basis.
+        assert m["calmar"] == pytest.approx((active_mean * 365.0) / 0.01)
+
+    def test_f2_simple_maxdd_seeds_peak_at_inception_zero(self) -> None:
+        """F2: the simple-branch maxDD seeds the running high-water at 0.0 (the
+        from-INCEPTION baseline), so a deepest-at-day-1 track shows underwater, not
+        0.0. [-0.02, +0.01, +0.03] → cumsum [-.02,-.01,.02], peak-0 → underwater
+        [-.02,-.01,0] → maxDD = -0.02.
+
+        Mutation-honest: the pre-F2 peak-first seed (`cumsum.cummax()` without the
+        `.clip(lower=0.0)`) makes the peak track day-1's own -0.02, giving underwater
+        [0,0,0] → maxDD 0.0 → this reddens. The GEOMETRIC branch is INTENTIONALLY
+        unchanged (quantstats path) — pinned separately by the byte-identity test."""
+        r = self._series([-0.02, 0.01, 0.03])
+        simple = compute_all_metrics(
+            r, periods_per_year=365, cumulative_method="simple", day_basis="active",
+        ).metrics_json
+        assert simple["max_drawdown"] == pytest.approx(-0.02)
+        # The GEOMETRIC branch is INTENTIONALLY unchanged. It ALREADY reports the
+        # from-inception drawdown (quantstats seeds equity at 1.0 = the peak-0
+        # equivalent), so on this fixture it too is -0.02 — the F2 fix makes the
+        # simple branch AGREE with the geometric branch's already-correct baseline
+        # (not diverge from it). Its computation path is untouched (byte-identity
+        # test pins that).
+        geom = compute_all_metrics(r, cumulative_method="geometric").metrics_json
+        assert geom["max_drawdown"] == pytest.approx(-0.02)
+
+    def test_simple_path_interior_nan_fails_loud(self) -> None:
+        """Finding 3: the simple arithmetic cumulative has no chain-break machinery,
+        so an interior NaN would silently bridge disjoint segments. Fail loud
+        instead (the allocated path must gap-fill dense with 0.0 first)."""
+        vals = [0.01, -0.005, float("nan"), 0.02, 0.01]
+        idx = pd.date_range("2025-03-01", periods=len(vals), freq="D")
+        r = pd.Series(vals, index=idx, dtype=float)
+        with pytest.raises(ValueError, match="interior NaN"):
+            compute_all_metrics(r, cumulative_method="simple")
+        # The geometric path tolerates it (honours the break via segmentation).
+        compute_all_metrics(r, cumulative_method="geometric")  # no raise

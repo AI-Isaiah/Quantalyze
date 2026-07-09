@@ -107,6 +107,26 @@ def test_gap_fill_empty_is_noop():
     assert gap_fill_daily_returns(empty).empty
 
 
+def test_gap_fill_preserves_guard_nan_days():
+    """§6.2 FROZEN PIN (DQ-03): ``gap_fill_daily_returns`` fills MISSING calendar
+    labels with 0.0 (equity flat), but a pre-existing guard-NaN day STAYS NaN —
+    it must never be converted to 0.0 (that would silently un-break the chain
+    and let a broken day compound as a flat 0%). ``reindex(fill_value=0.0)`` only
+    fills newly-created labels, so today's behavior already complies; a refactor
+    to ``.fillna(0)`` would flip this test RED."""
+    idx = pd.DatetimeIndex(["2026-01-01", "2026-01-02", "2026-01-04"])
+    returns = pd.Series([0.01, float("nan"), 0.02], index=idx, dtype="float64")
+    filled = gap_fill_daily_returns(returns)
+    # The MISSING calendar day (01-03) is filled 0.0 ...
+    assert filled.loc["2026-01-03"] == 0.0
+    # ... but the EXISTING guard-NaN day (01-02) STAYS NaN.
+    assert pd.isna(filled.loc["2026-01-02"])
+    # Index is gap-free ascending across the full span.
+    assert list(filled.index) == list(
+        pd.date_range("2026-01-01", "2026-01-04", freq="D")
+    )
+
+
 # --- combine_realized_and_funding (the regression) ----------------------------
 
 def test_combine_funding_lifts_return_regression():
@@ -138,6 +158,138 @@ def test_combine_funding_lifts_return_regression():
 def test_combine_empty_returns_empty_series():
     returns, _ = combine_realized_and_funding([], [], account_balance=100_000.0)
     assert returns.empty
+
+
+# --- combine_native_ledger (80-03 T1: the native sibling) ---------------------
+# combine_native_ledger is the transforms-level counterpart of
+# combine_realized_and_funding: it calls the landed native core
+# (reconstruct_native_nav_and_twr, venue="deribit") and reuses
+# gap_fill_daily_returns so the (returns, meta) shape is IDENTICAL to the legacy
+# sibling — everything downstream (CSV route, compute_all_metrics, persistence,
+# factsheet) is untouched by the switch (§9.2).
+
+
+def _usd_native_ledger(
+    pnl_by_day: dict[int, float],
+    *,
+    flows: list[tuple[int, float]] | None = None,
+    ccy: str = "USDC",
+):
+    """A minimal all-USD-family NativeLedger (branch-1 only, marks empty, mark ≡
+    1.0). ``terminal_native_equity`` is set residual-clean (Σ pnl + Σ flow) so the
+    §5 inception gate reconciles to a ~0 pre-history balance (full_history=True)."""
+    from services.external_flows import ExternalFlow
+    from services.native_nav import NativeLedger
+
+    base = pd.Timestamp("2026-01-01")
+    ordered = sorted(pnl_by_day)
+    pnl = pd.Series(
+        [pnl_by_day[d] for d in ordered],
+        index=pd.DatetimeIndex([base + pd.Timedelta(days=d) for d in ordered]),
+        name="native_pnl",
+    )
+    flows = flows or []
+    native_flows = [
+        ExternalFlow(str((base + pd.Timedelta(days=d)).date()), u, ccy, u)
+        for (d, u) in flows
+    ]
+    terminal = sum(pnl_by_day.values()) + sum(u for (_d, u) in flows)
+    return NativeLedger(
+        native_pnl={ccy: pnl},
+        terminal_native_equity={ccy: terminal},
+        marks={},
+        native_flows=native_flows,
+        terminal_upnl_native={},
+        full_history=True,
+    )
+
+
+def test_combine_native_ledger_shape_parity():
+    """combine_native_ledger returns the SAME (pd.Series, dict) shape
+    combine_realized_and_funding returns — a gap-filled float Series on an
+    ascending daily DatetimeIndex and a plain dict meta carrying the status hint."""
+    from services.broker_dailies import combine_native_ledger
+
+    ledger = _usd_native_ledger({0: 100_000.0, 1: 50_000.0, 2: -30_000.0})
+    returns, meta = combine_native_ledger(ledger, frozenset())
+    assert isinstance(returns, pd.Series)
+    assert returns.dtype == "float64"
+    assert isinstance(meta, dict)
+    assert meta["computation_status_hint"] in ("complete", "complete_with_warnings")
+    # Same ascending, gap-free daily index the CSV route requires.
+    assert list(returns.index) == list(returns.index.sort_values())
+    assert returns.index.freq is None or returns.index.inferred_freq == "D"
+
+
+def test_combine_native_ledger_gap_fill_reused():
+    """gap_fill_daily_returns is reused: a ledger with an activity GAP (days 0,1,3
+    — no day 2) yields a returns Series REINDEXED to every calendar day, the day-2
+    hole filled 0.0. Mutation (a): skipping gap_fill drops day 2 and reddens."""
+    from services.broker_dailies import combine_native_ledger
+
+    ledger = _usd_native_ledger({0: 100_000.0, 1: 50_000.0, 3: -30_000.0})
+    returns, _ = combine_native_ledger(ledger, frozenset())
+    day2 = pd.Timestamp("2026-01-03")  # base 2026-01-01 + 2 days
+    assert day2 in returns.index, "gap_fill must reindex the missing calendar day"
+    assert returns.loc[day2] == 0.0
+
+
+def test_combine_native_ledger_empty_is_noop():
+    """An empty core return yields an empty Series (gap_fill no-op)."""
+    from services.broker_dailies import combine_native_ledger
+    from services.native_nav import NativeLedger
+
+    empty = NativeLedger(
+        native_pnl={},
+        terminal_native_equity={},
+        marks={},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    returns, meta = combine_native_ledger(empty, frozenset())
+    assert returns.empty
+    assert isinstance(meta, dict)
+
+
+def test_combine_native_ledger_threads_venue_deribit():
+    """The core is called with venue="deribit" (it rides only into exception
+    metadata, G2). Neutering the venue kwarg reddens this."""
+    from unittest.mock import MagicMock, patch
+
+    import services.broker_dailies as bd
+
+    ledger = _usd_native_ledger({0: 100_000.0, 1: 50_000.0})
+    spy = MagicMock(
+        return_value=(pd.Series(dtype="float64", name="returns"), {})
+    )
+    with patch.object(bd, "reconstruct_native_nav_and_twr", spy):
+        bd.combine_native_ledger(ledger, frozenset())
+    _args, kwargs = spy.call_args
+    assert kwargs["venue"] == "deribit"
+    assert kwargs["indexable_currencies"] == frozenset()
+
+
+def test_combine_native_ledger_propagates_typed_error():
+    """A core NavReconstructionError subclass propagates OUT unchanged (typed) —
+    NOT swallowed, NOT converted to a bare ValueError or an empty series. Mutation
+    (b): catching+zeroing the core error here reddens (the callsite dispositions
+    it, never combine_native_ledger)."""
+    from unittest.mock import MagicMock, patch
+
+    import services.broker_dailies as bd
+    from services.native_nav import UnmarkableCurrencyError
+
+    ledger = _usd_native_ledger({0: 100_000.0})
+    exc = UnmarkableCurrencyError(
+        currency="BUIDL", venue="deribit", reason="no_usd_index", missing_day_count=3
+    )
+    with patch.object(
+        bd, "reconstruct_native_nav_and_twr", MagicMock(side_effect=exc)
+    ):
+        with pytest.raises(UnmarkableCurrencyError) as ei:
+            bd.combine_native_ledger(ledger, frozenset())
+    assert ei.value is exc
 
 
 # --- fetch_okx_total_equity_usd (the OKX read fix) ----------------------------
@@ -223,6 +375,7 @@ from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
 
 from services.deribit_ingest import (  # noqa: E402
     CompletenessReport,
+    DeribitNativeAccountState,
     LedgerCompletenessError,
     LedgerTruncatedError,
 )
@@ -262,28 +415,37 @@ def _deribit_ctx() -> tuple[MagicMock, dict]:
     return ctx, capture
 
 
-def _deribit_ledger_records() -> list[dict]:
-    """A >=2-day funding-inclusive ledger daily_pnl record set (70-03 shape)."""
-    return txn_rows_to_daily_records(
-        [
-            {"type": "settlement", "currency": "USDC", "change": 120.0,
-             "instrument_name": "BTC_USDC-PERPETUAL", "timestamp": 1_714_521_600_000},
-            {"type": "settlement", "currency": "USDC", "change": -40.0,
-             "instrument_name": "BTC_USDC-PERPETUAL", "timestamp": 1_714_608_000_000},
-        ]
+def _stub_native_ledger() -> "NativeLedger":
+    """A trivial USD-native NativeLedger stub. combine_native_ledger is MOCKED in
+    these branch tests, so the ledger content is inert."""
+    from services.native_nav import NativeLedger
+
+    pnl = pd.Series(
+        [1.0], index=pd.DatetimeIndex(["2024-05-01"]), dtype="float64",
+        name="native_pnl",
+    )
+    return NativeLedger(
+        native_pnl={"USDC": pnl},
+        terminal_native_equity={"USDC": 1.0},
+        marks={},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=True,
     )
 
 
 def _deribit_patches(
     ctx: MagicMock,
     *,
-    records: list[dict],
     report: CompletenessReport | None = None,
     combine_spy: MagicMock | None = None,
     ledger_side_effect: object = None,
+    native_ledger: "NativeLedger | None" = None,
 ) -> list:
-    """Patch set for the deribit branch. fetch_all_trades RAISES so any test
-    that reaches DONE proves the deribit branch never touched it (D-08)."""
+    """Patch set for the v1.9 NATIVE deribit branch. fetch_all_trades RAISES so
+    any test that reaches DONE proves the deribit branch never touched it (D-08).
+    build_deribit_native_ledger returns ``(NativeLedger, CompletenessReport)`` and
+    combine_native_ledger is a spy whose (returns, meta) drives the CSV write."""
     two_day = pd.Series(
         [0.01, -0.02],
         index=pd.DatetimeIndex(["2024-05-01", "2024-05-02"]),
@@ -297,11 +459,10 @@ def _deribit_patches(
     else:
         ledger_mock = AsyncMock(
             return_value=(
-                records,
-                # Default report is consistent with `records`: a nonzero
-                # return-row count so the C2 equity-vs-activity floor does not
-                # trip when the fixture supplies realized records.
-                report or CompletenessReport(total_return_rows=len(records)),
+                native_ledger or _stub_native_ledger(),
+                # Default report: a nonzero return-row count so the C2
+                # equity-vs-activity floor does not trip.
+                report or CompletenessReport(total_return_rows=2),
             )
         )
     return [
@@ -317,17 +478,28 @@ def _deribit_patches(
         ),
         patch("services.job_worker.aclose_exchange", new=AsyncMock()),
         patch(
-            "services.deribit_ingest.fetch_deribit_ledger_daily_records",
+            "services.deribit_ingest.build_deribit_native_ledger",
             new=ledger_mock,
         ),
         patch(
-            # FLOW-04 (77-03) + MUST-2: the deribit branch reads the companion
-            # 4-tuple (equity + session-uPnL wedge + unreadable flag) from ONE
-            # get_account_summaries response.
-            "services.deribit_ingest.fetch_deribit_account_equity_and_upnl_usd",
-            new=AsyncMock(return_value=(100_000.0, False, 0.0, False)),
+            # 80-06 (HIGH-1+MEDIUM-1, D5 one-read): the deribit branch reads its
+            # anchor ONCE via fetch_deribit_native_account_state — native maps
+            # (core anchor) + collapsed USD equity/wedge (materiality + C2) from ONE
+            # get_account_summaries response — and threads it into the builder.
+            "services.deribit_ingest.fetch_deribit_native_account_state",
+            new=AsyncMock(
+                return_value=DeribitNativeAccountState(
+                    native_equity={"USDC": 1.0},
+                    native_upnl={},
+                    collapsed_equity_usd=100_000.0,
+                    collapsed_upnl_usd=0.0,
+                    balance_error=False,
+                    upnl_unreadable=False,
+                    native_options_value={},
+                )
+            ),
         ),
-        patch("services.broker_dailies.combine_realized_and_funding", new=combine),
+        patch("services.broker_dailies.combine_native_ledger", new=combine),
         patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
@@ -341,7 +513,7 @@ async def test_deribit_branch_sources_from_ledger():
     calling fetch_all_trades (patched to raise) — realized comes from the
     txn-log cash deltas (D-08)."""
     ctx, capture = _deribit_ctx()
-    patches, _ = _deribit_patches(ctx, records=_deribit_ledger_records())
+    patches, _ = _deribit_patches(ctx)
     with _apply(patches):
         result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
     assert result.outcome == DispatchOutcome.DONE
@@ -350,10 +522,14 @@ async def test_deribit_branch_sources_from_ledger():
 
 
 @pytest.mark.asyncio
-async def test_deribit_passes_empty_funding():
-    """The branch calls combine with funding_rows == [] (funding is inside the
-    ledger settlement sum — count-once). Wiring a funding stream turns this red."""
+async def test_deribit_routes_through_native_combine():
+    """v1.9 native switch: the deribit branch computes (returns, meta) via
+    combine_native_ledger(ledger, indexable) — NOT combine_realized_and_funding.
+    Funding is inside the native ledger's settlement cash deltas (count-once,
+    D-08); there is no realized/funding stream fetch. The ledger passed to combine
+    is the one build_deribit_native_ledger returned + the report's indexable set."""
     ctx, _ = _deribit_ctx()
+    ledger = _stub_native_ledger()
     spy = MagicMock(
         return_value=(
             pd.Series(
@@ -364,20 +540,21 @@ async def test_deribit_passes_empty_funding():
             {"used_heuristic_capital": False},
         )
     )
+    report = CompletenessReport(
+        total_return_rows=2, indexable_currencies=frozenset({"BTC"})
+    )
     patches, combine = _deribit_patches(
-        ctx, records=_deribit_ledger_records(), combine_spy=spy
+        ctx, report=report, combine_spy=spy, native_ledger=ledger
     )
     with _apply(patches):
         result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
     assert result.outcome == DispatchOutcome.DONE
-    # Second positional arg to combine_realized_and_funding is funding_rows.
-    _args, _kw = combine.call_args
-    funding_arg = _args[1] if len(_args) > 1 else _kw.get("funding_rows")
-    assert funding_arg == [], (
-        f"deribit funding must be EMPTY (inside the settlement sum); got {funding_arg!r}"
-    )
-    # The realized (first) arg is the ledger records, not fetch_all_trades output.
-    assert _args[0] == _deribit_ledger_records()
+    combine.assert_called_once()
+    args, kwargs = combine.call_args
+    passed_ledger = kwargs.get("ledger", args[0] if args else None)
+    passed_indexable = kwargs.get("indexable", args[1] if len(args) > 1 else None)
+    assert passed_ledger is ledger
+    assert passed_indexable == frozenset({"BTC"})
 
 
 @pytest.mark.asyncio
@@ -386,7 +563,7 @@ async def test_deribit_completeness_gate_fails_loud():
     continuation=null) → job FAILED and NO csv_daily_returns upsert (no partial
     track record). Neutering the gate call turns this red."""
     ctx, capture = _deribit_ctx()
-    patches, _ = _deribit_patches(ctx, records=_deribit_ledger_records())
+    patches, _ = _deribit_patches(ctx)
     with _apply(patches), patch(
         "services.deribit_ingest.assert_ledger_complete",
         new=MagicMock(side_effect=LedgerCompletenessError("main×BTC incomplete")),
@@ -403,7 +580,6 @@ async def test_deribit_ledger_truncation_fails_loud():
     ctx, capture = _deribit_ctx()
     patches, _ = _deribit_patches(
         ctx,
-        records=[],
         ledger_side_effect=LedgerTruncatedError("main×BTC truncated at continuation"),
     )
     with _apply(patches):
@@ -422,7 +598,6 @@ async def test_deribit_currency_enumeration_fails_loud():
     ctx, capture = _deribit_ctx()
     patches, _ = _deribit_patches(
         ctx,
-        records=[],
         ledger_side_effect=CurrencyEnumerationError("get_currencies unreadable"),
     )
     with _apply(patches):
@@ -442,7 +617,6 @@ async def test_deribit_scope_auth_error_is_clean_permanent_failed():
     ctx, capture = _deribit_ctx()
     patches, _ = _deribit_patches(
         ctx,
-        records=[],
         ledger_side_effect=ScopeAuthError("2 funded subaccounts — use per-sub keys"),
     )
     with _apply(patches):
@@ -460,7 +634,6 @@ async def test_deribit_material_equity_zero_rows_fails_loud():
     ctx, capture = _deribit_ctx()
     patches, _ = _deribit_patches(
         ctx,
-        records=[],  # zero realized records
         report=CompletenessReport(total_return_rows=0),  # and zero return rows
     )
     with _apply(patches):
@@ -485,7 +658,6 @@ async def test_deribit_strategy_mode_ledger_incomplete_stamps_failed():
     ctx, capture = _deribit_ctx()
     patches, _ = _deribit_patches(
         ctx,
-        records=[],
         ledger_side_effect=LedgerCompletenessError("main×BTC incomplete"),
     )
     with _apply(patches), patch(
@@ -530,7 +702,6 @@ async def test_deribit_ledger_valueerror_is_permanent_and_stamps_failed():
     ctx, capture = _deribit_ctx()
     patches, _ = _deribit_patches(
         ctx,
-        records=[],
         # A TYPED structural valuation failure (subclass of ValueError) — the
         # permanent-and-stamp path is keyed on the TYPE, not on ValueError.
         ledger_side_effect=LedgerValuationError(
@@ -593,7 +764,6 @@ async def test_deribit_network_valueerror_is_not_permanent_and_no_stamp(
     ctx, capture = _deribit_ctx()
     patches, _ = _deribit_patches(
         ctx,
-        records=[],
         ledger_side_effect=network_exc,
     )
     with _apply(patches), patch(
@@ -626,7 +796,6 @@ async def test_deribit_material_equity_zero_rows_strategy_mode_stamps_failed():
     ctx, capture = _deribit_ctx()
     patches, _ = _deribit_patches(
         ctx,
-        records=[],  # zero realized records
         report=CompletenessReport(total_return_rows=0),  # zero return rows
     )
     with _apply(patches), patch(

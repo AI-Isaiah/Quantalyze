@@ -2607,6 +2607,15 @@ async def test_nav_error_permanent_stamps_failed_and_raises_4xx():
         f"(not leave the wizard on an infinite 'computing' spinner); "
         f"upserts: {sa_upsert_calls!r}"
     )
+    # SI-02 (MEDIUM-2, v1.9): the terminal 'failed' stamp MUST clear the
+    # runner-owned computation_warned marker so the status bridge branches
+    # (a)/(c) cannot resurrect a stale complete_with_warnings over this genuine
+    # failure. Neuter: drop `"computation_warned": False` from the source stamp
+    # → the marker survives TRUE → resurrection → this assert reddens.
+    assert failed[-1].get("computation_warned") is False, (
+        "NavReconstructionError 'failed' stamp must set computation_warned=False "
+        "(SI-02 stale-marker resurrection guard)"
+    )
 
 
 @pytest.mark.asyncio
@@ -2646,6 +2655,17 @@ async def test_nav_error_permanent_catch_is_narrow_transient_valueerror_still_5x
         "A generic ValueError must fall through to the generic 500 handler "
         "(stays retryable); the NavReconstructionError catch must not over-catch; "
         f"got {ei.value.status_code}"
+    )
+    # SI-02 (MEDIUM-2, v1.9): even the generic catch-all 'failed' stamp must clear
+    # the runner-owned computation_warned marker so the status bridge branches
+    # (a)/(c) cannot resurrect a stale complete_with_warnings over the failure.
+    generic_failed = [
+        u for u in sa_upsert_calls if u.get("computation_status") == "failed"
+    ]
+    assert generic_failed, "generic exception must stamp a terminal 'failed'"
+    assert generic_failed[-1].get("computation_warned") is False, (
+        "generic-exception 'failed' stamp must set computation_warned=False "
+        "(SI-02 stale-marker resurrection guard)"
     )
 
 
@@ -5245,6 +5265,12 @@ class TestLoadPositionTimeSeriesNavSafety:
         assert "position_snapshots" in error_msg, (
             f"Expected truncation hint in computation_error; got: {error_msg!r}"
         )
+        # SI-02 (MEDIUM-2): the truncation 'failed' stamp clears the marker so
+        # the status bridge cannot resurrect a stale complete_with_warnings.
+        assert last_failure.get("computation_warned") is False, (
+            "PaginatedSelectTruncated 'failed' stamp must set "
+            "computation_warned=False (SI-02 stale-marker resurrection guard)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -5889,3 +5915,107 @@ async def test_csv_run_stays_complete_without_unrealized_pnl_flag():
         "no material wedge → status must stay exact-string 'complete' (SC-4)"
     )
     assert not (final.get("data_quality_flags") or {}).get("unrealized_pnl_in_anchor")
+
+
+# ===========================================================================
+# T2 (wiring-seam) — the DARK trades path (run_strategy_analytics) picks the
+# annualization clock by asset class: √365 when the strategy is api_key_id-bearing
+# (crypto broker), 252 otherwise (demo / failed-resolution). No test proved this
+# branch; reverting it ships the wrong Sharpe clock green.
+# ===========================================================================
+
+
+def _trades_runner_supabase(*, api_key_id) -> MagicMock:
+    """Minimal supabase mock for run_strategy_analytics: a strategies row with the
+    given api_key_id, an inert strategy_analytics, a trades table serving one
+    daily_pnl row, and an api_keys balance read."""
+    daily_pnl_rows = [
+        {"symbol": "DERIBIT", "side": "buy", "price": 100.0, "quantity": 1,
+         "order_type": "daily_pnl", "timestamp": f"2024-01-0{d}T00:00:00+00:00",
+         "is_fill": False}
+        for d in range(1, 5)  # ≥2 trading days (insufficient-history floor)
+    ]
+    sb = MagicMock()
+
+    def _table(name):
+        t = MagicMock()
+        if name == "strategies":
+            chain = MagicMock()
+            chain.execute.return_value = MagicMock(
+                data={"id": "strat-test", "user_id": "user-1", "api_key_id": api_key_id}
+            )
+            eq = MagicMock()
+            eq.single = MagicMock(return_value=chain)
+            eq.execute = chain.execute
+            t.select.return_value.eq.return_value = eq
+        elif name == "strategy_analytics":
+            t.upsert.return_value = MagicMock(execute=MagicMock(return_value=MagicMock(data=[])))
+            t.select.return_value.eq.return_value.maybe_single.return_value.execute = (
+                MagicMock(return_value=MagicMock(data={"data_quality_flags": {}}))
+            )
+        elif name == "trades":
+            eq_strat = MagicMock()
+            eq_strat.neq = lambda *_a, **_k: MagicMock(
+                order=MagicMock(return_value=MagicMock(
+                    execute=MagicMock(return_value=MagicMock(data=daily_pnl_rows))
+                ))
+            )
+            eq_strat.eq = lambda *_a, **_k: MagicMock(
+                execute=MagicMock(return_value=MagicMock(data=[]))
+            )
+            t.select.return_value.eq.return_value = eq_strat
+        elif name == "api_keys":
+            single = MagicMock()
+            single.execute.return_value = MagicMock(data={"account_balance_usdt": 10000})
+            t.select.return_value.eq.return_value.single.return_value = single
+        return t
+
+    sb.table = _table
+    sb.rpc.return_value = MagicMock(execute=MagicMock())
+    return sb
+
+
+@pytest.mark.parametrize(
+    "api_key_id,expected_periods", [("key-1", 365), (None, 252)]
+)
+@pytest.mark.asyncio
+async def test_dark_trades_path_periods_per_year_by_asset_class(
+    api_key_id, expected_periods
+) -> None:
+    """T2: run_strategy_analytics calls compute_all_metrics with periods_per_year=365
+    for an api_key_id-bearing (crypto) strategy, 252 otherwise. Reverting the branch
+    to a bare compute_all_metrics(returns, benchmark) reddens (default 252)."""
+    from services.analytics_runner import run_strategy_analytics
+
+    sb = _trades_runner_supabase(api_key_id=api_key_id)
+    spy = MagicMock(return_value=MetricsResult(
+        metrics_json={"sparkline_returns": [], "sparkline_drawdown": [],
+                      "metrics_json": {}, "returns_series": [], "drawdown_series": [],
+                      "monthly_returns": {}, "rolling_metrics": {}, "return_quantiles": {}},
+        sibling_kinds={},
+    ))
+
+    async def _db_execute(fn):
+        return await asyncio.to_thread(fn)
+
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.db_execute", side_effect=_db_execute), \
+         patch("services.analytics_runner.trades_to_daily_returns_with_status",
+               return_value=(pd.Series(np.random.normal(0.001, 0.01, 10), index=dates),
+                             _DEFAULT_RETURNS_META)), \
+         patch("services.analytics_runner.compute_all_metrics", spy), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.position_reconstruction.reconstruct_positions",
+               new=AsyncMock(return_value={})), \
+         patch("services.position_reconstruction.compute_exposure_metrics",
+               new=AsyncMock(return_value={})):
+        await run_strategy_analytics("strat-test")
+
+    assert spy.call_count == 1
+    assert spy.call_args.kwargs["periods_per_year"] == expected_periods
+    # The dark path stays on the geometric/calendar DEFAULTS (Finding 5b): it must
+    # NOT pass cumulative_method/day_basis (documented break-glass degradation).
+    assert "cumulative_method" not in spy.call_args.kwargs
+    assert "day_basis" not in spy.call_args.kwargs

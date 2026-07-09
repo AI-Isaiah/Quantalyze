@@ -29,6 +29,7 @@ from scripts.deribit_acceptance import (
     check_date_coverage,
     check_factsheet_status,
     check_inverse_signs,
+    check_perp_only_eligibility,
     summarize_fills,
 )
 
@@ -282,3 +283,92 @@ def test_live_driver_pure_surface_imports() -> None:
     assert spec.window_start == date(2025, 8, 1)
     assert spec.window_end == date(2025, 9, 30)
     assert spec.label == "LTP072"
+
+
+# ---------------------------------------------------------------------------
+# check_perp_only_eligibility — Phase 82 SC-4 byte-identity control gate.
+# ---------------------------------------------------------------------------
+
+
+def test_perp_only_eligibility_zero_option_zero_summary_passes() -> None:
+    """A pure perp/future ledger (no option trade/delivery, no summary) is a valid
+    byte-identity control key → passes 0/0."""
+    rows = [
+        {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.01},
+        {"type": "trade", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.0002},
+        {"type": "delivery", "instrument_name": "BTC-27MAR26", "currency": "BTC",
+         "change": 0.02},
+    ]
+    chk = check_perp_only_eligibility(rows)
+    assert chk.passed
+    assert "0 option" in chk.detail
+
+
+def test_perp_only_eligibility_option_trade_fails_and_names_count() -> None:
+    """A single option trade row disqualifies the key as a byte-identity control
+    (its native P&L legitimately moves post-fix) → fails, naming the counts."""
+    rows = [
+        {"type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+         "change": -0.01},
+        {"type": "trade", "instrument_name": "BTC-14JUL25-60000-C", "currency": "BTC",
+         "change": 2.0},
+    ]
+    chk = check_perp_only_eligibility(rows)
+    assert not chk.passed
+    assert "1 option trade/delivery row(s)" in chk.detail
+
+
+def test_perp_only_eligibility_summary_row_fails() -> None:
+    """An options_settlement_summary row also disqualifies (the account traded
+    options at some point) → fails."""
+    rows = [
+        {"type": "options_settlement_summary", "currency": "BTC", "change": 0.0,
+         "realized_pl": 0.0, "unrealized_pl": 0.0},
+    ]
+    chk = check_perp_only_eligibility(rows)
+    assert not chk.passed
+    assert "options_settlement_summary row(s)" in chk.detail
+
+
+# ---------------------------------------------------------------------------
+# Phase 83 C2 — the fresh daily_reconcile basis is the FULL production ledger
+# (cash + daily-MTM), i.e. build_deribit_native_ledger().native_pnl — EXACTLY
+# what job_worker persists to csv_daily_returns. This SUPERSEDES the cash-only
+# basis: Phase 83 redistributes option session P&L across held days via the ΔMTM
+# channel, merged into native_pnl by the adapter (NOT by txn_rows_to_native_daily).
+# An interior held day where the option book moved (ΔMTM) but no cash row landed
+# is a real persisted nonzero day — the cash-only basis omitted it, "inject"-
+# failing a CORRECT held-options ledger (the Phase-83 C2 defect).
+# ---------------------------------------------------------------------------
+
+
+def test_ledger_nonzero_dates_gates_on_merged_mtm_basis() -> None:
+    import pandas as pd
+
+    from scripts.deribit_acceptance import _ledger_nonzero_dates
+
+    class _Ledger:
+        def __init__(self, native_pnl: dict[str, pd.Series]) -> None:
+            self.native_pnl = native_pnl
+
+    # Merged native_pnl for a held-options account: 07-12 carries ONLY a ΔMTM move
+    # (the option book marked up — NO cash row that day, so the cash-only basis
+    # would DROP it), 07-13 is genuinely flat, 07-14 an expiry-day cash change.
+    ledger = _Ledger(
+        {
+            "BTC": pd.Series(
+                [0.03, 0.0, -0.01],
+                index=pd.to_datetime(["2025-07-12", "2025-07-13", "2025-07-14"]),
+            )
+        }
+    )
+    days = _ledger_nonzero_dates(ledger)
+    # C2 regression: the ΔMTM-only held day MUST be gated (production persists it).
+    assert date(2025, 7, 12) in days
+    # The expiry-day cash change also counts.
+    assert date(2025, 7, 14) in days
+    # A genuinely flat day is excluded (advisory zero-day, never gated).
+    assert date(2025, 7, 13) not in days
+    assert days == {date(2025, 7, 12), date(2025, 7, 14)}

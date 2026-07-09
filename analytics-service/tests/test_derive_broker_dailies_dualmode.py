@@ -58,7 +58,7 @@ def _build_ctx(*, key_row: dict, strategy_row: dict | None) -> tuple[MagicMock, 
       - capture['upserts']: list of (table_name, payload, on_conflict)
       - capture['rpc_calls']: list of (rpc_name, payload)
     """
-    capture: dict = {"upserts": [], "rpc_calls": []}
+    capture: dict = {"upserts": [], "rpc_calls": [], "deletes": [], "ops": []}
 
     ctx = MagicMock()
     ctx.exchange = AsyncMock()
@@ -71,11 +71,42 @@ def _build_ctx(*, key_row: dict, strategy_row: dict | None) -> tuple[MagicMock, 
 
         def _upsert(payload: object, **kw: object) -> MagicMock:
             capture["upserts"].append((name, payload, kw.get("on_conflict")))
+            capture["ops"].append(("upsert", name))
             stub = MagicMock()
             stub.execute.return_value = MagicMock(data=1)
             return stub
 
         tbl.upsert.side_effect = _upsert
+
+        def _delete(**kw: object) -> MagicMock:
+            # Record a chainable delete so the axis-reconciliation span DELETE
+            # (bounded gte/lte on `date`, scoped by strategy_id/api_key_id) is
+            # falsifiable — a neuter that keeps the upsert but drops the delete
+            # leaves capture["deletes"] empty.
+            record: dict = {"table": name, "filters": {}}
+            capture["deletes"].append(record)
+            capture["ops"].append(("delete", name))
+            chain = MagicMock()
+
+            def _eq(col: str, val: object) -> MagicMock:
+                record["filters"][f"eq:{col}"] = val
+                return chain
+
+            def _gte(col: str, val: object) -> MagicMock:
+                record["filters"][f"gte:{col}"] = val
+                return chain
+
+            def _lte(col: str, val: object) -> MagicMock:
+                record["filters"][f"lte:{col}"] = val
+                return chain
+
+            chain.eq.side_effect = _eq
+            chain.gte.side_effect = _gte
+            chain.lte.side_effect = _lte
+            chain.execute.return_value = MagicMock(data=[], count=0)
+            return chain
+
+        tbl.delete.side_effect = _delete
         return tbl
 
     ctx.supabase.table.side_effect = _table
@@ -285,6 +316,14 @@ class TestStrategyModeNonRegression:
         _name, payload, _oc = sa_upserts[0]
         assert payload["computation_status"] == "failed"
         assert payload["data_quality_flags"] == {"csv_source": True}
+        # SI-02 (MEDIUM-2, v1.9): the terminal 'failed' stamp clears the
+        # runner-owned computation_warned marker so the status bridge cannot
+        # resurrect a stale complete_with_warnings over the failure. Neuter:
+        # drop `"computation_warned": False` from the source stamp → reddens.
+        assert payload.get("computation_warned") is False, (
+            "derive <2-day 'failed' stamp must set computation_warned=False "
+            "(SI-02 stale-marker resurrection guard)"
+        )
 
 
 def _patches_with_combine(
@@ -368,6 +407,13 @@ class TestNavReconstructionErrorPermanentCatch:
         _name, payload, _oc = sa_upserts[0]
         assert payload["computation_status"] == "failed"
         assert payload["data_quality_flags"] == {"csv_source": True}
+        # SI-02 (MEDIUM-2): the terminal NAV-fault 'failed' stamp clears the
+        # runner-owned marker so the status bridge cannot resurrect a stale
+        # complete_with_warnings over the failure.
+        assert payload.get("computation_warned") is False, (
+            "broker NAV-fault 'failed' stamp must set computation_warned=False "
+            "(SI-02 stale-marker resurrection guard)"
+        )
         # scrub_freeform_string redacts the denylisted `secret=` value.
         assert "hunter2" not in payload["computation_error"], (
             f"stamped computation_error must be scrubbed; got "
@@ -727,3 +773,157 @@ class TestLtp068PureFlowNoTradeDayUnioned:
         assert "negative_nav_guard" not in meta
         assert "flow_dominated_guard" not in meta
         assert "dust_nav_guard" not in meta
+
+
+class TestDerivePersistReconcilesAxis:
+    """MEDIUM-HIGH (v1.9) — the derive persist must be AUTHORITATIVE for the
+    strategy's series WITHIN its reconstructed span, not upsert-only.
+
+    An upsert-only persist never deletes: a day the CURRENT derive REFUSES
+    (NaN -> skipped by the 74-04 policy) but a PRIOR derive wrote keeps its
+    stale row. At load (run_csv_strategy_analytics) that day looks "present",
+    the MEDIUM-1 NaN reinstatement does NOT fire, and cumulative_twr_segmented
+    COMPOUNDS the stale return across a day this reconstruction refused -> the
+    headline is BRIDGED across the stale value instead of suffix-only. At the
+    v1.9 native cutover the native core's per-day DQ guards differ from the
+    legacy USD rows that populated the table, so recomputed track records would
+    silently mix stale legacy returns into refused days.
+
+    The fix reconciles the axis: DELETE the strategy's csv_daily_returns rows
+    inside the derive's authoritative span [returns.index.min, returns.index.max]
+    (bounded gte/lte on `date`, scoped by strategy_id/api_key_id), then re-insert
+    the fresh payload. A refused interior/leading day becomes honestly ABSENT.
+
+    SPAN bound (never delete legitimate out-of-scope history): the delete is a
+    RANGED gte/lte on the dense reconstructed calendar — a row OLDER than
+    returns.index.min() (written by an earlier, wider-window retention derive)
+    is strictly < span_start and CANNOT be reached. For a full_history Deribit
+    derive [min,max] IS the whole series; for a retention-windowed ccxt derive it
+    is only the reconstructed window.
+
+    Neuter: keep the upsert-only persist (drop the span DELETE) -> capture
+    ["deletes"] has no csv_daily_returns entry -> every assertion here reddens.
+    """
+
+    @staticmethod
+    def _refused_interior_returns() -> pd.Series:
+        """A 3-day dense series with a REFUSED interior day (D = 2024-05-02, NaN).
+        The fresh payload keeps 05-01 and 05-03; the derive REFUSES 05-02, so a
+        stale prior 05-02 row must be reconciled away (deleted, not survive)."""
+        idx = pd.DatetimeIndex(["2024-05-01", "2024-05-02", "2024-05-03"])
+        return pd.Series([0.01, np.nan, -0.02], index=idx, dtype="float64")
+
+    @pytest.mark.asyncio
+    async def test_strategy_mode_span_delete_reconciles_refused_day(self) -> None:
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-r", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-r", "user_id": "user-1"},
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-r"}
+        combine = MagicMock(
+            return_value=(
+                self._refused_interior_returns(),
+                {"used_heuristic_capital": False, "negative_nav_guard": True},
+            )
+        )
+        patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+
+        # Exactly one authoritative span DELETE on csv_daily_returns.
+        csv_deletes = [d for d in capture["deletes"] if d["table"] == "csv_daily_returns"]
+        assert len(csv_deletes) == 1, (
+            f"strategy derive must issue ONE csv_daily_returns span delete; "
+            f"got {capture['deletes']!r}"
+        )
+        filters = csv_deletes[0]["filters"]
+        # Scoped to the strategy axis (never a cross-strategy wipe).
+        assert filters.get("eq:strategy_id") == "strat-r"
+        assert "eq:api_key_id" not in filters
+        # Bounded to the dense reconstructed span [min, max].
+        span_start = filters.get("gte:date")
+        span_end = filters.get("lte:date")
+        assert span_start == "2024-05-01"
+        assert span_end == "2024-05-03"
+        # The REFUSED day D falls INSIDE the span -> its stale row is reconciled
+        # away (deleted, then NOT re-inserted since the payload omits it).
+        assert span_start <= "2024-05-02" <= span_end
+
+        # Out-of-scope history (a day BEFORE span_start) is unreachable by the
+        # ranged delete -> legitimate older rows from a wider-window derive survive.
+        assert "2024-04-30" < span_start
+
+        # The re-insert (upsert) restores ONLY the retained finite days; the
+        # refused day D is honestly ABSENT (not bridged across a stale value).
+        csv_upserts = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
+        assert len(csv_upserts) == 1
+        _name, payload, _oc = csv_upserts[0]
+        upsert_dates = sorted(row["date"] for row in payload)
+        assert upsert_dates == ["2024-05-01", "2024-05-03"], (
+            f"refused day D must not be re-inserted; got {upsert_dates!r}"
+        )
+
+        # Authoritative order: the span DELETE precedes the re-insert upsert so a
+        # crash can only leave the span EMPTY (self-healing on retry), never a
+        # half-stale mix.
+        ops = [o for o in capture["ops"] if o[1] == "csv_daily_returns"]
+        assert ops[0][0] == "delete", (
+            f"span delete must precede the re-insert upsert; got {ops!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_strategy_mode_clean_series_deletes_and_reinserts_all(self) -> None:
+        """A day the fresh derive LEGITIMATELY still has is NOT lost: the span
+        delete + re-insert nets to the full clean payload present (no refused
+        days -> nothing dropped)."""
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-c", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-c", "user_id": "user-1"},
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-c"}
+        patches = _patches(ctx, key_mode=False, returns=_two_day_returns())
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        csv_deletes = [d for d in capture["deletes"] if d["table"] == "csv_daily_returns"]
+        assert len(csv_deletes) == 1
+        filters = csv_deletes[0]["filters"]
+        assert filters.get("gte:date") == "2024-05-01"
+        assert filters.get("lte:date") == "2024-05-02"
+        # Both clean days are re-inserted -> retained history is preserved.
+        csv_upserts = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
+        _name, payload, _oc = csv_upserts[0]
+        assert sorted(row["date"] for row in payload) == ["2024-05-01", "2024-05-02"]
+
+    @pytest.mark.asyncio
+    async def test_key_mode_span_delete_scoped_to_api_key_axis(self) -> None:
+        """Key-mode reconciles on the per-key axis: the span delete is scoped by
+        api_key_id (never strategy_id), mirroring the upsert conflict arbiter."""
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-rk", "exchange": "binance", "user_id": "alloc-1"},
+            strategy_row=None,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "api_key_id": "key-rk"}
+        combine = MagicMock(
+            return_value=(
+                self._refused_interior_returns(),
+                {"used_heuristic_capital": False, "negative_nav_guard": True},
+            )
+        )
+        patches = _patches_with_combine(ctx, key_mode=True, combine_mock=combine)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        csv_deletes = [d for d in capture["deletes"] if d["table"] == "csv_daily_returns"]
+        assert len(csv_deletes) == 1
+        filters = csv_deletes[0]["filters"]
+        assert filters.get("eq:api_key_id") == "key-rk", (
+            f"key-mode span delete must scope on api_key_id; got {filters!r}"
+        )
+        assert "eq:strategy_id" not in filters
+        assert filters.get("gte:date") == "2024-05-01"
+        assert filters.get("lte:date") == "2024-05-03"

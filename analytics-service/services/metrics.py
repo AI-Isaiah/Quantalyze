@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
 from .transforms import downsample_series, cap_data_points
+from .nav_twr import cumulative_twr_segmented, _last_interior_break_suffix
 
 logger = logging.getLogger("quantalyze.analytics.metrics")
 
@@ -363,8 +364,44 @@ def compute_all_metrics(
     returns: pd.Series,
     benchmark_returns: pd.Series | None = None,
     periods_per_year: int = DEFAULT_PERIODS_PER_YEAR,
+    cumulative_method: str = "geometric",
+    day_basis: str = "calendar",
 ) -> MetricsResult:  # H-0729: in-module class, no forward-ref needed.
     """Compute all analytics from a daily returns series.
+
+    Fix A (v1.8) — three metrics CONVENTIONS, each defaulting to the pre-existing
+    platform behaviour so every non-overriding caller is BYTE-IDENTICAL:
+
+      * ``periods_per_year`` — the annualization clock (crypto → 365, non-crypto →
+        252). Threads every existing annualization site (unchanged mechanism).
+      * ``cumulative_method`` — ``"geometric"`` (default, compounding cumprod: the
+        headline ``cumulative_return`` compounds the segmented suffix, equity =
+        ``Π(1+r)``, drawdown off the geometric underwater curve) vs ``"simple"``
+        (arithmetic Σ of daily %, the capital-RESET convention an allocated-capital
+        mandate reports on: ``cumulative_return = Σr``, equity = ``1 + Σr``, drawdown
+        off the running-SUM series, CAGR/Calmar arithmetic-annualized). The whole
+        cumulative/annualized/drawdown triple moves COHERENTLY.
+      * ``day_basis`` — ``"calendar"`` (default) vs ``"active"`` (nonzero-P&L days
+        only) for the HEADLINE annualized risk (volatility / Sharpe / Sortino). On
+        the "active" basis the ROLLING Sharpe (30/90/365d) ALSO rides the nonzero-day
+        series (Finding 2) so a full-window rolling value converges to the headline
+        instead of being diluted by 0.0 days; wins/losses/best-worst-day stay
+        zero-day-invariant (a 0.0 day is neither a win nor a loss, and never the
+        max/min). NOTE: under ``cumulative_method="simple"`` the day_basis ALSO shifts
+        CAGR (and hence Calmar): the arithmetic annualization is ``mean(stat_returns)
+        × periods_per_year``, so the "active" basis annualizes on the nonzero-day mean
+        while "calendar" annualizes on the zero-diluted mean. (Under geometric, CAGR
+        is a calendar-span compound independent of day_basis.) On "calendar" the
+        active series IS the full series so everything is byte-identical. Config-driven
+        (Zavara → simple + active + 365) via ``run_csv_strategy_analytics``; absent ⇒
+        geometric + calendar (byte-identical).
+
+      Fix A / Finding 2 (single convention): the period panels (monthly grid,
+      MTD/YTD, 3M/6M) follow ``cumulative_method`` — arithmetic Σr per bucket on
+      "simple", geometric compound otherwise — so a "simple" factsheet's monthly
+      cells SUM to the arithmetic ``cumulative_return`` headline instead of mixing
+      conventions. best_month/worst_month/var_1m_99 derive from the monthly grid and
+      inherit the convention. All byte-identical on the default geometric path.
 
     Phase 12: returns a `MetricsResult` dataclass (NOT a bare dict) split per D-01/D-02:
 
@@ -424,6 +461,41 @@ def compute_all_metrics(
             "ingestion boundary."
         )
 
+    # Fix A: fail loud on an unknown convention rather than silently defaulting —
+    # a mislabeled factsheet convention is a money bug (Rule 12).
+    if cumulative_method not in ("geometric", "simple"):
+        raise ValueError(
+            f"compute_all_metrics: cumulative_method {cumulative_method!r} is not "
+            "one of ('geometric', 'simple')"
+        )
+    if day_basis not in ("calendar", "active"):
+        raise ValueError(
+            f"compute_all_metrics: day_basis {day_basis!r} is not one of "
+            "('calendar', 'active')"
+        )
+    # The HEADLINE annualized-risk series (volatility / Sharpe / Sortino). On the
+    # "active" basis it is the nonzero-P&L days only (a 0.0-return no-activity day
+    # would otherwise dilute mean & std); on "calendar" it IS the full series, so
+    # every existing caller is byte-identical. NaN gap days are dropped for the
+    # active view (they are neither activity nor a real 0).
+    stat_returns = (
+        returns[returns.notna() & (returns != 0.0)]
+        if day_basis == "active"
+        else returns
+    )
+
+    # Fix A / Finding 2 — SINGLE-CONVENTION bucket accumulator for the period
+    # panels (monthly grid, MTD/YTD, 3M/6M). On the "simple" (arithmetic) method a
+    # bucket return is Σr (the capital-reset convention the headline
+    # cumulative_return uses); on "geometric" it is the compounding Π(1+r)−1
+    # EXACTLY as before (byte-identical for every default caller). Mixing an
+    # arithmetic headline with geometric panels would make the monthly cells not sum
+    # to the headline — the bug this closes.
+    def _bucket_return(s: "pd.Series") -> Any:
+        if cumulative_method == "simple":
+            return s.sum()
+        return s.add(1).prod() - 1
+
     # Red-team F3: NaN in `returns` propagates through `cumprod` so one upstream
     # gap day silently truncates the equity curve at the gap (post-NaN rows
     # drop out at serialization). For chart-feeding paths, treat NaN as a
@@ -460,59 +532,137 @@ def compute_all_metrics(
     returns_for_chart = returns.fillna(0).clip(lower=_LOG_RETURN_FLOOR)
 
     # Core metrics (safe_float handles NaN/Inf from quantstats)
-    # NEW-C02-05: cumulative_return scalar uses raw returns (NaN-dropped, same
-    # as cagr/sharpe/sortino) so all headline KPIs share one NaN policy.
-    # returns_for_chart (fillna(0)) is chart-only — it bridges gap days to keep
-    # the equity curve continuous; the ranking scalar must not use it.
-    cumulative = (1 + returns_for_chart).cumprod()
-    total_return = _safe_float((1 + returns.dropna()).prod() - 1)
-    # TWR-05 (founder decision 2026-07-05): CAGR annualizes on the CALENDAR
-    # clock — years = true elapsed-calendar-days / 365 from the DatetimeIndex
-    # span — NOT on `periods_per_year` (252). A 24/7 crypto series posts a
-    # return every calendar day, so quantstats' `years = len(returns)/periods`
-    # at 252 mis-reads a ~365-row record as ~1.45 years and OVER-annualizes the
-    # return; a sparse CSV/MT5 series (rows < calendar-days) has the mirror bug.
-    # The date-span basis is frequency-proof for BOTH dense crypto and sparse
-    # CSV/MT5. `max(elapsed, 1)` guards a single-day/degenerate window against a
-    # divide-by-zero. NOTE: the ONLY upstream floor is `len(returns) < 2`; a
-    # genuine 2-day window (elapsed_days==1) still annualizes with exponent 365,
-    # which explodes CAGR for a days-old account and is NOT yet flagged. That
-    # short-window over-annualization is a pre-existing class (the old len/252
-    # basis had the same shape) tracked for a DQ short-window flag behind the
-    # Phase 78 parity gate — deliberately not point-fixed here because a
-    # CAGR-status change is factsheet-wide blast radius (roadmap Pitfall #12).
-    # This reuses `total_return` (== comp(returns)) so the geometric base is
-    # exactly the value the module already computed.
-    _cagr_index = returns.dropna().index
-    if total_return is None or len(_cagr_index) < 2:
-        cagr = _safe_float(float("nan"))
-    else:
-        _elapsed_days = max((_cagr_index[-1] - _cagr_index[0]).days, 1)
-        cagr = _safe_float(
-            (1.0 + total_return) ** (_CALENDAR_DAYS_PER_YEAR / _elapsed_days) - 1.0
+    # NEW-C02-05 / DQ-03 (§6.2): the headline cumulative_return NO LONGER bridges
+    # across an INTERIOR chain break. It compounds ONLY the maximal contiguous
+    # suffix after the last break via nav_twr.cumulative_twr_segmented (the ONE
+    # boundary source; suffix-honest, bit-identical Pi(1+r)-1 on the clean path).
+    # returns_for_chart (fillna(0)) stays chart-only — it bridges gap days to
+    # keep the equity curve continuous; the ranking scalar must not use it.
+    if cumulative_method == "simple":
+        # Fix A — SIMPLE / capital-reset convention (allocated-capital mandate):
+        # the whole cumulative/annualized/drawdown triple rides the arithmetic
+        # running-SUM series, NOT a geometric compound, so they stay internally
+        # coherent (a geometric drawdown on an arithmetic cumulative would be a
+        # mixed-basis fabrication). Capital is re-scheduled across the mandate, so
+        # daily % are summed (Σr), never chain-linked.
+        _cumsum = returns_for_chart.cumsum()
+        # Equity-like chart curve: 1 + Σr (starts at ~1, same shape the frontend
+        # equity chart expects), continuity via returns_for_chart (fillna(0)).
+        cumulative = 1.0 + _cumsum
+        # Headline cumulative_return = Σ of the ACTUAL daily returns (unclamped —
+        # the chart clamp is chart-only). Finding 3: the geometric branch honours
+        # interior NaN chain-breaks via cumulative_twr_segmented; the simple sum has
+        # no such machinery, so a bare `fillna(0).sum()` would SILENTLY bridge across
+        # a real gap (summing two disjoint segments as one track). The allocated path
+        # gap-fills dense with 0.0 (never NaN) by construction, so a NaN here is a
+        # contract violation upstream — FAIL LOUD rather than ship a silently-bridged
+        # cumulative (Rule 12).
+        _n_nan_simple = int(returns.isna().sum())
+        if _n_nan_simple > 0:
+            raise ValueError(
+                "compute_all_metrics: cumulative_method='simple' received a series "
+                f"with {_n_nan_simple} interior NaN day(s); the arithmetic Σr cannot "
+                "honour a chain-break and would silently bridge disjoint segments. "
+                "The allocated-capital path must gap-fill dense with 0.0 before this "
+                "call — refusing to ship a bridged cumulative."
+            )
+        total_return = _safe_float(float(returns.sum()))
+        # Arithmetic annualized return = mean daily × periods_per_year — the SAME
+        # clock Sharpe annualizes on (so CAGR and Sharpe agree), on the day-basis
+        # series (an active mandate annualizes over its trading days). NOTE: not a
+        # validated headline for zavara (only cumulative/maxDD/Sharpe are); this is
+        # the coherent arithmetic companion, never a geometric compound of a simple
+        # series.
+        _cagr_basis = stat_returns
+        cagr = (
+            _safe_float(float(_cagr_basis.mean()) * periods_per_year)
+            if len(_cagr_basis) >= 1
+            else _safe_float(float("nan"))
         )
-    volatility = _safe_float(qs.stats.volatility(returns, periods=periods_per_year))
-    sharpe = _safe_float(qs.stats.sharpe(returns, periods=periods_per_year))
+        # Max drawdown on the running-SUM (cumulative-fraction) series: the deepest
+        # (cum − running_peak). Non-positive fraction; 0.0 for a monotone series.
+        # F4: run on the UNCLIPPED cumsum (returns.cumsum()), the SAME series
+        # `total_return` sums — not `returns_for_chart` (clipped at −100%+ε). The
+        # simple path is NaN-free by the guard above, so this equals the chart cumsum
+        # for all reachable data; the clip only diverges on an (unreachable) ≤−100%
+        # single day. Keeps the drawdown consistent with the unclipped headline.
+        # F2: seed the running high-water at 0.0 (the from-INCEPTION baseline —
+        # starting capital is cumulative 0%), so a negative day-1 shows as underwater
+        # instead of being hidden by a peak seeded at day-1's own (negative) cum. This
+        # also makes the shipped maxDD == the harness `stitched_arithmetic_maxdd_pct`
+        # comparator (which also seeds at 0.0) == the allocated_capital meta.
+        _dd_cumsum = returns.cumsum()
+        _running_peak = _dd_cumsum.cummax().clip(lower=0.0)
+        _underwater = _dd_cumsum - _running_peak
+        max_dd = (
+            _safe_float(float(_underwater.min()))
+            if len(_underwater) > 0
+            else _safe_float(float("nan"))
+        )
+        # Drawdown time-series (underwater curve) for dd_duration + drawdown_details,
+        # on the same from-inception running-sum basis.
+        dd_series = _underwater
+    else:
+        # GEOMETRIC (default) — BYTE-IDENTICAL to pre-Fix-A.
+        cumulative = (1 + returns_for_chart).cumprod()
+        total_return = _safe_float(cumulative_twr_segmented(returns)[0])
+        # TWR-05 (founder decision 2026-07-05): CAGR annualizes on the CALENDAR
+        # clock — years = true elapsed-calendar-days / 365 from the DatetimeIndex
+        # span — NOT on `periods_per_year` (252). A 24/7 crypto series posts a
+        # return every calendar day, so quantstats' `years = len(returns)/periods`
+        # at 252 mis-reads a ~365-row record as ~1.45 years and OVER-annualizes the
+        # return; a sparse CSV/MT5 series (rows < calendar-days) has the mirror bug.
+        # The date-span basis is frequency-proof for BOTH dense crypto and sparse
+        # CSV/MT5. `max(elapsed, 1)` guards a single-day/degenerate window against a
+        # divide-by-zero. NOTE: the ONLY upstream floor is `len(returns) < 2`; a
+        # genuine 2-day window (elapsed_days==1) still annualizes with exponent 365,
+        # which explodes CAGR for a days-old account and is NOT yet flagged. That
+        # short-window over-annualization is a pre-existing class (the old len/252
+        # basis had the same shape) tracked for a DQ short-window flag behind the
+        # Phase 78 parity gate — deliberately not point-fixed here because a
+        # CAGR-status change is factsheet-wide blast radius (roadmap Pitfall #12).
+        # This reuses `total_return` (== the segmented suffix compound) so the
+        # geometric base is exactly the value the module already computed.
+        # DQ-03 (§6.2): the annualization window is the SAME days total_return
+        # compounds — the post-last-break suffix from the ONE shared
+        # nav_twr._last_interior_break_suffix source (NOT the full dropna span), so
+        # a broken-chain account annualizes over its trustworthy segment, never a
+        # mixed-basis fabrication. Clean series: the suffix IS the whole series, so
+        # this is byte-identical to the old `returns.dropna().index`.
+        _cagr_index = _last_interior_break_suffix(returns).index
+        if total_return is None or len(_cagr_index) < 2:
+            cagr = _safe_float(float("nan"))
+        else:
+            _elapsed_days = max((_cagr_index[-1] - _cagr_index[0]).days, 1)
+            cagr = _safe_float(
+                (1.0 + total_return) ** (_CALENDAR_DAYS_PER_YEAR / _elapsed_days) - 1.0
+            )
+        max_dd = _safe_float(qs.stats.max_drawdown(returns))
+        # Drawdown series — chart continuity per F3 (same fillna(0) rationale).
+        dd_series = qs.stats.to_drawdown_series(returns_for_chart)
+
+    # Headline annualized RISK on the day-basis series (Fix A): `stat_returns` IS
+    # `returns` on the calendar basis (byte-identical), or the nonzero-day series on
+    # the active basis. `periods_per_year` sets the annualization clock (crypto 365).
+    volatility = _safe_float(qs.stats.volatility(stat_returns, periods=periods_per_year))
+    sharpe = _safe_float(qs.stats.sharpe(stat_returns, periods=periods_per_year))
     # Audit 2026-05-07 H-0725: pass `rf=MAR` explicitly so the scalar sortino
     # and `_rolling_sortino` share the SAME minimum acceptable return constant.
     # Relying on qs.stats.sortino's implicit `rf=0` default silently diverges
     # the moment MAR is ever tuned away from 0.
-    sortino = _safe_float(qs.stats.sortino(returns, rf=MAR, periods=periods_per_year))
-    max_dd = _safe_float(qs.stats.max_drawdown(returns))
+    sortino = _safe_float(qs.stats.sortino(stat_returns, rf=MAR, periods=periods_per_year))
     # TWR-05: calmar = CAGR / |max_drawdown|, computed DIRECTLY so it shares the
-    # calendar-CAGR basis above. quantstats' calmar helper is NO LONGER called:
-    # it recomputes its own CAGR leg internally via `cagr(returns, periods=periods)`
-    # (a len/periods years exponent), which would DIVERGE from the date-span CAGR
-    # and leave the two headline numbers disagreeing (calmar != cagr / |maxdd|).
-    # NaN when max_dd is 0/None (a flat series) so the ratio never divides by zero.
+    # CAGR basis above (geometric calendar-CAGR, or the simple arithmetic annualized).
+    # quantstats' calmar helper is NO LONGER called: it recomputes its own CAGR leg
+    # internally via `cagr(returns, periods=periods)` (a len/periods years exponent),
+    # which would DIVERGE and leave the two headline numbers disagreeing (calmar !=
+    # cagr / |maxdd|). NaN when max_dd is 0/None (a flat series) so it never /0.
     calmar = (
         _safe_float(cagr / abs(max_dd))
         if (cagr is not None and max_dd is not None and max_dd != 0.0)
         else _safe_float(float("nan"))
     )
 
-    # Drawdown series — chart continuity per F3 (same fillna(0) rationale).
-    dd_series = qs.stats.to_drawdown_series(returns_for_chart)
     dd_duration = _max_dd_duration(dd_series)
 
     # Monthly returns (computed once, reused for grid + best/worst + VaR)
@@ -523,18 +673,35 @@ def compute_all_metrics(
     # returns 1.0 in pandas (NaN treated as multiplicative identity), producing
     # a phantom 0.0 month for periods that consist entirely of NaN-gap days.
     # Use x.notna().any() so only months with at least one real return are kept.
-    monthly_rets = (
-        returns.resample("ME")
-        .apply(lambda x: (1 + x).prod() - 1 if x.notna().any() else float("nan"))
-        .dropna()
-    )
+    # Fix A / Finding 2: the monthly bucket is arithmetic Σr on the "simple" method
+    # (so the grid SUMS to the arithmetic cumulative_return headline) and geometric
+    # Π(1+r)−1 otherwise (byte-identical). The empty / all-NaN bucket guard
+    # (x.notna().any()) is preserved on BOTH branches. best_month/worst_month/
+    # var_1m_99 derive from monthly_rets so they inherit the single convention.
+    if cumulative_method == "simple":
+        monthly_rets = (
+            returns.resample("ME")
+            .apply(lambda x: x.sum() if x.notna().any() else float("nan"))
+            .dropna()
+        )
+    else:
+        monthly_rets = (
+            returns.resample("ME")
+            .apply(lambda x: (1 + x).prod() - 1 if x.notna().any() else float("nan"))
+            .dropna()
+        )
     monthly = _monthly_returns_grid_from_series(monthly_rets)
 
-    # Rolling metrics
+    # Rolling metrics. Fix A / Finding 2: on the "active" day-basis the rolling
+    # Sharpe rides the SAME nonzero-day series (`stat_returns`) the HEADLINE Sharpe
+    # uses — so a full-window rolling value converges to the headline instead of
+    # being diluted by 0.0 no-activity days. On "calendar" `stat_returns IS returns`
+    # so this is byte-identical. `periods_per_year` is already the headline clock.
+    _rolling_basis = stat_returns if day_basis == "active" else returns
     rolling = {
-        "sharpe_30d": _rolling_sharpe(returns, 30, periods_per_year=periods_per_year),
-        "sharpe_90d": _rolling_sharpe(returns, 90, periods_per_year=periods_per_year),
-        "sharpe_365d": _rolling_sharpe(returns, 365, periods_per_year=periods_per_year),
+        "sharpe_30d": _rolling_sharpe(_rolling_basis, 30, periods_per_year=periods_per_year),
+        "sharpe_90d": _rolling_sharpe(_rolling_basis, 90, periods_per_year=periods_per_year),
+        "sharpe_365d": _rolling_sharpe(_rolling_basis, 365, periods_per_year=periods_per_year),
     }
 
     # Return quantiles — pass pre-computed monthly_rets to avoid double resample (NEW-C02-11)
@@ -563,8 +730,9 @@ def compute_all_metrics(
     returns_series = cap_data_points(returns_series)
     drawdown_series = cap_data_points(drawdown_series)
 
-    # Six month return
-    six_month = _safe_float(returns.tail(126).add(1).prod() - 1) if len(returns) >= 126 else None
+    # Six month return (single-convention: arithmetic Σr on "simple", geometric
+    # compound otherwise — byte-identical on the default geometric path).
+    six_month = _safe_float(_bucket_return(returns.tail(126))) if len(returns) >= 126 else None
 
     # Extended metrics
     metrics_json: dict[str, Any] = {}
@@ -613,11 +781,13 @@ def compute_all_metrics(
             exc_info=_should_emit_traceback("cvar", exc),
         )
 
-    metrics_json["mtd"] = _safe_float(returns[returns.index >= pd.Timestamp(returns.index[-1].replace(day=1))].add(1).prod() - 1)
-    metrics_json["ytd"] = _safe_float(returns[returns.index >= pd.Timestamp(f"{returns.index[-1].year}-01-01")].add(1).prod() - 1)
+    # MTD / YTD / 3M single-convention (arithmetic Σr on "simple", geometric
+    # compound otherwise — byte-identical on the default geometric path).
+    metrics_json["mtd"] = _safe_float(_bucket_return(returns[returns.index >= pd.Timestamp(returns.index[-1].replace(day=1))]))
+    metrics_json["ytd"] = _safe_float(_bucket_return(returns[returns.index >= pd.Timestamp(f"{returns.index[-1].year}-01-01")]))
     metrics_json["best_day"] = _safe_float(returns.max())
     metrics_json["worst_day"] = _safe_float(returns.min())
-    metrics_json["three_month"] = _safe_float(returns.tail(63).add(1).prod() - 1) if len(returns) >= 63 else None
+    metrics_json["three_month"] = _safe_float(_bucket_return(returns.tail(63))) if len(returns) >= 63 else None
 
     if len(monthly_rets) > 0:
         metrics_json["best_month"] = _safe_float(monthly_rets.max())

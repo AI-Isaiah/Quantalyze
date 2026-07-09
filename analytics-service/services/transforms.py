@@ -323,6 +323,21 @@ def _merge_status_meta(
         meta["unrealized_pnl_in_anchor"] = True
     if nav_meta.get("unrealized_pnl_unreadable"):
         meta["unrealized_pnl_unreadable"] = True
+    if nav_meta.get("twr_chain_broken"):
+        meta["twr_chain_broken"] = True
+    # Phase 82: this in-meta merge carries the pre-coverage option-dailies bucket
+    # LIST additively; a non-empty list already fired guard_fired above →
+    # complete_with_warnings. NOTE (F3): the list is NOT persisted to the factsheet.
+    # At the broker→CSV boundary (job_worker._prestamp_flags iterating
+    # NAV_TWR_GUARD_KEYS, and analytics_runner's data_quality_flags) it COLLAPSES to
+    # a boolean DQ-flag exactly like every other guard key — the persisted
+    # data_quality_flags carries `True`, not the (ccy, day) buckets. Status
+    # promotion to complete_with_warnings is CORRECT; no consumer reads the list, so
+    # it is deliberately NOT given list-persistence here.
+    if nav_meta.get("pre_summary_rollout_option_dailies"):
+        meta["pre_summary_rollout_option_dailies"] = nav_meta[
+            "pre_summary_rollout_option_dailies"
+        ]
     return meta
 
 

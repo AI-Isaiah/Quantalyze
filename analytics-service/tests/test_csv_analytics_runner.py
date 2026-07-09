@@ -54,6 +54,19 @@ def _make_supabase_mock(rows: list[dict]) -> MagicMock:
     select_chain.eq.return_value = eq_chain
     table.select.return_value = select_chain
 
+    # WR-01 strategy-existence probe: .select(...).eq(...).single().execute().
+    # MEDIUM-1 (v1.9): the runner now reads `api_key_id` off this row to gate the
+    # broker-vs-user-CSV NaN reinstatement. Wire a REAL dict (api_key_id=None →
+    # user-CSV branch, no reinstatement) so the shared mock preserves today's
+    # behavior; broker-sourced tests use _make_broker_supabase_mock below.
+    eq_chain.single.return_value = MagicMock(
+        execute=MagicMock(
+            return_value=MagicMock(
+                data={"id": "s", "user_id": "u", "api_key_id": None}
+            )
+        )
+    )
+
     # WR-02 (19.1-REVIEW): paginated_select calls .order(...).range(s, e)
     # .execute(). Wire the same rows on the range chain so the first
     # page returns everything; paginated_select then short-circuits on
@@ -153,6 +166,17 @@ async def test_csv_analytics_insufficient_history() -> None:
     # insufficient-history failure path so the owner UI renders the
     # "CSV upload failed" pill, not the generic "missing data" copy.
     assert failed[0].args[0].get("data_quality_flags") == {"csv_source": True}
+    # SI-02 (MEDIUM-2, v1.9): a runner-owned terminal 'failed' stamp MUST clear
+    # the runner-owned computation_warned marker. If a prior run left the marker
+    # TRUE (complete_with_warnings), the status bridge branches (a)/(c) read the
+    # marker and would RESURRECT complete_with_warnings over this genuine failure
+    # (stale metrics for a failed strategy). Clearing it here lets the bridge
+    # resolve 'failed'. Neuter: drop `"computation_warned": False` from the
+    # source stamp → marker survives TRUE → resurrection → this assert reddens.
+    assert failed[0].args[0].get("computation_warned") is False, (
+        "insufficient-history 'failed' stamp must set computation_warned=False "
+        "(SI-02 stale-marker resurrection guard)"
+    )
 
 
 @pytest.mark.asyncio
@@ -236,6 +260,12 @@ async def test_mark_unrecoverable_preserves_pre_stamped_guard_flags() -> None:
         "complete_with_warnings; pre-fix the wholesale write laundered it"
     )
     assert flags.get("csv_source") is True
+    # SI-02 (MEDIUM-2): the unrecoverable 'failed' stamp clears the runner-owned
+    # marker so the bridge cannot resurrect complete_with_warnings.
+    assert failed[0].args[0].get("computation_warned") is False, (
+        "_mark_unrecoverable 'failed' stamp must set computation_warned=False "
+        "(SI-02 stale-marker resurrection guard)"
+    )
 
 
 @pytest.mark.asyncio
@@ -359,6 +389,11 @@ async def test_csv_analytics_unrecoverable_stamps_csv_source_flag() -> None:
         f"{payload.get('data_quality_flags')!r}"
     )
     assert payload["computation_error"] == "CSV analytics computation failed."
+    # SI-02 (MEDIUM-2): the unrecoverable 'failed' stamp clears the marker.
+    assert payload.get("computation_warned") is False, (
+        "_mark_unrecoverable 'failed' stamp must set computation_warned=False "
+        "(SI-02 stale-marker resurrection guard)"
+    )
 
 
 @pytest.mark.asyncio
@@ -430,6 +465,11 @@ async def test_csv_analytics_paginated_truncation_writes_specific_error() -> Non
     assert payload["data_quality_flags"] == {"csv_source": True}, (
         f"WR-05 provenance flag must survive truncation; got: "
         f"{payload.get('data_quality_flags')!r}"
+    )
+    # SI-02 (MEDIUM-2): the truncation 'failed' stamp clears the marker.
+    assert payload.get("computation_warned") is False, (
+        "_mark_truncated 'failed' stamp must set computation_warned=False "
+        "(SI-02 stale-marker resurrection guard)"
     )
 
 
@@ -521,8 +561,9 @@ class TestNaNReturnsDownstreamTolerance:
     """Characterization pins for a guarded-day NaN-bearing returns Series.
 
     Sink (a) — compute_all_metrics / compute_period_returns: TOLERATES.
-        NaN days are honestly DROPPED from the headline scalars (dropna on the
-        cumulative_return, skipna .prod() for MTD/YTD) and treated as 0.0 for
+        NaN days are honestly EXCLUDED from the headline scalars (DQ-03 §6.2:
+        the cumulative_return compounds the post-last-interior-break suffix;
+        skipna .prod() for the MTD/YTD window KPIs) and treated as 0.0 for
         chart-only equity (fillna(0)); a NaN LAST day nulls return_24h via
         _safe_float. len() counts NaN entries so the `len(returns) < 2` guard is
         not tripped by guarded days. No fabricated magnitude is ever produced.
@@ -563,24 +604,27 @@ class TestNaNReturnsDownstreamTolerance:
         #  satisfied by the 6-row series even though only 4 days are real.)
         result = compute_all_metrics(returns)
 
-        # The headline cumulative_return equals the SAME metric computed on the
-        # NaN-DROPPED days — proving NaN is honestly excluded from statistics,
-        # not coerced to 0.0 (which would fabricate an extra flat day) and not
-        # propagated to a NaN headline (which would be an invalid magnitude).
-        expected_cum = float((1.0 + returns.dropna()).prod() - 1.0)
-        assert result["cumulative_return"] == pytest.approx(expected_cum, rel=1e-12)
+        # DQ-03 (§6.2): the headline cumulative_return no longer BRIDGES an
+        # interior break — it compounds ONLY the maximal contiguous suffix after
+        # the LAST interior NaN (index 2 here), proving NaN is honestly excluded
+        # (never coerced to 0.0, never propagated as a NaN headline). The leading
+        # NaN (index 0) is not an interior break; the suffix is [index 3..5].
+        expected_headline = float((1.0 + returns.iloc[3:]).prod() - 1.0)
+        assert result["cumulative_return"] == pytest.approx(expected_headline, rel=1e-12)
         assert np.isfinite(result["cumulative_return"]), (
             "headline cumulative_return must be finite (NaN days dropped, not "
             "propagated) — a NaN scalar would render as an invalid factsheet KPI"
         )
 
         # --- compute_period_returns: NaN days skipped, not fabricated. ---
+        # MTD/YTD are WINDOW KPIs (portfolio_metrics.compute_period_returns), out
+        # of §6's headline-chain scope: they compound via skipna .prod() over the
+        # whole window (the dropna-bridge), unchanged by DQ-03. So they equal the
+        # dropna cumulative for this single-month/single-year window.
+        expected_bridge = float((1.0 + returns.dropna()).prod() - 1.0)
         periods = compute_period_returns(returns)
-        # MTD/YTD compound via .prod() which skips NaN (skipna=True default);
-        # they equal the dropna cumulative for this single-month, single-year
-        # window — honest, finite, no fabricated magnitude.
-        assert periods["return_mtd"] == pytest.approx(expected_cum, rel=1e-12)
-        assert periods["return_ytd"] == pytest.approx(expected_cum, rel=1e-12)
+        assert periods["return_mtd"] == pytest.approx(expected_bridge, rel=1e-12)
+        assert periods["return_ytd"] == pytest.approx(expected_bridge, rel=1e-12)
         # Last day is real (0.015) -> return_24h is that value, unmodified.
         assert periods["return_24h"] == pytest.approx(0.015, rel=1e-12)
 
@@ -772,3 +816,358 @@ class TestNaNAccountHonestEndToEnd:
                 f"fabricated or NaN magnitude; got {payload[key]!r}"
             )
         assert payload["data_quality_flags"]["csv_source"] is True
+
+
+# ---------------------------------------------------------------------------
+# MEDIUM-1 (v1.9, DQ-03) — broker-sourced series reinstate the interior-break
+# NaN at the CSV persistence boundary so the headline does NOT bridge the break.
+# ---------------------------------------------------------------------------
+# Root cause: a guarded interior day (flow-dominated / negative-NAV / dust) is
+# np.nan and SKIPPED at the csv_daily_returns write (74-04 NaN policy), so it is
+# ABSENT from the stored rows. For a BROKER-sourced series (derive_broker_dailies
+# gap-fills to a DENSE daily calendar BEFORE the NaN-skip), an in-span missing
+# calendar date can ONLY be a refused/guarded day. If the loader rebuilds the
+# series verbatim from the stored (sparse) rows, cumulative_twr_segmented finds no
+# NaN and compounds ACROSS the break — the exact bridging DQ-03 forbids. The fix
+# reindexes a broker-sourced series to its dense [min,max] span and REINSTATES NaN
+# on in-span missing dates before compute_all_metrics, so the segmenter sees the
+# break and computes the suffix-only headline.
+#
+# Distinguisher (gated OFF for genuinely-sparse user CSVs): strategies.api_key_id.
+# derive_broker_dailies gates its ENTIRE broker path on api_key_id IS NOT NULL
+# (services/job_worker.py:_load_strategy_and_key); a user CSV upload has
+# api_key_id IS NULL (the wizard "CSV branch"). A user CSV's missing date is
+# legitimately absent (weekend / non-trading day), so it must NOT be NaN-filled.
+#
+# Neuter: skip the reinstatement (drop the broker reindex at the load boundary)
+# → the loaded broker series has no interior NaN → cumulative_twr_segmented
+# BRIDGES the break → the broker assert below reddens.
+
+
+def _make_broker_supabase_mock(
+    daily_rows: list[dict],
+    *,
+    api_key_id: str | None,
+    returns_denominator_config: object | None = None,
+    existing_flags: dict | None = None,
+) -> MagicMock:
+    """Supabase mock whose strategy-existence probe returns a REAL strategy row
+    with the given api_key_id (broker when non-None), and whose csv_daily_returns
+    load (paginated_select) returns daily_rows. strategy_analytics reads/writes
+    are inert. ``returns_denominator_config`` (when not None) is placed on the
+    strategy row (the allocated-capital override); ``existing_flags`` seeds the
+    _read_existing_flags probe (default empty)."""
+    sb = MagicMock()
+    # Memoize per-name table mocks so upsert/read call history accumulates on ONE
+    # stable mock per table (the runner calls supabase.table("strategy_analytics")
+    # many times; a fresh mock per call would scatter the upserts and hide them).
+    _tables: dict[str, MagicMock] = {}
+
+    def _table(name: str) -> MagicMock:
+        if name in _tables:
+            return _tables[name]
+        tbl = MagicMock()
+        _tables[name] = tbl
+        if name == "strategies":
+            row = {"id": "s", "user_id": "u", "api_key_id": api_key_id}
+            if returns_denominator_config is not None:
+                row["returns_denominator_config"] = returns_denominator_config
+            # .select(...).eq(...).single().execute() → real dict.
+            single_exec = MagicMock(return_value=MagicMock(data=row))
+            tbl.select.return_value.eq.return_value.single.return_value.execute = (
+                single_exec
+            )
+        elif name == "csv_daily_returns":
+            # paginated_select: .select(...).eq(...).order(...).range(s,e).execute().
+            eq_chain = tbl.select.return_value.eq.return_value
+            order_chain = eq_chain.order.return_value
+            order_chain.range.return_value.execute.return_value = MagicMock(
+                data=daily_rows
+            )
+            order_chain.execute.return_value = MagicMock(data=daily_rows)
+        elif name == "strategy_analytics":
+            # _read_existing_flags: .select(...).eq(...).maybe_single().execute().
+            tbl.select.return_value.eq.return_value.maybe_single.return_value.execute = (
+                MagicMock(return_value=MagicMock(
+                    data={"data_quality_flags": existing_flags or {}}
+                ))
+            )
+            tbl.upsert.return_value = MagicMock(execute=MagicMock())
+        else:
+            tbl.upsert.return_value = MagicMock(execute=MagicMock())
+        return tbl
+
+    sb.table.side_effect = _table
+    sb.rpc.return_value = MagicMock(execute=MagicMock())
+    return sb
+
+
+# A broker series that WAS dense [01..05] but whose interior day 03 was a guarded
+# NaN → SKIPPED at write → ABSENT from the stored rows. Suffix after the break =
+# {04, 05}. Bridged (buggy) product ≠ suffix-only product, so the two are
+# distinguishable in the headline.
+_BROKER_ROWS_GUARDED_INTERIOR = [
+    {"date": "2024-01-01", "daily_return": 0.10},
+    {"date": "2024-01-02", "daily_return": 0.10},
+    # 2024-01-03 ABSENT — the guarded/NaN interior day.
+    {"date": "2024-01-04", "daily_return": 0.20},
+    {"date": "2024-01-05", "daily_return": 0.20},
+]
+
+
+@pytest.mark.asyncio
+async def test_broker_series_reinstates_interior_nan_suffix_only_headline() -> None:
+    """MEDIUM-1: a BROKER-sourced series (api_key_id set) whose interior guarded
+    day is absent from csv_daily_returns must have the NaN REINSTATED at load so
+    the headline compounds ONLY the post-break suffix (not the bridged product)
+    and cumulative_twr_segmented raises twr_chain_broken."""
+    import numpy as np
+    from services.analytics_runner import run_csv_strategy_analytics
+    from services.nav_twr import (
+        _last_interior_break_suffix,
+        cumulative_twr_segmented,
+    )
+
+    captured: dict[str, pd.Series] = {}
+
+    def _spy_compute(returns: pd.Series, benchmark_rets=None, *a, **k):  # type: ignore[no-untyped-def]
+        captured["returns"] = returns
+        return _make_metrics_result()
+
+    sb = _make_broker_supabase_mock(
+        _BROKER_ROWS_GUARDED_INTERIOR, api_key_id="key-123"
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               side_effect=_spy_compute):
+        await run_csv_strategy_analytics("broker-strategy-uuid")
+
+    series = captured["returns"]
+    # (1) The interior guarded day is REINSTATED as NaN on the dense calendar.
+    ts_03 = pd.Timestamp("2024-01-03")
+    assert ts_03 in series.index, (
+        "broker load must reindex to the dense [min,max] calendar so the absent "
+        f"guarded day is present; got index {list(series.index)!r}"
+    )
+    assert bool(np.isnan(series.loc[ts_03])), (
+        "the in-span missing broker date must be reinstated as NaN (the guard), "
+        f"got {series.loc[ts_03]!r}"
+    )
+    assert int(series.notna().sum()) == 4 and int(series.isna().sum()) == 1
+
+    # (2) The headline compounds ONLY the suffix {04,05}, NOT the bridged product.
+    value, flags = cumulative_twr_segmented(series)
+    suffix_only = (1.20 * 1.20) - 1.0            # 0.44
+    bridged = (1.10 * 1.10 * 1.20 * 1.20) - 1.0  # 0.7424
+    assert value == pytest.approx(suffix_only), (
+        f"headline must be suffix-only {suffix_only}, not the bridged {bridged}; "
+        f"got {value}"
+    )
+    assert value != pytest.approx(bridged)
+    # (3) The chain-break flag is raised by the segmenter.
+    assert flags.get("twr_chain_broken") is True, (
+        "an interior break must raise twr_chain_broken"
+    )
+    # (4) The CAGR window is the same suffix (2 days), not the full span.
+    cagr_idx = _last_interior_break_suffix(series).index
+    assert list(cagr_idx) == [pd.Timestamp("2024-01-04"), pd.Timestamp("2024-01-05")]
+
+
+@pytest.mark.asyncio
+async def test_user_csv_sparse_day_not_nan_filled() -> None:
+    """MEDIUM-1 contrast: a USER-uploaded sparse CSV (api_key_id IS NULL) whose
+    interior date is genuinely absent must NOT be NaN-filled — the missing day is
+    legitimately absent (weekend / non-trading), so the loaded series stays sparse
+    and the headline compounds every stored day (no fabricated break)."""
+    import numpy as np
+    from services.analytics_runner import run_csv_strategy_analytics
+    from services.nav_twr import cumulative_twr_segmented
+
+    captured: dict[str, pd.Series] = {}
+
+    def _spy_compute(returns: pd.Series, benchmark_rets=None, *a, **k):  # type: ignore[no-untyped-def]
+        captured["returns"] = returns
+        return _make_metrics_result()
+
+    # Same rows, but api_key_id=None → user CSV: 2024-01-03 is legitimately absent.
+    sb = _make_broker_supabase_mock(
+        _BROKER_ROWS_GUARDED_INTERIOR, api_key_id=None
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               side_effect=_spy_compute):
+        await run_csv_strategy_analytics("user-csv-strategy-uuid")
+
+    series = captured["returns"]
+    # The user CSV series stays SPARSE — no dense reindex, no reinstated NaN.
+    assert pd.Timestamp("2024-01-03") not in series.index, (
+        "a user CSV's genuinely-absent day must NOT be reindexed in; the missing "
+        f"date must stay absent; got index {list(series.index)!r}"
+    )
+    assert int(series.isna().sum()) == 0, (
+        "a user CSV series must carry NO reinstated NaN (that would corrupt "
+        "legitimate sparse data)"
+    )
+    assert len(series) == 4
+    # No fabricated break: the headline compounds all four stored days.
+    value, flags = cumulative_twr_segmented(series)
+    assert value == pytest.approx((1.10 * 1.10 * 1.20 * 1.20) - 1.0)
+    assert "twr_chain_broken" not in flags
+
+
+# ===========================================================================
+# T1 (wiring-seam) — run_csv_strategy_analytics MUST thread the strategy's
+# conventions into the SHIPPED compute_all_metrics call. Existing tests patch
+# compute_all_metrics with a bare return_value and never inspect call args, so a
+# reverted threading would ship the old geometric/calendar/252 defaults green.
+# S1 — a malformed config is PERMANENT (422/failed), never transient-retried.
+# T6 — the allocated warn flag bridges through to complete_with_warnings.
+# ===========================================================================
+
+_ALLOC_CFG_SIMPLE_ACTIVE = {
+    "denominator": "allocated_capital",
+    "pnl_basis": "cash_settlement",
+    "capital_schedule": [{"effective_from": "2025-08-01", "capital_usd": 1_000_000}],
+    "metrics_basis": "active_day",
+    "cumulative_method": "simple",
+}
+
+
+def _daily_rows_15() -> list[dict]:
+    return [
+        {"date": f"2025-08-{d:02d}", "daily_return": 0.001 if d % 2 else -0.0005}
+        for d in range(1, 16)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_csv_runner_threads_config_into_compute_all_metrics() -> None:
+    """T1 [highest]: an api_key_id-bearing strategy with a simple/active_day config
+    → compute_all_metrics called with periods_per_year=365, cumulative_method=
+    'simple', day_basis='active'. Reverting the threading (defaults) reddens."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1",
+        returns_denominator_config=_ALLOC_CFG_SIMPLE_ACTIVE,
+    )
+    spy = MagicMock(return_value=_make_metrics_result())
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics", spy):
+        await run_csv_strategy_analytics("s")
+
+    assert spy.call_count == 1
+    kwargs = spy.call_args.kwargs
+    assert kwargs["periods_per_year"] == 365
+    assert kwargs["cumulative_method"] == "simple"
+    assert kwargs["day_basis"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_csv_runner_config_none_broker_is_geometric_calendar_365() -> None:
+    """T1 companion: api_key_id set + NO config → crypto √365 but the DEFAULT
+    geometric/calendar conventions (byte-identical to the pre-Fix-A recompute)."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(_daily_rows_15(), api_key_id="key-1")
+    spy = MagicMock(return_value=_make_metrics_result())
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics", spy):
+        await run_csv_strategy_analytics("s")
+
+    kwargs = spy.call_args.kwargs
+    assert kwargs["periods_per_year"] == 365
+    assert kwargs["cumulative_method"] == "geometric"
+    assert kwargs["day_basis"] == "calendar"
+
+
+@pytest.mark.asyncio
+async def test_csv_runner_no_api_key_is_252() -> None:
+    """T1 companion: api_key_id None (user CSV / MT5) → 252, geometric, calendar."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(_daily_rows_15(), api_key_id=None)
+    spy = MagicMock(return_value=_make_metrics_result())
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics", spy):
+        await run_csv_strategy_analytics("s")
+
+    kwargs = spy.call_args.kwargs
+    assert kwargs["periods_per_year"] == 252
+    assert kwargs["cumulative_method"] == "geometric"
+    assert kwargs["day_basis"] == "calendar"
+
+
+@pytest.mark.asyncio
+async def test_csv_runner_malformed_config_is_permanent_not_transient() -> None:
+    """S1: a malformed returns_denominator_config raises
+    ReturnsDenominatorConfigError INSIDE the metrics block. The runner must
+    disposition it PERMANENT (HTTPException 422 → classify_exception permanent) and
+    stamp failed — NOT let the generic `except Exception` downgrade it to a
+    transient 500 that retries forever."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    bad_cfg = {**_ALLOC_CFG_SIMPLE_ACTIVE, "metrics_basis": "not_a_basis"}
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1", returns_denominator_config=bad_cfg,
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))):
+        with pytest.raises(HTTPException) as exc_info:
+            await run_csv_strategy_analytics("s")
+    assert exc_info.value.status_code == 422  # 4xx → classify_exception PERMANENT
+    # A failed stamp with csv_source preserved was written to strategy_analytics.
+    sa = sb.table("strategy_analytics")
+    upserts = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and c.args[0].get("computation_status") == "failed"
+    ]
+    assert any(
+        u.args[0].get("data_quality_flags", {}).get("csv_source") for u in upserts
+    )
+
+
+@pytest.mark.asyncio
+async def test_csv_runner_bridges_mandate_window_excluded_days_warn() -> None:
+    """T6 / S3: an existing_flags carrying mandate_window_excluded_days=True bridges
+    THROUGH run_csv_strategy_analytics via ALLOCATED_CAPITAL_GUARD_KEYS → the
+    completed status is complete_with_warnings and the flag is preserved on the
+    persisted data_quality_flags."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1",
+        existing_flags={"mandate_window_excluded_days": True},
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_make_metrics_result()):
+        result = await run_csv_strategy_analytics("s")
+
+    # (The runner's RETURN value is always {"status": "complete"} by design — the
+    # real status lands on the strategy_analytics.computation_status upsert.)
+    assert result["strategy_id"] == "s"
+    sa = sb.table("strategy_analytics")
+    completed = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and c.args[0].get("computation_status") == "complete_with_warnings"
+    ]
+    assert completed, "expected a complete_with_warnings upsert (S3 bridge)"
+    assert completed[0].args[0]["data_quality_flags"].get(
+        "mandate_window_excluded_days"
+    ) is True
