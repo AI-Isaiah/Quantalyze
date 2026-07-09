@@ -56,6 +56,7 @@ from services.db import (
 )
 from services.metrics import (
     DEFAULT_PERIODS_PER_YEAR,
+    periods_per_year_for_asset_class,
     _safe_float,
     compute_all_metrics,
 )
@@ -1189,7 +1190,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
     # Verify strategy exists
     strategy_result = await db_execute(
         lambda: supabase.table("strategies")
-        .select("id, user_id, api_key_id")
+        .select("id, user_id, api_key_id, asset_class")
         .eq("id", strategy_id)
         .single()
         .execute()
@@ -1634,14 +1635,13 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         )
 
         # METRICS-11/12: compute_all_metrics returns MetricsResult dataclass.
-        # Fix A (v1.8): the trades path is crypto whenever it runs (an api_key_id-
-        # bearing strategy — this legacy path is dark in prod behind
-        # BROKER_DAILIES_VIA_FUNDING but must stay convention-consistent with the
-        # broker→CSV path if the kill-switch is ever flipped). Crypto ⇒ √365; the
-        # allocated-capital simple/active override rides ONLY the CSV path, so
-        # cumulative_method/day_basis stay at the geometric/calendar defaults here.
-        # Reuse the ALREADY-resolved `api_key_id` (never re-probe the row — a demo /
-        # failed-resolution strategy keeps api_key_id=None → the 252 default).
+        # #597: annualize by the strategy's asset_class (crypto √365 / traditional
+        # √252), read from the already-loaded strategy_row — NOT the api_key_id proxy
+        # (a CSV-uploaded crypto strategy is also √365). This legacy trades path is
+        # dark in prod behind BROKER_DAILIES_VIA_FUNDING but stays convention-
+        # consistent with the broker→CSV path. The allocated-capital simple/active
+        # override rides ONLY the CSV path, so cumulative_method/day_basis stay at the
+        # geometric/calendar defaults here.
         # Finding 5b (documented dark): this legacy trades path does NOT thread
         # cumulative_method/day_basis. It is UNREACHABLE in prod (guarded by
         # BROKER_DAILIES_VIA_FUNDING). If that kill-switch is ever flipped false
@@ -1653,8 +1653,10 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         metrics_result = compute_all_metrics(
             returns,
             benchmark_rets,
-            periods_per_year=(
-                365 if api_key_id else DEFAULT_PERIODS_PER_YEAR
+            periods_per_year=periods_per_year_for_asset_class(
+                strategy_row.get("asset_class")
+                if isinstance(strategy_row, dict)
+                else None
             ),
         )
 
@@ -2123,7 +2125,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
     # existence check.
     strategy_result = await db_execute(
         lambda: supabase.table("strategies")
-        .select("id, user_id, api_key_id, returns_denominator_config")
+        .select("id, user_id, api_key_id, returns_denominator_config, asset_class")
         .eq("id", strategy_id)
         .single()
         .execute()
@@ -2243,16 +2245,17 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # Fix A (v1.8): thread the strategy's metrics CONVENTIONS into the SHIPPED
         # factsheet so it matches the harness-validated path — NOT a geometric /
         # √252 / calendar recompute of the persisted returns.
-        #   * periods_per_year — ASSET-CLASS driven. ponytail: all broker
-        #     integrations (deribit / bybit / binance / okx) are crypto today, so an
-        #     api_key_id-bearing (broker-sourced) strategy ⇒ crypto ⇒ 365 (every
-        #     calendar day trades); a CSV upload (api_key_id NULL — MT5 / forex)
-        #     stays 252. Replace api_key_id with an explicit asset_class / venue-
-        #     market signal when a non-crypto broker is ever added.
+        #   * periods_per_year — ASSET-CLASS driven (#597): strategies.asset_class
+        #     ('crypto' √365 / 'traditional' √252), backfilled 'crypto' for every
+        #     api_key-sourced row, so a CSV-uploaded crypto strategy is ALSO √365
+        #     (the old api_key_id proxy wrongly left it at 252). This is the same
+        #     signal the OG card / ScenarioComposer / allocator portfolio read.
         #   * cumulative_method / day_basis — from returns_denominator_config (the
         #     allocated-capital override; Zavara → simple + active). Absent ⇒
         #     geometric + calendar (BYTE-IDENTICAL to the pre-Fix-A recompute).
-        _periods_per_year = 365 if _is_broker_sourced else DEFAULT_PERIODS_PER_YEAR
+        _periods_per_year = periods_per_year_for_asset_class(
+            _strategy_row.get("asset_class") if isinstance(_strategy_row, dict) else None
+        )
         _cumulative_method = "geometric"
         _day_basis = "calendar"
         _denominator_config = (

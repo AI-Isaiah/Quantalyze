@@ -2324,6 +2324,7 @@ export type Database = {
       strategies: {
         Row: {
           api_key_id: string | null
+          asset_class: string
           aum: number | null
           avg_daily_turnover: number | null
           benchmark: string
@@ -2354,6 +2355,7 @@ export type Database = {
         }
         Insert: {
           api_key_id?: string | null
+          asset_class?: string
           aum?: number | null
           avg_daily_turnover?: number | null
           benchmark?: string
@@ -2384,6 +2386,7 @@ export type Database = {
         }
         Update: {
           api_key_id?: string | null
+          asset_class?: string
           aum?: number | null
           avg_daily_turnover?: number | null
           benchmark?: string

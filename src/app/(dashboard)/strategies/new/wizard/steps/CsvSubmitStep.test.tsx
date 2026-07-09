@@ -24,6 +24,7 @@ const META: MetadataDraft = {
   leverageRange: "1x-3x",
   aum: "1000000",
   maxCapacity: "5000000",
+  assetClass: "crypto",
 };
 
 const PREVIEW = {

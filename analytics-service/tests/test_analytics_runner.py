@@ -5925,7 +5925,7 @@ async def test_csv_run_stays_complete_without_unrealized_pnl_flag():
 # ===========================================================================
 
 
-def _trades_runner_supabase(*, api_key_id) -> MagicMock:
+def _trades_runner_supabase(*, api_key_id, asset_class=None) -> MagicMock:
     """Minimal supabase mock for run_strategy_analytics: a strategies row with the
     given api_key_id, an inert strategy_analytics, a trades table serving one
     daily_pnl row, and an api_keys balance read."""
@@ -5942,7 +5942,8 @@ def _trades_runner_supabase(*, api_key_id) -> MagicMock:
         if name == "strategies":
             chain = MagicMock()
             chain.execute.return_value = MagicMock(
-                data={"id": "strat-test", "user_id": "user-1", "api_key_id": api_key_id}
+                data={"id": "strat-test", "user_id": "user-1",
+                      "api_key_id": api_key_id, "asset_class": asset_class}
             )
             eq = MagicMock()
             eq.single = MagicMock(return_value=chain)
@@ -5976,18 +5977,20 @@ def _trades_runner_supabase(*, api_key_id) -> MagicMock:
 
 
 @pytest.mark.parametrize(
-    "api_key_id,expected_periods", [("key-1", 365), (None, 252)]
+    "asset_class,expected_periods",
+    [("crypto", 365), ("traditional", 252), (None, 252)],
 )
 @pytest.mark.asyncio
 async def test_dark_trades_path_periods_per_year_by_asset_class(
-    api_key_id, expected_periods
+    asset_class, expected_periods
 ) -> None:
-    """T2: run_strategy_analytics calls compute_all_metrics with periods_per_year=365
-    for an api_key_id-bearing (crypto) strategy, 252 otherwise. Reverting the branch
-    to a bare compute_all_metrics(returns, benchmark) reddens (default 252)."""
+    """T2 (#597): run_strategy_analytics calls compute_all_metrics with
+    periods_per_year=365 for a crypto strategy, 252 for traditional (and 252 as the
+    conservative fallback when asset_class is absent). Reverting to the api_key_id
+    proxy would misannualize a CSV-crypto strategy at 252."""
     from services.analytics_runner import run_strategy_analytics
 
-    sb = _trades_runner_supabase(api_key_id=api_key_id)
+    sb = _trades_runner_supabase(api_key_id="key-1", asset_class=asset_class)
     spy = MagicMock(return_value=MetricsResult(
         metrics_json={"sparkline_returns": [], "sparkline_drawdown": [],
                       "metrics_json": {}, "returns_series": [], "drawdown_series": [],

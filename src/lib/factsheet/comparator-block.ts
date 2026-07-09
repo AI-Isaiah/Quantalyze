@@ -26,9 +26,14 @@ export function buildComparatorBlock(
   stratAnnVol: number,
   rollWindowDays: number,
   rollBetaWindowDays: number,
+  // #597 — the strategy's annualization basis (252 traditional / 365 crypto).
+  // Applied to BOTH the benchmark compute and the joint (alpha/TE/info-ratio/
+  // treynor) so the whole comparator block sits on ONE coherent basis; default
+  // 252 keeps existing callers byte-identical.
+  periodsPerYear = 252,
 ): ComparatorBlock {
-  const benchSummary = compute(benchReturns, dates);
-  const joint = jointMetrics(stratReturns, benchReturns);
+  const benchSummary = compute(benchReturns, dates, 0, periodsPerYear);
+  const joint = jointMetrics(stratReturns, benchReturns, 0, periodsPerYear);
   const cumVsBench = stratEquity.map((s, i) => {
     const b = benchSummary.eq[i];
     return b !== 0 ? s / b : 1;

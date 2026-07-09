@@ -7,7 +7,7 @@ import type { JointMetrics } from "./types";
  * cumulative benchmark return on the days the benchmark was positive
  * (resp. negative).
  */
-export function jointMetrics(rets: number[], bench: number[], rf = 0): JointMetrics {
+export function jointMetrics(rets: number[], bench: number[], rf = 0, periodsPerYear = 252): JointMetrics {
   const n = rets.length;
   if (n === 0 || bench.length !== n) {
     throw new Error("jointMetrics(): inputs must be non-empty arrays of equal length");
@@ -28,7 +28,7 @@ export function jointMetrics(rets: number[], bench: number[], rf = 0): JointMetr
   varB /= n;
 
   const beta = varB > 0 ? cov / varB : 0;
-  const alpha = (m - beta * mb) * 252;
+  const alpha = (m - beta * mb) * periodsPerYear;
   const corr = s > 0 && sb > 0 ? cov / (s * sb) : 0;
   const r2 = corr * corr;
 
@@ -37,9 +37,9 @@ export function jointMetrics(rets: number[], bench: number[], rf = 0): JointMetr
     const diff = rets[i] - bench[i] - (m - mb);
     teSum += diff * diff;
   }
-  const trackingError = Math.sqrt(teSum / n) * Math.sqrt(252);
-  const infoRatio = trackingError > 0 ? ((m - mb) * 252) / trackingError : 0;
-  const treynor = beta !== 0 ? ((m - rf / 252) * 252) / beta : 0;
+  const trackingError = Math.sqrt(teSum / n) * Math.sqrt(periodsPerYear);
+  const infoRatio = trackingError > 0 ? ((m - mb) * periodsPerYear) / trackingError : 0;
+  const treynor = beta !== 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / beta : 0;
 
   let upBenchSum = 0;
   let upStratSum = 0;

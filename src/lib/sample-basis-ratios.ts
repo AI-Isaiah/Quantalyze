@@ -1,5 +1,6 @@
 /**
- * Sample/252-basis risk-corrected ratios — a STANDALONE replica of the frozen
+ * Sample-basis risk-corrected ratios (default 252; #597 parameterizes
+ * periodsPerYear) — a STANDALONE replica of the frozen
  * scenario engine's metric math (Phase 42, PEER-05).
  *
  * ⛔ WHY A STANDALONE FILE (not an extraction from `scenario.ts`):
@@ -15,7 +16,8 @@
  * engine OR this replica fails that test.
  *
  * THE BASIS (verbatim, copied from `scenario.ts:335-378`, the cohort/quantstats
- * convention pinned by `scenario.peer-basis.test.ts`):
+ * convention pinned by `scenario.peer-basis.test.ts`; the `252` below is the
+ * DEFAULT periodsPerYear — #597 makes it a per-call argument, e.g. 365 crypto):
  *   - SAMPLE variance: `Σ(r−mean)² / (n−1)` (ddof=1, NOT population /n).
  *   - Sharpe: `(mean·252) / (√sampleVar · √252)`, rf=0. Null when vol == 0.
  *   - Sortino: downside RMS over TOTAL n × √252, rf=0 — `(mean·252) /
@@ -38,11 +40,11 @@
  * short, so it guards independently.
  */
 
-/** Risk-corrected ratios on the cohort's sample/252 basis. Null = insufficient data. */
+/** Risk-corrected ratios on the cohort's sample basis (default 252; #597 parameterizes periodsPerYear). Null = insufficient data. */
 export interface SampleBasisRatios {
-  /** Sample(ddof=1)×√252 Sharpe, rf=0. Null when annualized vol is 0 or n<2. */
+  /** Sample(ddof=1)×√N Sharpe (periodsPerYear, default 252), rf=0. Null when annualized vol is 0 or n<2. */
   sharpe: number | null;
-  /** Downside-RMS/n × √252 Sortino, rf=0. Null when there are no down days or n<2. */
+  /** Downside-RMS/n × √N Sortino (periodsPerYear, default 252), rf=0. Null when there are no down days or n<2. */
   sortino: number | null;
   /** Peak-to-trough max drawdown on Πᵢ(1+rᵢ) (≤ 0). Null when n<2. */
   max_drawdown: number | null;
@@ -50,12 +52,20 @@ export interface SampleBasisRatios {
 
 /**
  * Compute Sharpe / Sortino / max-drawdown for a daily-RETURN series on the
- * SAMPLE / 252 basis — identical math to the frozen `computeScenario` engine
+ * SAMPLE / N basis — identical math to the frozen `computeScenario` engine
  * (proven by the parity golden test). Pure, deterministic, no Date/PRNG.
  *
  * @param dailyReturns decimal daily returns (e.g. 0.012 = +1.2%).
+ * @param periodsPerYear annualization basis (#597): 252 (traditional, the
+ *   default — keeps every existing caller byte-identical) or 365 (crypto).
+ *   Derive it from a strategy's asset class via `annualizationPeriods()`. Used
+ *   for BOTH the √N vol/downside annualization AND the mean·N numerator, so the
+ *   replica stays in parity with `computeScenario` at ANY basis.
  */
-export function sampleBasisRatios(dailyReturns: number[]): SampleBasisRatios {
+export function sampleBasisRatios(
+  dailyReturns: number[],
+  periodsPerYear = 252,
+): SampleBasisRatios {
   const n = dailyReturns.length;
   // Degenerate guard — need ≥ 2 finite obs for a sample variance; any non-finite
   // return collapses to safe-null (never NaN/Inf reaches a consumer).
@@ -68,8 +78,8 @@ export function sampleBasisRatios(dailyReturns: number[]): SampleBasisRatios {
   const variance =
     dailyReturns.reduce((s, r) => s + (r - meanR) * (r - meanR), 0) / (n - 1);
   const volDaily = Math.sqrt(variance);
-  const volatility = volDaily * Math.sqrt(252);
-  const sharpeRaw = volatility > 0 ? (meanR * 252) / volatility : null;
+  const volatility = volDaily * Math.sqrt(periodsPerYear);
+  const sharpeRaw = volatility > 0 ? (meanR * periodsPerYear) / volatility : null;
 
   // Sortino: downside RMS divides by TOTAL observations (n), not the count of
   // negative days. Null when there are no down days (downsideVol == 0) so the UI
@@ -79,9 +89,9 @@ export function sampleBasisRatios(dailyReturns: number[]): SampleBasisRatios {
     0,
   );
   const downsideVar = downsideSumSq / n;
-  const downsideVol = Math.sqrt(downsideVar) * Math.sqrt(252);
+  const downsideVol = Math.sqrt(downsideVar) * Math.sqrt(periodsPerYear);
   const sortinoRaw: number | null =
-    downsideVol > 0 ? (meanR * 252) / downsideVol : null;
+    downsideVol > 0 ? (meanR * periodsPerYear) / downsideVol : null;
 
   // Max drawdown on the cumulative-product wealth curve Πᵢ(1+rᵢ). Basis-invariant
   // (no stdev) → identical under either convention; peak-to-trough, always ≤ 0.

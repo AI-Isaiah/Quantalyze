@@ -16,6 +16,9 @@ import {
   MAGNITUDE_CAPS,
   STRATEGY_ANALYTICS_COMPUTATION_STATUSES,
   isComputedAnalytics,
+  isCryptoExchange,
+  annualizationPeriods,
+  calendarYears,
 } from "./closed-sets";
 import { ROLES } from "./types";
 
@@ -46,6 +49,61 @@ describe("closed-sets registry", () => {
         isComputedAnalytics,
       );
       expect(computed).toEqual(["complete", "complete_with_warnings"]);
+    });
+  });
+
+  describe("asset-class annualization (#597)", () => {
+    // The single TS mapping from asset class → periods/year, mirroring the
+    // Python √365 crypto / √252 traditional. Every Sharpe/Sortino/vol surface
+    // (OG card, sample-basis replica, scenario engine, rolling metrics) derives
+    // its basis from here — a drift silently mis-annualizes every crypto card.
+    it("annualizationPeriods: crypto → 365, everything else → 252", () => {
+      expect(annualizationPeriods("crypto")).toBe(365);
+      expect(annualizationPeriods("traditional")).toBe(252);
+      // fail-safe: unknown / null / undefined → the conservative 252 default.
+      expect(annualizationPeriods("equities")).toBe(252);
+      expect(annualizationPeriods(null)).toBe(252);
+      expect(annualizationPeriods(undefined)).toBe(252);
+      expect(annualizationPeriods("")).toBe(252);
+    });
+
+    it("isCryptoExchange: every SUPPORTED exchange is crypto (case-insensitive)", () => {
+      for (const ex of SUPPORTED_EXCHANGES) {
+        expect(isCryptoExchange(ex)).toBe(true);
+        expect(isCryptoExchange(ex.toUpperCase())).toBe(true);
+      }
+      expect(isCryptoExchange("nyse")).toBe(false);
+      expect(isCryptoExchange(null)).toBe(false);
+      expect(isCryptoExchange(undefined)).toBe(false);
+      expect(isCryptoExchange("")).toBe(false);
+    });
+
+    it("wizard default: a detected crypto exchange annualizes √365, a CSV/unknown one √252", () => {
+      // The MetadataStep default (isCryptoExchange(detectedExchange) → 'crypto'
+      // else 'traditional') composed with annualizationPeriods must give 365 for
+      // a real exchange and 252 for the CSV/no-exchange path.
+      const fromExchange = (ex: string | null) =>
+        annualizationPeriods(isCryptoExchange(ex) ? "crypto" : "traditional");
+      expect(fromExchange("binance")).toBe(365);
+      expect(fromExchange("deribit")).toBe(365);
+      expect(fromExchange(null)).toBe(252); // CSV upload, no exchange
+    });
+
+    it("calendarYears: elapsed span on the 365.25-day civil clock (the CAGR clock)", () => {
+      const DAY = 86_400_000;
+      const start = Date.UTC(2024, 0, 1);
+      // Exactly 365.25 days → 1.0 calendar years.
+      expect(calendarYears(start, start + 365.25 * DAY)).toBeCloseTo(1, 12);
+      // Half a civil year.
+      expect(calendarYears(start, start + (365.25 / 2) * DAY)).toBeCloseTo(0.5, 12);
+      // The OG-card CAGR eligibility boundary: ~347 days is < 0.95y (blocked),
+      // ~348 days clears it — proving the gate is calendar- not count-based.
+      expect(calendarYears(start, start + 346 * DAY)).toBeLessThan(0.95);
+      expect(calendarYears(start, start + 348 * DAY)).toBeGreaterThanOrEqual(0.95);
+      // Non-positive / non-finite spans collapse to 0 so callers gate on `> 0`.
+      expect(calendarYears(start, start)).toBe(0);
+      expect(calendarYears(start, start - DAY)).toBe(0);
+      expect(calendarYears(NaN, start)).toBe(0);
     });
   });
 

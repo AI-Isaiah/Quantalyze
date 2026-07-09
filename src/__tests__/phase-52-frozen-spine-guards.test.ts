@@ -8,8 +8,9 @@
  * (CONTEXT collapses the chart-interactivity trio EquityChart + TouchTooltip +
  * useTapPin into one "chart interactivity" island; Phase 54 BP-03 adds the 3
  * factsheet SVG charts — TimeSeriesChart/HistogramChart/MasterBrush — frozen
- * because they are off-globbed from `no-raw-font-px`; so eleven file paths) must
- * NOT be touched during a restyle. They are frozen because:
+ * because they are off-globbed from `no-raw-font-px`; so nine file paths after
+ * the scenario.ts + compute.ts reviewed-edit carve-outs) must NOT be touched
+ * during a restyle. They are frozen because:
  *
  *   - `src/lib/scenario.ts` — the 252-day-annualization projection engine.
  *     v1.5 coverage-window re-baseline (ADR-001): REMOVED from FROZEN_ISLANDS
@@ -18,8 +19,18 @@
  *     that reviewed edit; the 252-annualization math itself stays LOCKED
  *     (scenario.test.ts's pins + the from-scratch numpy gate in 55-03 prove it).
  *   - `src/lib/factsheet/compute.ts` — the client-side factsheet compute that
- *     gives the scenario blend parity BY CONSTRUCTION (BODY-02). A drift here
- *     silently de-syncs the real factsheet from the scenario one.
+ *     gives the scenario blend parity BY CONSTRUCTION (BODY-02).
+ *     v1.8 asset-class annualization (#597): REMOVED from FROZEN_ISLANDS below,
+ *     same category as the scenario.ts carve-out — a deliberate, reviewed math
+ *     edit (a single additive `periodsPerYear = 252` param so crypto annualizes
+ *     vol/Sharpe/Sortino on √365), NOT a restyle reshape. Scope is the
+ *     SINGLE-STRATEGY factsheet ONLY: it is now asset-class-aware (crypto √365 /
+ *     traditional √252, the latter byte-identical). The scenario/blend PREVIEW
+ *     surface (scenario-factsheet-payload.ts) DELIBERATELY stays on the 252
+ *     default pending the blend follow-up PR (blend rule: 365 when ANY
+ *     constituent is crypto), so a crypto strategy's real factsheet (√365) and
+ *     its scenario preview (√252) diverge until that lands. compute.*.test.ts
+ *     pins the reviewed compute behavior.
  *   - `src/app/factsheet/[id]/v2/factsheet-context.tsx` — the FactsheetProvider
  *     the scenario mode mounts under `persist={false}`; RSC-ifying or
  *     re-shaping it would break the byte-identical scenarioMode flag.
@@ -149,21 +160,33 @@ const BASE = resolveBaselineRef();
 const CHANGED = changedFiles(BASE);
 
 /**
- * The SEVEN frozen client islands as EIGHT file paths (the chart-interactivity
- * island = EquityChart + TouchTooltip + useTapPin). Every one is verified to
- * exist on disk at planning time. A diff to ANY of them during a v1.4 restyle
- * is an exit-gate violation — the visual layer is free, the locked spine is not.
+ * The frozen client islands as NINE file paths after the scenario.ts + #597
+ * compute.ts reviewed-edit carve-outs (the chart-interactivity island =
+ * EquityChart + TouchTooltip + useTapPin). Every one is verified to exist on
+ * disk at planning time. A diff to ANY of them during a v1.4 restyle is an
+ * exit-gate violation — the visual layer is free, the locked spine is not.
  */
 const FROZEN_ISLANDS: string[] = [
   // v1.5 coverage-window re-baseline (ADR-001): `src/lib/scenario.ts` was
   // REMOVED from this frozen-island set because v1.5 Phase 55 deliberately
   // edits the projection engine ONCE (the coverage-window blend). The
   // phase-{29,30,31,32} git-delta guards now PIN that reviewed edit; freezing
-  // it here too would double-fail on the same intended change. The other TEN
-  // islands below STAY FROZEN — Phase 55 must not touch compute.ts, the
-  // FactsheetProvider, useBreakpoint, the MC worker, the chart-interactivity
-  // island (EquityChart/TouchTooltip/useTapPin), or the 3 factsheet SVGs.
-  "src/lib/factsheet/compute.ts",
+  // it here too would double-fail on the same intended change.
+  //
+  // v1.8 asset-class annualization (#597): `src/lib/factsheet/compute.ts` was
+  // likewise REMOVED. The freeze exists to stop a v1.4 VISUAL restyle from
+  // re-shaping the math spine — NOT to block a deliberate, reviewed math edit.
+  // #597 threads a single additive `periodsPerYear = 252` param through the
+  // client factsheet compute so a crypto SINGLE-STRATEGY factsheet annualizes
+  // vol/Sharpe/Sortino on √365 (traditional stays √252, byte-identical). The
+  // scenario/blend PREVIEW surface deliberately stays on the 252 default
+  // (blend-basis follow-up PR pending), so it does NOT track this edit. Same
+  // category as the scenario.ts carve-out above; compute.ts's own
+  // compute.*.test.ts suites pin the reviewed behavior (default-252 identity +
+  // explicit 365 cases).
+  // The remaining NINE islands below STAY FROZEN — no RSC-ification / reshape
+  // of the FactsheetProvider, useBreakpoint, the MC worker, the chart-
+  // interactivity island (EquityChart/TouchTooltip/useTapPin), or the 3 SVGs.
   "src/app/factsheet/[id]/v2/factsheet-context.tsx",
   "src/hooks/useBreakpoint.ts",
   "src/app/(dashboard)/allocations/lib/montecarlo.worker.ts",
@@ -190,7 +213,7 @@ describe("Phase 52 frozen-spine exit-gate guards", () => {
   });
 
   // One assertion per frozen island so a CI failure names the EXACT offending
-  // file (a single combined assertion would only say "one of eleven changed").
+  // file (a single combined assertion would only say "one of nine changed").
   for (const island of FROZEN_ISLANDS) {
     it(`exit gate (frozen client island): ${island} is zero-diff vs the phase baseline`, () => {
       expect(
@@ -198,9 +221,10 @@ describe("Phase 52 frozen-spine exit-gate guards", () => {
         `Phase 52 exit gate VIOLATED — ${island} changed; it is a FROZEN ` +
           "client island (BP-01 / SCENARIO-05 / BODY-02). v1.4 lifts " +
           "desktop byte-identity for the VISUAL layer only — the locked " +
-          "math/interaction spine (the projection engine, the factsheet " +
-          "compute, the FactsheetProvider, useBreakpoint, the MC worker, and " +
-          "the EquityChart/TouchTooltip/useTapPin chart-interactivity island) " +
+          "math/interaction spine (the FactsheetProvider, useBreakpoint, the " +
+          "MC worker, and the EquityChart/TouchTooltip/useTapPin chart-" +
+          "interactivity island; the projection engine + factsheet compute are " +
+          "reviewed-edit carve-outs, pinned by their own math gates) " +
           "must NOT be RSC-ified, re-shaped, or 'improved' during a restyle. " +
           `Revert ${island} to the baseline.`,
       ).not.toContain(island);

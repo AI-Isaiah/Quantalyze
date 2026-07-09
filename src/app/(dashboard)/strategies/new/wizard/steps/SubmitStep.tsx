@@ -86,6 +86,8 @@ export function SubmitStep({
           leverage_range: metadata.leverageRange || null,
           aum: metadata.aum ? Number(metadata.aum) : null,
           max_capacity: metadata.maxCapacity ? Number(metadata.maxCapacity) : null,
+          // #597 — asset class drives Sharpe/Sortino/vol annualization basis.
+          asset_class: metadata.assetClass,
         }),
       });
 

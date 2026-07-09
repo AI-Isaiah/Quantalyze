@@ -43,6 +43,7 @@ interface InitialDraft {
   aum: number | null;
   max_capacity: number | null;
   api_key_id: string | null;
+  asset_class: string | null;
 }
 
 interface WizardPageProps {
@@ -78,7 +79,7 @@ export default async function WizardPage({ searchParams }: WizardPageProps) {
   const { data: draft } = await supabase
     .from("strategies")
     .select(
-      "id, name, description, category_id, strategy_types, subtypes, markets, supported_exchanges, leverage_range, aum, max_capacity, api_key_id, created_at",
+      "id, name, description, category_id, strategy_types, subtypes, markets, supported_exchanges, leverage_range, aum, max_capacity, api_key_id, asset_class, created_at",
     )
     .eq("user_id", user.id)
     .eq("source", "wizard")

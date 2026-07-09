@@ -31,6 +31,7 @@ const FULL_METADATA: MetadataDraft = {
   leverageRange: "1x–5x",
   aum: "1000000",
   maxCapacity: "5000000",
+  assetClass: "crypto",
 };
 
 // A draft whose OPTIONAL numeric/array fields are empty — the recap must
@@ -46,6 +47,7 @@ const SPARSE_METADATA: MetadataDraft = {
   leverageRange: "",
   aum: "",
   maxCapacity: "",
+  assetClass: "traditional",
 };
 
 const CSV_SUMMARY: ReviewCsvSummary = {

@@ -63,3 +63,33 @@ describe("compute — QuantStats metrics extension", () => {
     expect(pr.recovery_factor).toBeNull();
   });
 });
+
+describe("compute — #597 asset-class annualization (periodsPerYear)", () => {
+  const rets = Array.from({ length: 60 }, (_, i) => (i % 2 === 0 ? 0.012 : -0.006));
+  const dates = Array.from({ length: 60 }, (_, i) =>
+    new Date(Date.UTC(2024, 0, i + 1)).toISOString().slice(0, 10),
+  );
+
+  it("default param == explicit 252 (byte-identical to the pre-#597 hardcode)", () => {
+    const def = compute(rets, dates);
+    const explicit = compute(rets, dates, 0, 252);
+    expect(explicit.sharpe).toBe(def.sharpe);
+    expect(explicit.sortino).toBe(def.sortino);
+    expect(explicit.ann_vol).toBe(def.ann_vol);
+  });
+
+  it("crypto (365) scales vol/Sharpe/Sortino by √(365/252) vs 252; CAGR & maxDD invariant", () => {
+    const trad = compute(rets, dates, 0, 252);
+    const crypto = compute(rets, dates, 0, 365);
+    const k = Math.sqrt(365 / 252);
+    // annVol ∝ √N.
+    expect(crypto.ann_vol).toBeCloseTo(trad.ann_vol * k, 10);
+    // Sharpe = mean·N / (s·√N) = mean·√N / s ∝ √N.
+    expect(crypto.sharpe!).toBeCloseTo(trad.sharpe! * k, 10);
+    expect(crypto.sortino!).toBeCloseTo(trad.sortino! * k, 10);
+    // CAGR is calendar-based (days/365.25) — asset-class-invariant.
+    expect(crypto.cagr).toBe(trad.cagr);
+    // Max drawdown has no annualization term.
+    expect(crypto.max_dd).toBe(trad.max_dd);
+  });
+});

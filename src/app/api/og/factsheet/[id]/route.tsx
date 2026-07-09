@@ -1,6 +1,7 @@
 import { ImageResponse } from "next/og";
 import { createClient } from "@/lib/supabase/server";
 import { withPublishedOnly } from "@/lib/visibility";
+import { computeOgHeadline } from "@/lib/factsheet/og-metrics";
 
 /**
  * Dynamic OG card for the v2 factsheet. Renders strategy name + headline
@@ -22,6 +23,7 @@ export async function GET(
     name?: string | null;
     codename?: string | null;
     description?: string | null;
+    asset_class?: string | null;
     strategy_analytics?: { daily_returns?: unknown } | { daily_returns?: unknown }[] | null;
   } | null = null;
   try {
@@ -30,7 +32,7 @@ export async function GET(
       supabase
         .from("strategies")
         .select(
-          "id, name, codename, description, strategy_analytics ( daily_returns )",
+          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns )",
         )
         .eq("id", id),
     )
@@ -45,10 +47,12 @@ export async function GET(
   const name = data?.name ?? data?.codename ?? "Strategy";
   const description = (data?.description ?? "").slice(0, 140);
 
-  // Quick headline metrics from the daily-returns array, computed inline so
-  // we don't pull the full buildFactsheetPayload heavy path on every OG hit.
-  // Wrap in try/catch — schema drift (analytics column becomes object instead
-  // of array) must not 500 the route, per the promise made above.
+  // Quick headline metrics from the daily-returns array, computed via the
+  // extracted pure helper (og-metrics.ts) so we don't pull the full
+  // buildFactsheetPayload heavy path on every OG hit — and so the clock/gate
+  // semantics are unit-tested in isolation. Wrap in try/catch — schema drift
+  // (analytics column becomes object instead of array) must not 500 the route,
+  // per the promise made above.
   let sharpe = NaN;
   let cagr = NaN;
   let maxDd = NaN;
@@ -58,31 +62,11 @@ export async function GET(
       : (data?.strategy_analytics as { daily_returns?: unknown } | null | undefined);
     const dailyRaw = analytics?.daily_returns;
     if (Array.isArray(dailyRaw)) {
-      const values: number[] = dailyRaw
-        .map(d => Number((d as { value?: unknown } | null)?.value))
-        .filter(v => Number.isFinite(v));
-      // Sharpe only needs ~30 obs to be meaningful; CAGR requires ≥252 since
-      // annualizing a 30-day return × 8.4 ships nonsense on social cards.
-      if (values.length >= 30) {
-        const m = values.reduce((a, x) => a + x, 0) / values.length;
-        const v = values.reduce((a, x) => a + (x - m) ** 2, 0) / values.length;
-        const s = Math.sqrt(v);
-        sharpe = s > 0 ? (m * 252) / (s * Math.sqrt(252)) : NaN;
-        let cum = 1;
-        let peak = 1;
-        let dd = 0;
-        for (const r of values) {
-          cum *= 1 + r;
-          if (cum > peak) peak = cum;
-          const cur = cum / peak - 1;
-          if (cur < dd) dd = cur;
-        }
-        maxDd = dd;
-        // CAGR only when we have a full year — and when cum stayed positive.
-        if (values.length >= 252 && cum > 0) {
-          cagr = Math.pow(cum, 252 / values.length) - 1;
-        }
-      }
+      const rows = dailyRaw.map(d => {
+        const row = d as { date?: unknown; value?: unknown } | null;
+        return { date: row?.date, value: Number(row?.value) };
+      });
+      ({ sharpe, cagr, maxDd } = computeOgHeadline(rows, data?.asset_class));
     }
   } catch (err) {
     console.error("[og:factsheet] headline metric compute failed", id, err);
@@ -122,7 +106,7 @@ export async function GET(
           <Stat label="Max DD" value={fmtPct(maxDd)} tone="neg" />
         </div>
         <div style={{ marginTop: "auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ fontSize: 18, color: "#64748B" }}>quantalyze.com</div>
+          <div style={{ fontSize: 18, color: "#64748B" }}>quantalyze.xyz</div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#1B6B5A", fontSize: 18, letterSpacing: 2 }}>
             <div style={{ width: 12, height: 12, background: "#1B6B5A", borderRadius: 2 }} />
             verified

@@ -89,6 +89,10 @@ vi.mock("@/lib/supabase/server", () => ({
       }),
     },
     from: () => ({
+      // #597 — finalize-wizard persists the asset-class choice via an
+      // owner-scoped `.update({asset_class}).eq('id').eq('user_id')` before
+      // dispatch. Non-blocking; stub a clean write so the chain resolves.
+      update: () => ({ eq: () => ({ eq: async () => ({ error: null }) }) }),
       select: () => ({
         eq: () => ({
           // audit-2026-05-07 C-0119/H-0329 — finalize-wizard now applies

@@ -87,6 +87,7 @@ const DRAFT = {
   aum: 1_000_000,
   max_capacity: 5_000_000,
   api_key_id: "key-1",
+  asset_class: "crypto",
 };
 
 let WizardClient: typeof import("./WizardClient").WizardClient;

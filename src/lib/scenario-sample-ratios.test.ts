@@ -57,6 +57,15 @@ const sampleSharpeRef = (MEAN * 252) / (Math.sqrt(sampleVariance) * ANNUALIZE);
 const downsideSumSq = RETS.reduce((s, r) => s + (r < 0 ? r * r : 0), 0);
 const sortinoRef = (MEAN * 252) / (Math.sqrt(downsideSumSq / N) * ANNUALIZE);
 
+// #597 — CRYPTO basis: same math, annualized on √365 instead of √252. Every
+// annualized ratio scales by √(365/252) vs the traditional basis; max_drawdown
+// is basis-invariant (no stdev) so it is UNCHANGED.
+const ANNUALIZE_365 = Math.sqrt(365);
+const sampleSharpeRef365 =
+  (MEAN * 365) / (Math.sqrt(sampleVariance) * ANNUALIZE_365);
+const sortinoRef365 =
+  (MEAN * 365) / (Math.sqrt(downsideSumSq / N) * ANNUALIZE_365);
+
 /** Max drawdown on the cumulative-product wealth curve. */
 function maxDrawdownRef(rets: number[]): number {
   let c = 1;
@@ -91,7 +100,7 @@ function businessDates(startDate: string, n: number): string[] {
  * portfolio daily returns equal RETS verbatim — letting us pin the standalone
  * replica against the frozen engine's output for the SAME series.
  */
-function singleStrategyScenario(dates: string[]) {
+function singleStrategyScenario(dates: string[], periodsPerYear = 252) {
   const strategy: StrategyForBuilder = {
     id: "pin",
     name: "Pin",
@@ -113,7 +122,7 @@ function singleStrategyScenario(dates: string[]) {
     leverage: { pin: 1 },
   };
   const cache = buildDateMapCache([strategy]);
-  return computeScenario([strategy], state, cache);
+  return computeScenario([strategy], state, cache, periodsPerYear);
 }
 
 describe("sampleBasisRatios — hand-derived sample/252 reference", () => {
@@ -136,6 +145,35 @@ describe("sampleBasisRatios — hand-derived sample/252 reference", () => {
   });
 });
 
+describe("sampleBasisRatios — #597 crypto (√365) basis", () => {
+  it("periodsPerYear=365 matches the hand-derived √365 Sharpe/Sortino reference", () => {
+    const r = sampleBasisRatios(RETS, 365);
+    expect(r.sharpe).not.toBeNull();
+    expect(r.sortino).not.toBeNull();
+    expect(r.sharpe!).toBe(round3(sampleSharpeRef365));
+    expect(r.sortino!).toBe(round3(sortinoRef365));
+  });
+
+  it("√365 Sharpe = √252 Sharpe × √(365/252) on the SAME series", () => {
+    // Annualized ratios scale by √N; the ratio of the two bases is √(365/252).
+    const r252 = sampleBasisRatios(RETS, 252);
+    const r365 = sampleBasisRatios(RETS, 365);
+    const scale = Math.sqrt(365 / 252);
+    expect(r365.sharpe!).toBeCloseTo(r252.sharpe! * scale, 2);
+    expect(r365.sortino!).toBeCloseTo(r252.sortino! * scale, 2);
+  });
+
+  it("max_drawdown is basis-INVARIANT (identical at 252 and 365)", () => {
+    expect(sampleBasisRatios(RETS, 365).max_drawdown).toBe(
+      sampleBasisRatios(RETS, 252).max_drawdown,
+    );
+  });
+
+  it("default (no arg) is byte-identical to explicit 252", () => {
+    expect(sampleBasisRatios(RETS)).toEqual(sampleBasisRatios(RETS, 252));
+  });
+});
+
 describe("sampleBasisRatios — ENGINE PARITY (replica ≡ frozen computeScenario)", () => {
   it("matches computeScenario's rounded sharpe/sortino/max_drawdown for the same series", () => {
     const m = singleStrategyScenario(businessDates("2024-01-02", N));
@@ -149,6 +187,21 @@ describe("sampleBasisRatios — ENGINE PARITY (replica ≡ frozen computeScenari
     expect(r.sharpe).toBe(m.sharpe);
     expect(r.sortino).toBe(m.sortino);
     expect(r.max_drawdown).toBe(m.max_drawdown);
+  });
+
+  it("#597 — parity ALSO holds at the crypto √365 basis (replica ≡ engine)", () => {
+    // Thread the SAME periodsPerYear=365 through BOTH the engine and the
+    // replica: they must still agree exactly. This proves the two stay in
+    // lockstep at ANY basis, not just the 252 default.
+    const m = singleStrategyScenario(businessDates("2024-01-02", N), 365);
+    const r = sampleBasisRatios(RETS, 365);
+    expect(m.n).toBe(N);
+    expect(r.sharpe).toBe(m.sharpe);
+    expect(r.sortino).toBe(m.sortino);
+    expect(r.max_drawdown).toBe(m.max_drawdown);
+    // And 365 genuinely differs from 252 for the annualized ratios (non-vacuous).
+    const m252 = singleStrategyScenario(businessDates("2024-01-02", N), 252);
+    expect(m.sharpe).not.toBe(m252.sharpe);
   });
 });
 

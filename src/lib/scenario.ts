@@ -86,6 +86,16 @@ export interface StrategyForBuilder {
   sharpe: number | null;
   volatility: number | null;
   max_drawdown: number | null;
+  /**
+   * #597 — the strategy's asset class ('crypto' | 'traditional'), carried so
+   * callers that build a SINGLE-asset-class blend can derive the engine's
+   * `periodsPerYear` (√365 crypto / √252 traditional) via
+   * `annualizationPeriods()`. OPTIONAL + additive: absent on the per-key /
+   * added-strategy adapter units (mixed books), where the engine keeps its
+   * 252 default. Never consumed by the engine directly — the axis-level
+   * `periodsPerYear` argument is the single knob.
+   */
+  asset_class?: string | null;
 }
 
 export interface ScenarioState {
@@ -216,6 +226,7 @@ export function computeScenario(
   strategies: StrategyForBuilder[],
   state: ScenarioState,
   dateMapCache: Map<string, Map<string, number>>,
+  periodsPerYear = 252,
 ): ComputedMetrics {
   const activeIds = strategies
     .map((s) => s.id)
@@ -495,7 +506,23 @@ export function computeScenario(
   }
 
   const twr = cumulative[n - 1] - 1;
-  const years = n / 252;
+  // #597 — annualize on the asset-class basis (default 252). years = n / N,
+  // vol/sharpe/sortino use √N and mean·N. Default 252 keeps every existing
+  // caller byte-identical.
+  //
+  // ⚠️ #597-blend FOLLOW-UP — CAGR CLOCK APPROXIMATION. This `years = n /
+  // periodsPerYear` is a COUNT-based CAGR clock, NOT the calendar clock the
+  // governing ruling mandates ("CAGR rides the calendar clock — days/365.25;
+  // risk metrics ride the frequency clock — 365 crypto / 252 traditional";
+  // see compute.ts / metrics.py TWR-05). It is left as-is DELIBERATELY: the
+  // scenario engine composes DENSE, calendar-ALIGNED axes, for which
+  // n/periodsPerYear ≈ calendar span — the ruling's acceptable-approximation
+  // case — and byte-identity of the default (252) path is a PR-#597 invariant.
+  // When the blend follow-up PR flips periodsPerYear toward 365, it MUST also
+  // convert this to a real calendar-span year count derived from the date axis
+  // (calendarYears(firstMs, lastMs) in closed-sets.ts). Do NOT blindly trust
+  // n/365 on a gappy series — a sparse track would over-annualize the CAGR.
+  const years = n / periodsPerYear;
   const cagr = years > 0 ? Math.pow(1 + twr, 1 / years) - 1 : null;
 
   // Vol (sample std), Sharpe (rf=0), Sortino (rf=0).
@@ -503,8 +530,8 @@ export function computeScenario(
   const variance =
     portDaily.reduce((s, r) => s + (r - meanR) * (r - meanR), 0) / (n - 1);
   const volDaily = Math.sqrt(variance);
-  const volatility = volDaily * Math.sqrt(252);
-  const sharpe = volatility > 0 ? (meanR * 252) / volatility : null;
+  const volatility = volDaily * Math.sqrt(periodsPerYear);
+  const sharpe = volatility > 0 ? (meanR * periodsPerYear) / volatility : null;
 
   // Sortino: downside RMS divides by TOTAL observations (n), not by the
   // count of negative days. See the file-level behavior notes.
@@ -522,9 +549,9 @@ export function computeScenario(
     0,
   );
   const downsideVar = downsideSumSq / n;
-  const downsideVol = Math.sqrt(downsideVar) * Math.sqrt(252);
+  const downsideVol = Math.sqrt(downsideVar) * Math.sqrt(periodsPerYear);
   const sortino: number | null =
-    downsideVol > 0 ? (meanR * 252) / downsideVol : null;
+    downsideVol > 0 ? (meanR * periodsPerYear) / downsideVol : null;
 
   // Max drawdown + duration.
   let peak = cumulative[0];

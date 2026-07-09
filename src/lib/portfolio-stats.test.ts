@@ -124,6 +124,38 @@ describe("computeRollingMetric", () => {
     const short = DAILY_RETURNS.slice(0, 5);
     expect(computeRollingMetric(short, 60, "sharpe")).toEqual([]);
   });
+
+  // #597 — asset-class annualization: crypto passes periodsPerYear=365.
+  it("default periodsPerYear is byte-identical to explicit 252", () => {
+    const window = 60;
+    expect(computeRollingMetric(DAILY_RETURNS, window, "sharpe")).toEqual(
+      computeRollingMetric(DAILY_RETURNS, window, "sharpe", 252),
+    );
+    expect(computeRollingMetric(DAILY_RETURNS, window, "volatility")).toEqual(
+      computeRollingMetric(DAILY_RETURNS, window, "volatility", 252),
+    );
+  });
+
+  it("crypto √365 Sharpe = √252 Sharpe × √(365/252) point-for-point", () => {
+    const window = 60;
+    const s252 = computeRollingMetric(DAILY_RETURNS, window, "sharpe", 252);
+    const s365 = computeRollingMetric(DAILY_RETURNS, window, "sharpe", 365);
+    const scale = Math.sqrt(365 / 252);
+    expect(s365.length).toBe(s252.length);
+    for (let i = 0; i < s365.length; i++) {
+      expect(s365[i].value).toBeCloseTo(s252[i].value * scale, 10);
+    }
+  });
+
+  it("crypto √365 volatility = √252 volatility × √(365/252) point-for-point", () => {
+    const window = 60;
+    const v252 = computeRollingMetric(DAILY_RETURNS, window, "volatility", 252);
+    const v365 = computeRollingMetric(DAILY_RETURNS, window, "volatility", 365);
+    const scale = Math.sqrt(365 / 252);
+    for (let i = 0; i < v365.length; i++) {
+      expect(v365[i].value).toBeCloseTo(v252[i].value * scale, 10);
+    }
+  });
 });
 
 // ── 4. computeVaR ───────────────────────────────────────────────────
@@ -341,6 +373,21 @@ describe("computeTrackingError", () => {
     const r = DAILY_RETURNS.map((d) => d.value);
     const b = BENCHMARK.map((d) => d.value);
     expect(computeTrackingError(r, b)).toBeGreaterThanOrEqual(0);
+  });
+
+  // #597 — crypto passes periodsPerYear=365; TE scales by √(365/252).
+  it("default periodsPerYear is byte-identical to explicit 252", () => {
+    const r = DAILY_RETURNS.map((d) => d.value);
+    const b = BENCHMARK.map((d) => d.value);
+    expect(computeTrackingError(r, b)).toBe(computeTrackingError(r, b, 252));
+  });
+
+  it("crypto √365 TE = √252 TE × √(365/252)", () => {
+    const r = DAILY_RETURNS.map((d) => d.value);
+    const b = BENCHMARK.map((d) => d.value);
+    const te365 = computeTrackingError(r, b, 365);
+    const te252 = computeTrackingError(r, b, 252);
+    expect(te365).toBeCloseTo(te252 * Math.sqrt(365 / 252), 12);
   });
 });
 

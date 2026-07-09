@@ -28,7 +28,7 @@ export type BootstrapCISummary = {
  * Deterministic Mulberry32 PRNG with a fixed seed so the same series
  * produces the same CI on every render.
  */
-export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, seed = 42): BootstrapCISummary {
+export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, seed = 42, periodsPerYear = 252): BootstrapCISummary {
   const n = rets.length;
   const sharpes: number[] = new Array(n_resamples);
   const sortinos: number[] = new Array(n_resamples);
@@ -46,13 +46,13 @@ export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, s
       }
       filled += take;
     }
-    const stats = headlineStats(resampled);
+    const stats = headlineStats(resampled, periodsPerYear);
     sharpes[k] = stats.sharpe;
     sortinos[k] = stats.sortino;
     maxDds[k] = stats.max_dd;
   }
 
-  const point = headlineStats(rets);
+  const point = headlineStats(rets, periodsPerYear);
   return {
     sharpe: { point: point.sharpe, ...ci95(sharpes), hist: histogram(sharpes, 40) },
     sortino: { point: point.sortino, ...ci95(sortinos), hist: histogram(sortinos, 40) },
@@ -92,7 +92,7 @@ function histogram(xs: number[], bins: number): BootstrapHistogram {
   return { lo, hi, bins: counts };
 }
 
-function headlineStats(rets: number[]): { sharpe: number; sortino: number; max_dd: number } {
+function headlineStats(rets: number[], periodsPerYear = 252): { sharpe: number; sortino: number; max_dd: number } {
   const n = rets.length;
   if (n === 0) return { sharpe: 0, sortino: 0, max_dd: 0 };
   let sum = 0;
@@ -110,9 +110,9 @@ function headlineStats(rets: number[]): { sharpe: number; sortino: number; max_d
     }
   }
   const s = Math.sqrt(varSum / n);
-  const sharpe = s > 0 ? (m * 252) / (s * Math.sqrt(252)) : 0;
-  const downDev = hasNeg ? Math.sqrt(downSqSum / n) * Math.sqrt(252) : 0;
-  const sortino = downDev > 0 ? (m * 252) / downDev : 0;
+  const sharpe = s > 0 ? (m * periodsPerYear) / (s * Math.sqrt(periodsPerYear)) : 0;
+  const downDev = hasNeg ? Math.sqrt(downSqSum / n) * Math.sqrt(periodsPerYear) : 0;
+  const sortino = downDev > 0 ? (m * periodsPerYear) / downDev : 0;
   const eq = cumEq(rets);
   const dd = drawdowns(eq);
   let maxDd = 0;

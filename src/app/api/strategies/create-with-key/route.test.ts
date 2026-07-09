@@ -50,6 +50,14 @@ const draftLookupMock = vi.fn(async () => ({ data: null, error: null }) as {
   data: { id: string; api_key_id: string } | null;
   error: null;
 });
+// #597 — the route force-derives asset_class:'crypto' on the freshly-created
+// draft via `from("strategies").update({...}).eq("id").eq("user_id")`. Mirror
+// the finalize-wizard thenable chain: update(payload) → eq → eq resolves to
+// `{ error }`. updateMock captures the payload so a test can assert the derive
+// fired with 'crypto'. Default resolves clean (non-blocking success path).
+const assetClassUpdateMock = vi.fn((..._args: unknown[]) => ({
+  eq: () => ({ eq: async () => ({ error: null }) }),
+}));
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     rpc: (...args: unknown[]) => rpcMock(...args),
@@ -61,6 +69,7 @@ vi.mock("@/lib/supabase/server", () => ({
           }),
         }),
       }),
+      update: (...args: unknown[]) => assetClassUpdateMock(...args),
     }),
   }),
 }));
@@ -100,6 +109,7 @@ describe("POST /api/strategies/create-with-key — envelope-encryption shape", (
     validateKeyMock.mockReset();
     encryptKeyMock.mockReset();
     rpcMock.mockReset();
+    assetClassUpdateMock.mockClear();
 
     validateKeyMock.mockResolvedValue({
       valid: true,
@@ -142,6 +152,13 @@ describe("POST /api/strategies/create-with-key — envelope-encryption shape", (
       "encrypted-blob-base64",
     );
     expect((rpcArgs as Record<string, unknown>).p_api_secret_encrypted).toBeNull();
+
+    // #597 — the draft is force-derived to 'crypto' right after creation so any
+    // sync-preview compute in the wizard window annualizes √365, not the DB
+    // DEFAULT 'traditional' √252. Every create-with-key strategy is API-keyed on
+    // a crypto venue, so the derive is unconditional.
+    expect(assetClassUpdateMock).toHaveBeenCalledTimes(1);
+    expect(assetClassUpdateMock).toHaveBeenCalledWith({ asset_class: "crypto" });
   });
 
   it("still 502s when api_key_encrypted itself is missing", async () => {

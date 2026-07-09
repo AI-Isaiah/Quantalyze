@@ -284,4 +284,68 @@ describe("[H-0191] MetadataStep", () => {
     expect(draft.categoryId).toBe("cat-aaa");
     expect(draft.description).toBe("A market-neutral basis strategy.");
   });
+
+  // ── #597 — asset-class picker: crypto-exchange detection LOCKS to 'crypto' ──
+  describe("#597 asset-class picker", () => {
+    /** A full MetadataDraft carrying the DB NOT NULL DEFAULT assetClass. */
+    function draftWithAssetClass(assetClass: string): MetadataDraft {
+      return {
+        name: null,
+        description: "A resumed draft description.",
+        categoryId: "cat-aaa",
+        strategyTypes: [],
+        subtypes: [],
+        markets: [],
+        supportedExchanges: [],
+        leverageRange: "",
+        aum: "",
+        maxCapacity: "",
+        assetClass,
+      };
+    }
+
+    it("locks the picker to 'crypto' (value + disabled) when a crypto exchange is detected", async () => {
+      render(<MetadataStep {...baseProps} detectedExchange="binance" />);
+      const select = (await screen.findByLabelText(
+        /Asset class/i,
+      )) as HTMLSelectElement;
+      expect(select.value).toBe("crypto");
+      expect(select).toBeDisabled();
+    });
+
+    // P2 regression guard: a RESUMED broker draft whose row carries the DB
+    // default 'traditional' must STILL lock to 'crypto' — the detected-exchange
+    // lock wins over the stale `initial` value. If someone reverts the state
+    // initializer to `initial?.assetClass ?? ...` (letting the stale default
+    // short-circuit detection), this reddens.
+    it("locks to 'crypto' even when a resumed draft carries initial.assetClass='traditional'", async () => {
+      render(
+        <MetadataStep
+          {...baseProps}
+          detectedExchange="binance"
+          initial={draftWithAssetClass("traditional")}
+        />,
+      );
+      const select = (await screen.findByLabelText(
+        /Asset class/i,
+      )) as HTMLSelectElement;
+      expect(select.value).toBe("crypto");
+      expect(select).toBeDisabled();
+    });
+
+    it("stays editable at the resumed value on the CSV path (no detected exchange)", async () => {
+      render(
+        <MetadataStep
+          {...baseProps}
+          detectedExchange={null}
+          initial={draftWithAssetClass("traditional")}
+        />,
+      );
+      const select = (await screen.findByLabelText(
+        /Asset class/i,
+      )) as HTMLSelectElement;
+      expect(select.value).toBe("traditional");
+      expect(select).not.toBeDisabled();
+    });
+  });
 });
