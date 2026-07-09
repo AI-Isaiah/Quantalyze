@@ -95,6 +95,7 @@ export default async function StrategyDetailPage({
       avgDailyTurnover: strategy.avg_daily_turnover ?? null,
       startDate: strategy.start_date ?? null,
       benchmark: strategy.benchmark ?? null,
+      assetClass: strategy.asset_class ?? null,
     },
     dailyReturns,
   );

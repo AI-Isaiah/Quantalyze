@@ -291,6 +291,36 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       );
     }
 
+    // #597 — force-derive 'crypto' on the freshly-created draft row. The
+    // SECURITY DEFINER `create_wizard_strategy` RPC signature cannot carry
+    // asset_class, so the row sits at the NOT NULL DEFAULT 'traditional' until
+    // finalize force-derives it. Any compute fired during the wizard window
+    // (e.g. sync-preview) would otherwise annualize a crypto strategy on √252.
+    // Every create-with-key strategy is API-keyed and every supported exchange
+    // (binance/okx/bybit/deribit) is a crypto venue, so 'crypto' is unconditional
+    // here. Owner-scoped (RLS + belt-and-braces user_id filter). Mirrors the
+    // migration backfill (api_key_id IS NOT NULL → crypto) and finalize's
+    // force-derive; closes the draft-preview √252 window.
+    //
+    // Non-blocking on failure: the column default leaves the row on √252 until
+    // finalize re-derives it to crypto, so a transient write fault must not fail
+    // the whole draft creation — just surface it for debugging (Rule 12).
+    // @audit-skip: non-security annualization metadata (√365 crypto / √252
+    // traditional) on a draft row that is NOT user-visible until finalize (which
+    // audits the user-visible creation) — mirrors the finalize-wizard skip.
+    const { error: assetClassErr } = await supabase
+      .from("strategies")
+      .update({ asset_class: "crypto" })
+      .eq("id", row.strategy_id)
+      .eq("user_id", user.id);
+    if (assetClassErr) {
+      console.warn(
+        "[strategies/create-with-key] asset_class force-derive failed (non-blocking):",
+        assetClassErr.message,
+        assetClassErr.code,
+      );
+    }
+
     // H-0309 / M-0346: stable `ok: true` success discriminator so the wizard
     // client (and any future caller) can branch on `data.ok` uniformly across
     // create-with-key / finalize-wizard / keys-sync, matching the csv-finalize

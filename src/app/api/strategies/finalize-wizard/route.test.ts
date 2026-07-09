@@ -59,6 +59,11 @@ const STATE = vi.hoisted(() => ({
   // RPC call capture (user-scoped).
   rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
   rpcResult: { data: null as unknown, error: null as unknown },
+  // #597 — capture the user-scoped strategies.asset_class UPDATE patch(es) so
+  // tests can assert the manager's asset-class choice is persisted; the forced
+  // error exercises the non-blocking log branch.
+  assetClassUpdates: [] as Array<Record<string, unknown>>,
+  assetClassUpdateError: null as { message: string } | null,
   // Admin RPC capture (after() block).
   adminRpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
   // H-0330 — forced error returned by admin.rpc('enqueue_compute_job').
@@ -126,8 +131,29 @@ vi.mock("@/lib/supabase/server", () => ({
           error: STATE.strategyError,
         }),
       });
+      // #597 — the route persists strategies.asset_class via a user-scoped
+      // update().eq().eq() (owner-scoped) before finalize. Chainable + awaitable
+      // (thenable) so `await update().eq().eq()` resolves; the route treats any
+      // error as non-blocking. Records the persisted value for assertions.
+      const buildUpdateChain = () => {
+        const chain = {
+          eq: () => chain,
+          then: (
+            onFulfilled: (v: { data: null; error: unknown }) => unknown,
+          ) =>
+            Promise.resolve({
+              data: null,
+              error: STATE.assetClassUpdateError ?? null,
+            }).then(onFulfilled),
+        };
+        return chain;
+      };
       return {
         select: () => buildEqChain(),
+        update: (patch: Record<string, unknown>) => {
+          STATE.assetClassUpdates.push(patch);
+          return buildUpdateChain();
+        },
       };
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
@@ -280,6 +306,8 @@ beforeEach(async () => {
   STATE.strategyRow = { api_key_id: API_KEY_ID };
   STATE.strategyError = null;
   STATE.strategySelectEqFilters = [];
+  STATE.assetClassUpdates = [];
+  STATE.assetClassUpdateError = null;
   STATE.rpcCalls = [];
   STATE.rpcResult = { data: STRATEGY_ID, error: null };
   STATE.adminApiKeyId = API_KEY_ID;
@@ -519,6 +547,76 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
       column: "user_id",
       value: USER.id,
     });
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * #597 — asset-class persistence. The finalize RPC signature cannot carry
+ * asset_class, so the route persists it via an owner-scoped strategies UPDATE
+ * before dispatch.
+ *
+ * FORCE-DERIVE rule (the crux): an API-keyed strategy always persists 'crypto'
+ * REGARDLESS of the submitted value — every supported exchange is a crypto
+ * venue, so the picker is only meaningful for CSV uploads. Trusting the
+ * submitted value would let a resumed broker draft (whose DB row carries the
+ * NOT NULL DEFAULT 'traditional') silently annualize a crypto strategy on √252,
+ * a regression vs the pre-#597 `api_key_id → √365` proxy. For CSV drafts
+ * (api_key_id null) the submitted value is honored, coercing anything outside
+ * the 'crypto'|'traditional' closed set to 'traditional' (the √252 default + DB
+ * column default). Non-blocking: a failed update logs but still finalizes.
+ */
+describe("POST /api/strategies/finalize-wizard — #597 asset_class persistence", () => {
+  function okProbe() {
+    return vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ read: true, trade: false, withdraw: false, probe_error: false }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+  }
+
+  // THE broker-resume regression: an API-keyed draft whose row carries the DB
+  // default 'traditional', submitting 'traditional', MUST still persist 'crypto'.
+  // If someone reverts the route to trust the submitted value, this reddens.
+  it("FORCE-DERIVES 'crypto' for an API-keyed draft even when 'traditional' is submitted", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: API_KEY_ID }; // api-keyed (broker resume)
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
+    expect(res.status).toBe(200);
+    expect(STATE.assetClassUpdates).toContainEqual({ asset_class: "crypto" });
+    // The submitted 'traditional' must NOT have been persisted.
+    expect(STATE.assetClassUpdates).not.toContainEqual({ asset_class: "traditional" });
+    fetchSpy.mockRestore();
+  });
+
+  it("persists 'crypto' for a CSV draft when the body sends asset_class: 'crypto'", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: null }; // CSV branch (probe skipped)
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "crypto" }));
+    expect(res.status).toBe(200);
+    expect(STATE.assetClassUpdates).toContainEqual({ asset_class: "crypto" });
+    fetchSpy.mockRestore();
+  });
+
+  it("coerces an invalid CSV-draft asset_class to 'traditional'", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: null }; // CSV branch — submitted value honored
+    const POST = await importPost();
+    await POST(makeReq({ ...VALID_BODY, asset_class: "equities" })); // garbage
+    expect(STATE.assetClassUpdates).toContainEqual({ asset_class: "traditional" });
+    fetchSpy.mockRestore();
+  });
+
+  it("still finalizes (200) when the asset_class update errors — non-blocking", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: null }; // CSV branch
+    STATE.assetClassUpdateError = { message: "transient PG blip" };
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "crypto" }));
+    expect(res.status).toBe(200);
     fetchSpy.mockRestore();
   });
 });

@@ -37,7 +37,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
       .select(
         `id, name, codename, disclosure_tier, status, markets, strategy_types,
        description, subtypes, supported_exchanges, leverage_range, aum,
-       max_capacity, avg_daily_turnover, start_date, benchmark,
+       max_capacity, avg_daily_turnover, start_date, benchmark, asset_class,
        strategy_analytics ( daily_returns, returns_series, computed_at )`,
       )
       .eq("id", id),
@@ -135,6 +135,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
       avgDailyTurnover: strategy.avg_daily_turnover ?? null,
       startDate: strategy.start_date ?? null,
       benchmark: strategy.benchmark ?? null,
+      assetClass: strategy.asset_class ?? null,
     },
     dailyReturns,
   );

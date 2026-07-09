@@ -16,6 +16,7 @@ import {
   EXCHANGES,
   canonicalizeExchange,
 } from "@/lib/constants";
+import { isCryptoExchange } from "@/lib/closed-sets";
 
 /**
  * MetadataStep collects the metadata the founder needs to approve a
@@ -35,6 +36,12 @@ export interface MetadataDraft {
   leverageRange: string;
   aum: string;
   maxCapacity: string;
+  /**
+   * #597 — asset class ('crypto' | 'traditional') driving Sharpe/Sortino/vol
+   * annualization (√365 crypto / √252 traditional). Defaults from the detected
+   * exchange (every supported exchange is crypto today) and is user-editable.
+   */
+  assetClass: string;
 }
 
 export interface MetadataStepProps {
@@ -90,6 +97,17 @@ export function MetadataStep({
   );
   const [aum, setAum] = useState<string>(initial?.aum ?? "");
   const [maxCapacity, setMaxCapacity] = useState<string>(initial?.maxCapacity ?? "");
+  // #597 — asset class drives annualization (√365 crypto / √252 traditional).
+  // A detected crypto exchange LOCKS the class to 'crypto' (every supported
+  // exchange is a crypto venue; finalize-wizard force-derives the same, so an
+  // editable picker here would lie). This must win over `initial` — a resumed
+  // broker draft carries the DB's NOT NULL DEFAULT 'traditional', and letting
+  // that stale default short-circuit the detection would silently annualize a
+  // crypto strategy on √252. CSV/unknown flows keep the editable picker.
+  const assetClassLocked = isCryptoExchange(detectedExchange);
+  const [assetClass, setAssetClass] = useState<string>(
+    assetClassLocked ? "crypto" : (initial?.assetClass ?? "traditional"),
+  );
   const [categoryLoadError, setCategoryLoadError] = useState<string | null>(null);
   // Phase 53 / APPLY-02 — inline per-field validation surfacing. The
   // description is the required free-text field; surface its existing
@@ -189,6 +207,7 @@ export function MetadataStep({
       leverageRange,
       aum,
       maxCapacity,
+      assetClass,
     });
   }
 
@@ -301,6 +320,26 @@ export function MetadataStep({
           onToggle={(item) =>
             toggle(supportedExchanges, item, setSupportedExchanges)
           }
+        />
+
+        {/* #597 — asset class drives Sharpe/Sortino/volatility annualization
+            (crypto trades 7 days/week → √365; traditional markets weekdays →
+            √252). Locked to 'crypto' when a crypto exchange is detected
+            (finalize-wizard force-derives the same); editable for CSV /
+            multi-asset strategies. */}
+        <Select
+          label={
+            assetClassLocked
+              ? "Asset class (auto-detected from exchange)"
+              : "Asset class"
+          }
+          options={[
+            { value: "crypto", label: "Crypto (annualize ×√365)" },
+            { value: "traditional", label: "Traditional / equities · FX (annualize ×√252)" },
+          ]}
+          value={assetClass}
+          onChange={(e) => setAssetClass(e.target.value)}
+          disabled={assetClassLocked}
         />
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">

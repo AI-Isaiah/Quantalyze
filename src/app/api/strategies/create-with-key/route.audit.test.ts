@@ -69,6 +69,9 @@ vi.mock("@/lib/supabase/server", () => ({
           }),
         }),
       }),
+      // #597 — the route force-derives asset_class='crypto' on the new draft
+      // via .update().eq().eq() after the RPC. Stub a clean resolving chain.
+      update: () => ({ eq: () => ({ eq: async () => ({ error: null }) }) }),
     }),
   }),
 }));

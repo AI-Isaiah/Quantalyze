@@ -48,6 +48,7 @@ interface InitialDraft {
   aum: number | null;
   max_capacity: number | null;
   api_key_id: string | null;
+  asset_class: string | null;
 }
 
 interface WizardClientProps {
@@ -167,6 +168,9 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
           leverageRange: initialDraft.leverage_range ?? "",
           aum: initialDraft.aum?.toString() ?? "",
           maxCapacity: initialDraft.max_capacity?.toString() ?? "",
+          // #597 — restore the persisted asset class on resume; the DB column
+          // is NOT NULL DEFAULT 'traditional', so null only occurs pre-catch-up.
+          assetClass: initialDraft.asset_class ?? "traditional",
         }
       : null,
   );

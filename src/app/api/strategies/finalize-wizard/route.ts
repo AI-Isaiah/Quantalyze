@@ -149,6 +149,7 @@ type ValidatedPayload = {
   leverage_range: string | null;
   aumNum: number | null;
   maxCapacityNum: number | null;
+  asset_class: string;
 };
 
 function validatePayload(
@@ -178,6 +179,7 @@ function validatePayload(
     leverage_range,
     aum,
     max_capacity,
+    asset_class,
   } = body;
 
   if (!isUuid(strategy_id)) {
@@ -260,6 +262,15 @@ function validatePayload(
   const aumNum = isValidDollar(aum) ? aum : null;
   const maxCapacityNum = isValidDollar(max_capacity) ? max_capacity : null;
 
+  // #597 — asset class drives Sharpe/Sortino/vol annualization (√365 crypto /
+  // √252 traditional). Accept only the two closed-set values; anything else
+  // (absent, garbled, a future value) fails SAFE to 'traditional' — the
+  // conservative √252 basis and the DB column default.
+  const asset_class_validated =
+    asset_class === "crypto" || asset_class === "traditional"
+      ? asset_class
+      : "traditional";
+
   // audit-2026-05-07 H-0324 — isUuid is a type predicate (value is
   // string), so the prior `as string` casts were redundant. Removing
   // them keeps the parse boundary statically verified end-to-end.
@@ -285,6 +296,7 @@ function validatePayload(
           : null,
       aumNum,
       maxCapacityNum,
+      asset_class: asset_class_validated,
     },
   };
 }
@@ -435,6 +447,42 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   const apiKeyId =
     typeof strategyRow.api_key_id === "string" ? strategyRow.api_key_id : null;
+
+  // #597 — persist the strategy's asset class onto the draft row. The
+  // SECURITY DEFINER `finalize_wizard_strategy` RPC signature does not carry
+  // asset_class, so it is written here directly on the owner-scoped client
+  // (RLS + the belt-and-braces user_id filter enforce ownership) BEFORE the
+  // finalize dispatch, covering both the legacy and unified paths.
+  //
+  // API-keyed strategies FORCE-DERIVE 'crypto': every supported exchange
+  // (binance/okx/bybit/deribit) is a crypto venue, so the picker is only
+  // meaningful for CSV uploads. Trusting the submitted value here would let a
+  // resumed broker draft (whose DB row carries the NOT NULL DEFAULT
+  // 'traditional') silently annualize a crypto strategy on √252 — a regression
+  // vs the pre-#597 `api_key_id → √365` proxy. Mirrors the migration backfill
+  // rule (api_key_id IS NOT NULL → crypto).
+  //
+  // Non-blocking on failure: the column default means a failed write leaves a
+  // CSV strategy on √252 (harmless for traditional; WRONG for crypto-CSV, so
+  // the failure is surfaced to Sentry below) and a broker strategy is
+  // re-derived to crypto on the next finalize attempt.
+  // @audit-skip: non-security annualization metadata (√365 crypto / √252
+  // traditional) written as part of the already-audited strategy finalization;
+  // a dedicated audit event would be noise (mirrors the last_sync_at skip below).
+  const { error: assetClassErr } = await supabase
+    .from("strategies")
+    .update({ asset_class: apiKeyId ? "crypto" : fields.asset_class })
+    .eq("id", fields.strategy_id)
+    .eq("user_id", user.id);
+  if (assetClassErr) {
+    console.warn(
+      `[strategies/finalize-wizard] asset_class persist failed (non-blocking): ${scrubInternalToken(assetClassErr.message)}`,
+    );
+    captureToSentry(assetClassErr, {
+      tags: { op: "finalize-wizard.asset_class_persist" },
+      level: "warning",
+    });
+  }
 
   // Probe runs BEFORE both legacy and unified paths so the
   // scope-broadening defense covers either code path (Phase 19 /
