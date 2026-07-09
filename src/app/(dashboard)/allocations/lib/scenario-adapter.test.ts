@@ -311,3 +311,88 @@ describe("buildAddedOnlySet — the added-only engine set (ENGINE-04 preconditio
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 84 Plan 01 (BLEND-01) — every adapter-built unit must carry an honest
+// asset_class so wave-2/3 call sites can derive blendPeriodsPerYear over the
+// active units. A per-key unit IS a connected exchange data source and every
+// SUPPORTED_EXCHANGE is a crypto venue today (isCryptoExchange, closed-sets.ts)
+// → per-key legs are crypto. Added units carry the metadata lookup's asset_class
+// (null when the lookup entry is absent — the default-meta branch). This is a
+// pure metadata-population change: nothing reads asset_class yet, so every
+// pre-existing pin (raw weights, weight-0 added default, equivalence oracle)
+// must stay green untouched.
+// ─────────────────────────────────────────────────────────────────────────
+describe("asset_class population on adapter units (Phase 84, BLEND-01)", () => {
+  const A_ID = "aaaaaaaa-0000-0000-0000-000000000001" as StrategyForBuilderId;
+  const B_ID = "bbbbbbbb-0000-0000-0000-000000000002" as StrategyForBuilderId;
+  const ADDED_2: AddedStrategy[] = [
+    { id: A_ID, name: "Added A", markets: ["binance"], strategy_types: ["momentum"] },
+    { id: B_ID, name: "Added B", markets: ["okx"], strategy_types: ["trend"] },
+  ];
+  const ADDED_RETURNS: Record<StrategyForBuilderId, DailyPoint[]> = {
+    [A_ID]: RETURNS_60D,
+  };
+  // A's lookup entry carries asset_class "traditional" (a CSV/tradfi add);
+  // B has NO lookup entry → the default-meta branch → asset_class null.
+  const ADDED_META: Record<
+    StrategyForBuilderId,
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
+  > = {
+    [A_ID]: {
+      disclosure_tier: "public",
+      cagr: 0.1,
+      sharpe: 1.1,
+      asset_class: "traditional",
+    },
+  };
+
+  it("AC1 per-key units each carry asset_class === 'crypto' (every SUPPORTED_EXCHANGE is crypto)", () => {
+    const result = buildPerKeyStrategyForBuilderSet(
+      { "key-A": RETURNS_60D, "key-B": RETURNS_60D },
+      { "key-A": 70, "key-B": 30 },
+    );
+    for (const s of result.strategies) {
+      expect(s.asset_class).toBe("crypto");
+    }
+    // Pre-existing raw-weight pin stays byte-identical (Pitfall 1 guard).
+    expect(result.state.weights["key-A"]).toBe(70);
+    expect(result.state.weights["key-B"]).toBe(30);
+  });
+
+  it("AC2 buildAddedOnlySet unit carries asset_class from the lookup entry when present", () => {
+    const out = buildAddedOnlySet(ADDED_2, ADDED_RETURNS, ADDED_META);
+    const a = out.strategies.find((s) => s.id === A_ID);
+    expect(a?.asset_class).toBe("traditional");
+  });
+
+  it("AC3 buildAddedOnlySet unit carries asset_class === null when the lookup entry is absent (default-meta branch)", () => {
+    const out = buildAddedOnlySet(ADDED_2, ADDED_RETURNS, ADDED_META);
+    const b = out.strategies.find((s) => s.id === B_ID);
+    expect(b?.asset_class).toBeNull();
+  });
+
+  it("AC4 mergeAddedIntoPerKeySet — per-key units 'crypto', added units lookup-value/null; weight-normalization byte-identical", () => {
+    const perKey = buildPerKeyStrategyForBuilderSet(
+      { "key-A": RETURNS_60D, "key-B": RETURNS_60D },
+      { "key-A": 70, "key-B": 30 },
+    );
+    const merged = mergeAddedIntoPerKeySet(
+      perKey,
+      ADDED_2,
+      ADDED_RETURNS,
+      ADDED_META,
+    );
+    const byId = new Map(merged.strategies.map((s) => [s.id, s]));
+    expect(byId.get("key-A")?.asset_class).toBe("crypto");
+    expect(byId.get("key-B")?.asset_class).toBe("crypto");
+    expect(byId.get(A_ID)?.asset_class).toBe("traditional");
+    expect(byId.get(B_ID)?.asset_class).toBeNull();
+    // Existing merge weight-normalization unchanged: per-key raw 70/30 → shares
+    // 0.7/0.3 (÷Σ100), added units keep the deliberate weight-0 default.
+    expect(merged.state.weights["key-A"]).toBeCloseTo(0.7, 12);
+    expect(merged.state.weights["key-B"]).toBeCloseTo(0.3, 12);
+    expect(merged.state.weights[A_ID]).toBe(0);
+    expect(merged.state.weights[B_ID]).toBe(0);
+  });
+});

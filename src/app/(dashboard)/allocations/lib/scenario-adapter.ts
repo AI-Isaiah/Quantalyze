@@ -62,7 +62,7 @@ function buildAddedUnits(
   addedStrategyReturnsLookup: Record<StrategyForBuilderId, DailyPoint[]>,
   addedStrategyMetadataLookup: Record<
     StrategyForBuilderId,
-    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
   >,
 ): StrategyForBuilder[] {
   return addedStrategies.map((a) => {
@@ -70,6 +70,7 @@ function buildAddedUnits(
       disclosure_tier: "public" as const,
       cagr: null,
       sharpe: null,
+      asset_class: null,
     };
     const returns = addedStrategyReturnsLookup[a.id] ?? [];
     return {
@@ -85,6 +86,11 @@ function buildAddedUnits(
       sharpe: meta.sharpe,
       volatility: null,
       max_drawdown: null,
+      // Phase 84 (BLEND-01): carry the metadata lookup's asset_class so the
+      // blend basis (blendPeriodsPerYear) can read it downstream; null when the
+      // lookup entry is absent (the default-meta branch above) — an unknown
+      // leg keeps the conservative 252 blend default.
+      asset_class: meta.asset_class ?? null,
     };
   });
 }
@@ -148,6 +154,12 @@ export function buildPerKeyStrategyForBuilderSet(
       sharpe: null,
       volatility: null,
       max_drawdown: null,
+      // Phase 84 (BLEND-01): a per-key unit IS a connected exchange data source,
+      // and every SUPPORTED_EXCHANGE is a crypto venue today (isCryptoExchange,
+      // closed-sets.ts) — so a per-key leg is a crypto leg under the blend rule
+      // (84-CONTEXT.md D). When a non-crypto venue is ever added to
+      // SUPPORTED_EXCHANGES this literal must derive from the key's exchange.
+      asset_class: "crypto",
     });
     selected[apiKeyId] = true; // default included (CONTEXT Area 1)
     // RAW clamped equity-share USD — NOT a sum-to-1 fraction (Pitfall 1). The
@@ -194,7 +206,7 @@ export function mergeAddedIntoPerKeySet(
   addedStrategyReturnsLookup: Record<StrategyForBuilderId, DailyPoint[]>,
   addedStrategyMetadataLookup: Record<
     StrategyForBuilderId,
-    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
   >,
 ): { strategies: StrategyForBuilder[]; state: ScenarioState } {
   if (addedStrategies.length === 0) return perKey;
@@ -251,14 +263,15 @@ export function mergeAddedIntoPerKeySet(
  *
  * @param addedStrategies  the draft's added strategies (branded AddedStrategy[]).
  * @param addedStrategyReturnsLookup  strategy id → that strategy's DailyPoint[].
- * @param addedStrategyMetadataLookup  strategy id → disclosure/cagr/sharpe meta.
+ * @param addedStrategyMetadataLookup  strategy id → disclosure/cagr/sharpe/
+ *   asset_class meta (asset_class → null when the entry is absent).
  */
 export function buildAddedOnlySet(
   addedStrategies: AddedStrategy[],
   addedStrategyReturnsLookup: Record<StrategyForBuilderId, DailyPoint[]>,
   addedStrategyMetadataLookup: Record<
     StrategyForBuilderId,
-    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
   >,
 ): { strategies: StrategyForBuilder[]; state: ScenarioState } {
   const addedAsBuilder = buildAddedUnits(
