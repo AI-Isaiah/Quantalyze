@@ -54,7 +54,17 @@ from services.db import (
     paginated_select,
     rows,
 )
-from services.metrics import _safe_float, compute_all_metrics
+from services.metrics import (
+    DEFAULT_PERIODS_PER_YEAR,
+    _safe_float,
+    compute_all_metrics,
+)
+from services.allocated_capital import (
+    ALLOCATED_CAPITAL_GUARD_KEYS,
+    ReturnsDenominatorConfigError,
+    metrics_day_basis,
+    parse_returns_denominator_config,
+)
 from services.equity.fallback import merge_dq_flags
 from services.position_reconstruction import _normalize_side
 from services.nav_twr import NAV_TWR_GUARD_KEYS, NavReconstructionError
@@ -191,6 +201,14 @@ class DataQualityFlags(TypedDict, total=False):
     # promotes computation_status to complete_with_warnings on the same channel
     # as the other guard keys so a wrong field name is LOUD. ---
     unrealized_pnl_unreadable: bool
+    # --- Fix B (v1.8 allocated-capital): mandate reporting-window exclusion. Fires
+    # when a config-bearing (allocated-capital) strategy dropped P&L activity days
+    # outside [mandate_start, mandate_end] — pre-mandate history and/or the
+    # post-mandate winding-down tail. Bridged explicitly by derive_broker_dailies
+    # (NOT a NAV_TWR_GUARD_KEYS member — it originates in the allocated_capital
+    # meta, not NavTWRMeta); promotes computation_status to complete_with_warnings
+    # on the same channel. ---
+    mandate_window_excluded_days: bool
     # --- sibling-table batch upsert ---
     sibling_kinds_failed: bool
     sibling_kinds_error: str
@@ -1616,7 +1634,29 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         )
 
         # METRICS-11/12: compute_all_metrics returns MetricsResult dataclass.
-        metrics_result = compute_all_metrics(returns, benchmark_rets)
+        # Fix A (v1.8): the trades path is crypto whenever it runs (an api_key_id-
+        # bearing strategy — this legacy path is dark in prod behind
+        # BROKER_DAILIES_VIA_FUNDING but must stay convention-consistent with the
+        # broker→CSV path if the kill-switch is ever flipped). Crypto ⇒ √365; the
+        # allocated-capital simple/active override rides ONLY the CSV path, so
+        # cumulative_method/day_basis stay at the geometric/calendar defaults here.
+        # Reuse the ALREADY-resolved `api_key_id` (never re-probe the row — a demo /
+        # failed-resolution strategy keeps api_key_id=None → the 252 default).
+        # Finding 5b (documented dark): this legacy trades path does NOT thread
+        # cumulative_method/day_basis. It is UNREACHABLE in prod (guarded by
+        # BROKER_DAILIES_VIA_FUNDING). If that kill-switch is ever flipped false
+        # (break-glass), an allocated-capital strategy routed here would revert to
+        # the geometric/calendar convention (NOT its simple/active mandate
+        # convention) — a KNOWN, ACCEPTABLE degradation for the break-glass path
+        # only; the shipped broker→CSV path (run_csv_strategy_analytics) carries the
+        # config-driven conventions.
+        metrics_result = compute_all_metrics(
+            returns,
+            benchmark_rets,
+            periods_per_year=(
+                365 if api_key_id else DEFAULT_PERIODS_PER_YEAR
+            ),
+        )
 
         # H-A1: pop exposure_series from exposure_metrics (so it lands in the
         # sibling table, not in the strategy_analytics.exposure_metrics column).
@@ -2083,7 +2123,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
     # existence check.
     strategy_result = await db_execute(
         lambda: supabase.table("strategies")
-        .select("id, user_id, api_key_id")
+        .select("id, user_id, api_key_id, returns_denominator_config")
         .eq("id", strategy_id)
         .single()
         .execute()
@@ -2200,7 +2240,42 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 strategy_id, exc,
             )
 
-        metrics_result = compute_all_metrics(returns, benchmark_rets)
+        # Fix A (v1.8): thread the strategy's metrics CONVENTIONS into the SHIPPED
+        # factsheet so it matches the harness-validated path — NOT a geometric /
+        # √252 / calendar recompute of the persisted returns.
+        #   * periods_per_year — ASSET-CLASS driven. ponytail: all broker
+        #     integrations (deribit / bybit / binance / okx) are crypto today, so an
+        #     api_key_id-bearing (broker-sourced) strategy ⇒ crypto ⇒ 365 (every
+        #     calendar day trades); a CSV upload (api_key_id NULL — MT5 / forex)
+        #     stays 252. Replace api_key_id with an explicit asset_class / venue-
+        #     market signal when a non-crypto broker is ever added.
+        #   * cumulative_method / day_basis — from returns_denominator_config (the
+        #     allocated-capital override; Zavara → simple + active). Absent ⇒
+        #     geometric + calendar (BYTE-IDENTICAL to the pre-Fix-A recompute).
+        _periods_per_year = 365 if _is_broker_sourced else DEFAULT_PERIODS_PER_YEAR
+        _cumulative_method = "geometric"
+        _day_basis = "calendar"
+        _denominator_config = (
+            parse_returns_denominator_config(
+                _strategy_row.get("returns_denominator_config")
+            )
+            if isinstance(_strategy_row, dict)
+            else None
+        )
+        if _denominator_config is not None:
+            _cumulative_method = _denominator_config.cumulative_method
+            # B2: EXHAUSTIVE fail-loud map (no silent calendar default on a typo'd /
+            # future metrics_basis). ReturnsDenominatorConfigError is dispositioned
+            # PERMANENT by the except branch below (mirrors the derive path).
+            _day_basis = metrics_day_basis(_denominator_config.metrics_basis)
+
+        metrics_result = compute_all_metrics(
+            returns,
+            benchmark_rets,
+            periods_per_year=_periods_per_year,
+            cumulative_method=_cumulative_method,
+            day_basis=_day_basis,
+        )
 
         data_quality_flags: DataQualityFlags = {"csv_source": True}  # M-0657
         if benchmark_stale or benchmark_rets is None:
@@ -2234,6 +2309,15 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # NAV_TWR_GUARD_KEYS source so a new guard surfaces here by construction.
         _warned = False
         for _flag in NAV_TWR_GUARD_KEYS:
+            if existing_flags.get(_flag):
+                data_quality_flags[_flag] = True  # type: ignore[literal-required]
+                _warned = True
+        # S3 — the allocated-capital warn flags (NOT NAV_TWR_GUARD_KEYS members: they
+        # originate in the allocated_capital meta, not NavTWRMeta) ride the SAME
+        # bridge via the ONE shared ALLOCATED_CAPITAL_GUARD_KEYS source, iterated
+        # exactly like NAV_TWR_GUARD_KEYS above — so a new allocated warn flag
+        # promotes here by construction instead of a hand-copied branch.
+        for _flag in ALLOCATED_CAPITAL_GUARD_KEYS:
             if existing_flags.get(_flag):
                 data_quality_flags[_flag] = True  # type: ignore[literal-required]
                 _warned = True
@@ -2352,6 +2436,42 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 mark_exc,
             )
         raise
+    except ReturnsDenominatorConfigError as cfg_exc:
+        # S1 / B2: a malformed returns_denominator_config (or an unknown
+        # metrics_basis) is PERMANENT — never retry-forever. Mirror the derive path
+        # (run_derive_broker_dailies_job stamps failed + permanent): the generic
+        # `except Exception` below would downgrade this to a 500 → classify_exception
+        # 'unknown' → indefinite transient retry, losing the reason. Stamp failed and
+        # raise a 422 HTTPException (4xx ∈ 400..499 → classify_exception PERMANENT).
+        logger.error(
+            "csv analytics: malformed returns_denominator_config for %s: %s",
+            strategy_id, cfg_exc,
+        )
+
+        def _mark_config_failed() -> None:
+            supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": strategy_id,
+                    "computation_status": "failed",
+                    "computation_warned": False,
+                    "computation_error": (
+                        "Strategy returns_denominator_config is malformed; "
+                        "operator intervention required."
+                    ),
+                    "data_quality_flags": {"csv_source": True},
+                },
+                on_conflict="strategy_id",
+            ).execute()
+        try:
+            await db_execute(_mark_config_failed)
+        except Exception as mark_exc:  # noqa: BLE001
+            logger.warning(
+                "csv analytics: could not mark strategy %s config-failed: %s",
+                strategy_id, mark_exc,
+            )
+        raise HTTPException(
+            status_code=422, detail="Malformed returns_denominator_config"
+        ) from cfg_exc
     except Exception as exc:  # noqa: BLE001
         logger.error("csv analytics failed for %s: %s", strategy_id, exc)
 

@@ -50,12 +50,14 @@ official OpenAPI schema + practitioner sources + ccxt source + a 3-account live 
   `transfer`, `swap`, `correction`, `usdc_reward`, `options_settlement_summary`.
   (`options_settlement_summary` is a zero-cash aggregate — live-confirmed Σ`change`=0.0 on all 3
   accounts; excluding it also avoids double-counting the real `settlement`/`delivery` rows.)
-  ⚠️ **Phase 83 (native path ONLY):** option `trade`/`delivery` rows contribute their FULL native
-  `change`, and `options_settlement_summary` is CLASSIFIED-BUT-INERT (change==0 enforced, contributes
-  NOTHING to attribution). Option P&L = cash `change` + the daily ΔMTM of the replayed open book —
-  see **D-12** below (which SUPERSEDES the Phase-82 D-11 coverage-gated reclass). The USD sibling
-  `txn_rows_to_daily_records` is UNCHANGED (summary stays excluded). `swap` is likewise native-only
-  cash-bearing (HIGH-1); it stays informational in the USD path.
+  ⚠️ **Native path, basis-gated (see D-13, the current pin):** under the DEFAULT `cash_settlement`
+  basis option `trade`/`delivery` rows contribute their FULL native `change` on the settlement day and
+  `options_settlement_summary` is INERT (change==0, contributes NOTHING); an OPEN option book at crawl
+  reconciles at §5 via the terminal wedge (`options_value`, H1). Under the OPT-IN `mark_to_market`
+  basis the D-11 coverage-gated `−commission`/summary re-attribution applies instead. (The Phase-83
+  D-12 ΔMTM replay was REVERTED.) The USD sibling `txn_rows_to_daily_records` is UNCHANGED (summary
+  stays excluded on both bases). `swap` is likewise native-only cash-bearing (HIGH-1); it stays
+  informational in the USD path.
 - **Unknown `type` with nonzero `change` → FAIL LOUD** (never silently include or drop). Deribit
   documents new types can appear at any time, so this is an allow-list, not a block-list.
 
@@ -89,12 +91,58 @@ The reconstruction is anchor-to-today: `initial_capital = equity_today − Σrea
 For a raw equity CURVE (not the anchor), prefer `account_summary.equity_usd` (mark-to-market). The
 per-row `balance`/`equity` are event-stamped snapshots, not a daily grid.
 
-## D-11 — Options P&L channel: coverage-gated MTM re-attribution (Phase 82, native path) — ⛔ SUPERSEDED by D-12
+## D-13 — Per-strategy accrual basis: `cash_settlement` (default) vs `mark_to_market` (opt-in); open-book §5 wedge; allocated path bypasses §5 — ✅ CURRENT
 
-> **⛔ SUPERSEDED by D-12 (Phase 83).** The coverage-gated `−commission` reclass, the summary→
-> `rpl+upl` attribution, the `pre_summary_rollout` era boundary, the pre-rollout-straddle permanent
-> FAILED, and the CR-01 open-book exemption are all REMOVED. Retained below only as history — do NOT
-> implement against it. The current rule is **D-12**.
+**SUPERSEDES D-12 (and re-activates the D-11 shape as an opt-in).** The Phase-83 daily-MTM replay was
+reverted. Option daily attribution is now selected per strategy/account by
+`returns_denominator_config.pnl_basis` (`services/deribit_txn.py`, threaded through
+`build_deribit_native_ledger`):
+
+- **`cash_settlement` — the DEFAULT and the fleet / Zavara basis.** Option `trade`/`delivery` rows
+  book their **FULL native `change`** on the settlement day; `options_settlement_summary` is INERT
+  (its 0.0 `change` is ignored, no `rpl+upl` attribution). There is NO coverage window, NO ΔMTM, NO
+  `pre_summary_rollout` warning. The balance identity is a plain arithmetic `Σnative == Σchange` over
+  cash-bearing rows and closes trivially — its job here is to catch a DROPPED / MIS-CLASSIFIED cash
+  row (it is the ONLY reconciliation on the allocated path, where §5 is bypassed). The CR-01
+  open-book strict-guard exemption is **NOT** applied under this basis (B1): the strict identity runs
+  on open-option currencies too.
+- **`mark_to_market` — OPT-IN.** Exactly the **D-11** shape: inside a currency's summary coverage
+  window option rows book `−commission` and `options_settlement_summary` contributes `rpl+upl`;
+  outside coverage they keep full `change` + the `pre_summary_rollout_option_dailies` warning; a
+  pre-rollout straddle fails loud; open books are exempted from the strict identity (CR-01), with §5
+  as the backstop.
+
+**Open option book at crawl under `cash_settlement` (§5 wedge, H1).** The venue-reported `equity`
+(`terminal_native_equity`) includes the open book's settled mark (`options_value`), but the cash-only
+`native_pnl` does not. To keep §5 (`_assert_inception_reconciled`) closing —
+`terminal_equity == Σnative_pnl + Σflow + wedge` — the open book's `options_value` is valued INTO the
+terminal wedge (`terminal_upnl_native = session_upl + options_value`); like the session-uPnL wedge it
+is stripped from the realized-basis NAV roll. Under `mark_to_market` the open book's value is already
+carried into `native_pnl` by the summary channel, so `options_value` is **NOT** added to the wedge
+there (it would double-count). Perp-only / no-open-book accounts have `options_value == 0` ⇒ wedge
+unchanged ⇒ SC-4 byte-identical.
+
+**Spot BTC_USDC extraction legs.** Net-daily spot-extraction legs are dropped from `native_pnl` ONLY
+on the ALLOCATED path (`exclude_spot_extraction = returns_denominator_config is not None`); on the NAV
+path spot legs are retained verbatim so §5 closes (Bug B).
+
+**Allocated path bypasses §5 entirely.** When `returns_denominator_config` is present the returns are
+`daily_pnl_usd(d) / allocated_capital(d)` (`allocated_capital_returns_and_metrics`), which returns
+BEFORE `reconstruct_native_nav_and_twr` — so neither §5 nor the NAV reconstruction runs for the
+Zavara/allocated factsheet.
+
+---
+
+## D-11 — Options P&L channel: coverage-gated MTM re-attribution (native path) — ✅ SHIPPED as the `mark_to_market` OPT-IN basis (see D-13)
+
+> **✅ CURRENT (basis-gated), per D-13.** Phase 83's ΔMTM replacement (D-12) was REVERTED; the code
+> now implements THIS D-11 shape, but ONLY under the OPT-IN `pnl_basis="mark_to_market"`. The default
+> and fleet/Zavara basis is `cash_settlement` (option rows book full cash `change`, summary inert) —
+> see **D-13**, the authoritative current pin. Under `mark_to_market` the coverage-gated `−commission`
+> reclass, the summary→`rpl+upl` attribution, the `pre_summary_rollout` warning, the pre-rollout-
+> straddle permanent-FAILED, and the CR-01 open-book strict-guard exemption all APPLY as described
+> below. (The `options_settlement_summary` is CLASSIFIED only under `mark_to_market`; under
+> `cash_settlement` it is inert.)
 
 Resolves the **F2 known limitation** above (open-option UPL in the anchor but not in Σrealized) for
 the NATIVE path. Deribit's `change` on an option `trade`/`delivery` is the **premium/payout cash**, a
@@ -176,9 +224,15 @@ legitimately MOVES for options accounts, same D8 posture as coin-dust accounts).
 preserved for perp-only / USD-native accounts (classification-gated: zero option/summary rows → same
 rows, same float ops, bit-identical output). Evidence: `docs/evidence/drb-options-semantics-2026-07.json`.
 
-## D-12 — Option daily attribution = full cash `change` + per-day ΔMTM of the replayed open book (Phase 83, native path)
+## D-12 — Option daily attribution = full cash `change` + per-day ΔMTM of the replayed open book (Phase 83, native path) — ⛔ REVERTED / SUPERSEDED by D-13
 
-**SUPERSEDES D-11.** Phase 82 fixed the full-history TOTAL but attributed each
+> **⛔ REVERTED — do NOT implement against this.** The Phase-83 daily-MTM replay
+> (`replay_option_positions`, `option_mtm_daily`, the merged-ΔMTM `native_pnl`, and the 3-channel
+> balance identity) was REMOVED from the code. The shipped rule is **D-13** (a per-strategy
+> `pnl_basis` selector: `cash_settlement` default + `mark_to_market` opt-in = the D-11 shape).
+> Retained below only as history.
+
+**~~SUPERSEDES D-11~~ (reverted).** Phase 82 fixed the full-history TOTAL but attributed each
 `options_settlement_summary`'s `realized_pl + unrealized_pl` — a per-SESSION delta spanning many days —
 to the ONE settlement day, so DAILY returns were insane (Phoenix `c225840c` key `95089958`: max
 |daily| 94%/day, Aug-2025 +3305%). Phase 83 marks the open option book DAILY and SPREADS the MTM

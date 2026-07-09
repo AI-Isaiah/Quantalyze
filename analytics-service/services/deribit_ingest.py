@@ -32,7 +32,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import AbstractSet, Any
 
 import ccxt
@@ -41,13 +41,14 @@ import pandas as pd
 from services.deribit_txn import (
     _INVERSE_CURRENCIES,
     CASH_BEARING_TYPES,
-    LedgerValuationError,
+    DEFAULT_PNL_BASIS,
+    PNL_BASIS_MARK_TO_MARKET,
     _day_ccy_own_index,
+    _option_activity_after_coverage,
+    _pre_coverage_option_days,
     assert_balance_identity,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
-    option_mtm_daily,
-    replay_option_positions,
     txn_rows_to_daily_records,
     txn_rows_to_native_daily,
 )
@@ -687,125 +688,6 @@ async def fetch_deribit_perp_daily_index(
     return prices
 
 
-# The daily 1D bar is stamped 08:00 UTC (Deribit's settlement boundary), so an
-# ``end_timestamp`` set at ``newest_day 00:00`` would DROP that day's 08:00 bar —
-# the final mark the option MTM replay needs. Pad the upper bound by a full UTC
-# day so ``newest_day``'s 08:00 bar is always inside the query window (and the
-# NEXT day's 08:00 bar is excluded). Pinned by ``test_option_marks_ms_bounds``.
-_OPTION_MARK_END_PAD_MS: int = 24 * 60 * 60 * 1000
-
-# Deribit's ``get_tradingview_chart_data`` retains 1D bars for ~2.5 years past an
-# option's expiry (probe evidence: docs/evidence/drb-option-daily-marks-2026-07.json).
-# An instrument whose ENTIRE life (``last_held_day``) predates this horizon returns
-# a WHOLLY-EMPTY marks response benignly (pre-retention) → its days stay cash-basis
-# (the M1 pre-retention discriminator compares ``last_held_day`` vs this horizon,
-# NOT a parsed expiry — no expiry parser exists nor is needed). A wholly-empty
-# response for an instrument INSIDE the horizon is STRUCTURAL → fail loud.
-_MARK_RETENTION_HORIZON_DAYS: int = int(2.5 * 365)
-
-
-async def fetch_deribit_option_daily_marks(
-    exchange: Any,
-    instrument: str,
-    *,
-    oldest_day: str,
-    newest_day: str,
-    sleep: SleepFn = asyncio.sleep,
-    max_retries: int = PUBLIC_READ_MAX_RETRIES,
-) -> dict[str, float]:
-    """Per-UTC-day daily CLOSE mark for a single OPTION ``instrument`` from the
-    PUBLIC ``get_tradingview_chart_data`` endpoint (``resolution=1D``), over
-    ``[oldest_day 00:00 UTC, newest_day 08:00 UTC]`` (the expiry-capped held span;
-    NEVER past the caller's ``newest_day``). The 80-02→83 sibling of
-    :func:`fetch_deribit_perp_daily_index` for the option daily-MTM channel
-    (Phase 83): SAME endpoint, SAME transient-retry → ``DeribitTransientReadError``
-    on budget exhaustion, SAME scrubbed structural-no-data ``{}`` return, SAME
-    tick→UTC-day mapping/dedupe.
-
-    Takes the INSTRUMENT name VERBATIM (no suffix synthesis — the caller passes a
-    real option instrument like ``BTC-14JUL25-60000-C``) and an explicit
-    ``newest_day`` (the replay's ``last_held_day``, which already caps the span at
-    the instrument's expiry — a position cannot outlive its expiry, so no expiry
-    parse is needed). ``end_timestamp`` is padded one UTC day past ``newest_day``
-    so the ``newest_day 08:00`` settlement bar is inside the window
-    (:data:`_OPTION_MARK_END_PAD_MS`).
-
-    Returns ``{utc_day_iso: close}``. The structural-gap / fail-loud decision
-    belongs to the CALLER (:func:`option_mtm_daily` — a sparse mark inside a
-    nonzero-position day is a ``LedgerValuationError``); this function stays an
-    HONEST fetch, exactly like its perp sibling: a TRANSIENT read
-    (``ccxt.NetworkError``) is retried with backoff and, on exhaustion, RAISES
-    ``DeribitTransientReadError`` (retryable) — never a silently-partial map; a
-    GENUINE benign no-data (the exchange RESPONDED — ``BadSymbol`` for an unlisted
-    instrument, or ``status != "ok"``) returns ``{}`` so the caller's fail-loud /
-    pre-retention partition handles a real gap. Every ccxt error is scrubbed
-    before logging.
-    """
-    start_ms = int(pd.Timestamp(oldest_day, tz="UTC").timestamp() * 1000)
-    end_ms = (
-        int(pd.Timestamp(newest_day, tz="UTC").timestamp() * 1000)
-        + _OPTION_MARK_END_PAD_MS
-    )
-    params: dict[str, Any] = {
-        "instrument_name": instrument,
-        "start_timestamp": start_ms,
-        "end_timestamp": end_ms,
-        "resolution": _PERP_DAILY_RESOLUTION,
-    }
-    retries = 0
-    while True:
-        try:
-            resp = await exchange.public_get_get_tradingview_chart_data(params)
-            break
-        except Exception as exc:  # noqa: BLE001
-            if _is_transient_read_error(exc):
-                retries += 1
-                if retries > max_retries:
-                    raise DeribitTransientReadError(
-                        "deribit get_tradingview_chart_data transient read budget "
-                        f"({max_retries}) exhausted for option instrument="
-                        f"{instrument} — refusing a silently-partial daily-mark map "
-                        "(retryable)"
-                    ) from None
-                await sleep(PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1)))
-                continue
-            logger.warning(
-                "deribit get_tradingview_chart_data structural no-data for option "
-                "instrument=%s (%s); returning no daily marks",
-                instrument,
-                scrub_freeform_string(str(exc)),
-            )
-            return {}
-    result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
-    if not isinstance(result, Mapping) or result.get("status") != "ok":
-        return {}
-    ticks = result.get("ticks", [])
-    close = result.get("close", [])
-    if (
-        not isinstance(ticks, Sequence)
-        or isinstance(ticks, (str, bytes))
-        or not isinstance(close, Sequence)
-        or isinstance(close, (str, bytes))
-        or len(ticks) != len(close)
-    ):
-        return {}
-    prices: dict[str, float] = {}
-    for raw_ts, raw_price in zip(ticks, close):
-        try:
-            ts_ms = int(raw_ts)
-            price = float(raw_price)
-        except (TypeError, ValueError):
-            continue
-        if price <= 0:
-            continue
-        day = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime(
-            "%Y-%m-%d"
-        )
-        # One 1D bar per UTC day; setdefault keeps the FIRST (defensive vs a dupe).
-        prices.setdefault(day, price)
-    return prices
-
-
 def _price_map_has_gap(
     price_map: Mapping[str, float], oldest_day: str, newest_day: str
 ) -> bool:
@@ -871,17 +753,23 @@ class CompletenessReport:
     # the ledger's marks were built against to ``reconstruct_native_nav_and_twr``,
     # never re-probing (which could drift and mis-classify a currency).
     indexable_currencies: frozenset[str] = field(default_factory=frozenset)
-    # Phase 83 — sorted-unique ``(currency, utc_day)`` buckets carrying option
-    # rows on PRE-RETENTION instruments (an instrument whose entire life predates
-    # the venue's ~2.5yr chart-retention horizon → a WHOLLY-EMPTY 1D marks response
-    # whose ``last_held_day`` is older than the horizon). Those days keep cash-basis
-    # ``change`` (no daily MTM) and are surfaced so the worker stamps the reused
-    # ``pre_summary_rollout_option_dailies`` warning (M2 — supersedes the Phase-82
-    # coverage fallback; the marks cover the pre-2025-01-12 summary-rollout era so
-    # the old boundary is meaningless). Empty for perp-only / in-retention accounts.
-    pre_mark_retention_option_days: list[tuple[str, str]] = field(
-        default_factory=list
-    )
+    # Phase 82 (MARK_TO_MARKET basis only) — sorted-unique ``(currency, utc_day)``
+    # buckets carrying option rows OUTSIDE their currency's summary coverage window
+    # (pre-rollout / trailing-edge cash fallback). A crawl artifact (like
+    # ``dated_external_flows``) computed in ``build_deribit_native_ledger`` from the
+    # raw rows; the worker stamps it as the ``pre_summary_rollout_option_dailies``
+    # warning (Q6). Empty for perp-only / fully-covered accounts — and ALWAYS empty
+    # under CASH_SETTLEMENT (the DEFAULT / shipped basis), where there is no summary
+    # channel and no "pre-coverage fallback" (every option row books its raw cash
+    # ``change`` by design), so the adapter suppresses this list entirely.
+    pre_coverage_option_days: list[tuple[str, str]] = field(default_factory=list)
+    # CR-01 — sorted currencies EXEMPTED from the strict balance-identity guard
+    # because their option book is provably OPEN at crawl (nonzero
+    # ``native_options_value``) or has trailing option activity past the last
+    # summary. Surfaced for logs / the acceptance harness ONLY; an open book is the
+    # normal state (§5 ``_assert_inception_reconciled`` is the authoritative
+    # reconciliation), so this is NOT a warning and never promotes the status.
+    balance_identity_open_option_ccys: list[str] = field(default_factory=list)
 
 
 def _now_ms() -> int:
@@ -1445,22 +1333,14 @@ class DeribitNativeAccountState:
     collapsed_upnl_usd: float
     balance_error: bool
     upnl_unreadable: bool
-    # Per-UPPERCASE-ccy ``options_value`` read off the SAME summaries response
-    # (D5): the NATIVE-unit mark of the currency's OPEN option book at crawl.
-    # Absent on perp-only summaries → 0.0 (never fabricated; SC-4 byte-safe). A
-    # failed/empty read yields an EMPTY map. Phase 83: this is the equity leg of
-    # the balance-identity BOOK CHANNEL anchor (``anchor_settled_book`` =
-    # ``options_value − options_session_upl``), NOT an exemption flag any more (the
-    # CR-01 strict-guard exemption is removed; the open book is now VALUED).
+    # CR-01 — per-UPPERCASE-ccy ``options_value`` read off the SAME summaries
+    # response (D5): the NATIVE-unit mark of the currency's OPEN option book. A
+    # nonzero value proves the option book is OPEN at crawl, so the STRICT
+    # balance-identity guard (which closes only for a FLAT-at-settlement book) is
+    # exempted for that currency and the §5 inception gate becomes the
+    # authoritative reconciliation. Absent on perp-only summaries → 0.0 (never
+    # fabricated; SC-4 byte-safe). A failed/empty read yields an EMPTY map.
     native_options_value: Mapping[str, float]
-    # Phase 83 — per-UPPERCASE-ccy ``options_session_upl`` read off the SAME
-    # summaries response: the OPTIONS-ONLY session unrealized wedge. The settled
-    # option book = ``options_value − options_session_upl`` (current-session moves
-    # excluded), the anchor for the book-channel cross-check against the replayed
-    # ``terminal_book``. Absent on perp-only summaries → 0.0 (never fabricated;
-    # SC-4 byte-safe). A failed/empty read yields an EMPTY map. Defaulted so a
-    # standalone / test caller that omits it degrades to a 0.0 book wedge.
-    native_options_session_upl: Mapping[str, float] = field(default_factory=dict)
 
 
 async def fetch_deribit_native_account_state(
@@ -1493,18 +1373,17 @@ async def fetch_deribit_native_account_state(
     try:
         resp = await exchange.private_get_get_account_summaries({})
     except Exception:  # noqa: BLE001 - a failed read is a DQ flag, not a crash
-        return DeribitNativeAccountState(empty, {}, None, 0.0, True, False, {}, {})
+        return DeribitNativeAccountState(empty, {}, None, 0.0, True, False, {})
     result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
     summaries = result.get("summaries", []) if isinstance(result, Mapping) else []
     if not isinstance(summaries, Sequence) or not summaries:
-        return DeribitNativeAccountState({}, {}, None, 0.0, True, False, {}, {})
+        return DeribitNativeAccountState({}, {}, None, 0.0, True, False, {})
 
     # Native per-currency maps read from the SAME summaries (D5) — NEVER index-
     # multiplied. session_upl absent/null/non-numeric → 0.0 (never fabricated).
     native_equity: dict[str, float] = {}
     native_upnl: dict[str, float] = {}
     native_options_value: dict[str, float] = {}
-    native_options_session_upl: dict[str, float] = {}
     for summ in summaries:
         if not isinstance(summ, Mapping):
             continue
@@ -1516,15 +1395,11 @@ async def fetch_deribit_native_account_state(
         # perp-only (options component absent → 0.0 → unchanged value → SC-4).
         upl, _read, _component_unread = _combined_session_upl(summ)
         native_upnl[ccy] = upl
-        # Phase 83 book-channel anchor legs, read off the SAME response. Absent on
-        # perp-only summaries → 0.0 (never fabricated; SC-4). ``options_value`` is
-        # the open book's NATIVE mark at crawl; ``options_session_upl`` is the
-        # options-only session move — the settled book = options_value −
-        # options_session_upl is cross-checked against the replayed terminal_book.
+        # CR-01: the open-option-book mark read off the SAME response. Absent on
+        # perp-only summaries → 0.0 (never fabricated; SC-4). A nonzero value
+        # exempts this currency from the STRICT balance-identity guard (§5 becomes
+        # authoritative on the open book).
         native_options_value[ccy] = float(summ.get("options_value", 0.0) or 0.0)
-        native_options_session_upl[ccy] = float(
-            summ.get("options_session_upl", 0.0) or 0.0
-        )
 
     # Resolve one {ccy}_usd index per held non-linear currency for the COLLAPSED
     # anchor/wedge only (the native maps above never touch these).
@@ -1591,7 +1466,7 @@ async def fetch_deribit_native_account_state(
         # the same fail-loud collapsed disposition (never fabricated).
         return DeribitNativeAccountState(
             native_equity, native_upnl, None, 0.0, True, False,
-            native_options_value, native_options_session_upl,
+            native_options_value,
         )
     open_unrealized_usd, upnl_unreadable = _deribit_session_upl_to_usd(
         summaries, index_prices
@@ -1604,7 +1479,6 @@ async def fetch_deribit_native_account_state(
         False,
         upnl_unreadable,
         native_options_value,
-        native_options_session_upl,
     )
 
 
@@ -1854,6 +1728,8 @@ async def build_deribit_native_ledger(
     *,
     account_state: DeribitNativeAccountState | None = None,
     sleep: SleepFn = asyncio.sleep,
+    pnl_basis: str = DEFAULT_PNL_BASIS,
+    exclude_spot_extraction: bool = False,
 ) -> tuple[NativeLedger, CompletenessReport]:
     """Assemble a :class:`~services.native_nav.NativeLedger` for the landed Phase-79
     native core from existing Deribit parts + the 80-01 siblings (NAT-04). It
@@ -1886,12 +1762,22 @@ async def build_deribit_native_ledger(
     _daily_records, raw_rows, indexable, report = await _crawl_deribit_ledger(
         exchange, since_ms, sleep=sleep
     )
-    # Phase 83: keep the PRE-MERGE CASH-ONLY (day, ccy)-keyed native dict for the
-    # balance-identity STRICT CASH CHANNEL (which reconciles against Σchange over
-    # cash-bearing rows — M3: merging ΔMTM in first would false-fire Σchange + Book
-    # ≠ Σchange). The ΔMTM-merged dict below feeds the pd.Series conversion + the
-    # book-channel cross-check.
-    native_daily_cash = txn_rows_to_native_daily(raw_rows)
+    # Keep the plain (day, ccy)-keyed native dict for the balance-identity guard
+    # (which reconciles against Σchange over cash-bearing rows) BEFORE the
+    # pd.Series conversion. ``pnl_basis`` (cash_settlement DEFAULT — zavara-
+    # validated — or mark_to_market) is threaded through per strategy/account.
+    # ``exclude_spot_extraction`` (Bug B) is TRUE only on the ALLOCATED / Zavara
+    # path (a non-None ``returns_denominator_config``); it drops net-extraction
+    # spot legs from native_pnl. On the NAV path it is FALSE so spot legs are
+    # RETAINED verbatim and the §5 inception reconciliation closes. The guard below
+    # is called in the SAME mode so the reference Σchange never drifts from native_pnl.
+    native_daily = txn_rows_to_native_daily(
+        raw_rows, pnl_basis=pnl_basis, exclude_spot_extraction=exclude_spot_extraction
+    )
+    native_pnl: dict[str, pd.Series] = {
+        ccy: _native_daily_to_series(day_map)
+        for ccy, day_map in native_daily.items()
+    }
     native_flows = report.dated_external_flows
     # HIGH-1/MEDIUM-1 (D5 one-read): use the anchor the caller already read from
     # the SAME get_account_summaries response so the core's anchor + the caller's
@@ -1902,59 +1788,6 @@ async def build_deribit_native_ledger(
         if account_state is not None
         else await fetch_deribit_native_account_state(exchange)
     )
-    # Phase 83 daily option MTM (§2). (a) replay the signed post-trade positions;
-    # (b) fetch 1D marks per held instrument over its expiry-capped [first, last]
-    # span (one public request each); (c) partition pre-retention-empty (cash-basis,
-    # warned) from in-retention holes (fail loud); (d) ΔMTM → merged into the cash
-    # dict; the terminal_book feeds the book-channel anchor cross-check. Perp-only /
-    # USD-native → empty replay → NO marks fetched → no-op merge (SC-4 byte-inert).
-    replay = replay_option_positions(raw_rows)
-    option_marks: dict[str, dict[str, float]] = {}
-    pre_retention_days: set[tuple[str, str]] = set()
-    retention_cutoff_day = (
-        datetime.now(timezone.utc) - timedelta(days=_MARK_RETENTION_HORIZON_DAYS)
-    ).strftime("%Y-%m-%d")
-    for instrument, rep in replay.items():
-        imarks = await fetch_deribit_option_daily_marks(
-            exchange,
-            instrument,
-            oldest_day=rep.first_day,
-            newest_day=rep.last_day,
-            sleep=sleep,
-        )
-        if imarks:
-            option_marks[instrument] = imarks
-            continue
-        # Wholly-empty marks response. Pre-retention (entire life predates the
-        # ~2.5yr chart-retention horizon) → cash-basis, warned. In-retention →
-        # STRUCTURAL fail loud (a listed, traded instrument with zero bars in
-        # retention is not benign — never fall back to the session lump).
-        if rep.last_day < retention_cutoff_day:
-            for day in rep.positions:
-                pre_retention_days.add((rep.currency, day))
-        else:
-            raise LedgerValuationError(
-                f"Deribit option instrument {instrument!r} returned NO 1D daily-mark "
-                f"bars yet its last held day ({rep.last_day}) is INSIDE the "
-                "chart-retention horizon — a listed, traded instrument with zero "
-                "bars in retention is structural; STOP and investigate (never fall "
-                "back to the session lump, D-07)"
-            )
-    in_retention = {i: r for i, r in replay.items() if i in option_marks}
-    delta_mtm, terminal_book = option_mtm_daily(in_retention, option_marks)
-    # (d) MERGE the ΔMTM channel into the cash dict (dict-add per (day, ccy)) → the
-    # native_pnl series the core rolls includes both cash + daily-MTM.
-    native_daily_merged: dict[str, dict[str, float]] = {
-        ccy: dict(days) for ccy, days in native_daily_cash.items()
-    }
-    for ccy, day_map in delta_mtm.items():
-        dst = native_daily_merged.setdefault(ccy, {})
-        for day, value in day_map.items():
-            dst[day] = dst.get(day, 0.0) + value
-    native_pnl: dict[str, pd.Series] = {
-        ccy: _native_daily_to_series(day_map)
-        for ccy, day_map in native_daily_merged.items()
-    }
     marks = await _build_dense_native_marks(
         exchange,
         indexable=indexable,
@@ -1965,11 +1798,19 @@ async def build_deribit_native_ledger(
         raw_rows=raw_rows,
         sleep=sleep,
     )
-    # Phase 83 MANDATORY fail-loud reconcile guard (§2 Q3, three channels). The
-    # $1-equivalent NATIVE floor is derived from the anchor mark the adapter already
-    # holds: USD-family ≈ 1.0 native/$1; an indexed coin ≈ 1/terminal_mark.
+    # Phase 82 MANDATORY fail-loud reconcile guard (§1): per currency the computed
+    # realized total MUST equal Σchange over cash-bearing rows, to
+    # max($1-equiv native floor, 1e-4·throughput). The $1-equivalent NATIVE floor
+    # is derived from the anchor mark the adapter already holds: USD-family ≈ 1.0
+    # native/$1; an indexed coin ≈ 1/terminal_mark. Closes by construction. Under
+    # CASH_SETTLEMENT (the DEFAULT / shipped basis) it is a plain Σ==Σ that catches a
+    # dropped/mis-summed cash row (the ONLY reconciliation there — B1: no open-option
+    # exemption). The mid-window-missing-summary breach it also catches is
+    # MARK_TO_MARKET-specific (an open-options session whose premium dropped with no
+    # summary carrying it) — either way a LedgerValuationError STOP, never a shipped
+    # wrong number.
     native_floor: dict[str, float] = {}
-    for ccy in set(native_daily_merged) | {str(c).upper() for c in state.native_equity}:
+    for ccy in set(native_daily) | {str(c).upper() for c in state.native_equity}:
         if ccy in USD_FAMILY:
             native_floor[ccy] = 1.0
             continue
@@ -1980,34 +1821,80 @@ async def build_deribit_native_ledger(
                 native_floor[ccy] = 1.0 / anchor_mark
         # else: no mark (a value-carrying no-mark coin fails at native_nav's own
         # mark refusal); rely on the relative 1e-4·throughput term (floor 0.0).
-    # The book-channel anchor: settled option book = options_value −
-    # options_session_upl (both off the SAME summaries response, D5). SC-4 byte-safe
-    # (absent → 0.0). Channel 1 sees the CASH-ONLY dict; channels 2/3 see the book.
-    anchor_settled_book: dict[str, float] = {
-        c: float(state.native_options_value.get(c, 0.0))
-        - float(state.native_options_session_upl.get(c, 0.0))
-        for c in set(state.native_options_value) | set(state.native_options_session_upl)
-    }
-    assert_balance_identity(
-        raw_rows,
-        native_daily_cash,
-        native_floor=native_floor,
-        terminal_book=terminal_book,
-        anchor_settled_book=anchor_settled_book,
-        delta_mtm=delta_mtm,
+    # CR-01 / B1 (BASIS-SCOPED): exempt provably-OPEN option currencies from the
+    # STRICT guard ONLY under mark_to_market. There the summary channel re-attributes
+    # option P&L across held days and the open book's terminal MTM is a legitimate
+    # residual the flat-at-settlement identity cannot close — so the exemption is
+    # needed and §5 (NAV path) is the authoritative backstop. Under CASH_SETTLEMENT
+    # (the DEFAULT / Zavara basis) EVERY option row books its FULL cash ``change``
+    # (coverage_windows are never consulted), so the strict Σnative==Σchange identity
+    # closes EXACTLY and MUST run on open-option currencies too — it is the ONLY
+    # fail-loud reconciliation on the allocated/cash_settlement path (``combine_native_ledger``
+    # returns the allocated metrics BEFORE ``reconstruct_native_nav_and_twr``, so §5
+    # never runs there). Exempting a currency here would silently ship a wrong
+    # factsheet on a dropped/mis-summed BTC cash row. Hence: no exemption under
+    # cash_settlement.
+    open_opt = (
+        frozenset(c for c, v in state.native_options_value.items() if v != 0.0)
+        | _option_activity_after_coverage(raw_rows)
+        if pnl_basis == PNL_BASIS_MARK_TO_MARKET
+        else frozenset()
     )
-    # Phase 83 Q4: pre-retention option instruments keep cash-basis `change` (no
-    # daily MTM). Surface the affected buckets so the worker stamps the reused
-    # ``pre_summary_rollout_option_dailies`` warning → complete_with_warnings (never
-    # silently ship a pre-retention cash-basis book as clean). Empty for Phoenix/
-    # Zav2 (neither has pre-retention history) and perp-only accounts.
-    report.pre_mark_retention_option_days = sorted(pre_retention_days)
+    assert_balance_identity(
+        raw_rows, native_daily, native_floor=native_floor, open_option_ccys=open_opt,
+        exclude_spot_extraction=exclude_spot_extraction, pnl_basis=pnl_basis,
+    )
+    # Surface the exempted currencies for logs/harness (an open book is the NORMAL
+    # state — §5 guards it — so this is NOT promoted to complete_with_warnings;
+    # trailing/pre-rollout activity is separately stamped below).
+    report.balance_identity_open_option_ccys = sorted(open_opt)
+    # Q6 (MARK_TO_MARKET ONLY): option rows outside their currency's summary
+    # coverage window fall back to cash-basis `change` (premium noise persists — no
+    # summary channel to reshape them). Surface the affected buckets so the worker
+    # stamps complete_with_warnings (never silently ship pre-rollout noise as clean
+    # under MTM). Under CASH_SETTLEMENT (the DEFAULT) EVERY option row books its
+    # raw cash `change` on its settlement day BY DESIGN — there is no summary
+    # channel and no "pre-coverage fallback", so this warning would be spurious;
+    # suppress it (judgment call b).
+    report.pre_coverage_option_days = (
+        _pre_coverage_option_days(raw_rows)
+        if pnl_basis == PNL_BASIS_MARK_TO_MARKET
+        else []
+    )
+    # H1 (BLOCKER): under CASH_SETTLEMENT the OPEN option book's settled mark
+    # (``native_options_value``) is INCLUDED in the venue-reported ``equity``
+    # (terminal_native_equity) but is NOT in the cash-only ``native_pnl`` and NOT in
+    # the session-uPnL wedge — so §5 (`_assert_inception_reconciled`) would strand it
+    # as an unexplained residual and fail a perfectly healthy open-options NAV
+    # account PERMANENT (the shipped NAV+options+cash_settlement §5 combination had
+    # ZERO coverage). Value the open book INTO the terminal wedge so the reconciliation
+    # closes: terminal_equity == Σnative_pnl + Σflow + wedge, with wedge = session
+    # uPnL + open-book MTM. Like the session-uPnL wedge, this open-MTM is stripped
+    # from the realized-basis NAV backward roll (consistent with the existing
+    # unrealized-stripping design). Perp-only / no-open-book accounts have
+    # ``options_value`` == 0 ⇒ wedge unchanged ⇒ byte-identical (SC-4).
+    #
+    # Under MARK_TO_MARKET the open book's value is ALREADY carried INTO native_pnl by
+    # the summary channel, so adding it to the wedge would DOUBLE-COUNT — keep the
+    # wedge = session uPnL only there (unchanged).
+    if pnl_basis == PNL_BASIS_MARK_TO_MARKET:
+        terminal_upnl_native: Mapping[str, float] = state.native_upnl
+    else:
+        _wedge_ccys = (
+            {str(c).upper() for c in state.native_upnl}
+            | {str(c).upper() for c in state.native_options_value}
+        )
+        terminal_upnl_native = {
+            c: float(state.native_upnl.get(c, 0.0))
+            + float(state.native_options_value.get(c, 0.0))
+            for c in _wedge_ccys
+        }
     ledger = NativeLedger(
         native_pnl=native_pnl,
         terminal_native_equity=state.native_equity,
         marks=marks,
         native_flows=native_flows,
-        terminal_upnl_native=state.native_upnl,
+        terminal_upnl_native=terminal_upnl_native,
         full_history=True,
     )
     return ledger, report

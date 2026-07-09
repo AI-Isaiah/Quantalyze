@@ -2630,98 +2630,6 @@ async def test_perp_daily_transient_raises_retryable() -> None:
     assert spy.waits == [1.0, 2.0]  # exponential backoff
 
 
-# ===========================================================================
-# Phase 83 (83-01): fetch_deribit_option_daily_marks — the option daily-MTM
-# mark fetcher. Sibling of fetch_deribit_perp_daily_index (same endpoint,
-# same read-error discipline), takes an instrument VERBATIM + an expiry-capped
-# [oldest_day, newest_day] span; the caller owns the fail-loud hole decision.
-# ===========================================================================
-
-
-async def test_option_marks_parses_maps_days_and_instrument() -> None:
-    stub = _ChartDataStub(
-        [_chart_ok([("2025-07-12", 0.041), ("2025-07-13", 0.038)])]
-    )
-    marks = await di.fetch_deribit_option_daily_marks(
-        stub,
-        "BTC-14JUL25-60000-C",
-        oldest_day="2025-07-12",
-        newest_day="2025-07-14",
-        sleep=_SleepSpy(),
-    )
-    assert marks == {"2025-07-12": 0.041, "2025-07-13": 0.038}
-    # Instrument passed VERBATIM (no suffix synthesis), 1D resolution.
-    assert stub.calls[0]["instrument_name"] == "BTC-14JUL25-60000-C"
-    assert stub.calls[0]["resolution"] == "1D"
-
-
-async def test_option_marks_ms_bounds() -> None:
-    """The exact ms bounds: start = oldest_day 00:00 UTC; end = newest_day 00:00
-    + one full UTC day so the newest_day 08:00 settlement bar is INSIDE the
-    window (a 00:00 upper bound would drop the final needed mark → a spurious
-    hole fail-loud downstream)."""
-    import pandas as pd
-
-    stub = _ChartDataStub([_chart_ok([("2025-07-12", 0.04)])])
-    await di.fetch_deribit_option_daily_marks(
-        stub,
-        "BTC-14JUL25-60000-C",
-        oldest_day="2025-07-12",
-        newest_day="2025-07-14",
-        sleep=_SleepSpy(),
-    )
-    start = int(pd.Timestamp("2025-07-12", tz="UTC").timestamp() * 1000)
-    end = int(pd.Timestamp("2025-07-14", tz="UTC").timestamp() * 1000) + 86_400_000
-    assert stub.calls[0]["start_timestamp"] == start
-    assert stub.calls[0]["end_timestamp"] == end
-    # The newest_day 08:00 bar tick is strictly inside [start, end].
-    bar_0800 = int(pd.Timestamp("2025-07-14T08:00:00", tz="UTC").timestamp() * 1000)
-    assert start <= bar_0800 <= end
-
-
-async def test_option_marks_skips_nonpositive_close() -> None:
-    stub = _ChartDataStub(
-        [_chart_ok([("2025-07-12", 0.04), ("2025-07-13", 0.0), ("2025-07-14", -1.0)])]
-    )
-    marks = await di.fetch_deribit_option_daily_marks(
-        stub, "BTC-14JUL25-60000-C", oldest_day="2025-07-12", newest_day="2025-07-14",
-        sleep=_SleepSpy(),
-    )
-    assert marks == {"2025-07-12": 0.04}  # 0 and negative dropped
-
-
-async def test_option_marks_status_not_ok_returns_empty() -> None:
-    stub = _ChartDataStub([{"result": {"status": "no_data", "ticks": [], "close": []}}])
-    marks = await di.fetch_deribit_option_daily_marks(
-        stub, "BTC-14JUL25-60000-C", oldest_day="2025-07-12", newest_day="2025-07-14",
-        sleep=_SleepSpy(),
-    )
-    assert marks == {}
-
-
-async def test_option_marks_structural_nodata_returns_empty() -> None:
-    # An unlisted/expired-past-retention instrument → BadSymbol (RESPONDED): {}.
-    stub = _ChartDataStub([ccxt.BadSymbol("no such instrument")])
-    marks = await di.fetch_deribit_option_daily_marks(
-        stub, "BTC-01JAN20-9000-C", oldest_day="2020-01-01", newest_day="2020-01-01",
-        sleep=_SleepSpy(),
-    )
-    assert marks == {}
-    assert len(stub.calls) == 1  # structural → NOT retried
-
-
-async def test_option_marks_transient_raises_retryable() -> None:
-    stub = _ChartDataStub([ccxt.RequestTimeout("blip")] * 3)
-    spy = _SleepSpy()
-    with pytest.raises(DeribitTransientReadError):
-        await di.fetch_deribit_option_daily_marks(
-            stub, "BTC-14JUL25-60000-C", oldest_day="2025-07-12",
-            newest_day="2025-07-14", sleep=spy, max_retries=2,
-        )
-    assert len(stub.calls) == 3  # initial + 2 retries
-    assert spy.waits == [1.0, 2.0]  # exponential backoff
-
-
 def test_price_map_has_gap() -> None:
     # Dense-daily (BTC/ETH shape) spanning [oldest, newest] → NO gap → no perp fetch.
     dense = {"2025-07-01": 1.0, "2025-07-02": 1.0, "2025-07-03": 1.0}
@@ -2854,22 +2762,13 @@ def _btc_summary(day: int, *, rpl: float = 0.0, upl: float = 0.0) -> dict[str, A
 
 
 def _btc_option_trade(
-    day: int,
-    *,
-    change: float,
-    position: float = 0.0,
-    commission: float = 0.01,
-    typ: str = "trade",
-    instrument: str = "BTC-14JUL25-60000-C",
+    day: int, *, change: float, commission: float = 0.01
 ) -> dict[str, Any]:
-    """Phase 83: option trade/delivery rows carry the signed post-trade
-    ``position`` (the replay's book source). ``typ='delivery'`` for expiries."""
     return {
-        "type": typ,
-        "instrument_name": instrument,
+        "type": "trade",
+        "instrument_name": "BTC-14JUL25-60000-C",
         "currency": "BTC",
         "change": change,
-        "position": position,
         "commission": commission,
         "timestamp": _jul_ms(day, 10),
     }
@@ -2887,48 +2786,15 @@ def _patch_jul_index(monkeypatch: Any) -> None:
     monkeypatch.setattr(di, "fetch_deribit_settlement_index", _fetch_index)
 
 
-class _MarksSpy:
-    """Records every fetch_deribit_option_daily_marks call (instrument + bounds)
-    and serves a scripted per-instrument daily-mark map. A perp-only ledger never
-    calls it (replay empty) → ``spy.calls == []`` pins SC-4."""
-
-    def __init__(self, marks_by_instrument: dict[str, dict[str, float]] | None = None):
-        self._marks = marks_by_instrument or {}
-        self.calls: list[tuple[str, str, str]] = []
-
-    def patch(self, monkeypatch: Any) -> None:
-        async def _fetch(
-            _ex: Any,
-            instrument: str,
-            *,
-            oldest_day: str,
-            newest_day: str,
-            sleep: Any = None,
-            max_retries: int = 0,
-        ) -> dict[str, float]:
-            self.calls.append((instrument, oldest_day, newest_day))
-            return dict(self._marks.get(instrument, {}))
-
-        monkeypatch.setattr(di, "fetch_deribit_option_daily_marks", _fetch)
-
-
-# A flat-terminal single BTC option: open +2 on 07-11, delivered (position 0) on
-# 07-14. Daily marks over its life. The book telescopes to 0 (flat terminal).
-_BTC_OPT_MARKS = {
-    "BTC-14JUL25-60000-C": {
-        "2025-07-11": 0.10, "2025-07-12": 0.12, "2025-07-13": 0.15,
-        "2025-07-14": 0.18,
-    }
-}
-
-
-async def test_native_ledger_options_mtm_merged_at_call_site(
+async def test_native_ledger_covered_options_reattributed_and_marks_dense(
     monkeypatch: Any,
 ) -> None:
-    """Phase 83 (Task 5): a covered BTC options account through the REAL adapter —
-    ledger native_pnl == cash channel (full option change) + hand-computed ΔMTM.
-    Proves the ΔMTM merge is INVOKED at the call site (wiring-guard: neuter the
-    merge → this reddens). Dense marks still cover every native_pnl day."""
+    """A covered-era BTC options account through the REAL adapter: option premium
+    is EXCLUDED (fee-only) and the summary channel enters native_pnl; the dense
+    marks span covers the summary-only day; the balance-identity guard closes.
+
+    Pre-fix: native_pnl[BTC][07-13] would be +1.0 (premium) and there would be no
+    07-12 summary entry — this asserts −0.01 and +1.01 respectively → RED."""
     import pandas as pd
 
     scopes = [di.Scope("main", None, True)]
@@ -2938,9 +2804,9 @@ async def test_native_ledger_options_mtm_merged_at_call_site(
     ) -> list[Any]:
         if currency == "BTC":
             return [
-                _btc_option_trade(11, change=-0.20, position=2.0, commission=0.0),
-                _btc_option_trade(14, change=0.30, position=0.0, typ="delivery",
-                                  commission=0.0),
+                _btc_summary(12, rpl=0.6, upl=0.41),   # carries fee-gross 1.01
+                _btc_summary(14, rpl=0.0, upl=0.0),    # upper window bound
+                _btc_option_trade(13, change=1.0, commission=0.01),  # inside → −0.01
             ]
         return []
 
@@ -2948,140 +2814,139 @@ async def test_native_ledger_options_mtm_merged_at_call_site(
         monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
     )
     _patch_jul_index(monkeypatch)
-    spy = _MarksSpy(_BTC_OPT_MARKS)
-    spy.patch(monkeypatch)
 
     ex = _NativeAnchorStub(
-        summaries=[{"currency": "BTC", "equity": 0.10, "session_upl": 0.0}],
+        summaries=[{"currency": "BTC", "equity": 1.0, "session_upl": 0.0}],
         index_price={"BTC": 60000.0},
     )
-    ledger, report = await di.build_deribit_native_ledger(ex)
+    ledger, report = await di.build_deribit_native_ledger(ex, pnl_basis="mark_to_market")
+
     btc = ledger.native_pnl["BTC"]
-    # Cash channel: −0.20 (07-11 open) + 0.30 (07-14 delivery) = 0.10 net.
-    # ΔMTM: book d11=2*0.10=0.20, d12=0.24, d13=0.30, d14 pos=0 -> 0.
-    #   Δ: 07-11 +0.20, 07-12 +0.04, 07-13 +0.06, 07-14 -0.30 (telescopes to 0).
-    assert btc.loc[pd.Timestamp("2025-07-11")] == pytest.approx(-0.20 + 0.20, abs=1e-9)
-    assert btc.loc[pd.Timestamp("2025-07-12")] == pytest.approx(0.04, abs=1e-9)
-    assert btc.loc[pd.Timestamp("2025-07-13")] == pytest.approx(0.06, abs=1e-9)
-    assert btc.loc[pd.Timestamp("2025-07-14")] == pytest.approx(0.30 - 0.30, abs=1e-9)
-    # ONE marks request for the single held instrument, expiry-capped bounds.
-    assert spy.calls == [("BTC-14JUL25-60000-C", "2025-07-11", "2025-07-14")]
-    # Dense marks cover the ΔMTM days.
+    assert btc.loc[pd.Timestamp("2025-07-12")] == pytest.approx(1.01, abs=1e-9)
+    assert btc.loc[pd.Timestamp("2025-07-13")] == pytest.approx(-0.01, abs=1e-9)
+    # Dense marks cover the summary-only day 07-12 (it is a native_pnl day).
     assert pd.Timestamp("2025-07-12") in ledger.marks["BTC"].index
-    # Flat terminal → no pre-retention buckets.
-    assert report.pre_mark_retention_option_days == []
+    assert pd.Timestamp("2025-07-13") in ledger.marks["BTC"].index
+    # Fully covered → no pre-coverage buckets.
+    assert report.pre_coverage_option_days == []
 
 
-async def test_native_ledger_perp_only_no_marks_fetched(
+async def test_native_ledger_broken_midwindow_closure_raises(
     monkeypatch: Any,
 ) -> None:
-    """SC-4 (Task 5): a perp-only ledger triggers ZERO option-marks fetches (empty
-    replay) and builds a byte-identical native_pnl (the ΔMTM merge is a no-op)."""
-    import pandas as pd
+    """The guard is INVOKED at the build call site (wiring-guard discipline): a
+    mid-window session with option premium but NO carrying summary breaches the
+    balance identity → LedgerValuationError at ledger build.
 
+    Neuter: removing the assert_balance_identity call from the adapter makes this
+    build succeed (premium silently dropped) → RED."""
     scopes = [di.Scope("main", None, True)]
 
     async def _paginate(
         _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
     ) -> list[Any]:
         if currency == "BTC":
-            return [{"type": "settlement", "currency": "BTC", "change": 0.5,
-                     "timestamp": _jul_ms(12, 8)}]
-        return []
-
-    _patch_pipeline(
-        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
-    )
-    _patch_jul_index(monkeypatch)
-    spy = _MarksSpy()
-    spy.patch(monkeypatch)
-
-    ex = _NativeAnchorStub(
-        summaries=[{"currency": "BTC", "equity": 0.5, "session_upl": 0.0}],
-        index_price={"BTC": 60000.0},
-    )
-    ledger, report = await di.build_deribit_native_ledger(ex)
-    assert spy.calls == []  # replay empty → marks fetcher NEVER called
-    assert ledger.native_pnl["BTC"].loc[pd.Timestamp("2025-07-12")] == pytest.approx(
-        0.5, abs=1e-12
-    )
-    assert report.pre_mark_retention_option_days == []
-
-
-async def test_native_ledger_pre_retention_stamps_warning(
-    monkeypatch: Any,
-) -> None:
-    """Phase 83 (Task 5): an option instrument whose entire life predates the 1D
-    chart-retention horizon returns WHOLLY-EMPTY marks → its days stay cash-basis
-    and are stamped as pre_mark_retention_option_days (the reused warning key)."""
-    scopes = [di.Scope("main", None, True)]
-
-    async def _paginate(
-        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
-    ) -> list[Any]:
-        if currency == "BTC":
-            # A 2020-vintage option (well past ~2.5yr retention as of test run).
             return [
-                {"type": "trade", "instrument_name": "BTC-10JAN20-9000-C",
-                 "currency": "BTC", "change": 0.3, "position": 1.0,
-                 "commission": 0.0, "index_price": 9000.0,
-                 "timestamp": int(pd.Timestamp("2020-01-08T10:00:00",
-                                               tz="UTC").timestamp() * 1000)},
-                {"type": "delivery", "instrument_name": "BTC-10JAN20-9000-C",
-                 "currency": "BTC", "change": 0.1, "position": 0.0,
-                 "commission": 0.0, "index_price": 9000.0,
-                 "timestamp": int(pd.Timestamp("2020-01-10T08:00:00",
-                                               tz="UTC").timestamp() * 1000)},
+                _btc_summary(12, rpl=0.0, upl=0.0),   # window bounds only
+                _btc_summary(14, rpl=0.0, upl=0.0),
+                _btc_option_trade(13, change=1.0, commission=0.01),  # premium dropped
             ]
         return []
 
-    import pandas as pd
-
     _patch_pipeline(
         monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
     )
     _patch_jul_index(monkeypatch)
-    spy = _MarksSpy()  # empty marks → wholly-empty response for the instrument
-    spy.patch(monkeypatch)
 
     ex = _NativeAnchorStub(
-        summaries=[{"currency": "BTC", "equity": 0.4, "session_upl": 0.0}],
-        index_price={"BTC": 60000.0},
-    )
-    _ledger, report = await di.build_deribit_native_ledger(ex)
-    assert report.pre_mark_retention_option_days == [
-        ("BTC", "2020-01-08"), ("BTC", "2020-01-10")
-    ]
-
-
-async def test_native_ledger_in_retention_empty_marks_fails_loud(
-    monkeypatch: Any,
-) -> None:
-    """Phase 83 (Task 5): a recent (in-retention) option instrument with a nonzero
-    position but WHOLLY-EMPTY marks is STRUCTURAL → fail loud at ledger build (never
-    a session-lump fallback)."""
-    scopes = [di.Scope("main", None, True)]
-
-    async def _paginate(
-        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
-    ) -> list[Any]:
-        if currency == "BTC":
-            return [_btc_option_trade(11, change=-0.2, position=2.0, commission=0.0)]
-        return []
-
-    _patch_pipeline(
-        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
-    )
-    _patch_jul_index(monkeypatch)
-    spy = _MarksSpy()  # empty marks for the in-retention 2025 instrument
-    spy.patch(monkeypatch)
-
-    ex = _NativeAnchorStub(
-        summaries=[{"currency": "BTC", "equity": 0.1, "session_upl": 0.0}],
+        summaries=[{"currency": "BTC", "equity": 1.0, "session_upl": 0.0}],
         index_price={"BTC": 60000.0},
     )
     with pytest.raises(LedgerValuationError):
-        await di.build_deribit_native_ledger(ex)
+        await di.build_deribit_native_ledger(ex, pnl_basis="mark_to_market")
+
+
+async def test_native_ledger_pre_coverage_option_days_reported(
+    monkeypatch: Any,
+) -> None:
+    """A pre-rollout BTC option row (before first_summary−24h) falls back to
+    cash-basis change and its (ccy, day) bucket is reported for the Q6 warning;
+    the balance identity still closes (cash contributions ARE the changes)."""
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [
+                _btc_summary(12, rpl=0.0, upl=0.0),
+                _btc_summary(14, rpl=0.0, upl=0.0),
+                _btc_option_trade(9, change=2.0),   # pre-rollout → cash fallback
+            ]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+    _patch_jul_index(monkeypatch)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.0}],
+        index_price={"BTC": 60000.0},
+    )
+    _ledger, report = await di.build_deribit_native_ledger(ex, pnl_basis="mark_to_market")
+    assert report.pre_coverage_option_days == [("BTC", "2025-07-09")]
+
+
+async def test_mixed_era_options_account_resolves_complete_with_warnings(
+    monkeypatch: Any,
+) -> None:
+    """M1 end-to-end: a mixed-era account (covered + pre-rollout option days)
+    stamps `pre_summary_rollout_option_dailies` (worker Q6 stamp) and the status
+    merge resolves to `complete_with_warnings`, NOT bare `complete` — the flag is
+    a registered NAV_TWR_GUARD_KEYS promoter.
+
+    Pre-M1 (flag not in the allow-list): the merge would return `complete` → RED."""
+    from services.broker_dailies import combine_native_ledger
+    from services.transforms import _merge_status_meta
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [
+                _btc_summary(12, rpl=0.6, upl=0.41),
+                _btc_summary(14, rpl=0.0, upl=0.0),
+                _btc_option_trade(13, change=1.0, commission=0.01),  # covered
+                _btc_option_trade(9, change=2.0),                    # pre-rollout
+            ]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+    _patch_jul_index(monkeypatch)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 3.0, "session_upl": 0.0}],
+        index_price={"BTC": 60000.0},
+    )
+    ledger, report = await di.build_deribit_native_ledger(ex, pnl_basis="mark_to_market")
+    assert report.pre_coverage_option_days == [("BTC", "2025-07-09")]
+
+    _returns, meta = combine_native_ledger(ledger, report.indexable_currencies)
+    # The worker Q6 stamp (job_worker deribit branch):
+    meta["pre_summary_rollout_option_dailies"] = [
+        f"{ccy}:{day}" for ccy, day in report.pre_coverage_option_days
+    ]
+    merged = _merge_status_meta(
+        meta, used_heuristic_capital=False, balance_error=False
+    )
+    assert merged["computation_status_hint"] == "complete_with_warnings"
+    # The bucket list is carried through verbatim (not coerced to a bare bool).
+    assert merged["pre_summary_rollout_option_dailies"] == ["BTC:2025-07-09"]
 
 
 # ===========================================================================
@@ -3331,12 +3196,11 @@ def _btc_deposit(day: int, *, change: float) -> dict[str, Any]:
     }
 
 
-async def _covered_options_ledger(monkeypatch: Any, *, perturb_mark: float = 0.0):
-    """A covered-era BTC options account seeded by a 1.0 BTC deposit: a single
-    option opened +2 (07-11) and delivered flat (07-14). Option premium counted
-    as full cash `change`; its MTM redistributed across held days via the ΔMTM
-    channel; §5 closes on the flat terminal. ``perturb_mark`` corrupts one daily
-    mark to prove the marks are load-bearing (book-channel / §5 breach)."""
+async def _covered_options_ledger(monkeypatch: Any, *, perturb_rpl: float = 0.0):
+    """A covered-era BTC options account seeded by a 1.0 BTC deposit: option
+    premium excluded (fee-only), summary carries the fee-gross economics, §5
+    closes (terminal 2.0 BTC = Σpnl 1.0 + Σflow 1.0). ``perturb_rpl`` materially
+    corrupts the summary to prove the balance-identity guard is load-bearing."""
     scopes = [di.Scope("main", None, True)]
 
     async def _paginate(
@@ -3344,10 +3208,10 @@ async def _covered_options_ledger(monkeypatch: Any, *, perturb_mark: float = 0.0
     ) -> list[Any]:
         if currency == "BTC":
             return [
-                _btc_deposit(10, change=1.0),  # external capital seed
-                _btc_option_trade(11, change=-0.20, position=2.0, commission=0.0),
-                _btc_option_trade(14, change=0.30, position=0.0, typ="delivery",
-                                  commission=0.0),
+                _btc_deposit(10, change=1.0),                       # external capital
+                _btc_summary(12, rpl=0.6 + perturb_rpl, upl=0.4007),  # fee-gross 1.0007
+                _btc_summary(14, rpl=0.0, upl=0.0),                # window upper bound
+                _btc_option_trade(13, change=1.0, commission=0.0007),  # inside → −0.0007
             ]
         return []
 
@@ -3355,51 +3219,57 @@ async def _covered_options_ledger(monkeypatch: Any, *, perturb_mark: float = 0.0
         monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
     )
     _patch_jul_index(monkeypatch)
-    marks = {"BTC-14JUL25-60000-C": dict(_BTC_OPT_MARKS["BTC-14JUL25-60000-C"])}
-    if perturb_mark:
-        marks["BTC-14JUL25-60000-C"]["2025-07-13"] += perturb_mark
-    spy = _MarksSpy(marks)
-    spy.patch(monkeypatch)
 
-    # Terminal equity = seed 1.0 + net option cash (−0.20 + 0.30 = 0.10) = 1.10;
-    # flat terminal → options_value 0, options_session_upl 0.
     ex = _NativeAnchorStub(
-        summaries=[{"currency": "BTC", "equity": 1.10, "session_upl": 0.0}],
+        summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.0}],
         index_price={"BTC": 60000.0},
     )
-    return await di.build_deribit_native_ledger(ex)
+    return await di.build_deribit_native_ledger(ex, pnl_basis="mark_to_market")
 
 
-async def test_e2e_covered_options_pnl_spread_and_inception_closes(
+async def test_e2e_covered_options_sane_returns_and_inception_closes(
     monkeypatch: Any,
 ) -> None:
-    """Phase 83 E2E (Task 8-i): the option P&L is SPREAD across held days (no single
-    day carries the whole session delta) and §5 closes (no InceptionReconciliation
-    breach). The spike shape is GONE."""
+    """The premium day (2025-07-13) return is ≈ −fee/NAV (|r| < 0.01), NOT the
+    pre-fix +65% premium spike, AND the §5 inception gate closes (no
+    InceptionReconciliationError). Pre-fix: day-13 native_pnl would be +1.0 BTC
+    (premium) → a >100% spike → RED."""
     import pandas as pd
 
     from services.broker_dailies import combine_native_ledger
 
     ledger, report = await _covered_options_ledger(monkeypatch)
     returns, meta = combine_native_ledger(ledger, report.indexable_currencies)
-    # The MTM is distributed: 07-12 and 07-13 both carry ΔMTM (0.04, 0.06) — no
-    # single day lumps the whole book move.
-    btc = ledger.native_pnl["BTC"]
-    assert btc.loc[pd.Timestamp("2025-07-12")] == pytest.approx(0.04, abs=1e-9)
-    assert btc.loc[pd.Timestamp("2025-07-13")] == pytest.approx(0.06, abs=1e-9)
+
+    r13 = float(returns.loc[pd.Timestamp("2025-07-13")])
+    assert abs(r13) < 0.01, f"premium day return {r13} should be fee-sized, not a spike"
+    assert pd.notna(r13)
+    # combine_native_ledger did NOT raise InceptionReconciliationError → §5 closed.
+    # (The inception-seed deposit legitimately trips flow_dominated on day-0, an
+    # artifact of the minimal fixture — unrelated to the options fix — so the
+    # status may be complete_with_warnings; what matters is no inception BREACH.)
     assert meta["computation_status_hint"] in ("complete", "complete_with_warnings")
+    # A fully-covered account is NOT flagged pre-coverage.
     assert "pre_summary_rollout_option_dailies" not in meta
-    assert report.pre_mark_retention_option_days == []
+    assert report.pre_coverage_option_days == []
 
 
-async def test_e2e_perturbed_terminal_mark_breaches_book_channel(
+async def test_e2e_material_summary_perturbation_breaches_guard(
     monkeypatch: Any,
 ) -> None:
-    """Phase 83 E2E (Task 8-iv): on a NON-FLAT terminal book, perturbing the LAST
-    day's mark shifts the replayed terminal_book away from the anchor's settled
-    book (options_value − options_session_upl) → the book-channel cross-check fails
-    loud at ledger build. Proves the marks are load-bearing (on a flat terminal an
-    interior perturbation telescopes away — the terminal is where it bites)."""
+    """Mutation-honesty: perturbing one summary's realized_pl by a MATERIAL amount
+    breaks the covered-era closure (Σ(rpl+upl) ≠ Σ_inside(change+commission)) →
+    assert_balance_identity raises at ledger build → the identity is load-bearing,
+    not tolerant-by-accident."""
+    with pytest.raises(LedgerValuationError):
+        await _covered_options_ledger(monkeypatch, perturb_rpl=0.5)
+
+
+async def test_e2e_total_is_era_invariant(monkeypatch: Any) -> None:
+    """A mixed-era account: covered-era option days are reshaped (fee-only) and
+    pre-coverage option days stay cash-basis, but the per-currency TOTAL native
+    pnl equals Σchange over cash-bearing rows either way (the balance identity
+    holds across both eras — Σchange is exact regardless of era)."""
     scopes = [di.Scope("main", None, True)]
 
     async def _paginate(
@@ -3407,9 +3277,10 @@ async def test_e2e_perturbed_terminal_mark_breaches_book_channel(
     ) -> list[Any]:
         if currency == "BTC":
             return [
-                _btc_deposit(10, change=1.0),
-                _btc_option_trade(11, change=-0.20, position=2.0, commission=0.0),
-                _btc_option_trade(14, change=0.0, position=2.0, commission=0.0),
+                _btc_summary(12, rpl=0.6, upl=0.4007),   # covered fee-gross 1.0007
+                _btc_summary(14, rpl=0.0, upl=0.0),
+                _btc_option_trade(13, change=1.0, commission=0.0007),  # covered → −0.0007
+                _btc_option_trade(9, change=0.3),        # pre-rollout → cash 0.3
             ]
         return []
 
@@ -3417,31 +3288,391 @@ async def test_e2e_perturbed_terminal_mark_breaches_book_channel(
         monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
     )
     _patch_jul_index(monkeypatch)
-    # Perturb the terminal (07-14) mark → replayed terminal_book = 2*(0.18+5.0)
-    # ≈ 10.36, but the anchor still reports options_value 0.36 → book-channel breach.
-    marks = {"BTC-14JUL25-60000-C": dict(_BTC_OPT_MARKS["BTC-14JUL25-60000-C"])}
-    marks["BTC-14JUL25-60000-C"]["2025-07-14"] += 5.0
-    spy = _MarksSpy(marks)
-    spy.patch(monkeypatch)
 
     ex = _NativeAnchorStub(
-        summaries=[{"currency": "BTC", "equity": 1.16, "session_upl": 0.0,
-                    "options_value": 0.36, "options_session_upl": 0.0}],
+        summaries=[{"currency": "BTC", "equity": 1.3, "session_upl": 0.0}],
+        index_price={"BTC": 60000.0},
+    )
+    ledger, report = await di.build_deribit_native_ledger(ex, pnl_basis="mark_to_market")
+
+    # Σ native pnl BTC == Σchange over cash-bearing rows (both eras): the covered
+    # day (−0.0007) + pre-rollout day (+0.3) + summary (+1.0007) = 1.3; Σchange
+    # over the two option trades = 1.0 + 0.3 = 1.3. Era-invariant total.
+    total_native = float(ledger.native_pnl["BTC"].sum())
+    assert total_native == pytest.approx(1.3, abs=1e-9)
+    # The pre-rollout day is FLAGGED (cash-basis), the covered day is not.
+    assert report.pre_coverage_option_days == [("BTC", "2025-07-09")]
+
+
+async def test_allocated_capital_path_and_null_config_byte_identical(
+    monkeypatch: Any,
+) -> None:
+    """Item 3 (allocated-capital denominator) through the production seam:
+
+    * config=None (EVERY normal strategy) → the NAV reconstruction path,
+      BYTE-IDENTICAL to the no-arg ``combine_native_ledger`` (same returns Series,
+      same meta, no ``returns_denominator`` marker);
+    * config PRESENT → the allocated-capital path: returns = daily_pnl_usd / capital,
+      BYPASSING ``reconstruct_native_nav_and_twr``/§5, with the zavara-convention
+      metrics on ``meta``. Reuses the ledger's ``native_pnl`` × ``marks`` (Option 2 —
+      the validated series), so the daily_pnl_usd never leaks a spot extraction."""
+    import pandas as pd
+
+    from services.allocated_capital import parse_returns_denominator_config
+    from services.broker_dailies import combine_native_ledger
+
+    ledger, report = await _covered_options_ledger(monkeypatch)
+
+    # NULL-config → NAV path, byte-identical to the no-arg call.
+    nav_returns, nav_meta = combine_native_ledger(ledger, report.indexable_currencies)
+    nav_returns2, nav_meta2 = combine_native_ledger(
+        ledger, report.indexable_currencies, denominator_config=None
+    )
+    pd.testing.assert_series_equal(nav_returns, nav_returns2)
+    assert nav_meta == nav_meta2
+    assert "returns_denominator" not in nav_meta  # NAV path — no allocated marker
+
+    # WITH config → allocated-capital path (bypasses §5; marked in meta).
+    cfg = parse_returns_denominator_config(
+        {
+            "denominator": "allocated_capital",
+            "pnl_basis": "mark_to_market",
+            "capital_schedule": [
+                {"effective_from": "2025-07-01", "capital_usd": 1_000_000}
+            ],
+            "metrics_basis": "active_day",
+        }
+    )
+    ac_returns, ac_meta = combine_native_ledger(
+        ledger, report.indexable_currencies, denominator_config=cfg
+    )
+    assert ac_meta["returns_denominator"] == "allocated_capital"
+    assert "cumulative_return_pct" in ac_meta and "max_drawdown_pct" in ac_meta
+    assert len(ac_returns) > 0
+    # The allocated path is INDEPENDENT of the NAV reconstruction (different math).
+    assert ac_returns.name == "returns"
+
+
+# ===========================================================================
+# CR-01 — open-option balance-identity exemption through the production seam.
+# An OPEN option book at crawl leaves the strict guard's residual = terminal open
+# MTM (it closes only for a flat-at-settlement book). The exemption lets §5 be the
+# authoritative reconciliation; a real hole for the exempted currency still fails
+# loud at §5. Fixtures reuse the _btc_* / _NativeAnchorStub seam helpers.
+# ===========================================================================
+
+
+def _open_book_paginate(*, drop_day12_summary: bool = False):
+    """A covered-era BTC options account with an OPEN position at crawl: the
+    day-12 summary carries +0.5 unrealized STILL open (Σupl telescopes to a
+    terminal open MTM of +0.09 vs the flat-closing 1.01), so the strict identity
+    residual is 0.09 → it would false-fire without the CR-01 exemption.
+
+    ``drop_day12_summary`` injects a MISSING-summary hole of size 1.1 → §5 must
+    fire (InceptionReconciliationError) for the exempted currency."""
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency != "BTC":
+            return []
+        rows: list[Any] = [_btc_deposit(10, change=1.0)]  # seed capital (flow)
+        if not drop_day12_summary:
+            rows.append(_btc_summary(12, rpl=0.6, upl=0.5))  # 1.1 incl open unreal.
+        rows.append(_btc_summary(14, rpl=0.0, upl=0.0))      # upper window bound
+        rows.append(_btc_option_trade(13, change=1.0, commission=0.01))  # −0.01
+        return rows
+
+    return _paginate
+
+
+async def test_open_book_exempt_passes_and_flat_book_still_guarded(
+    monkeypatch: Any,
+) -> None:
+    """CR-01 REGRESSION: an OPEN-book account (options_value != 0, telescoping
+    summaries) FAILS the strict guard today (residual = terminal open MTM 0.09) and
+    PASSES with the exemption. Neuter (drop the open_option_ccys wiring / read
+    options_value as 0) → build raises LedgerValuationError → RED.
+
+    Companion: a FLAT quiet book (no options_value, no trailing rows) exempts
+    NOTHING → the strict guard still runs and closes (byte regression preserved)."""
+    scopes = [di.Scope("main", None, True)]
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]},
+        paginate=_open_book_paginate(),
+    )
+    _patch_jul_index(monkeypatch)
+
+    # OPEN book: anchor summary carries a nonzero options_value → BTC exempt.
+    open_ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.59, "session_upl": 0.5,
+                    "options_value": 0.5}],
+        index_price={"BTC": 60000.0},
+    )
+    ledger, report = await di.build_deribit_native_ledger(open_ex, pnl_basis="mark_to_market")
+    # Exemption surfaced for the harness (NOT a warning — an open book is normal).
+    assert report.balance_identity_open_option_ccys == ["BTC"]
+    # §5 still closes for the intact open book (no InceptionReconciliationError).
+    from services.broker_dailies import combine_native_ledger
+
+    combine_native_ledger(ledger, report.indexable_currencies)  # must not raise
+
+    # FLAT quiet book (Phoenix-shaped): a fully-covered flat closure with NO
+    # options_value → nothing exempted → the strict guard runs and closes.
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]},
+        paginate=_covered_flat_paginate(),
+    )
+    flat_ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 1.0, "session_upl": 0.0}],
+        index_price={"BTC": 60000.0},
+    )
+    _fledger, freport = await di.build_deribit_native_ledger(flat_ex, pnl_basis="mark_to_market")
+    assert freport.balance_identity_open_option_ccys == []  # nothing exempted
+
+
+async def test_b1_cash_settlement_disables_open_option_exemption(
+    monkeypatch: Any,
+) -> None:
+    """B1 (BLOCKER): ``build_deribit_native_ledger`` applies the open-option
+    exemption ONLY under mark_to_market. Under cash_settlement (the allocated /
+    Zavara path, where §5 is BYPASSED by combine_native_ledger) an OPEN-book account
+    is NOT exempted → ``open_option_ccys=frozenset()`` → the strict Σnative==Σchange
+    identity stays live (the ONLY fail-loud reconciliation on that path).
+
+    Mutation-honest: reverting the pnl_basis gate makes the cash_settlement build
+    report ['BTC'] (exempted) → RED here."""
+    scopes = [di.Scope("main", None, True)]
+    anchor = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.0, "session_upl": 0.5,
+                    "options_value": 0.5}],
+        index_price={"BTC": 60000.0},
+    )
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]},
+        paginate=_open_book_paginate(),
+    )
+    _patch_jul_index(monkeypatch)
+    # cash_settlement (DEFAULT): open book NOT exempted; strict guard runs + closes
+    # (every option row books full change so Σnative == Σchange exactly).
+    _lc, rc = await di.build_deribit_native_ledger(anchor)
+    assert rc.balance_identity_open_option_ccys == []
+
+    # mark_to_market: the open book IS exempted (existing behaviour preserved).
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]},
+        paginate=_open_book_paginate(),
+    )
+    _lm, rm = await di.build_deribit_native_ledger(anchor, pnl_basis="mark_to_market")
+    assert rm.balance_identity_open_option_ccys == ["BTC"]
+
+
+def _covered_flat_paginate():
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency != "BTC":
+            return []
+        return [
+            _btc_summary(12, rpl=0.6, upl=0.41),  # flat closure 1.01
+            _btc_summary(14, rpl=0.0, upl=0.0),
+            _btc_option_trade(13, change=1.0, commission=0.01),  # −0.01
+        ]
+
+    return _paginate
+
+
+# ===========================================================================
+# H1 (BLOCKER) — a NAV-path Deribit account holding an OPEN option book at crawl
+# must reconcile at §5 under cash_settlement. The open book's settled mark
+# (options_value, already inside the venue `equity`) is valued INTO the terminal
+# wedge so terminal_equity == Σnative_pnl + Σflow + wedge; without it §5 strands
+# the mark → permanent-FAILED on a healthy account. This was the shipped
+# NAV+options+cash_settlement §5 combination's coverage gap.
+# ===========================================================================
+
+
+async def test_h1_cash_settlement_open_book_reconciles_at_inception(
+    monkeypatch: Any,
+) -> None:
+    """H1: drive the OPEN-book fixture through the PRODUCTION NAV chain under
+    cash_settlement (build defaults → combine_native_ledger(config=None)) and assert
+    §5 CLOSES. Cash-consistent equity 3.0 = Σflow(1.0 deposit) + Σnative_pnl(1.0
+    cash) + session_upl(0.5) + options_value(0.5).
+
+    Mutation-honest: reverting the H1 fix (wedge = session_upl only) leaves the 0.5
+    open-book mark unexplained → InceptionReconciliationError → RED (both the
+    wedge-value assertion and the combine below redden)."""
+    from services.broker_dailies import combine_native_ledger
+
+    scopes = [di.Scope("main", None, True)]
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]},
+        paginate=_open_book_paginate(),
+    )
+    _patch_jul_index(monkeypatch)
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 3.0, "session_upl": 0.5,
+                    "options_value": 0.5}],
+        index_price={"BTC": 60000.0},
+    )
+    ledger, report = await di.build_deribit_native_ledger(ex)  # default cash_settlement
+    # The open book's settled mark is valued INTO the wedge (session 0.5 + options 0.5).
+    assert ledger.terminal_upnl_native["BTC"] == pytest.approx(1.0)
+    # §5 reconciles through the production combine (no InceptionReconciliationError).
+    _returns, meta = combine_native_ledger(ledger, report.indexable_currencies)
+    assert meta["computation_status_hint"] in ("complete", "complete_with_warnings")
+
+
+async def test_h1_no_open_book_wedge_is_session_upl_only(
+    monkeypatch: Any,
+) -> None:
+    """H1 (b): a NAV account with NO open option book (options_value absent) keeps
+    the wedge == session uPnL — BYTE-IDENTICAL to pre-H1 — and §5 closes as before.
+    A perp settlement + a nonzero session_upl, no options."""
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
+            return [{"type": "settlement", "instrument_name": "BTC-PERPETUAL",
+                     "currency": "BTC", "change": -0.01, "index_price": 60000.0,
+                     "timestamp": _jul_ms(11, 8)}]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+    _patch_jul_index(monkeypatch)
+    # equity 0.29 = Σnative_pnl(-0.01) + session_upl(0.30); NO options_value.
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 0.29, "session_upl": 0.30}],
+        index_price={"BTC": 60000.0},
+    )
+    from services.broker_dailies import combine_native_ledger
+
+    ledger, report = await di.build_deribit_native_ledger(ex)
+    # Wedge is session-uPnL only (no options contribution) → byte-identical.
+    assert ledger.terminal_upnl_native.get("BTC", 0.0) == pytest.approx(0.30)
+    combine_native_ledger(ledger, report.indexable_currencies)  # §5 closes, no raise
+
+
+async def test_h1_mark_to_market_wedge_excludes_options_value(
+    monkeypatch: Any,
+) -> None:
+    """H1 (c): under mark_to_market the open book is carried into native_pnl by the
+    summary channel, so the wedge stays session-uPnL ONLY (options_value NOT added —
+    adding it would DOUBLE-COUNT). The MTM open-book §5 closure is preserved."""
+    from services.broker_dailies import combine_native_ledger
+
+    scopes = [di.Scope("main", None, True)]
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]},
+        paginate=_open_book_paginate(),
+    )
+    _patch_jul_index(monkeypatch)
+    # MTM-calibrated equity 2.59 = Σflow(1.0) + Σnative_pnl_MTM(1.09) + session_upl(0.5).
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.59, "session_upl": 0.5,
+                    "options_value": 0.5}],
+        index_price={"BTC": 60000.0},
+    )
+    ledger, report = await di.build_deribit_native_ledger(ex, pnl_basis="mark_to_market")
+    # Wedge is session uPnL ONLY — options_value NOT folded in under MTM.
+    assert ledger.terminal_upnl_native["BTC"] == pytest.approx(0.5)
+    combine_native_ledger(ledger, report.indexable_currencies)  # §5 closes, no raise
+
+
+async def test_open_book_missing_summary_hole_fails_at_inception_gate(
+    monkeypatch: Any,
+) -> None:
+    """CR-01: the exemption is NOT a silent skip — for the EXEMPTED currency a
+    dropped cash row / missing summary of size x surfaces at §5 as a residual → the
+    authoritative InceptionReconciliationError (same permanent-FAILED disposition
+    the strict guard would have). Drops the day-12 summary (size 1.1)."""
+    from services.broker_dailies import combine_native_ledger
+    from services.native_nav import InceptionReconciliationError
+
+    scopes = [di.Scope("main", None, True)]
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]},
+        paginate=_open_book_paginate(drop_day12_summary=True),
+    )
+    _patch_jul_index(monkeypatch)
+
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.59, "session_upl": 0.5,
+                    "options_value": 0.5}],
+        index_price={"BTC": 60000.0},
+    )
+    # BTC is exempt → the strict guard does NOT fire at build; the ledger builds.
+    ledger, report = await di.build_deribit_native_ledger(ex, pnl_basis="mark_to_market")
+    assert report.balance_identity_open_option_ccys == ["BTC"]
+    # §5 catches the 1.1 hole for the exempted currency (fail-loud preserved).
+    with pytest.raises(InceptionReconciliationError):
+        combine_native_ledger(ledger, report.indexable_currencies)
+
+
+async def test_open_book_renamed_options_value_field_fails_loud(
+    monkeypatch: Any,
+) -> None:
+    """CR-01 renamed-field safety: if ``options_value`` is ABSENT on an actually-
+    OPEN book (a renamed/garbled field → native_options_value 0.0) and there is no
+    trailing option activity, the currency is NOT exempted → the strict guard
+    false-fires LOUD (LedgerValuationError). Never a silent pass over an open book
+    the exemption failed to recognise."""
+    scopes = [di.Scope("main", None, True)]
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]},
+        paginate=_open_book_paginate(),
+    )
+    _patch_jul_index(monkeypatch)
+
+    # OPEN book but the anchor summary has NO options_value → BTC NOT exempted.
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 2.59, "session_upl": 0.5}],
         index_price={"BTC": 60000.0},
     )
     with pytest.raises(LedgerValuationError):
-        await di.build_deribit_native_ledger(ex)
+        await di.build_deribit_native_ledger(ex, pnl_basis="mark_to_market")
 
 
-async def test_e2e_non_flat_terminal_book_inception_closes(
+# ===========================================================================
+# Finding 1 (HIGH) — spot-extraction exclusion is ALLOCATED-PATH ONLY. On the
+# NAV path (config=None → build_deribit_native_ledger default
+# exclude_spot_extraction=False) a spot SELL is RETAINED in native_pnl so the §5
+# inception reconciliation closes; the allocated path drops it. Reuses the
+# _btc_deposit / _NativeAnchorStub / _patch_jul_index seam.
+# ===========================================================================
+
+
+def _btc_usdc_sell(day: int, *, btc: float, usdc: float) -> list[dict[str, Any]]:
+    """A BTC_USDC spot SELL posted as two mirror legs (BTC out, USDC cash in)."""
+    return [
+        {"type": "trade", "instrument_name": "BTC_USDC", "currency": "BTC",
+         "change": btc, "timestamp": _jul_ms(day, 10)},
+        {"type": "trade", "instrument_name": "BTC_USDC", "currency": "USDC",
+         "change": usdc, "timestamp": _jul_ms(day, 10)},
+    ]
+
+
+async def test_nav_path_spot_sell_retained_and_inception_closes(
     monkeypatch: Any,
 ) -> None:
-    """Phase 83 E2E (Task 8-ii): a NON-FLAT terminal book (an option still OPEN at
-    crawl — the last trade lands on the crawl/last grid day so the replay terminal
-    == the settled book at 08:00). Terminal equity = cash + options_value;
-    options_session_upl nonzero; the combined wedge → §5 closes with the
-    settled-book pnl total (the case Phase 82 could not close). The book-channel
-    anchor reconciles terminal_book against options_value − options_session_upl."""
+    """Finding 1a (BLOCKER regression): a NAV-path Deribit account (config=None,
+    default exclude_spot_extraction=False) that SELLS spot BTC_USDC RETAINS the
+    spot legs in native_pnl and the §5 inception gate closes.
+
+    Fixture: deposit 2.0 BTC (flow) then sell 1.0 BTC → 60,000 USDC. Terminal
+    equity BTC 1.0 (= 2.0 deposit − 1.0 sold), USDC 60,000. §5 per currency:
+    BTC 1.0 = Σpnl(−1.0) + Σflow(+2.0); USDC 60,000 = Σpnl(+60,000) + Σflow(0).
+
+    Pre-fix (UNCONDITIONAL exclusion): the sell is net-extraction so BOTH legs are
+    dropped → native_pnl has no BTC day-12 entry → §5 residual = 1.0 BTC →
+    InceptionReconciliationError. Both assertions below therefore RED on pre-fix."""
+    import pandas as pd
+
     from services.broker_dailies import combine_native_ledger
 
     scopes = [di.Scope("main", None, True)]
@@ -3450,13 +3681,54 @@ async def test_e2e_non_flat_terminal_book_inception_closes(
         _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
     ) -> list[Any]:
         if currency == "BTC":
-            # Open +2 on 07-11, still OPEN at crawl; last option row is on the last
-            # marked day (07-14) so the replay terminal == the settled 08:00 book
-            # (no drop-after-last_day asymmetry).
+            return [_btc_deposit(10, change=2.0), *_btc_usdc_sell(12, btc=-1.0, usdc=60000.0)]
+        return []
+
+    _patch_pipeline(
+        monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+    _patch_jul_index(monkeypatch)
+
+    ex = _NativeAnchorStub(
+        summaries=[
+            {"currency": "BTC", "equity": 1.0, "session_upl": 0.0},
+            {"currency": "USDC", "equity": 60000.0, "session_upl": 0.0},
+        ],
+        index_price={"BTC": 60000.0},
+    )
+    # DEFAULT exclude_spot_extraction=False (NAV path): build must NOT raise.
+    ledger, report = await di.build_deribit_native_ledger(ex)
+    # The spot SELL leg is RETAINED in native_pnl (the Finding-1 fix).
+    assert ledger.native_pnl["BTC"].loc[pd.Timestamp("2025-07-12")] == pytest.approx(
+        -1.0, abs=1e-12
+    )
+    assert ledger.native_pnl["USDC"].loc[pd.Timestamp("2025-07-12")] == pytest.approx(
+        60000.0, abs=1e-9
+    )
+    # §5 inception reconciliation closes (no InceptionReconciliationError). The
+    # inception-seed deposit may legitimately warn (flow_dominated) — what matters
+    # is no inception BREACH.
+    _returns, meta = combine_native_ledger(ledger, report.indexable_currencies)
+    assert meta["computation_status_hint"] in ("complete", "complete_with_warnings")
+
+
+async def test_allocated_path_spot_sell_excluded(monkeypatch: Any) -> None:
+    """Finding 1b: the ALLOCATED path (exclude_spot_extraction=True) still DROPS the
+    net-extraction spot legs from native_pnl (existing Zavara behaviour preserved).
+    The deposit/perp cash stays; only the spot extraction is removed."""
+    import pandas as pd
+
+    scopes = [di.Scope("main", None, True)]
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency == "BTC":
             return [
-                _btc_deposit(10, change=1.0),
-                _btc_option_trade(11, change=-0.20, position=2.0, commission=0.0),
-                _btc_option_trade(14, change=0.0, position=2.0, commission=0.0),
+                {"type": "settlement", "instrument_name": "BTC-PERPETUAL",
+                 "currency": "BTC", "change": -0.01, "index_price": 60000.0,
+                 "timestamp": _jul_ms(11, 8)},
+                *_btc_usdc_sell(12, btc=-1.0, usdc=60000.0),
             ]
         return []
 
@@ -3464,15 +3736,20 @@ async def test_e2e_non_flat_terminal_book_inception_closes(
         monkeypatch, scopes=scopes, currencies={"main": ["BTC"]}, paginate=_paginate,
     )
     _patch_jul_index(monkeypatch)
-    spy = _MarksSpy(_BTC_OPT_MARKS)  # book at 07-14 = 2*0.18 = 0.36
-    spy.patch(monkeypatch)
 
-    # Settled book at crawl = 0.36; options_session_upl 0.0 → anchor 0.36.
-    # Terminal equity = seed 1.0 + option cash (−0.20) + book 0.36 = 1.16.
     ex = _NativeAnchorStub(
-        summaries=[{"currency": "BTC", "equity": 1.16, "session_upl": 0.0,
-                    "options_value": 0.36, "options_session_upl": 0.0}],
+        summaries=[
+            {"currency": "BTC", "equity": 0.99, "session_upl": 0.0},
+            {"currency": "USDC", "equity": 60000.0, "session_upl": 0.0},
+        ],
         index_price={"BTC": 60000.0},
     )
-    ledger, report = await di.build_deribit_native_ledger(ex)  # no book/identity breach
-    combine_native_ledger(ledger, report.indexable_currencies)  # §5 closes
+    ledger, _report = await di.build_deribit_native_ledger(
+        ex, exclude_spot_extraction=True
+    )
+    # The perp settlement fee stays; the spot SELL legs are DROPPED.
+    assert ledger.native_pnl["BTC"].loc[pd.Timestamp("2025-07-11")] == pytest.approx(
+        -0.01, abs=1e-12
+    )
+    assert pd.Timestamp("2025-07-12") not in ledger.native_pnl["BTC"].index
+    assert "USDC" not in ledger.native_pnl  # the +60,000 cash leg dropped too

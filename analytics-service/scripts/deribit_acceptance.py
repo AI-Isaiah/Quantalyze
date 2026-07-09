@@ -79,6 +79,7 @@ from services.deribit_txn import (
     _INVERSE_CURRENCIES,
     _NATIVE_OPTIONS_SUMMARY_TYPES,
     classify_instrument,
+    deribit_linear_external_flow_usd,
     txn_change_to_usd,
 )
 
@@ -444,20 +445,19 @@ def _records_dates_by_value(
 
 def _ledger_nonzero_dates(native_ledger: Any) -> set[date]:
     """The fresh nonzero-P&L UTC-day set under the FULL production ledger — the
-    cash + daily-MTM ``native_pnl`` that ``job_worker`` persists to
-    ``csv_daily_returns`` via ``build_deribit_native_ledger``
-    (``services/deribit_ingest.py``). A day is nonzero iff ANY currency's native
-    pnl for that day is nonzero.
+    ``native_pnl`` that ``job_worker`` persists to ``csv_daily_returns`` via
+    ``build_deribit_native_ledger`` (``services/deribit_ingest.py``). A day is
+    nonzero iff ANY currency's native pnl for that day is nonzero.
 
-    Supersedes the pre-Phase-83 CASH-ONLY basis (``txn_rows_to_native_daily``,
-    Phase-83 C2): Phase 83 REDISTRIBUTES option session P&L across held days via the
-    ΔMTM channel, which the adapter merges into ``native_pnl`` (NOT
-    ``txn_rows_to_native_daily``). An interior held day where the option book moved
-    (ΔMTM) but NO cash row landed is a real persisted nonzero day; the cash-only
-    basis omitted it, so ``check_daily_reconcile`` "inject"-failed a CORRECT
-    held-options ledger (e.g. Phoenix, whose options carry interior held days
-    between open and expiry). This basis is exactly what production persists —
-    the money gates (balance-identity guard + §5 closure) are untouched."""
+    Read the ledger's ``native_pnl`` DIRECTLY — never a separately-recomputed
+    cash-only ``txn_rows_to_native_daily`` nor the legacy USD daily_pnl records
+    production no longer runs — so the harness gates on EXACTLY what production
+    persists, whatever the account's accrual basis. Under the DEFAULT
+    ``cash_settlement`` basis (the fleet basis) option premium/payout books its cash
+    ``change`` on the settlement day; the opt-in ``mark_to_market`` basis additionally
+    carries the ``options_settlement_summary`` channel (see D-13). (The Phase-83
+    daily-MTM ΔMTM merge was REVERTED — there is no longer a separate ΔMTM channel.)
+    The money gates (balance-identity guard + §5 closure) are untouched."""
     out: set[date] = set()
     for series in native_ledger.native_pnl.values():
         for ts, value in series.items():
@@ -516,11 +516,10 @@ async def verify_account(spec: AccountSpec, supabase: Any) -> AccountAcceptance:
         records, raw_rows, _indexable, completeness = await _crawl_deribit_ledger(
             exchange, None
         )
-        # Phase 83 C2: the daily_reconcile basis MUST be the FULL production ledger
-        # (cash + daily-MTM), NOT the cash-only channel — an interior held day where
-        # the option book moved (ΔMTM) with no cash row is a real persisted nonzero
-        # day. Re-crawl via the production adapter so the harness gates on exactly
-        # what job_worker persists. (Second crawl of the same immutable txn-log; an
+        # The daily_reconcile basis MUST be the FULL production ledger's native_pnl
+        # (via build_deribit_native_ledger — DEFAULT cash_settlement basis), NOT a
+        # separately-recomputed channel, so the harness gates on exactly what
+        # job_worker persists. (Second crawl of the same immutable txn-log; an
         # offline acceptance script — correctness over the extra round-trip.)
         native_ledger, _ledger_report = await build_deribit_native_ledger(
             exchange, None
@@ -542,8 +541,8 @@ async def verify_account(spec: AccountSpec, supabase: Any) -> AccountAcceptance:
         checks.append(Check("ledger_completeness", False, str(exc)))
 
     active_dates = _records_active_dates(records)
-    # Task 5 + Phase 83 C2: the gated nonzero-P&L days come from the FULL production
-    # ledger (cash + daily-MTM — exactly what job_worker persists), NOT the cash-only
+    # Task 5: the gated nonzero-P&L days come from the FULL production ledger's
+    # native_pnl (exactly what job_worker persists), NOT a separately-recomputed
     # channel and NOT the legacy USD daily_pnl records production no longer runs. The
     # USD records still supply the ADVISORY cosmetic zero-day basis.
     ledger_nonzero = _ledger_nonzero_dates(native_ledger)
@@ -578,8 +577,13 @@ async def verify_account(spec: AccountSpec, supabase: Any) -> AccountAcceptance:
     advisory: dict[str, object] = summarize_fills(completeness.total_return_rows)
     _eligibility = check_perp_only_eligibility(raw_rows)
     advisory["perp_only_eligibility"] = _eligibility.detail
-    advisory["net_external_flow_usd"] = completeness.net_external_flow_usd
-    advisory["saw_unvalued_inverse_flow"] = completeness.saw_unvalued_inverse_flow
+    # Net external-flow USD + unvalued-inverse flag (these advisory diagnostics were
+    # previously read off removed CompletenessReport attributes — a latent
+    # AttributeError crash; recompute them from the raw rows via the ONE honest
+    # source, the same function the ledger's flow channel uses).
+    _net_flow_usd, _saw_unvalued_inverse = deribit_linear_external_flow_usd(raw_rows)
+    advisory["net_external_flow_usd"] = _net_flow_usd
+    advisory["saw_unvalued_inverse_flow"] = _saw_unvalued_inverse
 
     return AccountAcceptance(
         strategy_id=spec.strategy_id,

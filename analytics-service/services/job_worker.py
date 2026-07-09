@@ -437,7 +437,7 @@ async def _load_strategy_and_key(
     def _load_strategy() -> dict[str, Any] | None:
         res = (
             supabase.table("strategies")
-            .select("id, user_id, api_key_id")
+            .select("id, user_id, api_key_id, returns_denominator_config")
             .eq("id", strategy_id)
             .maybe_single()
             .execute()
@@ -2021,7 +2021,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 build_deribit_native_ledger,
                 fetch_deribit_native_account_state,
             )
-            from services.deribit_txn import LedgerValuationError
+            from services.allocated_capital import (
+                ReturnsDenominatorConfigError,
+                exclude_spot_extraction_for,
+                parse_returns_denominator_config,
+            )
+            from services.deribit_txn import DEFAULT_PNL_BASIS, LedgerValuationError
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
             from services.redact import scrub_freeform_string
 
@@ -2089,6 +2094,44 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             balance_error = account_state.balance_error
             open_unrealized_usd = account_state.collapsed_upnl_usd
             upnl_unreadable = account_state.upnl_unreadable
+            # Per-strategy returns-denominator override (Zavara-only allocated
+            # capital). ABSENT on every normal strategy (and in key-mode, which owns
+            # no strategy) → None → the unchanged NAV path (byte-identical). A
+            # PRESENT-but-malformed config FAILS LOUD (permanent) — never ship a
+            # factsheet on a guessed capital base. Its ``pnl_basis`` also drives the
+            # native ledger's accrual basis (cash_settlement default).
+            try:
+                denominator_config = parse_returns_denominator_config(
+                    ctx.strategy_row.get("returns_denominator_config")
+                    if not is_key_mode and isinstance(ctx.strategy_row, dict)
+                    else None
+                )
+            except ReturnsDenominatorConfigError as exc:
+                await _stamp_deribit_analytics_failed(
+                    "Strategy returns_denominator_config is malformed."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: "
+                        f"{scrub_freeform_string(str(exc))}"
+                    ),
+                    error_kind="permanent",
+                )
+            pnl_basis = (
+                denominator_config.pnl_basis
+                if denominator_config is not None
+                else DEFAULT_PNL_BASIS
+            )
+            # Bug B (spot-extraction exclusion) is ALLOCATED-PATH ONLY. It rides the
+            # SAME signal (`denominator_config is not None`) that selects the
+            # allocated returns path in `combine_native_ledger` below — so the
+            # ledger's native_pnl and the returns path are ALWAYS built in the same
+            # mode. On the NAV path (config=None → False) spot legs are RETAINED so
+            # the §5 inception reconciliation closes (a dropped sell leg would leave
+            # a §5 residual — no flow channel carries it). Never decouple these two.
+            # F1: the SINGLE source shared with the acceptance harness.
+            exclude_spot_extraction = exclude_spot_extraction_for(denominator_config)
             try:
                 # v1.9 NATIVE SWITCH (80-03, NAT-05): every Deribit account —
                 # USD-native included — is reconstructed in NATIVE units through
@@ -2100,7 +2143,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # funding-inside-settlement and completeness accounting are
                 # unchanged) and assembles the NativeLedger + CompletenessReport.
                 native_ledger, _completeness = await build_deribit_native_ledger(
-                    ctx.exchange, account_state=account_state
+                    ctx.exchange, account_state=account_state, pnl_basis=pnl_basis,
+                    exclude_spot_extraction=exclude_spot_extraction,
                 )
                 # Re-anchored D-02 gate: a silently-partial ledger FAILS LOUD
                 # BEFORE any upsert — no partial track record is ever written. The
@@ -2142,7 +2186,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # The EXACT indexable set the ledger's marks were built against is
                 # threaded off the report — never re-probed (drift-free).
                 returns, meta = combine_native_ledger(
-                    native_ledger, _completeness.indexable_currencies
+                    native_ledger,
+                    _completeness.indexable_currencies,
+                    denominator_config=denominator_config,
                 )
                 # FLOW-04 materiality: the pure native core does not emit
                 # unrealized_pnl_in_anchor (it subtracts the wedge per-currency, App
@@ -2160,23 +2206,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     > UNREALIZED_MATERIALITY_RATIO
                 ):
                     meta["unrealized_pnl_in_anchor"] = True
-                # Phase 83 Q4: pre-retention option instruments (an option whose
-                # entire life predates the venue's ~2.5yr 1D-chart retention) have no
-                # daily marks, so their days stay cash-basis `change` (no daily MTM
-                # to reshape them). Stamp the affected buckets so the status promotes
-                # to complete_with_warnings (a non-empty list is a registered
+                # Q6: option rows outside their currency's summary coverage window
+                # (pre-2025-01-12 rollout / trailing edge) fell back to cash-basis
+                # `change` — premium noise persists there (no summary channel to
+                # reshape it). Stamp the affected buckets so the status promotes to
+                # complete_with_warnings (a non-empty list is a registered
                 # NAV_TWR_GUARD_KEYS flag) — the factsheet caveats rather than
-                # silently shipping a cash-basis pre-retention book as a clean track
-                # record. Reuses the existing ``pre_summary_rollout_option_dailies``
-                # meta key (M2 — its blast radius spans nav_twr / transforms /
-                # founder-lp; renaming would silently drop the warning at the
-                # broker→CSV boundary). Worker-stamped, not emitted by the pure core;
-                # the exact TOTAL stays honest (Σchange exact), only daily
+                # silently shipping pre-rollout noise as a clean track record.
+                # (Same pattern as unrealized_pnl_unreadable: worker-stamped, not
+                # emitted by the pure core.) The exact TOTAL stays honest (the
+                # per-currency cash total == Σchange in both eras); only the daily
                 # attribution on the cash-basis instruments is flagged.
-                if _completeness.pre_mark_retention_option_days:
+                if _completeness.pre_coverage_option_days:
                     meta["pre_summary_rollout_option_dailies"] = [
                         f"{ccy}:{day}"
-                        for ccy, day in _completeness.pre_mark_retention_option_days
+                        for ccy, day in _completeness.pre_coverage_option_days
                     ]
             except (
                 LedgerCompletenessError,
@@ -2706,8 +2750,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # NAV_TWR_GUARD_KEYS source (the DQ-01 NAV guards + DQ-02 coverage + FLOW-04
     # materiality + MUST-2 unreadable-uPnL) so adding a guard propagates onto the
     # broker→CSV bridge by construction rather than being silently dropped here.
+    from services.allocated_capital import ALLOCATED_CAPITAL_GUARD_KEYS
+
     _prestamp_flags: dict[str, Any] = {"csv_source": True}
     for _flag in NAV_TWR_GUARD_KEYS:
+        if meta.get(_flag):
+            _prestamp_flags[_flag] = True
+    # S3 — the allocated-capital warn flags ride the SAME bridge via the ONE shared
+    # ALLOCATED_CAPITAL_GUARD_KEYS source, iterated exactly like NAV_TWR_GUARD_KEYS.
+    # Kept OUT of NAV_TWR_GUARD_KEYS (they originate in the allocated_capital meta,
+    # not NavTWRMeta — the subset invariant test would break). One owner, two sites.
+    for _flag in ALLOCATED_CAPITAL_GUARD_KEYS:
         if meta.get(_flag):
             _prestamp_flags[_flag] = True
 

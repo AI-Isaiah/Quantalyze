@@ -487,24 +487,21 @@ async def test_deribit_material_wedge_prestamps_complete_with_warnings() -> None
 
 @pytest.mark.asyncio
 async def test_worker_stamps_pre_summary_rollout_option_dailies() -> None:
-    """Phase 83 (M2): the WORKER's OWN deribit stamp branch
-    (`if _completeness.pre_mark_retention_option_days:` in
-    run_derive_broker_dailies_job) populates data_quality_flags with the REUSED
-    `pre_summary_rollout_option_dailies` key (M2 — its blast radius spans nav_twr /
-    transforms / founder-lp; renaming would silently drop the warning) from
-    report.pre_mark_retention_option_days and pre-stamps it onto strategy_analytics
-    (the complete_with_warnings channel via NAV_TWR_GUARD_KEYS).
+    """M1 (money-risk 9): the WORKER's OWN deribit stamp branch
+    (`if _completeness.pre_coverage_option_days:` in run_derive_broker_dailies_job)
+    populates data_quality_flags['pre_summary_rollout_option_dailies'] from
+    report.pre_coverage_option_days and pre-stamps it onto strategy_analytics (the
+    complete_with_warnings channel via NAV_TWR_GUARD_KEYS).
 
     Mutation-honest: neutering the stamp block (removing the
     `meta['pre_summary_rollout_option_dailies'] = [...]` assignment) makes the flag
     never reach the pre-stamp → the assertion below reddens. The pre-existing
-    test_native_ledger_pre_retention_stamps_warning (test_deribit_ingest) only
-    checks the report field; this drives the WORKER so a regression in the worker
-    branch cannot ship green."""
+    test_mixed_era_options_account (test_deribit_ingest) only stamps meta by hand;
+    this drives the WORKER so a regression in the worker branch cannot ship green."""
     report = CompletenessReport(
         total_return_rows=2,
         indexable_currencies=frozenset({"BTC"}),
-        pre_mark_retention_option_days=[("BTC", "2020-01-08"), ("BTC", "2020-01-10")],
+        pre_coverage_option_days=[("BTC", "2025-07-09"), ("BTC", "2025-07-13")],
     )
     ctx, capture = _deribit_ctx()
     patches, _ = _patches(ctx, report=report)
@@ -524,9 +521,9 @@ async def test_worker_stamps_pre_summary_rollout_option_dailies() -> None:
     assert stamped, (
         "the worker's deribit branch must stamp pre_summary_rollout_option_dailies "
         "onto strategy_analytics.data_quality_flags (the complete_with_warnings "
-        "channel) from report.pre_mark_retention_option_days — an in-retention/"
-        "perp-only account never reaches here, so a regression that drops the stamp "
-        "ships green without this test"
+        "channel) from report.pre_coverage_option_days — a fully-covered/perp-only "
+        "account never reaches here, so a regression that drops the stamp ships "
+        "green without this test"
     )
 
 

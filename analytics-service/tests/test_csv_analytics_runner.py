@@ -845,23 +845,35 @@ class TestNaNAccountHonestEndToEnd:
 
 
 def _make_broker_supabase_mock(
-    daily_rows: list[dict], *, api_key_id: str | None
+    daily_rows: list[dict],
+    *,
+    api_key_id: str | None,
+    returns_denominator_config: object | None = None,
+    existing_flags: dict | None = None,
 ) -> MagicMock:
     """Supabase mock whose strategy-existence probe returns a REAL strategy row
     with the given api_key_id (broker when non-None), and whose csv_daily_returns
     load (paginated_select) returns daily_rows. strategy_analytics reads/writes
-    are inert."""
+    are inert. ``returns_denominator_config`` (when not None) is placed on the
+    strategy row (the allocated-capital override); ``existing_flags`` seeds the
+    _read_existing_flags probe (default empty)."""
     sb = MagicMock()
+    # Memoize per-name table mocks so upsert/read call history accumulates on ONE
+    # stable mock per table (the runner calls supabase.table("strategy_analytics")
+    # many times; a fresh mock per call would scatter the upserts and hide them).
+    _tables: dict[str, MagicMock] = {}
 
     def _table(name: str) -> MagicMock:
+        if name in _tables:
+            return _tables[name]
         tbl = MagicMock()
+        _tables[name] = tbl
         if name == "strategies":
+            row = {"id": "s", "user_id": "u", "api_key_id": api_key_id}
+            if returns_denominator_config is not None:
+                row["returns_denominator_config"] = returns_denominator_config
             # .select(...).eq(...).single().execute() → real dict.
-            single_exec = MagicMock(
-                return_value=MagicMock(
-                    data={"id": "s", "user_id": "u", "api_key_id": api_key_id}
-                )
-            )
+            single_exec = MagicMock(return_value=MagicMock(data=row))
             tbl.select.return_value.eq.return_value.single.return_value.execute = (
                 single_exec
             )
@@ -876,7 +888,9 @@ def _make_broker_supabase_mock(
         elif name == "strategy_analytics":
             # _read_existing_flags: .select(...).eq(...).maybe_single().execute().
             tbl.select.return_value.eq.return_value.maybe_single.return_value.execute = (
-                MagicMock(return_value=MagicMock(data={"data_quality_flags": {}}))
+                MagicMock(return_value=MagicMock(
+                    data={"data_quality_flags": existing_flags or {}}
+                ))
             )
             tbl.upsert.return_value = MagicMock(execute=MagicMock())
         else:
@@ -1003,3 +1017,157 @@ async def test_user_csv_sparse_day_not_nan_filled() -> None:
     value, flags = cumulative_twr_segmented(series)
     assert value == pytest.approx((1.10 * 1.10 * 1.20 * 1.20) - 1.0)
     assert "twr_chain_broken" not in flags
+
+
+# ===========================================================================
+# T1 (wiring-seam) — run_csv_strategy_analytics MUST thread the strategy's
+# conventions into the SHIPPED compute_all_metrics call. Existing tests patch
+# compute_all_metrics with a bare return_value and never inspect call args, so a
+# reverted threading would ship the old geometric/calendar/252 defaults green.
+# S1 — a malformed config is PERMANENT (422/failed), never transient-retried.
+# T6 — the allocated warn flag bridges through to complete_with_warnings.
+# ===========================================================================
+
+_ALLOC_CFG_SIMPLE_ACTIVE = {
+    "denominator": "allocated_capital",
+    "pnl_basis": "cash_settlement",
+    "capital_schedule": [{"effective_from": "2025-08-01", "capital_usd": 1_000_000}],
+    "metrics_basis": "active_day",
+    "cumulative_method": "simple",
+}
+
+
+def _daily_rows_15() -> list[dict]:
+    return [
+        {"date": f"2025-08-{d:02d}", "daily_return": 0.001 if d % 2 else -0.0005}
+        for d in range(1, 16)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_csv_runner_threads_config_into_compute_all_metrics() -> None:
+    """T1 [highest]: an api_key_id-bearing strategy with a simple/active_day config
+    → compute_all_metrics called with periods_per_year=365, cumulative_method=
+    'simple', day_basis='active'. Reverting the threading (defaults) reddens."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1",
+        returns_denominator_config=_ALLOC_CFG_SIMPLE_ACTIVE,
+    )
+    spy = MagicMock(return_value=_make_metrics_result())
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics", spy):
+        await run_csv_strategy_analytics("s")
+
+    assert spy.call_count == 1
+    kwargs = spy.call_args.kwargs
+    assert kwargs["periods_per_year"] == 365
+    assert kwargs["cumulative_method"] == "simple"
+    assert kwargs["day_basis"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_csv_runner_config_none_broker_is_geometric_calendar_365() -> None:
+    """T1 companion: api_key_id set + NO config → crypto √365 but the DEFAULT
+    geometric/calendar conventions (byte-identical to the pre-Fix-A recompute)."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(_daily_rows_15(), api_key_id="key-1")
+    spy = MagicMock(return_value=_make_metrics_result())
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics", spy):
+        await run_csv_strategy_analytics("s")
+
+    kwargs = spy.call_args.kwargs
+    assert kwargs["periods_per_year"] == 365
+    assert kwargs["cumulative_method"] == "geometric"
+    assert kwargs["day_basis"] == "calendar"
+
+
+@pytest.mark.asyncio
+async def test_csv_runner_no_api_key_is_252() -> None:
+    """T1 companion: api_key_id None (user CSV / MT5) → 252, geometric, calendar."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(_daily_rows_15(), api_key_id=None)
+    spy = MagicMock(return_value=_make_metrics_result())
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics", spy):
+        await run_csv_strategy_analytics("s")
+
+    kwargs = spy.call_args.kwargs
+    assert kwargs["periods_per_year"] == 252
+    assert kwargs["cumulative_method"] == "geometric"
+    assert kwargs["day_basis"] == "calendar"
+
+
+@pytest.mark.asyncio
+async def test_csv_runner_malformed_config_is_permanent_not_transient() -> None:
+    """S1: a malformed returns_denominator_config raises
+    ReturnsDenominatorConfigError INSIDE the metrics block. The runner must
+    disposition it PERMANENT (HTTPException 422 → classify_exception permanent) and
+    stamp failed — NOT let the generic `except Exception` downgrade it to a
+    transient 500 that retries forever."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    bad_cfg = {**_ALLOC_CFG_SIMPLE_ACTIVE, "metrics_basis": "not_a_basis"}
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1", returns_denominator_config=bad_cfg,
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))):
+        with pytest.raises(HTTPException) as exc_info:
+            await run_csv_strategy_analytics("s")
+    assert exc_info.value.status_code == 422  # 4xx → classify_exception PERMANENT
+    # A failed stamp with csv_source preserved was written to strategy_analytics.
+    sa = sb.table("strategy_analytics")
+    upserts = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and c.args[0].get("computation_status") == "failed"
+    ]
+    assert any(
+        u.args[0].get("data_quality_flags", {}).get("csv_source") for u in upserts
+    )
+
+
+@pytest.mark.asyncio
+async def test_csv_runner_bridges_mandate_window_excluded_days_warn() -> None:
+    """T6 / S3: an existing_flags carrying mandate_window_excluded_days=True bridges
+    THROUGH run_csv_strategy_analytics via ALLOCATED_CAPITAL_GUARD_KEYS → the
+    completed status is complete_with_warnings and the flag is preserved on the
+    persisted data_quality_flags."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1",
+        existing_flags={"mandate_window_excluded_days": True},
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_make_metrics_result()):
+        result = await run_csv_strategy_analytics("s")
+
+    # (The runner's RETURN value is always {"status": "complete"} by design — the
+    # real status lands on the strategy_analytics.computation_status upsert.)
+    assert result["strategy_id"] == "s"
+    sa = sb.table("strategy_analytics")
+    completed = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and c.args[0].get("computation_status") == "complete_with_warnings"
+    ]
+    assert completed, "expected a complete_with_warnings upsert (S3 bridge)"
+    assert completed[0].args[0]["data_quality_flags"].get(
+        "mandate_window_excluded_days"
+    ) is True
