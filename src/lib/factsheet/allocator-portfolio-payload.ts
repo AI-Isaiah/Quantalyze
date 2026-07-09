@@ -105,6 +105,14 @@ export function buildAllocatorPortfolioFactsheetPayload(
       // for allocator dashboard factsheets under the no-invented-data gate.
       // Without this, the conservative default ("csv") silently hides both panels.
       ingestSource: "api",
+      // FINDING-6 style (#597 part 2, BLEND-02): allocator portfolio blends are
+      // derived from live API equity curves — every supported venue is crypto
+      // today, so under the blend rule (84-CONTEXT.md, any-crypto-leg → 365) the
+      // portfolio series is calendar-daily → the risk metrics (ann_vol / sharpe /
+      // sortino) annualize on √365. CAGR stays on the calendar clock (invariant).
+      // A future non-crypto venue must derive this from the book's key roster
+      // (blendPeriodsPerYear over the constituent keys) instead of a literal.
+      assetClass: "crypto",
       description: null,
       subtypes: [],
       supportedExchanges: [],
