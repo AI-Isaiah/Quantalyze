@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import type { StrategyForBuilder } from "./scenario";
 
 /**
  * Tests for the My Allocation query helpers added in PR 1 of the
@@ -2329,5 +2330,77 @@ describe("liveBaselineMetricsFromPerKeyDailies — financial edge branches (Phas
       { "key-A": series([0.03, -0.02, 0.04, -0.01]) },
     );
     expect(single.avgRho).toBeNull();
+  });
+
+  it("BLEND-02: live-baseline Sharpe rides the √365 blend basis (every per-key leg is a crypto venue); twr/maxDd/avgRho basis-invariant", async () => {
+    const { liveBaselineMetricsFromPerKeyDailies } = await import("./queries");
+    const { computeScenario, buildDateMapCache } = await import("./scenario");
+
+    const aVals = [0.03, -0.02, 0.04, -0.01, 0.02, -0.015];
+    const bVals = [-0.01, 0.025, -0.03, 0.02, -0.005, 0.03];
+    const aSeries = series(aVals);
+    const bSeries = series(bVals);
+
+    const out = liveBaselineMetricsFromPerKeyDailies(
+      [spot("key-A", 60_000), spot("key-B", 40_000)],
+      { "key-A": aSeries, "key-B": bSeries },
+    );
+
+    // Reconstruct the EXACT units the helper builds (one StrategyForBuilder per
+    // api_key_id; weight = clamped equity contribution; every unit selected;
+    // asset_class "crypto" — every SUPPORTED_EXCHANGE is a crypto venue), so we
+    // can run the frozen engine at 252 vs 365 and pin WHICH basis the helper's
+    // Sharpe rides. This is the hand-computed 252-basis reference.
+    const unit = (id: string, s: typeof aSeries): StrategyForBuilder => ({
+      id,
+      name: `key ${id}`,
+      codename: null,
+      disclosure_tier: "exploratory",
+      strategy_types: [],
+      markets: [],
+      start_date: null,
+      daily_returns: s,
+      cagr: null,
+      sharpe: null,
+      volatility: null,
+      max_drawdown: null,
+      asset_class: "crypto",
+    });
+    const units = [unit("key-A", aSeries), unit("key-B", bSeries)];
+    const st = {
+      selected: { "key-A": true, "key-B": true },
+      weights: { "key-A": 60_000, "key-B": 40_000 },
+      startDates: {},
+    };
+    const cache = buildDateMapCache(units);
+    const cm252 = computeScenario(units, st, cache, 252);
+    const cm365 = computeScenario(units, st, cache, 365);
+
+    // Sharpe MOVED to the 365 basis: helper === the 365 run, and equals the
+    // 252-basis value × √(365/252).
+    expect(out.sharpe).not.toBeNull();
+    expect(out.sharpe).toBe(cm365.sharpe);
+    // Magnitude check: the Sharpe scales ≈√(365/252) vs the 252 basis. (Not an
+    // EXACT ULP identity — the engine annualizes mean-return and vol on slightly
+    // different clocks, so the ratio drifts ~1e-6 from √(365/252); the exact
+    // `=== cm365.sharpe` pin above is the load-bearing basis assertion. Precision
+    // 3 cleanly separates ~1.2035 from the 252-basis 1.0.)
+    expect((out.sharpe as number) / (cm252.sharpe as number)).toBeCloseTo(
+      Math.sqrt(365 / 252),
+      3,
+    );
+    // Falsifiable: the two bases genuinely differ for this fixture, so a helper
+    // still on the 252 default would fail the `=== cm365.sharpe` pin above.
+    expect(cm365.sharpe).not.toBe(cm252.sharpe);
+
+    // Basis-INVARIANT outputs: twr / maxDd / avgRho are identical across bases
+    // and byte-identical to the helper output (the blend basis touches ONLY the
+    // frequency-annualized risk metric).
+    expect(cm365.twr).toBe(cm252.twr);
+    expect(out.ytdTwr).toBe(cm252.twr);
+    expect(out.maxDd).toBe(cm252.max_drawdown);
+    expect(out.avgRho).toBe(cm252.avg_pairwise_correlation);
+    // Do NOT pin cagr here: liveBaseline flows through computeScenario, whose
+    // CAGR clock 84-06 converts to calendar-span this same phase.
   });
 });
