@@ -850,6 +850,7 @@ def _make_broker_supabase_mock(
     api_key_id: str | None,
     returns_denominator_config: object | None = None,
     existing_flags: dict | None = None,
+    asset_class: str | None = None,
 ) -> MagicMock:
     """Supabase mock whose strategy-existence probe returns a REAL strategy row
     with the given api_key_id (broker when non-None), and whose csv_daily_returns
@@ -869,7 +870,8 @@ def _make_broker_supabase_mock(
         tbl = MagicMock()
         _tables[name] = tbl
         if name == "strategies":
-            row = {"id": "s", "user_id": "u", "api_key_id": api_key_id}
+            row = {"id": "s", "user_id": "u", "api_key_id": api_key_id,
+                   "asset_class": asset_class}
             if returns_denominator_config is not None:
                 row["returns_denominator_config"] = returns_denominator_config
             # .select(...).eq(...).single().execute() → real dict.
@@ -1052,7 +1054,7 @@ async def test_csv_runner_threads_config_into_compute_all_metrics() -> None:
     from services.analytics_runner import run_csv_strategy_analytics
 
     sb = _make_broker_supabase_mock(
-        _daily_rows_15(), api_key_id="key-1",
+        _daily_rows_15(), api_key_id="key-1", asset_class="crypto",
         returns_denominator_config=_ALLOC_CFG_SIMPLE_ACTIVE,
     )
     spy = MagicMock(return_value=_make_metrics_result())
@@ -1071,11 +1073,13 @@ async def test_csv_runner_threads_config_into_compute_all_metrics() -> None:
 
 @pytest.mark.asyncio
 async def test_csv_runner_config_none_broker_is_geometric_calendar_365() -> None:
-    """T1 companion: api_key_id set + NO config → crypto √365 but the DEFAULT
-    geometric/calendar conventions (byte-identical to the pre-Fix-A recompute)."""
+    """T1 companion (#597): asset_class=crypto + NO config → crypto √365 but the
+    DEFAULT geometric/calendar conventions (byte-identical to the pre-Fix-A recompute)."""
     from services.analytics_runner import run_csv_strategy_analytics
 
-    sb = _make_broker_supabase_mock(_daily_rows_15(), api_key_id="key-1")
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1", asset_class="crypto"
+    )
     spy = MagicMock(return_value=_make_metrics_result())
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
@@ -1091,7 +1095,8 @@ async def test_csv_runner_config_none_broker_is_geometric_calendar_365() -> None
 
 @pytest.mark.asyncio
 async def test_csv_runner_no_api_key_is_252() -> None:
-    """T1 companion: api_key_id None (user CSV / MT5) → 252, geometric, calendar."""
+    """T1 companion: user CSV (api_key_id None) with no asset_class → 252,
+    geometric, calendar."""
     from services.analytics_runner import run_csv_strategy_analytics
 
     sb = _make_broker_supabase_mock(_daily_rows_15(), api_key_id=None)
@@ -1106,6 +1111,26 @@ async def test_csv_runner_no_api_key_is_252() -> None:
     assert kwargs["periods_per_year"] == 252
     assert kwargs["cumulative_method"] == "geometric"
     assert kwargs["day_basis"] == "calendar"
+
+
+@pytest.mark.asyncio
+async def test_csv_runner_csv_crypto_is_365() -> None:
+    """#597 crux: a CSV-uploaded strategy (api_key_id None) MARKED crypto annualizes
+    √365 — the whole point of decoupling the clock from the api_key_id ingestion
+    proxy. Reverting to `365 if api_key_id` reddens this (would give 252)."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id=None, asset_class="crypto"
+    )
+    spy = MagicMock(return_value=_make_metrics_result())
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics", spy):
+        await run_csv_strategy_analytics("s")
+
+    assert spy.call_args.kwargs["periods_per_year"] == 365
 
 
 @pytest.mark.asyncio

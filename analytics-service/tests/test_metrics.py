@@ -2400,3 +2400,22 @@ class TestFixAConventions:
             compute_all_metrics(r, cumulative_method="simple")
         # The geometric path tolerates it (honours the break via segmentation).
         compute_all_metrics(r, cumulative_method="geometric")  # no raise
+
+
+class TestPeriodsPerYearForAssetClass:
+    """#597: annualization basis resolves off strategies.asset_class."""
+
+    def test_crypto_is_365(self) -> None:
+        from services.metrics import periods_per_year_for_asset_class
+        assert periods_per_year_for_asset_class("crypto") == 365
+
+    def test_traditional_is_252(self) -> None:
+        from services.metrics import periods_per_year_for_asset_class
+        assert periods_per_year_for_asset_class("traditional") == 252
+
+    def test_none_and_unknown_fall_back_to_252(self) -> None:
+        # Conservative default — the DB CHECK constrains the domain, so this only
+        # guards a None read (e.g. an old schema without the column).
+        from services.metrics import periods_per_year_for_asset_class
+        assert periods_per_year_for_asset_class(None) == 252
+        assert periods_per_year_for_asset_class("equities") == 252

@@ -31,6 +31,19 @@ logger = logging.getLogger("quantalyze.analytics.metrics")
 # rewrite. Mirrors the existing `optimizer.py:TRADING_DAYS = 252` precedent.
 DEFAULT_PERIODS_PER_YEAR = 252
 
+# #597: annualization basis is an ASSET-CLASS property, not an ingestion detail.
+# crypto trades every calendar day (√365); traditional markets (equities/FX) trade
+# weekdays only (√252). Driven by strategies.asset_class ('crypto' | 'traditional',
+# NOT NULL DEFAULT 'traditional', backfilled 'crypto' for api_key-sourced rows).
+# ponytail: unknown/None → the conservative 252 (the DB CHECK already constrains the
+# domain, so this only guards a missing-column read on an old schema).
+PERIODS_PER_YEAR_CRYPTO = 365
+
+
+def periods_per_year_for_asset_class(asset_class: str | None) -> int:
+    """Annualization periods/year for a strategy's asset class (see #597)."""
+    return PERIODS_PER_YEAR_CRYPTO if asset_class == "crypto" else DEFAULT_PERIODS_PER_YEAR
+
 # TWR-05 (founder decision 2026-07-05): RETURN/CAGR and Calmar annualize on the
 # true CALENDAR clock — 365 calendar-days per year over the real DatetimeIndex
 # span — while Sharpe / volatility / Sortino / rolling_* / TE-IR stay on
