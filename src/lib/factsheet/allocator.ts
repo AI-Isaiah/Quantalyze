@@ -49,7 +49,21 @@ export function blend(weights: number[], series: number[][]): number[] {
   return out;
 }
 
-export function buildAllocatorMetrics(rets: number[], mmRets: number[]): AllocatorMetrics {
+/**
+ * @param periodsPerYear Annualization basis for the frequency-annualized vols
+ *   (ann_vol / mmAnnVol, and therefore blend_vol + the sleeve grid-scan).
+ *   Defaults to 252 so a caller that passes NO arg (the 60/40 pure-tradfi
+ *   reference panel) stays byte-identical to the pre-#597 hardcode. The caller
+ *   derives the basis from the REFERENCE blend's constituent legs per the locked
+ *   #597-part-2 ruling: a BTC/ETH leg makes the joined series calendar-daily
+ *   (√365); a pure-tradfi blend stays √252. cum_ret / max_dd / corr / tail_* are
+ *   basis-FREE and unaffected.
+ */
+export function buildAllocatorMetrics(
+  rets: number[],
+  mmRets: number[],
+  periodsPerYear = 252,
+): AllocatorMetrics {
   const n = rets.length;
   const eq = cumEq(rets);
   const dd = drawdowns(eq);
@@ -76,8 +90,8 @@ export function buildAllocatorMetrics(rets: number[], mmRets: number[]): Allocat
   cov /= n;
   const s = Math.sqrt(var_);
   const mmS = Math.sqrt(mmVar);
-  const annVol = s * Math.sqrt(252);
-  const mmAnnVol = mmS * Math.sqrt(252);
+  const annVol = s * Math.sqrt(periodsPerYear);
+  const mmAnnVol = mmS * Math.sqrt(periodsPerYear);
   const corr = s > 0 && mmS > 0 ? cov / (s * mmS) : 0;
   const cumRet = eq[n - 1] - 1;
   const maxDd = Math.min(...dd);
