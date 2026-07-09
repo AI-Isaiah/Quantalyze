@@ -34,7 +34,7 @@
     "next": "^16.2.10",
     "posthog-js": "^1.398.2",
     "posthog-node": "^5.40.0",
-    "puppeteer-core": "^24.40.0",
+    "puppeteer-core": "^25.3.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "react-markdown": "10.1.0",
