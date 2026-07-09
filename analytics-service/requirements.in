@@ -14,8 +14,8 @@
 # Dev/test-only deps (pytest, pyarrow, mypy, …) live in requirements-dev.txt and
 # are NOT shipped to prod (Dockerfile installs only requirements.txt).
 
-fastapi==0.138.0
-uvicorn[standard]==0.49.0
+fastapi==0.139.0
+uvicorn[standard]==0.51.0
 quantstats==0.0.81
 # ccxt parses live broker payloads feeding equity reconstruction + trade
 # ingestion; it releases near-daily and the unified API can change behavior
@@ -26,9 +26,9 @@ quantstats==0.0.81
 # opens a PR against requirements.txt, then re-run `make lock` and commit the
 # regenerated lock (Dependabot's own pip-compile won't match the uv/universal
 # format).
-ccxt==4.5.59
+ccxt==4.5.64
 pandas==2.2.3
-numpy==2.4.6
+numpy==2.5.1
 # NOTE: pyarrow is NOT here — it is a TEST-ONLY dependency (pd.read_parquet of the
 # golden_252d_input.parquet fixture, tests/conftest.py + tests/fixtures/regen_golden.py).
 # It was moved to requirements-dev.txt (H-0537) so the production Railway image (which
@@ -44,12 +44,12 @@ cryptography>=44.0
 # Phase 15 / CSV-01..CSV-02: pandera CSV row-schema validation +
 # python-multipart UploadFile parsing for /api/csv/validate (the only
 # multipart route in the service). pandera 0.32.x is compatible with
-# pandas==2.2.3 / numpy==2.4.6 (pinned above). supabase #480 bumped pandera
+# pandas==2.2.3 / numpy==2.5.1 (pinned above). supabase #480 bumped pandera
 # 0.20.4 -> 0.32.0, which dropped the multimethod dependency entirely — the
 # prior Python-3.14 multimethod<=1.10.0 pytest-collection workaround is gone.
 # (0.32 also left DataFrameSchema.__init__ unannotated; mypy clears it via the
 # pandera follow_imports=skip override in pyproject.toml.)
-pandera==0.32.0
+pandera==0.32.1
 python-multipart==0.0.32
 # Phase 16 / OBSERV-09: structlog JSON-format logs with correlation_id contextvar.
 structlog==26.1.0
@@ -64,7 +64,7 @@ psycopg[binary]==3.3.4
 # + before_send PII scrub (FULL mirror of src/lib/admin/pii-scrub.ts: 8 exact keys +
 # DENYLIST_PREFIX sb-ec- + JWT_SHAPE regex + broker signing headers per FIX 7).
 # vcrpy pin lands in Plan 8 (16-08).
-sentry-sdk[fastapi]==2.63.0
+sentry-sdk[fastapi]==2.64.0
 # Phase 16 / OBSERV-08: vcrpy pinned for deterministic local-repro of the unified
 # key flow. Records 12 cassettes (3 brokers × 4 scenarios) at
 # analytics-service/tests/cassettes/ and replays them in CI with NO network
@@ -72,7 +72,7 @@ sentry-sdk[fastapi]==2.63.0
 # Three-layer redaction (filter_headers + filter_query_parameters +
 # before_record_response deep walker) covers Bybit v5 / OKX / Binance signing
 # variants per Plan 16-08 FIX 3 (Binance signs via QUERY string, not headers).
-vcrpy==8.2.1
+vcrpy==8.3.0
 # aiohttp upper-bound: vcrpy's aiohttp stub (vcr/stubs/aiohttp_stubs.py) imports
 # symbols from aiohttp.streams at module load. aiohttp 3.14.0 (released 2026-06)
 # removed AsyncStreamReaderMixin, which vcrpy 8.1.1 still referenced — every
