@@ -124,6 +124,16 @@ export function CsvSubmitStep({
             leverage_range: metadata.leverageRange,
             aum: metadata.aum,
             max_capacity: metadata.maxCapacity,
+            // #597 part 2 — the deferred upload-picker persistence. The CSV
+            // branch captures an asset_class picker value (MetadataStep →
+            // MetadataDraft.assetClass) with a FREE choice (no exchange lock),
+            // but this body used to drop it, so every CSV strategy landed with
+            // asset_class null. Forward it verbatim (snake_case wire key,
+            // matching every sibling field); csv-finalize validates the closed
+            // set ('crypto' | 'traditional') at the route boundary. Unlike the
+            // API-key path there is NO force-derive to 'crypto' — a legitimately
+            // traditional CSV track record must keep the user's choice.
+            asset_class: metadata.assetClass,
           },
         }),
       });
