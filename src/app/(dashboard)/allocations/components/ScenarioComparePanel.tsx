@@ -83,6 +83,10 @@ interface ComparePayloadStrategy {
   strategy: {
     id: string;
     disclosure_tier: StrategyForBuilder["disclosure_tier"];
+    // Phase 84 (BLEND-01): the added leg's asset_class, arriving via the 84-03
+    // SSR select. Optional + `?? null` downstream so this stays compile- and
+    // runtime-safe independently of the SSR shape (an unknown leg → the 252 leg).
+    asset_class?: string | null;
     strategy_analytics: {
       daily_returns?: unknown;
       cagr?: number | null;
@@ -143,7 +147,7 @@ function deriveCompareInputs(
   const addedStrategyReturnsLookup: Record<string, DailyPoint[]> = {};
   const addedStrategyMetadataLookup: Record<
     string,
-    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
   > = {};
   for (const [id, s] of strategyById) {
     const raw = s.strategy.strategy_analytics?.daily_returns;
@@ -154,6 +158,9 @@ function deriveCompareInputs(
       disclosure_tier: s.strategy.disclosure_tier,
       cagr: s.strategy.strategy_analytics?.cagr ?? null,
       sharpe: s.strategy.strategy_analytics?.sharpe ?? null,
+      // Phase 84 (BLEND-01): carry asset_class so the added leg contributes to the
+      // blend basis (blendPeriodsPerYear). `?? null` keeps an absent SSR field safe.
+      asset_class: s.strategy.asset_class ?? null,
     };
   }
 
