@@ -71,7 +71,7 @@ jobs:
           cache: npm
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -125,7 +125,7 @@ jobs:
       # (flakiness audit F3 — transient ECONNRESET; no untrusted input).
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -175,7 +175,7 @@ jobs:
       # (flakiness audit F3 — transient ECONNRESET; no untrusted input).
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -244,7 +244,7 @@ jobs:
       # (flakiness audit F3 — transient ECONNRESET; no untrusted input).
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -333,7 +333,7 @@ jobs:
           cache: npm
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -383,7 +383,7 @@ jobs:
       # (flakiness audit F3 — transient ECONNRESET; no untrusted input).
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -470,7 +470,7 @@ jobs:
           cache: npm
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -544,7 +544,7 @@ jobs:
       # (flakiness audit F3 — transient ECONNRESET; no untrusted input).
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -1040,7 +1040,7 @@ jobs:
       # (flakiness audit F3 — transient ECONNRESET; no untrusted input).
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -1288,7 +1288,7 @@ jobs:
           cache: npm
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
@@ -1307,7 +1307,7 @@ jobs:
       # the write so the two parallel jobs never race the save.
       - name: Restore Playwright browsers
         id: playwright-cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('node_modules/@playwright/test/package.json') }}
@@ -1346,7 +1346,7 @@ jobs:
       # case where frontend-build's cache step hashed src/** to a
       # different bucket than this e2e job sees.
       - name: Restore .next/cache for the test-env build (read-only)
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .next/cache
           key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-${{ hashFiles('src/**') }}
@@ -1593,7 +1593,7 @@ jobs:
       # devDependency (0.15.1), so a cache hit already carries it.
       - name: Restore node_modules
         id: node_modules_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
