@@ -171,6 +171,11 @@ export interface Strategy {
   is_example: boolean;
   benchmark: string;
   created_at: string;
+  /**
+   * #597 — annualization asset class: 'crypto' (√365) | 'traditional' (√252).
+   * Nullable/optional for legacy rows; absent → treated as traditional (252).
+   */
+  asset_class?: string | null;
   /** Added in migration 012. "exploratory" is the safe default for legacy rows. */
   disclosure_tier?: DisclosureTier;
   /**

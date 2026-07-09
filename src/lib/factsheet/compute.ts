@@ -4,7 +4,10 @@ import type { ComputeResult } from "./types";
  * Headline per-series metrics for the strategy and each benchmark. Mirrors the
  * Python reference's numerical conventions:
  *
- *   - 252 trading days / year
+ *   - annualization = `periodsPerYear` trading days / year (#597: 252
+ *     traditional / 365 crypto; default 252 keeps every existing caller
+ *     byte-identical). Applies to vol/Sharpe/Sortino only — CAGR stays on the
+ *     CALENDAR year (days / 365.25), which is asset-class-invariant.
  *   - population stdev (not sample) — `statistics.pstdev`
  *   - CAGR = eq[-1] ** (1 / years) - 1
  *   - Sharpe / Sortino use rf = 0 unless explicitly passed
@@ -12,7 +15,12 @@ import type { ComputeResult } from "./types";
  * Degenerate cases (no drawdown, no losses, no left tail) surface as `null`
  * rather than 0 — `0 recovery_factor` would imply a real but zero ratio.
  */
-export function compute(rets: number[], dates: string[], rf = 0): ComputeResult {
+export function compute(
+  rets: number[],
+  dates: string[],
+  rf = 0,
+  periodsPerYear = 252,
+): ComputeResult {
   const n = rets.length;
   if (n === 0 || dates.length !== n) {
     throw new Error("compute(): rets and dates must be non-empty arrays of equal length");
@@ -29,12 +37,12 @@ export function compute(rets: number[], dates: string[], rf = 0): ComputeResult 
 
   const cumRet = eq[n - 1] - 1;
   const cagr = years > 0 && eq[n - 1] > 0 ? Math.pow(eq[n - 1], 1 / years) - 1 : 0;
-  const annVol = s * Math.sqrt(252);
-  const sharpe = s > 0 ? ((m - rf / 252) * 252) / (s * Math.sqrt(252)) : 0;
+  const annVol = s * Math.sqrt(periodsPerYear);
+  const sharpe = s > 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / (s * Math.sqrt(periodsPerYear)) : 0;
 
   const neg = rets.filter(x => x < 0);
-  const ddDev = neg.length > 0 ? Math.sqrt(neg.reduce((a, x) => a + x * x, 0) / n) * Math.sqrt(252) : 0;
-  const sortino = ddDev > 0 ? ((m - rf / 252) * 252) / ddDev : 0;
+  const ddDev = neg.length > 0 ? Math.sqrt(neg.reduce((a, x) => a + x * x, 0) / n) * Math.sqrt(periodsPerYear) : 0;
+  const sortino = ddDev > 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / ddDev : 0;
 
   let maxDd = 0;
   for (let i = 0; i < dd.length; i++) if (dd[i] < maxDd) maxDd = dd[i];

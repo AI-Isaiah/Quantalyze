@@ -106,6 +106,56 @@ export function isSupportedExchange(value: string): boolean {
   return (SUPPORTED_EXCHANGES as readonly string[]).includes(value.toLowerCase());
 }
 
+// --- Asset-class annualization (#597) --------------------------------------
+// Annualization is asset-class-driven: crypto trades 7 days/week (√365),
+// equities/FX trade weekdays only (√252). The signal is `strategies.asset_class`
+// ('crypto' | 'traditional'). Every surface that annualizes Sharpe / Sortino /
+// volatility / tracking-error must derive its `periodsPerYear` from the
+// strategy's asset class instead of a hardcoded 252. This is the ONE TS place
+// that maps the class → periods, mirroring the Python path (√365 crypto /
+// √252 traditional).
+
+/**
+ * Is this exchange a crypto venue? Today EVERY supported exchange
+ * (binance / okx / bybit / deribit) is crypto, so membership in the
+ * allowlist IS the crypto signal. Case-insensitive. When a non-crypto
+ * (equities/FX) venue is ever added to SUPPORTED_EXCHANGES this must be
+ * narrowed to an explicit crypto subset — until then, allowlist membership
+ * is the honest single source of truth.
+ */
+export function isCryptoExchange(exchange: string | null | undefined): boolean {
+  if (!exchange) return false;
+  return (SUPPORTED_EXCHANGES as readonly string[]).includes(
+    exchange.toLowerCase(),
+  );
+}
+
+/**
+ * Trading periods per year for annualization, keyed off a strategy's
+ * `asset_class`. 'crypto' → 365 (7-day markets), everything else → 252
+ * (weekday markets — the conservative default that matches the pre-#597
+ * hardcode, so any unknown/null value stays byte-identical to today).
+ */
+export function annualizationPeriods(
+  assetClass: string | null | undefined,
+): number {
+  return assetClass === "crypto" ? 365 : 252;
+}
+
+/**
+ * Calendar-year span between two epoch-ms timestamps on the 365.25-day civil
+ * clock. #597 / TWR-05: risk metrics ride the FREQUENCY clock
+ * (`annualizationPeriods`, 365/252); CAGR rides the CALENDAR clock (elapsed
+ * days / 365.25) and is asset-class-invariant. Mirrors compute.ts
+ * (`days / 365.25`) and metrics.py. Returns 0 (never negative) when the span is
+ * non-positive or non-finite, so callers can gate on `years > 0`.
+ */
+export function calendarYears(firstDateMs: number, lastDateMs: number): number {
+  const ms = lastDateMs - firstDateMs;
+  if (!Number.isFinite(ms) || ms <= 0) return 0;
+  return ms / (365.25 * 86_400_000);
+}
+
 // --- Self-editable preference fields ---------------------------------------
 // Canonical definition lives here; re-exported from @/lib/preferences so the
 // existing importers (useMandateAutoSave, preferences.test, route comments)

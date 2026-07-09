@@ -79,30 +79,46 @@ export function rollingBeta(
   return out;
 }
 
-export function rollingVol(rets: number[], window = ROLL_WINDOW_6MO): Array<number | null> {
+// #597 — `periodsPerYear` (N) is the annualization basis: 252 (traditional,
+// default — byte-identical to pre-#597) or 365 (crypto). Derive it from the
+// strategy's asset class via annualizationPeriods().
+export function rollingVol(
+  rets: number[],
+  window = ROLL_WINDOW_6MO,
+  periodsPerYear = 252,
+): Array<number | null> {
   const out: Array<number | null> = new Array(rets.length).fill(null);
-  const sqrt252 = Math.sqrt(252);
+  const sqrtN = Math.sqrt(periodsPerYear);
   for (let i = window - 1; i < rets.length; i++) {
     const w = rets.slice(i - window + 1, i + 1);
-    out[i] = pstdev(w) * sqrt252;
+    out[i] = pstdev(w) * sqrtN;
   }
   return out;
 }
 
-export function rollingSharpe(rets: number[], window = ROLL_WINDOW_6MO): Array<number | null> {
+export function rollingSharpe(
+  rets: number[],
+  window = ROLL_WINDOW_6MO,
+  periodsPerYear = 252,
+): Array<number | null> {
   const out: Array<number | null> = new Array(rets.length).fill(null);
+  const sqrtN = Math.sqrt(periodsPerYear);
   for (let i = window - 1; i < rets.length; i++) {
     const w = rets.slice(i - window + 1, i + 1);
     const m = mean(w);
     const s = pstdev(w);
-    out[i] = s > 0 ? (m * 252) / (s * Math.sqrt(252)) : 0;
+    out[i] = s > 0 ? (m * periodsPerYear) / (s * sqrtN) : 0;
   }
   return out;
 }
 
-export function rollingSortino(rets: number[], window = ROLL_WINDOW_6MO): Array<number | null> {
+export function rollingSortino(
+  rets: number[],
+  window = ROLL_WINDOW_6MO,
+  periodsPerYear = 252,
+): Array<number | null> {
   const out: Array<number | null> = new Array(rets.length).fill(null);
-  const sqrt252 = Math.sqrt(252);
+  const sqrtN = Math.sqrt(periodsPerYear);
   for (let i = window - 1; i < rets.length; i++) {
     const w = rets.slice(i - window + 1, i + 1);
     const m = mean(w);
@@ -114,8 +130,8 @@ export function rollingSortino(rets: number[], window = ROLL_WINDOW_6MO): Array<
         hasNeg = true;
       }
     }
-    const dd = hasNeg ? Math.sqrt(downSq / window) * sqrt252 : 0;
-    out[i] = dd > 0 ? (m * 252) / dd : 0;
+    const dd = hasNeg ? Math.sqrt(downSq / window) * sqrtN : 0;
+    out[i] = dd > 0 ? (m * periodsPerYear) / dd : 0;
   }
   return out;
 }

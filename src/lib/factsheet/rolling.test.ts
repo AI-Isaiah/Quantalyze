@@ -35,6 +35,41 @@ describe("rolling helpers", () => {
     expect(v[28]).toBeNull();
     expect(v[29]).not.toBeNull();
   });
+
+  // #597 — the annualization basis (periodsPerYear) threads through all three
+  // rolling helpers. Default stays 252 (byte-identical to pre-#597); crypto
+  // (365) scales every defined entry by √(365/252): vol = pstd·√N, Sharpe =
+  // (m/s)·√N, Sortino = (m/rms)·√N all carry a single √N term.
+  const k = Math.sqrt(365 / 252);
+
+  it("default periodsPerYear is 252 (byte-identical to an explicit 252)", () => {
+    expect(rollingVol(rets)).toEqual(rollingVol(rets, ROLL_WINDOW_6MO, 252));
+    expect(rollingSharpe(rets)).toEqual(rollingSharpe(rets, ROLL_WINDOW_6MO, 252));
+    expect(rollingSortino(rets)).toEqual(rollingSortino(rets, ROLL_WINDOW_6MO, 252));
+  });
+
+  it("crypto basis (365) scales vol/Sharpe/Sortino by √(365/252) on every defined entry", () => {
+    const win = ROLL_WINDOW_6MO;
+    const v252 = rollingVol(rets, win, 252);
+    const v365 = rollingVol(rets, win, 365);
+    const s252 = rollingSharpe(rets, win, 252);
+    const s365 = rollingSharpe(rets, win, 365);
+    const so252 = rollingSortino(rets, win, 252);
+    const so365 = rollingSortino(rets, win, 365);
+    let compared = 0;
+    for (let i = 0; i < rets.length; i++) {
+      if (v252[i] == null) {
+        expect(v365[i]).toBeNull();
+        continue;
+      }
+      expect(v365[i]!).toBeCloseTo(v252[i]! * k, 10);
+      expect(s365[i]!).toBeCloseTo(s252[i]! * k, 10);
+      expect(so365[i]!).toBeCloseTo(so252[i]! * k, 10);
+      compared++;
+    }
+    // Non-vacuity: the 300-day fixture fills the 126-day window.
+    expect(compared).toBeGreaterThan(0);
+  });
 });
 
 describe("pickRollingWindow", () => {

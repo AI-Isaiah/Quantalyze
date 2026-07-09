@@ -573,3 +573,112 @@ describe("RED-TEAM-H1: ingestSource derivation — the shared deriveIngestSource
     expect(payloadFixed!.ingestSource).toBe("api");
   });
 });
+
+// ---------------------------------------------------------------------------
+// #597 — asset-class annualization threads end-to-end through the factsheet.
+// A crypto strategy (assetClass:"crypto") must annualize EVERY single-strategy
+// KPI on √365; a traditional / absent one stays on √252 (byte-identical to the
+// pre-#597 hardcode). Proven at the payload boundary so the wiring through
+// compute / rolling / bootstrap / comparator can't silently regress.
+// ---------------------------------------------------------------------------
+describe("#597: asset-class annualization end-to-end", () => {
+  const rets = makeReturns(80);
+
+  it("absent assetClass == explicit 'traditional' == 252 (byte-identical)", () => {
+    const absent = buildFactsheetPayload(makeStrategy(), rets)!;
+    const trad = buildFactsheetPayload(makeStrategy({ assetClass: "traditional" }), rets)!;
+    expect(trad.strategyMetrics.sharpe).toBe(absent.strategyMetrics.sharpe);
+    expect(trad.strategyMetrics.sortino).toBe(absent.strategyMetrics.sortino);
+    expect(trad.strategyMetrics.ann_vol).toBe(absent.strategyMetrics.ann_vol);
+  });
+
+  it("crypto headline Sharpe / Sortino / vol scale by √(365/252) vs traditional; max_dd invariant", () => {
+    const trad = buildFactsheetPayload(makeStrategy({ assetClass: "traditional" }), rets)!;
+    const crypto = buildFactsheetPayload(makeStrategy({ assetClass: "crypto" }), rets)!;
+    const k = Math.sqrt(365 / 252);
+    expect(crypto.strategyMetrics.sharpe!).toBeCloseTo(trad.strategyMetrics.sharpe! * k, 8);
+    expect(crypto.strategyMetrics.sortino!).toBeCloseTo(trad.strategyMetrics.sortino! * k, 8);
+    expect(crypto.strategyMetrics.ann_vol).toBeCloseTo(trad.strategyMetrics.ann_vol * k, 8);
+    // Drawdown carries no annualization term.
+    expect(crypto.strategyMetrics.max_dd).toBe(trad.strategyMetrics.max_dd);
+  });
+
+  it("crypto bootstrap-CI Sharpe point estimate also lands on √365", () => {
+    const trad = buildFactsheetPayload(makeStrategy({ assetClass: "traditional" }), rets)!;
+    const crypto = buildFactsheetPayload(makeStrategy({ assetClass: "crypto" }), rets)!;
+    const k = Math.sqrt(365 / 252);
+    // Bootstrap point == headline stats on the same series/basis.
+    expect(crypto.bootstrapCI.sharpe.point).toBeCloseTo(trad.bootstrapCI.sharpe.point * k, 8);
+  });
+
+  // Comparator-block wiring: build-payload must forward periodsPerYear into
+  // buildComparatorBlock → jointMetrics. Tracking-error is an annualized vol
+  // (√N term) so it scales √(365/252); alpha = (mean − β·mean_b)·N so it scales
+  // linearly (365/252). Reddens if buildComparatorBlock stops forwarding the basis.
+  it("comparators.btc.joint annualization: TE scales √(365/252), alpha scales 365/252", () => {
+    const trad = buildFactsheetPayload(makeStrategy({ assetClass: "traditional" }), rets)!;
+    const crypto = buildFactsheetPayload(makeStrategy({ assetClass: "crypto" }), rets)!;
+    const jt = trad.comparators.btc.joint;
+    const jc = crypto.comparators.btc.joint;
+    expect(jt).not.toBeNull();
+    expect(jc).not.toBeNull();
+    expect(jc!.tracking_error).toBeCloseTo(jt!.tracking_error * Math.sqrt(365 / 252), 8);
+    expect(jc!.alpha).toBeCloseTo(jt!.alpha * (365 / 252), 8);
+  });
+
+  // Rolling-series wiring: build-payload must pass periodsPerYear into
+  // rollingVol. Every defined (post-warmup) entry scales √(365/252). Reddens if
+  // build-payload stops threading the basis into the rolling series.
+  it("strategyRollingVol scales √(365/252) on every defined entry", () => {
+    const trad = buildFactsheetPayload(makeStrategy({ assetClass: "traditional" }), rets)!;
+    const crypto = buildFactsheetPayload(makeStrategy({ assetClass: "crypto" }), rets)!;
+    const k = Math.sqrt(365 / 252);
+    let compared = 0;
+    for (let i = 0; i < trad.strategyRollingVol.length; i++) {
+      const t = trad.strategyRollingVol[i];
+      const c = crypto.strategyRollingVol[i];
+      if (t == null || c == null) continue;
+      expect(c).toBeCloseTo(t * k, 10);
+      compared++;
+    }
+    // Non-vacuity: the 80-day fixture fills the 30d fallback window, so there
+    // ARE post-warmup entries — a silently all-null array must not pass vacuously.
+    expect(compared).toBeGreaterThan(0);
+  });
+
+  // Peer-percentile ranks the ANNUALIZED Sharpe/Sortino DIRECTLY — no basis
+  // rescale. Annualized Sharpe is frequency-invariant, so the cohort (a fixed
+  // distribution of annualized Sharpes) is asset-class-agnostic. The SAME daily
+  // series posted 365 days/year genuinely has a √(365/252)× higher ANNUAL Sharpe
+  // than posted 252 days/year, so the crypto interpretation must rank AT LEAST
+  // as high as traditional — never below. This reddens if anyone re-introduces a
+  // √(252/365) "basis correction" (rejected: it de-annualizes crypto and stamps
+  // a ~17% systematic penalty on 24/7 sleeves — the wrong fix for a non-problem).
+  it("peerPercentile ranks raw annualized Sharpe: crypto never ranks BELOW traditional for the same series", () => {
+    const trad = buildFactsheetPayload(
+      makeStrategy({ ingestSource: "api", assetClass: "traditional" }),
+      rets,
+    )!;
+    const crypto = buildFactsheetPayload(
+      makeStrategy({ ingestSource: "api", assetClass: "crypto" }),
+      rets,
+    )!;
+    if (trad.ingestSource !== "api" || crypto.ingestSource !== "api") {
+      throw new Error("expected the api arm");
+    }
+    expect(trad.peerPercentile).not.toBeNull();
+    expect(crypto.peerPercentile).not.toBeNull();
+    // Crypto's higher annualized Sharpe/Sortino → percentile ≥ traditional's
+    // (cohort CDF is monotonic; equal only if both saturate the clamp). A
+    // rankScale revert would flip these below 1× and redden.
+    expect(crypto.peerPercentile!.sharpe).toBeGreaterThanOrEqual(trad.peerPercentile!.sharpe);
+    expect(crypto.peerPercentile!.sortino).toBeGreaterThanOrEqual(trad.peerPercentile!.sortino);
+    // max_dd carries no annualization term → identical rank.
+    expect(crypto.peerPercentile!.max_dd).toBe(trad.peerPercentile!.max_dd);
+    // Displayed headline Sharpe stays on the crypto √365 basis.
+    expect(crypto.strategyMetrics.sharpe!).toBeCloseTo(
+      trad.strategyMetrics.sharpe! * Math.sqrt(365 / 252),
+      8,
+    );
+  });
+});

@@ -71,7 +71,7 @@ function businessDates(startDate: string, n: number): string[] {
  * portfolio daily returns equal this strategy's returns verbatim — letting us
  * pin the engine's metric math against a hand-derived reference on RETS.
  */
-function singleStrategyScenario(dates: string[]) {
+function singleStrategyScenario(dates: string[], periodsPerYear = 252) {
   const strategy: StrategyForBuilder = {
     id: "pin",
     name: "Pin",
@@ -93,7 +93,7 @@ function singleStrategyScenario(dates: string[]) {
     leverage: { pin: 1 },
   };
   const cache = buildDateMapCache([strategy]);
-  return computeScenario([strategy], state, cache);
+  return computeScenario([strategy], state, cache, periodsPerYear);
 }
 
 // --------------------------------------------------------------------------
@@ -115,6 +115,15 @@ const populationSharpeRef =
 /** Sortino: downside RMS over TOTAL n × √252, rf=0 — quantstats basis (the engine's). */
 const downsideSumSq = RETS.reduce((s, r) => s + (r < 0 ? r * r : 0), 0);
 const sortinoRef = (MEAN * 252) / (Math.sqrt(downsideSumSq / N) * ANNUALIZE);
+
+// #597 — the same sample/downside basis annualized on √365 (crypto). A crypto
+// cohort's stored quantstats Sharpe/Sortino are annualized √365, so ranking a
+// crypto blend requires the engine to annualize √365 too (via periodsPerYear).
+const ANNUALIZE_365 = Math.sqrt(365);
+const sampleSharpeRef365 =
+  (MEAN * 365) / (Math.sqrt(sampleVariance) * ANNUALIZE_365);
+const sortinoRef365 =
+  (MEAN * 365) / (Math.sqrt(downsideSumSq / N) * ANNUALIZE_365);
 
 const TOL = 1e-9;
 
@@ -174,5 +183,31 @@ describe("PEER-02 convention pin: the blend's ranking basis is sample/252, not p
       if (dd < maxDD) maxDD = dd;
     }
     expect(a.max_drawdown!).toBe(Number(maxDD.toFixed(5)));
+  });
+});
+
+describe("#597 — the crypto blend ranks on the √365 basis (periodsPerYear=365)", () => {
+  it("computeScenario(...,365) sharpe/sortino equal the hand-derived √365 references", () => {
+    const m = singleStrategyScenario(businessDates("2024-01-02", N), 365);
+    expect(m.n).toBe(N);
+    expect(m.sharpe!).toBe(round3(sampleSharpeRef365));
+    expect(m.sortino!).toBe(round3(sortinoRef365));
+  });
+
+  it("√365 ranking metrics are STRICTLY HIGHER than √252 (non-vacuous) but max_drawdown is invariant", () => {
+    const m252 = singleStrategyScenario(businessDates("2024-01-02", N), 252);
+    const m365 = singleStrategyScenario(businessDates("2024-01-02", N), 365);
+    // mean·N / (vol·√N) = mean·√N/vol → scales by √(365/252) > 1 for a positive-mean series.
+    expect(m365.sharpe!).toBeGreaterThan(m252.sharpe! + TOL);
+    expect(m365.sortino!).toBeGreaterThan(m252.sortino! + TOL);
+    expect(m365.max_drawdown).toBe(m252.max_drawdown); // basis-invariant
+  });
+
+  it("the default (no periodsPerYear arg) equals explicit 252 — existing callers unchanged", () => {
+    const mDefault = singleStrategyScenario(businessDates("2024-01-02", N));
+    const m252 = singleStrategyScenario(businessDates("2024-01-02", N), 252);
+    expect(mDefault.sharpe).toBe(m252.sharpe);
+    expect(mDefault.sortino).toBe(m252.sortino);
+    expect(mDefault.volatility).toBe(m252.volatility);
   });
 });

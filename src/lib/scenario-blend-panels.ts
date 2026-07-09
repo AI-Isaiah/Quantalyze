@@ -10,8 +10,8 @@
  *   - quantiles       : Record<label, [q0,q25,q50,q75,q100]> for ReturnQuantiles.
  *   - rollingSharpe    : { sharpe_365d: series } so RollingMetrics resolves the
  *                       CHART_ACCENT stroke via its STROKE_BY_KEY map.
- *   - rollingVol       : sample-std, sqrt-252-annualized (mirrors portfolio-stats.ts).
- *   - rollingSortino   : downside RMS over TOTAL window n, sqrt-252-annualized (mirrors the engine).
+ *   - rollingVol       : sample-std, sqrt-N-annualized (periodsPerYear, default 252; mirrors portfolio-stats.ts).
+ *   - rollingSortino   : downside RMS over TOTAL window n, sqrt-N-annualized (periodsPerYear, default 252; mirrors the engine).
  *   - usableN          : count of usable daily returns (drives the empty branch).
  *
  * Convention pins (LOCKED — see scenario-blend-panels.test.ts):
@@ -24,14 +24,18 @@
  *     (scenario.ts:354-361). Numerator = mean annualized over the full year.
  *   - Degenerate input (length < window, fewer than MIN_USABLE points, or any
  *     non-finite value present) collapses EVERY series to [] / {}.
- *   - 252-trading-day annualization ONLY — no calendar-day or alternate basis.
+ *   - Annualizes on `periodsPerYear` (default 252; #597 threads 365 for crypto).
  */
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { mean, stdDev } from "@/lib/portfolio-math-utils";
 
-/** Trading days per year — the ONLY annualization basis the engine uses. */
+/**
+ * Default annualization basis — 252 trading days/year (traditional). #597 makes
+ * this a per-call `periodsPerYear` argument (365 for crypto) threaded through
+ * buildBlendPanels; the module constant remains the default so the blend path
+ * (a mixed book) stays byte-identical unless a caller passes 365.
+ */
 const TRADING_DAYS_PER_YEAR = 252;
-const ANNUALIZE = Math.sqrt(TRADING_DAYS_PER_YEAR);
 
 /** Below this many usable points every series collapses to []/{}. */
 const MIN_USABLE = 10;
@@ -43,9 +47,9 @@ export interface BlendPanelSeries {
   quantiles: Record<string, number[]>;
   /** { sharpe_365d: series } so RollingMetrics resolves CHART_ACCENT. {} if degenerate. */
   rollingSharpe: Record<string, { date: string; value: number }[]>;
-  /** sample-std × √252. [] if degenerate. */
+  /** sample-std × √N (periodsPerYear, default 252). [] if degenerate. */
   rollingVol: { date: string; value: number }[];
-  /** downside RMS ÷ TOTAL window n × √252. [] if degenerate. */
+  /** downside RMS ÷ TOTAL window n × √N (periodsPerYear, default 252). [] if degenerate. */
   rollingSortino: { date: string; value: number }[];
   /** Count of usable daily returns — drives the empty branch + disclosure copy. */
   usableN: number;
@@ -61,31 +65,41 @@ const EMPTY: Omit<BlendPanelSeries, "usableN"> = {
 
 /**
  * Rolling volatility — mirrors computeRollingMetric(daily, window, "volatility")
- * EXACTLY (sample std n-1, × √252, dated at the window's last day, [] below window).
+ * EXACTLY (sample std n-1, × √N (periodsPerYear, default 252), dated at the window's last day, [] below window).
  */
-function rollingVolatility(daily: DailyPoint[], window: number): DailyPoint[] {
+function rollingVolatility(
+  daily: DailyPoint[],
+  window: number,
+  periodsPerYear: number,
+): DailyPoint[] {
   if (daily.length < window) return [];
+  const annualize = Math.sqrt(periodsPerYear);
   const result: DailyPoint[] = [];
   for (let i = window - 1; i < daily.length; i++) {
     const slice = daily.slice(i - window + 1, i + 1).map((d) => d.value);
     const s = stdDev(slice, true);
-    result.push({ date: daily[i].date, value: s * ANNUALIZE });
+    result.push({ date: daily[i].date, value: s * annualize });
   }
   return result;
 }
 
 /**
  * Rolling Sharpe — mirrors computeRollingMetric(daily, window, "sharpe") EXACTLY
- * (mean × √252 ÷ sample std; 0 when std is 0).
+ * (mean × √N ÷ sample std (periodsPerYear, default 252); 0 when std is 0).
  */
-function rollingSharpeSeries(daily: DailyPoint[], window: number): DailyPoint[] {
+function rollingSharpeSeries(
+  daily: DailyPoint[],
+  window: number,
+  periodsPerYear: number,
+): DailyPoint[] {
   if (daily.length < window) return [];
+  const annualize = Math.sqrt(periodsPerYear);
   const result: DailyPoint[] = [];
   for (let i = window - 1; i < daily.length; i++) {
     const slice = daily.slice(i - window + 1, i + 1).map((d) => d.value);
     const m = mean(slice);
     const s = stdDev(slice, true);
-    result.push({ date: daily[i].date, value: s > 0 ? (m * ANNUALIZE) / s : 0 });
+    result.push({ date: daily[i].date, value: s > 0 ? (m * annualize) / s : 0 });
   }
   return result;
 }
@@ -93,20 +107,25 @@ function rollingSharpeSeries(daily: DailyPoint[], window: number): DailyPoint[] 
 /**
  * Rolling Sortino — mirrors the frozen engine (scenario.ts:354-361): the
  * downside sum-of-squares divides by the TOTAL window length (n), NOT the
- * count of down days; × √252; numerator = mean × 252; 0 when no downside.
+ * count of down days; × √N; numerator = mean × N (periodsPerYear, default 252); 0 when no downside.
  */
-function rollingSortinoSeries(daily: DailyPoint[], window: number): DailyPoint[] {
+function rollingSortinoSeries(
+  daily: DailyPoint[],
+  window: number,
+  periodsPerYear: number,
+): DailyPoint[] {
   if (daily.length < window) return [];
+  const annualize = Math.sqrt(periodsPerYear);
   const result: DailyPoint[] = [];
   for (let i = window - 1; i < daily.length; i++) {
     const slice = daily.slice(i - window + 1, i + 1).map((d) => d.value);
     const m = mean(slice);
     let downSq = 0;
     for (const x of slice) if (x < 0) downSq += x * x;
-    const dd = Math.sqrt(downSq / window) * ANNUALIZE; // ÷ window (total n)
+    const dd = Math.sqrt(downSq / window) * annualize; // ÷ window (total n)
     result.push({
       date: daily[i].date,
-      value: dd > 0 ? (m * TRADING_DAYS_PER_YEAR) / dd : 0,
+      value: dd > 0 ? (m * periodsPerYear) / dd : 0,
     });
   }
   return result;
@@ -130,6 +149,7 @@ function percentile(sorted: number[], p: number): number {
 export function buildBlendPanels(
   portfolioDaily: { date: string; value: number }[],
   window: number, // 63 | 126 | 252 (default 63 per RESEARCH; 3M/6M/12M toggle)
+  periodsPerYear = TRADING_DAYS_PER_YEAR, // #597 — 252 traditional (default) / 365 crypto
 ): BlendPanelSeries {
   // ── Degenerate guard FIRST (LOCKED pin) ───────────────────────────
   // Count finite points; any non-finite value present collapses every series.
@@ -177,13 +197,15 @@ export function buildBlendPanels(
     ],
   };
 
-  // ── Rolling series (sample-std × √252; engine-mirror Sortino) ──────
+  // ── Rolling series (sample-std × √N, periodsPerYear default 252; engine-mirror Sortino) ──────
   return {
     histogramSeries,
     quantiles,
-    rollingSharpe: { sharpe_365d: rollingSharpeSeries(portfolioDaily, window) },
-    rollingVol: rollingVolatility(portfolioDaily, window),
-    rollingSortino: rollingSortinoSeries(portfolioDaily, window),
+    rollingSharpe: {
+      sharpe_365d: rollingSharpeSeries(portfolioDaily, window, periodsPerYear),
+    },
+    rollingVol: rollingVolatility(portfolioDaily, window, periodsPerYear),
+    rollingSortino: rollingSortinoSeries(portfolioDaily, window, periodsPerYear),
     usableN,
   };
 }

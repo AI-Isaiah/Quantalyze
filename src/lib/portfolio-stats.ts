@@ -104,19 +104,24 @@ export function computeAnnualReturns(daily: DailyPoint[]): DailyPoint[] {
 // ── 3. computeRollingMetric ─────────────────────────────────────────
 /**
  * Compute a sliding-window metric over daily returns.
- * - "sharpe": mean * sqrt(252) / std  (annualized, rf=0)
- * - "volatility": std * sqrt(252)  (annualized)
+ * - "sharpe": mean * sqrt(N) / std  (annualized, rf=0)
+ * - "volatility": std * sqrt(N)  (annualized)
  *
- * Returns (n - window + 1) points, each dated at the window's last day.
+ * `periodsPerYear` (N) is the annualization basis — 252 (traditional, default)
+ * or 365 (crypto) per #597. Returns (n - window + 1) points, each dated at the
+ * window's last day.
  */
 export function computeRollingMetric(
   daily: DailyPoint[],
   window: number,
   metric: "sharpe" | "volatility",
+  periodsPerYear = 252,
 ): DailyPoint[] {
   if (daily.length < window) return [];
   const result: DailyPoint[] = [];
-  const sqrt252 = Math.sqrt(252);
+  // #597 — annualization basis (default 252 keeps existing callers
+  // byte-identical; pass 365 via annualizationPeriods() for crypto).
+  const sqrtN = Math.sqrt(periodsPerYear);
 
   for (let i = window - 1; i < daily.length; i++) {
     const slice = daily.slice(i - window + 1, i + 1).map((d) => d.value);
@@ -125,9 +130,9 @@ export function computeRollingMetric(
 
     let value: number;
     if (metric === "sharpe") {
-      value = s > 0 ? (m * sqrt252) / s : 0;
+      value = s > 0 ? (m * sqrtN) / s : 0;
     } else {
-      value = s * sqrt252;
+      value = s * sqrtN;
     }
     result.push({ date: daily[i].date, value });
   }
@@ -439,11 +444,15 @@ export function computeAlphaBeta(
 /**
  * Tracking error: annualized standard deviation of the return
  * difference (r - benchmark).
- * TE = std(r - b) * sqrt(252)
+ * TE = std(r - b) * sqrt(N)
+ *
+ * `periodsPerYear` (N) is the annualization basis — 252 (traditional, default,
+ * byte-identical to pre-#597) or 365 (crypto) per #597.
  */
 export function computeTrackingError(
   returns: number[],
   benchmark: number[],
+  periodsPerYear = 252,
 ): number {
   const n = Math.min(returns.length, benchmark.length);
   if (n < 2) return 0;
@@ -451,7 +460,7 @@ export function computeTrackingError(
   for (let i = 0; i < n; i++) {
     diff.push(returns[i] - benchmark[i]);
   }
-  return stdDev(diff, true) * Math.sqrt(252);
+  return stdDev(diff, true) * Math.sqrt(periodsPerYear);
 }
 
 // ── 11. computeRiskDecomposition ────────────────────────────────────

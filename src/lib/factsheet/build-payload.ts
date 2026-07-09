@@ -12,6 +12,7 @@ import {
 } from "./benchmarks";
 import { computeStyleDrift } from "./style-drift";
 import { computePeerPercentile } from "./peer-cohort";
+import { annualizationPeriods } from "@/lib/closed-sets";
 import { blend, buildAllocatorMetrics } from "./allocator";
 import { streakLengths, streakHistogram } from "./streak";
 import { calmarByYear } from "./calmar-by-year";
@@ -66,6 +67,13 @@ export function buildFactsheetPayload(
      *  (user-uploaded). Defaults to "csv" when absent so existing callers
      *  that don't know the source are conservative. (NEW-C20-01) */
     ingestSource?: IngestSource;
+    /** #597 — the strategy's asset class ('crypto' | 'traditional'), driving
+     *  the annualization basis of every SINGLE-STRATEGY KPI on this factsheet
+     *  (headline / rolling / bootstrap CI / comparator joint): √365 crypto,
+     *  √252 traditional. Additive + optional; absent → 252 (byte-identical to
+     *  the pre-#597 hardcode). Canned reference-allocation panels stay on
+     *  native 252 (see allocator.ts). */
+    assetClass?: string | null;
     description?: string | null;
     subtypes?: string[];
     supportedExchanges?: string[];
@@ -127,7 +135,11 @@ export function buildFactsheetPayload(
     { window: ROLL_WINDOW_30D, label: "30d" },
   ]);
 
-  const fullMetrics = compute(stratRet, dates);
+  // #597 — annualization basis for this strategy's KPIs (√365 crypto / √252
+  // traditional). One value threaded into every single-strategy KPI surface
+  // below so the whole factsheet renders on ONE coherent basis.
+  const periodsPerYear = annualizationPeriods(strategy.assetClass);
+  const fullMetrics = compute(stratRet, dates, 0, periodsPerYear);
   // Strip eq/dd before serialization — already shipped as strategyEquity / strategyDrawdowns
   // at the top level; carrying them twice burns ~16 KB on a 1049-day series.
   const { eq: _eq, dd: stratDd, ...strategyMetrics } = fullMetrics;
@@ -193,9 +205,9 @@ export function buildFactsheetPayload(
     dates,
     strategyReturns: stratRet,
     strategyEquity: stratEquity,
-    strategyRollingVol: rollingVol(stratRet, rollWindow.window),
-    strategyRollingSharpe: rollingSharpe(stratRet, rollWindow.window),
-    strategyRollingSortino: rollingSortino(stratRet, rollWindow.window),
+    strategyRollingVol: rollingVol(stratRet, rollWindow.window, periodsPerYear),
+    strategyRollingSharpe: rollingSharpe(stratRet, rollWindow.window, periodsPerYear),
+    strategyRollingSortino: rollingSortino(stratRet, rollWindow.window, periodsPerYear),
     rollingWindow: rollWindow,
     rollingBetaWindow: rollBetaWindow,
     strategyDrawdowns: stratDd,
@@ -203,8 +215,8 @@ export function buildFactsheetPayload(
     strategyMetrics,
     activeComparator: "btc",
     comparators: {
-      btc: buildComparatorBlock("BTC-USD", "BTC", btcRet, stratRet, stratEquity, dates, strategyMetrics.ann_vol, rollWindow.window, rollBetaWindow.window),
-      spx: buildComparatorBlock("S&P 500", "SPX", spxRet, stratRet, stratEquity, dates, strategyMetrics.ann_vol, rollWindow.window, rollBetaWindow.window),
+      btc: buildComparatorBlock("BTC-USD", "BTC", btcRet, stratRet, stratEquity, dates, strategyMetrics.ann_vol, rollWindow.window, rollBetaWindow.window, periodsPerYear),
+      spx: buildComparatorBlock("S&P 500", "SPX", spxRet, stratRet, stratEquity, dates, strategyMetrics.ann_vol, rollWindow.window, rollBetaWindow.window, periodsPerYear),
       none: noneComparatorBlock,
     },
     styleDrift,
@@ -222,7 +234,7 @@ export function buildFactsheetPayload(
       };
     })(),
     calmarByYear: calmarByYear(stratRet, dates),
-    bootstrapCI: bootstrapCI(stratRet),
+    bootstrapCI: bootstrapCI(stratRet, 2000, 5, 42, periodsPerYear),
     monthlyReturns: monthlyReturnsMatrix(stratRet, dates),
     dailyHeatmap: dailyReturnsByYear(stratRet, dates),
     correlations,
@@ -238,6 +250,19 @@ export function buildFactsheetPayload(
   // blob — so the discriminated union makes a csv consumer physically unable to
   // read them, and zero-population csv signatures never add payload weight.
   if (ingestSource === "api") {
+    // #597 — rank the ANNUALIZED Sharpe/Sortino directly against the cohort; do
+    // NOT rescale by the annualization basis. Annualized Sharpe is
+    // frequency-invariant: Sharpe_ann = mean·P / (sd·√P) = mean·√P / sd, and a
+    // crypto strategy's smaller daily returns (spread over P=365 days) × √365
+    // recover the exact same annual Sharpe that a traditional strategy's larger
+    // daily returns × √252 do. Two strategies with the same TRUE annual Sharpe
+    // land on the same annualized value regardless of P, so a √365 Sharpe and a
+    // √252 Sharpe are already on one common scale — the cohort (a fixed
+    // distribution of annualized Sharpes) is asset-class-agnostic. Applying a
+    // √(252/365) "basis correction" here would de-annualize crypto and stamp a
+    // systematic ~17% penalty on every 24/7 sleeve — the wrong fix for a
+    // non-problem. (Frequency only affects the standard ERROR of the estimate,
+    // not its expectation; more obs → tighter, if anything shrink crypto LESS.)
     const peer = computePeerPercentile(strategyMetrics.sharpe, strategyMetrics.sortino, strategyMetrics.max_dd);
     return {
       ...common,

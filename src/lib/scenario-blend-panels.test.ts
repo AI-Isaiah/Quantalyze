@@ -88,12 +88,16 @@ describe("buildBlendPanels — convention pins", () => {
     expect(panels.rollingSortino[0].value).not.toBeCloseTo(wrong, 6);
   });
 
-  // ── 4. 252-only annualization ───────────────────────────────────────
-  // (a) numeric anchor: constant-return → vol matches stdDev(slice,true) × √252.
-  //     For a constant slice, sample std = 0 → vol = 0 exactly.
-  // (b) source-read assertion: the live adapter module body contains no √365 /
-  //     *365 / √250 pattern (read the .ts via fs — non-vacuous, not a constant).
-  it("252-only: constant-return vol uses √252 and source has no 365/250 annualization", () => {
+  // ── 4. default √252 basis; annualization flows ONLY through the param ──
+  // #597 made the basis a `periodsPerYear` argument (252 default / 365 crypto),
+  // so the module is no longer "252-only" — but it must still NOT HARDCODE any
+  // alternate basis: the only annualization knob is the parameter.
+  // (a) numeric anchor: constant-return → vol matches stdDev(slice,true) × √252
+  //     at the DEFAULT. For a constant slice, sample std = 0 → vol = 0 exactly.
+  // (b) source-read assertion: the live adapter module body contains no
+  //     HARDCODED √365 / *365 / √250 literal (read the .ts via fs — the basis
+  //     is threaded via the periodsPerYear variable, never a magic number).
+  it("default √252 basis: constant-return vol is 0 and source hardcodes no alternate annualization", () => {
     const panels = buildBlendPanels(CONSTANT, 30);
     // Constant returns ⇒ sample std 0 ⇒ vol 0 (× √252 of zero is still zero).
     for (const pt of panels.rollingVol) {
@@ -108,6 +112,34 @@ describe("buildBlendPanels — convention pins", () => {
     expect(src).not.toMatch(
       /√365|√250|\*\s*365|\*\s*250|Math\.sqrt\(\s*365\s*\)|Math\.sqrt\(\s*250\s*\)/,
     );
+  });
+
+  // ── 4b. #597 crypto √365 basis ──────────────────────────────────────
+  it("default periodsPerYear is byte-identical to explicit 252 across every series", () => {
+    expect(buildBlendPanels(DAILY, WINDOW)).toEqual(
+      buildBlendPanels(DAILY, WINDOW, 252),
+    );
+  });
+
+  it("crypto √365 scales rollingVol/Sharpe by √(365/252) vs √252, point-for-point", () => {
+    const p252 = buildBlendPanels(DAILY, WINDOW, 252);
+    const p365 = buildBlendPanels(DAILY, WINDOW, 365);
+    const scale = Math.sqrt(365 / 252);
+
+    expect(p365.rollingVol.length).toBe(p252.rollingVol.length);
+    expect(p365.rollingVol.length).toBeGreaterThan(0); // non-vacuity
+    for (let i = 0; i < p252.rollingVol.length; i++) {
+      expect(p365.rollingVol[i].value).toBeCloseTo(
+        p252.rollingVol[i].value * scale,
+        10,
+      );
+    }
+
+    const s252 = p252.rollingSharpe["sharpe_365d"];
+    const s365 = p365.rollingSharpe["sharpe_365d"];
+    for (let i = 0; i < s252.length; i++) {
+      expect(s365[i].value).toBeCloseTo(s252[i].value * scale, 10);
+    }
   });
 
   // ── 5. histogram cumulative-wealth ──────────────────────────────────
