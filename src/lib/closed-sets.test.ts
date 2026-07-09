@@ -18,6 +18,7 @@ import {
   isComputedAnalytics,
   isCryptoExchange,
   annualizationPeriods,
+  blendPeriodsPerYear,
   calendarYears,
 } from "./closed-sets";
 import { ROLES } from "./types";
@@ -87,6 +88,40 @@ describe("closed-sets registry", () => {
       expect(fromExchange("binance")).toBe(365);
       expect(fromExchange("deribit")).toBe(365);
       expect(fromExchange(null)).toBe(252); // CSV upload, no exchange
+    });
+
+    it("blendPeriodsPerYear: √365 if ANY leg is crypto, else √252 (the locked #597 blend rule)", () => {
+      // A blended daily return series is calendar-daily (7-day) the moment ANY
+      // crypto leg is present, so it has ~365 obs/year; a pure-tradfi blend
+      // stays √252. blendPeriodsPerYear(legs) = legs.some(crypto) ? 365 : 252.
+      expect(
+        blendPeriodsPerYear([
+          { asset_class: "crypto" },
+          { asset_class: "traditional" },
+        ]),
+      ).toBe(365);
+      expect(
+        blendPeriodsPerYear([
+          { asset_class: "traditional" },
+          { asset_class: "traditional" },
+        ]),
+      ).toBe(252);
+      // Empty blend → the conservative pre-#597 252 default (byte-identical).
+      expect(blendPeriodsPerYear([])).toBe(252);
+      // null / undefined / missing asset_class legs → 252 (no crypto leg).
+      expect(
+        blendPeriodsPerYear([
+          { asset_class: null },
+          { asset_class: undefined },
+          {},
+        ]),
+      ).toBe(252);
+      // One crypto leg flips the whole blend to 365 even beside null legs.
+      expect(
+        blendPeriodsPerYear([{ asset_class: null }, { asset_class: "crypto" }]),
+      ).toBe(365);
+      // Exact-match closed set — DB stores lowercase 'crypto'; no case widening.
+      expect(blendPeriodsPerYear([{ asset_class: "CRYPTO" }])).toBe(252);
     });
 
     it("calendarYears: elapsed span on the 365.25-day civil clock (the CAGR clock)", () => {

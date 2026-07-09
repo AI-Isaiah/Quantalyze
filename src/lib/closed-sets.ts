@@ -143,6 +143,29 @@ export function annualizationPeriods(
 }
 
 /**
+ * Trading periods per year for a BLENDED (multi-strategy) return series, keyed
+ * off the constituent legs' `asset_class`. √365 if ANY constituent leg is
+ * crypto, else √252. Rationale (locked #597 blend rule): the blended daily
+ * return series is calendar-daily the moment a crypto leg is present, so it has
+ * ~365 obs/year; a pure-tradfi blend stays √252. An empty or all-unknown blend
+ * keeps the 252 pre-#597 default byte-identical.
+ *
+ * The blend sibling of `annualizationPeriods` — the ONE place that maps a set of
+ * legs → periods, so every wave-2/3 blend KPI call site derives its basis from
+ * here rather than hand-rolling a second rule. Exact-match 'crypto' only (no
+ * case/alias widening): the DB stores lowercase 'crypto' | 'traditional'.
+ *
+ * Structural param type (`{ asset_class?: string | null }`) — this module
+ * imports ONLY zod (module-header rule); importing StrategyForBuilder would risk
+ * a scenario→closed-sets cycle. Any object carrying `asset_class` satisfies it.
+ */
+export function blendPeriodsPerYear(
+  legs: ReadonlyArray<{ asset_class?: string | null }>,
+): number {
+  return legs.some((l) => l.asset_class === "crypto") ? 365 : 252;
+}
+
+/**
  * Calendar-year span between two epoch-ms timestamps on the 365.25-day civil
  * clock. #597 / TWR-05: risk metrics ride the FREQUENCY clock
  * (`annualizationPeriods`, 365/252); CAGR rides the CALENDAR clock (elapsed
