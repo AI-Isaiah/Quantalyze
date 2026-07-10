@@ -262,6 +262,13 @@ def _patches(
             "services.analytics_runner.get_benchmark_returns",
             new=AsyncMock(return_value=(None, True)),
         ),
+        # F-2: run_stitch_composite_job fetches the BTC benchmark via a LOCAL
+        # `from services.benchmark import get_benchmark_returns` — patch that target
+        # (default: unavailable → benchmark-invariant scalars, offline).
+        patch(
+            "services.benchmark.get_benchmark_returns",
+            new=AsyncMock(return_value=(None, True)),
+        ),
         patch(
             "services.deribit_ingest.fetch_deribit_native_account_state",
             new=AsyncMock(return_value=MagicMock(
@@ -488,3 +495,74 @@ async def test_traditional_asset_class_composite_fails_loud_mismatch_guard() -> 
         isinstance(p, dict) and "metrics_json_by_basis" in p
         for _t, p, _c in fake.upserts
     )
+
+
+@pytest.mark.asyncio
+async def test_composite_carries_benchmark_family_headline_and_by_basis() -> None:
+    """F-2: the atomic-upsert refactor must NOT drop the BTC benchmark family. The
+    global BTC series is threaded into the ONE canonical compute, so the headline
+    AND metrics_json_by_basis.cash_settlement both carry correlation/alpha/beta
+    (byte-identical — benchmark is strategy-independent, same compute), and
+    benchmark_unavailable is NOT set. Neuter (pass benchmark=None) → correlation
+    absent → this reddens."""
+    fake = _StatefulSupabase(members=[
+        _member(1, "2024-01-01", "2024-01-06"),  # Jan-01..Jan-05
+        _member(2, "2024-01-06", None),
+    ])
+    fake.strategy_row["asset_class"] = "crypto"
+    m1 = _returns([
+        ("2024-01-01", 0.02), ("2024-01-02", -0.01),
+        ("2024-01-03", 0.03), ("2024-01-04", 0.01), ("2024-01-05", -0.02),
+    ])
+    m2 = _returns([("2024-01-06", 0.02), ("2024-01-07", -0.03), ("2024-01-08", 0.01)])
+    # A real BTC benchmark spanning the composite window (>1 aligned day → greeks).
+    btc_idx = pd.date_range("2024-01-01", "2024-01-08", freq="D").as_unit("us")
+    btc = pd.Series(
+        [0.01, -0.02, 0.02, 0.00, -0.01, 0.03, -0.02, 0.01],
+        index=btc_idx, dtype="float64", name="BTC",
+    )
+    with _apply(_patches(fake, combine_returns=[(m1, {}), (m2, {})])), patch(
+        "services.benchmark.get_benchmark_returns",
+        new=AsyncMock(return_value=(btc, False)),  # available → fresh
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+
+    headline = _headline_metrics(fake)
+    cash = _by_basis_cash(fake)
+    # The benchmark family lands in the inner metrics_json JSONB sub-dict (spread
+    # into the headline row + carried in the by-basis object).
+    headline_inner = headline["metrics_json"]
+    cash_inner = cash["metrics_json"]
+    # The benchmark family is present (correlation computed off the BTC overlay)…
+    assert "correlation" in headline_inner and headline_inner["correlation"] is not None
+    # …and byte-identical across headline and by-basis (same benchmark, same compute).
+    for key in ("correlation", "alpha", "beta"):
+        assert headline_inner.get(key) == pytest.approx(cash_inner.get(key)), (
+            f"benchmark-family {key} diverges headline={headline_inner.get(key)} "
+            f"by-basis={cash_inner.get(key)}"
+        )
+    # Benchmark was available → no unavailable flag.
+    assert fake.analytics_flags.get("benchmark_unavailable") is not True
+
+
+@pytest.mark.asyncio
+async def test_composite_sets_benchmark_unavailable_when_fetch_fails() -> None:
+    """F-2: when the BTC benchmark is unavailable the composite still ships, but the
+    factsheet must SAY SO — data_quality_flags.benchmark_unavailable + note — rather
+    than silently omit the family with no explanation."""
+    fake = _StatefulSupabase(members=[
+        _member(1, "2024-01-01", "2024-01-04"),
+        _member(2, "2024-01-10", None),
+    ])
+    fake.strategy_row["asset_class"] = "crypto"
+    m1 = _returns([("2024-01-01", 0.02), ("2024-01-02", 0.01)])
+    m2 = _returns([("2024-01-10", 0.03), ("2024-01-11", -0.05)])
+    with _apply(_patches(fake, combine_returns=[(m1, {}), (m2, {})])), patch(
+        "services.benchmark.get_benchmark_returns",
+        new=AsyncMock(side_effect=RuntimeError("benchmark source down")),
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert fake.analytics_flags.get("benchmark_unavailable") is True
+    assert "benchmark_note" in fake.analytics_flags

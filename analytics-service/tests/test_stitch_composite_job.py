@@ -275,6 +275,14 @@ def _deribit_patches(
             "services.analytics_runner.run_csv_strategy_analytics",
             new=csv_analytics or AsyncMock(return_value={"status": "complete"}),
         ),
+        # F-2: run_stitch_composite_job fetches the BTC benchmark via a LOCAL
+        # `from services.benchmark import get_benchmark_returns` — patch that so the
+        # unit harness stays offline (default: unavailable; the asserted scalars are
+        # benchmark-invariant).
+        patch(
+            "services.benchmark.get_benchmark_returns",
+            new=AsyncMock(return_value=(None, True)),
+        ),
     ]
 
 

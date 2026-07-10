@@ -3251,9 +3251,31 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         cumulative_method = "geometric"
         day_basis = "calendar"
 
+    # F-2 (convergence red team): thread the GLOBAL BTC benchmark into the ONE
+    # canonical composite compute so the factsheet keeps the benchmark family
+    # (correlation / information_ratio / rolling alpha-beta / btc overlay) the
+    # pre-refactor headline carried. The benchmark is strategy-INDEPENDENT (the
+    # global BTC series), so passing it to the SAME compute for BOTH the headline
+    # and the by-basis object preserves parity by construction — the four core
+    # scalars stay benchmark-invariant, and the benchmark-derived family is
+    # byte-identical across headline and metrics_json_by_basis.cash_settlement.
+    # Guarded fetch (mirror run_csv_strategy_analytics): on failure the composite
+    # still ships (benchmark_unavailable flag + note set below).
+    from services.benchmark import get_benchmark_returns
+
+    benchmark_rets, benchmark_stale = None, True
+    try:
+        benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "stitch_composite: benchmark fetch failed for %s: %s",
+            strategy_id, exc,
+        )
+
     def _metrics_result_for(clipped_series: list[tuple[int, pd.Series]]) -> Any:
         """Stitch → gap-fill dense-with-0.0 → compute_all_metrics with the composite
-        conventions → the full MetricsResult (metrics_json + sibling_kinds).
+        conventions + the global BTC benchmark → the full MetricsResult
+        (metrics_json + sibling_kinds).
 
         This is the ONE canonical composite compute. Its ``metrics_json`` is used
         for BOTH the headline ``strategy_analytics`` scalars AND
@@ -3262,13 +3284,12 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         headline previously went through (``run_csv_strategy_analytics`` applied
         ``periods_per_year_for_asset_class(asset_class)`` — √252 for the 'traditional'
         default — and reinstated NaN/0.0 gap semantics that disagreed with this
-        in-memory series). Benchmark is None here (a composite has no single
-        benchmark series); the four headline scalars are benchmark-invariant."""
+        in-memory series)."""
         stitched = stitch_clipped_series(clipped_series)
         dense = gap_fill_daily_returns(stitched)
         return compute_all_metrics(
             dense,
-            None,
+            benchmark_rets,
             periods_per_year=periods_per_year,
             cumulative_method=cumulative_method,
             day_basis=day_basis,
@@ -3438,6 +3459,17 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         merged_flags["mtm_gated_reason"] = mtm_reason
     else:
         merged_flags.pop("mtm_gated_reason", None)
+    # F-2: surface benchmark availability so the factsheet renders the "benchmark
+    # unavailable" note instead of a silently-missing BTC family. DROP a stale flag
+    # when the fetch succeeded this derive (the benchmark healed).
+    if benchmark_stale or benchmark_rets is None:
+        merged_flags["benchmark_unavailable"] = True
+        merged_flags["benchmark_note"] = (
+            "Benchmark data unavailable. Alpha, beta, and correlation not computed."
+        )
+    else:
+        merged_flags.pop("benchmark_unavailable", None)
+        merged_flags.pop("benchmark_note", None)
     for _flag, _val in member_warn_flags.items():
         merged_flags[_flag] = _val
 
