@@ -36,7 +36,7 @@ import argparse
 import asyncio
 import json
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pandas as pd
@@ -50,6 +50,14 @@ from services.allocated_capital import (
 from services.broker_dailies import gap_fill_daily_returns
 from services.deribit_ingest import build_deribit_native_ledger
 from services.metrics import compute_all_metrics
+from services.stitch_composite import (
+    CompositeOverlapError,
+    MemberWindow,
+    assert_windows_disjoint,
+    clip_to_window,
+    coverage_mask,
+    stitch_clipped_series,
+)
 
 # The zavara allocated-capital schedule — an ACCEPTANCE FIXTURE, never attached to a
 # live strategy row here (activation is a separate deliberate data change).
@@ -77,6 +85,14 @@ _ZAVARA_DENOMINATOR_CONFIG: dict[str, Any] = {
 # Deribit is a crypto venue → the shipped factsheet annualizes on √365 (every
 # calendar day trades), matching run_csv_strategy_analytics' asset-class signal.
 _CRYPTO_PERIODS_PER_YEAR = 365
+
+# The v1.8-corroborated BLOCKING acceptance targets + pinned tolerances (decisions):
+# stitched cum within ±0.10pp of 62.66 and maxDD within ±0.05pp of −4.13 on
+# cash_settlement. A miss FAILS the phase — investigate, never widen silently.
+_ZAVARA_EXPECT_CUM_PCT = 62.66
+_ZAVARA_EXPECT_MAXDD_PCT = -4.13
+_ZAVARA_CUM_TOL_PCT = 0.10
+_ZAVARA_MAXDD_TOL_PCT = 0.05
 
 
 def _series_to_day_map(series: pd.Series) -> dict[str, float]:
@@ -299,8 +315,13 @@ async def _run(key_index: int, *, csv_path: str | None = None) -> dict[str, Any]
             # quantity zavara's ``daily_return_pct`` column reports. Emitted so the
             # orchestrator can stitch all keys into one series; also compared to the
             # CSV in-line when a ``--csv`` path is supplied.
+            # The dense per-key daily-return FRACTION map — the exact series the
+            # in-process --stitch-keys fan-out clips + stitches through the shared
+            # services.stitch_composite core (aggregated daily-% only, leak-safe).
+            shipped_daily_fraction = _series_to_day_map(dense_returns)
+            out["shipped_daily_return_fraction"] = shipped_daily_fraction
             shipped_daily_pct = {
-                d: v * 100.0 for d, v in _series_to_day_map(dense_returns).items()
+                d: v * 100.0 for d, v in shipped_daily_fraction.items()
             }
             out["shipped_daily_return_pct"] = shipped_daily_pct
             if csv_path is not None:
@@ -326,31 +347,175 @@ def _isnan(v: Any) -> bool:
     return isinstance(v, float) and v != v
 
 
+def _day_map_to_series(day_map: Mapping[str, float]) -> pd.Series:
+    """A ``{YYYY-MM-DD: value}`` map → a tz-naive midnight DatetimeIndex Series on the
+    ``[us]`` unit (matching ``gap_fill_daily_returns`` — #593 pandas 3.0), so the
+    index aligns byte-for-byte with the shared-core clip/stitch/coverage paths."""
+    days = sorted(day_map)
+    index = pd.DatetimeIndex(pd.to_datetime(days)).as_unit("us")
+    return pd.Series([float(day_map[d]) for d in days], index=index)
+
+
 def stitch_key_outputs(
     per_key_daily_pct: list[Mapping[str, float]],
     csv_daily_pct: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     """Stitch each key's ``shipped_daily_return_pct`` map into ONE arithmetic daily
     series (sequential subaccounts — dates do not overlap across keys) and report
-    the combined arithmetic-cumulative maxDD + cumulative. When ``csv_daily_pct`` is
-    supplied, also fit the uniform scale and per-day/per-month deviations of the
-    STITCHED series against the CSV. Pure / offline — no creds."""
-    stitched: dict[str, float] = {}
-    overlaps: list[str] = []
-    for m in per_key_daily_pct:
-        for day, val in m.items():
-            if day in stitched:
-                overlaps.append(day)
-            stitched[day] = float(val)
+    the combined arithmetic-cumulative maxDD + cumulative.
+
+    Parity by construction: this delegates to ``services.stitch_composite``
+    (``stitch_clipped_series``) — the SAME production stitch the worker composes —
+    so offline mode, the acceptance fan-out, and the worker all run ONE stitch
+    implementation. A day present in more than one key RAISES
+    ``CompositeOverlapError`` (fail-loud; the old report-only dict-merge is retired,
+    never last-write-wins). When ``csv_daily_pct`` is supplied, also fit the uniform
+    scale + per-day/per-month deviations of the STITCHED series vs the CSV. Pure /
+    offline — no creds."""
+    clipped: list[tuple[int, pd.Series]] = [
+        (i, _day_map_to_series(m)) for i, m in enumerate(per_key_daily_pct) if m
+    ]
+    stitched_series = stitch_clipped_series(clipped)  # RAISES on any day collision
+    stitched = _series_to_day_map(stitched_series)
     out: dict[str, Any] = {
         "n_stitched_days": len(stitched),
-        "overlap_days": sorted(set(overlaps)),
         "stitched_maxdd_pct": stitched_arithmetic_maxdd_pct(stitched),
         "stitched_cumulative_pct": sum(stitched.values()),
     }
     if csv_daily_pct is not None:
         out["csv_comparison"] = compare_shipped_to_csv(stitched, csv_daily_pct)
     return out
+
+
+def derive_member_windows(
+    per_key: Sequence[tuple[int, str, str]],
+    *,
+    mandate_end_exclusive: str,
+) -> list[MemberWindow]:
+    """CONFIRM the A1 key→window→tranche mapping from the per-key data itself.
+
+    ``per_key`` is ``(seq, first_day, last_day)`` per key (each key's actual dense
+    day extent). Sorted by ``first_day``, each key gets the half-open window
+    ``[first_i, first_{i+1})`` — the last key trims to ``mandate_end_exclusive`` (F3:
+    post-mandate April is non-corroborable). This is byte-consistent with the
+    ``capital_on_date`` handoff convention (a day equal to the next boundary belongs
+    to the next tranche).
+
+    A1 STOP (fail-loud): if a key's real ``last_day`` reaches ONTO or PAST the next
+    key's ``first_day``, the raw per-key day ranges OVERLAP — RAISE
+    ``CompositeOverlapError`` rather than force a clip window that silently hides the
+    overlap (T-86-17). Only the FINAL key's post-mandate tail is trimmed (an intended
+    F3 clip, never an inter-key overlap)."""
+    ordered = sorted(per_key, key=lambda k: k[1])
+    windows: list[MemberWindow] = []
+    for i, (seq, _first, last) in enumerate(ordered):
+        first = _first
+        if i + 1 < len(ordered):
+            next_seq, next_first = ordered[i + 1][0], ordered[i + 1][1]
+            if last >= next_first:
+                raise CompositeOverlapError(
+                    f"member seq {seq} ships data through {last} but seq {next_seq} "
+                    f"starts {next_first}; the raw per-key day ranges overlap — "
+                    "refusing to force a clip window that hides the overlap (A1 STOP)"
+                )
+            end: str = next_first
+        else:
+            end = mandate_end_exclusive
+        windows.append(MemberWindow(seq, first, end))
+    return windows
+
+
+async def _stitch_keys_run(
+    key_indices: Sequence[int],
+    *,
+    mandate_end_exclusive: str,
+    expect_cum_pct: float,
+    expect_maxdd_pct: float,
+    cum_tol_pct: float,
+    maxdd_tol_pct: float,
+) -> dict[str, Any]:
+    """The headless 3-key acceptance: run ``_run`` per key in-process (sequentially,
+    one exchange at a time — ``_run`` opens+aclose-s its own exchange), collect each
+    key's dense shipped daily FRACTION series, CONFIRM the A1 windows from the
+    per-key first days, clip + stitch through ``services.stitch_composite`` (the SAME
+    core the worker composes), gap-fill, and compute the SHIPPED
+    ``compute_all_metrics(simple/active/365)`` headline. SELF-ASSERTS the pinned
+    tolerances — a miss sets ``acceptance_pass=False`` (the caller exits nonzero).
+
+    Emits aggregated %/scalars + dates/day-counts ONLY (leak discipline, T-86-15)."""
+    per_key_series: list[tuple[int, pd.Series]] = []
+    per_key_extent: list[tuple[int, str, str]] = []
+    for ki in key_indices:
+        out = await _run(ki)
+        if out.get("metrics_error"):
+            raise RuntimeError(f"key {ki} valuation failed: {out['metrics_error']}")
+        frac = out.get("shipped_daily_return_fraction") or {}
+        if not frac:
+            raise RuntimeError(f"key {ki} produced no shipped daily returns")
+        series = _day_map_to_series(frac)
+        per_key_series.append((ki, series))
+        days = sorted(frac)
+        per_key_extent.append((ki, days[0], days[-1]))
+
+    # A1 CONFIRMATION — windows derived from the real per-key first/last days, with a
+    # STOP-on-overlap guard (never assumed, never forced).
+    windows = derive_member_windows(
+        per_key_extent, mandate_end_exclusive=mandate_end_exclusive
+    )
+    assert_windows_disjoint(windows)  # production guard (disjoint by construction)
+    window_by_seq = {w.seq: w for w in windows}
+
+    clipped: list[tuple[int, pd.Series]] = [
+        (
+            seq,
+            clip_to_window(
+                series,
+                window_by_seq[seq].window_start,
+                window_by_seq[seq].window_end,
+            ),
+        )
+        for seq, series in per_key_series
+    ]
+    mask = coverage_mask(clipped)
+    stitched = stitch_clipped_series(clipped)  # RAISES on any post-clip collision
+
+    dense = gap_fill_daily_returns(stitched)
+    shipped = compute_all_metrics(
+        dense,
+        None,
+        periods_per_year=_CRYPTO_PERIODS_PER_YEAR,
+        cumulative_method="simple",
+        day_basis="active",
+    )
+    mj = shipped.metrics_json
+    cum_pct = _pct(mj.get("cumulative_return"))
+    maxdd_pct = _pct(mj.get("max_drawdown"))
+
+    cum_ok = cum_pct is not None and abs(cum_pct - expect_cum_pct) <= cum_tol_pct
+    maxdd_ok = (
+        maxdd_pct is not None and abs(maxdd_pct - expect_maxdd_pct) <= maxdd_tol_pct
+    )
+    return {
+        "mode": "stitch_keys",
+        "per_key": [
+            {"key_index": seq, "first_day": f, "last_day": ll, "n_days": int(len(s))}
+            for (seq, f, ll), (_s2, s) in zip(per_key_extent, per_key_series)
+        ],
+        "derived_windows": [
+            {"seq": w.seq, "window_start": w.window_start, "window_end": w.window_end}
+            for w in windows
+        ],
+        "coverage_mask": mask,
+        "n_stitched_days": int(len(stitched)),
+        "n_dense_days": int(len(dense)),
+        "stitched_cumulative_return_pct": cum_pct,
+        "stitched_max_drawdown_pct": maxdd_pct,
+        "expect_cum": expect_cum_pct,
+        "expect_maxdd": expect_maxdd_pct,
+        "cum_within_tol": bool(cum_ok),
+        "maxdd_within_tol": bool(maxdd_ok),
+        "acceptance_pass": bool(cum_ok and maxdd_ok),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -366,7 +531,57 @@ def main(argv: list[str] | None = None) -> int:
         "--stitch", nargs="+", default=None, metavar="KEY_JSON",
         help="offline: stitch per-key JSON outputs into one series + combined maxDD",
     )
+    p.add_argument(
+        "--stitch-keys", nargs="+", type=int, default=None, metavar="KEY_INDEX",
+        help="BLOCKING: in-process fan-out over N live keys → clip + stitch through "
+        "services.stitch_composite → self-assert cum/maxDD tolerances (needs creds)",
+    )
+    p.add_argument(
+        "--expect-cum", type=float, default=_ZAVARA_EXPECT_CUM_PCT,
+        help="expected stitched cumulative %% (default: the Zavara target 62.66)",
+    )
+    p.add_argument(
+        "--expect-maxdd", type=float, default=_ZAVARA_EXPECT_MAXDD_PCT,
+        help="expected stitched max-drawdown %% (default: the Zavara target -4.13)",
+    )
     args = p.parse_args(argv)
+
+    # BLOCKING in-process 3-key fan-out — runs the live per-key crawl, confirms the
+    # A1 windows, stitches through the shared core, and self-asserts the tolerances.
+    if args.stitch_keys is not None:
+        mandate_end = str(_ZAVARA_DENOMINATOR_CONFIG["mandate_end"])
+        mandate_end_exclusive = (
+            pd.Timestamp(mandate_end) + pd.Timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+        try:
+            result = asyncio.run(
+                _stitch_keys_run(
+                    args.stitch_keys,
+                    mandate_end_exclusive=mandate_end_exclusive,
+                    expect_cum_pct=args.expect_cum,
+                    expect_maxdd_pct=args.expect_maxdd,
+                    cum_tol_pct=_ZAVARA_CUM_TOL_PCT,
+                    maxdd_tol_pct=_ZAVARA_MAXDD_TOL_PCT,
+                )
+            )
+        except Exception as e:  # scrub — never surface ccxt text / secrets
+            print(json.dumps({"error": type(e).__name__}), file=sys.stderr)
+            return 1
+        print(json.dumps(result, sort_keys=True))
+        # L2 fail-loud: a tolerance miss is NOT a pass — exit nonzero so a caught
+        # or out-of-tolerance run can never read as a green acceptance.
+        if not result["acceptance_pass"]:
+            print(
+                json.dumps({
+                    "acceptance_failed": {
+                        "cum_within_tol": result["cum_within_tol"],
+                        "maxdd_within_tol": result["maxdd_within_tol"],
+                    }
+                }),
+                file=sys.stderr,
+            )
+            return 1
+        return 0
 
     # OFFLINE stitch mode — no live crawl, no creds. Reads the per-key JSON files
     # emitted by earlier live runs plus (optionally) the CSV.
