@@ -11,6 +11,7 @@ import { isUuid } from "@/lib/utils";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { logAuditEventAsUser } from "@/lib/audit";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -914,6 +915,17 @@ async function runLegacyFinalize(args: {
                 `enqueue_compute_job failed: ${enqueueErr.message}`,
               );
             }
+            // Phase 89 — audit the composite dispatch, mirroring the
+            // keys/sync stitch_composite kickoff (keys/sync/route.ts:220-225):
+            // a stitch_composite enqueue is a user-initiated sync.start on the
+            // strategy, same class + shape as its keys/sync sibling. Idempotent
+            // double-submit is absorbed by the compute_jobs partial unique index.
+            logAuditEventAsUser(admin, user.id, {
+              action: "sync.start",
+              entity_type: "sync",
+              entity_id: resolvedId,
+              metadata: { path: "queue", kind: "stitch_composite" },
+            });
             return;
           }
           // Legacy single-key path (zero strategy_keys members) — unchanged,
