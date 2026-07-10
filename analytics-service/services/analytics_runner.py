@@ -2346,6 +2346,23 @@ async def run_csv_strategy_analytics(
                 _warned = True
         csv_status = "complete_with_warnings" if _warned else "complete"
 
+        # Finding 5 (non-composite direction): a strategy that STOPS being a
+        # composite (members removed → single-key path) — or ANY non-composite CSV
+        # recompute — is re-derived HERE with a fresh single-basis headline. The
+        # freshly-built data_quality_flags above already drops the composite-only
+        # flags (composite / per_key / gap_spans / gap_day_count / overlap_days /
+        # mtm_gated_reason) because this upsert REPLACES the column wholesale. But
+        # metrics_json_by_basis is NOT in this payload, so a prior composite's
+        # object (incl. a stale mark_to_market key) would SURVIVE next to a now
+        # single-key headline — silent disagreement. Null it so a stale composite
+        # object can't linger. Gate on the prior row's `composite` flag so a pure
+        # single-key strategy (never a composite) is byte-identical (no extra
+        # column write). composite_dense_gap_fill is the composite-owned headline
+        # path (run_stitch_composite_job owns its OWN by-basis write) — it never
+        # nulls here.
+        _was_composite = bool(existing_flags.get("composite"))
+        _clear_stale_by_basis = _was_composite and not composite_dense_gap_fill
+
         def _mark_complete() -> None:
             payload: dict[str, Any] = {
                 "strategy_id": strategy_id,
@@ -2360,6 +2377,10 @@ async def run_csv_strategy_analytics(
                 "volume_metrics": None,
                 "exposure_metrics": None,
             }
+            if _clear_stale_by_basis:
+                # SQL NULL (never JSON null) — Phase 85 CHECK allows NULL or a jsonb
+                # object. Python None → SQL NULL.
+                payload["metrics_json_by_basis"] = None
             payload.update(metrics_result.metrics_json)
             supabase.table("strategy_analytics").upsert(
                 payload, on_conflict="strategy_id"
