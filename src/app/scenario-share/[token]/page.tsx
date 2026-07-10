@@ -1,18 +1,21 @@
 // SECURITY BOUNDARY:
-// This is a PUBLIC, sessionless route. The ONLY Supabase read here is the
-// token-scoped `get_shared_scenario` SECURITY DEFINER RPC, which self-scopes on
-// `token_hash + revoked_at IS NULL` and returns ONLY name/draft/schema_version +
-// the draft's addedStrategies[].id PUBLISHED series. The admin client is used
-// purely as transport (service_role) — the RPC is the gate. NEVER add a query
-// that reads an arbitrary id, NEVER call the allocator-dashboard query helper,
-// and NEVER read holdings / AUM / api_keys / portfolios on this page. The
-// recipient sees the scenario in return / percentage form only, never an
-// allocator identity.
+// This is a PUBLIC, sessionless route. Two Supabase reads happen here, both on
+// the admin (service_role) transport: (1) the token-scoped `get_shared_scenario`
+// SECURITY DEFINER RPC — the gate — which self-scopes on `token_hash +
+// revoked_at IS NULL` and returns ONLY name/draft/schema_version + the draft's
+// addedStrategies[].id PUBLISHED series; and (2) a Phase-84 sibling read of
+// `strategies(id, asset_class)` bounded to those RPC-returned series ids and
+// `status='published'` (via withPublishedOnly), purely for the blend
+// annualization basis. NEVER add a query that reads an arbitrary id, NEVER call
+// the allocator-dashboard query helper, and NEVER read holdings / AUM / api_keys
+// / portfolios on this page. The recipient sees the scenario in return /
+// percentage form only, never an allocator identity.
 
 import { notFound } from "next/navigation";
 import { headers } from "next/headers";
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { withPublishedOnly } from "@/lib/visibility";
 import {
   publicIpLimiter,
   checkLimit,
@@ -160,28 +163,37 @@ export default async function ScenarioSharePage({
   const seriesIds = (row.series ?? []).map((s) => s.strategy_id);
   if (seriesIds.length > 0) {
     try {
-      // B10 sanctioned-exception: NOT routed through withPublishedOnly. This is a
-      // deliberate, load-bearing EXPLICIT `.eq("status","published")` that mirrors
-      // the get_shared_scenario RPC's OWN published-only rule as defence-in-depth
-      // on a PUBLIC sessionless route — the phase-84 security contract requires
-      // the predicate visible AT this call site (not hidden in a helper), so a
-      // future edit cannot silently drop the public-page published gate. The
+      // Published-only via withPublishedOnly (service-role-safe, visibility.ts):
+      // keeps the `no-raw-published-predicate` lint tripwire ACTIVE on this
+      // high-risk BYPASSRLS file — a future unguarded `strategies` read here still
+      // gets caught — while guaranteeing the published gate by construction. The
       // projection is bounded to id + asset_class and the ids to the RPC series,
       // so no draft/book/api-key row can leak even if RLS widened.
-      const { data: acRows } = await admin
-        .from("strategies")
-        .select("id, asset_class")
-        .in("id", seriesIds)
-        .eq("status", "published");
+      const { data: acRows, error: acError } = await withPublishedOnly(
+        admin.from("strategies").select("id, asset_class").in("id", seriesIds),
+      );
+      if (acError) {
+        // error-absent ≠ legit-absent: a PostgREST error (renamed/re-typed column,
+        // RLS change) returns {data:null,error} WITHOUT throwing, and a silent
+        // empty lookup would understate a crypto book's risk at √252 with no
+        // signal. Log so a schema/RLS fault is debuggable; still degrade to 252.
+        console.error("[scenario-share/page] asset_class basis read failed", {
+          message: (acError as { message?: string }).message,
+        });
+      }
       for (const r of (acRows ?? []) as Array<{
         id: string;
         asset_class: string | null;
       }>) {
         assetClassById[r.id] = r.asset_class ?? null;
       }
-    } catch {
-      // Degrade to the empty lookup (→ √252 default). The public page never
-      // throws on this optional annualization-basis enrichment.
+    } catch (e) {
+      // Transport/throw path degrades to the empty lookup (→ √252 default). The
+      // public page never throws on this optional annualization-basis enrichment,
+      // but log the breadcrumb (mirrors the get_shared_scenario error above).
+      console.error("[scenario-share/page] asset_class basis read threw", {
+        message: (e as { message?: string }).message,
+      });
     }
   }
 

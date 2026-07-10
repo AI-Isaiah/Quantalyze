@@ -2373,6 +2373,14 @@ export function ScenarioComposer({
   // to the pre-#597 default). Deps mirror engineState (the selected set + axis
   // the engine sees). NOTE: this is the DISPLAY basis only — the peer-rank path
   // below stays on the engine's RAW annualized values (see the fence there).
+  // KNOWN NUANCE (documented, spec-compliant): the basis reads the SELECTED set,
+  // not the engine's coverage-window `members`. A selected crypto leg whose span
+  // does not bracket the analytical window contributes no in-window returns yet
+  // still derives 365 — so a blend whose in-window series is effectively
+  // pure-tradfi can annualize risk at √365. This only ever affects
+  // crypto-selected scenarios (never breaks tradfi byte-identity); deriving over
+  // `members` would mean replicating the engine's coverage filter caller-side.
+  // The composer's auto-exclude UX makes a fully-out-of-window selected leg rare.
   const blendBasis = useMemo(
     () =>
       blendPeriodsPerYear(
