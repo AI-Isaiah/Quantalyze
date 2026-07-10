@@ -150,7 +150,7 @@ describe("keyWindowsSchema — 4 LOCKED superRefine rules", () => {
     const res = keyWindowsSchema.safeParse({
       keys: [
         {
-          api_key_id: "11111111-2222-3333-4444-555555555555",
+          api_key_id: "11111111-2222-4333-8444-555555555555",
           window_start: "2024-01-01",
           window_end: null,
           seq: 1,
