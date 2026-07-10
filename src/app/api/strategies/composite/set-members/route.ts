@@ -17,8 +17,9 @@ import type { User } from "@supabase/supabase-js";
  * The route never trusts client validation (T-88-16): a crafted payload that
  * "passed" the browser (overlapping windows, or a key with no api_key_id) is
  * rejected here before the RPC. Validation failures return a uniform
- * { code: 'INVALID_KEY_WINDOWS' } — zod issue details are NOT echoed (the client
- * computes its field-level messages locally from the same schema).
+ * { code: 'MULTI_KEY_WINDOWS_INVALID' } — the purpose-built WizardErrorCode the
+ * client maps to the window-specific copy — zod issue details are NOT echoed
+ * (the client computes its field-level messages locally from the same schema).
  *
  * seq is intentionally NOT sent to the RPC: it is derived server-side from
  * window_start order (Pitfall 2 — one derivation, both sides agree). The
@@ -50,7 +51,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== "object") {
     return NextResponse.json(
-      { code: "INVALID_KEY_WINDOWS" },
+      { code: "MULTI_KEY_WINDOWS_INVALID" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -59,7 +60,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   if (!isUuid(strategy_id)) {
     return NextResponse.json(
-      { code: "INVALID_KEY_WINDOWS" },
+      { code: "MULTI_KEY_WINDOWS_INVALID" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -70,7 +71,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const parsed = keyWindowsSchema.safeParse({ keys });
   if (!parsed.success) {
     return NextResponse.json(
-      { code: "INVALID_KEY_WINDOWS" },
+      { code: "MULTI_KEY_WINDOWS_INVALID" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -82,7 +83,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const everyKeyMinted = members.every((k) => isUuid(k.api_key_id));
   if (members.length === 0 || !everyKeyMinted) {
     return NextResponse.json(
-      { code: "INVALID_KEY_WINDOWS" },
+      { code: "MULTI_KEY_WINDOWS_INVALID" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }

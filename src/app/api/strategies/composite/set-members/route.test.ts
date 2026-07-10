@@ -103,7 +103,7 @@ function resetHappyMocks() {
 describe("POST /api/strategies/composite/set-members — server-side re-validation (T-88-16)", () => {
   beforeEach(resetHappyMocks);
 
-  it("rejects overlapping windows with 400 INVALID_KEY_WINDOWS — RPC never called", async () => {
+  it("rejects overlapping windows with 400 MULTI_KEY_WINDOWS_INVALID — RPC never called", async () => {
     const overlapping = [
       {
         api_key_id: AKID1,
@@ -126,13 +126,13 @@ describe("POST /api/strategies/composite/set-members — server-side re-validati
 
     expect(res.status).toBe(400);
     const json = await res.json();
-    expect(json.code).toBe("INVALID_KEY_WINDOWS");
+    expect(json.code).toBe("MULTI_KEY_WINDOWS_INVALID");
     // Uniform body — no raw zod issue details echoed.
     expect(json.issues).toBeUndefined();
     expect(rpcMock).not.toHaveBeenCalled();
   });
 
-  it("rejects a keys[] element with no api_key_id with 400 INVALID_KEY_WINDOWS — RPC never called", async () => {
+  it("rejects a keys[] element with no api_key_id with 400 MULTI_KEY_WINDOWS_INVALID — RPC never called", async () => {
     // keyWindowsSchema keeps api_key_id OPTIONAL (the live UI accumulates
     // windows before a key is minted). The route additionally requires it: an
     // unvalidated key must never reach the membership write.
@@ -146,7 +146,7 @@ describe("POST /api/strategies/composite/set-members — server-side re-validati
     );
 
     expect(res.status).toBe(400);
-    expect((await res.json()).code).toBe("INVALID_KEY_WINDOWS");
+    expect((await res.json()).code).toBe("MULTI_KEY_WINDOWS_INVALID");
     expect(rpcMock).not.toHaveBeenCalled();
   });
 });
