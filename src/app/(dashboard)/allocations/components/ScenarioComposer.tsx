@@ -76,6 +76,7 @@ import {
 } from "@/lib/scenario";
 import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
+import { blendPeriodsPerYear } from "@/lib/closed-sets";
 import {
   coverageSpanOf,
   covers,
@@ -2362,9 +2363,28 @@ export function ScenarioComposer({
     [engineSet, coverageWindow],
   );
 
+  // Phase 84 (BLEND-01) — the ONE blend basis for every DISPLAY KPI on this
+  // surface. Derived from the SELECTED engine-set legs' asset_class via the
+  // single blend rule (blendPeriodsPerYear, closed-sets.ts): √365 the moment any
+  // selected leg is crypto (the blended daily series is then calendar-daily),
+  // else √252. Unselected legs do NOT flip it. In book mode the per-key legs
+  // carry asset_class 'crypto' (84-01), so every real book blend derives 365; a
+  // pure-CSV-tradfi / all-unknown added-only blend derives 252 (byte-identical
+  // to the pre-#597 default). Deps mirror engineState (the selected set + axis
+  // the engine sees). NOTE: this is the DISPLAY basis only — the peer-rank path
+  // below stays on the engine's RAW annualized values (see the fence there).
+  const blendBasis = useMemo(
+    () =>
+      blendPeriodsPerYear(
+        engineSet.strategies.filter((s) => engineState.selected[s.id]),
+      ),
+    [engineSet, engineState],
+  );
+
   const scenarioMetrics = useMemo(
-    () => computeScenario(engineSet.strategies, engineState, dateMapCache),
-    [engineSet, engineState, dateMapCache],
+    () =>
+      computeScenario(engineSet.strategies, engineState, dateMapCache, blendBasis),
+    [engineSet, engineState, dateMapCache, blendBasis],
   );
 
   // Phase 57 Plan 03 (WINDOW-02/03, ADR §"UI state machine") — the pure
@@ -2624,6 +2644,13 @@ export function ScenarioComposer({
   // limiter token a `cancelled` boolean alone would still burn). The n>=252 gate
   // is unchanged: a sub-floor / non-finite blend returns a null body → no timer,
   // no fetch, scenarioPeer reset to null synchronously.
+  // BLEND-01 PEER-RANK FENCE (raw-value contract — DO NOT RESCALE). The peer
+  // percentile ranks the engine's RAW annualized Sharpe/Sortino/maxDD verbatim.
+  // Annualized Sharpe is FREQUENCY-INVARIANT, so a √(252/365) or (365/252)
+  // "correction" here would double-penalize a 24/7 crypto sleeve (~17%) — it was
+  // EXPLICITLY REJECTED in #597. The blend DISPLAY metrics (KPIs, panels, own-
+  // book delta, factsheet preview, benchmark) move to `blendBasis`; the peer-rank
+  // inputs below stay exactly `scenarioMetrics.*` with NO basis factor.
   const peerSharpe = scenarioMetrics.sharpe;
   const peerSortino = scenarioMetrics.sortino;
   const peerMaxDD = scenarioMetrics.max_drawdown;
@@ -2693,8 +2720,10 @@ export function ScenarioComposer({
     [scenarioMetrics.portfolio_daily_returns],
   );
   const blendPanels = useMemo(
-    () => buildBlendPanels(portfolioDaily, rollingWindow),
-    [portfolioDaily, rollingWindow],
+    // BLEND-01 — the rolling-window blend panels ride the SAME derived blend
+    // basis as the headline KPIs (√365 if any selected leg is crypto, else 252).
+    () => buildBlendPanels(portfolioDaily, rollingWindow, blendBasis),
+    [portfolioDaily, rollingWindow, blendBasis],
   );
 
   // PEER-04 (Phase 42) — per-constituent mandate chips for the blend. Built ONLY
@@ -2715,16 +2744,18 @@ export function ScenarioComposer({
     return constituents.length > 0 ? { constituents } : undefined;
   }, [engineSet]);
 
-  // PEER-05 (Phase 42) — the blend-vs-live-book signed delta on the SAME
-  // sample/252 basis as the peer rank (T-42-15). The own-book leg recomputes the
-  // live book's Sharpe/Sortino/maxDD via `sampleBasisRatios` on the OWN-BOOK
-  // DAILY RETURNS — derived here from `baselineEquityDailyPoints` (absolute-USD
-  // equity LEVELS: value[i]/value[i-1] − 1), NOT `liveBaselineMetrics` (a
-  // different/population basis). The blend leg uses `scenarioMetrics`
-  // (already the engine's sample/252 output). Each delta = blend − book; null
-  // when a leg is null. `null` (→ undefined) when there is no live book series
-  // (blank mode or a no-book allocator) so the panel is silently absent. Keyed on
-  // the engine output + the own-book series.
+  // PEER-05 (Phase 42) — the blend-vs-live-book signed delta on the sample basis
+  // at the blend's periodsPerYear (like-for-like legs; #597 BLEND-01). The
+  // own-book leg recomputes the live book's Sharpe/Sortino/maxDD via
+  // `sampleBasisRatios` on the OWN-BOOK DAILY RETURNS — derived here from
+  // `baselineEquityDailyPoints` (absolute-USD equity LEVELS: value[i]/value[i-1]
+  // − 1), NOT `liveBaselineMetrics` (a different/population basis). BLEND-01: the
+  // book leg is annualized at the SAME `blendBasis` the engine used for the blend
+  // leg (`scenarioMetrics`), so the delta stays like-for-like in BASIS at 365 as
+  // well as 252 — a crypto book's blend and own-book legs both ride √365. Each
+  // delta = blend − book; null when a leg is null. `null` (→ undefined) when
+  // there is no live book series (blank mode or a no-book allocator) so the panel
+  // is silently absent. Keyed on the engine output + the own-book series + basis.
   const scenarioOwnBookDelta = useMemo<OwnBookDeltaPayload | undefined>(() => {
     const levels = baselineEquityDailyPoints;
     // Need ≥ 2 dated levels to derive at least one daily return. No book → absent.
@@ -2738,10 +2769,11 @@ export function ScenarioComposer({
       }
     }
     if (bookReturns.length < 2) return undefined;
-    const book = sampleBasisRatios(bookReturns);
-    // Blend ratios are the engine's already-rounded sample/252 output — the SAME
-    // FORMULA as `book` (which `sampleBasisRatios` rounds identically), so the
-    // subtraction is like-for-like in BASIS. The two legs do NOT necessarily span
+    const book = sampleBasisRatios(bookReturns, blendBasis);
+    // Blend ratios are the engine's already-rounded sample-basis output at the
+    // SAME `blendBasis` — the SAME FORMULA as `book` (which `sampleBasisRatios`
+    // rounds identically at that basis), so the subtraction is like-for-like in
+    // BASIS. The two legs do NOT necessarily span
     // the SAME calendar window, though: the blend leg is the engine's overlap
     // window (`scenarioMetrics.n` obs from the constituents' include-from dates),
     // while the book leg is the allocator's full live-book equity history
@@ -2767,6 +2799,9 @@ export function ScenarioComposer({
     scenarioMetrics.sharpe,
     scenarioMetrics.sortino,
     scenarioMetrics.max_drawdown,
+    // BLEND-01 — the own-book leg is annualized at `blendBasis`, so a basis flip
+    // (a crypto leg added/removed) must re-derive the like-for-like delta.
+    blendBasis,
   ]);
 
   // CORR-01 — axis labels for the CorrelationHeatmap. Keyed on the SAME engine
@@ -3800,6 +3835,9 @@ export function ScenarioComposer({
           scenarioSeries={scenarioWealthSeries}
           benchmark={btcWealth}
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
+          // BLEND-01 — the factsheet-preview KPIs ride the same derived blend
+          // basis (√365 if any selected leg is crypto, else 252).
+          periodsPerYear={blendBasis}
           // PEER-01: the live peer rank (or null below the sample floor / min-N)
           // flows onto the synth csv payload's scenarioPeer carve-out.
           scenarioPeer={scenarioPeer ?? undefined}
@@ -3856,6 +3894,9 @@ export function ScenarioComposer({
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
           btcDaily={btcDaily}
           benchmarkAvailable={btcAvailable}
+          // BLEND-01 — TE/IR/alpha ride the same derived blend basis
+          // (√periodsPerYear); the correlation/beta terms are basis-invariant.
+          periodsPerYear={blendBasis}
         />
       </Card>
 

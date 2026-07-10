@@ -305,6 +305,14 @@ import {
   computeScenario as realComputeScenario,
   buildDateMapCache as realBuildDateMapCache,
 } from "@/lib/scenario";
+// Phase 84 (BLEND-01) — the parity-pinned replica, used to derive the EXPECTED
+// blend Sharpe at a given basis from the engine's own portfolio_daily_returns
+// (single source of truth — never a hand-rolled √N formula in the test).
+import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
+// Phase 84 (BLEND-01) — the single blend-basis rule, so the per-key recompute
+// oracle mirrors the composer's derived basis (crypto legs → √365) rather than
+// hardcoding the pre-#597 √252 default.
+import { blendPeriodsPerYear } from "@/lib/closed-sets";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
 // IMPACT-02 — imported REAL (never mocked) so the R3 guard's positive control
 // renders a genuine PercentileRankBadge in isolation, proving the testid query
@@ -498,6 +506,20 @@ function makePayload(
     mandateIsSet: false,
     ...overrides,
   };
+}
+
+// Phase 84 (BLEND-01) — module-scope readers over the engine-call spy for the
+// blend-basis regression pins. The last computeScenario invocation is the
+// composed-branch call whose strategies are the current engine set.
+function latestPeriodsPerYear(): number | undefined {
+  expect(computeScenarioStateArgs.length).toBeGreaterThan(0);
+  return computeScenarioStateArgs[computeScenarioStateArgs.length - 1]
+    .periodsPerYear;
+}
+/** The real engine output (ComputedMetrics) last handed to the mocked KpiStrip
+ *  — used to prove the threaded basis actually reached the engine's numbers. */
+function lastKpiScenarioMetrics() {
+  return vi.mocked(KpiStrip).mock.calls.at(-1)?.[0]?.scenarioMetrics;
 }
 
 // ---------------------------------------------------------------------------
@@ -4492,7 +4514,19 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
     // the independent oracle mirrors that exactly.
     const engineSet = { strategies: built.strategies, state };
     const cache = realBuildDateMapCache(engineSet.strategies);
-    return realComputeScenario(engineSet.strategies, engineSet.state, cache);
+    // BLEND-01: mirror the composer's blend-basis derivation exactly — the
+    // periods-per-year over the SELECTED legs (per-key legs are crypto → √365
+    // whenever any key is included; the all-excluded case has no selected leg →
+    // 252, though the engine yields null KPIs there anyway).
+    const basis = blendPeriodsPerYear(
+      engineSet.strategies.filter((s) => engineSet.state.selected[s.id]),
+    );
+    return realComputeScenario(
+      engineSet.strategies,
+      engineSet.state,
+      cache,
+      basis,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -7988,5 +8022,146 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
     expect(
       screen.getByTestId("scenario-membership-note"),
     ).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 84 Plan 05 (BLEND-01) — the blend-basis headline regression pins.
+//
+// The composer derives ONE blend basis (blendPeriodsPerYear over the SELECTED
+// engine-set legs) and threads it to computeScenario as the 4th arg. These pins
+// prove the two locked facts from 84-CONTEXT.md at the composer level, via the
+// engine-call spy (the harness the plan says to reuse):
+//   1. ≥1 crypto leg → periodsPerYear = 365 at the computeScenario call site,
+//      and the engine's Sharpe reflects the √365 basis (non-vacuous vs √252).
+//   2. an all-unknown-asset_class added-only blend stays 252 byte-identical.
+// CAGR is deliberately NOT asserted here — 84-06 converts scenario.ts's CAGR
+// clock within this same phase, so pinning it would create a false conflict.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — Phase 84 BLEND-01 blend basis threading", () => {
+  const BLEND_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-02-${String(i + 1).padStart(2, "0")}`,
+  );
+  // A materially non-trivial series (down days present) so Sharpe is finite and
+  // the √365 vs √252 difference is observable.
+  const BLEND_SERIES = BLEND_DATES.map((date, i) => ({
+    date,
+    value: [0.012, -0.008, 0.02, -0.006, 0.014][i % 5],
+  }));
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({ ok: true, status: 200, json: async () => [] }),
+      ),
+    );
+    cleanup();
+  });
+
+  it("a book blend with a per-key (crypto) leg threads periodsPerYear=365 to computeScenario, and the engine Sharpe reflects the √365 basis (non-vacuous vs √252)", () => {
+    // A per-key book payload: buildPerKeyStrategyForBuilderSet tags each per-key
+    // leg asset_class 'crypto' (every SUPPORTED_EXCHANGE is a crypto venue), so
+    // blendPeriodsPerYear over the selected legs → 365.
+    const payload = makePayload({
+      apiKeys: [
+        {
+          id: "key-crypto",
+          exchange: "binance",
+          label: "Desk",
+          is_active: true,
+          sync_status: null,
+          last_sync_at: null,
+          account_balance_usdt: null,
+          created_at: "2026-01-01T00:00:00Z",
+          sync_error: null,
+          last_429_at: null,
+          disconnected_at: null,
+        },
+      ],
+      holdingsSummary: [
+        { ...HOLDING_BTC, value_usd: 100_000, api_key_id: "key-crypto" },
+      ],
+      perKeyReturnsByApiKeyId: { "key-crypto": BLEND_SERIES },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: ["key-crypto"],
+    });
+
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // The blend basis threaded to the engine is 365 (any crypto leg).
+    expect(latestPeriodsPerYear()).toBe(365);
+
+    // Non-vacuous end-to-end: the engine's Sharpe equals the parity replica at
+    // 365 over the engine's OWN portfolio_daily_returns — and DIFFERS from the
+    // 252 value, proving the basis actually reached the numbers (not just the
+    // call-site arg).
+    const metrics = lastKpiScenarioMetrics();
+    expect(metrics).toBeTruthy();
+    const portfolioDaily = (metrics!.portfolio_daily_returns ?? []).map(
+      (p) => p.value,
+    );
+    expect(portfolioDaily.length).toBeGreaterThanOrEqual(2);
+    expect(metrics!.sharpe).toBe(sampleBasisRatios(portfolioDaily, 365).sharpe);
+    expect(metrics!.sharpe).not.toBe(
+      sampleBasisRatios(portfolioDaily, 252).sharpe,
+    );
+  });
+
+  it("an all-unknown-asset_class added-only blend stays periodsPerYear=252 byte-identical (no crypto leg → no √365 flip)", () => {
+    // gate=false → the added-only path. A drawer-added strategy with NO book
+    // entry and no lazily-fetched asset_class (fetch returns [] → null class)
+    // is an unknown leg → blendPeriodsPerYear stays 252.
+    const payload = makePayload({
+      perKeyDailiesGateSatisfied: false,
+      perKeyReturnsByApiKeyId: {},
+      eligibleApiKeyIds: [],
+      holdingsSummary: [],
+    });
+
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    addStrategy({
+      id: "bbbbbbbb-1111-2222-3333-444444444444",
+      name: "Unknown-class CSV strat",
+      markets: ["nasdaq"],
+      strategy_types: ["macro"],
+    });
+
+    // No selected leg is crypto → the basis stays at the pre-#597 252 default,
+    // byte-identical to passing no 4th arg.
+    expect(latestPeriodsPerYear()).toBe(252);
+    // And every selected engine leg is genuinely unknown-class (non-vacuous —
+    // this is the 252 case precisely because no leg is 'crypto').
+    const assetClasses = Object.values(
+      computeScenarioStateArgs[computeScenarioStateArgs.length - 1]
+        .assetClassById,
+    );
+    expect(assetClasses.every((c) => c !== "crypto")).toBe(true);
   });
 });
