@@ -462,16 +462,38 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // vs the pre-#597 `api_key_id → √365` proxy. Mirrors the migration backfill
   // rule (api_key_id IS NOT NULL → crypto).
   //
+  // Phase 86 / F-1: a MULTI-KEY composite has api_key_id=NULL (members live in
+  // strategy_keys), so the `apiKeyId ? crypto` rule alone would leave it on the
+  // picker/default 'traditional'. But every composite member venue is a crypto
+  // exchange this phase, and run_stitch_composite_job annualizes the headline on
+  // the venue blend (Deribit → √365). If asset_class stayed 'traditional', every
+  // #597 surface (scenario blends, leg annualization, OG card, peer-rank) would
+  // recompute √252 from the SAME returns and disagree with the composite headline
+  // by ~√(365/252) ≈ 1.20×. Force 'crypto' when the strategy has ≥1 member. The
+  // count is best-effort (membership isn't sensitive → admin client); a count
+  // blip falling open here CANNOT silently ship a mislabeled composite because
+  // the worker fails LOUD on a √365-vs-asset_class mismatch (F-1b) and the
+  // dispatch guard fails closed on unknowable membership.
+  const assetClassAdmin = createAdminClient();
+  const { count: assetClassMemberCount } = await assetClassAdmin
+    .from("strategy_keys")
+    .select("*", { count: "exact", head: true })
+    .eq("strategy_id", fields.strategy_id);
+  const isCompositeForAssetClass = (assetClassMemberCount ?? 0) > 0;
+  //
   // Non-blocking on failure: the column default means a failed write leaves a
   // CSV strategy on √252 (harmless for traditional; WRONG for crypto-CSV, so
-  // the failure is surfaced to Sentry below) and a broker strategy is
+  // the failure is surfaced to Sentry below) and a broker/composite strategy is
   // re-derived to crypto on the next finalize attempt.
   // @audit-skip: non-security annualization metadata (√365 crypto / √252
   // traditional) written as part of the already-audited strategy finalization;
   // a dedicated audit event would be noise (mirrors the last_sync_at skip below).
   const { error: assetClassErr } = await supabase
     .from("strategies")
-    .update({ asset_class: apiKeyId ? "crypto" : fields.asset_class })
+    .update({
+      asset_class:
+        apiKeyId || isCompositeForAssetClass ? "crypto" : fields.asset_class,
+    })
     .eq("id", fields.strategy_id)
     .eq("user_id", user.id);
   if (assetClassErr) {

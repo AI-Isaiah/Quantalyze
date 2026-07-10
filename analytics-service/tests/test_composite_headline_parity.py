@@ -389,31 +389,30 @@ async def test_shrinking_rederive_deletes_stale_out_of_span_rows() -> None:
 
 
 @pytest.mark.asyncio
-async def test_traditional_default_composite_headline_equals_by_basis_and_no_guard_fabrication() -> None:
-    """ROOT CAUSE regression (collapses F1/F2/F7). A composite with the DEFAULT
-    asset_class='traditional' AND an interior guard day (NaN) AND an inter-member
-    gap. Pre-fix the headline was delegated to
-    run_csv_strategy_analytics(composite_dense_gap_fill=True), which annualized on
-    periods_per_year_for_asset_class('traditional') = √252 while the by-basis object
-    used the venue blend (deribit → √365) — so headline volatility/sharpe diverged
-    ~√(365/252) from metrics_json_by_basis.cash_settlement (proven: 0.313 vs 0.377
-    vol). It ALSO 0.0-gap-filled the guard day (fabricating flat performance) while
-    the by-basis series honestly leaves it a chain break.
+async def test_composite_headline_equals_by_basis_with_interior_guard_day() -> None:
+    """ROOT CAUSE regression (collapses F1/F2/F7). A composite (asset_class='crypto'
+    — the value finalize-wizard force-derives for a composite, F-1a) with an
+    interior guard day (NaN) AND an inter-member gap. Pre-fix the headline was
+    delegated to run_csv_strategy_analytics(composite_dense_gap_fill=True), which
+    annualized on periods_per_year_for_asset_class(asset_class) and reinstated
+    NaN/0.0 gap semantics that disagreed with the in-memory by-basis compute (and,
+    for a traditional-default composite, diverged ~√(365/252) — now hard-blocked by
+    the F-1b mismatch guard, tested separately below).
 
     Post-fix the headline IS the same cash_metrics_json spread into
     metrics_json_by_basis.cash_settlement (computed ONCE, venue-blend √365), so:
       (a) headline == by-basis for cumulative_return/volatility/sharpe/max_drawdown,
       (b) the guard day is absent from csv_daily_returns (never fabricated as 0.0),
-      (c) the reference number is the honest √365 dense one, not two identically-
-          wrong √252 sparse ones.
+      (c) the reference number is the honest √365 dense one, not a sparse recompute.
     Neuter (route the headline back through the asset_class recompute) → (a) reddens.
     """
     fake = _StatefulSupabase(members=[
         _member(1, "2024-01-01", "2024-01-04"),  # half-open: Jan-01..Jan-03
         _member(2, "2024-01-10", None),
     ])
-    # asset_class DEFAULT 'traditional' — nothing forces a composite to crypto.
-    fake.strategy_row["asset_class"] = "traditional"
+    # asset_class='crypto' — the value finalize-wizard force-derives for a composite
+    # (F-1a); the venue blend (deribit → √365) agrees, so the F-1b guard passes.
+    fake.strategy_row["asset_class"] = "crypto"
     # m1 carries an INTERIOR guard day (Jan-02 = NaN) — a refused/guarded day the
     # honest series must leave as a chain break, never 0.0-fabricate.
     m1 = _returns([("2024-01-01", 0.02), ("2024-01-02", float("nan")), ("2024-01-03", 0.01)])
@@ -442,7 +441,7 @@ async def test_traditional_default_composite_headline_equals_by_basis_and_no_gua
     dense = gap_fill_daily_returns(stitched)
     reference = compute_all_metrics(
         dense, None,
-        periods_per_year=PERIODS_PER_YEAR_CRYPTO,  # venue blend, NOT asset_class √252
+        periods_per_year=PERIODS_PER_YEAR_CRYPTO,  # venue blend √365
         cumulative_method="geometric",
         day_basis="calendar",
     ).metrics_json
@@ -456,6 +455,36 @@ async def test_traditional_default_composite_headline_equals_by_basis_and_no_gua
         # (a) headline == by-basis byte-for-byte — the root-cause parity.
         assert headline[key] == pytest.approx(cash[key]), (
             f"ROOT-CAUSE divergence: headline {key}={headline[key]} != "
-            f"by-basis cash_settlement {key}={cash[key]} on a traditional-default "
-            f"composite (asset_class √252 recompute vs venue-blend √365 by-basis)"
+            f"by-basis cash_settlement {key}={cash[key]}"
         )
+
+
+@pytest.mark.asyncio
+async def test_traditional_asset_class_composite_fails_loud_mismatch_guard() -> None:
+    """F-1b: the composite headline annualizes on the venue blend (deribit → √365),
+    but every #597 asset-class surface recomputes from strategies.asset_class. A
+    composite left at asset_class='traditional' (√252) would make those surfaces
+    diverge from the headline by ~√(365/252). The worker must FAIL LOUD PERMANENT
+    (terminal stamp) rather than ship the mismatch. Neuter (drop the guard) → the
+    job returns DONE with a √365 headline beside √252 surfaces → this reddens."""
+    fake = _StatefulSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    fake.strategy_row["asset_class"] = "traditional"  # √252 ≠ venue-blend √365
+    m1 = _returns([("2024-01-01", 0.02), ("2024-01-02", 0.01)])
+    m2 = _returns([("2024-02-01", 0.03), ("2024-02-02", -0.05)])
+    with _apply(_patches(fake, combine_returns=[(m1, {}), (m2, {})])):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    # Terminal 'failed' stamp so the wizard poller reaches a gate.
+    assert any(
+        isinstance(p, dict) and p.get("computation_status") == "failed"
+        for _t, p, _c in fake.upserts
+    ), "asset_class mismatch must stamp a terminal failed row"
+    # No by-basis object shipped for the mismatched composite.
+    assert not any(
+        isinstance(p, dict) and "metrics_json_by_basis" in p
+        for _t, p, _c in fake.upserts
+    )

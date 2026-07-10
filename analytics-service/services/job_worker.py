@@ -2908,6 +2908,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         DEFAULT_PERIODS_PER_YEAR,
         PERIODS_PER_YEAR_CRYPTO,
         compute_all_metrics,
+        periods_per_year_for_asset_class,
     )
     from services.nav_twr import NavReconstructionError
     from services.redact import scrub_freeform_string
@@ -3213,6 +3214,34 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         if any(v in _COMPOSITE_CRYPTO_VENUES for v in venues)
         else DEFAULT_PERIODS_PER_YEAR
     )
+    # F-1 (convergence red team): the composite headline annualizes on the venue
+    # blend above, but every #597 asset-class surface (scenario blends, leg
+    # annualization, OG card, peer-rank via src/lib/closed-sets.ts) recomputes from
+    # strategies.asset_class. If asset_class's clock (√365 crypto / √252 traditional)
+    # disagrees with the venue blend, those surfaces silently diverge from THIS
+    # headline by ~√(365/252). finalize-wizard force-derives asset_class='crypto'
+    # for a composite (F-1a), but that write is non-blocking — so BACKSTOP it here:
+    # FAIL LOUD PERMANENT rather than ship a composite whose headline and
+    # asset-class surfaces annualize on different clocks. The strat_row was already
+    # loaded for the denominator config; its asset_class was previously ignored.
+    _asset_class_periods = periods_per_year_for_asset_class(
+        strat_row.get("asset_class") if isinstance(strat_row, dict) else None
+    )
+    if _asset_class_periods != periods_per_year:
+        await _stamp_failed(
+            "Composite asset_class annualization clock "
+            f"({_asset_class_periods}/yr) disagrees with the venue blend "
+            f"({periods_per_year}/yr); the factsheet and #597 surfaces would "
+            "diverge. Re-derive asset_class (crypto for a crypto-venue composite)."
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "run_stitch_composite_job: asset_class periods_per_year "
+                f"{_asset_class_periods} != venue-blend {periods_per_year}"
+            ),
+            error_kind="permanent",
+        )
     # Metrics conventions mirror run_csv_strategy_analytics: geometric/calendar by
     # default, simple/active under an allocated-capital override (Zavara).
     if denominator_config is not None:

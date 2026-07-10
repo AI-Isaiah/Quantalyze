@@ -657,6 +657,26 @@ describe("POST /api/strategies/finalize-wizard — #597 asset_class persistence"
     expect(res.status).toBe(200);
     fetchSpy.mockRestore();
   });
+
+  // F-1(a): a MULTI-KEY composite has api_key_id=NULL (members in strategy_keys)
+  // but every member venue is crypto this phase, so it must FORCE 'crypto' even
+  // though the CSV-branch would otherwise honor the submitted/default 'traditional'.
+  // Without this, the composite headline (venue-blend √365) and the #597 surfaces
+  // (√252 off asset_class) diverge ~√(365/252). Neuter (drop the composite check)
+  // → 'traditional' persists → this reddens.
+  it("FORCE-DERIVES 'crypto' for a composite draft (>=1 members, api_key_id NULL) submitting 'traditional'", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: null }; // composite: no single api_key
+    STATE.strategyKeysCount = 2; // >=1 member → composite
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
+    expect(res.status).toBe(200);
+    expect(STATE.assetClassUpdates).toContainEqual({ asset_class: "crypto" });
+    expect(STATE.assetClassUpdates).not.toContainEqual({
+      asset_class: "traditional",
+    });
+    fetchSpy.mockRestore();
+  });
 });
 
 /**
